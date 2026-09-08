@@ -1,8 +1,15 @@
 import os
 import sys
 import subprocess
+from batch_control import run as run_batch_subprocess
 import time
 import uuid
+import logging
+try:
+    from .v1_stage_metrics import stage
+except ImportError:
+    from v1_stage_metrics import stage
+logger = logging.getLogger(__name__)
 import io
 if isinstance(sys.stdout, io.TextIOWrapper):
     try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -29,7 +36,7 @@ def extract_audio_from_video(video_path, output_audio_path):
             .overwrite_output()
             .compile()
         )
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
+        run_batch_subprocess(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
         return True
     except ffmpeg.Error as e:
         print("FFmpeg extract audio error:", e)
@@ -95,7 +102,7 @@ def separate_vocals_demucs(
                 raise ValueError("segment_seconds must be positive")
             cmd.extend(["--segment", "{:g}".format(segment_seconds)])
         cmd += device_args
-        subprocess.run(
+        run_batch_subprocess(
             cmd,
             check=True,
             timeout=timeout_seconds,
@@ -191,6 +198,7 @@ def mix_audio_pydub(
         if original_popen is not None:
             subprocess.Popen = original_popen
 
+@stage("render")
 def process_video(
     video_path,
     srt_path,
@@ -245,15 +253,21 @@ def process_video(
         
     try:
         filter_parts = []
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        try:
+            original_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            original_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        finally:
+            cap.release()
+        w, h = original_w, original_h
+        if w <= 0 or h <= 0:
+            raise ValueError("Invalid video dimensions")
+        logger.info("V1 render size source=%dx%d output=%dx%d", original_w, original_h, w, h)
         
         # Xóa sạch toàn bộ watermark ở cả 4 góc video (Logo Tiểu Hồng Thư và ID tác giả nhảy trên/dưới)
         if delogo:
             try:
-                import cv2
-                cap = cv2.VideoCapture(video_path)
-                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                cap.release()
                 
                 if w > 0 and h > 0:
                     # 1. Góc dưới phải (Logo đáy)
@@ -310,10 +324,15 @@ def process_video(
         
         for enc_args in encoders_to_try:
             encoder_name = enc_args[0]
+            encoder_started = time.monotonic()
+            logger.info("V1 render start encoder=%s", encoder_name)
             cmd = [
                 'ffmpeg',
                 '-y',
-                '-threads', '0',
+                # Bound 4K decoder/filter frame pools: auto threading can
+                # allocate >10 GB and push a 16 GB machine into paging.
+                '-threads', '4',
+                '-filter_threads', '2',
                 '-i', video_path,
                 '-i', mixed_audio_path,
                 '-vf', filter_complex,
@@ -328,6 +347,9 @@ def process_video(
                 '-map_metadata', '-1',
                 '-fflags', '+bitexact',
                 '-shortest',
+                # Default shortest buffering can retain seconds of raw 4K60
+                # frames; audio is continuous, so a one-second window suffices.
+                '-shortest_buf_duration', '1',
                 output_video_path
             ]
             
@@ -338,7 +360,7 @@ def process_video(
                     if command_timeout <= 0:
                         print("Đã hết thời gian render trước khi thử encoder tiếp theo.")
                         break
-                proc = subprocess.run(
+                proc = run_batch_subprocess(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -348,10 +370,16 @@ def process_video(
                     timeout=command_timeout,
                 )
                 if proc.returncode == 0 and os.path.exists(output_video_path) and os.path.getsize(output_video_path) > 10000:
+                    logger.info("V1 render complete encoder=%s seconds=%.2f bytes=%d",
+                                encoder_name, time.monotonic()-encoder_started,
+                                os.path.getsize(output_video_path))
                     print(f"Render video thành công bằng encoder: {encoder_name}")
                     return True
                 else:
                     err_snippet = proc.stderr[-400:] if proc.stderr else ""
+                    logger.warning("V1 render fallback encoder=%s seconds=%.2f exit=%s reason=%s",
+                                   encoder_name, time.monotonic()-encoder_started,
+                                   proc.returncode, err_snippet)
                     print(f"Encoder {encoder_name} không thành công ({proc.returncode}): {err_snippet}")
             except subprocess.TimeoutExpired as enc_err:
                 print(f"Encoder {encoder_name} vượt quá deadline render ({enc_err}).")

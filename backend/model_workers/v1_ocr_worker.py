@@ -6,6 +6,8 @@ import argparse
 import json
 import os
 import traceback
+import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -43,13 +45,10 @@ def _paddle_payload(result: Any) -> Mapping[str, Any]:
     return nested if isinstance(nested, Mapping) else value
 
 
-def _run(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+@lru_cache(maxsize=1)
+def _model(detection_model, recognition_model, engine):
     from paddleocr import PaddleOCR
-
-    detection_model = str(payload.get("detection_model", "PP-OCRv6_tiny_det"))
-    recognition_model = str(payload.get("recognition_model", "PP-OCRv6_tiny_rec"))
-    engine = str(payload.get("engine", "onnxruntime"))
-    ocr = PaddleOCR(
+    return PaddleOCR(
         text_detection_model_name=detection_model,
         text_recognition_model_name=recognition_model,
         use_doc_orientation_classify=False,
@@ -58,6 +57,11 @@ def _run(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         engine=engine,
     )
 
+def _run(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    detection_model = str(payload.get("detection_model", "PP-OCRv6_tiny_det"))
+    recognition_model = str(payload.get("recognition_model", "PP-OCRv6_tiny_rec"))
+    engine = str(payload.get("engine", "onnxruntime"))
+    ocr = _model(detection_model, recognition_model, engine)
     images = []
     for image_path in payload.get("images", []):
         resolved_path = str(Path(image_path).resolve())
@@ -95,7 +99,28 @@ def _run(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     }
 
 
+def _serve():
+    # Model logs may use stdout; responses use atomic files instead.
+    for line in sys.stdin:
+        request = json.loads(line)
+        response_path = Path(request["response"])
+        try:
+            payload = json.loads(Path(request["request"]).read_text(encoding="utf-8"))
+            _write_json(response_path, {"success": True, "result": _run(payload)})
+        except Exception as exc:
+            _write_json(
+                response_path,
+                {
+                    "success": False,
+                    "error": f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+                },
+            )
+    return 0
+
+
 def main() -> int:
+    if "--serve" in sys.argv:
+        return _serve()
     parser = argparse.ArgumentParser()
     parser.add_argument("--request", required=True)
     parser.add_argument("--response", required=True)

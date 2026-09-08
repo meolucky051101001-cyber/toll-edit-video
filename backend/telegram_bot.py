@@ -94,6 +94,8 @@ async def safe_edit_status(status_msg, text, parse_mode=None, retries=3):
     Cập nhật status message trên Telegram an toàn, chống bị crash tiến trình
     khi mạng Internet bị giật hoặc đứt kết nối tạm thời (httpx.ConnectError).
     """
+    from telegram_progress import report
+    report(text)
     if not status_msg:
         return
     for attempt in range(retries):
@@ -203,9 +205,16 @@ async def cmd_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Xử lý hàng loạt video từ thư mục cục bộ (mặc định: D:\\video_input)
     Cú pháp: /batch hoặc /batch D:\\duong_dan_thu_muc
     """
-    input_dir = r"D:\video_input"
+    input_dir = None
     if context.args and len(context.args) > 0:
         input_dir = " ".join(context.args).strip()
+    else:
+        for candidate in [r"D:\video phôi", r"D:\video phoi", r"D:\video_input"]:
+            if os.path.exists(candidate):
+                input_dir = candidate
+                break
+        if not input_dir:
+            input_dir = r"D:\video phôi"
         
     output_dir = r"D:\banve"
     
@@ -328,7 +337,8 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 import re
 
-global_queue = asyncio.Queue()
+from telegram_queue_monitor import MonitoredQueue
+global_queue = MonitoredQueue()
 queue_counter = 0
 worker_task = None
 
@@ -414,7 +424,17 @@ async def video_worker():
             job = await global_queue.get()
             import shared_state
             shared_state.stop_requested = False
+            import job_tracker
+            tracker_job = None
+            from telegram_progress import current_job
+            progress_token = None
             try:
+                while tracker_job is None:
+                    try:
+                        tracker_job = job_tracker.start_batch(1, output_dir=r"D:\banve")
+                        progress_token = current_job.set(tracker_job)
+                    except job_tracker.JobAlreadyRunningError:
+                        await asyncio.sleep(1)
                 if isinstance(job, dict):
                     if job['type'] == 'url':
                         await process_single_url(job['update'], job['context'], job['url'], job['pos'])
@@ -441,9 +461,13 @@ async def video_worker():
                     pos, update, context, url = job
                     await process_single_url(update, context, url, pos)
             except asyncio.CancelledError:
+                if tracker_job:
+                    job_tracker.mark_stopped()
                 logger.info("Worker task cancelled by /stop.")
                 break
             except Exception as e:
+                if tracker_job:
+                    job_tracker.fail_batch(str(e), job_id=tracker_job)
                 logger.error(f"Worker error: {e}")
             finally:
                 import gc, torch
@@ -451,11 +475,22 @@ async def video_worker():
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 global_queue.task_done()
+                if tracker_job:
+                    state = job_tracker.get_status()
+                    if state.get("video_status") == "completed":
+                        job_tracker.finish_batch()
+                    elif state.get("active"):
+                        job_tracker.fail_batch("Video kết thúc mà chưa xác nhận thành phẩm.", job_id=tracker_job)
+                    job_tracker.release_batch(tracker_job)
+                if progress_token is not None:
+                    current_job.reset(progress_token)
         except asyncio.CancelledError:
             logger.info("Worker queue cancelled.")
             break
 
 async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, pos: int = 1):
+    import job_tracker
+    job_tracker.start_video("Video từ Telegram", pos, pos + global_queue.qsize())
     original_url = url
     chat_id = update.message.chat_id
 
@@ -508,6 +543,7 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
             return
 
         downloaded_files = [os.path.basename(video_path)]
+        job_tracker.start_video(os.path.basename(video_path), pos, pos + global_queue.qsize())
         base_name = os.path.splitext(downloaded_files[0])[0].rstrip('.')
 
         # Chuẩn bị thư mục output
@@ -750,6 +786,7 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
             os.makedirs(downloads_dir, exist_ok=True)
             local_save_path = os.path.join(downloads_dir, f"Dubbed_{base_name}.mp4")
             shutil.copy2(final_video, local_save_path)
+            job_tracker.finish_video(os.path.basename(video_path), local_save_path, time.time() - start_time)
             caption_lines.append(f"💾 Đã tự động lưu vào máy:\n`D:\\banve`\n")
         except Exception as e:
             logger.error(f"Lỗi khi copy vào máy: {e}")
@@ -777,14 +814,6 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
         
         caption_lines.append(f"📎 Link gốc: {original_url}\n")
 
-        # Tự động tải lên Google Drive nếu có cấu hình xác thực
-        try:
-            from google_drive_uploader import upload_video_to_gdrive
-            gdrive_res = upload_video_to_gdrive(final_video)
-            if gdrive_res and gdrive_res.get("link"):
-                caption_lines.append(f"☁️ Google Drive: {gdrive_res['link']}\n")
-        except Exception as ge:
-            logger.warning(f"Lỗi tự động tải Google Drive: {ge}")
 
         caption = "\n".join(caption_lines)
         if len(caption) > 1024:
@@ -900,6 +929,8 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str, filename: str, pos: int):
+    import job_tracker
+    job_tracker.start_video(filename, pos, pos + global_queue.qsize())
     status_msg = await update.message.reply_text(
         f"▶️ *Đang xử lý Video tải lên (Thứ {pos} trong hàng đợi):*\n`{filename}`\n\n"
         f"⏳ Phía sau còn {global_queue.qsize()} video đang chờ...",
@@ -1116,6 +1147,7 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
             os.makedirs(downloads_dir, exist_ok=True)
             local_save_path = os.path.join(downloads_dir, f"Dubbed_{base_name}.mp4")
             shutil.copy2(final_video, local_save_path)
+            job_tracker.finish_video(os.path.basename(video_path), local_save_path, time.time() - start_time)
             caption_lines.append(f"💾 Đã tự động lưu vào máy:\n`D:\\banve`\n")
         except Exception as e:
             logger.error(f"Lỗi khi copy vào máy: {e}")
@@ -1130,14 +1162,6 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
         queue_status = f"\n⏳ Phía sau còn {remaining} video đang chờ xử lý..." if remaining > 0 else "\n🎉 Đã hoàn tất toàn bộ hàng đợi!"
         caption = f"✅ Video đã lồng tiếng Tiếng Việt!\n⏱️ Thời gian xử lý: {time_str}{queue_status}"
 
-        # Tự động tải lên Google Drive nếu có cấu hình xác thực
-        try:
-            from google_drive_uploader import upload_video_to_gdrive
-            gdrive_res = upload_video_to_gdrive(final_video)
-            if gdrive_res and gdrive_res.get("link"):
-                caption += f"\n\n☁️ *Link Google Drive:*\n{gdrive_res['link']}"
-        except Exception as ge:
-            logger.warning(f"Lỗi tự động tải Google Drive: {ge}")
 
         await safe_edit_status(status_msg, caption)
 

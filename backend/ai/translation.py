@@ -22,8 +22,18 @@ except ImportError:
     # runtime dependency isolation and unexpectedly make a network request.
     MyMemoryTranslator = None
 import logging
+import time
+import hashlib
+import threading
+try:
+    from ..v1_stage_metrics import stage
+except ImportError:
+    from v1_stage_metrics import stage
 
 logger = logging.getLogger(__name__)
+_gemini_health_lock = threading.Lock()
+_gemini_cooldown = {}
+_gemini_last_good = {}
 
 
 def _contains_cjk(text):
@@ -126,33 +136,52 @@ def translate_with_gemini(
             if m and m not in models_to_try:
                 models_to_try.append(m)
         response = None
+        account = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+        with _gemini_health_lock:
+            last_good = _gemini_last_good.get(account)
+            if last_good in models_to_try:
+                models_to_try.remove(last_good)
+                models_to_try.insert(0, last_good)
+            models_to_try = [m for m in models_to_try
+                             if _gemini_cooldown.get((account, m), 0) <= time.monotonic()]
+        deadline = time.monotonic() + 90.0
         for model in models_to_try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 1:
+                break
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
             payload = {"contents": [{"parts": parts}]}
             headers = {"Content-Type": "application/json"}
             try:
                 logger.info(f"Đang gọi Google Gemini: {model}...")
-                response = requests.post(url, json=payload, headers=headers, timeout=60)
+                response = requests.post(url, json=payload, headers=headers,
+                                         timeout=(min(5.0, remaining / 2), min(25.0, remaining / 2)))
                 if response.status_code == 200:
+                    result = response.json()
+                    raw = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    match = re.search(r'\[.*\]', raw, re.DOTALL)
+                    translated = json.loads(match.group(0) if match else raw)
+                    if not isinstance(translated, list) or len(translated) != len(texts) or not all(
+                            isinstance(t, str) and t.strip() for t in translated):
+                        raise ValueError("Invalid translation array")
+                    with _gemini_health_lock:
+                        _gemini_last_good[account] = model
+                        _gemini_cooldown.pop((account, model), None)
                     logger.info(f"Gọi thành công Gemini {model}!")
-                    break
+                    return translated
                 else:
                     logger.warning(f"Lỗi gọi {model} (HTTP {response.status_code})")
+                    with _gemini_health_lock:
+                        _gemini_cooldown[(account, model)] = time.monotonic() + 300
+                    if response.status_code in (401, 403):
+                        break
             except Exception as req_e:
-                logger.warning(f"Lỗi kết nối {model}: {req_e}")
+                # Exception URLs can contain API keys; log only the error type.
+                logger.warning("Lỗi dịch %s: %s", model, type(req_e).__name__)
+                with _gemini_health_lock:
+                    _gemini_cooldown[(account, model)] = time.monotonic() + 300
                 
-        if not response or response.status_code != 200:
-            return None
-            
-        result = response.json()
-        text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-        match = re.search(r'\[.*\]', text, re.DOTALL)
-        if match:
-            text = match.group(0)
-            
-        translated = json.loads(text)
-        if len(translated) == len(texts):
-            return translated
+        return None
     except Exception as e:
         logger.warning(f"Lỗi dịch Gemini: {e}")
     return None
@@ -310,6 +339,7 @@ Dữ liệu:
         logger.debug(f"Lỗi dịch G4F: {e}")
     return None
 
+@stage("translation")
 def translate_subtitles(
     srt_segments,
     target_lang="vi",
@@ -397,8 +427,7 @@ def translate_subtitles(
             for position, (source, translated) in enumerate(
                 zip(texts, translated_texts), 1
             )
-            if _contains_cjk(source)
-            and str(source).strip() == str(translated).strip()
+            if target_lang.lower().startswith("vi") and _contains_cjk(translated)
         ]
         if unchanged_cjk:
             logger.warning(
@@ -438,7 +467,7 @@ def translate_subtitles(
                 or "Error 500" in str(translated_text)
                 or "Server Error" in str(translated_text)
                 or str(translated_text).startswith("Error")
-                or (translated_text == segment.content and _contains_cjk(segment.content))
+                or (target_lang.lower().startswith("vi") and _contains_cjk(translated_text))
             ):
                 try:
                     if MyMemoryTranslator is None:
@@ -461,7 +490,7 @@ def translate_subtitles(
                         translated_text[:120]
                     )
                 )
-            if translated_text == segment.content and _contains_cjk(segment.content):
+            if target_lang.lower().startswith("vi") and _contains_cjk(translated_text):
                 raise RuntimeError("Chinese source text remained untranslated")
                 
         except Exception as e:
@@ -471,7 +500,7 @@ def translate_subtitles(
             
         segment.content = translated_text
         
-    if strict and failed_segments:
+    if failed_segments and (strict or target_lang.lower().startswith("vi")):
         raise RuntimeError(
             "Translation failed for segment indexes: {}".format(
                 ", ".join(str(index) for index in failed_segments)

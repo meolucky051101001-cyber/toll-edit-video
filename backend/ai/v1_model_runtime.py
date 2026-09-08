@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
 from .v1_model_policy import V1ModelPolicy, current_v1_model_policy
+from .v1_ocr_session import run_request, close_session
 
 
 class V1ModelRuntimeError(RuntimeError):
@@ -94,7 +95,7 @@ def run_v1_ocr(
             json.dumps(dict(payload), ensure_ascii=False), encoding="utf-8"
         )
         try:
-            result = subprocess.run(
+            result = run_request(
                 [
                     str(python),
                     str(worker),

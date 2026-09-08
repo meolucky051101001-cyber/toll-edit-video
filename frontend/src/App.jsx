@@ -33,7 +33,7 @@ function App() {
     if (showLogs) {
       interval = setInterval(async () => {
         try {
-          const res = await fetch('http://localhost:8000/api/logs');
+          const res = await fetch('http://127.0.0.1:8088/api/logs');
           if (res.ok) {
             const data = await res.json();
             setBotLogs(data.logs);
@@ -139,7 +139,7 @@ function App() {
       );
       formData.append('api_key', voiceSource === 'fpt' ? voiceConfig.trim() : '');
 
-      const res = await fetch('http://127.0.0.1:8000/api/process_video', {
+      const res = await fetch('http://127.0.0.1:8088/api/process_video', {
         method: 'POST',
         body: formData
       });
@@ -166,7 +166,7 @@ function App() {
       formData.append('video_path', filePath);
       formData.append('target_lang', 'vi');
 
-      const res = await fetch('http://127.0.0.1:8000/api/generate_subtitles', {
+      const res = await fetch('http://127.0.0.1:8088/api/generate_subtitles', {
         method: 'POST',
         body: formData
       });
@@ -202,7 +202,7 @@ function App() {
       );
       formData.append('api_key', voiceSource === 'fpt' ? voiceConfig.trim() : '');
 
-      const res = await fetch('http://127.0.0.1:8000/api/process_url', {
+      const res = await fetch('http://127.0.0.1:8088/api/process_url', {
         method: 'POST',
         body: formData
       });

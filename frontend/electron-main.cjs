@@ -38,8 +38,8 @@ function createWindow() {
   // Setup CSP
   const isDev = !app.isPackaged;
   const contentSecurityPolicy = isDev
-    ? "default-src 'self' http://localhost:5173; script-src 'self' http://localhost:5173; style-src 'self' 'unsafe-inline' http://localhost:5173; img-src 'self' data: blob: local:; media-src 'self' blob: local:; connect-src 'self' http://127.0.0.1:8000 http://localhost:8000 http://localhost:5173 ws://localhost:5173;"
-    : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: local:; media-src 'self' blob: local:; connect-src 'self' http://127.0.0.1:8000 http://localhost:8000;";
+    ? "default-src 'self' http://localhost:5173; script-src 'self' http://localhost:5173; style-src 'self' 'unsafe-inline' http://localhost:5173; img-src 'self' data: blob: local:; media-src 'self' blob: local:; connect-src 'self' http://127.0.0.1:8088 http://localhost:8088 http://127.0.0.1:8000 http://localhost:8000 http://localhost:5173 ws://localhost:5173;"
+    : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: local:; media-src 'self' blob: local:; connect-src 'self' http://127.0.0.1:8088 http://localhost:8088 http://127.0.0.1:8000 http://localhost:8000;";
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({
       responseHeaders: {

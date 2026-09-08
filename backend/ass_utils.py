@@ -1,33 +1,133 @@
 import codecs
+import math
+import re
 import textwrap
+import copy
+from datetime import timedelta
 
-def generate_ass_file(dialogue_segments, floating_segments, output_path, play_res_x=1080, play_res_y=1920, main_y_pct=0.85):
-    # Cố định hoàn toàn độ phân giải ASS là 720x1280 để font size 38 luôn không đổi và có cùng tỷ lệ trên mọi video
-    play_res_x = 720
-    play_res_y = 1280
-    scale_y = 1.0
-    scale_x = 1.0
+try:
+    from .subtitle_layout import subtitle_measure, wrap_subtitle_text
+    from .subtitle_text import split_segment_text, split_subtitle_sentences
+except ImportError:
+    try:
+        from subtitle_layout import subtitle_measure, wrap_subtitle_text
+        from subtitle_text import split_segment_text, split_subtitle_sentences
+    except ImportError:
+        subtitle_measure = None
+        wrap_subtitle_text = None
+        split_segment_text = None
+        split_subtitle_sentences = None
+
+
+def _block_value(block, key, default=None):
+    return block.get(key, default) if isinstance(block, dict) else getattr(block, key, default)
+
+
+def _rounded_box(width, height, radius=12):
+    """Rounded ASS path inside the existing bounds; no extra border thickness."""
+    r = min(radius, width / 2, height / 2)
+    k = r * 0.55228475
+    w, h = width, height
+    return (
+        f"m {w} {r:g} l {w} {h-r:g} "
+        f"b {w} {h-r+k:g} {w-r+k:g} {h} {w-r:g} {h} "
+        f"l {r:g} {h} b {r-k:g} {h} 0 {h-r+k:g} 0 {h-r:g} "
+        f"l 0 {r:g} b 0 {r-k:g} {r-k:g} 0 {r:g} 0 "
+        f"l {w-r:g} 0 b {w-r+k:g} 0 {w} {r-k:g} {w} {r:g}"
+    )
+
+
+def generate_ass_file(
+    dialogue_segments,
+    floating_segments,
+    output_path,
+    play_res_x=1080,
+    play_res_y=1920,
+    main_y_pct=0.85,
+    *,
+    font_name="Arial",
+    font_color="&H00000000",
+    font_weight=2,
+):
+    """Generate an ASS subtitle file.
     
-    font_size = 38
-    outline = 12
-    
-    # Dùng style đơn giản nhất, chữ trắng viền đen
+    When source subtitles are selected, uses full X-Y bounding boxes to cover them.
+    Missing OCR retains a text-sized Vietnamese card.
+    Supports both landscape (horizontal) and portrait (vertical) videos.
+    """
+    if not font_name.strip() or any(char in font_name for char in ",\r\n"):
+        font_name = "Arial"
+    if not re.fullmatch(r"&H[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?&?", font_color):
+        font_color = "&H00000000"
+
+    bold = -1 if font_weight > 1 else 0
+
+    # Normalize scale while preserving any source aspect ratio (including square).
+    source_x = max(1, int(play_res_x or 1080))
+    source_y = max(1, int(play_res_y or 1920))
+    scale = 720.0 / min(source_x, source_y)
+    canvas_x = round(source_x * scale)
+    canvas_y = round(source_y * scale)
+    font_size = 32 if source_x > source_y else 38
+    line_h = 36 if source_x > source_y else 42
+    outline = 0
+
+    sticker_padding_x = 8
+    sticker_padding_y = 16
+    max_allowed_w = int(canvas_x * 0.90)
+    text_max_w = max_allowed_w - (outline * 2) - (sticker_padding_x * 2)
+
+    # Initialize font measurement if available
+    measure = None
+    if subtitle_measure is not None:
+        try:
+            measure = subtitle_measure(font_name, font_size, bold != 0)
+        except Exception:
+            measure = None
+
+    if measure is None:
+        char_est = int(font_size * 0.55)
+        def _measure(text):
+            return len(text) * char_est
+        measure = _measure
+
+    def _wrap_text(text, max_w):
+        if wrap_subtitle_text is not None:
+            try:
+                lines = wrap_subtitle_text(text, max_w, measure)
+                if len(lines) > 1 and len(lines[-1].split()) < 3:
+                    previous, tail = lines[-2].split(), lines[-1].split()
+                    while len(tail) < 3 and len(previous) > 3:
+                        candidate = [previous[-1]] + tail
+                        if measure(" ".join(candidate)) > max_w:
+                            break
+                        tail = candidate
+                        previous.pop()
+                    lines[-2:] = [" ".join(previous), " ".join(tail)]
+                return lines
+            except Exception:
+                pass
+        chars = max(1, int(max_w / (font_size * 0.55)))
+        return textwrap.wrap(text, width=chars) or [text]
+
+    text_outline = 2
+
     ass_content = f"""[Script Info]
 ScriptType: v4.00+
-PlayResX: {play_res_x}
-PlayResY: {play_res_y}
+PlayResX: {canvas_x}
+PlayResY: {canvas_y}
 WrapStyle: 2
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: BgStyle,Arial,{font_size},&H00F0F0F0,&H00F0F0F0,&H00F0F0F0,&H00F0F0F0,0,0,0,0,100,100,0,0,1,{outline},0,5,0,0,0,1
-Style: TextStyle,Arial,{font_size},&H00000000,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,5,10,10,10,1
+Style: TextStyle,{font_name},{font_size},{font_color},&H000000FF,&H00FFFFFF,&H00000000,{bold},0,0,0,100,100,0,0,1,{text_outline},0,5,10,10,10,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-    
+
     def format_time(td):
         total_seconds = int(td.total_seconds())
         hours = total_seconds // 3600
@@ -37,166 +137,214 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         return f"{hours}:{minutes:02d}:{seconds:02d}.{centiseconds:02d}"
 
     if dialogue_segments:
-        # TÍNH TOÁN MAX CHARS CHO MỖI LINE
-        # Hộp trắng tối đa chiếm 90% chiều rộng màn hình (theo yêu cầu wrap)
-        max_allowed_w = int(play_res_x * 0.90)
-        # Font width ước tính
-        max_chars_per_line = int(max_allowed_w / (22 * scale_x))
-        
-        # PRE-PROCESSING: Tách các segment quá dài thành các segment nối tiếp nhau
-        processed_segments = []
+        # Align only outer translated-page boundaries to the source's visual
+        # lifetime. Keep internal page timing and all audio timing untouched.
+        dialogue_segments = copy.deepcopy(list(dialogue_segments))
+        groups = []
         for seg in dialogue_segments:
-            text = str(seg.content).replace('\n', ' ').strip()
-            
-            # Dùng textwrap thử chia dòng
-            lines_test = textwrap.wrap(text, width=max_chars_per_line)
-            
-            # Nếu text quá dài, chiếm hơn 2 dòng
-            if len(lines_test) > 2:
-                # Chia thành nhiều segment nhỏ, mỗi segment chứa tối đa 2 dòng
-                num_parts = (len(lines_test) + 1) // 2
-                
-                total_duration = (seg.end - seg.start).total_seconds()
-                part_duration = total_duration / num_parts
-                
-                from copy import copy
-                from datetime import timedelta
-                
-                words = text.split()
-                if len(words) >= num_parts:
-                    words_per_part = len(words) // num_parts
-                    for p in range(num_parts):
-                        new_seg = copy(seg)
-                        start_idx = p * words_per_part
-                        end_idx = len(words) if p == num_parts - 1 else (p + 1) * words_per_part
-                        
-                        new_seg.content = " ".join(words[start_idx:end_idx])
-                        new_seg.start = seg.start + timedelta(seconds=p * part_duration)
-                        new_seg.end = seg.start + timedelta(seconds=(p + 1) * part_duration)
-                        processed_segments.append(new_seg)
-                else:
-                    processed_segments.append(seg)
-            else:
-                processed_segments.append(seg)
-                
-        for i, seg in enumerate(processed_segments):
+            source_id = getattr(seg, "source_segment_id", None) or seg.index
+            if not groups or groups[-1][0] != source_id:
+                groups.append((source_id, []))
+            groups[-1][1].append(seg)
+        for _, pages in groups:
+            tracks = [b for page in pages for b in
+                      (getattr(page, "tracking_blocks", None) or [])]
+            if tracks:
+                first = min(float(_block_value(b, "start", 0)) for b in tracks)
+                last = max(float(_block_value(b, "end", 0)) for b in tracks) + 1.0
+                if pages[0].start.total_seconds() - 0.30001 <= first:
+                    pages[0].start = timedelta(seconds=max(0, min(
+                        pages[0].start.total_seconds(), first)))
+                pages[-1].end = timedelta(seconds=last)
+        for i in range(len(groups) - 1):
+            boundary = groups[i + 1][1][0].start
+            for page in groups[i][1]:
+                page.end = min(page.end, boundary)
+        dialogue_segments = [s for s in dialogue_segments if s.end > s.start]
+        processed_segments = []
+        if split_subtitle_sentences is not None and split_segment_text is not None:
+            try:
+                for seg in dialogue_segments:
+                    parts = []
+                    for sentence in split_subtitle_sentences(seg.content):
+                        lines = _wrap_text(sentence, text_max_w)
+                        sentence_parts = list(
+                            " ".join(lines[offset : offset + 2])
+                            for offset in range(0, len(lines), 2)
+                        )
+                        # Rebalance a dangling last page such as "xếp.".
+                        if len(sentence_parts) > 1 and len(sentence_parts[-1].split()) <= 3:
+                            words = (sentence_parts[-2] + " " + sentence_parts[-1]).split()
+                            choices = []
+                            for cut in range(3, len(words) - 2):
+                                a, b = " ".join(words[:cut]), " ".join(words[cut:])
+                                if len(_wrap_text(a, text_max_w)) <= 2 and len(_wrap_text(b, text_max_w)) <= 2:
+                                    choices.append((abs(cut - len(words) / 2), a, b))
+                            if choices:
+                                _, a, b = min(choices)
+                                sentence_parts[-2:] = [a, b]
+                        parts.extend(sentence_parts)
+                    processed_segments.extend(split_segment_text(seg, parts))
+            except Exception:
+                processed_segments = list(dialogue_segments)
+        else:
+            processed_segments = list(dialogue_segments)
+
+        for seg in processed_segments:
             start_time = seg.start
             end_time = seg.end
-            start_str = format_time(start_time)
-            end_str = format_time(end_time)
-            text = str(seg.content).replace('\n', ' ').strip()
-            
-            # --- DYNAMIC MOTION TRACKING ---
-            from datetime import timedelta
+            text = str(seg.content).replace("\n", " ").strip()
+            if not text:
+                continue
+
+
             sub_events = []
-            if hasattr(seg, 'tracking_blocks') and len(seg.tracking_blocks) > 0:
-                blocks = sorted(seg.tracking_blocks, key=lambda x: x.start)
-                seg_s = start_time.total_seconds()
-                seg_e = end_time.total_seconds()
-                
-                current_s = seg_s
-                for i, b in enumerate(blocks):
-                    b_end = b.end if i < len(blocks) - 1 else seg_e
-                    e_overlap = min(seg_e, b_end)
-                    if e_overlap > current_s:
-                        sub_events.append({
-                            'start': current_s,
-                            'end': e_overlap,
-                            'block': b
-                        })
-                        current_s = e_overlap
-                # Lấp đầy khoảng trống (nếu có)
-                if current_s < seg_e and sub_events:
-                    sub_events[-1]['end'] = seg_e
-            else:
-                sub_events.append({
-                    'start': start_time.total_seconds(),
-                    'end': end_time.total_seconds(),
-                    'block': seg.best_block if hasattr(seg, 'best_block') else None
-                })
-                
+            seg_s, seg_e = start_time.total_seconds(), end_time.total_seconds()
+            blocks = sorted(getattr(seg, "tracking_blocks", None) or [],
+                            key=lambda b: _block_value(b, "start", 0.0))
+            cursor = seg_s
+            for b in blocks:
+                left = max(seg_s, float(_block_value(b, "start", seg_s)))
+                right = min(seg_e, float(_block_value(b, "end", seg_e)) + 1.0)
+                # Switch directly to the next detected position, without overlap.
+                following = next((float(_block_value(n, "start", seg_e))
+                                  for n in blocks
+                                  if float(_block_value(n, "start", seg_e)) >
+                                  float(_block_value(b, "start", seg_s))), None)
+                if following is not None:
+                    right = min(right, following)
+                if right <= left or right <= cursor:
+                    continue
+                # Keep both layers during the one-second disappearance grace.
+                left = max(left, cursor)
+                sub_events.append({"start": left, "end": right, "block": b})
+                cursor = right
+            if cursor < seg_e and not blocks:
+                sub_events.append({"start": cursor, "end": seg_e,
+                                   "block": getattr(seg, "best_block", None) if not blocks else None})
+
             for event in sub_events:
-                ev_start = timedelta(seconds=event['start'])
-                ev_end = timedelta(seconds=event['end'])
+                ev_start = timedelta(seconds=event["start"])
+                ev_end = timedelta(seconds=event["end"])
                 start_str = format_time(ev_start)
                 end_str = format_time(ev_end)
-                
-                b = event['block']
-                if b:
-                    raw_y_pct = getattr(b, 'y_pct', None)
-                    seg_y_pct = main_y_pct if raw_y_pct is None else raw_y_pct
-                    raw_max_y_pct = getattr(b, 'max_y_pct', None)
-                    seg_max_y_pct = seg_y_pct if raw_max_y_pct is None else raw_max_y_pct
-                    chinese_w = int((getattr(b, 'max_x_pct', 0) - getattr(b, 'x_pct', 0)) * play_res_x)
-                else:
-                    raw_y_pct = getattr(seg, 'y_pct', None)
-                    seg_y_pct = main_y_pct if raw_y_pct is None else raw_y_pct
-                    raw_max_y_pct = getattr(seg, 'max_y_pct', None)
-                    seg_max_y_pct = seg_y_pct if raw_max_y_pct is None else raw_max_y_pct
-                    chinese_w = 0
-                
-                # 1. Xác định độ rộng wrap chữ Việt
-                # Yêu cầu: Chỉ xuống dòng khi dòng đầu dài khoảng 90% chiều ngang màn hình
-                target_box_w = play_res_x * 0.90
-                target_chars = int(target_box_w / (22 * scale_x))
 
-                lines = textwrap.wrap(text, width=target_chars)
-                formatted_text = "\\N".join(lines)
+                b = event["block"]
+                if b:
+                    raw_y_pct = (
+                        b.get("y_pct")
+                        if isinstance(b, dict)
+                        else getattr(b, "y_pct", None)
+                    )
+                    raw_max_y_pct = (
+                        b.get("max_y_pct")
+                        if isinstance(b, dict)
+                        else getattr(b, "max_y_pct", None)
+                    )
+                    source_left_pct = (
+                        b.get("x_pct")
+                        if isinstance(b, dict)
+                        else getattr(b, "x_pct", None)
+                    )
+                    source_right_pct = (
+                        b.get("max_x_pct")
+                        if isinstance(b, dict)
+                        else getattr(b, "max_x_pct", None)
+                    )
+                else:
+                    raw_y_pct = None
+                    raw_max_y_pct = None
+                    source_left_pct = None
+                    source_right_pct = None
+
+                has_source = (
+                    b is not None
+                    and source_left_pct is not None
+                    and source_right_pct is not None
+                    and raw_y_pct is not None
+                    and raw_max_y_pct is not None
+                    and 0.0 <= source_left_pct < source_right_pct <= 1.0
+                    and 0.0 <= raw_y_pct < raw_max_y_pct <= 1.0
+                )
+
+                lines = _wrap_text(text, text_max_w)
+                formatted_text = "\\N".join(line.replace("\\", "／").replace("{", "｛").replace("}", "｝") for line in lines)
                 num_lines = len(lines)
-                char_h = int(42 * scale_y)
-                char_w = int(22 * scale_x)
-                
-                # 2. Tính kích thước chữ Việt THỰC TẾ sau khi wrap
-                lines_arr = formatted_text.split('\\N')
-                max_line_len = max(len(line) for line in lines_arr) if lines_arr else len(formatted_text)
-                
-                # Chiều rộng mỗi ký tự trung bình
-                actual_text_w = max_line_len * char_w
-                required_text_h = num_lines * char_h
-                
-                # 3. Ép khung trắng ÔM SÁT chữ Việt.
-                # Lưu ý: BgStyle có Outline=12, tức là đã có sẵn viền dày 12px tự động tỏa ra xung quanh.
-                # Nên padding ở đây bằng 0 thì thực tế vẫn có 12px khoảng trắng!
-                padding_x = 0
-                padding_y = 0
-                
-                box_w = actual_text_w + (padding_x * 2)
-                box_h = required_text_h + (padding_y * 2)
-                
-                # Đảm bảo box không tràn màn hình
-                max_allowed_w = int(play_res_x * 0.94)
-                if box_w > max_allowed_w: box_w = max_allowed_w
-                
-                # Tính toán tọa độ Y (neo theo ĐÁY của chữ Trung vì đáy luôn chính xác, đỉnh có thể bị dính nhầm description)
-                chinese_bottom_y = int(seg_max_y_pct * play_res_y)
-                raw_chinese_h = int((seg_max_y_pct - seg_y_pct) * play_res_y)
-                
-                # Giới hạn chiều cao chữ Trung tối đa để bao phủ chữ di chuyển
-                max_allowed_chinese_h = int(play_res_y * 0.35)
-                chinese_h = min(raw_chinese_h, max_allowed_chinese_h)
-                
-                # Bỏ qua việc ép box_h theo chinese_h để hộp trắng luôn ôm sát chữ Việt.
-                # chinese_h chỉ dùng để tính tâm dọc.
-                    
-                chinese_center_y = chinese_bottom_y - (chinese_h // 2)
-                
-                box_y = chinese_center_y - (box_h // 2)
-                if box_y < 0: box_y = 0
-                
-                box_x = (play_res_x - box_w) // 2
-                min_margin = int(play_res_x * 0.04)
-                if box_x < min_margin: box_x = min_margin
-                if box_x + box_w > play_res_x - min_margin:
-                    box_x = play_res_x - min_margin - box_w
-                
-                draw_cmd = f"{{\\p1}}m 0 0 l {box_w} 0 l {box_w} {box_h} l 0 {box_h}{{\\p0}}"
-                bg_line = f"{{\\an7\\pos({box_x},{box_y})}}{draw_cmd}"
-                ass_content += f"Dialogue: 0,{start_str},{end_str},BgStyle,,0,0,0,,{bg_line}\n"
-                
-                text_cx = box_x + (box_w // 2)
-                text_cy = box_y + padding_y
-                text_line = f"{{\\an8\\pos({text_cx},{text_cy})}}{formatted_text}"
-                ass_content += f"Dialogue: 1,{start_str},{end_str},TextStyle,,0,0,0,,{text_line}\n"
-            
-    with codecs.open(output_path, 'w', 'utf-8-sig') as f:
+                actual_text_w = math.ceil(
+                    max((measure(line) for line in lines), default=0)
+                )
+                required_text_h = num_lines * line_h
+
+                if has_source:
+                    chinese_w = int((source_right_pct - source_left_pct) * canvas_x)
+                    chinese_h = int((raw_max_y_pct - raw_y_pct) * canvas_y)
+                    # Keep the card centered on the video, not on OCR's X center.
+                    chinese_center_x = canvas_x // 2
+                    chinese_center_y = int(
+                        ((raw_y_pct + raw_max_y_pct) * 0.5) * canvas_y
+                    )
+
+                    # Cover box dimensions:
+                    # Must cover at least the entire Chinese text with small padding
+                    min_cover_w = math.ceil(2 * max(
+                        chinese_center_x - source_left_pct * canvas_x,
+                        source_right_pct * canvas_x - chinese_center_x,
+                    )) + (sticker_padding_x * 2)
+                    # OCR already includes an outer glyph margin. Do not add
+                    # the full text padding again around a tall source box.
+                    min_cover_h = chinese_h + 8
+
+                    # Expand if translated Vietnamese text is wider or taller (supports 2 lines)
+                    text_cover_w = actual_text_w + (sticker_padding_x * 2)
+                    text_cover_h = required_text_h + (sticker_padding_y * 2)
+
+                    target_visible_w = min(
+                        math.ceil(max(min_cover_w, text_cover_w) * 1.10), canvas_x
+                    )
+                    target_visible_h = min(canvas_y, max(min_cover_h, text_cover_h))
+
+                    # Because BgStyle has Outline=outline, ASS drawing dimensions
+                    # produce a visible box of size (draw_w + outline*2, draw_h + outline*2)
+                    draw_w = max(4, target_visible_w - (outline * 2))
+                    # Even widths allow exact integer-pixel centering.
+                    draw_w = min(canvas_x, 2 * math.ceil(draw_w / 2))
+                    draw_h = max(4, target_visible_h - (outline * 2))
+
+                    # Lock horizontal position; only Y follows the subtitle track.
+                    draw_x = chinese_center_x - (draw_w // 2)
+                    draw_y = chinese_center_y - (draw_h // 2)
+
+                    # Clamp to screen margins
+                    min_margin = 0
+                    if draw_x < min_margin:
+                        draw_x = min_margin
+                    if draw_x + draw_w > canvas_x - min_margin:
+                        draw_x = max(min_margin, canvas_x - min_margin - draw_w)
+
+                    draw_y = max(0, min(draw_y, canvas_y - draw_h - (outline * 2)))
+
+                    draw_cmd = "{\\p1}" + _rounded_box(draw_w, draw_h) + "{\\p0}"
+                    bg_line = f"{{\\an7\\pos({draw_x},{draw_y})}}{draw_cmd}"
+                    ass_content += f"Dialogue: 0,{start_str},{end_str},BgStyle,,0,0,0,,{bg_line}\n"
+
+                    text_cx = draw_x + (draw_w // 2)
+                    text_cy = draw_y + max(0, (draw_h - required_text_h) // 2)
+                    text_line = f"{{\\an8\\pos({text_cx},{text_cy})}}{formatted_text}"
+                    ass_content += f"Dialogue: 1,{start_str},{end_str},TextStyle,,0,0,0,,{text_line}\n"
+                else:
+                    # Missing OCR geometry must not remove the Vietnamese card.
+                    # This is a text background, not an inferred scene-text mask.
+                    text_cx = canvas_x // 2
+                    card_w = min(canvas_x, 2 * math.ceil((actual_text_w + 2 * sticker_padding_x) * 1.10 / 2))
+                    card_h = min(canvas_y, required_text_h + 2 * sticker_padding_y)
+                    card_x = (canvas_x - card_w) // 2
+                    card_y = max(0, min(int(main_y_pct * canvas_y) - sticker_padding_y, canvas_y - card_h))
+                    drawing = "{\\p1}" + _rounded_box(card_w, card_h) + "{\\p0}"
+                    background = f"{{\\an7\\pos({card_x},{card_y})}}{drawing}"
+                    ass_content += f"Dialogue: 0,{start_str},{end_str},BgStyle,,0,0,0,,{background}\n"
+                    text_cy = card_y + sticker_padding_y
+                    text_line = f"{{\\an8\\pos({text_cx},{text_cy})}}{formatted_text}"
+                    ass_content += f"Dialogue: 1,{start_str},{end_str},TextStyle,,0,0,0,,{text_line}\n"
+
+    with codecs.open(output_path, "w", "utf-8-sig") as f:
         f.write(ass_content)

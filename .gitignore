@@ -43,3 +43,6 @@ Thumbs.db
 *.exe
 *.disabled*
 .vscode/
+_review_src/
+export_giam_sat_a2ui/
+*.zip

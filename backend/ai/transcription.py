@@ -13,6 +13,21 @@ from datetime import timedelta
 from faster_whisper import WhisperModel
 
 from .v1_model_policy import current_v1_model_policy
+import logging
+import time
+
+
+def _cached_model_path(model_name, download_root):
+    if os.path.isdir(model_name):
+        return model_name
+    try:
+        from faster_whisper.utils import download_model
+        path = download_model(model_name, cache_dir=download_root, local_files_only=True)
+        if os.path.isfile(os.path.join(path, "model.bin")):
+            return path
+    except (OSError, ValueError):
+        pass
+    return model_name
 
 
 def _word_aligned_bounds(segment):
@@ -109,6 +124,8 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None):
     worker_count = max(1, int(num_workers))
 
     model = None
+    model_name = _cached_model_path(model_name, download_root)
+    load_started = time.monotonic()
     if torch.cuda.is_available():
         print(
             "🚀 CUDA detected: {}. Loading Faster-Whisper {}...".format(
@@ -136,6 +153,7 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None):
             download_root=download_root,
         )
 
+    logging.getLogger(__name__).info("V1 ASR model loaded seconds=%.2f", time.monotonic()-load_started)
     try:
         segments, _info = model.transcribe(
             audio_path,
