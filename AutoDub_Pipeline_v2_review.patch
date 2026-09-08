@@ -1,0 +1,3997 @@
+diff --git a/.gitignore b/.gitignore
+index da68834..10dd9a6 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,23 +1,26 @@
+-# Python virtual environments
++# Local environments and secrets
+ backend/venv/
+ backend/venv_old/
+ venv/
+ env/
+-ENV/
+ *.env
+-.env
+ backend/.env
+ 
+-# Python cache & compiled files
++# Python and test caches
+ __pycache__/
+ *.py[cod]
+-*$py.class
+ 
+-# Temporary workspace & render files
+-workspace/*
+-!workspace/.gitkeep
++# Frontend build/install output
++frontend/node_modules/
++frontend/dist/
++
++# Runtime artifacts
++workspace/
+ backend/workspace/
+ backend/downloads/
++*.lock
++*.log
++temp_burn*
+ *.mp4
+ *.mp3
+ *.wav
+@@ -25,31 +28,14 @@ backend/downloads/
+ *.png
+ *.ass
+ *.srt
+-temp_burn*
+-backend/temp_burn*
+-debug_out.txt
+-err_check_pipeline.txt
+ 
+-# Lock files
+-*.lock
+-bot_instance.lock
+-backend/bot_instance.lock
+-
+-# Log files
+-*.log
+-backend/app.log
+-
+-# Large Installer files
+-*.exe
+-
+-# Large RVC models / weights (Upload separately or via Git LFS if needed)
++# Large optional model assets
+ *.pth
+ *.index
+ *.onnx
+ 
+-# System & OS metadata
++# Editor/OS files
+ .DS_Store
+ Thumbs.db
+ .idea/
+ .vscode/
+-
+diff --git a/README.md b/README.md
+index 8faee0b..8139924 100644
+--- a/README.md
++++ b/README.md
+@@ -27,12 +27,20 @@ Công cụ tự động tải video, tách âm thanh nhân vật (Demucs), nhậ
+    # Chọn lệnh Windows chính xác tại https://pytorch.org/get-started/locally/
+    pip install -r requirements.txt
+    cd backend
++   Copy-Item .env.example .env
++   # Điền BOT_TOKEN/GEMINI_API_KEY và các thư mục AUTODUB_* trong .env.
+    ```
+ 2. Chạy Telegram Bot:
+    ```bash
++   # Kiểm tra dependency, FFmpeg/NVENC, CUDA, thư mục ghi và secrets trước.
++   .\venv\Scripts\python.exe -m pipeline_v2.preflight --project-root .. --interface telegram
+    python telegram_bot.py
+    ```
+ 
++Không chạy video production nếu preflight còn `error`; với Pipeline v2, kiểm tra
++thêm `pipeline:config` đang là `v2`. Unit test không thay thế lượt thử end-to-end
++với model, API key và driver thật của máy vận hành.
++
+ ## Pipeline v2 (opt-in)
+ 
+ Pipeline cũ vẫn là mặc định. Pipeline v2 bổ sung checkpoint theo stage, process
+diff --git a/backend/.env.example b/backend/.env.example
+new file mode 100644
+index 0000000..1f8d427
+--- /dev/null
++++ b/backend/.env.example
+@@ -0,0 +1,38 @@
++# Copy this file to backend/.env and fill in secrets locally. Never commit .env.
++PIPELINE_MODE=v2
++BOT_TOKEN=
++GEMINI_API_KEY=
++FPT_API_KEY=
++
++# Keep large mutable artifacts outside OneDrive/cloud-synced source folders.
++AUTODUB_WORKSPACE=D:\autodub_workspace
++AUTODUB_INPUT_DIR=D:\video_input
++AUTODUB_OUTPUT_DIR=D:\banve
++AUTODUB_CORS_ORIGINS=http://127.0.0.1:5173,http://localhost:5173,null
++
++ENABLE_STAGE_CACHE=true
++ENABLE_GPU_PROCESS_ISOLATION=true
++ENABLE_PARALLEL_OCR_GEMINI=false
++ENABLE_ADAPTIVE_DEMUCS=false
++ENABLE_ADAPTIVE_OCR=false
++ENABLE_TIMING_SOLVER=true
++ENABLE_FFMPEG_MIX_V2=true
++ENABLE_LEGACY_MIX_AB=false
++ENABLE_RVC=true
++PRESERVE_SOURCE_RESOLUTION=true
++
++ATEMPO_MIN=0.92
++ATEMPO_MAX=1.40
++TARGET_LUFS=-15
++TRUE_PEAK_MAX_DBTP=-1
++QC_GATE_POLICY=report_only
++
++GPU_LOCK_TIMEOUT_SECONDS=1800
++STAGE_TIMEOUT_SECONDS=3600
++TRANSLATION_BATCH_SEGMENTS=80
++TRANSLATION_BATCH_CHARACTERS=12000
++OCR_BATCH_SEGMENTS=80
++TTS_BATCH_SEGMENTS=64
++RVC_BATCH_SEGMENTS=64
++MIXER_CHUNK_SECONDS=300
++MIXER_MAX_INPUTS_PER_PASS=64
+diff --git a/backend/ai/translation.py b/backend/ai/translation.py
+index 9094fb0..7c97bae 100644
+--- a/backend/ai/translation.py
++++ b/backend/ai/translation.py
+@@ -8,6 +8,10 @@ import logging
+ 
+ logger = logging.getLogger(__name__)
+ 
++
++def _contains_cjk(text):
++    return any('\u4e00' <= character <= '\u9fff' for character in str(text))
++
+ def translate_with_gemini(
+     texts,
+     target_lang="vi",
+@@ -172,6 +176,8 @@ def translate_subtitles(
+     context_start_seconds=None,
+     context_end_seconds=None,
+     prior_context=None,
++    strict=False,
++    enable_g4f=True,
+ ):
+     print("Translating subtitles...")
+     texts = [seg.content for seg in srt_segments if seg.content]
+@@ -189,21 +195,46 @@ def translate_subtitles(
+             prior_context=prior_context,
+         )
+         
+-    if not translated_texts and texts:
++    if not translated_texts and texts and enable_g4f:
+         print("Trying ChatGPT (G4F) API...")
+         import concurrent.futures
+-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+-            future = executor.submit(translate_with_g4f, texts, target_lang)
+-            try:
+-                translated_texts = future.result(timeout=40)
+-            except concurrent.futures.TimeoutError:
+-                print("G4F phản hồi quá lâu (quá 40s), hủy để tránh treo bot.")
+-                translated_texts = None
+-            except Exception as e:
+-                print(f"Lỗi G4F: {e}")
+-                translated_texts = None
++        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
++        future = executor.submit(translate_with_g4f, texts, target_lang)
++        try:
++            translated_texts = future.result(timeout=40)
++        except concurrent.futures.TimeoutError:
++            print("G4F phản hồi quá lâu (quá 40s), hủy để tránh treo bot.")
++            future.cancel()
++            translated_texts = None
++        except Exception as e:
++            print(f"Lỗi G4F: {e}")
++            translated_texts = None
++        finally:
++            # Do not block on context-manager shutdown after the timeout.
++            executor.shutdown(wait=False, cancel_futures=True)
+         
+-    if translated_texts:
++    translated_texts_valid = bool(
++        translated_texts
++        and len(translated_texts) == len(texts)
++        and all(isinstance(item, str) and item.strip() for item in translated_texts)
++    )
++    if translated_texts_valid:
++        unchanged_cjk = [
++            position
++            for position, (source, translated) in enumerate(
++                zip(texts, translated_texts), 1
++            )
++            if _contains_cjk(source) and str(source).strip() == str(translated).strip()
++        ]
++        if unchanged_cjk:
++            print(
++                "AI translation left CJK source unchanged at positions: {}".format(
++                    ", ".join(str(position) for position in unchanged_cjk)
++                )
++            )
++            translated_texts_valid = False
++
++    if translated_texts_valid:
+         idx = 0
+         for segment in srt_segments:
+             if not segment.content:
+@@ -215,6 +246,7 @@ def translate_subtitles(
+         return srt_segments
+     
+     print("Falling back to Google Translate...")
++    failed_segments = []
+     for segment in srt_segments:
+         if not segment.content:
+             continue
+@@ -224,18 +256,36 @@ def translate_subtitles(
+             translator = GoogleTranslator(source='auto', target=target_lang)
+             translated_text = translator.translate(segment.content)
+             
+-            if translated_text == segment.content and any('\u4e00' <= c <= '\u9fff' for c in segment.content):
++            if translated_text == segment.content and _contains_cjk(segment.content):
+                 zh_translator = GoogleTranslator(source='zh-CN', target=target_lang)
+                 translated_text = zh_translator.translate(segment.content)
+             
++            if not isinstance(translated_text, str) or not translated_text.strip():
++                raise RuntimeError("Google Translate returned an empty result")
+             if "Error 500" in translated_text or "Server Error" in translated_text or translated_text.startswith("Error"):
+-                logger.warning(f"Google Translate trả về lỗi rác: {translated_text}")
+-                translated_text = segment.content
++                raise RuntimeError(
++                    "Google Translate returned an error payload: {}".format(
++                        translated_text[:120]
++                    )
++                )
++            if (
++                translated_text == segment.content
++                and _contains_cjk(segment.content)
++            ):
++                raise RuntimeError("Chinese source text remained untranslated")
+                 
+         except Exception as e:
+-            print(f"Lỗi dịch thuật: {e}")
++            print("Translation fallback error: {}".format(e))
++            failed_segments.append(int(getattr(segment, "index", 0)))
+             translated_text = segment.content
+             
+         segment.content = translated_text
+-        
++
++    if strict and failed_segments:
++        raise RuntimeError(
++            "Translation failed for segment indexes: {}".format(
++                ", ".join(str(index) for index in failed_segments)
++            )
++        )
++
+     return srt_segments
+diff --git a/backend/ai/voice_cloning.py b/backend/ai/voice_cloning.py
+index 515ce43..dbe46dd 100644
+--- a/backend/ai/voice_cloning.py
++++ b/backend/ai/voice_cloning.py
+@@ -9,6 +9,31 @@ rvc_semaphore = asyncio.Semaphore(1)
+ global_rvc_instance = None
+ global_rvc_model_path = None
+ 
++
++def discover_rvc_index(model_path):
++    """Find the real RVC feature index even when training prefixes its name."""
++    from pathlib import Path
++
++    model = Path(model_path)
++    exact = model.with_suffix(".index")
++    if exact.is_file() and exact.stat().st_size > 1024:
++        return str(exact)
++    matches = [
++        candidate
++        for candidate in model.parent.glob("*.index")
++        if model.stem.lower() in candidate.stem.lower()
++        and candidate.stat().st_size > 1024
++    ]
++    if not matches:
++        return None
++    matches.sort(
++        key=lambda candidate: (
++            0 if candidate.name.lower().startswith("added_") else 1,
++            candidate.name.lower(),
++        )
++    )
++    return str(matches[0])
++
+ class FPTQuotaError(Exception): pass
+ 
+ async def generate_tts_edge(text, output_path, voice="vi-VN-HoaiMyNeural", rate="+0%", pitch="+0Hz"):
+@@ -82,7 +107,13 @@ async def generate_tts_fpt(text, output_path, api_key, voice="banmai", speed="0"
+ 
+ rvc_semaphore = asyncio.Semaphore(1)
+ 
+-async def apply_rvc_clone(input_audio, output_audio, model_path):
++async def apply_rvc_clone(
++    input_audio,
++    output_audio,
++    model_path,
++    strict=False,
++    index_path=None,
++):
+     async with rvc_semaphore:
+         print(f"Applying RVC model from {model_path} to {input_audio}...")
+         import traceback
+@@ -96,9 +127,11 @@ async def apply_rvc_clone(input_audio, output_audio, model_path):
+                 
+                 if global_rvc_model_path != model_path:
+                     print("=> Nap model RVC vao VRAM (Chi chay 1 lan duy nhat)...")
+-                    index_path = model_path.replace(".pth", ".index")
+-                    if os.path.exists(index_path):
+-                        global_rvc_instance.load_model(model_path, version="v2", index_path=index_path)
++                    resolved_index = index_path or discover_rvc_index(model_path)
++                    if resolved_index:
++                        global_rvc_instance.load_model(
++                            model_path, version="v2", index_path=resolved_index
++                        )
+                     else:
+                         global_rvc_instance.load_model(model_path, version="v2")
+                     global_rvc_model_path = model_path
+@@ -111,6 +144,13 @@ async def apply_rvc_clone(input_audio, output_audio, model_path):
+         except Exception as e:
+             print(f"=> Loi khi chay RVC: {e}")
+             traceback.print_exc()
++            if strict:
++                try:
++                    if os.path.exists(output_audio):
++                        os.remove(output_audio)
++                except OSError:
++                    pass
++                raise RuntimeError("RVC conversion failed") from e
+             import shutil
+             shutil.copy(input_audio, output_audio)
+ 
+diff --git a/backend/batch_processor.py b/backend/batch_processor.py
+index 28755ff..75370a4 100644
+--- a/backend/batch_processor.py
++++ b/backend/batch_processor.py
+@@ -35,7 +35,15 @@ if os.path.exists(env_file):
+                 os.environ[k.strip()] = v.strip().strip('"').strip("'")
+ 
+ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+-WORKSPACE = os.path.abspath(os.path.join(BASE_DIR, "..", "workspace"))
++WORKSPACE = os.path.abspath(
++    os.getenv("AUTODUB_WORKSPACE", os.path.join(BASE_DIR, "..", "workspace"))
++)
++DEFAULT_INPUT_DIR = os.path.abspath(
++    os.getenv("AUTODUB_INPUT_DIR", r"D:\video_input")
++)
++DEFAULT_OUTPUT_DIR = os.path.abspath(
++    os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve")
++)
+ os.makedirs(WORKSPACE, exist_ok=True)
+ 
+ logger = logging.getLogger("batch_processor")
+@@ -209,7 +217,11 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
+         except:
+             pass
+ 
+-async def process_batch_folder(input_dir: str = r"D:\video_input", output_dir: str = r"D:\banve", progress_callback=None):
++async def process_batch_folder(
++    input_dir: str = DEFAULT_INPUT_DIR,
++    output_dir: str = DEFAULT_OUTPUT_DIR,
++    progress_callback=None,
++):
+     """
+     Quét và xử lý toàn bộ video trong thư mục đầu vào
+     """
+@@ -270,8 +282,8 @@ async def process_batch_folder(input_dir: str = r"D:\video_input", output_dir: s
+ if __name__ == "__main__":
+     import argparse
+     parser = argparse.ArgumentParser(description="Batch Video Dubbing Processor")
+-    parser.add_argument("--input", default=r"D:\video_input", help="Thư mục chứa video gốc")
+-    parser.add_argument("--output", default=r"D:\banve", help="Thư mục lưu video thành phẩm")
++    parser.add_argument("--input", default=DEFAULT_INPUT_DIR, help="Thư mục chứa video gốc")
++    parser.add_argument("--output", default=DEFAULT_OUTPUT_DIR, help="Thư mục lưu video thành phẩm")
+     args = parser.parse_args()
+ 
+     asyncio.run(process_batch_folder(args.input, args.output))
+diff --git a/backend/main.py b/backend/main.py
+index 74c00a0..904ecd4 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -9,13 +9,23 @@ from ai.transcription import extract_subtitles_whisper, save_srt
+ from ai.translation import translate_subtitles
+ from ai.voice_cloning import generate_dubbing_audio
+ from video_utils import extract_audio_from_video, mix_audio_pydub, process_video
++from pipeline_v2.config import PipelineMode, PipelineSettings
+ 
+ app = FastAPI()
+ 
++ALLOWED_CORS_ORIGINS = [
++    origin.strip()
++    for origin in os.getenv(
++        "AUTODUB_CORS_ORIGINS",
++        "http://127.0.0.1:5173,http://localhost:5173,null",
++    ).split(",")
++    if origin.strip()
++]
++
+ app.add_middleware(
+     CORSMiddleware,
+-    allow_origins=["*"],
+-    allow_credentials=True,
++    allow_origins=ALLOWED_CORS_ORIGINS,
++    allow_credentials=False,
+     allow_methods=["*"],
+     allow_headers=["*"],
+ )
+@@ -26,6 +36,65 @@ OUTPUT_DIR = os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve")
+ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+ os.makedirs(WORKSPACE, exist_ok=True)
+ 
++# The desktop/API surface can receive concurrent requests, while the media
++# pipeline is intentionally sized for one long GPU/FFmpeg job at a time.  Keep
++# requests queued instead of letting two jobs compete for shared output names,
++# VRAM and large temporary files.
++API_PROCESS_LOCK = asyncio.Lock()
++
++
++async def run_api_pipeline_v2(
++    video_path,
++    out_dir,
++    final_video,
++    published_video,
++    target_lang,
++    voice_source,
++    voice_param,
++    api_key,
++):
++    """Run the shared v2 runner for API routes when rollout mode is v2."""
++
++    settings = PipelineSettings.from_env()
++    if settings.mode is not PipelineMode.V2:
++        return None
++
++    from pipeline_v2.stage_validation import is_real_rvc_model
++    from pipeline_v2.video_pipeline import (
++        VideoPipelineRequest,
++        VideoPipelineRunner,
++        discover_rvc_model,
++    )
++
++    rvc_model = None
++    selected_voice_param = voice_param
++    if voice_source == "rvc":
++        candidate = Path(voice_param)
++        if is_real_rvc_model(candidate):
++            rvc_model = candidate
++        else:
++            rvc_model = discover_rvc_model(Path(WORKSPACE))
++        if rvc_model is None:
++            raise RuntimeError(
++                "RVC was requested but no real .pth model is available"
++            )
++        selected_voice_param = str(rvc_model)
++
++    request = VideoPipelineRequest(
++        video_path=Path(video_path),
++        job_directory=Path(out_dir),
++        output_path=Path(final_video),
++        delivery_copy_path=Path(published_video),
++        settings=settings,
++        api_key=(GEMINI_API_KEY if voice_source == "fpt" else (api_key or GEMINI_API_KEY)),
++        tts_api_key=(api_key if voice_source == "fpt" else ""),
++        target_lang=target_lang,
++        voice_source=voice_source,
++        voice_param=selected_voice_param,
++        rvc_model_path=rvc_model,
++    )
++    return await VideoPipelineRunner(request).run()
++
+ @app.get("/api/logs")
+ async def api_get_logs():
+     """Trả về 100 dòng log mới nhất của bot."""
+@@ -105,6 +174,7 @@ async def api_process_video(
+     font_weight: int = Form(1)
+ ):
+     """Xử lý full: Transcribe → Dịch → TTS → Mix Audio → Blur + Sub → Xuất video."""
++    await API_PROCESS_LOCK.acquire()
+     try:
+         base_name = os.path.splitext(os.path.basename(video_path))[0]
+         out_dir = os.path.join(WORKSPACE, base_name)
+@@ -116,6 +186,28 @@ async def api_process_video(
+         dubbing_dir = os.path.join(out_dir, "dubbing")
+         mixed_audio = os.path.join(out_dir, "mixed.wav")
+         final_video = os.path.join(out_dir, f"final_{base_name}.mp4")
++        published_video = os.path.join(OUTPUT_DIR, f"Dubbed_{base_name}.mp4")
++
++        v2_result = await run_api_pipeline_v2(
++            video_path,
++            out_dir,
++            final_video,
++            published_video,
++            target_lang,
++            voice_source,
++            voice_param,
++            api_key,
++        )
++        if v2_result is not None:
++            return {
++                "status": "success",
++                "pipeline": "v2",
++                "final_video": published_video,
++                "manifest": str(v2_result.manifest_path),
++                "qc_report": str(v2_result.qc_report_path),
++                "qc_allowed": v2_result.qc_allowed,
++                "message": f"Xuất video thành công: {published_video}",
++            }
+ 
+         # 1. Extract audio
+         extract_audio_from_video(video_path, original_audio)
+@@ -127,7 +219,11 @@ async def api_process_video(
+         translated_segments = translate_subtitles(
+             srt_segments,
+             target_lang,
+-            api_key=api_key or GEMINI_API_KEY,
++            api_key=(
++                GEMINI_API_KEY
++                if voice_source == "fpt"
++                else (api_key or GEMINI_API_KEY)
++            ),
+             video_path=video_path,
+         )
+         save_srt(translated_segments, srt_translated)
+@@ -156,7 +252,6 @@ async def api_process_video(
+         if not rendered:
+             raise RuntimeError("Final video render failed")
+         os.makedirs(OUTPUT_DIR, exist_ok=True)
+-        published_video = os.path.join(OUTPUT_DIR, f"Dubbed_{base_name}.mp4")
+         from pipeline_v2.atomic_io import atomic_copy_file
+ 
+         atomic_copy_file(final_video, published_video)
+@@ -170,6 +265,8 @@ async def api_process_video(
+         import traceback
+         traceback.print_exc()
+         return {"status": "error", "message": str(e)}
++    finally:
++        API_PROCESS_LOCK.release()
+ 
+ 
+ # ===== API: Tải video đã xuất =====
+@@ -196,14 +293,15 @@ async def api_process_url(
+     font_weight: int = Form(1)
+ ):
+     """Tải video từ URL (Xiaohongshu, TikTok, YouTube...) rồi xử lý toàn bộ."""
+-    import time
++    await API_PROCESS_LOCK.acquire()
++    try:
++        import time
+ 
+-    download_dir = os.path.join(WORKSPACE, "downloads")
+-    os.makedirs(download_dir, exist_ok=True)
++        download_dir = os.path.join(WORKSPACE, "downloads")
++        os.makedirs(download_dir, exist_ok=True)
+ 
+-    # Tạo tên file duy nhất
+-    timestamp = str(int(time.time()))
+-    try:
++        # Nanosecond prefix prevents stale-file collisions between fast retries.
++        timestamp = str(time.time_ns())
+         # Use the shared no-watermark downloader, including 206 + ffprobe checks.
+         from social_downloader import download_social_video
+ 
+@@ -229,6 +327,29 @@ async def api_process_url(
+         dubbing_dir = os.path.join(out_dir, "dubbing")
+         mixed_audio = os.path.join(out_dir, "mixed.wav")
+         final_video = os.path.join(out_dir, f"final_{base_name}.mp4")
++        published_video = os.path.join(OUTPUT_DIR, f"Dubbed_{base_name}.mp4")
++
++        v2_result = await run_api_pipeline_v2(
++            video_path,
++            out_dir,
++            final_video,
++            published_video,
++            target_lang,
++            voice_source,
++            voice_param,
++            api_key,
++        )
++        if v2_result is not None:
++            return {
++                "status": "success",
++                "pipeline": "v2",
++                "downloaded_video": video_path,
++                "final_video": published_video,
++                "manifest": str(v2_result.manifest_path),
++                "qc_report": str(v2_result.qc_report_path),
++                "qc_allowed": v2_result.qc_allowed,
++                "message": f"Hoàn tất! Video đã xuất tại: {published_video}",
++            }
+ 
+         # Extract audio
+         extract_audio_from_video(video_path, original_audio)
+@@ -240,7 +361,11 @@ async def api_process_url(
+         translated_segments = translate_subtitles(
+             srt_segments,
+             target_lang,
+-            api_key=api_key or GEMINI_API_KEY,
++            api_key=(
++                GEMINI_API_KEY
++                if voice_source == "fpt"
++                else (api_key or GEMINI_API_KEY)
++            ),
+             video_path=video_path,
+         )
+         save_srt(translated_segments, srt_translated)
+@@ -279,7 +404,6 @@ async def api_process_url(
+         if not rendered:
+             raise RuntimeError("Final video render failed")
+         os.makedirs(OUTPUT_DIR, exist_ok=True)
+-        published_video = os.path.join(OUTPUT_DIR, f"Dubbed_{base_name}.mp4")
+         from pipeline_v2.atomic_io import atomic_copy_file
+ 
+         atomic_copy_file(final_video, published_video)
+@@ -296,6 +420,8 @@ async def api_process_url(
+         import traceback
+         traceback.print_exc()
+         return {"status": "error", "step": "process", "message": str(e)}
++    finally:
++        API_PROCESS_LOCK.release()
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/backend/pipeline_v2/config.py b/backend/pipeline_v2/config.py
+index 6b76449..af4754e 100644
+--- a/backend/pipeline_v2/config.py
++++ b/backend/pipeline_v2/config.py
+@@ -93,6 +93,8 @@ class PipelineSettings:
+         )
+         if any(value <= 0 for value in integer_limits):
+             raise ValueError("Pipeline batch and input limits must be positive")
++        if self.mixer_max_inputs_per_pass < 2:
++            raise ValueError("mixer_max_inputs_per_pass must be at least 2")
+         if self.mixer_chunk_seconds <= 0:
+             raise ValueError("mixer_chunk_seconds must be positive")
+ 
+diff --git a/backend/pipeline_v2/gpu_worker.py b/backend/pipeline_v2/gpu_worker.py
+index 4558d42..ec00927 100644
+--- a/backend/pipeline_v2/gpu_worker.py
++++ b/backend/pipeline_v2/gpu_worker.py
+@@ -15,6 +15,7 @@ from typing import Any, Dict, Mapping, Sequence
+ from .atomic_io import atomic_write_json
+ from .batching import chunked
+ from .segments import segments_from_dicts, segments_to_dicts
++from .stage_validation import validate_demucs_outputs, validate_transformed_audio
+ 
+ 
+ def _prepare_legacy_imports() -> None:
+@@ -37,8 +38,7 @@ def _run_demucs(payload: Mapping[str, Any]) -> Dict[str, Any]:
+         segment_seconds=float(payload.get("segment_seconds", 6.0)),
+         timeout_seconds=float(payload.get("timeout_seconds", 3600.0)),
+     )
+-    if not Path(vocals).is_file() or not Path(background).is_file():
+-        raise RuntimeError("Demucs did not produce both requested stems")
++    validate_demucs_outputs(payload["input_audio"], vocals, background)
+     return {"vocals_path": vocals, "background_path": background}
+ 
+ 
+@@ -100,9 +100,13 @@ async def _rvc_batch(payload: Mapping[str, Any]) -> Dict[str, Any]:
+     for item in payload.get("items", []):
+         input_path = str(item["input_path"])
+         output_path = str(item["output_path"])
+-        await apply_rvc_clone(input_path, output_path, model_path)
+-        if not Path(output_path).is_file():
+-            raise RuntimeError("RVC output is missing: {}".format(output_path))
++        await apply_rvc_clone(
++            input_path,
++            output_path,
++            model_path,
++            strict=True,
++        )
++        validate_transformed_audio(input_path, output_path, "RVC")
+         completed.append(
+             {"index": int(item["index"]), "output_path": output_path}
+         )
+diff --git a/backend/pipeline_v2/mixer.py b/backend/pipeline_v2/mixer.py
+index 0b37d88..f790119 100644
+--- a/backend/pipeline_v2/mixer.py
++++ b/backend/pipeline_v2/mixer.py
+@@ -6,6 +6,7 @@ import math
+ import os
+ import subprocess
+ import tempfile
++import time
+ from dataclasses import dataclass
+ from pathlib import Path
+ from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple, Union
+@@ -35,8 +36,10 @@ class FFmpegMixSettings:
+             raise ValueError("duck_ratio must be at least 1")
+         if self.true_peak_dbtp > 0:
+             raise ValueError("true_peak_dbtp must not exceed 0")
+-        if self.voice_chunk_seconds <= 0 or self.max_inputs_per_pass <= 0:
+-            raise ValueError("Mixer resource limits must be positive")
++        if self.voice_chunk_seconds <= 0:
++            raise ValueError("voice_chunk_seconds must be positive")
++        if self.max_inputs_per_pass < 2:
++            raise ValueError("max_inputs_per_pass must be at least 2")
+ 
+ 
+ @dataclass(frozen=True)
+@@ -57,15 +60,26 @@ def _validated_dubs(dubbing_audio_files: Iterable[Mapping[str, Any]]) -> List[Di
+     valid = []
+     for item in dubbing_audio_files:
+         path = Path(str(item.get("path", "")))
+-        if not path.is_file():
+-            continue
++        if not path.is_file() or path.stat().st_size <= 0:
++            raise FileNotFoundError("Dubbing audio is missing or empty: {}".format(path))
+         start = float(item.get("start", 0.0))
+-        if start < 0:
+-            raise ValueError("Dubbing start time must not be negative")
++        if not math.isfinite(start) or start < 0:
++            raise ValueError("Dubbing start time must be finite and non-negative")
++        if item.get("end") is not None:
++            end = float(item["end"])
++            if not math.isfinite(end) or end <= start:
++                raise ValueError("Dubbing end time must be finite and after start")
+         valid.append({**dict(item), "path": str(path), "start": start})
+     return sorted(valid, key=lambda item: (item["start"], int(item.get("index", 0))))
+ 
+ 
++def _remaining_timeout(deadline: float) -> float:
++    remaining = deadline - time.monotonic()
++    if remaining <= 0:
++        raise TimeoutError("FFmpeg mixer exceeded its total timeout")
++    return remaining
++
++
+ def plan_voice_chunks(
+     dubs: Sequence[Mapping[str, Any]],
+     total_duration_seconds: float,
+@@ -114,7 +128,11 @@ def plan_voice_chunks(
+     return chunks
+ 
+ 
+-def _probe_duration(path: PathLike, ffprobe_binary: str = "ffprobe") -> float:
++def _probe_duration(
++    path: PathLike,
++    ffprobe_binary: str = "ffprobe",
++    timeout_seconds: float = 60.0,
++) -> float:
+     creation_flags = (
+         subprocess.CREATE_NO_WINDOW
+         if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW")
+@@ -135,7 +153,7 @@ def _probe_duration(path: PathLike, ffprobe_binary: str = "ffprobe") -> float:
+         text=True,
+         encoding="utf-8",
+         errors="replace",
+-        timeout=60,
++        timeout=timeout_seconds,
+         creationflags=creation_flags,
+     )
+     if result.returncode != 0:
+@@ -187,8 +205,9 @@ def _render_voice_group(
+     if labels:
+         filters.append(
+             "{}amix=inputs={}:duration=longest:normalize=0,"
+-            "apad,atrim=duration={:.6f},aformat=sample_rates=44100:channel_layouts=stereo[out]".format(
+-                "".join(labels), len(labels), chunk_duration
++            "apad=whole_dur={:.6f},atrim=start=0:end={:.6f},"
++            "asetpts=N/SR/TB,aformat=sample_rates=44100:channel_layouts=stereo[out]".format(
++                "".join(labels), len(labels), chunk_duration, chunk_duration
+             )
+         )
+         command.extend(["-filter_complex", ";".join(filters), "-map", "[out]"])
+@@ -203,7 +222,11 @@ def _render_voice_group(
+                 "0:a",
+             ]
+         )
+-    command.extend(["-c:a", "flac", str(output_path)])
++    # Bound both the filter graph and the output. An unbounded apad source can
++    # otherwise keep grouped/scalable FFmpeg passes alive forever.
++    command.extend(
++        ["-t", "{:.6f}".format(chunk_duration), "-c:a", "flac", str(output_path)]
++    )
+     _run_ffmpeg(command, timeout_seconds)
+ 
+ 
+@@ -212,8 +235,10 @@ def _mix_voice_tracks(
+     output_path: Path,
+     max_inputs: int,
+     ffmpeg_binary: str,
+-    timeout_seconds: float,
++    deadline: float,
+ ) -> None:
++    if max_inputs < 2:
++        raise ValueError("max_inputs must be at least 2")
+     current = list(inputs)
+     generation = 0
+     while len(current) > 1:
+@@ -233,7 +258,7 @@ def _mix_voice_tracks(
+             command.extend(
+                 ["-filter_complex", graph, "-map", "[out]", "-c:a", "flac", str(target)]
+             )
+-            _run_ffmpeg(command, timeout_seconds)
++            _run_ffmpeg(command, _remaining_timeout(deadline))
+             next_generation.append(target)
+         current = next_generation
+         generation += 1
+@@ -247,7 +272,7 @@ def _render_scalable_voice_bus(
+     directory: Path,
+     settings: FFmpegMixSettings,
+     ffmpeg_binary: str,
+-    timeout_seconds: float,
++    deadline: float,
+ ) -> Path:
+     chunk_paths = []
+     for chunk_index, chunk in enumerate(
+@@ -270,7 +295,7 @@ def _render_scalable_voice_bus(
+                 group_path,
+                 settings,
+                 ffmpeg_binary,
+-                timeout_seconds,
++                _remaining_timeout(deadline),
+             )
+             group_paths.append(group_path)
+         chunk_path = directory / "chunk-{}.flac".format(chunk_index)
+@@ -282,7 +307,7 @@ def _render_scalable_voice_bus(
+                 chunk_path,
+                 settings.max_inputs_per_pass,
+                 ffmpeg_binary,
+-                timeout_seconds,
++                deadline,
+             )
+         chunk_paths.append(chunk_path)
+ 
+@@ -311,7 +336,7 @@ def _render_scalable_voice_bus(
+         "flac",
+         str(voice_bus),
+     ]
+-    _run_ffmpeg(command, timeout_seconds)
++    _run_ffmpeg(command, _remaining_timeout(deadline))
+     return voice_bus
+ 
+ 
+@@ -421,8 +446,25 @@ def mix_audio_ffmpeg(
+     dubs = _validated_dubs(dubbing_audio_files)
+     output = Path(output_path)
+     output.parent.mkdir(parents=True, exist_ok=True)
+-    background_duration = _probe_duration(background_audio)
+-    effective_timeout = max(timeout_seconds, background_duration * 4.0 + 300.0)
++    if timeout_seconds <= 0:
++        raise ValueError("timeout_seconds must be positive")
++    # Treat the public timeout as an upper bound. Previously it was silently
++    # raised to at least five minutes, hiding deadlocks and defeating callers
++    # that deliberately requested a short failure window.
++    effective_timeout = float(timeout_seconds)
++    deadline = time.monotonic() + effective_timeout
++    background_duration = _probe_duration(
++        background_audio,
++        "ffprobe",
++        _remaining_timeout(deadline),
++    )
++    for dub in dubs:
++        if dub["start"] >= background_duration:
++            raise ValueError(
++                "Dubbing segment {} starts outside the background timeline".format(
++                    dub.get("index", "unknown")
++                )
++            )
+     if len(dubs) <= config.max_inputs_per_pass:
+         command, dub_count = build_ffmpeg_mix_command(
+             background_audio,
+@@ -431,7 +473,7 @@ def mix_audio_ffmpeg(
+             settings=config,
+             ffmpeg_binary=ffmpeg_binary,
+         )
+-        _run_ffmpeg(command, effective_timeout)
++        _run_ffmpeg(command, _remaining_timeout(deadline))
+     else:
+         with tempfile.TemporaryDirectory(
+             prefix="voice-bus-", dir=str(output.parent)
+@@ -442,7 +484,7 @@ def mix_audio_ffmpeg(
+                 Path(temporary_directory),
+                 config,
+                 ffmpeg_binary,
+-                effective_timeout,
++                deadline,
+             )
+             command, _ = build_ffmpeg_mix_command(
+                 background_audio,
+@@ -451,7 +493,7 @@ def mix_audio_ffmpeg(
+                 settings=config,
+                 ffmpeg_binary=ffmpeg_binary,
+             )
+-            _run_ffmpeg(command, effective_timeout)
++            _run_ffmpeg(command, _remaining_timeout(deadline))
+             dub_count = len(dubs)
+     if not output.is_file() or output.stat().st_size == 0:
+         raise RuntimeError("FFmpeg mix failed")
+diff --git a/backend/pipeline_v2/preflight.py b/backend/pipeline_v2/preflight.py
+new file mode 100644
+index 0000000..268e786
+--- /dev/null
++++ b/backend/pipeline_v2/preflight.py
+@@ -0,0 +1,323 @@
++"""Production-readiness checks for AutoDub Pipeline v2."""
++
++from __future__ import annotations
++
++import argparse
++import importlib.util
++import json
++import os
++import shutil
++import subprocess
++import sys
++import tempfile
++from dataclasses import asdict, dataclass
++from pathlib import Path
++from typing import Dict, Iterable, List, Mapping, Optional, Sequence
++
++from .config import PipelineSettings
++from .stage_validation import is_real_rvc_model
++
++
++@dataclass(frozen=True)
++class PreflightCheck:
++    name: str
++    status: str
++    message: str
++
++
++CORE_MODULES = (
++    "torch",
++    "torchaudio",
++    "demucs",
++    "easyocr",
++    "edge_tts",
++    "faster_whisper",
++    "ffmpeg",
++    "cv2",
++    "pydub",
++    "requests",
++    "srt",
++    "deep_translator",
++    "yt_dlp",
++)
++
++INTERFACE_MODULES = {
++    "api": ("fastapi", "uvicorn", "multipart"),
++    "telegram": ("telegram",),
++    "batch": (),
++}
++
++
++def _with_dotenv(environment: Mapping[str, str], backend_directory: Path) -> Dict[str, str]:
++    values = dict(environment)
++    dotenv = backend_directory / ".env"
++    if not dotenv.is_file():
++        return values
++    for raw_line in dotenv.read_text(encoding="utf-8").splitlines():
++        line = raw_line.strip()
++        if not line or line.startswith("#") or "=" not in line:
++            continue
++        key, value = line.split("=", 1)
++        values.setdefault(key.strip(), value.strip().strip('"').strip("'"))
++    return values
++
++
++def _configured_secret(environment: Mapping[str, str], name: str) -> str:
++    value = environment.get(name, "").strip()
++    if value.upper().startswith(("YOUR_", "PASTE_")):
++        return ""
++    return value
++
++
++def _writable_directory(path: Path) -> Optional[str]:
++    try:
++        path.mkdir(parents=True, exist_ok=True)
++        descriptor, temporary_name = tempfile.mkstemp(prefix=".autodub-preflight-", dir=str(path))
++        os.close(descriptor)
++        Path(temporary_name).unlink()
++        return None
++    except OSError as exc:
++        return "{}: {}".format(type(exc).__name__, exc)
++
++
++def _module_checks(names: Iterable[str]) -> List[PreflightCheck]:
++    checks = []
++    for name in sorted(set(names)):
++        available = importlib.util.find_spec(name) is not None
++        checks.append(
++            PreflightCheck(
++                "python_module:{}".format(name),
++                "pass" if available else "error",
++                "available" if available else "missing",
++            )
++        )
++    return checks
++
++
++def _command_check(name: str) -> PreflightCheck:
++    path = shutil.which(name)
++    return PreflightCheck(
++        "binary:{}".format(name),
++        "pass" if path else "error",
++        path or "not found on PATH",
++    )
++
++
++def _nvenc_check() -> PreflightCheck:
++    ffmpeg = shutil.which("ffmpeg")
++    if not ffmpeg:
++        return PreflightCheck("encoder:h264_nvenc", "skipped", "FFmpeg is unavailable")
++    try:
++        result = subprocess.run(
++            [ffmpeg, "-hide_banner", "-encoders"],
++            capture_output=True,
++            text=True,
++            encoding="utf-8",
++            errors="replace",
++            timeout=30,
++            creationflags=(
++                subprocess.CREATE_NO_WINDOW
++                if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW")
++                else 0
++            ),
++        )
++        available = result.returncode == 0 and "h264_nvenc" in result.stdout
++    except (OSError, subprocess.SubprocessError):
++        available = False
++    return PreflightCheck(
++        "encoder:h264_nvenc",
++        "pass" if available else "warning",
++        "available" if available else "unavailable; renderer will use a slower fallback",
++    )
++
++
++def _cuda_check() -> PreflightCheck:
++    if importlib.util.find_spec("torch") is None:
++        return PreflightCheck("gpu:cuda", "skipped", "PyTorch is unavailable")
++    try:
++        import torch
++
++        if not torch.cuda.is_available():
++            return PreflightCheck(
++                "gpu:cuda", "warning", "CUDA is unavailable; large models will run on CPU"
++            )
++        properties = torch.cuda.get_device_properties(0)
++        memory_gib = properties.total_memory / (1024 ** 3)
++        return PreflightCheck(
++            "gpu:cuda",
++            "pass" if memory_gib >= 5.5 else "warning",
++            "{} ({:.1f} GiB VRAM)".format(properties.name, memory_gib),
++        )
++    except Exception as exc:
++        return PreflightCheck("gpu:cuda", "warning", "probe failed: {}".format(exc))
++
++
++def _rvc_check(project_root: Path, settings: PipelineSettings) -> PreflightCheck:
++    candidates = []
++    for directory in (
++        project_root / "MyVoiceModel_v2",
++        project_root / "models" / "rvc",
++    ):
++        if directory.is_dir():
++            candidates.extend(sorted(directory.glob("*.pth")))
++    real_models = [candidate for candidate in candidates if is_real_rvc_model(candidate)]
++    if real_models:
++        if importlib.util.find_spec("rvc_python") is None:
++            return PreflightCheck(
++                "rvc:model",
++                "warning",
++                "real model found but optional rvc-python package is missing",
++            )
++        return PreflightCheck("rvc:model", "pass", str(real_models[0]))
++    status = "warning" if settings.enable_rvc else "skipped"
++    return PreflightCheck(
++        "rvc:model",
++        status,
++        "no real .pth model found; Edge TTS remains available",
++    )
++
++
++def run_preflight(
++    project_root: Path,
++    interface: str = "all",
++    environment: Optional[Mapping[str, str]] = None,
++) -> Dict[str, object]:
++    root = Path(project_root).resolve()
++    backend = root / "backend"
++    env = _with_dotenv(environment or os.environ, backend)
++    checks: List[PreflightCheck] = []
++
++    checks.append(
++        PreflightCheck(
++            "python:version",
++            "pass" if sys.version_info >= (3, 10) else "error",
++            sys.version.split()[0],
++        )
++    )
++    try:
++        settings = PipelineSettings.from_env(env)
++        checks.append(
++            PreflightCheck(
++                "pipeline:config",
++                "pass" if settings.mode.value == "v2" else "warning",
++                settings.mode.value
++                if settings.mode.value == "v2"
++                else "{}; set PIPELINE_MODE=v2 to activate Pipeline v2".format(
++                    settings.mode.value
++                ),
++            )
++        )
++    except (TypeError, ValueError) as exc:
++        checks.append(PreflightCheck("pipeline:config", "error", str(exc)))
++        settings = PipelineSettings()
++
++    interfaces = tuple(INTERFACE_MODULES) if interface == "all" else (interface,)
++    modules = list(CORE_MODULES)
++    for selected in interfaces:
++        modules.extend(INTERFACE_MODULES[selected])
++    checks.extend(_module_checks(modules))
++    checks.extend((_command_check("ffmpeg"), _command_check("ffprobe")))
++    checks.append(_nvenc_check())
++    checks.append(_cuda_check())
++    checks.append(_rvc_check(root, settings))
++
++    workspace = Path(env.get("AUTODUB_WORKSPACE", str(root / "workspace")))
++    output = Path(env.get("AUTODUB_OUTPUT_DIR", r"D:\banve"))
++    for name, directory in (("workspace", workspace), ("output", output)):
++        error = _writable_directory(directory)
++        checks.append(
++            PreflightCheck(
++                "directory:{}".format(name),
++                "error" if error else "pass",
++                error or str(directory.resolve()),
++            )
++        )
++
++    if "api" in interfaces:
++        cors_origins = [
++            item.strip()
++            for item in env.get(
++                "AUTODUB_CORS_ORIGINS",
++                "http://127.0.0.1:5173,http://localhost:5173,null",
++            ).split(",")
++            if item.strip()
++        ]
++        wildcard = "*" in cors_origins
++        checks.append(
++            PreflightCheck(
++                "api:cors",
++                "error" if wildcard else "pass",
++                "wildcard origin exposes the local file-processing API"
++                if wildcard
++                else ",".join(cors_origins),
++            )
++        )
++
++    if "telegram" in interfaces:
++        token = _configured_secret(env, "BOT_TOKEN")
++        checks.append(
++            PreflightCheck(
++                "secret:BOT_TOKEN",
++                "pass" if token else "error",
++                "configured" if token else "missing or placeholder",
++            )
++        )
++    gemini = _configured_secret(env, "GEMINI_API_KEY")
++    checks.append(
++        PreflightCheck(
++            "secret:GEMINI_API_KEY",
++            "pass" if gemini else "warning",
++            "configured" if gemini else "missing; Google fallback works but Gemini/timing rewrite does not",
++        )
++    )
++
++    counts = {status: 0 for status in ("pass", "warning", "error", "skipped")}
++    for check in checks:
++        counts[check.status] += 1
++    return {
++        "schema_version": 1,
++        "ready": counts["error"] == 0,
++        "interface": interface,
++        "summary": counts,
++        "checks": [asdict(check) for check in checks],
++    }
++
++
++def build_argument_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(description="Check AutoDub v2 production readiness")
++    parser.add_argument(
++        "--project-root",
++        default=str(Path(__file__).resolve().parents[2]),
++    )
++    parser.add_argument(
++        "--interface",
++        choices=("all", "api", "telegram", "batch"),
++        default="all",
++    )
++    parser.add_argument("--json", action="store_true")
++    return parser
++
++
++def main(argv: Optional[Sequence[str]] = None) -> int:
++    args = build_argument_parser().parse_args(argv)
++    report = run_preflight(Path(args.project_root), args.interface)
++    if args.json:
++        print(json.dumps(report, ensure_ascii=False, indent=2))
++    else:
++        for check in report["checks"]:
++            print("[{:<7}] {:<32} {}".format(check["status"], check["name"], check["message"]))
++        summary = report["summary"]
++        print(
++            "ready={} pass={} warning={} error={} skipped={}".format(
++                report["ready"],
++                summary["pass"],
++                summary["warning"],
++                summary["error"],
++                summary["skipped"],
++            )
++        )
++    return 0 if report["ready"] else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/backend/pipeline_v2/qc.py b/backend/pipeline_v2/qc.py
+index 7b70dc3..fa11852 100644
+--- a/backend/pipeline_v2/qc.py
++++ b/backend/pipeline_v2/qc.py
+@@ -202,6 +202,21 @@ def _duration_seconds(probe: Mapping[str, Any]) -> Optional[float]:
+     return max(durations) if durations else None
+ 
+ 
++def _stream_duration_seconds(
++    probe: Mapping[str, Any], codec_type: str
++) -> Optional[float]:
++    durations = [
++        value
++        for value in (
++            _float_or_none(stream.get("duration"))
++            for stream in probe.get("streams", [])
++            if stream.get("codec_type") == codec_type
++        )
++        if value is not None
++    ]
++    return max(durations) if durations else _duration_seconds(probe)
++
++
+ def _streams(probe: Mapping[str, Any], kind: str) -> List[Mapping[str, Any]]:
+     return [
+         stream
+@@ -407,6 +422,11 @@ def _check_segments(path: Path) -> Tuple[Dict[str, Any], List[QCCheck]]:
+     invalid_ranges = []
+     empty_text = []
+     missing_audio = []
++    timing_failures = []
++    timing_overflow_seconds = {}
++    untranslated_source = []
++    timing_metadata_count = 0
++    translation_metadata_count = 0
+     numeric_ids = []
+     for position, segment in enumerate(segments, 1):
+         segment_id = segment.get("id", segment.get("index", position))
+@@ -428,6 +448,26 @@ def _check_segments(path: Path) -> Tuple[Dict[str, Any], List[QCCheck]]:
+                 audio_path = path.parent / audio_path
+             if not audio_path.is_file():
+                 missing_audio.append(segment_id)
++        if "timing_fits" in segment:
++            timing_metadata_count += 1
++            actual_duration = _float_or_none(segment.get("actual_audio_duration"))
++            target_duration = _float_or_none(segment.get("target_audio_duration"))
++            if segment.get("timing_fits") is False:
++                timing_failures.append(segment_id)
++            if actual_duration is not None and target_duration is not None:
++                overflow = actual_duration - target_duration
++                if overflow > 0.08:
++                    timing_overflow_seconds[str(segment_id)] = round(overflow, 3)
++                    if segment_id not in timing_failures:
++                        timing_failures.append(segment_id)
++        original_text = str(segment.get("orig_content") or "").strip()
++        if original_text:
++            translation_metadata_count += 1
++            if (
++                original_text == text
++                and any("\u4e00" <= character <= "\u9fff" for character in original_text)
++            ):
++                untranslated_source.append(segment_id)
+ 
+     missing_ids = []
+     if numeric_ids:
+@@ -443,6 +483,11 @@ def _check_segments(path: Path) -> Tuple[Dict[str, Any], List[QCCheck]]:
+             "missing_audio_count": len(missing_audio),
+             "missing_ids": missing_ids,
+             "duplicate_ids": duplicate_ids,
++            "timing_failure_count": len(timing_failures),
++            "timing_failure_ids": timing_failures,
++            "timing_overflow_seconds": timing_overflow_seconds,
++            "untranslated_source_count": len(untranslated_source),
++            "untranslated_source_ids": untranslated_source,
+         }
+     )
+     problems = invalid_ranges or empty_text or missing_audio or missing_ids or duplicate_ids
+@@ -450,13 +495,62 @@ def _check_segments(path: Path) -> Tuple[Dict[str, Any], List[QCCheck]]:
+         checks.append(
+             QCCheck(
+                 "segments",
+-                "warning",
++                "error",
+                 "Missing or invalid segment data was detected",
+                 metrics,
+             )
+         )
+     else:
+         checks.append(QCCheck("segments", "pass", "All segment records are complete", metrics))
++    if timing_metadata_count == 0:
++        checks.append(
++            QCCheck("segment_timing", "skipped", "No measured audio timing metadata")
++        )
++    elif timing_failures:
++        checks.append(
++            QCCheck(
++                "segment_timing",
++                "error",
++                "Measured dubbing audio exceeds one or more segment windows",
++                {
++                    "segment_ids": timing_failures,
++                    "overflow_seconds": timing_overflow_seconds,
++                },
++            )
++        )
++    else:
++        checks.append(
++            QCCheck(
++                "segment_timing",
++                "pass",
++                "All measured dubbing audio fits its segment window",
++            )
++        )
++    if translation_metadata_count == 0:
++        checks.append(
++            QCCheck(
++                "translation_fallback",
++                "skipped",
++                "No source translation metadata was supplied",
++            )
++        )
++    elif untranslated_source:
++        checks.append(
++            QCCheck(
++                "translation_fallback",
++                "error",
++                "Chinese source text remained unchanged in translated subtitles",
++                {"segment_ids": untranslated_source},
++            )
++        )
++    else:
++        checks.append(
++            QCCheck(
++                "translation_fallback",
++                "pass",
++                "No unchanged Chinese source fallback was detected",
++            )
++        )
+     return metrics, checks
+ 
+ 
+@@ -662,8 +756,8 @@ def run_report_only_qc(
+             report.add("audio_probe", "error", "Could not probe analysis audio: {}".format(exc))
+ 
+         if video_probe is not None and audio_probe is not None:
+-            video_duration = _duration_seconds(video_probe)
+-            audio_duration = _duration_seconds(audio_probe)
++            video_duration = _stream_duration_seconds(video_probe, "video")
++            audio_duration = _stream_duration_seconds(audio_probe, "audio")
+             if video_duration is not None and audio_duration is not None:
+                 delta = abs(video_duration - audio_duration)
+                 allowed = max(
+diff --git a/backend/pipeline_v2/resume.py b/backend/pipeline_v2/resume.py
+index 39b61ae..062c1d0 100644
+--- a/backend/pipeline_v2/resume.py
++++ b/backend/pipeline_v2/resume.py
+@@ -8,7 +8,9 @@ from pathlib import Path
+ from typing import Any, Callable, Dict, List, Optional
+ 
+ from .config import PipelineMode, PipelineSettings
++from .artifact_store import hash_file
+ from .manifest import ManifestStore
++from .stage_validation import is_real_rvc_model
+ from .stage_status import StageStatus
+ from .video_pipeline import (
+     V2_STAGE_ORDER,
+@@ -52,10 +54,14 @@ def _published_outputs_present(manifest: Any) -> bool:
+         try:
+             candidate = Path(str(item["path"]))
+             expected_size = int(item["size_bytes"])
++            expected_sha256 = str(item["sha256"])
+         except (KeyError, TypeError, ValueError):
+             return False
+         if not candidate.is_file() or candidate.stat().st_size != expected_size:
+             return False
++        actual_sha256, _ = hash_file(candidate)
++        if actual_sha256 != expected_sha256:
++            return False
+     return True
+ 
+ 
+@@ -113,27 +119,26 @@ async def resume_video_job(
+     job: ResumableVideoJob,
+     settings: PipelineSettings,
+     api_key: str = "",
++    tts_api_key: str = "",
+     progress: Optional[ResumeProgress] = None,
+ ) -> VideoPipelineResult:
+     if settings.mode is not PipelineMode.V2:
+         raise RuntimeError("Automatic resume is active only in PIPELINE_MODE=v2")
+-    rvc_model = job.rvc_model_path
+-    if not rvc_model or not rvc_model.is_file():
+-        rvc_model = discover_rvc_model(job.job_directory.parent)
+-    voice_source = (
+-        "rvc"
+-        if rvc_model
+-        else ("edge" if job.voice_source == "rvc" else job.voice_source)
+-    )
+-    voice_param = (
+-        str(rvc_model)
+-        if rvc_model
+-        else (
+-            "vi-VN-HoaiMyNeural"
+-            if job.voice_source == "rvc"
+-            else job.voice_param
+-        )
+-    )
++    # Resume must preserve the voice provider recorded in the manifest.  A
++    # globally discoverable RVC model must never turn an Edge/FPT job into an
++    # RVC job, and an RVC job must not silently fall back to a different voice.
++    voice_source = job.voice_source
++    voice_param = job.voice_param
++    rvc_model = None
++    if voice_source == "rvc":
++        rvc_model = job.rvc_model_path
++        if not rvc_model or not is_real_rvc_model(rvc_model):
++            rvc_model = discover_rvc_model(job.job_directory.parent)
++        if not rvc_model:
++            raise RuntimeError(
++                "Cannot resume RVC job: no real .pth model is available"
++            )
++        voice_param = str(rvc_model)
+ 
+     async def report(stage: str, state: str) -> None:
+         if progress is None:
+@@ -149,6 +154,7 @@ async def resume_video_job(
+         delivery_copy_path=job.delivery_copy_path,
+         settings=settings,
+         api_key=api_key,
++        tts_api_key=tts_api_key,
+         target_lang=job.target_lang,
+         voice_source=voice_source,
+         voice_param=voice_param,
+diff --git a/backend/pipeline_v2/stage_validation.py b/backend/pipeline_v2/stage_validation.py
+new file mode 100644
+index 0000000..b533e16
+--- /dev/null
++++ b/backend/pipeline_v2/stage_validation.py
+@@ -0,0 +1,101 @@
++"""Fail-closed validation for heavyweight media stage outputs."""
++
++from __future__ import annotations
++
++import hashlib
++from pathlib import Path
++from typing import Optional, Union
++
++
++PathLike = Union[str, Path]
++
++
++def _require_nonempty_file(path: PathLike, label: str) -> Path:
++    candidate = Path(path)
++    if not candidate.is_file():
++        raise RuntimeError("{} output is missing: {}".format(label, candidate))
++    if candidate.stat().st_size <= 0:
++        raise RuntimeError("{} output is empty: {}".format(label, candidate))
++    return candidate
++
++
++def _sha256(path: Path) -> str:
++    digest = hashlib.sha256()
++    with path.open("rb") as handle:
++        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def files_are_identical(left: PathLike, right: PathLike) -> bool:
++    first = _require_nonempty_file(left, "First")
++    second = _require_nonempty_file(right, "Second")
++    try:
++        if first.resolve() == second.resolve():
++            return True
++    except OSError:
++        pass
++    if first.stat().st_size != second.stat().st_size:
++        return False
++    return _sha256(first) == _sha256(second)
++
++
++def validate_demucs_outputs(
++    input_audio: PathLike, vocals: PathLike, background: PathLike
++) -> None:
++    source = _require_nonempty_file(input_audio, "Demucs input")
++    voice = _require_nonempty_file(vocals, "Demucs vocals")
++    music = _require_nonempty_file(background, "Demucs background")
++    if files_are_identical(source, voice) or files_are_identical(source, music):
++        raise RuntimeError(
++            "Demucs returned the source audio as a stem; refusing degraded output"
++        )
++    if files_are_identical(voice, music):
++        raise RuntimeError("Demucs returned identical vocals and background stems")
++
++
++def validate_transformed_audio(
++    input_audio: PathLike, output_audio: PathLike, stage_name: str
++) -> None:
++    source = _require_nonempty_file(input_audio, "{} input".format(stage_name))
++    output = _require_nonempty_file(output_audio, "{} output".format(stage_name))
++    if files_are_identical(source, output):
++        raise RuntimeError(
++            "{} returned an unchanged copy of its input".format(stage_name)
++        )
++
++
++def is_real_rvc_model(path: PathLike) -> bool:
++    candidate = Path(path)
++    if not candidate.is_file() or candidate.stat().st_size <= 1024:
++        return False
++    try:
++        with candidate.open("rb") as handle:
++            prefix = handle.read(128)
++    except OSError:
++        return False
++    return b"git-lfs.github.com/spec" not in prefix
++
++
++def discover_rvc_index_file(model_path: PathLike) -> Optional[Path]:
++    """Return the RVC feature index that inference would select, if present."""
++
++    model = Path(model_path)
++    exact = model.with_suffix(".index")
++    if exact.is_file() and exact.stat().st_size > 1024:
++        return exact
++    matches = [
++        candidate
++        for candidate in model.parent.glob("*.index")
++        if model.stem.lower() in candidate.stem.lower()
++        and candidate.stat().st_size > 1024
++    ]
++    if not matches:
++        return None
++    matches.sort(
++        key=lambda candidate: (
++            0 if candidate.name.lower().startswith("added_") else 1,
++            candidate.name.lower(),
++        )
++    )
++    return matches[0]
+diff --git a/backend/pipeline_v2/timing.py b/backend/pipeline_v2/timing.py
+index b629046..a9de902 100644
+--- a/backend/pipeline_v2/timing.py
++++ b/backend/pipeline_v2/timing.py
+@@ -61,6 +61,46 @@ class RewriteRequest:
+     max_characters: int
+ 
+ 
++def plan_actual_timing_rewrites(
++    segments: Iterable[Any],
++    audio_infos: Iterable[Mapping[str, Any]],
++    safety_margin: float = 0.95,
++) -> List[RewriteRequest]:
++    """Create rewrite requests from measured TTS/RVC durations, not estimates."""
++
++    if not 0.5 <= safety_margin <= 1.0:
++        raise ValueError("safety_margin must be between 0.5 and 1.0")
++    by_index = {int(info["index"]): dict(info) for info in audio_infos}
++    requests = []
++    for segment in segments:
++        info = by_index.get(int(segment.index))
++        if not info:
++            continue
++        target = max((segment.end - segment.start).total_seconds(), 0.1)
++        actual = float(info.get("actual_audio_duration", 0.0) or 0.0)
++        fits = bool(info.get("timing_fits", actual <= target + 0.08))
++        if fits and actual <= target + 0.08:
++            continue
++        characters = max(normalized_character_count(str(segment.content)), 1)
++        if actual > 0:
++            budget = int(math.floor(characters * target / actual * safety_margin))
++        else:
++            budget = characters - 1
++        budget = max(1, min(budget, max(characters - 1, 1)))
++        requests.append(
++            RewriteRequest(
++                segment_index=int(segment.index),
++                source_segment_id=int(
++                    getattr(segment, "source_segment_id", None) or segment.index
++                ),
++                text=str(segment.content),
++                target_seconds=target,
++                max_characters=budget,
++            )
++        )
++    return requests
++
++
+ @dataclass
+ class TimingSolveResult:
+     segments: List[RuntimeSegment]
+diff --git a/backend/pipeline_v2/tts.py b/backend/pipeline_v2/tts.py
+index 30a86e1..016b68c 100644
+--- a/backend/pipeline_v2/tts.py
++++ b/backend/pipeline_v2/tts.py
+@@ -24,6 +24,7 @@ async def generate_tts_audio_v2(
+     voice_param: str = "vi-VN-HoaiMyNeural",
+     api_key: str = "",
+     policy: TimingPolicy = None,
++    strict_provider: bool = False,
+ ) -> List[Dict[str, Any]]:
+     """Generate TTS and apply at most the configured light atempo correction."""
+ 
+@@ -48,7 +49,11 @@ async def generate_tts_audio_v2(
+             if voice_source == "fpt":
+                 try:
+                     await generate_tts_fpt(text, str(raw), api_key, voice="banmai")
+-                except FPTQuotaError:
++                except FPTQuotaError as exc:
++                    if strict_provider:
++                        raise RuntimeError(
++                            "FPT TTS is unavailable; refusing silent provider fallback"
++                        ) from exc
+                     await generate_tts_edge(
+                         text, str(raw), "vi-VN-HoaiMyNeural", rate="+5%"
+                     )
+@@ -85,10 +90,23 @@ async def generate_tts_audio_v2(
+                 "path": str(fitted),
+                 "start": segment.start.total_seconds(),
+                 "end": segment.end.total_seconds(),
++                "source_audio_duration": fit.source_duration_seconds,
++                "target_audio_duration": fit.target_duration_seconds,
+                 "actual_audio_duration": fit.output_duration_seconds,
+                 "applied_atempo": fit.applied_atempo,
+                 "timing_fits": fit.fits,
+                 "content": text,
+             }
+ 
+-    return list(await asyncio.gather(*(one(segment) for segment in segments)))
++    tasks = [asyncio.create_task(one(segment)) for segment in segments]
++    try:
++        return list(await asyncio.gather(*tasks))
++    except BaseException:
++        # asyncio.gather does not reliably cancel sibling work when one item
++        # fails. Drain explicit cancellations before the caller removes the
++        # batch temporary directory.
++        for task in tasks:
++            if not task.done():
++                task.cancel()
++        await asyncio.gather(*tasks, return_exceptions=True)
++        raise
+diff --git a/backend/pipeline_v2/video_pipeline.py b/backend/pipeline_v2/video_pipeline.py
+index 93450b5..8da3b45 100644
+--- a/backend/pipeline_v2/video_pipeline.py
++++ b/backend/pipeline_v2/video_pipeline.py
+@@ -29,8 +29,19 @@ from .mixer import FFmpegMixSettings, mix_audio_ffmpeg
+ from .models import ArtifactRecord, FingerprintSet, JobManifest, fingerprint_json
+ from .qc import QCSettings, evaluate_qc_gate, run_report_only_qc
+ from .segments import RuntimeSegment, segment_from_dict, segment_to_dict, segments_from_dicts, segments_to_dicts
++from .stage_validation import (
++    discover_rvc_index_file,
++    is_real_rvc_model,
++    validate_demucs_outputs,
++)
+ from .stage_status import StageStatus
+-from .timing import GeminiTimingRewriter, TimingPolicy, fit_audio_to_window, solve_segment_timing
++from .timing import (
++    GeminiTimingRewriter,
++    TimingPolicy,
++    fit_audio_to_window,
++    plan_actual_timing_rewrites,
++    solve_segment_timing,
++)
+ from .tts import generate_tts_audio_v2
+ 
+ 
+@@ -52,6 +63,11 @@ V2_STAGE_ORDER = (
+     "deliver",
+ )
+ 
++# Bump this value whenever artifact semantics change.  It participates in the
++# manifest fingerprint so an upgraded runner cannot silently reuse output from
++# an older implementation that happened to have the same environment flags.
++PIPELINE_IMPLEMENTATION_VERSION = "2.1.0"
++
+ 
+ class QCGateBlocked(RuntimeError):
+     pass
+@@ -65,6 +81,7 @@ class VideoPipelineRequest:
+     settings: PipelineSettings
+     delivery_copy_path: Optional[Path] = None
+     api_key: str = ""
++    tts_api_key: str = ""
+     target_lang: str = "vi"
+     voice_source: str = "edge"
+     voice_param: str = "vi-VN-HoaiMyNeural"
+@@ -111,6 +128,31 @@ def compose_srt(segments: Iterable[Any]) -> str:
+     return "\n\n".join(blocks) + ("\n" if blocks else "")
+ 
+ 
++def validate_translated_batch(
++    source: Sequence[RuntimeSegment], translated: Sequence[RuntimeSegment]
++) -> None:
++    """Reject structurally incomplete or unchanged-CJK translation checkpoints."""
++
++    if len(source) != len(translated):
++        raise RuntimeError("Translation batch changed the segment count")
++    for original, result in zip(source, translated):
++        if int(original.index) != int(result.index):
++            raise RuntimeError("Translation batch changed segment identity")
++        source_text = str(original.content).strip()
++        translated_text = str(result.content).strip()
++        if not translated_text:
++            raise RuntimeError(
++                "Translation returned empty text for segment {}".format(original.index)
++            )
++        contains_cjk = any("\u4e00" <= character <= "\u9fff" for character in source_text)
++        if contains_cjk and translated_text == source_text:
++            raise RuntimeError(
++                "Translation left CJK source unchanged for segment {}".format(
++                    original.index
++                )
++            )
++
++
+ def merge_ocr_geometry(
+     translated: Iterable[Any], ocr_segments: Iterable[Any]
+ ) -> List[RuntimeSegment]:
+@@ -145,11 +187,8 @@ def discover_rvc_model(workspace: Path) -> Optional[Path]:
+         if not model_directory.is_dir():
+             continue
+         for candidate in sorted(model_directory.glob("*.pth")):
+-            try:
+-                if candidate.stat().st_size > 1024:
+-                    return candidate
+-            except OSError:
+-                continue
++            if is_real_rvc_model(candidate):
++                return candidate
+     return None
+ 
+ 
+@@ -157,6 +196,26 @@ class VideoPipelineRunner:
+     def __init__(self, request: VideoPipelineRequest):
+         self.request = request
+         self.video_path = Path(request.video_path).resolve()
++        output_path = Path(request.output_path).resolve()
++        if output_path == self.video_path:
++            raise ValueError("Pipeline output_path must not overwrite the input video")
++        if (
++            request.delivery_copy_path
++            and Path(request.delivery_copy_path).resolve() == self.video_path
++        ):
++            raise ValueError("Pipeline delivery_copy_path must not overwrite the input video")
++        if request.voice_source not in {"edge", "fpt", "rvc"}:
++            raise ValueError("voice_source must be edge, fpt or rvc")
++        if request.voice_source == "fpt" and not (
++            request.tts_api_key or request.api_key
++        ):
++            raise ValueError("FPT voice requires an API key")
++        if request.voice_source == "rvc" and (
++            not request.settings.enable_rvc
++            or not request.rvc_model_path
++            or not is_real_rvc_model(request.rvc_model_path)
++        ):
++            raise ValueError("RVC voice requires an enabled, real .pth model file")
+         self.job_directory = Path(request.job_directory).resolve()
+         self.v2_directory = self.job_directory / "pipeline_v2"
+         self.artifact_store = ArtifactStore(self.v2_directory / "artifacts")
+@@ -237,12 +296,13 @@ class VideoPipelineRunner:
+             timed_segments = merged
+ 
+         await self._execute("tts", lambda: self._tts_stage(timed_segments))
++        final_segments = self._segments_after_tts(timed_segments)
+         if self._rvc_enabled():
+-            await self._execute("rvc", lambda: self._rvc_stage(timed_segments))
++            await self._execute("rvc", lambda: self._rvc_stage(final_segments))
+         else:
+             self._skip("rvc", "RVC model unavailable or disabled")
+ 
+-        await self._execute("subtitles", lambda: self._subtitles_stage(timed_segments))
++        await self._execute("subtitles", lambda: self._subtitles_stage(final_segments))
+         if self.request.settings.enable_ffmpeg_mix_v2:
+             if self.request.settings.enable_legacy_mix_ab:
+                 await self._execute("mix_legacy", self._mix_legacy_stage)
+@@ -253,7 +313,7 @@ class VideoPipelineRunner:
+             await self._execute("mix_legacy", self._mix_legacy_stage)
+             self._skip("mix_v2", "ENABLE_FFMPEG_MIX_V2 is false")
+         await self._execute("render", self._render_stage)
+-        await self._execute("qc", lambda: self._qc_stage(timed_segments))
++        await self._execute("qc", lambda: self._qc_stage(final_segments))
+ 
+         report_payload = self._load_json("qc/qc_report.json")
+         gate = evaluate_qc_gate(report_payload, self.request.settings.qc_gate_policy)
+@@ -276,16 +336,21 @@ class VideoPipelineRunner:
+             "whisper": fingerprint_json("large-v3:int8_float16"),
+             "demucs": fingerprint_json("htdemucs:two-stems:segment=6"),
+         }
+-        if self.request.rvc_model_path and Path(self.request.rvc_model_path).is_file():
++        if self.request.rvc_model_path and is_real_rvc_model(self.request.rvc_model_path):
+             model_fingerprints["rvc"], _ = hash_file(self.request.rvc_model_path)
++            rvc_index = discover_rvc_index_file(self.request.rvc_model_path)
++            if rvc_index is not None:
++                model_fingerprints["rvc_index"], _ = hash_file(rvc_index)
+         fingerprints = FingerprintSet(
+             source_sha256=source_hash,
+             config_sha256=fingerprint_json(
+                 {
+                     **self.request.settings.cache_payload(),
++                    "pipeline_implementation_version": PIPELINE_IMPLEMENTATION_VERSION,
+                     "target_lang": self.request.target_lang,
+                     "voice_source": self.request.voice_source,
+                     "voice_param": self.request.voice_param,
++                    "clean_audio_hint": self.request.clean_audio_hint,
+                     "delogo": self.request.delogo,
+                 }
+             ),
+@@ -303,6 +368,22 @@ class VideoPipelineRunner:
+                 and existing.is_cache_compatible(fingerprints)
+                 and (self.request.settings.enable_stage_cache or not fully_delivered)
+             ):
++                current_request = dict(existing.metadata.get("request", {}))
++                requested_output = str(Path(self.request.output_path).resolve())
++                requested_copy = (
++                    str(Path(self.request.delivery_copy_path).resolve())
++                    if self.request.delivery_copy_path
++                    else None
++                )
++                if (
++                    current_request.get("output_path") != requested_output
++                    or current_request.get("delivery_copy_path") != requested_copy
++                ):
++                    existing.invalidate_from("deliver", V2_STAGE_ORDER)
++                    current_request["output_path"] = requested_output
++                    current_request["delivery_copy_path"] = requested_copy
++                    existing.metadata["request"] = current_request
++                    self.manifest_store.save(existing)
+                 return existing
+             archive = self.manifest_store.path.with_name(
+                 "job_manifest.{}.json".format(uuid.uuid4().hex)
+@@ -314,6 +395,7 @@ class VideoPipelineRunner:
+             stage_names=V2_STAGE_ORDER,
+             metadata={
+                 "mode": "v2",
++                "pipeline_implementation_version": PIPELINE_IMPLEMENTATION_VERSION,
+                 "source_path": str(self.video_path),
+                 "source_size_bytes": source_size,
+                 "legacy_default_unchanged": True,
+@@ -380,6 +462,14 @@ class VideoPipelineRunner:
+     ) -> None:
+         assert self.manifest is not None
+         names = ("ocr", "translate")
++        # A completed stage whose artifacts failed validation must be reset
++        # together with all downstream consumers before it can transition back
++        # to running.  The serial executor already does this; keep the parallel
++        # fast path identical so two corrupt checkpoints remain resumable.
++        for name in names:
++            record = self.manifest.stage(name)
++            if record.status is StageStatus.COMPLETED:
++                self.manifest.invalidate_from(name, V2_STAGE_ORDER)
+         for name in names:
+             self.manifest.start_stage(name)
+         self.manifest_store.save(self.manifest)
+@@ -396,8 +486,17 @@ class VideoPipelineRunner:
+                 first_error = first_error or result
+                 await self._notify(name, "failed")
+             else:
+-                self.manifest.complete_stage(name, list(result or []))
+-                await self._notify(name, "completed")
++                artifacts = list(result or [])
++                if not artifacts:
++                    error = RuntimeError(
++                        "Stage {!r} produced no artifacts".format(name)
++                    )
++                    self.manifest.fail_stage(name, str(error), type(error).__name__)
++                    first_error = first_error or error
++                    await self._notify(name, "failed")
++                else:
++                    self.manifest.complete_stage(name, artifacts)
++                    await self._notify(name, "completed")
+         self.manifest_store.save(self.manifest)
+         if first_error is not None:
+             raise first_error
+@@ -450,9 +549,26 @@ class VideoPipelineRunner:
+         callback = self.request.progress
+         if callback is None:
+             return
+-        result = callback(stage, state)
+-        if inspect.isawaitable(result):
+-            await result
++        try:
++            result = callback(stage, state)
++            if inspect.isawaitable(result):
++                await result
++        except Exception as exc:
++            # Status delivery is observability, not media correctness. A
++            # transient Telegram/UI failure must not corrupt stage state.
++            if self.manifest is not None:
++                warnings = self.manifest.metadata.setdefault("progress_warnings", [])
++                self.manifest.metadata["progress_warning_count"] = (
++                    int(self.manifest.metadata.get("progress_warning_count", 0)) + 1
++                )
++                warnings.append(
++                    {
++                        "stage": stage,
++                        "state": state,
++                        "error": "{}: {}".format(type(exc).__name__, exc),
++                    }
++                )
++                del warnings[:-50]
+ 
+     @staticmethod
+     def _check_stopped() -> None:
+@@ -542,6 +658,7 @@ class VideoPipelineRunner:
+                     self._resource_scaled_timeout(),
+                 )
+                 vocals, background = Path(vocals_value), Path(background_value)
++            validate_demucs_outputs(original, vocals, background)
+             return [
+                 self.artifact_store.put_file("audio/vocals.wav", vocals),
+                 self.artifact_store.put_file("audio/background.wav", background),
+@@ -663,8 +780,10 @@ class VideoPipelineRunner:
+             checkpoint_key = "translation/batches/{:05d}.json".format(batch_number)
+             input_fingerprint = fingerprint_json(
+                 {
++                    "pipeline_implementation_version": PIPELINE_IMPLEMENTATION_VERSION,
+                     "segments": segments_to_dicts(batch),
+                     "target_lang": self.request.target_lang,
++                    "prior_context": prior_context[-3:],
+                 }
+             )
+             checkpoint_path = self.artifact_store.path_for(checkpoint_key)
+@@ -673,11 +792,20 @@ class VideoPipelineRunner:
+                 try:
+                     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                     if checkpoint.get("input_fingerprint") == input_fingerprint:
+-                        translated_batch = segments_from_dicts(checkpoint["segments"])
++                        candidate_batch = segments_from_dicts(checkpoint["segments"])
++                        validate_translated_batch(batch, candidate_batch)
++                        translated_batch = candidate_batch
+                         artifacts.append(
+                             self.artifact_store.record_existing(checkpoint_key)
+                         )
+-                except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
++                except (
++                    OSError,
++                    KeyError,
++                    TypeError,
++                    ValueError,
++                    RuntimeError,
++                    json.JSONDecodeError,
++                ):
+                     translated_batch = None
+             if translated_batch is None:
+                 translated_batch = await asyncio.to_thread(
+@@ -689,7 +817,10 @@ class VideoPipelineRunner:
+                     context_start_seconds=batch[0].start.total_seconds(),
+                     context_end_seconds=batch[-1].end.total_seconds(),
+                     prior_context=prior_context[-3:],
++                    strict=True,
++                    enable_g4f=False,
+                 )
++                validate_translated_batch(batch, translated_batch)
+                 artifacts.append(
+                     self.artifact_store.put_json(
+                         checkpoint_key,
+@@ -758,8 +889,9 @@ class VideoPipelineRunner:
+     def _rvc_enabled(self) -> bool:
+         return bool(
+             self.request.settings.enable_rvc
++            and self.request.voice_source == "rvc"
+             and self.request.rvc_model_path
+-            and Path(self.request.rvc_model_path).is_file()
++            and is_real_rvc_model(self.request.rvc_model_path)
+         )
+ 
+     async def _tts_stage(
+@@ -774,17 +906,24 @@ class VideoPipelineRunner:
+             source = "edge"
+         artifacts: List[ArtifactRecord] = []
+         portable_infos: List[Dict[str, Any]] = []
++        actual_rewriter = (
++            GeminiTimingRewriter(self.request.api_key)
++            if self.request.settings.enable_timing_solver and self.request.api_key
++            else None
++        )
+         for batch_number, batch in enumerate(
+             chunked(list(segments), self.request.settings.tts_batch_segments), 1
+         ):
+             checkpoint_key = "tts/batches/{:05d}.json".format(batch_number)
+             input_fingerprint = fingerprint_json(
+                 {
++                    "pipeline_implementation_version": PIPELINE_IMPLEMENTATION_VERSION,
+                     "segments": segments_to_dicts(batch),
+                     "voice_source": source,
+                     "voice_param": self.request.voice_param,
+                     "atempo_min": policy.atempo_min,
+                     "atempo_max": policy.atempo_max,
++                    "actual_timing_rewrite": actual_rewriter is not None,
+                 }
+             )
+             restored = False
+@@ -807,6 +946,16 @@ class VideoPipelineRunner:
+                         artifacts.extend(audio_records)
+                         artifacts.append(self.artifact_store.record_existing(checkpoint_key))
+                         portable_infos.extend(checkpoint["segments"])
++                        restored_segments = checkpoint.get("runtime_segments", [])
++                        restored_by_index = {
++                            int(item["index"]): item
++                            for item in restored_segments
++                            if isinstance(item, dict) and "index" in item
++                        }
++                        for segment in batch:
++                            restored_segment = restored_by_index.get(int(segment.index))
++                            if restored_segment is not None:
++                                segment.content = str(restored_segment.get("content", ""))
+                         restored = True
+                 except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                     restored = False
+@@ -816,14 +965,38 @@ class VideoPipelineRunner:
+             with tempfile.TemporaryDirectory(
+                 prefix="tts-batch-", dir=self.work_directory
+             ) as work:
+-                infos = await generate_tts_audio_v2(
+-                    batch,
+-                    work,
+-                    voice_source=source,
+-                    voice_param=self.request.voice_param,
+-                    api_key=self.request.api_key,
+-                    policy=policy,
+-                )
++                async def generate_round(round_number: int):
++                    return await generate_tts_audio_v2(
++                        batch,
++                        Path(work) / "round-{}".format(round_number),
++                        voice_source=source,
++                        voice_param=self.request.voice_param,
++                        api_key=self.request.tts_api_key or self.request.api_key,
++                        policy=policy,
++                        strict_provider=True,
++                    )
++
++                infos = await generate_round(0)
++                if actual_rewriter is not None:
++                    for rewrite_round in range(1, policy.max_rewrite_rounds + 1):
++                        requests = plan_actual_timing_rewrites(batch, infos)
++                        if not requests:
++                            break
++                        replacements = await asyncio.to_thread(
++                            actual_rewriter, requests
++                        )
++                        changed = False
++                        for segment in batch:
++                            replacement = replacements.get(int(segment.index))
++                            if (
++                                replacement
++                                and replacement.strip() != str(segment.content).strip()
++                            ):
++                                segment.content = replacement.strip()
++                                changed = True
++                        if not changed:
++                            break
++                        infos = await generate_round(rewrite_round)
+                 batch_records = []
+                 batch_infos = []
+                 for info in infos:
+@@ -837,6 +1010,7 @@ class VideoPipelineRunner:
+                         "input_fingerprint": input_fingerprint,
+                         "audio_artifacts": [record.to_dict() for record in batch_records],
+                         "segments": batch_infos,
++                        "runtime_segments": segments_to_dicts(batch),
+                     },
+                 )
+                 artifacts.extend(batch_records)
+@@ -844,11 +1018,31 @@ class VideoPipelineRunner:
+                 portable_infos.extend(batch_infos)
+         artifacts.append(
+             self.artifact_store.put_json(
+-                "tts/segments.json", {"segments": portable_infos}
++                "tts/segments.json",
++                {
++                    "segments": portable_infos,
++                    "runtime_segments": segments_to_dicts(segments),
++                    "unresolved_source_ids": sorted(
++                        {
++                            int(info.get("source_segment_id", info["index"]))
++                            for info in portable_infos
++                            if not bool(info.get("timing_fits", False))
++                        }
++                    ),
++                },
+             )
+         )
+         return artifacts
+ 
++    def _segments_after_tts(
++        self, fallback: Sequence[RuntimeSegment]
++    ) -> List[RuntimeSegment]:
++        payload = self._load_json("tts/segments.json")
++        serialized = payload.get("runtime_segments")
++        if isinstance(serialized, list) and serialized:
++            return segments_from_dicts(serialized)
++        return segments_from_dicts(segments_to_dicts(fallback))
++
+     def _audio_infos(self) -> List[Dict[str, Any]]:
+         key = (
+             "rvc/segments.json"
+@@ -879,6 +1073,7 @@ class VideoPipelineRunner:
+             checkpoint_key = "rvc/batches/{:05d}.json".format(batch_number)
+             input_fingerprint = fingerprint_json(
+                 {
++                    "pipeline_implementation_version": PIPELINE_IMPLEMENTATION_VERSION,
+                     "tts": batch,
+                     "model": self.manifest.fingerprints.model_sha256.get("rvc", ""),
+                     "atempo_min": policy.atempo_min,
+@@ -965,6 +1160,8 @@ class VideoPipelineRunner:
+                             **original_info,
+                             "artifact_key": key,
+                             "path": None,
++                            "rvc_source_audio_duration": fit.source_duration_seconds,
++                            "target_audio_duration": fit.target_duration_seconds,
+                             "actual_audio_duration": fit.output_duration_seconds,
+                             "rvc_applied_atempo": fit.applied_atempo,
+                             "timing_fits": fit.fits,
+@@ -983,7 +1180,17 @@ class VideoPipelineRunner:
+                 portable.extend(batch_infos)
+         artifacts.append(
+             self.artifact_store.put_json(
+-                "rvc/segments.json", {"segments": portable}
++                "rvc/segments.json",
++                {
++                    "segments": portable,
++                    "unresolved_source_ids": sorted(
++                        {
++                            int(info.get("source_segment_id", info["index"]))
++                            for info in portable
++                            if not bool(info.get("timing_fits", False))
++                        }
++                    ),
++                },
+             )
+         )
+         return artifacts
+@@ -1026,6 +1233,7 @@ class VideoPipelineRunner:
+                 output,
+                 -2,
+                 1,
++                True,
+             )
+             return [self.artifact_store.put_file("audio/mixed_legacy.wav", output)]
+ 
+@@ -1045,6 +1253,7 @@ class VideoPipelineRunner:
+                         self.request.settings.mixer_max_inputs_per_pass
+                     ),
+                 ),
++                timeout_seconds=self.request.settings.stage_timeout_seconds,
+             )
+             return [self.artifact_store.put_file("audio/mixed_v2.wav", output)]
+ 
+@@ -1061,15 +1270,16 @@ class VideoPipelineRunner:
+             output = Path(work) / "final.mp4"
+             ok = await asyncio.to_thread(
+                 process_video,
+-                self.video_path,
+-                self._artifact_path("subtitles/final.ass"),
+-                self._selected_mix(),
+-                output,
++                str(self.video_path),
++                str(self._artifact_path("subtitles/final.ass")),
++                str(self._selected_mix()),
++                str(output),
+                 "Arial",
+                 "&H00FFFFFF",
+                 1,
+                 0.88,
+                 self.request.delogo,
++                self._resource_scaled_timeout(),
+             )
+             if not ok or not output.is_file():
+                 raise RuntimeError("Final video render failed")
+@@ -1078,8 +1288,37 @@ class VideoPipelineRunner:
+     async def _qc_stage(
+         self, segments: Sequence[RuntimeSegment]
+     ) -> Sequence[ArtifactRecord]:
++        audio_by_index = {
++            int(info["index"]): info for info in self._audio_infos()
++        }
++        qc_segments = []
++        for segment in segments:
++            payload = segment_to_dict(segment)
++            audio_info = audio_by_index.get(int(segment.index), {})
++            if audio_info:
++                payload.update(
++                    {
++                        "audio_path": str(
++                            self._artifact_path(audio_info["artifact_key"])
++                        ),
++                        "actual_audio_duration": audio_info.get(
++                            "actual_audio_duration"
++                        ),
++                        "target_audio_duration": max(
++                            (segment.end - segment.start).total_seconds(), 0.1
++                        ),
++                        "timing_fits": bool(
++                            audio_info.get("timing_fits", False)
++                        ),
++                        "applied_atempo": audio_info.get(
++                            "rvc_applied_atempo",
++                            audio_info.get("applied_atempo"),
++                        ),
++                    }
++                )
++            qc_segments.append(payload)
+         segment_artifact = self.artifact_store.put_json(
+-            "qc/segments.json", {"segments": segments_to_dicts(segments)}
++            "qc/segments.json", {"segments": qc_segments}
+         )
+         with tempfile.TemporaryDirectory(prefix="qc-", dir=self.work_directory) as work:
+             work_path = Path(work)
+@@ -1089,7 +1328,7 @@ class VideoPipelineRunner:
+                 run_report_only_qc,
+                 self._artifact_path("output/final.mp4"),
+                 report_path,
+-                self._selected_mix(),
++                self._artifact_path("output/final.mp4"),
+                 self._artifact_path("qc/segments.json"),
+                 self._artifact_path("subtitles/final.ass"),
+                 diagnostics,
+diff --git a/backend/social_downloader.py b/backend/social_downloader.py
+index 8e17f3f..6e8b95f 100644
+--- a/backend/social_downloader.py
++++ b/backend/social_downloader.py
+@@ -81,7 +81,15 @@ def download_file_stream(url: str, dest_path: str, headers: dict = None, timeout
+                         f.write(chunk)
+                 f.flush()
+                 os.fsync(f.fileno())
+-        if os.path.getsize(temporary_path) <= 10000:
++        actual_size = os.path.getsize(temporary_path)
++        expected_size = response.headers.get("Content-Length")
++        if expected_size is not None and actual_size != int(expected_size):
++            raise DownloadValidationError(
++                "Downloaded byte size {} differs from Content-Length {}".format(
++                    actual_size, expected_size
++                )
++            )
++        if actual_size <= 10000:
+             raise DownloadValidationError("Downloaded video is unexpectedly small")
+         probe_downloaded_video(temporary_path)
+         atomic_replace_file(temporary_path, dest_path)
+@@ -167,6 +175,8 @@ def download_parallel_range(url: str, dest_path: str, workers: int = 6, max_retr
+     Tải file bằng đa luồng HTTP Range song song với cơ chế tự động resume khi rớt mạng.
+     Tăng tốc độ tải file từ máy chủ CDN quốc tế lên gấp 5-10 lần và đảm bảo không bị timeout.
+     """
++    part_paths = []
++    assembled_path = None
+     try:
+         os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
+         req = urllib.request.Request(url, method='HEAD')
+@@ -179,7 +189,9 @@ def download_parallel_range(url: str, dest_path: str, workers: int = 6, max_retr
+ 
+         workers = max(1, min(int(workers), total_size))
+         chunk_size = total_size // workers
+-        tmp_base = dest_path + "_tmp"
++        # Each URL attempt gets isolated parts. Reusing leftovers from another
++        # CDN candidate can produce a byte-perfect size with mixed content.
++        tmp_base = "{}.{}.range".format(dest_path, uuid.uuid4().hex)
+ 
+         def _download_part(start, end, part_num):
+             part_name = f"{tmp_base}_{part_num}.part"
+@@ -238,6 +250,7 @@ def download_parallel_range(url: str, dest_path: str, workers: int = 6, max_retr
+             for i in range(workers):
+                 start = i * chunk_size
+                 end = total_size - 1 if i == workers - 1 else (start + chunk_size - 1)
++                part_paths.append(f"{tmp_base}_{i}.part")
+                 futures.append(executor.submit(_download_part, start, end, i))
+             results = [f.result() for f in futures]
+ 
+@@ -261,17 +274,17 @@ def download_parallel_range(url: str, dest_path: str, workers: int = 6, max_retr
+             raise DownloadValidationError("Merged Range download has the wrong byte size")
+         probe_downloaded_video(assembled_path)
+         atomic_replace_file(assembled_path, dest_path)
+-        for p, _ in results:
+-            try: os.remove(p)
+-            except OSError: pass
+         return True
+     except Exception as e:
+         logger.warning(f"Parallel Range download error for {url[:60]}: {e}")
+-        assembled_path = locals().get("assembled_path")
+-        if assembled_path and os.path.exists(assembled_path):
+-            try: os.remove(assembled_path)
+-            except OSError: pass
+         return False
++    finally:
++        for temporary in [*part_paths, assembled_path]:
++            if temporary and os.path.exists(temporary):
++                try:
++                    os.remove(temporary)
++                except OSError:
++                    pass
+ 
+ # =========================================================================
+ # 2. BÓC TÁCH XIAOHONGSHU (REDNOTE)
+diff --git a/backend/telegram_bot.py b/backend/telegram_bot.py
+index ef268fe..2715ea3 100644
+--- a/backend/telegram_bot.py
++++ b/backend/telegram_bot.py
+@@ -37,9 +37,16 @@ if os.path.exists(env_file):
+                 os.environ[k.strip()] = v.strip().strip('"').strip("'")
+ 
+ # ===== CẤU HÌNH =====
+-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
+-FPT_API_KEY = os.getenv("FPT_API_KEY", "YOUR_FPT_API_KEY")
++def configured_secret(name):
++    value = os.getenv(name, "").strip()
++    if value.upper().startswith(("YOUR_", "PASTE_")):
++        return ""
++    return value
++
++
++BOT_TOKEN = configured_secret("BOT_TOKEN")
++GEMINI_API_KEY = configured_secret("GEMINI_API_KEY")
++FPT_API_KEY = configured_secret("FPT_API_KEY")
+ 
+ # Import các module xử lý từ backend
+ sys.path.insert(0, os.path.dirname(__file__))
+@@ -56,7 +63,14 @@ from ai.translation import translate_subtitles
+ from ai.voice_cloning import generate_dubbing_audio
+ from video_utils import extract_audio_from_video, mix_audio_pydub, process_video
+ 
+-WORKSPACE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "workspace"))
++WORKSPACE = os.path.abspath(
++    os.getenv(
++        "AUTODUB_WORKSPACE",
++        os.path.join(os.path.dirname(__file__), "..", "workspace"),
++    )
++)
++INPUT_DIR = os.path.abspath(os.getenv("AUTODUB_INPUT_DIR", r"D:\video_input"))
++OUTPUT_DIR = os.path.abspath(os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve"))
+ os.makedirs(WORKSPACE, exist_ok=True)
+ 
+ logging.basicConfig(
+@@ -158,9 +172,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+         "3️⃣ Dịch phụ đề sang Tiếng Việt (Gemini 3.7 Flash)\n"
+         "4️⃣ Tách giọng & giữ nhạc nền (Meta Demucs)\n"
+         "5️⃣ Lồng tiếng Tiếng Việt (Microsoft Neural TTS)\n"
+-        "6️⃣ Xuất video chất lượng cao lưu vào `D:\\banve`\n\n"
++        f"6️⃣ Xuất video chất lượng cao lưu vào `{OUTPUT_DIR}`\n\n"
+         "📌 *Lệnh hỗ trợ:*\n"
+-        "• `/batch` - Tự động quét & edit hàng loạt video trong thư mục `D:\\video_input` trên máy\n"
++        f"• `/batch` - Tự động quét & edit hàng loạt video trong thư mục `{INPUT_DIR}` trên máy\n"
+         "• `/batch D:\\thu_muc` - Chỉ định thư mục chứa video cần edit\n"
+         "• `/status` - Kiểm tra trạng thái hàng đợi\n"
+         "• `/stop` - Dừng khẩn cấp toàn bộ tác vụ"
+@@ -183,11 +197,11 @@ async def cmd_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+     Xử lý hàng loạt video từ thư mục cục bộ (mặc định: D:\\video_input)
+     Cú pháp: /batch hoặc /batch D:\\duong_dan_thu_muc
+     """
+-    input_dir = r"D:\video_input"
++    input_dir = INPUT_DIR
+     if context.args and len(context.args) > 0:
+         input_dir = " ".join(context.args).strip()
+         
+-    output_dir = r"D:\banve"
++    output_dir = OUTPUT_DIR
+     
+     if not os.path.exists(input_dir):
+         os.makedirs(input_dir, exist_ok=True)
+@@ -379,6 +393,7 @@ async def video_worker():
+                             resumable,
+                             PipelineSettings.from_env(),
+                             api_key=GEMINI_API_KEY,
++                            tts_api_key=FPT_API_KEY,
+                             progress=resume_progress,
+                         )
+                 else:
+@@ -468,7 +483,7 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
+         from pipeline_v2.config import PipelineMode, PipelineSettings
+         if PipelineSettings.from_env().mode is PipelineMode.V2:
+             start_time = time.time()
+-            downloads_dir = r"D:\banve"
++            downloads_dir = OUTPUT_DIR
+             os.makedirs(downloads_dir, exist_ok=True)
+             local_save_path = os.path.join(downloads_dir, f"Dubbed_{base_name}.mp4")
+             await run_pipeline_v2_for_telegram(
+@@ -679,11 +694,11 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
+         # Copy sang máy tính người dùng
+         try:
+             import shutil
+-            downloads_dir = r"D:\banve"
++            downloads_dir = OUTPUT_DIR
+             os.makedirs(downloads_dir, exist_ok=True)
+             local_save_path = os.path.join(downloads_dir, f"Dubbed_{base_name}.mp4")
+             shutil.copy2(final_video, local_save_path)
+-            caption_lines.append(f"💾 Đã tự động lưu vào máy:\n`D:\\banve`\n")
++            caption_lines.append(f"💾 Đã tự động lưu vào máy:\n`{OUTPUT_DIR}`\n")
+         except Exception as e:
+             logger.error(f"Lỗi khi copy vào máy: {e}")
+ 
+@@ -860,7 +875,7 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
+         start_time = time.time()
+         from pipeline_v2.config import PipelineMode, PipelineSettings
+         if PipelineSettings.from_env().mode is PipelineMode.V2:
+-            downloads_dir = r"D:\banve"
++            downloads_dir = OUTPUT_DIR
+             os.makedirs(downloads_dir, exist_ok=True)
+             local_save_path = os.path.join(downloads_dir, f"Dubbed_{base_name}.mp4")
+             await run_pipeline_v2_for_telegram(
+@@ -1026,11 +1041,11 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
+         caption_lines = [f"🎬 Video đã lồng tiếng Việt\n"]
+         try:
+             import shutil
+-            downloads_dir = r"D:\banve"
++            downloads_dir = OUTPUT_DIR
+             os.makedirs(downloads_dir, exist_ok=True)
+             local_save_path = os.path.join(downloads_dir, f"Dubbed_{base_name}.mp4")
+             shutil.copy2(final_video, local_save_path)
+-            caption_lines.append(f"💾 Đã tự động lưu vào máy:\n`D:\\banve`\n")
++            caption_lines.append(f"💾 Đã tự động lưu vào máy:\n`{OUTPUT_DIR}`\n")
+         except Exception as e:
+             logger.error(f"Lỗi khi copy vào máy: {e}")
+ 
+@@ -1103,7 +1118,7 @@ def main():
+         logger.warning("Bot instance already running. Exiting duplicate process.")
+         sys.exit(0)
+ 
+-    if BOT_TOKEN == "PASTE_YOUR_TOKEN_HERE":
++    if not BOT_TOKEN:
+         print("=" * 60)
+         print("❌ LỖI: Chưa cấu hình Bot Token!")
+         print("Mở file telegram_bot.py và dán Token vào dòng BOT_TOKEN")
+diff --git a/backend/video_utils.py b/backend/video_utils.py
+index f1f279b..88ea339 100644
+--- a/backend/video_utils.py
++++ b/backend/video_utils.py
+@@ -129,11 +129,19 @@ def merge_audio_files_with_delay(video_path, original_audio_path, dubbing_audio_
+     # This is a basic implementation. A more robust way is using PyDub to generate a single mixed audio track first.
+     pass
+     
+-def mix_audio_pydub(original_audio_path, dubbing_audio_files, output_mixed_audio_path, original_volume_db=-5, dubbing_volume_db=1):
++def mix_audio_pydub(
++    original_audio_path,
++    dubbing_audio_files,
++    output_mixed_audio_path,
++    original_volume_db=-5,
++    dubbing_volume_db=1,
++    strict=False,
++):
+     """
+     Trộn âm thanh bằng PyDub. Giảm âm lượng nhạc nền (-15dB, tức khoảng 15-20%) và chèn giọng đọc AI vào đúng vị trí.
+     """
+     print("Mixing audio tracks using pydub...")
++    original_popen = None
+     try:
+         import subprocess
+         # Ngăn pydub nháy màn hình đen ffmpeg liên tục trên Windows
+@@ -154,6 +162,10 @@ def mix_audio_pydub(original_audio_path, dubbing_audio_files, output_mixed_audio
+         # Chèn từng file lồng tiếng (Khớp chính xác 100% thời gian với Subtitle)
+         for dub in dubbing_audio_files:
+             if not os.path.exists(dub["path"]):
++                if strict:
++                    raise FileNotFoundError(
++                        "Missing dubbing audio: {}".format(dub["path"])
++                    )
+                 continue
+             dub_audio = AudioSegment.from_file(dub["path"])
+             # Tăng âm lượng giọng đọc nếu cần
+@@ -166,11 +178,27 @@ def mix_audio_pydub(original_audio_path, dubbing_audio_files, output_mixed_audio
+         return output_mixed_audio_path
+     except Exception as e:
+         print(f"PyDub error: {e}. Fallback to original audio.")
++        if strict:
++            raise RuntimeError("PyDub legacy mix failed") from e
+         import shutil
+         shutil.copy(original_audio_path, output_mixed_audio_path)
+         return output_mixed_audio_path
++    finally:
++        if original_popen is not None:
++            subprocess.Popen = original_popen
+ 
+-def process_video(video_path, srt_path, mixed_audio_path, output_video_path, font_name="Arial", font_color="&H00FFFFFF", font_weight=1, main_y_pct=0.75, delogo=True):
++def process_video(
++    video_path,
++    srt_path,
++    mixed_audio_path,
++    output_video_path,
++    font_name="Arial",
++    font_color="&H00FFFFFF",
++    font_weight=1,
++    main_y_pct=0.75,
++    delogo=True,
++    timeout_seconds=None,
++):
+     """
+     Dùng ffmpeg để chèn hardsub, xóa sạch watermark gốc và ghép âm thanh mới.
+     """
+@@ -179,6 +207,13 @@ def process_video(video_path, srt_path, mixed_audio_path, output_video_path, fon
+         print("Lệnh /stop đã được yêu cầu. Hủy render video.")
+         return False
+ 
++    render_deadline = None
++    if timeout_seconds is not None:
++        timeout_seconds = float(timeout_seconds)
++        if timeout_seconds <= 0:
++            raise ValueError("timeout_seconds must be positive")
++        render_deadline = time.monotonic() + timeout_seconds
++
+     print("Processing final video with styled subtitles, auto-delogo and hardware encoder...")
+     
+     # Tạo bản copy an toàn ASCII ở thư mục gốc backend để FFmpeg filter subtitles không bị dính ký tự Unicode
+@@ -287,13 +322,30 @@ def process_video(video_path, srt_path, mixed_audio_path, output_video_path, fon
+             ]
+             
+             try:
+-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW, encoding='utf-8', errors='ignore')
++                command_timeout = None
++                if render_deadline is not None:
++                    command_timeout = render_deadline - time.monotonic()
++                    if command_timeout <= 0:
++                        print("Đã hết thời gian render trước khi thử encoder tiếp theo.")
++                        break
++                proc = subprocess.run(
++                    cmd,
++                    stdout=subprocess.PIPE,
++                    stderr=subprocess.PIPE,
++                    creationflags=CREATE_NO_WINDOW,
++                    encoding='utf-8',
++                    errors='ignore',
++                    timeout=command_timeout,
++                )
+                 if proc.returncode == 0 and os.path.exists(output_video_path) and os.path.getsize(output_video_path) > 10000:
+                     print(f"Render video thành công bằng encoder: {encoder_name}")
+                     return True
+                 else:
+                     err_snippet = proc.stderr[-400:] if proc.stderr else ""
+                     print(f"Encoder {encoder_name} không thành công ({proc.returncode}): {err_snippet}")
++            except subprocess.TimeoutExpired as enc_err:
++                print(f"Encoder {encoder_name} vượt quá deadline render ({enc_err}).")
++                break
+             except Exception as enc_err:
+                 print(f"Encoder {encoder_name} gặp ngoại lệ ({enc_err}), chuyển sang encoder dự phòng...")
+                 
+diff --git a/docs/pipeline_v2_rollout.md b/docs/pipeline_v2_rollout.md
+index e2178b3..d1515df 100644
+--- a/docs/pipeline_v2_rollout.md
++++ b/docs/pipeline_v2_rollout.md
+@@ -18,6 +18,21 @@ PIPELINE_MODE=legacy
+ Restart the bot only when its queue is empty. Never change modes while Demucs,
+ Whisper, EasyOCR, RVC or FFmpeg is active.
+ 
++## Preflight bắt buộc
++
++Tạo `backend/.env` từ `backend/.env.example`, điền secret thật và đặt workspace
++ngoài OneDrive/thư mục đồng bộ đám mây. Sau đó chạy bằng đúng Python trong venv:
++
++```powershell
++cd backend
++.\venv\Scripts\python.exe -m pipeline_v2.preflight --project-root .. --interface all
++```
++
++Chỉ bắt đầu video thật khi dòng cuối báo `ready=True`, `pipeline:config` là `v2`
++và không còn mục `error`. Warning về RVC có thể chấp nhận nếu chỉ dùng Edge/FPT;
++warning CUDA nghĩa là pipeline có thể chạy CPU nhưng không phù hợp video dài.
++Wildcard CORS bị preflight chặn vì API nhận đường dẫn file cục bộ.
++
+ ## Recommended rollout
+ 
+ Start with shadow mode:
+@@ -54,6 +69,11 @@ ENABLE_TIMING_SOLVER=true
+ ENABLE_FFMPEG_MIX_V2=true
+ ```
+ 
++API desktop xử lý tuần tự để hai request không tranh VRAM/FFmpeg hoặc ghi đè
++workspace cùng lúc. Electron dùng preload bridge cô lập; React không có quyền
++Node trực tiếp. Các origin API mặc định chỉ gồm UI localhost và origin `null`
++của bản Electron đóng gói; không cấu hình `AUTODUB_CORS_ORIGINS=*`.
++
+ When FFmpeg mix v2 is enabled, Pydub A/B output stays off by default to avoid
+ loading long PCM audio into RAM twice. Set `ENABLE_LEGACY_MIX_AB=true` only for
+ a deliberate listening comparison.
+@@ -98,6 +118,13 @@ The GPU lock is shared by Demucs, Whisper, EasyOCR and RVC. Each heavyweight
+ stage runs in its own Python process, and operating-system lock release protects
+ against worker crashes.
+ 
++Pipeline v2 dùng fail-closed cho các artifact tạo nội dung: Demucs/RVC giả hoặc
++Git LFS pointer, bản dịch CJK không đổi, batch OCR/Translation rỗng và FPT hết
++quota đều làm stage thất bại thay vì âm thầm xuất media sai. Resume giữ nguyên
++nguồn giọng đã ghi trong manifest; job RVC thiếu model sẽ dừng để người vận hành
++khôi phục đúng model. Callback Telegram/UI lỗi chỉ được ghi warning (giữ tối đa
++50 bản gần nhất) và không làm hỏng media job.
++
+ ## Duration-independent resource limits
+ 
+ Pipeline v2 does not use a separate long-video mode or change the render steps.
+@@ -130,6 +157,22 @@ MIXER_MAX_INPUTS_PER_PASS=64
+ These limits control peak resources, not video duration. They may be tuned for
+ the machine without changing stage order or output behavior.
+ 
++## Checklist trước khi chuyển sang hoạt động
++
++1. Preflight `ready=True` bằng chính venv sẽ chạy bot/API.
++2. Chạy một video 30–90 giây ở `QC_GATE_POLICY=report_only`; mở và nghe file cuối,
++   kiểm tra `qc/qc_report.json` và `job_manifest.json`.
++3. Dừng giữa TTS hoặc RVC rồi khởi động lại để xác nhận resume không đổi giọng và
++   không chạy lại các stage đã có SHA-256 hợp lệ.
++4. Chạy lần lượt Edge, FPT (nếu dùng) và RVC (nếu dùng); không coi một provider
++   đã qua là bằng chứng cho provider khác.
++5. Chạy một video dài đại diện với cấu hình batch thật và theo dõi VRAM, dung
++   lượng workspace, thời gian mixer/render.
++6. Sau khi ma trận video thật sạch, chuyển `QC_GATE_POLICY=warn`, rồi `block`.
++
++Không đánh dấu production-ready chỉ từ unit test: Demucs, dịch/TTS cloud, RVC và
++NVENC cần ít nhất một lượt end-to-end với model, API key và driver của máy chạy.
++
+ ## Rollback
+ 
+ Set the following and restart after the queue becomes empty:
+diff --git a/frontend/electron-main.cjs b/frontend/electron-main.cjs
+index 8afa58b..88a1ca2 100644
+--- a/frontend/electron-main.cjs
++++ b/frontend/electron-main.cjs
+@@ -3,7 +3,7 @@ const path = require('path');
+ const { spawn } = require('child_process');
+ 
+ protocol.registerSchemesAsPrivileged([
+-  { scheme: 'local', privileges: { supportFetchAPI: true, bypassCSP: true, secure: true, corsEnabled: true } }
++  { scheme: 'local', privileges: { supportFetchAPI: true, secure: true, corsEnabled: true } }
+ ]);
+ 
+ 
+@@ -15,8 +15,10 @@ function createWindow() {
+     width: 1280,
+     height: 720,
+     webPreferences: {
+-      nodeIntegration: true,
+-      contextIsolation: false,
++      preload: path.join(__dirname, 'preload.cjs'),
++      nodeIntegration: false,
++      contextIsolation: true,
++      sandbox: true,
+       webSecurity: true,
+       allowRunningInsecureContent: false,
+     },
+@@ -31,18 +33,23 @@ function createWindow() {
+     mainWindow.setAlwaysOnTop(false);
+   });
+ 
++  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
++
+   // Setup CSP
++  const isDev = !app.isPackaged;
++  const contentSecurityPolicy = isDev
++    ? "default-src 'self' http://localhost:5173; script-src 'self' http://localhost:5173; style-src 'self' 'unsafe-inline' http://localhost:5173; img-src 'self' data: blob: local:; media-src 'self' blob: local:; connect-src 'self' http://127.0.0.1:8000 http://localhost:8000 http://localhost:5173 ws://localhost:5173;"
++    : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: local:; media-src 'self' blob: local:; connect-src 'self' http://127.0.0.1:8000 http://localhost:8000;";
+   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+     callback({
+       responseHeaders: {
+         ...details.responseHeaders,
+-        'Content-Security-Policy': ["default-src 'self' 'unsafe-inline' data: blob: http: https: ws: wss: local:;"]
++        'Content-Security-Policy': [contentSecurityPolicy]
+       }
+     });
+   });
+ 
+   // Load React App
+-  const isDev = !app.isPackaged;
+   if (isDev) {
+     mainWindow.loadURL('http://localhost:5173');
+     mainWindow.webContents.openDevTools();
+@@ -62,6 +69,18 @@ function createWindow() {
+       });
+       pythonProcess.stdout.on('data', (data) => console.log(`Backend: ${data}`));
+       pythonProcess.stderr.on('data', (data) => console.error(`Backend Err: ${data}`));
++      pythonProcess.on('error', (error) => {
++          console.error("Failed to start python backend", error);
++          dialog.showErrorBox(
++            "AutoDub backend failed",
++            `Không thể chạy ${pythonExecutable}. Hãy tạo backend\\venv và cài requirements.txt.\n\n${error.message}`
++          );
++      });
++      pythonProcess.on('exit', (code, signal) => {
++          if (code !== 0 && mainWindow && !mainWindow.isDestroyed()) {
++              console.error(`Backend exited unexpectedly (code=${code}, signal=${signal})`);
++          }
++      });
+   } catch (e) {
+       console.error("Failed to start python backend", e);
+   }
+diff --git a/frontend/package-lock.json b/frontend/package-lock.json
+index c60a2fd..1101c08 100644
+--- a/frontend/package-lock.json
++++ b/frontend/package-lock.json
+@@ -59,9 +59,9 @@
+       "license": "MIT"
+     },
+     "node_modules/@electron/asar/node_modules/brace-expansion": {
+-      "version": "1.1.16",
+-      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-1.1.16.tgz",
+-      "integrity": "sha512-IDw48K2/2kRkg9LdJxurvq3lV3aBgq0REY89duEqFRthjlPdXHKMj7EnQOXVckxzgisinf3nHfrcE2FufFLXMw==",
++      "version": "1.1.18",
++      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-1.1.18.tgz",
++      "integrity": "sha512-Edep/X9fGqVNmzKBVsDYIOtD+z1tuezV70LBjdCst9Tqu76lsnvRiZ6oTic1n+/BIwX6QDGAO94PN4N2SADvtw==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+@@ -294,9 +294,9 @@
+       "license": "MIT"
+     },
+     "node_modules/@electron/universal/node_modules/brace-expansion": {
+-      "version": "2.1.2",
+-      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-2.1.2.tgz",
+-      "integrity": "sha512-w5JZcKgdhDOgOwm8H+KgbosopHMuGcl6qbulwjtz3SM7I7P3yW1eAjzMPLrIE+NQ9vjgANKHWeMHnrT0OXW1oA==",
++      "version": "2.1.4",
++      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-2.1.4.tgz",
++      "integrity": "sha512-hGfVzPxthbf3+2yjg/RBs60cB0FhqBS/zvdV/4wn4/BmN0bNMMHPc4V/BbFieqf1TKAGGAHnY4eSjajCl0f2Xg==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+@@ -1806,9 +1806,9 @@
+       "optional": true
+     },
+     "node_modules/brace-expansion": {
+-      "version": "5.0.8",
+-      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.8.tgz",
+-      "integrity": "sha512-JZyDyq3D4AUifKTPOB7DELf6XsB3WdPuNxCtob1vFXPsSXhdAiHBWJ/tJ8HAc9aH84BK+5JFZLNkJKx3G9kzQg==",
++      "version": "5.0.9",
++      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.9.tgz",
++      "integrity": "sha512-ScQ4IuvIEF1TMlP7Zt+vjJ//9zlPb2SDcxWxM3bk8s6t6GGdJ7KO1dCcTidOPJKePW30LE/2cT7wCyPho9/Wxg==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+@@ -2326,9 +2326,9 @@
+       "license": "MIT"
+     },
+     "node_modules/dir-compare/node_modules/brace-expansion": {
+-      "version": "1.1.16",
+-      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-1.1.16.tgz",
+-      "integrity": "sha512-IDw48K2/2kRkg9LdJxurvq3lV3aBgq0REY89duEqFRthjlPdXHKMj7EnQOXVckxzgisinf3nHfrcE2FufFLXMw==",
++      "version": "1.1.18",
++      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-1.1.18.tgz",
++      "integrity": "sha512-Edep/X9fGqVNmzKBVsDYIOtD+z1tuezV70LBjdCst9Tqu76lsnvRiZ6oTic1n+/BIwX6QDGAO94PN4N2SADvtw==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+@@ -2900,9 +2900,9 @@
+       "license": "MIT"
+     },
+     "node_modules/fast-uri": {
+-      "version": "3.1.4",
+-      "resolved": "https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.4.tgz",
+-      "integrity": "sha512-8JnbkQ4juDyvYs4mgFGQqg4yCYtFDtUtmp2QIQq11ZZe5CFQ5wcqm1rqDgAh/QdMySuBnPzMUiJUNZG5N/AiQw==",
++      "version": "3.1.6",
++      "resolved": "https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.6.tgz",
++      "integrity": "sha512-7Ical1vFEMr0onbVzEDIreM22I4khW+fzyQPwvAFWBp1iwdshSZRsL4jjRvPG9JP1uiqMHRto+YU6R2/CzDz5Q==",
+       "dev": true,
+       "funding": [
+         {
+@@ -2952,9 +2952,9 @@
+       "license": "MIT"
+     },
+     "node_modules/filelist/node_modules/brace-expansion": {
+-      "version": "2.1.2",
+-      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-2.1.2.tgz",
+-      "integrity": "sha512-w5JZcKgdhDOgOwm8H+KgbosopHMuGcl6qbulwjtz3SM7I7P3yW1eAjzMPLrIE+NQ9vjgANKHWeMHnrT0OXW1oA==",
++      "version": "2.1.4",
++      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-2.1.4.tgz",
++      "integrity": "sha512-hGfVzPxthbf3+2yjg/RBs60cB0FhqBS/zvdV/4wn4/BmN0bNMMHPc4V/BbFieqf1TKAGGAHnY4eSjajCl0f2Xg==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+@@ -3167,9 +3167,9 @@
+       "license": "MIT"
+     },
+     "node_modules/glob/node_modules/brace-expansion": {
+-      "version": "1.1.16",
+-      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-1.1.16.tgz",
+-      "integrity": "sha512-IDw48K2/2kRkg9LdJxurvq3lV3aBgq0REY89duEqFRthjlPdXHKMj7EnQOXVckxzgisinf3nHfrcE2FufFLXMw==",
++      "version": "1.1.18",
++      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-1.1.18.tgz",
++      "integrity": "sha512-Edep/X9fGqVNmzKBVsDYIOtD+z1tuezV70LBjdCst9Tqu76lsnvRiZ6oTic1n+/BIwX6QDGAO94PN4N2SADvtw==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+@@ -3508,9 +3508,9 @@
+       }
+     },
+     "node_modules/js-yaml": {
+-      "version": "4.3.0",
+-      "resolved": "https://registry.npmjs.org/js-yaml/-/js-yaml-4.3.0.tgz",
+-      "integrity": "sha512-1td788aAnnZ5qs7V2QIRl1owjtYpbKt749Y3xauqQgwIIGF/xXWz1wMTEBx5O3LK3lXLVuqXPdPxj2BoFHaW9Q==",
++      "version": "4.3.2",
++      "resolved": "https://registry.npmjs.org/js-yaml/-/js-yaml-4.3.2.tgz",
++      "integrity": "sha512-SFNOvSJ+Dgf/9An904Yx+CgSlIPCkIpao4qo51lpee25TIRejdH3rhR4EZMGoNx3/TP3O+wzWuiTFl4sqbltzA==",
+       "dev": true,
+       "funding": [
+         {
+@@ -4039,9 +4039,9 @@
+       "license": "MIT"
+     },
+     "node_modules/nanoid": {
+-      "version": "3.3.16",
+-      "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.16.tgz",
+-      "integrity": "sha512-bzlKTyNJ7+LdGIIwy8ijFpIqEQIvafahV7eYykJ8Cvh42EdJeODoJ6gUJXpQJvej1BddH8OqTXZNE/KfbWAu8Q==",
++      "version": "3.3.18",
++      "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.18.tgz",
++      "integrity": "sha512-DTg4MJbGMWkfi6VZFdNt2/caMbQy4Ou+Op/hJQvGEWcnVfoA1QA+xzRKAzw9jD6+GVOOeYr/mIcuDSdug6F6+w==",
+       "dev": true,
+       "funding": [
+         {
+diff --git a/frontend/preload.cjs b/frontend/preload.cjs
+new file mode 100644
+index 0000000..4523b8a
+--- /dev/null
++++ b/frontend/preload.cjs
+@@ -0,0 +1,6 @@
++const { contextBridge, ipcRenderer } = require('electron');
++
++contextBridge.exposeInMainWorld('autodub', Object.freeze({
++  openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
++  openFiles: () => ipcRenderer.invoke('dialog:openFiles'),
++}));
+diff --git a/frontend/src/App.jsx b/frontend/src/App.jsx
+index 3e4bc62..1520993 100644
+--- a/frontend/src/App.jsx
++++ b/frontend/src/App.jsx
+@@ -1,8 +1,9 @@
+ import React, { useState, useRef, useEffect } from 'react'
+ import './App.css'
+ 
+-// Using window.require for Electron IPC since contextIsolation is false
+-const ipcRenderer = window.require ? window.require('electron').ipcRenderer : null;
++// Electron exposes only the two file-picker operations through a sandboxed
++// preload bridge. Browser preview mode intentionally has no desktop access.
++const desktopBridge = window.autodub || null;
+ 
+ function App() {
+   const [selectedFolder, setSelectedFolder] = useState(null);
+@@ -18,6 +19,8 @@ function App() {
+   const [activeLeftTab, setActiveLeftTab] = useState('media');
+   const [subtitles, setSubtitles] = useState([]);
+   const [processLog, setProcessLog] = useState('');
++  const [voiceSource, setVoiceSource] = useState('edge');
++  const [voiceConfig, setVoiceConfig] = useState('');
+   
+   // Log viewer state
+   const [showLogs, setShowLogs] = useState(false);
+@@ -51,8 +54,8 @@ function App() {
+   };
+ 
+   const handleSelectFolder = async () => {
+-    if (ipcRenderer) {
+-      const result = await ipcRenderer.invoke('dialog:openDirectory');
++    if (desktopBridge) {
++      const result = await desktopBridge.openDirectory();
+       if (result && result.folderPath) {
+         setSelectedFolder(result.folderPath);
+         setVideos(result.videoFiles);
+@@ -66,8 +69,8 @@ function App() {
+   };
+ 
+   const handleSelectFiles = async () => {
+-    if (ipcRenderer) {
+-      const result = await ipcRenderer.invoke('dialog:openFiles');
++    if (desktopBridge) {
++      const result = await desktopBridge.openFiles();
+       if (result && result.videoFiles.length > 0) {
+         setSelectedFolder(result.folderPath);
+         setVideos(prev => [...prev, ...result.videoFiles]);
+@@ -127,8 +130,14 @@ function App() {
+       const formData = new FormData();
+       formData.append('video_path', filePath);
+       formData.append('target_lang', 'vi');
+-      formData.append('voice_source', 'edge');
+-      formData.append('voice_param', 'vi-VN-HoaiMyNeural');
++      formData.append('voice_source', voiceSource);
++      formData.append(
++        'voice_param',
++        voiceSource === 'rvc'
++          ? voiceConfig.trim()
++          : 'vi-VN-HoaiMyNeural'
++      );
++      formData.append('api_key', voiceSource === 'fpt' ? voiceConfig.trim() : '');
+ 
+       const res = await fetch('http://127.0.0.1:8000/api/process_video', {
+         method: 'POST',
+@@ -184,8 +193,14 @@ function App() {
+       const formData = new FormData();
+       formData.append('url', urlInput.trim());
+       formData.append('target_lang', 'vi');
+-      formData.append('voice_source', 'edge');
+-      formData.append('voice_param', 'vi-VN-HoaiMyNeural');
++      formData.append('voice_source', voiceSource);
++      formData.append(
++        'voice_param',
++        voiceSource === 'rvc'
++          ? voiceConfig.trim()
++          : 'vi-VN-HoaiMyNeural'
++      );
++      formData.append('api_key', voiceSource === 'fpt' ? voiceConfig.trim() : '');
+ 
+       const res = await fetch('http://127.0.0.1:8000/api/process_url', {
+         method: 'POST',
+@@ -513,16 +528,36 @@ function App() {
+                   <div className="prop-section-title">🎤 Giọng lồng tiếng</div>
+                   <div style={{marginBottom: '8px'}}>
+                     <span className="prop-label" style={{width: 'auto', marginBottom: '4px', display: 'block'}}>Nguồn giọng</span>
+-                    <select className="prop-select" defaultValue="edge">
++                    <select
++                      className="prop-select"
++                      value={voiceSource}
++                      onChange={event => {
++                        setVoiceSource(event.target.value);
++                        setVoiceConfig('');
++                      }}
++                    >
+                       <option value="edge">Edge TTS (Miễn phí)</option>
+                       <option value="fpt">FPT AI (API Key)</option>
+-                      <option value="elevenlabs">ElevenLabs (API Key)</option>
+                       <option value="rvc">RVC Model (Offline)</option>
+                     </select>
+                   </div>
+                   <div>
+-                    <span className="prop-label" style={{width: 'auto', marginBottom: '4px', display: 'block'}}>API Key / Model</span>
+-                    <input className="prop-input-full" placeholder="Nhập API Key hoặc đường dẫn model..." />
++                    <span className="prop-label" style={{width: 'auto', marginBottom: '4px', display: 'block'}}>
++                      {voiceSource === 'rvc' ? 'Đường dẫn model .pth' : 'FPT API Key'}
++                    </span>
++                    <input
++                      className="prop-input-full"
++                      value={voiceConfig}
++                      disabled={voiceSource === 'edge'}
++                      onChange={event => setVoiceConfig(event.target.value)}
++                      placeholder={
++                        voiceSource === 'rvc'
++                          ? 'D:\\models\\voice.pth (để trống để tự tìm model)'
++                          : voiceSource === 'fpt'
++                            ? 'Nhập FPT API Key...'
++                            : 'Edge TTS không cần cấu hình'
++                      }
++                    />
+                   </div>
+                 </div>
+ 
+diff --git a/run_batch_edit.bat b/run_batch_edit.bat
+index 30ff72a..1562748 100644
+--- a/run_batch_edit.bat
++++ b/run_batch_edit.bat
+@@ -1,21 +1,34 @@
+ @echo off
+ chcp 65001 >nul
+ title Auto Batch Video Dubbing Processor
++if not defined AUTODUB_INPUT_DIR set "AUTODUB_INPUT_DIR=D:\video_input"
++if not defined AUTODUB_OUTPUT_DIR set "AUTODUB_OUTPUT_DIR=D:\banve"
+ echo ========================================================
+ echo   AUTO BATCH VIDEO DUBBING PROCESSOR (OFFLINE / LOCAL)
+ echo ========================================================
+ echo.
+-echo [1] Thư mục chứa video gốc : D:\video_input
+-echo [2] Thư mục lưu thành phẩm : D:\banve
++echo [1] Thư mục chứa video gốc : %AUTODUB_INPUT_DIR%
++echo [2] Thư mục lưu thành phẩm : %AUTODUB_OUTPUT_DIR%
+ echo.
+ echo Đang quét và bắt đầu xử lý tuần tự từng video...
+ echo.
+ 
+ cd /d "%~dp0backend"
+-call ".\venv\Scripts\python.exe" "batch_processor.py" --input "D:\video_input" --output "D:\banve"
++if not exist ".\venv\Scripts\python.exe" (
++  echo [ERROR] Chua co backend\venv. Hay cai dependencies truoc.
++  pause
++  exit /b 1
++)
++call ".\venv\Scripts\python.exe" -m pipeline_v2.preflight --project-root "%~dp0" --interface batch
++if errorlevel 1 (
++  echo [ERROR] Preflight that bai.
++  pause
++  exit /b 1
++)
++call ".\venv\Scripts\python.exe" "batch_processor.py" --input "%AUTODUB_INPUT_DIR%" --output "%AUTODUB_OUTPUT_DIR%"
+ 
+ echo.
+ echo ========================================================
+-echo   HOÀN TẤT! Video thành phẩm đã được lưu tại D:\banve
++echo   HOÀN TẤT! Video thành phẩm đã được lưu tại %AUTODUB_OUTPUT_DIR%
+ echo ========================================================
+ pause
+diff --git a/start_bot.bat b/start_bot.bat
+index 74982be..24059e6 100644
+--- a/start_bot.bat
++++ b/start_bot.bat
+@@ -4,9 +4,33 @@
+ :: ==========================================
+ 
+ set "PROJECT_DIR=%~dp0"
++set "PYTHON_EXE=%PROJECT_DIR%backend\venv\Scripts\python.exe"
++
++if not exist "%PYTHON_EXE%" (
++  echo [ERROR] Chua co backend\venv. Hay tao venv va cai requirements.txt truoc.
++  pause
++  exit /b 1
++)
++
++:: Fail early with a readable dependency/config report.
++cd /d "%PROJECT_DIR%backend"
++"%PYTHON_EXE%" -m pipeline_v2.preflight --project-root "%PROJECT_DIR%" --interface all
++if errorlevel 1 (
++  echo [ERROR] Preflight that bai. Sua cac muc error o tren roi chay lai.
++  pause
++  exit /b 1
++)
+ 
+ :: Khởi động Frontend (Log Viewer) ngầm
+ cd /d "%PROJECT_DIR%frontend"
++if not exist "node_modules" (
++  call npm ci
++  if errorlevel 1 (
++    echo [ERROR] Khong the cai dependency frontend.
++    pause
++    exit /b 1
++  )
++)
+ start /b cmd /c "npm run dev"
+ 
+ :: Đợi 2 giây để Frontend kịp chạy
+@@ -17,8 +41,4 @@ powershell -Command "Get-CimInstance Win32_Process -Filter \"Name like 'python%'
+ 
+ :: Khởi động Backend (Telegram Bot) ngầm
+ cd /d "%PROJECT_DIR%backend"
+-if exist "venv\Scripts\python.exe" (
+-  start /b "" "venv\Scripts\python.exe" telegram_bot.py
+-) else (
+-  start /b "" py telegram_bot.py
+-)
++start /b "" "%PYTHON_EXE%" telegram_bot.py
+diff --git a/tests/test_pipeline_v2_failure_semantics.py b/tests/test_pipeline_v2_failure_semantics.py
+new file mode 100644
+index 0000000..afada58
+--- /dev/null
++++ b/tests/test_pipeline_v2_failure_semantics.py
+@@ -0,0 +1,258 @@
++import asyncio
++import importlib
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++from types import ModuleType, SimpleNamespace
++from unittest import mock
++
++from backend.pipeline_v2 import gpu_worker
++from backend.pipeline_v2.config import PipelineMode, PipelineSettings
++from backend.pipeline_v2.resume import ResumableVideoJob, resume_video_job
++from backend.pipeline_v2.segments import RuntimeSegment
++from backend.pipeline_v2.stage_validation import (
++    is_real_rvc_model,
++    validate_demucs_outputs,
++)
++
++
++class MediaStageValidationTests(unittest.TestCase):
++    def test_demucs_rejects_legacy_source_audio_fallback(self):
++        with tempfile.TemporaryDirectory() as directory:
++            source = Path(directory) / "source.wav"
++            source.write_bytes(b"source-audio")
++            with self.assertRaisesRegex(RuntimeError, "source audio as a stem"):
++                validate_demucs_outputs(source, source, source)
++
++    def test_gpu_worker_rejects_demucs_fallback_even_when_files_exist(self):
++        with tempfile.TemporaryDirectory() as directory:
++            source = Path(directory) / "source.wav"
++            source.write_bytes(b"source-audio")
++            fake_video_utils = ModuleType("video_utils")
++            fake_video_utils.separate_vocals_demucs = lambda *args, **kwargs: (
++                str(source),
++                str(source),
++            )
++            with mock.patch.dict(sys.modules, {"video_utils": fake_video_utils}):
++                with self.assertRaisesRegex(RuntimeError, "source audio as a stem"):
++                    gpu_worker._run_demucs(
++                        {
++                            "input_audio": str(source),
++                            "output_directory": directory,
++                        }
++                    )
++
++    def test_rvc_worker_requires_strict_transform(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            source = root / "source.mp3"
++            output = root / "output.wav"
++            source.write_bytes(b"source-audio")
++            observed = {}
++
++            async def fake_apply(input_path, output_path, model_path, strict=False):
++                observed["strict"] = strict
++                Path(output_path).write_bytes(b"converted-audio")
++
++            ai_package = ModuleType("ai")
++            ai_package.__path__ = []
++            voice_module = ModuleType("ai.voice_cloning")
++            voice_module.apply_rvc_clone = fake_apply
++            with mock.patch.dict(
++                sys.modules,
++                {"ai": ai_package, "ai.voice_cloning": voice_module},
++            ):
++                result = asyncio.run(
++                    gpu_worker._rvc_batch(
++                        {
++                            "model_path": str(root / "model.pth"),
++                            "items": [
++                                {
++                                    "index": 1,
++                                    "input_path": str(source),
++                                    "output_path": str(output),
++                                }
++                            ],
++                        }
++                    )
++                )
++            self.assertTrue(observed["strict"])
++            self.assertEqual(result["items"][0]["output_path"], str(output))
++
++    def test_rvc_model_discovery_rejects_git_lfs_pointer(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            pointer = root / "pointer.pth"
++            pointer.write_bytes(
++                b"version https://git-lfs.github.com/spec/v1\n" + b"x" * 2048
++            )
++            model = root / "model.pth"
++            model.write_bytes(b"real-model-data" * 100)
++            self.assertFalse(is_real_rvc_model(pointer))
++            self.assertTrue(is_real_rvc_model(model))
++
++
++class TranslationFailureTests(unittest.TestCase):
++    def _load_translation_with_failing_google(self):
++        requests_module = ModuleType("requests")
++        deep_module = ModuleType("deep_translator")
++
++        class FailingGoogleTranslator:
++            def __init__(self, *args, **kwargs):
++                pass
++
++            def translate(self, text):
++                raise RuntimeError("offline")
++
++        deep_module.GoogleTranslator = FailingGoogleTranslator
++        sys.modules.pop("backend.ai.translation", None)
++        with mock.patch.dict(
++            sys.modules,
++            {"requests": requests_module, "deep_translator": deep_module},
++        ):
++            return importlib.import_module("backend.ai.translation")
++
++    def test_v2_strict_translation_rejects_source_text_fallback(self):
++        translation = self._load_translation_with_failing_google()
++        segment = SimpleNamespace(index=7, content="你好")
++        with self.assertRaisesRegex(RuntimeError, "segment indexes: 7"):
++            translation.translate_subtitles(
++                [segment], strict=True, enable_g4f=False
++            )
++
++    def test_legacy_translation_can_still_use_source_fallback(self):
++        translation = self._load_translation_with_failing_google()
++        segment = SimpleNamespace(index=7, content="你好")
++        result = translation.translate_subtitles(
++            [segment], strict=False, enable_g4f=False
++        )
++        self.assertEqual(result[0].content, "你好")
++
++    def test_unchanged_gemini_cjk_is_retranslated_by_strict_fallback(self):
++        translation = self._load_translation_with_failing_google()
++
++        class WorkingGoogleTranslator:
++            def __init__(self, *args, **kwargs):
++                pass
++
++            def translate(self, text):
++                return "Xin chào"
++
++        segment = SimpleNamespace(index=3, content="你好")
++        with mock.patch.object(
++            translation, "translate_with_gemini", return_value=["你好"]
++        ), mock.patch.object(
++            translation, "GoogleTranslator", WorkingGoogleTranslator
++        ):
++            result = translation.translate_subtitles(
++                [segment], api_key="key", strict=True, enable_g4f=False
++            )
++        self.assertEqual(result[0].content, "Xin chào")
++
++
++class ResumeVoiceConsistencyTests(unittest.IsolatedAsyncioTestCase):
++    @staticmethod
++    def _job(root, voice_source="edge", rvc_model_path=None):
++        return ResumableVideoJob(
++            job_id="job",
++            manifest_path=root / "job" / "pipeline_v2" / "job_manifest.json",
++            job_directory=root / "job",
++            source_path=root / "source.mp4",
++            output_path=root / "output.mp4",
++            delivery_copy_path=None,
++            target_lang="vi",
++            voice_source=voice_source,
++            voice_param="vi-VN-HoaiMyNeural",
++            rvc_model_path=rvc_model_path,
++            clean_audio_hint=None,
++            delogo=False,
++            next_stage="tts",
++        )
++
++    async def test_edge_resume_does_not_switch_to_discovered_rvc(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            discovered_model = root / "voice.pth"
++            discovered_model.write_bytes(b"model" * 400)
++            observed = {}
++
++            class FakeRunner:
++                def __init__(self, request):
++                    observed["request"] = request
++
++                async def run(self):
++                    return "done"
++
++            with mock.patch(
++                "backend.pipeline_v2.resume.discover_rvc_model",
++                return_value=discovered_model,
++            ), mock.patch(
++                "backend.pipeline_v2.resume.VideoPipelineRunner", FakeRunner
++            ):
++                result = await resume_video_job(
++                    self._job(root),
++                    PipelineSettings(mode=PipelineMode.V2),
++                )
++
++            self.assertEqual(result, "done")
++            self.assertEqual(observed["request"].voice_source, "edge")
++            self.assertIsNone(observed["request"].rvc_model_path)
++
++    async def test_rvc_resume_fails_when_model_cannot_be_restored(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            with mock.patch(
++                "backend.pipeline_v2.resume.discover_rvc_model", return_value=None
++            ):
++                with self.assertRaisesRegex(RuntimeError, "Cannot resume RVC job"):
++                    await resume_video_job(
++                        self._job(
++                            root,
++                            voice_source="rvc",
++                            rvc_model_path=root / "missing.pth",
++                        ),
++                        PipelineSettings(mode=PipelineMode.V2),
++                    )
++
++
++class TTSFailureSemanticsTests(unittest.IsolatedAsyncioTestCase):
++    async def test_strict_fpt_does_not_silently_switch_to_edge(self):
++        from datetime import timedelta
++        from backend.pipeline_v2.tts import generate_tts_audio_v2
++
++        class FakeQuotaError(Exception):
++            pass
++
++        async def fail_fpt(*_args, **_kwargs):
++            raise FakeQuotaError("quota")
++
++        async def unexpected_edge(*_args, **_kwargs):
++            raise AssertionError("Edge fallback must not run in strict v2 mode")
++
++        voice_module = ModuleType("ai.voice_cloning")
++        voice_module.FPTQuotaError = FakeQuotaError
++        voice_module.generate_tts_fpt = fail_fpt
++        voice_module.generate_tts_edge = unexpected_edge
++        voice_module._run_capcut_tts = lambda *_args, **_kwargs: None
++        segment = RuntimeSegment(
++            index=1,
++            start=timedelta(seconds=0),
++            end=timedelta(seconds=1),
++            content="Xin chào",
++        )
++        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
++            sys.modules, {"ai.voice_cloning": voice_module}
++        ):
++            with self.assertRaisesRegex(RuntimeError, "refusing silent provider"):
++                await generate_tts_audio_v2(
++                    [segment],
++                    directory,
++                    voice_source="fpt",
++                    api_key="test-key",
++                    strict_provider=True,
++                )
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_pipeline_v2_mixer.py b/tests/test_pipeline_v2_mixer.py
+index 39f2045..f9d29d1 100644
+--- a/tests/test_pipeline_v2_mixer.py
++++ b/tests/test_pipeline_v2_mixer.py
+@@ -26,6 +26,7 @@ class FFmpegMixerTests(unittest.TestCase):
+                 str(path),
+             ],
+             check=True,
++            timeout=30,
+         )
+ 
+     def test_filter_graph_contains_ducking_loudnorm_and_limiter(self):
+@@ -60,6 +61,7 @@ class FFmpegMixerTests(unittest.TestCase):
+                 [{"index": 1, "path": str(dub), "start": 0.75}],
+                 output,
+                 FFmpegMixSettings(target_lufs=-15.0, true_peak_dbtp=-1.0),
++                timeout_seconds=30,
+             )
+             self.assertEqual(result.dub_count, 1)
+             self.assertAlmostEqual(probe_audio_duration(output), 2.0, delta=0.08)
+@@ -89,10 +91,28 @@ class FFmpegMixerTests(unittest.TestCase):
+                     max_inputs_per_pass=2,
+                     voice_chunk_seconds=1.0,
+                 ),
++                timeout_seconds=30,
+             )
+             self.assertEqual(result.dub_count, 6)
+             self.assertAlmostEqual(probe_audio_duration(output), 3.0, delta=0.10)
+ 
++    def test_scalable_resource_limit_rejects_non_reducing_mix_tree(self):
++        with self.assertRaisesRegex(ValueError, "at least 2"):
++            FFmpegMixSettings(max_inputs_per_pass=1)
++
++    def test_missing_dub_is_rejected_instead_of_silently_dropped(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            background = root / "background.wav"
++            self._tone(background, 220, 1)
++            with self.assertRaises(FileNotFoundError):
++                mix_audio_ffmpeg(
++                    background,
++                    [{"index": 1, "path": str(root / "missing.mp3"), "start": 0.0}],
++                    root / "mixed.wav",
++                    timeout_seconds=10,
++                )
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/tests/test_pipeline_v2_preflight.py b/tests/test_pipeline_v2_preflight.py
+new file mode 100644
+index 0000000..5fa31ab
+--- /dev/null
++++ b/tests/test_pipeline_v2_preflight.py
+@@ -0,0 +1,74 @@
++import tempfile
++import unittest
++from pathlib import Path
++from unittest import mock
++
++from backend.pipeline_v2.preflight import run_preflight
++
++
++class PreflightTests(unittest.TestCase):
++    def test_placeholder_token_is_reported_as_missing(self):
++        with tempfile.TemporaryDirectory() as directory, mock.patch(
++            "backend.pipeline_v2.preflight.importlib.util.find_spec",
++            return_value=object(),
++        ), mock.patch(
++            "backend.pipeline_v2.preflight.shutil.which",
++            return_value="tool.exe",
++        ), mock.patch(
++            "backend.pipeline_v2.preflight._nvenc_check"
++        ) as nvenc, mock.patch(
++            "backend.pipeline_v2.preflight._cuda_check"
++        ) as cuda:
++            from backend.pipeline_v2.preflight import PreflightCheck
++
++            nvenc.return_value = PreflightCheck("encoder:h264_nvenc", "pass", "ok")
++            cuda.return_value = PreflightCheck("gpu:cuda", "pass", "ok")
++            report = run_preflight(
++                Path(directory),
++                "telegram",
++                {
++                    "BOT_TOKEN": "YOUR_TELEGRAM_BOT_TOKEN",
++                    "AUTODUB_OUTPUT_DIR": str(Path(directory) / "output"),
++                },
++            )
++        token = next(
++            check for check in report["checks"] if check["name"] == "secret:BOT_TOKEN"
++        )
++        self.assertEqual(token["status"], "error")
++        self.assertFalse(report["ready"])
++
++    def test_api_wildcard_cors_is_rejected(self):
++        with tempfile.TemporaryDirectory() as directory, mock.patch(
++            "backend.pipeline_v2.preflight.importlib.util.find_spec",
++            return_value=object(),
++        ), mock.patch(
++            "backend.pipeline_v2.preflight.shutil.which",
++            return_value="tool.exe",
++        ), mock.patch(
++            "backend.pipeline_v2.preflight._nvenc_check"
++        ) as nvenc, mock.patch(
++            "backend.pipeline_v2.preflight._cuda_check"
++        ) as cuda:
++            from backend.pipeline_v2.preflight import PreflightCheck
++
++            nvenc.return_value = PreflightCheck("encoder:h264_nvenc", "pass", "ok")
++            cuda.return_value = PreflightCheck("gpu:cuda", "pass", "ok")
++            report = run_preflight(
++                Path(directory),
++                "api",
++                {
++                    "PIPELINE_MODE": "v2",
++                    "AUTODUB_CORS_ORIGINS": "*",
++                    "AUTODUB_WORKSPACE": str(Path(directory) / "workspace"),
++                    "AUTODUB_OUTPUT_DIR": str(Path(directory) / "output"),
++                },
++            )
++        cors = next(
++            check for check in report["checks"] if check["name"] == "api:cors"
++        )
++        self.assertEqual(cors["status"], "error")
++        self.assertFalse(report["ready"])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_pipeline_v2_preservation.py b/tests/test_pipeline_v2_preservation.py
+index 156a142..832cd0d 100644
+--- a/tests/test_pipeline_v2_preservation.py
++++ b/tests/test_pipeline_v2_preservation.py
+@@ -35,6 +35,12 @@ class LegacyPatchPreservationTests(unittest.TestCase):
+         self.assertIn("await asyncio.sleep", body)
+         self.assertEqual(source.count(".edit_text("), 1)
+ 
++    def test_placeholder_secrets_are_not_treated_as_credentials(self):
++        source = (ROOT / "backend" / "telegram_bot.py").read_text(encoding="utf-8")
++        self.assertIn("def configured_secret", source)
++        self.assertIn('value.upper().startswith(("YOUR_", "PASTE_"))', source)
++        self.assertIn("if not BOT_TOKEN:", source)
++
+     def test_gemini_keeps_inline_video_frame_context(self):
+         source = (ROOT / "backend" / "ai" / "translation.py").read_text(
+             encoding="utf-8"
+@@ -55,6 +61,20 @@ class LegacyPatchPreservationTests(unittest.TestCase):
+         self.assertIn('payload.get("segment_seconds", 6.0)', worker)
+         self.assertIn('payload.get("num_workers", 1)', worker)
+ 
++    def test_fastapi_processing_routes_share_v2_runner(self):
++        source = (ROOT / "backend" / "main.py").read_text(encoding="utf-8")
++        self.assertIn("async def run_api_pipeline_v2", source)
++        self.assertEqual(source.count("await run_api_pipeline_v2("), 2)
++        self.assertIn('"pipeline": "v2"', source)
++        self.assertEqual(source.count("await API_PROCESS_LOCK.acquire()"), 2)
++        self.assertEqual(source.count("API_PROCESS_LOCK.release()"), 2)
++        self.assertIn("time.time_ns()", source)
++        self.assertIn(
++            'tts_api_key=(api_key if voice_source == "fpt" else "")', source
++        )
++        self.assertNotIn('allow_origins=["*"]', source)
++        self.assertIn("AUTODUB_CORS_ORIGINS", source)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/tests/test_pipeline_v2_qc.py b/tests/test_pipeline_v2_qc.py
+index 6e27feb..9e7a781 100644
+--- a/tests/test_pipeline_v2_qc.py
++++ b/tests/test_pipeline_v2_qc.py
+@@ -38,7 +38,39 @@ class SegmentQcTests(unittest.TestCase):
+             metrics, checks = _check_segments(path)
+             self.assertEqual(metrics["missing_ids"], [2])
+             self.assertEqual(metrics["missing_audio_count"], 1)
+-            self.assertEqual(checks[0].status, "warning")
++            self.assertEqual(checks[0].status, "error")
++
++    def test_measured_timing_and_source_language_failures_are_blocking_checks(self):
++        with tempfile.TemporaryDirectory() as directory:
++            audio = Path(directory) / "voice.wav"
++            audio.write_bytes(b"voice")
++            path = Path(directory) / "segments.json"
++            path.write_text(
++                json.dumps(
++                    {
++                        "segments": [
++                            {
++                                "index": 1,
++                                "start": 0.0,
++                                "end": 1.0,
++                                "content": "你好",
++                                "orig_content": "你好",
++                                "audio_path": str(audio),
++                                "actual_audio_duration": 1.4,
++                                "target_audio_duration": 1.0,
++                                "timing_fits": False,
++                            }
++                        ]
++                    },
++                    ensure_ascii=False,
++                ),
++                encoding="utf-8",
++            )
++            metrics, checks = _check_segments(path)
++            by_name = {check.name: check for check in checks}
++            self.assertEqual(metrics["timing_failure_ids"], [1])
++            self.assertEqual(by_name["segment_timing"].status, "error")
++            self.assertEqual(by_name["translation_fallback"].status, "error")
+ 
+ 
+ class SubtitleQcTests(unittest.TestCase):
+diff --git a/tests/test_pipeline_v2_scaling.py b/tests/test_pipeline_v2_scaling.py
+index ee5e1c7..2a8bfe9 100644
+--- a/tests/test_pipeline_v2_scaling.py
++++ b/tests/test_pipeline_v2_scaling.py
+@@ -3,6 +3,7 @@ import unittest
+ from pathlib import Path
+ 
+ from backend.pipeline_v2.batching import bounded_batches, chunked
++from backend.pipeline_v2.artifact_store import hash_file
+ from backend.pipeline_v2.manifest import ManifestStore
+ from backend.pipeline_v2.mixer import plan_voice_chunks
+ from backend.pipeline_v2.models import FingerprintSet
+@@ -64,6 +65,42 @@ class StartupResumeDiscoveryTests(unittest.TestCase):
+             self.assertEqual(jobs[0].job_id, "job-1")
+             self.assertEqual(jobs[0].next_stage, "input")
+ 
++    def test_same_size_corrupt_delivery_is_resumable(self):
++        with tempfile.TemporaryDirectory() as directory:
++            workspace = Path(directory)
++            source = workspace / "source.mp4"
++            source.write_bytes(b"video")
++            output = workspace / "published.mp4"
++            output.write_bytes(b"good-output")
++            sha256, size = hash_file(output)
++            manifest_directory = workspace / "job-1" / "pipeline_v2"
++            store = ManifestStore(manifest_directory)
++            manifest = store.create(
++                "job-1",
++                FingerprintSet("source", "config", {}),
++                stage_names=V2_STAGE_ORDER,
++                metadata={
++                    "source_path": str(source),
++                    "request": {"output_path": str(output)},
++                },
++            )
++            manifest.start_stage("deliver")
++            manifest.stage("deliver").metadata["published_outputs"] = [
++                {
++                    "path": str(output),
++                    "size_bytes": size,
++                    "sha256": sha256,
++                }
++            ]
++            manifest.complete_stage("deliver")
++            store.save(manifest)
++            self.assertEqual(find_resumable_jobs(workspace), [])
++
++            output.write_bytes(b"evil-output")
++            self.assertEqual(output.stat().st_size, size)
++            jobs = find_resumable_jobs(workspace)
++            self.assertEqual(len(jobs), 1)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/tests/test_pipeline_v2_timing.py b/tests/test_pipeline_v2_timing.py
+index e788663..c1f5890 100644
+--- a/tests/test_pipeline_v2_timing.py
++++ b/tests/test_pipeline_v2_timing.py
+@@ -8,6 +8,7 @@ from backend.pipeline_v2.segments import RuntimeSegment
+ from backend.pipeline_v2.timing import (
+     TimingPolicy,
+     fit_audio_to_window,
++    plan_actual_timing_rewrites,
+     plan_segment,
+     solve_segment_timing,
+ )
+@@ -56,6 +57,28 @@ class TimingSolverTests(unittest.TestCase):
+         )
+         self.assertLessEqual(plan_segment(segment).required_atempo, 1.08)
+ 
++    def test_measured_duration_creates_a_smaller_second_pass_budget(self):
++        segment = RuntimeSegment(
++            index=3,
++            start=timedelta(seconds=0),
++            end=timedelta(seconds=1),
++            content="Một câu lồng tiếng thực tế đang bị dài",
++            source_segment_id=9,
++        )
++        requests = plan_actual_timing_rewrites(
++            [segment],
++            [
++                {
++                    "index": 3,
++                    "actual_audio_duration": 1.5,
++                    "timing_fits": False,
++                }
++            ],
++        )
++        self.assertEqual(len(requests), 1)
++        self.assertEqual(requests[0].source_segment_id, 9)
++        self.assertLess(requests[0].max_characters, len(segment.content.replace(" ", "")))
++
+ 
+ class AudioFitIntegrationTests(unittest.TestCase):
+     def test_atempo_is_capped_at_one_point_zero_eight(self):
+diff --git a/tests/test_pipeline_v2_video_pipeline.py b/tests/test_pipeline_v2_video_pipeline.py
+index 0f58282..50f2106 100644
+--- a/tests/test_pipeline_v2_video_pipeline.py
++++ b/tests/test_pipeline_v2_video_pipeline.py
+@@ -1,7 +1,10 @@
+ import tempfile
+ import unittest
++import sys
+ from datetime import timedelta
+ from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
+ 
+ from backend.pipeline_v2.config import PipelineMode, PipelineSettings, QCGatePolicy
+ from backend.pipeline_v2.qc import evaluate_qc_gate
+@@ -135,6 +138,198 @@ class FakeVideoPipelineRunner(VideoPipelineRunner):
+ 
+ 
+ class VideoPipelineEndToEndTests(unittest.IsolatedAsyncioTestCase):
++    async def test_rvc_index_and_adaptive_hint_participate_in_cache_identity(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            source = root / "source.mp4"
++            source.write_bytes(b"source-video")
++            model = root / "voice.pth"
++            index = root / "voice.index"
++            model.write_bytes(b"model" * 400)
++            index.write_bytes(b"index-a" * 200)
++            settings = PipelineSettings(
++                mode=PipelineMode.V2,
++                enable_stage_cache=True,
++            )
++            request = VideoPipelineRequest(
++                video_path=source,
++                job_directory=root / "job",
++                output_path=root / "delivered.mp4",
++                settings=settings,
++                voice_source="rvc",
++                voice_param=str(model),
++                rvc_model_path=model,
++                clean_audio_hint=True,
++            )
++            first = VideoPipelineRunner(request)._load_or_create_manifest()
++            first_index_hash = first.fingerprints.model_sha256["rvc_index"]
++
++            index.write_bytes(b"index-b" * 200)
++            second = VideoPipelineRunner(request)._load_or_create_manifest()
++            self.assertNotEqual(
++                first_index_hash,
++                second.fingerprints.model_sha256["rvc_index"],
++            )
++
++            changed_hint = VideoPipelineRequest(
++                video_path=source,
++                job_directory=root / "hint-job",
++                output_path=root / "hint-output.mp4",
++                settings=settings,
++                clean_audio_hint=False,
++            )
++            unchanged_hint = VideoPipelineRequest(
++                video_path=source,
++                job_directory=root / "other-hint-job",
++                output_path=root / "other-hint-output.mp4",
++                settings=settings,
++                clean_audio_hint=True,
++            )
++            self.assertNotEqual(
++                VideoPipelineRunner(changed_hint)
++                ._load_or_create_manifest()
++                .fingerprints.config_sha256,
++                VideoPipelineRunner(unchanged_hint)
++                ._load_or_create_manifest()
++                .fingerprints.config_sha256,
++            )
++
++    async def test_pipeline_version_change_invalidates_existing_manifest(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            source = root / "source.mp4"
++            source.write_bytes(b"source-video")
++            request = VideoPipelineRequest(
++                video_path=source,
++                job_directory=root / "job",
++                output_path=root / "delivered.mp4",
++                settings=PipelineSettings(
++                    mode=PipelineMode.V2,
++                    enable_stage_cache=True,
++                ),
++            )
++
++            with mock.patch(
++                "backend.pipeline_v2.video_pipeline.PIPELINE_IMPLEMENTATION_VERSION",
++                "test-version-a",
++            ):
++                first = VideoPipelineRunner(request)._load_or_create_manifest()
++
++            with mock.patch(
++                "backend.pipeline_v2.video_pipeline.PIPELINE_IMPLEMENTATION_VERSION",
++                "test-version-b",
++            ):
++                second = VideoPipelineRunner(request)._load_or_create_manifest()
++
++            self.assertNotEqual(
++                first.fingerprints.config_sha256,
++                second.fingerprints.config_sha256,
++            )
++            self.assertEqual(
++                second.metadata["pipeline_implementation_version"],
++                "test-version-b",
++            )
++            archived = list(
++                (root / "job" / "pipeline_v2").glob("job_manifest.*.json")
++            )
++            self.assertEqual(len(archived), 1)
++
++    async def test_tts_stage_rewrites_from_measured_duration_and_persists_text(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            source = root / "source.mp4"
++            source.write_bytes(b"source-video")
++            request = VideoPipelineRequest(
++                video_path=source,
++                job_directory=root / "job",
++                output_path=root / "delivered.mp4",
++                api_key="test-key",
++                settings=PipelineSettings(
++                    mode=PipelineMode.V2,
++                    enable_timing_solver=True,
++                ),
++            )
++            runner = VideoPipelineRunner(request)
++            runner.manifest = runner._load_or_create_manifest()
++            segment = RuntimeSegment(
++                index=1,
++                start=timedelta(seconds=0),
++                end=timedelta(seconds=1),
++                content="Câu lồng tiếng thực tế quá dài",
++                source_segment_id=5,
++            )
++            calls = []
++
++            async def fake_generate(segments, output_directory, **kwargs):
++                self.assertTrue(kwargs["strict_provider"])
++                calls.append(str(segments[0].content))
++                output_root = Path(output_directory)
++                output_root.mkdir(parents=True, exist_ok=True)
++                audio = output_root / "1.mp3"
++                audio.write_bytes("audio-{}".format(len(calls)).encode("ascii"))
++                fits = len(calls) > 1
++                return [
++                    {
++                        "index": 1,
++                        "source_segment_id": 5,
++                        "path": str(audio),
++                        "start": 0.0,
++                        "end": 1.0,
++                        "actual_audio_duration": 0.9 if fits else 1.5,
++                        "timing_fits": fits,
++                        "content": str(segments[0].content),
++                    }
++                ]
++
++            rewriter = mock.Mock(return_value={1: "Câu ngắn"})
++            with mock.patch(
++                "backend.pipeline_v2.video_pipeline.generate_tts_audio_v2",
++                side_effect=fake_generate,
++            ), mock.patch(
++                "backend.pipeline_v2.video_pipeline.GeminiTimingRewriter",
++                return_value=rewriter,
++            ):
++                await runner._tts_stage([segment])
++
++            payload = runner._load_json("tts/segments.json")
++            self.assertEqual(calls, ["Câu lồng tiếng thực tế quá dài", "Câu ngắn"])
++            self.assertEqual(payload["runtime_segments"][0]["content"], "Câu ngắn")
++            self.assertEqual(payload["unresolved_source_ids"], [])
++
++    async def test_render_stage_converts_paths_for_legacy_renderer(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            source = root / "source.mp4"
++            source.write_bytes(b"source-video")
++            request = VideoPipelineRequest(
++                video_path=source,
++                job_directory=root / "job",
++                output_path=root / "delivered.mp4",
++                settings=PipelineSettings(mode=PipelineMode.V2),
++            )
++            runner = VideoPipelineRunner(request)
++            runner.manifest = runner._load_or_create_manifest()
++            runner.artifact_store.put_text("subtitles/final.ass", "ASS")
++            runner.artifact_store.put_bytes("audio/mixed_legacy.wav", b"mix")
++            captured = {}
++
++            def fake_process_video(*args):
++                captured["args"] = args
++                Path(args[3]).write_bytes(b"rendered")
++                return True
++
++            fake_module = SimpleNamespace(process_video=fake_process_video)
++            with mock.patch.dict(sys.modules, {"video_utils": fake_module}):
++                records = await runner._render_stage()
++
++            self.assertEqual(len(records), 1)
++            self.assertTrue(
++                runner.artifact_store.path_for("output/final.mp4").is_file()
++            )
++            for path_argument in captured["args"][:4]:
++                self.assertIsInstance(path_argument, str)
++            self.assertGreater(float(captured["args"][9]), 0.0)
++
+     async def test_fake_pipeline_delivers_and_resumes_without_rerunning(self):
+         with tempfile.TemporaryDirectory() as directory:
+             root = Path(directory)
+@@ -177,6 +372,20 @@ class VideoPipelineEndToEndTests(unittest.IsolatedAsyncioTestCase):
+             await resumed.run()
+             self.assertEqual(resumed.calls, [])
+ 
++            # A delivery destination change reuses expensive media artifacts
++            # but must publish to the newly requested path.
++            second_output = root / "delivered-second.mp4"
++            second_request = VideoPipelineRequest(
++                video_path=source,
++                job_directory=root / "job",
++                output_path=second_output,
++                settings=settings,
++            )
++            redirected = FakeVideoPipelineRunner(second_request)
++            await redirected.run()
++            self.assertEqual(redirected.calls, [])
++            self.assertEqual(second_output.read_bytes(), b"final-video")
++
+             # Corrupting a completed artifact invalidates that stage and only
+             # its downstream consumers; earlier expensive stages stay cached.
+             resumed.artifact_store.path_for("translation/segments.json").write_bytes(
+@@ -191,6 +400,124 @@ class VideoPipelineEndToEndTests(unittest.IsolatedAsyncioTestCase):
+             self.assertIn("translate", repaired.calls)
+             self.assertIn("render", repaired.calls)
+ 
++    async def test_progress_callback_failure_does_not_fail_media_pipeline(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            source = root / "source.mp4"
++            source.write_bytes(b"source-video")
++
++            def broken_progress(_stage, _state):
++                raise ConnectionError("status channel offline")
++
++            request = VideoPipelineRequest(
++                video_path=source,
++                job_directory=root / "job",
++                output_path=root / "delivered.mp4",
++                settings=PipelineSettings(mode=PipelineMode.V2),
++                progress=broken_progress,
++            )
++            runner = FakeVideoPipelineRunner(request)
++            result = await runner.run()
++            self.assertTrue(result.final_video.is_file())
++            self.assertTrue(runner.manifest.metadata["progress_warnings"])
++
++    async def test_parallel_context_rejects_empty_artifacts_and_resets_corrupt_cache(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            source = root / "source.mp4"
++            source.write_bytes(b"source-video")
++            request = VideoPipelineRequest(
++                video_path=source,
++                job_directory=root / "job",
++                output_path=root / "delivered.mp4",
++                settings=PipelineSettings(mode=PipelineMode.V2),
++            )
++            runner = VideoPipelineRunner(request)
++            runner.manifest = runner._load_or_create_manifest()
++
++            for name in ("ocr", "translate"):
++                runner.manifest.start_stage(name)
++                artifact = runner.artifact_store.put_bytes(
++                    "{}/stale.bin".format(name), b"stale"
++                )
++                runner.manifest.complete_stage(name, [artifact])
++                runner.artifact_store.path_for(artifact.key).write_bytes(b"corrupt")
++
++            async def empty_stage(_transcript):
++                return []
++
++            with mock.patch.object(runner, "_ocr_stage", side_effect=empty_stage), mock.patch.object(
++                runner, "_translate_stage", side_effect=empty_stage
++            ):
++                with self.assertRaisesRegex(RuntimeError, "produced no artifacts"):
++                    await runner._execute_parallel_context([])
++
++            self.assertEqual(runner.manifest.stage("ocr").status.value, "failed")
++            self.assertEqual(runner.manifest.stage("translate").status.value, "failed")
++
++    async def test_progress_warning_history_is_bounded(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            source = root / "source.mp4"
++            source.write_bytes(b"source-video")
++
++            def broken_progress(_stage, _state):
++                raise ConnectionError("status channel offline")
++
++            runner = VideoPipelineRunner(
++                VideoPipelineRequest(
++                    video_path=source,
++                    job_directory=root / "job",
++                    output_path=root / "delivered.mp4",
++                    settings=PipelineSettings(mode=PipelineMode.V2),
++                    progress=broken_progress,
++                )
++            )
++            runner.manifest = runner._load_or_create_manifest()
++            for _ in range(75):
++                await runner._notify("tts", "running")
++
++            self.assertEqual(len(runner.manifest.metadata["progress_warnings"]), 50)
++            self.assertEqual(runner.manifest.metadata["progress_warning_count"], 75)
++
++    async def test_runner_rejects_destructive_output_and_invalid_rvc(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            source = root / "source.mp4"
++            source.write_bytes(b"source-video")
++            with self.assertRaisesRegex(ValueError, "must not overwrite"):
++                VideoPipelineRunner(
++                    VideoPipelineRequest(
++                        video_path=source,
++                        job_directory=root / "job-a",
++                        output_path=source,
++                        settings=PipelineSettings(mode=PipelineMode.V2),
++                    )
++                )
++            with self.assertRaisesRegex(ValueError, "real .pth"):
++                VideoPipelineRunner(
++                    VideoPipelineRequest(
++                        video_path=source,
++                        job_directory=root / "job-b",
++                        output_path=root / "out.mp4",
++                        settings=PipelineSettings(mode=PipelineMode.V2),
++                        voice_source="rvc",
++                        voice_param=str(root / "missing.pth"),
++                        rvc_model_path=root / "missing.pth",
++                    )
++                )
++            with self.assertRaisesRegex(ValueError, "FPT voice requires"):
++                VideoPipelineRunner(
++                    VideoPipelineRequest(
++                        video_path=source,
++                        job_directory=root / "job-c",
++                        output_path=root / "out-fpt.mp4",
++                        settings=PipelineSettings(mode=PipelineMode.V2),
++                        voice_source="fpt",
++                        voice_param="banmai",
++                    )
++                )
++
+ 
+ class QCGateTests(unittest.TestCase):
+     def test_block_policy_blocks_errors_but_report_only_does_not(self):

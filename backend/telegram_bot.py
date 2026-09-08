@@ -8,6 +8,7 @@ import sys
 import asyncio
 import time
 import subprocess
+from pathlib import Path
 
 # CẤP CỨU: Chặn VĨNH VIỄN tất cả các cửa sổ terminal (cmd) đen nháy lên do các thư viện bên thứ 3 (Whisper, PyDub, OCR) gọi ngầm ffmpeg.
 if os.name == 'nt':
@@ -35,10 +36,21 @@ if os.path.exists(env_file):
                 k, v = line.strip().split("=", 1)
                 os.environ[k.strip()] = v.strip().strip('"').strip("'")
 
+# This entrypoint belongs to the dedicated Tool V1 branch. Never let a stale
+# machine-level variable route its jobs into Pipeline V2.
+os.environ["PIPELINE_MODE"] = "legacy"
+
 # ===== CẤU HÌNH =====
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
-FPT_API_KEY = os.getenv("FPT_API_KEY", "YOUR_FPT_API_KEY")
+def configured_secret(name):
+    value = os.getenv(name, "").strip()
+    if value.upper().startswith(("YOUR_", "PASTE_")):
+        return ""
+    return value
+
+
+BOT_TOKEN = configured_secret("BOT_TOKEN")
+GEMINI_API_KEY = configured_secret("GEMINI_API_KEY")
+FPT_API_KEY = configured_secret("FPT_API_KEY")
 
 # Import các module xử lý từ backend
 sys.path.insert(0, os.path.dirname(__file__))
@@ -52,10 +64,18 @@ if isinstance(sys.stderr, io.TextIOWrapper):
 
 from ai.transcription import extract_subtitles_whisper, save_srt
 from ai.translation import translate_subtitles
-from ai.voice_cloning import generate_dubbing_audio
+from ai.voice_cloning import generate_dubbing_audio, rvc_runtime_available
+from url_utils import extract_http_urls
 from video_utils import extract_audio_from_video, mix_audio_pydub, process_video
 
-WORKSPACE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "workspace"))
+WORKSPACE = os.path.abspath(
+    os.getenv(
+        "AUTODUB_WORKSPACE",
+        os.path.join(os.path.dirname(__file__), "..", "workspace"),
+    )
+)
+INPUT_DIR = os.path.abspath(os.getenv("AUTODUB_INPUT_DIR", r"D:\video_input"))
+OUTPUT_DIR = os.path.abspath(os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve"))
 os.makedirs(WORKSPACE, exist_ok=True)
 
 logging.basicConfig(
@@ -74,6 +94,8 @@ async def safe_edit_status(status_msg, text, parse_mode=None, retries=3):
     Cập nhật status message trên Telegram an toàn, chống bị crash tiến trình
     khi mạng Internet bị giật hoặc đứt kết nối tạm thời (httpx.ConnectError).
     """
+    from telegram_progress import report
+    report(text)
     if not status_msg:
         return
     for attempt in range(retries):
@@ -84,6 +106,62 @@ async def safe_edit_status(status_msg, text, parse_mode=None, retries=3):
             logger.warning(f"Lỗi cập nhật status Telegram (Lần {attempt+1}/{retries}): {e}")
             if attempt < retries - 1:
                 await asyncio.sleep(1.0)
+
+
+async def run_pipeline_v2_for_telegram(
+    video_path, out_dir, final_video, status_msg, delivery_copy_path=None
+):
+    """Run the opt-in v2 pipeline while legacy remains the default."""
+
+    from pipeline_v2.config import PipelineSettings
+    from pipeline_v2.video_pipeline import (
+        VideoPipelineRequest,
+        VideoPipelineRunner,
+        discover_rvc_model,
+    )
+
+    settings = PipelineSettings.from_env()
+    rvc_model = discover_rvc_model(Path(WORKSPACE))
+
+    async def progress(stage, state):
+        await safe_edit_status(
+            status_msg,
+            "⚙️ Pipeline v2: `{}` — {}".format(stage, state),
+            parse_mode="Markdown",
+        )
+
+    request = VideoPipelineRequest(
+        video_path=Path(video_path),
+        job_directory=Path(out_dir),
+        output_path=Path(final_video),
+        delivery_copy_path=(
+            Path(delivery_copy_path) if delivery_copy_path else None
+        ),
+        settings=settings,
+        api_key=GEMINI_API_KEY,
+        voice_source="rvc" if rvc_model else "edge",
+        voice_param=str(rvc_model) if rvc_model else "vi-VN-HoaiMyNeural",
+        rvc_model_path=rvc_model,
+        progress=progress,
+    )
+    return await VideoPipelineRunner(request).run()
+
+
+def snapshot_legacy_telegram_run(
+    video_path, out_dir, artifacts, run_started_at_epoch=None
+):
+    from pipeline_v2.config import PipelineMode, PipelineSettings
+
+    if PipelineSettings.from_env().mode is not PipelineMode.SHADOW:
+        return
+    from pipeline_v2.shadow import snapshot_completed_legacy_run
+
+    snapshot_completed_legacy_run(
+        Path(video_path),
+        Path(out_dir) / "pipeline_v2_shadow",
+        artifacts,
+        run_started_at_epoch=run_started_at_epoch,
+    )
 
 # ===== LỆNH /start =====
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -97,12 +175,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Facebook / Instagram\n\n"
         "Bot sẽ tự động:\n"
         "1️⃣ Tải video sạch không watermark\n"
-        "2️⃣ Nhận dạng giọng nói (Whisper Large-v3 AI)\n"
-        "3️⃣ Dịch phụ đề sang Tiếng Việt (Gemini 3.7 Flash)\n"
-        "4️⃣ Tách giọng & giữ nhạc nền (Meta Demucs)\n"
+        "2️⃣ Nhận dạng giọng nói (Faster-Whisper Large-v3 Turbo)\n"
+        "3️⃣ Dịch phụ đề sang Tiếng Việt (Gemini 3.8 Flash)\n"
+        "4️⃣ Tách giọng & giữ nhạc nền (Demucs htdemucs Fast)\n"
         "5️⃣ Lồng tiếng Tiếng Việt (Microsoft Neural TTS)\n"
         "6️⃣ Xuất video chất lượng cao lưu vào `D:\\banve`\n\n"
         "📌 *Lệnh hỗ trợ:*\n"
+        "• `/llm` - Cấu hình mô hình AI dịch thuật (Google Gemini / OpenAI GPT-4o / DeepSeek V4)\n"
         "• `/batch` - Tự động quét & edit hàng loạt video trong thư mục `D:\\video_input` trên máy\n"
         "• `/batch D:\\thu_muc` - Chỉ định thư mục chứa video cần edit\n"
         "• `/status` - Kiểm tra trạng thái hàng đợi\n"
@@ -126,9 +205,16 @@ async def cmd_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Xử lý hàng loạt video từ thư mục cục bộ (mặc định: D:\\video_input)
     Cú pháp: /batch hoặc /batch D:\\duong_dan_thu_muc
     """
-    input_dir = r"D:\video_input"
+    input_dir = None
     if context.args and len(context.args) > 0:
         input_dir = " ".join(context.args).strip()
+    else:
+        for candidate in [r"D:\video phôi", r"D:\video phoi", r"D:\video_input"]:
+            if os.path.exists(candidate):
+                input_dir = candidate
+                break
+        if not input_dir:
+            input_dir = r"D:\video phôi"
         
     output_dir = r"D:\banve"
     
@@ -164,11 +250,51 @@ async def cmd_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     async def telegram_progress(msg: str):
         try:
-            await status_msg.edit_text(f"📁 *Batch Processing (`{input_dir}`):*\n\n{msg}", parse_mode="Markdown")
+            await safe_edit_status(
+                status_msg,
+                f"📁 *Batch Processing (`{input_dir}`):*\n\n{msg}",
+                parse_mode="Markdown",
+            )
         except Exception:
             pass
             
     asyncio.create_task(process_batch_folder(input_dir, output_dir, telegram_progress))
+
+async def cmd_llm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xem hoặc chuyển đổi nhà cung cấp AI dịch thuật (Gemini / OpenAI ChatGPT / DeepSeek)."""
+    args = context.args
+    current_provider = os.getenv("LLM_PROVIDER", "auto").lower()
+    
+    gemini_status = "🟢 Đã nạp Key" if os.getenv("GEMINI_API_KEY") else "⚪ Chưa cấu hình"
+    openai_status = "🟢 Đã nạp Key" if os.getenv("OPENAI_API_KEY") else "⚪ Chưa cấu hình"
+    deepseek_status = "🟢 Đã nạp Key" if os.getenv("DEEPSEEK_API_KEY") else "⚪ Chưa cấu hình"
+    
+    if not args:
+        await update.message.reply_text(
+            f"🧠 *CẤU HÌNH NHÀ CUNG CẤP AI DỊCH THUẬT (LLM)*\n\n"
+            f"📍 *Chế độ ưu tiên hiện tại:* `{current_provider.upper()}`\n\n"
+            f"🔹 **Google Gemini (3.8 Flash + fallback):** {gemini_status}\n"
+            f"🔹 **OpenAI ChatGPT (GPT-4o Vision):** {openai_status}\n"
+            f"🔹 **DeepSeek-V4 Series (Văn phong Douyin/TikTok):** {deepseek_status}\n\n"
+            f"👉 *Cách đổi mô hình ưu tiên:*\n"
+            f"• `/llm auto` - Tự động luân chuyển Gemini ➡️ OpenAI ➡️ DeepSeek (Khuyên dùng)\n"
+            f"• `/llm openai` - Ưu tiên OpenAI GPT-4o\n"
+            f"• `/llm deepseek` - Ưu tiên DeepSeek V4\n"
+            f"• `/llm gemini` - Ưu tiên Google Gemini",
+            parse_mode="Markdown"
+        )
+        return
+        
+    choice = args[0].lower().strip()
+    if choice in ("auto", "gemini", "openai", "deepseek"):
+        os.environ["LLM_PROVIDER"] = choice
+        await update.message.reply_text(
+            f"✅ Đã chuyển mô hình dịch thuật chính sang: *{choice.upper()}*!\n\n"
+            f"*(Hệ thống vẫn tự động kích hoạt chế độ Fallback nếu nhà cung cấp này gặp sự cố hoặc hết quota)*",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text("❌ Lựa chọn không hợp lệ. Vui lòng chọn: `auto`, `gemini`, `openai`, hoặc `deepseek`.", parse_mode="Markdown")
 
 import shared_state
 shared_state.stop_requested = False
@@ -211,7 +337,8 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 import re
 
-global_queue = asyncio.Queue()
+from telegram_queue_monitor import MonitoredQueue
+global_queue = MonitoredQueue()
 queue_counter = 0
 worker_task = None
 
@@ -225,11 +352,19 @@ async def send_video_safely(context, chat_id, final_video, caption, status_msg, 
                 chat_id=chat_id, video=vf, caption=caption,
                 supports_streaming=True, read_timeout=600, write_timeout=600, connect_timeout=600
             )
-        await status_msg.edit_text(f"✅ *Hoàn tất!*\n`{url_or_filename}`", parse_mode="Markdown")
+        await safe_edit_status(
+            status_msg,
+            f"✅ *Hoàn tất!*\n`{url_or_filename}`",
+            parse_mode="Markdown",
+        )
         return
 
     # Nếu file quá lớn (do chất lượng 720p ép buộc), tiến hành cắt nhỏ video bằng FFmpeg (copy codec không làm giảm chất lượng)
-    await status_msg.edit_text(f"✂️ *Video gốc quá lớn ({file_size // (1024*1024)}MB)!*\nBot đang giữ nguyên chất lượng cao (>720p) và tự động cắt thành các phần <50MB để gửi cho bạn...", parse_mode="Markdown")
+    await safe_edit_status(
+        status_msg,
+        f"✂️ *Video gốc quá lớn ({file_size // (1024*1024)}MB)!*\nBot đang giữ nguyên chất lượng cao (>720p) và tự động cắt thành các phần <50MB để gửi cho bạn...",
+        parse_mode="Markdown",
+    )
     
     import math
     import subprocess
@@ -258,7 +393,11 @@ async def send_video_safely(context, chat_id, final_video, caption, status_msg, 
         
         for i, part in enumerate(parts, 1):
             if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-            await status_msg.edit_text(f"📤 Đang gửi phần {i}/{len(parts)}...", parse_mode="Markdown")
+            await safe_edit_status(
+                status_msg,
+                f"📤 Đang gửi phần {i}/{len(parts)}...",
+                parse_mode="Markdown",
+            )
             part_caption = f"{caption}\n\n(Phần {i}/{len(parts)})" if i == 1 else f"🎬 Phần {i}/{len(parts)}"
             with open(part, 'rb') as vf:
                 await context.bot.send_video(
@@ -266,11 +405,18 @@ async def send_video_safely(context, chat_id, final_video, caption, status_msg, 
                     supports_streaming=True, read_timeout=600, write_timeout=600, connect_timeout=600
                 )
         
-        await status_msg.edit_text(f"✅ *Đã gửi thành công {len(parts)} phần video chất lượng cao!*\n`{url_or_filename}`", parse_mode="Markdown")
+        await safe_edit_status(
+            status_msg,
+            f"✅ *Đã gửi thành công {len(parts)} phần video chất lượng cao!*\n`{url_or_filename}`",
+            parse_mode="Markdown",
+        )
         
     except Exception as e:
         logger.error(f"Error splitting video: {e}")
-        await status_msg.edit_text(f"❌ *Lỗi chia nhỏ video:* Không thể gửi file lớn qua Telegram.")
+        await safe_edit_status(
+            status_msg,
+            "❌ *Lỗi chia nhỏ video:* Không thể gửi file lớn qua Telegram.",
+        )
 
 async def video_worker():
     while True:
@@ -278,19 +424,50 @@ async def video_worker():
             job = await global_queue.get()
             import shared_state
             shared_state.stop_requested = False
+            import job_tracker
+            tracker_job = None
+            from telegram_progress import current_job
+            progress_token = None
             try:
+                while tracker_job is None:
+                    try:
+                        tracker_job = job_tracker.start_batch(1, output_dir=r"D:\banve")
+                        progress_token = current_job.set(tracker_job)
+                    except job_tracker.JobAlreadyRunningError:
+                        await asyncio.sleep(1)
                 if isinstance(job, dict):
                     if job['type'] == 'url':
                         await process_single_url(job['update'], job['context'], job['url'], job['pos'])
                     elif job['type'] == 'video':
                         await process_single_video(job['update'], job['context'], job['file_id'], job['filename'], job['pos'])
+                    elif job['type'] == 'resume_v2':
+                        from pipeline_v2.config import PipelineSettings
+                        from pipeline_v2.resume import resume_video_job
+
+                        resumable = job['job']
+
+                        async def resume_progress(job_id, stage, state):
+                            logger.info(
+                                "[resume:%s] %s: %s", job_id, stage, state
+                            )
+
+                        await resume_video_job(
+                            resumable,
+                            PipelineSettings.from_env(),
+                            api_key=GEMINI_API_KEY,
+                            progress=resume_progress,
+                        )
                 else:
                     pos, update, context, url = job
                     await process_single_url(update, context, url, pos)
             except asyncio.CancelledError:
+                if tracker_job:
+                    job_tracker.mark_stopped()
                 logger.info("Worker task cancelled by /stop.")
                 break
             except Exception as e:
+                if tracker_job:
+                    job_tracker.fail_batch(str(e), job_id=tracker_job)
                 logger.error(f"Worker error: {e}")
             finally:
                 import gc, torch
@@ -298,11 +475,22 @@ async def video_worker():
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 global_queue.task_done()
+                if tracker_job:
+                    state = job_tracker.get_status()
+                    if state.get("video_status") == "completed":
+                        job_tracker.finish_batch()
+                    elif state.get("active"):
+                        job_tracker.fail_batch("Video kết thúc mà chưa xác nhận thành phẩm.", job_id=tracker_job)
+                    job_tracker.release_batch(tracker_job)
+                if progress_token is not None:
+                    current_job.reset(progress_token)
         except asyncio.CancelledError:
             logger.info("Worker queue cancelled.")
             break
 
 async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, pos: int = 1):
+    import job_tracker
+    job_tracker.start_video("Video từ Telegram", pos, pos + global_queue.qsize())
     original_url = url
     chat_id = update.message.chat_id
 
@@ -355,6 +543,7 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
             return
 
         downloaded_files = [os.path.basename(video_path)]
+        job_tracker.start_video(os.path.basename(video_path), pos, pos + global_queue.qsize())
         base_name = os.path.splitext(downloaded_files[0])[0].rstrip('.')
 
         # Chuẩn bị thư mục output
@@ -367,6 +556,39 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
         dubbing_dir = os.path.join(out_dir, "dubbing")
         mixed_audio = os.path.join(out_dir, "mixed.wav")
         final_video = os.path.join(out_dir, f"final_{base_name}.mp4")
+
+        from pipeline_v2.config import PipelineMode, PipelineSettings
+        if PipelineSettings.from_env().mode is PipelineMode.V2:
+            start_time = time.time()
+            downloads_dir = r"D:\banve"
+            os.makedirs(downloads_dir, exist_ok=True)
+            local_save_path = os.path.join(downloads_dir, f"Dubbed_{base_name}.mp4")
+            await run_pipeline_v2_for_telegram(
+                video_path,
+                out_dir,
+                final_video,
+                status_msg,
+                delivery_copy_path=local_save_path,
+            )
+            elapsed_time = int(time.time() - start_time)
+            mins = elapsed_time // 60
+            secs = elapsed_time % 60
+            time_str = f"{mins} phút {secs} giây" if mins > 0 else f"{secs} giây"
+            remaining = global_queue.qsize()
+            queue_status = f"\n⏳ Phía sau còn {remaining} video đang chờ xử lý..." if remaining > 0 else "\n🎉 Đã hoàn tất toàn bộ hàng đợi!"
+            caption = (
+                f"✅ *Video đã lồng tiếng Tiếng Việt (Pipeline v2 - Âm thanh Studio)!*\n\n"
+                f"🎬 Video: `{video_title if 'video_title' in locals() else base_name}`\n"
+                f"💾 Đã tự động lưu vào máy: `D:\\banve`\n"
+                f"⏱️ Thời gian xử lý: {time_str}"
+                f"{queue_status}"
+            )
+            await safe_edit_status(
+                status_msg,
+                caption,
+                parse_mode="Markdown",
+            )
+            return
 
         # ===== BƯỚC 2: TÁCH ÂM THANH =====
         start_time = time.time()
@@ -447,22 +669,37 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # (Di chuyển BƯỚC 4.5 xuống sau BƯỚC 5 để đồng bộ thời gian biến mất của phụ đề với audio)
 
         # ===== BƯỚC 5: LỒNG TIẾNG =====
+        # Khôi phục giọng RVC (Đáng yêu / Chí Mai)
+        rvc_model_path = None
+        search_dirs = [
+            os.path.join(os.path.dirname(__file__), "..", "MyVoiceModel_v2"),
+            os.path.join(WORKSPACE, "..", "MyVoiceModel_v2"),
+            os.path.join(WORKSPACE, "MyVoiceModel_v2"),
+            os.path.join(WORKSPACE, "models", "rvc"),
+            os.path.join(os.path.dirname(__file__), "..", "models", "rvc"),
+        ]
+        for d in search_dirs:
+            if os.path.exists(d):
+                for f in sorted(os.listdir(d)):
+                    if f.endswith(".pth"):
+                        candidate = os.path.join(d, f)
+                        try:
+                            if os.path.getsize(candidate) > 1024:
+                                rvc_model_path = candidate
+                                break
+                        except OSError:
+                            continue
+            if rvc_model_path:
+                break
+                    
+        v_source = "rvc" if rvc_model_path and rvc_runtime_available() else "edge"
+        v_label = "Giọng Chí Mai (RVC)" if v_source == "rvc" else "Giọng Hoài My"
         await safe_edit_status(
             status_msg,
-            "🗣️ *Bước 5/6:* Đang lồng tiếng AI (Giọng Hoài My)...",
+            f"🗣️ *Bước 5/6:* Đang lồng tiếng AI ({v_label})...",
             parse_mode="Markdown"
         )
-        # Khôi phục giọng RVC (Đáng yêu)
-        rvc_model_path = None
-        models_dir = os.path.join(WORKSPACE, "models", "rvc")
-        if os.path.exists(models_dir):
-            for f in os.listdir(models_dir):
-                if f.endswith(".pth"):
-                    rvc_model_path = os.path.join(models_dir, f)
-                    break
-                    
-        v_source = "rvc" if rvc_model_path else "edge"
-        if rvc_model_path:
+        if v_source == "rvc":
             v_param = rvc_model_path
         else:
             # from audio_analysis import detect_gender
@@ -519,6 +756,27 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
         res = await asyncio.to_thread(process_video, video_path, sub_file_to_use, mixed_audio, final_video, main_y_pct=y_pct, delogo=False)
         if not res: raise Exception("Tiến trình render video bị lỗi hoặc đã bị hủy bằng lệnh /stop!")
 
+        try:
+            snapshot_legacy_telegram_run(
+                video_path,
+                out_dir,
+                {
+                    "extract_audio": {"original_audio": Path(original_audio)},
+                    "demucs": {
+                        "vocals": Path(vocals_audio),
+                        "background": Path(no_vocals_audio),
+                    },
+                    "transcribe": {"srt": Path(srt_original)},
+                    "translate": {"srt": Path(srt_translated)},
+                    "tts": {"dubbing_directory": Path(dubbing_dir)},
+                    "mix": {"mixed_audio": Path(mixed_audio)},
+                    "render": {"final_video": Path(final_video)},
+                },
+                run_started_at_epoch=start_time,
+            )
+        except Exception as shadow_error:
+            logger.warning("Shadow manifest warning: %s", shadow_error)
+
         caption_lines = [f"🎬 Video đã lồng tiếng Việt\n"]
         
         # Copy sang máy tính người dùng
@@ -528,6 +786,7 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
             os.makedirs(downloads_dir, exist_ok=True)
             local_save_path = os.path.join(downloads_dir, f"Dubbed_{base_name}.mp4")
             shutil.copy2(final_video, local_save_path)
+            job_tracker.finish_video(os.path.basename(video_path), local_save_path, time.time() - start_time)
             caption_lines.append(f"💾 Đã tự động lưu vào máy:\n`D:\\banve`\n")
         except Exception as e:
             logger.error(f"Lỗi khi copy vào máy: {e}")
@@ -554,6 +813,7 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
             caption_lines.append(f"🎉 Đã hoàn tất toàn bộ hàng đợi!\n")
         
         caption_lines.append(f"📎 Link gốc: {original_url}\n")
+
 
         caption = "\n".join(caption_lines)
         if len(caption) > 1024:
@@ -586,17 +846,8 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
-    # Tìm TẤT CẢ các URL trong tin nhắn bằng Regex (Hỗ trợ text chia sẻ từ điện thoại có chứa tiếng Trung/dấu phẩy liền kề)
-    urls = re.findall(r'(https?://[a-zA-Z0-9\-\.\/\?\:\#\=\&\%\_\~\+]+)', text)
-
-    # Loại bỏ các link trùng lặp trong cùng 1 tin nhắn
-    seen = set()
-    unique_urls = []
-    for u in urls:
-        if u not in seen:
-            seen.add(u)
-            unique_urls.append(u)
-    urls = unique_urls
+    # Hỗ trợ nhiều URL, loại trùng và bỏ timestamp dính vào link khi copy chat.
+    urls = extract_http_urls(text)
 
     if not urls:
         await update.message.reply_text(
@@ -608,6 +859,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     global queue_counter, worker_task
     import shared_state
+    shared_state.stop_requested = False
+
+    if global_queue.empty():
+        queue_counter = 0
     
     if worker_task is None or worker_task.done():
         worker_task = asyncio.create_task(video_worker())
@@ -636,6 +891,10 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Người dùng gửi file video trực tiếp qua Telegram (Đẩy vào Queue)."""
     global queue_counter, worker_task
     import shared_state
+    shared_state.stop_requested = False
+
+    if global_queue.empty():
+        queue_counter = 0
     
     if worker_task is None or worker_task.done():
         worker_task = asyncio.create_task(video_worker())
@@ -670,6 +929,8 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str, filename: str, pos: int):
+    import job_tracker
+    job_tracker.start_video(filename, pos, pos + global_queue.qsize())
     status_msg = await update.message.reply_text(
         f"▶️ *Đang xử lý Video tải lên (Thứ {pos} trong hàng đợi):*\n`{filename}`\n\n"
         f"⏳ Phía sau còn {global_queue.qsize()} video đang chờ...",
@@ -703,6 +964,38 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
         final_video = os.path.join(out_dir, f"final_{base_name}.mp4")
 
         start_time = time.time()
+        from pipeline_v2.config import PipelineMode, PipelineSettings
+        if PipelineSettings.from_env().mode is PipelineMode.V2:
+            downloads_dir = r"D:\banve"
+            os.makedirs(downloads_dir, exist_ok=True)
+            local_save_path = os.path.join(downloads_dir, f"Dubbed_{base_name}.mp4")
+            await run_pipeline_v2_for_telegram(
+                video_path,
+                out_dir,
+                final_video,
+                status_msg,
+                delivery_copy_path=local_save_path,
+            )
+            elapsed_time = int(time.time() - start_time)
+            mins = elapsed_time // 60
+            secs = elapsed_time % 60
+            time_str = f"{mins} phút {secs} giây" if mins > 0 else f"{secs} giây"
+            remaining = global_queue.qsize()
+            queue_status = f"\n⏳ Phía sau còn {remaining} video đang chờ xử lý..." if remaining > 0 else "\n🎉 Đã hoàn tất toàn bộ hàng đợi!"
+            caption = (
+                f"✅ *Video đã lồng tiếng Tiếng Việt (Pipeline v2 - Âm thanh Studio)!*\n\n"
+                f"🎬 Video: `{filename}`\n"
+                f"💾 Đã tự động lưu vào máy: `D:\\banve`\n"
+                f"⏱️ Thời gian xử lý: {time_str}"
+                f"{queue_status}"
+            )
+            await safe_edit_status(
+                status_msg,
+                caption,
+                parse_mode="Markdown",
+            )
+            return
+
         await safe_edit_status(status_msg, "🎧 Đang tách âm thanh...")
         import shared_state
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
@@ -754,19 +1047,34 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
         await asyncio.to_thread(save_srt, translated_segments, srt_translated)
 
         # ===== BƯỚC 5: LỒNG TIẾNG =====
-        await safe_edit_status(status_msg, "🗣️ Đang lồng tiếng AI (Giọng Hoài My)...")
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-        # Khôi phục giọng RVC (Đáng yêu)
+        # Khôi phục giọng RVC (Đáng yêu / Chí Mai)
         rvc_model_path = None
-        models_dir = os.path.join(WORKSPACE, "models", "rvc")
-        if os.path.exists(models_dir):
-            for f in os.listdir(models_dir):
-                if f.endswith(".pth"):
-                    rvc_model_path = os.path.join(models_dir, f)
-                    break
+        search_dirs = [
+            os.path.join(os.path.dirname(__file__), "..", "MyVoiceModel_v2"),
+            os.path.join(WORKSPACE, "..", "MyVoiceModel_v2"),
+            os.path.join(WORKSPACE, "MyVoiceModel_v2"),
+            os.path.join(WORKSPACE, "models", "rvc"),
+            os.path.join(os.path.dirname(__file__), "..", "models", "rvc"),
+        ]
+        for d in search_dirs:
+            if os.path.exists(d):
+                for f in sorted(os.listdir(d)):
+                    if f.endswith(".pth"):
+                        candidate = os.path.join(d, f)
+                        try:
+                            if os.path.getsize(candidate) > 1024:
+                                rvc_model_path = candidate
+                                break
+                        except OSError:
+                            continue
+            if rvc_model_path:
+                break
                     
-        v_source = "rvc" if rvc_model_path else "edge"
-        if rvc_model_path:
+        v_source = "rvc" if rvc_model_path and rvc_runtime_available() else "edge"
+        v_label = "Giọng Chí Mai (RVC)" if v_source == "rvc" else "Giọng Hoài My"
+        await safe_edit_status(status_msg, f"🗣️ Đang lồng tiếng AI ({v_label})...")
+        if v_source == "rvc":
             v_param = rvc_model_path
         else:
             v_param = "vi-VN-HoaiMyNeural"  # Tạm thời cố định giọng nữ
@@ -811,6 +1119,27 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
         res = await asyncio.to_thread(process_video, video_path, sub_file_to_use, mixed_audio, final_video, main_y_pct=y_pct, delogo=False)
         if not res: raise Exception("Tiến trình render video bị lỗi hoặc đã bị hủy bằng lệnh /stop!")
 
+        try:
+            snapshot_legacy_telegram_run(
+                video_path,
+                out_dir,
+                {
+                    "extract_audio": {"original_audio": Path(original_audio)},
+                    "demucs": {
+                        "vocals": Path(vocals_audio),
+                        "background": Path(no_vocals_audio),
+                    },
+                    "transcribe": {"srt": Path(srt_original)},
+                    "translate": {"srt": Path(srt_translated)},
+                    "tts": {"dubbing_directory": Path(dubbing_dir)},
+                    "mix": {"mixed_audio": Path(mixed_audio)},
+                    "render": {"final_video": Path(final_video)},
+                },
+                run_started_at_epoch=start_time,
+            )
+        except Exception as shadow_error:
+            logger.warning("Shadow manifest warning: %s", shadow_error)
+
         caption_lines = [f"🎬 Video đã lồng tiếng Việt\n"]
         try:
             import shutil
@@ -818,6 +1147,7 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
             os.makedirs(downloads_dir, exist_ok=True)
             local_save_path = os.path.join(downloads_dir, f"Dubbed_{base_name}.mp4")
             shutil.copy2(final_video, local_save_path)
+            job_tracker.finish_video(os.path.basename(video_path), local_save_path, time.time() - start_time)
             caption_lines.append(f"💾 Đã tự động lưu vào máy:\n`D:\\banve`\n")
         except Exception as e:
             logger.error(f"Lỗi khi copy vào máy: {e}")
@@ -831,13 +1161,9 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
         remaining = global_queue.qsize()
         queue_status = f"\n⏳ Phía sau còn {remaining} video đang chờ xử lý..." if remaining > 0 else "\n🎉 Đã hoàn tất toàn bộ hàng đợi!"
         caption = f"✅ Video đã lồng tiếng Tiếng Việt!\n⏱️ Thời gian xử lý: {time_str}{queue_status}"
-        
-        with open(final_video, 'rb') as vf:
-            pass # (Giữ block open để tương thích nếu cần)
-            
-        # Tạm thời không gửi video qua Telegram để tiết kiệm mạng (chỉ lưu ổ đĩa)
-        # await send_video_safely(context, update.message.chat_id, final_video, caption, status_msg, filename)
-        await status_msg.edit_text(caption)
+
+
+        await safe_edit_status(status_msg, caption)
 
         # ===== DỌN DẸP RÁC (TRÁNH LỖI FULL Ổ CỨNG) =====
         # try:
@@ -855,6 +1181,29 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ===== KHỞI CHẠY BOT =====
+async def enqueue_interrupted_v2_jobs(application):
+    """Put interrupted v2 jobs ahead of newly submitted work after restart."""
+
+    global worker_task
+    from pipeline_v2.config import PipelineMode, PipelineSettings
+
+    settings = PipelineSettings.from_env()
+    if settings.mode is not PipelineMode.V2:
+        return
+    from pipeline_v2.resume import find_resumable_jobs
+
+    resumable_jobs = find_resumable_jobs(Path(WORKSPACE))
+    for resumable in resumable_jobs:
+        await global_queue.put({"type": "resume_v2", "job": resumable})
+        logger.info(
+            "Queued interrupted pipeline v2 job %s from stage %s",
+            resumable.job_id,
+            resumable.next_stage,
+        )
+    if resumable_jobs and (worker_task is None or worker_task.done()):
+        worker_task = application.create_task(video_worker())
+
+
 def main():
     # Dam bao chi co duy nhat 1 tien trinh Telegram Bot chay tai 1 thoi diem
     import msvcrt
@@ -868,7 +1217,7 @@ def main():
         logger.warning("Bot instance already running. Exiting duplicate process.")
         sys.exit(0)
 
-    if BOT_TOKEN == "PASTE_YOUR_TOKEN_HERE":
+    if not BOT_TOKEN:
         print("=" * 60)
         print("❌ LỖI: Chưa cấu hình Bot Token!")
         print("Mở file telegram_bot.py và dán Token vào dòng BOT_TOKEN")
@@ -900,7 +1249,12 @@ def main():
                 write_timeout=120,
                 pool_timeout=120,
             )
-            app = Application.builder().token(BOT_TOKEN).request(request).build()
+            app = (
+                Application.builder()
+                .token(BOT_TOKEN)
+                .request(request)
+                .build()
+            )
 
             # Đăng ký handlers
             app.add_handler(CommandHandler("start", cmd_start))
@@ -908,6 +1262,7 @@ def main():
             app.add_handler(CommandHandler("status", cmd_status))
             app.add_handler(CommandHandler("batch", cmd_batch))
             app.add_handler(CommandHandler("local", cmd_batch))
+            app.add_handler(CommandHandler("llm", cmd_llm))
             app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
             app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
@@ -921,4 +1276,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

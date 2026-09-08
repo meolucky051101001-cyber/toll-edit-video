@@ -1,0 +1,4 @@
+# Optional isolated OCR runtime for Tool V1.
+# Install into backend/model_venv, never into backend/venv.
+paddleocr==3.7.0
+onnxruntime>=1.23,<2

@@ -1,8 +1,15 @@
 import os
 import sys
 import subprocess
+from batch_control import run as run_batch_subprocess
 import time
 import uuid
+import logging
+try:
+    from .v1_stage_metrics import stage
+except ImportError:
+    from v1_stage_metrics import stage
+logger = logging.getLogger(__name__)
 import io
 if isinstance(sys.stdout, io.TextIOWrapper):
     try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -24,18 +31,23 @@ def extract_audio_from_video(video_path, output_audio_path):
     try:
         cmd = (
             ffmpeg
-            .input(video_path)
-            .output(output_audio_path, acodec='pcm_s16le', ac=2, ar='44100')
+            .input(str(video_path))
+            .output(str(output_audio_path), acodec='pcm_s16le', ac=2, ar='44100')
             .overwrite_output()
             .compile()
         )
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
+        run_batch_subprocess(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
         return True
     except ffmpeg.Error as e:
         print("FFmpeg extract audio error:", e)
         return False
 
-def separate_vocals_demucs(input_audio_path, output_dir):
+def separate_vocals_demucs(
+    input_audio_path,
+    output_dir,
+    segment_seconds=None,
+    timeout_seconds=300,
+):
     """
     Sử dụng Demucs để tách vocal ra khỏi nhạc nền siêu tốc.
     Trả về (vocals_path, no_vocals_path)
@@ -43,6 +55,7 @@ def separate_vocals_demucs(input_audio_path, output_dir):
     import subprocess
     import sys
     import os
+    from ai.v1_model_policy import current_v1_model_policy
     
     # Resolve đường dẫn tuyệt đối để tránh lỗi ký tự đặc biệt và ".."
     input_audio_path = os.path.abspath(input_audio_path)
@@ -60,7 +73,9 @@ def separate_vocals_demucs(input_audio_path, output_dir):
             venv_python = sys.executable  # Fallback
         
         cpu_jobs = max(1, (os.cpu_count() or 4) - 1)
-        model_name = "htdemucs"
+        # V1 deliberately keeps the fast single-model Demucs profile.  The
+        # heavier ensemble/RoFormer models belong to V2 and are not imported.
+        model_name = current_v1_model_policy().demucs_model
         
         # Tối ưu hóa siêu tốc:
         # 1. -n htdemucs: Bản 1 model nhanh gấp 4 lần htdemucs_ft (4 models)
@@ -78,8 +93,21 @@ def separate_vocals_demucs(input_audio_path, output_dir):
             "--shifts", "0",
             "--overlap", "0.1",
             "-o", output_dir
-        ] + device_args
-        subprocess.run(cmd, check=True, timeout=300, creationflags=CREATE_NO_WINDOW)
+        ]
+        # Pipeline v2 passes 6 seconds to cap peak VRAM on RTX 4050 6 GB.
+        # ``None`` deliberately preserves the legacy command line unchanged.
+        if segment_seconds is not None:
+            segment_seconds = float(segment_seconds)
+            if segment_seconds <= 0:
+                raise ValueError("segment_seconds must be positive")
+            cmd.extend(["--segment", "{:g}".format(segment_seconds)])
+        cmd += device_args
+        run_batch_subprocess(
+            cmd,
+            check=True,
+            timeout=timeout_seconds,
+            creationflags=CREATE_NO_WINDOW,
+        )
         
         base_name = os.path.splitext(os.path.basename(input_audio_path))[0]
         demucs_out_dir = os.path.join(output_dir, model_name, base_name)
@@ -111,11 +139,20 @@ def merge_audio_files_with_delay(video_path, original_audio_path, dubbing_audio_
     # This is a basic implementation. A more robust way is using PyDub to generate a single mixed audio track first.
     pass
     
-def mix_audio_pydub(original_audio_path, dubbing_audio_files, output_mixed_audio_path, original_volume_db=-5, dubbing_volume_db=1):
+def mix_audio_pydub(
+    original_audio_path,
+    dubbing_audio_files,
+    output_mixed_audio_path,
+    original_volume_db=-5,
+    dubbing_volume_db=1,
+    strict=False,
+    **kwargs,
+):
     """
     Trộn âm thanh bằng PyDub. Giảm âm lượng nhạc nền (-15dB, tức khoảng 15-20%) và chèn giọng đọc AI vào đúng vị trí.
     """
     print("Mixing audio tracks using pydub...")
+    original_popen = None
     try:
         import subprocess
         # Ngăn pydub nháy màn hình đen ffmpeg liên tục trên Windows
@@ -136,6 +173,10 @@ def mix_audio_pydub(original_audio_path, dubbing_audio_files, output_mixed_audio
         # Chèn từng file lồng tiếng (Khớp chính xác 100% thời gian với Subtitle)
         for dub in dubbing_audio_files:
             if not os.path.exists(dub["path"]):
+                if strict:
+                    raise FileNotFoundError(
+                        "Missing dubbing audio: {}".format(dub["path"])
+                    )
                 continue
             dub_audio = AudioSegment.from_file(dub["path"])
             # Tăng âm lượng giọng đọc nếu cần
@@ -148,11 +189,29 @@ def mix_audio_pydub(original_audio_path, dubbing_audio_files, output_mixed_audio
         return output_mixed_audio_path
     except Exception as e:
         print(f"PyDub error: {e}. Fallback to original audio.")
+        if strict:
+            raise RuntimeError("PyDub legacy mix failed") from e
         import shutil
         shutil.copy(original_audio_path, output_mixed_audio_path)
         return output_mixed_audio_path
+    finally:
+        if original_popen is not None:
+            subprocess.Popen = original_popen
 
-def process_video(video_path, srt_path, mixed_audio_path, output_video_path, font_name="Arial", font_color="&H00FFFFFF", font_weight=1, main_y_pct=0.75, delogo=True):
+@stage("render")
+def process_video(
+    video_path,
+    srt_path,
+    mixed_audio_path,
+    output_video_path,
+    font_name="Arial",
+    font_color="&H00FFFFFF",
+    font_weight=1,
+    main_y_pct=0.75,
+    delogo=True,
+    timeout_seconds=None,
+    **kwargs,
+):
     """
     Dùng ffmpeg để chèn hardsub, xóa sạch watermark gốc và ghép âm thanh mới.
     """
@@ -160,6 +219,18 @@ def process_video(video_path, srt_path, mixed_audio_path, output_video_path, fon
     if getattr(shared_state, 'stop_requested', False):
         print("Lệnh /stop đã được yêu cầu. Hủy render video.")
         return False
+
+    video_path = os.fspath(video_path)
+    srt_path = os.fspath(srt_path)
+    mixed_audio_path = os.fspath(mixed_audio_path)
+    output_video_path = os.fspath(output_video_path)
+
+    render_deadline = None
+    if timeout_seconds is not None:
+        timeout_seconds = float(timeout_seconds)
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        render_deadline = time.monotonic() + timeout_seconds
 
     print("Processing final video with styled subtitles, auto-delogo and hardware encoder...")
     
@@ -182,15 +253,21 @@ def process_video(video_path, srt_path, mixed_audio_path, output_video_path, fon
         
     try:
         filter_parts = []
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        try:
+            original_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            original_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        finally:
+            cap.release()
+        w, h = original_w, original_h
+        if w <= 0 or h <= 0:
+            raise ValueError("Invalid video dimensions")
+        logger.info("V1 render size source=%dx%d output=%dx%d", original_w, original_h, w, h)
         
         # Xóa sạch toàn bộ watermark ở cả 4 góc video (Logo Tiểu Hồng Thư và ID tác giả nhảy trên/dưới)
         if delogo:
             try:
-                import cv2
-                cap = cv2.VideoCapture(video_path)
-                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                cap.release()
                 
                 if w > 0 and h > 0:
                     # 1. Góc dưới phải (Logo đáy)
@@ -247,10 +324,15 @@ def process_video(video_path, srt_path, mixed_audio_path, output_video_path, fon
         
         for enc_args in encoders_to_try:
             encoder_name = enc_args[0]
+            encoder_started = time.monotonic()
+            logger.info("V1 render start encoder=%s", encoder_name)
             cmd = [
                 'ffmpeg',
                 '-y',
-                '-threads', '0',
+                # Bound 4K decoder/filter frame pools: auto threading can
+                # allocate >10 GB and push a 16 GB machine into paging.
+                '-threads', '4',
+                '-filter_threads', '2',
                 '-i', video_path,
                 '-i', mixed_audio_path,
                 '-vf', filter_complex,
@@ -265,17 +347,43 @@ def process_video(video_path, srt_path, mixed_audio_path, output_video_path, fon
                 '-map_metadata', '-1',
                 '-fflags', '+bitexact',
                 '-shortest',
+                # Default shortest buffering can retain seconds of raw 4K60
+                # frames; audio is continuous, so a one-second window suffices.
+                '-shortest_buf_duration', '1',
                 output_video_path
             ]
             
             try:
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW, encoding='utf-8', errors='ignore')
+                command_timeout = None
+                if render_deadline is not None:
+                    command_timeout = render_deadline - time.monotonic()
+                    if command_timeout <= 0:
+                        print("Đã hết thời gian render trước khi thử encoder tiếp theo.")
+                        break
+                proc = run_batch_subprocess(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=CREATE_NO_WINDOW,
+                    encoding='utf-8',
+                    errors='ignore',
+                    timeout=command_timeout,
+                )
                 if proc.returncode == 0 and os.path.exists(output_video_path) and os.path.getsize(output_video_path) > 10000:
+                    logger.info("V1 render complete encoder=%s seconds=%.2f bytes=%d",
+                                encoder_name, time.monotonic()-encoder_started,
+                                os.path.getsize(output_video_path))
                     print(f"Render video thành công bằng encoder: {encoder_name}")
                     return True
                 else:
                     err_snippet = proc.stderr[-400:] if proc.stderr else ""
+                    logger.warning("V1 render fallback encoder=%s seconds=%.2f exit=%s reason=%s",
+                                   encoder_name, time.monotonic()-encoder_started,
+                                   proc.returncode, err_snippet)
                     print(f"Encoder {encoder_name} không thành công ({proc.returncode}): {err_snippet}")
+            except subprocess.TimeoutExpired as enc_err:
+                print(f"Encoder {encoder_name} vượt quá deadline render ({enc_err}).")
+                break
             except Exception as enc_err:
                 print(f"Encoder {encoder_name} gặp ngoại lệ ({enc_err}), chuyển sang encoder dự phòng...")
                 

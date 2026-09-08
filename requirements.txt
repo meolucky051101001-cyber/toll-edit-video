@@ -1,1 +1,22 @@
-yt-dlp
+# Install a CUDA-enabled PyTorch + TorchAudio build for the local NVIDIA driver
+# before this file. See README.md; letting pip choose a CPU wheel wastes RTX 4050.
+demucs>=4.0,<5
+easyocr>=1.7,<2
+edge-tts>=6.1,<8
+fastapi>=0.110,<1
+faster-whisper>=1.0,<2
+ffmpeg-python>=0.2,<1
+httpx>=0.27,<1
+opencv-python>=4.9,<5
+pydub>=0.25,<1
+python-multipart>=0.0.9,<1
+python-telegram-bot>=20.7,<23
+requests>=2.31,<3
+srt>=3.5,<4
+deep-translator>=1.11,<2
+uvicorn[standard]>=0.29,<1
+yt-dlp>=2024.4
+
+# Optional voice-clone providers used only when selected/configured:
+# capcut-tts-api
+# rvc-python
