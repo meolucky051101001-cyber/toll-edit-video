@@ -12,6 +12,7 @@ import asyncio
 import logging
 import gc
 import shutil
+from pathlib import Path
 
 # Cấu hình UTF-8 cho console Windows
 import io
@@ -24,17 +25,20 @@ if isinstance(sys.stderr, io.TextIOWrapper):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-# Load biến môi trường từ .env
-env_file = os.path.join(BASE_DIR, ".env")
-if os.path.exists(env_file):
-    with open(env_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if "=" in line and not line.strip().startswith("#"):
-                k, v = line.strip().split("=", 1)
-                os.environ[k.strip()] = v.strip().strip('"').strip("'")
+from environment import load_environment
+
+load_environment(Path(__file__).resolve().parent)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-WORKSPACE = os.path.abspath(os.path.join(BASE_DIR, "..", "workspace"))
+WORKSPACE = os.path.abspath(
+    os.getenv("AUTODUB_WORKSPACE", os.path.join(BASE_DIR, "..", "workspace"))
+)
+DEFAULT_INPUT_DIR = os.path.abspath(
+    os.getenv("AUTODUB_INPUT_DIR", r"D:\video_input")
+)
+DEFAULT_OUTPUT_DIR = os.path.abspath(
+    os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve")
+)
 os.makedirs(WORKSPACE, exist_ok=True)
 
 logger = logging.getLogger("batch_processor")
@@ -74,6 +78,42 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 await progress_callback(msg)
             except Exception:
                 pass
+
+    from pipeline_v2.config import PipelineMode, PipelineSettings
+    pipeline_settings = PipelineSettings.from_env()
+    if pipeline_settings.mode is PipelineMode.V2:
+        try:
+            from pipeline_v2.video_pipeline import (
+                VideoPipelineRequest,
+                VideoPipelineRunner,
+                discover_rvc_model,
+            )
+
+            async def v2_progress(stage: str, state: str):
+                await notify("[pipeline v2] {}: {}".format(stage, state))
+
+            final_dest = os.path.join(output_dir, f"Dubbed_{base_name}.mp4")
+            rvc_model = discover_rvc_model(Path(WORKSPACE))
+            request = VideoPipelineRequest(
+                video_path=Path(video_path),
+                job_directory=Path(out_dir),
+                output_path=Path(final_dest),
+                settings=pipeline_settings,
+                api_key=GEMINI_API_KEY,
+                voice_source="rvc" if rvc_model else "edge",
+                voice_param=(
+                    str(rvc_model) if rvc_model else "vi-VN-HoaiMyNeural"
+                ),
+                rvc_model_path=rvc_model,
+                progress=v2_progress,
+            )
+            await VideoPipelineRunner(request).run()
+            await notify("✅ Pipeline v2 hoàn thành -> {}".format(final_dest))
+            return True
+        except Exception as error:
+            logger.error("Pipeline v2 failed: %s", error, exc_info=True)
+            await notify("❌ Pipeline v2 lỗi: {}".format(error))
+            return False
 
     try:
         t0 = time.time()
@@ -129,6 +169,31 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         final_dest = os.path.join(output_dir, f"Dubbed_{base_name}.mp4")
         shutil.copy2(final_video, final_dest)
 
+        if pipeline_settings.mode is PipelineMode.SHADOW:
+            try:
+                from pipeline_v2.shadow import snapshot_completed_legacy_run
+
+                snapshot_completed_legacy_run(
+                    Path(video_path),
+                    Path(out_dir) / "pipeline_v2_shadow",
+                    {
+                        "extract_audio": {"original_audio": Path(original_audio)},
+                        "demucs": {
+                            "vocals": Path(vocals_audio),
+                            "background": Path(no_vocals_audio),
+                        },
+                        "transcribe": {"srt": Path(srt_original)},
+                        "translate": {"srt": Path(srt_translated)},
+                        "tts": {"dubbing_directory": Path(dubbing_dir)},
+                        "mix": {"mixed_audio": Path(mixed_audio)},
+                        "render": {"final_video": Path(final_video)},
+                        "deliver": {"published_video": Path(final_dest)},
+                    },
+                    run_started_at_epoch=t0,
+                )
+            except Exception as shadow_error:
+                logger.warning("Shadow manifest warning: %s", shadow_error)
+
         dt = int(time.time() - t0)
         await notify(f"✅ Hoàn thành video ({dt}s) -> Đã lưu vào {final_dest}")
         return True
@@ -147,7 +212,11 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         except:
             pass
 
-async def process_batch_folder(input_dir: str = r"D:\video_input", output_dir: str = r"D:\banve", progress_callback=None):
+async def process_batch_folder(
+    input_dir: str = DEFAULT_INPUT_DIR,
+    output_dir: str = DEFAULT_OUTPUT_DIR,
+    progress_callback=None,
+):
     """
     Quét và xử lý toàn bộ video trong thư mục đầu vào
     """
@@ -208,8 +277,8 @@ async def process_batch_folder(input_dir: str = r"D:\video_input", output_dir: s
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Batch Video Dubbing Processor")
-    parser.add_argument("--input", default=r"D:\video_input", help="Thư mục chứa video gốc")
-    parser.add_argument("--output", default=r"D:\banve", help="Thư mục lưu video thành phẩm")
+    parser.add_argument("--input", default=DEFAULT_INPUT_DIR, help="Thư mục chứa video gốc")
+    parser.add_argument("--output", default=DEFAULT_OUTPUT_DIR, help="Thư mục lưu video thành phẩm")
     args = parser.parse_args()
 
     asyncio.run(process_batch_folder(args.input, args.output))

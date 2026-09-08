@@ -24,8 +24,8 @@ def extract_audio_from_video(video_path, output_audio_path):
     try:
         cmd = (
             ffmpeg
-            .input(video_path)
-            .output(output_audio_path, acodec='pcm_s16le', ac=2, ar='44100')
+            .input(str(video_path))
+            .output(str(output_audio_path), acodec='pcm_s16le', ac=2, ar='44100')
             .overwrite_output()
             .compile()
         )
@@ -35,72 +35,26 @@ def extract_audio_from_video(video_path, output_audio_path):
         print("FFmpeg extract audio error:", e)
         return False
 
-def separate_vocals_demucs(input_audio_path, output_dir):
+def separate_vocals_demucs(
+    input_audio_path,
+    output_dir,
+    segment_seconds=None,
+    timeout_seconds=300,
+):
     """
-    Sử dụng Demucs để tách vocal ra khỏi nhạc nền siêu tốc.
+    Tách vocal bằng BS-RoFormer, tự động fallback về Demucs fine-tuned.
+
+    Tên hàm cũ được giữ để không phá API V1/V2.
     Trả về (vocals_path, no_vocals_path)
     """
-    import subprocess
-    import sys
-    import os
-    
-    # Resolve đường dẫn tuyệt đối để tránh lỗi ký tự đặc biệt và ".."
-    input_audio_path = os.path.abspath(input_audio_path)
-    output_dir = os.path.abspath(output_dir)
-    
-    if not os.path.exists(input_audio_path):
-        print(f"File audio không tồn tại: {input_audio_path}")
-        return input_audio_path, input_audio_path
-    
-    print(f"Bắt đầu tách âm thanh bằng Demucs (Tối ưu tốc độ) cho {input_audio_path}...")
-    try:
-        # Dùng python của venv để đảm bảo demucs được tìm thấy
-        venv_python = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv", "Scripts", "python.exe")
-        if not os.path.exists(venv_python):
-            venv_python = sys.executable  # Fallback
-        
-        cpu_jobs = max(1, (os.cpu_count() or 4) - 1)
-        model_name = "htdemucs"
-        
-        # Tối ưu hóa siêu tốc:
-        # 1. -n htdemucs: Bản 1 model nhanh gấp 4 lần htdemucs_ft (4 models)
-        # 2. --shifts 0: Tắt shift trick để tăng tốc thêm gấp 2-3 lần
-        # 3. --overlap 0.1: Giảm độ đè lặp phân đoạn
-        # 4. -j cpu_jobs: Tận dụng toàn bộ luồng CPU đa nhân
-        import torch
-        device_args = ["-d", "cuda"] if torch.cuda.is_available() else ["-d", "cpu", "-j", str(cpu_jobs)]
-        
-        cmd = [
-            venv_python, "-m", "demucs",
-            input_audio_path,
-            "-n", model_name,
-            "--two-stems", "vocals",
-            "--shifts", "0",
-            "--overlap", "0.1",
-            "-o", output_dir
-        ] + device_args
-        subprocess.run(cmd, check=True, timeout=300, creationflags=CREATE_NO_WINDOW)
-        
-        base_name = os.path.splitext(os.path.basename(input_audio_path))[0]
-        demucs_out_dir = os.path.join(output_dir, model_name, base_name)
-        
-        vocals_path = os.path.join(demucs_out_dir, "vocals.wav")
-        no_vocals_path = os.path.join(demucs_out_dir, "no_vocals.wav")
-        
-        if os.path.exists(vocals_path) and os.path.exists(no_vocals_path):
-            print(f"Demucs tách thành công! Vocals: {vocals_path}")
-            return vocals_path, no_vocals_path
-        else:
-            # Tìm đệ quy nếu thư mục đặt tên khác
-            for root, dirs, files in os.walk(output_dir):
-                if "vocals.wav" in files and "no_vocals.wav" in files:
-                    return os.path.join(root, "vocals.wav"), os.path.join(root, "no_vocals.wav")
-            print(f"Demucs chạy xong nhưng không tìm thấy file output tại {demucs_out_dir}")
-            return input_audio_path, input_audio_path
-            
-    except Exception as e:
-        print(f"Lỗi khi chạy Demucs: {e}")
-        return input_audio_path, input_audio_path
+    from ai.source_separation import separate_vocals
+
+    return separate_vocals(
+        input_audio_path,
+        output_dir,
+        segment_seconds=segment_seconds,
+        timeout_seconds=timeout_seconds,
+    )
 
 def merge_audio_files_with_delay(video_path, original_audio_path, dubbing_audio_files, output_video_path, original_volume=0.1, dub_volume=1.0):
     """
@@ -111,11 +65,20 @@ def merge_audio_files_with_delay(video_path, original_audio_path, dubbing_audio_
     # This is a basic implementation. A more robust way is using PyDub to generate a single mixed audio track first.
     pass
     
-def mix_audio_pydub(original_audio_path, dubbing_audio_files, output_mixed_audio_path, original_volume_db=-5, dubbing_volume_db=1):
+def mix_audio_pydub(
+    original_audio_path,
+    dubbing_audio_files,
+    output_mixed_audio_path,
+    original_volume_db=-5,
+    dubbing_volume_db=1,
+    strict=False,
+    **kwargs,
+):
     """
     Trộn âm thanh bằng PyDub. Giảm âm lượng nhạc nền (-15dB, tức khoảng 15-20%) và chèn giọng đọc AI vào đúng vị trí.
     """
     print("Mixing audio tracks using pydub...")
+    original_popen = None
     try:
         import subprocess
         # Ngăn pydub nháy màn hình đen ffmpeg liên tục trên Windows
@@ -136,6 +99,10 @@ def mix_audio_pydub(original_audio_path, dubbing_audio_files, output_mixed_audio
         # Chèn từng file lồng tiếng (Khớp chính xác 100% thời gian với Subtitle)
         for dub in dubbing_audio_files:
             if not os.path.exists(dub["path"]):
+                if strict:
+                    raise FileNotFoundError(
+                        "Missing dubbing audio: {}".format(dub["path"])
+                    )
                 continue
             dub_audio = AudioSegment.from_file(dub["path"])
             # Tăng âm lượng giọng đọc nếu cần
@@ -148,11 +115,28 @@ def mix_audio_pydub(original_audio_path, dubbing_audio_files, output_mixed_audio
         return output_mixed_audio_path
     except Exception as e:
         print(f"PyDub error: {e}. Fallback to original audio.")
+        if strict:
+            raise RuntimeError("PyDub legacy mix failed") from e
         import shutil
         shutil.copy(original_audio_path, output_mixed_audio_path)
         return output_mixed_audio_path
+    finally:
+        if original_popen is not None:
+            subprocess.Popen = original_popen
 
-def process_video(video_path, srt_path, mixed_audio_path, output_video_path, font_name="Arial", font_color="&H00FFFFFF", font_weight=1, main_y_pct=0.75, delogo=True):
+def process_video(
+    video_path,
+    srt_path,
+    mixed_audio_path,
+    output_video_path,
+    font_name="Arial",
+    font_color="&H00FFFFFF",
+    font_weight=1,
+    main_y_pct=0.75,
+    delogo=True,
+    timeout_seconds=None,
+    **kwargs,
+):
     """
     Dùng ffmpeg để chèn hardsub, xóa sạch watermark gốc và ghép âm thanh mới.
     """
@@ -160,6 +144,18 @@ def process_video(video_path, srt_path, mixed_audio_path, output_video_path, fon
     if getattr(shared_state, 'stop_requested', False):
         print("Lệnh /stop đã được yêu cầu. Hủy render video.")
         return False
+
+    video_path = os.fspath(video_path)
+    srt_path = os.fspath(srt_path)
+    mixed_audio_path = os.fspath(mixed_audio_path)
+    output_video_path = os.fspath(output_video_path)
+
+    render_deadline = None
+    if timeout_seconds is not None:
+        timeout_seconds = float(timeout_seconds)
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        render_deadline = time.monotonic() + timeout_seconds
 
     print("Processing final video with styled subtitles, auto-delogo and hardware encoder...")
     
@@ -269,13 +265,30 @@ def process_video(video_path, srt_path, mixed_audio_path, output_video_path, fon
             ]
             
             try:
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW, encoding='utf-8', errors='ignore')
+                command_timeout = None
+                if render_deadline is not None:
+                    command_timeout = render_deadline - time.monotonic()
+                    if command_timeout <= 0:
+                        print("Đã hết thời gian render trước khi thử encoder tiếp theo.")
+                        break
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=CREATE_NO_WINDOW,
+                    encoding='utf-8',
+                    errors='ignore',
+                    timeout=command_timeout,
+                )
                 if proc.returncode == 0 and os.path.exists(output_video_path) and os.path.getsize(output_video_path) > 10000:
                     print(f"Render video thành công bằng encoder: {encoder_name}")
                     return True
                 else:
                     err_snippet = proc.stderr[-400:] if proc.stderr else ""
                     print(f"Encoder {encoder_name} không thành công ({proc.returncode}): {err_snippet}")
+            except subprocess.TimeoutExpired as enc_err:
+                print(f"Encoder {encoder_name} vượt quá deadline render ({enc_err}).")
+                break
             except Exception as enc_err:
                 print(f"Encoder {encoder_name} gặp ngoại lệ ({enc_err}), chuyển sang encoder dự phòng...")
                 

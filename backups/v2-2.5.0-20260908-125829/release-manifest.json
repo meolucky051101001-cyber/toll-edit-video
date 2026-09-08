@@ -1,0 +1,62 @@
+[
+  {
+    "File": "backend\\telegram_bot.py",
+    "PreviouslyExisted": true,
+    "NewHash": "533330E96363F296098E64F6766553425B7D5A654937B1C3164C7DB04C7CCAB5"
+  },
+  {
+    "File": "backend\\dashboard_monitor.py",
+    "PreviouslyExisted": true,
+    "NewHash": "1BE33B9A67EBC8BD359FE785E3865E654013152272397FB53D7A9FFFF5BC99F8"
+  },
+  {
+    "File": "backend\\ocr_utils.py",
+    "PreviouslyExisted": true,
+    "NewHash": "3C7377928369BA7A18E86478BF66A0CD0812CA406808B97732ABDFCA76FAB71A"
+  },
+  {
+    "File": "backend\\pipeline_v2\\video_pipeline.py",
+    "PreviouslyExisted": true,
+    "NewHash": "CA499C66C6D3560CF9E13671DDF451E425D323852A2E665A7910B6D31BA068EB"
+  },
+  {
+    "File": "backend\\pipeline_v2\\qc.py",
+    "PreviouslyExisted": true,
+    "NewHash": "034E41F17A72705826FABA3AE7C02CBFDC7C36DAC3E1E13210D1695B455F2E6E"
+  },
+  {
+    "File": "backend\\model_workers\\model_runtime_worker.py",
+    "PreviouslyExisted": true,
+    "NewHash": "DD64ACE87B896275918CB50F88DC1F837A5E91B77AC92AE3925471A0E5426566"
+  },
+  {
+    "File": "backend\\durable_jobs.py",
+    "PreviouslyExisted": false,
+    "NewHash": "C0D116A5FB7D14D585332CE60ABED282E9A81CC6D524DA6ACED93F364B1270EE"
+  },
+  {
+    "File": "backend\\durable_adapter.py",
+    "PreviouslyExisted": false,
+    "NewHash": "21DEC889639CA389EAD5A7629C81EBC03B04775EA1BBBD9D5FF5E64B2CDF0D83"
+  },
+  {
+    "File": "backend\\ai\\ocr_session.py",
+    "PreviouslyExisted": false,
+    "NewHash": "499F801B50EA91320487EB21ED6BDE8418ED666E357B641C97E7BA384BEEF088"
+  },
+  {
+    "File": "backend\\pipeline_v2\\cover_qc.py",
+    "PreviouslyExisted": false,
+    "NewHash": "A1D86C8AF571819A340D0BB2F0CD0E475430B8022155B65D154713B293062866"
+  },
+  {
+    "File": "backend\\templates\\dashboard.html",
+    "PreviouslyExisted": false,
+    "NewHash": "F6C81235BBFAD5E8FB55A016AE08D6B62FB4959FE3DF4F59661A3E6F9007CF58"
+  },
+  {
+    "File": "tests\\test_v2_maintenance.py",
+    "PreviouslyExisted": false,
+    "NewHash": "488DDC6EE26BC41B07994FA5FD8837F8CF7D5F322577845CA2F03D716D9C05E2"
+  }
+]
