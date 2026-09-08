@@ -815,7 +815,18 @@ def run_report_only_qc(
                 subtitle_metrics, subtitle_checks = _check_ass_safe_area(subtitles, config)
                 report.metrics["subtitle_safe_area"] = subtitle_metrics
                 report.checks.extend(subtitle_checks)
-            except OSError as exc:
+                if segments_path is not None and Path(segments_path).suffix.lower() == '.json':
+                    from .cover_qc import inspect_covers
+                    coverage = inspect_covers(_load_segments(Path(segments_path)),
+                                              subtitles.read_text(encoding='utf-8-sig'))
+                    report.metrics['source_cover'] = coverage
+                    report.add('source_cover', 'error' if coverage['failures'] else 'pass',
+                               'Known source rectangles must remain inside a timed cover', coverage)
+                    if coverage['unverified_segments']:
+                        report.add('source_cover_unverified', 'warning',
+                                   'No source geometry; visual cover cannot be verified',
+                                   {'segment_ids': coverage['unverified_segments']})
+            except (OSError, ValueError, TypeError, KeyError) as exc:
                 report.add("subtitle_safe_area", "error", "Could not inspect ASS file: {}".format(exc))
 
     video_duration = _duration_seconds(video_probe) if video_probe is not None else None

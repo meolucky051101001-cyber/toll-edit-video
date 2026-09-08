@@ -67,9 +67,9 @@ def _run_ocr(payload: Mapping[str, Any]) -> Dict[str, Any]:
     from ocr_utils import perform_video_ocr, release_ocr_reader
 
     segments = segments_from_dicts(payload.get("segments", []))
-    batches = chunked(
-        segments, max(1, int(payload.get("batch_segments", len(segments) or 1)))
-    )
+    # OCR already bounds image batches. Keep transcript context intact so a
+    # batch's final cue is not mistakenly sampled through the end of the video.
+    batches = [segments]
     try:
         block_count = 0
         width, height = 1080, 1920
@@ -186,5 +186,4 @@ def main(argv: Sequence[str] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 

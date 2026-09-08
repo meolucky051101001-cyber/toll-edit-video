@@ -10,6 +10,11 @@ from typing import Any, Dict, Iterable, List
 
 from .timing import TimingPolicy, fit_audio_to_window
 
+try:
+    from ..subtitle_text import normalize_subtitle_text
+except ImportError:
+    from subtitle_text import normalize_subtitle_text
+
 
 def _prepare_legacy_imports() -> None:
     backend_directory = Path(__file__).resolve().parents[1]
@@ -46,9 +51,10 @@ async def generate_tts_audio_v2(
         async with semaphore:
             raw = output / "{}_raw.mp3".format(segment.index)
             fitted = output / "{}.mp3".format(segment.index)
-            text = str(segment.content).strip()
+            text = normalize_subtitle_text(segment.content)
+            segment.content = text
             seg_gender = str(getattr(segment, "gender", "female") or "female").lower()
-            if enable_auto_gender and seg_gender == "male":
+            if enable_auto_gender and seg_gender == "male" and voice_source != "fpt":
                 try:
                     await asyncio.to_thread(
                         _run_capcut_tts, text, str(raw), "BV075_streaming"
@@ -59,7 +65,9 @@ async def generate_tts_audio_v2(
                     )
             elif voice_source == "fpt":
                 try:
-                    await generate_tts_fpt(text, str(raw), api_key, voice="banmai")
+                    # Explicit FPT selection must not be replaced by the gender route.
+                    selected_voice = voice_param if not voice_param.startswith("vi-") else "banmai"
+                    await generate_tts_fpt(text, str(raw), api_key, voice=selected_voice)
                 except FPTQuotaError as exc:
                     if strict_provider:
                         raise RuntimeError(
@@ -122,4 +130,3 @@ async def generate_tts_audio_v2(
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
-

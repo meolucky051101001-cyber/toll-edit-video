@@ -29,6 +29,18 @@ class ModelPolicyTests(unittest.TestCase):
                 {"ASR_BACKEND": "imaginary"}, project_root=Path("C:/missing")
             )
 
+    def test_fast_profile_selects_v1_models_without_disabling_v2_features(self):
+        policy = RuntimeModelPolicy.from_env({"MODEL_SPEED_PROFILE": "fast"})
+        self.assertEqual((policy.asr_backend, policy.whisper_model), ("whisper", "large-v3"))
+        self.assertEqual((policy.separator_backend, policy.demucs_primary_model), ("demucs", "htdemucs"))
+        self.assertEqual(policy.demucs_fallback_model, "htdemucs_ft")
+        self.assertEqual(policy.paddle_ocr_version, "PP-OCRv6")
+        self.assertNotEqual(policy.fingerprint_payload(), RuntimeModelPolicy.from_env({}).fingerprint_payload())
+        override = RuntimeModelPolicy.from_env({"MODEL_SPEED_PROFILE": "fast", "ASR_BACKEND": "qwen3"})
+        self.assertEqual(override.asr_backend, "qwen3")
+        with self.assertRaises(ValueError):
+            RuntimeModelPolicy.from_env({"MODEL_SPEED_PROFILE": "typo"})
+
 
 class QwenAlignmentTests(unittest.TestCase):
     def test_chinese_units_join_without_spaces_and_split_on_punctuation(self):

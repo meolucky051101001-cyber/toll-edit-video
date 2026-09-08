@@ -46,6 +46,7 @@ from .timing import (
     TimingPolicy,
     fit_audio_to_window,
     plan_actual_timing_rewrites,
+    plan_segment,
     solve_segment_timing,
 )
 from .tts import generate_tts_audio_v2
@@ -72,7 +73,7 @@ V2_STAGE_ORDER = (
 # Bump this value whenever artifact semantics change.  It participates in the
 # manifest fingerprint so an upgraded runner cannot silently reuse output from
 # an older implementation that happened to have the same environment flags.
-PIPELINE_IMPLEMENTATION_VERSION = "2.3.1"
+PIPELINE_IMPLEMENTATION_VERSION = "2.5.0"
 
 
 class QCGateBlocked(RuntimeError):
@@ -95,6 +96,9 @@ class VideoPipelineRequest:
     clean_audio_hint: Optional[bool] = None
     delogo: bool = False
     progress: Optional[Callable[[str, str], Any]] = None
+    font_name: str = "Arial"
+    font_color: str = "&H00000000"
+    font_weight: int = 2
 
 
 @dataclass(frozen=True)
@@ -115,6 +119,7 @@ def _prepare_legacy_imports() -> None:
 class VideoPipelineRunner:
     def __init__(self, request: VideoPipelineRequest):
         self.request = request
+        self._batch_scope = uuid.uuid4().hex
         self.video_path = Path(request.video_path).resolve()
         output_path = Path(request.output_path).resolve()
         if output_path == self.video_path:
@@ -262,6 +267,7 @@ class VideoPipelineRunner:
             "whisper": fingerprint_json(
                 {
                     "backend": selected_models.asr_backend,
+                    "speed_profile": selected_models.speed_profile,
                     "primary": selected_models.qwen_asr_model,
                     "aligner": selected_models.qwen_aligner_model,
                     "fallback": selected_models.whisper_model,
@@ -270,6 +276,7 @@ class VideoPipelineRunner:
             "demucs": fingerprint_json(
                 {
                     "backend": selected_models.separator_backend,
+                    "speed_profile": selected_models.speed_profile,
                     "primary": selected_models.separator_model,
                     "fallbacks": [
                         selected_models.demucs_primary_model,
@@ -311,6 +318,15 @@ class VideoPipelineRunner:
                     "clean_audio_hint": self.request.clean_audio_hint,
                     "delogo": self.request.delogo,
                     "model_policy": selected_models.fingerprint_payload(),
+                    "translation_provider": os.getenv("LLM_PROVIDER", "auto").strip().lower(),
+                    "translation_credentials": {
+                        "gemini": bool(self.request.api_key or os.getenv("GEMINI_API_KEY")),
+                        "openai": bool(os.getenv("OPENAI_API_KEY")),
+                        "deepseek": bool(os.getenv("DEEPSEEK_API_KEY")),
+                    },
+                    "font_name": self.request.font_name,
+                    "font_color": self.request.font_color,
+                    "font_weight": self.request.font_weight,
                 }
             ),
             model_sha256=model_fingerprints,
@@ -325,6 +341,7 @@ class VideoPipelineRunner:
             if (
                 compatible_shape
                 and existing.is_cache_compatible(fingerprints)
+                and bool(existing.metadata.get("cache_generation"))
                 and (self.request.settings.enable_stage_cache or not fully_delivered)
             ):
                 current_request = dict(existing.metadata.get("request", {}))
@@ -343,11 +360,13 @@ class VideoPipelineRunner:
                     current_request["delivery_copy_path"] = requested_copy
                     existing.metadata["request"] = current_request
                     self.manifest_store.save(existing)
+                self._batch_scope = existing.metadata["cache_generation"]
                 return existing
             archive = self.manifest_store.path.with_name(
                 "job_manifest.{}.json".format(uuid.uuid4().hex)
             )
             atomic_replace_file(self.manifest_store.path, archive)
+        self._batch_scope = uuid.uuid4().hex
         return self.manifest_store.create(
             job_id=self.job_directory.name,
             fingerprints=fingerprints,
@@ -355,9 +374,11 @@ class VideoPipelineRunner:
             metadata={
                 "mode": "v2",
                 "pipeline_implementation_version": PIPELINE_IMPLEMENTATION_VERSION,
+                "model_speed_profile": selected_models.speed_profile,
+                "model_policy": selected_models.fingerprint_payload(),
                 "source_path": str(self.video_path),
                 "source_size_bytes": source_size,
-                "legacy_default_unchanged": True,
+                "cache_generation": self._batch_scope,
                 "request": {
                     "output_path": str(Path(self.request.output_path).resolve()),
                     "delivery_copy_path": (
@@ -375,6 +396,9 @@ class VideoPipelineRunner:
                     ),
                     "clean_audio_hint": self.request.clean_audio_hint,
                     "delogo": self.request.delogo,
+                    "font_name": self.request.font_name,
+                    "font_color": self.request.font_color,
+                    "font_weight": self.request.font_weight,
                 },
             },
         )
@@ -700,9 +724,7 @@ class VideoPipelineRunner:
             width, height = 1080, 1920
             main_positions = []
             try:
-                for batch in chunked(
-                    segments, self.request.settings.ocr_batch_segments
-                ):
+                for batch in [segments]:
                     _blocks, width, height, main_y_pct = await asyncio.to_thread(
                         perform_video_ocr,
                         str(self.video_path),
@@ -746,6 +768,7 @@ class VideoPipelineRunner:
             checkpoint_key = "translation/batches/{:05d}.json".format(batch_number)
             input_fingerprint = fingerprint_json(
                 {
+                    "cache_generation": self._batch_scope,
                     "pipeline_implementation_version": PIPELINE_IMPLEMENTATION_VERSION,
                     "segments": segments_to_dicts(batch),
                     "target_lang": self.request.target_lang,
@@ -785,6 +808,16 @@ class VideoPipelineRunner:
                     prior_context=prior_context[-3:],
                     strict=True,
                     enable_g4f=False,
+                    duration_budgets=[
+                        {
+                            "seconds": round(max((segment.end - segment.start).total_seconds(), 0.1), 3),
+                            "max_characters": plan_segment(segment, TimingPolicy(
+                                atempo_min=self.request.settings.atempo_min,
+                                atempo_max=self.request.settings.atempo_max,
+                            )).character_budget,
+                        }
+                        for segment in batch
+                    ],
                 )
                 validate_translated_batch(batch, translated_batch)
                 artifacts.append(
@@ -883,6 +916,7 @@ class VideoPipelineRunner:
             checkpoint_key = "tts/batches/{:05d}.json".format(batch_number)
             input_fingerprint = fingerprint_json(
                 {
+                    "cache_generation": self._batch_scope,
                     "pipeline_implementation_version": PIPELINE_IMPLEMENTATION_VERSION,
                     "segments": segments_to_dicts(batch),
                     "voice_source": source,
@@ -932,9 +966,9 @@ class VideoPipelineRunner:
             with tempfile.TemporaryDirectory(
                 prefix="tts-batch-", dir=self.work_directory
             ) as work:
-                async def generate_round(round_number: int):
+                async def generate_round(round_number: int, selected_segments):
                     return await generate_tts_audio_v2(
-                        batch,
+                        selected_segments,
                         Path(work) / "round-{}".format(round_number),
                         voice_source=source,
                         voice_param=self.request.voice_param,
@@ -944,7 +978,7 @@ class VideoPipelineRunner:
                         enable_auto_gender=self.request.settings.enable_auto_gender,
                     )
 
-                infos = await generate_round(0)
+                infos = await generate_round(0, batch)
                 if actual_rewriter is not None:
                     for rewrite_round in range(1, policy.max_rewrite_rounds + 1):
                         requests = plan_actual_timing_rewrites(batch, infos)
@@ -953,18 +987,27 @@ class VideoPipelineRunner:
                         replacements = await asyncio.to_thread(
                             actual_rewriter, requests
                         )
-                        changed = False
+                        requested_indices = {request.segment_index for request in requests}
+                        changed_segments = []
                         for segment in batch:
                             replacement = replacements.get(int(segment.index))
                             if (
-                                replacement
+                                int(segment.index) in requested_indices
+                                and replacement
                                 and replacement.strip() != str(segment.content).strip()
                             ):
                                 segment.content = replacement.strip()
-                                changed = True
-                        if not changed:
+                                changed_segments.append(segment)
+                        if not changed_segments:
                             break
-                        infos = await generate_round(rewrite_round)
+                        revised_infos = await generate_round(rewrite_round, changed_segments)
+                        revised_by_index = {int(info["index"]): info for info in revised_infos}
+                        expected_indices = {int(segment.index) for segment in changed_segments}
+                        if (set(revised_by_index) != expected_indices
+                                or len(revised_infos) != len(expected_indices)):
+                            raise RuntimeError("TTS rewrite returned mismatched audio segments")
+                        # Keep unchanged audio and the original batch order.
+                        infos = [revised_by_index.get(int(info["index"]), info) for info in infos]
                 batch_records = []
                 batch_infos = []
                 for info in infos:
@@ -1041,10 +1084,12 @@ class VideoPipelineRunner:
             checkpoint_key = "rvc/batches/{:05d}.json".format(batch_number)
             input_fingerprint = fingerprint_json(
                 {
+                    "cache_generation": self._batch_scope,
                     "pipeline_implementation_version": PIPELINE_IMPLEMENTATION_VERSION,
                     "tts": batch,
                     "enable_auto_gender": self.request.settings.enable_auto_gender,
                     "model": self.manifest.fingerprints.model_sha256.get("rvc", ""),
+                    "model_index": self.manifest.fingerprints.model_sha256.get("rvc_index", ""),
                     "atempo_min": policy.atempo_min,
                     "atempo_max": policy.atempo_max,
                 }
@@ -1200,6 +1245,9 @@ class VideoPipelineRunner:
                 width,
                 height,
                 main_y,
+                font_name=self.request.font_name,
+                font_color=self.request.font_color,
+                font_weight=self.request.font_weight,
             )
             return [self.artifact_store.put_file("subtitles/final.ass", output)]
 
@@ -1257,9 +1305,9 @@ class VideoPipelineRunner:
                 str(self._artifact_path("subtitles/final.ass")),
                 str(self._selected_mix()),
                 str(output),
-                "Arial",
-                "&H00FFFFFF",
-                1,
+                self.request.font_name,
+                self.request.font_color,
+                self.request.font_weight,
                 0.88,
                 self.request.delogo,
                 self._resource_scaled_timeout(),

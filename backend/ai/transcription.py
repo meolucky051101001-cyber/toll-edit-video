@@ -105,6 +105,29 @@ def _merge_short_fragments(segments):
         merged.append(current)
     return merged
 
+def _group_fast_speech_windows(segments, max_seconds=4.8, max_characters=48):
+    """Bound adjacent Whisper lines into speech windows before translation.
+
+    Keep every recognized word and the audible outer bounds; never bridge a
+    significant pause or overlap. ASS still handles sentence display changes.
+    Only the opt-in fast profile uses this, leaving raw Whisper timing intact.
+    """
+    grouped = []
+    for item in segments:
+        if grouped:
+            previous = grouped[-1]
+            gap = float(item["start"]) - float(previous["end"])
+            duration = float(item["end"]) - float(previous["start"])
+            text = _join_aligned_tokens(previous["text"], item["text"])
+            if (0 <= gap <= 0.20 and duration <= max_seconds
+                    and len(text.replace(" ", "")) <= max_characters):
+                previous["end"] = item["end"]
+                previous["text"] = text
+                continue
+        grouped.append(dict(item))
+    return grouped
+
+
 def _join_aligned_tokens(left, right):
     left = str(left or "")
     right = str(right or "")
@@ -215,7 +238,7 @@ def _extract_subtitles_qwen(audio_path, output_srt_path, policy):
 
 
 def _extract_subtitles_faster_whisper(
-    audio_path, output_srt_path, num_workers=2, model_name="large-v3"
+    audio_path, output_srt_path, num_workers=2, model_name="large-v3", group_speech_windows=False
 ):
     from faster_whisper import WhisperModel
 
@@ -262,6 +285,8 @@ def _extract_subtitles_faster_whisper(
             transcribed_segments.append({"start": start, "end": end, "text": text})
 
         merged_segments = _merge_short_fragments(transcribed_segments)
+        if group_speech_windows:
+            merged_segments = _group_fast_speech_windows(merged_segments)
         
         return _write_srt_segments(merged_segments, output_srt_path)
     finally:
@@ -299,9 +324,9 @@ def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2):
         output_srt_path,
         num_workers=num_workers,
         model_name=policy.whisper_model,
+        group_speech_windows=getattr(policy, "speed_profile", "quality") == "fast",
     )
 
 def save_srt(srt_segments, output_path):
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(srt.compose(srt_segments, reindex=False))
-

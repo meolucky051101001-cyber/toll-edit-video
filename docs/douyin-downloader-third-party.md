@@ -33,6 +33,13 @@ The X-Bogus implementation also retains its upstream notice:
 - Copyright (C) 2021 Evil0ctal
 - License: Apache License 2.0, <https://www.apache.org/licenses/LICENSE-2.0>
 
+The A-Bogus implementation in `backend/douyin_abogus.py` retains its source
+header and license:
+
+- Original project: <https://github.com/Johnserf-Seed/f2>
+- Copyright (c) JohnserfSeed
+- License: Apache License 2.0
+
 Only the request signer, single-video metadata flow, cookie parsing, and clean
 media selection concepts are included. The upstream CLI, database, browser
 automation, server, and batch downloader are not bundled.

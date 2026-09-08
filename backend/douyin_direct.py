@@ -27,6 +27,15 @@ from urllib.parse import urlencode, urlparse
 
 import requests
 
+try:
+    from .douyin_abogus import ABogus, BrowserFingerprintGenerator
+except ImportError:  # Running social_downloader.py directly from backend/.
+    try:
+        from douyin_abogus import ABogus, BrowserFingerprintGenerator
+    except ImportError:  # gmssl remains an install-time dependency.
+        ABogus = None
+        BrowserFingerprintGenerator = None
+
 
 DOUYIN_BASE_URL = "https://www.douyin.com"
 DOUYIN_DETAIL_PATH = "/aweme/v1/web/aweme/detail/"
@@ -60,6 +69,14 @@ def _parse_cookie_header(value: str) -> Dict[str, str]:
     return parsed
 
 
+def _is_douyin_cookie_domain(domain: str) -> bool:
+    normalized = str(domain or "").lower().lstrip(".")
+    return any(
+        normalized == allowed or normalized.endswith("." + allowed)
+        for allowed in ("douyin.com", "iesdouyin.com")
+    )
+
+
 def _read_cookie_file(path: Path) -> Dict[str, str]:
     """Read a raw Cookie header or a Netscape/yt-dlp cookie file."""
     cookies: Dict[str, str] = {}
@@ -73,7 +90,7 @@ def _read_cookie_file(path: Path) -> Dict[str, str]:
         fields = line.split("\t")
         if len(fields) >= 7:
             domain, name, value = fields[0], fields[5], fields[6]
-            if "douyin.com" in domain or "iesdouyin.com" in domain:
+            if _is_douyin_cookie_domain(domain):
                 cookies[name.strip()] = value.strip()
             continue
         cookies.update(_parse_cookie_header(line))
@@ -266,7 +283,13 @@ def _default_query(cookies: Mapping[str, str]) -> Dict[str, str]:
 
 
 def _signed_url(path: str, params: Mapping[str, str]) -> str:
-    unsigned = f"{DOUYIN_BASE_URL}{path}?{urlencode(params)}"
+    query = urlencode(params)
+    if ABogus is not None and BrowserFingerprintGenerator is not None:
+        fingerprint = BrowserFingerprintGenerator.generate_fingerprint("Chrome")
+        signer = ABogus(fp=fingerprint, user_agent=DOUYIN_USER_AGENT)
+        signed_query, _signature, _user_agent, _body = signer.generate_abogus(query, "")
+        return f"{DOUYIN_BASE_URL}{path}?{signed_query}"
+    unsigned = f"{DOUYIN_BASE_URL}{path}?{query}"
     return _XBogus(DOUYIN_USER_AGENT).build(unsigned)
 
 
@@ -408,8 +431,6 @@ def resolve_douyin_video(
                 "Referer": f"{DOUYIN_BASE_URL}/",
                 "Origin": DOUYIN_BASE_URL,
             }
-            if cookies:
-                download_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
             return DouyinVideoInfo(title, tuple(candidates), download_headers)
     if last_status in (403, 429):
         suffix = "; cần cookie Douyin mới trong DOUYIN_COOKIE_FILE" if not cookies else "; cookie đã hết hạn hoặc bị giới hạn"

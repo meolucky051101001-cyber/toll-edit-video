@@ -5,6 +5,11 @@ import os
 import asyncio
 from pathlib import Path
 
+from environment import load_environment
+
+BASE_DIR = Path(__file__).resolve().parent
+load_environment(BASE_DIR)
+
 from ai.transcription import extract_subtitles_whisper, save_srt
 from ai.translation import translate_subtitles
 from ai.voice_cloning import generate_dubbing_audio
@@ -30,7 +35,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BASE_DIR = Path(__file__).resolve().parent
 WORKSPACE = os.getenv("AUTODUB_WORKSPACE", str(BASE_DIR.parent / "workspace"))
 OUTPUT_DIR = os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -52,6 +56,9 @@ async def run_api_pipeline_v2(
     voice_source,
     voice_param,
     api_key,
+    font_name="Arial",
+    font_color="&H00FFFFFF",
+    font_weight=1,
 ):
     """Run the shared v2 runner for API routes when rollout mode is v2."""
 
@@ -92,6 +99,9 @@ async def run_api_pipeline_v2(
         voice_source=voice_source,
         voice_param=selected_voice_param,
         rvc_model_path=rvc_model,
+        font_name=font_name,
+        font_color=font_color,
+        font_weight=font_weight,
     )
     return await VideoPipelineRunner(request).run()
 
@@ -197,6 +207,9 @@ async def api_process_video(
             voice_source,
             voice_param,
             api_key,
+            font_name,
+            font_color,
+            font_weight,
         )
         if v2_result is not None:
             return {
@@ -338,6 +351,9 @@ async def api_process_url(
             voice_source,
             voice_param,
             api_key,
+            font_name,
+            font_color,
+            font_weight,
         )
         if v2_result is not None:
             return {

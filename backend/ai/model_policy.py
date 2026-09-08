@@ -1,8 +1,8 @@
 """Central, environment-driven model policy for Pipeline v2.
 
-The defaults deliberately target the strongest models that fit the production
-RTX 4050 6 GiB machine. Every expensive local model has a proven fallback so a
-missing wheel, first-run download failure, or VRAM spike does not abort a job.
+The quality profile keeps the existing strong-model defaults. The fast profile
+selects the proven V1 ASR/separator with V2 processing and validation intact.
+Explicit backend/model settings override either profile.
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ def ordered_unique(*values: str) -> Tuple[str, ...]:
 
 @dataclass(frozen=True)
 class RuntimeModelPolicy:
+    speed_profile: str = "quality"
     separator_backend: str = "auto"
     separator_model: str = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
     demucs_primary_model: str = "htdemucs_ft"
@@ -66,6 +67,8 @@ class RuntimeModelPolicy:
         project_root: Optional[Path] = None,
     ) -> "RuntimeModelPolicy":
         env = environment if environment is not None else os.environ
+        speed_profile = _choice(env.get("MODEL_SPEED_PROFILE"), "quality", ("quality", "fast"))
+        fast = speed_profile == "fast"
         root = Path(project_root or Path(__file__).resolve().parents[2])
         default_runtime = root / "backend" / "model_venv" / "Scripts" / "python.exe"
         default_cache = root / "models"
@@ -73,9 +76,10 @@ class RuntimeModelPolicy:
         if not runtime_python and default_runtime.is_file():
             runtime_python = str(default_runtime)
         return cls(
+            speed_profile=speed_profile,
             separator_backend=_choice(
                 env.get("SOURCE_SEPARATOR_BACKEND"),
-                "auto",
+                "demucs" if fast else "auto",
                 ("auto", "roformer", "demucs"),
             ),
             separator_model=_clean(
@@ -83,14 +87,14 @@ class RuntimeModelPolicy:
                 "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
             ),
             demucs_primary_model=_clean(
-                env.get("DEMUCS_MODEL"), "htdemucs_ft"
+                env.get("DEMUCS_MODEL"), "htdemucs" if fast else "htdemucs_ft"
             ),
             demucs_fallback_model=_clean(
-                env.get("DEMUCS_FALLBACK_MODEL"), "htdemucs"
+                env.get("DEMUCS_FALLBACK_MODEL"), "htdemucs_ft" if fast else "htdemucs"
             ),
             asr_backend=_choice(
                 env.get("ASR_BACKEND"),
-                "auto",
+                "whisper" if fast else "auto",
                 ("auto", "qwen3", "whisper"),
             ),
             qwen_asr_model=_clean(

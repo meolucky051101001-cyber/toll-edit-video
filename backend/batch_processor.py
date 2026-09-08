@@ -25,14 +25,9 @@ if isinstance(sys.stderr, io.TextIOWrapper):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-# Load biến môi trường từ .env
-env_file = os.path.join(BASE_DIR, ".env")
-if os.path.exists(env_file):
-    with open(env_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if "=" in line and not line.strip().startswith("#"):
-                k, v = line.strip().split("=", 1)
-                os.environ[k.strip()] = v.strip().strip('"').strip("'")
+from environment import load_environment
+
+load_environment(Path(__file__).resolve().parent)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 WORKSPACE = os.path.abspath(

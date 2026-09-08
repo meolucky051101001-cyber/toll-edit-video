@@ -13,6 +13,11 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 from .segments import RuntimeSegment, segment_from_dict, segment_to_dict
 
+try:
+    from ..subtitle_text import normalize_subtitle_text
+except ImportError:
+    from subtitle_text import normalize_subtitle_text
+
 
 PathLike = Union[str, os.PathLike]
 
@@ -25,8 +30,8 @@ def _creation_flags() -> int:
 
 @dataclass(frozen=True)
 class TimingPolicy:
-    atempo_min: float = 0.92
-    atempo_max: float = 1.40
+    atempo_min: float = 1.00
+    atempo_max: float = 1.50
     estimated_chars_per_second: float = 11.5
     min_segment_seconds: float = 0.35
     max_rewrite_rounds: int = 2
@@ -223,6 +228,8 @@ def solve_segment_timing(
 ) -> TimingSolveResult:
     config = policy or TimingPolicy()
     working = _copy_segments(segments)
+    for segment in working:
+        segment.content = normalize_subtitle_text(segment.content)
     rewrite_rounds = 0
     if rewrite_callback is not None:
         for _round in range(config.max_rewrite_rounds):
@@ -246,7 +253,7 @@ def solve_segment_timing(
                 break
             changed = False
             for segment in working:
-                replacement = rewritten.get(segment.index)
+                replacement = normalize_subtitle_text(rewritten.get(segment.index))
                 if replacement and replacement.strip() != segment.content.strip():
                     segment.content = replacement.strip()
                     changed = True
@@ -256,6 +263,9 @@ def solve_segment_timing(
 
     expanded = []
     for segment in working:
+        # Sentence changes are display cues in the ASS renderer. Keeping a
+        # fitting speech window together avoids extra TTS/RVC requests and
+        # artificial pauses without combining sentences on the subtitle card.
         if plan_segment(segment, config).fits:
             expanded.append(segment)
         else:
@@ -315,7 +325,8 @@ class GeminiTimingRewriter:
             prompt = (
                 "Rút gọn các câu tiếng Việt để lồng tiếng đúng thời lượng. Giữ nguyên ý, "
                 "đại từ, tên riêng và giọng điệu; không cắt cụt ý. Mỗi câu không vượt quá "
-                "max_characters. Chỉ trả về JSON dạng [{\"id\":1,\"text\":\"...\"}].\n"
+                "max_characters. Không dùng dấu ba chấm; chỉ đặt dấu chấm khi hết câu. "
+                "Chỉ trả về JSON dạng [{\"id\":1,\"text\":\"Câu đã rút gọn\"}].\n"
                 + json.dumps(items, ensure_ascii=False)
             )
             allowed = {item.segment_index: item.max_characters for item in batch}
@@ -341,9 +352,10 @@ class GeminiTimingRewriter:
                     payload = json.loads(match.group(0))
                     for item in payload:
                         segment_id = int(item["id"])
-                        candidate = str(item["text"]).strip()
+                        candidate = normalize_subtitle_text(item["text"])
                         if (
                             segment_id in allowed
+                            and candidate
                             and normalized_character_count(candidate) <= allowed[segment_id]
                         ):
                             rewritten[segment_id] = candidate

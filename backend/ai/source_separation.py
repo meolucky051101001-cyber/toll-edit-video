@@ -92,6 +92,7 @@ def separate_vocals(
         ordered_unique(policy.demucs_primary_model, policy.demucs_fallback_model), 1
     ):
         try:
+            fast = getattr(policy, "speed_profile", "quality") == "fast"
             print("Đang tách bằng Demucs model {}...".format(model_name))
             command = [
                 venv_python,
@@ -103,9 +104,9 @@ def separate_vocals(
                 "--two-stems",
                 "vocals",
                 "--shifts",
-                "1" if model_number == 1 else "0",
+                "1" if model_number == 1 and not fast else "0",
                 "--overlap",
-                "0.25" if model_number == 1 else "0.1",
+                "0.25" if model_number == 1 and not fast else "0.1",
                 "-o",
                 output_dir,
             ]

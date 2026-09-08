@@ -56,17 +56,11 @@ INTERFACE_MODULES = {
 
 
 def _with_dotenv(environment: Mapping[str, str], backend_directory: Path) -> Dict[str, str]:
-    values = dict(environment)
-    dotenv = backend_directory / ".env"
-    if not dotenv.is_file():
-        return values
-    for raw_line in dotenv.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-    return values
+    try:
+        from environment import read_environment
+    except ImportError:
+        from backend.environment import read_environment
+    return read_environment(backend_directory, environment)
 
 
 def _configured_secret(environment: Mapping[str, str], name: str) -> str:
@@ -292,7 +286,7 @@ def run_preflight(
 ) -> Dict[str, object]:
     root = Path(project_root).resolve()
     backend = root / "backend"
-    env = _with_dotenv(environment or os.environ, backend)
+    env = _with_dotenv(os.environ if environment is None else environment, backend)
     checks: List[PreflightCheck] = []
 
     checks.append(

@@ -122,6 +122,15 @@ class DownloadProbeTests(unittest.TestCase):
 
 
 class DouyinDirectTests(unittest.TestCase):
+    def test_signed_detail_url_prefers_abogus_when_available(self):
+        from backend import douyin_direct
+
+        signed = douyin_direct._signed_url(
+            douyin_direct.DOUYIN_DETAIL_PATH,
+            {"aid": "6383", "aweme_id": "7676769981752790308"},
+        )
+        self.assertIn("a_bogus=", signed)
+
     def test_xbogus_matches_upstream_vector(self):
         from backend.douyin_direct import DOUYIN_USER_AGENT, _XBogus
 
@@ -173,11 +182,14 @@ class DouyinDirectTests(unittest.TestCase):
         )
         session = SimpleNamespace(get=lambda *args, **kwargs: response)
         info = resolve_douyin_video(
-            "7676769981752790308", session=session, environment={}
+            "7676769981752790308",
+            session=session,
+            environment={"DOUYIN_COOKIE": "sessionid=must-not-reach-cdn"},
         )
         self.assertEqual(info.title, "video thử nghiệm")
         self.assertEqual(info.media_urls[0], "https://high.example/video.mp4?watermark=0")
         self.assertNotIn("playwm", "\n".join(info.media_urls))
+        self.assertNotIn("Cookie", info.download_headers)
 
     def test_cookie_file_supports_netscape_format_without_logging_value(self):
         from backend.douyin_direct import load_douyin_cookies
@@ -188,6 +200,8 @@ class DouyinDirectTests(unittest.TestCase):
                 "# Netscape HTTP Cookie File\n"
                 ".douyin.com\tTRUE\t/\tTRUE\t0\tmsToken\tsecret-token\n"
                 "#HttpOnly_.douyin.com\tTRUE\t/\tTRUE\t0\tttwid\tweb-token\n"
+                ".evildouyin.com\tTRUE\t/\tTRUE\t0\tbad1\tsecret\n"
+                ".douyin.com.attacker.tld\tTRUE\t/\tTRUE\t0\tbad2\tsecret\n"
                 ".example.com\tTRUE\t/\tTRUE\t0\tignored\tsecret\n",
                 encoding="utf-8",
             )

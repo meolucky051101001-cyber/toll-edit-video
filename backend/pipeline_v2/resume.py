@@ -39,6 +39,9 @@ class ResumableVideoJob:
     clean_audio_hint: Optional[bool]
     delogo: bool
     next_stage: str
+    font_name: str = "Arial"
+    font_color: str = "&H00000000"
+    font_weight: int = 2
 
 
 def _published_outputs_present(manifest: Any) -> bool:
@@ -108,6 +111,9 @@ def find_resumable_jobs(workspace: Path) -> List[ResumableVideoJob]:
                     clean_audio_hint=request.get("clean_audio_hint"),
                     delogo=bool(request.get("delogo", False)),
                     next_stage=next_stage,
+                    font_name=str(request.get("font_name", "Arial")),
+                    font_color=str(request.get("font_color", "&H00000000")),
+                    font_weight=int(request.get("font_weight", 2)),
                 )
             )
         except (OSError, KeyError, TypeError, ValueError):
@@ -162,5 +168,8 @@ async def resume_video_job(
         clean_audio_hint=job.clean_audio_hint,
         delogo=job.delogo,
         progress=report,
+        font_name=job.font_name,
+        font_color=job.font_color,
+        font_weight=job.font_weight,
     )
     return await VideoPipelineRunner(request).run()

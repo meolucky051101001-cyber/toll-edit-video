@@ -27,14 +27,12 @@ from telegram import BotCommand, Update
 from telegram.error import NetworkError
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Load .env local file
-env_file = os.path.join(os.path.dirname(__file__), ".env")
-if os.path.exists(env_file):
-    with open(env_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if "=" in line and not line.strip().startswith("#"):
-                k, v = line.strip().split("=", 1)
-                os.environ[k.strip()] = v.strip().strip('"').strip("'")
+try:
+    from .environment import load_environment
+except ImportError:
+    from environment import load_environment
+
+load_environment(Path(__file__).resolve().parent)
 
 # ===== CẤU HÌNH =====
 def configured_secret(name):
@@ -81,7 +79,7 @@ WORKSPACE = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "workspace"),
     )
 )
-INPUT_DIR = os.path.abspath(os.getenv("AUTODUB_INPUT_DIR", r"D:\video_input"))
+INPUT_DIR = os.path.abspath(os.getenv("AUTODUB_INPUT_DIR", r"D:\video phôi"))
 OUTPUT_DIR = os.path.abspath(os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve"))
 os.makedirs(WORKSPACE, exist_ok=True)
 
@@ -173,6 +171,22 @@ async def run_pipeline_v2_for_telegram(
     )
 
     settings = PipelineSettings.from_env()
+    # Preserve the recorded voice and request when restarting this queue item.
+    from pipeline_v2.resume import find_resumable_jobs, resume_video_job, _published_outputs_present
+    from pipeline_v2.manifest import ManifestStore
+    manifest_path = Path(out_dir) / 'pipeline_v2' / 'job_manifest.json'
+    if manifest_path.is_file():
+        manifest = ManifestStore(manifest_path.parent).load()
+        from pipeline_v2.artifact_store import hash_file
+        source_hash, _ = await asyncio.to_thread(hash_file, video_path)
+        if source_hash == manifest.fingerprints.source_sha256 and _published_outputs_present(manifest):
+            return
+        for resumable in find_resumable_jobs(Path(out_dir).parent):
+            if resumable.job_directory.resolve() == Path(out_dir).resolve():
+                async def resume_progress(job_id, stage, state):
+                    await safe_edit_status(status_msg, f'V2: {stage} — {state}')
+                return await resume_video_job(resumable, settings, api_key=GEMINI_API_KEY,
+                                              tts_api_key=FPT_API_KEY, progress=resume_progress)
     rvc_model = discover_rvc_model(Path(WORKSPACE))
 
     async def progress(stage, state):
@@ -277,11 +291,11 @@ async def cmd_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Xử lý hàng loạt video từ thư mục cục bộ (mặc định: D:\\video_input)
     Cú pháp: /batch hoặc /batch D:\\duong_dan_thu_muc
     """
-    input_dir = r"D:\video_input"
+    input_dir = INPUT_DIR
     if context.args and len(context.args) > 0:
         input_dir = " ".join(context.args).strip()
         
-    output_dir = r"D:\banve"
+    output_dir = OUTPUT_DIR
     
     if not os.path.exists(input_dir):
         os.makedirs(input_dir, exist_ok=True)
@@ -292,10 +306,11 @@ async def cmd_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
         
-    from batch_processor import SUPPORTED_EXTENSIONS, process_batch_folder
+    from batch_processor import SUPPORTED_EXTENSIONS
     video_files = [
         f for f in os.listdir(input_dir)
         if f.lower().endswith(SUPPORTED_EXTENSIONS) and not f.startswith("Dubbed_")
+        and Path(input_dir, f).is_file()
     ]
     
     if not video_files:
@@ -306,24 +321,15 @@ async def cmd_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
         
-    status_msg = await update.message.reply_text(
-        f"🚀 *Đã tìm thấy {len(video_files)} video trong `{input_dir}`!*\n\n"
-        f"🤖 Bot đang bắt đầu xử lý lần lượt từng video (chống giật lag máy)...\n"
-        f"💾 Video thành phẩm sẽ được lưu trực tiếp vào: `{output_dir}`",
-        parse_mode="Markdown"
-    )
-    
-    async def telegram_progress(msg: str):
-        try:
-            await safe_edit_status(
-                status_msg,
-                f"📁 *Batch Processing (`{input_dir}`):*\n\n{msg}",
-                parse_mode="Markdown",
-            )
-        except Exception:
-            pass
-            
-    asyncio.create_task(process_batch_folder(input_dir, output_dir, telegram_progress))
+    added = 0
+    for filename in sorted(video_files):
+        accepted = await global_queue.put({'type':'local', 'path':str(Path(input_dir, filename).resolve()),
+            'update':update, 'context':context, 'pos':0})
+        added += accepted is not None
+    ensure_worker(context.application)
+    await update.message.reply_text(f"Đã lưu {added} video vào hàng đợi V2.")
+    return
+
 
 async def cmd_llm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xem hoặc chuyển đổi nhà cung cấp AI dịch thuật (Gemini / OpenAI ChatGPT / DeepSeek)."""
@@ -367,19 +373,26 @@ shared_state.stop_requested = False
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import shared_state
     shared_state.stop_requested = True
+    global_queue.cancel()
+    # Interrupt only this V2 process's children before draining threaded work.
+    import psutil
+    for child in psutil.Process(os.getpid()).children(recursive=True):
+        try:
+            child.kill()
+        except psutil.Error:
+            pass
     
     # 1. Hủy ngay lập tức worker task nếu đang chạy
     global worker_task
     if worker_task and not worker_task.done():
         worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
     
     # 2. Xóa sạch hàng đợi
-    while not global_queue.empty():
-        try:
-            global_queue.get_nowait()
-            global_queue.task_done()
-        except:
-            pass
+    global_queue.cancel()
             
     global queue_counter
     queue_counter = 0
@@ -402,9 +415,66 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 import re
 
-global_queue = asyncio.Queue()
+from durable_adapter import DurableQueue
+global_queue = DurableQueue(Path(WORKSPACE) / "queue_v2.sqlite3")
 queue_counter = 0
 worker_task = None
+
+def ensure_worker(application):
+    global worker_task
+    if worker_task is None or worker_task.done():
+        # The perpetual consumer must not be awaited by Application.stop().
+        worker_task = asyncio.create_task(video_worker())
+
+async def shutdown_v2(application):
+    global worker_task
+    shared_state.stop_requested = True
+    if worker_task is not None and not worker_task.done():
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+    worker_task = None
+
+async def initialize_v2(application):
+    await configure_bot_profile(application)
+    global_queue.initialize(application)
+    ensure_worker(application)
+
+async def run_durable_video(job):
+    """Stable paths make pipeline manifests usable after a process restart."""
+    context, update = job['context'], job['update']
+    job_key = job.get('job_key') or ('queue_' + str(global_queue.active[0]))
+    status = None
+    try:
+        status = await update.message.reply_text("V2 đang xử lý video trong hàng đợi đã lưu.")
+    except Exception:
+        logger.warning('Telegram status unavailable; continue the persisted job')
+    video = job.get('video_path')
+    if not video or not Path(video).is_file():
+        downloads = Path(WORKSPACE) / 'downloads'
+        downloads.mkdir(parents=True, exist_ok=True)
+        prefix = job_key
+        if job['type'] == 'url':
+            from social_downloader import download_social_video
+            ok, video, title, error = await asyncio.to_thread(download_social_video,
+                job['url'], str(downloads), prefix)
+            if not ok or not video or not Path(video).is_file():
+                raise RuntimeError(error or 'Download failed')
+        elif job['type'] == 'video':
+            remote = await context.bot.get_file(job['file_id'])
+            video = str(downloads / (prefix + '.mp4'))
+            await remote.download_to_drive(video + '.part', read_timeout=600, write_timeout=600)
+            os.replace(video + '.part', video)
+        else:
+            video = job['path']
+            if not Path(video).is_file():
+                raise FileNotFoundError(video)
+        global_queue.checkpoint(video_path=str(video))
+    paths = TelegramJobPaths.create(WORKSPACE, OUTPUT_DIR, job_key)
+    paths.prepare_directories()
+    await process_v2_telegram_job(video, paths, job.get('filename') or Path(video).name, status)
 
 async def send_video_safely(context, chat_id, final_video, caption, status_msg, url_or_filename):
     file_size = os.path.getsize(final_video)
@@ -488,37 +558,28 @@ async def video_worker():
             job = await global_queue.get()
             import shared_state
             shared_state.stop_requested = False
+            processing = asyncio.create_task(run_durable_video(job))
             try:
-                if isinstance(job, dict):
-                    if job['type'] == 'url':
-                        await process_single_url(job['update'], job['context'], job['url'], job['pos'])
-                    elif job['type'] == 'video':
-                        await process_single_video(job['update'], job['context'], job['file_id'], job['filename'], job['pos'])
-                    elif job['type'] == 'resume_v2':
-                        from pipeline_v2.config import PipelineSettings
-                        from pipeline_v2.resume import resume_video_job
-
-                        resumable = job['job']
-
-                        async def resume_progress(job_id, stage, state):
-                            logger.info(
-                                "[resume:%s] %s: %s", job_id, stage, state
-                            )
-
-                        await resume_video_job(
-                            resumable,
-                            PipelineSettings.from_env(),
-                            api_key=GEMINI_API_KEY,
-                            progress=resume_progress,
-                        )
-                else:
-                    pos, update, context, url = job
-                    await process_single_url(update, context, url, pos)
+                await asyncio.shield(processing)
             except asyncio.CancelledError:
+                # asyncio.to_thread cannot be killed by cancelling its waiter.
+                # Drain the current pipeline before another worker can start.
+                shared_state.stop_requested = True
+                try:
+                    await processing
+                except Exception:
+                    logger.info('Interrupted pipeline stopped')
+                # Leave interrupted work recoverable, unless /stop cancelled it.
+                global_queue.active = None
                 logger.info("Worker task cancelled by /stop.")
                 break
             except Exception as e:
+                global_queue.fail(e)
                 logger.error(f"Worker error: {e}")
+                try:
+                    await job['update'].message.reply_text("V2 xử lý lỗi. Công việc đã được lưu với trạng thái lỗi; hãy gửi lại nếu muốn thử lại.")
+                except Exception:
+                    logger.warning("Could not report job failure")
             finally:
                 import gc, torch
                 gc.collect()
@@ -819,14 +880,6 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
         
         caption_lines.append(f"📎 Link gốc: {original_url}\n")
 
-        # Tự động tải lên Google Drive nếu có cấu hình xác thực
-        try:
-            from google_drive_uploader import upload_video_to_gdrive
-            gdrive_res = upload_video_to_gdrive(final_video)
-            if gdrive_res and gdrive_res.get("link"):
-                caption_lines.append(f"☁️ Google Drive: {gdrive_res['link']}\n")
-        except Exception as ge:
-            logger.warning(f"Lỗi tự động tải Google Drive: {ge}")
 
         caption = "\n".join(caption_lines)
         if len(caption) > 1024:
@@ -1150,14 +1203,6 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
         queue_status = f"\n⏳ Phía sau còn {remaining} video đang chờ xử lý..." if remaining > 0 else "\n🎉 Đã hoàn tất toàn bộ hàng đợi!"
         caption = f"✅ Video đã lồng tiếng Tiếng Việt!\n⏱️ Thời gian xử lý: {time_str}{queue_status}"
 
-        # Tự động tải lên Google Drive nếu có cấu hình xác thực
-        try:
-            from google_drive_uploader import upload_video_to_gdrive
-            gdrive_res = upload_video_to_gdrive(final_video)
-            if gdrive_res and gdrive_res.get("link"):
-                caption += f"\n\n☁️ *Link Google Drive:*\n{gdrive_res['link']}"
-        except Exception as ge:
-            logger.warning(f"Lỗi tự động tải Google Drive: {ge}")
 
         await safe_edit_status(status_msg, caption)
 
@@ -1177,27 +1222,6 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ===== KHỞI CHẠY BOT =====
-async def enqueue_interrupted_v2_jobs(application):
-    """Put interrupted v2 jobs ahead of newly submitted work after restart."""
-
-    global worker_task
-    from pipeline_v2.config import PipelineMode, PipelineSettings
-
-    settings = PipelineSettings.from_env()
-    if settings.mode is not PipelineMode.V2:
-        return
-    from pipeline_v2.resume import find_resumable_jobs
-
-    resumable_jobs = find_resumable_jobs(Path(WORKSPACE))
-    for resumable in resumable_jobs:
-        await global_queue.put({"type": "resume_v2", "job": resumable})
-        logger.info(
-            "Queued interrupted pipeline v2 job %s from stage %s",
-            resumable.job_id,
-            resumable.next_stage,
-        )
-    if resumable_jobs and (worker_task is None or worker_task.done()):
-        worker_task = application.create_task(video_worker())
 
 
 def main():
@@ -1257,7 +1281,8 @@ def main():
                 .token(BOT_TOKEN)
                 .request(request)
                 .get_updates_request(get_updates_request)
-                .post_init(configure_bot_profile)
+                .post_init(initialize_v2)
+                .post_stop(shutdown_v2)
                 .build()
             )
 

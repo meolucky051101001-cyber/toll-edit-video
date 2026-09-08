@@ -159,18 +159,25 @@ def _run_qwen_asr(payload: Mapping[str, Any]) -> Dict[str, Any]:
                 getattr(result, "language", detected_language) or detected_language
             )
             offset = chunk_start / float(sample_rate)
+            # Assign each word to exactly one side of the overlap midpoint.
+            # Keep the complete word timing; clipping a word can lose syllables.
             keep_after = overlap_seconds * 0.5 if chunk_number > 1 else 0.0
+            keep_before = (
+                len(chunk) / float(sample_rate) - overlap_seconds * 0.5
+                if chunk_end < len(audio) else float("inf")
+            )
             items = getattr(result, "time_stamps", None) or []
             for item in items:
                 start = float(_timestamp_value(item, "start_time", 0.0) or 0.0)
                 end = float(_timestamp_value(item, "end_time", start) or start)
                 text = str(_timestamp_value(item, "text", "") or "")
-                if not text.strip() or end <= start or end <= keep_after:
+                midpoint = (start + end) * 0.5
+                if not text.strip() or end <= start or not keep_after <= midpoint < keep_before:
                     continue
                 timestamps.append(
                     {
                         "text": text,
-                        "start": offset + max(start, keep_after),
+                        "start": offset + start,
                         "end": offset + end,
                     }
                 )
@@ -207,16 +214,23 @@ def _paddle_payload(result: Any) -> Mapping[str, Any]:
     return nested if isinstance(nested, Mapping) else value
 
 
+_ocr_models = {}
+
+
 def _run_paddle_ocr(payload: Mapping[str, Any]) -> Dict[str, Any]:
     from paddleocr import PaddleOCR
 
-    ocr = PaddleOCR(
-        ocr_version=str(payload.get("ocr_version", "PP-OCRv6")),
-        use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
-        use_textline_orientation=False,
-        engine=str(payload.get("engine", "onnxruntime")),
-    )
+    key = (str(payload.get("ocr_version", "PP-OCRv6")), str(payload.get("engine", "onnxruntime")))
+    if key not in _ocr_models:
+        _ocr_models.clear()
+        _ocr_models[key] = PaddleOCR(
+            ocr_version=str(payload.get("ocr_version", "PP-OCRv6")),
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+            engine=str(payload.get("engine", "onnxruntime")),
+        )
+    ocr = _ocr_models[key]
     images = []
     for image_path in payload.get("images", []):
         predictions = list(ocr.predict(str(Path(image_path).resolve())))
@@ -261,9 +275,34 @@ _HANDLERS = {
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--request", required=True)
-    parser.add_argument("--response", required=True)
+    parser.add_argument("--request")
+    parser.add_argument("--response")
+    parser.add_argument("--session-dir")
     args = parser.parse_args()
+    if args.session_dir:
+        import time
+        root = Path(args.session_dir)
+        idle = time.monotonic()
+        while root.is_dir() and time.monotonic()-idle < 300:
+            requests = sorted(root.glob('request-*.json'))
+            if not requests:
+                time.sleep(.05)
+                continue
+            for path in requests:
+                try:
+                    payload = json.loads(path.read_text(encoding='utf-8'))
+                    data = {'success': True, 'result': _run_paddle_ocr(payload)}
+                except Exception as exc:
+                    data = {'success': False, 'error': str(exc)}
+                response = root/path.name.replace('request-', 'response-')
+                temporary = response.with_suffix('.tmp')
+                temporary.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+                path.unlink()
+                temporary.replace(response)
+                idle = time.monotonic()
+        return 0
+    if not args.request or not args.response:
+        parser.error('--request and --response are required without --session-dir')
     try:
         request = json.loads(Path(args.request).read_text(encoding="utf-8"))
         stage = str(request.get("stage", ""))

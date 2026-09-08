@@ -19,6 +19,11 @@ import logging
 
 from .model_policy import current_model_policy, ordered_unique
 
+try:
+    from ..subtitle_text import normalize_subtitle_text
+except ImportError:
+    from subtitle_text import normalize_subtitle_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,8 +49,10 @@ def _validate_fallback_translation(source_text, translated_text, provider):
                 provider, str(translated_text or "")[:120]
             )
         )
-    translated = str(translated_text).strip()
-    if _contains_cjk(source_text) and translated == str(source_text).strip():
+    translated = normalize_subtitle_text(translated_text)
+    if not translated:
+        raise RuntimeError("{} returned no subtitle text after cleanup".format(provider))
+    if _contains_cjk(source_text) and translated == normalize_subtitle_text(source_text):
         raise RuntimeError("{} left Chinese source text untranslated".format(provider))
     return translated
 
@@ -81,7 +88,7 @@ def _translate_with_resilient_fallback(source_text, target_lang):
 
     raise RuntimeError("; ".join(failures[-3:]))
 
-def build_translation_prompt(texts, target_lang="vi", prior_context=None, with_vision=True):
+def build_translation_prompt(texts, target_lang="vi", prior_context=None, with_vision=True, duration_budgets=None):
     lang_name = "Tiếng Việt" if target_lang == "vi" else target_lang
     prompt = f"""Bạn là một chuyên gia dịch thuật nội dung mạng xã hội (Tiktok, Douyin).
 Nhiệm vụ: Dịch mảng JSON chứa các câu phụ đề dưới đây sang {lang_name}.
@@ -92,10 +99,20 @@ Yêu cầu TỐI QUAN TRỌNG:
 4. TUYỆT ĐỐI KHÔNG lạm dụng từ tiếng Anh. Ưu tiên tiếng Việt thuần túy.
 5. KHỚP KHẨU HÌNH & THỜI LƯỢNG (LIP-SYNC): Văn bản dịch dùng để lồng tiếng (TTS), độ dài âm tiết của câu tiếng Việt PHẢI TƯƠNG ĐƯƠNG VỚI CÂU GỐC để khớp hoàn hảo khẩu hình miệng của nhân vật (không được dịch quá dài khiến AI phải đọc quá nhanh, và không được dịch quá cụt khiến AI đọc xong trước khi nhân vật khép miệng).
 6. Ngữ cảnh nối tiếp: Vì phụ đề thường bị ngắt giữa chừng, hãy đọc cả đoạn để dịch sao cho ý nối liền mạch trơn tru.
+   KHÔNG dùng dấu ba chấm (... hoặc …), kể cả đầu/cuối đoạn bị ngắt. Chỉ đặt dấu chấm khi đã hết một câu hoàn chỉnh. Hệ thống sẽ chuyển phụ đề sang câu kế tiếp tại dấu kết câu; vẫn giữ đúng số phần tử JSON theo đầu vào.
 """
     if with_vision:
         prompt += "7. TRỰC QUAN: Hãy kết hợp các bức ảnh đính kèm từ video để chọn đại từ nhân xưng và danh từ chính xác tuyệt đối với ngữ cảnh.\n"
     prompt += "8. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.\n"
+    if duration_budgets and len(duration_budgets) == len(texts):
+        prompt += (
+            "9. NGÂN SÁCH THỜI LƯỢNG cho từng phần tử, cùng thứ tự với mảng gốc:\n"
+            + json.dumps(duration_budgets, ensure_ascii=False)
+            + "\nseconds là số giây đọc; max_characters là giới hạn ký tự mong muốn (kể cả khoảng trắng). "
+            "Hãy chọn câu dịch ngắn gọn, dễ đọc ngay từ lần đầu để vừa thời gian, "
+            "nhưng giữ đủ ý chính, tên riêng, số lượng và phủ định. Không cắt cụt từ, "
+            "không bỏ ý chỉ để đạt giới hạn; không trả về bảng ngân sách.\n"
+        )
     prompt += "Dữ liệu:\n"
     if prior_context:
         prompt += "Ngữ cảnh nối tiếp từ batch trước (không dịch lại):\n"
@@ -151,7 +168,8 @@ def translate_with_gemini(
     if not api_key:
         return None
     try:
-        prompt = build_translation_prompt(texts, target_lang, prior_context, with_vision=True)
+        prompt = build_translation_prompt(texts, target_lang, prior_context, with_vision=True,
+                                          duration_budgets=kwargs.get("duration_budgets"))
         parts = [{"text": prompt}]
         
         frames = extract_video_frames_base64(video_path, context_start_seconds, context_end_seconds)
@@ -213,7 +231,8 @@ def translate_with_openai(
     if not api_key:
         return None
     try:
-        prompt = build_translation_prompt(texts, target_lang, prior_context, with_vision=True)
+        prompt = build_translation_prompt(texts, target_lang, prior_context, with_vision=True,
+                                          duration_budgets=kwargs.get("duration_budgets"))
         messages_content = [{"type": "text", "text": prompt}]
         
         frames = extract_video_frames_base64(video_path, context_start_seconds, context_end_seconds)
@@ -273,7 +292,8 @@ def translate_with_deepseek(
     if not api_key:
         return None
     try:
-        prompt = build_translation_prompt(texts, target_lang, prior_context, with_vision=False)
+        prompt = build_translation_prompt(texts, target_lang, prior_context, with_vision=False,
+                                          duration_budgets=kwargs.get("duration_budgets"))
         policy = current_model_policy()
         seen = ordered_unique(model, *policy.deepseek_candidates)
             
@@ -322,6 +342,7 @@ Yêu cầu TỐI QUAN TRỌNG:
 1. BẮT BUỘC giữ nguyên số lượng phần tử của mảng JSON.
 2. Dịch tự nhiên, cuốn hút, chuẩn văn phong video ngắn mạng xã hội.
 3. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.
+4. KHÔNG dùng dấu ba chấm (... hoặc …). Chỉ dùng dấu chấm khi kết thúc câu hoàn chỉnh; giữ nguyên số phần tử JSON.
 Dữ liệu:
 """
         prompt += json.dumps(texts, ensure_ascii=False)
@@ -424,6 +445,11 @@ def translate_subtitles(
                 logger.warning(f"Lỗi G4F: {e}")
                 translated_texts = None
         
+    if isinstance(translated_texts, list):
+        translated_texts = [
+            normalize_subtitle_text(item) if isinstance(item, str) else item
+            for item in translated_texts
+        ]
     translated_texts_valid = bool(
         translated_texts
         and len(translated_texts) == len(texts)
@@ -436,7 +462,7 @@ def translate_subtitles(
                 zip(texts, translated_texts), 1
             )
             if _contains_cjk(source)
-            and str(source).strip() == str(translated).strip()
+            and normalize_subtitle_text(source) == str(translated).strip()
         ]
         if unchanged_cjk:
             logger.warning(

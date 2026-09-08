@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import unittest
 import sys
@@ -295,6 +296,97 @@ class VideoPipelineEndToEndTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(calls, ["Câu lồng tiếng thực tế quá dài", "Câu ngắn"])
             self.assertEqual(payload["runtime_segments"][0]["content"], "Câu ngắn")
             self.assertEqual(payload["unresolved_source_ids"], [])
+
+    async def test_tts_rewrites_only_changed_audio_and_resumes_complete_batch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.write_bytes(b"source-video")
+            runner = VideoPipelineRunner(VideoPipelineRequest(
+                video_path=source, job_directory=root / "job",
+                output_path=root / "delivered.mp4", api_key="test-key",
+                settings=PipelineSettings(mode=PipelineMode.V2, enable_timing_solver=True),
+            ))
+            runner.manifest = runner._load_or_create_manifest()
+            segments = [RuntimeSegment(
+                index=index, start=timedelta(seconds=index - 1),
+                end=timedelta(seconds=index), content="Original {}".format(index),
+                source_segment_id=index + 10,
+            ) for index in (1, 2, 3)]
+            calls = []
+
+            async def fake_generate(selected, output_directory, **kwargs):
+                calls.append([item.index for item in selected])
+                Path(output_directory).mkdir(parents=True, exist_ok=True)
+                infos = []
+                for item in selected:
+                    audio = Path(output_directory) / "{}.mp3".format(item.index)
+                    audio.write_bytes("audio-{}-round-{}".format(item.index, len(calls)).encode())
+                    fits = item.index != 2 or len(calls) >= 3
+                    infos.append({
+                        "index": item.index, "source_segment_id": item.source_segment_id,
+                        "path": str(audio), "start": item.start.total_seconds(),
+                        "end": item.end.total_seconds(), "content": item.content,
+                        "actual_audio_duration": 0.8 if fits else 2.0, "timing_fits": fits,
+                    })
+                return infos
+
+            # Ignore unsolicited edits to fitting clips. The second rewrite
+            # must still preserve clips generated in the original round.
+            rewriter = mock.Mock(side_effect=[
+                {1: "Unsolicited change", 2: "Shorter"}, {2: "Short"},
+            ])
+            with mock.patch(
+                "backend.pipeline_v2.video_pipeline.generate_tts_audio_v2", side_effect=fake_generate,
+            ), mock.patch(
+                "backend.pipeline_v2.video_pipeline.GeminiTimingRewriter", return_value=rewriter,
+            ):
+                await runner._tts_stage(segments)
+                payload = runner._load_json("tts/segments.json")
+                self.assertEqual(calls, [[1, 2, 3], [2], [2]])
+                self.assertEqual([item["index"] for item in payload["segments"]], [1, 2, 3])
+                self.assertEqual([item["content"] for item in payload["runtime_segments"]],
+                                 ["Original 1", "Short", "Original 3"])
+                self.assertEqual(payload["unresolved_source_ids"], [])
+                for index, round_number in ((1, 1), (2, 3), (3, 1)):
+                    self.assertEqual(runner.artifact_store.path_for("tts/{}.mp3".format(index)).read_bytes(),
+                                     "audio-{}-round-{}".format(index, round_number).encode())
+                for item in segments:
+                    item.content = "Original {}".format(item.index)
+                await runner._tts_stage(segments)
+                self.assertEqual(calls, [[1, 2, 3], [2], [2]])
+                self.assertEqual(segments[1].content, "Short")
+
+    async def test_parallel_ocr_and_translation_overlap_and_merge_geometry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.write_bytes(b"source-video")
+            runner = FakeVideoPipelineRunner(VideoPipelineRequest(
+                video_path=source, job_directory=root / "job", output_path=root / "delivered.mp4",
+                settings=PipelineSettings(mode=PipelineMode.V2, enable_parallel_ocr_gemini=True,
+                                          enable_gpu_process_isolation=False),
+            ))
+            ocr_started, translate_started = asyncio.Event(), asyncio.Event()
+            original_ocr, original_translate = runner._ocr_stage, runner._translate_stage
+
+            async def ocr(transcript):
+                ocr_started.set()
+                await asyncio.wait_for(translate_started.wait(), timeout=2)
+                return await original_ocr(transcript)
+
+            async def translate(transcript):
+                translate_started.set()
+                await asyncio.wait_for(ocr_started.wait(), timeout=2)
+                return await original_translate(transcript)
+
+            with mock.patch.object(runner, "_ocr_stage", side_effect=ocr), \
+                    mock.patch.object(runner, "_translate_stage", side_effect=translate):
+                await runner.run()
+            transcript = runner._load_segments("transcript/segments.json")
+            merged = runner._merged_translated_segments(transcript)
+            self.assertEqual(merged[0].content, "Xin chào")
+            self.assertEqual((merged[0].y_pct, merged[0].max_y_pct), (0.8, 0.85))
 
     async def test_render_stage_converts_paths_for_legacy_renderer(self):
         with tempfile.TemporaryDirectory() as directory:

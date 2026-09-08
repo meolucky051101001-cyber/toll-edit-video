@@ -17,8 +17,8 @@ from backend.pipeline_v2.timing import (
 class TimingSolverTests(unittest.TestCase):
     def test_default_policy_matches_production_speed_envelope(self):
         policy = TimingPolicy()
-        self.assertEqual(policy.atempo_min, 0.92)
-        self.assertEqual(policy.atempo_max, 1.40)
+        self.assertEqual(policy.atempo_min, 1.00)
+        self.assertEqual(policy.atempo_max, 1.50)
 
     def test_budgeted_rewrite_runs_before_tts(self):
         segment = RuntimeSegment(
@@ -62,7 +62,7 @@ class TimingSolverTests(unittest.TestCase):
             source_segment_id=26,
         )
         solved = solve_segment_timing([segment])
-        self.assertGreater(len(solved.segments), 1)
+        self.assertEqual(len(solved.segments), 1)
         self.assertTrue(
             all(
                 any(character.isalnum() for character in item.content)
@@ -71,7 +71,7 @@ class TimingSolverTests(unittest.TestCase):
         )
         self.assertEqual(
             "".join(item.content for item in solved.segments).replace(" ", ""),
-            segment.content.replace(" ", ""),
+            "Nếunếuba",
         )
 
     def test_plan_requires_only_light_atempo(self):
@@ -107,6 +107,34 @@ class TimingSolverTests(unittest.TestCase):
 
 
 class AudioFitIntegrationTests(unittest.TestCase):
+    def test_short_audio_is_not_slowed_below_normal_speed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.wav"
+            output = root / "fitted.wav"
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=1",
+                    str(source),
+                ],
+                check=True,
+            )
+            result = fit_audio_to_window(
+                source,
+                output,
+                target_seconds=2.0,
+            )
+            self.assertEqual(result.applied_atempo, 1.00)
+            self.assertTrue(result.fits)
+            self.assertTrue(output.is_file())
+
     def test_atempo_is_capped_at_one_point_zero_eight(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

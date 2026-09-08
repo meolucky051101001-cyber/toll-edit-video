@@ -60,8 +60,8 @@ class PipelineSettings:
     enable_legacy_mix_ab: bool = False
     enable_rvc: bool = True
     enable_auto_gender: bool = False
-    atempo_min: float = 0.92
-    atempo_max: float = 1.40
+    atempo_min: float = 1.00
+    atempo_max: float = 1.50
     target_lufs: float = -15.0
     true_peak_max_dbtp: float = -1.0
     qc_gate_policy: QCGatePolicy = QCGatePolicy.BLOCK
@@ -137,8 +137,8 @@ class PipelineSettings:
             enable_legacy_mix_ab=_env_bool(env, "ENABLE_LEGACY_MIX_AB", False),
             enable_rvc=_env_bool(env, "ENABLE_RVC", True),
             enable_auto_gender=_env_bool(env, "ENABLE_AUTO_GENDER", False),
-            atempo_min=_env_float(env, "ATEMPO_MIN", 0.92),
-            atempo_max=_env_float(env, "ATEMPO_MAX", 1.40),
+            atempo_min=_env_float(env, "ATEMPO_MIN", 1.00),
+            atempo_max=_env_float(env, "ATEMPO_MAX", 1.50),
             target_lufs=_env_float(env, "TARGET_LUFS", -15.0),
             true_peak_max_dbtp=_env_float(env, "TRUE_PEAK_MAX_DBTP", -1.0),
             qc_gate_policy=qc_policy,
