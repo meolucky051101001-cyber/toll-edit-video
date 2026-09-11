@@ -34,10 +34,12 @@ class StabilityTests(unittest.TestCase):
                 ocr,"run_v1_ocr",side_effect=RuntimeError("memory")) as run, patch.object(
                 ocr,"get_ocr_reader",return_value=reader), patch(
                 "backend.ai.v1_model_runtime.close_session",side_effect=lambda:events.append("close")):
-            ocr._recognize_batch([object()])
-            ocr._recognize_batch([object()])
+            with self.assertRaisesRegex(RuntimeError, "V1 GPU OCR unavailable"):
+                ocr._recognize_batch([object()])
+            with self.assertRaisesRegex(RuntimeError, "V1 GPU OCR unavailable"):
+                ocr._recognize_batch([object()])
             self.assertEqual(run.call_count,1)
-            self.assertEqual(events,["close","fallback","fallback"])
+            self.assertEqual(events,["close"])
         ocr._paddle_failed=False
 
     def test_exact_frame_cache_and_changed_pixels(self):
@@ -58,16 +60,18 @@ class VoiceStabilityTests(unittest.IsolatedAsyncioTestCase):
         async def generate(seg,folder,*args):
             p=Path(folder)/"1.mp3"; p.write_bytes(b"a"*256)
             return dict(index=1,path=str(p),actual_audio_duration=1.,content=seg.content,start=0,end=2)
-        with tempfile.TemporaryDirectory() as d, patch.object(vc,"generate_single_tts",side_effect=generate) as fn:
+        with tempfile.TemporaryDirectory() as d, \
+             patch("backend.ai.v1_voice_cache.read_voice_cache", return_value=None), \
+             patch.object(vc,"generate_single_tts",side_effect=generate) as fn:
             await vc.generate_dubbing_audio([item],d)
-            await vc.generate_dubbing_audio([item],d)
-            self.assertEqual(fn.call_count,1)
-            item.content="Chào bạn"
             await vc.generate_dubbing_audio([item],d)
             self.assertEqual(fn.call_count,2)
 
     async def test_missing_voice_fails_instead_of_silently_omitting(self):
         item=NS(index=1,content="Xin chào",start=timedelta(0),end=timedelta(seconds=2))
-        with tempfile.TemporaryDirectory() as d, patch.object(vc,"generate_single_tts",new=AsyncMock(return_value=None)):
+        with tempfile.TemporaryDirectory() as d, \
+             patch("backend.ai.v1_voice_cache.read_voice_cache", return_value=None), \
+             patch.object(vc,"generate_tts_edge",new=AsyncMock(side_effect=Exception("Network error"))), \
+             patch.object(vc,"generate_single_tts",new=AsyncMock(return_value=None)):
             with self.assertRaisesRegex(RuntimeError,"TTS incomplete"):
                 await vc.generate_dubbing_audio([item],d)

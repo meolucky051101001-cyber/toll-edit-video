@@ -666,7 +666,7 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 seg.index = i
         except Exception as e:
             logger.error(f"OCR Error: {e}", exc_info=True)
-            vid_w, vid_h, main_y_pct, floating_segments = 1920, 1080, 0.88, []
+            raise RuntimeError("OCR failed; stopping job to avoid exposing original subtitles") from e
         finally:
             from ocr_utils import release_ocr_reader
             release_ocr_reader()
@@ -1051,7 +1051,7 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
                 seg.index = i
         except Exception as e:
             logger.error(f"OCR Error: {e}", exc_info=True)
-            vid_w, vid_h, main_y_pct, floating_segments = 1920, 1080, 0.88, []
+            raise RuntimeError("OCR failed; stopping job to avoid exposing original subtitles") from e
         finally:
             from ocr_utils import release_ocr_reader
             release_ocr_reader()

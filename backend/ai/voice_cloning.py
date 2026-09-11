@@ -64,7 +64,7 @@ def discover_rvc_index(model_path):
     return str(matches[0])
 
 class FPTQuotaError(Exception): pass
-
+class TTSIncompleteError(RuntimeError): pass
 @stage("tts_edge_including_queue")
 async def generate_tts_edge(
     text,
@@ -467,17 +467,25 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                 except Exception:
                     result = None
             if result is None:
-                # Cứu hộ lần 2: Tạo đoạn âm thanh im lặng đúng thời lượng để bảo vệ toàn bộ video
-                try:
-                    seg_dur = max(0.5, (seg.end - seg.start).total_seconds())
-                    silent_audio = AudioSegment.silent(duration=int(seg_dur * 1000))
-                    silent_audio.export(path, format="mp3")
-                    result = dict(index=seg.index, path=path, start=seg.start.total_seconds(),
-                                 end=seg.end.total_seconds(), actual_audio_duration=seg_dur,
-                                 content=seg.content.strip())
-                except Exception as sil_err:
-                    raise RuntimeError(f"TTS failed for subtitle {seg.index}; refusing incomplete voiceover: {sil_err}")
-            write_voice_cache(path, key, result["actual_audio_duration"], seg.content.strip())
+                # TTS fail hoàn toàn sau khi đã thử Edge TTS cứu hộ
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                raise TTSIncompleteError(f"Failed segment: {seg.index} - {seg.content.strip()[:20]}...")
+            
+            # 1.3 KHÔNG CACHE AUDIO LỖI
+            # Validation tối thiểu trước khi ghi cache
+            if os.path.exists(path) and os.path.getsize(path) > 128 and result.get("actual_audio_duration", 0) > 0.1:
+                write_voice_cache(path, key, result["actual_audio_duration"], seg.content.strip())
+            else:
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                raise TTSIncompleteError(f"Failed segment: {seg.index} (Audio invalid or too short)")
             return result
     results = await asyncio.gather(*(run_one(seg) for seg in translated_segments), return_exceptions=True)
     errors = [r for r in results if isinstance(r, BaseException)]
