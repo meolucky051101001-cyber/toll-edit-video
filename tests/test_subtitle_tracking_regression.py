@@ -30,14 +30,21 @@ class SubtitleRegressionTests(unittest.TestCase):
         for name in ("api_process_video", "api_process_url"):
             function = next(n for n in module.body if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
             calls = sorted((n for n in ast.walk(function) if isinstance(n, ast.Call)), key=lambda n:n.lineno)
-            named = {n.func.id:n for n in calls if isinstance(n.func, ast.Name)}
+            
+            named = {}
+            for n in calls:
+                if isinstance(n.func, ast.Name):
+                    named[n.func.id] = n
+                elif isinstance(n.func, ast.Attribute) and getattr(n.func, "attr", "") == "to_thread":
+                    if n.args and isinstance(n.args[0], ast.Name):
+                        named[n.args[0].id] = n
+                        
             self.assertLess(named["locate_v1_subtitles"].lineno, named["translate_subtitles"].lineno)
             render = named["process_video"]
-            self.assertIsInstance(render.args[1], ast.Name)
-            self.assertEqual(render.args[1].id, "ass_path")
-            generate = next(n for n in calls if n.args and isinstance(n.args[0],ast.Name)
-                            and n.args[0].id=="generate_ass_file")
-            self.assertLess(generate.lineno,render.lineno)
+            self.assertIsInstance(render.args[2], ast.Name)
+            self.assertEqual(render.args[2].id, "ass_path")
+            generate = named["generate_ass_file"]
+            self.assertLess(generate.lineno, render.lineno)
 
     def render(self, segment, w=720, h=1280):
         with tempfile.TemporaryDirectory() as directory:

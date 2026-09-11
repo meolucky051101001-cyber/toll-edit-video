@@ -104,6 +104,29 @@ BATCH_TASK_LOCK = asyncio.Lock()
 BATCH_TASK: Optional[asyncio.Task] = None
 
 
+
+def _validate_input_path(video_path: str) -> Path:
+    from fastapi import HTTPException
+    import os
+    from pathlib import Path
+    
+    clean_path = video_path.strip()
+    if not clean_path:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    
+    candidate = Path(clean_path).resolve()
+    allowed_root = get_input_dir().resolve()
+    
+    try:
+        candidate.relative_to(allowed_root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Path must be within allowed input directory")
+        
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+        
+    return candidate
+
 def _folder_by_key(folder: str) -> Path:
     folders = {
         "phoi": get_input_dir(),
@@ -134,7 +157,7 @@ def _safe_media_path(folder: str, filename: str) -> Path:
     return candidate
 
 
-def _read_log_tail(max_lines: int = 100) -> str:
+def _read_log_tail(max_lines: int = 500) -> str:
     configured = os.getenv("AUTODUB_LOG_FILE")
     candidates = [
         Path(configured) if configured else None,
@@ -227,8 +250,10 @@ async def api_get_logs():
 @app.post("/api/generate_subtitles")
 async def api_generate_subtitles(video_path: str = Form(...), target_lang: str = Form("vi")):
     """Nhận đường dẫn file video trên máy, tạo phụ đề gốc và dịch."""
+    valid_path = _validate_input_path(video_path)
+    video_path = str(valid_path)
     try:
-        base_name = os.path.splitext(os.path.basename(video_path))[0]
+        base_name = valid_path.stem
         out_dir = os.path.join(WORKSPACE, base_name)
         os.makedirs(out_dir, exist_ok=True)
 
@@ -237,19 +262,19 @@ async def api_generate_subtitles(video_path: str = Form(...), target_lang: str =
         srt_translated = os.path.join(out_dir, "translated.srt")
 
         # 1. Extract audio
-        extract_audio_from_video(video_path, original_audio)
+        await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
 
         # 2. Transcribe with Whisper
-        srt_segments = extract_subtitles_whisper(original_audio, srt_original)
+        srt_segments = await asyncio.to_thread(extract_subtitles_whisper, original_audio, srt_original)
 
         # 3. Translate
-        translated_segments = translate_subtitles(
+        translated_segments = await asyncio.to_thread(translate_subtitles, 
             srt_segments,
             target_lang,
             api_key=GEMINI_API_KEY,
             video_path=video_path,
         )
-        save_srt(translated_segments, srt_translated)
+        await asyncio.to_thread(save_srt, translated_segments, srt_translated)
 
         # Prepare response data
         subtitles = []
@@ -287,9 +312,11 @@ async def api_process_video(
     font_weight: int = Form(1)
 ):
     """Xử lý full: Transcribe → Dịch → TTS → Mix Audio → Blur + Sub → Xuất video."""
+    valid_path = _validate_input_path(video_path)
+    video_path = str(valid_path)
     await API_PROCESS_LOCK.acquire()
     try:
-        base_name = os.path.splitext(os.path.basename(video_path))[0]
+        base_name = valid_path.stem
         out_dir = os.path.join(WORKSPACE, base_name)
         os.makedirs(out_dir, exist_ok=True)
 
@@ -323,14 +350,14 @@ async def api_process_video(
             }
 
         # 1. Extract audio
-        extract_audio_from_video(video_path, original_audio)
+        await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
 
         # 2. Transcribe
-        srt_segments = extract_subtitles_whisper(original_audio, srt_original)
+        srt_segments = await asyncio.to_thread(extract_subtitles_whisper, original_audio, srt_original)
         vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
 
         # 3. Translate
-        translated_segments = translate_subtitles(
+        translated_segments = await asyncio.to_thread(translate_subtitles, 
             srt_segments,
             target_lang,
             api_key=(
@@ -340,7 +367,7 @@ async def api_process_video(
             ),
             video_path=video_path,
         )
-        save_srt(translated_segments, srt_translated)
+        await asyncio.to_thread(save_srt, translated_segments, srt_translated)
 
         # 4. Generate TTS dubbing
         dubbing_audio_files = await generate_dubbing_audio(
@@ -355,17 +382,18 @@ async def api_process_video(
         translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
 
         # 5. Mix audio (original + dubbing)
-        mix_audio_pydub(original_audio, dubbing_audio_files, mixed_audio)
+        await asyncio.to_thread(mix_audio_pydub, original_audio, dubbing_audio_files, mixed_audio)
 
         # 6. Final render: Blur + Subtitles + Audio → Output video
         from ass_utils import generate_ass_file
         ass_path = os.path.join(out_dir, "final.ass")
+        
         await asyncio.to_thread(
             generate_ass_file, translated_segments, [], ass_path,
             play_res_x=vid_w, play_res_y=vid_h, main_y_pct=main_y,
             font_name=font_name, font_color=font_color, font_weight=font_weight,
         )
-        rendered = process_video(
+        rendered = await asyncio.to_thread(process_video, 
             video_path,
             ass_path,
             mixed_audio,
@@ -477,14 +505,14 @@ async def api_process_url(
             }
 
         # Extract audio
-        extract_audio_from_video(video_path, original_audio)
+        await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
 
         # Transcribe
-        srt_segments = extract_subtitles_whisper(original_audio, srt_original)
+        srt_segments = await asyncio.to_thread(extract_subtitles_whisper, original_audio, srt_original)
         vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
 
         # Translate
-        translated_segments = translate_subtitles(
+        translated_segments = await asyncio.to_thread(translate_subtitles, 
             srt_segments,
             target_lang,
             api_key=(
@@ -494,7 +522,7 @@ async def api_process_url(
             ),
             video_path=video_path,
         )
-        save_srt(translated_segments, srt_translated)
+        await asyncio.to_thread(save_srt, translated_segments, srt_translated)
 
         # Subtitles for response
         subtitles = []
@@ -519,17 +547,18 @@ async def api_process_url(
         translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
 
         # Mix audio
-        mix_audio_pydub(original_audio, dubbing_audio_files, mixed_audio)
+        await asyncio.to_thread(mix_audio_pydub, original_audio, dubbing_audio_files, mixed_audio)
 
         # Final render
         from ass_utils import generate_ass_file
         ass_path = os.path.join(out_dir, "final.ass")
+        
         await asyncio.to_thread(
             generate_ass_file, translated_segments, [], ass_path,
             play_res_x=vid_w, play_res_y=vid_h, main_y_pct=main_y,
             font_name=font_name, font_color=font_color, font_weight=font_weight,
         )
-        rendered = process_video(
+        rendered = await asyncio.to_thread(process_video, 
             video_path,
             ass_path,
             mixed_audio,

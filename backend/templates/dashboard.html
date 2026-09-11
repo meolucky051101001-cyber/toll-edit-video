@@ -1,6 +1,24 @@
 <!DOCTYPE html>
 <html lang="vi">
 <head>
+<script>
+window.LOCAL_TOKEN = "__REPLACE_TOKEN__";
+const originalFetch = window.fetch;
+window.fetch = async function() {
+    let [resource, config] = arguments;
+    if(resource && typeof resource === 'string' && resource.startsWith('/api/')) {
+        if (!config) config = {};
+        if (!config.headers) config.headers = {};
+        if (config.headers instanceof Headers) {
+            config.headers.append('X-Local-Control-Token', window.LOCAL_TOKEN);
+        } else {
+            config.headers['X-Local-Control-Token'] = window.LOCAL_TOKEN;
+        }
+    }
+    return originalFetch(resource, config);
+};
+</script>
+
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Tool V1 - Giám Sát Video Phôi & Tiến Độ Render</title>
