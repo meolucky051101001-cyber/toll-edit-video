@@ -63,6 +63,8 @@ _DEFAULT_STATE: Dict[str, Any] = {
     "last_error": None,
     "last_completed": None,
     "history": [],
+    "step_durations": {},
+    "current_step_start": None,
     "updated_at": 0,
 }
 
@@ -243,6 +245,13 @@ def get_status() -> Dict[str, Any]:
         if state.get("active") and state.get("start_time"):
             elapsed = int(time.time() - state["start_time"])
             state["elapsed_seconds"] = elapsed
+            # Tính thời gian thực tế của bước đang chạy
+            cur_step = state.get("step")
+            cur_step_start = state.get("current_step_start")
+            if cur_step and cur_step > 0 and cur_step_start:
+                durations = dict(state.get("step_durations") or {})
+                durations[str(cur_step)] = round(time.time() - cur_step_start, 1)
+                state["step_durations"] = durations
             # Ước tính ETA đơn giản theo %
             pct = state.get("percent", 0)
             if pct > 10 and pct < 100:
@@ -303,6 +312,7 @@ def start_video(video_name: str, index: int = 1, total: int = 1):
             "status": "running",
             "video_name": video_name,
             "video_status": "running",
+            "translation_models": [],
             "step": 0,
             "step_name": "Bắt đầu xử lý video...",
             "percent": 5,
@@ -312,8 +322,23 @@ def start_video(video_name: str, index: int = 1, total: int = 1):
             "queue_total": total,
             "queue_index": index,
             "last_error": None,
+            "step_durations": {},
+            "current_step_start": time.time(),
             "updated_at": time.time(),
         })
+        _save_state_to_disk()
+
+
+def record_translation_model(model, identity):
+    with _LOCK:
+        _sync_from_disk_unlocked()
+        current = (_CURRENT_STATE.get("job_id"), _CURRENT_STATE.get("video_name"), _CURRENT_STATE.get("start_time"))
+        if identity != current or not _CURRENT_STATE.get("active"):
+            return
+        models = list(_CURRENT_STATE.get("translation_models", []))
+        if model not in models:
+            models.append(model)
+        _CURRENT_STATE["translation_models"] = models
         _save_state_to_disk()
 
 
@@ -324,6 +349,13 @@ def update_step(step: float, step_name: str, percent: Optional[int] = None, deta
         if percent is None:
             percent = STEP_PERCENT_MAP.get(float(step), int(step * 15))
         percent = min(99, max(0, percent))
+
+        now = time.time()
+        prev_step = _CURRENT_STATE.get("step")
+        step_durations = dict(_CURRENT_STATE.get("step_durations") or {})
+        current_step_start = _CURRENT_STATE.get("current_step_start") or now
+        if prev_step and prev_step != step and prev_step > 0:
+            step_durations[str(prev_step)] = round(now - current_step_start, 1)
 
         status = "rendering" if step >= 6.0 else "running"
         if (_CURRENT_STATE.get("step"), _CURRENT_STATE.get("step_name")) != (step, step_name):
@@ -338,7 +370,9 @@ def update_step(step: float, step_name: str, percent: Optional[int] = None, deta
             "step_name": step_name,
             "percent": percent,
             "details": details,
-            "updated_at": time.time(),
+            "step_durations": step_durations,
+            "current_step_start": now,
+            "updated_at": now,
         })
         _save_state_to_disk()
 
@@ -359,15 +393,28 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
         # Giữ tối đa 20 video gần nhất
         _CURRENT_STATE["history"] = history[:20]
 
+        step_durations = dict(_CURRENT_STATE.get("step_durations") or {})
+        last_step = _CURRENT_STATE.get("step")
+        current_step_start = _CURRENT_STATE.get("current_step_start") or now
+        if last_step and last_step > 0:
+            step_durations[str(last_step)] = round(now - current_step_start, 1)
+
         _CURRENT_STATE.update({
             "percent": 100,
             "step": 6,
             "step_name": f"Hoàn thành xuất sắc: {video_name}",
             "last_completed": record,
             "video_status": "completed",
+            "step_durations": step_durations,
             "updated_at": now,
         })
         _save_state_to_disk()
+
+        try:
+            from render_history import record_render_duration
+            record_render_duration(output_path or video_name, duration_seconds)
+        except Exception:
+            pass
 
 
 def finish_batch():

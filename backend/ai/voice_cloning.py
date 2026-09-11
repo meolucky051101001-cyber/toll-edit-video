@@ -16,6 +16,21 @@ global_rvc_instance = None
 global_rvc_model_path = None
 
 
+def build_atempo_filter(ratio: float) -> str:
+    """Ghép chuỗi filter atempo của FFmpeg cho dải tốc độ mở rộng an toàn [0.25x - 4.0x]."""
+    ratio = max(0.25, min(float(ratio), 4.0))
+    filters = []
+    current = ratio
+    while current > 2.0:
+        filters.append("atempo=2.0")
+        current /= 2.0
+    while current < 0.5:
+        filters.append("atempo=0.5")
+        current /= 0.5
+    filters.append(f"atempo={current:.3f}")
+    return ",".join(filters)
+
+
 def rvc_runtime_available():
     """Return whether the optional legacy RVC engine can actually be imported."""
 
@@ -50,6 +65,7 @@ def discover_rvc_index(model_path):
 
 class FPTQuotaError(Exception): pass
 
+@stage("tts_edge_including_queue")
 async def generate_tts_edge(
     text,
     output_path,
@@ -94,6 +110,7 @@ async def generate_tts_edge(
                 await asyncio.sleep(max(0.0, float(delay)))
         raise RuntimeError("Edge TTS failed after {} attempts".format(attempts)) from last_error
 
+@stage("tts_capcut_attempt")
 def _run_capcut_tts_once(
     text, output_path, voice="BV562_streaming", poll_interval=3.0
 ):
@@ -105,8 +122,12 @@ def _run_capcut_tts_once(
     task_id = res["data"]["tasks"][0]["id"]
     token = res["data"]["tasks"][0]["token"]
     
-    for _ in range(60):
-        time.sleep(max(0.0, float(poll_interval)))
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        time.sleep(min(max(0.0, float(poll_interval)),
+                       max(0.0, deadline - time.monotonic())))
+        if time.monotonic() >= deadline:
+            break
         query_res = client.query_tts_task(task_id, token)
         status = query_res["data"]["tasks"][0]["status"]
         if status in ("success", "succeed"):
@@ -122,7 +143,7 @@ def _run_capcut_tts_once(
         elif status == "failed":
             raise Exception("CapCut TTS task failed")
             
-    raise Exception("CapCut TTS timeout after 60s")
+    raise TimeoutError("CapCut TTS polling exceeded 60s (network calls may add time)")
 
 
 def _run_capcut_tts(
@@ -210,6 +231,7 @@ async def generate_tts_fpt(text, output_path, api_key, voice="banmai", speed="0"
 
 rvc_semaphore = asyncio.Semaphore(1)
 
+@stage("rvc_including_queue")
 async def apply_rvc_clone(
     input_audio,
     output_audio,
@@ -237,13 +259,16 @@ async def apply_rvc_clone(
         except OSError:
             pass
         
+        @stage("rvc_execution_excluding_queue")
         def run_rvc_with_method(method="rmvpe"):
             global global_rvc_instance, global_rvc_model_path
             import torch
             torch.backends.cudnn.enabled = False
             from rvc_python.infer import RVCInference
             if global_rvc_instance is None:
-                global_rvc_instance = RVCInference(device="cuda:0" if torch.cuda.is_available() else "cpu")
+                if not torch.cuda.is_available():
+                    raise RuntimeError("V1 requires CUDA for RVC; CPU fallback disabled")
+                global_rvc_instance = RVCInference(device="cuda:0")
             
             if global_rvc_model_path != model_path:
                 print("=> Nap model RVC vao VRAM (Chi chay 1 lan duy nhat)...")
@@ -332,14 +357,16 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
                     
                     if expected_s > 0 and duration_s > expected_s:
                         ratio = duration_s / expected_s
-                        ratio = min(ratio, 1.8) 
-                        temp_speed = audio_path.replace(".mp3", "_speed.mp3")
+                        tempo_filter = build_atempo_filter(ratio)
+                        base_audio, ext = os.path.splitext(audio_path)
+                        temp_speed = f"{base_audio}_speed{ext}"
                         import subprocess, shutil
-                        await asyncio.to_thread(subprocess.run, ["ffmpeg", "-y", "-i", audio_path, "-filter:a", f"atempo={ratio:.2f}", temp_speed], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0, check=True, timeout=60)
+                        await asyncio.to_thread(subprocess.run, ["ffmpeg", "-y", "-i", audio_path, "-filter:a", tempo_filter, temp_speed], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0, check=True, timeout=60)
                         if os.path.exists(temp_speed):
                             shutil.move(temp_speed, audio_path)
                         
-                    temp_filtered = audio_path.replace(".mp3", "_filtered.mp3")
+                    base_audio, ext = os.path.splitext(audio_path)
+                    temp_filtered = f"{base_audio}_filtered{ext}"
                     clear_filter = "highpass=f=100,equalizer=f=3500:width_type=q:width=1.5:g=3,treble=g=3,acompressor=threshold=-15dB:ratio=3:attack=5:release=50:makeup=5dB"
                     import subprocess, shutil
                     await asyncio.to_thread(subprocess.run, ["ffmpeg", "-y", "-i", audio_path, "-filter:a", clear_filter, temp_filtered], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0, check=True, timeout=60)
@@ -347,9 +374,12 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
                         shutil.move(temp_filtered, audio_path)
                 else:
                     await generate_tts_edge(text, audio_path, voice_param, pitch="+0Hz", rate="+5%")
+            elif voice_source == "capcut":
+                await asyncio.to_thread(_run_capcut_tts, text, audio_path, voice_param)
             elif voice_source == "rvc":
-                temp_edge_raw = audio_path.replace(".mp3", "_temp_raw.mp3")
-                temp_edge_rvc = audio_path.replace(".mp3", "_temp_rvc.mp3")
+                base_audio, ext = os.path.splitext(audio_path)
+                temp_edge_raw = f"{base_audio}_temp_raw{ext}"
+                temp_edge_rvc = f"{base_audio}_temp_rvc{ext}"
                 
                 try:
                     await asyncio.to_thread(_run_capcut_tts, text, temp_edge_raw, "BV562_streaming")
@@ -357,7 +387,7 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
                     print(f"Lỗi CapCut TTS: {e}. Fallback sang Edge TTS (Hoài My)...")
                     await generate_tts_edge(text, temp_edge_raw, "vi-VN-HoaiMyNeural", pitch="+0Hz", rate="+0%")
                 
-                await apply_rvc_clone(temp_edge_raw, temp_edge_rvc, voice_param)
+                await apply_rvc_clone(temp_edge_raw, temp_edge_rvc, voice_param, strict=True)
                 
                 audio = AudioSegment.from_file(temp_edge_rvc)
                 duration_s = len(audio) / 1000.0
@@ -365,9 +395,9 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
                 
                 if expected_s > 0 and duration_s > expected_s + 0.3:
                     ratio = duration_s / expected_s
-                    ratio = min(ratio, 2.0)
+                    tempo_filter = build_atempo_filter(ratio)
                     import subprocess
-                    await asyncio.to_thread(subprocess.run, ["ffmpeg", "-y", "-i", temp_edge_rvc, "-filter:a", f"atempo={ratio}", audio_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0, check=True, timeout=60)
+                    await asyncio.to_thread(subprocess.run, ["ffmpeg", "-y", "-i", temp_edge_rvc, "-filter:a", tempo_filter, audio_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0, check=True, timeout=60)
                 else:
                     import shutil
                     shutil.copy(temp_edge_rvc, audio_path)
@@ -419,15 +449,35 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                 return None
             key = voice_cache_key(seg, voice_source, voice_param)
             path = os.path.join(output_folder, f"{seg.index}.mp3")
-            duration = read_voice_cache(path, key)
+            duration = read_voice_cache(path, key, seg.content.strip())
             if duration is not None:
                 return dict(index=seg.index, path=path, start=seg.start.total_seconds(),
                             end=seg.end.total_seconds(), actual_audio_duration=duration,
                             content=seg.content.strip())
             result = await generate_single_tts(seg, output_folder, voice_source, voice_param, api_key)
             if result is None:
-                raise RuntimeError(f"TTS failed for subtitle {seg.index}; refusing incomplete voiceover")
-            write_voice_cache(path, key, result["actual_audio_duration"])
+                # Cứu hộ lần 1: Thử đọc bằng Edge TTS cơ bản
+                try:
+                    await generate_tts_edge(seg.content.strip(), path, "vi-VN-HoaiMyNeural", pitch="+0Hz", rate="+0%")
+                    if os.path.exists(path) and os.path.getsize(path) > 128:
+                        audio = AudioSegment.from_file(path)
+                        result = dict(index=seg.index, path=path, start=seg.start.total_seconds(),
+                                     end=seg.end.total_seconds(), actual_audio_duration=len(audio) / 1000.0,
+                                     content=seg.content.strip())
+                except Exception:
+                    result = None
+            if result is None:
+                # Cứu hộ lần 2: Tạo đoạn âm thanh im lặng đúng thời lượng để bảo vệ toàn bộ video
+                try:
+                    seg_dur = max(0.5, (seg.end - seg.start).total_seconds())
+                    silent_audio = AudioSegment.silent(duration=int(seg_dur * 1000))
+                    silent_audio.export(path, format="mp3")
+                    result = dict(index=seg.index, path=path, start=seg.start.total_seconds(),
+                                 end=seg.end.total_seconds(), actual_audio_duration=seg_dur,
+                                 content=seg.content.strip())
+                except Exception as sil_err:
+                    raise RuntimeError(f"TTS failed for subtitle {seg.index}; refusing incomplete voiceover: {sil_err}")
+            write_voice_cache(path, key, result["actual_audio_duration"], seg.content.strip())
             return result
     results = await asyncio.gather(*(run_one(seg) for seg in translated_segments), return_exceptions=True)
     errors = [r for r in results if isinstance(r, BaseException)]

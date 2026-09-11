@@ -88,6 +88,7 @@ def _readtext_batch(frames):
     return result
 
 
+@stage("ocr_recognize_batch")
 def _recognize_batch(frames):
     """Recognize sampled frames with PP-OCRv6 Tiny, then fall back safely."""
 
@@ -150,8 +151,9 @@ def _recognize_batch(frames):
                 from ai.v1_model_runtime import close_session
             close_session()
             _paddle_failed = True
-            logger.warning("PP-OCRv6 Tiny failed; falling back to EasyOCR: %s", exc)
+            logger.error("PP-OCRv6 GPU failed; CPU fallback disabled: %s", exc)
 
+    raise RuntimeError("V1 GPU OCR unavailable; CPU EasyOCR fallback disabled")
     easy_reader = get_ocr_reader()
     return [
         easy_reader.readtext(

@@ -359,10 +359,12 @@ async def send_video_safely(context, chat_id, final_video, caption, status_msg, 
         )
         return
 
-    # Nếu file quá lớn (do chất lượng 720p ép buộc), tiến hành cắt nhỏ video bằng FFmpeg (copy codec không làm giảm chất lượng)
+    # Video dung lượng lớn (>49.5MB): Giữ nguyên 100% chất lượng gốc (không nén CRF làm giảm độ nét)
+    # File video hoàn chỉnh chất lượng cao nhất đã được lưu trực tiếp tại D:\banve.
     await safe_edit_status(
         status_msg,
-        f"✂️ *Video gốc quá lớn ({file_size // (1024*1024)}MB)!*\nBot đang giữ nguyên chất lượng cao (>720p) và tự động cắt thành các phần <50MB để gửi cho bạn...",
+        f"💎 *Video chất lượng cao ({file_size // (1024*1024)}MB) đã lưu tại D:\\banve!*\n"
+        f"Giữ nguyên 100% độ nét gốc (không nén), chia phần stream-copy gửi qua Telegram...",
         parse_mode="Markdown",
     )
     
@@ -429,12 +431,24 @@ async def video_worker():
             from telegram_progress import current_job
             progress_token = None
             try:
+                wait_notice_sent = False
                 while tracker_job is None:
                     try:
                         tracker_job = job_tracker.start_batch(1, output_dir=r"D:\banve")
                         progress_token = current_job.set(tracker_job)
                     except job_tracker.JobAlreadyRunningError:
-                        await asyncio.sleep(1)
+                        if not wait_notice_sent and isinstance(job, dict) and job.get('update'):
+                            try:
+                                wait_notice_sent = True
+                                update_obj = job.get('update')
+                                if update_obj and hasattr(update_obj, 'message') and update_obj.message:
+                                    await update_obj.message.reply_text(
+                                        "⏳ *Hệ thống đang bận xử lý Batch Offline.*\nYêu cầu của bạn đã được xếp hàng an toàn và sẽ tự động bắt đầu ngay khi Batch hoàn tất.",
+                                        parse_mode="Markdown"
+                                    )
+                            except Exception:
+                                pass
+                        await asyncio.sleep(2)
                 if isinstance(job, dict):
                     if job['type'] == 'url':
                         await process_single_url(job['update'], job['context'], job['url'], job['pos'])
@@ -474,6 +488,8 @@ async def video_worker():
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                    if hasattr(torch.cuda, "ipc_collect"):
+                        torch.cuda.ipc_collect()
                 global_queue.task_done()
                 if tracker_job:
                     state = job_tracker.get_status()
@@ -1242,6 +1258,14 @@ def main():
 
     while True:
         try:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    asyncio.set_event_loop(asyncio.new_event_loop())
+            except RuntimeError:
+                asyncio.set_event_loop(asyncio.new_event_loop())
+
             # Tăng timeout lên 120 giây để không bị Timed out khi gửi/tải video lớn
             request = HTTPXRequest(
                 connect_timeout=30,
@@ -1267,6 +1291,8 @@ def main():
             app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
             print("Bot da san sang! Dang lang nghe tin nhan...")
+            from tool_control_runtime import install as install_tool_control
+            install_tool_control(app, globals(), 'v1')
             app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
         except Exception as e:
             logger.error(f"Lỗi polling hoặc mạng gián đoạn: {e}. Đang tự động kết nối lại sau 5 giây...")

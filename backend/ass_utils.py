@@ -36,6 +36,42 @@ def _rounded_box(width, height, radius=12):
         f"l {w-r:g} 0 b {w-r+k:g} 0 {w} {r-k:g} {w} {r:g}"
     )
 
+def sync_and_clamp_subtitles(translated_segments, dubbing_audio_files=None):
+    """
+    Đồng bộ thời lượng phụ đề chuẩn xác theo giọng đọc thực tế và chống đè chéo (Anti-Overlap).
+    Đảm bảo thời lượng hiển thị tối thiểu không bị chớp giật (< 0.5s).
+    """
+    import datetime
+    if not translated_segments:
+        return translated_segments
+
+    # 1. Đồng bộ end time theo độ dài thực tế của file âm thanh TTS
+    if dubbing_audio_files:
+        for audio_info in dubbing_audio_files:
+            if audio_info:
+                idx = audio_info.get("index")
+                actual_duration = audio_info.get("actual_audio_duration", 0)
+                for seg in translated_segments:
+                    if getattr(seg, "index", None) == idx and actual_duration > 0:
+                        seg.end = seg.start + datetime.timedelta(seconds=actual_duration + 0.15)
+                        break
+
+    # 2. Chống đè sub (Anti-Overlap) và đảm bảo thời gian đọc tối thiểu
+    for i in range(len(translated_segments) - 1):
+        curr_seg = translated_segments[i]
+        next_seg = translated_segments[i + 1]
+        if curr_seg.end > next_seg.start:
+            safe_end = next_seg.start - datetime.timedelta(seconds=0.05)
+            if (safe_end - curr_seg.start).total_seconds() >= 0.5:
+                curr_seg.end = safe_end
+            else:
+                curr_seg.end = max(curr_seg.start + datetime.timedelta(seconds=0.5), safe_end)
+                if next_seg.start < curr_seg.end:
+                    next_seg.start = curr_seg.end + datetime.timedelta(seconds=0.05)
+                    if next_seg.end <= next_seg.start:
+                        next_seg.end = next_seg.start + datetime.timedelta(seconds=0.6)
+    return translated_segments
+
 
 def generate_ass_file(
     dialogue_segments,
@@ -107,7 +143,33 @@ def generate_ass_file(
                 return lines
             except Exception:
                 pass
+                
+        # Quality Gate: Ngắt dòng thông minh theo ngữ nghĩa (Inspect Text Overflow)
         chars = max(1, int(max_w / (font_size * 0.55)))
+        if len(text) > chars:
+            mid = len(text) // 2
+            best_split = -1
+            # 1. Ưu tiên cắt ở dấu câu (, . -) gần giữa câu
+            for punct in [', ', '. ', ' - ']:
+                idx = text.find(punct, max(0, mid - chars//3), min(len(text), mid + chars//3))
+                if idx != -1:
+                    best_split = idx + 1 # cắt ngay sau dấu phẩy/chấm
+                    break
+            
+            # 2. Nếu không có dấu câu, ưu tiên cắt trước các liên từ
+            if best_split == -1:
+                words = text.split(' ')
+                word_count = len(words)
+                if word_count > 3:
+                    conjunctions = {"và", "nhưng", "thì", "là", "mà", "để", "cho", "nên"}
+                    for i in range(max(1, word_count//2 - 2), min(word_count-1, word_count//2 + 3)):
+                        if words[i].lower() in conjunctions:
+                            best_split = len(" ".join(words[:i]))
+                            break
+                            
+            if best_split != -1 and best_split < chars + 10: # Tránh trường hợp vệt cắt quá xa
+                return [text[:best_split].strip(), text[best_split:].strip()]
+                
         return textwrap.wrap(text, width=chars) or [text]
 
     text_outline = 2

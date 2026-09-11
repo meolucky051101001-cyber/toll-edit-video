@@ -1,48 +1,31 @@
-# Local environments and secrets
-backend/venv/
-backend/venv_old/
-backend/model_venv/
-venv/
-env/
-*.env
-backend/.env
+﻿backend/.env
+.env
 
-# Python and test caches
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
 
-# Frontend build/install output
-frontend/node_modules/
-frontend/dist/
+node_modules/
 
-# Runtime artifacts
+cache/
+temp/
+tmp/
+downloads/
+outputs/
+logs/
+runtime_logs/
+
+*.part
+*.downloading
+
+.venv/
+venv/
+model_venv/
 workspace/
-backend/workspace/
-backend/downloads/
-*.lock
-*.log
-temp_burn*
-*.mp4
-*.mp3
-*.wav
-*.jpg
-*.png
-*.ass
-*.srt
 
-# Large optional model assets
-/models/
+models/
+weights/
+*.pt
 *.pth
-*.index
-*.onnx
-
-# Editor/OS files
-.DS_Store
-Thumbs.db
-.idea/
-*.exe
-*.disabled*
-.vscode/
-_review_src/
-export_giam_sat_a2ui/
-*.zip
+*.bin
+*.safetensors

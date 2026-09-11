@@ -128,7 +128,8 @@ def run_v1_ocr(
                 response.get("error")
                 or result.stderr[-3000:]
                 or result.stdout[-3000:]
-                or "unknown PP-OCRv6 error"
+                or "invalid/empty worker response (returncode={}, response_exists={}, keys={})".format(
+                    result.returncode, response_path.is_file(), sorted(response.keys()))
             )
             raise V1ModelRuntimeError("PP-OCRv6 failed: {}".format(detail))
         return dict(response.get("result", {}))

@@ -1,3 +1,4 @@
+from video_pause import checkpoint as pause_checkpoint
 """
 Batch Video Processor - Tự động xử lý hàng loạt video từ thư mục máy tính (Offline / Local Folder)
 - Quét toàn bộ video trong thư mục đầu vào (mặc định: D:\\video_input)
@@ -181,16 +182,17 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
 
             final_dest = os.path.join(output_dir, f"Dubbed_{base_name}.mp4")
             rvc_model = discover_rvc_model(Path(WORKSPACE))
+            from voice_selection import resolve_voice
+            from dataclasses import replace
+            selected_source, selected_param, selected_label = resolve_voice("rvc" if rvc_model else "edge", rvc_model)
             request = VideoPipelineRequest(
                 video_path=Path(video_path),
                 job_directory=Path(out_dir),
                 output_path=Path(final_dest),
                 settings=pipeline_settings,
                 api_key=GEMINI_API_KEY,
-                voice_source="rvc" if rvc_model else "edge",
-                voice_param=(
-                    str(rvc_model) if rvc_model else "vi-VN-HoaiMyNeural"
-                ),
+                voice_source=selected_source,
+                voice_param=selected_param,
                 rvc_model_path=rvc_model,
                 progress=v2_progress,
             )
@@ -204,6 +206,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
 
     try:
         t0 = time.time()
+        await pause_checkpoint()
         _raise_if_stopped()
         await notify("🎧 Bước 1/6: Đang trích xuất âm thanh gốc...")
         job_tracker.update_step(1, "Bước 1/6: Đang trích xuất âm thanh gốc...", percent=10)
@@ -214,11 +217,13 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             )
             return False
 
+        await pause_checkpoint()
         _raise_if_stopped()
         await notify("🧠 Bước 2/6: Demucs htdemucs Fast đang tách giọng và giữ nhạc nền...")
         job_tracker.update_step(2, "Bước 2/6: Demucs tách giọng và giữ nhạc nền...", percent=25)
         vocals_audio, no_vocals_audio = await asyncio.to_thread(separate_vocals_demucs, original_audio, out_dir)
 
+        await pause_checkpoint()
         _raise_if_stopped()
         await notify("🤖 Bước 3/6: Faster-Whisper Large-v3 Turbo đang nhận dạng giọng nói...")
         job_tracker.update_step(3, "Bước 3/6: Faster-Whisper Large-v3 Turbo nhận dạng giọng nói...", percent=40)
@@ -233,6 +238,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             )
             return False
 
+        await pause_checkpoint()
         _raise_if_stopped()
         await notify("👀 Bước 3.5/6: Đang quét vị trí phụ đề gốc...")
         job_tracker.update_step(3.5, "Bước 3.5/6: Quét vị trí phụ đề gốc (PP-OCRv6)...", percent=55)
@@ -259,6 +265,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         for i, seg in enumerate(srt_segments, 1):
             seg.index = i
 
+        await pause_checkpoint()
         _raise_if_stopped()
         await notify(f"🌐 Bước 4/6: Gemini 3.8 Flash đang dịch ({len(srt_segments)} câu)...")
         job_tracker.update_step(4, f"Bước 4/6: Gemini 3.8 Flash đang dịch ({len(srt_segments)} câu)...", percent=70)
@@ -292,35 +299,20 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             if rvc_model_path:
                 break
                 
-        v_source = "rvc" if rvc_model_path and rvc_runtime_available() else "edge"
-        v_param = rvc_model_path if v_source == "rvc" else "vi-VN-HoaiMyNeural"
-
+        from voice_selection import resolve_voice
+        v_source, v_param, v_label = resolve_voice(
+            "rvc" if rvc_model_path and rvc_runtime_available() else "edge", rvc_model_path)
+        await pause_checkpoint()
         _raise_if_stopped()
-        await notify(f"🗣️ Bước 5/6: Đang lồng tiếng AI ({'Giọng Chí Mai RVC' if v_source == 'rvc' else 'Giọng Hoài My'})...")
-        job_tracker.update_step(5, f"Bước 5/6: Lồng tiếng AI ({'Giọng Chí Mai RVC' if v_source == 'rvc' else 'Giọng Hoài My'})...", percent=85)
+        await notify(f"Đang lồng tiếng: {v_label}")
+        job_tracker.update_step(5, f"Lồng tiếng: {v_label}", percent=85)
         dubbing_audio_files = await generate_dubbing_audio(
             translated_segments, dubbing_dir, voice_source=v_source, voice_param=v_param
         )
 
-        # ĐỒNG BỘ THỜI GIAN BIẾN MẤT CỦA PHỤ ĐỀ THEO GIỌNG ĐỌC
-        for i, audio_info in enumerate(dubbing_audio_files):
-            if audio_info:
-                idx = audio_info.get("index")
-                actual_duration = audio_info.get("actual_audio_duration", 0)
-                for seg in translated_segments:
-                    if getattr(seg, "index", None) == idx and actual_duration > 0:
-                        new_end = seg.start + datetime.timedelta(seconds=actual_duration + 0.1)
-                        seg.end = new_end
-                        break
-
-        # CHỐNG ĐÈ SUB (Anti-Overlap): Đảm bảo sub trước phải biến mất trước khi sub sau xuất hiện
-        for i in range(len(translated_segments) - 1):
-            if translated_segments[i].end > translated_segments[i+1].start:
-                safe_end = translated_segments[i+1].start - datetime.timedelta(seconds=0.05)
-                if safe_end > translated_segments[i].start:
-                    translated_segments[i].end = safe_end
-                else:
-                    translated_segments[i].end = translated_segments[i].start + datetime.timedelta(seconds=0.1)
+        # ĐỒNG BỘ THỜI GIAN THEO GIỌNG ĐỌC & CHỐNG ĐÈ SUB CHUYÊN SÂU
+        from ass_utils import sync_and_clamp_subtitles
+        translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
 
         # Căn chỉnh phụ đề ASS
         ass_path = os.path.join(out_dir, "final.ass")
@@ -329,6 +321,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         # Trộn nhạc nền sạch với giọng lồng tiếng
         await asyncio.to_thread(mix_audio_pydub, no_vocals_audio, dubbing_audio_files, mixed_audio, original_volume_db=-2, dubbing_volume_db=1)
 
+        await pause_checkpoint()
         _raise_if_stopped()
         await notify("🎬 Bước 6/6: Đang Render video thành phẩm (Multi-threading)...")
         job_tracker.update_step(6, "Bước 6/6: Render video thành phẩm bằng NVENC GPU...", percent=95)
@@ -340,6 +333,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             )
             return False
 
+        await pause_checkpoint()
         _raise_if_stopped()
         # Lưu thành phẩm vào thư mục đầu ra
         probe = await asyncio.to_thread(probe_downloaded_video, final_video)
@@ -351,6 +345,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         receipt_path = _receipt_path(final_dest)
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_json(receipt_path, {
+            "voice_id": __import__("voice_selection").selected()["id"],
             "input_sha256": fingerprint(video_path),
             "output_sha256": fingerprint(final_dest),
         })
@@ -406,6 +401,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
         except:
             pass
 
@@ -498,7 +495,17 @@ async def _process_batch_folder(
 
         # Kiểm tra nếu video này đã được render thành phẩm trong output_dir thì bỏ qua
         expected_render = os.path.join(output_dir, f"Dubbed_{base_stem}.mp4")
-        if os.path.isfile(expected_render) and await asyncio.to_thread(_verified_output, vpath, expected_render):
+        verified = os.path.isfile(expected_render) and await asyncio.to_thread(_verified_output, vpath, expected_render)
+        if verified:
+            from voice_selection import selected
+            receipt = json.loads(_receipt_path(expected_render).read_text(encoding="utf-8"))
+            if receipt.get("voice_id") != selected()["id"]:
+                # Preserve the old render; never mistake a different voice for completion.
+                backup = Path(expected_render).with_name(Path(expected_render).stem + "_previous_" + uuid.uuid4().hex[:8] + ".mp4")
+                Path(expected_render).rename(backup)
+                logger.info("Giọng đã đổi hoặc bản cũ chưa ghi giọng; giữ bản trước tại %s và render lại", backup)
+                verified = False
+        if verified:
             skip_msg = f"⏩ [{idx}/{total}] Video `{vname}` đã có thành phẩm (`{os.path.basename(expected_render)}`). Bỏ qua..."
             logger.info(skip_msg)
             if progress_callback:
@@ -510,9 +517,17 @@ async def _process_batch_folder(
             continue
 
         if os.path.exists(expected_render):
-            failure_count += 1
-            job_tracker.set_error(vname, "Thành phẩm cũ chưa xác minh hoặc khác đầu vào; giữ nguyên để kiểm tra.", fatal=False)
-            continue
+            # Tự động sao lưu thành phẩm cũ chưa khớp để không làm kẹt batch và render bản mới
+            mtime_tag = int(os.path.getmtime(expected_render))
+            backup_render = Path(expected_render).with_name(f"{Path(expected_render).stem}_old_{mtime_tag}_{uuid.uuid4().hex[:4]}.mp4")
+            try:
+                Path(expected_render).rename(backup_render)
+                logger.info(f"Thành phẩm cũ chưa xác minh; đã sao lưu tại {backup_render} và tiến hành render lại cho {vname}")
+            except Exception as rename_err:
+                logger.warning(f"Không thể sao lưu thành phẩm cũ {expected_render}: {rename_err}")
+                failure_count += 1
+                job_tracker.set_error(vname, f"Không thể sao lưu thành phẩm cũ: {rename_err}", fatal=False)
+                continue
 
         step_msg = f"🎬 **[{idx}/{total}] Đang xử lý:** `{vname}`..."
         logger.info(step_msg)

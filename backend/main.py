@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Form, Body, HTTPException
+from fastapi import FastAPI, Form, Body, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import os
@@ -7,6 +7,8 @@ import datetime
 import logging
 import mimetypes
 import uuid
+import json
+from urllib.parse import unquote
 from pathlib import Path
 from typing import Optional
 
@@ -43,12 +45,42 @@ app.add_middleware(
 )
 
 BASE_DIR = Path(__file__).resolve().parent
+
+def ensure_tool_control():
+    try:
+        import socket, subprocess, sys
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            if s.connect_ex(('127.0.0.1', 8090)) == 0:
+                return
+        pythonw = BASE_DIR / "venv" / "Scripts" / "pythonw.exe"
+        script = BASE_DIR / "tool_control.py"
+        if not pythonw.exists():
+            pythonw = Path(sys.executable)
+        subprocess.Popen(
+            [str(pythonw), str(script)],
+            cwd=str(BASE_DIR),
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        logger.info("Launched tool_control.py on port 8090")
+    except Exception as e:
+        logger.warning("Failed to auto-start tool_control: %s", e)
+
+@app.on_event("startup")
+async def on_startup():
+    ensure_tool_control()
 WORKSPACE = os.getenv("AUTODUB_WORKSPACE", str(BASE_DIR.parent / "workspace"))
 OUTPUT_DIR = os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 os.makedirs(WORKSPACE, exist_ok=True)
 
 def get_input_dir() -> Path:
+    saved = Path(WORKSPACE) / "dashboard_input.json"
+    if saved.exists():
+        return Path(json.loads(saved.read_text(encoding="utf-8"))["path"])
     env_dir = os.getenv("AUTODUB_INPUT_DIR")
     if env_dir and os.path.exists(env_dir):
         return Path(env_dir)
@@ -318,6 +350,10 @@ async def api_process_video(
             api_key=api_key
         )
 
+        # 4.5. Synchronize subtitle timing to audio duration & anti-overlap
+        from ass_utils import sync_and_clamp_subtitles
+        translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
+
         # 5. Mix audio (original + dubbing)
         mix_audio_pydub(original_audio, dubbing_audio_files, mixed_audio)
 
@@ -478,6 +514,10 @@ async def api_process_url(
             api_key=api_key
         )
 
+        # Synchronize subtitle timing to audio duration & anti-overlap
+        from ass_utils import sync_and_clamp_subtitles
+        translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
+
         # Mix audio
         mix_audio_pydub(original_audio, dubbing_audio_files, mixed_audio)
 
@@ -537,6 +577,8 @@ async def serve_dashboard():
 async def api_get_status():
     """Trả về trạng thái tiến độ thời gian thực của tác vụ hiện tại."""
     status = job_tracker.get_status()
+    import video_pause
+    status["pause_state"] = video_pause.state()
     status["stop_requested"] = bool(
         status.get("stop_requested")
         or getattr(shared_state, "stop_requested", False)
@@ -556,6 +598,90 @@ async def api_get_queue():
         return {**data, "available": alive, "message": "" if alive else "Bot đã dừng; danh sách là bản ghi cuối cùng."}
     except (OSError, ValueError, TypeError):
         raise HTTPException(503, "Không đọc được hàng đợi Telegram")
+
+def _check_input_request(request):
+    if request.headers.get("X-Dashboard-Input") != "1" or request.headers.get("origin") not in (None, "http://127.0.0.1:8088", "http://localhost:8088"):
+        raise HTTPException(403, "Yêu cầu không hợp lệ")
+    if (BATCH_TASK is not None and not BATCH_TASK.done()) or job_tracker.get_status().get("active"):
+        raise HTTPException(409, "Chờ video đang xử lý hoàn tất trước khi đổi nguồn hoặc thêm video.")
+
+FOLDER_PICKER_LOCK = asyncio.Lock()
+
+@app.post("/api/choose-input-folder")
+async def api_choose_input_folder(request: Request):
+    _check_input_request(request)
+    if FOLDER_PICKER_LOCK.locked():
+        raise HTTPException(409, "Hộp chọn thư mục đang mở. Hãy chọn hoặc bấm Hủy trong cửa sổ đó.")
+    async with FOLDER_PICKER_LOCK:
+        import sys, subprocess
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, str(BASE_DIR / "choose_video_folder.py"), str(get_input_dir()),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
+            if process.returncode:
+                raise HTTPException(503, "Không mở được hộp chọn thư mục Windows. Hãy kiểm tra phiên desktop đang đăng nhập.")
+            return json.loads(stdout.decode("utf-8"))
+        except asyncio.TimeoutError:
+            raise HTTPException(408, "Hết thời gian chọn thư mục. Bấm Chọn thư mục để thử lại.")
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.communicate()
+
+@app.post("/api/input-folder")
+async def api_input_folder(request: Request):
+    async with BATCH_TASK_LOCK:
+        _check_input_request(request)
+        data = await request.json()
+        value = data.get("path", "") if isinstance(data, dict) else ""
+        if not isinstance(value, str) or not value.strip():
+            raise HTTPException(400, "Nhập đường dẫn thư mục video.")
+        path = Path(value.strip().strip('"'))
+        if not path.is_absolute() or not path.is_dir():
+            raise HTTPException(400, "Thư mục không tồn tại. Hãy nhập đường dẫn đầy đủ.")
+        path = path.resolve()
+        if path == get_output_dir().resolve():
+            raise HTTPException(400, "Hãy chọn thư mục nguồn khác thư mục video hoàn thành.")
+        dest = Path(WORKSPACE) / "dashboard_input.json"
+        tmp = dest.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"path": str(path)}), encoding="utf-8")
+        os.replace(tmp, dest)
+        return {"path": str(path)}
+
+@app.post("/api/input-video")
+async def api_input_video(request: Request):
+    from batch_processor import SUPPORTED_EXTENSIONS
+    async with BATCH_TASK_LOCK:
+        _check_input_request(request)
+        name = unquote(request.headers.get("X-Video-Name", ""))
+        if not name or Path(name).name != name or any(c in name for c in '/\\:') or Path(name).suffix.lower() not in SUPPORTED_EXTENSIONS:
+            raise HTTPException(400, "Chỉ nhận file video MP4, MKV, MOV, AVI, WEBM, FLV, M4V.")
+        if name.startswith("Dubbed_"):
+            name = "Source_" + name
+        root = get_input_dir().resolve()
+        if not root.is_dir():
+            raise HTTPException(400, "Thư mục nguồn không còn tồn tại. Hãy chọn lại.")
+        # Stage completely before exposing the video to the batch scanner.
+        tmp = root / (".upload-" + uuid.uuid4().hex + ".part")
+        target = root / name
+        total = 0
+        try:
+            with tmp.open("xb") as out:
+                async for chunk in request.stream():
+                    total += len(chunk)
+                    if total > 4 * 1024**3:
+                        raise HTTPException(413, "Mỗi video tối đa 4 GB.")
+                    await asyncio.to_thread(out.write, chunk)
+            if not total:
+                raise HTTPException(400, "File video rỗng.")
+            if target.exists():
+                target = root / (Path(name).stem + "_" + uuid.uuid4().hex[:8] + Path(name).suffix)
+            tmp.rename(target)
+            return {"name": target.name, "size": total}
+        finally:
+            tmp.unlink(missing_ok=True)
 
 @app.get("/api/phoi")
 async def api_get_phoi():
@@ -582,7 +708,7 @@ async def api_get_phoi():
     try:
         for f in sorted(os.listdir(input_dir)):
             full_path = input_dir / f
-            if full_path.is_file() and f.lower().endswith(SUPPORTED_EXTENSIONS) and not f.startswith("Dubbed_") and " (1)" not in f:
+            if full_path.is_file() and f.lower().endswith(SUPPORTED_EXTENSIONS) and not f.startswith("Dubbed_"):
                 size_b = full_path.stat().st_size
                 total_size += size_b
                 mtime_str = datetime.datetime.fromtimestamp(full_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
@@ -631,8 +757,12 @@ async def api_get_banve():
         }
 
     from batch_processor import SUPPORTED_EXTENSIONS
+    from render_history import get_all_render_durations, format_duration
+    durations = get_all_render_durations(output_dir)
+
     files_data = []
     total_size = 0
+    total_render_sec = 0
     try:
         for f in sorted(os.listdir(output_dir), reverse=True):
             full_path = output_dir / f
@@ -640,10 +770,15 @@ async def api_get_banve():
                 size_b = full_path.stat().st_size
                 total_size += size_b
                 mtime_str = datetime.datetime.fromtimestamp(full_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                dur_sec = durations.get(f) or durations.get(f.replace("Dubbed_", "")) or 0
+                if dur_sec:
+                    total_render_sec += dur_sec
                 files_data.append({
                     "name": f,
                     "size_mb": round(size_b / (1024 * 1024), 2),
                     "created": mtime_str,
+                    "duration_seconds": dur_sec,
+                    "duration_formatted": format_duration(dur_sec) if dur_sec else "--",
                 })
     except Exception as e:
         logger.error(f"Lỗi đọc thư mục bản vẽ: {e}")
@@ -654,6 +789,8 @@ async def api_get_banve():
         "files": files_data,
         "total_count": len(files_data),
         "total_size_mb": round(total_size / (1024 * 1024), 2),
+        "total_duration_seconds": total_render_sec,
+        "total_duration_formatted": format_duration(total_render_sec) if total_render_sec else "--",
     }
 
 
@@ -662,6 +799,8 @@ async def api_run_batch():
     """Kích hoạt chạy batch toàn bộ video phôi ngầm."""
     global BATCH_TASK
     async with BATCH_TASK_LOCK:
+        if Path(r"C:\tool v1\workspace\control\v1.pause").exists():
+            raise HTTPException(409, "Tool đang tắt, không nhận batch mới.")
         status = job_tracker.get_status()
         if (BATCH_TASK is not None and not BATCH_TASK.done()) or status.get("active"):
             return JSONResponse(
@@ -705,10 +844,28 @@ async def api_run_batch():
         content={
             "status": "started",
             "job_id": job_id,
-            "message": "Đã bắt đầu xử lý toàn bộ video trong thư mục video phôi!",
+            "message": "Đã bắt đầu xử lý video trong thư mục đã chọn!",
         },
     )
 
+
+@app.post("/api/pause-video")
+async def api_pause_video(request: Request):
+    if request.headers.get("X-Dashboard-Input") != "1" or request.headers.get("origin") not in (None,"http://127.0.0.1:8088","http://localhost:8088"):
+        raise HTTPException(403, "Yêu cầu không hợp lệ")
+    import video_pause
+    if not job_tracker.get_status().get("active"):
+        raise HTTPException(409, "Không có video đang xử lý.")
+    video_pause.request_pause()
+    return {"message": "Sẽ tạm dừng sau bước đang chạy."}
+
+@app.post("/api/resume-video")
+async def api_resume_video(request: Request):
+    if request.headers.get("X-Dashboard-Input") != "1" or request.headers.get("origin") not in (None,"http://127.0.0.1:8088","http://localhost:8088"):
+        raise HTTPException(403, "Yêu cầu không hợp lệ")
+    import video_pause
+    video_pause.resume()
+    return {"message": "Đã tiếp tục xử lý video."}
 
 @app.post("/api/stop-batch")
 async def api_stop_batch():
@@ -750,6 +907,23 @@ async def api_stream_video(folder: str, filename: str):
     file_path = _safe_media_path(folder, unquote(filename))
     media_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
     return FileResponse(str(file_path), media_type=media_type)
+
+
+# ===== AUDIO SETTINGS (MIXER GAIN CONTROLS) =====
+from audio_settings import get_audio_settings, save_audio_settings
+
+@app.get("/api/audio-settings")
+async def api_get_audio_settings():
+    """Lấy cấu hình âm lượng BGM và Dubbing Voice hiện tại."""
+    return get_audio_settings()
+
+
+@app.post("/api/audio-settings")
+async def api_save_audio_settings(payload: dict = Body(...)):
+    """Lưu cấu hình âm lượng BGM và Dubbing Voice mới."""
+    bgm = payload.get("bgm_volume_db", -2.0)
+    dub = payload.get("dubbing_volume_db", 1.0)
+    return save_audio_settings(bgm, dub)
 
 
 # ===== A2UI (AGENT-TO-USER INTERFACE) ISOLATED EXTENSION ENDPOINTS =====

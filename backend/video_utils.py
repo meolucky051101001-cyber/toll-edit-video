@@ -143,15 +143,25 @@ def mix_audio_pydub(
     original_audio_path,
     dubbing_audio_files,
     output_mixed_audio_path,
-    original_volume_db=-5,
-    dubbing_volume_db=1,
+    original_volume_db=None,
+    dubbing_volume_db=None,
     strict=False,
     **kwargs,
 ):
     """
-    Trộn âm thanh bằng PyDub. Giảm âm lượng nhạc nền (-15dB, tức khoảng 15-20%) và chèn giọng đọc AI vào đúng vị trí.
+    Trộn âm thanh bằng PyDub. Điều chỉnh âm lượng nhạc nền và giọng đọc AI theo cấu hình mixer.
     """
-    print("Mixing audio tracks using pydub...")
+    try:
+        from audio_settings import get_audio_settings
+        _cfg = get_audio_settings()
+        if original_volume_db is None or original_volume_db in (-2, -5):
+            original_volume_db = _cfg.get("bgm_volume_db", -2.0)
+        if dubbing_volume_db is None or dubbing_volume_db == 1:
+            dubbing_volume_db = _cfg.get("dubbing_volume_db", 1.0)
+    except Exception:
+        if original_volume_db is None: original_volume_db = -2.0
+        if dubbing_volume_db is None: dubbing_volume_db = 1.0
+    print(f"Mixing audio tracks using pydub (BGM={original_volume_db}dB, Dubbing={dubbing_volume_db}dB)...")
     original_popen = None
     try:
         import subprocess
@@ -234,12 +244,18 @@ def process_video(
 
     print("Processing final video with styled subtitles, auto-delogo and hardware encoder...")
     
-    # Tạo bản copy an toàn ASCII ở thư mục gốc backend để FFmpeg filter subtitles không bị dính ký tự Unicode
+    # Tạo bản copy an toàn ASCII ở thư mục temp_subs để FFmpeg filter subtitles không bị dính ký tự Unicode
     import shutil
     import uuid
     base_dir = os.path.dirname(os.path.abspath(__file__))
+    temp_subs_dir = os.path.join(base_dir, "temp_subs")
+    try:
+        os.makedirs(temp_subs_dir, exist_ok=True)
+    except Exception:
+        temp_subs_dir = base_dir
+
     unique_sub_name = f"temp_burn_{int(time.time())}_{uuid.uuid4().hex[:6]}" + (".ass" if srt_path.endswith('.ass') else ".srt")
-    safe_sub_path = os.path.join(base_dir, unique_sub_name)
+    safe_sub_path = os.path.join(temp_subs_dir, unique_sub_name)
     try:
         shutil.copy2(srt_path, safe_sub_path)
         srt_to_use = safe_sub_path
@@ -319,7 +335,7 @@ def process_video(
             ['h264_nvenc', '-preset', 'p4', '-tune', 'hq', '-b:v', b_v, '-spatial-aq', '1'],
             ['h264_nvenc', '-preset', 'fast', '-b:v', b_v],
             ['h264_mf', '-b:v', b_v],
-            ['libx264', '-preset', 'veryfast', '-crf', '20', '-threads', '0']
+            ['libx264', '-preset', 'veryfast', '-crf', '22']
         ]
         
         for enc_args in encoders_to_try:

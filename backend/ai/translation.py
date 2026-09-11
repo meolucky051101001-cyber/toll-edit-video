@@ -48,8 +48,10 @@ Yêu cầu TỐI QUAN TRỌNG:
 2. DỊCH CHUẨN XÁC NHƯNG HẤP DẪN: Ưu tiên dịch đúng nghĩa đen và bóng của câu chữ. Giữ văn phong tự nhiên, cuốn hút, có chút thiên hướng mạng xã hội để đăng video.
 3. XỬ LÝ TỪ NGỮ VĂN HOA/THƠ CA: Các video Douyin thường dùng câu chữ hoa mỹ. Ví dụ '懒春秋' mang ý nghĩa 'thư thái, nhàn hạ' chứ KHÔNG PHẢI là 'lười biếng'. Hãy dịch thoát ý, sang trọng.
 4. TUYỆT ĐỐI KHÔNG lạm dụng từ tiếng Anh. Ưu tiên tiếng Việt thuần túy.
-5. KHỚP KHẨU HÌNH & THỜI LƯỢNG (LIP-SYNC): Văn bản dịch dùng để lồng tiếng (TTS), độ dài âm tiết của câu tiếng Việt PHẢI TƯƠNG ĐƯƠNG VỚI CÂU GỐC để khớp hoàn hảo khẩu hình miệng của nhân vật (không được dịch quá dài khiến AI phải đọc quá nhanh, và không được dịch quá cụt khiến AI đọc xong trước khi nhân vật khép miệng).
-6. Ngữ cảnh nối tiếp: Vì phụ đề thường bị ngắt giữa chừng, hãy đọc cả đoạn để dịch sao cho ý nối liền mạch trơn tru.
+5. KHỚP KHẨU HÌNH & THỜI LƯỢNG (LIP-SYNC): Văn bản dịch dùng để lồng tiếng (TTS), độ dài âm tiết của câu tiếng Việt PHẢI TƯƠNG ĐƯƠNG VỚI CÂU GỐC để khớp hoàn hảo khẩu hình miệng của nhân vật.
+6. THUẬT NGỮ KIẾN TRÚC & ĐỜI SỐNG: '三合院' dịch là 'nhà tam hợp viện / nhà ba gian', '占地' dịch là 'diện tích đất', '大气' dịch là 'bề thế, sang trọng / đẳng cấp' (tuyệt đối không dịch thành 'dấu chân', 'khí quyển').
+7. LỌC HOẶC VIỆT HÓA CÂU KÊU GỌI (CTA): Các câu kêu gọi Douyin/TikTok như '回复888', '关注我', '点赞' hãy dịch khéo thành lời kêu gọi tự nhiên ngắn gọn (ví dụ: 'để lại bình luận bên dưới nhé' hoặc 'liên hệ ngay nhé'), không dịch máy số hiệu thô thiển.
+8. Ngữ cảnh nối tiếp: Vì phụ đề thường bị ngắt giữa chừng, hãy đọc cả đoạn để dịch sao cho ý nối liền mạch trơn tru.
 """
     if with_vision:
         prompt += "7. TRỰC QUAN: Hãy kết hợp các bức ảnh đính kèm từ video để chọn đại từ nhân xưng và danh từ chính xác tuyệt đối với ngữ cảnh.\n"
@@ -120,16 +122,16 @@ def translate_with_gemini(
                     "data": b64
                 }
             })
-        preferred_gemini = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
+        preferred_gemini = os.getenv("GEMINI_MODEL", "gemini-3.7-flash").strip()
         candidate_models = [
             preferred_gemini,
-            "gemini-3.8-flash",
             "gemini-3.7-flash",
-            "gemini-3.6-flash",
-            "gemini-flash-latest",
             "gemini-3.5-flash",
-            "gemini-flash-lite-latest",
             "gemini-3.5-flash-lite",
+            "gemini-3.6-flash",
+            "gemini-3.1-flash-lite",
+            "gemini-flash-lite-latest",
+            "gemini-3.8-flash",
         ]
         models_to_try = []
         for m in candidate_models:
@@ -158,7 +160,8 @@ def translate_with_gemini(
                                          timeout=(min(5.0, remaining / 2), min(25.0, remaining / 2)))
                 if response.status_code == 200:
                     result = response.json()
-                    raw = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    parts_out = result.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                    raw = "".join(p.get("text", "") for p in parts_out if not p.get("thought")).strip()
                     match = re.search(r'\[.*\]', raw, re.DOTALL)
                     translated = json.loads(match.group(0) if match else raw)
                     if not isinstance(translated, list) or len(translated) != len(texts) or not all(
@@ -172,14 +175,24 @@ def translate_with_gemini(
                 else:
                     logger.warning(f"Lỗi gọi {model} (HTTP {response.status_code})")
                     with _gemini_health_lock:
-                        _gemini_cooldown[(account, model)] = time.monotonic() + 300
+                        if response.status_code == 429:
+                            _gemini_cooldown[(account, model)] = time.monotonic() + 15
+                        elif response.status_code in (500, 502, 503, 504):
+                            _gemini_cooldown[(account, model)] = time.monotonic() + 20
+                        elif response.status_code == 404:
+                            _gemini_cooldown[(account, model)] = time.monotonic() + 86400
+                        else:
+                            _gemini_cooldown[(account, model)] = time.monotonic() + 60
                     if response.status_code in (401, 403):
                         break
             except Exception as req_e:
                 # Exception URLs can contain API keys; log only the error type.
                 logger.warning("Lỗi dịch %s: %s", model, type(req_e).__name__)
                 with _gemini_health_lock:
-                    _gemini_cooldown[(account, model)] = time.monotonic() + 300
+                    if isinstance(req_e, (requests.ConnectionError, requests.Timeout)):
+                        _gemini_cooldown.pop((account, model), None)
+                    else:
+                        _gemini_cooldown[(account, model)] = time.monotonic() + 30
                 
         return None
     except Exception as e:

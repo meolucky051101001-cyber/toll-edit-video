@@ -165,6 +165,31 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
         except Exception as e:
             logger.warning(f"TikWM thử link {t_url} lỗi: {e}")
 
+    # Chiến lược 2: Direct Douyin Mobile API (Dự phòng khi TikWM lỗi hoặc bị chặn IP)
+    if video_id:
+        try:
+            logger.info(f"TikWM không khả dụng, chuyển sang Douyin Direct API cho video_id: {video_id}")
+            direct_api = f"https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/?item_ids={video_id}"
+            headers = {"User-Agent": USER_AGENTS["mobile"]}
+            res_dir = requests.get(direct_api, headers=headers, timeout=10)
+            if res_dir.status_code == 200:
+                dir_data = res_dir.json()
+                item_list = dir_data.get("item_list", [])
+                if item_list:
+                    item = item_list[0]
+                    title = item.get("desc", "") or "douyin_video"
+                    safe_title = clean_filename(title)
+                    play_urls = item.get("video", {}).get("play_addr", {}).get("url_list", [])
+                    for p_url in play_urls:
+                        # Thay playwm bằng play để lấy luồng video gốc không logo
+                        clean_play_url = p_url.replace("playwm", "play")
+                        target_path = os.path.join(output_dir, f"{prefix}_{safe_title}.mp4")
+                        if download_file_stream(clean_play_url, target_path, headers=headers):
+                            logger.info(f"Tải thành công Douyin Direct không logo: {target_path}")
+                            return True, target_path, title, ""
+        except Exception as e_direct:
+            logger.warning(f"Douyin Direct Scraper gặp lỗi: {e_direct}")
+
     return False, "", "", "Không thể bóc tách link Douyin qua API"
 
 import urllib.request
@@ -304,6 +329,9 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
         }
+        xhs_cookie = os.getenv("XHS_COOKIE", "").strip()
+        if xhs_cookie:
+            headers['Cookie'] = xhs_cookie
         
         # Tạo danh sách các link ứng viên (tự động chữa lỗi nhầm ký tự l / I / 1 / 0 / O)
         fetch_candidates = [url.strip()]

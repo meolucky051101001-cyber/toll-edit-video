@@ -172,6 +172,29 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None):
             text = segment.text.strip()
             if not text:
                 continue
+            words = getattr(segment, "words", None)
+            duration = float(segment.end) - float(segment.start)
+            if words and duration > 6.0:
+                sub_chunks = []
+                cur = []
+                for w in words:
+                    cur.append(w)
+                    cur_dur = float(cur[-1].end) - float(cur[0].start)
+                    w_text = str(getattr(w, "word", "") or "")
+                    is_end = any(p in w_text for p in "。！？!?")
+                    is_comma = any(p in w_text for p in "，,；;") and cur_dur >= 3.0
+                    if is_end or is_comma:
+                        txt = "".join(str(getattr(x, "word", "") or "") for x in cur).strip()
+                        if txt:
+                            sub_chunks.append({"start": float(cur[0].start), "end": float(cur[-1].end), "text": txt})
+                        cur = []
+                if cur:
+                    txt = "".join(str(getattr(x, "word", "") or "") for x in cur).strip()
+                    if txt:
+                        sub_chunks.append({"start": float(cur[0].start), "end": float(cur[-1].end), "text": txt})
+                if len(sub_chunks) > 1:
+                    transcribed_segments.extend(sub_chunks)
+                    continue
             start, end = _word_aligned_bounds(segment)
             transcribed_segments.append({"start": start, "end": end, "text": text})
 

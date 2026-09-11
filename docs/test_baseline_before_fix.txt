@@ -1,0 +1,516 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.10.11, pytest-9.1.1, pluggy-1.6.0 -- C:\tool v1\backend\venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: C:\tool v1
+plugins: anyio-4.14.2, hydra-core-1.0.7, asyncio-1.4.0, mock-3.15.1
+asyncio: mode=strict, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 92 items
+
+tests/test_ocr_fail_closed.py::OCRFailureTests::test_both_telegram_ocr_handlers_raise FAILED [  1%]
+tests/test_ocr_fail_closed.py::OCRFailureTests::test_worker_rejects_cpu_only_session PASSED [  2%]
+tests/test_v1_stability.py::StabilityTests::test_exact_frame_cache_and_changed_pixels PASSED [  3%]
+tests/test_v1_stability.py::StabilityTests::test_gemini_skips_recent_failed_model_and_keeps_full_array PASSED [  4%]
+tests/test_v1_stability.py::StabilityTests::test_ocr_closes_failed_worker_before_fallback_and_does_not_retry FAILED [  5%]
+tests/test_v1_stability.py::VoiceStabilityTests::test_missing_voice_fails_instead_of_silently_omitting FAILED [  6%]
+tests/test_v1_stability.py::VoiceStabilityTests::test_successful_cue_reused_but_changed_text_invalidates FAILED [  7%]
+tests/test_asr_single_worker.py::WorkerTests::test_serial_gpu_uses_one_worker_without_changing_quality FAILED [  8%]
+tests/test_translation_optimization.py::OptimizationTests::test_all_failed_fail_fast_during_cooldown FAILED [  9%]
+tests/test_translation_optimization.py::OptimizationTests::test_cache_reuses_success_not_network FAILED [ 10%]
+tests/test_translation_optimization.py::OptimizationTests::test_context_and_account_invalidate_cache PASSED [ 11%]
+tests/test_translation_optimization.py::OptimizationTests::test_failed_model_skipped_next_video_and_recovers FAILED [ 13%]
+tests/test_translation_optimization.py::OptimizationTests::test_invalid_cache_rejected PASSED [ 14%]
+tests/test_translation_optimization.py::OptimizationTests::test_transport_failure_does_not_poison_next_job FAILED [ 15%]
+tests/test_pipeline_v2_adaptive.py::AdaptiveDecisionTests::test_explicit_clean_hint_skips_demucs PASSED [ 16%]
+tests/test_pipeline_v2_adaptive.py::AdaptiveDecisionTests::test_resolution_policy_never_upscales PASSED [ 17%]
+tests/test_pipeline_v2_adaptive.py::AdaptiveDecisionTests::test_uncertain_ocr_runs_and_clear_frames_skip PASSED [ 18%]
+tests/test_pipeline_v2_adaptive.py::ParallelContextTests::test_parallel_mode_starts_both_operations_before_release PASSED [ 19%]
+tests/test_pipeline_v2_checkpoint.py::AtomicIoTests::test_failed_replace_preserves_previous_file_and_cleans_temp PASSED [ 20%]
+tests/test_pipeline_v2_checkpoint.py::ArtifactStoreTests::test_rejects_path_traversal PASSED [ 21%]
+tests/test_pipeline_v2_checkpoint.py::ArtifactStoreTests::test_staged_file_is_published_and_detects_corruption PASSED [ 22%]
+tests/test_pipeline_v2_checkpoint.py::ManifestTests::test_cache_identity_changes_with_source_config_or_model PASSED [ 23%]
+tests/test_pipeline_v2_checkpoint.py::ManifestTests::test_interrupted_stage_becomes_retryable_and_counts_attempts PASSED [ 25%]
+tests/test_pipeline_v2_checkpoint.py::ManifestTests::test_invalid_transition_is_rejected PASSED [ 26%]
+tests/test_pipeline_v2_checkpoint.py::ManifestTests::test_invalidate_resets_selected_stage_and_downstream_only PASSED [ 27%]
+tests/test_pipeline_v2_checkpoint.py::ManifestTests::test_manifest_round_trip_and_stage_artifact_cache PASSED [ 28%]
+tests/test_pipeline_v2_download.py::PartialContentTests::test_full_stream_rejects_incomplete_206 PASSED [ 29%]
+tests/test_pipeline_v2_download.py::PartialContentTests::test_range_requires_exact_206_and_content_range PASSED [ 30%]
+tests/test_pipeline_v2_download.py::DownloadProbeTests::test_probe_requires_container_video_stream_and_duration PASSED [ 31%]
+tests/test_pipeline_v2_download.py::DownloadProbeTests::test_xhs_clean_origin_cdn_patch_is_preserved PASSED [ 32%]
+tests/test_pipeline_v2_failure_semantics.py::MediaStageValidationTests::test_demucs_rejects_legacy_source_audio_fallback PASSED [ 33%]
+tests/test_pipeline_v2_failure_semantics.py::MediaStageValidationTests::test_gpu_worker_rejects_demucs_fallback_even_when_files_exist PASSED [ 34%]
+tests/test_pipeline_v2_failure_semantics.py::MediaStageValidationTests::test_rvc_model_discovery_rejects_git_lfs_pointer PASSED [ 35%]
+tests/test_pipeline_v2_failure_semantics.py::MediaStageValidationTests::test_rvc_worker_requires_strict_transform PASSED [ 36%]
+tests/test_pipeline_v2_failure_semantics.py::TranslationFailureTests::test_legacy_translation_can_still_use_source_fallback FAILED [ 38%]
+tests/test_pipeline_v2_failure_semantics.py::TranslationFailureTests::test_unchanged_gemini_cjk_is_retranslated_by_strict_fallback PASSED [ 39%]
+tests/test_pipeline_v2_failure_semantics.py::TranslationFailureTests::test_v2_strict_translation_rejects_source_text_fallback PASSED [ 40%]
+tests/test_pipeline_v2_failure_semantics.py::ResumeVoiceConsistencyTests::test_edge_resume_does_not_switch_to_discovered_rvc PASSED [ 41%]
+tests/test_pipeline_v2_failure_semantics.py::ResumeVoiceConsistencyTests::test_rvc_resume_fails_when_model_cannot_be_restored PASSED [ 42%]
+tests/test_pipeline_v2_failure_semantics.py::TTSFailureSemanticsTests::test_strict_fpt_does_not_silently_switch_to_edge PASSED [ 43%]
+tests/test_pipeline_v2_gender.py::TestPipelineV2Gender::test_enrich_segments_default PASSED [ 44%]
+tests/test_pipeline_v2_gender.py::TestPipelineV2Gender::test_gender_fallback_when_file_missing PASSED [ 45%]
+tests/test_pipeline_v2_gender.py::TestPipelineV2Gender::test_segment_gender_serialization PASSED [ 46%]
+tests/test_pipeline_v2_gpu.py::GPULockTests::test_lock_blocks_second_owner_and_releases PASSED [ 47%]
+tests/test_pipeline_v2_gpu.py::GPUExecutorTests::test_health_stage_runs_in_child_process PASSED [ 48%]
+tests/test_pipeline_v2_gpu.py::GPUExecutorTests::test_unknown_stage_returns_structured_error PASSED [ 50%]
+tests/test_pipeline_v2_gpu.py::SegmentSerializationTests::test_round_trip_preserves_source_identity PASSED [ 51%]
+tests/test_pipeline_v2_mixer.py::FFmpegMixerTests::test_filter_graph_contains_ducking_loudnorm_and_limiter PASSED [ 52%]
+tests/test_pipeline_v2_mixer.py::FFmpegMixerTests::test_missing_dub_is_rejected_instead_of_silently_dropped PASSED [ 53%]
+tests/test_pipeline_v2_mixer.py::FFmpegMixerTests::test_real_mix_keeps_background_duration PASSED [ 54%]
+tests/test_pipeline_v2_mixer.py::FFmpegMixerTests::test_scalable_mix_uses_chunked_voice_bus_without_duration_drift PASSED [ 55%]
+tests/test_pipeline_v2_mixer.py::FFmpegMixerTests::test_scalable_resource_limit_rejects_non_reducing_mix_tree PASSED [ 56%]
+tests/test_pipeline_v2_orchestrator.py::PipelineSettingsTests::test_rejects_unsafe_atempo_bounds PASSED [ 57%]
+tests/test_pipeline_v2_orchestrator.py::PipelineSettingsTests::test_v2_is_the_default_for_the_v2_release_branch PASSED [ 58%]
+tests/test_pipeline_v2_orchestrator.py::OrchestratorTests::test_failure_is_checkpointed PASSED [ 59%]
+tests/test_pipeline_v2_orchestrator.py::OrchestratorTests::test_orders_stages_and_reuses_valid_cache PASSED [ 60%]
+tests/test_pipeline_v2_preflight.py::PreflightTests::test_api_wildcard_cors_is_rejected PASSED [ 61%]
+tests/test_pipeline_v2_preflight.py::PreflightTests::test_placeholder_token_is_reported_as_missing PASSED [ 63%]
+tests/test_pipeline_v2_preservation.py::LegacyPatchPreservationTests::test_fastapi_processing_routes_share_v2_runner PASSED [ 64%]
+tests/test_pipeline_v2_preservation.py::LegacyPatchPreservationTests::test_gemini_keeps_inline_video_frame_context PASSED [ 65%]
+tests/test_pipeline_v2_preservation.py::LegacyPatchPreservationTests::test_local_renderer_uses_portable_environment_paths PASSED [ 66%]
+tests/test_pipeline_v2_preservation.py::LegacyPatchPreservationTests::test_nvenc_and_unique_subtitle_cleanup_patch_remain PASSED [ 67%]
+tests/test_pipeline_v2_preservation.py::LegacyPatchPreservationTests::test_placeholder_secrets_are_not_treated_as_credentials PASSED [ 68%]
+tests/test_pipeline_v2_preservation.py::LegacyPatchPreservationTests::test_telegram_network_updates_use_safe_wrapper PASSED [ 69%]
+tests/test_pipeline_v2_preservation.py::LegacyPatchPreservationTests::test_v2_gpu_limits_are_explicit PASSED [ 70%]
+tests/test_pipeline_v2_qc.py::SegmentQcTests::test_measured_timing_and_source_language_failures_are_blocking_checks PASSED [ 71%]
+tests/test_pipeline_v2_qc.py::SegmentQcTests::test_reports_missing_segment_id_and_audio PASSED [ 72%]
+tests/test_pipeline_v2_qc.py::SegmentQcTests::test_srt_timestamp_parser PASSED [ 73%]
+tests/test_pipeline_v2_qc.py::SubtitleQcTests::test_ass_position_outside_safe_area_is_reported PASSED [ 75%]
+tests/test_pipeline_v2_qc.py::ReportOnlyGuaranteeTests::test_findings_do_not_disable_delivery PASSED [ 76%]
+tests/test_pipeline_v2_qc.py::ReportOnlyGuaranteeTests::test_missing_media_creates_atomic_non_blocking_report PASSED [ 77%]
+tests/test_pipeline_v2_scaling.py::ResourceBatchingTests::test_bounded_batches_preserve_order_and_obey_limits PASSED [ 78%]
+tests/test_pipeline_v2_scaling.py::ResourceBatchingTests::test_voice_chunks_cover_timeline_without_cutting_crossing_dub PASSED [ 79%]
+tests/test_pipeline_v2_scaling.py::StartupResumeDiscoveryTests::test_interrupted_manifest_is_discovered_without_secrets PASSED [ 80%]
+tests/test_pipeline_v2_scaling.py::StartupResumeDiscoveryTests::test_same_size_corrupt_delivery_is_resumable PASSED [ 81%]
+tests/test_pipeline_v2_timing.py::TimingSolverTests::test_budgeted_rewrite_runs_before_tts PASSED [ 82%]
+tests/test_pipeline_v2_timing.py::TimingSolverTests::test_default_policy_matches_production_speed_envelope PASSED [ 83%]
+tests/test_pipeline_v2_timing.py::TimingSolverTests::test_measured_duration_creates_a_smaller_second_pass_budget PASSED [ 84%]
+tests/test_pipeline_v2_timing.py::TimingSolverTests::test_plan_requires_only_light_atempo PASSED [ 85%]
+tests/test_pipeline_v2_timing.py::TimingSolverTests::test_split_never_emits_punctuation_only_tts_segments PASSED [ 86%]
+tests/test_pipeline_v2_timing.py::TimingSolverTests::test_split_preserves_source_segment_id PASSED [ 88%]
+tests/test_pipeline_v2_timing.py::AudioFitIntegrationTests::test_atempo_is_capped_at_one_point_zero_eight PASSED [ 89%]
+tests/test_pipeline_v2_video_pipeline.py::VideoPipelineEndToEndTests::test_fake_pipeline_delivers_and_resumes_without_rerunning PASSED [ 90%]
+tests/test_pipeline_v2_video_pipeline.py::VideoPipelineEndToEndTests::test_parallel_context_rejects_empty_artifacts_and_resets_corrupt_cache PASSED [ 91%]
+tests/test_pipeline_v2_video_pipeline.py::VideoPipelineEndToEndTests::test_pipeline_version_change_invalidates_existing_manifest PASSED [ 92%]
+tests/test_pipeline_v2_video_pipeline.py::VideoPipelineEndToEndTests::test_progress_callback_failure_does_not_fail_media_pipeline PASSED [ 93%]
+tests/test_pipeline_v2_video_pipeline.py::VideoPipelineEndToEndTests::test_progress_warning_history_is_bounded PASSED [ 94%]
+tests/test_pipeline_v2_video_pipeline.py::VideoPipelineEndToEndTests::test_render_stage_converts_paths_for_legacy_renderer PASSED [ 95%]
+tests/test_pipeline_v2_video_pipeline.py::VideoPipelineEndToEndTests::test_runner_rejects_destructive_output_and_invalid_rvc PASSED [ 96%]
+tests/test_pipeline_v2_video_pipeline.py::VideoPipelineEndToEndTests::test_rvc_index_and_adaptive_hint_participate_in_cache_identity PASSED [ 97%]
+tests/test_pipeline_v2_video_pipeline.py::VideoPipelineEndToEndTests::test_tts_stage_rewrites_from_measured_duration_and_persists_text PASSED [ 98%]
+tests/test_pipeline_v2_video_pipeline.py::QCGateTests::test_block_policy_blocks_errors_but_report_only_does_not PASSED [100%]
+
+================================== FAILURES ===================================
+____________ OCRFailureTests.test_both_telegram_ocr_handlers_raise ____________
+
+self = <tests.test_ocr_fail_closed.OCRFailureTests testMethod=test_both_telegram_ocr_handlers_raise>
+
+    def test_both_telegram_ocr_handlers_raise(self):
+        tree = ast.parse((Path(__file__).resolve().parents[1]/'backend/telegram_bot.py').read_text(encoding='utf-8-sig'))
+        handlers = [n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler) and 'OCR Error:' in ast.unparse(n)]
+        self.assertEqual(len(handlers), 2)
+        for handler in handlers:
+>           self.assertIsInstance(handler.body[-1], ast.Raise)
+E           AssertionError: <ast.Assign object at 0x0000017203573DC0> is not an instance of <class 'ast.Raise'>
+
+tests\test_ocr_fail_closed.py:11: AssertionError
+_ StabilityTests.test_ocr_closes_failed_worker_before_fallback_and_does_not_retry _
+
+self = <tests.test_v1_stability.StabilityTests testMethod=test_ocr_closes_failed_worker_before_fallback_and_does_not_retry>
+
+    def test_ocr_closes_failed_worker_before_fallback_and_does_not_retry(self):
+        ocr._paddle_failed=False
+        events=[]
+        reader=Mock()
+        reader.readtext.side_effect=lambda *a,**kw: events.append("fallback") or []
+        with patch.object(ocr,"runtime_module_available",return_value=True), patch.object(
+                ocr.cv2,"imwrite",return_value=True), patch.object(
+                ocr,"run_v1_ocr",side_effect=RuntimeError("memory")) as run, patch.object(
+                ocr,"get_ocr_reader",return_value=reader), patch(
+                "backend.ai.v1_model_runtime.close_session",side_effect=lambda:events.append("close")):
+>           ocr._recognize_batch([object()])
+
+tests\test_v1_stability.py:37: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+backend\v1_stage_metrics.py:48: in wrapped
+    result = fn(*args, **kwargs)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+frames = [<object object at 0x0000017203762960>]
+
+    @stage("ocr_recognize_batch")
+    def _recognize_batch(frames):
+        """Recognize sampled frames with PP-OCRv6 Tiny, then fall back safely."""
+    
+        global _paddle_failed
+        policy = current_v1_model_policy()
+        if not _paddle_failed and policy.ocr_backend in {"auto", "paddle"} and runtime_module_available(
+            "paddleocr", policy
+        ):
+            try:
+                with tempfile.TemporaryDirectory(prefix="autodub-v1-ocr-frames-") as temporary:
+                    paths = []
+                    for index, frame in enumerate(frames):
+                        path = Path(temporary) / "frame_{:04d}.png".format(index)
+                        if not cv2.imwrite(str(path), frame):
+                            raise OSError("Could not write OCR frame {}".format(path))
+                        paths.append(str(path))
+    
+                    result = run_v1_ocr(
+                        {
+                            "images": paths,
+                            "detection_model": policy.paddle_detection_model,
+                            "recognition_model": policy.paddle_recognition_model,
+                            "engine": policy.paddle_engine,
+                        },
+                        timeout_seconds=float(
+                            os.getenv("V1_OCR_TIMEOUT_SECONDS", "900")
+                        ),
+                        policy=policy,
+                    )
+                    by_path = {
+                        str(item.get("path")): item.get("rows", [])
+                        for item in result.get("images", [])
+                    }
+                    if any(path not in by_path for path in paths):
+                        raise RuntimeError("OCR response omitted a sampled frame")
+                    output = []
+                    for path in paths:
+                        rows = []
+                        for item in by_path.get(path, []):
+                            bbox = item.get("bbox", [])
+                            text = str(item.get("text", "") or "")
+                            score = float(item.get("score", 0.0) or 0.0)
+                            if len(bbox) >= 4 and text.strip():
+                                rows.append((bbox, text, score))
+                        output.append(rows)
+                    if len(output) != len(frames):
+                        raise RuntimeError("PP-OCRv6 returned an incomplete frame batch")
+                    logger.info(
+                        "PP-OCRv6 Tiny completed %d sampled frames via %s",
+                        len(frames),
+                        policy.paddle_engine,
+                    )
+                    return output
+            except (V1ModelRuntimeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                # Close the failed model BEFORE opening the CPU fallback. Stay on
+                # fallback until this video ends instead of loading both repeatedly.
+                try:
+                    from .ai.v1_model_runtime import close_session
+                except ImportError:
+                    from ai.v1_model_runtime import close_session
+                close_session()
+                _paddle_failed = True
+                logger.error("PP-OCRv6 GPU failed; CPU fallback disabled: %s", exc)
+    
+>       raise RuntimeError("V1 GPU OCR unavailable; CPU EasyOCR fallback disabled")
+E       RuntimeError: V1 GPU OCR unavailable; CPU EasyOCR fallback disabled
+
+backend\ocr_utils.py:156: RuntimeError
+------------------------------ Captured log call ------------------------------
+ERROR    backend.ocr_utils:ocr_utils.py:154 PP-OCRv6 GPU failed; CPU fallback disabled: memory
+__ VoiceStabilityTests.test_missing_voice_fails_instead_of_silently_omitting __
+
+self = <tests.test_v1_stability.VoiceStabilityTests testMethod=test_missing_voice_fails_instead_of_silently_omitting>
+
+    async def test_missing_voice_fails_instead_of_silently_omitting(self):
+        item=NS(index=1,content="Xin chαo",start=timedelta(0),end=timedelta(seconds=2))
+        with tempfile.TemporaryDirectory() as d, patch.object(vc,"generate_single_tts",new=AsyncMock(return_value=None)):
+>           with self.assertRaisesRegex(RuntimeError,"TTS incomplete"):
+E           AssertionError: RuntimeError not raised
+
+tests\test_v1_stability.py:72: AssertionError
+---------------------------- Captured stdout call -----------------------------
+Generating TTS for dubbing using edge (Parallel)...
+------------------------------ Captured log call ------------------------------
+WARNING  asyncio:base_events.py:1904 Executing <Task finished name='Task-2' coro=<generate_dubbing_audio.<locals>.run_one() done, defined at C:\tool v1\backend\ai\voice_cloning.py:446> result={'actual_audio_duration': 1.536, 'content': 'Xin chαo', 'end': 2.0, 'index': 1, ...} created at C:\Users\admin\AppData\Local\Programs\Python\Python310\lib\asyncio\tasks.py:636> took 0.218 seconds
+_ VoiceStabilityTests.test_successful_cue_reused_but_changed_text_invalidates _
+
+self = <tests.test_v1_stability.VoiceStabilityTests testMethod=test_successful_cue_reused_but_changed_text_invalidates>
+
+    async def test_successful_cue_reused_but_changed_text_invalidates(self):
+        item=NS(index=1,content="Xin chαo",start=timedelta(0),end=timedelta(seconds=2))
+        async def generate(seg,folder,*args):
+            p=Path(folder)/"1.mp3"; p.write_bytes(b"a"*256)
+            return dict(index=1,path=str(p),actual_audio_duration=1.,content=seg.content,start=0,end=2)
+        with tempfile.TemporaryDirectory() as d, patch.object(vc,"generate_single_tts",side_effect=generate) as fn:
+            await vc.generate_dubbing_audio([item],d)
+            await vc.generate_dubbing_audio([item],d)
+>           self.assertEqual(fn.call_count,1)
+E           AssertionError: 0 != 1
+
+tests\test_v1_stability.py:64: AssertionError
+---------------------------- Captured stdout call -----------------------------
+Generating TTS for dubbing using edge (Parallel)...\n\u2705 [CACHE HIT] T\xe1i s\u1eed d\u1ee5ng audio: 'Xin ch\xe0o...'\nGenerating TTS for dubbing using edge (Parallel)...
+____ WorkerTests.test_serial_gpu_uses_one_worker_without_changing_quality _____
+
+self = <tests.test_asr_single_worker.WorkerTests testMethod=test_serial_gpu_uses_one_worker_without_changing_quality>
+
+    def test_serial_gpu_uses_one_worker_without_changing_quality(self):
+        model = Mock()
+        model.transcribe.return_value = (iter([]), None)
+        @contextmanager
+        def lease(key, factory):
+            yield factory()
+>       with patch.object(t, '_cached_model_path', return_value='local-model'), patch('torch.cuda.is_available', return_value=True), patch.object(t.asr_cache, 'lease', side_effect=lease), patch.object(t, 'WhisperModel', return_value=model) as ctor:
+E       AttributeError: module 'backend.ai.transcription' has no attribute 'asr_cache'
+
+tests\test_asr_single_worker.py:13: AttributeError
+_________ OptimizationTests.test_all_failed_fail_fast_during_cooldown _________
+
+self = <tests.test_translation_optimization.OptimizationTests testMethod=test_all_failed_fail_fast_during_cooldown>
+
+    def test_all_failed_fail_fast_during_cooldown(self):
+        with patch.object(tr.requests, 'post', return_value=Mock(status_code=429)) as post:
+            self.assertIsNone(tr.translate_with_gemini(['\u4f60\u597d'], api_key='test-key'))
+            self.assertIsNone(tr.translate_with_gemini(['\u4f60\u597d'], api_key='test-key'))
+>           self.assertEqual(post.call_count, 6)
+E           AssertionError: 7 != 6
+
+tests\test_translation_optimization.py:55: AssertionError
+------------------------------ Captured log call ------------------------------
+WARNING  ai.translation:translation.py:176 L\u1ed7i g\u1ecdi gemini-3.7-flash (HTTP 429)\nWARNING  ai.translation:translation.py:176 L\u1ed7i g\u1ecdi gemini-3.5-flash (HTTP 429)\nWARNING  ai.translation:translation.py:176 L\u1ed7i g\u1ecdi gemini-3.5-flash-lite (HTTP 429)\nWARNING  ai.translation:translation.py:176 L\u1ed7i g\u1ecdi gemini-3.6-flash (HTTP 429)\nWARNING  ai.translation:translation.py:176 L\u1ed7i g\u1ecdi gemini-3.1-flash-lite (HTTP 429)\nWARNING  ai.translation:translation.py:176 L\u1ed7i g\u1ecdi gemini-flash-lite-latest (HTTP 429)\nWARNING  ai.translation:translation.py:176 L\u1ed7i g\u1ecdi gemini-3.8-flash (HTTP 429)
+___________ OptimizationTests.test_cache_reuses_success_not_network ___________
+
+self = <tests.test_translation_optimization.OptimizationTests testMethod=test_cache_reuses_success_not_network>
+
+    def test_cache_reuses_success_not_network(self):
+        with patch.object(tr.requests, 'post', return_value=self.success()) as post:
+            tr.translate_with_gemini(['\u4f60\u597d'], api_key='test-key')
+            self.assertEqual(tr.translate_with_gemini(['\u4f60\u597d'], api_key='test-key'), ['Xin ch\xe0o'])
+>           self.assertEqual(post.call_count, 1)
+E           AssertionError: 2 != 1
+
+tests\test_translation_optimization.py:49: AssertionError
+_____ OptimizationTests.test_failed_model_skipped_next_video_and_recovers _____
+
+self = <tests.test_translation_optimization.OptimizationTests testMethod=test_failed_model_skipped_next_video_and_recovers>
+
+    def test_failed_model_skipped_next_video_and_recovers(self):
+        with patch.object(tr.requests, 'post', side_effect=[Mock(status_code=503), self.success()]) as post:
+            self.assertEqual(tr.translate_with_gemini(['\u4f60\u597d'], api_key='test-key'), ['Xin ch\xe0o'])
+            self.assertIn('gemini-3.7-flash', post.call_args_list[0].args[0])
+>           self.assertIn('gemini-3.6-flash', post.call_args_list[1].args[0])
+E           AssertionError: 'gemini-3.6-flash' not found in 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=test-key'
+
+tests\test_translation_optimization.py:34: AssertionError
+------------------------------ Captured log call ------------------------------
+WARNING  ai.translation:translation.py:176 L\u1ed7i g\u1ecdi gemini-3.7-flash (HTTP 503)
+______ OptimizationTests.test_transport_failure_does_not_poison_next_job ______
+
+self = <tests.test_translation_optimization.OptimizationTests testMethod=test_transport_failure_does_not_poison_next_job>
+
+    def test_transport_failure_does_not_poison_next_job(self):
+        with patch.object(tr.requests, 'post', side_effect=tr.requests.ConnectionError('network')) as post:
+            self.assertIsNone(tr.translate_with_gemini(['\u4f60\u597d'], api_key='test-key'))
+>           self.assertEqual(post.call_count, 6)
+E           AssertionError: 7 != 6
+
+tests\test_translation_optimization.py:73: AssertionError
+------------------------------ Captured log call ------------------------------
+WARNING  ai.translation:translation.py:190 L\u1ed7i d\u1ecbch gemini-3.7-flash: ConnectionError\nWARNING  ai.translation:translation.py:190 L\u1ed7i d\u1ecbch gemini-3.5-flash: ConnectionError\nWARNING  ai.translation:translation.py:190 L\u1ed7i d\u1ecbch gemini-3.5-flash-lite: ConnectionError\nWARNING  ai.translation:translation.py:190 L\u1ed7i d\u1ecbch gemini-3.6-flash: ConnectionError\nWARNING  ai.translation:translation.py:190 L\u1ed7i d\u1ecbch gemini-3.1-flash-lite: ConnectionError\nWARNING  ai.translation:translation.py:190 L\u1ed7i d\u1ecbch gemini-flash-lite-latest: ConnectionError\nWARNING  ai.translation:translation.py:190 L\u1ed7i d\u1ecbch gemini-3.8-flash: ConnectionError
+_ TranslationFailureTests.test_legacy_translation_can_still_use_source_fallback _
+
+self = <tests.test_pipeline_v2_failure_semantics.TranslationFailureTests testMethod=test_legacy_translation_can_still_use_source_fallback>
+
+    def test_legacy_translation_can_still_use_source_fallback(self):
+        translation = self._load_translation_with_failing_google()
+        segment = SimpleNamespace(index=7, content="\u4f60\u597d")
+>       result = translation.translate_subtitles(
+            [segment], strict=False, enable_g4f=False
+        )
+
+tests\test_pipeline_v2_failure_semantics.py:127: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+backend\v1_stage_metrics.py:48: in wrapped
+    result = fn(*args, **kwargs)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+srt_segments = [namespace(index=7, content='\u4f60\u597d', orig_content='\u4f60\u597d')]
+target_lang = 'vi', api_key = '', video_path = None
+context_start_seconds = None, context_end_seconds = None, prior_context = None
+strict = False, enable_g4f = False, kwargs = {}
+
+    @stage("translation")
+    def translate_subtitles(
+        srt_segments,
+        target_lang="vi",
+        api_key="",
+        video_path=None,
+        context_start_seconds=None,
+        context_end_seconds=None,
+        prior_context=None,
+        strict=False,
+        enable_g4f=True,
+        **kwargs
+    ):
+        logger.info("Translating subtitles...")
+        texts = [seg.content for seg in srt_segments if seg.content]
+        if not texts:
+            return srt_segments
+    
+        translated_texts = None
+        preferred_provider = os.getenv("LLM_PROVIDER", "auto").lower()
+    
+        # Danh s\xe1ch th\u1ee9 t\u1ef1 \u01b0u ti\xean c\xe1c nh\xe0 cung c\u1ea5p LLM
+        providers_order = []
+        if preferred_provider == "openai":
+            providers_order = ["openai", "gemini", "deepseek"]
+        elif preferred_provider == "deepseek":
+            providers_order = ["deepseek", "gemini", "openai"]
+        else: # auto / gemini
+            providers_order = ["gemini", "openai", "deepseek"]
+    
+        for p in providers_order:
+            if translated_texts:
+                break
+            if p == "gemini":
+                g_key = api_key or os.getenv("GEMINI_API_KEY", "")
+                if g_key:
+                    translated_texts = translate_with_gemini(
+                        texts, target_lang, g_key, video_path,
+                        context_start_seconds=context_start_seconds,
+                        context_end_seconds=context_end_seconds,
+                        prior_context=prior_context,
+                        **kwargs
+                    )
+            elif p == "openai":
+                o_key = os.getenv("OPENAI_API_KEY", "")
+                if o_key:
+                    translated_texts = translate_with_openai(
+                        texts, target_lang, o_key, video_path,
+                        context_start_seconds=context_start_seconds,
+                        context_end_seconds=context_end_seconds,
+                        prior_context=prior_context,
+                        **kwargs
+                    )
+            elif p == "deepseek":
+                d_key = os.getenv("DEEPSEEK_API_KEY", "")
+                if d_key:
+                    translated_texts = translate_with_deepseek(
+                        texts, target_lang, d_key,
+                        prior_context=prior_context,
+                        **kwargs
+                    )
+    
+        # Fallback Tier: G4F Free
+        if not translated_texts and enable_g4f:
+            logger.info("Trying ChatGPT (G4F) API...")
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(translate_with_g4f, texts, target_lang)
+                try:
+                    translated_texts = future.result(timeout=40)
+                except concurrent.futures.TimeoutError:
+                    logger.warning("G4F ph\u1ea3n h\u1ed3i qu\xe1 l\xe2u (qu\xe1 40s), h\u1ee7y \u0111\u1ec3 tr\xe1nh treo bot.")
+                    translated_texts = None
+                except Exception as e:
+                    logger.warning(f"L\u1ed7i G4F: {e}")
+                    translated_texts = None
+    
+        translated_texts_valid = bool(
+            translated_texts
+            and len(translated_texts) == len(texts)
+            and all(isinstance(item, str) and item.strip() for item in translated_texts)
+        )
+        if translated_texts_valid:
+            unchanged_cjk = [
+                position
+                for position, (source, translated) in enumerate(
+                    zip(texts, translated_texts), 1
+                )
+                if target_lang.lower().startswith("vi") and _contains_cjk(translated)
+            ]
+            if unchanged_cjk:
+                logger.warning(
+                    "AI translation left CJK source unchanged at positions: %s",
+                    ", ".join(str(position) for position in unchanged_cjk),
+                )
+                translated_texts_valid = False
+    
+        if translated_texts_valid:
+            idx = 0
+            for segment in srt_segments:
+                if not segment.content:
+                    continue
+                segment.orig_content = segment.content
+                segment.content = translated_texts[idx]
+                idx += 1
+            logger.info("LLM translation successful.")
+            return srt_segments
+    
+        logger.info("Falling back to Google Translate...")
+        failed_segments = []
+        for segment in srt_segments:
+            if not segment.content:
+                continue
+    
+            try:
+                segment.orig_content = segment.content
+                src_lang = 'zh-CN' if _contains_cjk(segment.content) else 'auto'
+                try:
+                    translator = GoogleTranslator(source=src_lang, target=target_lang)
+                    translated_text = translator.translate(segment.content)
+                except Exception:
+                    translated_text = None
+    
+                if (
+                    not translated_text
+                    or "Error 500" in str(translated_text)
+                    or "Server Error" in str(translated_text)
+                    or str(translated_text).startswith("Error")
+                    or (target_lang.lower().startswith("vi") and _contains_cjk(translated_text))
+                ):
+                    try:
+                        if MyMemoryTranslator is None:
+                            raise RuntimeError("MyMemoryTranslator is unavailable")
+                        mm_target = "vi-VN" if target_lang.lower().startswith("vi") else target_lang
+                        mm_src = "zh-CN" if _contains_cjk(segment.content) else "auto"
+                        translated_text = MyMemoryTranslator(source=mm_src, target=mm_target).translate(segment.content)
+                    except Exception:
+                        pass
+    
+                if not isinstance(translated_text, str) or not translated_text.strip():
+                    raise RuntimeError("Google Translate returned an empty result")
+                if (
+                    "Error 500" in translated_text
+                    or "Server Error" in translated_text
+                    or translated_text.startswith("Error")
+                ):
+                    raise RuntimeError(
+                        "Google Translate returned an error payload: {}".format(
+                            translated_text[:120]
+                        )
+                    )
+                if target_lang.lower().startswith("vi") and _contains_cjk(translated_text):
+                    raise RuntimeError("Chinese source text remained untranslated")
+    
+            except Exception as e:
+                logger.warning(f"L\u1ed7i d\u1ecbch thu\u1eadt: {e}")
+                failed_segments.append(int(getattr(segment, "index", 0)))
+                translated_text = segment.content
+    
+            segment.content = translated_text
+    
+        if failed_segments and (strict or target_lang.lower().startswith("vi")):
+>           raise RuntimeError(
+                "Translation failed for segment indexes: {}".format(
+                    ", ".join(str(index) for index in failed_segments)
+                )
+            )
+E           RuntimeError: Translation failed for segment indexes: 7
+
+backend\ai\translation.py:517: RuntimeError
+------------------------------ Captured log call ------------------------------
+WARNING  backend.ai.translation:translation.py:510 L\u1ed7i d\u1ecbch thu\u1eadt: Google Translate returned an empty result
+=========================== short test summary info ===========================
+FAILED tests/test_ocr_fail_closed.py::OCRFailureTests::test_both_telegram_ocr_handlers_raise
+FAILED tests/test_v1_stability.py::StabilityTests::test_ocr_closes_failed_worker_before_fallback_and_does_not_retry
+FAILED tests/test_v1_stability.py::VoiceStabilityTests::test_missing_voice_fails_instead_of_silently_omitting
+FAILED tests/test_v1_stability.py::VoiceStabilityTests::test_successful_cue_reused_but_changed_text_invalidates
+FAILED tests/test_asr_single_worker.py::WorkerTests::test_serial_gpu_uses_one_worker_without_changing_quality
+FAILED tests/test_translation_optimization.py::OptimizationTests::test_all_failed_fail_fast_during_cooldown
+FAILED tests/test_translation_optimization.py::OptimizationTests::test_cache_reuses_success_not_network
+FAILED tests/test_translation_optimization.py::OptimizationTests::test_failed_model_skipped_next_video_and_recovers
+FAILED tests/test_translation_optimization.py::OptimizationTests::test_transport_failure_does_not_poison_next_job
+FAILED tests/test_pipeline_v2_failure_semantics.py::TranslationFailureTests::test_legacy_translation_can_still_use_source_fallback
+======================= 10 failed, 82 passed in 25.41s ========================

@@ -11,6 +11,28 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping
 
+_cuda_sessions = []
+_ort_guard_installed = False
+
+def _configure_cuda():
+    global _ort_guard_installed
+    import onnxruntime as ort
+    if _ort_guard_installed:
+        return
+    dll_path = Path(__file__).resolve().parents[1] / "venv" / "Lib" / "site-packages" / "torch" / "lib"
+    if dll_path.is_dir():
+        ort.preload_dlls(directory=str(dll_path))
+    original = ort.InferenceSession
+    class CudaSession(original):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.disable_fallback()
+            if "CUDAExecutionProvider" not in self.get_providers():
+                raise RuntimeError("OCR session failed to activate CUDA; refusing CPU inference")
+            _cuda_sessions.append(self)
+    ort.InferenceSession = CudaSession
+    _ort_guard_installed = True
+
 
 def _json_value(value: Any) -> Any:
     if hasattr(value, "tolist"):
@@ -47,8 +69,14 @@ def _paddle_payload(result: Any) -> Mapping[str, Any]:
 
 @lru_cache(maxsize=1)
 def _model(detection_model, recognition_model, engine):
+    if engine == "onnxruntime":
+        import onnxruntime
+        _configure_cuda()
+        if "CUDAExecutionProvider" not in onnxruntime.get_available_providers():
+            raise RuntimeError("V1 OCR requires ONNX CUDAExecutionProvider; CPU fallback disabled")
     from paddleocr import PaddleOCR
     return PaddleOCR(
+        device="gpu:0",
         text_detection_model_name=detection_model,
         text_recognition_model_name=recognition_model,
         use_doc_orientation_classify=False,
@@ -93,6 +121,8 @@ def _run(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         images.append({"path": str(image_path), "rows": rows})
     return {
         "images": images,
+        "gpu_sessions": len(_cuda_sessions),
+        "execution_providers": [s.get_providers() for s in _cuda_sessions],
         "detection_model": detection_model,
         "recognition_model": recognition_model,
         "engine": engine,

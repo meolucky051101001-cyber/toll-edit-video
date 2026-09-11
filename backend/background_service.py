@@ -35,8 +35,18 @@ def main():
     python = ROOT / "venv" / "Scripts" / "python.exe"
     script = ROOT / ("main.py" if service == "dashboard" else "telegram_bot.py")
     environment = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
+    # Keep the control plane available independently of either dashboard.
+    control_python = Path(r"C:\tool v1\backend\venv\Scripts\pythonw.exe")
+    control_script = Path(r"C:\tool v1\backend\tool_control.py")
+    subprocess.Popen([str(control_python), str(control_script)],
+                     cwd=str(control_script.parent), creationflags=subprocess.CREATE_NO_WINDOW,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    control_pause = Path(r"C:\tool v1\workspace\control") / "v1.pause"
     delay = 5
     while True:
+        if service == "telegram" and control_pause.exists():
+            time.sleep(2)
+            continue
         started = time.monotonic()
         output_path = logs / (service + ".log")
         if output_path.exists() and output_path.stat().st_size > 10_000_000:
@@ -46,7 +56,7 @@ def main():
                 process = subprocess.Popen(
                     [str(python), "-u", str(script)], cwd=str(ROOT), env=environment,
                     stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
-                    creationflags=subprocess.CREATE_NO_WINDOW)
+                    creationflags=(subprocess.CREATE_NO_WINDOW | subprocess.NORMAL_PRIORITY_CLASS))
                 logger.info("Started PID %s", process.pid)
                 code = process.wait()
                 logger.warning("Exited code %s; restarting", code)

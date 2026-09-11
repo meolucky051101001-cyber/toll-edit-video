@@ -6,110 +6,132 @@
   <title>Tool V1 - Giám Sát Video Phôi & Tiến Độ Render</title>
   <style>
     :root {
-      --bg-dark: #0f141c;
-      --bg-card: #171f2c;
-      --bg-card-hover: #1e293b;
-      --border: #293548;
-      --primary: #3b82f6;
-      --primary-hover: #2563eb;
-      --accent: #06b6d4;
-      --success: #10b981;
-      --warning: #f59e0b;
-      --danger: #ef4444;
-      --text: #f1f5f9;
+      --bg-dark: #0b1017;
+      --bg-card: #131b26;
+      --bg-card-hover: #1b2636;
+      --border: #233144;
+      --border-focus: #3b82f6;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --accent: #38bdf8;
+      --success: #047857;
+      --success-hover: #065f46;
+      --success-text: #34d399;
+      --warning: #d97706;
+      --danger: #dc2626;
+      --danger-hover: #b91c1c;
+      --text: #f8fafc;
       --text-muted: #94a3b8;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-    body { background-color: var(--bg-dark); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; }
+    body { background-color: var(--bg-dark); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; -webkit-font-smoothing: antialiased; }
     
     /* Header */
-    header { background: #131b26; border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; position: relative; z-index: 10; }
+    header { background: #111722; border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; position: relative; z-index: 10; }
     .logo-area { display: flex; align-items: center; gap: 12px; }
-    .logo-badge { background: linear-gradient(135deg, #3b82f6, #06b6d4); color: white; padding: 6px 12px; border-radius: 8px; font-weight: bold; font-size: 14px; letter-spacing: 0.5px; }
+    .logo-badge { background: #1e3a8a; color: #ffffff; border: 1px solid #3b82f6; padding: 6px 12px; border-radius: 8px; font-weight: 700; font-size: 13px; letter-spacing: 0.5px; }
     .app-title { font-size: 18px; font-weight: 700; color: #fff; }
-    .app-subtitle { font-size: 12px; color: var(--text-muted); }
+    .app-subtitle { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
     
-    .hw-status { display: flex; align-items: center; gap: 16px; font-size: 13px; }
-    .badge { padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
-    .badge-gpu { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
-    .badge-online { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
-    .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-    .dot-green { background: #10b981; box-shadow: 0 0 8px #10b981; }
-    .dot-blue { background: #3b82f6; box-shadow: 0 0 8px #3b82f6; }
-    .dot-yellow { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; animation: pulse 1.5s infinite; }
+    .hw-status { display: flex; align-items: center; gap: 12px; font-size: 13px; flex-wrap: wrap; }
+    .badge { padding: 5px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+    .badge-gpu { background: rgba(16, 185, 129, 0.12); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .badge-online { background: rgba(59, 130, 246, 0.12); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+    .dot-green { background: #10b981; outline: 2px solid rgba(16, 185, 129, 0.3); outline-offset: 1px; }
+    .dot-blue { background: #3b82f6; outline: 2px solid rgba(59, 130, 246, 0.3); outline-offset: 1px; }
+    .dot-yellow { background: #f59e0b; outline: 2px solid rgba(245, 158, 11, 0.3); outline-offset: 1px; animation: pulse 1.5s infinite; }
     
-    .btn { padding: 8px 16px; border-radius: 8px; border: 1px solid transparent; font-size: 13px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; transition: all 0.2s ease; }
-    .btn-primary { background: #2563eb; color: white; }
-    .btn-primary:hover { background: #1d4ed8; }
-    .btn-success { background: #059669; color: white; }
-    .btn-success:hover { background: #047857; }
-    .btn-danger { background: #dc2626; color: white; }
-    .btn-danger:hover { background: #b91c1c; }
-    .btn-outline { background: transparent; border-color: var(--border); color: var(--text); }
-    .btn-outline:hover { background: var(--bg-card-hover); border-color: var(--text-muted); }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn { padding: 8px 16px; border-radius: 8px; border: 1px solid transparent; font-size: 13px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; transition: background-color 0.15s, border-color 0.15s, opacity 0.15s; text-decoration: none; }
+    .btn-primary { background: var(--primary); color: #ffffff; }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-success { background: var(--success); color: #ffffff; }
+    .btn-success:hover { background: var(--success-hover); }
+    .btn-danger { background: var(--danger); color: #ffffff; }
+    .btn-danger:hover { background: var(--danger-hover); }
+    .btn-outline { background: rgba(255, 255, 255, 0.03); border-color: var(--border); color: var(--text); }
+    .btn-outline:hover { background: var(--bg-card-hover); border-color: #3b82f6; }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
     
     /* Layout */
     .container { max-width: 1540px; margin: 0 auto; padding: 20px; width: 100%; flex: 1; display: flex; flex-direction: column; gap: 20px; }
     
+    .control-frame-wrapper { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; padding: 4px; }
+    #tool-control-frame { width: 100%; height: 340px; border: 0; border-radius: 10px; background: transparent; display: block; }
+    .control-ext-link { display: inline-flex; align-items: center; gap: 6px; color: #38bdf8; font-size: 12px; text-decoration: none; align-self: flex-start; }
+    .control-ext-link:hover { text-decoration: underline; }
+    .collapsible-header-bar:hover { background: rgba(27, 38, 54, 0.95) !important; border-color: #3b82f6 !important; }
+
+    /* Mixer Audio Controls */
+    .mixer-slider { width: 100%; height: 6px; border-radius: 3px; background: #233144; outline: none; -webkit-appearance: none; cursor: pointer; margin: 10px 0; }
+    .mixer-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #38bdf8; border: 2px solid #fff; cursor: pointer; box-shadow: 0 0 10px rgba(56, 189, 248, 0.6); transition: transform 0.1s; }
+    .mixer-slider::-webkit-slider-thumb:hover { transform: scale(1.2); }
+    .mixer-val-badge { font-family: monospace; font-size: 13px; font-weight: 700; padding: 3px 10px; border-radius: 6px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); font-variant-numeric: tabular-nums; }
+    .mixer-presets { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+    .mixer-tag { font-size: 11px; padding: 3px 9px; border-radius: 6px; background: rgba(255, 255, 255, 0.04); border: 1px solid var(--border); color: var(--text-muted); cursor: pointer; transition: all 0.15s; user-select: none; }
+    .mixer-tag:hover { background: rgba(56, 189, 248, 0.12); border-color: #38bdf8; color: #f8fafc; }
+    .mixer-tag.active { background: rgba(56, 189, 248, 0.22); border-color: #38bdf8; color: #38bdf8; font-weight: 600; }
+
     /* Progress Hero Card */
-    .hero-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 24px; position: relative; overflow: hidden; }
-    .hero-card::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, #3b82f6, #06b6d4, #10b981); }
+    .hero-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 24px; position: relative; }
     
     .hero-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
-    .hero-status-title { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); font-weight: 700; margin-bottom: 6px; }
+    .hero-status-title { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); font-weight: 700; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
     .hero-video-name { font-size: 20px; font-weight: 800; color: #fff; word-break: break-all; }
     
     .progress-box { margin: 18px 0; }
     .progress-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
     .progress-step-text { font-size: 14px; font-weight: 600; color: #60a5fa; }
-    .progress-pct-text { font-size: 24px; font-weight: 900; color: #38bdf8; }
+    .progress-pct-text { font-size: 24px; font-weight: 800; color: #38bdf8; font-variant-numeric: tabular-nums; }
     
-    .progress-bar-track { width: 100%; height: 14px; background: #0b1017; border-radius: 10px; overflow: hidden; position: relative; border: 1px solid rgba(255,255,255,0.05); }
-    .progress-bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #2563eb, #06b6d4, #10b981); border-radius: 10px; transition: width 0.4s ease-in-out; position: relative; }
-    .progress-bar-fill::after { content: ""; position: absolute; top: 0; left: 0; bottom: 0; right: 0; background-image: linear-gradient(45deg, rgba(255,255,255,0.15) 25%, transparent 25%, transparent 50%, rgba(255,255,255,0.15) 50%, rgba(255,255,255,0.15) 75%, transparent 75%, transparent); background-size: 20px 20px; animation: moveStripes 1s linear infinite; }
+    .progress-bar-track { width: 100%; height: 12px; background: #0b1017; border-radius: 8px; overflow: hidden; position: relative; border: 1px solid rgba(255,255,255,0.06); }
+    .progress-bar-fill { height: 100%; width: 100%; background: linear-gradient(90deg, #2563eb, #38bdf8); border-radius: 8px; transform-origin: left; transform: scaleX(0); transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1); will-change: transform; }
     
-    @keyframes moveStripes { 0% { background-position: 0 0; } 100% { background-position: 20px 0; } }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
     
-    /* Pipeline Steps Visualization */
-    .steps-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; margin-top: 20px; }
-    .step-item { background: #111722; border: 1px solid var(--border); border-radius: 10px; padding: 12px 8px; text-align: center; transition: all 0.2s; display: flex; flex-direction: column; align-items: center; gap: 6px; }
-    .step-item.active { background: rgba(59, 130, 246, 0.15); border-color: #3b82f6; box-shadow: 0 0 15px rgba(59, 130, 246, 0.2); }
-    .step-item.completed { background: rgba(16, 185, 129, 0.12); border-color: rgba(16, 185, 129, 0.4); }
-    .step-icon { font-size: 20px; }
-    .step-title { font-size: 11px; font-weight: 700; color: #cbd5e1; }
-    .step-tag { font-size: 10px; color: var(--text-muted); }
-    .step-item.completed .step-tag { color: #34d399; font-weight: bold; }
-    .step-item.active .step-tag { color: #60a5fa; font-weight: bold; }
+    /* Pipeline Steps Bento Visualization */
+    .steps-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 10px; margin-top: 20px; }
+    .step-item { background: #101622; border: 1px solid var(--border); border-radius: 10px; padding: 12px 8px; text-align: center; transition: border-color 0.2s, background-color 0.2s; display: flex; flex-direction: column; align-items: center; gap: 6px; min-height: 125px; }
+    .step-duration { display: inline-flex; align-items: center; justify-content: center; gap: 3px; font-size: 11px; font-weight: 700; color: var(--text-muted); background: rgba(255, 255, 255, 0.04); padding: 2px 7px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.06); font-variant-numeric: tabular-nums; margin-top: auto; line-height: 1.2; }
+    .step-item.active .step-duration { color: #60a5fa; background: rgba(59, 130, 246, 0.15); border-color: rgba(59, 130, 246, 0.35); }
+    .step-item.completed .step-duration { color: #34d399; background: rgba(16, 185, 129, 0.12); border-color: rgba(16, 185, 129, 0.3); }
+    .step-item.active { background: rgba(59, 130, 246, 0.12); border-color: #3b82f6; }
+    .step-item.completed { background: rgba(16, 185, 129, 0.08); border-color: rgba(16, 185, 129, 0.35); }
+    .step-icon { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 6px; background: rgba(255, 255, 255, 0.04); color: #94a3b8; margin-bottom: 2px; }
+    .step-item.active .step-icon { background: rgba(59, 130, 246, 0.2); color: #60a5fa; }
+    .step-item.completed .step-icon { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+    .step-title { font-size: 12px; font-weight: 700; color: #f1f5f9; }
+    .step-tag { font-size: 11px; font-weight: 500; color: var(--text-muted); line-height: 1.35; word-break: break-word; }
+    .step-item.completed .step-tag { color: #34d399; font-weight: 600; }
+    .step-item.active .step-tag { color: #60a5fa; font-weight: 600; }
     
-    .stats-row { display: flex; gap: 20px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-muted); }
-    .stat-chip { display: flex; align-items: center; gap: 6px; }
-    .stat-val { color: #fff; font-weight: 700; }
+    .stats-row { display: flex; gap: 20px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-muted); flex-wrap: wrap; }
+    .stat-chip { display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+    .stat-val { color: #fff; font-weight: 700; font-variant-numeric: tabular-nums; }
     
     /* Main Grid */
     .main-grid { display: grid; grid-template-columns: 1fr 1.15fr; gap: 20px; flex: 1; }
     @media (max-width: 1100px) { .main-grid { grid-template-columns: 1fr; } .steps-grid { grid-template-columns: repeat(4, 1fr); } }
     
     .panel { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; display: flex; flex-direction: column; overflow: hidden; }
-    .panel-header { padding: 16px 20px; background: #131a26; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+    .panel-header { padding: 16px 20px; background: #111722; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
     .panel-title { font-size: 15px; font-weight: 700; display: flex; align-items: center; gap: 8px; color: #fff; }
     .panel-actions { display: flex; gap: 8px; align-items: center; }
     .panel-body { padding: 16px 20px; flex: 1; display: flex; flex-direction: column; overflow-y: auto; }
     
     /* Table styling */
-    .data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    .data-table th { text-align: left; padding: 10px 12px; color: var(--text-muted); font-weight: 600; border-bottom: 1px solid var(--border); }
-    .data-table td { padding: 10px 12px; border-bottom: 1px solid #1c2636; color: #e2e8f0; }
+    .data-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+    .data-table th { text-align: left; padding: 10px 12px; color: var(--text-muted); font-weight: 600; font-size: 12px; border-bottom: 1px solid var(--border); }
+    .data-table td { padding: 10px 12px; border-bottom: 1px solid #1c2636; color: #e2e8f0; font-size: 12px; }
     .data-table tr:hover { background: rgba(255,255,255,0.03); }
     
-    .status-badge { padding: 3px 8px; border-radius: 6px; font-size: 10px; font-weight: 700; display: inline-block; }
+    .status-badge { padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; display: inline-block; font-variant-numeric: tabular-nums; }
     .status-waiting { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
-    .status-running { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); animation: pulse 1s infinite; }
+    .status-running { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
     .status-completed { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
     
     /* Terminal Console */
-    .terminal-box { background: #090d13; border: 1px solid #1f2937; border-radius: 8px; padding: 14px; flex: 1; font-family: "Consolas", "Courier New", monospace; font-size: 11.5px; line-height: 1.6; color: #e2e8f0; overflow-y: auto; max-height: 480px; min-height: 380px; white-space: pre-wrap; word-break: break-all; }
+    .terminal-box { background: #090d13; border: 1px solid #1f2937; border-radius: 8px; padding: 14px; flex: 1; font-family: ui-monospace, "Consolas", "Courier New", monospace; font-size: 12px; line-height: 1.6; color: #e2e8f0; overflow-y: auto; max-height: 480px; min-height: 380px; white-space: pre-wrap; word-break: break-all; }
     .log-line { margin-bottom: 2px; }
     .log-line.nvenc { color: #34d399; }
     .log-line.ai { color: #38bdf8; }
@@ -117,22 +139,31 @@
     .log-line.error { color: #f87171; }
     .log-line.step { color: #a78bfa; font-weight: bold; }
     
-      .log-tools { display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:12px; }
-      .log-tools input:not([type=checkbox]), .log-tools select { background:#131b26; color:#e2e8f0; border:1px solid #475569; border-radius:6px; padding:8px; min-width:0; }
-      .log-tools input:not([type=checkbox]) { flex:1; }
-      #terminalLogs { font-family:inherit; font-size:13px; white-space:normal; word-break:normal; overflow-wrap:anywhere; }
-      .log-entry { border-left:3px solid #38bdf8; padding:10px 12px; margin-bottom:8px; background:#131b26; border-radius:5px; }
-      .log-entry.warn { border-color:#fbbf24; }
-      .log-entry.error { border-color:#f87171; }
-      .log-meta { color:#94a3b8; font-size:11px; margin-bottom:4px; }
-      .log-entry.warn .log-meta { color:#fbbf24; }
-      .log-entry.error .log-meta { color:#f87171; }
-      .log-entry summary { cursor:pointer; color:#94a3b8; font-size:11px; margin-top:6px; }
-      .log-entry pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; margin:8px 0 0; }
-      /* Modal Video Preview */
+    .log-tools { display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:12px; }
+    .log-tools input:not([type=checkbox]), .log-tools select { background:#111722; color:#e2e8f0; border:1px solid #334155; border-radius:6px; padding:8px; min-width:0; }
+    .log-tools input:not([type=checkbox]) { flex:1; }
+    #terminalLogs { font-family:inherit; font-size:12px; white-space:normal; word-break:normal; overflow-wrap:anywhere; }
+    .log-tools { position: sticky; top: 0; z-index: 5; background: var(--bg-card); padding-bottom: 8px; border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+    .log-entry { border: 1px solid #1f2937; border-left: 2px solid #38bdf8; padding:10px 12px; margin-bottom:8px; background:#111722; border-radius:6px; }
+    .log-entry.warn { border-left-color:#fbbf24; }
+    .log-entry.error { border-left-color:#f87171; background: rgba(239, 68, 68, 0.04); }
+    .log-meta { color:#94a3b8; font-size:11px; margin-bottom:4px; font-variant-numeric: tabular-nums; }
+    .log-entry.warn .log-meta { color:#fbbf24; }
+    .log-entry.error .log-meta { color:#f87171; }
+    .log-entry summary { cursor:pointer; color:#94a3b8; font-size:11px; margin-top:6px; }
+    .log-entry pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; margin:8px 0 0; font-family: ui-monospace, "Consolas", monospace; color: #cbd5e1; }
+    
+    .folder-config-box { padding: 14px 20px; border-bottom: 1px solid var(--border); background: rgba(11, 16, 23, 0.4); }
+    .folder-path-row { display: flex; gap: 8px; margin: 8px 0 12px; flex-wrap: wrap; }
+    .folder-path-input { flex: 1; min-width: 180px; background: #0b1017; color: #e2e8f0; border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; font-size: 12px; font-family: ui-monospace, "Consolas", monospace; }
+    .dropzone { border: 1.5px dashed #334155; border-radius: 8px; padding: 18px; text-align: center; background: rgba(16, 22, 34, 0.6); transition: border-color 0.2s, background-color 0.2s; }
+    .dropzone.dragover { border-color: #3b82f6; background: rgba(59, 130, 246, 0.08); }
+    .dropzone-desc { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
+    
+    /* Modal Video Preview */
     .modal-backdrop { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.85); backdrop-filter: blur(4px); display: none; align-items: center; justify-content: center; z-index: 999; }
     .modal-box { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; width: 90%; max-width: 860px; overflow: hidden; display: flex; flex-direction: column; }
-    .modal-header { padding: 14px 20px; background: #131b26; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+    .modal-header { padding: 14px 20px; background: #111722; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
     .modal-title { font-size: 15px; font-weight: 700; color: #fff; }
     .modal-close { background: none; border: none; font-size: 20px; color: var(--text-muted); cursor: pointer; }
     .modal-body { padding: 16px; background: #000; display: flex; justify-content: center; align-items: center; }
@@ -141,6 +172,98 @@
     /* Empty state */
     .empty-state { text-align: center; padding: 30px; color: var(--text-muted); font-size: 13px; }
     .empty-icon { font-size: 32px; margin-bottom: 8px; opacity: 0.5; }
+    
+    /* Beginner guidance */
+    .quick-guide { background:#111722; border:1px solid var(--border); border-radius:16px; padding:24px; }
+    .guide-eyebrow { color:#38bdf8; font-size:11px; font-weight:700; letter-spacing:1px; }
+    .guide-heading h1 { font-size:24px; margin:7px 0 8px; letter-spacing:-0.5px; }
+    .guide-heading p,.guide-grid p { color:#cbd5e1; font-size:14px; line-height:1.7; }
+    .guide-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; margin-top:22px; }
+    .guide-grid article { padding:18px; border:1px solid var(--border); border-radius:12px; background:#0b1017; }
+    .guide-number { display:inline-grid; place-items:center; width:30px; height:30px; border-radius:50%; background:#1e3a8a; color:#bfdbfe; font-weight:800; font-size: 13px; }
+    .guide-grid h2 { font-size:16px; margin:12px 0 8px; }
+    .guide-grid p { min-height:74px; margin-bottom:16px; overflow-wrap:anywhere; }
+    .guide-grid .btn { text-decoration:none; min-height:42px; }
+    .quick-guide :focus-visible { outline:2px solid #3b82f6; outline-offset:2px; }
+    #processing-progress { scroll-margin-top:16px; }
+    #processing-progress .step-tag { font-size:11px; }
+    #processing-progress .stats-row { flex-wrap:wrap; }
+    @media(max-width:760px) {
+      .guide-grid { grid-template-columns:1fr; }
+      .guide-grid p { min-height:0; }
+      .quick-guide { padding:18px; }
+      header,.hw-status { flex-wrap:wrap; gap:12px; }
+      #processing-progress .hero-top { flex-direction:column; gap:16px; }
+    }
+  
+    /* Match both columns while keeping the log content independently scrollable. */
+    .main-grid { grid-template-columns:minmax(0,1fr) minmax(0,1.15fr); align-items:stretch; }
+    .video-column { min-width:0; }
+    .video-column > .panel { flex-shrink:0; }
+    .monitor-column { display:flex; flex-direction:column; gap:20px; min-width:0; min-height:640px; contain:size; }
+    .monitor-column .queue-panel { flex:0 0 240px; height:240px; min-height:0; }
+    .monitor-column .queue-panel > div[tabindex] { flex:1 1 0; min-height:0; max-height:none !important; overflow:auto; scrollbar-gutter:stable; overscroll-behavior:contain; }
+    .queue-panel .panel-header, .queue-panel #queueMessage { flex-shrink:0; }
+    .queue-panel #queueMessage { font-size:12px; line-height:1.5; }
+    .queue-panel .data-table { table-layout:fixed; width:100%; }
+    .queue-panel .data-table th:first-child { width:85px; }
+    .queue-panel .data-table th:last-child { width:90px; }
+    .queue-panel .data-table thead th { position:sticky; top:0; z-index:1; background:var(--bg-card); }
+    .queue-panel .data-table td:nth-child(2) { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .queue-panel .data-table td { vertical-align:middle; }
+    .log-panel #terminalLogs { scrollbar-gutter:stable; overscroll-behavior:contain; }
+    .log-panel { flex:1; min-height:0; }
+    .log-panel .panel-body { min-height:0; overflow:hidden; }
+    .log-panel .terminal-box { flex:1 1 0; height:0; min-height:0; max-height:none; }
+    .log-panel .panel-header,.log-panel .log-tools,#logSummary { flex-shrink:0; }
+    @media(max-width:1100px) {
+      .main-grid { grid-template-columns:minmax(0,1fr); }
+      .monitor-column { contain:none; min-height:0; }
+      .log-panel { flex:none; height:600px; }
+    }
+
+    /* MAXIMIZED LOG PANEL & ZOOM STYLES */
+    .log-panel-maximized {
+      position: fixed !important;
+      top: 20px !important;
+      left: 20px !important;
+      right: 20px !important;
+      bottom: 20px !important;
+      z-index: 10000 !important;
+      margin: 0 !important;
+      display: flex !important;
+      flex-direction: column !important;
+      max-height: calc(100vh - 40px) !important;
+      background: #0d131d !important;
+      box-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.95), 0 0 0 1px rgba(56, 189, 248, 0.4) !important;
+      border-radius: 12px !important;
+      animation: zoomLogAnim 0.18s ease-out;
+    }
+
+    @keyframes zoomLogAnim {
+      from { opacity: 0; transform: scale(0.98); }
+      to { opacity: 1; transform: scale(1); }
+    }
+
+    .log-panel-maximized #collapsibleLogBody {
+      display: flex !important;
+      flex-direction: column !important;
+      flex: 1 !important;
+      min-height: 0 !important;
+      overflow: hidden !important;
+    }
+
+    .log-panel-maximized #logTableContainer {
+      max-height: none !important;
+      flex: 1 !important;
+      overflow-y: auto !important;
+    }
+
+    .log-panel-maximized #btnZoomLog {
+      background: rgba(56, 189, 248, 0.2) !important;
+      border-color: #38bdf8 !important;
+      color: #38bdf8 !important;
+    }
   </style>
 </head>
 <body>
@@ -149,14 +272,14 @@
     <div class="logo-area">
       <div class="logo-badge">TOOL V1</div>
       <div>
-        <div class="app-title">Bảng Điều Khiển Video Phôi & Giám Sát Render</div>
-        <div class="app-subtitle">Tự động lồng tiếng AI & Hardware Acceleration (RTX 4050 NVENC)</div>
+        <div class="app-title">Xử lý và lồng tiếng video</div>
+        <div class="app-subtitle">Thêm video gốc, theo dõi xử lý và lấy video đã hoàn thành.</div>
       </div>
     </div>
     
-      <div class="hw-status">
-        <a class="btn btn-outline" href="http://127.0.0.1:8088/" title="Mở dashboard Tool V1">Tool V1</a>
-        <a class="btn btn-outline" href="http://127.0.0.1:8089/" title="Mở dashboard Tool V2">Tool V2</a>
+    <div class="hw-status">
+      <a class="btn btn-outline" href="http://127.0.0.1:8088/" title="Mở dashboard Tool V1">Tool V1</a>
+      <a class="btn btn-outline" href="http://127.0.0.1:8089/" title="Mở dashboard Tool V2">Tool V2</a>
       <span class="badge badge-gpu">
         <span class="dot dot-green"></span>
         RTX 4050 (NVENC 8000k CUDA)
@@ -165,23 +288,41 @@
         <span class="dot dot-blue"></span>
         Tool V1 Legacy
       </span>
-      <a href="/a2ui" class="btn btn-outline" style="border-color: rgba(168, 85, 247, 0.4); color: #c084fc; text-decoration: none;" title="Khám phá giao diện động A2UI">⚡ A2UI Studio</a>
       <button class="btn btn-outline" onclick="refreshAll()" title="Làm mới dữ liệu">🔄 Làm mới</button>
     </div>
   </header>
 
   <div class="container">
+    <!-- COLLAPSIBLE SYSTEM CONTROL (PORT 8090) -->
+    <div class="system-control-collapsible" style="margin-bottom: 8px;">
+      <div class="collapsible-header-bar" onclick="toggleSystemControl()" style="display: flex; justify-content: space-between; align-items: center; background: rgba(19, 27, 38, 0.8); border: 1px solid var(--border); border-radius: 10px; padding: 10px 16px; cursor: pointer; transition: background 0.2s;">
+        <div style="display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 600; color: #f8fafc;">
+          <span id="controlExpandIcon" style="display: inline-block; transition: transform 0.2s; color: #38bdf8; font-size: 11px;">▶</span>
+          <span>⚙️ Quản Lý Tiến Trình & Bật/Tắt Bot (Thu gọn / Mở rộng)</span>
+          <span class="badge badge-gpu" style="font-size: 10px; padding: 2px 8px;">Port 8090</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <a class="control-ext-link" href="http://127.0.0.1:8090/" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="font-size: 12px; color: #38bdf8; text-decoration: none;">Mở tab riêng ↗</a>
+          <span style="font-size: 12px; color: var(--text-muted);" id="controlToggleLabel">Nhấn để mở ▾</span>
+        </div>
+      </div>
+      <div id="systemControlBody" style="display: none; margin-top: 8px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--bg-card); padding: 4px;">
+        <iframe id="tool-control-frame" title="Điều khiển Tool V1, V2 và Telegram bot" src="http://127.0.0.1:8090/" style="width:100%; height:340px; border:0; border-radius:8px; display:block;"></iframe>
+      </div>
+    </div>
 
     <!-- HERO PROGRESS CARD -->
-    <div class="hero-card">
+    <div class="hero-card" id="processing-progress">
       <div class="hero-top">
         <div>
           <div class="hero-status-title" id="statusTitle">TRẠNG THÁI TIẾN ĐỘ</div>
           <div class="hero-video-name" id="currentVideoName">Đang chờ lệnh...</div>
         </div>
-        <div style="display: flex; gap: 8px;">
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
           <button class="btn btn-danger" id="btnStop" onclick="stopBatch()" style="display: none;">⏹ Dừng Xử Lý</button>
-          <button class="btn btn-success" id="btnRunHero" onclick="startBatch()">🚀 Bắt Đầu Xử Lý Video Phôi</button>
+          <button class="btn btn-outline" id="btnPauseVideo" onclick="controlVideo('pause')" disabled>⏸ Tạm dừng video</button>
+          <button class="btn btn-success" id="btnResumeVideo" onclick="controlVideo('resume')" disabled>▶ Tiếp tục</button>
+          <button class="btn btn-success" id="btnRunHero" onclick="startBatch()">▶ Bắt đầu xử lý video</button>
         </div>
       </div>
 
@@ -199,47 +340,69 @@
       <!-- 7 PIPELINE STEPS -->
       <div class="steps-grid">
         <div class="step-item" id="step1">
-          <div class="step-icon">🎧</div>
-          <div class="step-title">Bước 1</div>
-          <div class="step-tag">Tách âm (10%)</div>
+          <div class="step-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>
+          </div>
+          <div class="step-title">Bước 1 · Audio</div>
+          <div class="step-tag">FFmpeg · Audio Extraction</div>
+          <div class="step-duration" id="timeStep1" title="Thời gian chạy thực tế Bước 1">--</div>
         </div>
         <div class="step-item" id="step2">
-          <div class="step-icon">🧠</div>
-          <div class="step-title">Bước 2</div>
-          <div class="step-tag">Demucs Fast (25%)</div>
+          <div class="step-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 10v3"/><path d="M6 6v11"/><path d="M10 3v18"/><path d="M14 8v7"/><path d="M18 5v13"/><path d="M22 10v3"/></svg>
+          </div>
+          <div class="step-title">Bước 2 · Separation</div>
+          <div class="step-tag">Demucs · htdemucs</div>
+          <div class="step-duration" id="timeStep2" title="Thời gian chạy thực tế Bước 2">--</div>
         </div>
         <div class="step-item" id="step3">
-          <div class="step-icon">🤖</div>
-          <div class="step-title">Bước 3</div>
-          <div class="step-tag">Whisper ASR (40%)</div>
+          <div class="step-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+          </div>
+          <div class="step-title">Bước 3 · ASR</div>
+          <div class="step-tag">Faster-Whisper · Turbo</div>
+          <div class="step-duration" id="timeStep3" title="Thời gian chạy thực tế Bước 3">--</div>
         </div>
         <div class="step-item" id="step35">
-          <div class="step-icon">👀</div>
-          <div class="step-title">Bước 3.5</div>
-          <div class="step-tag">PP-OCRv6 (55%)</div>
+          <div class="step-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 8h10M7 12h10M7 16h6"/></svg>
+          </div>
+          <div class="step-title">Bước 3.5 · OCR</div>
+          <div class="step-tag">PP-OCRv6 Tiny · Det+Rec</div>
+          <div class="step-duration" id="timeStep35" title="Thời gian chạy thực tế Bước 3.5">--</div>
         </div>
         <div class="step-item" id="step4">
-          <div class="step-icon">🌐</div>
-          <div class="step-title">Bước 4</div>
-          <div class="step-tag">Gemini Dịch (70%)</div>
+          <div class="step-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" x2="22" y1="12" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          </div>
+          <div class="step-title">Bước 4 · Translation</div>
+          <div class="step-tag">Gemini · Translation</div>
+          <small id="translationModelName" style="font-size:11px;overflow-wrap:anywhere;color:var(--text-muted)">Model: chưa ghi nhận</small>
+          <div class="step-duration" id="timeStep4" title="Thời gian chạy thực tế Bước 4">--</div>
         </div>
         <div class="step-item" id="step5">
-          <div class="step-icon">🗣️</div>
-          <div class="step-title">Bước 5</div>
-          <div class="step-tag">RVC Dub (85%)</div>
+          <div class="step-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          </div>
+          <div class="step-title">Bước 5 · Dubbing</div>
+          <div class="step-tag">TTS → RVC · Voice Conv</div>
+          <div class="step-duration" id="timeStep5" title="Thời gian chạy thực tế Bước 5">--</div>
         </div>
         <div class="step-item" id="step6">
-          <div class="step-icon">🎬</div>
-          <div class="step-title">Bước 6</div>
-          <div class="step-tag">NVENC Render (95%)</div>
+          <div class="step-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="15" x="2" y="5" rx="2"/><polyline points="10 9 14 12 10 15"/></svg>
+          </div>
+          <div class="step-title">Bước 6 · Encoding</div>
+          <div class="step-tag">FFmpeg · h264_nvenc</div>
+          <div class="step-duration" id="timeStep6" title="Thời gian chạy thực tế Bước 6">--</div>
         </div>
       </div>
 
       <!-- STATS FOOTER -->
       <div class="stats-row">
         <div class="stat-chip">⏱ Đã chạy: <span class="stat-val" id="valElapsed">00:00</span></div>
-        <div class="stat-chip">⏳ Ước tính còn lại (ETA): <span class="stat-val" id="valEta">--</span></div>
-        <div class="stat-chip">📂 Hàng đợi video phôi: <span class="stat-val" id="valQueue">0 / 0</span></div>
+        <div class="stat-chip">⏳ Thời gian còn lại: <span class="stat-val" id="valEta">--</span></div>
+        <div class="stat-chip">📂 Tiến độ hàng đợi: <span class="stat-val" id="valQueue">0 / 0</span></div>
         <div class="stat-chip">📁 Thư mục xuất: <span class="stat-val">D:\banve</span></div>
       </div>
     </div>
@@ -248,31 +411,38 @@
     <div class="main-grid">
 
       <!-- LEFT COLUMN: VIDEO PHÔI & THÀNH PHẨM -->
-      <div style="display: flex; flex-direction: column; gap: 20px;">
+      <div class="video-column" style="display: flex; flex-direction: column; gap: 20px;">
 
-          <div class="panel">
-            <div class="panel-header">
-              <div class="panel-title">⏳ Video đang chờ xử lý <span class="badge badge-gpu" id="queueBadge">Telegram</span></div>
-            </div>
-            <div id="queueMessage" role="status" style="padding:10px 20px;color:var(--text-muted);font-size:12px">Đang kết nối hàng đợi…</div>
-            <div style="max-height:320px;overflow:auto;padding:0 20px 12px" tabindex="0" aria-label="Danh sách video chờ">
-              <table class="data-table">
-                <thead><tr><th>Thứ tự chờ</th><th>Tên video / Link</th><th>Nguồn</th></tr></thead>
-                <tbody id="queueTableBody"></tbody>
-              </table>
-            </div>
-          </div>
           <!-- PANEL: VIDEO PHÔI (D:\video phôi) -->
         <div class="panel">
           <div class="panel-header">
             <div class="panel-title">
-              <span>📂 Thư Mục Video Phôi (D:\video phôi)</span>
+              <span>📂 Video gốc cần xử lý</span>
               <span class="badge badge-gpu" id="phoiBadgeCount">0 video</span>
             </div>
             <div class="panel-actions">
               <button class="btn btn-outline" style="font-size: 11px; padding: 5px 10px;" onclick="openFolder('phoi')">📂 Mở Thư Mục</button>
-              <button class="btn btn-primary" style="font-size: 11px; padding: 5px 12px;" onclick="startBatch()">🚀 Chạy Ngay</button>
+              <button class="btn btn-primary" style="font-size: 11px; padding: 5px 12px;" onclick="startBatch()">▶ Bắt đầu xử lý</button>
             </div>
+          </div>
+          <div class="folder-config-box">
+            <label for="inputFolderPath" style="font-size: 12px; font-weight: 700; color: #f1f5f9; display: flex; align-items: center; gap: 6px;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+              Thư mục video đầu vào hiện tại
+            </label>
+            <div class="folder-path-row">
+              <input id="inputFolderPath" class="folder-path-input" readonly placeholder="Bấm Chọn thư mục...">
+              <button class="btn btn-outline" id="chooseInputFolder" style="font-size: 11px; padding: 6px 12px;" onclick="chooseInputFolder()">📂 Đổi Thư Mục</button>
+            </div>
+            <div id="videoDropZone" class="dropzone">
+              <div style="display:flex; justify-content:center; margin-bottom: 6px;">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/><path d="M12 12v9"/><path d="m16 16-4-4-4 4"/></svg>
+              </div>
+              Kéo thả video vào đây hoặc <button class="btn btn-outline" style="font-size: 11px; padding: 3px 8px; margin-left: 4px;" onclick="document.getElementById('inputVideos').click()">Chọn file</button>
+              <div class="dropzone-desc">Video được sao chép vào thư mục đã chọn. File gốc được giữ nguyên. Tối đa 4 GB/file.</div>
+              <input type="file" id="inputVideos" multiple accept=".mp4,.mkv,.mov,.avi,.webm,.flv,.m4v" hidden onchange="uploadInputVideos(this.files);this.value=''">
+            </div>
+            <div id="inputFeedback" role="status" style="margin-top:8px;font-size:12px;color:#38bdf8"></div>
           </div>
           <div class="panel-body" style="max-height: 280px;">
             <div id="phoiTableContainer">
@@ -297,7 +467,7 @@
         <div class="panel">
           <div class="panel-header">
             <div class="panel-title">
-              <span>💾 Video Thành Phẩm Đã Render (D:\banve)</span>
+              <span>✅ Video đã hoàn thành</span>
               <span class="badge badge-gpu" id="banveBadgeCount">0 video</span>
             </div>
             <div class="panel-actions">
@@ -310,9 +480,10 @@
                 <thead>
                   <tr>
                     <th>Tên Thành Phẩm</th>
-                    <th>Dung lượng</th>
-                    <th>Ngày xuất</th>
-                    <th>Hành động</th>
+                    <th style="width: 85px;">Dung lượng</th>
+                    <th style="width: 110px;">Thời gian edit</th>
+                    <th style="width: 135px;">Ngày xuất</th>
+                    <th style="width: 70px; text-align: center;">Hành động</th>
                   </tr>
                 </thead>
                 <tbody id="banveTableBody">
@@ -325,30 +496,133 @@
 
       </div>
 
-      <!-- RIGHT COLUMN: LIVE LOG TERMINAL -->
-      <div class="panel">
+      <!-- RIGHT COLUMN: QUEUE AND LIVE LOG -->
+      <div class="monitor-column">
+          <div class="panel queue-panel">
+            <div class="panel-header">
+              <div class="panel-title">⏳ Video đang chờ xử lý <span class="badge badge-gpu" id="queueBadge">Telegram</span></div>
+            </div>
+            <div id="queueMessage" role="status" style="padding:10px 20px;color:var(--text-muted);font-size:12px">Đang kết nối hàng đợi…</div>
+            <div style="max-height:320px;overflow:auto;padding:0 20px 12px" tabindex="0" aria-label="Danh sách video chờ">
+              <table class="data-table">
+                <thead><tr><th>Thứ tự chờ</th><th>Tên video / Link</th><th>Nguồn</th></tr></thead>
+                <tbody id="queueTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+      <!-- AUDIO MIXER CONTROL PANEL -->
+      <div class="panel mixer-panel" style="margin-bottom: 16px;">
         <div class="panel-header">
           <div class="panel-title">
+            <span style="display: inline-flex; align-items: center; gap: 8px;">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+              🎚️ Bộ Tùy Chỉnh Mixer (Nhạc Nền & Giọng Đọc AI)
+            </span>
+            <span class="badge badge-gpu" id="mixerStatusBadge">Tự động áp dụng</span>
+          </div>
+          <div class="panel-actions">
+            <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px;" onclick="resetMixerDefaults()">↺ Mặc định</button>
+            <button class="btn btn-primary" style="font-size: 11px; padding: 4px 10px;" id="btnSaveMixer" onclick="saveMixerSettings()">💾 Lưu cấu hình</button>
+          </div>
+        </div>
+        <div class="panel-body" style="padding: 18px 20px; display: flex; flex-direction: column; gap: 16px;">
+          <!-- BGM Volume Slider -->
+          <div class="mixer-control-group">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+              <label for="bgmSlider" style="font-size: 13px; font-weight: 600; color: #f8fafc; display: flex; align-items: center; gap: 6px;">
+                🎵 Nhạc nền gốc (BGM)
+              </label>
+              <span class="mixer-val-badge" id="bgmValText">-2.0 dB</span>
+            </div>
+            <input type="range" id="bgmSlider" min="-24" max="6" step="0.5" value="-2" class="mixer-slider" oninput="updateMixerLiveDisplay()" onchange="saveMixerSettings()">
+            <div class="mixer-presets">
+              <span class="mixer-tag" onclick="setBgmPreset(-24)">🔇 Tắt hẳn</span>
+              <span class="mixer-tag" onclick="setBgmPreset(-10)">🔈 Nhỏ sâu (-10dB)</span>
+              <span class="mixer-tag" onclick="setBgmPreset(-5)">🔉 Nhỏ vừa (-5dB)</span>
+              <span class="mixer-tag active" id="tagBgmDefault" onclick="setBgmPreset(-2)">✨ Chuẩn (-2dB)</span>
+              <span class="mixer-tag" onclick="setBgmPreset(0)">🔊 Gốc (0dB)</span>
+            </div>
+          </div>
+
+          <!-- Dubbing Voice Slider -->
+          <div class="mixer-control-group">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+              <label for="dubSlider" style="font-size: 13px; font-weight: 600; color: #f8fafc; display: flex; align-items: center; gap: 6px;">
+                🗣️ Giọng đọc AI (Dubbing)
+              </label>
+              <span class="mixer-val-badge" id="dubValText">+1.0 dB</span>
+            </div>
+            <input type="range" id="dubSlider" min="-10" max="10" step="0.5" value="1" class="mixer-slider" oninput="updateMixerLiveDisplay()" onchange="saveMixerSettings()">
+            <div class="mixer-presets">
+              <span class="mixer-tag" onclick="setDubPreset(-3)">🔈 Nhẹ (-3dB)</span>
+              <span class="mixer-tag" onclick="setDubPreset(0)">🔉 Vừa (0dB)</span>
+              <span class="mixer-tag active" id="tagDubDefault" onclick="setDubPreset(1)">✨ Chuẩn (+1dB)</span>
+              <span class="mixer-tag" onclick="setDubPreset(3)">🔊 To rõ (+3dB)</span>
+              <span class="mixer-tag" onclick="setDubPreset(6)">📢 Tối đa (+6dB)</span>
+            </div>
+          </div>
+
+          <div id="mixerNotice" style="font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: rgba(255,255,255,0.03); border-radius: 6px; border: 1px solid var(--border);">
+            ℹ️ Cài đặt này áp dụng trực tiếp cho tất cả video render mới (Telegram Bot, Batch, V1 & V2).
+          </div>
+        </div>
+      </div>
+
+      <!-- COLLAPSIBLE LOG PANEL -->
+      <div class="panel log-panel-collapsible" id="logPanelWrapper" style="border: 1px solid var(--border); border-radius: 12px; overflow: hidden;">
+        <div class="panel-header" onclick="toggleLogPanel()" style="cursor: pointer; user-select: none;">
+          <div class="panel-title" style="display: flex; align-items: center; gap: 8px;">
+            <span id="logExpandIcon" style="display: inline-block; transition: transform 0.2s; color: #38bdf8; font-size: 11px;">▶</span>
             <span>💻 Quan Sát Render Ngầm & Log Hệ Thống</span>
             <span class="dot dot-green" id="logDot"></span>
           </div>
-          <div class="panel-actions">
+          <div class="panel-actions" onclick="event.stopPropagation()">
             <label style="font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer;">
               <input type="checkbox" id="chkAutoScroll" checked> Tự cuộn
             </label>
-            <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px;" onclick="clearLogs()">Bỏ lọc</button>
+            <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px;" onclick="downloadLogs()" title="Tải toàn bộ log (.txt)">📥 Xuất</button>
             <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px;" onclick="fetchLogs()">🔄 Tải lại</button>
+            <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px;" id="btnZoomLog" onclick="toggleMaximizeLog()" title="Phóng to toàn màn hình bảng log">⛶ Phóng to</button>
+            <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px;" onclick="toggleLogPanel()" id="btnToggleLogText">Mở log ▾</button>
           </div>
         </div>
-        <div class="panel-body">
-            <div class="log-tools">
-              <input id="logSearch" aria-label="Tìm nhật ký" placeholder="Tìm nội dung nhật ký…" oninput="renderLogs()">
-              <select id="logFilter" aria-label="Lọc mức nhật ký" onchange="renderLogs()"><option value="all">Tất cả</option><option value="error">Lỗi</option><option value="warn">Cảnh báo</option><option value="info">Thông tin</option></select>
-              <label><input type="checkbox" id="logRaw" onchange="renderLogs()"> Log gốc</label>
+        <div class="panel-body" id="collapsibleLogBody" style="display: none; padding: 0;">
+          <div style="display: flex; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: rgba(11, 16, 23, 0.4); align-items: center; flex-wrap: wrap;">
+            <input id="logSearch" style="flex: 1; min-width: 160px; background: #0b1017; color: #e2e8f0; border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font-size: 12px;" aria-label="Tìm nhật ký" placeholder="Tìm nội dung nhật ký…" oninput="renderLogs()">
+            <select id="logFilter" style="background: #0b1017; color: #e2e8f0; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 12px;" aria-label="Lọc mức nhật ký" onchange="renderLogs()">
+              <option value="all">Tất cả mức độ</option>
+              <option value="error">❌ Chỉ Lỗi</option>
+              <option value="warn">⚠️ Chỉ Cảnh báo</option>
+              <option value="info">ℹ️ Chỉ Thông tin</option>
+            </select>
+            <div style="display: inline-flex; align-items: center; gap: 3px; background: #0b1017; padding: 2px 6px; border: 1px solid var(--border); border-radius: 6px;">
+              <span style="font-size: 11px; color: var(--text-muted); margin-right: 2px;">Cỡ chữ:</span>
+              <button class="btn btn-outline" style="padding: 2px 6px; font-size: 11px; line-height: 1;" onclick="adjustLogZoom(-1)" title="Giảm cỡ chữ (nhỏ hơn)">A-</button>
+              <span id="logZoomVal" style="font-size: 11px; font-weight: 600; min-width: 36px; text-align: center; color: #38bdf8;">100%</span>
+              <button class="btn btn-outline" style="padding: 2px 6px; font-size: 11px; line-height: 1;" onclick="adjustLogZoom(1)" title="Tăng cỡ chữ (to hơn)">A+</button>
             </div>
-            <div id="logSummary" role="status" style="font-size:12px;color:var(--text-muted);padding:8px 0">Đang kết nối…</div>
-            <div class="terminal-box" id="terminalLogs">Đang nạp dữ liệu nhật ký...</div>
+            <label style="font-size: 11px; color: var(--text-muted); display: inline-flex; align-items: center; gap: 4px; cursor: pointer; user-select: none;" title="Hiển thị đầy đủ nội dung dòng, không bị cắt ngắn '...'">
+              <input type="checkbox" id="chkLogWrap" onchange="toggleLogWrap()"> Xuống dòng
+            </label>
+            <span id="logSummaryBadge" class="badge badge-gpu" style="font-size: 11px; padding: 3px 8px;">0 bản ghi</span>
+          </div>
+          <div id="logTableContainer" style="max-height: 280px; overflow-y: auto;">
+            <table class="data-table" id="logTable">
+              <thead>
+                <tr>
+                  <th style="width: 110px;">Thời gian</th>
+                  <th style="width: 100px;">Mức độ</th>
+                  <th>Nội dung sự kiện</th>
+                  <th style="width: 70px; text-align: center;">Chi tiết</th>
+                </tr>
+              </thead>
+              <tbody id="logTableBody">
+                <!-- Rendered dynamically -->
+              </tbody>
+            </table>
+          </div>
         </div>
+      </div>
       </div>
 
     </div>
@@ -367,6 +641,26 @@
       </div>
     </div>
   </div>
+
+  <!-- MODAL LOG DETAIL -->
+  <div class="modal-backdrop" id="logDetailModal" onclick="closeLogModal(event)">
+    <div class="modal-box" style="max-width: 820px;" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <div class="modal-title" id="modalLogTitle">Chi tiết Nhật Ký Kỹ Thuật</div>
+        <button class="modal-close" onclick="closeLogModal()">&times;</button>
+      </div>
+      <div class="modal-body" style="background: #0b1017; padding: 18px; display: flex; flex-direction: column; gap: 14px;">
+        <pre id="modalLogContent" style="width: 100%; max-height: 440px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: #cbd5e1; line-height: 1.5; background: rgba(0,0,0,0.5); padding: 12px; border-radius: 8px; border: 1px solid var(--border);"></pre>
+        <div style="display: flex; justify-content: flex-end; gap: 10px; width: 100%;">
+          <button class="btn btn-outline" onclick="copyLogContent()">📋 Sao chép</button>
+          <button class="btn btn-primary" onclick="closeLogModal()">Đóng</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- BACKDROP FOR MAXIMIZED LOG -->
+  <div class="modal-backdrop" id="logMaximizeBackdrop" onclick="toggleMaximizeLog()" style="display: none; z-index: 9998; backdrop-filter: blur(4px); background: rgba(0,0,0,0.75);"></div>
 
   <script>
     let isAutoScroll = true;
@@ -401,6 +695,9 @@
     }
 
     function renderStatus(state) {
+      document.getElementById('translationModelName').textContent = state.translation_models && state.translation_models.length
+        ? 'Đã dịch bằng: ' + state.translation_models.join(', ')
+        : 'Model thực tế: chưa ghi nhận';
       const step = Number(state.step) || 0;
       const stepPercent = {1:10, 2:25, 3:40, 3.5:55, 4:70, 5:85, 6:95};
       const videoDone = state.video_status === 'completed';
@@ -415,18 +712,25 @@
       const progressBar = document.getElementById('progressBar');
       const btnStop = document.getElementById('btnStop');
       const btnRunHero = document.getElementById('btnRunHero');
+
       const videoKey = String(state.job_id) + ':' + state.video_name + ':' + state.start_time;
       if (displayedVideoKey !== videoKey) {
         progressBar.style.transition = 'none';
-        progressBar.style.width = '0%';
+        progressBar.style.transform = 'scaleX(0)';
         void progressBar.offsetWidth;
         progressBar.style.transition = '';
         displayedVideoKey = videoKey;
+        [1, 2, 3, 3.5, 4, 5, 6].forEach(k => {
+          const t = document.getElementById('timeStep' + String(k).replace('.', ''));
+          if (t) t.textContent = '--';
+        });
       }
       progressBar.setAttribute('role', 'progressbar');
       progressBar.setAttribute('aria-valuemin', '0');
       progressBar.setAttribute('aria-valuemax', '100');
       progressBar.setAttribute('aria-valuenow', String(percent));
+
+      const scale = Math.max(0, Math.min(100, Number(state.percent) || 0)) / 100;
 
       if (isRunning) {
         statusTitle.innerHTML = '<span class="dot dot-yellow"></span> ĐANG XỬ LÝ & RENDER NGẦM';
@@ -434,7 +738,7 @@
           'Video ' + state.queue_index + '/' + state.queue_total + ': ' + state.video_name : 'Đang chuẩn bị hàng đợi...';
         stepDescription.textContent = state.step_name || 'Đang thực thi...';
         pctText.textContent = `${state.percent}%`;
-        progressBar.style.width = `${state.percent}%`;
+        progressBar.style.transform = `scaleX(${scale})`;
         btnStop.style.display = 'inline-flex';
         btnRunHero.style.display = 'none';
       } else {
@@ -442,7 +746,7 @@
         currentVideoName.textContent = state.last_completed ? `Vừa hoàn thành: ${state.last_completed.video_name}` : 'Chưa có tác vụ nào đang chạy';
         stepDescription.textContent = state.step_name || 'Sẵn sàng xử lý video';
         pctText.textContent = `${state.percent || 0}%`;
-        progressBar.style.width = `${state.percent || 0}%`;
+        progressBar.style.transform = `scaleX(${scale})`;
         btnStop.style.display = 'none';
         btnRunHero.style.display = 'inline-flex';
       }
@@ -451,6 +755,10 @@
       document.getElementById('valEta').textContent = state.eta_seconds ? `~${formatTime(state.eta_seconds)}` : '--';
       document.getElementById('valQueue').textContent = `${state.queue_index || 0} / ${state.queue_total || 0}`;
 
+      const pauseState=state.pause_state||'running';
+      document.getElementById('btnPauseVideo').disabled=!isRunning||pauseState!=='running';
+      document.getElementById('btnResumeVideo').disabled=pauseState==='running';
+      if(pauseState!=='running'){statusTitle.textContent=pauseState==='paused'?'⏸ ĐÃ TẠM DỪNG':'⏳ ĐANG CHỜ TẠM DỪNG';stepDescription.textContent=pauseState==='paused'?'Bấm Tiếp tục để chạy tiếp từ bước đang chờ.':'Hoàn tất bước hiện tại rồi tạm dừng, giữ nguyên tiến độ.';}
       // Update Pipeline 7 steps
       const currentStep = Number(state.step) || 0;
       const stepElements = {
@@ -462,37 +770,107 @@
         5: document.getElementById('step5'),
         6: document.getElementById('step6'),
       };
+      const timeElements = {
+        1: document.getElementById('timeStep1'),
+        2: document.getElementById('timeStep2'),
+        3: document.getElementById('timeStep3'),
+        3.5: document.getElementById('timeStep35'),
+        4: document.getElementById('timeStep4'),
+        5: document.getElementById('timeStep5'),
+        6: document.getElementById('timeStep6'),
+      };
 
       const stepKeys = [1, 2, 3, 3.5, 4, 5, 6];
       stepKeys.forEach(k => {
         const el = stepElements[k];
+        const timeEl = timeElements[k];
         if (!el) return;
         el.classList.remove('active', 'completed');
         el.removeAttribute('aria-current');
+
+        const durRaw = state.step_durations && (state.step_durations[k] !== undefined ? state.step_durations[k] : state.step_durations[String(k)]);
+        const durText = durRaw !== undefined ? `${Number(durRaw).toFixed(1)}s` : '';
+
         if (videoDone) {
           el.classList.add('completed');
+          if (timeEl) timeEl.textContent = durText ? `✓ ${durText}` : '✓ Xong';
         } else if (isRunning || ['error', 'stopped', 'interrupted'].includes(state.status)) {
           if (currentStep === k) {
             el.classList.add('active');
             el.setAttribute('aria-current', 'step');
+            if (timeEl) timeEl.textContent = durText ? `⏱ ${durText}` : '⏱ Đang chạy';
           } else if (currentStep > k) {
             el.classList.add('completed');
+            if (timeEl) timeEl.textContent = durText ? `✓ ${durText}` : '✓ Xong';
+          } else {
+            if (timeEl && !durText) timeEl.textContent = '--';
           }
+        } else {
+          if (timeEl) timeEl.textContent = durText ? `✓ ${durText}` : '--';
         }
       });
     }
 
+let inputUploading=false;
+    async function chooseInputFolder(){
+      if(inputUploading)return;
+      const button=document.getElementById('chooseInputFolder');const feedback=document.getElementById('inputFeedback');button.disabled=true;feedback.textContent='Hãy chọn thư mục trong cửa sổ Windows vừa mở…';
+      try{const r=await fetch('/api/choose-input-folder',{method:'POST',headers:{'X-Dashboard-Input':'1'}});const d=await r.json();if(!r.ok)throw Error(d.detail||'Không mở được hộp chọn thư mục');if(!d.path){feedback.textContent='Đã hủy chọn. Giữ nguyên thư mục hiện tại.';return;}document.getElementById('inputFolderPath').value=d.path;await changeInputFolder();}catch(e){feedback.textContent=e.message;}finally{button.disabled=false;}
+    }
+    async function changeInputFolder(){
+      if(inputUploading)return;
+      const feedback=document.getElementById('inputFeedback');
+      try{const r=await fetch('/api/input-folder',{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Input':'1'},body:JSON.stringify({path:document.getElementById('inputFolderPath').value})});const d=await r.json();if(!r.ok)throw Error(d.detail||'Không đổi được thư mục');feedback.textContent='Đang dùng: '+d.path;document.getElementById('inputFolderPath').value=d.path;await fetchPhoi();}catch(e){feedback.textContent=e.message;}
+    }
+    async function uploadInputVideos(files){
+      if(inputUploading)return;inputUploading=true;const feedback=document.getElementById('inputFeedback');let count=0;
+      try{for(const file of Array.from(files)){feedback.textContent='Đang sao chép: '+file.name;if(file.size>4*1024**3)throw Error('File vượt 4 GB: '+file.name);const r=await fetch('/api/input-video',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Dashboard-Input':'1','X-Video-Name':encodeURIComponent(file.name)},body:file});const d=await r.json();if(!r.ok)throw Error(d.detail||'Không tải được video');count++;}feedback.textContent='Đã thêm '+count+' video. Bấm Bắt đầu xử lý khi sẵn sàng.';}catch(e){feedback.textContent='Đã thêm '+count+' video. '+e.message;}finally{inputUploading=false;fetchPhoi();}
+    }
+    function downloadLogs() {
+      const term = document.getElementById('terminalLogs');
+      const text = logText || (term ? term.innerText : '');
+      if (!text) {
+        alert('Chưa có dữ liệu nhật ký để xuất.');
+        return;
+      }
+      const blob = new Blob([text], {type: 'text/plain;charset=utf-8'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'render_log_' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.txt';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const zone = document.getElementById('videoDropZone');
+      ['dragenter', 'dragover'].forEach(ev => {
+        zone.addEventListener(ev, e => {
+          e.preventDefault();
+          zone.classList.add('dragover');
+        });
+      });
+      ['dragleave', 'drop'].forEach(ev => {
+        zone.addEventListener(ev, e => {
+          e.preventDefault();
+          zone.classList.remove('dragover');
+          if (ev === 'drop') uploadInputVideos(e.dataTransfer.files);
+        });
+      });
+    });
     async function fetchPhoi() {
       try {
         const res = await fetch('/api/phoi');
         if (!res.ok) return;
         const data = await res.json();
-        
+        const pathInput=document.getElementById('inputFolderPath'); if(!pathInput.dataset.saved || pathInput.value===pathInput.dataset.saved)pathInput.value=data.path;pathInput.dataset.saved=data.path;
         document.getElementById('phoiBadgeCount').textContent = `${data.total_count} video (${data.total_size_mb} MB)`;
         const tbody = document.getElementById('phoiTableBody');
         
         if (!data.files || data.files.length === 0) {
-          tbody.innerHTML = `<tr><td colspan="4" class="empty-state"><div class="empty-icon">📁</div>Thư mục D:\\video phôi đang trống.<br>Hãy sao chép các video cần edit vào đây!</td></tr>`;
+          tbody.innerHTML = `<tr><td colspan="4" class="empty-state"><div class="empty-icon">📁</div>Chưa có video trong thư mục đã chọn.<br>Kéo thả video hoặc chọn thư mục khác ở phía trên!</td></tr>`;
           return;
         }
 
@@ -505,13 +883,13 @@
 
           return `
             <tr>
-              <td style="font-weight: 600; color: #fff; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${safeName}">
-                🎬 ${safeName}
+              <td style="font-weight: 600; color: #fff; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${safeName}">
+                <span style="display:inline-flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="15" x="2" y="5" rx="2"/><polyline points="10 9 14 12 10 15"/></svg>${safeName}</span>
               </td>
-              <td>${f.size_mb} MB</td>
+              <td style="font-variant-numeric: tabular-nums;">${f.size_mb} MB</td>
               <td><span class="status-badge ${badgeClass}">${f.status_label}</span></td>
               <td>
-                <button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px;" onclick="previewVideo('phoi', '${encodedName}')">▶ Xem</button>
+                <button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px; display:inline-flex; align-items:center; gap:4px;" onclick="previewVideo('phoi', '${encodedName}')"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Xem</button>
               </td>
             </tr>
           `;
@@ -522,32 +900,50 @@
       }
     }
 
+    let lastBanveFingerprint = '';
     async function fetchBanve() {
       try {
         const res = await fetch('/api/banve');
         if (!res.ok) return;
         const data = await res.json();
         
-        document.getElementById('banveBadgeCount').textContent = `${data.total_count} video (${data.total_size_mb} MB)`;
+        const countText = data.total_count > 200 
+          ? `${data.total_count} video (hiển thị 200 gần nhất · ${data.total_size_mb} MB)` 
+          : `${data.total_count} video (${data.total_size_mb} MB)`;
+        document.getElementById('banveBadgeCount').textContent = countText;
         const tbody = document.getElementById('banveTableBody');
 
         if (!data.files || data.files.length === 0) {
-          tbody.innerHTML = `<tr><td colspan="4" class="empty-state"><div class="empty-icon">💾</div>Chưa có video thành phẩm nào trong D:\\banve</td></tr>`;
+          if (lastBanveFingerprint !== 'empty') {
+            lastBanveFingerprint = 'empty';
+            tbody.innerHTML = `<tr><td colspan="5" class="empty-state"><div class="empty-icon">💾</div>Chưa có video thành phẩm nào trong D:\\banve</td></tr>`;
+          }
           return;
         }
 
-        tbody.innerHTML = data.files.slice(0, 15).map(f => {
+        const sliceFiles = data.files.slice(0, 200);
+        const currentFingerprint = `${data.total_count}_${data.total_size_mb}_${sliceFiles[0]?.name || ''}_${sliceFiles[0]?.duration_formatted || ''}_${sliceFiles[sliceFiles.length - 1]?.name || ''}`;
+        if (currentFingerprint === lastBanveFingerprint) {
+          return;
+        }
+        lastBanveFingerprint = currentFingerprint;
+
+        tbody.innerHTML = sliceFiles.map(f => {
           const safeName = escapeHtml(String(f.name));
           const encodedName = encodeURIComponent(String(f.name)).replace(/'/g, '%27');
+          const durBadge = f.duration_formatted && f.duration_formatted !== '--'
+            ? `<span style="display: inline-flex; align-items: center; gap: 4px; color: #38bdf8; font-weight: 600; font-variant-numeric: tabular-nums;" title="Tổng thời gian xử lý: ${f.duration_seconds || 0} giây">⏱️ ${escapeHtml(f.duration_formatted)}</span>`
+            : `<span style="color: var(--text-muted); font-size: 11px;">--</span>`;
           return `
             <tr>
-              <td style="font-weight: 600; color: #34d399; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${safeName}">
-                ✅ ${safeName}
+              <td style="font-weight: 600; color: #34d399; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${safeName}">
+                <span style="display:inline-flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>${safeName}</span>
               </td>
-              <td>${f.size_mb} MB</td>
-              <td style="color: var(--text-muted); font-size: 11px;">${f.created}</td>
-              <td>
-                <button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px;" onclick="previewVideo('banve', '${encodedName}')">▶ Xem</button>
+              <td style="font-variant-numeric: tabular-nums;">${f.size_mb} MB</td>
+              <td>${durBadge}</td>
+              <td style="color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums;">${f.created}</td>
+              <td style="text-align: center;">
+                <button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px; display:inline-flex; align-items:center; gap:4px;" onclick="previewVideo('banve', '${encodedName}')"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Xem</button>
               </td>
             </tr>
           `;
@@ -569,11 +965,13 @@
           progressLogKey = '';
           progressVideoKey = videoKey;
         }
-        const key = videoKey + ':' + state.step + ':' + state.video_status + ':' + state.status + ':' + state.step_name;
+        const modelNames = Array.isArray(state.translation_models) ? state.translation_models.join(', ') : '';
+        const key = videoKey + ':' + state.step + ':' + state.video_status + ':' + state.status + ':' + state.step_name + ':' + modelNames;
         if (key === progressLogKey) return;
         progressLogKey = key;
         const failed = ['error', 'interrupted'].includes(state.status) || state.video_status === 'error';
-        const message = 'Trạng thái ghi nhận • ' + state.video_name + ' • ' + (state.step_name || 'Đang chuẩn bị');
+        const message = 'Trạng thái ghi nhận • ' + state.video_name + ' • ' + (state.step_name || 'Đang chuẩn bị') +
+          (modelNames ? ' • Model đã dịch thành công: ' + modelNames : '');
         const time = state.updated_at ? new Date(state.updated_at * 1000).toLocaleString('vi-VN') : 'Vừa ghi nhận';
         progressLogEntries.push({time, level: failed ? 'error' : 'info', message,
           raw: 'Nguồn: /api/status (không suy đoán các bước trước đó)\n' + message});
@@ -597,9 +995,21 @@
         if (entry.level === 'error') return msg;
         if (/Chưa cấu hình.*Google Drive/i.test(msg)) return 'Chưa cấu hình Google Drive — chưa thể tải video lên Drive. Đây không phải thông báo lỗi render.';
         if (entry.level === 'warn') return msg;
+        const calling = msg.match(/Đang gọi Google Gemini: ([\w.-]+)/);
+        if (calling) return '🌐 Đang gọi model dịch: ' + calling[1] + ' — chờ phản hồi.';
+        const cached = msg.match(/Translation cache hit; original model=([\w.-]+)/);
+        if (cached) return '♻️ Dùng bản dịch đã lưu từ ' + cached[1] + ' — không gọi API mới.';
         const metric = msg.match(/stage=(\w+) seconds=([\d.]+) success=(True|False)/);
         if (metric) {
           const names = {voice:'Lồng tiếng', render:'Xuất video', translation:'Dịch phụ đề', asr:'Nhận diện lời nói', demucs:'Tách giọng'};
+          const stageStepMap = {demucs: '2', asr: '3', ocr: '35', translation: '4', voice: '5', render: '6'};
+          const stepKey = stageStepMap[metric[1]];
+          if (stepKey) {
+            const timeEl = document.getElementById('timeStep' + stepKey);
+            if (timeEl && (!timeEl.textContent || timeEl.textContent === '--' || timeEl.textContent.includes('⏱'))) {
+              timeEl.textContent = '✓ ' + Number(metric[2]).toFixed(1) + 's';
+            }
+          }
           return (names[metric[1]] || metric[1]) + (metric[3] === 'True' ? ' hoàn tất' : ' không thành công') + ' • ' + Number(metric[2]).toFixed(1) + ' giây';
         }
         if (/V1 render complete/.test(msg)) return 'Đã xuất video thành công' + (/nvenc/.test(msg) ? ' bằng GPU NVIDIA.' : '.');
@@ -610,19 +1020,171 @@
         if (/Application started/.test(msg)) return 'Bot Telegram đã khởi động, sẵn sàng nhận yêu cầu.';
         return msg;
       }
+      let currentVisibleLogs = [];
+      const ZOOM_LEVELS = [0.85, 1.0, 1.15, 1.3, 1.5, 1.75];
+      let currentZoomIdx = 1;
+      try {
+        const saved = localStorage.getItem('autodub_log_zoom_idx');
+        if (saved !== null) {
+          const idx = parseInt(saved, 10);
+          if (!isNaN(idx) && idx >= 0 && idx < ZOOM_LEVELS.length) currentZoomIdx = idx;
+        }
+      } catch (_) {}
+
+      function applyLogZoom() {
+        const scale = ZOOM_LEVELS[currentZoomIdx];
+        const table = document.getElementById('logTable');
+        const valEl = document.getElementById('logZoomVal');
+        if (valEl) valEl.textContent = Math.round(scale * 100) + '%';
+        if (table) {
+          table.style.fontSize = (12 * scale) + 'px';
+        }
+        try { localStorage.setItem('autodub_log_zoom_idx', String(currentZoomIdx)); } catch (_) {}
+      }
+
+      function adjustLogZoom(delta) {
+        currentZoomIdx = Math.max(0, Math.min(ZOOM_LEVELS.length - 1, currentZoomIdx + delta));
+        applyLogZoom();
+      }
+
+      let isLogWrap = false;
+      try { isLogWrap = localStorage.getItem('autodub_log_wrap') === '1'; } catch (_) {}
+
+      function toggleLogWrap() {
+        const chk = document.getElementById('chkLogWrap');
+        isLogWrap = chk ? chk.checked : !isLogWrap;
+        try { localStorage.setItem('autodub_log_wrap', isLogWrap ? '1' : '0'); } catch (_) {}
+        renderLogs();
+      }
+
+      let isLogMaximized = false;
+      function toggleMaximizeLog() {
+        const panel = document.getElementById('logPanelWrapper');
+        const btn = document.getElementById('btnZoomLog');
+        const backdrop = document.getElementById('logMaximizeBackdrop');
+        const body = document.getElementById('collapsibleLogBody');
+        const icon = document.getElementById('logExpandIcon');
+        const btnToggle = document.getElementById('btnToggleLogText');
+
+        isLogMaximized = !isLogMaximized;
+        if (isLogMaximized) {
+          body.style.display = 'flex';
+          if (icon) icon.style.transform = 'rotate(90deg)';
+          if (btnToggle) btnToggle.textContent = 'Thu gọn ▴';
+
+          panel.classList.add('log-panel-maximized');
+          if (backdrop) backdrop.style.display = 'block';
+          if (btn) {
+            btn.innerHTML = '🗗 Thu nhỏ';
+            btn.title = 'Thu nhỏ về vị trí ban đầu (Esc)';
+          }
+        } else {
+          panel.classList.remove('log-panel-maximized');
+          if (backdrop) backdrop.style.display = 'none';
+          if (btn) {
+            btn.innerHTML = '⛶ Phóng to';
+            btn.title = 'Phóng to toàn màn hình bảng log';
+          }
+          body.style.display = 'block';
+        }
+        renderLogs();
+      }
+
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && isLogMaximized) {
+          toggleMaximizeLog();
+        }
+      });
+
       function renderLogs() {
-        const term = document.getElementById('terminalLogs');
+        const tbody = document.getElementById('logTableBody');
+        if (!tbody) return;
         const query = (document.getElementById('logSearch').value || '').toLowerCase();
         const filter = document.getElementById('logFilter').value || 'all';
-        const raw = document.getElementById('logRaw').checked;
-          const entries = parseLogs(logText).concat(progressLogEntries);
+        const entries = parseLogs(logText).concat(progressLogEntries);
         entries.forEach(e => { if (/success=False/.test(e.message)) e.level = 'error'; });
-        const visible = entries.filter(e => (filter === 'all' || e.level === filter) && (e.raw + explainLog(e)).toLowerCase().includes(query));
-        const oldScroll = term.scrollTop;
-        const labels = {error:'Lỗi', warn:'Cảnh báo', info:'Thông tin'};
-        term.innerHTML = visible.map(e => '<article class="log-entry ' + e.level + '"><div class="log-meta">' + escapeHtml(e.time) + ' · ' + labels[e.level] + '</div>' + (raw ? '<pre>' + escapeHtml(e.raw) + '</pre>' : '<div>' + escapeHtml(explainLog(e)) + '</div><details><summary>Xem log kỹ thuật</summary><pre>' + escapeHtml(e.raw) + '</pre></details>') + '</article>').join('') || '<div class="empty-state">Không có nhật ký phù hợp.</div>';
-        document.getElementById('logSummary').textContent = visible.length + '/' + entries.length + ' sự kiện gần nhất • ' + entries.filter(e => e.level === 'error').length + ' lỗi • ' + entries.filter(e => e.level === 'warn').length + ' cảnh báo (trong phần log được tải)';
-        term.scrollTop = isAutoScroll ? term.scrollHeight : oldScroll;
+        const visible = entries.filter(e => (filter === 'all' || e.level === filter) && (e.raw + ' ' + explainLog(e)).toLowerCase().includes(query));
+        currentVisibleLogs = visible;
+
+        const badgeEl = document.getElementById('logSummaryBadge');
+        if (badgeEl) badgeEl.textContent = `${visible.length} / ${entries.length} bản ghi`;
+
+        if (!visible.length) {
+          tbody.innerHTML = '<tr><td colspan="4" class="empty-state" style="padding:20px;"><div class="empty-icon">📋</div>Không có nhật ký phù hợp.</td></tr>';
+          return;
+        }
+
+        const badgeStyles = {
+          error: 'background:rgba(239,68,68,0.15);color:#f87171;border:1px solid rgba(239,68,68,0.3);',
+          warn: 'background:rgba(245,158,11,0.15);color:#fbbf24;border:1px solid rgba(245,158,11,0.3);',
+          info: 'background:rgba(59,130,246,0.15);color:#60a5fa;border:1px solid rgba(59,130,246,0.3);'
+        };
+        const badgeLabels = {error: 'Lỗi', warn: 'Cảnh báo', info: 'Thông tin'};
+        const badgeIcons = {error: '❌', warn: '⚠️', info: 'ℹ️'};
+
+        const wrapTdStyle = isLogWrap
+          ? 'white-space: normal; word-break: break-word; max-width: none;'
+          : 'white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 380px;';
+
+        tbody.innerHTML = visible.map((e, idx) => {
+          const safeMsg = escapeHtml(explainLog(e));
+          const safeTime = escapeHtml(e.time || '--:--:--');
+          const bStyle = badgeStyles[e.level] || badgeStyles.info;
+          const bLabel = badgeLabels[e.level] || 'Thông tin';
+          const bIcon = badgeIcons[e.level] || 'ℹ️';
+
+          return `
+            <tr>
+              <td style="font-variant-numeric: tabular-nums; color: var(--text-muted); font-size: 0.92em; white-space: nowrap;">
+                ${safeTime}
+              </td>
+              <td>
+                <span class="badge" style="${bStyle} font-size: 0.85em; padding: 2px 6px;">
+                  ${bIcon} ${bLabel}
+                </span>
+              </td>
+              <td style="font-size: 1em; line-height: 1.45; color: ${e.level === 'error' ? '#fca5a5' : '#e2e8f0'}; ${wrapTdStyle}" title="${escapeHtml(e.message)}">
+                ${safeMsg}
+              </td>
+              <td style="text-align: center;">
+                <button class="btn btn-outline" style="padding: 2px 7px; font-size: 0.9em; display: inline-flex; align-items: center; gap: 3px;" onclick="viewLogDetail(${idx})" title="Xem chi tiết log kỹ thuật">
+                  👁 Xem
+                </button>
+              </td>
+            </tr>
+          `;
+        }).join('');
+
+        applyLogZoom();
+
+        const chk = document.getElementById('chkLogWrap');
+        if (chk && chk.checked !== isLogWrap) chk.checked = isLogWrap;
+
+        const container = document.getElementById('logTableContainer');
+        if (isAutoScroll && container) {
+          container.scrollTop = container.scrollHeight;
+        }
+      }
+
+      function viewLogDetail(idx) {
+        const entry = currentVisibleLogs[idx];
+        if (!entry) return;
+        document.getElementById('modalLogTitle').textContent = `Chi tiết Nhật Ký (${entry.time || 'Vừa xong'}) · ${entry.level.toUpperCase()}`;
+        document.getElementById('modalLogContent').textContent = entry.raw || entry.message;
+        document.getElementById('logDetailModal').style.display = 'flex';
+      }
+
+      function closeLogModal(e) {
+        document.getElementById('logDetailModal').style.display = 'none';
+      }
+
+      function copyLogContent() {
+        const content = document.getElementById('modalLogContent').textContent;
+        navigator.clipboard.writeText(content).then(() => {
+          alert('Đã sao chép nội dung log vào clipboard!');
+        }).catch(() => {
+          alert('Không thể tự động sao chép. Vui lòng bôi đen và nhấn Ctrl+C.');
+        });
       }
       async function fetchLogs() {
         if (logPending) return;
@@ -686,7 +1248,8 @@
       }
 
     async function startBatch() {
-      if (!confirm('Bạn có muốn bắt đầu xử lý toàn bộ video trong thư mục D:\\video phôi?')) return;
+      if(inputUploading){alert('Chờ tải video lên hoàn tất.');return;}
+      if (!confirm('Bắt đầu xử lý video trong thư mục: '+document.getElementById('inputFolderPath').dataset.saved+'?')) return;
       try {
         const res = await fetch('/api/run-batch', { method: 'POST' });
         const data = await res.json();
@@ -697,6 +1260,9 @@
       }
     }
 
+    async function controlVideo(action){
+      try{const r=await fetch('/api/'+action+'-video',{method:'POST',headers:{'X-Dashboard-Input':'1'}});const d=await r.json();if(!r.ok)throw Error(d.detail||'Không gửi được lệnh');document.getElementById('stepDescription').textContent=d.message;}catch(e){alert(e.message);}
+    }
     async function stopBatch() {
       if (!confirm('Bạn có chắc chắn muốn dừng tiến trình xử lý hiện tại không?')) return;
       try {
@@ -757,15 +1323,118 @@
         document.getElementById('queueBadge').textContent = data.items.length + ' video chờ';
         document.getElementById('queueMessage').textContent = data.message || 'Thứ tự xử lý từ trên xuống • Không bao gồm video đã lấy ra xử lý.';
         document.getElementById('queueTableBody').innerHTML = data.items.map(item =>
-          '<tr><td>' + escapeHtml(String(item.position)) + '</td><td style="overflow-wrap:anywhere">' +
-          escapeHtml(item.name) + '</td><td>Telegram</td></tr>').join('') ||
+          '<tr><td style="font-variant-numeric: tabular-nums;"><span style="display:inline-block;padding:1px 6px;border-radius:10px;background:#1e293b;border:1px solid #334155;font-weight:700;font-size:11px;">#' + escapeHtml(String(item.position)) + '</span></td><td style="font-weight:500;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(item.name) + '">' +
+          escapeHtml(item.name) + '</td><td><span class="badge" style="background:rgba(59,130,246,0.15);color:#93c5fd;border:1px solid rgba(59,130,246,0.3);font-size:11px;padding:2px 6px;border-radius:4px;">Telegram</span></td></tr>').join('') ||
           '<tr><td colspan="3" class="empty-state">' + (data.available ? 'Không có video đang chờ.' : 'Chưa có dữ liệu hàng đợi trực tiếp.') + '</td></tr>';
       } catch (error) {
         document.getElementById('queueMessage').textContent = 'Chưa kết nối được hàng đợi; dữ liệu cũ (nếu có) chưa được cập nhật.';
       } finally { queuePending = false; }
     }
     setInterval(fetchQueue, 2500);
+    // ===== MIXER AUDIO CONTROLS =====
+    async function loadMixerSettings() {
+      try {
+        const res = await fetch('/api/audio-settings');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.bgm_volume_db !== undefined) {
+          document.getElementById('bgmSlider').value = data.bgm_volume_db;
+        }
+        if (data.dubbing_volume_db !== undefined) {
+          document.getElementById('dubSlider').value = data.dubbing_volume_db;
+        }
+        updateMixerLiveDisplay();
+      } catch (err) {
+        console.error('Error loading audio settings:', err);
+      }
+    }
+
+    function updateMixerLiveDisplay() {
+      const bgm = parseFloat(document.getElementById('bgmSlider').value);
+      const dub = parseFloat(document.getElementById('dubSlider').value);
+      document.getElementById('bgmValText').textContent = (bgm > 0 ? '+' : '') + bgm.toFixed(1) + ' dB';
+      document.getElementById('dubValText').textContent = (dub > 0 ? '+' : '') + dub.toFixed(1) + ' dB';
+    }
+
+    function setBgmPreset(val) {
+      document.getElementById('bgmSlider').value = val;
+      updateMixerLiveDisplay();
+      saveMixerSettings();
+    }
+
+    function setDubPreset(val) {
+      document.getElementById('dubSlider').value = val;
+      updateMixerLiveDisplay();
+      saveMixerSettings();
+    }
+
+    function resetMixerDefaults() {
+      document.getElementById('bgmSlider').value = -2.0;
+      document.getElementById('dubSlider').value = 1.0;
+      updateMixerLiveDisplay();
+      saveMixerSettings();
+    }
+
+    async function saveMixerSettings() {
+      const bgm = parseFloat(document.getElementById('bgmSlider').value);
+      const dub = parseFloat(document.getElementById('dubSlider').value);
+      updateMixerLiveDisplay();
+      const notice = document.getElementById('mixerNotice');
+      try {
+        const res = await fetch('/api/audio-settings', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({bgm_volume_db: bgm, dubbing_volume_db: dub})
+        });
+        if (res.ok) {
+          notice.textContent = `✅ Đã lưu cấu hình: Nhạc nền ${bgm > 0 ? '+' : ''}${bgm.toFixed(1)}dB, Giọng đọc ${dub > 0 ? '+' : ''}${dub.toFixed(1)}dB`;
+          notice.style.color = '#34d399';
+          setTimeout(() => {
+            notice.textContent = 'ℹ️ Cài đặt này áp dụng trực tiếp cho tất cả video render mới (Telegram Bot, Batch, V1 & V2).';
+            notice.style.color = 'var(--text-muted)';
+          }, 3500);
+        }
+      } catch (err) {
+        notice.textContent = '❌ Lỗi lưu cấu hình: ' + err.message;
+        notice.style.color = '#f87171';
+      }
+    }
+
+    // ===== COLLAPSIBLE PANELS =====
+    function toggleSystemControl() {
+      const body = document.getElementById('systemControlBody');
+      const icon = document.getElementById('controlExpandIcon');
+      const label = document.getElementById('controlToggleLabel');
+      if (body.style.display === 'none' || !body.style.display) {
+        body.style.display = 'block';
+        icon.style.transform = 'rotate(90deg)';
+        label.textContent = 'Nhấn để thu gọn ▴';
+      } else {
+        body.style.display = 'none';
+        icon.style.transform = 'rotate(0deg)';
+        label.textContent = 'Nhấn để mở ▾';
+      }
+    }
+
+    function toggleLogPanel() {
+      if (isLogMaximized) toggleMaximizeLog();
+      const body = document.getElementById('collapsibleLogBody');
+      const icon = document.getElementById('logExpandIcon');
+      const btn = document.getElementById('btnToggleLogText');
+      if (body.style.display === 'none' || !body.style.display) {
+        body.style.display = 'block';
+        icon.style.transform = 'rotate(90deg)';
+        btn.textContent = 'Thu gọn ▴';
+      } else {
+        body.style.display = 'none';
+        icon.style.transform = 'rotate(0deg)';
+        btn.textContent = 'Mở log ▾';
+      }
+    }
+
     function refreshAll() {
+      loadMixerSettings();
+      applyLogZoom();
       fetchQueue();
       fetchStatus();
       fetchPhoi();

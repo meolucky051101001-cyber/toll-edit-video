@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tool V1 - Giám Sát Video Phôi & Tiến Độ Render</title>
+  <style>
+    :root {
+      --bg-dark: #0f141c;
+      --bg-card: #171f2c;
+      --bg-card-hover: #1e293b;
+      --border: #293548;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --accent: #06b6d4;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    body { background-color: var(--bg-dark); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; }
+    
+    /* Header */
+    header { background: #131b26; border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; position: relative; z-index: 10; }
+    .logo-area { display: flex; align-items: center; gap: 12px; }
+    .logo-badge { background: linear-gradient(135deg, #3b82f6, #06b6d4); color: white; padding: 6px 12px; border-radius: 8px; font-weight: bold; font-size: 14px; letter-spacing: 0.5px; }
+    .app-title { font-size: 18px; font-weight: 700; color: #fff; }
+    .app-subtitle { font-size: 12px; color: var(--text-muted); }
+    
+    .hw-status { display: flex; align-items: center; gap: 16px; font-size: 13px; }
+    .badge { padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+    .badge-gpu { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .badge-online { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .dot-green { background: #10b981; box-shadow: 0 0 8px #10b981; }
+    .dot-blue { background: #3b82f6; box-shadow: 0 0 8px #3b82f6; }
+    .dot-yellow { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; animation: pulse 1.5s infinite; }
+    
+    .btn { padding: 8px 16px; border-radius: 8px; border: 1px solid transparent; font-size: 13px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; transition: all 0.2s ease; }
+    .btn-primary { background: #2563eb; color: white; }
+    .btn-primary:hover { background: #1d4ed8; }
+    .btn-success { background: #059669; color: white; }
+    .btn-success:hover { background: #047857; }
+    .btn-danger { background: #dc2626; color: white; }
+    .btn-danger:hover { background: #b91c1c; }
+    .btn-outline { background: transparent; border-color: var(--border); color: var(--text); }
+    .btn-outline:hover { background: var(--bg-card-hover); border-color: var(--text-muted); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    
+    /* Layout */
+    .container { max-width: 1540px; margin: 0 auto; padding: 20px; width: 100%; flex: 1; display: flex; flex-direction: column; gap: 20px; }
+    
+    /* Progress Hero Card */
+    .hero-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 24px; position: relative; overflow: hidden; }
+    .hero-card::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, #3b82f6, #06b6d4, #10b981); }
+    
+    .hero-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
+    .hero-status-title { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); font-weight: 700; margin-bottom: 6px; }
+    .hero-video-name { font-size: 20px; font-weight: 800; color: #fff; word-break: break-all; }
+    
+    .progress-box { margin: 18px 0; }
+    .progress-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .progress-step-text { font-size: 14px; font-weight: 600; color: #60a5fa; }
+    .progress-pct-text { font-size: 24px; font-weight: 900; color: #38bdf8; }
+    
+    .progress-bar-track { width: 100%; height: 14px; background: #0b1017; border-radius: 10px; overflow: hidden; position: relative; border: 1px solid rgba(255,255,255,0.05); }
+    .progress-bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #2563eb, #06b6d4, #10b981); border-radius: 10px; transition: width 0.4s ease-in-out; position: relative; }
+    .progress-bar-fill::after { content: ""; position: absolute; top: 0; left: 0; bottom: 0; right: 0; background-image: linear-gradient(45deg, rgba(255,255,255,0.15) 25%, transparent 25%, transparent 50%, rgba(255,255,255,0.15) 50%, rgba(255,255,255,0.15) 75%, transparent 75%, transparent); background-size: 20px 20px; animation: moveStripes 1s linear infinite; }
+    
+    @keyframes moveStripes { 0% { background-position: 0 0; } 100% { background-position: 20px 0; } }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    
+    /* Pipeline Steps Visualization */
+    .steps-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; margin-top: 20px; }
+    .step-item { background: #111722; border: 1px solid var(--border); border-radius: 10px; padding: 12px 8px; text-align: center; transition: all 0.2s; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+    .step-item.active { background: rgba(59, 130, 246, 0.15); border-color: #3b82f6; box-shadow: 0 0 15px rgba(59, 130, 246, 0.2); }
+    .step-item.completed { background: rgba(16, 185, 129, 0.12); border-color: rgba(16, 185, 129, 0.4); }
+    .step-icon { font-size: 20px; }
+    .step-title { font-size: 11px; font-weight: 700; color: #cbd5e1; }
+    .step-tag { font-size: 10px; color: var(--text-muted); }
+    .step-item.completed .step-tag { color: #34d399; font-weight: bold; }
+    .step-item.active .step-tag { color: #60a5fa; font-weight: bold; }
+    
+    .stats-row { display: flex; gap: 20px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-muted); }
+    .stat-chip { display: flex; align-items: center; gap: 6px; }
+    .stat-val { color: #fff; font-weight: 700; }
+    
+    /* Main Grid */
+    .main-grid { display: grid; grid-template-columns: 1fr 1.15fr; gap: 20px; flex: 1; }
+    @media (max-width: 1100px) { .main-grid { grid-template-columns: 1fr; } .steps-grid { grid-template-columns: repeat(4, 1fr); } }
+    
+    .panel { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; display: flex; flex-direction: column; overflow: hidden; }
+    .panel-header { padding: 16px 20px; background: #131a26; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+    .panel-title { font-size: 15px; font-weight: 700; display: flex; align-items: center; gap: 8px; color: #fff; }
+    .panel-actions { display: flex; gap: 8px; align-items: center; }
+    .panel-body { padding: 16px 20px; flex: 1; display: flex; flex-direction: column; overflow-y: auto; }
+    
+    /* Table styling */
+    .data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .data-table th { text-align: left; padding: 10px 12px; color: var(--text-muted); font-weight: 600; border-bottom: 1px solid var(--border); }
+    .data-table td { padding: 10px 12px; border-bottom: 1px solid #1c2636; color: #e2e8f0; }
+    .data-table tr:hover { background: rgba(255,255,255,0.03); }
+    
+    .status-badge { padding: 3px 8px; border-radius: 6px; font-size: 10px; font-weight: 700; display: inline-block; }
+    .status-waiting { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+    .status-running { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); animation: pulse 1s infinite; }
+    .status-completed { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+    
+    /* Terminal Console */
+    .terminal-box { background: #090d13; border: 1px solid #1f2937; border-radius: 8px; padding: 14px; flex: 1; font-family: "Consolas", "Courier New", monospace; font-size: 11.5px; line-height: 1.6; color: #e2e8f0; overflow-y: auto; max-height: 480px; min-height: 380px; white-space: pre-wrap; word-break: break-all; }
+    .log-line { margin-bottom: 2px; }
+    .log-line.nvenc { color: #34d399; }
+    .log-line.ai { color: #38bdf8; }
+    .log-line.warn { color: #fbbf24; }
+    .log-line.error { color: #f87171; }
+    .log-line.step { color: #a78bfa; font-weight: bold; }
+    
+      .log-tools { display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:12px; }
+      .log-tools input:not([type=checkbox]), .log-tools select { background:#131b26; color:#e2e8f0; border:1px solid #475569; border-radius:6px; padding:8px; min-width:0; }
+      .log-tools input:not([type=checkbox]) { flex:1; }
+      #terminalLogs { font-family:inherit; font-size:13px; white-space:normal; word-break:normal; overflow-wrap:anywhere; }
+      .log-entry { border-left:3px solid #38bdf8; padding:10px 12px; margin-bottom:8px; background:#131b26; border-radius:5px; }
+      .log-entry.warn { border-color:#fbbf24; }
+      .log-entry.error { border-color:#f87171; }
+      .log-meta { color:#94a3b8; font-size:11px; margin-bottom:4px; }
+      .log-entry.warn .log-meta { color:#fbbf24; }
+      .log-entry.error .log-meta { color:#f87171; }
+      .log-entry summary { cursor:pointer; color:#94a3b8; font-size:11px; margin-top:6px; }
+      .log-entry pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; margin:8px 0 0; }
+      /* Modal Video Preview */
+    .modal-backdrop { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.85); backdrop-filter: blur(4px); display: none; align-items: center; justify-content: center; z-index: 999; }
+    .modal-box { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; width: 90%; max-width: 860px; overflow: hidden; display: flex; flex-direction: column; }
+    .modal-header { padding: 14px 20px; background: #131b26; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+    .modal-title { font-size: 15px; font-weight: 700; color: #fff; }
+    .modal-close { background: none; border: none; font-size: 20px; color: var(--text-muted); cursor: pointer; }
+    .modal-body { padding: 16px; background: #000; display: flex; justify-content: center; align-items: center; }
+    .modal-body video { width: 100%; max-height: 520px; border-radius: 6px; }
+    
+    /* Empty state */
+    .empty-state { text-align: center; padding: 30px; color: var(--text-muted); font-size: 13px; }
+    .empty-icon { font-size: 32px; margin-bottom: 8px; opacity: 0.5; }
+  </style>
+</head>
+<body>
+  <!-- HEADER -->
+  <header>
+    <div class="logo-area">
+      <div class="logo-badge">TOOL V1</div>
+      <div>
+        <div class="app-title">Bảng Điều Khiển Video Phôi & Giám Sát Render</div>
+        <div class="app-subtitle">Tự động lồng tiếng AI & Hardware Acceleration (RTX 4050 NVENC)</div>
+      </div>
+    </div>
+    
+      <div class="hw-status">
+        <a class="btn btn-outline" href="http://127.0.0.1:8088/" title="Mở dashboard Tool V1">Tool V1</a>
+        <a class="btn btn-outline" href="http://127.0.0.1:8089/" title="Mở dashboard Tool V2">Tool V2</a>
+      <span class="badge badge-gpu">
+        <span class="dot dot-green"></span>
+        RTX 4050 (NVENC 8000k CUDA)
+      </span>
+      <span class="badge badge-online">
+        <span class="dot dot-blue"></span>
+        Tool V1 Legacy
+      </span>
+      <a href="/a2ui" class="btn btn-outline" style="border-color: rgba(168, 85, 247, 0.4); color: #c084fc; text-decoration: none;" title="Khám phá giao diện động A2UI">⚡ A2UI Studio</a>
+      <button class="btn btn-outline" onclick="refreshAll()" title="Làm mới dữ liệu">🔄 Làm mới</button>
+    </div>
+  </header>
+
+  <div class="container">
+
+    <!-- HERO PROGRESS CARD -->
+    <div class="hero-card">
+      <div class="hero-top">
+        <div>
+          <div class="hero-status-title" id="statusTitle">TRẠNG THÁI TIẾN ĐỘ</div>
+          <div class="hero-video-name" id="currentVideoName">Đang chờ lệnh...</div>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn btn-danger" id="btnStop" onclick="stopBatch()" style="display: none;">⏹ Dừng Xử Lý</button>
+          <button class="btn btn-success" id="btnRunHero" onclick="startBatch()">🚀 Bắt Đầu Xử Lý Video Phôi</button>
+        </div>
+      </div>
+
+      <!-- PROGRESS BAR -->
+      <div class="progress-box">
+        <div class="progress-header">
+          <span class="progress-step-text" id="stepDescription">Hệ thống sẵn sàng</span>
+          <span class="progress-pct-text" id="pctText">0%</span>
+        </div>
+        <div class="progress-bar-track">
+          <div class="progress-bar-fill" id="progressBar"></div>
+        </div>
+      </div>
+
+      <!-- 7 PIPELINE STEPS -->
+      <div class="steps-grid">
+        <div class="step-item" id="step1">
+          <div class="step-icon">🎧</div>
+          <div class="step-title">Bước 1</div>
+          <div class="step-tag">Tách âm (10%)</div>
+        </div>
+        <div class="step-item" id="step2">
+          <div class="step-icon">🧠</div>
+          <div class="step-title">Bước 2</div>
+          <div class="step-tag">Demucs Fast (25%)</div>
+        </div>
+        <div class="step-item" id="step3">
+          <div class="step-icon">🤖</div>
+          <div class="step-title">Bước 3</div>
+          <div class="step-tag">Whisper ASR (40%)</div>
+        </div>
+        <div class="step-item" id="step35">
+          <div class="step-icon">👀</div>
+          <div class="step-title">Bước 3.5</div>
+          <div class="step-tag">PP-OCRv6 (55%)</div>
+        </div>
+        <div class="step-item" id="step4">
+          <div class="step-icon">🌐</div>
+          <div class="step-title">Bước 4</div>
+          <div class="step-tag">Gemini Dịch (70%)</div>
+        </div>
+        <div class="step-item" id="step5">
+          <div class="step-icon">🗣️</div>
+          <div class="step-title">Bước 5</div>
+          <div class="step-tag">RVC Dub (85%)</div>
+        </div>
+        <div class="step-item" id="step6">
+          <div class="step-icon">🎬</div>
+          <div class="step-title">Bước 6</div>
+          <div class="step-tag">NVENC Render (95%)</div>
+        </div>
+      </div>
+
+      <!-- STATS FOOTER -->
+      <div class="stats-row">
+        <div class="stat-chip">⏱ Đã chạy: <span class="stat-val" id="valElapsed">00:00</span></div>
+        <div class="stat-chip">⏳ Ước tính còn lại (ETA): <span class="stat-val" id="valEta">--</span></div>
+        <div class="stat-chip">📂 Hàng đợi video phôi: <span class="stat-val" id="valQueue">0 / 0</span></div>
+        <div class="stat-chip">📁 Thư mục xuất: <span class="stat-val">D:\banve</span></div>
+      </div>
+    </div>
+
+    <!-- MAIN TWO-COLUMN GRID -->
+    <div class="main-grid">
+
+      <!-- LEFT COLUMN: VIDEO PHÔI & THÀNH PHẨM -->
+      <div style="display: flex; flex-direction: column; gap: 20px;">
+
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title">⏳ Video đang chờ xử lý <span class="badge badge-gpu" id="queueBadge">Telegram</span></div>
+            </div>
+            <div id="queueMessage" role="status" style="padding:10px 20px;color:var(--text-muted);font-size:12px">Đang kết nối hàng đợi…</div>
+            <div style="max-height:320px;overflow:auto;padding:0 20px 12px" tabindex="0" aria-label="Danh sách video chờ">
+              <table class="data-table">
+                <thead><tr><th>Thứ tự chờ</th><th>Tên video / Link</th><th>Nguồn</th></tr></thead>
+                <tbody id="queueTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <!-- PANEL: VIDEO PHÔI (D:\video phôi) -->
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">
+              <span>📂 Thư Mục Video Phôi (D:\video phôi)</span>
+              <span class="badge badge-gpu" id="phoiBadgeCount">0 video</span>
+            </div>
+            <div class="panel-actions">
+              <button class="btn btn-outline" style="font-size: 11px; padding: 5px 10px;" onclick="openFolder('phoi')">📂 Mở Thư Mục</button>
+              <button class="btn btn-primary" style="font-size: 11px; padding: 5px 12px;" onclick="startBatch()">🚀 Chạy Ngay</button>
+            </div>
+          </div>
+          <div class="panel-body" style="max-height: 280px;">
+            <div id="phoiTableContainer">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Tên Video</th>
+                    <th>Dung lượng</th>
+                    <th>Trạng thái</th>
+                    <th>Hành động</th>
+                  </tr>
+                </thead>
+                <tbody id="phoiTableBody">
+                  <!-- Rendered dynamically -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- PANEL: VIDEO THÀNH PHẨM (D:\banve) -->
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">
+              <span>💾 Video Thành Phẩm Đã Render (D:\banve)</span>
+              <span class="badge badge-gpu" id="banveBadgeCount">0 video</span>
+            </div>
+            <div class="panel-actions">
+              <button class="btn btn-outline" style="font-size: 11px; padding: 5px 10px;" onclick="openFolder('banve')">📂 Mở Thư Mục</button>
+            </div>
+          </div>
+          <div class="panel-body" style="max-height: 280px;">
+            <div id="banveTableContainer">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Tên Thành Phẩm</th>
+                    <th>Dung lượng</th>
+                    <th>Ngày xuất</th>
+                    <th>Hành động</th>
+                  </tr>
+                </thead>
+                <tbody id="banveTableBody">
+                  <!-- Rendered dynamically -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- RIGHT COLUMN: LIVE LOG TERMINAL -->
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">
+            <span>💻 Quan Sát Render Ngầm & Log Hệ Thống</span>
+            <span class="dot dot-green" id="logDot"></span>
+          </div>
+          <div class="panel-actions">
+            <label style="font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer;">
+              <input type="checkbox" id="chkAutoScroll" checked> Tự cuộn
+            </label>
+            <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px;" onclick="clearLogs()">Bỏ lọc</button>
+            <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px;" onclick="fetchLogs()">🔄 Tải lại</button>
+          </div>
+        </div>
+        <div class="panel-body">
+            <div class="log-tools">
+              <input id="logSearch" aria-label="Tìm nhật ký" placeholder="Tìm nội dung nhật ký…" oninput="renderLogs()">
+              <select id="logFilter" aria-label="Lọc mức nhật ký" onchange="renderLogs()"><option value="all">Tất cả</option><option value="error">Lỗi</option><option value="warn">Cảnh báo</option><option value="info">Thông tin</option></select>
+              <label><input type="checkbox" id="logRaw" onchange="renderLogs()"> Log gốc</label>
+            </div>
+            <div id="logSummary" role="status" style="font-size:12px;color:var(--text-muted);padding:8px 0">Đang kết nối…</div>
+            <div class="terminal-box" id="terminalLogs">Đang nạp dữ liệu nhật ký...</div>
+        </div>
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- MODAL VIDEO PREVIEW -->
+  <div class="modal-backdrop" id="videoModal" onclick="closeModal(event)">
+    <div class="modal-box" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <div class="modal-title" id="modalVideoTitle">Xem thử Video</div>
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <video id="previewVideoPlayer" controls autoplay></video>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let isAutoScroll = true;
+
+    document.getElementById('chkAutoScroll').addEventListener('change', (e) => {
+      isAutoScroll = e.target.checked;
+    });
+
+    function formatTime(secs) {
+      if (!secs || isNaN(secs)) return '00:00';
+      const m = Math.floor(secs / 60).toString().padStart(2, '0');
+      const s = Math.floor(secs % 60).toString().padStart(2, '0');
+      return `${m}:${s}`;
+    }
+
+    let statusRequestPending = false;
+    let displayedVideoKey = '';
+    async function fetchStatus() {
+      if (statusRequestPending) return;
+      statusRequestPending = true;
+      try {
+        const res = await fetch('/api/status', {cache: 'no-store', signal: AbortSignal.timeout(8000)});
+        if (!res.ok) return;
+        const data = await res.json();
+          renderStatus(data);
+          observeProgressLog(data);
+      } catch (err) {
+        console.error('Error fetching status:', err);
+      } finally {
+        statusRequestPending = false;
+      }
+    }
+
+    function renderStatus(state) {
+      const step = Number(state.step) || 0;
+      const stepPercent = {1:10, 2:25, 3:40, 3.5:55, 4:70, 5:85, 6:95};
+      const videoDone = state.video_status === 'completed';
+      const percent = videoDone ? 100 : (state.active ? (stepPercent[step] || 5) :
+        Math.max(0, Math.min(100, Number(state.percent) || 0)));
+      state = {...state, percent};
+      const isRunning = state.active;
+      const statusTitle = document.getElementById('statusTitle');
+      const currentVideoName = document.getElementById('currentVideoName');
+      const stepDescription = document.getElementById('stepDescription');
+      const pctText = document.getElementById('pctText');
+      const progressBar = document.getElementById('progressBar');
+      const btnStop = document.getElementById('btnStop');
+      const btnRunHero = document.getElementById('btnRunHero');
+      const videoKey = String(state.job_id) + ':' + state.video_name + ':' + state.start_time;
+      if (displayedVideoKey !== videoKey) {
+        progressBar.style.transition = 'none';
+        progressBar.style.width = '0%';
+        void progressBar.offsetWidth;
+        progressBar.style.transition = '';
+        displayedVideoKey = videoKey;
+      }
+      progressBar.setAttribute('role', 'progressbar');
+      progressBar.setAttribute('aria-valuemin', '0');
+      progressBar.setAttribute('aria-valuemax', '100');
+      progressBar.setAttribute('aria-valuenow', String(percent));
+
+      if (isRunning) {
+        statusTitle.innerHTML = '<span class="dot dot-yellow"></span> ĐANG XỬ LÝ & RENDER NGẦM';
+        currentVideoName.textContent = state.video_name ?
+          'Video ' + state.queue_index + '/' + state.queue_total + ': ' + state.video_name : 'Đang chuẩn bị hàng đợi...';
+        stepDescription.textContent = state.step_name || 'Đang thực thi...';
+        pctText.textContent = `${state.percent}%`;
+        progressBar.style.width = `${state.percent}%`;
+        btnStop.style.display = 'inline-flex';
+        btnRunHero.style.display = 'none';
+      } else {
+        statusTitle.innerHTML = '<span class="dot dot-green"></span> HỆ THỐNG SẴN SÀNG';
+        currentVideoName.textContent = state.last_completed ? `Vừa hoàn thành: ${state.last_completed.video_name}` : 'Chưa có tác vụ nào đang chạy';
+        stepDescription.textContent = state.step_name || 'Sẵn sàng xử lý video';
+        pctText.textContent = `${state.percent || 0}%`;
+        progressBar.style.width = `${state.percent || 0}%`;
+        btnStop.style.display = 'none';
+        btnRunHero.style.display = 'inline-flex';
+      }
+
+      document.getElementById('valElapsed').textContent = formatTime(state.elapsed_seconds);
+      document.getElementById('valEta').textContent = state.eta_seconds ? `~${formatTime(state.eta_seconds)}` : '--';
+      document.getElementById('valQueue').textContent = `${state.queue_index || 0} / ${state.queue_total || 0}`;
+
+      // Update Pipeline 7 steps
+      const currentStep = Number(state.step) || 0;
+      const stepElements = {
+        1: document.getElementById('step1'),
+        2: document.getElementById('step2'),
+        3: document.getElementById('step3'),
+        3.5: document.getElementById('step35'),
+        4: document.getElementById('step4'),
+        5: document.getElementById('step5'),
+        6: document.getElementById('step6'),
+      };
+
+      const stepKeys = [1, 2, 3, 3.5, 4, 5, 6];
+      stepKeys.forEach(k => {
+        const el = stepElements[k];
+        if (!el) return;
+        el.classList.remove('active', 'completed');
+        el.removeAttribute('aria-current');
+        if (videoDone) {
+          el.classList.add('completed');
+        } else if (isRunning || ['error', 'stopped', 'interrupted'].includes(state.status)) {
+          if (currentStep === k) {
+            el.classList.add('active');
+            el.setAttribute('aria-current', 'step');
+          } else if (currentStep > k) {
+            el.classList.add('completed');
+          }
+        }
+      });
+    }
+
+    async function fetchPhoi() {
+      try {
+        const res = await fetch('/api/phoi');
+        if (!res.ok) return;
+        const data = await res.json();
+        
+        document.getElementById('phoiBadgeCount').textContent = `${data.total_count} video (${data.total_size_mb} MB)`;
+        const tbody = document.getElementById('phoiTableBody');
+        
+        if (!data.files || data.files.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="4" class="empty-state"><div class="empty-icon">📁</div>Thư mục D:\\video phôi đang trống.<br>Hãy sao chép các video cần edit vào đây!</td></tr>`;
+          return;
+        }
+
+        tbody.innerHTML = data.files.map(f => {
+          let badgeClass = 'status-waiting';
+          if (f.status === 'running') badgeClass = 'status-running';
+          if (f.status === 'completed') badgeClass = 'status-completed';
+          const safeName = escapeHtml(String(f.name));
+          const encodedName = encodeURIComponent(String(f.name)).replace(/'/g, '%27');
+
+          return `
+            <tr>
+              <td style="font-weight: 600; color: #fff; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${safeName}">
+                🎬 ${safeName}
+              </td>
+              <td>${f.size_mb} MB</td>
+              <td><span class="status-badge ${badgeClass}">${f.status_label}</span></td>
+              <td>
+                <button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px;" onclick="previewVideo('phoi', '${encodedName}')">▶ Xem</button>
+              </td>
+            </tr>
+          `;
+        }).join('');
+
+      } catch (err) {
+        console.error('Error fetching phoi:', err);
+      }
+    }
+
+    async function fetchBanve() {
+      try {
+        const res = await fetch('/api/banve');
+        if (!res.ok) return;
+        const data = await res.json();
+        
+        document.getElementById('banveBadgeCount').textContent = `${data.total_count} video (${data.total_size_mb} MB)`;
+        const tbody = document.getElementById('banveTableBody');
+
+        if (!data.files || data.files.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="4" class="empty-state"><div class="empty-icon">💾</div>Chưa có video thành phẩm nào trong D:\\banve</td></tr>`;
+          return;
+        }
+
+        tbody.innerHTML = data.files.slice(0, 15).map(f => {
+          const safeName = escapeHtml(String(f.name));
+          const encodedName = encodeURIComponent(String(f.name)).replace(/'/g, '%27');
+          return `
+            <tr>
+              <td style="font-weight: 600; color: #34d399; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${safeName}">
+                ✅ ${safeName}
+              </td>
+              <td>${f.size_mb} MB</td>
+              <td style="color: var(--text-muted); font-size: 11px;">${f.created}</td>
+              <td>
+                <button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px;" onclick="previewVideo('banve', '${encodedName}')">▶ Xem</button>
+              </td>
+            </tr>
+          `;
+        }).join('');
+
+      } catch (err) {
+        console.error('Error fetching banve:', err);
+      }
+    }
+
+      let logText = '', logPending = false, logDisconnected = false;
+      let progressLogKey = '', progressVideoKey = '';
+      let progressLogEntries = [];
+      function observeProgressLog(state) {
+        if (!state.video_name) return;
+        const videoKey = String(state.job_id) + ':' + state.video_name;
+        if (videoKey !== progressVideoKey) {
+          progressLogEntries = [];
+          progressLogKey = '';
+          progressVideoKey = videoKey;
+        }
+        const key = videoKey + ':' + state.step + ':' + state.video_status + ':' + state.status + ':' + state.step_name;
+        if (key === progressLogKey) return;
+        progressLogKey = key;
+        const failed = ['error', 'interrupted'].includes(state.status) || state.video_status === 'error';
+        const message = 'Trạng thái ghi nhận • ' + state.video_name + ' • ' + (state.step_name || 'Đang chuẩn bị');
+        const time = state.updated_at ? new Date(state.updated_at * 1000).toLocaleString('vi-VN') : 'Vừa ghi nhận';
+        progressLogEntries.push({time, level: failed ? 'error' : 'info', message,
+          raw: 'Nguồn: /api/status (không suy đoán các bước trước đó)\n' + message});
+        progressLogEntries = progressLogEntries.slice(-30);
+        renderLogs();
+      }
+      function parseLogs(text) {
+        const entries = [];
+        for (const line of text.split('\n')) {
+          if (!line.trim()) continue;
+          const match = line.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})[,.]\d+ - (.*?) - (DEBUG|INFO|WARNING|ERROR|CRITICAL) - (.*)$/);
+          if (match) entries.push({time: match[1] + ' ' + match[2], level: /ERROR|CRITICAL/.test(match[4]) ? 'error' : match[4] === 'WARNING' ? 'warn' : 'info', message: match[5], raw: line});
+          else if (entries.length) { entries[entries.length-1].raw += '\n' + line; entries[entries.length-1].message += '\n' + line; }
+          else entries.push({time: '', level: 'info', message: line, raw: line});
+        }
+        return entries;
+      }
+      function explainLog(entry) {
+        const msg = entry.message;
+        // Never reinterpret errors as successful work, even when they mention NVENC or RVC.
+        if (entry.level === 'error') return msg;
+        if (/Chưa cấu hình.*Google Drive/i.test(msg)) return 'Chưa cấu hình Google Drive — chưa thể tải video lên Drive. Đây không phải thông báo lỗi render.';
+        if (entry.level === 'warn') return msg;
+        const metric = msg.match(/stage=(\w+) seconds=([\d.]+) success=(True|False)/);
+        if (metric) {
+          const names = {voice:'Lồng tiếng', render:'Xuất video', translation:'Dịch phụ đề', asr:'Nhận diện lời nói', demucs:'Tách giọng'};
+          return (names[metric[1]] || metric[1]) + (metric[3] === 'True' ? ' hoàn tất' : ' không thành công') + ' • ' + Number(metric[2]).toFixed(1) + ' giây';
+        }
+        if (/V1 render complete/.test(msg)) return 'Đã xuất video thành công' + (/nvenc/.test(msg) ? ' bằng GPU NVIDIA.' : '.');
+        if (/V1 render start/.test(msg)) return 'Đang xuất video' + (/nvenc/.test(msg) ? ' bằng GPU NVIDIA…' : '…');
+        if (/Hubert.*Config|current working directory/.test(msg)) return 'Thông số khởi tạo mô hình giọng nói (chi tiết kỹ thuật).';
+        if (/Loading.*rmvpe/.test(msg)) return 'Đang nạp mô hình phân tích cao độ giọng nói.';
+        if (/Loading:.*\.pth/.test(msg)) return 'Đang nạp mô hình giọng đọc RVC.';
+        if (/Application started/.test(msg)) return 'Bot Telegram đã khởi động, sẵn sàng nhận yêu cầu.';
+        return msg;
+      }
+      function renderLogs() {
+        const term = document.getElementById('terminalLogs');
+        const query = (document.getElementById('logSearch').value || '').toLowerCase();
+        const filter = document.getElementById('logFilter').value || 'all';
+        const raw = document.getElementById('logRaw').checked;
+          const entries = parseLogs(logText).concat(progressLogEntries);
+        entries.forEach(e => { if (/success=False/.test(e.message)) e.level = 'error'; });
+        const visible = entries.filter(e => (filter === 'all' || e.level === filter) && (e.raw + explainLog(e)).toLowerCase().includes(query));
+        const oldScroll = term.scrollTop;
+        const labels = {error:'Lỗi', warn:'Cảnh báo', info:'Thông tin'};
+        term.innerHTML = visible.map(e => '<article class="log-entry ' + e.level + '"><div class="log-meta">' + escapeHtml(e.time) + ' · ' + labels[e.level] + '</div>' + (raw ? '<pre>' + escapeHtml(e.raw) + '</pre>' : '<div>' + escapeHtml(explainLog(e)) + '</div><details><summary>Xem log kỹ thuật</summary><pre>' + escapeHtml(e.raw) + '</pre></details>') + '</article>').join('') || '<div class="empty-state">Không có nhật ký phù hợp.</div>';
+        document.getElementById('logSummary').textContent = visible.length + '/' + entries.length + ' sự kiện gần nhất • ' + entries.filter(e => e.level === 'error').length + ' lỗi • ' + entries.filter(e => e.level === 'warn').length + ' cảnh báo (trong phần log được tải)';
+        term.scrollTop = isAutoScroll ? term.scrollHeight : oldScroll;
+      }
+      async function fetchLogs() {
+        if (logPending) return;
+        logPending = true;
+        try {
+          const res = await fetch('/api/logs', {cache: 'no-store', signal: AbortSignal.timeout(8000)});
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const data = await res.json();
+          if (typeof data.logs !== 'string') throw new Error('Dữ liệu log không hợp lệ');
+          if (data.logs !== logText || !logText || logDisconnected) { logText = data.logs; renderLogs(); }
+          logDisconnected = false;
+          document.getElementById('logDot').title = 'Kết nối nhật ký đang hoạt động';
+        } catch (err) {
+          logDisconnected = true;
+          document.getElementById('logSummary').textContent = 'Không tải được nhật ký. Đang giữ dữ liệu cũ; sẽ tự thử lại.';
+        } finally { logPending = false; }
+      }
+      async function legacyFetchLogs() {
+      try {
+        const res = await fetch('/api/logs');
+        if (!res.ok) return;
+        const data = await res.json();
+        const term = document.getElementById('terminalLogs');
+        
+        if (data.logs) {
+          // Syntax highlight common terms
+          const lines = data.logs.split('\n');
+          const styled = lines.map(line => {
+            let cls = 'log-line';
+            if (line.includes('nvenc') || line.includes('Render') || line.includes('Hoàn tất') || line.includes('thành công')) cls += ' nvenc';
+            else if (line.includes('Bước') || line.includes('Gemini') || line.includes('Whisper') || line.includes('RVC')) cls += ' ai';
+            else if (line.includes('WARNING') || line.includes('Lưu ý') || line.includes('bỏ qua')) cls += ' warn';
+            else if (line.includes('ERROR') || line.includes('Lỗi') || line.includes('fail')) cls += ' error';
+            return `<div class="${cls}">${escapeHtml(line)}</div>`;
+          }).join('');
+
+          term.innerHTML = styled || 'Chưa có nhật ký nào.';
+          if (isAutoScroll) {
+            term.scrollTop = term.scrollHeight;
+          }
+        }
+      } catch (err) {
+        console.error('Error fetching logs:', err);
+      }
+    }
+
+    function escapeHtml(text) {
+      return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+      function clearLogs() {
+        document.getElementById('logSearch').value = '';
+        document.getElementById('logFilter').value = 'all';
+        document.getElementById('logRaw').checked = false;
+        renderLogs();
+      }
+
+    async function startBatch() {
+      if (!confirm('Bạn có muốn bắt đầu xử lý toàn bộ video trong thư mục D:\\video phôi?')) return;
+      try {
+        const res = await fetch('/api/run-batch', { method: 'POST' });
+        const data = await res.json();
+        alert(data.message);
+        refreshAll();
+      } catch (err) {
+        alert('Lỗi kích hoạt batch: ' + err.message);
+      }
+    }
+
+    async function stopBatch() {
+      if (!confirm('Bạn có chắc chắn muốn dừng tiến trình xử lý hiện tại không?')) return;
+      try {
+        const res = await fetch('/api/stop-batch', { method: 'POST' });
+        const data = await res.json();
+        alert(data.message);
+        refreshAll();
+      } catch (err) {
+        alert('Lỗi dừng batch: ' + err.message);
+      }
+    }
+
+    async function openFolder(folder) {
+      try {
+        const form = new FormData();
+        form.append('folder', folder);
+        const res = await fetch('/api/open-folder', {
+          method: 'POST', body: form, signal: AbortSignal.timeout(10000)
+        });
+        const data = await res.json();
+        if (!res.ok || data.status !== 'ok') {
+          throw new Error(data.message || data.detail || 'Máy chủ không mở được thư mục.');
+        }
+      } catch (err) {
+        console.error('Error opening folder:', err);
+        alert('Không mở được thư mục: ' + err.message);
+      }
+    }
+
+    function previewVideo(folder, encodedName) {
+      const modal = document.getElementById('videoModal');
+      const player = document.getElementById('previewVideoPlayer');
+      const title = document.getElementById('modalVideoTitle');
+      const name = decodeURIComponent(encodedName);
+
+      title.textContent = `Xem trước: ${name}`;
+      player.src = `/api/stream/${folder}/${encodedName}`;
+      modal.style.display = 'flex';
+      player.play().catch(() => {});
+    }
+
+    function closeModal(e) {
+      const modal = document.getElementById('videoModal');
+      const player = document.getElementById('previewVideoPlayer');
+      player.pause();
+      player.src = '';
+      modal.style.display = 'none';
+    }
+
+    let queuePending = false;
+    async function fetchQueue() {
+      if (queuePending) return;
+      queuePending = true;
+      try {
+        const response = await fetch('/api/queue', {cache:'no-store', signal:AbortSignal.timeout(8000)});
+        if (!response.ok) throw new Error('Queue unavailable');
+        const data = await response.json();
+        document.getElementById('queueBadge').textContent = data.items.length + ' video chờ';
+        document.getElementById('queueMessage').textContent = data.message || 'Thứ tự xử lý từ trên xuống • Không bao gồm video đã lấy ra xử lý.';
+        document.getElementById('queueTableBody').innerHTML = data.items.map(item =>
+          '<tr><td>' + escapeHtml(String(item.position)) + '</td><td style="overflow-wrap:anywhere">' +
+          escapeHtml(item.name) + '</td><td>Telegram</td></tr>').join('') ||
+          '<tr><td colspan="3" class="empty-state">' + (data.available ? 'Không có video đang chờ.' : 'Chưa có dữ liệu hàng đợi trực tiếp.') + '</td></tr>';
+      } catch (error) {
+        document.getElementById('queueMessage').textContent = 'Chưa kết nối được hàng đợi; dữ liệu cũ (nếu có) chưa được cập nhật.';
+      } finally { queuePending = false; }
+    }
+    setInterval(fetchQueue, 2500);
+    function refreshAll() {
+      fetchQueue();
+      fetchStatus();
+      fetchPhoi();
+      fetchBanve();
+      fetchLogs();
+    }
+
+    // Auto-refresh loops
+    refreshAll();
+    setInterval(fetchStatus, 1500);
+    setInterval(fetchPhoi, 4000);
+    setInterval(fetchBanve, 5000);
+    setInterval(fetchLogs, 2500);
+  </script>
+</body>
+</html>

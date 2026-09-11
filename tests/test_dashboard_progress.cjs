@@ -14,7 +14,7 @@ function element(id) {
   return elements.get(id);
 }
 const html = fs.readFileSync(path.join(__dirname, '../backend/templates/dashboard.html'), 'utf8');
-const context = vm.createContext({document: {getElementById: element},
+const context = vm.createContext({document: {getElementById: element, addEventListener() {}},
   fetch: () => new Promise(() => {}), setInterval() {}, console, AbortSignal});
 for (const match of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) vm.runInContext(match[1], context);
 const state = {active:true, job_id:'batch', video_name:'one.mp4', queue_index:1,
