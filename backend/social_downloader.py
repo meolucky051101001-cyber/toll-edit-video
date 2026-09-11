@@ -59,7 +59,7 @@ XHS_ORIGIN_CDN_DOMAINS = (
 )
 
 def clean_filename(title: str, max_len: int = 40) -> str:
-    """Lọc bỏ ký tự đặc biệt để đặt tên file an toàn trên Windows"""
+    """Lá»c bá» kÃ½ tá»± Ä‘áº·c biá»‡t Ä‘á»ƒ Ä‘áº·t tÃªn file an toÃ n trÃªn Windows"""
     if not title:
         return "social_video"
     cleaned = re.sub(r'[\\/*?:"<>|]', '', title).strip()
@@ -95,25 +95,25 @@ def download_file_stream(url: str, dest_path: str, headers: dict = None, timeout
         atomic_replace_file(temporary_path, dest_path)
         return True
     except Exception as e:
-        logger.error(f"Lỗi tải stream từ {url[:60]}: {e}")
+        logger.error(f"Lá»—i táº£i stream tá»« {url[:60]}: {e}")
         if os.path.exists(temporary_path):
             try: os.remove(temporary_path)
             except OSError: pass
         return False
 
 def extract_douyin_video_id(url: str) -> str:
-    """Trích xuất ID video từ các định dạng link Douyin phức tạp (web search, modal_id, etc.)"""
-    # 1. Tìm modal_id hoặc aweme_id hoặc item_id trong query params
+    """TrÃ­ch xuáº¥t ID video tá»« cÃ¡c Ä‘á»‹nh dáº¡ng link Douyin phá»©c táº¡p (web search, modal_id, etc.)"""
+    # 1. TÃ¬m modal_id hoáº·c aweme_id hoáº·c item_id trong query params
     query_match = re.search(r'(?:modal_id|aweme_id|item_id|item_ids|video_id)=(\d+)', url)
     if query_match:
         return query_match.group(1)
         
-    # 2. Tìm /video/123456 hoặc /note/123456
+    # 2. TÃ¬m /video/123456 hoáº·c /note/123456
     path_match = re.search(r'/(?:video|note)/(\d+)', url)
     if path_match:
         return path_match.group(1)
         
-    # 3. Nếu là shortlink v.douyin.com
+    # 3. Náº¿u lÃ  shortlink v.douyin.com
     if "v.douyin.com" in url:
         try:
             res = requests.get(url, headers={"User-Agent": USER_AGENTS["mobile"]}, allow_redirects=True, timeout=10)
@@ -126,22 +126,22 @@ def extract_douyin_video_id(url: str) -> str:
     return ""
 
 # =========================================================================
-# 1. BÓC TÁCH DOUYIN & TIKTOK (NO WATERMARK)
+# 1. BÃ“C TÃCH DOUYIN & TIKTOK (NO WATERMARK)
 # =========================================================================
 def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
     """
-    Tải video Douyin / TikTok không logo (Full HD) qua API giải mã trực tiếp.
+    Táº£i video Douyin / TikTok khÃ´ng logo (Full HD) qua API giáº£i mÃ£ trá»±c tiáº¿p.
     """
-    logger.info(f"Đang giải mã Douyin/TikTok không logo: {url}")
+    logger.info(f"Äang giáº£i mÃ£ Douyin/TikTok khÃ´ng logo: {url}")
     
-    # Chuẩn hóa link nếu là link tìm kiếm trên web có modal_id
+    # Chuáº©n hÃ³a link náº¿u lÃ  link tÃ¬m kiáº¿m trÃªn web cÃ³ modal_id
     video_id = extract_douyin_video_id(url)
     target_urls = [url]
     if video_id:
         target_urls.insert(0, f"https://www.douyin.com/video/{video_id}")
         target_urls.insert(1, f"https://www.iesdouyin.com/share/video/{video_id}/")
 
-    # Chiến lược 1: TikWM Multi-platform API
+    # Chiáº¿n lÆ°á»£c 1: TikWM Multi-platform API
     for t_url in target_urls:
         try:
             api_url = "https://www.tikwm.com/api/"
@@ -160,15 +160,15 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
                         
                         target_path = os.path.join(output_dir, f"{prefix}_{safe_title}.mp4")
                         if download_file_stream(video_url, target_path):
-                            logger.info(f"Tải thành công Douyin/TikTok không logo: {target_path}")
+                            logger.info(f"Táº£i thÃ nh cÃ´ng Douyin/TikTok khÃ´ng logo: {target_path}")
                             return True, target_path, title, ""
         except Exception as e:
-            logger.warning(f"TikWM thử link {t_url} lỗi: {e}")
+            logger.warning(f"TikWM thá»­ link {t_url} lá»—i: {e}")
 
-    # Chiến lược 2: Direct Douyin Mobile API (Dự phòng khi TikWM lỗi hoặc bị chặn IP)
+    # Chiáº¿n lÆ°á»£c 2: Direct Douyin Mobile API (Dá»± phÃ²ng khi TikWM lá»—i hoáº·c bá»‹ cháº·n IP)
     if video_id:
         try:
-            logger.info(f"TikWM không khả dụng, chuyển sang Douyin Direct API cho video_id: {video_id}")
+            logger.info(f"TikWM khÃ´ng kháº£ dá»¥ng, chuyá»ƒn sang Douyin Direct API cho video_id: {video_id}")
             direct_api = f"https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/?item_ids={video_id}"
             headers = {"User-Agent": USER_AGENTS["mobile"]}
             res_dir = requests.get(direct_api, headers=headers, timeout=10)
@@ -181,24 +181,24 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
                     safe_title = clean_filename(title)
                     play_urls = item.get("video", {}).get("play_addr", {}).get("url_list", [])
                     for p_url in play_urls:
-                        # Thay playwm bằng play để lấy luồng video gốc không logo
+                        # Thay playwm báº±ng play Ä‘á»ƒ láº¥y luá»“ng video gá»‘c khÃ´ng logo
                         clean_play_url = p_url.replace("playwm", "play")
                         target_path = os.path.join(output_dir, f"{prefix}_{safe_title}.mp4")
                         if download_file_stream(clean_play_url, target_path, headers=headers):
-                            logger.info(f"Tải thành công Douyin Direct không logo: {target_path}")
+                            logger.info(f"Táº£i thÃ nh cÃ´ng Douyin Direct khÃ´ng logo: {target_path}")
                             return True, target_path, title, ""
         except Exception as e_direct:
-            logger.warning(f"Douyin Direct Scraper gặp lỗi: {e_direct}")
+            logger.warning(f"Douyin Direct Scraper gáº·p lá»—i: {e_direct}")
 
-    return False, "", "", "Không thể bóc tách link Douyin qua API"
+    return False, "", "", "KhÃ´ng thá»ƒ bÃ³c tÃ¡ch link Douyin qua API"
 
 import urllib.request
 import concurrent.futures
 
 def download_parallel_range(url: str, dest_path: str, workers: int = 6, max_retries: int = 8) -> bool:
     """
-    Tải file bằng đa luồng HTTP Range song song với cơ chế tự động resume khi rớt mạng.
-    Tăng tốc độ tải file từ máy chủ CDN quốc tế lên gấp 5-10 lần và đảm bảo không bị timeout.
+    Táº£i file báº±ng Ä‘a luá»“ng HTTP Range song song vá»›i cÆ¡ cháº¿ tá»± Ä‘á»™ng resume khi rá»›t máº¡ng.
+    TÄƒng tá»‘c Ä‘á»™ táº£i file tá»« mÃ¡y chá»§ CDN quá»‘c táº¿ lÃªn gáº¥p 5-10 láº§n vÃ  Ä‘áº£m báº£o khÃ´ng bá»‹ timeout.
     """
     part_paths = []
     assembled_path = None
@@ -314,13 +314,13 @@ def download_parallel_range(url: str, dest_path: str, workers: int = 6, max_retr
                     pass
 
 # =========================================================================
-# 2. BÓC TÁCH XIAOHONGSHU (REDNOTE)
+# 2. BÃ“C TÃCH XIAOHONGSHU (REDNOTE)
 # =========================================================================
 def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
     """
-    Tải video Xiaohongshu (Tiểu Hồng Thư) không logo chất lượng cao
+    Táº£i video Xiaohongshu (Tiá»ƒu Há»“ng ThÆ°) khÃ´ng logo cháº¥t lÆ°á»£ng cao
     """
-    logger.info(f"Đang bóc tách Xiaohongshu: {url}")
+    logger.info(f"Äang bÃ³c tÃ¡ch Xiaohongshu: {url}")
     os.makedirs(output_dir, exist_ok=True)
     try:
         import json
@@ -333,7 +333,7 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
         if xhs_cookie:
             headers['Cookie'] = xhs_cookie
         
-        # Tạo danh sách các link ứng viên (tự động chữa lỗi nhầm ký tự l / I / 1 / 0 / O)
+        # Táº¡o danh sÃ¡ch cÃ¡c link á»©ng viÃªn (tá»± Ä‘á»™ng chá»¯a lá»—i nháº§m kÃ½ tá»± l / I / 1 / 0 / O)
         fetch_candidates = [url.strip()]
         if url.strip().startswith("http://xhslink.com"):
             fetch_candidates.append(url.strip().replace("http://xhslink.com", "https://xhslink.com"))
@@ -364,39 +364,39 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
                     clean_path = r.url.split('?')[0].rstrip('/').lower()
                     is_missing = clean_path in ["https://www.xiaohongshu.com", "http://www.xiaohongshu.com", "https://xiaohongshu.com", 
                                                 "https://www.xiaohongshu.com/explore", "http://www.xiaohongshu.com/explore",
-                                                "https://www.xiaohongshu.com/discovery", "http://www.xiaohongshu.com/discovery"] or any(msg in r.text for msg in ["你访问的页面不见了", "页面不存在", "该笔记已被删除", "笔记不存在"])
+                                                "https://www.xiaohongshu.com/discovery", "http://www.xiaohongshu.com/discovery"] or any(msg in r.text for msg in ["ä½ è®¿é—®çš„é¡µé¢ä¸è§äº†", "é¡µé¢ä¸å­˜åœ¨", "è¯¥ç¬”è®°å·²è¢«åˆ é™¤", "ç¬”è®°ä¸å­˜åœ¨"])
                     if r.status_code == 200 and not is_missing:
                         res = r
-                        logger.info(f"Đã giải mã thành công link XHS: {candidate_url} -> {r.url[:80]}")
+                        logger.info(f"ÄÃ£ giáº£i mÃ£ thÃ nh cÃ´ng link XHS: {candidate_url} -> {r.url[:80]}")
                         break
                     elif r.status_code == 200 and is_missing:
-                        logger.warning(f"Link XHS '{candidate_url}' bị 404/Explore, tiếp tục thử các biến thể khác...")
+                        logger.warning(f"Link XHS '{candidate_url}' bá»‹ 404/Explore, tiáº¿p tá»¥c thá»­ cÃ¡c biáº¿n thá»ƒ khÃ¡c...")
                 except Exception as req_err:
-                    logger.warning(f"Thử tải '{candidate_url}' thất bại ({req_err})")
+                    logger.warning(f"Thá»­ táº£i '{candidate_url}' tháº¥t báº¡i ({req_err})")
                     if attempt == 0:
                         headers['User-Agent'] = USER_AGENTS["desktop"]
             if res is not None:
                 break
 
         if res is None:
-            return False, "", "", "Bài viết trên Tiểu Hồng Thư (XHS) này không tồn tại, đã bị xóa hoặc link bị sai ký tự (Lưu ý chữ 'I' hoa và 'l' thường)"
+            return False, "", "", "BÃ i viáº¿t trÃªn Tiá»ƒu Há»“ng ThÆ° (XHS) nÃ y khÃ´ng tá»“n táº¡i, Ä‘Ã£ bá»‹ xÃ³a hoáº·c link bá»‹ sai kÃ½ tá»± (LÆ°u Ã½ chá»¯ 'I' hoa vÃ  'l' thÆ°á»ng)"
 
         real_url = res.url
         clean_real = real_url.split('?')[0].rstrip('/').lower()
         if clean_real in ["https://www.xiaohongshu.com", "http://www.xiaohongshu.com", "https://xiaohongshu.com", 
                           "https://www.xiaohongshu.com/explore", "http://www.xiaohongshu.com/explore",
                           "https://www.xiaohongshu.com/discovery", "http://www.xiaohongshu.com/discovery"]:
-            return False, "", "", "Bài viết trên Tiểu Hồng Thư (XHS) này đã bị tác giả xóa, hết hạn hoặc không tồn tại"
+            return False, "", "", "BÃ i viáº¿t trÃªn Tiá»ƒu Há»“ng ThÆ° (XHS) nÃ y Ä‘Ã£ bá»‹ tÃ¡c giáº£ xÃ³a, háº¿t háº¡n hoáº·c khÃ´ng tá»“n táº¡i"
 
         html = res.text
-        if any(msg in html for msg in ["你访问的页面不见了", "页面不存在", "该笔记已被删除", "笔记不存在", "Note not found"]):
-            return False, "", "", "Bài viết trên Tiểu Hồng Thư này đã bị tác giả xóa (Trang không tồn tại)"
+        if any(msg in html for msg in ["ä½ è®¿é—®çš„é¡µé¢ä¸è§äº†", "é¡µé¢ä¸å­˜åœ¨", "è¯¥ç¬”è®°å·²è¢«åˆ é™¤", "ç¬”è®°ä¸å­˜åœ¨", "Note not found"]):
+            return False, "", "", "BÃ i viáº¿t trÃªn Tiá»ƒu Há»“ng ThÆ° nÃ y Ä‘Ã£ bá»‹ tÃ¡c giáº£ xÃ³a (Trang khÃ´ng tá»“n táº¡i)"
 
         origin_video_url = None
         backup_stream_urls = []
         title = "xiaohongshu_video"
 
-        # 2. Trích xuất từ window.__INITIAL_STATE__
+        # 2. TrÃ­ch xuáº¥t tá»« window.__INITIAL_STATE__
         state_match = re.search(r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\})</script>', html, re.DOTALL)
         if state_match:
             try:
@@ -407,7 +407,7 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
                 
                 video = note_data.get("video")
                 if video and isinstance(video, dict):
-                    # ƯU TIÊN SỐ 1: Bóc tách originVideoKey (Video GỐC SẠCH 100% KHÔNG WATERMARK/LOGO)
+                    # Æ¯U TIÃŠN Sá» 1: BÃ³c tÃ¡ch originVideoKey (Video Gá»C Sáº CH 100% KHÃ”NG WATERMARK/LOGO)
                     origin_key = video.get("consumer", {}).get("originVideoKey")
                     if origin_key:
                         for dom in XHS_ORIGIN_CDN_DOMAINS:
@@ -416,7 +416,7 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
                                 h_res = requests.head(test_origin_url, headers=headers, timeout=4)
                                 if h_res.status_code == 200 and int(h_res.headers.get("Content-Length", 0)) > 10000:
                                     origin_video_url = test_origin_url
-                                    logger.info(f"Đã tìm thấy luồng video XHS GỐC SẠCH KHÔNG LOGO: {test_origin_url}")
+                                    logger.info(f"ÄÃ£ tÃ¬m tháº¥y luá»“ng video XHS Gá»C Sáº CH KHÃ”NG LOGO: {test_origin_url}")
                                     break
                             except:
                                 pass
@@ -435,67 +435,67 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
                                     if b_u and b_u not in backup_stream_urls:
                                         backup_stream_urls.append(b_u)
             except Exception as e:
-                logger.warning(f"Lỗi parse JSON state của XHS: {e}")
+                logger.warning(f"Lá»—i parse JSON state cá»§a XHS: {e}")
 
         safe_title = clean_filename(title)
         target_path = os.path.join(output_dir, f"{prefix}_{safe_title}.mp4")
 
-        # 3. TẢI VIDEO GỐC SẠCH KHÔNG LOGO BẰNG RANGE MULTI-THREAD
+        # 3. Táº¢I VIDEO Gá»C Sáº CH KHÃ”NG LOGO Báº°NG RANGE MULTI-THREAD
         if origin_video_url:
-            logger.info(f"Đang tải video XHS GỐC KHÔNG WATERMARK bằng đa luồng: {origin_video_url}")
+            logger.info(f"Äang táº£i video XHS Gá»C KHÃ”NG WATERMARK báº±ng Ä‘a luá»“ng: {origin_video_url}")
             if download_parallel_range(origin_video_url, target_path, workers=6):
-                logger.info(f"Tải thành công video XHS GỐC KHÔNG WATERMARK: {target_path}")
+                logger.info(f"Táº£i thÃ nh cÃ´ng video XHS Gá»C KHÃ”NG WATERMARK: {target_path}")
                 return True, target_path, title, ""
-            # Thử lại bằng stream thông thường nếu parallel lỗi
+            # Thá»­ láº¡i báº±ng stream thÃ´ng thÆ°á»ng náº¿u parallel lá»—i
             if download_file_stream(origin_video_url, target_path, headers=headers, timeout=(10, 60)):
-                logger.info(f"Tải thành công video XHS GỐC: {target_path}")
+                logger.info(f"Táº£i thÃ nh cÃ´ng video XHS Gá»C: {target_path}")
                 return True, target_path, title, ""
 
-        # 4. Dự phòng: Quét các luồng stream backup
+        # 4. Dá»± phÃ²ng: QuÃ©t cÃ¡c luá»“ng stream backup
         for v_url in backup_stream_urls:
-            logger.info(f"Thử tải luồng backup stream: {v_url[:80]}...")
+            logger.info(f"Thá»­ táº£i luá»“ng backup stream: {v_url[:80]}...")
             if download_file_stream(v_url, target_path, headers=headers, timeout=(10, 40)):
-                logger.info(f"Tải thành công video XHS (stream): {target_path}")
+                logger.info(f"Táº£i thÃ nh cÃ´ng video XHS (stream): {target_path}")
                 return True, target_path, title, ""
 
-        # Nếu là bài đăng dạng Album ảnh (không có video)
+        # Náº¿u lÃ  bÃ i Ä‘Äƒng dáº¡ng Album áº£nh (khÃ´ng cÃ³ video)
         if state_match and "imageList" in str(state_match.group(1)):
-            return False, "", "", "Bài viết này là Album ảnh (không phải video)"
+            return False, "", "", "BÃ i viáº¿t nÃ y lÃ  Album áº£nh (khÃ´ng pháº£i video)"
 
-        return False, "", "", "Không tìm thấy luồng video trong bài viết Tiểu Hồng Thư"
+        return False, "", "", "KhÃ´ng tÃ¬m tháº¥y luá»“ng video trong bÃ i viáº¿t Tiá»ƒu Há»“ng ThÆ°"
     except Exception as e:
-        logger.warning(f"Xiaohongshu Direct Scraper gặp lỗi: {e}")
-        return False, "", "", f"Lỗi bóc tách XHS: {str(e)}"
+        logger.warning(f"Xiaohongshu Direct Scraper gáº·p lá»—i: {e}")
+        return False, "", "", f"Lá»—i bÃ³c tÃ¡ch XHS: {str(e)}"
 
 # =========================================================================
-# 3. BỘ ĐIỀU PHỐI ĐA NỀN TẢNG (ROUTER)
+# 3. Bá»˜ ÄIá»€U PHá»I ÄA Ná»€N Táº¢NG (ROUTER)
 # =========================================================================
 def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
     """
-    Hàm tổng quản lý tải video đa nền tảng không logo:
+    HÃ m tá»•ng quáº£n lÃ½ táº£i video Ä‘a ná»n táº£ng khÃ´ng logo:
     - Douyin / TikTok / Kuaishou / Xiaohongshu / Facebook / YouTube / X...
     """
     os.makedirs(output_dir, exist_ok=True)
     lower_url = url.lower()
     
-    # 1. Nhánh Douyin & TikTok
+    # 1. NhÃ¡nh Douyin & TikTok
     if any(k in lower_url for k in ["douyin.com", "iesdouyin.com", "tiktok.com", "tikwm.com"]):
         success, path, title, err = download_douyin_tiktok(url, output_dir, prefix)
         if success:
             return True, path, title, ""
             
-    # 2. Nhánh Xiaohongshu
+    # 2. NhÃ¡nh Xiaohongshu
     elif any(k in lower_url for k in ["xiaohongshu.com", "xhslink.com"]):
         return download_xiaohongshu(url, output_dir, prefix)
 
-    # 3. Chuẩn hóa URL cho yt-dlp fallback
+    # 3. Chuáº©n hÃ³a URL cho yt-dlp fallback
     clean_target_url = url
     if "douyin.com" in lower_url:
         v_id = extract_douyin_video_id(url)
         if v_id:
             clean_target_url = f"https://www.douyin.com/video/{v_id}"
 
-    logger.info(f"Sử dụng Universal Downloader cho: {clean_target_url}")
+    logger.info(f"Sá»­ dá»¥ng Universal Downloader cho: {clean_target_url}")
     safe_output_template = os.path.join(output_dir, f"{prefix}_%(title).30s.%(ext)s")
     
     cmd_download = [
@@ -534,8 +534,17 @@ def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
                 return False, "", "", str(probe_error)
             return True, final_path, downloaded[0], ""
         else:
-            return False, "", "", proc.stderr[:400] if proc.stderr else "Không tìm thấy file sau khi tải"
-    except subprocess.TimeoutExpired:
-        return False, "", "", "Tải video quá lâu (>5 phút)"
+            return False, "", "", proc.stderr[:400] if proc.stderr else "KhÃ´ng tÃ¬m tháº¥y file sau khi táº£i"
+    except subprocess.TimeoutExpired as e:
+        # Cleanup any partial files left by yt-dlp
+        try:
+            for f in os.listdir(output_dir):
+                if f.startswith(prefix) and (f.endswith(".part") or f.endswith(".ytdl")):
+                    os.remove(os.path.join(output_dir, f))
+        except Exception as cleanup_err:
+            pass
+        return False, "", "", f"Tải video quá lâu (>{configured_timeout}s)"
     except Exception as e:
         return False, "", "", str(e)
+
+
