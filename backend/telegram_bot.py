@@ -62,9 +62,11 @@ if isinstance(sys.stdout, io.TextIOWrapper):
 if isinstance(sys.stderr, io.TextIOWrapper):
     sys.stderr.reconfigure(encoding='utf-8')
 
-from ai.transcription import extract_subtitles_whisper, save_srt
+from ai.transcription import save_srt
+from ai.v1_asr_isolated import extract_subtitles_isolated
 from ai.translation import translate_subtitles
-from ai.voice_cloning import generate_dubbing_audio, rvc_runtime_available
+from ai.voice_cloning import rvc_runtime_available
+from ai.v1_voice_isolated import generate_dubbing_audio_isolated
 from url_utils import extract_http_urls
 from video_utils import extract_audio_from_video, mix_audio_pydub, process_video
 
@@ -640,7 +642,7 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         # Sử dụng vocals_audio (giọng sạch) thay vì original_audio
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-        srt_segments = await asyncio.to_thread(extract_subtitles_whisper, vocals_audio, srt_original)
+        srt_segments = await asyncio.to_thread(extract_subtitles_isolated, vocals_audio, srt_original)
 
         # ===== BƯỚC 3.5: KIỂM TRA VỊ TRÍ PHỤ ĐỀ CHÍNH VÀ QUÉT PHỤ ĐỀ CÂM =====
         await safe_edit_status(status_msg, "👀 *Bước 3.5/6:* Đang quét vùng phụ đề cố định (OCR)...", parse_mode="Markdown")
@@ -723,7 +725,7 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
             # v_param = "vi-VN-HoaiMyNeural" if gender == "female" else "vi-VN-NamMinhNeural"
             v_param = "vi-VN-HoaiMyNeural"  # Tạm thời cố định giọng nữ
         
-        dubbing_audio_files = await generate_dubbing_audio(
+        dubbing_audio_files = await generate_dubbing_audio_isolated(
             translated_segments, dubbing_dir, voice_source=v_source, voice_param=v_param
         )
         
@@ -1026,7 +1028,7 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
         # ===== BƯỚC 3: NHẬN DẠNG GIỌNG NÓI =====
         await safe_edit_status(status_msg, "🤖 Whisper AI đang nhận dạng từ Vocal sạch...")
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-        srt_segments = await asyncio.to_thread(extract_subtitles_whisper, vocals_audio, srt_original)
+        srt_segments = await asyncio.to_thread(extract_subtitles_isolated, vocals_audio, srt_original)
 
         # ===== BƯỚC 3.5: KIỂM TRA VỊ TRÍ PHỤ ĐỀ CHÍNH VÀ QUÉT PHỤ ĐỀ CÂM =====
         await safe_edit_status(status_msg, "👀 Đang quét vùng phụ đề cố định (OCR)...", parse_mode="Markdown")
@@ -1095,7 +1097,7 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             v_param = "vi-VN-HoaiMyNeural"  # Tạm thời cố định giọng nữ
         
-        dubbing_audio_files = await generate_dubbing_audio(
+        dubbing_audio_files = await generate_dubbing_audio_isolated(
             translated_segments, dubbing_dir, voice_source=v_source, voice_param=v_param
         )
         

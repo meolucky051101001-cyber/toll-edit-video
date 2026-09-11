@@ -136,7 +136,7 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None):
             model_name,
             device="cuda",
             compute_type="int8_float16",
-            num_workers=worker_count,
+            num_workers=1,
             download_root=download_root,
         )
     else:
