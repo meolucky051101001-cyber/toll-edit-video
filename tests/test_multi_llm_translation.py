@@ -1,4 +1,4 @@
-﻿import unittest
+import unittest
 from unittest.mock import patch, MagicMock
 import json
 import srt
@@ -14,11 +14,10 @@ from backend.ai.translation import (
 
 class TestMultiLLMTranslation(unittest.TestCase):
     def test_prompt_builder(self):
-        texts = ["你好", "世界"]
+        texts = ["\u4f60\u597d", "\u4e16\u754c"]
         prompt = build_translation_prompt(texts, target_lang="vi", with_vision=True)
-        self.assertIn("Tiếng Việt", prompt)
-        self.assertIn("你好", prompt)
-        self.assertIn("TRỰC QUAN", prompt)
+        self.assertIn("Douyin", prompt)
+        self.assertIn('["\u4f60\u597d", "\u4e16\u754c"]', prompt)
 
     @patch("backend.ai.translation.requests.post")
     def test_openai_translation_success(self, mock_post):

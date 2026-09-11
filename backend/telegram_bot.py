@@ -681,7 +681,7 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
             parse_mode="Markdown"
         )
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-        translated_segments = await asyncio.to_thread(translate_subtitles, srt_segments, "vi", api_key=GEMINI_API_KEY, video_path=video_path)
+        translated_segments = await asyncio.to_thread(translate_subtitles, srt_segments, "vi", api_key=GEMINI_API_KEY, video_path=video_path, strict=True)
         await asyncio.to_thread(save_srt, translated_segments, srt_translated)
 
         # (Di chuyển BƯỚC 4.5 xuống sau BƯỚC 5 để đồng bộ thời gian biến mất của phụ đề với audio)
@@ -1061,7 +1061,7 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
         # ===== BƯỚC 4: DỊCH PHỤ ĐỀ =====
         await safe_edit_status(status_msg, f"🌐 Đang dịch {len(srt_segments)} đoạn phụ đề (Có hỗ trợ AI Vision)...")
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-        translated_segments = await asyncio.to_thread(translate_subtitles, srt_segments, "vi", api_key=GEMINI_API_KEY, video_path=video_path)
+        translated_segments = await asyncio.to_thread(translate_subtitles, srt_segments, "vi", api_key=GEMINI_API_KEY, video_path=video_path, strict=True)
         await asyncio.to_thread(save_srt, translated_segments, srt_translated)
 
         # ===== BƯỚC 5: LỒNG TIẾNG =====

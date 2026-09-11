@@ -17,10 +17,11 @@ class StabilityTests(unittest.TestCase):
         good.json.return_value={"candidates":[{"content":{"parts":[{"text":'["Xin chào"]'}]}}]}
         bad=Mock(status_code=503)
         with patch.object(tr,"extract_video_frames_base64",return_value=[]), patch.object(
-                tr.requests,"post",side_effect=[bad,good,good]) as post:
+                tr.requests,"post",side_effect=[bad,good,good]) as post, patch(
+                "backend.ai.v1_translation_cache.read_cache", return_value=None):
             self.assertEqual(tr.translate_with_gemini(["你好"],api_key="test-only"),["Xin chào"])
             first_success=post.call_args_list[1].args[0]
-            self.assertEqual(tr.translate_with_gemini(["你好"],api_key="test-only"),["Xin chào"])
+            self.assertEqual(tr.translate_with_gemini(["您好"],api_key="test-only"),["Xin chào"])
             self.assertEqual(post.call_args_list[2].args[0],first_success)
             self.assertIsInstance(post.call_args.kwargs["timeout"],tuple)
 

@@ -13,7 +13,9 @@ class TranslationGuardTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([s.index for s in segments],[2])
             segments[0].content="Lắng nghe âm thanh dễ chịu"
         with tempfile.TemporaryDirectory() as folder, patch(
-                "backend.ai.translation.translate_subtitles",side_effect=repair) as translate, patch.object(
+                "backend.ai.translation.translate_subtitles",side_effect=repair) as translate, patch(
+                "backend.ai.v1_voice_cache.read_voice_cache", return_value=None), patch.object(
+                vc,"generate_tts_edge",new=AsyncMock(side_effect=Exception("network"))), patch.object(
                 vc,"generate_single_tts",new=AsyncMock(return_value=None)) as tts:
             with self.assertRaisesRegex(RuntimeError,"TTS incomplete"):
                 await vc.generate_dubbing_audio(items,folder)

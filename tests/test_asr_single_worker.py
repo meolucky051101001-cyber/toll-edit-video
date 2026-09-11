@@ -7,10 +7,7 @@ class WorkerTests(unittest.TestCase):
     def test_serial_gpu_uses_one_worker_without_changing_quality(self):
         model = Mock()
         model.transcribe.return_value = (iter([]), None)
-        @contextmanager
-        def lease(key, factory):
-            yield factory()
-        with patch.object(t, '_cached_model_path', return_value='local-model'), patch('torch.cuda.is_available', return_value=True), patch.object(t.asr_cache, 'lease', side_effect=lease), patch.object(t, 'WhisperModel', return_value=model) as ctor:
+        with patch.object(t, '_cached_model_path', return_value='local-model'), patch('torch.cuda.is_available', return_value=True), patch.object(t, 'WhisperModel', return_value=model) as ctor:
             t._transcribe_once('audio.wav', 'large-v3-turbo', 2)
         self.assertEqual(ctor.call_args.kwargs['num_workers'], 1)
         self.assertEqual(ctor.call_args.kwargs['device'], 'cuda')

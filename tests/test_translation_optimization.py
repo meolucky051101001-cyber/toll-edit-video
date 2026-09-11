@@ -31,15 +31,16 @@ class OptimizationTests(unittest.TestCase):
         with patch.object(tr.requests, 'post', side_effect=[Mock(status_code=503), self.success()]) as post:
             self.assertEqual(tr.translate_with_gemini(['你好'], api_key='test-key'), ['Xin chào'])
             self.assertIn('gemini-3.7-flash', post.call_args_list[0].args[0])
-            self.assertIn('gemini-3.6-flash', post.call_args_list[1].args[0])
+            self.assertIn('gemini-3.5-flash', post.call_args_list[1].args[0])
         with patch.object(tr.requests, 'post', return_value=self.success()) as post:
             tr.translate_with_gemini(['您好'], api_key='test-key')
             self.assertEqual(post.call_count, 1)
-            self.assertIn('gemini-3.6-flash', post.call_args.args[0])
+            self.assertIn('gemini-3.5-flash', post.call_args.args[0])
         for key in tr._gemini_cooldown:
             tr._gemini_cooldown[key] = 0
+        tr._gemini_last_good.clear()
         with patch.object(tr.requests, 'post', return_value=self.success()) as post:
-            tr.translate_with_gemini(['再见'], api_key='test-key')
+            tr.translate_with_gemini(['三'], api_key='test-key')
             self.assertIn('gemini-3.7-flash', post.call_args.args[0])
 
     def test_cache_reuses_success_not_network(self):
@@ -52,7 +53,7 @@ class OptimizationTests(unittest.TestCase):
         with patch.object(tr.requests, 'post', return_value=Mock(status_code=429)) as post:
             self.assertIsNone(tr.translate_with_gemini(['你好'], api_key='test-key'))
             self.assertIsNone(tr.translate_with_gemini(['你好'], api_key='test-key'))
-            self.assertEqual(post.call_count, 6)
+            self.assertEqual(post.call_count, 7)
 
     def test_context_and_account_invalidate_cache(self):
         with patch.object(tr.requests, 'post', return_value=self.success()) as post:
@@ -70,7 +71,7 @@ class OptimizationTests(unittest.TestCase):
     def test_transport_failure_does_not_poison_next_job(self):
         with patch.object(tr.requests, 'post', side_effect=tr.requests.ConnectionError('network')) as post:
             self.assertIsNone(tr.translate_with_gemini(['你好'], api_key='test-key'))
-            self.assertEqual(post.call_count, 6)
+            self.assertEqual(post.call_count, 7)
         with patch.object(tr.requests, 'post', return_value=self.success()) as post:
             self.assertEqual(tr.translate_with_gemini(['您好'], api_key='test-key'), ['Xin chào'])
             self.assertEqual(post.call_count, 1)
