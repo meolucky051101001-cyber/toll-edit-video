@@ -88,7 +88,16 @@ def _translate_with_resilient_fallback(source_text, target_lang):
 
     raise RuntimeError("; ".join(failures[-3:]))
 
-def build_translation_prompt(texts, target_lang="vi", prior_context=None, with_vision=True, duration_budgets=None):
+def build_translation_prompt(
+    texts,
+    target_lang="vi",
+    prior_context=None,
+    with_vision=True,
+    duration_budgets=None,
+    glossary=None,
+    entity_map=None,
+    speaker_map=None,
+):
     lang_name = "Tiếng Việt" if target_lang == "vi" else target_lang
     prompt = f"""Bạn là một chuyên gia dịch thuật nội dung mạng xã hội (Tiktok, Douyin).
 Nhiệm vụ: Dịch mảng JSON chứa các câu phụ đề dưới đây sang {lang_name}.
@@ -113,10 +122,28 @@ Yêu cầu TỐI QUAN TRỌNG:
             "nhưng giữ đủ ý chính, tên riêng, số lượng và phủ định. Không cắt cụt từ, "
             "không bỏ ý chỉ để đạt giới hạn; không trả về bảng ngân sách.\n"
         )
+    if glossary:
+        prompt += (
+            "10. BẢNG THUẬT NGỮ CỐ ĐỊNH (GLOSSARY) - BẮT BUỘC tuân thủ chính xác các từ khóa sau:\n"
+            + json.dumps(dict(glossary), ensure_ascii=False)
+            + "\n"
+        )
+    if entity_map:
+        prompt += (
+            "11. BẢNG THỰC THỂ / TÊN RIÊNG (ENTITY MAP) - BẮT BUỘC dùng đúng tên thực thể/nhân vật/địa danh sau:\n"
+            + json.dumps(dict(entity_map), ensure_ascii=False)
+            + "\n"
+        )
+    if speaker_map:
+        prompt += (
+            "12. BẢNG NHÂN VẬT / NGƯỜI NÓI (SPEAKER MAP) - Dùng đúng vai vế và đại từ nhân xưng phù hợp cho từng nhân vật:\n"
+            + json.dumps(dict(speaker_map), ensure_ascii=False)
+            + "\n"
+        )
     prompt += "Dữ liệu:\n"
     if prior_context:
-        prompt += "Ngữ cảnh nối tiếp từ batch trước (không dịch lại):\n"
-        prompt += json.dumps(prior_context, ensure_ascii=False) + "\n"
+        prompt += "Ngữ cảnh nối tiếp từ batch trước (để duy trì xưng hô và mạch truyện, KHÔNG dịch lại):\n"
+        prompt += json.dumps(list(prior_context), ensure_ascii=False) + "\n"
     prompt += json.dumps(texts, ensure_ascii=False)
     return prompt
 
@@ -168,8 +195,16 @@ def translate_with_gemini(
     if not api_key:
         return None
     try:
-        prompt = build_translation_prompt(texts, target_lang, prior_context, with_vision=True,
-                                          duration_budgets=kwargs.get("duration_budgets"))
+        prompt = build_translation_prompt(
+            texts,
+            target_lang,
+            prior_context,
+            with_vision=True,
+            duration_budgets=kwargs.get("duration_budgets"),
+            glossary=kwargs.get("glossary"),
+            entity_map=kwargs.get("entity_map"),
+            speaker_map=kwargs.get("speaker_map"),
+        )
         parts = [{"text": prompt}]
         
         frames = extract_video_frames_base64(video_path, context_start_seconds, context_end_seconds)
@@ -231,8 +266,16 @@ def translate_with_openai(
     if not api_key:
         return None
     try:
-        prompt = build_translation_prompt(texts, target_lang, prior_context, with_vision=True,
-                                          duration_budgets=kwargs.get("duration_budgets"))
+        prompt = build_translation_prompt(
+            texts,
+            target_lang,
+            prior_context,
+            with_vision=True,
+            duration_budgets=kwargs.get("duration_budgets"),
+            glossary=kwargs.get("glossary"),
+            entity_map=kwargs.get("entity_map"),
+            speaker_map=kwargs.get("speaker_map"),
+        )
         messages_content = [{"type": "text", "text": prompt}]
         
         frames = extract_video_frames_base64(video_path, context_start_seconds, context_end_seconds)
@@ -292,8 +335,16 @@ def translate_with_deepseek(
     if not api_key:
         return None
     try:
-        prompt = build_translation_prompt(texts, target_lang, prior_context, with_vision=False,
-                                          duration_budgets=kwargs.get("duration_budgets"))
+        prompt = build_translation_prompt(
+            texts,
+            target_lang,
+            prior_context,
+            with_vision=False,
+            duration_budgets=kwargs.get("duration_budgets"),
+            glossary=kwargs.get("glossary"),
+            entity_map=kwargs.get("entity_map"),
+            speaker_map=kwargs.get("speaker_map"),
+        )
         policy = current_model_policy()
         seen = ordered_unique(model, *policy.deepseek_candidates)
             
@@ -379,9 +430,19 @@ def translate_subtitles(
     prior_context=None,
     strict=False,
     enable_g4f=True,
+    glossary=None,
+    entity_map=None,
+    speaker_map=None,
     **kwargs
 ):
     logger.info("Translating subtitles...")
+    kwargs = dict(kwargs)
+    if glossary is not None:
+        kwargs["glossary"] = glossary
+    if entity_map is not None:
+        kwargs["entity_map"] = entity_map
+    if speaker_map is not None:
+        kwargs["speaker_map"] = speaker_map
     texts = [seg.content for seg in srt_segments if seg.content]
     if not texts:
         return srt_segments

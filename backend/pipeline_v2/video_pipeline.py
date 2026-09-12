@@ -99,6 +99,9 @@ class VideoPipelineRequest:
     font_name: str = "Arial"
     font_color: str = "&H00000000"
     font_weight: int = 2
+    glossary: Optional[Mapping[str, str]] = None
+    entity_map: Optional[Mapping[str, str]] = None
+    speaker_map: Optional[Mapping[str, str]] = None
 
 
 @dataclass(frozen=True)
@@ -129,8 +132,8 @@ class VideoPipelineRunner:
             and Path(request.delivery_copy_path).resolve() == self.video_path
         ):
             raise ValueError("Pipeline delivery_copy_path must not overwrite the input video")
-        if request.voice_source not in {"edge", "fpt", "rvc"}:
-            raise ValueError("voice_source must be edge, fpt or rvc")
+        if request.voice_source not in {"edge", "fpt", "rvc", "capcut"}:
+            raise ValueError("voice_source must be edge, fpt, rvc or capcut")
         if request.voice_source == "fpt" and not (
             request.tts_api_key or request.api_key
         ):
@@ -772,7 +775,10 @@ class VideoPipelineRunner:
                     "pipeline_implementation_version": PIPELINE_IMPLEMENTATION_VERSION,
                     "segments": segments_to_dicts(batch),
                     "target_lang": self.request.target_lang,
-                    "prior_context": prior_context[-3:],
+                    "prior_context": prior_context[-4:],
+                    "glossary": dict(self.request.glossary or {}),
+                    "entity_map": dict(self.request.entity_map or {}),
+                    "speaker_map": dict(self.request.speaker_map or {}),
                 }
             )
             checkpoint_path = self.artifact_store.path_for(checkpoint_key)
@@ -805,9 +811,12 @@ class VideoPipelineRunner:
                     str(self.video_path),
                     context_start_seconds=batch[0].start.total_seconds(),
                     context_end_seconds=batch[-1].end.total_seconds(),
-                    prior_context=prior_context[-3:],
+                    prior_context=prior_context[-4:],
                     strict=True,
                     enable_g4f=False,
+                    glossary=self.request.glossary,
+                    entity_map=self.request.entity_map,
+                    speaker_map=self.request.speaker_map,
                     duration_budgets=[
                         {
                             "seconds": round(max((segment.end - segment.start).total_seconds(), 0.1), 3),
@@ -834,6 +843,7 @@ class VideoPipelineRunner:
                 {
                     "source": str(segment.orig_content or ""),
                     "translated": str(segment.content),
+                    "speaker_id": str(getattr(segment, "speaker_id", "") or ""),
                 }
                 for segment in translated_batch[-3:]
             )
@@ -844,6 +854,15 @@ class VideoPipelineRunner:
             ),
             self.artifact_store.put_text(
                 "translation/translated.srt", compose_srt(translated_all)
+            ),
+            self.artifact_store.put_json(
+                "translation/context.json",
+                {
+                    "glossary": dict(self.request.glossary or {}),
+                    "entity_map": dict(self.request.entity_map or {}),
+                    "speaker_map": dict(self.request.speaker_map or {}),
+                    "prior_context_count": len(prior_context),
+                },
             ),
         ])
         return artifacts
@@ -901,7 +920,7 @@ class VideoPipelineRunner:
             atempo_max=self.request.settings.atempo_max,
         )
         source = "rvc" if self._rvc_enabled() else self.request.voice_source
-        if source not in {"edge", "fpt", "rvc"}:
+        if source not in {"edge", "fpt", "rvc", "capcut"}:
             source = "edge"
         artifacts: List[ArtifactRecord] = []
         portable_infos: List[Dict[str, Any]] = []

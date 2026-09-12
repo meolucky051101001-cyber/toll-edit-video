@@ -1,4 +1,4 @@
-﻿import unittest
+import unittest
 from unittest.mock import patch, MagicMock
 import json
 import srt
@@ -53,6 +53,51 @@ class TestMultiLLMTranslation(unittest.TestCase):
         with patch.dict("os.environ", {"LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "sk-test"}):
             res = translate_subtitles([sub], target_lang="vi")
             self.assertEqual(res[0].content, "Xin chào")
+
+    def test_prompt_builder_with_glossary_entity_speaker_and_cross_batch_context(self):
+        texts = ["小帅来到了北京", "老张正在吃火锅"]
+        glossary = {"火锅": "lẩu"}
+        entity_map = {"小帅": "Tiểu Soái", "北京": "Bắc Kinh"}
+        speaker_map = {"SPEAKER_00": "Người kể chuyện"}
+        prior_context = [{"source": "很久以前", "translated": "Ngày xửa ngày xưa"}]
+
+        prompt = build_translation_prompt(
+            texts,
+            target_lang="vi",
+            prior_context=prior_context,
+            glossary=glossary,
+            entity_map=entity_map,
+            speaker_map=speaker_map,
+        )
+        self.assertIn("GLOSSARY", prompt)
+        self.assertIn("lẩu", prompt)
+        self.assertIn("ENTITY MAP", prompt)
+        self.assertIn("Tiểu Soái", prompt)
+        self.assertIn("SPEAKER MAP", prompt)
+        self.assertIn("Người kể chuyện", prompt)
+        self.assertIn("Ngày xửa ngày xưa", prompt)
+
+    @patch("backend.ai.translation.translate_with_deepseek")
+    def test_translate_subtitles_forwards_glossary_and_maps(self, mock_deepseek):
+        mock_deepseek.return_value = ["Tiểu Soái đi ăn lẩu"]
+        sub = srt.Subtitle(index=1, start=timedelta(seconds=0), end=timedelta(seconds=2), content="小帅吃火锅")
+        glossary = {"火锅": "lẩu"}
+        entity_map = {"小帅": "Tiểu Soái"}
+        speaker_map = {"SPEAKER_00": "Tiểu Soái"}
+        with patch.dict("os.environ", {"LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": "sk-test"}):
+            res = translate_subtitles(
+                [sub],
+                target_lang="vi",
+                glossary=glossary,
+                entity_map=entity_map,
+                speaker_map=speaker_map,
+            )
+            self.assertEqual(res[0].content, "Tiểu Soái đi ăn lẩu")
+            self.assertEqual(mock_deepseek.call_count, 1)
+            _, kwargs = mock_deepseek.call_args
+            self.assertEqual(kwargs.get("glossary"), glossary)
+            self.assertEqual(kwargs.get("entity_map"), entity_map)
+            self.assertEqual(kwargs.get("speaker_map"), speaker_map)
 
 if __name__ == "__main__":
     unittest.main()
