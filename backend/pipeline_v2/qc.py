@@ -622,13 +622,22 @@ def _sample_frames(
     diagnostics_directory: Path,
     ffmpeg_binary: str,
     timeout: float,
+    extra_samples: Optional[Sequence[Tuple[str, float]]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[QCCheck]]:
     store = ArtifactStore(diagnostics_directory)
-    samples = (
+    baseline = [
         ("first", 0.0),
         ("middle", max(0.0, duration / 2.0)),
         ("last", max(0.0, duration - 0.1)),
-    )
+        ("tail", max(0.0, duration - 0.25)),
+    ]
+    seen_times = set()
+    samples: List[Tuple[str, float]] = []
+    for label, timestamp in (list(extra_samples or []) + baseline):
+        t_rounded = round(max(0.0, min(float(timestamp), max(0.0, duration - 0.05))), 2)
+        if t_rounded not in seen_times:
+            seen_times.add(t_rounded)
+            samples.append((label, t_rounded))
     artifacts: List[Dict[str, Any]] = []
     failures = []
     for label, timestamp in samples:
@@ -835,6 +844,39 @@ def run_report_only_qc(
     elif not video.is_file() or video_duration is None or video_duration <= 0:
         report.add("frame_samples", "skipped", "Video duration is unavailable for frame sampling")
     else:
+        # Collect specialized diagnostic sample points
+        diagnostic_points: List[Tuple[str, float]] = []
+        if segments_path is not None and Path(segments_path).is_file():
+            try:
+                loaded_segs = _load_segments(Path(segments_path))
+                # 1. Diagnostic frame at sentence transitions
+                for idx, seg in enumerate(loaded_segs[:4]):
+                    end_sec = float(seg.get("end", 0.0))
+                    if 0.2 <= end_sec <= max(0.0, video_duration - 0.5):
+                        diagnostic_points.append((f"transition_{idx}", end_sec))
+                # 2. Diagnostic frame at weak OCR and near-edge candidates
+                weak_i, edge_i = 0, 0
+                for seg in loaded_segs:
+                    blocks = seg.get("tracking_blocks") or ([seg["best_block"]] if seg.get("best_block") else [])
+                    for b in blocks:
+                        prob = float(b.get("prob", 1.0) or 1.0)
+                        t = float(b.get("sample_time", b.get("start", 0.0)))
+                        if prob < 0.65 and weak_i < 3:
+                            diagnostic_points.append((f"weak_ocr_{weak_i}", t))
+                            weak_i += 1
+                        x1 = float(b.get("x_pct", 0.1))
+                        x2 = float(b.get("max_x_pct", 0.9))
+                        if (x1 < 0.08 or x2 > 0.92) and edge_i < 3:
+                            diagnostic_points.append((f"near_edge_{edge_i}", t))
+                            edge_i += 1
+            except Exception:
+                pass
+
+        if "coverage" in locals() and coverage.get("failures"):
+            for f_idx, fail_item in enumerate(coverage["failures"][:3]):
+                fail_t = float(fail_item.get("start", 0.0))
+                diagnostic_points.append((f"cover_fail_{f_idx}", fail_t))
+
         diagnostics = Path(diagnostics_directory or (Path(report_path).parent / "qc_diagnostics"))
         try:
             frame_artifacts, frame_checks = _sample_frames(
@@ -843,6 +885,7 @@ def run_report_only_qc(
                 diagnostics,
                 ffmpeg_binary,
                 config.command_timeout_seconds,
+                extra_samples=diagnostic_points,
             )
             report.diagnostic_artifacts.extend(frame_artifacts)
             report.checks.extend(frame_checks)

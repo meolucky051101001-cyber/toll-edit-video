@@ -132,6 +132,41 @@ class ReportOnlyGuaranteeTests(unittest.TestCase):
             self.assertFalse(report.blocking)
             self.assertTrue(report.delivery_allowed)
 
+    @mock.patch("backend.pipeline_v2.qc._run_command")
+    def test_sample_frames_includes_transitions_edges_weak_ocr_and_tail(self, run_command):
+        from backend.pipeline_v2.qc import _sample_frames
+        run_command.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / "video.mp4"
+            video.write_bytes(b"dummy")
+            diag_dir = Path(directory) / "diagnostics"
+
+            # Create dummy image output for committed stages
+            def fake_command(cmd, timeout):
+                out_path = Path(cmd[-1])
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_bytes(b"fake png")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            run_command.side_effect = fake_command
+
+            extra = [("transition_0", 2.5), ("weak_ocr_0", 4.0), ("near_edge_0", 1.2)]
+            artifacts, checks = _sample_frames(
+                video,
+                duration=10.0,
+                diagnostics_directory=diag_dir,
+                ffmpeg_binary="ffmpeg",
+                timeout=30.0,
+                extra_samples=extra,
+            )
+            labels = [a["key"] for a in artifacts]
+            self.assertTrue(any("transition_0" in l for l in labels))
+            self.assertTrue(any("weak_ocr_0" in l for l in labels))
+            self.assertTrue(any("near_edge_0" in l for l in labels))
+            self.assertTrue(any("tail" in l for l in labels))
+            self.assertEqual(checks[0].status, "pass")
+
 
 if __name__ == "__main__":
     unittest.main()
