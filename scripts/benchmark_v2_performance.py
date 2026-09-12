@@ -1,0 +1,443 @@
+"""Performance benchmark script for Tool V2 pipeline.
+
+Measures RAM, VRAM, stage execution times, rewrite counts, and error rates
+across cold and warm runs for video clips of varying durations (3m, 10m, 30m, 60m).
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Sequence
+
+# Ensure backend root is in sys.path
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+BACKEND_DIR = PROJECT_ROOT / "backend"
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+logger = logging.getLogger("benchmark_v2")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+
+
+@dataclass
+class ResourceStats:
+    peak_ram_mb: float = 0.0
+    avg_ram_mb: float = 0.0
+    peak_vram_mb: float = 0.0
+    sample_count: int = 0
+
+
+class ResourceMonitor:
+    """Monitors process tree RAM and CUDA VRAM in the background."""
+
+    def __init__(self, interval_seconds: float = 0.25):
+        self.interval = interval_seconds
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._ram_samples: List[float] = []
+        self._peak_vram_mb: float = 0.0
+        self._has_cuda: bool = False
+        try:
+            import torch
+            self._has_cuda = torch.cuda.is_available()
+            if self._has_cuda:
+                torch.cuda.reset_peak_memory_stats()
+        except Exception:
+            self._has_cuda = False
+
+    def start(self) -> None:
+        self._running = True
+        self._ram_samples.clear()
+        self._peak_vram_mb = 0.0
+        if self._has_cuda:
+            try:
+                import torch
+                torch.cuda.reset_peak_memory_stats()
+            except Exception:
+                pass
+        self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self._thread.start()
+
+    def _get_process_ram_mb(self) -> float:
+        try:
+            import psutil
+            parent = psutil.Process(os.getpid())
+            total = parent.memory_info().rss
+            for child in parent.children(recursive=True):
+                try:
+                    total += child.memory_info().rss
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            return total / (1024.0 * 1024.0)
+        except Exception:
+            return 0.0
+
+    def _get_vram_mb(self) -> float:
+        if not self._has_cuda:
+            return 0.0
+        try:
+            import torch
+            return torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
+        except Exception:
+            return 0.0
+
+    def _monitor_loop(self) -> None:
+        while self._running:
+            ram = self._get_process_ram_mb()
+            if ram > 0:
+                self._ram_samples.append(ram)
+            vram = self._get_vram_mb()
+            if vram > self._peak_vram_mb:
+                self._peak_vram_mb = vram
+            time.sleep(self.interval)
+
+    def stop(self) -> ResourceStats:
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=1.0)
+        final_vram = self._get_vram_mb()
+        if final_vram > self._peak_vram_mb:
+            self._peak_vram_mb = final_vram
+        peak_ram = max(self._ram_samples) if self._ram_samples else 0.0
+        avg_ram = sum(self._ram_samples) / max(len(self._ram_samples), 1)
+        return ResourceStats(
+            peak_ram_mb=round(peak_ram, 2),
+            avg_ram_mb=round(avg_ram, 2),
+            peak_vram_mb=round(self._peak_vram_mb, 2),
+            sample_count=len(self._ram_samples),
+        )
+
+
+@dataclass
+class StageTiming:
+    name: str
+    duration_seconds: float
+    status: str
+
+
+@dataclass
+class BenchmarkResult:
+    duration_minutes: float
+    mode: str  # "cold" or "warm"
+    total_time_seconds: float
+    peak_ram_mb: float
+    avg_ram_mb: float
+    peak_vram_mb: float
+    rewrite_rounds: int
+    error_count: int
+    status: str
+    stages: List[StageTiming] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+def create_synthetic_video(output_path: Path, duration_seconds: float) -> Path:
+    """Generate a lightweight synthetic MP4 with video and audio tracks for benchmarking."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=c=black:s=720x1280:r=25:d={duration_seconds}",
+        "-f",
+        "lavfi",
+        "-i",
+        f"sine=frequency=440:duration={duration_seconds}",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-tune",
+        "stillimage",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "64k",
+        "-shortest",
+        str(output_path),
+    ]
+    subprocess.run(command, check=True, timeout=max(120, int(duration_seconds * 2)))
+    return output_path
+
+
+def parse_manifest_timings(manifest: Any) -> tuple[List[StageTiming], int, int]:
+    """Extract stage timings, rewrite count, and error count from manifest."""
+    stages = []
+    error_count = 0
+    rewrite_rounds = int(manifest.metadata.get("rewrite_rounds", 0))
+
+    for stage_name, stage in manifest.stages.items():
+        dur = 0.0
+        if stage.started_at and stage.finished_at:
+            try:
+                t0 = datetime.fromisoformat(stage.started_at.replace("Z", "+00:00"))
+                t1 = datetime.fromisoformat(stage.finished_at.replace("Z", "+00:00"))
+                dur = round((t1 - t0).total_seconds(), 2)
+            except Exception:
+                dur = 0.0
+        if stage.status.value == "failed":
+            error_count += 1
+        stages.append(
+            StageTiming(
+                name=stage_name,
+                duration_seconds=dur,
+                status=stage.status.value,
+            )
+        )
+    return stages, rewrite_rounds, error_count
+
+
+async def run_single_benchmark(
+    video_path: Path,
+    duration_minutes: float,
+    mode: str,
+    work_dir: Path,
+    enable_gpu_isolation: bool = True,
+    simulate: bool = False,
+) -> BenchmarkResult:
+    """Execute a single benchmark run (cold or warm)."""
+    from pipeline_v2.config import PipelineMode, PipelineSettings
+    from pipeline_v2.video_pipeline import VideoPipelineRequest, VideoPipelineRunner
+
+    job_dir = work_dir / f"bench_{mode}_{int(duration_minutes * 60)}s"
+    output_video = job_dir / "output.mp4"
+    if mode == "cold" and job_dir.exists():
+        import shutil
+        shutil.rmtree(job_dir, ignore_errors=True)
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    settings = PipelineSettings(
+        mode=PipelineMode.V2,
+        enable_stage_cache=(mode == "warm"),
+        enable_gpu_process_isolation=enable_gpu_isolation,
+        translation_batch_segments=80,
+        translation_batch_characters=12000,
+    )
+
+    request = VideoPipelineRequest(
+        video_path=video_path,
+        job_directory=job_dir,
+        output_path=output_video,
+        settings=settings,
+        target_lang="vi",
+        voice_source="edge",
+    )
+
+    if simulate:
+        # Fast simulation for automated testing
+        monitor = ResourceMonitor(interval_seconds=0.05)
+        monitor.start()
+        time.sleep(0.15)
+        res_stats = monitor.stop()
+        fake_stages = [
+            StageTiming("extract_audio", round(duration_minutes * 0.5, 2), "completed"),
+            StageTiming("demucs", round(duration_minutes * 1.2, 2), "completed"),
+            StageTiming("transcribe", round(duration_minutes * 0.8, 2), "completed"),
+            StageTiming("ocr", round(duration_minutes * 1.5, 2), "completed"),
+            StageTiming("translate", round(duration_minutes * 0.4, 2), "completed"),
+            StageTiming("timing", round(duration_minutes * 0.2, 2), "completed"),
+            StageTiming("tts", round(duration_minutes * 1.0, 2), "completed"),
+            StageTiming("subtitles", round(duration_minutes * 0.3, 2), "completed"),
+            StageTiming("mix", round(duration_minutes * 0.4, 2), "completed"),
+            StageTiming("render", round(duration_minutes * 2.0, 2), "completed"),
+            StageTiming("qc", round(duration_minutes * 0.3, 2), "completed"),
+        ]
+        return BenchmarkResult(
+            duration_minutes=duration_minutes,
+            mode=mode,
+            total_time_seconds=round(sum(s.duration_seconds for s in fake_stages), 2),
+            peak_ram_mb=res_stats.peak_ram_mb or 180.0,
+            avg_ram_mb=res_stats.avg_ram_mb or 150.0,
+            peak_vram_mb=res_stats.peak_vram_mb or 0.0,
+            rewrite_rounds=0,
+            error_count=0,
+            status="SUCCESS (SIMULATED)",
+            stages=fake_stages,
+            metadata={"simulated": True},
+        )
+
+    monitor = ResourceMonitor(interval_seconds=0.25)
+    monitor.start()
+    t_start = time.perf_counter()
+    runner = VideoPipelineRunner(request)
+    status = "SUCCESS"
+    error_count = 0
+    stages: List[StageTiming] = []
+    rewrite_rounds = 0
+
+    try:
+        result = await runner.run()
+        stages, rewrite_rounds, error_count = parse_manifest_timings(runner.manifest)
+        if not result.qc_allowed:
+            status = f"QC_BLOCKED: {result.qc_reason}"
+    except Exception as exc:
+        status = f"FAILED: {exc}"
+        error_count += 1
+        if runner.manifest:
+            stages, rewrite_rounds, _ = parse_manifest_timings(runner.manifest)
+    finally:
+        total_time = round(time.perf_counter() - t_start, 2)
+        res_stats = monitor.stop()
+
+    return BenchmarkResult(
+        duration_minutes=duration_minutes,
+        mode=mode,
+        total_time_seconds=total_time,
+        peak_ram_mb=res_stats.peak_ram_mb,
+        avg_ram_mb=res_stats.avg_ram_mb,
+        peak_vram_mb=res_stats.peak_vram_mb,
+        rewrite_rounds=rewrite_rounds,
+        error_count=error_count,
+        status=status,
+        stages=stages,
+    )
+
+
+def print_benchmark_summary(results: List[BenchmarkResult]) -> None:
+    """Print ASCII report of benchmark runs."""
+    header = (
+        f"{'Duration':<10} | {'Mode':<6} | {'Total Time (s)':<14} | "
+        f"{'Peak RAM (MB)':<14} | {'Peak VRAM (MB)':<14} | {'Rewrites':<8} | {'Errors':<6} | {'Status'}"
+    )
+    separator = "-" * len(header)
+    print("\n" + separator)
+    print("TOOL V2 PERFORMANCE BENCHMARK REPORT")
+    print(separator)
+    print(header)
+    print(separator)
+    for r in results:
+        dur_label = f"{r.duration_minutes:.1f}m"
+        print(
+            f"{dur_label:<10} | {r.mode:<6} | {r.total_time_seconds:<14.2f} | "
+            f"{r.peak_ram_mb:<14.1f} | {r.peak_vram_mb:<14.1f} | {r.rewrite_rounds:<8} | "
+            f"{r.error_count:<6} | {r.status}"
+        )
+    print(separator)
+
+    # Detailed stage breakdown
+    print("\nSTAGE BREAKDOWN (Duration in seconds):")
+    for r in results:
+        print(f"\n--- Clip: {r.duration_minutes:.1f}m ({r.mode.upper()} run) ---")
+        for st in r.stages:
+            print(f"  {st.name:<20}: {st.duration_seconds:>7.2f}s  [{st.status}]")
+    print("\n")
+
+
+async def main_async(args: argparse.Namespace) -> int:
+    durations = [float(d.strip()) for d in args.durations.split(",") if d.strip()]
+    modes = [m.strip().lower() for m in args.modes.split(",") if m.strip()]
+    output_report = Path(args.output_report)
+    output_report.parent.mkdir(parents=True, exist_ok=True)
+
+    results: List[BenchmarkResult] = []
+    temp_dir_ctx = tempfile.TemporaryDirectory(prefix="v2_benchmark_")
+    work_dir = Path(temp_dir_ctx.name)
+
+    try:
+        for dur in durations:
+            duration_seconds = dur * 60.0
+            clip_path = args.video_path
+            if not clip_path or not Path(clip_path).is_file():
+                if not args.simulate:
+                    logger.info("Generating %g minute synthetic test video...", dur)
+                    clip_path = create_synthetic_video(
+                        work_dir / f"test_{int(duration_seconds)}s.mp4", duration_seconds
+                    )
+                else:
+                    clip_path = work_dir / f"test_{int(duration_seconds)}s.mp4"
+
+            for mode in modes:
+                logger.info("Running benchmark: %.1f minutes, %s mode...", dur, mode)
+                res = await run_single_benchmark(
+                    video_path=Path(clip_path),
+                    duration_minutes=dur,
+                    mode=mode,
+                    work_dir=work_dir,
+                    enable_gpu_isolation=not args.no_gpu_isolation,
+                    simulate=args.simulate,
+                )
+                results.append(res)
+                logger.info(
+                    "Done %.1fm %s: %.2fs, Peak RAM: %.1fMB, VRAM: %.1fMB",
+                    dur,
+                    mode,
+                    res.total_time_seconds,
+                    res.peak_ram_mb,
+                    res.peak_vram_mb,
+                )
+
+        print_benchmark_summary(results)
+
+        # Save JSON artifact
+        json_data = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "results": [asdict(r) for r in results],
+        }
+        output_report.write_text(json.dumps(json_data, indent=2, ensure_ascii=False), encoding="utf-8")
+        logger.info("Saved benchmark report to: %s", output_report)
+        return 0
+    finally:
+        temp_dir_ctx.cleanup()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Tool V2 Performance Benchmark")
+    parser.add_argument(
+        "--durations",
+        type=str,
+        default="3,10,30,60",
+        help="Comma-separated clip durations in minutes (e.g., '3,10,30,60' or '0.5,1.0')",
+    )
+    parser.add_argument(
+        "--modes",
+        type=str,
+        default="cold,warm",
+        help="Comma-separated modes: 'cold', 'warm', or 'cold,warm'",
+    )
+    parser.add_argument(
+        "--video-path",
+        type=str,
+        default=None,
+        help="Optional real video path to benchmark instead of synthetic video",
+    )
+    parser.add_argument(
+        "--output-report",
+        type=str,
+        default="benchmarks/v2_performance_report.json",
+        help="Output JSON report path",
+    )
+    parser.add_argument(
+        "--no-gpu-isolation",
+        action="store_true",
+        help="Disable GPU subprocess isolation during benchmark",
+    )
+    parser.add_argument(
+        "--simulate",
+        action="store_true",
+        help="Simulate stages for fast validation testing",
+    )
+    args = parser.parse_args()
+    sys.exit(asyncio.run(main_async(args)))
+
+
+if __name__ == "__main__":
+    main()
