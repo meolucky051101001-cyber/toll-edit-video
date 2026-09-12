@@ -5,6 +5,7 @@ import secrets
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -76,11 +77,32 @@ def launch(key, service):
                      cwd=str(root), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      creationflags=subprocess.CREATE_NO_WINDOW)
 
+def _get_dashboard_token(key='v1'):
+    ws = os.getenv("AUTODUB_WORKSPACE")
+    if ws and key == 'v1':
+        token_file = Path(ws) / ".dashboard_control_token"
+        try:
+            if token_file.is_file():
+                return token_file.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+    root = ROOTS.get(key)
+    if not root:
+        return ""
+    token_file = root.parent / "workspace" / ".dashboard_control_token"
+    try:
+        if token_file.is_file():
+            return token_file.read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+    return ""
+
 def stop_and_release(key):
     """
     Dừng triệt để toàn bộ bot, batch processor, worker và giải phóng toàn bộ RAM/VRAM.
     Được gọi khi người dùng chủ động tắt tool hoặc khi chuyển sang tool khác.
     """
+    FLAGS.mkdir(parents=True, exist_ok=True)
     flag = FLAGS / (key + '.pause')
     flag.write_text('paused', encoding='utf-8')
 
@@ -96,15 +118,32 @@ def stop_and_release(key):
         except Exception:
             pass
         if batch_active:
+            token = _get_dashboard_token('v1')
+            headers = {'Content-Type': 'application/json', 'X-Dashboard-Input': '1'}
+            if token:
+                headers['X-Local-Control-Token'] = token
+            log_path = Path(r"C:\tool v1\workspace\service_logs\tool_control.log")
             try:
                 req = urllib.request.Request(
                     'http://127.0.0.1:8088/api/stop-batch',
                     data=b'{}',
-                    headers={'Content-Type': 'application/json', 'X-Dashboard-Input': '1'}
+                    headers=headers
                 )
-                urllib.request.urlopen(req, timeout=1.0)
-            except Exception:
-                pass
+                with urllib.request.urlopen(req, timeout=1.5) as resp:
+                    if resp.status == 200:
+                        time.sleep(0.5)
+            except urllib.error.HTTPError as e:
+                try:
+                    with open(log_path, "a", encoding="utf-8") as lf:
+                        lf.write(f"Dashboard /api/stop-batch rejected with HTTP {e.code}: {e.reason}\n")
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    with open(log_path, "a", encoding="utf-8") as lf:
+                        lf.write(f"Failed to reach dashboard /api/stop-batch: {e}\n")
+                except Exception:
+                    pass
 
     # 2. Thu thập toàn bộ tiến trình liên quan đến Tool (trừ tool_control.py)
     targets = {}

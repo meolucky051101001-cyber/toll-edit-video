@@ -1,4 +1,4 @@
-﻿backend/.env
+backend/.env
 .env
 
 __pycache__/
@@ -33,3 +33,6 @@ weights/
 master_plan.txt
 *.control_token
 workspace/.dashboard_control_token
+voice_cache/
+backend/voice_cache/
+*.tmp

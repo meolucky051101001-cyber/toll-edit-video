@@ -8,11 +8,9 @@ from pathlib import Path
 import srt
 
 async def generate_dubbing_audio_isolated(segments, output_folder, voice_source='edge', voice_param='vi-VN-HoaiMyNeural', api_key=''):
-    # Preserve in-memory repair semantics for legacy untranslated input.
     from .translation import _contains_cjk
-    if api_key or any(_contains_cjk(s.content) for s in segments):
-        from .voice_cloning import generate_dubbing_audio
-        return await generate_dubbing_audio(segments, output_folder, voice_source, voice_param, api_key)
+    if any(_contains_cjk(s.content) for s in segments):
+        raise RuntimeError("Phụ đề chứa ký tự CJK tiếng Trung chưa được dịch (Fail-Closed).")
     try:
         from ..batch_control import run, stop_check
         from .. import shared_state
@@ -30,13 +28,31 @@ async def generate_dubbing_audio_isolated(segments, output_folder, voice_source=
             voice_segments = [srt.Subtitle(s.index, s.start, s.end, s.content,
                                           proprietary=s.proprietary) for s in segments]
             request.write_text(srt.compose(voice_segments, reindex=False), encoding='utf-8')
-            run([str(backend/'venv/Scripts/python.exe'), str(backend/'model_workers/v1_voice_worker.py'),
-                 str(request), str(result), str(Path(output_folder).resolve()), voice_source, voice_param],
-                timeout=1800, check=True, cwd=str(backend),
-                env=dict(os.environ, PYTHONIOENCODING='utf-8'),
-                creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)|getattr(subprocess,'NORMAL_PRIORITY_CLASS',0),
-                stdout=subprocess.DEVNULL)
-            return json.loads(result.read_text(encoding='utf-8'))
+            worker_env = dict(os.environ, PYTHONIOENCODING='utf-8')
+            if api_key:
+                worker_env['VOICE_API_KEY'] = str(api_key)
+                worker_env['FPT_API_KEY'] = str(api_key)
+            try:
+                run([str(backend/'venv/Scripts/python.exe'), str(backend/'model_workers/v1_voice_worker.py'),
+                     str(request), str(result), str(Path(output_folder).resolve()), voice_source, voice_param],
+                    timeout=1800, check=True, cwd=str(backend),
+                    env=worker_env,
+                    creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)|getattr(subprocess,'NORMAL_PRIORITY_CLASS',0),
+                    stdout=subprocess.DEVNULL)
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"Voice worker subprocess failed with exit code {e.returncode}") from e
+            except subprocess.TimeoutExpired as e:
+                raise RuntimeError(f"Voice worker subprocess timed out after {e.timeout}s") from e
+
+            if not result.is_file():
+                raise RuntimeError("Voice worker subprocess failed to produce result file")
+            try:
+                data = json.loads(result.read_text(encoding='utf-8'))
+            except Exception as e:
+                raise RuntimeError(f"Voice worker output could not be parsed: {e}") from e
+            if not isinstance(data, list):
+                raise RuntimeError(f"Voice worker returned invalid data type: {type(data)}")
+            return data
     cancelled = __import__('threading').Event()
     inherited = stop_check.get()
     token = stop_check.set(lambda: cancelled.is_set() or bool(shared_state.stop_requested) or bool(inherited and inherited()))

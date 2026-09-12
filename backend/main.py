@@ -49,6 +49,7 @@ app.add_middleware(
 import secrets
 
 LOCAL_TOKEN = os.getenv("AUTODUB_LOCAL_TOKEN", secrets.token_urlsafe(32))
+DASHBOARD_CONTROL_TOKEN = LOCAL_TOKEN
 
 def _is_valid_host(host_header: str) -> bool:
     if not host_header:
@@ -298,62 +299,66 @@ async def api_get_logs():
 
 # ===== API: Tạo phụ đề (Transcribe + Translate) =====
 @app.post("/api/generate_subtitles")
+@app.post("/api/generate-subtitles")
 async def api_generate_subtitles(video_path: str = Form(...), target_lang: str = Form("vi")):
     """Nhận đường dẫn file video trên máy, tạo phụ đề gốc và dịch."""
-    valid_path = _validate_input_path(video_path)
-    video_path = str(valid_path)
     if UNIFIED_PIPELINE_LOCK.locked() or job_tracker.get_status().get("active"):
         raise HTTPException(status_code=409, detail="Pipeline đang bận xử lý video khác. Vui lòng đợi hoàn thành!")
-    async with UNIFIED_PIPELINE_LOCK:
-        try:
-            base_name = valid_path.stem
-            out_dir = os.path.join(WORKSPACE, base_name)
-            os.makedirs(out_dir, exist_ok=True)
+    await UNIFIED_PIPELINE_LOCK.acquire()
+    try:
+        valid_path = _validate_input_path(video_path)
+        video_path = str(valid_path)
+        base_name = valid_path.stem
+        out_dir = os.path.join(WORKSPACE, base_name)
+        os.makedirs(out_dir, exist_ok=True)
 
-            original_audio = os.path.join(out_dir, "original.wav")
-            srt_original = os.path.join(out_dir, "original.srt")
-            srt_translated = os.path.join(out_dir, "translated.srt")
+        original_audio = os.path.join(out_dir, "original.wav")
+        srt_original = os.path.join(out_dir, "original.srt")
+        srt_translated = os.path.join(out_dir, "translated.srt")
 
-            # 1. Extract audio
-            await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
+        # 1. Extract audio
+        await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
 
-            # 2. Transcribe with Whisper
-            srt_segments = await asyncio.to_thread(extract_subtitles_isolated, original_audio, srt_original)
+        # 2. Transcribe with Whisper
+        srt_segments = await asyncio.to_thread(extract_subtitles_isolated, original_audio, srt_original)
 
-            # 3. Translate
-            translated_segments = await asyncio.to_thread(translate_subtitles, 
-                srt_segments,
-                target_lang,
-                api_key=GEMINI_API_KEY,
-                video_path=video_path,
-            )
-            await asyncio.to_thread(save_srt, translated_segments, srt_translated)
+        # 3. Translate
+        translated_segments = await asyncio.to_thread(translate_subtitles, 
+            srt_segments,
+            target_lang,
+            api_key=GEMINI_API_KEY,
+            video_path=video_path,
+        )
+        await asyncio.to_thread(save_srt, translated_segments, srt_translated)
 
-            # Prepare response data
-            subtitles = []
-            for seg in translated_segments:
-                subtitles.append({
-                    "index": seg.index,
-                    "start": seg.start.total_seconds(),
-                    "end": seg.end.total_seconds(),
-                    "content": seg.content
-                })
+        # Prepare response data
+        subtitles = []
+        for seg in translated_segments:
+            subtitles.append({
+                "index": seg.index,
+                "start": seg.start.total_seconds(),
+                "end": seg.end.total_seconds(),
+                "content": seg.content
+            })
 
-            return {
-                "status": "success",
-                "original_srt": srt_original,
-                "translated_srt": srt_translated,
-                "subtitles": subtitles,
-                "total": len(subtitles)
-            }
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return {"status": "error", "message": str(e)}
+        return {
+            "status": "success",
+            "original_srt": srt_original,
+            "translated_srt": srt_translated,
+            "subtitles": subtitles,
+            "total": len(subtitles)
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "message": str(e)}
+    finally:
+        UNIFIED_PIPELINE_LOCK.release()
 
 
 # ===== API: Xử lý full (Lồng tiếng + Xuất video) =====
 @app.post("/api/process_video")
+@app.post("/api/process-video")
 async def api_process_video(
     video_path: str = Form(...),
     target_lang: str = Form("vi"),
@@ -365,12 +370,12 @@ async def api_process_video(
     font_weight: int = Form(1)
 ):
     """Xử lý full: Transcribe → Dịch → TTS → Mix Audio → Blur + Sub → Xuất video."""
-    valid_path = _validate_input_path(video_path)
-    video_path = str(valid_path)
-    if job_tracker.get_status().get("active"):
+    if UNIFIED_PIPELINE_LOCK.locked() or job_tracker.get_status().get("active"):
         raise HTTPException(status_code=409, detail="Đang có tiến trình Batch xử lý video. Vui lòng đợi hoàn thành!")
     await API_PROCESS_LOCK.acquire()
     try:
+        valid_path = _validate_input_path(video_path)
+        video_path = str(valid_path)
         base_name = valid_path.stem
         out_dir = os.path.join(WORKSPACE, base_name)
         os.makedirs(out_dir, exist_ok=True)
@@ -490,6 +495,7 @@ async def download_video(filename: str):
 
 # ===== API: Tải video từ URL + Xử lý tự động =====
 @app.post("/api/process_url")
+@app.post("/api/process-url")
 async def api_process_url(
     url: str = Form(...),
     target_lang: str = Form("vi"),
@@ -501,8 +507,8 @@ async def api_process_url(
     font_weight: int = Form(1)
 ):
     """Tải video từ URL (Xiaohongshu, TikTok, YouTube...) rồi xử lý toàn bộ."""
-    if job_tracker.get_status().get("active"):
-        raise HTTPException(status_code=409, detail="Đang có tiến trình Batch xử lý video. Vui lòng đợi hoàn thành!")
+    if UNIFIED_PIPELINE_LOCK.locked() or job_tracker.get_status().get("active"):
+        raise HTTPException(status_code=409, detail="Pipeline đang bận xử lý video khác. Vui lòng đợi hoàn thành!")
     await API_PROCESS_LOCK.acquire()
     try:
         import time
@@ -881,15 +887,37 @@ async def api_get_banve():
     }
 
 
+async def batch_runner(input_dir: str = "", output_dir: str = "", job_id: str = ""):
+    if not input_dir:
+        input_dir = str(get_input_dir())
+    if not output_dir:
+        output_dir = str(get_output_dir())
+    if not job_id:
+        job_id = uuid.uuid4().hex
+    from batch_processor import process_batch_folder
+    async with UNIFIED_PIPELINE_LOCK:
+        try:
+            await process_batch_folder(
+                input_dir, output_dir, job_id=job_id
+            )
+        except job_tracker.JobAlreadyRunningError as e:
+            logger.warning("Từ chối batch trùng: %s", e)
+        except Exception as e:
+            logger.error("Lỗi chạy batch qua API: %s", e, exc_info=True)
+            job_tracker.fail_batch(str(e), job_id=job_id)
+
+
 @app.post("/api/run-batch")
 async def api_run_batch():
     """Kích hoạt chạy batch toàn bộ video phôi ngầm."""
     global BATCH_TASK
+    status = job_tracker.get_status()
     if UNIFIED_PIPELINE_LOCK.locked():
         return JSONResponse(
             status_code=409,
             content={
                 "status": "busy",
+                "job_id": status.get("job_id"),
                 "message": "Pipeline đang bận xử lý video khác.",
             },
         )
@@ -916,22 +944,8 @@ async def api_run_batch():
         return JSONResponse(status_code=409, content={
             "status": "busy", "message": "Một batch khác đang chạy."})
 
-    from batch_processor import process_batch_folder
-
-    async def batch_runner():
-        async with UNIFIED_PIPELINE_LOCK:
-            try:
-                await process_batch_folder(
-                    input_dir, output_dir, job_id=job_id
-                )
-            except job_tracker.JobAlreadyRunningError as e:
-                logger.warning("Từ chối batch trùng: %s", e)
-            except Exception as e:
-                logger.error("Lỗi chạy batch qua API: %s", e, exc_info=True)
-                job_tracker.fail_batch(str(e), job_id=job_id)
-
     BATCH_TASK = asyncio.create_task(
-        batch_runner(), name=f"autodub-batch-{job_id}"
+        batch_runner(input_dir, output_dir, job_id), name=f"autodub-batch-{job_id}"
     )
 
     return JSONResponse(

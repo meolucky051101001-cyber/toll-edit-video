@@ -14,16 +14,22 @@ if not exist "%PYTHON_EXE%" (
 
 :: Kiểm tra riêng cho Tool V1; không yêu cầu hoặc kích hoạt Pipeline V2.
 cd /d "%PROJECT_DIR%backend"
-"%PYTHON_EXE%" v1_preflight.py --project-root "%PROJECT_DIR%" --interface telegram
+"%PYTHON_EXE%" v1_preflight.py --project-root "%PROJECT_DIR%" --interface all
 if errorlevel 1 (
   echo [ERROR] Preflight that bai. Sua cac muc error o tren roi chay lai.
   pause
   exit /b 1
 )
 
+:: Đảm bảo Dashboard Tool V1 (cổng 8088) đang chạy
+netstat -ano | findstr ":8088" >nul
+if errorlevel 1 (
+  echo [Tool V1] Dang khoi dong Dashboard tren cong 8088...
+  start /b "" "%PYTHON_EXE%" main.py
+  timeout /t 2 /nobreak >nul
+)
 
-
-:: Khóa riêng trong AUTODUB_WORKSPACE chặn V1 chạy trùng. Không dừng bất kỳ
-:: telegram_bot.py khác vì tiến trình đó có thể là Tool V2.
-cd /d "%PROJECT_DIR%backend"
+:: Khởi động Telegram Bot Tool V1
+echo [Tool V1] Dang khoi dong Telegram Bot...
 start /b "" "%PYTHON_EXE%" telegram_bot.py
+echo [Tool V1] Khoi dong thanh cong! Dashboard dang chay tai http://127.0.0.1:8088

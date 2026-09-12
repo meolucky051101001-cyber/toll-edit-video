@@ -65,7 +65,8 @@ logger.setLevel(logging.INFO)
 # Import các module AI
 from ai.transcription import extract_subtitles_whisper, save_srt
 from ai.translation import translate_subtitles
-from ai.voice_cloning import generate_dubbing_audio, rvc_runtime_available
+from ai.v1_voice_isolated import generate_dubbing_audio_isolated
+from ai.voice_cloning import rvc_runtime_available
 from video_utils import extract_audio_from_video, mix_audio_pydub, process_video, separate_vocals_demucs
 from ass_utils import generate_ass_file
 from ocr_utils import perform_video_ocr, release_ocr_reader
@@ -313,7 +314,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         _raise_if_stopped()
         await notify(f"Đang lồng tiếng: {v_label}")
         job_tracker.update_step(5, f"Lồng tiếng: {v_label}", percent=85)
-        dubbing_audio_files = await generate_dubbing_audio(
+        dubbing_audio_files = await generate_dubbing_audio_isolated(
             translated_segments, dubbing_dir, voice_source=v_source, voice_param=v_param
         )
 
