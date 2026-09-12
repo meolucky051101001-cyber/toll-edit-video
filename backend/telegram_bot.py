@@ -196,6 +196,9 @@ async def run_pipeline_v2_for_telegram(
             parse_mode="Markdown",
         )
 
+    from voice_selection import resolve_voice
+    from dataclasses import replace
+    selected_source, selected_param, selected_label = resolve_voice("rvc" if rvc_model else "edge", rvc_model)
     request = VideoPipelineRequest(
         video_path=Path(video_path),
         job_directory=Path(out_dir),
@@ -205,15 +208,23 @@ async def run_pipeline_v2_for_telegram(
         ),
         settings=settings,
         api_key=GEMINI_API_KEY,
-        voice_source="rvc" if rvc_model else "edge",
-        voice_param=str(rvc_model) if rvc_model else "vi-VN-HoaiMyNeural",
+        voice_source=selected_source,
+        voice_param=selected_param,
         rvc_model_path=rvc_model,
         progress=progress,
     )
     return await VideoPipelineRunner(request).run()
 
 
-async def process_v2_telegram_job(video_path, paths, title, status_msg):
+async def process_v2_telegram_job(
+    video_path,
+    paths,
+    title,
+    status_msg,
+    context=None,
+    chat_id=None,
+    url_or_filename=None,
+):
     """Run and report the shared production V2 path for every Telegram input."""
 
     started_at = time.time()
@@ -230,7 +241,21 @@ async def process_v2_telegram_job(video_path, paths, title, status_msg):
         elapsed_seconds=time.time() - started_at,
         remaining_jobs=global_queue.qsize(),
     )
-    await safe_edit_status(status_msg, caption, parse_mode="Markdown")
+    final_video = paths.final_video
+    if not Path(final_video).is_file() and paths.delivery_copy and Path(paths.delivery_copy).is_file():
+        final_video = paths.delivery_copy
+
+    if context and chat_id and Path(final_video).is_file():
+        await send_video_safely(
+            context,
+            chat_id,
+            str(final_video),
+            caption,
+            status_msg,
+            url_or_filename or title,
+        )
+    else:
+        await safe_edit_status(status_msg, caption, parse_mode="Markdown")
 
 
 def snapshot_legacy_telegram_run(
@@ -474,7 +499,15 @@ async def run_durable_video(job):
         global_queue.checkpoint(video_path=str(video))
     paths = TelegramJobPaths.create(WORKSPACE, OUTPUT_DIR, job_key)
     paths.prepare_directories()
-    await process_v2_telegram_job(video, paths, job.get('filename') or Path(video).name, status)
+    await process_v2_telegram_job(
+        video,
+        paths,
+        job.get('filename') or Path(video).name,
+        status,
+        context=context,
+        chat_id=job.get('chat_id'),
+        url_or_filename=job.get('url') or job.get('filename'),
+    )
 
 async def send_video_safely(context, chat_id, final_video, caption, status_msg, url_or_filename):
     file_size = os.path.getsize(final_video)
@@ -654,6 +687,9 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 paths,
                 video_title if "video_title" in locals() else base_name,
                 status_msg,
+                context=context,
+                chat_id=chat_id,
+                url_or_filename=url,
             )
             return
 
@@ -885,9 +921,7 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if len(caption) > 1024:
             caption = caption[:1020] + "..."
 
-        # Tạm thời không gửi video qua Telegram để tiết kiệm mạng (chỉ lưu ổ đĩa)
-        # await send_video_safely(context, chat_id, final_video, caption, status_msg, url)
-        await safe_edit_status(status_msg, caption)
+        await send_video_safely(context, chat_id, final_video, caption, status_msg, url)
 
         # ===== DỌN DẸP RÁC (TRÁNH LỖI FULL Ổ CỨNG) =====
         # try:
@@ -1035,6 +1069,9 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
                 paths,
                 filename,
                 status_msg,
+                context=context,
+                chat_id=chat_id,
+                url_or_filename=filename,
             )
             return
 
@@ -1298,6 +1335,8 @@ def main():
             app.add_error_handler(telegram_error_handler)
 
             print("Bot da san sang! Dang lang nghe tin nhan...")
+            from tool_control_runtime import install as install_tool_control
+            install_tool_control(app, globals(), 'v2')
             app.run_polling(
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=False,

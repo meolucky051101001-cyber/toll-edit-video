@@ -284,6 +284,8 @@ def main() -> int:
         root = Path(args.session_dir)
         idle = time.monotonic()
         while root.is_dir() and time.monotonic()-idle < 300:
+            if (root / 'stop').exists():
+                break
             requests = sorted(root.glob('request-*.json'))
             if not requests:
                 time.sleep(.05)

@@ -45,4 +45,5 @@ Thumbs.db
 
 # Backups and temporary files
 backups/
+benchmarks/
 *.before-*

@@ -75,6 +75,8 @@ class TestPipelineV2Gender(unittest.TestCase):
         }
 
         mock_edge = AsyncMock()
+        from backend.pipeline_v2.tts import _prepare_legacy_imports
+        _prepare_legacy_imports()
         import ai.voice_cloning
         with tempfile.TemporaryDirectory() as td, \
              patch("ai.voice_cloning.generate_tts_edge", mock_edge), \

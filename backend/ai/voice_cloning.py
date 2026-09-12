@@ -325,6 +325,8 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
                         shutil.move(temp_filtered, audio_path)
                 else:
                     await generate_tts_edge(text, audio_path, voice_param, pitch="+0Hz", rate="+5%")
+            elif voice_source == "capcut":
+                await asyncio.to_thread(_run_capcut_tts, text, audio_path, voice_param)
             elif voice_source == "rvc":
                 temp_edge_raw = audio_path.replace(".mp3", "_temp_raw.mp3")
                 temp_edge_rvc = audio_path.replace(".mp3", "_temp_rvc.mp3")
@@ -335,7 +337,7 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
                     print(f"Lỗi CapCut TTS: {e}. Fallback sang Edge TTS (Hoài My)...")
                     await generate_tts_edge(text, temp_edge_raw, "vi-VN-HoaiMyNeural", pitch="+0Hz", rate="+0%")
                 
-                await apply_rvc_clone(temp_edge_raw, temp_edge_rvc, voice_param)
+                await apply_rvc_clone(temp_edge_raw, temp_edge_rvc, voice_param, strict=True)
                 
                 audio = AudioSegment.from_file(temp_edge_rvc)
                 duration_s = len(audio) / 1000.0

@@ -35,8 +35,12 @@ def main():
     python = ROOT / "venv" / "Scripts" / "python.exe"
     script = ROOT / ("dashboard_monitor.py" if service == "dashboard" else "telegram_bot.py")
     environment = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
+    control_pause = (ROOT.parent / "workspace" / "control" / "v2.pause")
     delay = 5
     while True:
+        if service == "telegram" and control_pause.exists():
+            time.sleep(2)
+            continue
         started = time.monotonic()
         output_path = logs / (service + ".log")
         if output_path.exists() and output_path.stat().st_size > 10_000_000:

@@ -88,7 +88,10 @@
     .stat-val { color: #fff; font-weight: 700; }
     
     /* Main Grid */
-    .main-grid { display: grid; grid-template-columns: 1fr 1.15fr; gap: 20px; flex: 1; }
+    .main-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 20px; flex: 1; align-items: stretch; }
+    .video-column { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+    .video-column > .panel { flex-shrink: 0; }
+    .monitor-column { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
     @media (max-width: 1100px) { .main-grid { grid-template-columns: 1fr; } .steps-grid { grid-template-columns: repeat(4, 1fr); } }
     
     .panel { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; display: flex; flex-direction: column; overflow: hidden; }
@@ -141,13 +144,66 @@
     /* Empty state */
     .empty-state { text-align: center; padding: 30px; color: var(--text-muted); font-size: 13px; }
     .empty-icon { font-size: 32px; margin-bottom: 8px; opacity: 0.5; }
+    /* Mixer Audio Controls */
+    .mixer-slider { width: 100%; height: 6px; border-radius: 3px; background: #233144; outline: none; -webkit-appearance: none; cursor: pointer; margin: 10px 0; }
+    .mixer-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #38bdf8; border: 2px solid #fff; cursor: pointer; box-shadow: 0 0 10px rgba(56, 189, 248, 0.6); transition: transform 0.1s; }
+    .mixer-slider::-webkit-slider-thumb:hover { transform: scale(1.2); }
+    .mixer-val-badge { font-family: monospace; font-size: 13px; font-weight: 700; padding: 3px 10px; border-radius: 6px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); font-variant-numeric: tabular-nums; }
+    .mixer-presets { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+    .mixer-tag { font-size: 11px; padding: 3px 9px; border-radius: 6px; background: rgba(255, 255, 255, 0.04); border: 1px solid var(--border); color: var(--text-muted); cursor: pointer; transition: all 0.15s; user-select: none; }
+    .mixer-tag:hover { background: rgba(56, 189, 248, 0.12); border-color: #38bdf8; color: #f8fafc; }
+    .mixer-tag.active { background: rgba(56, 189, 248, 0.22); border-color: #38bdf8; color: #38bdf8; font-weight: 600; }
+    .collapsible-header-bar:hover { background: rgba(27, 38, 54, 0.95) !important; border-color: #3b82f6 !important; }
+
+    /* MAXIMIZED LOG PANEL & ZOOM STYLES */
+    .log-panel-maximized {
+      position: fixed !important;
+      top: 20px !important;
+      left: 20px !important;
+      right: 20px !important;
+      bottom: 20px !important;
+      z-index: 10000 !important;
+      margin: 0 !important;
+      display: flex !important;
+      flex-direction: column !important;
+      max-height: calc(100vh - 40px) !important;
+      background: #0d131d !important;
+      box-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.95), 0 0 0 1px rgba(56, 189, 248, 0.4) !important;
+      border-radius: 12px !important;
+      animation: zoomLogAnim 0.18s ease-out;
+    }
+
+    @keyframes zoomLogAnim {
+      from { opacity: 0; transform: scale(0.98); }
+      to { opacity: 1; transform: scale(1); }
+    }
+
+    .log-panel-maximized #collapsibleLogBody {
+      display: flex !important;
+      flex-direction: column !important;
+      flex: 1 !important;
+      min-height: 0 !important;
+      overflow: hidden !important;
+    }
+
+    .log-panel-maximized #logTableContainer {
+      max-height: none !important;
+      flex: 1 !important;
+      overflow-y: auto !important;
+    }
+
+    .log-panel-maximized #btnZoomLog {
+      background: rgba(56, 189, 248, 0.2) !important;
+      border-color: #38bdf8 !important;
+      color: #38bdf8 !important;
+    }
   </style>
 </head>
 <body>
   <!-- HEADER -->
   <header>
     <div class="logo-area">
-      <div class="logo-badge">TOOL V1</div>
+      <div class="logo-badge">TOOL V2</div>
       <div>
         <div class="app-title">Bảng Điều Khiển Video Phôi & Giám Sát Render</div>
         <div class="app-subtitle">Tự động lồng tiếng AI & Hardware Acceleration (RTX 4050 NVENC)</div>
@@ -163,14 +219,29 @@
       </span>
       <span class="badge badge-online">
         <span class="dot dot-blue"></span>
-        Tool V1 Legacy
+        Tool V2
       </span>
-      <a href="/a2ui" class="btn btn-outline" style="border-color: rgba(168, 85, 247, 0.4); color: #c084fc; text-decoration: none;" title="Khám phá giao diện động A2UI">⚡ A2UI Studio</a>
       <button class="btn btn-outline" onclick="refreshAll()" title="Làm mới dữ liệu">🔄 Làm mới</button>
     </div>
   </header>
 
   <div class="container">
+    <!-- COLLAPSIBLE SYSTEM CONTROL (PORT 8090) -->
+    <div class="system-control-collapsible" style="margin-bottom: 8px;">
+      <div class="collapsible-header-bar" onclick="toggleSystemControl()" style="display: flex; justify-content: space-between; align-items: center; background: rgba(19, 27, 38, 0.8); border: 1px solid var(--border); border-radius: 10px; padding: 10px 16px; cursor: pointer; transition: background 0.2s;">
+        <div style="display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 600; color: #f8fafc;">
+          <span id="controlExpandIcon" style="display: inline-block; transition: transform 0.2s; color: #38bdf8; font-size: 11px;">▶</span>
+          <span>⚙️ Quản Lý Tiến Trình & Bật/Tắt Bot (Thu gọn / Mở rộng)</span>
+          <span class="badge badge-gpu" style="font-size: 10px; padding: 2px 8px;">Port 8090</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <span style="font-size: 12px; color: var(--text-muted);" id="controlToggleLabel">Nhấn để mở ▾</span>
+        </div>
+      </div>
+      <div id="systemControlBody" style="display: none; margin-top: 8px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--bg-card); padding: 4px;">
+        <iframe id="tool-control-frame" title="Điều khiển Tool V1, V2 và Telegram bot" src="http://127.0.0.1:8090/" style="width:100%; height:340px; border:0; border-radius:8px; display:block;"></iframe>
+      </div>
+    </div>
 
     <!-- HERO PROGRESS CARD -->
     <div class="hero-card">
@@ -248,7 +319,7 @@
     <div class="main-grid">
 
       <!-- LEFT COLUMN: VIDEO PHÔI & THÀNH PHẨM -->
-      <div style="display: flex; flex-direction: column; gap: 20px;">
+      <div class="video-column">
 
         <!-- PANEL: VIDEO PHÔI (D:\video phôi) -->
         <div class="panel">
@@ -298,9 +369,10 @@
                 <thead>
                   <tr>
                     <th>Tên Thành Phẩm</th>
-                    <th>Dung lượng</th>
-                    <th>Ngày xuất</th>
-                    <th>Hành động</th>
+                    <th style="width: 85px;">Dung lượng</th>
+                    <th style="width: 110px;">Thời gian edit</th>
+                    <th style="width: 135px;">Ngày xuất</th>
+                    <th style="width: 70px; text-align: center;">Hành động</th>
                   </tr>
                 </thead>
                 <tbody id="banveTableBody">
@@ -313,30 +385,123 @@
 
       </div>
 
-      <!-- RIGHT COLUMN: LIVE LOG TERMINAL -->
-      <div class="panel">
-        <div class="panel-header">
-          <div class="panel-title">
-            <span>💻 Quan Sát Render Ngầm & Log Hệ Thống</span>
-            <span class="dot dot-green" id="logDot"></span>
-          </div>
-          <div class="panel-actions">
-            <label style="font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer;">
-              <input type="checkbox" id="chkAutoScroll" checked> Tự cuộn
-            </label>
-            <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px;" onclick="clearLogs()">Bỏ lọc</button>
-            <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px;" onclick="fetchLogs()">🔄 Tải lại</button>
-          </div>
-        </div>
-        <div class="panel-body">
-            <div class="log-tools">
-              <input id="logSearch" aria-label="Tìm nhật ký" placeholder="Tìm nội dung nhật ký…" oninput="renderLogs()">
-              <select id="logFilter" aria-label="Lọc mức nhật ký" onchange="renderLogs()"><option value="all">Tất cả</option><option value="error">Lỗi</option><option value="warn">Cảnh báo</option><option value="info">Thông tin</option></select>
-              <label><input type="checkbox" id="logRaw" onchange="renderLogs()"> Log gốc</label>
+      <!-- RIGHT COLUMN: MIXER & LOG PANEL -->
+      <div class="monitor-column">
+
+        <!-- AUDIO MIXER CONTROL PANEL -->
+        <div class="panel mixer-panel">
+          <div class="panel-header">
+            <div class="panel-title">
+              <span style="display: inline-flex; align-items: center; gap: 8px;">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+                🎚️ Bộ Tùy Chỉnh Mixer (Nhạc Nền & Giọng Đọc AI)
+              </span>
+              <span class="badge badge-gpu" id="mixerStatusBadge">Tự động áp dụng</span>
             </div>
-            <div id="logSummary" role="status" style="font-size:12px;color:var(--text-muted);padding:8px 0">Đang kết nối…</div>
-            <div class="terminal-box" id="terminalLogs">Đang nạp dữ liệu nhật ký...</div>
+            <div class="panel-actions">
+              <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px;" onclick="resetMixerDefaults()">↺ Mặc định</button>
+              <button class="btn btn-primary" style="font-size: 11px; padding: 4px 10px;" id="btnSaveMixer" onclick="saveMixerSettings()">💾 Lưu cấu hình</button>
+            </div>
+          </div>
+          <div class="panel-body" style="padding: 18px 20px; display: flex; flex-direction: column; gap: 16px;">
+            <!-- BGM Volume Slider -->
+            <div class="mixer-control-group">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <label for="bgmSlider" style="font-size: 13px; font-weight: 600; color: #f8fafc; display: flex; align-items: center; gap: 6px;">
+                  🎵 Nhạc nền gốc (BGM)
+                </label>
+                <span class="mixer-val-badge" id="bgmValText">-2.0 dB</span>
+              </div>
+              <input type="range" id="bgmSlider" min="-24" max="6" step="0.5" value="-2" class="mixer-slider" oninput="updateMixerLiveDisplay()" onchange="saveMixerSettings()">
+              <div class="mixer-presets">
+                <span class="mixer-tag" onclick="setBgmPreset(-24)">🔇 Tắt hẳn</span>
+                <span class="mixer-tag" onclick="setBgmPreset(-10)">🔈 Nhỏ sâu (-10dB)</span>
+                <span class="mixer-tag" onclick="setBgmPreset(-5)">🔉 Nhỏ vừa (-5dB)</span>
+                <span class="mixer-tag active" id="tagBgmDefault" onclick="setBgmPreset(-2)">✨ Chuẩn (-2dB)</span>
+                <span class="mixer-tag" onclick="setBgmPreset(0)">🔊 Gốc (0dB)</span>
+              </div>
+            </div>
+
+            <!-- Dubbing Voice Slider -->
+            <div class="mixer-control-group">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <label for="dubSlider" style="font-size: 13px; font-weight: 600; color: #f8fafc; display: flex; align-items: center; gap: 6px;">
+                  🗣️ Giọng đọc AI (Dubbing)
+                </label>
+                <span class="mixer-val-badge" id="dubValText">+1.0 dB</span>
+              </div>
+              <input type="range" id="dubSlider" min="-10" max="10" step="0.5" value="1" class="mixer-slider" oninput="updateMixerLiveDisplay()" onchange="saveMixerSettings()">
+              <div class="mixer-presets">
+                <span class="mixer-tag" onclick="setDubPreset(-3)">🔈 Nhẹ (-3dB)</span>
+                <span class="mixer-tag" onclick="setDubPreset(0)">🔉 Vừa (0dB)</span>
+                <span class="mixer-tag active" id="tagDubDefault" onclick="setDubPreset(1)">✨ Chuẩn (+1dB)</span>
+                <span class="mixer-tag" onclick="setDubPreset(3)">🔊 To rõ (+3dB)</span>
+                <span class="mixer-tag" onclick="setDubPreset(6)">📢 Tối đa (+6dB)</span>
+              </div>
+            </div>
+
+            <div id="mixerNotice" style="font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: rgba(255,255,255,0.03); border-radius: 6px; border: 1px solid var(--border);">
+              ℹ️ Cài đặt này áp dụng trực tiếp cho tất cả video render mới (Telegram Bot, Batch, V1 & V2).
+            </div>
+          </div>
         </div>
+
+        <!-- COLLAPSIBLE LOG PANEL -->
+        <div class="panel log-panel-collapsible" id="logPanelWrapper" style="border: 1px solid var(--border); border-radius: 12px; overflow: hidden;">
+          <div class="panel-header" onclick="toggleLogPanel()" style="cursor: pointer; user-select: none;">
+            <div class="panel-title" style="display: flex; align-items: center; gap: 8px;">
+              <span id="logExpandIcon" style="display: inline-block; transition: transform 0.2s; color: #38bdf8; font-size: 11px;">▶</span>
+              <span>💻 Quan Sát Render Ngầm & Log Hệ Thống</span>
+              <span class="dot dot-green" id="logDot"></span>
+            </div>
+            <div class="panel-actions" onclick="event.stopPropagation()">
+              <label style="font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                <input type="checkbox" id="chkAutoScroll" checked> Tự cuộn
+              </label>
+              <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px;" onclick="downloadLogs()" title="Tải toàn bộ log (.txt)">📥 Xuất</button>
+              <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px;" onclick="fetchLogs()">🔄 Tải lại</button>
+              <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px;" id="btnZoomLog" onclick="toggleMaximizeLog()" title="Phóng to toàn màn hình bảng log">⛶ Phóng to</button>
+              <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px;" onclick="toggleLogPanel()" id="btnToggleLogText">Mở log ▾</button>
+            </div>
+          </div>
+          <div class="panel-body" id="collapsibleLogBody" style="display: none; padding: 0;">
+            <div style="display: flex; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: rgba(11, 16, 23, 0.4); align-items: center; flex-wrap: wrap;">
+              <input id="logSearch" style="flex: 1; min-width: 160px; background: #0b1017; color: #e2e8f0; border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font-size: 12px;" aria-label="Tìm nhật ký" placeholder="Tìm nội dung nhật ký…" oninput="renderLogs()">
+              <select id="logFilter" style="background: #0b1017; color: #e2e8f0; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 12px;" aria-label="Lọc mức nhật ký" onchange="renderLogs()">
+                <option value="all">Tất cả mức độ</option>
+                <option value="error">❌ Chỉ Lỗi</option>
+                <option value="warn">⚠️ Chỉ Cảnh báo</option>
+                <option value="info">ℹ️ Chỉ Thông tin</option>
+              </select>
+              <div style="display: inline-flex; align-items: center; gap: 3px; background: #0b1017; padding: 2px 6px; border: 1px solid var(--border); border-radius: 6px;">
+                <span style="font-size: 11px; color: var(--text-muted); margin-right: 2px;">Cỡ chữ:</span>
+                <button class="btn btn-outline" style="padding: 2px 6px; font-size: 11px; line-height: 1;" onclick="adjustLogZoom(-1)" title="Giảm cỡ chữ (nhỏ hơn)">A-</button>
+                <span id="logZoomVal" style="font-size: 11px; font-weight: 600; min-width: 36px; text-align: center; color: #38bdf8;">100%</span>
+                <button class="btn btn-outline" style="padding: 2px 6px; font-size: 11px; line-height: 1;" onclick="adjustLogZoom(1)" title="Tăng cỡ chữ (to hơn)">A+</button>
+              </div>
+              <label style="font-size: 11px; color: var(--text-muted); display: inline-flex; align-items: center; gap: 4px; cursor: pointer; user-select: none;" title="Hiển thị đầy đủ nội dung dòng, không bị cắt ngắn '...'">
+                <input type="checkbox" id="chkLogWrap" onchange="toggleLogWrap()"> Xuống dòng
+              </label>
+              <span id="logSummaryBadge" class="badge badge-gpu" style="font-size: 11px; padding: 3px 8px;">0 bản ghi</span>
+            </div>
+            <div id="logTableContainer" style="max-height: 280px; overflow-y: auto;">
+              <table class="data-table" id="logTable">
+                <thead>
+                  <tr>
+                    <th style="width: 110px;">Thời gian</th>
+                    <th style="width: 100px;">Mức độ</th>
+                    <th>Nội dung sự kiện</th>
+                    <th style="width: 70px; text-align: center;">Chi tiết</th>
+                  </tr>
+                </thead>
+                <tbody id="logTableBody">
+                  <!-- Rendered dynamically -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
       </div>
 
     </div>
@@ -355,6 +520,26 @@
       </div>
     </div>
   </div>
+
+  <!-- MODAL LOG DETAIL -->
+  <div class="modal-backdrop" id="logDetailModal" onclick="closeLogModal(event)">
+    <div class="modal-box" style="max-width: 820px;" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <div class="modal-title" id="modalLogTitle">Chi tiết Nhật Ký Kỹ Thuật</div>
+        <button class="modal-close" onclick="closeLogModal()">&times;</button>
+      </div>
+      <div class="modal-body" style="background: #0b1017; padding: 18px; display: flex; flex-direction: column; gap: 14px;">
+        <pre id="modalLogContent" style="width: 100%; max-height: 440px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: #cbd5e1; line-height: 1.5; background: rgba(0,0,0,0.5); padding: 12px; border-radius: 8px; border: 1px solid var(--border);"></pre>
+        <div style="display: flex; justify-content: flex-end; gap: 10px; width: 100%;">
+          <button class="btn btn-outline" onclick="copyLogContent()">📋 Sao chép</button>
+          <button class="btn btn-primary" onclick="closeLogModal()">Đóng</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- BACKDROP FOR MAXIMIZED LOG -->
+  <div class="modal-backdrop" id="logMaximizeBackdrop" onclick="toggleMaximizeLog()" style="display: none; z-index: 9998; backdrop-filter: blur(4px); background: rgba(0,0,0,0.75);"></div>
 
   <script>
     let isAutoScroll = true;
@@ -509,31 +694,49 @@
       }
     }
 
+    let lastBanveFingerprint = '';
     async function fetchBanve() {
       try {
         const res = await fetch('/api/banve');
         if (!res.ok) return;
         const data = await res.json();
         
-        document.getElementById('banveBadgeCount').textContent = `${data.total_count} video (${data.total_size_mb} MB)`;
+        const countText = data.total_count > 200 
+          ? `${data.total_count} video (hiển thị 200 gần nhất · ${data.total_size_mb} MB)` 
+          : `${data.total_count} video (${data.total_size_mb} MB)`;
+        document.getElementById('banveBadgeCount').textContent = countText;
         const tbody = document.getElementById('banveTableBody');
 
         if (!data.files || data.files.length === 0) {
-          tbody.innerHTML = `<tr><td colspan="4" class="empty-state"><div class="empty-icon">💾</div>Chưa có video thành phẩm nào trong D:\\banve</td></tr>`;
+          if (lastBanveFingerprint !== 'empty') {
+            lastBanveFingerprint = 'empty';
+            tbody.innerHTML = `<tr><td colspan="5" class="empty-state"><div class="empty-icon">💾</div>Chưa có video thành phẩm nào trong D:\\banve</td></tr>`;
+          }
           return;
         }
 
-        tbody.innerHTML = data.files.slice(0, 15).map(f => {
+        const sliceFiles = data.files.slice(0, 200);
+        const currentFingerprint = `${data.total_count}_${data.total_size_mb}_${sliceFiles[0]?.name || ''}_${sliceFiles[0]?.duration_formatted || ''}_${sliceFiles[sliceFiles.length - 1]?.name || ''}`;
+        if (currentFingerprint === lastBanveFingerprint) {
+          return;
+        }
+        lastBanveFingerprint = currentFingerprint;
+
+        tbody.innerHTML = sliceFiles.map(f => {
           const safeName = escapeHtml(String(f.name));
           const encodedName = encodeURIComponent(String(f.name)).replace(/'/g, '%27');
+          const durBadge = f.duration_formatted && f.duration_formatted !== '--'
+            ? `<span style="display: inline-flex; align-items: center; gap: 4px; color: #38bdf8; font-weight: 600; font-variant-numeric: tabular-nums;" title="Tổng thời gian xử lý: ${f.duration_seconds || 0} giây">⏱️ ${escapeHtml(f.duration_formatted)}</span>`
+            : `<span style="color: var(--text-muted); font-size: 11px;">--</span>`;
           return `
             <tr>
               <td style="font-weight: 600; color: #34d399; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${safeName}">
                 ✅ ${safeName}
               </td>
-              <td>${f.size_mb} MB</td>
-              <td style="color: var(--text-muted); font-size: 11px;">${f.created}</td>
-              <td>
+              <td style="font-variant-numeric: tabular-nums;">${f.size_mb} MB</td>
+              <td>${durBadge}</td>
+              <td style="color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums;">${f.created}</td>
+              <td style="text-align: center;">
                 <button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px;" onclick="previewVideo('banve', '${encodedName}')">▶ Xem</button>
               </td>
             </tr>
@@ -563,6 +766,24 @@
         if (entry.level === 'error') return msg;
         if (/Chưa cấu hình.*Google Drive/i.test(msg)) return 'Chưa cấu hình Google Drive — chưa thể tải video lên Drive. Đây không phải thông báo lỗi render.';
         if (entry.level === 'warn') return msg;
+        const calling = msg.match(/Đang gọi Google Gemini:\s*([\w.-]+)/);
+        if (calling) return '🌐 Đang gọi model dịch: ' + calling[1] + ' — chờ phản hồi...';
+        const callingOai = msg.match(/Đang gọi OpenAI ChatGPT\s*\(([\w.-]+)\)/);
+        if (callingOai) return '🌐 Đang gọi OpenAI ChatGPT: ' + callingOai[1] + ' — chờ phản hồi...';
+        const callingDs = msg.match(/Đang gọi DeepSeek\s*\(([\w.-]+)\)/);
+        if (callingDs) return '🌐 Đang gọi DeepSeek: ' + callingDs[1] + ' — chờ phản hồi...';
+        const geminiOk = msg.match(/Gọi thành công Gemini\s+([\w.-]+)!/);
+        if (geminiOk) return '✅ Dịch phụ đề thành công bằng Google Gemini: ' + geminiOk[1];
+        const openaiOk = msg.match(/Dịch thành công bằng OpenAI ChatGPT\s*\(([\w.-]+)\)/);
+        if (openaiOk) return '✅ Dịch phụ đề thành công bằng OpenAI: ' + openaiOk[1];
+        const deepseekOk = msg.match(/Dịch thành công bằng DeepSeek\s*\(([\w.-]+)\)/);
+        if (deepseekOk) return '✅ Dịch phụ đề thành công bằng DeepSeek: ' + deepseekOk[1];
+        const transDone = msg.match(/Hoàn tất.*?dịch phụ đề.*?bằng model:\s*([^\n!]+)/i) || msg.match(/Hoàn thành dịch.*?bằng model:\s*([^\n!]+)/i);
+        if (transDone) return '✅ Hoàn tất dịch phụ đề bằng model: ' + transDone[1].trim();
+        const modelRec = msg.match(/Đã ghi nhận model dịch thuật:\s*([^\n!]+)/);
+        if (modelRec) return '🌐 Đã ghi nhận model dịch thuật: ' + modelRec[1].trim();
+        if (/LLM translation successful/i.test(msg)) return '✅ Bản dịch AI đã được tạo và xác thực thành công.';
+        if (/Translating subtitles/i.test(msg)) return '🌐 Bắt đầu dịch phụ đề sang tiếng Việt...';
         const metric = msg.match(/stage=(\w+) seconds=([\d.]+) success=(True|False)/);
         if (metric) {
           const names = {voice:'Lồng tiếng', render:'Xuất video', translation:'Dịch phụ đề', asr:'Nhận diện lời nói', demucs:'Tách giọng'};
@@ -576,20 +797,195 @@
         if (/Application started/.test(msg)) return 'Bot Telegram đã khởi động, sẵn sàng nhận yêu cầu.';
         return msg;
       }
+      let currentVisibleLogs = [];
+      const ZOOM_LEVELS = [0.85, 1.0, 1.15, 1.3, 1.5, 1.75];
+      let currentZoomIdx = 1;
+      try {
+        const saved = localStorage.getItem('autodub_log_zoom_idx');
+        if (saved !== null) {
+          const idx = parseInt(saved, 10);
+          if (!isNaN(idx) && idx >= 0 && idx < ZOOM_LEVELS.length) currentZoomIdx = idx;
+        }
+      } catch (_) {}
+
+      function applyLogZoom() {
+        const scale = ZOOM_LEVELS[currentZoomIdx];
+        const table = document.getElementById('logTable');
+        const valEl = document.getElementById('logZoomVal');
+        if (valEl) valEl.textContent = Math.round(scale * 100) + '%';
+        if (table) {
+          table.style.fontSize = (12 * scale) + 'px';
+        }
+        try { localStorage.setItem('autodub_log_zoom_idx', String(currentZoomIdx)); } catch (_) {}
+      }
+
+      function adjustLogZoom(delta) {
+        currentZoomIdx = Math.max(0, Math.min(ZOOM_LEVELS.length - 1, currentZoomIdx + delta));
+        applyLogZoom();
+      }
+
+      let isLogWrap = false;
+      try { isLogWrap = localStorage.getItem('autodub_log_wrap') === '1'; } catch (_) {}
+
+      function toggleLogWrap() {
+        const chk = document.getElementById('chkLogWrap');
+        isLogWrap = chk ? chk.checked : !isLogWrap;
+        try { localStorage.setItem('autodub_log_wrap', isLogWrap ? '1' : '0'); } catch (_) {}
+        renderLogs();
+      }
+
+      let isLogMaximized = false;
+      function toggleMaximizeLog() {
+        const panel = document.getElementById('logPanelWrapper');
+        const btn = document.getElementById('btnZoomLog');
+        const backdrop = document.getElementById('logMaximizeBackdrop');
+        const body = document.getElementById('collapsibleLogBody');
+        const icon = document.getElementById('logExpandIcon');
+        const btnToggle = document.getElementById('btnToggleLogText');
+
+        isLogMaximized = !isLogMaximized;
+        if (isLogMaximized) {
+          body.style.display = 'flex';
+          if (icon) icon.style.transform = 'rotate(90deg)';
+          if (btnToggle) btnToggle.textContent = 'Thu gọn ▴';
+
+          panel.classList.add('log-panel-maximized');
+          if (backdrop) backdrop.style.display = 'block';
+          if (btn) {
+            btn.innerHTML = '🗗 Thu nhỏ';
+            btn.title = 'Thu nhỏ về vị trí ban đầu (Esc)';
+          }
+        } else {
+          panel.classList.remove('log-panel-maximized');
+          if (backdrop) backdrop.style.display = 'none';
+          if (btn) {
+            btn.innerHTML = '⛶ Phóng to';
+            btn.title = 'Phóng to toàn màn hình bảng log';
+          }
+          body.style.display = 'block';
+        }
+        renderLogs();
+      }
+
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && isLogMaximized) {
+          toggleMaximizeLog();
+        }
+      });
+
       function renderLogs() {
-        const term = document.getElementById('terminalLogs');
+        const tbody = document.getElementById('logTableBody');
+        if (!tbody) return;
         const query = (document.getElementById('logSearch').value || '').toLowerCase();
         const filter = document.getElementById('logFilter').value || 'all';
-        const raw = document.getElementById('logRaw').checked;
         const entries = parseLogs(logText);
         entries.forEach(e => { if (/success=False/.test(e.message)) e.level = 'error'; });
-        const visible = entries.filter(e => (filter === 'all' || e.level === filter) && (e.raw + explainLog(e)).toLowerCase().includes(query));
-        const oldScroll = term.scrollTop;
-        const labels = {error:'Lỗi', warn:'Cảnh báo', info:'Thông tin'};
-        term.innerHTML = visible.map(e => '<article class="log-entry ' + e.level + '"><div class="log-meta">' + escapeHtml(e.time) + ' · ' + labels[e.level] + '</div>' + (raw ? '<pre>' + escapeHtml(e.raw) + '</pre>' : '<div>' + escapeHtml(explainLog(e)) + '</div><details><summary>Xem log kỹ thuật</summary><pre>' + escapeHtml(e.raw) + '</pre></details>') + '</article>').join('') || '<div class="empty-state">Không có nhật ký phù hợp.</div>';
-        document.getElementById('logSummary').textContent = visible.length + '/' + entries.length + ' sự kiện gần nhất • ' + entries.filter(e => e.level === 'error').length + ' lỗi • ' + entries.filter(e => e.level === 'warn').length + ' cảnh báo (trong phần log được tải)';
-        term.scrollTop = isAutoScroll ? term.scrollHeight : oldScroll;
+        const visible = entries.filter(e => (filter === 'all' || e.level === filter) && (e.raw + ' ' + explainLog(e)).toLowerCase().includes(query));
+        currentVisibleLogs = visible;
+
+        const badgeEl = document.getElementById('logSummaryBadge');
+        if (badgeEl) badgeEl.textContent = `${visible.length} / ${entries.length} bản ghi`;
+
+        if (!visible.length) {
+          tbody.innerHTML = '<tr><td colspan="4" class="empty-state" style="padding:20px;"><div class="empty-icon">📋</div>Không có nhật ký phù hợp.</td></tr>';
+          return;
+        }
+
+        const badgeStyles = {
+          error: 'background:rgba(239,68,68,0.15);color:#f87171;border:1px solid rgba(239,68,68,0.3);',
+          warn: 'background:rgba(245,158,11,0.15);color:#fbbf24;border:1px solid rgba(245,158,11,0.3);',
+          info: 'background:rgba(59,130,246,0.15);color:#60a5fa;border:1px solid rgba(59,130,246,0.3);'
+        };
+        const badgeLabels = {error: 'Lỗi', warn: 'Cảnh báo', info: 'Thông tin'};
+        const badgeIcons = {error: '❌', warn: '⚠️', info: 'ℹ️'};
+
+        const wrapTdStyle = isLogWrap
+          ? 'white-space: normal; word-break: break-word; max-width: none;'
+          : 'white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 380px;';
+
+        tbody.innerHTML = visible.map((e, idx) => {
+          const safeMsg = escapeHtml(explainLog(e));
+          const safeTime = escapeHtml(e.time || '--:--:--');
+          const bStyle = badgeStyles[e.level] || badgeStyles.info;
+          const bLabel = badgeLabels[e.level] || 'Thông tin';
+          const bIcon = badgeIcons[e.level] || 'ℹ️';
+
+          return `
+            <tr>
+              <td style="font-variant-numeric: tabular-nums; color: var(--text-muted); font-size: 0.92em; white-space: nowrap;">
+                ${safeTime}
+              </td>
+              <td>
+                <span class="badge" style="${bStyle} font-size: 0.85em; padding: 2px 6px;">
+                  ${bIcon} ${bLabel}
+                </span>
+              </td>
+              <td style="font-size: 1em; line-height: 1.45; color: ${e.level === 'error' ? '#fca5a5' : '#e2e8f0'}; ${wrapTdStyle}" title="${escapeHtml(e.message)}">
+                ${safeMsg}
+              </td>
+              <td style="text-align: center;">
+                <button class="btn btn-outline" style="padding: 2px 7px; font-size: 0.9em; display: inline-flex; align-items: center; gap: 3px;" onclick="viewLogDetail(${idx})" title="Xem chi tiết log kỹ thuật">
+                  👁 Xem
+                </button>
+              </td>
+            </tr>
+          `;
+        }).join('');
+
+        applyLogZoom();
+
+        const chk = document.getElementById('chkLogWrap');
+        if (chk && chk.checked !== isLogWrap) chk.checked = isLogWrap;
+
+        const container = document.getElementById('logTableContainer');
+        if (isAutoScroll && container) {
+          container.scrollTop = container.scrollHeight;
+        }
       }
+
+      function viewLogDetail(idx) {
+        const entry = currentVisibleLogs[idx];
+        if (!entry) return;
+        document.getElementById('modalLogTitle').textContent = `Chi tiết Nhật Ký (${entry.time || 'Vừa xong'}) · ${entry.level.toUpperCase()}`;
+        document.getElementById('modalLogContent').textContent = entry.raw || entry.message;
+        document.getElementById('logDetailModal').style.display = 'flex';
+      }
+
+      function closeLogModal(e) {
+        document.getElementById('logDetailModal').style.display = 'none';
+      }
+
+      function copyLogContent() {
+        const content = document.getElementById('modalLogContent').textContent;
+        navigator.clipboard.writeText(content).then(() => {
+          alert('Đã sao chép nội dung log vào clipboard!');
+        }).catch(() => {
+          alert('Không thể tự động sao chép. Vui lòng bôi đen và nhấn Ctrl+C.');
+        });
+      }
+
+      function downloadLogs() {
+        if (!logText) {
+          alert('Chưa có dữ liệu nhật ký để xuất.');
+          return;
+        }
+        const blob = new Blob([logText], {type: 'text/plain;charset=utf-8'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `tool-v2-logs-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.txt`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      function clearLogs() {
+        document.getElementById('logSearch').value = '';
+        document.getElementById('logFilter').value = 'all';
+        renderLogs();
+      }
+
       async function fetchLogs() {
         if (logPending) return;
         logPending = true;
@@ -603,37 +999,10 @@
           document.getElementById('logDot').title = 'Kết nối nhật ký đang hoạt động';
         } catch (err) {
           logDisconnected = true;
-          document.getElementById('logSummary').textContent = 'Không tải được nhật ký. Đang giữ dữ liệu cũ; sẽ tự thử lại.';
+          const badgeEl = document.getElementById('logSummaryBadge');
+          if (badgeEl) badgeEl.textContent = 'Mất kết nối log';
         } finally { logPending = false; }
       }
-      async function legacyFetchLogs() {
-      try {
-        const res = await fetch('/api/logs');
-        if (!res.ok) return;
-        const data = await res.json();
-        const term = document.getElementById('terminalLogs');
-        
-        if (data.logs) {
-          // Syntax highlight common terms
-          const lines = data.logs.split('\n');
-          const styled = lines.map(line => {
-            let cls = 'log-line';
-            if (line.includes('nvenc') || line.includes('Render') || line.includes('Hoàn tất') || line.includes('thành công')) cls += ' nvenc';
-            else if (line.includes('Bước') || line.includes('Gemini') || line.includes('Whisper') || line.includes('RVC')) cls += ' ai';
-            else if (line.includes('WARNING') || line.includes('Lưu ý') || line.includes('bỏ qua')) cls += ' warn';
-            else if (line.includes('ERROR') || line.includes('Lỗi') || line.includes('fail')) cls += ' error';
-            return `<div class="${cls}">${escapeHtml(line)}</div>`;
-          }).join('');
-
-          term.innerHTML = styled || 'Chưa có nhật ký nào.';
-          if (isAutoScroll) {
-            term.scrollTop = term.scrollHeight;
-          }
-        }
-      } catch (err) {
-        console.error('Error fetching logs:', err);
-      }
-    }
 
     function escapeHtml(text) {
       return text
@@ -643,13 +1012,6 @@
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
     }
-
-      function clearLogs() {
-        document.getElementById('logSearch').value = '';
-        document.getElementById('logFilter').value = 'all';
-        document.getElementById('logRaw').checked = false;
-        renderLogs();
-      }
 
     async function startBatch() {
       if (!confirm('Bạn có muốn bắt đầu xử lý toàn bộ video trong thư mục D:\\video phôi?')) return;
@@ -712,7 +1074,110 @@
       modal.style.display = 'none';
     }
 
+    // ===== MIXER AUDIO CONTROLS =====
+    async function loadMixerSettings() {
+      try {
+        const res = await fetch('/api/audio-settings');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.bgm_volume_db !== undefined) {
+          document.getElementById('bgmSlider').value = data.bgm_volume_db;
+        }
+        if (data.dubbing_volume_db !== undefined) {
+          document.getElementById('dubSlider').value = data.dubbing_volume_db;
+        }
+        updateMixerLiveDisplay();
+      } catch (err) {
+        console.error('Error loading audio settings:', err);
+      }
+    }
+
+    function updateMixerLiveDisplay() {
+      const bgm = parseFloat(document.getElementById('bgmSlider').value);
+      const dub = parseFloat(document.getElementById('dubSlider').value);
+      document.getElementById('bgmValText').textContent = (bgm > 0 ? '+' : '') + bgm.toFixed(1) + ' dB';
+      document.getElementById('dubValText').textContent = (dub > 0 ? '+' : '') + dub.toFixed(1) + ' dB';
+    }
+
+    function setBgmPreset(val) {
+      document.getElementById('bgmSlider').value = val;
+      updateMixerLiveDisplay();
+      saveMixerSettings();
+    }
+
+    function setDubPreset(val) {
+      document.getElementById('dubSlider').value = val;
+      updateMixerLiveDisplay();
+      saveMixerSettings();
+    }
+
+    function resetMixerDefaults() {
+      document.getElementById('bgmSlider').value = -2.0;
+      document.getElementById('dubSlider').value = 1.0;
+      updateMixerLiveDisplay();
+      saveMixerSettings();
+    }
+
+    async function saveMixerSettings() {
+      const bgm = parseFloat(document.getElementById('bgmSlider').value);
+      const dub = parseFloat(document.getElementById('dubSlider').value);
+      updateMixerLiveDisplay();
+      const notice = document.getElementById('mixerNotice');
+      try {
+        const res = await fetch('/api/audio-settings', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({bgm_volume_db: bgm, dubbing_volume_db: dub})
+        });
+        if (res.ok) {
+          notice.textContent = `✅ Đã lưu cấu hình: Nhạc nền ${bgm > 0 ? '+' : ''}${bgm.toFixed(1)}dB, Giọng đọc ${dub > 0 ? '+' : ''}${dub.toFixed(1)}dB`;
+          notice.style.color = '#34d399';
+          setTimeout(() => {
+            notice.textContent = 'ℹ️ Cài đặt này áp dụng trực tiếp cho tất cả video render mới (Telegram Bot, Batch, V1 & V2).';
+            notice.style.color = 'var(--text-muted)';
+          }, 3500);
+        }
+      } catch (err) {
+        notice.textContent = '❌ Lỗi lưu cấu hình: ' + err.message;
+        notice.style.color = '#f87171';
+      }
+    }
+
+    // ===== COLLAPSIBLE PANELS =====
+    function toggleSystemControl() {
+      const body = document.getElementById('systemControlBody');
+      const icon = document.getElementById('controlExpandIcon');
+      const label = document.getElementById('controlToggleLabel');
+      if (body.style.display === 'none' || !body.style.display) {
+        body.style.display = 'block';
+        icon.style.transform = 'rotate(90deg)';
+        label.textContent = 'Nhấn để thu gọn ▴';
+      } else {
+        body.style.display = 'none';
+        icon.style.transform = 'rotate(0deg)';
+        label.textContent = 'Nhấn để mở ▾';
+      }
+    }
+
+    function toggleLogPanel() {
+      if (isLogMaximized) toggleMaximizeLog();
+      const body = document.getElementById('collapsibleLogBody');
+      const icon = document.getElementById('logExpandIcon');
+      const btn = document.getElementById('btnToggleLogText');
+      if (body.style.display === 'none' || !body.style.display) {
+        body.style.display = 'block';
+        icon.style.transform = 'rotate(90deg)';
+        btn.textContent = 'Thu gọn ▴';
+      } else {
+        body.style.display = 'none';
+        icon.style.transform = 'rotate(0deg)';
+        btn.textContent = 'Mở log ▾';
+      }
+    }
+
     function refreshAll() {
+      loadMixerSettings();
+      applyLogZoom();
       fetchStatus();
       fetchPhoi();
       fetchBanve();

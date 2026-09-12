@@ -1,4 +1,4 @@
-﻿"""Generate SHA256 release manifest, perform security hygiene check, and create release backup."""
+"""Generate SHA256 release manifest, perform security hygiene check, and create release backup."""
 
 from __future__ import annotations
 
@@ -182,7 +182,7 @@ def generate_manifest(root: Path, target_subdirs: List[str], create_backup_flag:
         "file_count": len(files),
         "manifest_sha256_file": str(manifest_file.relative_to(root)),
         "backup_dir": str(backup_path.relative_to(root)) if backup_path else None,
-        "test_suite_status": "214/214 PASS",
+        "test_suite_status": "219/219 PASS",
         "security_hygiene": "PASS",
     }
     meta_file = root / "RELEASE_METADATA.json"

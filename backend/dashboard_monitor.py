@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException, Body
 from fastapi.responses import HTMLResponse, FileResponse
 from environment import read_environment
 
@@ -73,11 +73,21 @@ async def status():
 
 def listing(root):
     files = []
+    try:
+        from render_history import get_all_render_durations, format_duration
+        durations = get_all_render_durations(root) if root == OUTPUT else {}
+    except Exception:
+        durations = {}
+        format_duration = lambda s: "--"
+
     for p in root.iterdir() if root.is_dir() else []:
         if p.is_file() and p.suffix.lower() in MEDIA:
             stat = p.stat()
+            dur_sec = durations.get(p.name) or durations.get(p.name.replace("Dubbed_", "")) or 0
             files.append({"name": p.name, "size_mb": round(stat.st_size / 1048576, 2),
                           "created": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                          "duration_seconds": dur_sec,
+                          "duration_formatted": format_duration(dur_sec) if dur_sec else "--",
                           "status": "waiting", "status_label": "Chưa xác minh"})
     files.sort(key=lambda item: item["created"], reverse=True)
     return {"files": files, "total_count": len(files),
@@ -97,7 +107,7 @@ def log_tail():
     if not paths:
         return ""
     with max(paths, key=lambda p: p.stat().st_mtime).open(encoding="utf-8", errors="replace") as f:
-        return "".join(deque(f, maxlen=100))
+        return "".join(deque(f, maxlen=500))
 
 @app.get("/api/logs")
 async def logs():
@@ -126,6 +136,18 @@ async def stream(key: str, filename: str):
     if target.parent != root or target.suffix.lower() not in MEDIA or not target.is_file():
         raise HTTPException(404, "Video không tồn tại")
     return FileResponse(target)
+
+from audio_settings import get_audio_settings, save_audio_settings
+
+@app.get("/api/audio-settings")
+async def api_get_audio_settings():
+    return get_audio_settings()
+
+@app.post("/api/audio-settings")
+async def api_save_audio_settings(payload: dict = Body(...)):
+    bgm = payload.get("bgm_volume_db", -2.0)
+    dub = payload.get("dubbing_volume_db", 1.0)
+    return save_audio_settings(bgm, dub)
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():

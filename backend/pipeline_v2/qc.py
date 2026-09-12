@@ -889,6 +889,38 @@ def run_report_only_qc(
             )
             report.diagnostic_artifacts.extend(frame_artifacts)
             report.checks.extend(frame_checks)
+
+            # Pixel-level inspection on sampled diagnostic frames
+            if subtitles is not None and subtitles.is_file() and frame_artifacts:
+                try:
+                    from .cover_qc import parse_ass_covers, inspect_frame_pixel_coverage
+                    ass_covers, cw, ch = parse_ass_covers(subtitles.read_text(encoding="utf-8-sig"))
+                    pixel_results = []
+                    for art in frame_artifacts:
+                        fpath = diagnostics / art.get("artifact_key", "")
+                        ts = art.get("timestamp_seconds")
+                        if fpath.is_file():
+                            pix_res = inspect_frame_pixel_coverage(fpath, ass_covers, canvas_w=cw, canvas_h=ch, timestamp=ts)
+                            if pix_res.get("checked"):
+                                pixel_results.append(pix_res)
+
+                    if pixel_results:
+                        all_filled = all(r.get("all_boxes_filled") for r in pixel_results)
+                        report.metrics["pixel_cover_qc"] = {
+                            "checked_frames": len(pixel_results),
+                            "all_boxes_filled": all_filled,
+                            "results": pixel_results,
+                        }
+                        report.add(
+                            "pixel_cover_qc",
+                            "pass" if all_filled else "warning",
+                            "Output frame pixels verified for visual subtitle cover fill"
+                            if all_filled
+                            else "Some output frame pixels showed incomplete cover fill",
+                            {"checked_frames": len(pixel_results)},
+                        )
+                except Exception as exc:
+                    logger.debug("Pixel cover check error: %s", exc)
         except (OSError, subprocess.SubprocessError) as exc:
             report.add("frame_samples", "warning", "Could not sample frames: {}".format(exc))
 

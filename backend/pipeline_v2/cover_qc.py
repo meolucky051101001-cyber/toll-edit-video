@@ -7,7 +7,7 @@ def seconds(value):
     return int(h)*3600 + int(m)*60 + float(s)
 
 
-def inspect_covers(segments, ass):
+def parse_ass_covers(ass):
     width = re.search(r'^PlayResX:\s*(\d+)', ass, re.M)
     height = re.search(r'^PlayResY:\s*(\d+)', ass, re.M)
     if not width or not height:
@@ -17,8 +17,6 @@ def inspect_covers(segments, ass):
     for line in ass.splitlines():
         if line.startswith('Style: BgStyle,'):
             style = line.split(':', 1)[1].strip().split(',')
-            # ASS v4+ Outline is field 16. The generator subtracts this
-            # border from its drawing dimensions, so QC must include it.
             if len(style) > 16:
                 outline = max(0., float(style[16]))
     covers = []
@@ -41,6 +39,11 @@ def inspect_covers(segments, ass):
         covers.append((seconds(fields[1]), seconds(fields[2]),
             x+min(numbers[::2])-outline, y+min(numbers[1::2])-outline,
             x+max(numbers[::2])+outline, y+max(numbers[1::2])+outline))
+    return covers, w, h
+
+
+def inspect_covers(segments, ass):
+    covers, w, h = parse_ass_covers(ass)
     failures, unverified = [], []
     checked = 0
     for seg in segments:
@@ -66,3 +69,63 @@ def inspect_covers(segments, ass):
                 failures.append(dict(segment=seg.get('index'),start=left,end=right,uncovered_seconds=round(gap,3)))
     return dict(checked_rectangles=checked, failures=failures, unverified_segments=unverified,
                 diagnostic_times=sorted({round(f['start'],2) for f in failures})[:12])
+
+
+def inspect_frame_pixel_coverage(frame_path, covers, canvas_w=1080, canvas_h=1920, timestamp=None):
+    """Verify that active cover boxes contain valid background fill in rendered output pixels."""
+    from pathlib import Path
+    p = Path(frame_path)
+    if not p.is_file():
+        return {"checked": False, "reason": "frame_file_missing"}
+
+    # Filter active covers if timestamp is provided
+    active = covers
+    if timestamp is not None:
+        t = float(timestamp)
+        active = [c for c in covers if c[0] <= t <= c[1]]
+    if not active:
+        return {"checked": False, "reason": "no_active_covers_at_timestamp"}
+
+    try:
+        from PIL import Image
+        import numpy as np
+
+        with Image.open(p) as img:
+            img = img.convert("RGB")
+            fw, fh = img.size
+            arr = np.array(img)
+
+        scale_x = fw / max(1, canvas_w)
+        scale_y = fh / max(1, canvas_h)
+
+        checked_boxes = []
+        for cover in active:
+            _, _, x1, y1, x2, y2 = cover
+            px1 = max(0, min(fw - 1, int(x1 * scale_x)))
+            py1 = max(0, min(fh - 1, int(y1 * scale_y)))
+            px2 = max(0, min(fw, int(x2 * scale_x)))
+            py2 = max(0, min(fh, int(y2 * scale_y)))
+            if px2 <= px1 or py2 <= py1:
+                continue
+
+            patch = arr[py1:py2, px1:px2]
+            # White sticker cover: check high brightness pixels
+            is_white = (patch[:, :, 0] > 190) & (patch[:, :, 1] > 190) & (patch[:, :, 2] > 190)
+            white_ratio = float(np.mean(is_white))
+            checked_boxes.append({
+                "bbox": [px1, py1, px2, py2],
+                "white_ratio": round(white_ratio, 3),
+                "has_cover_fill": white_ratio >= 0.35,
+            })
+
+        all_ok = all(b["has_cover_fill"] for b in checked_boxes) if checked_boxes else True
+        return {
+            "checked": True,
+            "frame": p.name,
+            "timestamp": timestamp,
+            "boxes_checked": len(checked_boxes),
+            "all_boxes_filled": all_ok,
+            "details": checked_boxes,
+        }
+    except Exception as exc:
+        return {"checked": False, "error": str(exc)}

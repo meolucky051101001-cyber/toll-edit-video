@@ -692,10 +692,13 @@ class VideoPipelineRunner:
             if not segment_payload:
                 raise RuntimeError("ASR returned no speech segments")
             if self.request.settings.enable_auto_gender:
-                from .gender_detector import enrich_segments_with_gender
+                from .gender_detector import enrich_segments_with_gender, enrich_segments_with_speaker_and_gender
                 runtime_segs = segments_from_dicts(segment_payload)
                 enriched_segs = await asyncio.to_thread(
                     enrich_segments_with_gender, runtime_segs, speech
+                )
+                enriched_segs = await asyncio.to_thread(
+                    enrich_segments_with_speaker_and_gender, enriched_segs, speech
                 )
                 segment_payload = segments_to_dicts(enriched_segs)
             return [
@@ -1291,6 +1294,15 @@ class VideoPipelineRunner:
             return [self.artifact_store.put_file("audio/mixed_legacy.wav", output)]
 
     async def _mix_v2_stage(self) -> Sequence[ArtifactRecord]:
+        bgm_gain, voice_gain = -2.0, 1.0
+        try:
+            from ..audio_settings import get_audio_settings
+            audio_cfg = get_audio_settings()
+            bgm_gain = float(audio_cfg.get("bgm_volume_db", -2.0))
+            voice_gain = float(audio_cfg.get("dubbing_volume_db", 1.0))
+        except Exception:
+            pass
+
         with tempfile.TemporaryDirectory(prefix="mix-v2-", dir=self.work_directory) as work:
             output = Path(work) / "mixed_v2.wav"
             await asyncio.to_thread(
@@ -1299,6 +1311,8 @@ class VideoPipelineRunner:
                 self._audio_infos(),
                 output,
                 FFmpegMixSettings(
+                    background_gain_db=bgm_gain,
+                    voice_gain_db=voice_gain,
                     target_lufs=self.request.settings.target_lufs,
                     true_peak_dbtp=self.request.settings.true_peak_max_dbtp,
                     voice_chunk_seconds=self.request.settings.mixer_chunk_seconds,

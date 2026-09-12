@@ -94,16 +94,17 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
 
             final_dest = os.path.join(output_dir, f"Dubbed_{base_name}.mp4")
             rvc_model = discover_rvc_model(Path(WORKSPACE))
+            from voice_selection import resolve_voice
+            from dataclasses import replace
+            selected_source, selected_param, selected_label = resolve_voice("rvc" if rvc_model else "edge", rvc_model)
             request = VideoPipelineRequest(
                 video_path=Path(video_path),
                 job_directory=Path(out_dir),
                 output_path=Path(final_dest),
                 settings=pipeline_settings,
                 api_key=GEMINI_API_KEY,
-                voice_source="rvc" if rvc_model else "edge",
-                voice_param=(
-                    str(rvc_model) if rvc_model else "vi-VN-HoaiMyNeural"
-                ),
+                voice_source=selected_source,
+                voice_param=selected_param,
                 rvc_model_path=rvc_model,
                 progress=v2_progress,
             )
