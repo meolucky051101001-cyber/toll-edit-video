@@ -50,7 +50,13 @@ class TestDashboardHardening(unittest.TestCase):
         self.input_patch.start()
         self.output_patch.start()
         main.BATCH_TASK = None
-        self.client = TestClient(main.app)
+        self.client = TestClient(main.app, headers={"X-Local-Control-Token": main.LOCAL_TOKEN})
+
+    def test_missing_token_returns_403(self):
+        unauth_client = TestClient(main.app)
+        response = unauth_client.post("/api/run-batch")
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("X-Local-Control-Token", response.json()["detail"])
 
     def tearDown(self):
         self.input_patch.stop()

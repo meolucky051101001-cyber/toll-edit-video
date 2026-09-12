@@ -44,6 +44,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import secrets
+
+LOCAL_TOKEN = os.getenv("AUTODUB_LOCAL_TOKEN", secrets.token_urlsafe(32))
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+        return JSONResponse(status_code=403, content={"detail": "Chỉ hỗ trợ truy cập nội bộ (localhost)"})
+
+    path = request.url.path
+    method = request.method.upper()
+    if method in ("POST", "PUT", "DELETE", "PATCH") and (path.startswith("/api/") or path.startswith("/a2ui/")):
+        token = request.headers.get("X-Local-Control-Token")
+        if not token or token != LOCAL_TOKEN:
+            return JSONResponse(status_code=403, content={"detail": "Yêu cầu thiếu hoặc sai X-Local-Control-Token"})
+
+    return await call_next(request)
+
 BASE_DIR = Path(__file__).resolve().parent
 
 def ensure_tool_control():
@@ -598,7 +617,8 @@ async def serve_dashboard():
     template_path = BASE_DIR / "templates" / "dashboard.html"
     if template_path.exists():
         with open(template_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read())
+            html = f.read().replace("__REPLACE_TOKEN__", LOCAL_TOKEN)
+            return HTMLResponse(content=html)
     return HTMLResponse("<h2>Dashboard template not found.</h2>", status_code=404)
 
 
@@ -963,7 +983,8 @@ async def serve_a2ui_studio():
     template_path = BASE_DIR / "templates" / "a2ui_studio.html"
     if template_path.exists():
         with open(template_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read())
+            html = f.read().replace("__REPLACE_TOKEN__", LOCAL_TOKEN)
+            return HTMLResponse(content=html)
     return HTMLResponse("<h2>A2UI Studio template not found.</h2>", status_code=404)
 
 

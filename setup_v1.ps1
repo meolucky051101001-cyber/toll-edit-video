@@ -1,4 +1,4 @@
-﻿Write-Host "=============================================" -ForegroundColor Cyan
+Write-Host "=============================================" -ForegroundColor Cyan
 Write-Host "       TOOL V1 - AUTO SETUP SCRIPT          " -ForegroundColor Cyan
 Write-Host "=============================================" -ForegroundColor Cyan
 
@@ -39,11 +39,11 @@ if (-not (Test-Path "backend\.env")) {
 
 # 5. Create runtime folders
 Write-Host "[5/7] Creating runtime folders..." -ForegroundColor Yellow
- = @("D:\video phôi", "backend\workspace", "backend\workspace\downloads")
-foreach ( in ) {
-    if (-not (Test-Path )) {
-        New-Item -ItemType Directory -Force -Path  | Out-Null
-        Write-Host "Created " -ForegroundColor Green
+$folders = @("D:\video phôi", "backend\workspace", "backend\workspace\downloads")
+foreach ($f in $folders) {
+    if (-not (Test-Path $f)) {
+        New-Item -ItemType Directory -Force -Path $f | Out-Null
+        Write-Host "Created $f" -ForegroundColor Green
     }
 }
 
@@ -57,9 +57,9 @@ Write-Host "Dependencies installed." -ForegroundColor Green
 # 7. Run Preflight Health Check
 Write-Host "[7/7] Running Preflight Health Check..." -ForegroundColor Yellow
 & "backend\venv\Scripts\python.exe" "backend\v1_preflight.py"
- = 
+$preflightExit = $LASTEXITCODE
 
-if ( -eq 0) {
+if ($preflightExit -eq 0) {
     Write-Host "=============================================" -ForegroundColor Cyan
     Write-Host " SETUP COMPLETE! Tool V1 is ready to run." -ForegroundColor Green
     Write-Host " Start the tool using: backend\venv\Scripts\python.exe backend\main.py" -ForegroundColor Cyan

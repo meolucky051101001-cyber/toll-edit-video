@@ -20,7 +20,8 @@ from fastapi.testclient import TestClient
 
 class TestA2UIProtocol(unittest.TestCase):
     def setUp(self):
-        self.client = TestClient(app)
+        import main
+        self.client = TestClient(app, headers={"X-Local-Control-Token": main.LOCAL_TOKEN})
 
     def test_protocol_message_serialization(self):
         cs = CreateSurface(surfaceId="surf-1", catalogId="test-catalog")
