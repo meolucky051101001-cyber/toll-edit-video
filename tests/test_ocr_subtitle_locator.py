@@ -207,7 +207,7 @@ class SubtitleCoverGeometryTests(unittest.TestCase):
         self.assertIsNotNone(match)
         _, _, box_width, box_height = map(int, match.groups())
         self.assertLessEqual(box_width / 720, 0.99)
-        self.assertAlmostEqual(box_height / 1280, 0.091, delta=0.005)
+        self.assertAlmostEqual(box_height / 1280, 0.075, delta=0.005)
 
 
 if __name__ == "__main__":

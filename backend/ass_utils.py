@@ -93,7 +93,7 @@ def generate_ass_file(
     outline = 0
 
     sticker_padding_x = 8
-    sticker_padding_y = 16
+    sticker_padding_y = 6
     max_allowed_w = int(canvas_x * 0.90)
     text_max_w = max_allowed_w - (outline * 2) - (sticker_padding_x * 2)
 
@@ -312,7 +312,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     text_cover_h = required_text_h + (sticker_padding_y * 2)
 
                     target_visible_w = min(
-                        math.ceil(max(min_cover_w, text_cover_w) * 1.10), canvas_x
+                        max(min_cover_w, text_cover_w), canvas_x
                     )
                     target_visible_h = min(canvas_y, max(min_cover_h, text_cover_h))
 

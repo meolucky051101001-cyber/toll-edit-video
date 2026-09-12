@@ -125,6 +125,42 @@ class SubtitleLayoutTests(unittest.TestCase):
             self.assertLessEqual(x + width + 12, 684)
             self.assertLessEqual(height + 24, 128)
 
+    def test_no_cover_emitted_when_no_source_subtitle(self):
+        # Segment with no tracking blocks and no best_block (has_source is False)
+        seg = RuntimeSegment(index=1, start=timedelta(seconds=0), end=timedelta(seconds=2),
+                             content="Phụ đề không có nguồn tiếng Trung")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "no_cover.ass"
+            generate_ass_file([seg], [], path)
+            content = path.read_text(encoding="utf-8-sig")
+            bg_lines = [l for l in content.splitlines() if ",BgStyle," in l]
+            text_lines = [l for l in content.splitlines() if ",TextStyle," in l]
+            # Must NOT emit any BgStyle cover!
+            self.assertEqual(len(bg_lines), 0)
+            self.assertEqual(len(text_lines), 1)
+
+    def test_cover_box_does_not_balloon(self):
+        # Tight Chinese bbox
+        from backend.pipeline_v2.segments import GeometryBlock
+        seg = RuntimeSegment(
+            index=1, start=timedelta(seconds=0), end=timedelta(seconds=2),
+            content="Xin chào bạn",
+            best_block=GeometryBlock(text="你好朋友", start=0, end=2,
+                                     x_pct=0.35, max_x_pct=0.65, y_pct=0.75, max_y_pct=0.79)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tight.ass"
+            generate_ass_file([seg], [], path)
+            content = path.read_text(encoding="utf-8-sig")
+            bg_line = next(l for l in content.splitlines() if ",BgStyle," in l)
+            match = re.search(r"\\pos\((\d+),(\d+)\).*?m (\d+) [\d.]+ l [\d.]+ [\d.]+ b [\d.]+ [\d.]+ [\d.]+ (\d+)", bg_line)
+            self.assertIsNotNone(match)
+            _, _, width, height = map(int, match.groups())
+            # Box width must fit text width without * 1.10 ballooning (< 350 px for 720 canvas)
+            self.assertLess(width, 350)
+            # Box height should be tight (< 60 px)
+            self.assertLess(height, 65)
+
 
 if __name__ == "__main__":
     unittest.main()
