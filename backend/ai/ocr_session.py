@@ -5,14 +5,17 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
+import logging
+import psutil
 from .model_runtime import ModelRuntimeError, _creation_flags, _worker_path
 
 
 class OCRSession:
     def __init__(self, policy):
-        self.temp = tempfile.TemporaryDirectory(prefix='v2-ocr-session-')
+        self.temp = tempfile.TemporaryDirectory(prefix='v2-ocr-session-', ignore_cleanup_errors=True)
         self.root = Path(self.temp.name)
         self.number = 0
+        self.closed = False
         cache = Path(policy.model_cache_directory).resolve()
         env = dict(os.environ, HF_HOME=str(cache/'huggingface'),
                    MODELSCOPE_CACHE=str(cache/'modelscope'), PADDLE_PDX_CACHE_HOME=str(cache/'paddlex'),
@@ -28,6 +31,8 @@ class OCRSession:
             raise
 
     def run(self, payload, timeout):
+        if self.closed:
+            raise ModelRuntimeError('OCR session is closed')
         self.number += 1
         request = self.root/('request-%06d.json' % self.number)
         response = self.root/('response-%06d.json' % self.number)
@@ -49,12 +54,39 @@ class OCRSession:
         return data['result']
 
     def close(self):
+        if self.closed:
+            return
+        # Capture descendants before the Windows venv launcher exits; its
+        # actual Python child inherits the log handle.
+        children = []
+        try:
+            children = psutil.Process(self.process.pid).children(recursive=True)
+        except psutil.NoSuchProcess:
+            pass
         if self.process.poll() is None:
-            self.process.terminate()
+            (self.root / 'stop').touch()
             try:
-                self.process.wait(timeout=5)
+                self.process.wait(timeout=3)
             except subprocess.TimeoutExpired:
+                for child in reversed(children):
+                    try:
+                        child.kill()
+                    except psutil.NoSuchProcess:
+                        pass
                 self.process.kill()
                 self.process.wait(timeout=5)
+        for child in reversed(children):
+            try:
+                if child.is_running():
+                    child.kill()
+            except psutil.NoSuchProcess:
+                pass
+        _, alive = psutil.wait_procs(children, timeout=5)
+        if alive:
+            raise ModelRuntimeError('OCR child process did not exit')
         self.log.close()
-        self.temp.cleanup()
+        self.closed = True
+        try:
+            self.temp.cleanup()
+        except OSError as exc:
+            logging.getLogger(__name__).warning('OCR temporary cleanup deferred: %s', exc)
