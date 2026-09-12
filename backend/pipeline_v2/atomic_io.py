@@ -6,11 +6,25 @@ import json
 import os
 import shutil
 import tempfile
+import time
+import logging
 from pathlib import Path
 from typing import Any, Union
 
 
 PathLike = Union[str, os.PathLike]
+
+
+def _replace_with_retry(staged: Path, destination: Path) -> None:
+    """Tolerate brief Windows reader/AV locks without removing the old file."""
+    for attempt in range(8):
+        try:
+            os.replace(str(staged), str(destination))
+            return
+        except OSError as exc:
+            if getattr(exc, 'winerror', None) not in {5, 32, 33} or attempt == 7:
+                raise
+            time.sleep(min(0.05 * (2 ** attempt), 0.5))
 
 
 def _sync_parent_directory(path: Path) -> None:
@@ -38,7 +52,7 @@ def atomic_replace_file(staged_path: PathLike, destination_path: PathLike) -> Pa
     destination.parent.mkdir(parents=True, exist_ok=True)
     with staged.open("ab") as handle:
         os.fsync(handle.fileno())
-    os.replace(str(staged), str(destination))
+    _replace_with_retry(staged, destination)
     _sync_parent_directory(destination.parent)
     return destination
 
@@ -62,8 +76,9 @@ def atomic_write_bytes(path: PathLike, data: bytes) -> Path:
     except BaseException:
         try:
             temporary_path.unlink()
-        except FileNotFoundError:
-            pass
+        except OSError as exc:
+            if not isinstance(exc, FileNotFoundError):
+                logging.getLogger(__name__).warning('Could not remove temporary file %s: %s', temporary_path, exc)
         raise
 
 
@@ -108,8 +123,8 @@ def atomic_copy_file(source_path: PathLike, destination_path: PathLike) -> Path:
     except BaseException:
         try:
             temporary.unlink()
-        except FileNotFoundError:
-            pass
+        except OSError as exc:
+            if not isinstance(exc, FileNotFoundError):
+                logging.getLogger(__name__).warning('Could not remove temporary file %s: %s', temporary, exc)
         raise
-
 
