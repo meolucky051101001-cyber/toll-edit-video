@@ -259,6 +259,16 @@ def get_status() -> Dict[str, Any]:
                 state["eta_seconds"] = max(0, int(total_est - elapsed))
             else:
                 state["eta_seconds"] = None
+        # Đảm bảo translation_models không bị rỗng nếu video vừa hoàn thành có lưu model
+        if not state.get("translation_models"):
+            last_models = (state.get("last_completed") or {}).get("translation_models")
+            if last_models:
+                state["translation_models"] = list(last_models)
+            elif state.get("history"):
+                for hist in state.get("history", []):
+                    if hist.get("translation_models"):
+                        state["translation_models"] = list(hist["translation_models"])
+                        break
         return state
 
 
@@ -329,17 +339,22 @@ def start_video(video_name: str, index: int = 1, total: int = 1):
         _save_state_to_disk()
 
 
-def record_translation_model(model, identity):
+def record_translation_model(model: str, identity: Optional[Any] = None):
+    """Ghi nhận model AI thực tế đã dịch video này."""
+    if not model:
+        return
     with _LOCK:
         _sync_from_disk_unlocked()
-        current = (_CURRENT_STATE.get("job_id"), _CURRENT_STATE.get("video_name"), _CURRENT_STATE.get("start_time"))
-        if identity != current or not _CURRENT_STATE.get("active"):
-            return
+        if identity is not None:
+            current = (_CURRENT_STATE.get("job_id"), _CURRENT_STATE.get("video_name"), _CURRENT_STATE.get("start_time"))
+            if identity != current:
+                return
         models = list(_CURRENT_STATE.get("translation_models", []))
         if model not in models:
             models.append(model)
         _CURRENT_STATE["translation_models"] = models
         _save_state_to_disk()
+        logger.info("Đã ghi nhận model dịch thuật: %s", model)
 
 
 def update_step(step: float, step_name: str, percent: Optional[int] = None, details: str = ""):
@@ -382,11 +397,13 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
     with _LOCK:
         _sync_from_disk_unlocked()
         now = time.time()
+        models = list(_CURRENT_STATE.get("translation_models", []))
         record = {
             "video_name": video_name,
             "output_path": output_path,
             "duration_seconds": int(duration_seconds),
             "completed_at": now,
+            "translation_models": models,
         }
         history = _CURRENT_STATE.get("history", [])
         history.insert(0, record)
@@ -405,6 +422,7 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
             "step_name": f"Hoàn thành xuất sắc: {video_name}",
             "last_completed": record,
             "video_status": "completed",
+            "translation_models": models,
             "step_durations": step_durations,
             "updated_at": now,
         })

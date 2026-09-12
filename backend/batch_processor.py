@@ -275,6 +275,13 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                                       api_key=GEMINI_API_KEY, video_path=video_path),
             srt_translated)
         await asyncio.to_thread(save_srt, translated_segments, srt_translated)
+        try:
+            t_models = job_tracker.get_status().get("translation_models", [])
+            used_model = ", ".join(t_models) if t_models else "Gemini"
+            logger.info(f"Hoàn tất Bước 4/6 dịch phụ đề ({len(translated_segments)} câu) bằng model: {used_model}")
+            await notify(f"🌐 Bước 4/6: Đã dịch xong {len(translated_segments)} câu bằng model {used_model}")
+        except Exception:
+            pass
 
         # Khôi phục giọng RVC (Đáng yêu / Chí Mai)
         rvc_model_path = None

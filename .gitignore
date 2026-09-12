@@ -29,3 +29,7 @@ weights/
 *.pth
 *.bin
 *.safetensors
+
+master_plan.txt
+*.control_token
+workspace/.dashboard_control_token

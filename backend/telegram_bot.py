@@ -683,6 +683,12 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
         translated_segments = await asyncio.to_thread(translate_subtitles, srt_segments, "vi", api_key=GEMINI_API_KEY, video_path=video_path, strict=True)
         await asyncio.to_thread(save_srt, translated_segments, srt_translated)
+        try:
+            t_models = job_tracker.get_status().get("translation_models", [])
+            model_info = ", ".join(t_models) if t_models else "Gemini"
+            logger.info(f"Hoàn tất Bước 4/6 dịch phụ đề ({len(translated_segments)} đoạn) bằng model: {model_info}")
+        except Exception:
+            pass
 
         # (Di chuyển BƯỚC 4.5 xuống sau BƯỚC 5 để đồng bộ thời gian biến mất của phụ đề với audio)
 
@@ -1063,6 +1069,12 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
         translated_segments = await asyncio.to_thread(translate_subtitles, srt_segments, "vi", api_key=GEMINI_API_KEY, video_path=video_path, strict=True)
         await asyncio.to_thread(save_srt, translated_segments, srt_translated)
+        try:
+            t_models = job_tracker.get_status().get("translation_models", [])
+            model_info = ", ".join(t_models) if t_models else "Gemini"
+            logger.info(f"Hoàn tất Bước 4/6 dịch phụ đề ({len(translated_segments)} đoạn) bằng model: {model_info}")
+        except Exception:
+            pass
 
         # ===== BƯỚC 5: LỒNG TIẾNG =====
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
