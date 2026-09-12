@@ -16,8 +16,10 @@ from typing import Optional
 os.environ["PIPELINE_MODE"] = "legacy"
 
 from ai.transcription import extract_subtitles_whisper, save_srt
+from ai.v1_asr_isolated import extract_subtitles_isolated
 from ai.translation import translate_subtitles
 from ai.voice_cloning import generate_dubbing_audio
+from ai.v1_voice_isolated import generate_dubbing_audio_isolated
 from video_utils import extract_audio_from_video, mix_audio_pydub, process_video
 from pipeline_v2.config import PipelineMode, PipelineSettings
 import shared_state
@@ -118,8 +120,9 @@ def get_output_dir() -> Path:
 # pipeline is intentionally sized for one long GPU/FFmpeg job at a time.  Keep
 # requests queued instead of letting two jobs compete for shared output names,
 # VRAM and large temporary files.
-API_PROCESS_LOCK = asyncio.Lock()
-BATCH_TASK_LOCK = asyncio.Lock()
+UNIFIED_PIPELINE_LOCK = asyncio.Lock()
+API_PROCESS_LOCK = UNIFIED_PIPELINE_LOCK
+BATCH_TASK_LOCK = UNIFIED_PIPELINE_LOCK
 BATCH_TASK: Optional[asyncio.Task] = None
 
 
@@ -284,7 +287,7 @@ async def api_generate_subtitles(video_path: str = Form(...), target_lang: str =
         await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
 
         # 2. Transcribe with Whisper
-        srt_segments = await asyncio.to_thread(extract_subtitles_whisper, original_audio, srt_original)
+        srt_segments = await asyncio.to_thread(extract_subtitles_isolated, original_audio, srt_original)
 
         # 3. Translate
         translated_segments = await asyncio.to_thread(translate_subtitles, 
@@ -333,6 +336,8 @@ async def api_process_video(
     """Xử lý full: Transcribe → Dịch → TTS → Mix Audio → Blur + Sub → Xuất video."""
     valid_path = _validate_input_path(video_path)
     video_path = str(valid_path)
+    if job_tracker.get_status().get("active"):
+        raise HTTPException(status_code=409, detail="Đang có tiến trình Batch xử lý video. Vui lòng đợi hoàn thành!")
     await API_PROCESS_LOCK.acquire()
     try:
         base_name = valid_path.stem
@@ -372,7 +377,7 @@ async def api_process_video(
         await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
 
         # 2. Transcribe
-        srt_segments = await asyncio.to_thread(extract_subtitles_whisper, original_audio, srt_original)
+        srt_segments = await asyncio.to_thread(extract_subtitles_isolated, original_audio, srt_original)
         vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
 
         # 3. Translate
@@ -389,7 +394,7 @@ async def api_process_video(
         await asyncio.to_thread(save_srt, translated_segments, srt_translated)
 
         # 4. Generate TTS dubbing
-        dubbing_audio_files = await generate_dubbing_audio(
+        dubbing_audio_files = await generate_dubbing_audio_isolated(
             translated_segments, dubbing_dir,
             voice_source=voice_source,
             voice_param=voice_param,
@@ -465,6 +470,8 @@ async def api_process_url(
     font_weight: int = Form(1)
 ):
     """Tải video từ URL (Xiaohongshu, TikTok, YouTube...) rồi xử lý toàn bộ."""
+    if job_tracker.get_status().get("active"):
+        raise HTTPException(status_code=409, detail="Đang có tiến trình Batch xử lý video. Vui lòng đợi hoàn thành!")
     await API_PROCESS_LOCK.acquire()
     try:
         import time
@@ -527,7 +534,7 @@ async def api_process_url(
         await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
 
         # Transcribe
-        srt_segments = await asyncio.to_thread(extract_subtitles_whisper, original_audio, srt_original)
+        srt_segments = await asyncio.to_thread(extract_subtitles_isolated, original_audio, srt_original)
         vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
 
         # Translate
@@ -554,7 +561,7 @@ async def api_process_url(
             })
 
         # TTS
-        dubbing_audio_files = await generate_dubbing_audio(
+        dubbing_audio_files = await generate_dubbing_audio_isolated(
             translated_segments, dubbing_dir,
             voice_source=voice_source,
             voice_param=voice_param,

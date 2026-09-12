@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import io
 
@@ -144,9 +144,15 @@ def translate_with_gemini(
             cache_k = cache_key(parts, candidate_models, account)
             cached = read_cache(cache_k, len(texts), target_lang)
             if cached:
-                logger.info("Sử dụng bản dịch từ cache")
+                m_cache = cached.get("model", "gemini-cached")
+                logger.info("Sử dụng bản dịch từ cache (model=%s)", m_cache)
                 with _gemini_health_lock:
                     _gemini_last_good[account] = cached["model"]
+                try:
+                    import job_tracker
+                    job_tracker.record_translation_model(m_cache)
+                except Exception:
+                    pass
                 return cached["texts"]
         except ImportError:
             cache_k = None
@@ -185,7 +191,12 @@ def translate_with_gemini(
                     with _gemini_health_lock:
                         _gemini_last_good[account] = model
                         _gemini_cooldown.pop((account, model), None)
-                    logger.info(f"Gá»i thÃ nh cÃ´ng Gemini {model}!")
+                    logger.info(f"Gọi thành công Gemini {model}!")
+                    try:
+                        import job_tracker
+                        job_tracker.record_translation_model(model)
+                    except Exception:
+                        pass
                     return translated
                 else:
                     logger.warning(f"Lá»—i gá»i {model} (HTTP {response.status_code})")
@@ -269,7 +280,12 @@ def translate_with_openai(
                         text = match.group(0)
                     translated = json.loads(text)
                     if len(translated) == len(texts):
-                        logger.info(f"Dá»‹ch thÃ nh cÃ´ng báº±ng OpenAI ChatGPT ({om})!")
+                        logger.info(f"Dịch thành công bằng OpenAI ChatGPT ({om})!")
+                        try:
+                            import job_tracker
+                            job_tracker.record_translation_model(f"OpenAI {om}")
+                        except Exception:
+                            pass
                         return translated
                 else:
                     logger.warning(f"Lá»—i OpenAI ({om}) HTTP {resp.status_code}: {resp.text[:200]}")
@@ -322,7 +338,12 @@ def translate_with_deepseek(
                         text = match.group(0)
                     translated = json.loads(text)
                     if len(translated) == len(texts):
-                        logger.info(f"Dá»‹ch thÃ nh cÃ´ng báº±ng DeepSeek ({dm})!")
+                        logger.info(f"Dịch thành công bằng DeepSeek ({dm})!")
+                        try:
+                            import job_tracker
+                            job_tracker.record_translation_model(f"DeepSeek {dm}")
+                        except Exception:
+                            pass
                         return translated
                 else:
                     logger.warning(f"Lá»—i DeepSeek ({dm}) HTTP {resp.status_code}: {resp.text[:200]}")
@@ -431,18 +452,16 @@ def translate_subtitles(
                 
     # Fallback Tier: G4F Free
     if not translated_texts and enable_g4f:
-        logger.info("Trying ChatGPT (G4F) API...")
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(translate_with_g4f, texts, target_lang)
-            try:
-                translated_texts = future.result(timeout=40)
-            except concurrent.futures.TimeoutError:
-                logger.warning("G4F pháº£n há»“i quÃ¡ lÃ¢u (quÃ¡ 40s), há»§y Ä‘á»ƒ trÃ¡nh treo bot.")
-                translated_texts = None
-            except Exception as e:
-                logger.warning(f"Lá»—i G4F: {e}")
-                translated_texts = None
+        logger.info("Trying ChatGPT (G4F) API via bounded fallback...")
+        try:
+            from ai.v1_bounded_fallback import run_fallback
+            translated_texts = run_fallback(translate_with_g4f, texts, target_lang, timeout=40)
+        except TimeoutError:
+            logger.warning("G4F phản hồi quá lâu (quá 40s), hủy để tránh treo bot.")
+            translated_texts = None
+        except Exception as e:
+            logger.warning(f"Lỗi G4F: {e}")
+            translated_texts = None
         
     translated_texts_valid = bool(
         translated_texts
@@ -473,6 +492,13 @@ def translate_subtitles(
             segment.content = translated_texts[idx]
             idx += 1
         logger.info("LLM translation successful.")
+        try:
+            import job_tracker
+            t_models = job_tracker.get_status().get("translation_models", [])
+            m_name = ", ".join(t_models) if t_models else "AI"
+            logger.info(f"Hoàn thành dịch {len(texts)} đoạn phụ đề bằng model: {m_name}")
+        except Exception:
+            pass
         return srt_segments
     
     logger.info("Falling back to Google Translate...")
@@ -534,6 +560,15 @@ def translate_subtitles(
                 ", ".join(str(index) for index in failed_segments)
             )
         )
+
+    try:
+        import job_tracker
+        t_models = job_tracker.get_status().get("translation_models", [])
+        if not t_models:
+            job_tracker.record_translation_model("Google Translate (fallback)")
+            logger.info("Hoàn tất dịch phụ đề bằng model: Google Translate (fallback)")
+    except Exception:
+        pass
 
     return srt_segments
 

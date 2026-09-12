@@ -680,8 +680,11 @@ def ensure_single_controller():
             if conn.laddr and conn.laddr.port == 8090 and conn.pid:
                 if conn.pid not in (current_pid, parent_pid):
                     try:
-                        psutil.Process(conn.pid).kill()
-                        killed = True
+                        proc = psutil.Process(conn.pid)
+                        cmdline = " ".join(proc.cmdline() or []).lower()
+                        if "tool_control.py" in cmdline:
+                            proc.kill()
+                            killed = True
                     except (psutil.Error, OSError): pass
     except (psutil.Error, OSError): pass
     if killed:

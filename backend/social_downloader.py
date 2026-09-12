@@ -513,14 +513,18 @@ def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
     ]
     
     try:
-        configured_timeout = float(
-            os.getenv("SOCIAL_DOWNLOAD_TIMEOUT_SECONDS", "0")
-        )
+        raw_timeout = os.getenv("SOCIAL_DOWNLOAD_TIMEOUT_SECONDS", "120.0")
+        try:
+            configured_timeout = float(raw_timeout)
+        except (ValueError, TypeError):
+            configured_timeout = 120.0
+        if configured_timeout <= 0:
+            configured_timeout = 120.0
         proc = subprocess.run(
             cmd_download,
             capture_output=True,
             text=True,
-            timeout=configured_timeout if configured_timeout > 0 else None,
+            timeout=configured_timeout,
             creationflags=CREATE_NO_WINDOW
         )
         
