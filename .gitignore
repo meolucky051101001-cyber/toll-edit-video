@@ -42,3 +42,7 @@ temp_burn*
 Thumbs.db
 .idea/
 .vscode/
+
+# Backups and temporary files
+backups/
+*.before-*

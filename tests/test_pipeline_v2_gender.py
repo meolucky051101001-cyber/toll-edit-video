@@ -75,8 +75,9 @@ class TestPipelineV2Gender(unittest.TestCase):
         }
 
         mock_edge = AsyncMock()
+        import ai.voice_cloning
         with tempfile.TemporaryDirectory() as td, \
-             patch("backend.ai.voice_cloning.generate_tts_edge", mock_edge), \
+             patch("ai.voice_cloning.generate_tts_edge", mock_edge), \
              patch("backend.pipeline_v2.tts.fit_audio_to_window") as mock_fit:
             # Create dummy raw audio files so fit_audio_to_window works
             for s in segs:

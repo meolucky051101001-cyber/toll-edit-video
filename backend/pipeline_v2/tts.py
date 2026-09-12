@@ -35,21 +35,13 @@ async def generate_tts_audio_v2(
 ) -> List[Dict[str, Any]]:
     """Generate TTS and apply at most the configured light atempo correction."""
 
-    try:
-        from ..ai.voice_cloning import (
-            FPTQuotaError,
-            _run_capcut_tts,
-            generate_tts_edge,
-            generate_tts_fpt,
-        )
-    except ImportError:
-        _prepare_legacy_imports()
-        from ai.voice_cloning import (
-            FPTQuotaError,
-            _run_capcut_tts,
-            generate_tts_edge,
-            generate_tts_fpt,
-        )
+    _prepare_legacy_imports()
+    from ai.voice_cloning import (
+        FPTQuotaError,
+        _run_capcut_tts,
+        generate_tts_edge,
+        generate_tts_fpt,
+    )
 
     config = policy or TimingPolicy()
     output = Path(output_directory)
