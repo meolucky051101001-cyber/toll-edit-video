@@ -10,7 +10,11 @@ from backend.ai.translation import translate_subtitles
 from backend.pipeline_v2.segments import RuntimeSegment
 from backend.pipeline_v2.timing import solve_segment_timing
 from backend.subtitle_layout import subtitle_measure, wrap_subtitle_text
-from backend.subtitle_text import normalize_subtitle_text, split_subtitle_sentences
+from backend.subtitle_text import (
+    clean_incomplete_segment_stops,
+    normalize_subtitle_text,
+    split_subtitle_sentences,
+)
 
 
 def segment(text, start=10, end=22):
@@ -83,6 +87,69 @@ class SubtitleTextTests(unittest.TestCase):
         self.assertTrue(events[0][9].endswith("là kịch kim rồi."))
         self.assertTrue(events[1][9].endswith("Chốt hạ bằng trai đẹp nha, chốt luôn."))
         self.assertTrue(events[2][9].endswith("Ôi toàn con trai"))
+
+    def test_ellipsis_variants_completely_removed_without_stray_dots(self):
+        # Mixed ellipsis variants: ... followed by dot, unicode ellipsis with dot, two-dot leader, etc.
+        cases = [
+            ("Xin chào….", "Xin chào"),
+            ("Chào bạn.…", "Chào bạn"),
+            ("Chờ một chút‥", "Chờ một chút"),
+            ("Cứ từ từ⋯", "Cứ từ từ"),
+            ("Thử nghiệm.... rất tốt", "Thử nghiệm rất tốt"),
+            ("Nghe nói . . . là thật", "Nghe nói là thật"),
+            ("...Bắt đầu và kết thúc...", "Bắt đầu và kết thúc"),
+        ]
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(normalize_subtitle_text(raw), expected)
+
+    def test_incomplete_clause_particles_do_not_keep_terminal_period(self):
+        # Conjunctions/prepositions at the end of text must not retain a trailing period
+        cases = [
+            ("Tôi nghĩ là.", "Tôi nghĩ là"),
+            ("Bởi vì trời mưa và.", "Bởi vì trời mưa và"),
+            ("Nếu như bạn muốn nhưng.", "Nếu như bạn muốn nhưng"),
+            ("Chúng tôi tin rằng.", "Chúng tôi tin rằng"),
+            ("Sản phẩm này của.", "Sản phẩm này của"),
+        ]
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(normalize_subtitle_text(raw), expected)
+
+    def test_cross_segment_incomplete_clause_period_cleaning(self):
+        # If segment i ends with a dot but segment i+1 continues with lowercase or conjunction
+        segments = [
+            "Nếu bạn muốn mua sản phẩm này.",
+            "thì hãy nhanh tay đặt hàng nhé.",
+            "Hôm nay trời rất đẹp.",
+            "Chúng ta cùng đi dạo phố.",
+            "Tôi cam kết rằng.",
+            "chất lượng luôn đứng đầu.",
+        ]
+        cleaned = clean_incomplete_segment_stops(segments)
+        self.assertEqual(
+            cleaned,
+            [
+                "Nếu bạn muốn mua sản phẩm này",
+                "thì hãy nhanh tay đặt hàng nhé.",
+                "Hôm nay trời rất đẹp.",
+                "Chúng ta cùng đi dạo phố.",
+                "Tôi cam kết rằng",
+                "chất lượng luôn đứng đầu.",
+            ],
+        )
+
+    def test_sentence_split_strictly_on_terminal_punctuation_not_commas_or_abbreviations(self):
+        text = "TP. HCM có nhiều quận, chẳng hạn Q. 1, Q. 3 v.v. đều rất sầm uất. Bạn có thích không? Mua ngay!"
+        sentences = split_subtitle_sentences(text)
+        self.assertEqual(
+            sentences,
+            [
+                "TP. HCM có nhiều quận, chẳng hạn Q. 1, Q. 3 v.v. đều rất sầm uất.",
+                "Bạn có thích không?",
+                "Mua ngay!",
+            ],
+        )
 
 
 class SubtitleLayoutTests(unittest.TestCase):

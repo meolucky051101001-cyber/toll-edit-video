@@ -14,9 +14,17 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 from .segments import RuntimeSegment, segment_from_dict, segment_to_dict
 
 try:
-    from ..subtitle_text import normalize_subtitle_text
+    from ..subtitle_text import (
+        clean_incomplete_segment_stops,
+        normalize_subtitle_text,
+        split_subtitle_sentences,
+    )
 except ImportError:
-    from subtitle_text import normalize_subtitle_text
+    from subtitle_text import (
+        clean_incomplete_segment_stops,
+        normalize_subtitle_text,
+        split_subtitle_sentences,
+    )
 
 
 PathLike = Union[str, os.PathLike]
@@ -167,9 +175,12 @@ def _copy_segments(segments: Iterable[Any]) -> List[RuntimeSegment]:
 
 
 def _split_clauses(text: str) -> List[str]:
+    sentences = split_subtitle_sentences(text)
+    if len(sentences) > 1:
+        return sentences
     raw_parts = [
         part.strip()
-        for part in re.split(r"(?<=[,.!?;:…，。！？；：])\s*", text.strip())
+        for part in re.split(r"(?<=[,.!?;:，。！？；：])\s*", text.strip())
         if part.strip()
     ]
     parts = []
@@ -230,6 +241,7 @@ def solve_segment_timing(
     working = _copy_segments(segments)
     for segment in working:
         segment.content = normalize_subtitle_text(segment.content)
+    clean_incomplete_segment_stops(working)
     rewrite_rounds = 0
     if rewrite_callback is not None:
         for _round in range(config.max_rewrite_rounds):
@@ -260,6 +272,7 @@ def solve_segment_timing(
             rewrite_rounds += 1
             if not changed:
                 break
+            clean_incomplete_segment_stops(working)
 
     expanded = []
     for segment in working:
@@ -325,7 +338,8 @@ class GeminiTimingRewriter:
             prompt = (
                 "Rút gọn các câu tiếng Việt để lồng tiếng đúng thời lượng. Giữ nguyên ý, "
                 "đại từ, tên riêng và giọng điệu; không cắt cụt ý. Mỗi câu không vượt quá "
-                "max_characters. Không dùng dấu ba chấm; chỉ đặt dấu chấm khi hết câu. "
+                "max_characters. Không dùng dấu ba chấm (... hoặc …); chỉ đặt dấu chấm (. ! ?) "
+                "khi hết câu hoàn chỉnh, tuyệt đối không chèn dấu chấm ở câu lửng. "
                 "Chỉ trả về JSON dạng [{\"id\":1,\"text\":\"Câu đã rút gọn\"}].\n"
                 + json.dumps(items, ensure_ascii=False)
             )

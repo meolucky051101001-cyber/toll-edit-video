@@ -20,9 +20,9 @@ import logging
 from .model_policy import current_model_policy, ordered_unique
 
 try:
-    from ..subtitle_text import normalize_subtitle_text
+    from ..subtitle_text import clean_incomplete_segment_stops, normalize_subtitle_text
 except ImportError:
-    from subtitle_text import normalize_subtitle_text
+    from subtitle_text import clean_incomplete_segment_stops, normalize_subtitle_text
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ Yêu cầu TỐI QUAN TRỌNG:
 4. TUYỆT ĐỐI KHÔNG lạm dụng từ tiếng Anh. Ưu tiên tiếng Việt thuần túy.
 5. KHỚP KHẨU HÌNH & THỜI LƯỢNG (LIP-SYNC): Văn bản dịch dùng để lồng tiếng (TTS), độ dài âm tiết của câu tiếng Việt PHẢI TƯƠNG ĐƯƠNG VỚI CÂU GỐC để khớp hoàn hảo khẩu hình miệng của nhân vật (không được dịch quá dài khiến AI phải đọc quá nhanh, và không được dịch quá cụt khiến AI đọc xong trước khi nhân vật khép miệng).
 6. Ngữ cảnh nối tiếp: Vì phụ đề thường bị ngắt giữa chừng, hãy đọc cả đoạn để dịch sao cho ý nối liền mạch trơn tru.
-   KHÔNG dùng dấu ba chấm (... hoặc …), kể cả đầu/cuối đoạn bị ngắt. Chỉ đặt dấu chấm khi đã hết một câu hoàn chỉnh. Hệ thống sẽ chuyển phụ đề sang câu kế tiếp tại dấu kết câu; vẫn giữ đúng số phần tử JSON theo đầu vào.
+    KHÔNG dùng dấu ba chấm (... hoặc …), kể cả đầu/cuối đoạn bị ngắt. TUYỆT ĐỐI KHÔNG chèn dấu chấm (.) giữa câu lửng hoặc ở cuối các vế câu chưa hết ý. Chỉ đặt dấu kết câu (. ! ?) khi đã kết thúc một câu hoàn chỉnh trọn vẹn ý nghĩa. Hệ thống sẽ chuyển phụ đề sang câu kế tiếp tại dấu kết câu; vẫn giữ đúng số phần tử JSON theo đầu vào.
 """
     if with_vision:
         prompt += "7. TRỰC QUAN: Hãy kết hợp các bức ảnh đính kèm từ video để chọn đại từ nhân xưng và danh từ chính xác tuyệt đối với ngữ cảnh.\n"
@@ -342,7 +342,7 @@ Yêu cầu TỐI QUAN TRỌNG:
 1. BẮT BUỘC giữ nguyên số lượng phần tử của mảng JSON.
 2. Dịch tự nhiên, cuốn hút, chuẩn văn phong video ngắn mạng xã hội.
 3. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.
-4. KHÔNG dùng dấu ba chấm (... hoặc …). Chỉ dùng dấu chấm khi kết thúc câu hoàn chỉnh; giữ nguyên số phần tử JSON.
+4. KHÔNG dùng dấu ba chấm (... hoặc …). Chỉ dùng dấu chấm (. ! ?) khi kết thúc câu hoàn chỉnh, TUYỆT ĐỐI KHÔNG chèn dấu chấm ở cuối câu lửng hoặc vế câu chưa hết ý; giữ nguyên số phần tử JSON.
 Dữ liệu:
 """
         prompt += json.dumps(texts, ensure_ascii=False)
@@ -450,6 +450,7 @@ def translate_subtitles(
             normalize_subtitle_text(item) if isinstance(item, str) else item
             for item in translated_texts
         ]
+        translated_texts = clean_incomplete_segment_stops(translated_texts)
     translated_texts_valid = bool(
         translated_texts
         and len(translated_texts) == len(texts)
@@ -508,4 +509,5 @@ def translate_subtitles(
             )
         )
 
+    clean_incomplete_segment_stops(srt_segments)
     return srt_segments

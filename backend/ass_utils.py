@@ -7,16 +7,25 @@ from datetime import timedelta
 
 try:
     from .subtitle_layout import subtitle_measure, wrap_subtitle_text
-    from .subtitle_text import split_segment_text, split_subtitle_sentences
+    from .subtitle_text import (
+        clean_incomplete_segment_stops,
+        split_segment_text,
+        split_subtitle_sentences,
+    )
 except ImportError:
     try:
         from subtitle_layout import subtitle_measure, wrap_subtitle_text
-        from subtitle_text import split_segment_text, split_subtitle_sentences
+        from subtitle_text import (
+            clean_incomplete_segment_stops,
+            split_segment_text,
+            split_subtitle_sentences,
+        )
     except ImportError:
         subtitle_measure = None
         wrap_subtitle_text = None
         split_segment_text = None
         split_subtitle_sentences = None
+        clean_incomplete_segment_stops = None
 
 
 def _block_value(block, key, default=None):
@@ -182,6 +191,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             for page in groups[i][1]:
                 page.end = min(page.end, boundary)
         dialogue_segments = [s for s in dialogue_segments if s.end > s.start]
+        if clean_incomplete_segment_stops is not None:
+            dialogue_segments = clean_incomplete_segment_stops(dialogue_segments)
         processed_segments = []
         if split_subtitle_sentences is not None and split_segment_text is not None:
             try:
