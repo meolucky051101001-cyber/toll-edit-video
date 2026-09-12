@@ -102,6 +102,7 @@ class VideoPipelineRequest:
     glossary: Optional[Mapping[str, str]] = None
     entity_map: Optional[Mapping[str, str]] = None
     speaker_map: Optional[Mapping[str, str]] = None
+    speaker_voice_map: Optional[Mapping[str, str]] = None
 
 
 @dataclass(frozen=True)
@@ -940,6 +941,7 @@ class VideoPipelineRunner:
                     "segments": segments_to_dicts(batch),
                     "voice_source": source,
                     "voice_param": self.request.voice_param,
+                    "speaker_voice_map": dict(self.request.speaker_voice_map or {}),
                     "enable_auto_gender": self.request.settings.enable_auto_gender,
                     "atempo_min": policy.atempo_min,
                     "atempo_max": policy.atempo_max,
@@ -995,6 +997,7 @@ class VideoPipelineRunner:
                         policy=policy,
                         strict_provider=True,
                         enable_auto_gender=self.request.settings.enable_auto_gender,
+                        speaker_voice_map=self.request.speaker_voice_map,
                     )
 
                 infos = await generate_round(0, batch)

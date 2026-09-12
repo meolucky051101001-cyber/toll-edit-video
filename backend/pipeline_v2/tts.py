@@ -31,16 +31,25 @@ async def generate_tts_audio_v2(
     policy: TimingPolicy = None,
     strict_provider: bool = False,
     enable_auto_gender: bool = False,
+    speaker_voice_map: Optional[Mapping[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Generate TTS and apply at most the configured light atempo correction."""
 
-    _prepare_legacy_imports()
-    from ai.voice_cloning import (
-        FPTQuotaError,
-        _run_capcut_tts,
-        generate_tts_edge,
-        generate_tts_fpt,
-    )
+    try:
+        from ..ai.voice_cloning import (
+            FPTQuotaError,
+            _run_capcut_tts,
+            generate_tts_edge,
+            generate_tts_fpt,
+        )
+    except ImportError:
+        _prepare_legacy_imports()
+        from ai.voice_cloning import (
+            FPTQuotaError,
+            _run_capcut_tts,
+            generate_tts_edge,
+            generate_tts_fpt,
+        )
 
     config = policy or TimingPolicy()
     output = Path(output_directory)
@@ -54,7 +63,27 @@ async def generate_tts_audio_v2(
             text = normalize_subtitle_text(segment.content)
             segment.content = text
             seg_gender = str(getattr(segment, "gender", "female") or "female").lower()
-            if enable_auto_gender and seg_gender == "male" and voice_source != "fpt":
+            speaker_id = str(getattr(segment, "speaker_id", "") or "").strip()
+            mapped_voice = None
+            if speaker_voice_map:
+                if speaker_id and speaker_id in speaker_voice_map:
+                    mapped_voice = speaker_voice_map[speaker_id]
+                elif seg_gender in speaker_voice_map:
+                    mapped_voice = speaker_voice_map[seg_gender]
+
+            if mapped_voice:
+                if mapped_voice.startswith("BV") or voice_source == "capcut":
+                    await asyncio.to_thread(_run_capcut_tts, text, str(raw), mapped_voice)
+                elif voice_source == "fpt" or mapped_voice in {"banmai", "leminh", "myan", "thuminh", "giahuy"}:
+                    fpt_voice = mapped_voice if not mapped_voice.startswith("vi-") else "banmai"
+                    await generate_tts_fpt(text, str(raw), api_key, voice=fpt_voice)
+                else:
+                    pitch = "+15Hz" if mapped_voice == "vi-VN-HoaiMyNeural" else "+0Hz"
+                    rate = "+15%" if mapped_voice == "vi-VN-HoaiMyNeural" else "+5%"
+                    await generate_tts_edge(text, str(raw), mapped_voice, pitch=pitch, rate=rate)
+            elif voice_source == "capcut":
+                await asyncio.to_thread(_run_capcut_tts, text, str(raw), voice_param)
+            elif enable_auto_gender and seg_gender == "male" and voice_source != "fpt":
                 try:
                     await asyncio.to_thread(
                         _run_capcut_tts, text, str(raw), "BV075_streaming"
