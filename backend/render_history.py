@@ -72,7 +72,7 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
 
     return meta
 
-def _acquire_lock(lock_path: Path, timeout: float = 10.0) -> bool:
+def _acquire_lock(lock_path: Path, timeout: float = 10.0, stale_timeout: float = 60.0) -> bool:
     start = time.monotonic()
     while time.monotonic() - start < timeout:
         try:
@@ -80,6 +80,16 @@ def _acquire_lock(lock_path: Path, timeout: float = 10.0) -> bool:
             os.close(fd)
             return True
         except FileExistsError:
+            try:
+                mtime = os.path.getmtime(str(lock_path))
+                if time.time() - mtime > stale_timeout:
+                    try:
+                        os.unlink(str(lock_path))
+                        continue
+                    except OSError:
+                        pass
+            except OSError:
+                pass
             time.sleep(0.1)
         except OSError:
             time.sleep(0.1)
