@@ -50,12 +50,29 @@ import secrets
 
 LOCAL_TOKEN = os.getenv("AUTODUB_LOCAL_TOKEN", secrets.token_urlsafe(32))
 
+def _is_valid_host(host_header: str) -> bool:
+    if not host_header:
+        return False
+    h = host_header.strip().lower()
+    if h.startswith("[") and "]" in h:
+        host_part = h[1:h.index("]")]
+    else:
+        host_part = h.split(":")[0]
+    return host_part in ("127.0.0.1", "localhost", "::1", "testserver", "testclient")
+
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
+    # 1. Host header validation (DNS Rebinding protection)
+    host_header = request.headers.get("host", "")
+    if not _is_valid_host(host_header):
+        return JSONResponse(status_code=403, content={"detail": f"Host không hợp lệ: '{host_header}'"})
+
+    # 2. Client socket IP validation (Defense in depth)
     client_host = request.client.host if request.client else ""
     if client_host not in ("127.0.0.1", "::1", "localhost", "testclient"):
         return JSONResponse(status_code=403, content={"detail": "Chỉ hỗ trợ truy cập nội bộ (localhost)"})
 
+    # 3. State-changing token validation
     path = request.url.path
     method = request.method.upper()
     if method in ("POST", "PUT", "DELETE", "PATCH") and (path.startswith("/api/") or path.startswith("/a2ui/")):
@@ -98,6 +115,16 @@ OUTPUT_DIR = os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 os.makedirs(WORKSPACE, exist_ok=True)
 
+# Write runtime token file for tool_control graceful stop
+TOKEN_FILE = Path(WORKSPACE) / ".dashboard_control_token"
+try:
+    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp_t = TOKEN_FILE.with_suffix(".tmp")
+    tmp_t.write_text(LOCAL_TOKEN, encoding="utf-8")
+    tmp_t.replace(TOKEN_FILE)
+except Exception as _te:
+    logger.warning("Failed to write runtime control token: %s", _te)
+
 def get_input_dir() -> Path:
     saved = Path(WORKSPACE) / "dashboard_input.json"
     if saved.exists():
@@ -123,6 +150,7 @@ def get_output_dir() -> Path:
 UNIFIED_PIPELINE_LOCK = asyncio.Lock()
 API_PROCESS_LOCK = UNIFIED_PIPELINE_LOCK
 BATCH_TASK_LOCK = UNIFIED_PIPELINE_LOCK
+BATCH_INPUT_LOCK = asyncio.Lock()
 BATCH_TASK: Optional[asyncio.Task] = None
 
 
@@ -274,51 +302,54 @@ async def api_generate_subtitles(video_path: str = Form(...), target_lang: str =
     """Nhận đường dẫn file video trên máy, tạo phụ đề gốc và dịch."""
     valid_path = _validate_input_path(video_path)
     video_path = str(valid_path)
-    try:
-        base_name = valid_path.stem
-        out_dir = os.path.join(WORKSPACE, base_name)
-        os.makedirs(out_dir, exist_ok=True)
+    if UNIFIED_PIPELINE_LOCK.locked() or job_tracker.get_status().get("active"):
+        raise HTTPException(status_code=409, detail="Pipeline đang bận xử lý video khác. Vui lòng đợi hoàn thành!")
+    async with UNIFIED_PIPELINE_LOCK:
+        try:
+            base_name = valid_path.stem
+            out_dir = os.path.join(WORKSPACE, base_name)
+            os.makedirs(out_dir, exist_ok=True)
 
-        original_audio = os.path.join(out_dir, "original.wav")
-        srt_original = os.path.join(out_dir, "original.srt")
-        srt_translated = os.path.join(out_dir, "translated.srt")
+            original_audio = os.path.join(out_dir, "original.wav")
+            srt_original = os.path.join(out_dir, "original.srt")
+            srt_translated = os.path.join(out_dir, "translated.srt")
 
-        # 1. Extract audio
-        await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
+            # 1. Extract audio
+            await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
 
-        # 2. Transcribe with Whisper
-        srt_segments = await asyncio.to_thread(extract_subtitles_isolated, original_audio, srt_original)
+            # 2. Transcribe with Whisper
+            srt_segments = await asyncio.to_thread(extract_subtitles_isolated, original_audio, srt_original)
 
-        # 3. Translate
-        translated_segments = await asyncio.to_thread(translate_subtitles, 
-            srt_segments,
-            target_lang,
-            api_key=GEMINI_API_KEY,
-            video_path=video_path,
-        )
-        await asyncio.to_thread(save_srt, translated_segments, srt_translated)
+            # 3. Translate
+            translated_segments = await asyncio.to_thread(translate_subtitles, 
+                srt_segments,
+                target_lang,
+                api_key=GEMINI_API_KEY,
+                video_path=video_path,
+            )
+            await asyncio.to_thread(save_srt, translated_segments, srt_translated)
 
-        # Prepare response data
-        subtitles = []
-        for seg in translated_segments:
-            subtitles.append({
-                "index": seg.index,
-                "start": seg.start.total_seconds(),
-                "end": seg.end.total_seconds(),
-                "content": seg.content
-            })
+            # Prepare response data
+            subtitles = []
+            for seg in translated_segments:
+                subtitles.append({
+                    "index": seg.index,
+                    "start": seg.start.total_seconds(),
+                    "end": seg.end.total_seconds(),
+                    "content": seg.content
+                })
 
-        return {
-            "status": "success",
-            "original_srt": srt_original,
-            "translated_srt": srt_translated,
-            "subtitles": subtitles,
-            "total": len(subtitles)
-        }
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return {"status": "error", "message": str(e)}
+            return {
+                "status": "success",
+                "original_srt": srt_original,
+                "translated_srt": srt_translated,
+                "subtitles": subtitles,
+                "total": len(subtitles)
+            }
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {"status": "error", "message": str(e)}
 
 
 # ===== API: Xử lý full (Lồng tiếng + Xuất video) =====
@@ -688,7 +719,7 @@ async def api_choose_input_folder(request: Request):
 
 @app.post("/api/input-folder")
 async def api_input_folder(request: Request):
-    async with BATCH_TASK_LOCK:
+    async with BATCH_INPUT_LOCK:
         _check_input_request(request)
         data = await request.json()
         value = data.get("path", "") if isinstance(data, dict) else ""
@@ -709,7 +740,7 @@ async def api_input_folder(request: Request):
 @app.post("/api/input-video")
 async def api_input_video(request: Request):
     from batch_processor import SUPPORTED_EXTENSIONS
-    async with BATCH_TASK_LOCK:
+    async with BATCH_INPUT_LOCK:
         _check_input_request(request)
         name = unquote(request.headers.get("X-Video-Name", ""))
         if not name or Path(name).name != name or any(c in name for c in '/\\:') or Path(name).suffix.lower() not in SUPPORTED_EXTENSIONS:
@@ -854,33 +885,41 @@ async def api_get_banve():
 async def api_run_batch():
     """Kích hoạt chạy batch toàn bộ video phôi ngầm."""
     global BATCH_TASK
-    async with BATCH_TASK_LOCK:
-        if Path(r"C:\tool v1\workspace\control\v1.pause").exists():
-            raise HTTPException(409, "Tool đang tắt, không nhận batch mới.")
-        status = job_tracker.get_status()
-        if (BATCH_TASK is not None and not BATCH_TASK.done()) or status.get("active"):
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "status": "busy",
-                    "job_id": status.get("job_id"),
-                    "message": "Hiện đang có tiến trình video đang xử lý, vui lòng đợi!",
-                },
-            )
+    if UNIFIED_PIPELINE_LOCK.locked():
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": "busy",
+                "message": "Pipeline đang bận xử lý video khác.",
+            },
+        )
+    if Path(r"C:\tool v1\workspace\control\v1.pause").exists():
+        raise HTTPException(409, "Tool đang tắt, không nhận batch mới.")
+    status = job_tracker.get_status()
+    if (BATCH_TASK is not None and not BATCH_TASK.done()) or status.get("active"):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": "busy",
+                "job_id": status.get("job_id"),
+                "message": "Hiện đang có tiến trình video đang xử lý, vui lòng đợi!",
+            },
+        )
 
-        shared_state.stop_requested = False
-        input_dir = str(get_input_dir())
-        output_dir = str(get_output_dir())
-        job_id = uuid.uuid4().hex
-        try:
-            job_tracker.start_batch(0, input_dir, output_dir, job_id=job_id)
-        except job_tracker.JobAlreadyRunningError:
-            return JSONResponse(status_code=409, content={
-                "status": "busy", "message": "Một batch khác đang chạy."})
+    shared_state.stop_requested = False
+    input_dir = str(get_input_dir())
+    output_dir = str(get_output_dir())
+    job_id = uuid.uuid4().hex
+    try:
+        job_tracker.start_batch(0, input_dir, output_dir, job_id=job_id)
+    except job_tracker.JobAlreadyRunningError:
+        return JSONResponse(status_code=409, content={
+            "status": "busy", "message": "Một batch khác đang chạy."})
 
-        from batch_processor import process_batch_folder
+    from batch_processor import process_batch_folder
 
-        async def batch_runner():
+    async def batch_runner():
+        async with UNIFIED_PIPELINE_LOCK:
             try:
                 await process_batch_folder(
                     input_dir, output_dir, job_id=job_id
@@ -891,9 +930,9 @@ async def api_run_batch():
                 logger.error("Lỗi chạy batch qua API: %s", e, exc_info=True)
                 job_tracker.fail_batch(str(e), job_id=job_id)
 
-        BATCH_TASK = asyncio.create_task(
-            batch_runner(), name=f"autodub-batch-{job_id}"
-        )
+    BATCH_TASK = asyncio.create_task(
+        batch_runner(), name=f"autodub-batch-{job_id}"
+    )
 
     return JSONResponse(
         status_code=202,
