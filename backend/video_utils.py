@@ -69,15 +69,25 @@ def mix_audio_pydub(
     original_audio_path,
     dubbing_audio_files,
     output_mixed_audio_path,
-    original_volume_db=-5,
-    dubbing_volume_db=1,
+    original_volume_db=None,
+    dubbing_volume_db=None,
     strict=False,
     **kwargs,
 ):
     """
-    Trộn âm thanh bằng PyDub. Giảm âm lượng nhạc nền (-15dB, tức khoảng 15-20%) và chèn giọng đọc AI vào đúng vị trí.
+    Trộn âm thanh bằng PyDub. Điều chỉnh âm lượng nhạc nền và giọng đọc AI theo cấu hình mixer.
     """
-    print("Mixing audio tracks using pydub...")
+    try:
+        from audio_settings import get_audio_settings
+        _cfg = get_audio_settings()
+        if original_volume_db is None or original_volume_db in (-2, -5):
+            original_volume_db = _cfg.get("bgm_volume_db", -2.0)
+        if dubbing_volume_db is None or dubbing_volume_db == 1:
+            dubbing_volume_db = _cfg.get("dubbing_volume_db", 1.0)
+    except Exception:
+        if original_volume_db is None: original_volume_db = -2.0
+        if dubbing_volume_db is None: dubbing_volume_db = 1.0
+    print(f"Mixing audio tracks using pydub (BGM={original_volume_db}dB, Dubbing={dubbing_volume_db}dB)...")
     original_popen = None
     try:
         import subprocess
@@ -250,6 +260,7 @@ def process_video(
                 '-i', video_path,
                 '-i', mixed_audio_path,
                 '-vf', filter_complex,
+                '-af', 'apad',
                 '-map', '0:v',
                 '-map', '1:a',
                 '-c:v', encoder_name
