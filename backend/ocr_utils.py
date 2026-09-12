@@ -199,6 +199,7 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
             count = max(1, __import__("math").ceil((e - s) / interval))
             for n in range(count):
                 target_timestamps.append((s + (n + 0.5) * (e - s) / count, seg, seg_idx))
+        target_timestamps.sort(key=lambda item: item[0])
     else:
         # Without a transcript there is no reliable way to distinguish scene text.
         cap.release()

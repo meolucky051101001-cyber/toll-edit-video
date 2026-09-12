@@ -218,6 +218,11 @@ def _is_static_packaging_or_logo(cluster: Sequence[_Candidate]) -> bool:
     if best_text_score >= 0.45:
         return False
 
+    center = median(item.center_y for item in chosen)
+    # Mid-screen zone (0.25 - 0.68) is product packaging/scene text zone unless strongly matched to ASR
+    if 0.25 <= center <= 0.68 and best_text_score < 0.40:
+        return True
+
     texts = Counter(item.normalized_text for item in chosen if item.normalized_text)
     unique_texts = len(texts)
     sample_count = len(chosen)

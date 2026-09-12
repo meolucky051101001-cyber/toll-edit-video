@@ -111,6 +111,25 @@ class ChineseSubtitleLocatorTests(unittest.TestCase):
         self.assertEqual(selected.candidate_count, 0)
         self.assertAlmostEqual(selected.top, 0.75)
 
+    def test_midscreen_packaging_text_is_filtered_even_if_frequent(self):
+        speech = {
+            1: "今天给各位推荐一款很好用的收纳盒",
+            2: "收纳盒可以放很多小卡",
+        }
+        detections = [
+            # Mid-screen product packaging text (center_y = 0.45)
+            block(1, "优质收纳", 0.30, 0.70, 0.42, 0.48, 0.95),
+            block(2, "优质收纳", 0.30, 0.70, 0.42, 0.48, 0.95),
+            # Bottom real subtitle (center_y = 0.78)
+            block(1, "推荐一款很好用的收纳盒", 0.10, 0.90, 0.75, 0.81, 0.88),
+            block(2, "可以放很多小卡", 0.15, 0.85, 0.75, 0.81, 0.88),
+        ]
+        selected = select_chinese_subtitle_band(detections, speech, 1080, 1920)
+        self.assertEqual(selected.mode, "asr_match")
+        self.assertAlmostEqual(selected.top, 0.75)
+        self.assertAlmostEqual(selected.bottom, 0.81)
+        self.assertTrue(all("优质收纳" not in item["text"] for item in selected.selected_by_segment.values()))
+
 
 class SubtitleCoverGeometryTests(unittest.TestCase):
     def test_sticker_stays_compact_and_centered_on_source(self):
