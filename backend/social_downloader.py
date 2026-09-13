@@ -49,7 +49,11 @@ def sanitize_url(url: str) -> str:
         parsed = urlparse(url)
         if not parsed.query:
             return url
-        sensitive_keys = {"xsec_token", "token", "api_key", "secret", "auth", "signature", "key"}
+        sensitive_keys = {
+            "xsec_token", "token", "api_key", "secret", "auth",
+            "signature", "key", "shareredid", "share_id", "password",
+            "access_token",
+        }
         qsl = parse_qsl(parsed.query, keep_blank_values=True)
         sanitized_qsl = [
             (k, "[REDACTED]" if k.lower() in sensitive_keys else v)
@@ -57,7 +61,7 @@ def sanitize_url(url: str) -> str:
         ]
         return urlunparse(parsed._replace(query=urlencode(sanitized_qsl)))
     except Exception:
-        return re.sub(r"(xsec_token|token|api_key|secret)=[^&]+", r"\1=[REDACTED]", str(url))
+        return re.sub(r"(xsec_token|token|api_key|secret|shareRedId|share_id)=[^&]+", r"\1=[REDACTED]", str(url))
 
 
 USER_AGENTS = {
@@ -218,7 +222,7 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
                             logger.info(f"Tải thành công Douyin/TikTok không logo: {target_path}")
                             return True, target_path, title, ""
         except Exception as e:
-            logger.warning(f"TikWM thử link {t_url} lỗi: {e}")
+            logger.warning(f"TikWM thử link {sanitize_url(t_url)} lỗi: {e}")
 
     error = resolver_error or "Không thể bóc tách link Douyin/TikTok qua API"
     return False, "", "", error
@@ -506,7 +510,7 @@ def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
         if v_id:
             clean_target_url = f"https://www.douyin.com/video/{v_id}"
 
-    logger.info(f"Sử dụng Universal Downloader cho: {clean_target_url}")
+    logger.info(f"Sử dụng Universal Downloader cho: {sanitize_url(clean_target_url)}")
     safe_output_template = os.path.join(output_dir, f"{prefix}_%(title).30s.%(ext)s")
     
     cmd_download = [

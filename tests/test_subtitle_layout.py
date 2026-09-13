@@ -249,6 +249,26 @@ class SubtitleLayoutTests(unittest.TestCase):
             self.assertLessEqual(width, 648)
             self.assertGreaterEqual(x, 36)
 
+    def test_cover_box_edge_to_edge_ocr_strictly_obeys_90_percent_limit(self):
+        # Even if OCR spans 0.00 to 1.00 (edge-to-edge), cover MUST NEVER exceed 90%
+        from backend.pipeline_v2.segments import GeometryBlock
+        seg = RuntimeSegment(
+            index=1, start=timedelta(seconds=0), end=timedelta(seconds=2),
+            content="Toàn màn hình",
+            best_block=GeometryBlock(text="全屏字幕测试覆盖", start=0, end=2,
+                                     x_pct=0.00, max_x_pct=1.00, y_pct=0.75, max_y_pct=0.79)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "edge_to_edge.ass"
+            generate_ass_file([seg], [], path, play_res_x=1000, play_res_y=1000)
+            content = path.read_text(encoding="utf-8-sig")
+            bg_line = next(l for l in content.splitlines() if ",BgStyle," in l)
+            match = re.search(r"\\pos\((\d+),(\d+)\).*?m (\d+) [\d.]+ l [\d.]+ [\d.]+ b [\d.]+ [\d.]+ [\d.]+ (\d+)", bg_line)
+            self.assertIsNotNone(match)
+            x, _, width, _ = map(int, match.groups())
+            self.assertLessEqual(width, 648)
+            self.assertGreaterEqual(x, 36)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -80,6 +80,7 @@ def _run_ocr(payload: Mapping[str, Any]) -> Dict[str, Any]:
                 target_lang=str(payload.get("target_lang", "vi")),
                 sample_rate=float(payload.get("sample_rate", 1.0)),
                 srt_segments=batch,
+                adaptive=bool(payload.get("enable_adaptive_ocr", False)),
             )
             block_count += len(blocks)
             main_positions.append(float(main_y_pct))

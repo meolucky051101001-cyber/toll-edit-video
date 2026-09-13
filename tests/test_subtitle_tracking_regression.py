@@ -114,8 +114,9 @@ class SubtitleRegressionTests(unittest.TestCase):
         bg=next(l for l in text.splitlines() if l.startswith("Dialogue: 0,"))
         x,y=map(int,re.search(r"\\pos\((\d+),(\d+)\)",bg).groups())
         width,height=map(int,re.search(r"m (\d+) [\d.]+ l [\d.]+ [\d.]+ b [\d.]+ [\d.]+ [\d.]+ (\d+)",bg).groups())
-        self.assertEqual(x,0)
-        self.assertEqual(width,720)
+        # Hard limit: cover must always be <= 90% width (648px) and leave >= 5% margin (36px)
+        self.assertEqual(x,36)
+        self.assertEqual(width,648)
         self.assertLessEqual(y,.8*1280)
         self.assertGreaterEqual(y+height,.9*1280)
 

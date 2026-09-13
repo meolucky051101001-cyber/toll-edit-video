@@ -75,6 +75,54 @@ class TestPixelCoverQC(unittest.TestCase):
             self.assertFalse(result["all_boxes_filled"])
             self.assertLess(result["details"][0]["white_ratio"], 0.35)
 
+    def test_inspect_frame_pixel_coverage_accepts_valid_sticker_with_5_to_15_percent_text(self):
+        with tempfile.TemporaryDirectory() as td:
+            frame_file = Path(td) / "frame_valid_sticker.png"
+
+            # 1080x1920 image with background
+            arr = np.zeros((1920, 1080, 3), dtype=np.uint8)
+            # Fill sticker box [100, 1500, 980, 1650] with white/light sticker background
+            arr[1500:1650, 100:980] = [240, 240, 240]
+            # Draw dark subtitle text characters occupying ~9% of the sticker (between 5% and 15%)
+            # Sticker area = 150 * 880 = 132,000 px. Text = 15 * 780 = 11,700 px (8.86%)
+            arr[1560:1575, 150:930] = [20, 20, 20]
+            img = Image.fromarray(arr)
+            img.save(frame_file)
+
+            covers = [
+                (0.0, 5.0, 100, 1500, 980, 1650)
+            ]
+
+            result = inspect_frame_pixel_coverage(
+                frame_file, covers, canvas_w=1080, canvas_h=1920, timestamp=2.0
+            )
+            self.assertTrue(result["checked"])
+            self.assertTrue(result["all_boxes_filled"])
+            detail = result["details"][0]
+            self.assertGreaterEqual(detail["foreground_ratio"], 0.05)
+            self.assertLessEqual(detail["foreground_ratio"], 0.15)
+            self.assertGreaterEqual(detail["white_ratio"], 0.85)
+
+    def test_inspect_frame_pixel_coverage_rejects_insufficient_white_cover_at_50_percent(self):
+        with tempfile.TemporaryDirectory() as td:
+            frame_file = Path(td) / "frame_50_pct.png"
+
+            # Image where only 50% of the sticker is white (would wrongly pass under 35% threshold)
+            arr = np.zeros((1920, 1080, 3), dtype=np.uint8)
+            arr[1500:1575, 100:980] = [245, 245, 245] # 75px / 150px = 50%
+            img = Image.fromarray(arr)
+            img.save(frame_file)
+
+            covers = [
+                (0.0, 5.0, 100, 1500, 980, 1650)
+            ]
+
+            result = inspect_frame_pixel_coverage(
+                frame_file, covers, canvas_w=1080, canvas_h=1920, timestamp=2.0
+            )
+            self.assertTrue(result["checked"])
+            self.assertFalse(result["all_boxes_filled"]) # Must FAIL because white_ratio < 0.65
+
     def test_pixel_cover_qc_failure_blocks_delivery_when_policy_is_block(self):
         from backend.pipeline_v2.qc import evaluate_qc_gate
 

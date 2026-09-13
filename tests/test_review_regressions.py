@@ -122,7 +122,14 @@ class PipelineRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(runner._load_segments("transcript/segments.json")), 1)
 
     async def test_style_is_written_to_ass_and_preserved_on_resume(self):
-        self.request = replace(self.request, font_name="Tahoma", font_color="&H0000FF00", font_weight=1)
+        self.request = replace(
+            self.request,
+            font_name="Tahoma",
+            font_color="&H0000FF00",
+            font_weight=1,
+            speaker_map={"SPEAKER_00": "male"},
+            speaker_voice_map={"male": "vi-VN-NamMinhNeural"},
+        )
         runner = self.runner()
         await runner._subtitles_stage([segment("Xin chào")])
         ass = runner.artifact_store.path_for("subtitles/final.ass").read_text(encoding="utf-8-sig")
@@ -136,6 +143,8 @@ class PipelineRegressionTests(unittest.IsolatedAsyncioTestCase):
             resumed_request = factory.call_args.args[0]
             self.assertEqual((resumed_request.font_name, resumed_request.font_color, resumed_request.font_weight),
                              ("Tahoma", "&H0000FF00", 1))
+            self.assertEqual(resumed_request.speaker_map, {"SPEAKER_00": "male"})
+            self.assertEqual(resumed_request.speaker_voice_map, {"male": "vi-VN-NamMinhNeural"})
         self.request = replace(self.request, font_color="&H000000FF")
         self.assertNotEqual(runner._batch_scope, self.runner()._batch_scope)
 

@@ -27,6 +27,9 @@ BACKEND_DIR = PROJECT_ROOT / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from environment import load_environment
+load_environment(BACKEND_DIR)
+
 logger = logging.getLogger("benchmark_v2")
 logging.basicConfig(
     level=logging.INFO,
@@ -158,8 +161,38 @@ class BenchmarkResult:
 
 
 def create_synthetic_video(output_path: Path, duration_seconds: float) -> Path:
-    """Generate a lightweight synthetic MP4 with video and audio tracks for benchmarking."""
+    """Generate or loop an MP4 clip with real speech audio for reliable benchmarking."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    downloads = PROJECT_ROOT / "workspace" / "downloads"
+    sample_videos = sorted(downloads.glob("queue_9b27caac*.mp4"))
+    if not sample_videos:
+        sample_videos = sorted(downloads.glob("queue_*.mp4"))
+    real_sample = next((v for v in sample_videos if v.stat().st_size > 1000000 and not v.name.endswith(".part")), None)
+    if real_sample and real_sample.is_file():
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-stream_loop",
+            "-1",
+            "-i",
+            str(real_sample),
+            "-t",
+            f"{duration_seconds:.2f}",
+            "-c",
+            "copy",
+            str(output_path),
+        ]
+        try:
+            subprocess.run(command, check=True, timeout=120)
+            if output_path.is_file() and output_path.stat().st_size > 10000:
+                return output_path
+        except Exception:
+            pass
+
+    # Fallback to pure synthetic video if no sample video is present
     command = [
         "ffmpeg",
         "-hide_banner",
@@ -243,6 +276,9 @@ async def run_single_benchmark(
         enable_gpu_process_isolation=enable_gpu_isolation,
         translation_batch_segments=80,
         translation_batch_characters=12000,
+        enable_timing_solver=True,
+        enable_ffmpeg_mix_v2=True,
+        enable_adaptive_ocr=True,
     )
 
     request = VideoPipelineRequest(
@@ -252,6 +288,7 @@ async def run_single_benchmark(
         settings=settings,
         target_lang="vi",
         voice_source="edge",
+        api_key=os.getenv("GEMINI_API_KEY", ""),
     )
 
     if simulate:
@@ -433,6 +470,11 @@ async def main_async(args: argparse.Namespace) -> int:
         }
         output_report.write_text(json.dumps(json_data, indent=2, ensure_ascii=False), encoding="utf-8")
         logger.info("Saved benchmark report to: %s", output_report)
+
+        any_failed = any(r.error_count > 0 or "FAILED" in r.status for r in results)
+        if any_failed:
+            logger.error("Benchmark finished with failures!")
+            return 1
         return 0
     finally:
         temp_dir_ctx.cleanup()

@@ -42,6 +42,8 @@ class ResumableVideoJob:
     font_name: str = "Arial"
     font_color: str = "&H00000000"
     font_weight: int = 2
+    speaker_map: Optional[Dict[str, str]] = None
+    speaker_voice_map: Optional[Dict[str, str]] = None
 
 
 def _published_outputs_present(manifest: Any) -> bool:
@@ -114,6 +116,8 @@ def find_resumable_jobs(workspace: Path) -> List[ResumableVideoJob]:
                     font_name=str(request.get("font_name", "Arial")),
                     font_color=str(request.get("font_color", "&H00000000")),
                     font_weight=int(request.get("font_weight", 2)),
+                    speaker_map=request.get("speaker_map"),
+                    speaker_voice_map=request.get("speaker_voice_map"),
                 )
             )
         except (OSError, KeyError, TypeError, ValueError):
@@ -171,5 +175,7 @@ async def resume_video_job(
         font_name=job.font_name,
         font_color=job.font_color,
         font_weight=job.font_weight,
+        speaker_map=job.speaker_map,
+        speaker_voice_map=job.speaker_voice_map,
     )
     return await VideoPipelineRunner(request).run()

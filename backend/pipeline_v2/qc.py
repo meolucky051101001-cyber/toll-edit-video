@@ -37,6 +37,7 @@ class QCSettings:
     subtitle_safe_margin_y_pct: float = 0.05
     sample_frames: bool = True
     command_timeout_seconds: float = 120.0
+    gate_policy: str = "block"
 
 
 @dataclass(frozen=True)
@@ -851,9 +852,11 @@ def run_report_only_qc(
                 loaded_segs = _load_segments(Path(segments_path))
                 # 1. Diagnostic frame at sentence transitions
                 for idx, seg in enumerate(loaded_segs[:4]):
+                    start_sec = float(seg.get("start", 0.0))
                     end_sec = float(seg.get("end", 0.0))
-                    if 0.2 <= end_sec <= max(0.0, video_duration - 0.5):
-                        diagnostic_points.append((f"transition_{idx}", end_sec))
+                    mid_sec = round((start_sec + end_sec) / 2.0, 2)
+                    if 0.2 <= mid_sec <= max(0.0, video_duration - 0.5):
+                        diagnostic_points.append((f"transition_{idx}", mid_sec))
                 # 2. Diagnostic frame at weak OCR and near-edge candidates
                 weak_i, edge_i = 0, 0
                 for seg in loaded_segs:
@@ -892,13 +895,17 @@ def run_report_only_qc(
 
             # Pixel-level inspection on sampled diagnostic frames
             if subtitles is not None and subtitles.is_file() and frame_artifacts:
+                pol = getattr(config, "gate_policy", getattr(config, "qc_gate_policy", None))
+                gate_policy_str = str(getattr(pol, "value", pol) if pol is not None else os.getenv("QC_GATE_POLICY", "block")).lower()
+                is_block = gate_policy_str == "block"
                 try:
                     from .cover_qc import parse_ass_covers, inspect_frame_pixel_coverage
                     ass_covers, cw, ch = parse_ass_covers(subtitles.read_text(encoding="utf-8-sig"))
                     pixel_results = []
                     for art in frame_artifacts:
-                        fpath = diagnostics / art.get("artifact_key", "")
-                        ts = art.get("timestamp_seconds")
+                        key_name = art.get("key") or art.get("artifact_key", "")
+                        fpath = diagnostics / key_name
+                        ts = art.get("metadata", {}).get("timestamp_seconds", art.get("timestamp_seconds"))
                         if fpath.is_file():
                             pix_res = inspect_frame_pixel_coverage(fpath, ass_covers, canvas_w=cw, canvas_h=ch, timestamp=ts)
                             if pix_res.get("checked"):
@@ -911,8 +918,6 @@ def run_report_only_qc(
                             "all_boxes_filled": all_filled,
                             "results": pixel_results,
                         }
-                        gate_policy_str = str(getattr(config.gate_policy, "value", config.gate_policy)).lower()
-                        is_block = gate_policy_str == "block" or os.getenv("QC_GATE_POLICY", "block").lower() == "block"
                         qc_status = "pass" if all_filled else ("error" if is_block else "warning")
                         report.add(
                             "pixel_cover_qc",
@@ -922,8 +927,33 @@ def run_report_only_qc(
                             else "Some output frame pixels showed incomplete cover fill (exposed source text / insufficient cover)",
                             {"checked_frames": len(pixel_results), "gate_policy": gate_policy_str},
                         )
+                    elif ass_covers:
+                        # Fail-closed: ASS covers were defined but no sampled frame pixel result could be generated
+                        report.metrics["pixel_cover_qc"] = {
+                            "checked_frames": 0,
+                            "all_boxes_filled": False,
+                            "reason": "no_pixel_results_generated",
+                        }
+                        qc_status = "error" if is_block else "warning"
+                        report.add(
+                            "pixel_cover_qc",
+                            qc_status,
+                            "ASS covers were defined but no sampled frame pixel result could be produced for verification",
+                            {"checked_frames": 0, "gate_policy": gate_policy_str},
+                        )
                 except Exception as exc:
                     logger.debug("Pixel cover check error: %s", exc)
+                    report.metrics["pixel_cover_qc"] = {
+                        "checked_frames": 0,
+                        "all_boxes_filled": False,
+                        "error": str(exc),
+                    }
+                    report.add(
+                        "pixel_cover_qc",
+                        "error" if is_block else "warning",
+                        f"Failed to execute pixel cover QC: {exc}",
+                        {"checked_frames": 0, "gate_policy": gate_policy_str},
+                    )
         except (OSError, subprocess.SubprocessError) as exc:
             report.add("frame_samples", "warning", "Could not sample frames: {}".format(exc))
 

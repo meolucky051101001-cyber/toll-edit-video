@@ -104,3 +104,59 @@ class VisualReuseTests(unittest.TestCase):
         result = select_chinese_subtitle_band(rows, speech, 1080, 1920)
         self.assertNotIn(2, result.selected_by_segment)
         self.assertNotIn(3, result.selected_by_segment)
+
+    def test_adaptive_ocr_coarse_scanning_reduces_sample_count(self):
+        import importlib
+        module = importlib.import_module("backend.ocr_utils")
+        from datetime import timedelta
+        from types import SimpleNamespace
+
+        # 10 segments of 3 seconds each
+        segments = [
+            SimpleNamespace(
+                index=i,
+                start=timedelta(seconds=(i - 1) * 3.0),
+                end=timedelta(seconds=i * 3.0),
+                content="测试自适应OCR粗扫描",
+                best_block=None,
+                tracking_blocks=[],
+            )
+            for i in range(1, 11)
+        ]
+
+        dense_timestamps = []
+        adaptive_timestamps = []
+
+        # Intercept capture
+        cap = SimpleNamespace(
+            isOpened=lambda: True,
+            set=lambda *args: True,
+            read=lambda: (True, np.zeros((1280, 720, 3), dtype=np.uint8)),
+            get=lambda p: {cv2.CAP_PROP_FRAME_COUNT: 1000, cv2.CAP_PROP_FRAME_WIDTH: 720, cv2.CAP_PROP_FRAME_HEIGHT: 1280, cv2.CAP_PROP_FPS: 30}.get(p, 0),
+            release=lambda: None,
+        )
+
+        dense_calls = []
+        def count_dense(imgs):
+            dense_calls.extend(imgs)
+            return [[] for _ in imgs]
+
+        adaptive_calls = []
+        def count_adaptive(imgs):
+            adaptive_calls.extend(imgs)
+            return [[] for _ in imgs]
+
+        with patch.object(module.cv2, "VideoCapture", return_value=cap), \
+             patch.object(module, "_readtext_batch", side_effect=count_dense):
+            # Dense scan (adaptive=False)
+            module.perform_video_ocr("fixture.mp4", srt_segments=segments, adaptive=False)
+
+        with patch.object(module.cv2, "VideoCapture", return_value=cap), \
+             patch.object(module, "_readtext_batch", side_effect=count_adaptive):
+            # Adaptive scan (adaptive=True)
+            module.perform_video_ocr("fixture.mp4", srt_segments=segments, adaptive=True)
+
+        # Adaptive coarse scanning must use at least 50% fewer samples than dense
+        self.assertGreater(len(dense_calls), 0)
+        self.assertGreater(len(adaptive_calls), 0)
+        self.assertLess(len(adaptive_calls), len(dense_calls) * 0.5)

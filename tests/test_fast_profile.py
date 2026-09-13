@@ -63,3 +63,65 @@ class FastProfileTests(unittest.TestCase):
             self.assertIn("2.4", payload)
             self.assertIn("38", payload)
             self.assertIn("giữ đủ ý chính", payload)
+
+    def test_provider_voice_filtering_in_tts(self):
+        import asyncio
+        from datetime import timedelta
+        from backend.pipeline_v2.segments import RuntimeSegment
+        from backend.pipeline_v2.tts import generate_tts_audio_v2
+
+        with tempfile.TemporaryDirectory() as td:
+            seg = RuntimeSegment(
+                index=1,
+                start=timedelta(seconds=0),
+                end=timedelta(seconds=2),
+                content="Xin chào các bạn",
+                gender="male",
+            )
+
+            capcut_calls = []
+            def fake_capcut(text, out, voice):
+                capcut_calls.append(voice)
+                Path(out).write_bytes(b"dummy")
+
+            edge_calls = []
+            async def fake_edge(text, out, voice, **kwargs):
+                edge_calls.append(voice)
+                Path(out).write_bytes(b"dummy")
+
+            import sys
+            from backend.ai import voice_cloning as vc
+            sys.modules["ai.voice_cloning"] = vc
+            fake_fit = mock.Mock(fitted_path=Path(td) / "1.mp3", fits=True, actual_duration=1.0, target_duration=1.0, stretch_factor=1.0, method="fit")
+            # Case 1: Incompatible Edge voice mapped for CapCut provider -> must be ignored!
+            with mock.patch.object(vc, "_run_capcut_tts", side_effect=fake_capcut), \
+                 mock.patch.object(vc, "generate_tts_edge", side_effect=fake_edge), \
+                 mock.patch("backend.pipeline_v2.tts.fit_audio_to_window", return_value=fake_fit):
+                asyncio.run(
+                    generate_tts_audio_v2(
+                        [seg],
+                        td,
+                        voice_source="capcut",
+                        voice_param="BV562_streaming",
+                        speaker_voice_map={"male": "vi-VN-NamMinhNeural"},
+                    )
+                )
+            # Must NOT call CapCut with Edge voice "vi-VN-NamMinhNeural"
+            self.assertNotIn("vi-VN-NamMinhNeural", capcut_calls)
+            self.assertIn("BV562_streaming", capcut_calls)
+
+            # Case 2: Compatible CapCut voice mapped -> applied
+            capcut_calls.clear()
+            with mock.patch.object(vc, "_run_capcut_tts", side_effect=fake_capcut), \
+                 mock.patch.object(vc, "generate_tts_edge", side_effect=fake_edge), \
+                 mock.patch("backend.pipeline_v2.tts.fit_audio_to_window", return_value=fake_fit):
+                asyncio.run(
+                    generate_tts_audio_v2(
+                        [seg],
+                        td,
+                        voice_source="capcut",
+                        voice_param="BV562_streaming",
+                        speaker_voice_map={"male": "BV075_streaming"},
+                    )
+                )
+            self.assertEqual(capcut_calls, ["BV075_streaming"])

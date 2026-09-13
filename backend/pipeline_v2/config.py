@@ -52,7 +52,7 @@ class PipelineSettings:
     enable_stage_cache: bool = False
     enable_parallel_ocr_gemini: bool = False
     enable_adaptive_demucs: bool = False
-    enable_adaptive_ocr: bool = False
+    enable_adaptive_ocr: bool = True
     preserve_source_resolution: bool = True
     enable_gpu_process_isolation: bool = True
     enable_timing_solver: bool = True

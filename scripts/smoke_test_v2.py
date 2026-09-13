@@ -105,6 +105,15 @@ async def run_smoke_test():
         print(f"FAIL: Blocking QC errors found: {[c.get('name') for c in error_checks]}")
         return 1
 
+    pixel_check = next((c for c in checks if c.get("name") == "pixel_cover_qc"), None)
+    if not pixel_check:
+        print("FAIL: pixel_cover_qc check is missing from QC report")
+        return 1
+    if pixel_check.get("status") != "pass":
+        print(f"FAIL: pixel_cover_qc check status is {pixel_check.get('status')}, expected 'pass'")
+        return 1
+    print(f"SUCCESS: pixel_cover_qc check passed: {pixel_check.get('message')}")
+
     if "pixel_cover_qc" in qc_data.get("metrics", {}):
         print(f"SUCCESS: Pixel cover QC metric = {qc_data['metrics']['pixel_cover_qc']}")
 

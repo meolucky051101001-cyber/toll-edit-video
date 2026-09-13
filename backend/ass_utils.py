@@ -322,28 +322,24 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     text_cover_w = actual_text_w + (sticker_padding_x * 2)
                     text_cover_h = required_text_h + (sticker_padding_y * 2)
 
-                    # HARD LIMIT: Never exceed 90% of canvas width unless source Chinese subtitle explicitly spans edge-to-edge
+                    # HARD LIMIT: Cover must ALWAYS be <= 90% of canvas width, leaving at least 5% margin on each side
                     max_allowed_cover_w = int(canvas_x * 0.90)
-                    target_visible_w = max(min_cover_w, text_cover_w)
-                    if not (source_left_pct <= 0.02 and source_right_pct >= 0.98):
-                        target_visible_w = min(target_visible_w, max_allowed_cover_w)
-                    else:
-                        target_visible_w = min(target_visible_w, canvas_x)
+                    target_visible_w = min(max(min_cover_w, text_cover_w), max_allowed_cover_w)
                     target_visible_h = min(canvas_y, max(min_cover_h, text_cover_h))
 
                     # Because BgStyle has Outline=outline, ASS drawing dimensions
                     # produce a visible box of size (draw_w + outline*2, draw_h + outline*2)
                     draw_w = max(4, target_visible_w - (outline * 2))
                     # Even widths allow exact integer-pixel centering.
-                    draw_w = min(canvas_x, 2 * math.ceil(draw_w / 2))
+                    draw_w = min(max_allowed_cover_w, 2 * math.ceil(draw_w / 2))
                     draw_h = max(4, target_visible_h - (outline * 2))
 
                     # Lock horizontal position; only Y follows the subtitle track.
                     draw_x = chinese_center_x - (draw_w // 2)
                     draw_y = chinese_center_y - (draw_h // 2)
 
-                    # Clamp to screen margins
-                    min_margin = 0
+                    # Clamp to screen margins: always leave at least 5% margin on each side
+                    min_margin = int(canvas_x * 0.05)
                     if draw_x < min_margin:
                         draw_x = min_margin
                     if draw_x + draw_w > canvas_x - min_margin:

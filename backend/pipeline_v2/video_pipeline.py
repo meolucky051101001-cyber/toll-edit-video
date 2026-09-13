@@ -403,6 +403,8 @@ class VideoPipelineRunner:
                     "font_name": self.request.font_name,
                     "font_color": self.request.font_color,
                     "font_weight": self.request.font_weight,
+                    "speaker_map": self.request.speaker_map,
+                    "speaker_voice_map": self.request.speaker_voice_map,
                 },
             },
         )
@@ -717,6 +719,7 @@ class VideoPipelineRunner:
                     "target_lang": self.request.target_lang,
                     "segments": segments_to_dicts(transcript),
                     "batch_segments": self.request.settings.ocr_batch_segments,
+                    "enable_adaptive_ocr": self.request.settings.enable_adaptive_ocr,
                 },
                 self._resource_scaled_timeout(),
             )
@@ -736,6 +739,7 @@ class VideoPipelineRunner:
                         1.0,
                         None,
                         batch,
+                        adaptive=self.request.settings.enable_adaptive_ocr,
                     )
                     main_positions.append(float(main_y_pct))
             finally:

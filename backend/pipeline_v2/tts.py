@@ -58,17 +58,27 @@ async def generate_tts_audio_v2(
             speaker_id = str(getattr(segment, "speaker_id", "") or "").strip()
             mapped_voice = None
             if speaker_voice_map:
+                candidate = None
                 if speaker_id and speaker_id in speaker_voice_map:
-                    mapped_voice = speaker_voice_map[speaker_id]
+                    candidate = speaker_voice_map[speaker_id]
                 elif seg_gender in speaker_voice_map:
-                    mapped_voice = speaker_voice_map[seg_gender]
+                    candidate = speaker_voice_map[seg_gender]
+
+                # Only use candidate if it is valid for the current voice_source/provider
+                if candidate:
+                    cand_str = str(candidate).strip()
+                    if voice_source == "capcut" and cand_str.startswith("BV"):
+                        mapped_voice = cand_str
+                    elif voice_source == "edge" and cand_str.startswith("vi-"):
+                        mapped_voice = cand_str
+                    elif voice_source == "fpt" and cand_str in {"banmai", "leminh", "myan", "thuminh", "giahuy"}:
+                        mapped_voice = cand_str
 
             if mapped_voice:
-                if mapped_voice.startswith("BV") or voice_source == "capcut":
+                if voice_source == "capcut" or mapped_voice.startswith("BV"):
                     await asyncio.to_thread(_run_capcut_tts, text, str(raw), mapped_voice)
                 elif voice_source == "fpt" or mapped_voice in {"banmai", "leminh", "myan", "thuminh", "giahuy"}:
-                    fpt_voice = mapped_voice if not mapped_voice.startswith("vi-") else "banmai"
-                    await generate_tts_fpt(text, str(raw), api_key, voice=fpt_voice)
+                    await generate_tts_fpt(text, str(raw), api_key, voice=mapped_voice)
                 else:
                     pitch = "+15Hz" if mapped_voice == "vi-VN-HoaiMyNeural" else "+0Hz"
                     rate = "+15%" if mapped_voice == "vi-VN-HoaiMyNeural" else "+5%"

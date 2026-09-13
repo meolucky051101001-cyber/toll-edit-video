@@ -178,27 +178,54 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
 
     # === TỐI ƯU HÓA SIÊU TỐC OCR THEO TỪNG ĐOẠN THOẠI ===
     target_timestamps = []
+    is_adaptive = bool(kwargs.get("adaptive", False))
+    interval = max(0.08, min(0.5, float(os.getenv("OCR_TRACK_INTERVAL", "0.2"))))
+
     if srt_segments:
-        # Cover every speech segment; process recognition in bounded batches.
-        for seg_idx, seg in enumerate(srt_segments):
-            s = seg.start.total_seconds()
-            e = seg.end.total_seconds()
-            if e <= s:
-                continue
-            # Fixed temporal cadence rather than three snapshots per long ASR cue.
-            interval = max(0.08, min(0.5, float(os.getenv("OCR_TRACK_INTERVAL", "0.2"))))
-            # Visual subtitles can lead/lag ASR boundaries. Sample a bounded
-            # overlap using this cue's transcript, never unrelated scene text.
-            s = max(0.0, s - 0.3)
-            # Include silent gaps: burnt-in captions often outlive the speech.
-            next_start = (srt_segments[seg_idx + 1].start.total_seconds()
-                          if seg_idx + 1 < len(srt_segments) else duration)
-            e = max(e, next_start) + 0.3
-            if duration > 0:
-                e = min(e, duration)
-            count = max(1, __import__("math").ceil((e - s) / interval))
-            for n in range(count):
-                target_timestamps.append((s + (n + 0.5) * (e - s) / count, seg, seg_idx))
+        if is_adaptive:
+            # Coarse scan per sentence; sample coarse checkpoints, only refine at boundaries/changes
+            for seg_idx, seg in enumerate(srt_segments):
+                s = seg.start.total_seconds()
+                e = seg.end.total_seconds()
+                if e <= s:
+                    continue
+                s_bound = max(0.0, s - 0.2)
+                next_start = (srt_segments[seg_idx + 1].start.total_seconds()
+                              if seg_idx + 1 < len(srt_segments) else duration)
+                e_bound = max(e, next_start) + 0.2
+                if duration > 0:
+                    e_bound = min(e_bound, duration)
+
+                # Coarse anchor: center of the sentence
+                t_mid = (s + e) / 2.0
+                target_timestamps.append((t_mid, seg, seg_idx))
+
+                # If sentence is sufficiently long, sample onset and offset for refinement
+                if e - s > 1.2:
+                    t_on = s + 0.2
+                    t_off = max(s + 0.4, e - 0.2)
+                    target_timestamps.append((t_on, seg, seg_idx))
+                    target_timestamps.append((t_off, seg, seg_idx))
+                # If there is a transition to the next sentence within 0.8s, add boundary sample
+                if next_start - e < 0.8 and next_start > e:
+                    target_timestamps.append(((e + next_start) / 2.0, seg, seg_idx))
+        else:
+            # Dense temporal cadence (legacy / regression test compatibility)
+            for seg_idx, seg in enumerate(srt_segments):
+                s = seg.start.total_seconds()
+                e = seg.end.total_seconds()
+                if e <= s:
+                    continue
+                s = max(0.0, s - 0.3)
+                next_start = (srt_segments[seg_idx + 1].start.total_seconds()
+                              if seg_idx + 1 < len(srt_segments) else duration)
+                e = max(e, next_start) + 0.3
+                if duration > 0:
+                    e = min(e, duration)
+                count = max(1, __import__("math").ceil((e - s) / interval))
+                for n in range(count):
+                    target_timestamps.append((s + (n + 0.5) * (e - s) / count, seg, seg_idx))
+
         target_timestamps.sort(key=lambda item: item[0])
     else:
         # Without a transcript there is no reliable way to distinguish scene text.

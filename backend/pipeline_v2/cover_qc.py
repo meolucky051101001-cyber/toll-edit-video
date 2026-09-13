@@ -78,11 +78,13 @@ def inspect_frame_pixel_coverage(frame_path, covers, canvas_w=1080, canvas_h=192
     if not p.is_file():
         return {"checked": False, "reason": "frame_file_missing"}
 
-    # Filter active covers if timestamp is provided
+    # Filter active covers if timestamp is provided.
+    # ASS dialog events are displayed on [start, end), so a frame sampled at
+    # or after end time does not have the subtitle active.
     active = covers
     if timestamp is not None:
         t = float(timestamp)
-        active = [c for c in covers if c[0] <= t <= c[1]]
+        active = [c for c in covers if c[0] <= t < (c[1] - 0.01)]
     if not active:
         return {"checked": False, "reason": "no_active_covers_at_timestamp"}
 
@@ -109,13 +111,36 @@ def inspect_frame_pixel_coverage(frame_path, covers, canvas_w=1080, canvas_h=192
                 continue
 
             patch = arr[py1:py2, px1:px2]
-            # White sticker cover: check high brightness pixels
-            is_white = (patch[:, :, 0] > 190) & (patch[:, :, 1] > 190) & (patch[:, :, 2] > 190)
+            h, w = patch.shape[:2]
+            if h < 2 or w < 2:
+                continue
+
+            # Bright sticker background pixels (white / off-white #F0F0F0)
+            is_white = (patch[:, :, 0] > 185) & (patch[:, :, 1] > 185) & (patch[:, :, 2] > 185)
             white_ratio = float(np.mean(is_white))
+
+            # Foreground subtitle text pixels (dark characters, typically 5-15% of sticker)
+            is_dark_fg = (patch[:, :, 0] < 85) & (patch[:, :, 1] < 85) & (patch[:, :, 2] < 85)
+            foreground_ratio = float(np.mean(is_dark_fg))
+
+            # Total accounted area (sticker background + valid foreground text)
+            total_accounted = white_ratio + foreground_ratio
+
+            # A valid subtitle sticker must have a dominant white background (>= 65%),
+            # reasonable foreground text coverage (<= 25%), and total accounted area >= 80%.
+            # This prevents exposed video scenes or Chinese text bleed (which fail to form a valid sticker).
+            has_cover_fill = (
+                white_ratio >= 0.65
+                and foreground_ratio <= 0.25
+                and total_accounted >= 0.80
+            )
+
             checked_boxes.append({
                 "bbox": [px1, py1, px2, py2],
                 "white_ratio": round(white_ratio, 3),
-                "has_cover_fill": white_ratio >= 0.35,
+                "foreground_ratio": round(foreground_ratio, 3),
+                "total_accounted": round(total_accounted, 3),
+                "has_cover_fill": has_cover_fill,
             })
 
         all_ok = all(b["has_cover_fill"] for b in checked_boxes) if checked_boxes else True

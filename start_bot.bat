@@ -36,8 +36,8 @@ start /b cmd /c "npm run dev"
 :: Đợi 2 giây để Frontend kịp chạy
 ping 127.0.0.1 -n 3 > NUL
 
-:: Dọn dẹp tiến trình telegram_bot cũ nếu có để tránh chạy trùng lặp
-powershell -Command "Get-CimInstance Win32_Process -Filter \"Name like 'python%'\" | Where-Object { $_.CommandLine -like '*telegram_bot.py*' } | Stop-Process -Force" >NUL 2>&1
+:: Dọn dẹp tiến trình telegram_bot cũ của riêng Tool V2 (tuyệt đối không tắt Tool V1)
+powershell -Command "$proj = '%PROJECT_DIR%'.TrimEnd('\'); Get-CimInstance Win32_Process -Filter \"Name like 'python%'\" | Where-Object { ($_.CommandLine -like ('*' + $proj + '*telegram_bot.py*') -or $_.CommandLine -like '*tool v2*telegram_bot.py*') -and $_.CommandLine -notlike '*tool v1*' } | Stop-Process -Force" >NUL 2>&1
 
 :: Khởi động Backend (Telegram Bot) ngầm
 cd /d "%PROJECT_DIR%backend"
