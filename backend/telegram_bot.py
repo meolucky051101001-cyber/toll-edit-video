@@ -71,6 +71,7 @@ from ai.translation import translate_subtitles
 from ai.voice_cloning import generate_dubbing_audio
 from telegram_jobs import TelegramJobPaths, build_v2_completion_caption
 from url_utils import extract_http_urls
+from social_downloader import sanitize_url
 from video_utils import extract_audio_from_video, mix_audio_pydub, process_video
 
 WORKSPACE = os.path.abspath(
@@ -946,7 +947,7 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
     except subprocess.TimeoutExpired:
         await safe_edit_status(status_msg, "❌ Tải video quá lâu (>5 phút). Thử link khác nhé!")
     except Exception as e:
-        logger.error(f"Error processing {url}: {e}", exc_info=True)
+        logger.error(f"Error processing {sanitize_url(url)}: {e}", exc_info=True)
         await safe_edit_status(status_msg, f"❌ Lỗi xử lý:\n{str(e)[:500]}")
 
 

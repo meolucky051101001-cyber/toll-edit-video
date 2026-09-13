@@ -71,6 +71,60 @@ class SegmentQcTests(unittest.TestCase):
             self.assertEqual(metrics["timing_failure_ids"], [1])
             self.assertEqual(by_name["segment_timing"].status, "error")
             self.assertEqual(by_name["translation_fallback"].status, "error")
+            self.assertEqual(by_name["tts_integrity"].status, "skipped")
+
+    def test_tts_integrity_pass_and_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "voice.wav"
+            audio.write_bytes(b"voice")
+            path = Path(directory) / "segments.json"
+
+            # Case 1: Pass without silent fallback
+            path.write_text(
+                json.dumps(
+                    {
+                        "segments": [
+                            {
+                                "index": 1,
+                                "start": 0.0,
+                                "end": 1.0,
+                                "content": "Xin chào",
+                                "audio_path": str(audio),
+                                "is_silent_fallback": False,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            metrics, checks = _check_segments(path)
+            by_name = {check.name: check for check in checks}
+            self.assertEqual(by_name["tts_integrity"].status, "pass")
+            self.assertEqual(metrics["tts_degraded_segments"], 0)
+
+            # Case 2: Degraded with silent fallback
+            path.write_text(
+                json.dumps(
+                    {
+                        "segments": [
+                            {
+                                "index": 1,
+                                "start": 0.0,
+                                "end": 1.0,
+                                "content": "Xin chào",
+                                "audio_path": str(audio),
+                                "is_silent_fallback": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            metrics, checks = _check_segments(path)
+            by_name = {check.name: check for check in checks}
+            self.assertEqual(by_name["tts_integrity"].status, "error")
+            self.assertEqual(metrics["tts_degraded_segments"], 1)
+            self.assertEqual(metrics["tts_degraded_segment_ids"], [1])
 
 
 class SubtitleQcTests(unittest.TestCase):

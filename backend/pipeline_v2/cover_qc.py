@@ -143,7 +143,19 @@ def inspect_frame_pixel_coverage(frame_path, covers, canvas_w=1080, canvas_h=192
                 "has_cover_fill": has_cover_fill,
             })
 
-        all_ok = all(b["has_cover_fill"] for b in checked_boxes) if checked_boxes else True
+        if not checked_boxes:
+            # Active covers existed at this timestamp, but none produced a valid bounding box on this frame
+            return {
+                "checked": True,
+                "frame": p.name,
+                "timestamp": timestamp,
+                "boxes_checked": 0,
+                "all_boxes_filled": False,
+                "reason": "active_covers_unverifiable_or_degenerate",
+                "details": [],
+            }
+
+        all_ok = all(b["has_cover_fill"] for b in checked_boxes)
         return {
             "checked": True,
             "frame": p.name,

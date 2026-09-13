@@ -117,6 +117,15 @@ async def run_smoke_test():
     if "pixel_cover_qc" in qc_data.get("metrics", {}):
         print(f"SUCCESS: Pixel cover QC metric = {qc_data['metrics']['pixel_cover_qc']}")
 
+    tts_check = next((c for c in checks if c.get("name") == "tts_integrity"), None)
+    if not tts_check:
+        print("FAIL: tts_integrity check is missing from QC report")
+        return 1
+    if tts_check.get("status") != "pass":
+        print(f"FAIL: tts_integrity check status is {tts_check.get('status')}, expected 'pass'")
+        return 1
+    print(f"SUCCESS: tts_integrity check passed: {tts_check.get('message')}")
+
     # Save summary manifest for audit inspection
     summary = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),

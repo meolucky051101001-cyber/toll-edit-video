@@ -263,7 +263,7 @@ async def run_single_benchmark(
     from pipeline_v2.config import PipelineMode, PipelineSettings
     from pipeline_v2.video_pipeline import VideoPipelineRequest, VideoPipelineRunner
 
-    job_dir = work_dir / f"bench_{mode}_{int(duration_minutes * 60)}s"
+    job_dir = work_dir / f"bench_{int(duration_minutes * 60)}s"
     output_video = job_dir / "output.mp4"
     if mode == "cold" and job_dir.exists():
         import shutil
@@ -272,7 +272,7 @@ async def run_single_benchmark(
 
     settings = PipelineSettings(
         mode=PipelineMode.V2,
-        enable_stage_cache=(mode == "warm"),
+        enable_stage_cache=True,
         enable_gpu_process_isolation=enable_gpu_isolation,
         translation_batch_segments=80,
         translation_batch_characters=12000,

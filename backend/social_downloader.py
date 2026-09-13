@@ -52,7 +52,8 @@ def sanitize_url(url: str) -> str:
         sensitive_keys = {
             "xsec_token", "token", "api_key", "secret", "auth",
             "signature", "key", "shareredid", "share_id", "password",
-            "access_token",
+            "access_token", "sign", "sig", "pass", "ticket", "session",
+            "credential", "hash",
         }
         qsl = parse_qsl(parsed.query, keep_blank_values=True)
         sanitized_qsl = [
@@ -61,7 +62,7 @@ def sanitize_url(url: str) -> str:
         ]
         return urlunparse(parsed._replace(query=urlencode(sanitized_qsl)))
     except Exception:
-        return re.sub(r"(xsec_token|token|api_key|secret|shareRedId|share_id)=[^&]+", r"\1=[REDACTED]", str(url))
+        return re.sub(r"(xsec_token|token|api_key|secret|shareRedId|share_id|sign|sig|pass|ticket|session)=[^&]+", r"\1=[REDACTED]", str(url), flags=re.IGNORECASE)
 
 
 USER_AGENTS = {
@@ -131,7 +132,7 @@ def download_file_stream(url: str, dest_path: str, headers: dict = None, timeout
         atomic_replace_file(temporary_path, dest_path)
         return True
     except Exception as e:
-        logger.error(f"Lỗi tải stream từ {url[:60]}: {e}")
+        logger.error(f"Lỗi tải stream từ {sanitize_url(url)}: {e}")
         if os.path.exists(temporary_path):
             try: os.remove(temporary_path)
             except OSError: pass
@@ -168,7 +169,7 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
     """
     Tải video Douyin / TikTok không logo (Full HD) qua API giải mã trực tiếp.
     """
-    logger.info(f"Đang giải mã Douyin/TikTok không logo: {url}")
+    logger.info(f"Đang giải mã Douyin/TikTok không logo: {sanitize_url(url)}")
     
     # Chuẩn hóa link nếu là link tìm kiếm trên web có modal_id
     video_id = extract_douyin_video_id(url)
@@ -336,7 +337,7 @@ def download_parallel_range(url: str, dest_path: str, workers: int = 6, max_retr
         atomic_replace_file(assembled_path, dest_path)
         return True
     except Exception as e:
-        logger.warning(f"Parallel Range download error for {url[:60]}: {e}")
+        logger.warning(f"Parallel Range download error for {sanitize_url(url)}: {e}")
         return False
     finally:
         for temporary in [*part_paths, assembled_path]:
@@ -431,7 +432,7 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
                                 h_res = requests.head(test_origin_url, headers=headers, timeout=4)
                                 if h_res.status_code == 200 and int(h_res.headers.get("Content-Length", 0)) > 10000:
                                     origin_video_url = test_origin_url
-                                    logger.info(f"Đã tìm thấy luồng video XHS GỐC SẠCH KHÔNG LOGO: {test_origin_url}")
+                                    logger.info(f"Đã tìm thấy luồng video XHS GỐC SẠCH KHÔNG LOGO: {sanitize_url(test_origin_url)}")
                                     break
                             except:
                                 pass
@@ -457,7 +458,7 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
 
         # 3. TẢI VIDEO GỐC SẠCH KHÔNG LOGO BẰNG RANGE MULTI-THREAD
         if origin_video_url:
-            logger.info(f"Đang tải video XHS GỐC KHÔNG WATERMARK bằng đa luồng: {origin_video_url}")
+            logger.info(f"Đang tải video XHS GỐC KHÔNG WATERMARK bằng đa luồng: {sanitize_url(origin_video_url)}")
             if download_parallel_range(origin_video_url, target_path, workers=6):
                 logger.info(f"Tải thành công video XHS GỐC KHÔNG WATERMARK: {target_path}")
                 return True, target_path, title, ""
@@ -468,7 +469,7 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
 
         # 4. Dự phòng: Quét các luồng stream backup
         for v_url in backup_stream_urls:
-            logger.info(f"Thử tải luồng backup stream: {v_url[:80]}...")
+            logger.info(f"Thử tải luồng backup stream: {sanitize_url(v_url)}")
             if download_file_stream(v_url, target_path, headers=headers, timeout=(10, 40)):
                 logger.info(f"Tải thành công video XHS (stream): {target_path}")
                 return True, target_path, title, ""

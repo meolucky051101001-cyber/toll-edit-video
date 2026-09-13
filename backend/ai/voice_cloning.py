@@ -1,6 +1,7 @@
 import os
 import asyncio
 import re
+import random
 import threading
 import subprocess
 import logging
@@ -9,7 +10,7 @@ from pydub import AudioSegment
 
 logger = logging.getLogger(__name__)
 
-edge_semaphore = asyncio.Semaphore(2)
+edge_semaphore = asyncio.Semaphore(1)
 capcut_semaphore = threading.Semaphore(2)
 rvc_semaphore = asyncio.Semaphore(1)
 global_rvc_instance = None
@@ -50,31 +51,36 @@ async def generate_tts_edge(
     pitch="+0Hz",
     attempts=4,
     retry_delays=(2.0, 5.0, 10.0),
+    target_duration=None,
 ):
     text_clean = str(text or "").strip()
+    silence_dur = f"{max(0.2, float(target_duration or 0.5)):.2f}"
     if not any(c.isalnum() for c in text_clean):
-        # Text has no pronounceable words, emit silence
+        # Text has no pronounceable words, emit silence matching target window
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
-            "-t", "0.5", "-c:a", "libmp3lame", "-b:a", "64k", str(output_path)
+            "-t", silence_dur, "-c:a", "libmp3lame", "-b:a", "64k", str(output_path)
         ]
         subprocess.run(cmd, check=True)
-        return
+        return True
 
     async with edge_semaphore:
         last_error = None
         for attempt in range(max(1, int(attempts))):
+            curr_rate = rate if attempt == 0 else "+0%"
+            curr_pitch = pitch if attempt == 0 else "+0Hz"
             try:
                 if os.path.exists(output_path):
                     os.remove(output_path)
                 communicate = edge_tts.Communicate(
-                    text_clean, voice, rate=rate, pitch=pitch
+                    text_clean, voice, rate=curr_rate, pitch=curr_pitch
                 )
                 await asyncio.wait_for(communicate.save(output_path), timeout=35.0)
                 if not os.path.isfile(output_path) or os.path.getsize(output_path) < 128:
                     raise RuntimeError("Edge TTS returned empty audio")
-                return
+                await asyncio.sleep(0.15)
+                return False
             except Exception as exc:
                 last_error = exc
                 try:
@@ -84,21 +90,22 @@ async def generate_tts_edge(
                     pass
                 if attempt + 1 >= max(1, int(attempts)):
                     if "NoAudioReceived" in type(exc).__name__ or "NoAudioReceived" in str(exc) or "empty audio" in str(exc).lower():
-                        logger.warning("Edge TTS received no audio for text '%s'; generating silence placeholder: %s", text_clean[:40], exc)
+                        logger.warning("Edge TTS received no audio for text '%s'; generating %ss silence placeholder: %s", text_clean[:40], silence_dur, exc)
                         cmd = [
                             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                             "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
-                            "-t", "0.5", "-c:a", "libmp3lame", "-b:a", "64k", str(output_path)
+                            "-t", silence_dur, "-c:a", "libmp3lame", "-b:a", "64k", str(output_path)
                         ]
                         res = subprocess.run(cmd, capture_output=True, timeout=10)
                         if res.returncode == 0 and os.path.isfile(output_path) and os.path.getsize(output_path) > 0:
-                            return
+                            return True
                     break
-                delay = (
+                base_delay = (
                     retry_delays[min(attempt, len(retry_delays) - 1)]
                     if retry_delays
                     else 0.0
                 )
+                delay = base_delay + random.uniform(0.5, 1.5)
                 print(
                     "Edge TTS retry {}/{} after {}: {}".format(
                         attempt + 2, attempts, type(exc).__name__, exc

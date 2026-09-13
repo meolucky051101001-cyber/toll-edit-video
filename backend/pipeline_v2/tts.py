@@ -74,6 +74,8 @@ async def generate_tts_audio_v2(
                     elif voice_source == "fpt" and cand_str in {"banmai", "leminh", "myan", "thuminh", "giahuy"}:
                         mapped_voice = cand_str
 
+            target = max((segment.end - segment.start).total_seconds(), 0.1)
+            is_silent_fallback = False
             if mapped_voice:
                 if voice_source == "capcut" or mapped_voice.startswith("BV"):
                     await asyncio.to_thread(_run_capcut_tts, text, str(raw), mapped_voice)
@@ -82,7 +84,9 @@ async def generate_tts_audio_v2(
                 else:
                     pitch = "+15Hz" if mapped_voice == "vi-VN-HoaiMyNeural" else "+0Hz"
                     rate = "+15%" if mapped_voice == "vi-VN-HoaiMyNeural" else "+5%"
-                    await generate_tts_edge(text, str(raw), mapped_voice, pitch=pitch, rate=rate)
+                    is_silent_fallback = bool(await generate_tts_edge(
+                        text, str(raw), mapped_voice, pitch=pitch, rate=rate, target_duration=target
+                    ))
             elif voice_source == "capcut":
                 await asyncio.to_thread(_run_capcut_tts, text, str(raw), voice_param)
             elif enable_auto_gender and seg_gender == "male" and voice_source != "fpt":
@@ -91,9 +95,9 @@ async def generate_tts_audio_v2(
                         _run_capcut_tts, text, str(raw), "BV075_streaming"
                     )
                 except Exception:
-                    await generate_tts_edge(
-                        text, str(raw), "vi-VN-NamMinhNeural", rate="+5%", pitch="+0Hz"
-                    )
+                    is_silent_fallback = bool(await generate_tts_edge(
+                        text, str(raw), "vi-VN-NamMinhNeural", rate="+5%", pitch="+0Hz", target_duration=target
+                    ))
             elif voice_source == "fpt":
                 try:
                     # Explicit FPT selection must not be replaced by the gender route.
@@ -104,27 +108,27 @@ async def generate_tts_audio_v2(
                         raise RuntimeError(
                             "FPT TTS is unavailable; refusing silent provider fallback"
                         ) from exc
-                    await generate_tts_edge(
-                        text, str(raw), "vi-VN-HoaiMyNeural", rate="+5%"
-                    )
+                    is_silent_fallback = bool(await generate_tts_edge(
+                        text, str(raw), "vi-VN-HoaiMyNeural", rate="+5%", target_duration=target
+                    ))
             elif voice_source == "rvc":
                 try:
                     await asyncio.to_thread(
                         _run_capcut_tts, text, str(raw), "BV562_streaming"
                     )
                 except Exception:
-                    await generate_tts_edge(
-                        text, str(raw), "vi-VN-HoaiMyNeural", rate="+0%"
-                    )
+                    is_silent_fallback = bool(await generate_tts_edge(
+                        text, str(raw), "vi-VN-HoaiMyNeural", rate="+0%", target_duration=target
+                    ))
             else:
-                await generate_tts_edge(
+                is_silent_fallback = bool(await generate_tts_edge(
                     text,
                     str(raw),
                     voice_param,
                     pitch="+15Hz" if voice_param == "vi-VN-HoaiMyNeural" else "+0Hz",
                     rate="+15%" if voice_param == "vi-VN-HoaiMyNeural" else "+5%",
-                )
-            target = max((segment.end - segment.start).total_seconds(), 0.1)
+                    target_duration=target,
+                ))
             fit = await asyncio.to_thread(
                 fit_audio_to_window, raw, fitted, target, config
             )
@@ -147,6 +151,7 @@ async def generate_tts_audio_v2(
                 "timing_fits": fit.fits,
                 "content": text,
                 "gender": seg_gender,
+                "is_silent_fallback": is_silent_fallback,
             }
 
     tasks = [asyncio.create_task(one(segment)) for segment in segments]

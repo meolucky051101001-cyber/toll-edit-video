@@ -1059,6 +1059,9 @@ class VideoPipelineRunner:
                 {
                     "segments": portable_infos,
                     "runtime_segments": segments_to_dicts(segments),
+                    "silent_fallback_count": sum(
+                        1 for info in portable_infos if bool(info.get("is_silent_fallback", False))
+                    ),
                     "unresolved_source_ids": sorted(
                         {
                             int(info.get("source_segment_id", info["index"]))
@@ -1237,6 +1240,9 @@ class VideoPipelineRunner:
                 "rvc/segments.json",
                 {
                     "segments": portable,
+                    "silent_fallback_count": sum(
+                        1 for info in portable if bool(info.get("is_silent_fallback", False))
+                    ),
                     "unresolved_source_ids": sorted(
                         {
                             int(info.get("source_segment_id", info["index"]))
@@ -1381,6 +1387,9 @@ class VideoPipelineRunner:
                         "applied_atempo": audio_info.get(
                             "rvc_applied_atempo",
                             audio_info.get("applied_atempo"),
+                        ),
+                        "is_silent_fallback": bool(
+                            audio_info.get("is_silent_fallback", False)
                         ),
                     }
                 )

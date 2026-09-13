@@ -428,6 +428,8 @@ def _check_segments(path: Path) -> Tuple[Dict[str, Any], List[QCCheck]]:
     untranslated_source = []
     timing_metadata_count = 0
     translation_metadata_count = 0
+    tts_metadata_count = 0
+    silent_fallback_ids = []
     numeric_ids = []
     for position, segment in enumerate(segments, 1):
         segment_id = segment.get("id", segment.get("index", position))
@@ -461,6 +463,10 @@ def _check_segments(path: Path) -> Tuple[Dict[str, Any], List[QCCheck]]:
                     timing_overflow_seconds[str(segment_id)] = round(overflow, 3)
                     if segment_id not in timing_failures:
                         timing_failures.append(segment_id)
+        if "is_silent_fallback" in segment:
+            tts_metadata_count += 1
+            if bool(segment.get("is_silent_fallback", False)):
+                silent_fallback_ids.append(segment_id)
         original_text = str(segment.get("orig_content") or "").strip()
         if original_text:
             translation_metadata_count += 1
@@ -489,6 +495,8 @@ def _check_segments(path: Path) -> Tuple[Dict[str, Any], List[QCCheck]]:
             "timing_overflow_seconds": timing_overflow_seconds,
             "untranslated_source_count": len(untranslated_source),
             "untranslated_source_ids": untranslated_source,
+            "tts_degraded_segments": len(silent_fallback_ids),
+            "tts_degraded_segment_ids": silent_fallback_ids,
         }
     )
     problems = invalid_ranges or empty_text or missing_audio or missing_ids or duplicate_ids
@@ -550,6 +558,39 @@ def _check_segments(path: Path) -> Tuple[Dict[str, Any], List[QCCheck]]:
                 "translation_fallback",
                 "pass",
                 "No unchanged Chinese source fallback was detected",
+            )
+        )
+    if tts_metadata_count == 0:
+        checks.append(
+            QCCheck(
+                "tts_integrity",
+                "skipped",
+                "No TTS audio generation metadata was supplied",
+            )
+        )
+    elif silent_fallback_ids:
+        checks.append(
+            QCCheck(
+                "tts_integrity",
+                "error",
+                "Silent fallback audio was generated for spoken segments due to TTS failures",
+                {
+                    "degraded_segment_ids": silent_fallback_ids,
+                    "degraded_count": len(silent_fallback_ids),
+                    "total_segments": len(segments),
+                },
+            )
+        )
+    else:
+        checks.append(
+            QCCheck(
+                "tts_integrity",
+                "pass",
+                "All spoken segments have audio generated without silent fallback",
+                {
+                    "degraded_count": 0,
+                    "total_segments": len(segments),
+                },
             )
         )
     return metrics, checks

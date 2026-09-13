@@ -125,7 +125,7 @@ class PipelineSettings:
                 env, "ENABLE_PARALLEL_OCR_GEMINI", False
             ),
             enable_adaptive_demucs=_env_bool(env, "ENABLE_ADAPTIVE_DEMUCS", False),
-            enable_adaptive_ocr=_env_bool(env, "ENABLE_ADAPTIVE_OCR", False),
+            enable_adaptive_ocr=_env_bool(env, "ENABLE_ADAPTIVE_OCR", True),
             preserve_source_resolution=_env_bool(
                 env, "PRESERVE_SOURCE_RESOLUTION", True
             ),
@@ -169,4 +169,5 @@ class PipelineSettings:
         payload["qc_gate_policy"] = self.qc_gate_policy.value
         payload.pop("gpu_lock_timeout_seconds", None)
         payload.pop("stage_timeout_seconds", None)
+        payload.pop("enable_stage_cache", None)
         return payload

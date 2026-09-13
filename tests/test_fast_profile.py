@@ -125,3 +125,51 @@ class FastProfileTests(unittest.TestCase):
                     )
                 )
             self.assertEqual(capcut_calls, ["BV075_streaming"])
+
+    def test_adaptive_ocr_enabled_by_default_when_env_empty(self):
+        from backend.pipeline_v2.config import PipelineSettings
+        settings = PipelineSettings.from_env({})
+        self.assertTrue(settings.enable_adaptive_ocr)
+
+    def test_tts_audio_v2_records_silent_fallback(self):
+        import asyncio
+        from datetime import timedelta
+        from backend.pipeline_v2.segments import RuntimeSegment
+        from backend.pipeline_v2.tts import generate_tts_audio_v2
+        import sys
+        from backend.ai import voice_cloning as vc
+        sys.modules["ai.voice_cloning"] = vc
+
+        seg = RuntimeSegment(
+            index=1,
+            start=timedelta(seconds=0),
+            end=timedelta(seconds=2),
+            content="Xin chào",
+            gender="female",
+        )
+        with tempfile.TemporaryDirectory() as td:
+            fake_fit = mock.Mock(
+                source_duration_seconds=2.0,
+                target_duration_seconds=2.0,
+                output_duration_seconds=2.0,
+                applied_atempo=1.0,
+                fits=True,
+            )
+            async def fake_edge_silent(*args, **kwargs):
+                Path(args[1]).write_bytes(b"silence")
+                return True
+
+            with mock.patch.object(vc, "generate_tts_edge", side_effect=fake_edge_silent) as mocked_edge, \
+                 mock.patch("backend.pipeline_v2.tts.fit_audio_to_window", return_value=fake_fit):
+                infos = asyncio.run(
+                    generate_tts_audio_v2(
+                        [seg],
+                        td,
+                        voice_source="edge",
+                        voice_param="vi-VN-HoaiMyNeural",
+                    )
+                )
+                self.assertEqual(len(infos), 1)
+                self.assertTrue(infos[0]["is_silent_fallback"])
+                self.assertEqual(mocked_edge.call_args.kwargs.get("target_duration"), 2.0)
+

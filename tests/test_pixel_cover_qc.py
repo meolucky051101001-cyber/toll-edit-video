@@ -143,6 +143,26 @@ class TestPixelCoverQC(unittest.TestCase):
         warn_decision = evaluate_qc_gate(fake_report, "warn")
         self.assertTrue(warn_decision.allowed)
 
+    def test_inspect_frame_pixel_coverage_degenerate_box_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            frame_file = Path(td) / "frame_zero.png"
+            arr = np.ones((1920, 1080, 3), dtype=np.uint8) * 255
+            img = Image.fromarray(arr)
+            img.save(frame_file)
+
+            # Active cover at timestamp 2.0, but with degenerate zero-area box [500, 500, 500, 500]
+            covers = [
+                (0.0, 5.0, 500, 500, 500, 500)
+            ]
+
+            result = inspect_frame_pixel_coverage(
+                frame_file, covers, canvas_w=1080, canvas_h=1920, timestamp=2.0
+            )
+            self.assertTrue(result["checked"])
+            self.assertFalse(result["all_boxes_filled"])
+            self.assertEqual(result["boxes_checked"], 0)
+            self.assertEqual(result["reason"], "active_covers_unverifiable_or_degenerate")
+
 
 if __name__ == "__main__":
     unittest.main()
