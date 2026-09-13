@@ -1,4 +1,4 @@
-﻿"""Tests for Telegram Bot V2 video delivery via send_video_safely."""
+"""Tests for Telegram Bot V2 video delivery via send_video_safely."""
 
 import asyncio
 from pathlib import Path
@@ -79,6 +79,57 @@ class TestTelegramBotV2Delivery(unittest.IsolatedAsyncioTestCase):
             call_args = mock_safe_edit.call_args[0]
             self.assertEqual(call_args[0], mock_status)
             self.assertIn("test_headless", call_args[1])
+
+    async def test_end_to_end_queue_to_delivery_preserves_chat_id(self):
+        from backend.durable_adapter import DurableQueue
+
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "queue.sqlite3"
+            queue = DurableQueue(db_path)
+            fake_app = SimpleNamespace(bot=AsyncMock())
+            queue.initialize(fake_app)
+
+            mock_chat = SimpleNamespace(id=987654321)
+            mock_message = SimpleNamespace(
+                message_id=42,
+                chat_id=987654321,
+                chat=mock_chat,
+                reply_text=AsyncMock(),
+            )
+            mock_update = SimpleNamespace(
+                update_id=1001,
+                effective_chat=mock_chat,
+                message=mock_message,
+                to_json=lambda: '{"update_id": 1001, "message": {"message_id": 42, "chat": {"id": 987654321}, "text": "http://example.com/vid.mp4"}}',
+            )
+
+            job_input = {
+                'type': 'url',
+                'url': 'http://example.com/vid.mp4',
+                'update': mock_update,
+                'chat_id': 987654321,
+                'pos': 1,
+            }
+            await queue.put(job_input)
+
+            # Claim from queue (deserializes from SQLite)
+            with patch("backend.durable_adapter.Update.de_json", return_value=mock_update), \
+                 patch("backend.durable_adapter.CallbackContext.from_update", return_value=SimpleNamespace()):
+                claimed_job = await queue.get()
+            self.assertEqual(claimed_job.get('chat_id'), 987654321)
+
+            # Test run_durable_video flow
+            with patch("backend.telegram_bot.global_queue", queue), \
+                 patch("backend.telegram_bot.process_v2_telegram_job", new_callable=AsyncMock) as mock_process:
+                from backend.telegram_bot import run_durable_video
+                dummy_vid = Path(td) / "dummy.mp4"
+                dummy_vid.write_bytes(b"dummy")
+                claimed_job['video_path'] = str(dummy_vid)
+
+                await run_durable_video(claimed_job)
+
+                self.assertEqual(mock_process.call_count, 1)
+                self.assertEqual(mock_process.call_args[1].get('chat_id'), 987654321)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-﻿"""Unit tests verifying pixel-level cover QC on rendered frames."""
+"""Unit tests verifying pixel-level cover QC on rendered frames."""
 
 from pathlib import Path
 import tempfile
@@ -51,6 +51,49 @@ class TestPixelCoverQC(unittest.TestCase):
             self.assertTrue(result["checked"])
             self.assertFalse(result["all_boxes_filled"])
             self.assertEqual(result["details"][0]["white_ratio"], 0.0)
+
+    def test_inspect_frame_pixel_coverage_detects_chinese_text_bleed_over_cover(self):
+        with tempfile.TemporaryDirectory() as td:
+            frame_file = Path(td) / "frame_bleed.png"
+
+            # Create an image where the cover area has heavy dark Chinese text strokes
+            # taking up more than 70% of the box (white_ratio < 0.35)
+            arr = np.zeros((1920, 1080, 3), dtype=np.uint8)
+            # Only 20% of pixels in the box are white, the rest are dark text strokes
+            arr[1500:1530, 100:980] = [255, 255, 255]
+            img = Image.fromarray(arr)
+            img.save(frame_file)
+
+            covers = [
+                (0.0, 5.0, 100, 1500, 980, 1650)
+            ]
+
+            result = inspect_frame_pixel_coverage(
+                frame_file, covers, canvas_w=1080, canvas_h=1920, timestamp=2.0
+            )
+            self.assertTrue(result["checked"])
+            self.assertFalse(result["all_boxes_filled"])
+            self.assertLess(result["details"][0]["white_ratio"], 0.35)
+
+    def test_pixel_cover_qc_failure_blocks_delivery_when_policy_is_block(self):
+        from backend.pipeline_v2.qc import evaluate_qc_gate
+
+        # Report with pixel_cover_qc error
+        fake_report = {
+            "checks": [
+                {"name": "audio_duration", "status": "pass"},
+                {"name": "pixel_cover_qc", "status": "error", "message": "Incomplete cover fill / exposed Chinese text"},
+            ]
+        }
+
+        # Under "block" policy, gate decision MUST be allowed=False
+        decision = evaluate_qc_gate(fake_report, "block")
+        self.assertFalse(decision.allowed)
+        self.assertIn("pixel_cover_qc", decision.blocking_checks)
+
+        # Under "warn" policy, gate decision allows delivery
+        warn_decision = evaluate_qc_gate(fake_report, "warn")
+        self.assertTrue(warn_decision.allowed)
 
 
 if __name__ == "__main__":

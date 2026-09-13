@@ -11,6 +11,7 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception: pass
 
 import json
+import time
 import requests
 import base64
 import re
@@ -181,6 +182,19 @@ def extract_video_frames_base64(video_path, context_start_seconds=None, context_
         logger.debug(f"Không thể trích xuất ảnh từ video: {img_e}")
         return []
 
+_gemini_unhealthy_until = 0.0
+
+
+def is_gemini_available() -> bool:
+    return time.time() >= _gemini_unhealthy_until
+
+
+def mark_gemini_unhealthy(cooldown_seconds: float = 300.0) -> None:
+    global _gemini_unhealthy_until
+    _gemini_unhealthy_until = time.time() + cooldown_seconds
+    logger.warning("Gemini marked unhealthy; cooling down for %g seconds", cooldown_seconds)
+
+
 def translate_with_gemini(
     texts,
     target_lang="vi",
@@ -193,6 +207,9 @@ def translate_with_gemini(
 ):
     api_key = api_key or os.getenv("GEMINI_API_KEY", "")
     if not api_key:
+        return None
+    if not is_gemini_available():
+        logger.debug("Gemini currently in cooldown health cache, skipping.")
         return None
     try:
         prompt = build_translation_prompt(
@@ -218,7 +235,8 @@ def translate_with_gemini(
         if frames:
             logger.info(f"Đã đính kèm {len(frames)} ảnh từ video vào Gemini Vision.")
         
-        models_to_try = current_model_policy().gemini_candidates
+        # Limit candidates to at most 2 to avoid cascading delays
+        models_to_try = current_model_policy().gemini_candidates[:2]
         response = None
         for model in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
@@ -226,12 +244,21 @@ def translate_with_gemini(
             headers = {"Content-Type": "application/json"}
             try:
                 logger.info(f"Đang gọi Google Gemini: {model}...")
-                response = requests.post(url, json=payload, headers=headers, timeout=60)
+                # Reduced timeout from 60s to 20s to prevent stalling pipeline
+                response = requests.post(url, json=payload, headers=headers, timeout=20)
                 if response.status_code == 200:
                     logger.info(f"Gọi thành công Gemini {model}!")
                     break
+                elif response.status_code in (429, 403, 400, 503):
+                    logger.warning(f"Lỗi gọi {model} (HTTP {response.status_code}) - cooldown activated")
+                    mark_gemini_unhealthy(300.0)
+                    break
                 else:
                     logger.warning(f"Lỗi gọi {model} (HTTP {response.status_code})")
+            except requests.exceptions.Timeout:
+                logger.warning(f"Gemini {model} timeout sau 20s - cooldown activated")
+                mark_gemini_unhealthy(180.0)
+                break
             except Exception as req_e:
                 logger.warning(f"Lỗi kết nối {model}: {req_e}")
                 

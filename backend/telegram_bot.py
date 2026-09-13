@@ -196,7 +196,7 @@ async def run_pipeline_v2_for_telegram(
             parse_mode="Markdown",
         )
 
-    from voice_selection import resolve_voice
+    from voice_selection import resolve_voice, get_speaker_voice_map, get_speaker_map
     from dataclasses import replace
     selected_source, selected_param, selected_label = resolve_voice("rvc" if rvc_model else "edge", rvc_model)
     request = VideoPipelineRequest(
@@ -211,6 +211,8 @@ async def run_pipeline_v2_for_telegram(
         voice_source=selected_source,
         voice_param=selected_param,
         rvc_model_path=rvc_model,
+        speaker_map=get_speaker_map(),
+        speaker_voice_map=get_speaker_voice_map(),
         progress=progress,
     )
     return await VideoPipelineRunner(request).run()
@@ -347,9 +349,10 @@ async def cmd_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     added = 0
+    chat_id = update.effective_chat.id if update and getattr(update, 'effective_chat', None) else None
     for filename in sorted(video_files):
         accepted = await global_queue.put({'type':'local', 'path':str(Path(input_dir, filename).resolve()),
-            'update':update, 'context':context, 'pos':0})
+            'update':update, 'context':context, 'chat_id':chat_id, 'pos':0})
         added += accepted is not None
     ensure_worker(context.application)
     await update.message.reply_text(f"Đã lưu {added} video vào hàng đợi V2.")
@@ -499,13 +502,18 @@ async def run_durable_video(job):
         global_queue.checkpoint(video_path=str(video))
     paths = TelegramJobPaths.create(WORKSPACE, OUTPUT_DIR, job_key)
     paths.prepare_directories()
+    resolved_chat_id = job.get('chat_id')
+    if not resolved_chat_id and update and getattr(update, 'effective_chat', None):
+        resolved_chat_id = update.effective_chat.id
+    if not resolved_chat_id and update and getattr(update, 'message', None) and getattr(update.message, 'chat_id', None):
+        resolved_chat_id = update.message.chat_id
     await process_v2_telegram_job(
         video,
         paths,
         job.get('filename') or Path(video).name,
         status,
         context=context,
-        chat_id=job.get('chat_id'),
+        chat_id=resolved_chat_id,
         url_or_filename=job.get('url') or job.get('filename'),
     )
 
@@ -967,6 +975,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if worker_task is None or worker_task.done():
         worker_task = asyncio.create_task(video_worker())
 
+    chat_id = update.effective_chat.id if update and getattr(update, 'effective_chat', None) else None
+
     # Đưa từng URL vào hàng đợi
     for url in urls:
         queue_counter += 1
@@ -975,6 +985,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'pos': queue_counter,
             'update': update,
             'context': context,
+            'chat_id': chat_id,
             'url': url
         })
         
@@ -1011,11 +1022,13 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Không nhận dạng được file video.")
         return
         
+    chat_id = update.effective_chat.id if update and getattr(update, 'effective_chat', None) else None
     await global_queue.put({
         'type': 'video',
         'pos': queue_counter,
         'update': update,
         'context': context,
+        'chat_id': chat_id,
         'file_id': file_obj.file_id,
         'filename': filename
     })

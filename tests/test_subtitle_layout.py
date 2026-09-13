@@ -228,6 +228,27 @@ class SubtitleLayoutTests(unittest.TestCase):
             # Box height should be tight (< 60 px)
             self.assertLess(height, 65)
 
+    def test_cover_box_hard_limited_to_90_percent_width(self):
+        # Chinese bbox spanning 0.03 to 0.97 (would be 0.94 without hard limit)
+        from backend.pipeline_v2.segments import GeometryBlock
+        seg = RuntimeSegment(
+            index=1, start=timedelta(seconds=0), end=timedelta(seconds=2),
+            content="Dòng phụ đề tiếng Việt rất dài để kiểm tra việc giới hạn 90% chiều ngang video",
+            best_block=GeometryBlock(text="这是一段非常长的中文源文字用于测试边界覆盖", start=0, end=2,
+                                     x_pct=0.03, max_x_pct=0.97, y_pct=0.75, max_y_pct=0.79)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hard_limit.ass"
+            generate_ass_file([seg], [], path, play_res_x=1000, play_res_y=1000)
+            content = path.read_text(encoding="utf-8-sig")
+            bg_line = next(l for l in content.splitlines() if ",BgStyle," in l)
+            match = re.search(r"\\pos\((\d+),(\d+)\).*?m (\d+) [\d.]+ l [\d.]+ [\d.]+ b [\d.]+ [\d.]+ [\d.]+ (\d+)", bg_line)
+            self.assertIsNotNone(match)
+            x, _, width, _ = map(int, match.groups())
+            # For normalized 720 canvas width, width MUST be <= 648 (90%) and x >= 36 (5% margin)
+            self.assertLessEqual(width, 648)
+            self.assertGreaterEqual(x, 36)
+
 
 if __name__ == "__main__":
     unittest.main()

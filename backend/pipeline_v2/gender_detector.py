@@ -1,10 +1,19 @@
-"""Speaker gender detection using fundamental frequency (F0) pitch estimation."""
+"""Speaker gender detection and multi-speaker grouping using acoustic F0 pitch estimation.
+
+NOTE: This module uses an acoustic fundamental frequency (F0) heuristic based on
+librosa.yin pitch tracking rather than a deep neural diarization model (such as PyAnnote).
+Heuristic design:
+- Segments with median F0 < 190.0 Hz are classified as male, >= 190.0 Hz as female.
+- Male sub-clustering: < 130.0 Hz -> SPEAKER_MALE_0 (deep), >= 130.0 Hz -> SPEAKER_MALE_1.
+- Female sub-clustering: < 230.0 Hz -> SPEAKER_FEMALE_0, >= 230.0 Hz -> SPEAKER_FEMALE_1.
+- Provides extremely fast, lightweight execution with zero extra model weights and low RAM/VRAM.
+"""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, List, Sequence
+from typing import Any, List, Optional, Sequence
 import numpy as np
 
 logger = logging.getLogger(__name__)

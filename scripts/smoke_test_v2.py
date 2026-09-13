@@ -59,32 +59,69 @@ async def run_smoke_test():
     print(f"Pipeline completed in {elapsed:.1f}s. Result: {result}")
 
     # Verify output video
-    if not out_video.is_file():
-        print(f"FAIL: Output video not generated at {out_video}")
+    if not out_video.is_file() or out_video.stat().st_size == 0:
+        print(f"FAIL: Output video not generated or empty at {out_video}")
         return 1
     size_mb = out_video.stat().st_size / (1024 * 1024)
     print(f"SUCCESS: Output video size = {size_mb:.2f} MB")
 
     # Verify transcript artifacts
-    job_dir = work_dir / "job"
     segments_file = runner.artifact_store.path_for("transcript/segments.json")
-    if segments_file.is_file():
-        seg_data = json.loads(segments_file.read_text(encoding="utf-8"))
-        segs = seg_data.get("segments", [])
-        print(f"SUCCESS: Transcript segments = {len(segs)}")
-        if segs:
-            print(f"  Sample segment 0: gender={segs[0].get('gender')}, speaker_id={segs[0].get('speaker_id')}")
+    if not segments_file.is_file():
+        print(f"FAIL: segments.json missing at {segments_file}")
+        return 1
+    seg_data = json.loads(segments_file.read_text(encoding="utf-8"))
+    segs = seg_data.get("segments", [])
+    if not segs:
+        print("FAIL: segments.json contains 0 segments")
+        return 1
+    print(f"SUCCESS: Transcript segments = {len(segs)}")
+    print(f"  Sample segment 0: gender={segs[0].get('gender')}, speaker_id={segs[0].get('speaker_id')}")
 
     # Verify QC report
-    qc_file = runner.artifact_store.path_for("artifacts/qc/qc_report.json")
+    qc_file = runner.artifact_store.path_for("qc/qc_report.json")
     if not qc_file.is_file():
-        qc_file = job_dir / "qc" / "qc_report.json"
-    if qc_file.is_file():
-        qc_data = json.loads(qc_file.read_text(encoding="utf-8"))
-        print(f"SUCCESS: QC summary = {qc_data.get('summary')}")
-        if "pixel_cover_qc" in qc_data.get("metrics", {}):
-            print(f"SUCCESS: Pixel cover QC metric = {qc_data['metrics']['pixel_cover_qc']}")
+        print(f"FAIL: QC report artifact missing at {qc_file}")
+        return 1
 
+    qc_data = json.loads(qc_file.read_text(encoding="utf-8"))
+    print(f"SUCCESS: QC summary = {qc_data.get('summary')}")
+
+    # Verify QC gate allowed
+    if not getattr(result, "qc_allowed", False):
+        print(f"FAIL: QC gate blocked delivery! reason={getattr(result, 'reason', 'unknown')}")
+        return 1
+    print(f"SUCCESS: QC gate allowed delivery = {result.qc_allowed}")
+
+    # Verify all 13 checks
+    checks = qc_data.get("checks", [])
+    print(f"SUCCESS: Total QC checks evaluated = {len(checks)}")
+    if len(checks) < 13:
+        print(f"FAIL: Expected at least 13 QC checks, got {len(checks)}")
+        return 1
+
+    error_checks = [c for c in checks if c.get("status") == "error"]
+    if error_checks:
+        print(f"FAIL: Blocking QC errors found: {[c.get('name') for c in error_checks]}")
+        return 1
+
+    if "pixel_cover_qc" in qc_data.get("metrics", {}):
+        print(f"SUCCESS: Pixel cover QC metric = {qc_data['metrics']['pixel_cover_qc']}")
+
+    # Save summary manifest for audit inspection
+    summary = {
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "status": "PASS",
+        "output_video": str(out_video),
+        "video_size_mb": round(size_mb, 2),
+        "elapsed_seconds": round(elapsed, 2),
+        "segments_count": len(segs),
+        "qc_allowed": result.qc_allowed,
+        "qc_checks_count": len(checks),
+        "checks": [c.get("name") for c in checks],
+    }
+    (work_dir / "smoke_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"SUCCESS: Smoke test summary saved to: {work_dir / 'smoke_summary.json'}")
     return 0
 
 

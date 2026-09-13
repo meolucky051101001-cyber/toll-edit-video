@@ -50,6 +50,11 @@ class DurableQueue:
             raise RuntimeError('Durable intake is not initialized')
         update = job['update']
         payload = {k: v for k, v in job.items() if k not in {'update', 'context'}}
+        if not payload.get('chat_id'):
+            if hasattr(update, 'effective_chat') and update.effective_chat:
+                payload['chat_id'] = update.effective_chat.id
+            elif hasattr(update, 'message') and getattr(update.message, 'chat_id', None):
+                payload['chat_id'] = update.message.chat_id
         payload['update'] = json.loads(update.to_json())
         payload['job_key'] = 'queue_' + uuid.uuid4().hex
         fingerprint = compute_source_fingerprint(payload)

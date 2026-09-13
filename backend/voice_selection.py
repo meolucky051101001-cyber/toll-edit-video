@@ -68,3 +68,41 @@ def resolve_voice(default_source, default_param):
             return "edge", "vi-VN-HoaiMyNeural", "Microsoft · Hoài My (nữ)"
         return default_source, str(default_param), voice["label"]
     return voice["source"], voice["param"], voice["label"]
+
+
+DEFAULT_SPEAKER_VOICE_MAP = {
+    "male": "vi-VN-NamMinhNeural",
+    "female": "vi-VN-HoaiMyNeural",
+    "SPEAKER_MALE_0": "vi-VN-NamMinhNeural",
+    "SPEAKER_MALE_1": "vi-VN-NamMinhNeural",
+    "SPEAKER_FEMALE_0": "vi-VN-HoaiMyNeural",
+    "SPEAKER_FEMALE_1": "vi-VN-HoaiMyNeural",
+}
+
+DEFAULT_SPEAKER_MAP = {
+    "SPEAKER_MALE_0": "Nhân vật nam chính",
+    "SPEAKER_MALE_1": "Nhân vật nam phụ",
+    "SPEAKER_FEMALE_0": "Nhân vật nữ chính",
+    "SPEAKER_FEMALE_1": "Nhân vật nữ phụ",
+}
+
+
+def get_speaker_voice_map() -> dict:
+    svm_file = BASE / "speaker_voice_map.json"
+    if svm_file.is_file():
+        try:
+            return json.loads(svm_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return dict(DEFAULT_SPEAKER_VOICE_MAP)
+
+
+def get_speaker_map() -> dict:
+    sm_file = BASE / "speaker_map.json"
+    if sm_file.is_file():
+        try:
+            return json.loads(sm_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return dict(DEFAULT_SPEAKER_MAP)
+

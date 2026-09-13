@@ -94,7 +94,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
 
             final_dest = os.path.join(output_dir, f"Dubbed_{base_name}.mp4")
             rvc_model = discover_rvc_model(Path(WORKSPACE))
-            from voice_selection import resolve_voice
+            from voice_selection import resolve_voice, get_speaker_voice_map, get_speaker_map
             from dataclasses import replace
             selected_source, selected_param, selected_label = resolve_voice("rvc" if rvc_model else "edge", rvc_model)
             request = VideoPipelineRequest(
@@ -106,6 +106,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 voice_source=selected_source,
                 voice_param=selected_param,
                 rvc_model_path=rvc_model,
+                speaker_map=get_speaker_map(),
+                speaker_voice_map=get_speaker_voice_map(),
                 progress=v2_progress,
             )
             await VideoPipelineRunner(request).run()

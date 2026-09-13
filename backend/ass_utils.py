@@ -322,9 +322,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     text_cover_w = actual_text_w + (sticker_padding_x * 2)
                     text_cover_h = required_text_h + (sticker_padding_y * 2)
 
-                    target_visible_w = min(
-                        max(min_cover_w, text_cover_w), canvas_x
-                    )
+                    # HARD LIMIT: Never exceed 90% of canvas width unless source Chinese subtitle explicitly spans edge-to-edge
+                    max_allowed_cover_w = int(canvas_x * 0.90)
+                    target_visible_w = max(min_cover_w, text_cover_w)
+                    if not (source_left_pct <= 0.02 and source_right_pct >= 0.98):
+                        target_visible_w = min(target_visible_w, max_allowed_cover_w)
+                    else:
+                        target_visible_w = min(target_visible_w, canvas_x)
                     target_visible_h = min(canvas_y, max(min_cover_h, text_cover_h))
 
                     # Because BgStyle has Outline=outline, ASS drawing dimensions

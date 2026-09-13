@@ -911,13 +911,16 @@ def run_report_only_qc(
                             "all_boxes_filled": all_filled,
                             "results": pixel_results,
                         }
+                        gate_policy_str = str(getattr(config.gate_policy, "value", config.gate_policy)).lower()
+                        is_block = gate_policy_str == "block" or os.getenv("QC_GATE_POLICY", "block").lower() == "block"
+                        qc_status = "pass" if all_filled else ("error" if is_block else "warning")
                         report.add(
                             "pixel_cover_qc",
-                            "pass" if all_filled else "warning",
+                            qc_status,
                             "Output frame pixels verified for visual subtitle cover fill"
                             if all_filled
-                            else "Some output frame pixels showed incomplete cover fill",
-                            {"checked_frames": len(pixel_results)},
+                            else "Some output frame pixels showed incomplete cover fill (exposed source text / insufficient cover)",
+                            {"checked_frames": len(pixel_results), "gate_policy": gate_policy_str},
                         )
                 except Exception as exc:
                     logger.debug("Pixel cover check error: %s", exc)

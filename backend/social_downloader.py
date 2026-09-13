@@ -39,6 +39,27 @@ logger = logging.getLogger(__name__)
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 
+
+def sanitize_url(url: str) -> str:
+    """Redact sensitive query parameters like xsec_token, token, secret, api_key from URLs for safe logging."""
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+        parsed = urlparse(url)
+        if not parsed.query:
+            return url
+        sensitive_keys = {"xsec_token", "token", "api_key", "secret", "auth", "signature", "key"}
+        qsl = parse_qsl(parsed.query, keep_blank_values=True)
+        sanitized_qsl = [
+            (k, "[REDACTED]" if k.lower() in sensitive_keys else v)
+            for k, v in qsl
+        ]
+        return urlunparse(parsed._replace(query=urlencode(sanitized_qsl)))
+    except Exception:
+        return re.sub(r"(xsec_token|token|api_key|secret)=[^&]+", r"\1=[REDACTED]", str(url))
+
+
 USER_AGENTS = {
     "mobile": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
     "desktop": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -328,7 +349,7 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
     """
     Tải video Xiaohongshu (Tiểu Hồng Thư) không logo chất lượng cao
     """
-    logger.info(f"Đang bóc tách Xiaohongshu: {url}")
+    logger.info(f"Đang bóc tách Xiaohongshu: {sanitize_url(url)}")
     os.makedirs(output_dir, exist_ok=True)
     try:
         import json

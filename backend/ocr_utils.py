@@ -317,8 +317,16 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                 cap.release()
                 return [], width, height, 0.85
 
-            cap.set(cv2.CAP_PROP_POS_MSEC, current_time * 1000)
-            ret, frame = cap.read()
+            target_msec = current_time * 1000
+            try:
+                current_pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+            except Exception:
+                current_pos_msec = None
+            if current_pos_msec is not None and 0 <= (target_msec - current_pos_msec) <= 80:
+                ret, frame = cap.read()
+            else:
+                cap.set(cv2.CAP_PROP_POS_MSEC, target_msec)
+                ret, frame = cap.read()
             if not ret: continue
 
             # 1. Cắt vùng chứa phụ đề tiềm năng (từ 5% đến 95% chiều cao màn hình)

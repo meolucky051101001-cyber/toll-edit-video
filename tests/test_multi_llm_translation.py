@@ -99,5 +99,25 @@ class TestMultiLLMTranslation(unittest.TestCase):
             self.assertEqual(kwargs.get("entity_map"), entity_map)
             self.assertEqual(kwargs.get("speaker_map"), speaker_map)
 
+    def test_gemini_health_cache_and_retry_limits(self):
+        from backend.ai.translation import is_gemini_available, mark_gemini_unhealthy
+
+        # Should be available initially
+        mark_gemini_unhealthy(cooldown_seconds=-1.0)
+        self.assertTrue(is_gemini_available())
+
+        # When cooldown marked, is_gemini_available becomes False
+        mark_gemini_unhealthy(cooldown_seconds=60.0)
+        self.assertFalse(is_gemini_available())
+
+        # When unavailable, translate_with_gemini immediately returns None without calling API
+        res = translate_with_gemini(["你好"], api_key="dummy_key")
+        self.assertIsNone(res)
+
+        # Reset cooldown
+        mark_gemini_unhealthy(cooldown_seconds=-1.0)
+        self.assertTrue(is_gemini_available())
+
+
 if __name__ == "__main__":
     unittest.main()

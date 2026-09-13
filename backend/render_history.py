@@ -1,13 +1,13 @@
 """
 render_history.py - Quản lý và lưu trữ vĩnh viễn thời gian render/edit của từng video thành phẩm.
-Lưu trữ vào D:\banve\.render_history.json để dùng chung cho cả Tool V1, Tool V2 và Telegram Bot.
+Lưu trữ vào D:\banve\.render_history_v2.json để hoàn toàn độc lập cho Tool V2.
 """
 import os
 import json
 from pathlib import Path
 from typing import Dict, Optional
 
-HISTORY_FILE = Path(r"D:\banve\.render_history.json")
+HISTORY_FILE = Path(os.getenv("TOOL_V2_RENDER_HISTORY", r"D:\banve\.render_history_v2.json"))
 
 
 def format_duration(seconds: float) -> str:
@@ -27,8 +27,8 @@ def format_duration(seconds: float) -> str:
 
 
 def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int]:
-    """Đọc toàn bộ lịch sử thời gian render từ file D:\banve\.render_history.json và cache runtime."""
-    history_file = (output_dir / ".render_history.json") if output_dir else HISTORY_FILE
+    """Đọc toàn bộ lịch sử thời gian render từ file D:\banve\.render_history_v2.json và cache runtime."""
+    history_file = (output_dir / ".render_history_v2.json") if output_dir else HISTORY_FILE
     meta: Dict[str, int] = {}
     if history_file.exists():
         try:

@@ -88,6 +88,18 @@ class ResourceMonitor:
             return 0.0
 
     def _get_vram_mb(self) -> float:
+        try:
+            res = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                creationflags=0x08000000 if os.name == "nt" else 0,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return float(res.stdout.strip().splitlines()[0])
+        except Exception:
+            pass
         if not self._has_cuda:
             return 0.0
         try:
@@ -387,9 +399,36 @@ async def main_async(args: argparse.Namespace) -> int:
 
         print_benchmark_summary(results)
 
+        # Query real GPU hardware details
+        gpu_info = "Unknown"
+        try:
+            res = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                creationflags=0x08000000 if os.name == "nt" else 0,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                gpu_info = res.stdout.strip()
+        except Exception:
+            pass
+
         # Save JSON artifact
         json_data = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "hardware": {
+                "gpu": gpu_info,
+                "platform": sys.platform,
+                "python": sys.version.split()[0],
+            },
+            "pipeline_configuration": {
+                "speed_profile": os.getenv("MODEL_SPEED_PROFILE", "fast (Whisper + Demucs)"),
+                "asr_backend": "faster-whisper (cuda fp16)",
+                "vocal_separation": "Meta Demucs htdemucs",
+                "ffmpeg_encoder": "h264_nvenc",
+                "cache_policy": "per-stage content hash (warm runs reuse cached artifacts)",
+            },
             "results": [asdict(r) for r in results],
         }
         output_report.write_text(json.dumps(json_data, indent=2, ensure_ascii=False), encoding="utf-8")
