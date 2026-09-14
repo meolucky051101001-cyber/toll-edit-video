@@ -1,5 +1,187 @@
-"""Check known source rectangles against emitted ASS covers, without model calls."""
+from dataclasses import dataclass
 import re
+from typing import Any, Dict, List, Optional, Sequence, Union
+
+
+@dataclass
+class ExpectedCoverEvent:
+    segment_id: Any
+    src_start: float
+    src_end: float
+    expected_start: float
+    expected_end: float
+    hold_seconds: float
+    bridged_to_next: bool
+    position_changed: bool
+    x_pct: float
+    y_pct: float
+    max_x_pct: float
+    max_y_pct: float
+    text: str = ""
+
+
+def _prop(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def build_expected_cover_timeline(
+    segments: Sequence[Any],
+    video_duration: Optional[float] = None,
+    fps: float = 30.0,
+) -> List[ExpectedCoverEvent]:
+    """Build the expected visual cover timeline from OCR / subtitle tracking data.
+
+    Rules enforced:
+    1. Visual driven: Uses exact OCR start/end times rather than constraining to ASR boundaries.
+    2. Subtitle classification: Does NOT blindly filter by y_pct >= 0.45. Subtitles in the upper
+       screen (e.g. is_subtitle=True) are kept; packaging / background text in the lower screen
+       (e.g. is_subtitle=False or is_packaging=True) is excluded. Never falls back to discarded blocks.
+    3. No fake covers: Segments lacking OCR geometry emit no expected cover event (unverified).
+    4. Block gap splitting: Multiple tracking blocks in a segment separated by > 1.0s gap are split
+       into separate visual events.
+    5. Hold 1.0s & continuous bridging: Covers hold 1.0s after text disappears, or bridge continuously
+       to the next event if it begins within 1.0s.
+    6. Video end clamping: Events are clamped to video_duration if provided.
+    """
+    frame_dur = 1.0 / max(1.0, float(fps))
+    raw_events = []
+
+    for seg in (segments or []):
+        is_sub = _prop(seg, "is_subtitle", None)
+        is_pack = _prop(seg, "is_packaging", False) or _prop(seg, "is_static", False)
+        if is_sub is False or is_pack is True:
+            continue
+
+        blocks = _prop(seg, "tracking_blocks") or ([_prop(seg, "best_block")] if _prop(seg, "best_block") else [])
+        if not blocks:
+            # Segment has no OCR geometry -> Do not fabricate a default cover!
+            continue
+
+        valid_blocks = []
+        for b in blocks:
+            b_is_sub = _prop(b, "is_subtitle", None)
+            b_is_pack = _prop(b, "is_packaging", False) or _prop(b, "is_static", False)
+            if b_is_sub is False or b_is_pack is True:
+                continue
+            if b_is_sub is True:
+                valid_blocks.append(b)
+                continue
+
+            in_band = _prop(b, "in_subtitle_band", None)
+            if in_band is None:
+                in_band = _prop(seg, "in_subtitle_band", None)
+            if in_band is False:
+                continue
+            if in_band is True:
+                valid_blocks.append(b)
+                continue
+
+            b_type = str(_prop(b, "type", "")).lower()
+            if b_type in ("packaging", "background", "logo", "watermark"):
+                continue
+
+            prob = _prop(b, "prob", 1.0)
+            if prob is not None and float(prob) < 0.3:
+                continue
+
+            valid_blocks.append(b)
+
+        if not valid_blocks:
+            # All blocks were filtered as background/packaging.
+            # Do NOT fall back to original blocks!
+            continue
+
+        sorted_blocks = sorted(valid_blocks, key=lambda x: float(_prop(x, "start", 0.0)))
+
+        # Split into clusters if gap between adjacent blocks > 1.0s
+        clusters: List[List[Any]] = []
+        current_cluster: List[Any] = []
+        for b in sorted_blocks:
+            b_start = float(_prop(b, "start", 0.0))
+            if not current_cluster:
+                current_cluster.append(b)
+            else:
+                prev_end = float(_prop(current_cluster[-1], "end", b_start))
+                if (b_start - prev_end) > 1.0:
+                    clusters.append(current_cluster)
+                    current_cluster = [b]
+                else:
+                    current_cluster.append(b)
+        if current_cluster:
+            clusters.append(current_cluster)
+
+        seg_id = _prop(seg, "id", _prop(seg, "index", 0))
+        seg_text = str(_prop(seg, "text", "") or "")
+
+        for cluster in clusters:
+            c_start = float(_prop(cluster[0], "start", 0.0))
+            c_end = float(_prop(cluster[-1], "end", c_start))
+            if c_end <= c_start:
+                continue
+
+            x_pct = min(float(_prop(b, "x_pct", 0.1)) for b in cluster)
+            y_pct = min(float(_prop(b, "y_pct", 0.8)) for b in cluster)
+            max_x_pct = max(float(_prop(b, "max_x_pct", 0.9)) for b in cluster)
+            max_y_pct = max(float(_prop(b, "max_y_pct", 0.9)) for b in cluster)
+
+            c_text = " ".join(str(_prop(b, "text", "")) for b in cluster if _prop(b, "text")).strip() or seg_text
+
+            raw_events.append({
+                "seg_id": seg_id,
+                "src_start": c_start,
+                "src_end": c_end,
+                "x_pct": x_pct,
+                "y_pct": y_pct,
+                "max_x_pct": max_x_pct,
+                "max_y_pct": max_y_pct,
+                "text": c_text,
+            })
+
+    raw_events.sort(key=lambda ev: (ev["src_start"], ev["src_end"]))
+
+    expected_timeline: List[ExpectedCoverEvent] = []
+    for i, ev in enumerate(raw_events):
+        next_start = raw_events[i + 1]["src_start"] if (i + 1 < len(raw_events)) else None
+        expected_start = max(0.0, ev["src_start"])
+
+        if next_start is not None and (next_start - ev["src_end"]) <= 1.0:
+            bridged = True
+            expected_end = max(ev["src_end"], next_start)
+            next_y = raw_events[i + 1]["y_pct"]
+            pos_changed = abs(ev["y_pct"] - next_y) > 0.04
+        else:
+            bridged = False
+            expected_end = ev["src_end"] + 1.0
+            pos_changed = False
+
+        if video_duration is not None:
+            v_dur = float(video_duration)
+            expected_end = min(v_dur, expected_end)
+            expected_start = min(v_dur, expected_start)
+
+        hold_sec = max(0.0, expected_end - ev["src_end"])
+
+        expected_timeline.append(
+            ExpectedCoverEvent(
+                segment_id=ev["seg_id"],
+                src_start=round(ev["src_start"], 3),
+                src_end=round(ev["src_end"], 3),
+                expected_start=round(expected_start, 3),
+                expected_end=round(expected_end, 3),
+                hold_seconds=round(hold_sec, 3),
+                bridged_to_next=bridged,
+                position_changed=pos_changed,
+                x_pct=round(ev["x_pct"], 4),
+                y_pct=round(ev["y_pct"], 4),
+                max_x_pct=round(ev["max_x_pct"], 4),
+                max_y_pct=round(ev["max_y_pct"], 4),
+                text=ev["text"],
+            )
+        )
+
+    return expected_timeline
 
 
 def seconds(value):
