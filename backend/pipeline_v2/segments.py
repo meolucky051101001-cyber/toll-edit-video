@@ -16,6 +16,12 @@ class GeometryBlock:
     max_x_pct: float = 0.0
     y_pct: float = 0.0
     max_y_pct: float = 0.0
+    prob: Optional[float] = 1.0
+    is_subtitle: Optional[bool] = None
+    is_packaging: Optional[bool] = None
+    is_static: Optional[bool] = None
+    in_subtitle_band: Optional[bool] = None
+    type: Optional[str] = None
 
 
 @dataclass
@@ -32,10 +38,14 @@ class RuntimeSegment:
     tracking_blocks: List[GeometryBlock] = field(default_factory=list)
     gender: str = "female"
     speaker_id: Optional[str] = None
+    is_subtitle: Optional[bool] = None
+    is_packaging: Optional[bool] = None
+    is_static: Optional[bool] = None
+    in_subtitle_band: Optional[bool] = None
 
 
 def _block_to_dict(block: Any) -> Dict[str, Any]:
-    return {
+    res = {
         "text": str(getattr(block, "text", "")),
         "start": float(getattr(block, "start", 0.0)),
         "end": float(getattr(block, "end", 0.0)),
@@ -44,6 +54,11 @@ def _block_to_dict(block: Any) -> Dict[str, Any]:
         "y_pct": float(getattr(block, "y_pct", 0.0)),
         "max_y_pct": float(getattr(block, "max_y_pct", 0.0)),
     }
+    for key in ("prob", "is_subtitle", "is_packaging", "is_static", "in_subtitle_band", "type"):
+        val = getattr(block, key, None) if not isinstance(block, dict) else block.get(key)
+        if val is not None:
+            res[key] = val
+    return res
 
 
 def _block_from_dict(data: Mapping[str, Any]) -> GeometryBlock:
@@ -55,6 +70,12 @@ def _block_from_dict(data: Mapping[str, Any]) -> GeometryBlock:
         max_x_pct=float(data.get("max_x_pct", 0.0)),
         y_pct=float(data.get("y_pct", 0.0)),
         max_y_pct=float(data.get("max_y_pct", 0.0)),
+        prob=float(data["prob"]) if data.get("prob") is not None else 1.0,
+        is_subtitle=bool(data["is_subtitle"]) if data.get("is_subtitle") is not None else None,
+        is_packaging=bool(data["is_packaging"]) if data.get("is_packaging") is not None else None,
+        is_static=bool(data["is_static"]) if data.get("is_static") is not None else None,
+        in_subtitle_band=bool(data["in_subtitle_band"]) if data.get("in_subtitle_band") is not None else None,
+        type=str(data["type"]) if data.get("type") is not None else None,
     )
 
 
@@ -62,7 +83,7 @@ def segment_to_dict(segment: Any) -> Dict[str, Any]:
     best_block = getattr(segment, "best_block", None)
     tracking = getattr(segment, "tracking_blocks", []) or []
     source_segment_id = getattr(segment, "source_segment_id", None)
-    return {
+    res = {
         "index": int(segment.index),
         "start": float(segment.start.total_seconds()),
         "end": float(segment.end.total_seconds()),
@@ -78,6 +99,11 @@ def segment_to_dict(segment: Any) -> Dict[str, Any]:
         "gender": str(getattr(segment, "gender", "female") or "female"),
         "speaker_id": getattr(segment, "speaker_id", None),
     }
+    for key in ("is_subtitle", "is_packaging", "is_static", "in_subtitle_band"):
+        val = getattr(segment, key, None) if not isinstance(segment, dict) else segment.get(key)
+        if val is not None:
+            res[key] = val
+    return res
 
 
 def segment_from_dict(data: Mapping[str, Any]) -> RuntimeSegment:
@@ -104,6 +130,10 @@ def segment_from_dict(data: Mapping[str, Any]) -> RuntimeSegment:
         ],
         gender=str(data.get("gender", "female") or "female"),
         speaker_id=data.get("speaker_id"),
+        is_subtitle=bool(data["is_subtitle"]) if data.get("is_subtitle") is not None else None,
+        is_packaging=bool(data["is_packaging"]) if data.get("is_packaging") is not None else None,
+        is_static=bool(data["is_static"]) if data.get("is_static") is not None else None,
+        in_subtitle_band=bool(data["in_subtitle_band"]) if data.get("in_subtitle_band") is not None else None,
     )
 
 

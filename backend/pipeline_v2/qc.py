@@ -658,6 +658,69 @@ def _check_ass_safe_area(
     ]
 
 
+def plan_diagnostic_samples(
+    duration: float,
+    extra_samples: Optional[Sequence[Tuple[str, float]]] = None,
+    max_samples: Optional[int] = 30,
+) -> List[Tuple[str, float]]:
+    """Select diagnostic sample points with an optional total budget cap (inclusive of baseline).
+
+    Rules:
+    1. Guaranteed baseline samples: first (0.0), middle (duration / 2.0), last (duration - 0.1), tail (duration - 0.25).
+    2. Extra sample candidates are deduplicated by label.
+    3. If max_samples is specified (e.g. 30), total output samples (baseline + extra)
+       strictly does NOT exceed max_samples.
+    4. If extra candidates exceed remaining budget (max_samples - len(baseline)), candidate points
+       are sampled evenly to maximize temporal and scenario coverage.
+    """
+    clamped_dur = max(0.1, float(duration))
+
+    baseline_points = [
+        ("first", 0.0),
+        ("middle", round(clamped_dur / 2.0, 2)),
+        ("last", round(max(0.0, clamped_dur - 0.1), 2)),
+        ("tail", round(max(0.0, clamped_dur - 0.25), 2)),
+    ]
+
+    unique_baseline: List[Tuple[str, float]] = []
+    seen_baseline_t = set()
+    for lbl, t in baseline_points:
+        t_clamped = round(max(0.0, min(t, max(0.0, clamped_dur - 0.05))), 2)
+        if t_clamped not in seen_baseline_t:
+            seen_baseline_t.add(t_clamped)
+            unique_baseline.append((lbl, t_clamped))
+
+    raw_extras: List[Tuple[str, float]] = []
+    seen_labels = {lbl for lbl, _ in unique_baseline}
+
+    for label, timestamp in (extra_samples or []):
+        if label in seen_labels:
+            continue
+        t_rounded = round(max(0.0, min(float(timestamp), max(0.0, clamped_dur - 0.05))), 2)
+        seen_labels.add(label)
+        raw_extras.append((label, t_rounded))
+
+    if max_samples is not None:
+        budget = max(len(unique_baseline), int(max_samples))
+        remaining_budget = budget - len(unique_baseline)
+        if len(raw_extras) <= remaining_budget:
+            selected_extras = raw_extras
+        else:
+            raw_extras.sort(key=lambda x: (x[1], x[0]))
+            step = (len(raw_extras) - 1) / max(1, remaining_budget - 1)
+            selected_indices = {round(i * step) for i in range(remaining_budget)}
+            selected_extras = [raw_extras[i] for i in sorted(selected_indices)]
+        all_samples = unique_baseline + selected_extras
+        all_samples.sort(key=lambda s: (s[1], s[0]))
+        return all_samples[:budget]
+    else:
+        seen_times = {s[1] for s in raw_extras}
+        baseline_to_add = [(lbl, t) for lbl, t in unique_baseline if t not in seen_times]
+        all_samples = raw_extras + baseline_to_add
+        all_samples.sort(key=lambda s: (s[1], s[0]))
+        return all_samples
+
+
 def _sample_frames(
     video_path: Path,
     duration: float,
@@ -665,29 +728,10 @@ def _sample_frames(
     ffmpeg_binary: str,
     timeout: float,
     extra_samples: Optional[Sequence[Tuple[str, float]]] = None,
+    max_samples: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], List[QCCheck]]:
     store = ArtifactStore(diagnostics_directory)
-    baseline = [
-        ("first", 0.0),
-        ("middle", max(0.0, duration / 2.0)),
-        ("last", max(0.0, duration - 0.1)),
-        ("tail", max(0.0, duration - 0.25)),
-    ]
-    seen_labels = set()
-    samples: List[Tuple[str, float]] = []
-    for label, timestamp in (extra_samples or []):
-        if label not in seen_labels:
-            seen_labels.add(label)
-            t_rounded = round(max(0.0, min(float(timestamp), max(0.0, duration - 0.05))), 2)
-            samples.append((label, t_rounded))
-
-    seen_baseline_times = {s[1] for s in samples}
-    for label, timestamp in baseline:
-        t_rounded = round(max(0.0, min(float(timestamp), max(0.0, duration - 0.05))), 2)
-        if t_rounded not in seen_baseline_times and label not in seen_labels:
-            seen_baseline_times.add(t_rounded)
-            seen_labels.add(label)
-            samples.append((label, t_rounded))
+    samples = plan_diagnostic_samples(duration, extra_samples, max_samples=max_samples)
     artifacts: List[Dict[str, Any]] = []
     failures = []
     for label, timestamp in samples:

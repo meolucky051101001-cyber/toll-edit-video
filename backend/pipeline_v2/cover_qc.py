@@ -93,22 +93,29 @@ def build_expected_cover_timeline(
             # Do NOT fall back to original blocks!
             continue
 
-        sorted_blocks = sorted(valid_blocks, key=lambda x: float(_prop(x, "start", 0.0)))
+        sorted_blocks = sorted(
+            valid_blocks,
+            key=lambda x: (float(_prop(x, "start", 0.0)), float(_prop(x, "end", 0.0))),
+        )
 
         # Split into clusters if gap between adjacent blocks > 1.0s
         clusters: List[List[Any]] = []
         current_cluster: List[Any] = []
+        cluster_end = -1.0
         for b in sorted_blocks:
             b_start = float(_prop(b, "start", 0.0))
+            b_end = float(_prop(b, "end", b_start))
             if not current_cluster:
                 current_cluster.append(b)
+                cluster_end = b_end
             else:
-                prev_end = float(_prop(current_cluster[-1], "end", b_start))
-                if (b_start - prev_end) > 1.0:
+                if (b_start - cluster_end) > 1.0:
                     clusters.append(current_cluster)
                     current_cluster = [b]
+                    cluster_end = b_end
                 else:
                     current_cluster.append(b)
+                    cluster_end = max(cluster_end, b_end)
         if current_cluster:
             clusters.append(current_cluster)
 
@@ -116,8 +123,8 @@ def build_expected_cover_timeline(
         seg_text = str(_prop(seg, "text", "") or "")
 
         for cluster in clusters:
-            c_start = float(_prop(cluster[0], "start", 0.0))
-            c_end = float(_prop(cluster[-1], "end", c_start))
+            c_start = min(float(_prop(b, "start", 0.0)) for b in cluster)
+            c_end = max(float(_prop(b, "end", _prop(b, "start", 0.0))) for b in cluster)
             if c_end <= c_start:
                 continue
 
@@ -139,18 +146,37 @@ def build_expected_cover_timeline(
                 "text": c_text,
             })
 
-    raw_events.sort(key=lambda ev: (ev["src_start"], ev["src_end"]))
+    raw_events.sort(key=lambda ev: (
+        round(ev["src_start"], 3),
+        round(ev["src_end"], 3),
+        round(ev["y_pct"], 3),
+        round(ev["x_pct"], 3),
+        str(ev["seg_id"]),
+    ))
 
     expected_timeline: List[ExpectedCoverEvent] = []
     for i, ev in enumerate(raw_events):
-        next_start = raw_events[i + 1]["src_start"] if (i + 1 < len(raw_events)) else None
         expected_start = max(0.0, ev["src_start"])
 
-        if next_start is not None and (next_start - ev["src_end"]) <= 1.0:
+        # Look for subsequent events that start strictly after this event
+        # Concurrent / simultaneous events starting at the same time do not bridge into each other
+        candidates = [
+            other for other in raw_events
+            if other["src_start"] > (ev["src_start"] + 1e-4)
+        ]
+        next_ev = None
+        if candidates:
+            min_start = min(c["src_start"] for c in candidates)
+            earliest_candidates = [
+                c for c in candidates
+                if abs(c["src_start"] - min_start) < max(0.02, frame_dur * 0.5)
+            ]
+            next_ev = min(earliest_candidates, key=lambda c: abs(c["y_pct"] - ev["y_pct"]))
+
+        if next_ev is not None and (next_ev["src_start"] - ev["src_end"]) <= 1.0:
             bridged = True
-            expected_end = max(ev["src_end"], next_start)
-            next_y = raw_events[i + 1]["y_pct"]
-            pos_changed = abs(ev["y_pct"] - next_y) > 0.04
+            expected_end = max(ev["src_end"], next_ev["src_start"])
+            pos_changed = abs(ev["y_pct"] - next_ev["y_pct"]) > 0.04
         else:
             bridged = False
             expected_end = ev["src_end"] + 1.0
@@ -180,6 +206,14 @@ def build_expected_cover_timeline(
                 text=ev["text"],
             )
         )
+
+    expected_timeline.sort(key=lambda ev: (
+        ev.expected_start,
+        ev.expected_end,
+        ev.y_pct,
+        ev.x_pct,
+        str(ev.segment_id),
+    ))
 
     return expected_timeline
 
