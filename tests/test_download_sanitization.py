@@ -99,6 +99,38 @@ class TestUrlSanitization(unittest.TestCase):
         self.assertNotIn("leaked_token_12345", captured_records[0])
         self.assertIn("token=%5BREDACTED%5D", captured_records[0])
 
+    def test_sensitive_url_filter_scrubs_tracebacks_when_exc_info_is_true(self):
+        import logging
+        test_logger = logging.getLogger("test_traceback_sanitization")
+        test_logger.setLevel(logging.INFO)
+        test_filter = SensitiveUrlFilter()
+        test_logger.addFilter(test_filter)
+
+        captured_records = []
+        class ListHandler(logging.Handler):
+            def emit(self, record):
+                captured_records.append(self.format(record))
+
+        handler = ListHandler()
+        formatter = logging.Formatter("%(levelname)s: %(message)s")
+        handler.setFormatter(formatter)
+        test_logger.addHandler(handler)
+
+        secret_token = "SUPER_SECRET_TRACEBACK_TOKEN_98765"
+        try:
+            raise ValueError(f"HTTP request failed on https://api.social.com/fetch?token={secret_token}&sign=abc12345")
+        except ValueError as exc:
+            test_logger.error("Download exception caught: %s", exc, exc_info=True)
+
+        self.assertEqual(len(captured_records), 1)
+        full_log_output = captured_records[0]
+        self.assertNotIn(secret_token, full_log_output)
+        self.assertNotIn("abc12345", full_log_output)
+        self.assertIn("token=%5BREDACTED%5D", full_log_output)
+        self.assertIn("sign=%5BREDACTED%5D", full_log_output)
+        self.assertIn("Traceback", full_log_output)
+
 
 if __name__ == "__main__":
     unittest.main()
+

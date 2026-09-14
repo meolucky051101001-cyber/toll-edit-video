@@ -43,6 +43,11 @@ os.makedirs(WORKSPACE, exist_ok=True)
 
 logger = logging.getLogger("batch_processor")
 logger.setLevel(logging.INFO)
+try:
+    from social_downloader import SensitiveUrlFilter
+    logger.addFilter(SensitiveUrlFilter())
+except Exception:
+    pass
 
 # Import các module AI
 from ai.transcription import extract_subtitles_whisper, save_srt

@@ -194,22 +194,162 @@ class FastProfileTests(unittest.TestCase):
                 self.assertFalse(infos2[0]["is_silent_fallback"])
 
     def test_pipeline_early_aborts_after_tts_on_silent_fallback(self):
-        from backend.pipeline_v2.video_pipeline import VideoPipelineRunner, VideoPipelineRequest, QCGateBlocked
+        import asyncio
+        from datetime import timedelta
+        from backend.pipeline_v2.video_pipeline import (
+            VideoPipelineRunner,
+            VideoPipelineRequest,
+            QCGateBlocked,
+            compose_srt,
+        )
         from backend.pipeline_v2.config import PipelineSettings, QCGatePolicy
+        from backend.pipeline_v2.segments import RuntimeSegment, segments_to_dicts
+
+        class EarlyAbortTestRunner(VideoPipelineRunner):
+            def __init__(self, request):
+                super().__init__(request)
+                self.executed_stages = []
+
+            async def _extract_audio_stage(self):
+                self.executed_stages.append("extract_audio")
+                return [self.artifact_store.put_bytes("audio/original.wav", b"dummy-audio")]
+
+            async def _demucs_stage(self):
+                self.executed_stages.append("demucs")
+                return [
+                    self.artifact_store.put_bytes("audio/vocals.wav", b"dummy-vocals"),
+                    self.artifact_store.put_bytes("audio/background.wav", b"dummy-bg"),
+                ]
+
+            async def _transcribe_stage(self):
+                self.executed_stages.append("transcribe")
+                segs = [
+                    RuntimeSegment(
+                        index=1,
+                        start=timedelta(seconds=0),
+                        end=timedelta(seconds=2),
+                        content="test segment",
+                    )
+                ]
+                return [
+                    self.artifact_store.put_text("transcript/original.srt", compose_srt(segs)),
+                    self.artifact_store.put_json("transcript/segments.json", {"segments": segments_to_dicts(segs)}),
+                ]
+
+            async def _ocr_stage(self, transcript):
+                self.executed_stages.append("ocr")
+                return [
+                    self.artifact_store.put_json(
+                        "ocr/result.json",
+                        {"segments": segments_to_dicts(transcript), "width": 720, "height": 1280, "main_y_pct": 0.8},
+                    )
+                ]
+
+            async def _translate_stage(self, transcript):
+                self.executed_stages.append("translate")
+                return [
+                    self.artifact_store.put_json(
+                        "translation/segments.json",
+                        {"segments": segments_to_dicts(transcript)},
+                    ),
+                    self.artifact_store.put_text("translation/translated.srt", compose_srt(transcript)),
+                ]
+
+            async def _timing_stage(self, segments):
+                self.executed_stages.append("timing")
+                return [
+                    self.artifact_store.put_json(
+                        "translation/timed_segments.json",
+                        {"segments": segments_to_dicts(segments)},
+                    )
+                ]
+
+            async def _tts_stage(self, segments):
+                self.executed_stages.append("tts")
+                audio = self.artifact_store.put_bytes("tts/1.mp3", b"silent-audio")
+                index = self.artifact_store.put_json(
+                    "tts/segments.json",
+                    {
+                        "silent_fallback_count": 1,
+                        "segments": [
+                            {
+                                "index": 1,
+                                "source_segment_id": 1,
+                                "artifact_key": "tts/1.mp3",
+                                "start": 0.0,
+                                "end": 2.0,
+                                "actual_audio_duration": 2.0,
+                                "timing_fits": True,
+                                "is_silent_fallback": True,
+                                "content": "test segment",
+                            }
+                        ],
+                    },
+                )
+                return [audio, index]
+
+            async def _rvc_stage(self, segments):
+                self.executed_stages.append("rvc")
+                return []
+
+            async def _subtitles_stage(self, segments):
+                self.executed_stages.append("subtitles")
+                return []
+
+            async def _mix_v2_stage(self):
+                self.executed_stages.append("mix_v2")
+                return []
+
+            async def _mix_legacy_stage(self):
+                self.executed_stages.append("mix_legacy")
+                return []
+
+            async def _render_stage(self):
+                self.executed_stages.append("render")
+                return []
+
+            async def _qc_stage(self, segments):
+                self.executed_stages.append("qc")
+                return []
+
         with tempfile.TemporaryDirectory() as td:
             work = Path(td)
+            in_video = work / "in.mp4"
+            in_video.write_bytes(b"dummy-mp4-header")
             req = VideoPipelineRequest(
-                video_path=work / "in.mp4",
+                video_path=in_video,
                 job_directory=work / "job",
                 output_path=work / "out.mp4",
-                settings=PipelineSettings(qc_gate_policy=QCGatePolicy.BLOCK),
+                settings=PipelineSettings(
+                    qc_gate_policy=QCGatePolicy.BLOCK,
+                    enable_adaptive_demucs=False,
+                    enable_adaptive_ocr=False,
+                    enable_timing_solver=True,
+                    enable_rvc=True,
+                    enable_ffmpeg_mix_v2=True,
+                ),
             )
-            runner = VideoPipelineRunner(req)
-            runner.artifact_store.put_json("tts/segments.json", {"silent_fallback_count": 1, "segments": []})
+            runner = EarlyAbortTestRunner(req)
+            # Force _rvc_enabled to True so RVC would normally run
+            runner._rvc_enabled = lambda: True
+
             with self.assertRaises(QCGateBlocked) as ctx:
-                tts_payload = runner._load_json("tts/segments.json")
-                silent_count = int(tts_payload.get("silent_fallback_count", 0))
-                if silent_count > 0 and runner.request.settings.qc_gate_policy is QCGatePolicy.BLOCK:
-                    raise QCGateBlocked(f"QC gate early abort: TTS stage produced {silent_count} silent fallback segment(s). Stopping pipeline before RVC, mix, and render.")
-            self.assertIn("QC gate early abort", str(ctx.exception))
+                asyncio.run(runner.run())
+
+            self.assertIn("QC gate early abort: TTS stage produced 1 silent fallback segment(s)", str(ctx.exception))
+            # Verify upstream stages ran up to TTS
+            self.assertIn("extract_audio", runner.executed_stages)
+            self.assertIn("demucs", runner.executed_stages)
+            self.assertIn("transcribe", runner.executed_stages)
+            self.assertIn("translate", runner.executed_stages)
+            self.assertIn("timing", runner.executed_stages)
+            self.assertIn("tts", runner.executed_stages)
+            # CRITICAL: Verify downstream stages were NEVER executed!
+            self.assertNotIn("rvc", runner.executed_stages)
+            self.assertNotIn("subtitles", runner.executed_stages)
+            self.assertNotIn("mix_v2", runner.executed_stages)
+            self.assertNotIn("mix_legacy", runner.executed_stages)
+            self.assertNotIn("render", runner.executed_stages)
+            self.assertNotIn("qc", runner.executed_stages)
+
 

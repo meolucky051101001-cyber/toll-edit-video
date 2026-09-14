@@ -152,13 +152,37 @@ class StageTiming:
     status: str
 
 
+def probe_media_duration_seconds(path: Path) -> float:
+    """Probe exact duration in seconds from media file using ffprobe."""
+    try:
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ]
+        out = subprocess.check_output(cmd, text=True, timeout=10).strip()
+        val = float(out)
+        if val > 0:
+            return round(val, 2)
+    except Exception:
+        pass
+    return 0.0
+
+
 @dataclass
 class BenchmarkResult:
     duration_minutes: float
-    mode: str  # "cold" or "warm"
-    total_time_seconds: float
-    peak_ram_mb: float
-    avg_ram_mb: float
+    actual_duration_seconds: float = 0.0
+    mode: str = "cold"  # "cold" or "warm"
+    total_time_seconds: float = 0.0
+    realtime_ratio: float = 0.0
+    peak_ram_mb: float = 0.0
+    avg_ram_mb: float = 0.0
     baseline_vram_mb: float = 0.0
     peak_vram_mb: float = 0.0
     delta_vram_mb: float = 0.0
@@ -292,10 +316,16 @@ async def run_single_benchmark(
     work_dir: Path,
     enable_gpu_isolation: bool = True,
     simulate: bool = False,
+    rvc_model_path: Optional[Path] = None,
 ) -> BenchmarkResult:
     """Execute a single benchmark run (cold or warm)."""
     from pipeline_v2.config import PipelineMode, PipelineSettings
     from pipeline_v2.video_pipeline import VideoPipelineRequest, VideoPipelineRunner
+
+    # Probe real duration from the media file
+    actual_duration = probe_media_duration_seconds(video_path)
+    if actual_duration <= 0.0:
+        actual_duration = round(duration_minutes * 60.0, 2)
 
     job_dir = work_dir / f"bench_{int(duration_minutes * 60)}s"
     output_video = job_dir / "output.mp4"
@@ -313,6 +343,7 @@ async def run_single_benchmark(
         enable_timing_solver=True,
         enable_ffmpeg_mix_v2=True,
         enable_adaptive_ocr=True,
+        enable_rvc=(rvc_model_path is not None),
     )
 
     live_durations: Dict[str, float] = {}
@@ -336,7 +367,8 @@ async def run_single_benchmark(
         output_path=output_video,
         settings=settings,
         target_lang="vi",
-        voice_source="edge",
+        voice_source="rvc" if rvc_model_path else "edge",
+        rvc_model_path=rvc_model_path,
         api_key=os.getenv("GEMINI_API_KEY", ""),
         progress=on_progress,
     )
@@ -356,11 +388,13 @@ async def run_single_benchmark(
                 StageTiming("translate", 0.00, "completed [reused from cache]"),
                 StageTiming("timing", 0.00, "completed [reused from cache]"),
                 StageTiming("tts", 0.00, "completed [reused from cache]"),
+                StageTiming("rvc", 0.00, "completed [reused from cache]") if rvc_model_path else None,
                 StageTiming("subtitles", 0.00, "completed [reused from cache]"),
                 StageTiming("mix_v2", 0.00, "completed [reused from cache]"),
                 StageTiming("render", 0.00, "completed [reused from cache]"),
                 StageTiming("qc", 0.00, "completed [reused from cache]"),
             ]
+            fake_stages = [s for s in fake_stages if s is not None]
             sim_total = 0.02
         else:
             fake_stages = [
@@ -371,17 +405,22 @@ async def run_single_benchmark(
                 StageTiming("translate", round(duration_minutes * 0.4, 2), "completed"),
                 StageTiming("timing", round(duration_minutes * 0.2, 2), "completed"),
                 StageTiming("tts", round(duration_minutes * 1.0, 2), "completed"),
+                StageTiming("rvc", round(duration_minutes * 1.2, 2), "completed") if rvc_model_path else None,
                 StageTiming("subtitles", round(duration_minutes * 0.3, 2), "completed"),
                 StageTiming("mix_v2", round(duration_minutes * 0.4, 2), "completed"),
                 StageTiming("render", round(duration_minutes * 2.0, 2), "completed"),
                 StageTiming("qc", round(duration_minutes * 0.3, 2), "completed"),
             ]
+            fake_stages = [s for s in fake_stages if s is not None]
             sim_total = round(sum(s.duration_seconds for s in fake_stages), 2)
 
+        ratio = round(sim_total / max(0.01, actual_duration), 2)
         return BenchmarkResult(
             duration_minutes=duration_minutes,
+            actual_duration_seconds=actual_duration,
             mode=mode,
             total_time_seconds=sim_total,
+            realtime_ratio=ratio,
             peak_ram_mb=res_stats.peak_ram_mb or 180.0,
             avg_ram_mb=res_stats.avg_ram_mb or 150.0,
             baseline_vram_mb=res_stats.baseline_vram_mb or 0.0,
@@ -392,7 +431,7 @@ async def run_single_benchmark(
             status="SUCCESS (SIMULATED)",
             video_source=str(video_path),
             stages=fake_stages,
-            metadata={"simulated": True},
+            metadata={"simulated": True, "rvc_enabled": rvc_model_path is not None},
         )
 
     monitor = ResourceMonitor(interval_seconds=0.25)
@@ -428,10 +467,13 @@ async def run_single_benchmark(
         total_time = round(time.perf_counter() - t_start, 2)
         res_stats = monitor.stop()
 
+    ratio = round(total_time / max(0.01, actual_duration), 2)
     return BenchmarkResult(
         duration_minutes=duration_minutes,
+        actual_duration_seconds=actual_duration,
         mode=mode,
         total_time_seconds=total_time,
+        realtime_ratio=ratio,
         peak_ram_mb=res_stats.peak_ram_mb,
         avg_ram_mb=res_stats.avg_ram_mb,
         baseline_vram_mb=res_stats.baseline_vram_mb,
@@ -442,13 +484,14 @@ async def run_single_benchmark(
         status=status,
         video_source=str(video_path),
         stages=stages,
+        metadata={"rvc_enabled": rvc_model_path is not None},
     )
 
 
 def print_benchmark_summary(results: List[BenchmarkResult]) -> None:
     """Print ASCII report of benchmark runs."""
     header = (
-        f"{'Clip / Video':<24} | {'Dur':<6} | {'Mode':<6} | {'Total Time (s)':<14} | "
+        f"{'Clip / Video':<24} | {'Act Dur':<8} | {'Mode':<6} | {'Total Time (s)':<14} | {'Ratio':<7} | "
         f"{'Peak RAM':<10} | {'VRAM Total':<11} | {'VRAM Delta':<11} | {'Rewrites':<8} | {'Errors':<6} | {'Status'}"
     )
     separator = "-" * len(header)
@@ -461,22 +504,25 @@ def print_benchmark_summary(results: List[BenchmarkResult]) -> None:
         v_name = Path(r.video_source).name if r.video_source else "synthetic"
         if len(v_name) > 22:
             v_name = v_name[:19] + "..."
-        dur_label = f"{r.duration_minutes:.1f}m"
+        dur_label = f"{r.actual_duration_seconds:.1f}s"
+        ratio_label = f"{r.realtime_ratio:.2f}x"
         print(
-            f"{v_name:<24} | {dur_label:<6} | {r.mode:<6} | {r.total_time_seconds:<14.2f} | "
+            f"{v_name:<24} | {dur_label:<8} | {r.mode:<6} | {r.total_time_seconds:<14.2f} | {ratio_label:<7} | "
             f"{r.peak_ram_mb:<10.1f} | {r.peak_vram_mb:<11.1f} | {r.delta_vram_mb:<11.1f} | {r.rewrite_rounds:<8} | "
             f"{r.error_count:<6} | {r.status}"
         )
     print(separator)
+    print("* Note: 'Act Dur' is probed directly from the source media with ffprobe.")
+    print("* Note: 'Ratio' = Total Processing Time / Actual Duration (values < 1.0x indicate faster than real-time).")
     print("* Note: 'VRAM Total' reflects GPU memory used including Windows WDDM/Desktop/Chrome baseline.")
-    print("* Note: 'VRAM Delta' reflects net GPU memory allocated by the pipeline during execution.")
+    print("* Note: 'VRAM Delta' is an empirical approximation subject to Windows WDDM virtualization and background paging.")
     print("* Note: Warm speedup is achieved via stage-cache reuse (verified 0.00s per cached stage).")
 
     # Detailed stage breakdown
     print("\nSTAGE BREAKDOWN (Duration in seconds):")
     for r in results:
         v_name = Path(r.video_source).name if r.video_source else "synthetic"
-        print(f"\n--- Clip: {r.duration_minutes:.1f}m [{v_name}] ({r.mode.upper()} run) ---")
+        print(f"\n--- Clip: {r.actual_duration_seconds:.1f}s [{v_name}] ({r.mode.upper()} run) ---")
         for st in r.stages:
             print(f"  {st.name:<20}: {st.duration_seconds:>7.2f}s  [{st.status}]")
     print("\n")
@@ -487,6 +533,18 @@ async def main_async(args: argparse.Namespace) -> int:
     modes = [m.strip().lower() for m in args.modes.split(",") if m.strip()]
     output_report = Path(args.output_report)
     output_report.parent.mkdir(parents=True, exist_ok=True)
+
+    # Resolve RVC model path if requested
+    rvc_model_path: Optional[Path] = None
+    if args.rvc:
+        p = Path(args.rvc_model)
+        if not p.is_absolute():
+            p = (PROJECT_ROOT / p).resolve()
+        if p.is_file():
+            rvc_model_path = p
+            logger.info("RVC enabled for benchmark using model: %s", rvc_model_path)
+        else:
+            logger.warning("RVC model not found at '%s', continuing without RVC", p)
 
     results: List[BenchmarkResult] = []
     temp_dir_ctx = tempfile.TemporaryDirectory(prefix="v2_benchmark_")
@@ -536,10 +594,11 @@ async def main_async(args: argparse.Namespace) -> int:
             for clip_path in clips_to_test:
                 for mode in modes:
                     logger.info(
-                        "Running benchmark: %s, %.1f minutes, %s mode...",
+                        "Running benchmark: %s, %.1f minutes, %s mode (RVC: %s)...",
                         clip_path.name,
                         dur,
                         mode,
+                        rvc_model_path is not None,
                     )
                     res = await run_single_benchmark(
                         video_path=Path(clip_path),
@@ -548,14 +607,16 @@ async def main_async(args: argparse.Namespace) -> int:
                         work_dir=work_dir,
                         enable_gpu_isolation=not args.no_gpu_isolation,
                         simulate=args.simulate,
+                        rvc_model_path=rvc_model_path,
                     )
                     results.append(res)
                     logger.info(
-                        "Done %s %.1fm %s: %.2fs, Peak RAM: %.1fMB, VRAM Total: %.1fMB, VRAM Delta: %.1fMB",
+                        "Done %s Act:%.1fs %s: %.2fs (Ratio: %.2fx), Peak RAM: %.1fMB, VRAM Total: %.1fMB, VRAM Delta: %.1fMB",
                         clip_path.name,
-                        dur,
+                        res.actual_duration_seconds,
                         mode,
                         res.total_time_seconds,
+                        res.realtime_ratio,
                         res.peak_ram_mb,
                         res.peak_vram_mb,
                         res.delta_vram_mb,
@@ -591,8 +652,11 @@ async def main_async(args: argparse.Namespace) -> int:
                 "asr_backend": "faster-whisper (cuda fp16)",
                 "vocal_separation": "Meta Demucs htdemucs",
                 "ffmpeg_encoder": "h264_nvenc",
+                "rvc_enabled": rvc_model_path is not None,
+                "rvc_model": str(rvc_model_path) if rvc_model_path else None,
                 "cache_policy": "per-stage content hash (warm runs reuse cached artifacts)",
-                "vram_reporting": "peak_vram_mb is total GPU VRAM used; delta_vram_mb is pipeline-specific net delta",
+                "vram_reporting": "peak_vram_mb is total GPU VRAM used; delta_vram_mb is pipeline net delta (empirical approximation on Windows WDDM)",
+                "realtime_ratio_definition": "total_time_seconds / actual_duration_seconds (<1.0x is faster than realtime)",
             },
             "results": [asdict(r) for r in results],
         }
@@ -627,6 +691,17 @@ def main() -> None:
         type=str,
         default=None,
         help="Optional real video path or comma-separated paths/globs to benchmark",
+    )
+    parser.add_argument(
+        "--rvc",
+        action="store_true",
+        help="Enable RVC stage in pipeline benchmark using specified or default voice model",
+    )
+    parser.add_argument(
+        "--rvc-model",
+        type=str,
+        default="MyVoiceModel_v2/mi-giong_cua_toi_v2.pth",
+        help="Path to RVC .pth model file (default: MyVoiceModel_v2/mi-giong_cua_toi_v2.pth)",
     )
     parser.add_argument(
         "--output-report",

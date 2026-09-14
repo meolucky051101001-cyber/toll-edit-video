@@ -75,6 +75,25 @@ async def generate_tts_audio_v2(
                         mapped_voice = cand_str
 
             target = max((segment.end - segment.start).total_seconds(), 0.1)
+
+            async def _synthesize_edge_with_rescue(
+                edge_voice: str,
+                edge_pitch: str = "+0Hz",
+                edge_rate: str = "+0%",
+            ) -> bool:
+                is_silent = bool(await generate_tts_edge(
+                    text, str(raw), edge_voice, pitch=edge_pitch, rate=edge_rate, target_duration=target
+                ))
+                if is_silent and not strict_provider:
+                    try:
+                        capcut_voice = "BV075_streaming" if seg_gender == "male" else "BV562_streaming"
+                        await asyncio.to_thread(_run_capcut_tts, text, str(raw), capcut_voice)
+                        if raw.is_file() and raw.stat().st_size > 256:
+                            is_silent = False
+                    except Exception:
+                        pass
+                return is_silent
+
             is_silent_fallback = False
             if mapped_voice:
                 if voice_source == "capcut" or mapped_voice.startswith("BV"):
@@ -84,9 +103,9 @@ async def generate_tts_audio_v2(
                 else:
                     pitch = "+15Hz" if mapped_voice == "vi-VN-HoaiMyNeural" else "+0Hz"
                     rate = "+15%" if mapped_voice == "vi-VN-HoaiMyNeural" else "+5%"
-                    is_silent_fallback = bool(await generate_tts_edge(
-                        text, str(raw), mapped_voice, pitch=pitch, rate=rate, target_duration=target
-                    ))
+                    is_silent_fallback = await _synthesize_edge_with_rescue(
+                        mapped_voice, edge_pitch=pitch, edge_rate=rate
+                    )
             elif voice_source == "capcut":
                 await asyncio.to_thread(_run_capcut_tts, text, str(raw), voice_param)
             elif enable_auto_gender and seg_gender == "male" and voice_source != "fpt":
@@ -95,9 +114,9 @@ async def generate_tts_audio_v2(
                         _run_capcut_tts, text, str(raw), "BV075_streaming"
                     )
                 except Exception:
-                    is_silent_fallback = bool(await generate_tts_edge(
-                        text, str(raw), "vi-VN-NamMinhNeural", rate="+5%", pitch="+0Hz", target_duration=target
-                    ))
+                    is_silent_fallback = await _synthesize_edge_with_rescue(
+                        "vi-VN-NamMinhNeural", edge_rate="+5%", edge_pitch="+0Hz"
+                    )
             elif voice_source == "fpt":
                 try:
                     # Explicit FPT selection must not be replaced by the gender route.
@@ -108,35 +127,24 @@ async def generate_tts_audio_v2(
                         raise RuntimeError(
                             "FPT TTS is unavailable; refusing silent provider fallback"
                         ) from exc
-                    is_silent_fallback = bool(await generate_tts_edge(
-                        text, str(raw), "vi-VN-HoaiMyNeural", rate="+5%", target_duration=target
-                    ))
+                    is_silent_fallback = await _synthesize_edge_with_rescue(
+                        "vi-VN-HoaiMyNeural", edge_rate="+5%"
+                    )
             elif voice_source == "rvc":
                 try:
                     await asyncio.to_thread(
                         _run_capcut_tts, text, str(raw), "BV562_streaming"
                     )
                 except Exception:
-                    is_silent_fallback = bool(await generate_tts_edge(
-                        text, str(raw), "vi-VN-HoaiMyNeural", rate="+0%", target_duration=target
-                    ))
+                    is_silent_fallback = await _synthesize_edge_with_rescue(
+                        "vi-VN-HoaiMyNeural", edge_rate="+0%"
+                    )
             else:
-                is_silent_fallback = bool(await generate_tts_edge(
-                    text,
-                    str(raw),
-                    voice_param,
-                    pitch="+15Hz" if voice_param == "vi-VN-HoaiMyNeural" else "+0Hz",
-                    rate="+15%" if voice_param == "vi-VN-HoaiMyNeural" else "+5%",
-                    target_duration=target,
-                ))
-                if is_silent_fallback and not strict_provider:
-                    try:
-                        capcut_voice = "BV075_streaming" if seg_gender == "male" else "BV562_streaming"
-                        await asyncio.to_thread(_run_capcut_tts, text, str(raw), capcut_voice)
-                        if raw.is_file() and raw.stat().st_size > 256:
-                            is_silent_fallback = False
-                    except Exception:
-                        pass
+                pitch = "+15Hz" if voice_param == "vi-VN-HoaiMyNeural" else "+0Hz"
+                rate = "+15%" if voice_param == "vi-VN-HoaiMyNeural" else "+5%"
+                is_silent_fallback = await _synthesize_edge_with_rescue(
+                    voice_param, edge_pitch=pitch, edge_rate=rate
+                )
             fit = await asyncio.to_thread(
                 fit_audio_to_window, raw, fitted, target, config
             )

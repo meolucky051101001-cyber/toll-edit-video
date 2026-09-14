@@ -241,7 +241,100 @@ class TestPixelCoverQC(unittest.TestCase):
             self.assertTrue(report.metrics["pixel_cover_qc"]["all_boxes_filled"])
             self.assertEqual(report.metrics["pixel_cover_qc"]["checked_frames"], len(keys))
 
+    def test_full_timeline_sampling_guarantees_tail_and_budget_for_26_40_49_100_segments(self):
+        import json
+        from unittest import mock
+        from backend.pipeline_v2.qc import run_report_only_qc, QCSettings
+
+        test_counts = [26, 40, 49, 100]
+        for count in test_counts:
+            with self.subTest(segment_count=count):
+                with tempfile.TemporaryDirectory() as td:
+                    video_file = Path(td) / "video.mp4"
+                    video_file.write_bytes(b"dummy")
+                    report_file = Path(td) / "qc_report.json"
+                    ass_file = Path(td) / "subs.ass"
+                    ass_file.write_text(
+                        "[Script Info]\nPlayResX: 1080\nPlayResY: 1920\n\n[Events]\n"
+                        "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,{\\pos(540,1550)}Hello\n",
+                        encoding="utf-8-sig",
+                    )
+
+                    duration = float(count * 2 + 10)
+                    segments_data = []
+                    shift_idx = count // 2
+                    for i in range(count):
+                        start_t = float(i * 2 + 1)
+                        end_t = start_t + 1.5
+                        # Inject a y position shift at shift_idx
+                        y_pos = 0.70 if i == shift_idx else 0.85
+                        segments_data.append({
+                            "id": i + 1,
+                            "start": start_t,
+                            "end": end_t,
+                            "text": f"Seg {i}",
+                            "y_pct": y_pos,
+                        })
+                    seg_file = Path(td) / "segments.json"
+                    seg_file.write_text(json.dumps(segments_data), encoding="utf-8")
+
+                    def fake_run_command(cmd, timeout=30.0):
+                        cmd_str = " ".join(str(c) for c in cmd)
+                        if "ffprobe" in cmd_str:
+                            mock_res = mock.Mock(returncode=0)
+                            mock_res.stdout = json.dumps({"format": {"duration": str(duration)}, "streams": [{"codec_type": "video", "duration": str(duration)}]})
+                            mock_res.stderr = ""
+                            return mock_res
+                        elif "ffmpeg" in cmd_str:
+                            out_path = Path(cmd[-1])
+                            out_path.parent.mkdir(parents=True, exist_ok=True)
+                            out_path.write_bytes(b"dummy")
+                            mock_res = mock.Mock(returncode=0)
+                            mock_res.stdout = ""
+                            mock_res.stderr = ""
+                            return mock_res
+                        return mock.Mock(returncode=0, stdout="", stderr="")
+
+                    with mock.patch("backend.pipeline_v2.qc._run_command", side_effect=fake_run_command):
+                        with mock.patch("backend.pipeline_v2.cover_qc.inspect_frame_pixel_coverage") as mock_pix:
+                            mock_pix.return_value = {
+                                "checked": True,
+                                "all_boxes_filled": True,
+                                "boxes_checked": 1,
+                                "details": [{"white_ratio": 0.9}],
+                            }
+                            report = run_report_only_qc(
+                                video_path=video_file,
+                                report_path=report_file,
+                                ass_path=ass_file,
+                                segments_path=seg_file,
+                                settings=QCSettings(sample_frames=True),
+                            )
+
+                    keys = [a.get("key", "") for a in report.diagnostic_artifacts]
+                    transition_keys = [k for k in keys if "transition_" in k]
+
+                    # 1. Total transition samples must NEVER exceed 30
+                    self.assertLessEqual(len(transition_keys), 30)
+
+                    # 2. For 26 segments (<= 30), all 26 must be present
+                    if count == 26:
+                        self.assertEqual(len(transition_keys), 26)
+                    else:
+                        # For 40, 49, 100 segments, should fill the full 30 budget
+                        self.assertEqual(len(transition_keys), 30)
+
+                    # 3. Head (transition_0) must ALWAYS be sampled
+                    self.assertIn("frames/transition_0.png", keys)
+
+                    # 4. Tail (transition_{count - 1}) must ALWAYS be sampled (NEVER dropped)
+                    self.assertIn(f"frames/transition_{count - 1}.png", keys)
+
+                    # 5. Position shift must be preserved
+                    self.assertIn(f"frames/transition_{shift_idx}.png", keys)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

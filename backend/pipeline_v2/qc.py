@@ -892,34 +892,50 @@ def run_report_only_qc(
             try:
                 loaded_segs = _load_segments(Path(segments_path))
                 # 1. Comprehensive subtitle cluster sampling across entire video
-                # If 25 or fewer segments, sample EVERY segment's midpoint.
-                # If more than 25 segments, sample up to 25 evenly distributed segments
-                # PLUS any segment where subtitle position shifts.
+                # Up to 30 sample frames spanning the entire timeline.
+                # Must guarantee head (0), tail (total_segs - 1), and subtitle position shifts are sampled.
                 total_segs = len(loaded_segs)
                 selected_indices = set()
-                if total_segs <= 25:
+                if total_segs <= 30:
                     selected_indices.update(range(total_segs))
                 else:
-                    step = max(1, total_segs // 25)
-                    for i in range(0, total_segs, step):
-                        selected_indices.add(i)
-                    selected_indices.add(total_segs - 1)
-
+                    shift_indices = []
                     prev_y = None
                     for idx, seg in enumerate(loaded_segs):
                         cur_y = seg.get("y_pct") or seg.get("max_y_pct")
                         if prev_y is not None and cur_y is not None and abs(float(cur_y) - float(prev_y)) > 0.04:
-                            selected_indices.add(idx)
+                            shift_indices.append(idx)
                         if cur_y is not None:
                             prev_y = cur_y
 
-                for idx in sorted(selected_indices)[:30]:
+                    # Mandatory head and tail
+                    selected_indices.add(0)
+                    selected_indices.add(total_segs - 1)
+
+                    # Prioritize position shifts within remaining budget
+                    remaining_budget = 30 - len(selected_indices)
+                    if len(shift_indices) > remaining_budget:
+                        step = (len(shift_indices) - 1) / max(1, remaining_budget - 1)
+                        for k in range(remaining_budget):
+                            selected_indices.add(shift_indices[round(k * step)])
+                    else:
+                        selected_indices.update(shift_indices)
+
+                    # Distribute remaining slots evenly across the full timeline [0, total_segs - 1]
+                    if len(selected_indices) < 30:
+                        grid = [round(i * (total_segs - 1) / 29.0) for i in range(30)]
+                        for pt in grid:
+                            selected_indices.add(pt)
+                            if len(selected_indices) >= 30:
+                                break
+
+                for idx in sorted(selected_indices):
                     seg = loaded_segs[idx]
                     start_sec = float(seg.get("start", 0.0))
                     end_sec = float(seg.get("end", 0.0))
                     mid_sec = round((start_sec + end_sec) / 2.0, 2)
-                    if 0.2 <= mid_sec <= max(0.0, video_duration - 0.5):
-                        diagnostic_points.append((f"transition_{idx}", mid_sec))
+                    sample_time = max(0.05, min(mid_sec, max(0.05, video_duration - 0.1)))
+                    diagnostic_points.append((f"transition_{idx}", round(sample_time, 2)))
                 # 2. Diagnostic frame at weak OCR and near-edge candidates
                 weak_i, edge_i = 0, 0
                 for seg in loaded_segs:

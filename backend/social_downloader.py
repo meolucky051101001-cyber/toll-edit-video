@@ -116,6 +116,12 @@ class SensitiveUrlFilter(logging.Filter):
                         for a in record.args
                     )
 
+            if record.exc_info:
+                import traceback
+                raw_tb = "".join(traceback.format_exception(*record.exc_info))
+                record.exc_text = sanitize_text(raw_tb)
+                record.exc_info = None
+
             if record.exc_text:
                 record.exc_text = sanitize_text(record.exc_text)
         except Exception:

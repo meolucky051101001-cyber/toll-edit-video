@@ -35,6 +35,46 @@ def parse_manifest(manifest_path: Path) -> Dict[str, str]:
     return entries
 
 
+def load_blobs_batch(v1_dir: Path, blob_shas: Dict[str, str]) -> Dict[str, bytes]:
+    sha_to_paths: Dict[str, List[str]] = {}
+    for rpath, bsha in blob_shas.items():
+        sha_to_paths.setdefault(bsha, []).append(rpath)
+
+    unique_shas = list(sha_to_paths.keys())
+    proc = subprocess.Popen(
+        ["git", "-C", str(v1_dir), "cat-file", "--batch"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+    input_data = ("\n".join(unique_shas) + "\n").encode("ascii")
+    stdout_bytes, _ = proc.communicate(input_data)
+
+    blobs_by_sha: Dict[str, bytes] = {}
+    offset = 0
+    total_len = len(stdout_bytes)
+    while offset < total_len:
+        newline_idx = stdout_bytes.find(b"\n", offset)
+        if newline_idx == -1:
+            break
+        header = stdout_bytes[offset:newline_idx].decode("ascii", errors="replace")
+        parts = header.split()
+        if len(parts) >= 3 and parts[1] == "blob":
+            sha = parts[0]
+            size = int(parts[2])
+            start = newline_idx + 1
+            content = stdout_bytes[start : start + size]
+            blobs_by_sha[sha] = content
+            offset = start + size + 1
+        else:
+            offset = newline_idx + 1
+
+    path_to_content: Dict[str, bytes] = {}
+    for rpath, bsha in blob_shas.items():
+        if bsha in blobs_by_sha:
+            path_to_content[rpath] = blobs_by_sha[bsha]
+    return path_to_content
+
+
 def verify_v1_baseline(
     v1_dir: Path,
     manifest_path: Path,
@@ -111,57 +151,81 @@ def verify_v1_baseline(
 
     print(f"[INFO] Tree contains {len(tree_blobs)} blob objects")
 
+    # Batch load all pristine blobs from git object store
+    path_to_content = load_blobs_batch(v1_dir, tree_blobs)
+
     blob_mismatches = 0
     checked_count = 0
     for rel_path, expected_sha256 in manifest_entries.items():
-        if rel_path not in tree_blobs:
+        if rel_path not in tree_blobs or rel_path not in path_to_content:
             print(f"[FAIL] File missing from git tree: {rel_path}")
             blob_mismatches += 1
             continue
 
-        blob_sha = tree_blobs[rel_path]
-        try:
-            content = subprocess.check_output(
-                ["git", "-C", str(v1_dir), "cat-file", "blob", blob_sha],
-                timeout=10,
-            )
-            actual_sha256 = hashlib.sha256(content).hexdigest()
-            if actual_sha256 != expected_sha256:
-                print(f"[FAIL] SHA-256 mismatch for {rel_path}")
-                print(f"  Expected: {expected_sha256}")
-                print(f"  Actual:   {actual_sha256}")
-                blob_mismatches += 1
-            else:
-                checked_count += 1
-        except Exception as exc:
-            print(f"[FAIL] Could not read blob {blob_sha} for {rel_path}: {exc}")
+        content = path_to_content[rel_path]
+        actual_sha256 = hashlib.sha256(content).hexdigest()
+        if actual_sha256 != expected_sha256:
+            print(f"[FAIL] SHA-256 mismatch for {rel_path}")
+            print(f"  Expected: {expected_sha256}")
+            print(f"  Actual:   {actual_sha256}")
             blob_mismatches += 1
+        else:
+            checked_count += 1
 
     if blob_mismatches > 0:
         print(f"[FAIL] {blob_mismatches} blob(s) failed cryptographic verification!")
         return False
 
-    print(f"[PASS] All {checked_count}/{len(manifest_entries)} Git tree blob objects verified matching SHA-256 exactly.")
+    print(f"[PASS] Git Object Store Baseline: All {checked_count}/{len(manifest_entries)} Git tree blob objects verified matching SHA-256 exactly (pristine).")
 
-    # 5. Optional Disk Check
+    # 5. Working Tree / Disk Check
     if check_disk:
-        disk_matches = 0
-        disk_diffs = []
+        print("-" * 70)
+        print("WORKING TREE DISK STATUS VERIFICATION (--check-disk)")
+        print("-" * 70)
+        exact_matches = 0
+        crlf_matches = 0
+        modified_diffs = []
+        missing_files = []
+
         for rel_path, expected_sha256 in manifest_entries.items():
             fpath = v1_dir / rel_path
             if not fpath.is_file():
-                disk_diffs.append((rel_path, "missing_on_disk"))
+                missing_files.append(rel_path)
                 continue
-            actual_sha = hashlib.sha256(fpath.read_bytes()).hexdigest()
-            if actual_sha == expected_sha256:
-                disk_matches += 1
+
+            disk_bytes = fpath.read_bytes()
+            disk_sha = hashlib.sha256(disk_bytes).hexdigest()
+            if disk_sha == expected_sha256:
+                exact_matches += 1
+                continue
+
+            # Compare with CRLF normalized
+            blob_bytes = path_to_content.get(rel_path, b"")
+            if disk_bytes.replace(b"\r\n", b"\n") == blob_bytes.replace(b"\r\n", b"\n"):
+                crlf_matches += 1
             else:
-                disk_diffs.append((rel_path, "modified_in_worktree"))
-        print(f"[INFO] Disk Worktree Status: {disk_matches}/{len(manifest_entries)} match pristine blob exactly.")
-        if disk_diffs:
-            print(f"[INFO] {len(disk_diffs)} worktree modifications detected (expected runtime state/crlf):")
-            for r, reason in disk_diffs[:10]:
-                print(f"       - {r} ({reason})")
+                modified_diffs.append(rel_path)
+
+        total_files = len(manifest_entries)
+        print(f"[INFO] Working Tree Disk Breakdown:")
+        print(f"       - Exact byte matches:        {exact_matches}/{total_files}")
+        print(f"       - CRLF-only differences:     {crlf_matches}/{total_files} (Windows checkout line endings)")
+        print(f"       - Content modified on disk:  {len(modified_diffs)}/{total_files}")
+        print(f"       - Missing files on disk:     {len(missing_files)}/{total_files}")
+
+        if modified_diffs or missing_files:
+            print(f"[FAIL] Working tree is NOT pristine. Detected active modifications or runtime state:")
+            for item in modified_diffs[:10]:
+                print(f"       - Modified: {item}")
+            for item in missing_files[:5]:
+                print(f"       - Missing:  {item}")
+            print("=" * 70)
+            print("RESULT: DISK WORKING TREE CHECK FAILED (FAIL-CLOSED)")
+            print("=" * 70)
+            return False
+
+        print(f"[PASS] Working tree on disk has NO content modifications (all {total_files} files match content).")
 
     print("=" * 70)
     print("RESULT: TOOL V1 BASELINE IS VALID AND CRYPTOGRAPHICALLY SECURE")
