@@ -673,12 +673,20 @@ def _sample_frames(
         ("last", max(0.0, duration - 0.1)),
         ("tail", max(0.0, duration - 0.25)),
     ]
-    seen_times = set()
+    seen_labels = set()
     samples: List[Tuple[str, float]] = []
-    for label, timestamp in (list(extra_samples or []) + baseline):
+    for label, timestamp in (extra_samples or []):
+        if label not in seen_labels:
+            seen_labels.add(label)
+            t_rounded = round(max(0.0, min(float(timestamp), max(0.0, duration - 0.05))), 2)
+            samples.append((label, t_rounded))
+
+    seen_baseline_times = {s[1] for s in samples}
+    for label, timestamp in baseline:
         t_rounded = round(max(0.0, min(float(timestamp), max(0.0, duration - 0.05))), 2)
-        if t_rounded not in seen_times:
-            seen_times.add(t_rounded)
+        if t_rounded not in seen_baseline_times and label not in seen_labels:
+            seen_baseline_times.add(t_rounded)
+            seen_labels.add(label)
             samples.append((label, t_rounded))
     artifacts: List[Dict[str, Any]] = []
     failures = []
@@ -886,111 +894,138 @@ def run_report_only_qc(
     elif not video.is_file() or video_duration is None or video_duration <= 0:
         report.add("frame_samples", "skipped", "Video duration is unavailable for frame sampling")
     else:
+        # Load ASS covers early if available so diagnostic sampling can anchor directly to real cover events
+        ass_covers = []
+        cw, ch = 1080, 1920
+        if subtitles is not None and Path(subtitles).is_file():
+            try:
+                from .cover_qc import parse_ass_covers
+                ass_covers, cw, ch = parse_ass_covers(Path(subtitles).read_text(encoding="utf-8-sig"))
+            except Exception:
+                pass
+
         # Collect specialized diagnostic sample points
         diagnostic_points: List[Tuple[str, float]] = []
+        loaded_segs = []
         if segments_path is not None and Path(segments_path).is_file():
             try:
                 loaded_segs = _load_segments(Path(segments_path))
-                # 1. Comprehensive subtitle cluster sampling across entire video
-                # Up to 30 sample frames spanning the entire timeline.
-                # Must guarantee head (0), tail (total_segs - 1), and subtitle position shifts are sampled.
-                shift_indices = []
-                prev_y = None
-                for idx, seg in enumerate(loaded_segs):
-                    cur_y = seg.get("y_pct") or seg.get("max_y_pct")
-                    if prev_y is not None and cur_y is not None and abs(float(cur_y) - float(prev_y)) > 0.04:
-                        shift_indices.append(idx)
-                    if cur_y is not None:
-                        prev_y = cur_y
-
-                total_segs = len(loaded_segs)
-                selected_indices = set()
-                if total_segs <= 30:
-                    selected_indices.update(range(total_segs))
-                else:
-                    # Mandatory head and tail
-                    selected_indices.add(0)
-                    selected_indices.add(total_segs - 1)
-
-                    # Prioritize position shifts within remaining budget
-                    remaining_budget = 30 - len(selected_indices)
-                    if len(shift_indices) > remaining_budget:
-                        step = (len(shift_indices) - 1) / max(1, remaining_budget - 1)
-                        for k in range(remaining_budget):
-                            selected_indices.add(shift_indices[round(k * step)])
-                    else:
-                        selected_indices.update(shift_indices)
-
-                    # Distribute remaining slots evenly across the full timeline [0, total_segs - 1]
-                    if len(selected_indices) < 30:
-                        grid = [round(i * (total_segs - 1) / 29.0) for i in range(30)]
-                        for pt in grid:
-                            selected_indices.add(pt)
-                            if len(selected_indices) >= 30:
-                                break
-
-                # 1a. Transition boundary frames:
-                # Sample immediately after transition onset (start + 0.06s) to verify
-                # that subtitle cover is placed promptly without initial flicker or bleed.
-                for idx in sorted(selected_indices):
-                    seg = loaded_segs[idx]
-                    start_sec = float(seg.get("start", 0.0))
-                    end_sec = float(seg.get("end", 0.0))
-                    duration_seg = max(0.05, end_sec - start_sec)
-                    onset_offset = min(0.06, max(0.02, duration_seg * 0.15))
-                    sample_time = max(0.05, min(start_sec + onset_offset, max(0.05, video_duration - 0.1)))
-                    diagnostic_points.append((f"transition_{idx}", round(sample_time, 2)))
-
-                # 1b. Additional boundary transition frames:
-                # Sample right before subtitle ends (exit boundary) and right before position shifts
-                # to catch premature disappearance, text exposure, or flicker between subtitles.
-                shift_set = set(shift_indices) if "shift_indices" in locals() else set()
-                boundary_budget = 16
-                boundary_count = 0
-                for idx in sorted(selected_indices):
-                    if boundary_count >= boundary_budget:
-                        break
-                    seg = loaded_segs[idx]
-                    start_sec = float(seg.get("start", 0.0))
-                    end_sec = float(seg.get("end", 0.0))
-                    duration_seg = max(0.05, end_sec - start_sec)
-
-                    # Exit boundary frame (immediately before subtitle ends)
-                    if duration_seg > 0.2:
-                        exit_offset = min(0.06, max(0.02, duration_seg * 0.15))
-                        exit_time = max(0.05, min(end_sec - exit_offset, max(0.05, video_duration - 0.1)))
-                        diagnostic_points.append((f"boundary_exit_{idx}", round(exit_time, 2)))
-                        boundary_count += 1
-
-                    # Pre-shift boundary frame (immediately before position shift)
-                    if idx > 0 and idx in shift_set:
-                        prev_seg = loaded_segs[idx - 1]
-                        prev_end = float(prev_seg.get("end", 0.0))
-                        pre_shift_t = max(0.05, min(prev_end - 0.05, max(0.05, video_duration - 0.1)))
-                        diagnostic_points.append((f"boundary_shift_{idx}_pre", round(pre_shift_t, 2)))
-                        boundary_count += 1
-
-                    # Midpoint frame (steady state)
-                    mid_time = max(0.05, min((start_sec + end_sec) / 2.0, max(0.05, video_duration - 0.1)))
-                    diagnostic_points.append((f"boundary_mid_{idx}", round(mid_time, 2)))
-                    boundary_count += 1
-                # 2. Diagnostic frame at weak OCR and near-edge candidates
-                weak_i, edge_i = 0, 0
-                for seg in loaded_segs:
-                    blocks = seg.get("tracking_blocks") or ([seg["best_block"]] if seg.get("best_block") else [])
-                    for b in blocks:
-                        prob = float(b.get("prob", 1.0) or 1.0)
-                        t = float(b.get("sample_time", b.get("start", 0.0)))
-                        if prob < 0.65 and weak_i < 3:
-                            diagnostic_points.append((f"weak_ocr_{weak_i}", t))
-                            weak_i += 1
-                        x1 = float(b.get("x_pct", 0.1))
-                        x2 = float(b.get("max_x_pct", 0.9))
-                        if (x1 < 0.08 or x2 > 0.92) and edge_i < 3:
-                            diagnostic_points.append((f"near_edge_{edge_i}", t))
-                            edge_i += 1
             except Exception:
                 pass
+
+        if ass_covers:
+            # 1. Primary: Sample directly from actual ASS covers
+            total_covers = len(ass_covers)
+            selected_cov_indices = set()
+            if total_covers <= 15:
+                selected_cov_indices.update(range(total_covers))
+            else:
+                selected_cov_indices.add(0)
+                selected_cov_indices.add(total_covers - 1)
+                cov_shifts = []
+                for i in range(len(ass_covers) - 1):
+                    c1, c2 = ass_covers[i], ass_covers[i + 1]
+                    if abs(c1[3] - c2[3]) > (ch * 0.03):
+                        cov_shifts.append(i + 1)
+                for s_idx in cov_shifts[:8]:
+                    selected_cov_indices.add(s_idx)
+                rem = 15 - len(selected_cov_indices)
+                if rem > 0:
+                    step = (total_covers - 1) / max(1, rem + 1)
+                    for k in range(1, rem + 1):
+                        selected_cov_indices.add(round(k * step))
+
+            for idx in sorted(selected_cov_indices):
+                c = ass_covers[idx]
+                c_start, c_end = c[0], c[1]
+                dur = max(0.05, c_end - c_start)
+                onset_offset = min(0.06, max(0.02, dur * 0.15))
+                onset_t = round(max(0.05, min(c_start + onset_offset, max(0.05, video_duration - 0.1))), 2)
+                mid_t = round(max(0.05, min((c_start + c_end) / 2.0, max(0.05, video_duration - 0.1))), 2)
+                exit_t = round(max(0.05, min(c_end - onset_offset, max(0.05, video_duration - 0.1))), 2)
+
+                diagnostic_points.append((f"cover_onset_{idx}", onset_t))
+                diagnostic_points.append((f"cover_mid_{idx}", mid_t))
+                if dur > 0.2:
+                    diagnostic_points.append((f"cover_exit_{idx}", exit_t))
+
+                # Boundary shift pre-transition frame
+                if idx > 0 and idx in selected_cov_indices:
+                    prev_c = ass_covers[idx - 1]
+                    if abs(prev_c[3] - c[3]) > (ch * 0.03):
+                        pre_shift = round(max(0.05, min(prev_c[1] - 0.05, video_duration - 0.1)), 2)
+                        diagnostic_points.append((f"cover_shift_{idx}_pre", pre_shift))
+
+            # 2. Hold grace rule check: verify cover continues holding after source Chinese text ends
+            if loaded_segs:
+                for s_idx, seg in enumerate(loaded_segs):
+                    blocks = seg.get("tracking_blocks") or ([seg["best_block"]] if seg.get("best_block") else [])
+                    if blocks:
+                        src_end = max(float(b.get("end", 0.0)) for b in blocks)
+                        matching = [c for c in ass_covers if c[0] <= src_end <= c[1] + 0.05]
+                        for c in matching:
+                            if c[1] >= src_end + 0.3:
+                                hold_t = round(min(c[1] - 0.06, src_end + 0.5), 2)
+                                if 0.05 <= hold_t <= video_duration - 0.05:
+                                    diagnostic_points.append((f"cover_hold_{s_idx}", hold_t))
+                                    break
+        elif loaded_segs:
+            # Fallback when ASS covers are unavailable: sample from segments.json
+            shift_indices = []
+            prev_y = None
+            for idx, seg in enumerate(loaded_segs):
+                cur_y = seg.get("y_pct") or seg.get("max_y_pct")
+                if prev_y is not None and cur_y is not None and abs(float(cur_y) - float(prev_y)) > 0.04:
+                    shift_indices.append(idx)
+                if cur_y is not None:
+                    prev_y = cur_y
+
+            total_segs = len(loaded_segs)
+            selected_indices = set()
+            if total_segs <= 30:
+                selected_indices.update(range(total_segs))
+            else:
+                selected_indices.add(0)
+                selected_indices.add(total_segs - 1)
+                remaining_budget = 30 - len(selected_indices)
+                if len(shift_indices) > remaining_budget:
+                    step = (len(shift_indices) - 1) / max(1, remaining_budget - 1)
+                    for k in range(remaining_budget):
+                        selected_indices.add(shift_indices[round(k * step)])
+                else:
+                    selected_indices.update(shift_indices)
+                if len(selected_indices) < 30:
+                    grid = [round(i * (total_segs - 1) / 29.0) for i in range(30)]
+                    for pt in grid:
+                        selected_indices.add(pt)
+                        if len(selected_indices) >= 30:
+                            break
+
+            for idx in sorted(selected_indices):
+                seg = loaded_segs[idx]
+                start_sec = float(seg.get("start", 0.0))
+                end_sec = float(seg.get("end", 0.0))
+                duration_seg = max(0.05, end_sec - start_sec)
+                onset_offset = min(0.06, max(0.02, duration_seg * 0.15))
+                sample_time = max(0.05, min(start_sec + onset_offset, max(0.05, video_duration - 0.1)))
+                diagnostic_points.append((f"transition_{idx}", round(sample_time, 2)))
+
+        # Diagnostic frame at weak OCR and near-edge candidates
+        if loaded_segs:
+            weak_i, edge_i = 0, 0
+            for seg in loaded_segs:
+                blocks = seg.get("tracking_blocks") or ([seg["best_block"]] if seg.get("best_block") else [])
+                for b in blocks:
+                    prob = float(b.get("prob", 1.0) or 1.0)
+                    t = float(b.get("sample_time", b.get("start", 0.0)))
+                    if prob < 0.65 and weak_i < 3:
+                        diagnostic_points.append((f"weak_ocr_{weak_i}", t))
+                        weak_i += 1
+                    x1 = float(b.get("x_pct", 0.1))
+                    x2 = float(b.get("max_x_pct", 0.9))
+                    if (x1 < 0.08 or x2 > 0.92) and edge_i < 3:
+                        diagnostic_points.append((f"near_edge_{edge_i}", t))
+                        edge_i += 1
 
         if "coverage" in locals() and coverage.get("failures"):
             for f_idx, fail_item in enumerate(coverage["failures"][:3]):
@@ -1011,22 +1046,63 @@ def run_report_only_qc(
             report.checks.extend(frame_checks)
 
             # Pixel-level inspection on sampled diagnostic frames
-            if subtitles is not None and subtitles.is_file() and frame_artifacts:
+            if subtitles is not None and Path(subtitles).is_file() and frame_artifacts:
                 pol = getattr(config, "gate_policy", getattr(config, "qc_gate_policy", None))
                 gate_policy_str = str(getattr(pol, "value", pol) if pol is not None else os.getenv("QC_GATE_POLICY", "block")).lower()
                 is_block = gate_policy_str == "block"
                 try:
                     from .cover_qc import parse_ass_covers, inspect_frame_pixel_coverage
-                    ass_covers, cw, ch = parse_ass_covers(subtitles.read_text(encoding="utf-8-sig"))
+                    if not ass_covers:
+                        ass_covers, cw, ch = parse_ass_covers(Path(subtitles).read_text(encoding="utf-8-sig"))
+
+                    expected_cover_prefixes = (
+                        "cover_onset_",
+                        "cover_mid_",
+                        "cover_exit_",
+                        "cover_hold_",
+                        "cover_shift_",
+                        "cover_fail_",
+                        "transition_",
+                        "boundary_mid_",
+                        "boundary_exit_",
+                        "boundary_shift_",
+                    )
+
                     pixel_results = []
                     for art in frame_artifacts:
                         key_name = art.get("key") or art.get("artifact_key", "")
                         fpath = diagnostics / key_name
                         ts = art.get("metadata", {}).get("timestamp_seconds", art.get("timestamp_seconds"))
-                        if fpath.is_file():
-                            pix_res = inspect_frame_pixel_coverage(fpath, ass_covers, canvas_w=cw, canvas_h=ch, timestamp=ts)
-                            if pix_res.get("checked"):
-                                pixel_results.append(pix_res)
+                        if not fpath.is_file():
+                            continue
+
+                        # Check if this frame was sampled specifically expecting an active cover
+                        base_name = Path(key_name).name
+                        is_expected_cover = any(
+                            base_name.startswith(p) or key_name.startswith(f"frames/{p}") or key_name.startswith(p)
+                            for p in expected_cover_prefixes
+                        )
+
+                        pix_res = inspect_frame_pixel_coverage(fpath, ass_covers, canvas_w=cw, canvas_h=ch, timestamp=ts)
+                        if pix_res.get("checked"):
+                            # If expected cover frame produced 0 boxes checked (degenerate cover box)
+                            if is_expected_cover and pix_res.get("boxes_checked", 0) == 0:
+                                pix_res["all_boxes_filled"] = False
+                                pix_res["reason"] = "expected_cover_missing_or_degenerate"
+                            pixel_results.append(pix_res)
+                        else:
+                            # checked=False: no active covers found in ASS at timestamp
+                            if is_expected_cover:
+                                # FAIL-CLOSED: Frame was sampled expecting an active cover, but none existed!
+                                pixel_results.append({
+                                    "checked": True,
+                                    "frame": fpath.name,
+                                    "timestamp": ts,
+                                    "boxes_checked": 0,
+                                    "all_boxes_filled": False,
+                                    "reason": f"expected_cover_missing_or_late ({pix_res.get('reason', 'no_active_covers')})",
+                                    "details": [],
+                                })
 
                     if pixel_results:
                         all_filled = all(r.get("all_boxes_filled") for r in pixel_results)
@@ -1044,8 +1120,8 @@ def run_report_only_qc(
                             else "Some output frame pixels showed incomplete cover fill (exposed source text / insufficient cover)",
                             {"checked_frames": len(pixel_results), "gate_policy": gate_policy_str},
                         )
-                    elif ass_covers:
-                        # Fail-closed: ASS covers were defined but no sampled frame pixel result could be generated
+                    else:
+                        # Fail-closed: Subtitles were provided but no sampled frame pixel result could be produced
                         report.metrics["pixel_cover_qc"] = {
                             "checked_frames": 0,
                             "all_boxes_filled": False,
@@ -1055,7 +1131,7 @@ def run_report_only_qc(
                         report.add(
                             "pixel_cover_qc",
                             qc_status,
-                            "ASS covers were defined but no sampled frame pixel result could be produced for verification",
+                            "ASS covers were expected but no sampled frame pixel result could be produced for verification",
                             {"checked_frames": 0, "gate_policy": gate_policy_str},
                         )
                 except Exception as exc:

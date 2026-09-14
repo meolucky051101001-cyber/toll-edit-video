@@ -296,6 +296,30 @@ def solve_segment_timing(
     return TimingSolveResult(expanded, plans, unresolved, rewrite_rounds)
 
 
+def _check_gemini_available() -> bool:
+    try:
+        from ai.translation import is_gemini_available
+        return is_gemini_available()
+    except ImportError:
+        try:
+            from backend.ai.translation import is_gemini_available
+            return is_gemini_available()
+        except ImportError:
+            return True
+
+
+def _mark_gemini_cooldown(cooldown_seconds: float = 180.0) -> None:
+    try:
+        from ai.translation import mark_gemini_unhealthy
+        mark_gemini_unhealthy(cooldown_seconds)
+    except ImportError:
+        try:
+            from backend.ai.translation import mark_gemini_unhealthy
+            mark_gemini_unhealthy(cooldown_seconds)
+        except ImportError:
+            pass
+
+
 class GeminiTimingRewriter:
     """Ask Gemini to shorten only segments that exceed their duration budget."""
 
@@ -303,7 +327,7 @@ class GeminiTimingRewriter:
         self,
         api_key: str,
         models: Optional[Sequence[str]] = None,
-        timeout_seconds: float = 60.0,
+        timeout_seconds: float = 15.0,
         max_batch_requests: int = 60,
     ):
         self.api_key = api_key
@@ -320,6 +344,8 @@ class GeminiTimingRewriter:
 
     def __call__(self, requests: Sequence[RewriteRequest]) -> Mapping[int, str]:
         if not self.api_key or not requests:
+            return {}
+        if not _check_gemini_available():
             return {}
         import requests as http_requests
 
@@ -345,6 +371,8 @@ class GeminiTimingRewriter:
             )
             allowed = {item.segment_index: item.max_characters for item in batch}
             for model in self.models:
+                if not _check_gemini_available():
+                    break
                 url = (
                     "https://generativelanguage.googleapis.com/v1beta/models/"
                     "{}:generateContent?key={}".format(model, self.api_key)
@@ -355,6 +383,9 @@ class GeminiTimingRewriter:
                         json={"contents": [{"parts": [{"text": prompt}]}]},
                         timeout=self.timeout_seconds,
                     )
+                    if response.status_code == 429 or response.status_code >= 500:
+                        _mark_gemini_cooldown(180.0)
+                        break
                     if response.status_code != 200:
                         continue
                     text = response.json()["candidates"][0]["content"]["parts"][0][
@@ -373,6 +404,12 @@ class GeminiTimingRewriter:
                             and normalized_character_count(candidate) <= allowed[segment_id]
                         ):
                             rewritten[segment_id] = candidate
+                    break
+                except (
+                    http_requests.Timeout,
+                    http_requests.ConnectionError,
+                ):
+                    _mark_gemini_cooldown(180.0)
                     break
                 except (
                     KeyError,

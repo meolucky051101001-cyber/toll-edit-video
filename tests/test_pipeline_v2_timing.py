@@ -165,5 +165,39 @@ class AudioFitIntegrationTests(unittest.TestCase):
             self.assertTrue(output.is_file())
 
 
+class GeminiCircuitBreakerTests(unittest.TestCase):
+    def test_gemini_timing_rewriter_bypasses_when_gemini_unavailable(self):
+        from unittest import mock
+        from backend.pipeline_v2.timing import GeminiTimingRewriter, RewriteRequest
+
+        rewriter = GeminiTimingRewriter(api_key="fake-key", models=["gemini-2.5-flash"])
+        req = RewriteRequest(segment_index=1, text="Câu quá dài", max_characters=10, target_seconds=1.0, source_segment_id=1)
+
+        with mock.patch("backend.pipeline_v2.timing._check_gemini_available", return_value=False):
+            with mock.patch("requests.post") as mock_post:
+                res = rewriter([req])
+                self.assertEqual(res, {})
+                mock_post.assert_not_called()
+
+    def test_gemini_timing_rewriter_trips_circuit_breaker_on_429(self):
+        from unittest import mock
+        from backend.pipeline_v2.timing import GeminiTimingRewriter, RewriteRequest
+
+        rewriter = GeminiTimingRewriter(api_key="fake-key", models=["model-1", "model-2"])
+        req = RewriteRequest(segment_index=1, text="Câu quá dài", max_characters=10, target_seconds=1.0, source_segment_id=1)
+
+        mock_resp = mock.Mock()
+        mock_resp.status_code = 429
+
+        with mock.patch("backend.pipeline_v2.timing._check_gemini_available", return_value=True):
+            with mock.patch("backend.pipeline_v2.timing._mark_gemini_cooldown") as mock_cooldown:
+                with mock.patch("requests.post", return_value=mock_resp) as mock_post:
+                    res = rewriter([req])
+                    self.assertEqual(res, {})
+                    mock_cooldown.assert_called_once_with(180.0)
+                    # Must break immediately and NOT try model-2!
+                    self.assertEqual(mock_post.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

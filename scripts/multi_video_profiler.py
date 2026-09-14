@@ -47,6 +47,30 @@ def probe_video_info(video_path: Path) -> Dict[str, Any]:
     return {"duration": 0.0, "width": 0, "height": 0, "resolution": "unknown"}
 
 
+def rank_bottlenecks(stage_timings: Dict[str, float], total_elapsed: float) -> List[Dict[str, Any]]:
+    ranked = []
+    for name, dur in sorted(stage_timings.items(), key=lambda x: x[1], reverse=True):
+        if dur > 0.05:
+            pct = round((dur / total_elapsed * 100.0), 1) if total_elapsed > 0 else 0.0
+            ranked.append({"stage": name, "duration_seconds": dur, "percentage": pct})
+    return ranked
+
+
+def enforce_clean_directory(target_dir: Path):
+    if not target_dir.exists():
+        target_dir.mkdir(parents=True, exist_ok=True)
+        return
+    for _ in range(5):
+        try:
+            shutil.rmtree(target_dir)
+            break
+        except Exception:
+            time.sleep(0.5)
+    if target_dir.exists() and any(target_dir.iterdir()):
+        raise RuntimeError(f"FAIL-CLOSED: Could not clean directory: {target_dir}")
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+
 async def profile_single_video(
     video_path: Path,
     label: str,
@@ -65,9 +89,7 @@ async def profile_single_video(
     print(f"======================================================================")
 
     out_base = output_base or (ROOT / "workspace" / f"profiler_{label}_{int(time.time())}")
-    if out_base.exists():
-        shutil.rmtree(out_base, ignore_errors=True)
-    out_base.mkdir(parents=True, exist_ok=True)
+    enforce_clean_directory(out_base)
 
     out_video = out_base / f"output_{label}.mp4"
     rvc_model = (ROOT / "MyVoiceModel_v2" / "mi-giong_cua_toi_v2.pth") if with_rvc else None
@@ -85,6 +107,7 @@ async def profile_single_video(
         rvc_model_path=rvc_model,
     )
 
+    run_start_utc = datetime.now(timezone.utc)
     t0 = time.time()
     runner = VideoPipelineRunner(request)
     qc_allowed = False
@@ -100,6 +123,7 @@ async def profile_single_video(
 
     manifest = runner.manifest
     stage_timings: Dict[str, float] = {}
+    stale_stages = []
     if manifest:
         for s_name, stage in manifest.stages.items():
             if stage.status.value == "completed" and stage.started_at and stage.finished_at:
@@ -108,10 +132,15 @@ async def profile_single_video(
                     ts_end = datetime.fromisoformat(stage.finished_at.replace("Z", "+00:00"))
                     dur = round((ts_end - ts_start).total_seconds(), 2)
                     stage_timings[s_name] = dur
+                    if ts_start < run_start_utc - timedelta(seconds=2.0):
+                        stale_stages.append((s_name, stage.started_at))
                 except Exception:
                     stage_timings[s_name] = 0.0
             else:
                 stage_timings[s_name] = 0.0
+
+    if stale_stages:
+        raise RuntimeError(f"FAIL-CLOSED: Stale cached stages detected in cold profile: {stale_stages}")
 
     # Read QC metrics and boundary frames
     qc_metrics: Dict[str, Any] = {}
@@ -134,15 +163,18 @@ async def profile_single_video(
 
     whisper_time = stage_timings.get("transcribe", 0.0)
     demucs_time = stage_timings.get("demucs", 0.0)
+    timing_time = stage_timings.get("timing", 0.0)
     ai_heavy_time = whisper_time + demucs_time
     total_pipeline_time = round(elapsed, 2)
     ai_percentage = round((ai_heavy_time / total_pipeline_time * 100.0), 1) if total_pipeline_time > 0 else 0.0
 
+    top_bottlenecks = rank_bottlenecks(stage_timings, total_pipeline_time)
+
     print(f"Result for {label}:")
     print(f"  Total Elapsed: {total_pipeline_time}s")
-    if total_pipeline_time > 0:
-        print(f"  Whisper large-v3: {whisper_time}s ({whisper_time / total_pipeline_time * 100:.1f}%)")
-        print(f"  Demucs htdemucs: {demucs_time}s ({demucs_time / total_pipeline_time * 100:.1f}%)")
+    print(f"  Top Stage Bottlenecks:")
+    for b in top_bottlenecks[:4]:
+        print(f"    - {b['stage']}: {b['duration_seconds']}s ({b['percentage']}%)")
     print(f"  Combined (Whisper + Demucs): {ai_heavy_time}s ({ai_percentage}%)")
     if with_rvc:
         rvc_time = stage_timings.get("rvc", 0.0)
@@ -163,9 +195,11 @@ async def profile_single_video(
         "realtime_ratio": round(total_pipeline_time / max(0.1, info["duration"]), 2),
         "stage_timings": stage_timings,
         "bottlenecks": {
+            "top_bottlenecks": top_bottlenecks,
             "whisper_seconds": whisper_time,
             "demucs_seconds": demucs_time,
-            "combined_seconds": ai_heavy_time,
+            "timing_seconds": timing_time,
+            "combined_ai_heavy_seconds": ai_heavy_time,
             "ai_heavy_percentage": ai_percentage,
         },
         "qc": {
@@ -242,14 +276,17 @@ def collect_from_workspace_dir(
 
     whisper_time = stage_timings.get("transcribe", 0.0)
     demucs_time = stage_timings.get("demucs", 0.0)
+    timing_time = stage_timings.get("timing", 0.0)
     ai_heavy_time = whisper_time + demucs_time
     ai_percentage = round((ai_heavy_time / total_pipeline_time * 100.0), 1) if total_pipeline_time > 0 else 0.0
 
+    top_bottlenecks = rank_bottlenecks(stage_timings, total_pipeline_time)
+
     print(f"Result for {label} (from {dir_path.name}):")
     print(f"  Total Elapsed: {total_pipeline_time}s")
-    if total_pipeline_time > 0:
-        print(f"  Whisper large-v3: {whisper_time}s ({whisper_time / total_pipeline_time * 100:.1f}%)")
-        print(f"  Demucs htdemucs: {demucs_time}s ({demucs_time / total_pipeline_time * 100:.1f}%)")
+    print(f"  Top Stage Bottlenecks:")
+    for b in top_bottlenecks[:4]:
+        print(f"    - {b['stage']}: {b['duration_seconds']}s ({b['percentage']}%)")
     print(f"  Combined (Whisper + Demucs): {ai_heavy_time}s ({ai_percentage}%)")
     if with_rvc:
         rvc_time = stage_timings.get("rvc", 0.0)
@@ -270,9 +307,11 @@ def collect_from_workspace_dir(
         "realtime_ratio": round(total_pipeline_time / max(0.1, info["duration"]), 2),
         "stage_timings": stage_timings,
         "bottlenecks": {
+            "top_bottlenecks": top_bottlenecks,
             "whisper_seconds": whisper_time,
             "demucs_seconds": demucs_time,
-            "combined_seconds": ai_heavy_time,
+            "timing_seconds": timing_time,
+            "combined_ai_heavy_seconds": ai_heavy_time,
             "ai_heavy_percentage": ai_percentage,
         },
         "qc": {
@@ -288,7 +327,7 @@ def collect_from_workspace_dir(
 async def main():
     parser = argparse.ArgumentParser(description="Multi-video profiler for Tool V2")
     parser.add_argument("--out", type=str, default="benchmarks/multi_video_benchmark_report.json")
-    parser.add_argument("--collect-existing", action="store_true", help="Collect metrics from recent profiler runs in workspace")
+    parser.add_argument("--collect-existing", action="store_true", help="Explicitly collect metrics from recent profiler runs in workspace")
     args = parser.parse_args()
 
     downloads = ROOT / "workspace" / "downloads"
@@ -298,7 +337,8 @@ async def main():
 
     results = []
 
-    if args.collect_existing or not sys.argv[1:]:
+    # STRICT: Only collect from existing runs if --collect-existing is EXPLICITLY set!
+    if args.collect_existing:
         existing_a = sorted(ROOT.glob("workspace/profiler_4K_Video_A_RVC_*"))
         existing_b = sorted(ROOT.glob("workspace/profiler_4K_Video_B_New_*"))
         existing_c = sorted(ROOT.glob("workspace/profiler_1080p_Video_New_*"))
@@ -311,20 +351,18 @@ async def main():
             r3 = collect_from_workspace_dir(existing_c[-1], video_1080p[0], "1080p_Video_New", with_rvc=False)
             results.append(r3)
         else:
-            args.collect_existing = False
+            raise RuntimeError("FAIL: --collect-existing was specified but not all 3 profiler runs exist in workspace.")
 
     if not results:
-        # 1. 4K Video A with RVC
+        # Default mode: COLD RUN 100% on GPU with fail-closed clean directory and fresh timestamp assertion
         if video_4k_a and video_4k_a[0].is_file():
             r1 = await profile_single_video(video_4k_a[0], "4K_Video_A_RVC", with_rvc=True)
             results.append(r1)
 
-        # 2. 4K Video B (Fresh new 4K video) with Edge TTS
         if video_4k_b and video_4k_b[0].is_file():
             r2 = await profile_single_video(video_4k_b[0], "4K_Video_B_New", with_rvc=False)
             results.append(r2)
 
-        # 3. 1080p Video with Edge TTS
         if video_1080p and video_1080p[0].is_file():
             r3 = await profile_single_video(video_1080p[0], "1080p_Video_New", with_rvc=False)
             results.append(r3)
@@ -333,7 +371,7 @@ async def main():
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_data = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "summary": "Multi-video production benchmark with Whisper/Demucs bottleneck analysis and RVC",
+        "summary": "Multi-video production benchmark with dynamic bottleneck ranking and RVC",
         "results": results,
     }
     report_path.write_text(json.dumps(report_data, indent=2, ensure_ascii=False), encoding="utf-8")

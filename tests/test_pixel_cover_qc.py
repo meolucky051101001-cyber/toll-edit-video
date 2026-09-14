@@ -347,8 +347,8 @@ class TestPixelCoverQC(unittest.TestCase):
             ass_file = Path(td) / "subs.ass"
             ass_file.write_text(
                 "[Script Info]\nPlayResX: 1080\nPlayResY: 1920\n\n[Events]\n"
-                "Dialogue: 0,0:00:01.00,0:00:04.00,BgStyle,,0,0,0,,{\\pos(540,1550)}{\\p1}m 0 0 l 100 0 l 100 50 l 0 50{\\p0}\n"
-                "Dialogue: 0,0:00:05.00,0:00:08.00,BgStyle,,0,0,0,,{\\pos(540,1200)}{\\p1}m 0 0 l 100 0 l 100 50 l 0 50{\\p0}\n",
+                "Dialogue: 0,0:00:01.00,0:00:04.00,BgStyle,,0,0,0,,{\\an7\\pos(540,1550)}{\\p1}m 0 0 l 100 0 l 100 50 l 0 50{\\p0}\n"
+                "Dialogue: 0,0:00:05.00,0:00:08.00,BgStyle,,0,0,0,,{\\an7\\pos(540,1200)}{\\p1}m 0 0 l 100 0 l 100 50 l 0 50{\\p0}\n",
                 encoding="utf-8-sig",
             )
             segments = [
@@ -390,14 +390,202 @@ class TestPixelCoverQC(unittest.TestCase):
                     )
 
             keys = [a.get("key", "") for a in report.diagnostic_artifacts]
-            # Must contain onset transition
-            self.assertIn("frames/transition_0.png", keys)
-            self.assertIn("frames/transition_1.png", keys)
-            # Must contain boundary exit
-            self.assertIn("frames/boundary_exit_0.png", keys)
-            self.assertIn("frames/boundary_exit_1.png", keys)
-            # Must contain boundary shift pre
-            self.assertIn("frames/boundary_shift_1_pre.png", keys)
+            # Must sample from ASS covers: onset, mid, exit, shift pre
+            self.assertTrue(any("cover_onset_0" in k or "transition_0" in k for k in keys))
+            self.assertTrue(any("cover_mid_0" in k or "boundary_mid_0" in k for k in keys))
+            self.assertTrue(any("cover_exit_0" in k or "boundary_exit_0" in k for k in keys))
+            self.assertTrue(any("cover_shift_1_pre" in k or "boundary_shift_1_pre" in k for k in keys))
+
+    def test_missing_cover_causes_qc_error(self):
+        """If an expected cover frame has no cover in ASS, QC must fail closed (status=error)."""
+        import json
+        from unittest import mock
+        from backend.pipeline_v2.qc import run_report_only_qc, QCSettings
+
+        with tempfile.TemporaryDirectory() as td:
+            video_file = Path(td) / "video.mp4"
+            video_file.write_bytes(b"dummy")
+            report_file = Path(td) / "qc_report.json"
+            # ASS with NO covers
+            ass_file = Path(td) / "subs.ass"
+            ass_file.write_text(
+                "[Script Info]\nPlayResX: 1080\nPlayResY: 1920\n\n[Events]\n"
+                "Dialogue: 1,0:00:01.00,0:00:04.00,TextStyle,,0,0,0,,Phu de khong co cover\n",
+                encoding="utf-8-sig",
+            )
+            segments = [
+                {"id": 1, "start": 1.0, "end": 4.0, "text": "Phu de", "y_pct": 0.85},
+            ]
+            seg_file = Path(td) / "segments.json"
+            seg_file.write_text(json.dumps(segments), encoding="utf-8")
+
+            def fake_run_command(cmd, timeout=30.0):
+                cmd_str = " ".join(str(c) for c in cmd)
+                if "ffprobe" in cmd_str:
+                    mock_res = mock.Mock(returncode=0)
+                    mock_res.stdout = json.dumps({"format": {"duration": "10.0"}, "streams": [{"codec_type": "video", "duration": "10.0"}]})
+                    mock_res.stderr = ""
+                    return mock_res
+                elif "ffmpeg" in cmd_str:
+                    if str(cmd[-1]) != "-":
+                        out_path = Path(cmd[-1])
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
+                        out_path.write_bytes(b"dummy")
+                    return mock.Mock(returncode=0, stdout="", stderr="")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with mock.patch("backend.pipeline_v2.qc._run_command", side_effect=fake_run_command):
+                with mock.patch("backend.pipeline_v2.cover_qc.inspect_frame_pixel_coverage") as mock_pix:
+                    mock_pix.return_value = {"checked": False, "reason": "no_active_covers_at_timestamp"}
+                    report = run_report_only_qc(
+                        video_path=video_file,
+                        report_path=report_file,
+                        ass_path=ass_file,
+                        segments_path=seg_file,
+                        settings=QCSettings(sample_frames=True),
+                    )
+
+            pix_check = next((c for c in report.checks if getattr(c, "name", None) == "pixel_cover_qc"), None)
+            self.assertIsNotNone(pix_check)
+            # Must fail closed with status error!
+            self.assertEqual(pix_check.status, "error")
+            self.assertFalse(report.metrics.get("pixel_cover_qc", {}).get("all_boxes_filled"))
+
+    def test_late_cover_appearance_causes_qc_error(self):
+        """Cover appears late (t=2.0s instead of t=1.0s), Chinese text exposed at 1.0s-2.0s must fail QC."""
+        import json
+        from unittest import mock
+        from backend.pipeline_v2.qc import run_report_only_qc, QCSettings
+
+        with tempfile.TemporaryDirectory() as td:
+            video_file = Path(td) / "video.mp4"
+            video_file.write_bytes(b"dummy")
+            report_file = Path(td) / "qc_report.json"
+            # ASS cover starts at 2.0s, but source Chinese text is active from 1.0s to 4.0s
+            ass_file = Path(td) / "subs.ass"
+            ass_file.write_text(
+                "[Script Info]\nPlayResX: 1080\nPlayResY: 1920\n\n[Events]\n"
+                + r"Dialogue: 0,0:00:02.00,0:00:04.00,BgStyle,,0,0,0,,{\an7\pos(540,1550)}{\p1}m 0 0 l 100 0 l 100 50 l 0 50{\p0}" + "\n",
+                encoding="utf-8-sig",
+            )
+            segments = [
+                {
+                    "id": 1,
+                    "index": 1,
+                    "start": 1.0,
+                    "end": 4.0,
+                    "text": "Late cover text",
+                    "y_pct": 0.85,
+                    "tracking_blocks": [
+                        {"start": 1.0, "end": 4.0, "x_pct": 0.3, "max_x_pct": 0.7, "y_pct": 0.85, "max_y_pct": 0.90}
+                    ],
+                },
+            ]
+            seg_file = Path(td) / "segments.json"
+            seg_file.write_text(json.dumps(segments), encoding="utf-8")
+
+            def fake_run_command(cmd, timeout=30.0):
+                cmd_str = " ".join(str(c) for c in cmd)
+                if "ffprobe" in cmd_str:
+                    mock_res = mock.Mock(returncode=0)
+                    mock_res.stdout = json.dumps({"format": {"duration": "10.0"}, "streams": [{"codec_type": "video", "duration": "10.0"}]})
+                    mock_res.stderr = ""
+                    return mock_res
+                elif "ffmpeg" in cmd_str:
+                    if str(cmd[-1]) != "-":
+                        out_path = Path(cmd[-1])
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
+                        out_path.write_bytes(b"dummy")
+                    return mock.Mock(returncode=0, stdout="", stderr="")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            def fake_inspect_pixel(fpath, ass_covers, canvas_w=1080, canvas_h=1920, timestamp=None):
+                t = float(timestamp or 0.0)
+                # Cover only exists at [2.0, 4.0]! At t < 2.0s, cover is missing!
+                if t < 2.0:
+                    return {"checked": False, "reason": "no_active_covers_at_timestamp"}
+                return {"checked": True, "all_boxes_filled": True, "boxes_checked": 1, "details": []}
+
+            with mock.patch("backend.pipeline_v2.qc._run_command", side_effect=fake_run_command):
+                with mock.patch("backend.pipeline_v2.cover_qc.inspect_frame_pixel_coverage", side_effect=fake_inspect_pixel):
+                    report = run_report_only_qc(
+                        video_path=video_file,
+                        report_path=report_file,
+                        ass_path=ass_file,
+                        segments_path=seg_file,
+                        settings=QCSettings(sample_frames=True),
+                    )
+
+            # Both source_cover and pixel_cover_qc must report error because cover was late!
+            source_check = next((c for c in report.checks if getattr(c, "name", None) == "source_cover"), None)
+            pix_check = next((c for c in report.checks if getattr(c, "name", None) == "pixel_cover_qc"), None)
+            self.assertIsNotNone(source_check)
+            self.assertEqual(source_check.status, "error")
+            self.assertIsNotNone(pix_check)
+            self.assertEqual(pix_check.status, "error")
+
+    def test_hold_period_grace_rule_sampling(self):
+        """When source Chinese text ends early but cover holds, hold sample must be tested."""
+        import json
+        from unittest import mock
+        from backend.pipeline_v2.qc import run_report_only_qc, QCSettings
+
+        with tempfile.TemporaryDirectory() as td:
+            video_file = Path(td) / "video.mp4"
+            video_file.write_bytes(b"dummy")
+            report_file = Path(td) / "qc_report.json"
+            # ASS cover extends to 4.0s
+            ass_file = Path(td) / "subs.ass"
+            ass_file.write_text(
+                "[Script Info]\nPlayResX: 1080\nPlayResY: 1920\n\n[Events]\n"
+                + r"Dialogue: 0,0:00:01.00,0:00:04.00,BgStyle,,0,0,0,,{\an7\pos(540,1550)}{\p1}m 0 0 l 100 0 l 100 50 l 0 50{\p0}" + "\n",
+                encoding="utf-8-sig",
+            )
+            # Source Chinese text ended at 2.0s! Cover holds until 4.0s (hold grace rule)
+            segments = [
+                {
+                    "id": 1,
+                    "start": 1.0,
+                    "end": 4.0,
+                    "text": "Hold grace text",
+                    "y_pct": 0.85,
+                    "tracking_blocks": [
+                        {"start": 1.0, "end": 2.0, "x_pct": 0.3, "max_x_pct": 0.7, "y_pct": 0.85, "max_y_pct": 0.90}
+                    ],
+                }
+            ]
+            seg_file = Path(td) / "segments.json"
+            seg_file.write_text(json.dumps(segments), encoding="utf-8")
+
+            def fake_run_command(cmd, timeout=30.0):
+                cmd_str = " ".join(str(c) for c in cmd)
+                if "ffprobe" in cmd_str:
+                    mock_res = mock.Mock(returncode=0)
+                    mock_res.stdout = json.dumps({"format": {"duration": "10.0"}, "streams": [{"codec_type": "video", "duration": "10.0"}]})
+                    mock_res.stderr = ""
+                    return mock_res
+                elif "ffmpeg" in cmd_str:
+                    if str(cmd[-1]) != "-":
+                        out_path = Path(cmd[-1])
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
+                        out_path.write_bytes(b"dummy")
+                    return mock.Mock(returncode=0, stdout="", stderr="")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with mock.patch("backend.pipeline_v2.qc._run_command", side_effect=fake_run_command):
+                with mock.patch("backend.pipeline_v2.cover_qc.inspect_frame_pixel_coverage") as mock_pix:
+                    mock_pix.return_value = {"checked": True, "all_boxes_filled": True, "boxes_checked": 1, "details": []}
+                    report = run_report_only_qc(
+                        video_path=video_file,
+                        report_path=report_file,
+                        ass_path=ass_file,
+                        segments_path=seg_file,
+                        settings=QCSettings(sample_frames=True),
+                    )
+
+            keys = [a.get("key", "") for a in report.diagnostic_artifacts]
+            # Must contain cover_hold_0
+            self.assertTrue(any("cover_hold_0" in k for k in keys))
 
 
 if __name__ == "__main__":

@@ -235,6 +235,43 @@ class VideoPipelineEndToEndTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(len(archived), 1)
 
+    def test_cache_version_2_7_0_invalidates_2_6_0_manifest(self):
+        """Verify PIPELINE_IMPLEMENTATION_VERSION = 2.7.0 invalidates and archives 2.6.0 cache manifest."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.write_bytes(b"source-video")
+            request = VideoPipelineRequest(
+                video_path=source,
+                job_directory=root / "job",
+                output_path=root / "delivered.mp4",
+                settings=PipelineSettings(
+                    mode=PipelineMode.V2,
+                    enable_stage_cache=True,
+                ),
+            )
+
+            # Create an existing manifest under version 2.6.0
+            with mock.patch(
+                "backend.pipeline_v2.video_pipeline.PIPELINE_IMPLEMENTATION_VERSION",
+                "2.6.0",
+            ):
+                manifest_v26 = VideoPipelineRunner(request)._load_or_create_manifest()
+                self.assertEqual(manifest_v26.metadata["pipeline_implementation_version"], "2.6.0")
+
+            # Now run under default current PIPELINE_IMPLEMENTATION_VERSION (2.7.0)
+            runner_v27 = VideoPipelineRunner(request)
+            manifest_v27 = runner_v27._load_or_create_manifest()
+
+            self.assertEqual(manifest_v27.metadata["pipeline_implementation_version"], "2.7.0")
+            self.assertNotEqual(
+                manifest_v26.fingerprints.config_sha256,
+                manifest_v27.fingerprints.config_sha256,
+            )
+            # Manifest must have been archived
+            archived = list((root / "job" / "pipeline_v2").glob("job_manifest.*.json"))
+            self.assertEqual(len(archived), 1)
+
     async def test_tts_stage_rewrites_from_measured_duration_and_persists_text(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
