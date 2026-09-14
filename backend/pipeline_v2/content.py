@@ -74,6 +74,10 @@ def merge_ocr_geometry(
             segment.max_y_pct = source.max_y_pct
             segment.best_block = source.best_block
             segment.tracking_blocks = source.tracking_blocks
+            segment.is_subtitle = getattr(source, "is_subtitle", None)
+            segment.is_packaging = getattr(source, "is_packaging", None)
+            segment.is_static = getattr(source, "is_static", None)
+            segment.in_subtitle_band = getattr(source, "in_subtitle_band", None)
         merged.append(segment)
     return merged
 

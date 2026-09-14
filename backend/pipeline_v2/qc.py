@@ -38,6 +38,7 @@ class QCSettings:
     sample_frames: bool = True
     command_timeout_seconds: float = 120.0
     gate_policy: str = "block"
+    diagnostic_max_samples: int = 30
 
 
 @dataclass(frozen=True)
@@ -728,7 +729,7 @@ def _sample_frames(
     ffmpeg_binary: str,
     timeout: float,
     extra_samples: Optional[Sequence[Tuple[str, float]]] = None,
-    max_samples: Optional[int] = None,
+    max_samples: Optional[int] = 30,
 ) -> Tuple[List[Dict[str, Any]], List[QCCheck]]:
     store = ArtifactStore(diagnostics_directory)
     samples = plan_diagnostic_samples(duration, extra_samples, max_samples=max_samples)
@@ -1085,6 +1086,7 @@ def run_report_only_qc(
                 ffmpeg_binary,
                 config.command_timeout_seconds,
                 extra_samples=diagnostic_points,
+                max_samples=getattr(config, "diagnostic_max_samples", 30),
             )
             report.diagnostic_artifacts.extend(frame_artifacts)
             report.checks.extend(frame_checks)

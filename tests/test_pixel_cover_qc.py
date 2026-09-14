@@ -323,8 +323,11 @@ class TestPixelCoverQC(unittest.TestCase):
                     if count == 26:
                         self.assertEqual(len(transition_keys), 26)
                     else:
-                        # For 40, 49, 100 segments, should fill the full 30 budget
-                        self.assertEqual(len(transition_keys), 30)
+                        # For 40, 49, 100 segments, transition samples fill remaining budget after 4 baseline frames (30 - 4 = 26)
+                        self.assertEqual(len(transition_keys), 26)
+
+                    # Total diagnostic frames (including baseline) must strictly be <= 30
+                    self.assertLessEqual(len(keys), 30)
 
                     # 3. Head (transition_0) must ALWAYS be sampled
                     self.assertIn("frames/transition_0.png", keys)

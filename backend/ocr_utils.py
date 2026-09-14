@@ -142,6 +142,42 @@ def stabilize_samples(samples):
     return result
 
 
+class OCRBlock:
+    def __init__(
+        self,
+        text,
+        start,
+        end,
+        x_pct,
+        max_x_pct,
+        y_pct,
+        max_y_pct,
+        prob=1.0,
+        sample_segment_id=None,
+        sample_time=0.0,
+        is_subtitle=True,
+        is_packaging=False,
+        is_static=False,
+        in_subtitle_band=True,
+        type="subtitle",
+    ):
+        self.text = text
+        self.start = start
+        self.end = end
+        self.x_pct = x_pct
+        self.max_x_pct = max_x_pct
+        self.y_pct = y_pct
+        self.max_y_pct = max_y_pct
+        self.prob = prob
+        self.sample_segment_id = sample_segment_id
+        self.sample_time = sample_time
+        self.is_subtitle = is_subtitle
+        self.is_packaging = is_packaging
+        self.is_static = is_static
+        self.in_subtitle_band = in_subtitle_band
+        self.type = type
+
+
 def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=None, srt_segments=None, **kwargs):
     logger.info(f"Bắt đầu OCR toàn diện trên video {video_path}")
 
@@ -160,19 +196,6 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
     if width <= 0 or height <= 0:
         cap.release()
         raise ValueError("Video has invalid dimensions")
-
-    class OCRBlock:
-        def __init__(self, text, start, end, x_pct, max_x_pct, y_pct, max_y_pct, prob=1.0, sample_segment_id=None, sample_time=0.0):
-            self.text = text
-            self.start = start
-            self.end = end
-            self.x_pct = x_pct
-            self.max_x_pct = max_x_pct
-            self.y_pct = y_pct
-            self.max_y_pct = max_y_pct
-            self.prob = prob
-            self.sample_segment_id = sample_segment_id
-            self.sample_time = sample_time
 
     all_blocks = []
 
@@ -507,6 +530,11 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                                 start=max(seg_s, left), end=min(seg_e, right),
                                 prob=row.get("prob", 0.0),
                                 sample_segment_id=s_key, sample_time=row["sample_time"],
+                                is_subtitle=True,
+                                is_packaging=False,
+                                is_static=False,
+                                in_subtitle_band=True,
+                                type="subtitle",
                             ))
                     seg.tracking_blocks = tracking
 
@@ -519,9 +547,18 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                         y_pct=b["y_pct"],
                         max_y_pct=b["max_y_pct"],
                         prob=b.get("prob", 1.0),
+                        is_subtitle=True,
+                        is_packaging=False,
+                        is_static=False,
+                        in_subtitle_band=True,
+                        type="subtitle",
                     )
                     seg.y_pct = b["y_pct"]
                     seg.max_y_pct = b["max_y_pct"]
+                    seg.is_subtitle = True
+                    seg.is_packaging = False
+                    seg.is_static = False
+                    seg.in_subtitle_band = True
                     logger.info(f"Sync (Subtitle Band): '{str(getattr(seg, 'content', ''))[:15]}' -> Y: {seg.y_pct:.3f} - {seg.max_y_pct:.3f}")
                 else:
                     # No subtitle found for this segment: do NOT assign random Chinese block!
@@ -529,6 +566,10 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                     seg.tracking_blocks = []
                     seg.y_pct = global_med_top
                     seg.max_y_pct = global_med_bottom
+                    seg.is_subtitle = False
+                    seg.is_packaging = False
+                    seg.is_static = False
+                    seg.in_subtitle_band = False
     else:
         logger.info("No reliable Chinese subtitle band detected (video without subtitles or only static packaging/logos).")
         main_y_pct = 0.85
@@ -538,5 +579,9 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                 seg.tracking_blocks = []
                 seg.y_pct = 0.85
                 seg.max_y_pct = 0.90
+                seg.is_subtitle = False
+                seg.is_packaging = False
+                seg.is_static = False
+                seg.in_subtitle_band = False
 
     return [], width, height, main_y_pct

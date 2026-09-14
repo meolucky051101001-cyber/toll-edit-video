@@ -1,6 +1,6 @@
 """Comprehensive unit tests for expected cover timeline contract and red tests.
 
-Phase 1 (Đợt 1 & 1.1) Test Suite:
+Phase 1 (Đợt 1, 1.1 & 1.2) Test Suite:
 1. Genuine subtitle in upper screen (y_pct < 0.45) is included.
 2. Packaging / background text in lower screen (y_pct > 0.45) is excluded.
 3. OCR starting earlier and ending later than ASR preserves full OCR bounds.
@@ -12,24 +12,34 @@ Phase 1 (Đợt 1 & 1.1) Test Suite:
 9. Clamping at video duration.
 10. Deterministic, order-invariant handling of simultaneous events (both hold to 5s regardless of list order).
 11. Long timeline scalability (>30 segments).
-12. Real production sampling budget cap (plan_diagnostic_samples) guarantees <= 30 frames inclusive of baseline.
-13. Classification metadata serialization roundtrip (GeometryBlock and RuntimeSegment).
-14. Failure detection: missing cover in ASS.
-15. Failure detection: late cover onset.
-16. Failure detection: early cover exit.
-17. RED TEST 1 (Fails on 9c4f070): Insufficient hold (0.5s instead of 1.0s).
-18. RED TEST 2 (Fails on 9c4f070): Unbridged gap (100ms) between adjacent subtitles.
+12. Real production plan_diagnostic_samples guarantees <= 30 frames inclusive of baseline.
+13. Integration test: run_report_only_qc strictly caps FFmpeg extraction calls <= 30.
+14. Classification metadata serialization roundtrip (GeometryBlock and RuntimeSegment).
+15. Real OCR output flow: OCRBlock assigns metadata, preserved across merge and JSON, ingested by timeline.
+16. Failure detection: missing cover in ASS.
+17. Failure detection: late cover onset.
+18. Failure detection: early cover exit.
+19. RED TEST 1 (Fails on 9c4f070): Insufficient hold (0.5s instead of 1.0s).
+20. RED TEST 2 (Fails on 9c4f070): Unbridged gap (100ms) between adjacent subtitles.
 """
 
 from datetime import timedelta
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
+
+_backend_dir = str(Path(__file__).resolve().parents[1] / "backend")
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
+
 import numpy as np
 from PIL import Image
 
+from backend.ocr_utils import OCRBlock
+from backend.pipeline_v2.content import merge_ocr_geometry
 from backend.pipeline_v2.cover_qc import (
     build_expected_cover_timeline,
     ExpectedCoverEvent,
@@ -40,6 +50,8 @@ from backend.pipeline_v2.segments import (
     RuntimeSegment,
     segment_to_dict,
     segment_from_dict,
+    segments_to_dicts,
+    segments_from_dicts,
 )
 
 
@@ -330,8 +342,60 @@ class TestExpectedCoverTimeline(unittest.TestCase):
         planned_small = plan_diagnostic_samples(duration=duration, extra_samples=small_candidates, max_samples=30)
         self.assertEqual(len(planned_small), 6, "4 baseline + 2 small candidates = 6 frames")
 
+    def test_run_report_only_qc_caps_ffmpeg_samples_to_budget_30(self):
+        """13. Integration test: run_report_only_qc with 50 candidates strictly caps FFmpeg extraction calls <= 30."""
+        with tempfile.TemporaryDirectory() as td:
+            video_file = Path(td) / "video.mp4"
+            video_file.write_bytes(b"dummy")
+            report_file = Path(td) / "qc_report.json"
+            ass_file = Path(td) / "subs.ass"
+            ass_file.write_text("[Script Info]\nPlayResX: 1080\nPlayResY: 1920\n\n[Events]\n", encoding="utf-8-sig")
+
+            # 50 segments -> generates 50 transition candidates in fallback branch
+            segments = []
+            for i in range(50):
+                segments.append({
+                    "id": i + 1,
+                    "start": float(i * 2),
+                    "end": float(i * 2 + 1.5),
+                    "text": f"Seg {i + 1}",
+                    "y_pct": 0.85,
+                })
+            seg_file = Path(td) / "segments.json"
+            seg_file.write_text(json.dumps(segments), encoding="utf-8")
+
+            ffmpeg_frame_calls = []
+
+            def fake_run_command(cmd, timeout=30.0):
+                cmd_str = " ".join(str(c) for c in cmd)
+                if "ffprobe" in cmd_str:
+                    mock_res = mock.Mock(returncode=0)
+                    mock_res.stdout = json.dumps({"format": {"duration": "120.0"}, "streams": [{"codec_type": "video", "duration": "120.0"}]})
+                    mock_res.stderr = ""
+                    return mock_res
+                elif "ffmpeg" in cmd_str:
+                    if str(cmd[-1]) != "-":
+                        out_path = Path(cmd[-1])
+                        _create_synthetic_frame(out_path, width=1080, height=1920)
+                        ffmpeg_frame_calls.append(out_path.name)
+                    return mock.Mock(returncode=0, stdout="", stderr="")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with mock.patch("backend.pipeline_v2.qc._run_command", side_effect=fake_run_command):
+                report = run_report_only_qc(
+                    video_path=video_file,
+                    report_path=report_file,
+                    ass_path=ass_file,
+                    segments_path=seg_file,
+                    settings=QCSettings(sample_frames=True, diagnostic_max_samples=30),
+                )
+
+            self.assertLessEqual(len(ffmpeg_frame_calls), 30, "FFmpeg frame extraction calls must strictly NOT exceed budget of 30")
+            self.assertEqual(len(ffmpeg_frame_calls), 30, "Budget of 30 frames should be fully utilized when 50 candidates exist")
+            self.assertLessEqual(len(report.diagnostic_artifacts), 30, "Diagnostic artifacts count must not exceed 30")
+
     def test_segment_serialization_preserves_classification_metadata(self):
-        """13. GeometryBlock and RuntimeSegment serialization preserves is_subtitle, is_packaging, prob, and type."""
+        """14. GeometryBlock and RuntimeSegment serialization preserves is_subtitle, is_packaging, prob, and type."""
         block = GeometryBlock(
             text="Test Block",
             start=1.0,
@@ -364,13 +428,11 @@ class TestExpectedCoverTimeline(unittest.TestCase):
         )
 
         data = segment_to_dict(seg)
-        # Verify JSON serializability
         serialized_json = json.dumps(data)
         self.assertIn('"is_subtitle": true', serialized_json)
         self.assertIn('"is_packaging": false', serialized_json)
         self.assertIn('"in_subtitle_band": true', serialized_json)
 
-        # Verify deserialization round-trip
         loaded = segment_from_dict(json.loads(serialized_json))
         self.assertTrue(loaded.is_subtitle)
         self.assertFalse(loaded.is_packaging)
@@ -380,11 +442,85 @@ class TestExpectedCoverTimeline(unittest.TestCase):
         self.assertFalse(loaded.tracking_blocks[0].is_packaging)
         self.assertEqual(loaded.tracking_blocks[0].prob, 0.95)
 
-        # Verify build_expected_cover_timeline correctly ingests the deserialized segment
         timeline = build_expected_cover_timeline([loaded], video_duration=10.0, fps=30.0)
         self.assertEqual(len(timeline), 1)
         self.assertEqual(timeline[0].src_start, 1.0)
         self.assertEqual(timeline[0].src_end, 3.0)
+
+    def test_mocked_ocr_output_assigns_classification_metadata_and_ingests_to_timeline(self):
+        """15. Real OCR output flow: OCRBlock assigns metadata, preserved across merge and JSON, ingested by timeline."""
+        ocr_seg = RuntimeSegment(
+            index=1,
+            start=timedelta(seconds=1.0),
+            end=timedelta(seconds=3.0),
+            content="Original text",
+            y_pct=0.82,
+            max_y_pct=0.88,
+            is_subtitle=True,
+            is_packaging=False,
+            is_static=False,
+            in_subtitle_band=True,
+            best_block=OCRBlock(
+                text="Sub",
+                start=1.0,
+                end=3.0,
+                x_pct=0.2,
+                max_x_pct=0.8,
+                y_pct=0.82,
+                max_y_pct=0.88,
+                prob=0.95,
+                is_subtitle=True,
+                is_packaging=False,
+                is_static=False,
+                in_subtitle_band=True,
+                type="subtitle",
+            ),
+            tracking_blocks=[
+                OCRBlock(
+                    text="Sub",
+                    start=1.0,
+                    end=3.0,
+                    x_pct=0.2,
+                    max_x_pct=0.8,
+                    y_pct=0.82,
+                    max_y_pct=0.88,
+                    prob=0.95,
+                    is_subtitle=True,
+                    is_packaging=False,
+                    is_static=False,
+                    in_subtitle_band=True,
+                    type="subtitle",
+                )
+            ],
+        )
+
+        translated_seg = RuntimeSegment(
+            index=1,
+            start=timedelta(seconds=1.0),
+            end=timedelta(seconds=3.0),
+            content="Translated Vietnamese",
+        )
+
+        # 1. Merge preserves metadata
+        merged = merge_ocr_geometry([translated_seg], [ocr_seg])
+        self.assertEqual(len(merged), 1)
+        self.assertTrue(merged[0].is_subtitle)
+        self.assertFalse(merged[0].is_packaging)
+        self.assertTrue(merged[0].in_subtitle_band)
+
+        # 2. Serialization preserves metadata
+        dicts = segments_to_dicts(merged)
+        serialized_json = json.dumps(dicts)
+        self.assertIn('"is_subtitle": true', serialized_json)
+        self.assertIn('"in_subtitle_band": true', serialized_json)
+
+        # 3. Deserialized segments correctly ingested into cover timeline
+        loaded = segments_from_dicts(json.loads(serialized_json))
+        timeline = build_expected_cover_timeline(loaded, video_duration=10.0, fps=30.0)
+        self.assertEqual(len(timeline), 1)
+        self.assertEqual(timeline[0].src_start, 1.0)
+        self.assertEqual(timeline[0].src_end, 3.0)
+        self.assertEqual(timeline[0].expected_end, 4.0)
 
 
 class TestRealQCFailureDetections(unittest.TestCase):
@@ -430,7 +566,7 @@ class TestRealQCFailureDetections(unittest.TestCase):
         return video_file, report_file, ass_file, seg_file, fake_run_command
 
     def test_qc_fails_when_cover_missing_in_ass(self):
-        """Scenario 14: Chinese text has NO cover in ASS -> QC must report error."""
+        """Scenario 16: Chinese text has NO cover in ASS -> QC must report error."""
         with tempfile.TemporaryDirectory() as td:
             ass_content = (
                 "[Script Info]\nPlayResX: 1080\nPlayResY: 1920\n\n[Events]\n"
@@ -453,7 +589,7 @@ class TestRealQCFailureDetections(unittest.TestCase):
             self.assertEqual(src_check.status, "error")
 
     def test_qc_fails_when_cover_onset_is_late(self):
-        """Scenario 15: Cover starts at 1.5s while Chinese text starts at 1.0s -> QC must report error."""
+        """Scenario 17: Cover starts at 1.5s while Chinese text starts at 1.0s -> QC must report error."""
         with tempfile.TemporaryDirectory() as td:
             ass_content = (
                 "[Script Info]\nPlayResX: 1080\nPlayResY: 1920\n\n[Events]\n"
@@ -476,7 +612,7 @@ class TestRealQCFailureDetections(unittest.TestCase):
             self.assertEqual(src_check.status, "error")
 
     def test_qc_fails_when_cover_exit_is_early(self):
-        """Scenario 16: Cover exits at 2.5s while Chinese text continues until 3.0s -> QC must report error."""
+        """Scenario 18: Cover exits at 2.5s while Chinese text continues until 3.0s -> QC must report error."""
         with tempfile.TemporaryDirectory() as td:
             ass_content = (
                 "[Script Info]\nPlayResX: 1080\nPlayResY: 1920\n\n[Events]\n"
@@ -499,7 +635,7 @@ class TestRealQCFailureDetections(unittest.TestCase):
             self.assertEqual(src_check.status, "error")
 
     def test_qc_fails_when_cover_only_holds_0_2s_or_0_5s_instead_of_1_0s(self):
-        """Scenario 17 [RED TEST on 9c4f070]:
+        """Scenario 19 [RED TEST on 9c4f070]:
         Cover ends at 3.5s (only holding 0.5s after text ends at 3.0s, instead of required 1.0s to 4.0s).
         On commit 9c4f070, this assertion FAILS because inspect_covers only checks [src_start, src_end].
         """
@@ -526,7 +662,7 @@ class TestRealQCFailureDetections(unittest.TestCase):
             self.assertEqual(src_check.status, "error", "Insufficient hold (0.5s instead of 1.0s) must fail QC")
 
     def test_qc_fails_when_unbridged_gap_50_to_200ms_between_subs(self):
-        """Scenario 18 [RED TEST on 9c4f070]:
+        """Scenario 20 [RED TEST on 9c4f070]:
         Two adjacent subtitles (1.0-2.0s and 2.1-4.0s) have a 100ms gap.
         Cover 1 closes at 2.0s and Cover 2 opens at 2.1s (unbridged flicker gap).
         On commit 9c4f070, this assertion FAILS because inspect_covers evaluates each segment independently.
