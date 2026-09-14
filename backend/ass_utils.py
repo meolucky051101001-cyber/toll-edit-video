@@ -32,6 +32,15 @@ def _block_value(block, key, default=None):
     return block.get(key, default) if isinstance(block, dict) else getattr(block, key, default)
 
 
+def _excluded_source(block):
+    return (_block_value(block, "is_subtitle") is False
+            or _block_value(block, "is_packaging") is True
+            or _block_value(block, "is_static") is True
+            or _block_value(block, "in_subtitle_band") is False
+            or str(_block_value(block, "type", "")).lower() in
+            ("packaging", "background", "logo", "watermark"))
+
+
 def _transition_cover_blocks(blocks):
     """Cover sampling uncertainty at contiguous, nearby caption transitions."""
     keys = ('start', 'end', 'x_pct', 'max_x_pct', 'y_pct', 'max_y_pct')
@@ -169,6 +178,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         # Align only outer translated-page boundaries to the source's visual
         # lifetime. Keep internal page timing and all audio timing untouched.
         dialogue_segments = copy.deepcopy(list(dialogue_segments))
+        for seg in dialogue_segments:
+            # Cached/imported geometry must obey the same classification as OCR.
+            if _excluded_source(seg):
+                seg.tracking_blocks = []
+                seg.best_block = None
+            else:
+                original_tracks = getattr(seg, "tracking_blocks", None) or []
+                seg.tracking_blocks = [b for b in original_tracks if not _excluded_source(b)]
+                if _excluded_source(getattr(seg, "best_block", None)) or (
+                    original_tracks and not seg.tracking_blocks
+                ):
+                    seg.best_block = None
         groups = []
         for seg in dialogue_segments:
             source_id = getattr(seg, "source_segment_id", None) or seg.index
@@ -305,7 +326,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     chinese_w = int((source_right_pct - source_left_pct) * canvas_x)
                     chinese_h = int((raw_max_y_pct - raw_y_pct) * canvas_y)
                     # Keep the card centered on the video, not on OCR's X center.
-                    chinese_center_x = canvas_x // 2
+                    chinese_center_x = canvas_x / 2
                     chinese_center_y = int(
                         ((raw_y_pct + raw_max_y_pct) * 0.5) * canvas_y
                     )
@@ -323,7 +344,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     text_cover_h = required_text_h + (sticker_padding_y * 2)
 
                     # HARD LIMIT: Cover must ALWAYS be <= 90% of canvas width, leaving at least 5% margin on each side
-                    max_allowed_cover_w = int(canvas_x * 0.90)
+                    max_allowed_cover_w = max_allowed_w
                     target_visible_w = min(max(min_cover_w, text_cover_w), max_allowed_cover_w)
                     target_visible_h = min(canvas_y, max(min_cover_h, text_cover_h))
 
@@ -335,7 +356,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     draw_h = max(4, target_visible_h - (outline * 2))
 
                     # Lock horizontal position; only Y follows the subtitle track.
-                    draw_x = chinese_center_x - (draw_w // 2)
+                    draw_x = chinese_center_x - draw_w / 2
                     draw_y = chinese_center_y - (draw_h // 2)
 
                     # Clamp to screen margins: always leave at least 5% margin on each side
@@ -348,12 +369,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     draw_y = max(0, min(draw_y, canvas_y - draw_h - (outline * 2)))
 
                     draw_cmd = "{\\p1}" + _rounded_box(draw_w, draw_h) + "{\\p0}"
-                    bg_line = f"{{\\an7\\pos({draw_x},{draw_y})}}{draw_cmd}"
+                    bg_line = f"{{\\an7\\pos({draw_x:g},{draw_y})}}{draw_cmd}"
                     ass_content += f"Dialogue: 0,{start_str},{end_str},BgStyle,,0,0,0,,{bg_line}\n"
 
-                    text_cx = draw_x + (draw_w // 2)
+                    text_cx = chinese_center_x
                     text_cy = draw_y + max(0, (draw_h - required_text_h) // 2)
-                    text_line = f"{{\\an8\\pos({text_cx},{text_cy})}}{formatted_text}"
+                    text_line = f"{{\\an8\\pos({text_cx:g},{text_cy})}}{formatted_text}"
                     ass_content += f"Dialogue: 1,{start_str},{end_str},TextStyle,,0,0,0,,{text_line}\n"
                 else:
                     # When no subtitle exists, DO NOT emit a default BgStyle cover box in the middle of the screen!

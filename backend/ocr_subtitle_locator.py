@@ -108,7 +108,7 @@ def _geometry_score(
     height = bottom - top
     if not (0.0 <= left < right <= 1.0 and 0.03 <= top < bottom <= 0.96):
         return None
-    if width < 0.025 or height < 0.007 or height > 0.14:
+    if width < 0.025 or width > 0.90 + 1e-9 or height < 0.007 or height > 0.14:
         return None
 
     pixel_aspect = (width * max(frame_width, 1)) / (
@@ -288,6 +288,14 @@ def select_chinese_subtitle_band(
         return score, strong
 
     for ordinal, source in enumerate(blocks):
+        # Respect explicit classification before mapping drops optional fields.
+        if (_value(source, "is_subtitle") is False
+                or _value(source, "is_packaging") is True
+                or _value(source, "is_static") is True
+                or _value(source, "in_subtitle_band") is False
+                or str(_value(source, "type", "")).lower() in
+                ("packaging", "background", "logo", "watermark")):
+            continue
         block = _as_mapping(source)
         if len(_chinese_text(block["text"])) < 2:
             continue
@@ -389,6 +397,11 @@ def select_chinese_subtitle_band(
         ]
         seen_segments = {other.segment_id for other in related}
         matching_segments = {other.segment_id for other in related if other.strong_text_match}
+        # Repeated unmatched scene text must not enter through bracket recovery.
+        # Position alone is not evidence: genuine fixed-position dialogue with
+        # changing text or matching ASR remains eligible.
+        if len(seen_segments - {None}) >= 2 and not matching_segments:
+            return False
         return not (len(seen_segments) >= 3 and
                     len(matching_segments) / len(seen_segments) < 0.6)
 

@@ -73,7 +73,7 @@ V2_STAGE_ORDER = (
 # Bump this value whenever artifact semantics change.  It participates in the
 # manifest fingerprint so an upgraded runner cannot silently reuse output from
 # an older implementation that happened to have the same environment flags.
-PIPELINE_IMPLEMENTATION_VERSION = "2.8.0"
+PIPELINE_IMPLEMENTATION_VERSION = "2.9.0"
 
 
 class QCGateBlocked(RuntimeError):

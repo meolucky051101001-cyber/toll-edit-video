@@ -164,15 +164,15 @@ class SubtitleCoverGeometryTests(unittest.TestCase):
         )
         self.assertIsNotNone(match)
         box_x, box_y, box_width, box_height = map(int, match.groups())
-        self.assertLessEqual(box_width, int(0.99 * 720))
+        self.assertLessEqual(box_width, int(0.90 * 720))
         self.assertLessEqual(box_height, int(0.10 * 1280))
         self.assertLessEqual(box_y - 12, int(0.74 * 1280))
         self.assertGreaterEqual(box_y + box_height + 12, int(0.80 * 1280))
         self.assertAlmostEqual(box_x + (box_width / 2), 0.50 * 720, delta=1)
         self.assertAlmostEqual(box_y + (box_height / 2), 0.77 * 1280, delta=1)
-        # Include the 12px same-colour ASS outline when checking coverage.
-        self.assertLessEqual(box_x - 12, int(0.11 * 720) + 2)
-        self.assertGreaterEqual(box_x + box_width + 12, int(0.89 * 720) - 2)
+        # BgStyle has no outline: the drawing itself must cover source text.
+        self.assertLessEqual(box_x, int(0.11 * 720) + 2)
+        self.assertGreaterEqual(box_x + box_width, int(0.89 * 720) - 2)
 
     def test_long_two_line_sticker_keeps_compact_height(self):
         segment = RuntimeSegment(
@@ -206,7 +206,7 @@ class SubtitleCoverGeometryTests(unittest.TestCase):
         )
         self.assertIsNotNone(match)
         _, _, box_width, box_height = map(int, match.groups())
-        self.assertLessEqual(box_width / 720, 0.99)
+        self.assertLessEqual(box_width / 720, 0.90)
         self.assertAlmostEqual(box_height / 1280, 0.075, delta=0.005)
 
 
