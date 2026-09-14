@@ -206,6 +206,17 @@ class SmokeColdEnforcementTests(unittest.TestCase):
         fresh_results = verify_stages_freshness(manifest_fresh, run_start)
         self.assertEqual(fresh_results, [])
 
+    def test_smoke_test_args_parsing(self):
+        scripts_path = Path(__file__).resolve().parents[1] / "scripts"
+        import sys
+        if str(scripts_path) not in sys.path:
+            sys.path.insert(0, str(scripts_path))
+        from smoke_test_v2 import parse_args
+        with patch("sys.argv", ["smoke_test_v2.py", "--with-rvc", "--video", "sample.mp4"]):
+            args = parse_args()
+            self.assertTrue(args.with_rvc)
+            self.assertEqual(args.video, "sample.mp4")
+
 
 if __name__ == '__main__':
     unittest.main()

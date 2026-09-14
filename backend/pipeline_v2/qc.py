@@ -894,20 +894,20 @@ def run_report_only_qc(
                 # 1. Comprehensive subtitle cluster sampling across entire video
                 # Up to 30 sample frames spanning the entire timeline.
                 # Must guarantee head (0), tail (total_segs - 1), and subtitle position shifts are sampled.
+                shift_indices = []
+                prev_y = None
+                for idx, seg in enumerate(loaded_segs):
+                    cur_y = seg.get("y_pct") or seg.get("max_y_pct")
+                    if prev_y is not None and cur_y is not None and abs(float(cur_y) - float(prev_y)) > 0.04:
+                        shift_indices.append(idx)
+                    if cur_y is not None:
+                        prev_y = cur_y
+
                 total_segs = len(loaded_segs)
                 selected_indices = set()
                 if total_segs <= 30:
                     selected_indices.update(range(total_segs))
                 else:
-                    shift_indices = []
-                    prev_y = None
-                    for idx, seg in enumerate(loaded_segs):
-                        cur_y = seg.get("y_pct") or seg.get("max_y_pct")
-                        if prev_y is not None and cur_y is not None and abs(float(cur_y) - float(prev_y)) > 0.04:
-                            shift_indices.append(idx)
-                        if cur_y is not None:
-                            prev_y = cur_y
-
                     # Mandatory head and tail
                     selected_indices.add(0)
                     selected_indices.add(total_segs - 1)
@@ -929,13 +929,51 @@ def run_report_only_qc(
                             if len(selected_indices) >= 30:
                                 break
 
+                # 1a. Transition boundary frames:
+                # Sample immediately after transition onset (start + 0.06s) to verify
+                # that subtitle cover is placed promptly without initial flicker or bleed.
                 for idx in sorted(selected_indices):
                     seg = loaded_segs[idx]
                     start_sec = float(seg.get("start", 0.0))
                     end_sec = float(seg.get("end", 0.0))
-                    mid_sec = round((start_sec + end_sec) / 2.0, 2)
-                    sample_time = max(0.05, min(mid_sec, max(0.05, video_duration - 0.1)))
+                    duration_seg = max(0.05, end_sec - start_sec)
+                    onset_offset = min(0.06, max(0.02, duration_seg * 0.15))
+                    sample_time = max(0.05, min(start_sec + onset_offset, max(0.05, video_duration - 0.1)))
                     diagnostic_points.append((f"transition_{idx}", round(sample_time, 2)))
+
+                # 1b. Additional boundary transition frames:
+                # Sample right before subtitle ends (exit boundary) and right before position shifts
+                # to catch premature disappearance, text exposure, or flicker between subtitles.
+                shift_set = set(shift_indices) if "shift_indices" in locals() else set()
+                boundary_budget = 16
+                boundary_count = 0
+                for idx in sorted(selected_indices):
+                    if boundary_count >= boundary_budget:
+                        break
+                    seg = loaded_segs[idx]
+                    start_sec = float(seg.get("start", 0.0))
+                    end_sec = float(seg.get("end", 0.0))
+                    duration_seg = max(0.05, end_sec - start_sec)
+
+                    # Exit boundary frame (immediately before subtitle ends)
+                    if duration_seg > 0.2:
+                        exit_offset = min(0.06, max(0.02, duration_seg * 0.15))
+                        exit_time = max(0.05, min(end_sec - exit_offset, max(0.05, video_duration - 0.1)))
+                        diagnostic_points.append((f"boundary_exit_{idx}", round(exit_time, 2)))
+                        boundary_count += 1
+
+                    # Pre-shift boundary frame (immediately before position shift)
+                    if idx > 0 and idx in shift_set:
+                        prev_seg = loaded_segs[idx - 1]
+                        prev_end = float(prev_seg.get("end", 0.0))
+                        pre_shift_t = max(0.05, min(prev_end - 0.05, max(0.05, video_duration - 0.1)))
+                        diagnostic_points.append((f"boundary_shift_{idx}_pre", round(pre_shift_t, 2)))
+                        boundary_count += 1
+
+                    # Midpoint frame (steady state)
+                    mid_time = max(0.05, min((start_sec + end_sec) / 2.0, max(0.05, video_duration - 0.1)))
+                    diagnostic_points.append((f"boundary_mid_{idx}", round(mid_time, 2)))
+                    boundary_count += 1
                 # 2. Diagnostic frame at weak OCR and near-edge candidates
                 weak_i, edge_i = 0, 0
                 for seg in loaded_segs:

@@ -335,6 +335,70 @@ class TestPixelCoverQC(unittest.TestCase):
                     # 5. Position shift must be preserved
                     self.assertIn(f"frames/transition_{shift_idx}.png", keys)
 
+    def test_boundary_transition_sampling_detects_onset_exit_and_shift(self):
+        import json
+        from unittest import mock
+        from backend.pipeline_v2.qc import run_report_only_qc, QCSettings
+
+        with tempfile.TemporaryDirectory() as td:
+            video_file = Path(td) / "video.mp4"
+            video_file.write_bytes(b"dummy")
+            report_file = Path(td) / "qc_report.json"
+            ass_file = Path(td) / "subs.ass"
+            ass_file.write_text(
+                "[Script Info]\nPlayResX: 1080\nPlayResY: 1920\n\n[Events]\n"
+                "Dialogue: 0,0:00:01.00,0:00:04.00,BgStyle,,0,0,0,,{\\pos(540,1550)}{\\p1}m 0 0 l 100 0 l 100 50 l 0 50{\\p0}\n"
+                "Dialogue: 0,0:00:05.00,0:00:08.00,BgStyle,,0,0,0,,{\\pos(540,1200)}{\\p1}m 0 0 l 100 0 l 100 50 l 0 50{\\p0}\n",
+                encoding="utf-8-sig",
+            )
+            segments = [
+                {"id": 1, "start": 1.0, "end": 4.0, "text": "First seg", "y_pct": 0.85},
+                {"id": 2, "start": 5.0, "end": 8.0, "text": "Second seg (shifted)", "y_pct": 0.65},
+            ]
+            seg_file = Path(td) / "segments.json"
+            seg_file.write_text(json.dumps(segments), encoding="utf-8")
+
+            def fake_run_command(cmd, timeout=30.0):
+                cmd_str = " ".join(str(c) for c in cmd)
+                if "ffprobe" in cmd_str:
+                    mock_res = mock.Mock(returncode=0)
+                    mock_res.stdout = json.dumps({"format": {"duration": "10.0"}, "streams": [{"codec_type": "video", "duration": "10.0"}]})
+                    mock_res.stderr = ""
+                    return mock_res
+                elif "ffmpeg" in cmd_str:
+                    if str(cmd[-1]) != "-":
+                        out_path = Path(cmd[-1])
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
+                        out_path.write_bytes(b"dummy")
+                    return mock.Mock(returncode=0, stdout="", stderr="")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with mock.patch("backend.pipeline_v2.qc._run_command", side_effect=fake_run_command):
+                with mock.patch("backend.pipeline_v2.cover_qc.inspect_frame_pixel_coverage") as mock_pix:
+                    mock_pix.return_value = {
+                        "checked": True,
+                        "all_boxes_filled": True,
+                        "boxes_checked": 1,
+                        "details": [{"white_ratio": 0.9}],
+                    }
+                    report = run_report_only_qc(
+                        video_path=video_file,
+                        report_path=report_file,
+                        ass_path=ass_file,
+                        segments_path=seg_file,
+                        settings=QCSettings(sample_frames=True),
+                    )
+
+            keys = [a.get("key", "") for a in report.diagnostic_artifacts]
+            # Must contain onset transition
+            self.assertIn("frames/transition_0.png", keys)
+            self.assertIn("frames/transition_1.png", keys)
+            # Must contain boundary exit
+            self.assertIn("frames/boundary_exit_0.png", keys)
+            self.assertIn("frames/boundary_exit_1.png", keys)
+            # Must contain boundary shift pre
+            self.assertIn("frames/boundary_shift_1_pre.png", keys)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -78,21 +80,60 @@ def verify_stages_freshness(
     return stale_stages
 
 
-async def run_smoke_test():
+def parse_args():
+    parser = argparse.ArgumentParser(description="Tool V2 production smoke test")
+    parser.add_argument("--with-rvc", action="store_true", help="Enable RVC voice cloning in smoke test")
+    parser.add_argument("--video", type=str, default="", help="Specific video path or filename pattern")
+    return parser.parse_args()
+
+
+async def run_smoke_test(args: Optional[argparse.Namespace] = None):
+    if args is None:
+        args = parse_args()
+
     env = read_environment(ROOT / "backend")
     settings = PipelineSettings.from_env(env)
     print(f"Loaded pipeline settings: mode={settings.mode}, auto_gender={settings.enable_auto_gender}")
 
     downloads = ROOT / "workspace" / "downloads"
-    sample_videos = list(downloads.glob("queue_9b27caac*.mp4"))
-    if not sample_videos:
-        sample_videos = list(downloads.glob("*.mp4"))
-    if not sample_videos:
-        print("Error: No sample video found in workspace/downloads.")
-        return 1
+    if args.video:
+        candidate = Path(args.video)
+        if not candidate.is_file():
+            candidate = downloads / args.video
+        if not candidate.is_file():
+            matches = list(downloads.glob(f"*{args.video}*"))
+            if matches:
+                candidate = matches[0]
+        if not candidate.is_file():
+            print(f"Error: Specified video not found: {args.video}")
+            return 1
+        source_video = candidate
+    else:
+        sample_videos = list(downloads.glob("queue_9b27caac*.mp4"))
+        if not sample_videos:
+            sample_videos = list(downloads.glob("*.mp4"))
+        if not sample_videos:
+            print("Error: No sample video found in workspace/downloads.")
+            return 1
+        source_video = sample_videos[0]
 
-    source_video = sample_videos[0]
     print(f"Using source video: {source_video.name}")
+
+    with_rvc = args.with_rvc or os.getenv("ENABLE_RVC", "0").lower() in {"1", "true"}
+    rvc_model = None
+    if with_rvc:
+        rvc_model = ROOT / "MyVoiceModel_v2" / "mi-giong_cua_toi_v2.pth"
+        if not rvc_model.is_file():
+            print(f"FAIL: RVC model not found at {rvc_model}")
+            return 1
+        settings = replace(settings, enable_rvc=True)
+        voice_source = "rvc"
+        voice_param = str(rvc_model)
+        print(f"RVC voice conversion ENABLED with model: {rvc_model.name}")
+    else:
+        voice_source = "edge"
+        voice_param = "vi-VN-HoaiMyNeural"
+        print(f"Using voice source: {voice_source} ({voice_param})")
 
     work_dir = ROOT / "workspace" / "smoke_test_run"
     enforce_clean_smoke_directory(work_dir)
@@ -104,8 +145,9 @@ async def run_smoke_test():
         output_path=out_video,
         settings=settings,
         api_key=env.get("GEMINI_API_KEY", ""),
-        voice_source="edge",
-        voice_param="vi-VN-HoaiMyNeural",
+        voice_source=voice_source,
+        voice_param=voice_param,
+        rvc_model_path=rvc_model,
     )
 
     run_start_utc = datetime.now(timezone.utc)
@@ -216,6 +258,15 @@ async def run_smoke_test():
     if stale_stages:
         print(f"FAIL: Cold smoke test assertion failed! Stale cached stages detected: {stale_stages}")
         return 1
+
+    if with_rvc:
+        rvc_stage = manifest.stages.get("rvc")
+        if not rvc_stage or rvc_stage.status.value != "completed":
+            rvc_status = rvc_stage.status.value if rvc_stage else "missing"
+            print(f"FAIL: RVC was enabled but stage status is '{rvc_status}', expected 'completed'")
+            return 1
+        print(f"SUCCESS: RVC stage completed verified: {rvc_stage.started_at} -> {rvc_stage.finished_at}")
+
     completed_count = len([s for s in manifest.stages.values() if s.status.value == "completed"])
     print(
         f"SUCCESS: All {completed_count} completed stages programmatically verified fresh "
@@ -227,6 +278,9 @@ async def run_smoke_test():
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "run_start_utc": run_start_iso,
         "cold_verified": True,
+        "rvc_enabled": with_rvc,
+        "voice_source": voice_source,
+        "source_video": source_video.name,
         "status": "PASS",
         "output_video": str(out_video),
         "video_size_mb": round(size_mb, 2),

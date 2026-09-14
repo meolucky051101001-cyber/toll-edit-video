@@ -1,9 +1,9 @@
 {
-  "timestamp": "20260914-175713",
+  "timestamp": "20260914-210642",
   "release_tag": "v2-pipeline-stage12",
-  "file_count": 121,
+  "file_count": 122,
   "manifest_sha256_file": "RELEASE_MANIFEST.sha256",
-  "backup_dir": "backups\\v2-release-20260914-175713",
+  "backup_dir": "backups\\v2-release-20260914-210642",
   "test_suite_status": "244/244 PASS",
   "security_hygiene": "PASS"
 }
