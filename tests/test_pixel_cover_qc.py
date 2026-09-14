@@ -204,9 +204,10 @@ class TestPixelCoverQC(unittest.TestCase):
                     return mock_res
                 elif "ffmpeg" in cmd_str:
                     # Write dummy output frame
-                    out_path = Path(cmd[-1])
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    out_path.write_bytes(b"dummy frame")
+                    if str(cmd[-1]) != "-":
+                        out_path = Path(cmd[-1])
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
+                        out_path.write_bytes(b"dummy frame")
                     mock_res = mock.Mock(returncode=0)
                     mock_res.stdout = ""
                     mock_res.stderr = ""
@@ -286,9 +287,10 @@ class TestPixelCoverQC(unittest.TestCase):
                             mock_res.stderr = ""
                             return mock_res
                         elif "ffmpeg" in cmd_str:
-                            out_path = Path(cmd[-1])
-                            out_path.parent.mkdir(parents=True, exist_ok=True)
-                            out_path.write_bytes(b"dummy")
+                            if str(cmd[-1]) != "-":
+                                out_path = Path(cmd[-1])
+                                out_path.parent.mkdir(parents=True, exist_ok=True)
+                                out_path.write_bytes(b"dummy")
                             mock_res = mock.Mock(returncode=0)
                             mock_res.stdout = ""
                             mock_res.stderr = ""

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -23,6 +23,61 @@ from pipeline_v2.config import PipelineSettings
 from pipeline_v2.video_pipeline import VideoPipelineRequest, VideoPipelineRunner
 
 
+def enforce_clean_smoke_directory(work_dir: Path, retries: int = 5, delay: float = 0.5) -> None:
+    """Fail-closed cleanup of the smoke test workspace to ensure clean cold execution."""
+    if not work_dir.exists():
+        work_dir.mkdir(parents=True, exist_ok=True)
+        return
+
+    print(f"Cleaning previous smoke test directory: {work_dir} (enforcing fail-closed cold run)...")
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            shutil.rmtree(work_dir)
+            break
+        except Exception as err:
+            last_err = err
+            time.sleep(delay)
+
+    if work_dir.exists():
+        remaining = list(work_dir.iterdir())
+        if remaining:
+            raise RuntimeError(
+                f"Fail-closed: Smoke test directory '{work_dir}' could not be cleaned. "
+                f"Remaining entries: {[p.name for p in remaining]}. Error: {last_err}"
+            )
+        try:
+            work_dir.rmdir()
+        except Exception:
+            pass
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Verified smoke test workspace is clean: {work_dir}")
+
+
+def verify_stages_freshness(
+    manifest, run_start_utc: datetime, tolerance_seconds: float = 2.0
+) -> list[str]:
+    """Verify that all completed stages in the manifest were executed in this run."""
+    min_allowed_time = run_start_utc - timedelta(seconds=tolerance_seconds)
+    run_start_iso = run_start_utc.isoformat()
+    stale_stages: list[str] = []
+    for s_name, stage in manifest.stages.items():
+        if stage.status.value == "completed":
+            if not stage.started_at:
+                stale_stages.append(f"{s_name} (missing started_at)")
+                continue
+            try:
+                stage_time = datetime.fromisoformat(stage.started_at.replace("Z", "+00:00"))
+                if stage_time < min_allowed_time:
+                    stale_stages.append(
+                        f"{s_name} (started_at {stage.started_at} < run_start {run_start_iso})"
+                    )
+            except Exception as parse_err:
+                stale_stages.append(f"{s_name} (timestamp parse error: {parse_err})")
+    return stale_stages
+
+
 async def run_smoke_test():
     env = read_environment(ROOT / "backend")
     settings = PipelineSettings.from_env(env)
@@ -40,10 +95,7 @@ async def run_smoke_test():
     print(f"Using source video: {source_video.name}")
 
     work_dir = ROOT / "workspace" / "smoke_test_run"
-    if work_dir.exists():
-        print(f"Cleaning previous smoke test directory: {work_dir} to enforce clean cold run...")
-        shutil.rmtree(work_dir, ignore_errors=True)
-    work_dir.mkdir(parents=True, exist_ok=True)
+    enforce_clean_smoke_directory(work_dir)
     out_video = work_dir / "Dubbed_smoke_test.mp4"
 
     request = VideoPipelineRequest(
@@ -55,6 +107,10 @@ async def run_smoke_test():
         voice_source="edge",
         voice_param="vi-VN-HoaiMyNeural",
     )
+
+    run_start_utc = datetime.now(timezone.utc)
+    run_start_iso = run_start_utc.isoformat()
+    print(f"Recorded smoke test start time (UTC): {run_start_iso}")
 
     runner = VideoPipelineRunner(request)
     print("Starting VideoPipelineRunner...")
@@ -144,6 +200,8 @@ async def run_smoke_test():
 
     manifest_created_at = manifest.created_at
     print(f"SUCCESS: Manifest created_at = {manifest_created_at}")
+
+    # Programmatic assertion: every completed stage must be freshly executed in this run
     stage_summaries = {}
     for s_name, stage in manifest.stages.items():
         stage_summaries[s_name] = {
@@ -154,9 +212,21 @@ async def run_smoke_test():
         if stage.status.value == "completed":
             print(f"  Stage '{s_name}': {stage.started_at} -> {stage.finished_at}")
 
+    stale_stages = verify_stages_freshness(manifest, run_start_utc)
+    if stale_stages:
+        print(f"FAIL: Cold smoke test assertion failed! Stale cached stages detected: {stale_stages}")
+        return 1
+    completed_count = len([s for s in manifest.stages.values() if s.status.value == "completed"])
+    print(
+        f"SUCCESS: All {completed_count} completed stages programmatically verified fresh "
+        f"(started_at >= run_start_utc: {run_start_iso})"
+    )
+
     # Save summary manifest for audit inspection
     summary = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "run_start_utc": run_start_iso,
+        "cold_verified": True,
         "status": "PASS",
         "output_video": str(out_video),
         "video_size_mb": round(size_mb, 2),

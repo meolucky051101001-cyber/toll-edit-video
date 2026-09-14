@@ -145,5 +145,67 @@ class OCRReuseTests(unittest.TestCase):
             self.assertEqual(constructor.call_count, 2)
 
 
+class SmokeColdEnforcementTests(unittest.TestCase):
+    def test_enforce_clean_smoke_directory_cleans_and_recreates(self):
+        import sys
+        scripts_path = Path(__file__).resolve().parents[1] / "scripts"
+        if str(scripts_path) not in sys.path:
+            sys.path.insert(0, str(scripts_path))
+        from smoke_test_v2 import enforce_clean_smoke_directory
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "smoke_dir"
+            target.mkdir()
+            (target / "nested").mkdir()
+            (target / "nested" / "file.txt").write_text("artifact")
+            self.assertTrue((target / "nested" / "file.txt").exists())
+            enforce_clean_smoke_directory(target)
+            self.assertTrue(target.exists())
+            self.assertEqual(list(target.iterdir()), [])
+
+    def test_enforce_clean_smoke_directory_fail_closed_on_locked_files(self):
+        import sys
+        scripts_path = Path(__file__).resolve().parents[1] / "scripts"
+        if str(scripts_path) not in sys.path:
+            sys.path.insert(0, str(scripts_path))
+        from smoke_test_v2 import enforce_clean_smoke_directory
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "smoke_dir"
+            target.mkdir()
+            (target / "file.txt").write_text("artifact")
+            with patch("shutil.rmtree", side_effect=PermissionError("File locked")):
+                with self.assertRaises(RuntimeError) as ctx:
+                    enforce_clean_smoke_directory(target, retries=2, delay=0.01)
+                self.assertIn("Fail-closed", str(ctx.exception))
+
+    def test_verify_stages_freshness_detects_stale_and_fresh_stages(self):
+        from types import SimpleNamespace
+        import sys
+        scripts_path = Path(__file__).resolve().parents[1] / "scripts"
+        if str(scripts_path) not in sys.path:
+            sys.path.insert(0, str(scripts_path))
+        from smoke_test_v2 import verify_stages_freshness
+
+        run_start = datetime(2026, 9, 14, 10, 30, 0, tzinfo=timezone.utc)
+
+        # Stale stage
+        stale_stage = SimpleNamespace(
+            status=SimpleNamespace(value="completed"),
+            started_at="2026-09-14T07:15:00.000Z",
+        )
+        manifest_stale = SimpleNamespace(stages={"tts": stale_stage})
+        stale_results = verify_stages_freshness(manifest_stale, run_start)
+        self.assertEqual(len(stale_results), 1)
+        self.assertIn("tts", stale_results[0])
+
+        # Fresh stage
+        fresh_stage = SimpleNamespace(
+            status=SimpleNamespace(value="completed"),
+            started_at="2026-09-14T10:30:05.123Z",
+        )
+        manifest_fresh = SimpleNamespace(stages={"tts": fresh_stage})
+        fresh_results = verify_stages_freshness(manifest_fresh, run_start)
+        self.assertEqual(fresh_results, [])
+
+
 if __name__ == '__main__':
     unittest.main()
