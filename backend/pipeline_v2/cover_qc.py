@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import re
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 
 @dataclass
@@ -346,8 +346,21 @@ def inspect_covers(
     }
 
 
-def inspect_frame_pixel_coverage(frame_path, covers, canvas_w=1080, canvas_h=1920, timestamp=None):
-    """Verify that active cover boxes contain valid background fill in rendered output pixels."""
+def inspect_frame_pixel_coverage(
+    frame_path,
+    covers,
+    canvas_w=1080,
+    canvas_h=1920,
+    timestamp=None,
+    expected_regions: Optional[Sequence[Mapping[str, Any]]] = None,
+):
+    """Verify sticker fill and whether known source subtitle pixels escape it.
+
+    ``expected_regions`` contains OCR-confirmed source subtitle rectangles for
+    this frame. Restricting overflow inspection to those rectangles avoids
+    treating arbitrary high-contrast product packaging elsewhere in the video
+    as exposed subtitles.
+    """
     from pathlib import Path
     p = Path(frame_path)
     if not p.is_file():
@@ -376,6 +389,7 @@ def inspect_frame_pixel_coverage(frame_path, covers, canvas_w=1080, canvas_h=192
         scale_y = fh / max(1, canvas_h)
 
         checked_boxes = []
+        active_pixel_boxes = []
         for cover in active:
             _, _, x1, y1, x2, y2 = cover
             px1 = max(0, min(fw - 1, int(x1 * scale_x)))
@@ -384,6 +398,8 @@ def inspect_frame_pixel_coverage(frame_path, covers, canvas_w=1080, canvas_h=192
             py2 = max(0, min(fh, int(y2 * scale_y)))
             if px2 <= px1 or py2 <= py1:
                 continue
+
+            active_pixel_boxes.append((px1, py1, px2, py2))
 
             patch = arr[py1:py2, px1:px2]
             h, w = patch.shape[:2]
@@ -430,13 +446,122 @@ def inspect_frame_pixel_coverage(frame_path, covers, canvas_w=1080, canvas_h=192
                 "details": [],
             }
 
-        all_ok = all(b["has_cover_fill"] for b in checked_boxes)
+        expected_region_checks = []
+        for region in expected_regions or []:
+            try:
+                rx1 = int(float(region["x_pct"]) * fw)
+                ry1 = int(float(region["y_pct"]) * fh)
+                rx2 = int(float(region["max_x_pct"]) * fw)
+                ry2 = int(float(region["max_y_pct"]) * fh)
+            except (KeyError, TypeError, ValueError):
+                expected_region_checks.append({
+                    "segment_id": region.get("segment_id") if isinstance(region, dict) else None,
+                    "geometry_covered": False,
+                    "overflow_detected": False,
+                    "reason": "invalid_expected_region",
+                })
+                continue
+
+            rx1 = max(0, min(fw - 1, rx1))
+            ry1 = max(0, min(fh - 1, ry1))
+            rx2 = max(0, min(fw, rx2))
+            ry2 = max(0, min(fh, ry2))
+            if rx2 <= rx1 or ry2 <= ry1:
+                expected_region_checks.append({
+                    "segment_id": region.get("segment_id"),
+                    "bbox": [rx1, ry1, rx2, ry2],
+                    "geometry_covered": False,
+                    "overflow_detected": False,
+                    "reason": "degenerate_expected_region",
+                })
+                continue
+
+            region_h, region_w = ry2 - ry1, rx2 - rx1
+            covered_mask = np.zeros((region_h, region_w), dtype=bool)
+            for cx1, cy1, cx2, cy2 in active_pixel_boxes:
+                ix1, iy1 = max(rx1, cx1), max(ry1, cy1)
+                ix2, iy2 = min(rx2, cx2), min(ry2, cy2)
+                if ix2 > ix1 and iy2 > iy1:
+                    covered_mask[iy1 - ry1:iy2 - ry1, ix1 - rx1:ix2 - rx1] = True
+
+            uncovered_mask = ~covered_mask
+            uncovered_ratio = float(np.mean(uncovered_mask))
+            geometry_covered = uncovered_ratio <= 0.005
+            overflow_detected = False
+            contrast_range = 0.0
+            edge_density = 0.0
+            dark_ratio = 0.0
+            bright_ratio = 0.0
+
+            if np.any(uncovered_mask):
+                source_patch = arr[ry1:ry2, rx1:rx2]
+                gray = (
+                    source_patch[:, :, 0] * 0.299
+                    + source_patch[:, :, 1] * 0.587
+                    + source_patch[:, :, 2] * 0.114
+                )
+                exposed_values = gray[uncovered_mask]
+                if exposed_values.size:
+                    contrast_range = float(
+                        np.percentile(exposed_values, 95)
+                        - np.percentile(exposed_values, 5)
+                    )
+                    dark_ratio = float(np.mean(exposed_values < 90))
+                    bright_ratio = float(np.mean(exposed_values > 200))
+
+                    horizontal_edges = np.zeros_like(gray, dtype=bool)
+                    vertical_edges = np.zeros_like(gray, dtype=bool)
+                    horizontal_edges[:, 1:] = np.abs(np.diff(gray, axis=1)) > 35
+                    vertical_edges[1:, :] = np.abs(np.diff(gray, axis=0)) > 35
+                    edge_density = float(
+                        np.mean((horizontal_edges | vertical_edges)[uncovered_mask])
+                    )
+                    high_contrast_text_signal = (
+                        contrast_range >= 40
+                        and edge_density >= 0.01
+                        and (dark_ratio >= 0.015 or bright_ratio >= 0.015)
+                    )
+                    overflow_detected = (
+                        uncovered_ratio > 0.005 and high_contrast_text_signal
+                    )
+
+            expected_region_checks.append({
+                "segment_id": region.get("segment_id"),
+                "bbox": [rx1, ry1, rx2, ry2],
+                "geometry_covered": geometry_covered,
+                "uncovered_ratio": round(uncovered_ratio, 4),
+                "overflow_detected": overflow_detected,
+                "contrast_range": round(contrast_range, 2),
+                "edge_density": round(edge_density, 4),
+                "dark_ratio": round(dark_ratio, 4),
+                "bright_ratio": round(bright_ratio, 4),
+            })
+
+        source_regions_covered = all(
+            check.get("geometry_covered", False) for check in expected_region_checks
+        )
+        overflow_detected = any(
+            check.get("overflow_detected", False) for check in expected_region_checks
+        )
+        all_ok = (
+            all(b["has_cover_fill"] for b in checked_boxes)
+            and source_regions_covered
+            and not overflow_detected
+        )
+        reason = None
+        if not source_regions_covered or overflow_detected:
+            reason = "source_text_outside_cover"
+        elif not all_ok:
+            reason = "invalid_cover_fill"
         return {
             "checked": True,
             "frame": p.name,
             "timestamp": timestamp,
             "boxes_checked": len(checked_boxes),
             "all_boxes_filled": all_ok,
+            "overflow_detected": overflow_detected,
+            "expected_region_checks": expected_region_checks,
+            "reason": reason,
             "details": checked_boxes,
         }
     except Exception as exc:

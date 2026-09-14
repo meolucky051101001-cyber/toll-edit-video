@@ -138,6 +138,177 @@ class TestPixelCoverQC(unittest.TestCase):
             self.assertTrue(result["checked"])
             self.assertFalse(result["all_boxes_filled"]) # Must FAIL because white_ratio < 0.65
 
+    def test_inspect_frame_pixel_coverage_detects_source_text_overflow_outside_sticker(self):
+        with tempfile.TemporaryDirectory() as td:
+            frame_file = Path(td) / "frame_overflow.png"
+            arr = np.full((240, 400, 3), 120, dtype=np.uint8)
+            # The rendered sticker covers x=100..300, while OCR says the source
+            # subtitle occupies x=70..330. High-contrast source glyph strokes
+            # remain visible in the uncovered strips on both sides.
+            arr[120:180, 100:300] = [240, 240, 240]
+            for x in (74, 82, 90, 310, 318, 326):
+                arr[128:172, x:x + 3] = [10, 10, 10]
+                arr[134:138, max(70, x - 4):min(330, x + 7)] = [245, 245, 245]
+            Image.fromarray(arr).save(frame_file)
+
+            result = inspect_frame_pixel_coverage(
+                frame_file,
+                [(0.0, 5.0, 100, 120, 300, 180)],
+                canvas_w=400,
+                canvas_h=240,
+                timestamp=2.0,
+                expected_regions=[{
+                    "segment_id": 1,
+                    "x_pct": 70 / 400,
+                    "max_x_pct": 330 / 400,
+                    "y_pct": 120 / 240,
+                    "max_y_pct": 180 / 240,
+                    "text": "中文字幕",
+                }],
+            )
+
+            self.assertTrue(result["checked"])
+            self.assertFalse(result["all_boxes_filled"])
+            self.assertTrue(result["overflow_detected"])
+            self.assertEqual(result["reason"], "source_text_outside_cover")
+            self.assertGreater(
+                result["expected_region_checks"][0]["uncovered_ratio"], 0.20
+            )
+
+    def test_inspect_frame_pixel_coverage_accepts_ocr_region_fully_inside_sticker(self):
+        with tempfile.TemporaryDirectory() as td:
+            frame_file = Path(td) / "frame_contained.png"
+            arr = np.zeros((240, 400, 3), dtype=np.uint8)
+            arr[100:190, 80:320] = [240, 240, 240]
+            Image.fromarray(arr).save(frame_file)
+
+            result = inspect_frame_pixel_coverage(
+                frame_file,
+                [(0.0, 5.0, 80, 100, 320, 190)],
+                canvas_w=400,
+                canvas_h=240,
+                timestamp=2.0,
+                expected_regions=[{
+                    "segment_id": 1,
+                    "x_pct": 100 / 400,
+                    "max_x_pct": 300 / 400,
+                    "y_pct": 120 / 240,
+                    "max_y_pct": 170 / 240,
+                    "text": "中文字幕",
+                }],
+            )
+
+            self.assertTrue(result["checked"])
+            self.assertTrue(result["all_boxes_filled"])
+            self.assertFalse(result["overflow_detected"])
+            self.assertTrue(result["expected_region_checks"][0]["geometry_covered"])
+
+    def test_rendered_chinese_overflow_becomes_blocking_pixel_qc_error(self):
+        import json
+        from unittest import mock
+        from backend.pipeline_v2.qc import (
+            QCSettings,
+            evaluate_qc_gate,
+            run_report_only_qc,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            video_file = root / "video.mp4"
+            video_file.write_bytes(b"dummy")
+            report_file = root / "qc_report.json"
+            ass_file = root / "subs.ass"
+            ass_file.write_text(
+                "[Script Info]\nPlayResX: 400\nPlayResY: 240\n\n[Events]\n"
+                + r"Dialogue: 0,0:00:01.00,0:00:04.00,BgStyle,,0,0,0,,{\an7\pos(100,120)}{\p1}m 0 0 l 200 0 l 200 60 l 0 60{\p0}"
+                + "\n",
+                encoding="utf-8-sig",
+            )
+            segments_file = root / "segments.json"
+            segments_file.write_text(
+                json.dumps([{
+                    "id": 1,
+                    "index": 1,
+                    "start": 1.0,
+                    "end": 3.0,
+                    "text": "Bản dịch",
+                    "is_subtitle": True,
+                    "tracking_blocks": [{
+                        "start": 1.0,
+                        "end": 3.0,
+                        "x_pct": 70 / 400,
+                        "max_x_pct": 330 / 400,
+                        "y_pct": 120 / 240,
+                        "max_y_pct": 180 / 240,
+                        "text": "中文字幕",
+                        "is_subtitle": True,
+                    }],
+                }], ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            def fake_run_command(command, timeout=30.0):
+                command_text = " ".join(str(item) for item in command)
+                if "ffprobe" in command_text:
+                    return mock.Mock(
+                        returncode=0,
+                        stdout=json.dumps({
+                            "format": {"duration": "5.0"},
+                            "streams": [
+                                {
+                                    "codec_type": "video",
+                                    "duration": "5.0",
+                                    "avg_frame_rate": "25/1",
+                                },
+                                {"codec_type": "audio", "duration": "5.0"},
+                            ],
+                        }),
+                        stderr="",
+                    )
+                if "ffmpeg" in command_text and "-frames:v" in command:
+                    pattern = Path(command[-1])
+                    count = int(command[command.index("-frames:v") + 1])
+                    for index in range(count):
+                        frame = np.full((240, 400, 3), 120, dtype=np.uint8)
+                        frame[120:180, 100:300] = [240, 240, 240]
+                        for x in (74, 82, 90, 310, 318, 326):
+                            frame[128:172, x:x + 3] = [10, 10, 10]
+                            frame[134:138, max(70, x - 4):min(330, x + 7)] = [245, 245, 245]
+                        output = Path(
+                            str(pattern).replace("%06d", "{:06d}".format(index))
+                        )
+                        output.parent.mkdir(parents=True, exist_ok=True)
+                        Image.fromarray(frame).save(output)
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with mock.patch(
+                "backend.pipeline_v2.qc._run_command", side_effect=fake_run_command
+            ):
+                report = run_report_only_qc(
+                    video_path=video_file,
+                    report_path=report_file,
+                    ass_path=ass_file,
+                    segments_path=segments_file,
+                    settings=QCSettings(sample_frames=True, gate_policy="block"),
+                )
+
+            pixel_check = next(
+                check for check in report.checks if check.name == "pixel_cover_qc"
+            )
+            self.assertEqual(pixel_check.status, "error")
+            self.assertFalse(report.metrics["pixel_cover_qc"]["all_boxes_filled"])
+            self.assertGreater(report.metrics["pixel_cover_qc"]["overflow_frames"], 0)
+            self.assertGreater(
+                report.metrics["pixel_cover_qc"]["uncovered_source_frames"], 0
+            )
+            self.assertTrue(any(
+                result.get("overflow_detected")
+                for result in report.metrics["pixel_cover_qc"]["results"]
+            ))
+            decision = evaluate_qc_gate(report, "block")
+            self.assertFalse(decision.allowed)
+            self.assertIn("pixel_cover_qc", decision.blocking_checks)
+
     def test_pixel_cover_qc_failure_blocks_delivery_when_policy_is_block(self):
         from backend.pipeline_v2.qc import evaluate_qc_gate
 
@@ -504,7 +675,14 @@ class TestPixelCoverQC(unittest.TestCase):
                     return mock.Mock(returncode=0, stdout="", stderr="")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
-            def fake_inspect_pixel(fpath, ass_covers, canvas_w=1080, canvas_h=1920, timestamp=None):
+            def fake_inspect_pixel(
+                fpath,
+                ass_covers,
+                canvas_w=1080,
+                canvas_h=1920,
+                timestamp=None,
+                expected_regions=None,
+            ):
                 t = float(timestamp or 0.0)
                 # Cover only exists at [2.0, 4.0]! At t < 2.0s, cover is missing!
                 if t < 2.0:

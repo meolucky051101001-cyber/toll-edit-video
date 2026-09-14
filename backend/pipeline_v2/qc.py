@@ -1063,6 +1063,18 @@ def run_report_only_qc(
             except Exception:
                 pass
 
+        expected_cover_timeline = []
+        if loaded_segs:
+            try:
+                from .cover_qc import build_expected_cover_timeline
+                expected_cover_timeline = build_expected_cover_timeline(
+                    loaded_segs,
+                    video_duration=video_duration,
+                    fps=video_fps,
+                )
+            except (TypeError, ValueError):
+                expected_cover_timeline = []
+
         if ass_covers:
             # 1. Primary: Sample directly from actual ASS covers
             total_covers = len(ass_covers)
@@ -1236,7 +1248,30 @@ def run_report_only_qc(
                             for p in expected_cover_prefixes
                         )
 
-                        pix_res = inspect_frame_pixel_coverage(fpath, ass_covers, canvas_w=cw, canvas_h=ch, timestamp=ts)
+                        sample_time = float(ts) if ts is not None else None
+                        expected_regions = []
+                        if sample_time is not None:
+                            expected_regions = [
+                                {
+                                    "segment_id": event.segment_id,
+                                    "x_pct": event.x_pct,
+                                    "max_x_pct": event.max_x_pct,
+                                    "y_pct": event.y_pct,
+                                    "max_y_pct": event.max_y_pct,
+                                    "text": event.text,
+                                }
+                                for event in expected_cover_timeline
+                                if event.src_start <= sample_time < event.src_end
+                            ]
+
+                        pix_res = inspect_frame_pixel_coverage(
+                            fpath,
+                            ass_covers,
+                            canvas_w=cw,
+                            canvas_h=ch,
+                            timestamp=ts,
+                            expected_regions=expected_regions,
+                        )
                         if pix_res.get("checked"):
                             # If expected cover frame produced 0 boxes checked (degenerate cover box)
                             if is_expected_cover and pix_res.get("boxes_checked", 0) == 0:
@@ -1259,9 +1294,22 @@ def run_report_only_qc(
 
                     if pixel_results:
                         all_filled = all(r.get("all_boxes_filled") for r in pixel_results)
+                        overflow_frames = sum(
+                            1 for result in pixel_results
+                            if result.get("overflow_detected")
+                        )
+                        uncovered_source_frames = sum(
+                            1 for result in pixel_results
+                            if any(
+                                not region.get("geometry_covered", False)
+                                for region in result.get("expected_region_checks", [])
+                            )
+                        )
                         report.metrics["pixel_cover_qc"] = {
                             "checked_frames": len(pixel_results),
                             "all_boxes_filled": all_filled,
+                            "overflow_frames": overflow_frames,
+                            "uncovered_source_frames": uncovered_source_frames,
                             "results": pixel_results,
                         }
                         qc_status = "pass" if all_filled else ("error" if is_block else "warning")
@@ -1271,7 +1319,12 @@ def run_report_only_qc(
                             "Output frame pixels verified for visual subtitle cover fill"
                             if all_filled
                             else "Some output frame pixels showed incomplete cover fill (exposed source text / insufficient cover)",
-                            {"checked_frames": len(pixel_results), "gate_policy": gate_policy_str},
+                            {
+                                "checked_frames": len(pixel_results),
+                                "overflow_frames": overflow_frames,
+                                "uncovered_source_frames": uncovered_source_frames,
+                                "gate_policy": gate_policy_str,
+                            },
                         )
                     else:
                         # Fail-closed: Subtitles were provided but no sampled frame pixel result could be produced
