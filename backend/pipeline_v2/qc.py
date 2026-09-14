@@ -671,8 +671,9 @@ def plan_diagnostic_samples(
     2. Extra sample candidates are deduplicated by label.
     3. If max_samples is specified (e.g. 30), total output samples (baseline + extra)
        strictly does NOT exceed max_samples.
-    4. If extra candidates exceed remaining budget (max_samples - len(baseline)), candidate points
-       are sampled evenly to maximize temporal and scenario coverage.
+    4. If extra candidates exceed the remaining budget, failure/position-shift samples are
+       retained ahead of boundary/OCR diagnostics and routine transition samples. Each priority
+       tier is sampled evenly over time when that tier alone exceeds the available slots.
     """
     clamped_dur = max(0.1, float(duration))
 
@@ -707,10 +708,40 @@ def plan_diagnostic_samples(
         if len(raw_extras) <= remaining_budget:
             selected_extras = raw_extras
         else:
-            raw_extras.sort(key=lambda x: (x[1], x[0]))
-            step = (len(raw_extras) - 1) / max(1, remaining_budget - 1)
-            selected_indices = {round(i * step) for i in range(remaining_budget)}
-            selected_extras = [raw_extras[i] for i in sorted(selected_indices)]
+            def priority(label: str) -> int:
+                normalized = str(label).lower()
+                if normalized.startswith(("cover_fail_", "boundary_shift_", "cover_shift_")):
+                    return 0
+                if normalized.startswith((
+                    "boundary_",
+                    "cover_onset_",
+                    "cover_exit_",
+                    "cover_hold_",
+                    "weak_ocr_",
+                    "near_edge_",
+                )):
+                    return 1
+                return 2
+
+            def evenly_select(items: List[Tuple[str, float]], limit: int) -> List[Tuple[str, float]]:
+                ordered = sorted(items, key=lambda x: (x[1], x[0]))
+                if limit <= 0:
+                    return []
+                if len(ordered) <= limit:
+                    return ordered
+                if limit == 1:
+                    return [ordered[0]]
+                step = (len(ordered) - 1) / (limit - 1)
+                indices = [round(i * step) for i in range(limit)]
+                return [ordered[index] for index in indices]
+
+            selected_extras = []
+            for tier in (0, 1, 2):
+                slots = remaining_budget - len(selected_extras)
+                if slots <= 0:
+                    break
+                tier_items = [item for item in raw_extras if priority(item[0]) == tier]
+                selected_extras.extend(evenly_select(tier_items, slots))
         all_samples = unique_baseline + selected_extras
         all_samples.sort(key=lambda s: (s[1], s[0]))
         return all_samples[:budget]
@@ -1053,7 +1084,8 @@ def run_report_only_qc(
                 duration_seg = max(0.05, end_sec - start_sec)
                 onset_offset = min(0.06, max(0.02, duration_seg * 0.15))
                 sample_time = max(0.05, min(start_sec + onset_offset, max(0.05, video_duration - 0.1)))
-                diagnostic_points.append((f"transition_{idx}", round(sample_time, 2)))
+                label = f"boundary_shift_{idx}" if idx in shift_indices else f"transition_{idx}"
+                diagnostic_points.append((label, round(sample_time, 2)))
 
         # Diagnostic frame at weak OCR and near-edge candidates
         if loaded_segs:

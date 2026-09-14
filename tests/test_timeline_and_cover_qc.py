@@ -324,6 +324,10 @@ class TestExpectedCoverTimeline(unittest.TestCase):
         candidates = [(f"transition_{i}", round(1.0 + i * 1.8, 2)) for i in range(40)]
         candidates.extend([(f"weak_ocr_{i}", round(5.0 + i * 10.0, 2)) for i in range(5)])
         candidates.extend([(f"cover_onset_{i}", round(2.0 + i * 15.0, 2)) for i in range(5)])
+        candidates.extend([
+            ("cover_fail_critical", 33.3),
+            ("boundary_shift_critical", 66.6),
+        ])
 
         planned = plan_diagnostic_samples(duration=duration, extra_samples=candidates, max_samples=30)
 
@@ -336,6 +340,8 @@ class TestExpectedCoverTimeline(unittest.TestCase):
         self.assertIn("middle", labels, "Baseline 'middle' must be preserved")
         self.assertIn("last", labels, "Baseline 'last' must be preserved")
         self.assertIn("tail", labels, "Baseline 'tail' must be preserved")
+        self.assertIn("cover_fail_critical", labels, "A cover failure must outrank routine samples")
+        self.assertIn("boundary_shift_critical", labels, "A position shift must outrank routine samples")
 
         # Test small candidate count (less than budget)
         small_candidates = [("cover_0", 10.0), ("cover_1", 20.0)]
@@ -359,7 +365,7 @@ class TestExpectedCoverTimeline(unittest.TestCase):
                     "start": float(i * 2),
                     "end": float(i * 2 + 1.5),
                     "text": f"Seg {i + 1}",
-                    "y_pct": 0.85,
+                    "y_pct": 0.70 if i == 11 else 0.85,
                 })
             seg_file = Path(td) / "segments.json"
             seg_file.write_text(json.dumps(segments), encoding="utf-8")
@@ -393,6 +399,9 @@ class TestExpectedCoverTimeline(unittest.TestCase):
             self.assertLessEqual(len(ffmpeg_frame_calls), 30, "FFmpeg frame extraction calls must strictly NOT exceed budget of 30")
             self.assertEqual(len(ffmpeg_frame_calls), 30, "Budget of 30 frames should be fully utilized when 50 candidates exist")
             self.assertLessEqual(len(report.diagnostic_artifacts), 30, "Diagnostic artifacts count must not exceed 30")
+            artifact_keys = {item.get("key", "") for item in report.diagnostic_artifacts}
+            self.assertIn("frames/boundary_shift_11.png", artifact_keys)
+            self.assertIn("frames/boundary_shift_12.png", artifact_keys)
 
     def test_segment_serialization_preserves_classification_metadata(self):
         """14. GeometryBlock and RuntimeSegment serialization preserves is_subtitle, is_packaging, prob, and type."""
@@ -447,8 +456,8 @@ class TestExpectedCoverTimeline(unittest.TestCase):
         self.assertEqual(timeline[0].src_start, 1.0)
         self.assertEqual(timeline[0].src_end, 3.0)
 
-    def test_mocked_ocr_output_assigns_classification_metadata_and_ingests_to_timeline(self):
-        """15. Real OCR output flow: OCRBlock assigns metadata, preserved across merge and JSON, ingested by timeline."""
+    def test_labeled_ocr_blocks_preserve_metadata_through_merge_and_timeline(self):
+        """15. Labeled OCR blocks preserve metadata across merge, JSON, and timeline ingestion."""
         ocr_seg = RuntimeSegment(
             index=1,
             start=timedelta(seconds=1.0),

@@ -155,11 +155,11 @@ class OCRBlock:
         prob=1.0,
         sample_segment_id=None,
         sample_time=0.0,
-        is_subtitle=True,
-        is_packaging=False,
-        is_static=False,
-        in_subtitle_band=True,
-        type="subtitle",
+        is_subtitle=None,
+        is_packaging=None,
+        is_static=None,
+        in_subtitle_band=None,
+        type=None,
     ):
         self.text = text
         self.start = start

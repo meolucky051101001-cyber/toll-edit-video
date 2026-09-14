@@ -43,7 +43,7 @@ class VisualReuseTests(unittest.TestCase):
                 get=lambda key: {cv2.CAP_PROP_FPS:30, cv2.CAP_PROP_FRAME_WIDTH:720,
                     cv2.CAP_PROP_FRAME_HEIGHT:1280, cv2.CAP_PROP_FRAME_COUNT:180}[key],
                 set=lambda *args: None, read=lambda: (True, frame.copy()), release=lambda: None)
-            from backend.pipeline_v2.segments import RuntimeSegment
+            from backend.pipeline_v2.segments import RuntimeSegment, segment_from_dict, segment_to_dict
             segments = [RuntimeSegment(i+1, timedelta(seconds=i*2),
                 timedelta(seconds=(i+1)*2), '今天我们学习做饭') for i in range(3)]
             calls = []
@@ -65,6 +65,17 @@ class VisualReuseTests(unittest.TestCase):
                 self.assertIsNotNone(item.best_block)
                 self.assertTrue(item.tracking_blocks)
                 self.assertAlmostEqual(item.best_block.y_pct, 1015/1280-.0046875, places=3)
+                self.assertTrue(item.is_subtitle)
+                self.assertTrue(item.in_subtitle_band)
+                self.assertFalse(item.is_packaging)
+                self.assertTrue(item.best_block.is_subtitle)
+                self.assertTrue(item.best_block.in_subtitle_band)
+                self.assertEqual(item.best_block.type, "subtitle")
+                self.assertTrue(all(block.is_subtitle for block in item.tracking_blocks))
+                restored = segment_from_dict(segment_to_dict(item))
+                self.assertTrue(restored.is_subtitle)
+                self.assertTrue(restored.best_block.is_subtitle)
+                self.assertTrue(all(block.is_subtitle for block in restored.tracking_blocks))
 
     def test_unchanged_caption_reuses_but_change_absence_and_expiry_do_not(self):
         image = np.zeros((200, 360, 3), dtype=np.uint8)

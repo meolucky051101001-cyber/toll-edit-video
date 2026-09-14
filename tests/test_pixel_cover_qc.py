@@ -242,14 +242,15 @@ class TestPixelCoverQC(unittest.TestCase):
             self.assertTrue(report.metrics["pixel_cover_qc"]["all_boxes_filled"])
             self.assertEqual(report.metrics["pixel_cover_qc"]["checked_frames"], len(keys))
 
-    def test_full_timeline_sampling_guarantees_tail_and_budget_for_26_40_49_100_segments(self):
+    def test_full_timeline_sampling_preserves_priority_shifts_tail_and_budget(self):
         import json
         from unittest import mock
         from backend.pipeline_v2.qc import run_report_only_qc, QCSettings
 
-        test_counts = [26, 40, 49, 100]
-        for count in test_counts:
-            with self.subTest(segment_count=count):
+        test_cases = [(26, 13), (40, 20), (49, 24), (100, 50),
+                      (100, 11), (100, 35), (100, 59), (100, 83)]
+        for count, shift_idx in test_cases:
+            with self.subTest(segment_count=count, shift_index=shift_idx):
                 with tempfile.TemporaryDirectory() as td:
                     video_file = Path(td) / "video.mp4"
                     video_file.write_bytes(b"dummy")
@@ -263,7 +264,6 @@ class TestPixelCoverQC(unittest.TestCase):
 
                     duration = float(count * 2 + 10)
                     segments_data = []
-                    shift_idx = count // 2
                     for i in range(count):
                         start_t = float(i * 2 + 1)
                         end_t = start_t + 1.5
@@ -315,16 +315,18 @@ class TestPixelCoverQC(unittest.TestCase):
 
                     keys = [a.get("key", "") for a in report.diagnostic_artifacts]
                     transition_keys = [k for k in keys if "transition_" in k]
+                    shift_keys = [k for k in keys if "boundary_shift_" in k]
+                    timeline_keys = transition_keys + shift_keys
 
                     # 1. Total transition samples must NEVER exceed 30
-                    self.assertLessEqual(len(transition_keys), 30)
+                    self.assertLessEqual(len(timeline_keys), 26)
 
                     # 2. For 26 segments (<= 30), all 26 must be present
                     if count == 26:
-                        self.assertEqual(len(transition_keys), 26)
+                        self.assertEqual(len(timeline_keys), 26)
                     else:
                         # For 40, 49, 100 segments, transition samples fill remaining budget after 4 baseline frames (30 - 4 = 26)
-                        self.assertEqual(len(transition_keys), 26)
+                        self.assertEqual(len(timeline_keys), 26)
 
                     # Total diagnostic frames (including baseline) must strictly be <= 30
                     self.assertLessEqual(len(keys), 30)
@@ -336,7 +338,8 @@ class TestPixelCoverQC(unittest.TestCase):
                     self.assertIn(f"frames/transition_{count - 1}.png", keys)
 
                     # 5. Position shift must be preserved
-                    self.assertIn(f"frames/transition_{shift_idx}.png", keys)
+                    self.assertIn(f"frames/boundary_shift_{shift_idx}.png", keys)
+                    self.assertIn(f"frames/boundary_shift_{shift_idx + 1}.png", keys)
 
     def test_boundary_transition_sampling_detects_onset_exit_and_shift(self):
         import json
