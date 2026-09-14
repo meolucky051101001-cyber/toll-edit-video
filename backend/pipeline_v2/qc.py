@@ -11,6 +11,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
@@ -171,7 +172,7 @@ def probe_media(
         (
             "format=duration,format_name,size,bit_rate:"
             "stream=index,codec_type,codec_name,width,height,duration,"
-            "sample_rate,channels,channel_layout"
+            "avg_frame_rate,r_frame_rate,sample_rate,channels,channel_layout"
         ),
         "-of",
         "json",
@@ -188,6 +189,38 @@ def _float_or_none(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _frame_rate_or_none(value: Any) -> Optional[float]:
+    """Parse ffprobe frame-rate values such as ``30000/1001`` safely."""
+    if value is None:
+        return None
+    try:
+        raw = str(value).strip()
+        if "/" in raw:
+            numerator, denominator = raw.split("/", 1)
+            denominator_value = float(denominator)
+            if denominator_value == 0:
+                return None
+            rate = float(numerator) / denominator_value
+        else:
+            rate = float(raw)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    return rate if 0.1 <= rate <= 1000.0 else None
+
+
+def _video_frame_rate(probe: Optional[Mapping[str, Any]], default: float = 30.0) -> float:
+    """Return the video's measured average/rate metadata with a safe fallback."""
+    if probe is not None:
+        for stream in probe.get("streams", []):
+            if stream.get("codec_type") != "video":
+                continue
+            for field_name in ("avg_frame_rate", "r_frame_rate"):
+                rate = _frame_rate_or_none(stream.get(field_name))
+                if rate is not None:
+                    return rate
+    return float(default)
 
 
 def _duration_seconds(probe: Mapping[str, Any]) -> Optional[float]:
@@ -761,70 +794,106 @@ def _sample_frames(
     timeout: float,
     extra_samples: Optional[Sequence[Tuple[str, float]]] = None,
     max_samples: Optional[int] = 30,
+    fps: float = 30.0,
 ) -> Tuple[List[Dict[str, Any]], List[QCCheck]]:
     store = ArtifactStore(diagnostics_directory)
     samples = plan_diagnostic_samples(duration, extra_samples, max_samples=max_samples)
     artifacts: List[Dict[str, Any]] = []
-    failures = []
+    failures: List[str] = []
+    measured_fps = max(1.0, float(fps))
+
+    # Several labels may intentionally target the same frame. Decode each
+    # unique frame only once, then publish one artifact per diagnostic label.
+    samples_by_frame: Dict[int, List[Tuple[str, float]]] = {}
     for label, timestamp in samples:
-        key = "frames/{}.png".format(label)
-        staged = store.staging_path(key)
+        frame_number = max(0, int(round(float(timestamp) * measured_fps)))
+        samples_by_frame.setdefault(frame_number, []).append((label, timestamp))
+    selected_frames = sorted(samples_by_frame)
+
+    if not selected_frames:
+        return artifacts, [
+            QCCheck("frame_samples", "skipped", "No diagnostic frame was requested")
+        ]
+
+    diagnostics_directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".frame_batch_", dir=str(diagnostics_directory)
+    ) as temporary_directory:
+        temporary_root = Path(temporary_directory)
+        output_pattern = temporary_root / "sample_%06d.png"
+        select_expression = "+".join(
+            "eq(n\\,{})".format(frame_number) for frame_number in selected_frames
+        )
         command = [
             ffmpeg_binary,
             "-hide_banner",
             "-loglevel",
             "error",
-            "-ss",
-            "{:.3f}".format(timestamp),
+            "-y",
             "-i",
             str(video_path),
-            "-frames:v",
-            "1",
             "-vf",
-            "scale='min(960,iw)':-2",
+            "select={},scale='min(960,iw)':-2".format(select_expression),
+            "-fps_mode",
+            "vfr",
+            "-start_number",
+            "0",
+            "-frames:v",
+            str(len(selected_frames)),
             "-vcodec",
             "png",
             "-f",
             "image2",
-            "-y",
-            str(staged),
+            str(output_pattern),
         ]
         try:
             result = _run_command(command, timeout)
-            if result.returncode != 0 or not staged.is_file() or staged.stat().st_size == 0:
-                failures.append(label)
-                try:
-                    staged.unlink()
-                except FileNotFoundError:
-                    pass
-                continue
-            record = store.commit_staged(
-                staged,
-                key,
-                metadata={"timestamp_seconds": round(timestamp, 3)},
-            )
-            artifacts.append(record.to_dict())
+            if result.returncode != 0:
+                failures.extend(label for label, _ in samples)
+            else:
+                for output_index, frame_number in enumerate(selected_frames):
+                    decoded_frame = temporary_root / "sample_{:06d}.png".format(output_index)
+                    labels = samples_by_frame[frame_number]
+                    if not decoded_frame.is_file() or decoded_frame.stat().st_size == 0:
+                        failures.extend(label for label, _ in labels)
+                        continue
+                    for label, timestamp in labels:
+                        key = "frames/{}.png".format(label)
+                        record = store.put_file(
+                            key,
+                            decoded_frame,
+                            metadata={
+                                "timestamp_seconds": round(timestamp, 3),
+                                "source_frame_number": frame_number,
+                                "source_fps": round(measured_fps, 6),
+                            },
+                        )
+                        artifacts.append(record.to_dict())
         except (OSError, subprocess.SubprocessError):
-            failures.append(label)
-            try:
-                staged.unlink()
-            except FileNotFoundError:
-                pass
+            failures.extend(label for label, _ in samples)
+
+    extraction_metrics = {
+        "requested_samples": len(samples),
+        "decoded_unique_frames": len(selected_frames),
+        "ffmpeg_invocations": 1,
+        "fps": round(measured_fps, 6),
+        "created": len(artifacts),
+    }
     if failures:
         return artifacts, [
             QCCheck(
                 "frame_samples",
                 "warning",
                 "One or more diagnostic frames could not be extracted",
-                {"failed": failures, "created": len(artifacts)},
+                {**extraction_metrics, "failed": failures},
             )
         ]
     return artifacts, [
         QCCheck(
             "frame_samples",
             "pass",
-            "Created first, middle and last diagnostic frames",
-            {"created": len(artifacts)},
+            "Created diagnostic frames in one sequential decode",
+            extraction_metrics,
         )
     ]
 
@@ -846,6 +915,7 @@ def run_report_only_qc(
     video = Path(video_path)
     report = QCReport(video_path=str(video))
     video_probe: Optional[Dict[str, Any]] = None
+    video_fps = 30.0
 
     if not video.is_file():
         report.add("video_file", "error", "Final video file is missing")
@@ -858,6 +928,8 @@ def run_report_only_qc(
                 timeout=min(config.command_timeout_seconds, 30.0),
             )
             report.media["video"] = video_probe
+            video_fps = _video_frame_rate(video_probe)
+            report.metrics["video_fps"] = round(video_fps, 6)
             video_streams = _streams(video_probe, "video")
             audio_streams = _streams(video_probe, "audio")
             report.add(
@@ -953,7 +1025,9 @@ def run_report_only_qc(
                 if segments_path is not None and Path(segments_path).suffix.lower() == '.json':
                     from .cover_qc import inspect_covers
                     coverage = inspect_covers(_load_segments(Path(segments_path)),
-                                              subtitles.read_text(encoding='utf-8-sig'))
+                                              subtitles.read_text(encoding='utf-8-sig'),
+                                              video_duration=_duration_seconds(video_probe) if video_probe is not None else None,
+                                              fps=video_fps)
                     report.metrics['source_cover'] = coverage
                     report.add('source_cover', 'error' if coverage['failures'] else 'pass',
                                'Known source rectangles must remain inside a timed cover', coverage)
@@ -1119,6 +1193,7 @@ def run_report_only_qc(
                 config.command_timeout_seconds,
                 extra_samples=diagnostic_points,
                 max_samples=getattr(config, "diagnostic_max_samples", 30),
+                fps=video_fps,
             )
             report.diagnostic_artifacts.extend(frame_artifacts)
             report.checks.extend(frame_checks)

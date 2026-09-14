@@ -90,7 +90,7 @@ class CoverTests(unittest.TestCase):
         return {'index': 1, 'start': 0, 'end': 2, 'tracking_blocks': [
             dict(start=0, end=2, x_pct=.1, max_x_pct=.9, y_pct=.8, max_y_pct=.9)]}
 
-    def ass(self, end='0:00:02.00', width=80):
+    def ass(self, end='0:00:03.00', width=80):
         return ('[Script Info]\nPlayResX: 100\nPlayResY: 100\n[Events]\n'
                 'Dialogue: 0,0:00:00.00,' + end + ',BgStyle,,0,0,0,,'
                 r'{\an7\pos(10,80)}{\p1}m 0 0 l ' + str(width) +
@@ -99,12 +99,12 @@ class CoverTests(unittest.TestCase):
     def test_missing_white_box_is_detected_even_when_text_anchor_is_safe(self):
         ass = self.ass().replace('BgStyle', 'TextStyle')
         result = inspect_covers([self.segment()], ass)
-        self.assertEqual(result['failures'][0]['uncovered_seconds'], 2)
+        self.assertEqual(result['failures'][0]['uncovered_seconds'], 3)
 
     def test_too_narrow_and_early_ending_cover_fail(self):
         self.assertTrue(inspect_covers([self.segment()], self.ass(width=40))['failures'])
         result = inspect_covers([self.segment()], self.ass(end='0:00:01.00'))
-        self.assertEqual(result['failures'][0]['uncovered_seconds'], 1)
+        self.assertEqual(result['failures'][0]['uncovered_seconds'], 2)
 
     def test_complete_cover_passes_and_no_source_geometry_is_unverified(self):
         self.assertFalse(inspect_covers([self.segment()], self.ass())['failures'])

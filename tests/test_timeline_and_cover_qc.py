@@ -1,4 +1,4 @@
-"""Comprehensive unit tests for expected cover timeline contract and red tests.
+"""Comprehensive tests for the expected cover timeline and production QC path.
 
 Phase 1 (Đợt 1, 1.1 & 1.2) Test Suite:
 1. Genuine subtitle in upper screen (y_pct < 0.45) is included.
@@ -19,8 +19,8 @@ Phase 1 (Đợt 1, 1.1 & 1.2) Test Suite:
 16. Failure detection: missing cover in ASS.
 17. Failure detection: late cover onset.
 18. Failure detection: early cover exit.
-19. RED TEST 1 (Fails on 9c4f070): Insufficient hold (0.5s instead of 1.0s).
-20. RED TEST 2 (Fails on 9c4f070): Unbridged gap (100ms) between adjacent subtitles.
+19. Insufficient hold (0.5s instead of 1.0s) fails closed.
+20. Unbridged gap (100ms) between adjacent subtitles fails closed.
 """
 
 from datetime import timedelta
@@ -69,6 +69,20 @@ def _create_synthetic_frame(file_path: Path, width: int = 1080, height: int = 19
     img = Image.fromarray(arr)
     file_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(file_path, format="PNG")
+
+
+def _create_synthetic_batch(command, width: int = 1080, height: int = 1920):
+    """Materialize all sequence outputs requested by one FFmpeg invocation."""
+    if "-frames:v" not in command:
+        return []
+    pattern = Path(command[-1])
+    count = int(command[command.index("-frames:v") + 1])
+    paths = []
+    for index in range(count):
+        path = Path(str(pattern).replace("%06d", "{:06d}".format(index)))
+        _create_synthetic_frame(path, width=width, height=height)
+        paths.append(path)
+    return paths
 
 
 class TestExpectedCoverTimeline(unittest.TestCase):
@@ -380,10 +394,9 @@ class TestExpectedCoverTimeline(unittest.TestCase):
                     mock_res.stderr = ""
                     return mock_res
                 elif "ffmpeg" in cmd_str:
-                    if str(cmd[-1]) != "-":
-                        out_path = Path(cmd[-1])
-                        _create_synthetic_frame(out_path, width=1080, height=1920)
-                        ffmpeg_frame_calls.append(out_path.name)
+                    if "-frames:v" in cmd:
+                        _create_synthetic_batch(cmd, width=1080, height=1920)
+                        ffmpeg_frame_calls.append(tuple(cmd))
                     return mock.Mock(returncode=0, stdout="", stderr="")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
@@ -396,8 +409,8 @@ class TestExpectedCoverTimeline(unittest.TestCase):
                     settings=QCSettings(sample_frames=True, diagnostic_max_samples=30),
                 )
 
-            self.assertLessEqual(len(ffmpeg_frame_calls), 30, "FFmpeg frame extraction calls must strictly NOT exceed budget of 30")
-            self.assertEqual(len(ffmpeg_frame_calls), 30, "Budget of 30 frames should be fully utilized when 50 candidates exist")
+            self.assertEqual(len(ffmpeg_frame_calls), 1, "All diagnostic frames must be extracted by one FFmpeg decode")
+            self.assertEqual(len(report.diagnostic_artifacts), 30, "Budget of 30 frame artifacts should be fully utilized")
             self.assertLessEqual(len(report.diagnostic_artifacts), 30, "Diagnostic artifacts count must not exceed 30")
             artifact_keys = {item.get("key", "") for item in report.diagnostic_artifacts}
             self.assertIn("frames/boundary_shift_11.png", artifact_keys)
@@ -533,12 +546,7 @@ class TestExpectedCoverTimeline(unittest.TestCase):
 
 
 class TestRealQCFailureDetections(unittest.TestCase):
-    """Real failure detection tests evaluated against actual run_report_only_qc output.
-
-    Under Phase 1 requirements, tests for unbridged gaps and insufficient hold must
-    assert failure. On commit 9c4f070, these tests will FAIL (RED TESTS) because
-    commit 9c4f070 currently permits short holds (0.2s/0.5s) and unbridged gaps.
-    """
+    """Real failure detections evaluated against run_report_only_qc output."""
 
     def _setup_qc_run(self, td: str, ass_content: str, segments_data: list, duration: float = 10.0):
         video_file = Path(td) / "video.mp4"
@@ -566,9 +574,7 @@ class TestRealQCFailureDetections(unittest.TestCase):
                 mock_res.stderr = ""
                 return mock_res
             elif "ffmpeg" in cmd_str:
-                if str(cmd[-1]) != "-":
-                    out_path = Path(cmd[-1])
-                    _create_synthetic_frame(out_path, width=1080, height=1920)
+                _create_synthetic_batch(cmd, width=1080, height=1920)
                 return mock.Mock(returncode=0, stdout="", stderr="")
             return mock.Mock(returncode=0, stdout="", stderr="")
 
@@ -644,9 +650,8 @@ class TestRealQCFailureDetections(unittest.TestCase):
             self.assertEqual(src_check.status, "error")
 
     def test_qc_fails_when_cover_only_holds_0_2s_or_0_5s_instead_of_1_0s(self):
-        """Scenario 19 [RED TEST on 9c4f070]:
+        """Scenario 19:
         Cover ends at 3.5s (only holding 0.5s after text ends at 3.0s, instead of required 1.0s to 4.0s).
-        On commit 9c4f070, this assertion FAILS because inspect_covers only checks [src_start, src_end].
         """
         with tempfile.TemporaryDirectory() as td:
             ass_content = (
@@ -667,14 +672,12 @@ class TestRealQCFailureDetections(unittest.TestCase):
 
             src_check = next((c for c in report.checks if getattr(c, "name", None) == "source_cover"), None)
             self.assertIsNotNone(src_check)
-            # On 9c4f070, this assertion FAILS (returns 'pass' instead of 'error'):
             self.assertEqual(src_check.status, "error", "Insufficient hold (0.5s instead of 1.0s) must fail QC")
 
     def test_qc_fails_when_unbridged_gap_50_to_200ms_between_subs(self):
-        """Scenario 20 [RED TEST on 9c4f070]:
+        """Scenario 20:
         Two adjacent subtitles (1.0-2.0s and 2.1-4.0s) have a 100ms gap.
         Cover 1 closes at 2.0s and Cover 2 opens at 2.1s (unbridged flicker gap).
-        On commit 9c4f070, this assertion FAILS because inspect_covers evaluates each segment independently.
         """
         with tempfile.TemporaryDirectory() as td:
             ass_content = (
@@ -706,7 +709,6 @@ class TestRealQCFailureDetections(unittest.TestCase):
 
             src_check = next((c for c in report.checks if getattr(c, "name", None) == "source_cover"), None)
             self.assertIsNotNone(src_check)
-            # On 9c4f070, this assertion FAILS (returns 'pass' instead of 'error'):
             self.assertEqual(src_check.status, "error", "Unbridged gap (100ms) between adjacent subtitles must fail QC")
 
 

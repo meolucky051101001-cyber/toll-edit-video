@@ -9,11 +9,30 @@ from backend.pipeline_v2.qc import (
     _check_ass_safe_area,
     _check_segments,
     _parse_srt_timestamp,
+    _video_frame_rate,
     run_report_only_qc,
 )
 
 
 class SegmentQcTests(unittest.TestCase):
+    def test_video_frame_rate_uses_ffprobe_fraction_and_safe_fallback(self):
+        probe = {
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "avg_frame_rate": "30000/1001",
+                    "r_frame_rate": "30/1",
+                }
+            ]
+        }
+        self.assertAlmostEqual(_video_frame_rate(probe), 29.97002997, places=6)
+        self.assertEqual(
+            _video_frame_rate(
+                {"streams": [{"codec_type": "video", "avg_frame_rate": "0/0"}]}
+            ),
+            30.0,
+        )
+
     def test_srt_timestamp_parser(self):
         self.assertEqual(_parse_srt_timestamp("01:02:03,500"), 3723.5)
 
@@ -198,9 +217,14 @@ class ReportOnlyGuaranteeTests(unittest.TestCase):
 
             # Create dummy image output for committed stages
             def fake_command(cmd, timeout):
-                out_path = Path(cmd[-1])
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_bytes(b"fake png")
+                output_pattern = Path(cmd[-1])
+                output_pattern.parent.mkdir(parents=True, exist_ok=True)
+                count = int(cmd[cmd.index("-frames:v") + 1])
+                for index in range(count):
+                    out_path = Path(
+                        str(output_pattern).replace("%06d", "{:06d}".format(index))
+                    )
+                    out_path.write_bytes(b"fake png")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             run_command.side_effect = fake_command
@@ -220,6 +244,8 @@ class ReportOnlyGuaranteeTests(unittest.TestCase):
             self.assertTrue(any("near_edge_0" in l for l in labels))
             self.assertTrue(any("tail" in l for l in labels))
             self.assertEqual(checks[0].status, "pass")
+            self.assertEqual(run_command.call_count, 1)
+            self.assertEqual(checks[0].metrics["ffmpeg_invocations"], 1)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,21 @@ import numpy as np
 from backend.pipeline_v2.cover_qc import inspect_frame_pixel_coverage, parse_ass_covers
 
 
+def _write_mock_batch_frames(command, payload=b"dummy frame"):
+    """Materialize the image sequence requested by batched FFmpeg extraction."""
+    if "-frames:v" not in command:
+        return []
+    pattern = Path(command[-1])
+    pattern.parent.mkdir(parents=True, exist_ok=True)
+    count = int(command[command.index("-frames:v") + 1])
+    paths = []
+    for index in range(count):
+        path = Path(str(pattern).replace("%06d", "{:06d}".format(index)))
+        path.write_bytes(payload)
+        paths.append(path)
+    return paths
+
+
 class TestPixelCoverQC(unittest.TestCase):
     def test_inspect_frame_pixel_coverage_detects_white_fill(self):
         with tempfile.TemporaryDirectory() as td:
@@ -203,11 +218,7 @@ class TestPixelCoverQC(unittest.TestCase):
                     mock_res.stderr = ""
                     return mock_res
                 elif "ffmpeg" in cmd_str:
-                    # Write dummy output frame
-                    if str(cmd[-1]) != "-":
-                        out_path = Path(cmd[-1])
-                        out_path.parent.mkdir(parents=True, exist_ok=True)
-                        out_path.write_bytes(b"dummy frame")
+                    _write_mock_batch_frames(cmd)
                     mock_res = mock.Mock(returncode=0)
                     mock_res.stdout = ""
                     mock_res.stderr = ""
@@ -287,10 +298,7 @@ class TestPixelCoverQC(unittest.TestCase):
                             mock_res.stderr = ""
                             return mock_res
                         elif "ffmpeg" in cmd_str:
-                            if str(cmd[-1]) != "-":
-                                out_path = Path(cmd[-1])
-                                out_path.parent.mkdir(parents=True, exist_ok=True)
-                                out_path.write_bytes(b"dummy")
+                            _write_mock_batch_frames(cmd, payload=b"dummy")
                             mock_res = mock.Mock(returncode=0)
                             mock_res.stdout = ""
                             mock_res.stderr = ""
@@ -372,10 +380,7 @@ class TestPixelCoverQC(unittest.TestCase):
                     mock_res.stderr = ""
                     return mock_res
                 elif "ffmpeg" in cmd_str:
-                    if str(cmd[-1]) != "-":
-                        out_path = Path(cmd[-1])
-                        out_path.parent.mkdir(parents=True, exist_ok=True)
-                        out_path.write_bytes(b"dummy")
+                    _write_mock_batch_frames(cmd, payload=b"dummy")
                     return mock.Mock(returncode=0, stdout="", stderr="")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
@@ -433,10 +438,7 @@ class TestPixelCoverQC(unittest.TestCase):
                     mock_res.stderr = ""
                     return mock_res
                 elif "ffmpeg" in cmd_str:
-                    if str(cmd[-1]) != "-":
-                        out_path = Path(cmd[-1])
-                        out_path.parent.mkdir(parents=True, exist_ok=True)
-                        out_path.write_bytes(b"dummy")
+                    _write_mock_batch_frames(cmd, payload=b"dummy")
                     return mock.Mock(returncode=0, stdout="", stderr="")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
@@ -498,10 +500,7 @@ class TestPixelCoverQC(unittest.TestCase):
                     mock_res.stderr = ""
                     return mock_res
                 elif "ffmpeg" in cmd_str:
-                    if str(cmd[-1]) != "-":
-                        out_path = Path(cmd[-1])
-                        out_path.parent.mkdir(parents=True, exist_ok=True)
-                        out_path.write_bytes(b"dummy")
+                    _write_mock_batch_frames(cmd, payload=b"dummy")
                     return mock.Mock(returncode=0, stdout="", stderr="")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
@@ -571,10 +570,7 @@ class TestPixelCoverQC(unittest.TestCase):
                     mock_res.stderr = ""
                     return mock_res
                 elif "ffmpeg" in cmd_str:
-                    if str(cmd[-1]) != "-":
-                        out_path = Path(cmd[-1])
-                        out_path.parent.mkdir(parents=True, exist_ok=True)
-                        out_path.write_bytes(b"dummy")
+                    _write_mock_batch_frames(cmd, payload=b"dummy")
                     return mock.Mock(returncode=0, stdout="", stderr="")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 

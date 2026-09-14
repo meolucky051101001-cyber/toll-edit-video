@@ -258,33 +258,92 @@ def parse_ass_covers(ass):
     return covers, w, h
 
 
-def inspect_covers(segments, ass):
+def inspect_covers(
+    segments: Sequence[Any],
+    ass: str,
+    video_duration: Optional[float] = None,
+    fps: float = 30.0,
+) -> Dict[str, Any]:
+    """Compare ASS cover events with the visual OCR timeline.
+
+    Coverage is checked over the *expected* visual lifetime, rather than over
+    the ASR segment alone.  This makes the check catch both required cases:
+    the one-second hold after source text disappears and a flicker gap before
+    the next subtitle when its onset is at most one second away.
+    """
     covers, w, h = parse_ass_covers(ass)
-    failures, unverified = [], []
-    checked = 0
-    for seg in segments:
-        start, end = float(seg['start']), float(seg['end'])
-        blocks = seg.get('tracking_blocks') or ([seg['best_block']] if seg.get('best_block') else [])
+    timeline = build_expected_cover_timeline(
+        segments,
+        video_duration=video_duration,
+        fps=fps,
+    )
+    temporal_tolerance = max(0.03, 1.0 / max(1.0, float(fps)))
+    failures: List[Dict[str, Any]] = []
+    unverified = []
+
+    for seg in segments or []:
+        blocks = _prop(seg, "tracking_blocks") or (
+            [_prop(seg, "best_block")] if _prop(seg, "best_block") else []
+        )
         if not blocks:
-            unverified.append(seg.get('index'))
-        for block in blocks:
-            left, right = max(start,float(block['start'])), min(end,float(block['end']))
-            if right-left <= .03:
+            unverified.append(_prop(seg, "id", _prop(seg, "index")))
+
+    for event in timeline:
+        left = float(event.expected_start)
+        right = float(event.expected_end)
+        if right - left <= temporal_tolerance:
+            continue
+
+        valid = sorted(
+            (max(left, cover_start), min(right, cover_end))
+            for cover_start, cover_end, x1, y1, x2, y2 in covers
+            if cover_end > left
+            and cover_start < right
+            and x1 <= event.x_pct * w + 2
+            and x2 >= event.max_x_pct * w - 2
+            and y1 <= event.y_pct * h + 2
+            and y2 >= event.max_y_pct * h - 2
+        )
+
+        cursor = left
+        uncovered = 0.0
+        first_gap_start: Optional[float] = None
+        for interval_start, interval_end in valid:
+            if interval_end <= cursor:
                 continue
-            checked += 1
-            valid = sorted((max(left,a), min(right,z)) for a,z,x,y,r,b in covers
-                if z>left and a<right and x<=float(block['x_pct'])*w+2
-                and r>=float(block['max_x_pct'])*w-2
-                and y<=float(block['y_pct'])*h+2 and b>=float(block['max_y_pct'])*h-2)
-            cursor, gap = left, 0.
-            for a,z in valid:
-                gap += max(0,a-cursor)
-                cursor=max(cursor,z)
-            gap += max(0,right-cursor)
-            if gap > .03:
-                failures.append(dict(segment=seg.get('index'),start=left,end=right,uncovered_seconds=round(gap,3)))
-    return dict(checked_rectangles=checked, failures=failures, unverified_segments=unverified,
-                diagnostic_times=sorted({round(f['start'],2) for f in failures})[:12])
+            if interval_start > cursor:
+                first_gap_start = cursor if first_gap_start is None else first_gap_start
+                uncovered += interval_start - cursor
+            cursor = max(cursor, interval_end)
+        if cursor < right:
+            first_gap_start = cursor if first_gap_start is None else first_gap_start
+            uncovered += right - cursor
+
+        if uncovered > temporal_tolerance:
+            failures.append(
+                {
+                    "segment": event.segment_id,
+                    "start": round(first_gap_start if first_gap_start is not None else left, 3),
+                    "end": round(right, 3),
+                    "source_start": event.src_start,
+                    "source_end": event.src_end,
+                    "expected_start": event.expected_start,
+                    "expected_end": event.expected_end,
+                    "uncovered_seconds": round(uncovered, 3),
+                    "hold_seconds": event.hold_seconds,
+                    "bridged_to_next": event.bridged_to_next,
+                    "reason": "expected_visual_cover_gap",
+                }
+            )
+
+    return {
+        "checked_rectangles": len(timeline),
+        "failures": failures,
+        "unverified_segments": unverified,
+        "fps": round(float(fps), 3),
+        "temporal_tolerance_seconds": round(temporal_tolerance, 4),
+        "diagnostic_times": sorted({round(f["start"], 2) for f in failures})[:12],
+    }
 
 
 def inspect_frame_pixel_coverage(frame_path, covers, canvas_w=1080, canvas_h=1920, timestamp=None):
