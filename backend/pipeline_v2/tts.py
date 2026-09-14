@@ -129,6 +129,14 @@ async def generate_tts_audio_v2(
                     rate="+15%" if voice_param == "vi-VN-HoaiMyNeural" else "+5%",
                     target_duration=target,
                 ))
+                if is_silent_fallback and not strict_provider:
+                    try:
+                        capcut_voice = "BV075_streaming" if seg_gender == "male" else "BV562_streaming"
+                        await asyncio.to_thread(_run_capcut_tts, text, str(raw), capcut_voice)
+                        if raw.is_file() and raw.stat().st_size > 256:
+                            is_silent_fallback = False
+                    except Exception:
+                        pass
             fit = await asyncio.to_thread(
                 fit_audio_to_window, raw, fitted, target, config
             )

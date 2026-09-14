@@ -29,8 +29,20 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 try:
     from .environment import load_environment
+    from .social_downloader import (
+        SensitiveUrlFilter,
+        sanitize_exception,
+        sanitize_text,
+        sanitize_url,
+    )
 except ImportError:
     from environment import load_environment
+    from social_downloader import (
+        SensitiveUrlFilter,
+        sanitize_exception,
+        sanitize_text,
+        sanitize_url,
+    )
 
 load_environment(Path(__file__).resolve().parent)
 
@@ -93,6 +105,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+logger.addFilter(SensitiveUrlFilter())
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 BOT_COMMANDS = (
@@ -947,8 +960,8 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
     except subprocess.TimeoutExpired:
         await safe_edit_status(status_msg, "❌ Tải video quá lâu (>5 phút). Thử link khác nhé!")
     except Exception as e:
-        logger.error(f"Error processing {sanitize_url(url)}: {e}", exc_info=True)
-        await safe_edit_status(status_msg, f"❌ Lỗi xử lý:\n{str(e)[:500]}")
+        logger.error(f"Error processing {sanitize_url(url)}: {sanitize_exception(e, include_traceback=True)}")
+        await safe_edit_status(status_msg, f"❌ Lỗi xử lý:\n{sanitize_text(str(e))[:500]}")
 
 
 # ===== XỬ LÝ MESSAGE CÓ CHỨA LINK =====

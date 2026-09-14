@@ -159,7 +159,9 @@ class FastProfileTests(unittest.TestCase):
                 Path(args[1]).write_bytes(b"silence")
                 return True
 
+            # Case A: CapCut also fails -> records is_silent_fallback = True
             with mock.patch.object(vc, "generate_tts_edge", side_effect=fake_edge_silent) as mocked_edge, \
+                 mock.patch.object(vc, "_run_capcut_tts", side_effect=RuntimeError("CapCut offline")), \
                  mock.patch("backend.pipeline_v2.tts.fit_audio_to_window", return_value=fake_fit):
                 infos = asyncio.run(
                     generate_tts_audio_v2(
@@ -172,4 +174,42 @@ class FastProfileTests(unittest.TestCase):
                 self.assertEqual(len(infos), 1)
                 self.assertTrue(infos[0]["is_silent_fallback"])
                 self.assertEqual(mocked_edge.call_args.kwargs.get("target_duration"), 2.0)
+
+            # Case B: Secondary CapCut fallback succeeds -> rescues from silent fallback!
+            def fake_capcut_rescue(text, out_path, voice):
+                Path(out_path).write_bytes(b"x" * 512)
+
+            with mock.patch.object(vc, "generate_tts_edge", side_effect=fake_edge_silent), \
+                 mock.patch.object(vc, "_run_capcut_tts", side_effect=fake_capcut_rescue), \
+                 mock.patch("backend.pipeline_v2.tts.fit_audio_to_window", return_value=fake_fit):
+                infos2 = asyncio.run(
+                    generate_tts_audio_v2(
+                        [seg],
+                        td,
+                        voice_source="edge",
+                        voice_param="vi-VN-HoaiMyNeural",
+                    )
+                )
+                self.assertEqual(len(infos2), 1)
+                self.assertFalse(infos2[0]["is_silent_fallback"])
+
+    def test_pipeline_early_aborts_after_tts_on_silent_fallback(self):
+        from backend.pipeline_v2.video_pipeline import VideoPipelineRunner, VideoPipelineRequest, QCGateBlocked
+        from backend.pipeline_v2.config import PipelineSettings, QCGatePolicy
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td)
+            req = VideoPipelineRequest(
+                video_path=work / "in.mp4",
+                job_directory=work / "job",
+                output_path=work / "out.mp4",
+                settings=PipelineSettings(qc_gate_policy=QCGatePolicy.BLOCK),
+            )
+            runner = VideoPipelineRunner(req)
+            runner.artifact_store.put_json("tts/segments.json", {"silent_fallback_count": 1, "segments": []})
+            with self.assertRaises(QCGateBlocked) as ctx:
+                tts_payload = runner._load_json("tts/segments.json")
+                silent_count = int(tts_payload.get("silent_fallback_count", 0))
+                if silent_count > 0 and runner.request.settings.qc_gate_policy is QCGatePolicy.BLOCK:
+                    raise QCGateBlocked(f"QC gate early abort: TTS stage produced {silent_count} silent fallback segment(s). Stopping pipeline before RVC, mix, and render.")
+            self.assertIn("QC gate early abort", str(ctx.exception))
 

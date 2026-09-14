@@ -8,7 +8,12 @@ BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from social_downloader import sanitize_url
+from social_downloader import (
+    SensitiveUrlFilter,
+    sanitize_exception,
+    sanitize_text,
+    sanitize_url,
+)
 
 
 class TestUrlSanitization(unittest.TestCase):
@@ -46,6 +51,53 @@ class TestUrlSanitization(unittest.TestCase):
         self.assertNotIn("uppercase_sig", sanitized)
         self.assertNotIn("secret_pass", sanitized)
         self.assertIn("safe=true", sanitized)
+
+    def test_sanitize_text_redacts_urls_inside_arbitrary_strings(self):
+        msg = "Failed fetching from https://api.douyin.com/v1/play?token=secret999&v=1 and redirected to https://cdn.xhs.com/clip.mp4?sign=xyz123"
+        sanitized = sanitize_text(msg)
+        self.assertNotIn("secret999", sanitized)
+        self.assertNotIn("xyz123", sanitized)
+        self.assertIn("token=%5BREDACTED%5D", sanitized)
+        self.assertIn("sign=%5BREDACTED%5D", sanitized)
+
+    def test_sanitize_exception_redacts_requests_http_error(self):
+        import requests
+        exc = requests.exceptions.HTTPError("403 Client Error: Forbidden for url: https://example.com/video?token=supersecret&sign=sigval")
+        sanitized = sanitize_exception(exc)
+        self.assertNotIn("supersecret", sanitized)
+        self.assertNotIn("sigval", sanitized)
+        self.assertIn("token=%5BREDACTED%5D", sanitized)
+
+    def test_sanitize_exception_with_traceback(self):
+        try:
+            raise ValueError("Crash with url https://example.com/data?pass=mypassword&id=10")
+        except ValueError as e:
+            tb_sanitized = sanitize_exception(e, include_traceback=True)
+            self.assertNotIn("mypassword", tb_sanitized)
+            self.assertIn("pass=%5BREDACTED%5D", tb_sanitized)
+            self.assertIn("Traceback", tb_sanitized)
+
+    def test_sensitive_url_filter_intercepts_log_records(self):
+        import logging
+        test_logger = logging.getLogger("test_sanitizer_filter")
+        test_logger.setLevel(logging.INFO)
+        test_filter = SensitiveUrlFilter()
+        test_logger.addFilter(test_filter)
+
+        captured_records = []
+        class ListHandler(logging.Handler):
+            def emit(self, record):
+                captured_records.append(self.format(record))
+
+        handler = ListHandler()
+        formatter = logging.Formatter("%(message)s")
+        handler.setFormatter(formatter)
+        test_logger.addHandler(handler)
+
+        test_logger.info("Connecting to https://secret-domain.com/feed?token=leaked_token_12345")
+        self.assertEqual(len(captured_records), 1)
+        self.assertNotIn("leaked_token_12345", captured_records[0])
+        self.assertIn("token=%5BREDACTED%5D", captured_records[0])
 
 
 if __name__ == "__main__":

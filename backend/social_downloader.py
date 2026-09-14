@@ -65,6 +65,67 @@ def sanitize_url(url: str) -> str:
         return re.sub(r"(xsec_token|token|api_key|secret|shareRedId|share_id|sign|sig|pass|ticket|session)=[^&]+", r"\1=[REDACTED]", str(url), flags=re.IGNORECASE)
 
 
+_URL_REGEX = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
+
+
+def sanitize_text(text: str) -> str:
+    """Scrub sensitive query parameters from any URLs found within a string."""
+    if not text:
+        return ""
+    text_str = str(text)
+
+    def _replace_match(m: re.Match) -> str:
+        raw_url = m.group(0)
+        return sanitize_url(raw_url)
+
+    return _URL_REGEX.sub(_replace_match, text_str)
+
+
+def sanitize_exception(exc: BaseException, include_traceback: bool = False) -> str:
+    """Format an exception with all embedded URLs sanitized of sensitive query params."""
+    if exc is None:
+        return ""
+    if include_traceback:
+        import traceback
+        tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        return sanitize_text("".join(tb_lines))
+    return sanitize_text(str(exc))
+
+
+class SensitiveUrlFilter(logging.Filter):
+    """Logging filter that scrubs sensitive query parameters from all log messages, args, and tracebacks."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if isinstance(record.msg, str):
+                record.msg = sanitize_text(record.msg)
+            elif record.msg is not None:
+                record.msg = sanitize_text(str(record.msg))
+
+            if record.args:
+                if isinstance(record.args, dict):
+                    record.args = {
+                        k: (sanitize_text(v) if isinstance(v, str) else v)
+                        for k, v in record.args.items()
+                    }
+                elif isinstance(record.args, (tuple, list)):
+                    record.args = tuple(
+                        sanitize_text(a) if isinstance(a, str) else (
+                            sanitize_exception(a) if isinstance(a, BaseException) else a
+                        )
+                        for a in record.args
+                    )
+
+            if record.exc_text:
+                record.exc_text = sanitize_text(record.exc_text)
+        except Exception:
+            pass
+        return True
+
+
+logger.addFilter(SensitiveUrlFilter())
+
+
 USER_AGENTS = {
     "mobile": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
     "desktop": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -132,7 +193,7 @@ def download_file_stream(url: str, dest_path: str, headers: dict = None, timeout
         atomic_replace_file(temporary_path, dest_path)
         return True
     except Exception as e:
-        logger.error(f"Lỗi tải stream từ {sanitize_url(url)}: {e}")
+        logger.error(f"Lỗi tải stream từ {sanitize_url(url)}: {sanitize_exception(e)}")
         if os.path.exists(temporary_path):
             try: os.remove(temporary_path)
             except OSError: pass

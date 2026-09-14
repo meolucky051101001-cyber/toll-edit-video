@@ -22,7 +22,7 @@ from .adaptive import (
 from .artifact_store import ArtifactStore, hash_file
 from .atomic_io import atomic_copy_file, atomic_replace_file
 from .batching import bounded_batches, chunked
-from .config import PipelineSettings
+from .config import PipelineSettings, QCGatePolicy
 from .content import (
     compose_srt,
     discover_rvc_model,
@@ -226,6 +226,15 @@ class VideoPipelineRunner:
 
         await self._execute("tts", lambda: self._tts_stage(timed_segments))
         final_segments = self._segments_after_tts(timed_segments)
+
+        # Early Fail-Fast: Avoid wasting GPU on RVC, audio mixing, or NVENC render if TTS produced silent fallback
+        tts_payload = self._load_json("tts/segments.json")
+        silent_count = int(tts_payload.get("silent_fallback_count", 0))
+        if silent_count > 0 and self.request.settings.qc_gate_policy is QCGatePolicy.BLOCK:
+            raise QCGateBlocked(
+                f"QC gate early abort: TTS stage produced {silent_count} silent fallback segment(s). Stopping pipeline before RVC, mix, and render."
+            )
+
         if self._rvc_enabled():
             await self._execute("rvc", lambda: self._rvc_stage(final_segments))
         else:

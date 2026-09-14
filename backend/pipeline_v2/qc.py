@@ -891,8 +891,30 @@ def run_report_only_qc(
         if segments_path is not None and Path(segments_path).is_file():
             try:
                 loaded_segs = _load_segments(Path(segments_path))
-                # 1. Diagnostic frame at sentence transitions
-                for idx, seg in enumerate(loaded_segs[:4]):
+                # 1. Comprehensive subtitle cluster sampling across entire video
+                # If 25 or fewer segments, sample EVERY segment's midpoint.
+                # If more than 25 segments, sample up to 25 evenly distributed segments
+                # PLUS any segment where subtitle position shifts.
+                total_segs = len(loaded_segs)
+                selected_indices = set()
+                if total_segs <= 25:
+                    selected_indices.update(range(total_segs))
+                else:
+                    step = max(1, total_segs // 25)
+                    for i in range(0, total_segs, step):
+                        selected_indices.add(i)
+                    selected_indices.add(total_segs - 1)
+
+                    prev_y = None
+                    for idx, seg in enumerate(loaded_segs):
+                        cur_y = seg.get("y_pct") or seg.get("max_y_pct")
+                        if prev_y is not None and cur_y is not None and abs(float(cur_y) - float(prev_y)) > 0.04:
+                            selected_indices.add(idx)
+                        if cur_y is not None:
+                            prev_y = cur_y
+
+                for idx in sorted(selected_indices)[:30]:
+                    seg = loaded_segs[idx]
                     start_sec = float(seg.get("start", 0.0))
                     end_sec = float(seg.get("end", 0.0))
                     mid_sec = round((start_sec + end_sec) / 2.0, 2)

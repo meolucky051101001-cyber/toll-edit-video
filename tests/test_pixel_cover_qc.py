@@ -163,6 +163,85 @@ class TestPixelCoverQC(unittest.TestCase):
             self.assertEqual(result["boxes_checked"], 0)
             self.assertEqual(result["reason"], "active_covers_unverifiable_or_degenerate")
 
+    def test_full_timeline_segment_sampling_in_qc(self):
+        import json
+        from unittest import mock
+        from backend.pipeline_v2.qc import run_report_only_qc, QCSettings
+
+        with tempfile.TemporaryDirectory() as td:
+            video_file = Path(td) / "test_video.mp4"
+            video_file.write_bytes(b"video content")
+            report_file = Path(td) / "qc_report.json"
+            ass_file = Path(td) / "subs.ass"
+            ass_file.write_text(
+                "[Script Info]\nPlayResX: 1080\nPlayResY: 1920\n\n[Events]\n"
+                "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,{\\pos(540,1550)}Hello\n",
+                encoding="utf-8-sig",
+            )
+
+            # Create 12 segments spanning 30 seconds
+            segments_data = []
+            for i in range(12):
+                start_t = float(i * 2 + 1)
+                end_t = start_t + 1.5
+                segments_data.append({
+                    "id": i + 1,
+                    "start": start_t,
+                    "end": end_t,
+                    "text": f"Segment {i + 1}",
+                    "y_pct": 0.85,
+                })
+            seg_file = Path(td) / "segments.json"
+            seg_file.write_text(json.dumps(segments_data), encoding="utf-8")
+
+            # Mock ffprobe duration to 30.0s and ffmpeg frame dumps
+            def fake_run_command(cmd, timeout=30.0):
+                cmd_str = " ".join(str(c) for c in cmd)
+                if "ffprobe" in cmd_str:
+                    mock_res = mock.Mock(returncode=0)
+                    mock_res.stdout = json.dumps({"format": {"duration": "30.0"}, "streams": [{"codec_type": "video", "duration": "30.0"}]})
+                    mock_res.stderr = ""
+                    return mock_res
+                elif "ffmpeg" in cmd_str:
+                    # Write dummy output frame
+                    out_path = Path(cmd[-1])
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_bytes(b"dummy frame")
+                    mock_res = mock.Mock(returncode=0)
+                    mock_res.stdout = ""
+                    mock_res.stderr = ""
+                    return mock_res
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with mock.patch("backend.pipeline_v2.qc._run_command", side_effect=fake_run_command):
+                with mock.patch("backend.pipeline_v2.cover_qc.inspect_frame_pixel_coverage") as mock_pix:
+                    mock_pix.return_value = {
+                        "checked": True,
+                        "all_boxes_filled": True,
+                        "boxes_checked": 1,
+                        "details": [{"white_ratio": 0.9}],
+                    }
+                    report = run_report_only_qc(
+                        video_path=video_file,
+                        report_path=report_file,
+                        ass_path=ass_file,
+                        segments_path=seg_file,
+                        settings=QCSettings(sample_frames=True),
+                    )
+
+            # Check that samples were generated across all 12 segments (not capped at 4)
+            keys = [a.get("key", "") for a in report.diagnostic_artifacts]
+            transition_keys = [k for k in keys if "transition_" in k]
+            # Should have sampled all 12 segments: transition_0 through transition_11
+            self.assertEqual(len(transition_keys), 12)
+            self.assertIn("frames/transition_0.png", keys)
+            self.assertIn("frames/transition_11.png", keys)
+            # Pixel cover qc should be pass
+            self.assertIn("pixel_cover_qc", report.metrics)
+            self.assertTrue(report.metrics["pixel_cover_qc"]["all_boxes_filled"])
+            self.assertEqual(report.metrics["pixel_cover_qc"]["checked_frames"], len(keys))
+
 
 if __name__ == "__main__":
     unittest.main()
+
