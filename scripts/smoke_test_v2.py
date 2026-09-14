@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import time
 
@@ -38,6 +40,9 @@ async def run_smoke_test():
     print(f"Using source video: {source_video.name}")
 
     work_dir = ROOT / "workspace" / "smoke_test_run"
+    if work_dir.exists():
+        print(f"Cleaning previous smoke test directory: {work_dir} to enforce clean cold run...")
+        shutil.rmtree(work_dir, ignore_errors=True)
     work_dir.mkdir(parents=True, exist_ok=True)
     out_video = work_dir / "Dubbed_smoke_test.mp4"
 
@@ -126,6 +131,29 @@ async def run_smoke_test():
         return 1
     print(f"SUCCESS: tts_integrity check passed: {tts_check.get('message')}")
 
+    # Verify manifest and pipeline version
+    manifest = runner.manifest
+    if not manifest:
+        print("FAIL: Runner manifest is missing!")
+        return 1
+    pipe_ver = manifest.metadata.get("pipeline_implementation_version")
+    print(f"SUCCESS: Pipeline implementation version = {pipe_ver}")
+    if pipe_ver != "2.6.0":
+        print(f"FAIL: Expected pipeline version 2.6.0, got {pipe_ver}")
+        return 1
+
+    manifest_created_at = manifest.created_at
+    print(f"SUCCESS: Manifest created_at = {manifest_created_at}")
+    stage_summaries = {}
+    for s_name, stage in manifest.stages.items():
+        stage_summaries[s_name] = {
+            "status": stage.status.value,
+            "started_at": stage.started_at,
+            "finished_at": stage.finished_at,
+        }
+        if stage.status.value == "completed":
+            print(f"  Stage '{s_name}': {stage.started_at} -> {stage.finished_at}")
+
     # Save summary manifest for audit inspection
     summary = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -137,6 +165,9 @@ async def run_smoke_test():
         "qc_allowed": result.qc_allowed,
         "qc_checks_count": len(checks),
         "checks": [c.get("name") for c in checks],
+        "pipeline_implementation_version": pipe_ver,
+        "manifest_created_at": manifest_created_at,
+        "stages": stage_summaries,
     }
     (work_dir / "smoke_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"SUCCESS: Smoke test summary saved to: {work_dir / 'smoke_summary.json'}")
