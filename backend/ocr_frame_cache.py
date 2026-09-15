@@ -4,8 +4,9 @@ import numpy as np
 
 
 class SubtitleFrameCache:
-    def __init__(self, top, bottom):
+    def __init__(self, top, bottom, max_age=1.0):
         self.top, self.bottom = top, bottom
+        self.max_age = max_age
         self.entries = []
         self.hits = 0
 
@@ -21,7 +22,7 @@ class SubtitleFrameCache:
         gray, edges = signature
         for when, old_gray, old_edges, result in reversed(self.entries):
             # Periodic recognition bounds accumulated visual drift.
-            if abs(timestamp-when) > 1.0 or gray.shape != old_gray.shape:
+            if abs(timestamp-when) > self.max_age or gray.shape != old_gray.shape:
                 continue
             delta = np.abs(gray.astype(np.int16)-old_gray.astype(np.int16))
             changed = np.logical_xor(edges, old_edges).sum()

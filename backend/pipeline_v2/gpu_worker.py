@@ -72,6 +72,7 @@ def _run_ocr(payload: Mapping[str, Any]) -> Dict[str, Any]:
     batches = [segments]
     try:
         block_count = 0
+        sampling_metrics = {}
         width, height = 1080, 1920
         main_positions = []
         for batch in batches:
@@ -81,6 +82,7 @@ def _run_ocr(payload: Mapping[str, Any]) -> Dict[str, Any]:
                 sample_rate=float(payload.get("sample_rate", 1.0)),
                 srt_segments=batch,
                 adaptive=bool(payload.get("enable_adaptive_ocr", False)),
+                metrics=sampling_metrics,
             )
             block_count += len(blocks)
             main_positions.append(float(main_y_pct))
@@ -95,6 +97,7 @@ def _run_ocr(payload: Mapping[str, Any]) -> Dict[str, Any]:
             "height": height,
             "main_y_pct": main_y_pct,
             "block_count": block_count,
+            "sampling_metrics": sampling_metrics,
         }
     finally:
         release_ocr_reader()
@@ -187,4 +190,3 @@ def main(argv: Sequence[str] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
