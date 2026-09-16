@@ -1,0 +1,1444 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Studio Kịch Bản AI & Lồng Sub CapCut TTS</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #0b0f17;
+      --bg-card: #131b26;
+      --bg-card-hover: #1a2433;
+      --bg-card-subtle: #17212f;
+      --border: #243042;
+      --border-bright: #3b82f6;
+      --text-main: #f8fafc;
+      --text-dim: #94a3b8;
+      --text-muted: #64748b;
+      --primary: #8b5cf6;
+      --primary-hover: #7c3aed;
+      --accent-pink: #ec4899;
+      --accent-cyan: #06b6d4;
+      --accent-blue: #3b82f6;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      font-family: 'Inter', sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+    }
+
+    /* HEADER */
+    header {
+      background: rgba(19, 27, 38, 0.95);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .logo-area { display: flex; align-items: center; gap: 14px; }
+    .logo-badge {
+      background: linear-gradient(135deg, #8b5cf6, #ec4899);
+      color: white;
+      font-weight: 800;
+      font-size: 13px;
+      padding: 6px 14px;
+      border-radius: 8px;
+      letter-spacing: 0.5px;
+      box-shadow: 0 4px 14px rgba(236, 72, 153, 0.35);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .app-title { font-size: 16px; font-weight: 700; color: #fff; }
+    .app-subtitle { font-size: 12px; color: var(--text-dim); }
+
+    .nav-actions { display: flex; align-items: center; gap: 10px; }
+    .btn {
+      padding: 7px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      text-decoration: none;
+      transition: all 0.2s ease;
+      border: 1px solid transparent;
+    }
+    .btn-outline {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      color: var(--text-main);
+    }
+    .btn-outline:hover {
+      background: rgba(255, 255, 255, 0.12);
+      border-color: #475569;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--primary), var(--accent-pink));
+      color: white;
+      box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+    }
+    .btn-primary:hover {
+      filter: brightness(1.1);
+      transform: translateY(-1px);
+    }
+    .btn-success {
+      background: linear-gradient(135deg, #059669, #10b981);
+      color: white;
+      box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+    }
+    .btn-success:hover {
+      filter: brightness(1.1);
+      transform: translateY(-1px);
+    }
+    .btn-active {
+      background: linear-gradient(135deg, #8b5cf6, #ec4899) !important;
+      color: white !important;
+      border: none !important;
+      font-weight: 700 !important;
+    }
+
+    /* MAIN CONTAINER */
+    .studio-container {
+      display: grid;
+      grid-template-columns: 460px 1fr;
+      gap: 20px;
+      padding: 20px 24px;
+      max-width: 1720px;
+      width: 100%;
+      margin: 0 auto;
+      flex: 1;
+    }
+
+    @media (max-width: 1200px) {
+      .studio-container {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* PANELS */
+    .panel {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+    }
+    .panel-header {
+      padding: 14px 18px;
+      background: rgba(255, 255, 255, 0.02);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .panel-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .panel-body {
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      overflow-y: auto;
+    }
+
+    /* TABS */
+    .mode-tab-group {
+      display: flex;
+      background: #0f172a;
+      border-radius: 10px;
+      padding: 4px;
+      border: 1px solid var(--border);
+      gap: 4px;
+    }
+    .mode-tab {
+      flex: 1;
+      text-align: center;
+      padding: 9px 12px;
+      border-radius: 7px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-dim);
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .mode-tab.active {
+      background: linear-gradient(135deg, rgba(139, 92, 246, 0.3), rgba(236, 72, 153, 0.3));
+      border: 1px solid rgba(236, 72, 153, 0.5);
+      color: #fff;
+      font-weight: 700;
+    }
+
+    /* FORM ELEMENTS */
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .form-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-dim);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .form-hint {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .form-input, .form-select, .form-textarea {
+      width: 100%;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px 12px;
+      color: #fff;
+      font-size: 13px;
+      font-family: inherit;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .form-input:focus, .form-select:focus, .form-textarea:focus {
+      outline: none;
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.25);
+    }
+    .form-textarea {
+      resize: vertical;
+      min-height: 72px;
+    }
+
+    /* QUICK VIDEO PICKER */
+    .video-picker-grid {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    /* VOICE SELECTOR CARD */
+    .voice-select-box {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      max-height: 180px;
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+    .voice-card {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .voice-card:hover {
+      border-color: #475569;
+      background: #172235;
+    }
+    .voice-card.selected {
+      border-color: var(--primary);
+      background: rgba(139, 92, 246, 0.15);
+      box-shadow: 0 0 0 1px var(--primary);
+    }
+    .voice-card-name {
+      font-size: 12px;
+      font-weight: 700;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .voice-card-badge {
+      font-size: 9px;
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text-dim);
+    }
+    .voice-card-desc {
+      font-size: 10px;
+      color: var(--text-muted);
+      line-height: 1.3;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    /* SCENE CARDS (RIGHT PANEL) */
+    .script-header-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .script-title-info {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .script-main-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: #fff;
+    }
+    .script-tags {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .tag-badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-dim);
+      font-weight: 500;
+    }
+    .tag-badge-accent {
+      background: rgba(139, 92, 246, 0.2);
+      color: #c084fc;
+      border: 1px solid rgba(139, 92, 246, 0.3);
+    }
+
+    .scenes-list {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .scene-card {
+      background: var(--bg-card-subtle);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      transition: border-color 0.2s;
+    }
+    .scene-card:hover {
+      border-color: #3b82f6;
+    }
+    .scene-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .scene-index-badge {
+      font-size: 12px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: #1e293b;
+      color: #38bdf8;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .scene-time-badge {
+      font-size: 11px;
+      font-family: var(--font-mono);
+      color: var(--text-dim);
+      background: rgba(255, 255, 255, 0.04);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .scene-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn-preview-tts {
+      padding: 4px 10px;
+      font-size: 11px;
+      background: rgba(139, 92, 246, 0.2);
+      border: 1px solid rgba(139, 92, 246, 0.4);
+      color: #d8b4fe;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.2s;
+    }
+    .btn-preview-tts:hover {
+      background: rgba(139, 92, 246, 0.4);
+    }
+    .btn-preview-tts.playing {
+      background: var(--success);
+      color: #fff;
+      border-color: var(--success);
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+
+    .scene-dialogue-input {
+      background: #0b0f17;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: #fff;
+      font-size: 13.5px;
+      line-height: 1.5;
+      font-family: inherit;
+      resize: vertical;
+      min-height: 64px;
+    }
+    .scene-dialogue-input:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+
+    .scene-meta-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .scene-mini-input {
+      background: #0b0f17;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      color: var(--text-dim);
+      font-size: 12px;
+    }
+    .scene-stats-line {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* OUTPUT ACTION BAR */
+    .output-action-bar {
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      margin-top: 8px;
+    }
+    .output-buttons-row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .audio-player-box, .video-player-box {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: #0b0f17;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+    }
+
+    /* LIVE STATUS / LOG */
+    .status-toast-bar {
+      background: #0f172a;
+      border-top: 1px solid var(--border);
+      padding: 8px 24px;
+      font-size: 12px;
+      color: var(--text-dim);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      bottom: 0;
+      z-index: 50;
+    }
+
+    /* MODAL CHỌN 6 HOOK */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(6px);
+      display: none;
+      justify-content: center;
+      align-items: center;
+      z-index: 200;
+      padding: 20px;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal-box {
+      background: var(--bg-card);
+      border: 1px solid var(--border-bright);
+      border-radius: 16px;
+      width: 100%;
+      max-width: 680px;
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+      overflow: hidden;
+    }
+    .modal-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .modal-body {
+      padding: 18px 20px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .hook-option-card {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .hook-option-card:hover {
+      border-color: var(--accent-pink);
+      background: #172133;
+      transform: translateX(4px);
+    }
+    .hook-type-badge {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--accent-cyan);
+    }
+    .hook-text {
+      font-size: 13.5px;
+      font-weight: 600;
+      color: #fff;
+      line-height: 1.4;
+    }
+
+    /* EMPTY STATE */
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 48px 24px;
+      text-align: center;
+      color: var(--text-muted);
+      gap: 12px;
+    }
+    .empty-state-icon { font-size: 40px; }
+    .empty-state-title { font-size: 15px; font-weight: 600; color: var(--text-dim); }
+    .empty-state-desc { font-size: 12.5px; max-width: 400px; line-height: 1.5; }
+
+    /* LOADING SPINNER */
+    .spinner {
+      border: 2px solid rgba(255, 255, 255, 0.2);
+      border-top-color: #fff;
+      border-radius: 50%;
+      width: 14px;
+      height: 14px;
+      animation: spin 0.8s linear infinite;
+      display: inline-block;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+  <!-- TOP HEADER -->
+  <header>
+    <div class="logo-area">
+      <div class="logo-badge">
+        <span>✍️</span>
+        <span>STUDIO KỊCH BẢN AI</span>
+      </div>
+      <div>
+        <div class="app-title">Biên Kịch Tự Động & Lồng Tiếng CapCut TTS</div>
+        <div class="app-subtitle">Gemini Vision Đọc Video • 6 Hook Viral • 8 Giọng Đọc Chuẩn • Xuất Sub SRT & Burn Video</div>
+      </div>
+    </div>
+
+    <div class="nav-actions">
+      <a class="btn btn-outline" href="http://127.0.0.1:8088/" title="Mở dashboard Tool V1">Tool V1</a>
+      <a class="btn btn-outline" href="http://127.0.0.1:8089/" title="Mở dashboard Tool V2">Tool V2</a>
+      <a class="btn btn-outline" href="/quy-trinh" style="border-color: #2563eb; color: #38bdf8;" title="Mở Studio Quy trình biên tập video & chống re-up">🎬 Quy Trình</a>
+      <a class="btn btn-active" href="/kich-ban" title="Đang ở Studio Kịch Bản AI">✍️ Kịch Bản</a>
+      <button class="btn btn-outline" onclick="handleClearDraft()" title="Xóa trắng bản thảo để làm kịch bản mới">🗑️ Làm mới</button>
+    </div>
+  </header>
+
+  <!-- MAIN 2-COLUMN WORKSPACE -->
+  <main class="studio-container">
+
+    <!-- LEFT COLUMN: INPUT & SETTINGS -->
+    <section class="panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span>⚙️</span>
+          <span>Đầu Vào Kịch Bản & Cấu Hình</span>
+        </div>
+        <span class="tag-badge" id="aiModelBadge">Gemini Vision 3.7</span>
+      </div>
+
+      <div class="panel-body">
+        <!-- MODE SELECTOR TABS -->
+        <div class="mode-tab-group">
+          <button class="mode-tab active" id="tabModeVideo" onclick="switchMode('video')">
+            👁️ AI Xem Video (Video-to-Script)
+          </button>
+          <button class="mode-tab" id="tabModeText" onclick="switchMode('text')">
+            💡 Nhập Ý Tưởng / Chủ Đề
+          </button>
+        </div>
+
+        <!-- MODE 1: VIDEO-TO-SCRIPT -->
+        <div id="sectionVideoMode" style="display: flex; flex-direction: column; gap: 14px;">
+          <div class="form-group">
+            <label class="form-label">
+              <span>Chọn Video Cần Dựng Kịch Bản</span>
+              <button class="btn btn-outline" style="font-size:10.5px; padding:2px 6px;" onclick="loadAvailableVideos()" title="Quét lại thư mục video">🔄 Quét lại</button>
+            </label>
+            <select class="form-select" id="selAvailableVideos" onchange="handleSelectAvailableVideo(this.value)">
+              <option value="">-- Chọn video trong D:\video phôi hoặc D:\banve --</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">
+              <span>Hoặc Nhập Đường Dẫn File Video (.mp4)</span>
+            </label>
+            <input type="text" class="form-input" id="txtVideoPath" placeholder="Ví dụ: D:\video phôi\review_san_pham.mp4">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">
+              <span>Thể Loại Video (Genre)</span>
+              <span class="form-hint">AI tối ưu văn phong</span>
+            </label>
+            <select class="form-select" id="selVideoGenre">
+              <option value="review">Review Sản Phẩm / Hướng Dẫn Thực Chiến</option>
+              <option value="story">Tâm Sự / Kể Chuyện Đời Sống Gần Gũi</option>
+              <option value="tech">Công Nghệ / Mẹo Thủ Thuật Hay</option>
+              <option value="auto">Tự Động Nhận Diện Toàn Bộ Nội Dung</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Phong Cách Nói Chuyện</label>
+            <select class="form-select" id="selVideoStyle">
+              <option value="Chuyên gia cuốn hút & thực chiến">Chuyên gia cuốn hút & thực chiến</option>
+              <option value="Hài hước, dí dỏm, chọc cười">Hài hước, dí dỏm, chân thật</option>
+              <option value="Kịch tính, tò mò, giật gân">Kịch tính, tò mò, hồi hộp</option>
+              <option value="Chân thành, mộc mạc đời thường">Chân thành, mộc mạc đời thường</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Yêu Cầu Bổ Sung Cho AI (Tùy chọn)</label>
+            <textarea class="form-textarea" id="txtVideoCustomInst" placeholder="Ví dụ: Tập trung nhấn mạnh vào độ tiện dụng, không nhắc đến giá tiền, xưng hô 'mình - các bác'..."></textarea>
+          </div>
+
+          <button class="btn btn-primary" id="btnAnalyzeVideo" onclick="handleAnalyzeVideo()" style="padding: 11px; justify-content: center; font-size: 13.5px;">
+            <span>⚡ AI Phân Tích & Dựng Kịch Bản Khớp Video</span>
+          </button>
+        </div>
+
+        <!-- MODE 2: TEXT-TO-SCRIPT -->
+        <div id="sectionTextMode" style="display: none; flex-direction: column; gap: 14px;">
+          <div class="form-group">
+            <label class="form-label">Chủ Đề Hoặc Ý Tưởng Video</label>
+            <textarea class="form-textarea" id="txtTopic" placeholder="Ví dụ: 3 mẹo tiết kiệm tiền khi mua đồ gia dụng thông minh..."></textarea>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+            <div class="form-group">
+              <label class="form-label">Nền Tảng Đăng</label>
+              <select class="form-select" id="selPlatform">
+                <option value="tiktok">TikTok (9:16)</option>
+                <option value="reels">Facebook Reels (9:16)</option>
+                <option value="shorts">YouTube Shorts (9:16)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Thời Lượng Mục Tiêu</label>
+              <select class="form-select" id="selDurationTarget">
+                <option value="15">15 giây (Siêu ngắn)</option>
+                <option value="30">30 giây (Chuẩn viral)</option>
+                <option value="45" selected>45 giây (Chi tiết vừa đủ)</option>
+                <option value="60">60 giây (Review sâu)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+              <label class="form-label" style="margin: 0;">Câu Mở Đầu (Hook) Đã Chọn</label>
+              <button class="btn btn-outline" style="font-size:11px; padding:3px 8px; color:#ec4899; border-color:#ec4899;" onclick="handleGenerateHooks()">
+                🎣 Tạo 6 Hook Giật Tít
+              </button>
+            </div>
+            <input type="text" class="form-input" id="txtSelectedHook" placeholder="Bấm 'Tạo 6 Hook' hoặc tự gõ câu mở đầu tại đây...">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Phong Cách Lời Văn</label>
+            <select class="form-select" id="selTextStyle">
+              <option value="Chuyên gia cuốn hút & thực chiến">Chuyên gia cuốn hút & thực chiến</option>
+              <option value="Hài hước, dí dỏm, chọc cười">Hài hước, dí dỏm, chọc cười</option>
+              <option value="Kịch tính, tò mò, giật gân">Kịch tính, tò mò, giật gân</option>
+              <option value="Chân thành, mộc mạc đời thường">Chân thành, mộc mạc đời thường</option>
+            </select>
+          </div>
+
+          <button class="btn btn-primary" id="btnGenerateScriptText" onclick="handleGenerateScriptFromText()" style="padding: 11px; justify-content: center; font-size: 13.5px;">
+            <span>✍️ Viết Kịch Bản Toàn Diện (Hook -> Body -> CTA)</span>
+          </button>
+        </div>
+
+        <!-- VOICE SELECTOR (CHUNG CHO CẢ 2 CHẾ ĐỘ) -->
+        <div class="form-group" style="margin-top: 8px; padding-top: 14px; border-top: 1px solid var(--border);">
+          <label class="form-label">
+            <span>Giọng Đọc CapCut TTS (8 Giọng Việt Nam)</span>
+            <span class="form-hint" id="selectedVoiceLabel">Mai (Nữ Chuẩn)</span>
+          </label>
+          <div class="voice-select-box" id="voiceSelectBox">
+            <!-- Render động bằng JS -->
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- RIGHT COLUMN: SCENE EDITOR & OUTPUT -->
+    <section class="panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span>🎬</span>
+          <span>Bảng Phân Cảnh & Biên Tập Kịch Bản</span>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn btn-outline" style="font-size: 11.5px; padding: 4px 10px;" onclick="handleAddScene()">
+            ➕ Thêm Phân Cảnh
+          </button>
+        </div>
+      </div>
+
+      <div class="panel-body">
+        <!-- SCRIPT HEADER METADATA -->
+        <div class="script-header-bar" id="scriptHeaderBar" style="display: none;">
+          <div class="script-title-info">
+            <div class="script-main-title" id="valScriptTitle">Tiêu đề kịch bản</div>
+            <div class="script-tags">
+              <span class="tag-badge tag-badge-accent" id="valDetectedSubject">Sản phẩm: ...</span>
+              <span class="tag-badge" id="valVideoDuration">Thời lượng: 0s</span>
+              <span class="tag-badge" id="valSceneCount">0 phân cảnh</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- EMPTY STATE -->
+        <div class="empty-state" id="emptyStateBox">
+          <div class="empty-state-icon">📝</div>
+          <div class="empty-state-title">Chưa có kịch bản nào được dựng</div>
+          <div class="empty-state-desc">
+            Hãy chọn video ở cột bên trái để <b>AI Gemini Vision</b> tự xem và viết kịch bản khớp từng giây, hoặc nhập ý tưởng để tạo kịch bản mới!
+          </div>
+        </div>
+
+        <!-- SCENE LIST -->
+        <div class="scenes-list" id="scenesList">
+          <!-- Render động danh sách scene bằng JS -->
+        </div>
+
+        <!-- OUTPUT & ACTIONS BAR -->
+        <div class="output-action-bar" id="outputActionBar" style="display: none;">
+          <div class="output-buttons-row">
+            <button class="btn btn-success" id="btnRenderTTS" onclick="handleRenderFullTTS()" style="font-size: 13.5px; padding: 10px 16px;">
+              <span>✨ Tạo Toàn Bộ Âm Thanh (CapCut TTS) & Sub SRT</span>
+            </button>
+            <button class="btn btn-primary" id="btnBurnVideo" onclick="handleBurnVideo()" style="font-size: 13.5px; padding: 10px 16px;">
+              <span>🎬 Xuất Video Đã Lồng Tiếng (FFmpeg Burn)</span>
+            </button>
+          </div>
+
+          <!-- AUDIO PLAYER CONTAINER -->
+          <div class="audio-player-box" id="audioPlayerBox" style="display: none;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="font-size: 12px; font-weight: 700; color: #10b981;">🎵 Bản Thu Âm Hoàn Tất (CapCut TTS)</span>
+              <a id="linkDownloadSrt" href="#" download style="font-size: 11.5px; color: #38bdf8; text-decoration: none;">📥 Tải file phụ đề (.SRT)</a>
+            </div>
+            <audio id="audioPlayer" controls style="width: 100%; height: 36px; border-radius: 6px;"></audio>
+          </div>
+
+          <!-- VIDEO PLAYER CONTAINER -->
+          <div class="video-player-box" id="videoPlayerBox" style="display: none;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="font-size: 12px; font-weight: 700; color: #a855f7;">🏆 Video Thành Phẩm (Đã Lồng Tiếng & Chèn Sub)</span>
+              <span id="finalVideoPathLabel" style="font-size: 11px; color: var(--text-dim); font-family: var(--font-mono);"></span>
+            </div>
+            <video id="finalVideoPlayer" controls style="width: 100%; max-height: 380px; border-radius: 8px; background: #000;"></video>
+          </div>
+        </div>
+
+      </div>
+    </section>
+  </main>
+
+  <!-- LIVE STATUS BAR -->
+  <footer class="status-toast-bar">
+    <div id="statusToastText">🚀 Sẵn sàng tạo kịch bản AI với 8 giọng đọc CapCut Việt Nam.</div>
+    <div style="font-size: 11px; color: var(--text-muted);">AutoDub Studio v2.5</div>
+  </footer>
+
+  <!-- MODAL 6 HOOK GIẬT TÍT -->
+  <div class="modal-overlay" id="modalHooks">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div style="font-weight: 700; font-size: 14.5px; color: #fff; display: flex; align-items: center; gap: 8px;">
+          <span>🎣</span>
+          <span>Chọn 1 Trong 6 Hook Viral Giật Tít</span>
+        </div>
+        <button class="btn btn-outline" style="padding: 2px 8px; font-size: 13px;" onclick="closeHooksModal()">✕</button>
+      </div>
+      <div class="modal-body" id="modalHooksBody">
+        <!-- Render 6 Hook options bằng JS -->
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ===== STATE QUẢN LÝ TẬP TRUNG =====
+    let currentMode = 'video';
+    let availableVoices = [];
+    let selectedVoice = 'BV562_streaming';
+    let scriptData = null;
+    let scenes = [];
+    let previewAudio = null;
+    let playingSceneIndex = null;
+    let renderedResult = null;
+
+    // Khởi tạo khi nạp trang
+    document.addEventListener('DOMContentLoaded', () => {
+      loadVoices();
+      loadAvailableVideos();
+      restoreSavedDraft();
+    });
+
+    // ===== LOAD VOICES =====
+    async function loadVoices() {
+      try {
+        const res = await fetch('/api/script/voices');
+        const data = await res.json();
+        if (data.status === 'success' && data.voices) {
+          availableVoices = data.voices;
+          renderVoiceCards();
+        }
+      } catch (err) {
+        console.error('Lỗi tải voices:', err);
+      }
+    }
+
+    function renderVoiceCards() {
+      const box = document.getElementById('voiceSelectBox');
+      box.innerHTML = '';
+      availableVoices.forEach(v => {
+        const card = document.createElement('div');
+        card.className = `voice-card ${v.id === selectedVoice ? 'selected' : ''}`;
+        card.onclick = () => selectVoice(v.id, v.name);
+        
+        const genderIcon = v.gender === 'female' ? '👩' : '👨';
+        const providerBadge = v.provider === 'capcut' ? 'CapCut' : 'Edge';
+
+        card.innerHTML = `
+          <div class="voice-card-name">
+            <span>${genderIcon} ${v.name}</span>
+            <span class="voice-card-badge">${providerBadge}</span>
+          </div>
+          <div class="voice-card-desc">${v.desc}</div>
+        `;
+        box.appendChild(card);
+      });
+    }
+
+    function selectVoice(id, name) {
+      selectedVoice = id;
+      document.getElementById('selectedVoiceLabel').innerText = name;
+      renderVoiceCards();
+    }
+
+    // ===== LOAD AVAILABLE VIDEOS (D:\video phôi & D:\banve) =====
+    async function loadAvailableVideos() {
+      const sel = document.getElementById('selAvailableVideos');
+      sel.innerHTML = '<option value="">⏳ Đang quét video...</option>';
+      try {
+        const res = await fetch('/api/script/available-videos');
+        const data = await res.json();
+        sel.innerHTML = '<option value="">-- Chọn video trong D:\\video phôi hoặc D:\\banve --</option>';
+        if (data.status === 'success' && data.videos && data.videos.length > 0) {
+          data.videos.forEach(v => {
+            const opt = document.createElement('option');
+            opt.value = v.path;
+            opt.innerText = `[${v.size_mb} MB] ${v.name} (${v.folder})`;
+            sel.appendChild(opt);
+          });
+          showStatus(`📂 Đã tìm thấy ${data.videos.length} video phôi trong hệ thống.`);
+        } else {
+          sel.innerHTML = '<option value="">(Chưa tìm thấy video .mp4 nào trong D:\\video phôi hoặc D:\\banve)</option>';
+        }
+      } catch (e) {
+        sel.innerHTML = '<option value="">(Không thể quét video)</option>';
+      }
+    }
+
+    function handleSelectAvailableVideo(path) {
+      if (path) {
+        document.getElementById('txtVideoPath').value = path;
+        showStatus(`🎯 Đã chọn video: ${path.split('\\\\').pop() || path}`);
+      }
+    }
+
+    // ===== CHUYỂN ĐỔI CHẾ ĐỘ (MODE) =====
+    function switchMode(mode) {
+      currentMode = mode;
+      const tabV = document.getElementById('tabModeVideo');
+      const tabT = document.getElementById('tabModeText');
+      const secV = document.getElementById('sectionVideoMode');
+      const secT = document.getElementById('sectionTextMode');
+
+      if (mode === 'video') {
+        tabV.classList.add('active');
+        tabT.classList.remove('active');
+        secV.style.display = 'flex';
+        secT.style.display = 'none';
+      } else {
+        tabT.classList.add('active');
+        tabV.classList.remove('active');
+        secT.style.display = 'flex';
+        secV.style.display = 'none';
+      }
+    }
+
+    // ===== MODE 1: AI XEM VIDEO (VIDEO-TO-SCRIPT) =====
+    async function handleAnalyzeVideo() {
+      const videoPath = document.getElementById('txtVideoPath').value.trim();
+      if (!videoPath) {
+        alert('Vui lòng chọn hoặc nhập đường dẫn file video trước!');
+        return;
+      }
+      const genre = document.getElementById('selVideoGenre').value;
+      const style = document.getElementById('selVideoStyle').value;
+      const customInst = document.getElementById('txtVideoCustomInst').value.trim();
+
+      const btn = document.getElementById('btnAnalyzeVideo');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> <span>AI đang trích xuất khung hình và đọc nội dung...</span>';
+      showStatus('⏳ AI đang trích xuất khung hình và phân tích video qua Gemini Vision...');
+
+      try {
+        const res = await fetch('/api/script/analyze-video', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            video_path: videoPath,
+            genre: genre,
+            style: style,
+            custom_instruction: customInst
+          })
+        });
+        const data = await res.json();
+        if (data.status === 'success' && data.script) {
+          scriptData = data.script;
+          scenes = data.script.scenes || [];
+          renderScenes();
+          showStatus(`🎉 Phân tích xong video (${data.script.video_duration}s)! Đã dựng kịch bản khớp chuẩn thời lượng.`);
+          saveDraft();
+        } else {
+          alert('Lỗi phân tích video: ' + (data.message || 'Không xác định'));
+          showStatus('❌ Lỗi: ' + (data.message || 'Thất bại'));
+        }
+      } catch (err) {
+        alert('Lỗi kết nối máy chủ: ' + err.message);
+        showStatus('❌ Lỗi kết nối: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<span>⚡ AI Phân Tích & Dựng Kịch Bản Khớp Video</span>';
+      }
+    }
+
+    // ===== MODE 2: HOOK GENERATOR & TEXT-TO-SCRIPT =====
+    async function handleGenerateHooks() {
+      const topic = document.getElementById('txtTopic').value.trim();
+      if (!topic) {
+        alert('Vui lòng nhập chủ đề video trước!');
+        return;
+      }
+      showStatus('⏳ Đang sinh 6 Hook giật tít theo công thức social-media-skills...');
+
+      try {
+        const res = await fetch('/api/script/hooks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ topic: topic, num_hooks: 6 })
+        });
+        const data = await res.json();
+        if (data.status === 'success' && data.hooks) {
+          renderHooksModal(data.hooks);
+        } else {
+          alert('Lỗi sinh Hook: ' + (data.message || 'Không rõ'));
+        }
+      } catch (err) {
+        alert('Lỗi kết nối: ' + err.message);
+      }
+    }
+
+    function renderHooksModal(hooks) {
+      const body = document.getElementById('modalHooksBody');
+      body.innerHTML = '';
+      hooks.forEach(h => {
+        const card = document.createElement('div');
+        card.className = 'hook-option-card';
+        card.onclick = () => {
+          document.getElementById('txtSelectedHook').value = h.text;
+          closeHooksModal();
+          showStatus(`✅ Đã chọn Hook: "${h.text}"`);
+        };
+        card.innerHTML = `
+          <div class="hook-type-badge">${h.type || 'Viral Hook'}</div>
+          <div class="hook-text">"${h.text}"</div>
+        `;
+        body.appendChild(card);
+      });
+      document.getElementById('modalHooks').classList.add('open');
+    }
+
+    function closeHooksModal() {
+      document.getElementById('modalHooks').classList.remove('open');
+    }
+
+    async function handleGenerateScriptFromText() {
+      const topic = document.getElementById('txtTopic').value.trim();
+      if (!topic) {
+        alert('Vui lòng nhập chủ đề video!');
+        return;
+      }
+      const platform = document.getElementById('selPlatform').value;
+      const duration = parseInt(document.getElementById('selDurationTarget').value, 10);
+      const hook = document.getElementById('txtSelectedHook').value.trim();
+      const style = document.getElementById('selTextStyle').value;
+
+      const btn = document.getElementById('btnGenerateScriptText');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> <span>AI đang viết kịch bản...</span>';
+      showStatus('⏳ AI đang viết kịch bản chuẩn cấu trúc Reels/TikTok...');
+
+      try {
+        const res = await fetch('/api/script/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            topic: topic,
+            platform: platform,
+            duration_target: duration,
+            style: style,
+            hook_text: hook,
+            custom_instruction: ''
+          })
+        });
+        const data = await res.json();
+        if (data.status === 'success' && data.script) {
+          scriptData = data.script;
+          scenes = data.script.scenes || [];
+          renderScenes();
+          showStatus('✅ Đã tạo xong kịch bản AI! Bạn có thể sửa câu chữ hoặc nghe thử từng câu.');
+          saveDraft();
+        } else {
+          alert('Lỗi tạo kịch bản: ' + (data.message || 'Không rõ'));
+        }
+      } catch (err) {
+        alert('Lỗi kết nối: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<span>✍️ Viết Kịch Bản Toàn Diện (Hook -> Body -> CTA)</span>';
+      }
+    }
+
+    // ===== RENDER SCENES & EDITOR =====
+    function renderScenes() {
+      const emptyBox = document.getElementById('emptyStateBox');
+      const headerBar = document.getElementById('scriptHeaderBar');
+      const scenesBox = document.getElementById('scenesList');
+      const actionsBar = document.getElementById('outputActionBar');
+
+      if (!scenes || scenes.length === 0) {
+        emptyBox.style.display = 'flex';
+        headerBar.style.display = 'none';
+        scenesBox.innerHTML = '';
+        actionsBar.style.display = 'none';
+        return;
+      }
+
+      emptyBox.style.display = 'none';
+      headerBar.style.display = 'flex';
+      actionsBar.style.display = 'flex';
+
+      // Update header
+      document.getElementById('valScriptTitle').innerText = scriptData?.title || 'Kịch Bản Video Ngắn';
+      document.getElementById('valDetectedSubject').innerText = `Chủ đề: ${scriptData?.detected_subject || 'Video'}`;
+      document.getElementById('valVideoDuration').innerText = `Thời lượng: ~${calculateTotalDuration()}s`;
+      document.getElementById('valSceneCount').innerText = `${scenes.length} phân cảnh`;
+
+      // Render cards
+      scenesBox.innerHTML = '';
+      scenes.forEach((sc, idx) => {
+        const words = (sc.speaker_text || '').trim().split(/\\s+/).filter(Boolean).length;
+        const estSec = (words / 2.4).toFixed(1);
+
+        const card = document.createElement('div');
+        card.className = 'scene-card';
+        card.id = `scene_card_${idx}`;
+
+        const isPlaying = playingSceneIndex === idx;
+
+        card.innerHTML = `
+          <div class="scene-card-header">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span class="scene-index-badge">#${idx + 1}</span>
+              <span class="tag-badge ${sc.section === 'hook' ? 'tag-badge-accent' : ''}">${(sc.section || 'PHÂN CẢNH').toUpperCase()}</span>
+              <span class="scene-time-badge">${sc.time_range || '00:00 - ...'}</span>
+            </div>
+            <div class="scene-actions">
+              <button class="btn-preview-tts ${isPlaying ? 'playing' : ''}" onclick="handlePreviewSceneTTS(${idx})">
+                <span>${isPlaying ? '⏹ Đang Đọc...' : '▶ Nghe Thử TTS'}</span>
+              </button>
+              <button class="btn btn-outline" style="padding:2px 6px; font-size:11px; color:#ef4444;" onclick="handleDeleteScene(${idx})" title="Xóa phân cảnh này">🗑️</button>
+            </div>
+          </div>
+
+          <textarea class="scene-dialogue-input" placeholder="Lời thoại thuyết minh..." oninput="updateSceneText(${idx}, this.value)">${escapeHtml(sc.speaker_text || '')}</textarea>
+
+          <div class="scene-meta-row">
+            <input type="text" class="scene-mini-input" placeholder="Mô tả hình ảnh AI thấy / gợi ý quay..." value="${escapeHtml(sc.visual_cue || '')}" oninput="updateSceneVisual(${idx}, this.value)">
+            <input type="text" class="scene-mini-input" placeholder="Chữ nổi trên video..." value="${escapeHtml(sc.text_overlay || '')}" oninput="updateSceneOverlay(${idx}, this.value)">
+          </div>
+
+          <div class="scene-stats-line">
+            <span>Độ dài: <b style="color:#f8fafc;">${words}</b> từ</span>
+            <span>Tốc độ đọc ước tính: ~<b style="color:#38bdf8;">${estSec}s</b> (2.4 từ/s)</span>
+          </div>
+        `;
+        scenesBox.appendChild(card);
+      });
+    }
+
+    function calculateTotalDuration() {
+      let totalWords = 0;
+      scenes.forEach(s => {
+        totalWords += (s.speaker_text || '').trim().split(/\\s+/).filter(Boolean).length;
+      });
+      return (totalWords / 2.4).toFixed(1);
+    }
+
+    function updateSceneText(idx, val) {
+      if (scenes[idx]) {
+        scenes[idx].speaker_text = val;
+        saveDraft();
+      }
+    }
+
+    function updateSceneVisual(idx, val) {
+      if (scenes[idx]) {
+        scenes[idx].visual_cue = val;
+        saveDraft();
+      }
+    }
+
+    function updateSceneOverlay(idx, val) {
+      if (scenes[idx]) {
+        scenes[idx].text_overlay = val;
+        saveDraft();
+      }
+    }
+
+    function handleDeleteScene(idx) {
+      if (scenes.length <= 1) {
+        alert('Kịch bản cần ít nhất 1 phân cảnh!');
+        return;
+      }
+      scenes.splice(idx, 1);
+      renderScenes();
+      saveDraft();
+    }
+
+    function handleAddScene() {
+      const nextIdx = scenes.length + 1;
+      scenes.push({
+        index: nextIdx,
+        section: 'point',
+        time_range: '00:00 - 00:05',
+        speaker_text: 'Nội dung phân cảnh mới...',
+        visual_cue: 'Hình ảnh phân cảnh mới...',
+        text_overlay: 'TỪ KHÓA MỚI'
+      });
+      renderScenes();
+      saveDraft();
+    }
+
+    // ===== TTS PREVIEW FOR SINGLE SCENE =====
+    async function handlePreviewSceneTTS(idx) {
+      const sc = scenes[idx];
+      if (!sc || !sc.speaker_text) return;
+
+      if (playingSceneIndex === idx && previewAudio) {
+        previewAudio.pause();
+        previewAudio = null;
+        playingSceneIndex = null;
+        renderScenes();
+        return;
+      }
+
+      if (previewAudio) {
+        previewAudio.pause();
+        previewAudio = null;
+      }
+
+      playingSceneIndex = idx;
+      renderScenes();
+      showStatus(`🔊 Đang tạo giọng đọc CapCut cho phân cảnh #${idx + 1}...`);
+
+      try {
+        const res = await fetch('/api/script/preview-tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: sc.speaker_text,
+            voice: selectedVoice
+          })
+        });
+        const data = await res.json();
+        if (data.status === 'success' && data.stream_url) {
+          previewAudio = new Audio(data.stream_url);
+          previewAudio.onended = () => {
+            playingSceneIndex = null;
+            renderScenes();
+          };
+          previewAudio.onerror = () => {
+            playingSceneIndex = null;
+            renderScenes();
+          };
+          previewAudio.play();
+          showStatus(`▶ Đang phát thử giọng đọc (${data.duration}s) phân cảnh #${idx + 1}`);
+        } else {
+          alert('Lỗi TTS: ' + (data.message || 'Thất bại'));
+          playingSceneIndex = null;
+          renderScenes();
+        }
+      } catch (err) {
+        alert('Lỗi kết nối TTS: ' + err.message);
+        playingSceneIndex = null;
+        renderScenes();
+      }
+    }
+
+    // ===== RENDER FULL TTS & SUBTITLES =====
+    async function handleRenderFullTTS() {
+      if (!scenes || scenes.length === 0) {
+        alert('Chưa có kịch bản nào!');
+        return;
+      }
+      const btn = document.getElementById('btnRenderTTS');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> <span>CapCut TTS đang đọc & khớp phụ đề...</span>';
+      showStatus('⏳ CapCut TTS đang đọc toàn bộ kịch bản và xuất file SRT...');
+
+      try {
+        const res = await fetch('/api/script/render-all', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            scenes: scenes,
+            voice: selectedVoice
+          })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+          renderedResult = data;
+          document.getElementById('audioPlayerBox').style.display = 'flex';
+          const audio = document.getElementById('audioPlayer');
+          audio.src = data.audio_stream_url;
+          audio.play();
+
+          const linkSrt = document.getElementById('linkDownloadSrt');
+          linkSrt.href = data.srt_download_url;
+          linkSrt.download = data.srt_filename;
+
+          showStatus(`🎉 Đã tạo xong âm thanh hoàn chỉnh! Tổng thời lượng: ${data.total_duration}s`);
+        } else {
+          alert('Lỗi tạo âm thanh: ' + (data.message || 'Thất bại'));
+          showStatus('❌ Lỗi: ' + (data.message || 'Thất bại'));
+        }
+      } catch (err) {
+        alert('Lỗi kết nối: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<span>✨ Tạo Toàn Bộ Âm Thanh (CapCut TTS) & Sub SRT</span>';
+      }
+    }
+
+    // ===== BURN TO VIDEO (FFMPEG) =====
+    async function handleBurnVideo() {
+      if (!renderedResult) {
+        alert('Vui lòng bấm \"Tạo Toàn Bộ Âm Thanh & Sub SRT\" trước khi xuất video!');
+        return;
+      }
+      const videoPath = document.getElementById('txtVideoPath').value.trim();
+      if (!videoPath) {
+        alert('Vui lòng chọn video nền để lồng tiếng!');
+        return;
+      }
+
+      const btn = document.getElementById('btnBurnVideo');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> <span>FFmpeg đang lồng tiếng & dập sub...</span>';
+      showStatus('⏳ Đang dùng FFmpeg ghép âm thanh CapCut và dập phụ đề vào video nền...');
+
+      try {
+        const res = await fetch('/api/script/burn-video', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            video_path: videoPath,
+            audio_filename: renderedResult.audio_filename,
+            srt_filename: renderedResult.srt_filename
+          })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+          document.getElementById('videoPlayerBox').style.display = 'flex';
+          const video = document.getElementById('finalVideoPlayer');
+          video.src = data.video_stream_url;
+          video.play();
+
+          document.getElementById('finalVideoPathLabel').innerText = data.final_video;
+          showStatus(`🏆 Xuất video thành công: ${data.final_video}`);
+        } else {
+          alert('Lỗi xuất video: ' + (data.message || 'Thất bại'));
+          showStatus('❌ Lỗi: ' + (data.message || 'Thất bại'));
+        }
+      } catch (err) {
+        alert('Lỗi kết nối: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<span>🎬 Xuất Video Đã Lồng Tiếng (FFmpeg Burn)</span>';
+      }
+    }
+
+    // ===== DRAFT LOCALSTORAGE PERSISTENCE =====
+    function saveDraft() {
+      try {
+        const draft = {
+          scriptData,
+          scenes,
+          videoPath: document.getElementById('txtVideoPath').value,
+          topic: document.getElementById('txtTopic').value,
+          selectedVoice,
+          savedAt: new Date().toISOString()
+        };
+        localStorage.setItem('autodub_script_studio_draft', JSON.stringify(draft));
+      } catch (e) {
+        console.warn('Không thể lưu bản thảo:', e);
+      }
+    }
+
+    function restoreSavedDraft() {
+      try {
+        const saved = localStorage.getItem('autodub_script_studio_draft');
+        if (saved) {
+          const draft = JSON.parse(saved);
+          if (draft.scenes && Array.isArray(draft.scenes) && draft.scenes.length > 0) {
+            scriptData = draft.scriptData || null;
+            scenes = draft.scenes;
+            if (draft.videoPath) document.getElementById('txtVideoPath').value = draft.videoPath;
+            if (draft.topic) document.getElementById('txtTopic').value = draft.topic;
+            if (draft.selectedVoice) {
+              selectedVoice = draft.selectedVoice;
+              renderVoiceCards();
+            }
+            renderScenes();
+            showStatus('📋 Đã khôi phục bản thảo kịch bản gần nhất của bạn.');
+          }
+        }
+      } catch (e) {
+        console.warn('Lỗi phục hồi bản thảo:', e);
+      }
+    }
+
+    function handleClearDraft() {
+      if (scenes.length > 0) {
+        if (!confirm('Bạn có chắc muốn xóa bản thảo hiện tại để làm kịch bản mới không?')) return;
+      }
+      scriptData = null;
+      scenes = [];
+      renderedResult = null;
+      localStorage.removeItem('autodub_script_studio_draft');
+      renderScenes();
+      document.getElementById('audioPlayerBox').style.display = 'none';
+      document.getElementById('videoPlayerBox').style.display = 'none';
+      showStatus('✨ Đã làm mới kịch bản.');
+    }
+
+    function showStatus(msg) {
+      document.getElementById('statusToastText').innerText = msg;
+    }
+
+    function escapeHtml(text) {
+      return (text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+  </script>
+</body>
+</html>

@@ -443,6 +443,13 @@ def dashboard():
 from workflow_api import router as workflow_router
 app.include_router(workflow_router)
 
+try:
+    from script_api import router as script_router
+    app.include_router(script_router)
+    print("[Studio Kich Ban] script_router mounted successfully on V2.")
+except Exception as _se:
+    print(f"[Studio Kich Ban] Failed to mount script_router on V2: {_se}")
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8089)
