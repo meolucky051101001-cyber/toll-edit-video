@@ -110,13 +110,20 @@ Yêu cầu TỐI QUAN TRỌNG:
 5. KHỚP KHẨU HÌNH & THỜI LƯỢNG (LIP-SYNC): Văn bản dịch dùng để lồng tiếng (TTS), độ dài âm tiết của câu tiếng Việt PHẢI TƯƠNG ĐƯƠNG VỚI CÂU GỐC để khớp hoàn hảo khẩu hình miệng của nhân vật (không được dịch quá dài khiến AI phải đọc quá nhanh, và không được dịch quá cụt khiến AI đọc xong trước khi nhân vật khép miệng).
 6. Ngữ cảnh nối tiếp: Vì phụ đề thường bị ngắt giữa chừng, hãy đọc cả đoạn để dịch sao cho ý nối liền mạch trơn tru.
     KHÔNG dùng dấu ba chấm (... hoặc …), kể cả đầu/cuối đoạn bị ngắt. TUYỆT ĐỐI KHÔNG chèn dấu chấm (.) giữa câu lửng hoặc ở cuối các vế câu chưa hết ý. Chỉ đặt dấu kết câu (. ! ?) khi đã kết thúc một câu hoàn chỉnh trọn vẹn ý nghĩa. Hệ thống sẽ chuyển phụ đề sang câu kế tiếp tại dấu kết câu; vẫn giữ đúng số phần tử JSON theo đầu vào.
+7. BẮT LỖI ĐỒNG ÂM ASR DO NHẬN DẠNG GIỌNG NÓI (WHISPER): Phụ đề tiếng Trung gốc được trích xuất bằng ASR nên thường xuất hiện các từ đồng âm/gần âm sai trong video review, handmade, đồ gia dụng. Hãy dùng ngữ cảnh sản phẩm để tự động sửa:
+   - '天手章' hoặc '手张' -> hiểu đúng là '贴手帐' hoặc '手帐' (dán sổ tay / chơi sổ Bullet Journal / planner); tuyệt đối KHÔNG dịch thành 'chương tay' hay 'quả trứng'.
+   - '怪蛋' -> hiểu đúng là '怪诞' (kỳ ảo, kỳ thú, độc lạ); KHÔNG dịch thành 'quả trứng quái'.
+   - '风味感' trong ngữ cảnh đồ dùng/thủ công -> hiểu đúng là '氛围感' (cảm giác không gian chill / vibe nghệ thuật); KHÔNG dịch thành 'hương vị ẩm thực' hay 'phong vị'.
+   - '苏打' khi nói về keo dán/băng keo -> hiểu đúng là '胶带' / '调色板贴纸' (băng dính Washi Tape / sticker bảng màu); KHÔNG dịch thành nước sô-đa.
+   - '叶芝麦' -> hiểu đúng là '叶之脉' (gân của chiếc lá); dịch thoát ý tự nhiên.
+   - '可思线' -> hiểu đúng là '可撕线' (đường răng cưa dễ xé).
 """
     if with_vision:
-        prompt += "7. TRỰC QUAN: Hãy kết hợp các bức ảnh đính kèm từ video để chọn đại từ nhân xưng và danh từ chính xác tuyệt đối với ngữ cảnh.\n"
-    prompt += "8. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.\n"
+        prompt += "8. TRỰC QUAN: Hãy kết hợp các bức ảnh đính kèm từ video để chọn đại từ nhân xưng và danh từ chính xác tuyệt đối với ngữ cảnh.\n"
+    prompt += "9. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.\n"
     if duration_budgets and len(duration_budgets) == len(texts):
         prompt += (
-            "9. NGÂN SÁCH THỜI LƯỢNG cho từng phần tử, cùng thứ tự với mảng gốc:\n"
+            "10. NGÂN SÁCH THỜI LƯỢNG cho từng phần tử, cùng thứ tự với mảng gốc:\n"
             + json.dumps(duration_budgets, ensure_ascii=False)
             + "\nseconds là số giây đọc; max_characters là giới hạn ký tự mong muốn (kể cả khoảng trắng). "
             "Hãy chọn câu dịch ngắn gọn, dễ đọc ngay từ lần đầu để vừa thời gian, "
@@ -244,6 +251,7 @@ def translate_with_gemini(
                 logger.info(f"Đang gọi Google Gemini: {model}...")
                 # Reduced timeout from 60s to 20s to prevent stalling pipeline
                 response = requests.post(url, json=payload, headers=headers, timeout=20)
+                response.encoding = "utf-8"
                 if response.status_code == 200:
                     result = response.json()
                     text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -251,6 +259,11 @@ def translate_with_gemini(
                     translated = json.loads(match.group(0) if match else text)
                     if (isinstance(translated, list) and len(translated) == len(texts)
                             and all(isinstance(item, str) and item.strip() for item in translated)):
+                        try:
+                            from mojibake_repair import repair_vietnamese_mojibake
+                            translated = [repair_vietnamese_mojibake(t) for t in translated]
+                        except Exception:
+                            pass
                         _gemini_transient_failures = 0
                         logger.info(f"Gọi thành công Gemini {model}!")
                         return translated

@@ -368,11 +368,11 @@
         <div class="panel">
           <div class="panel-header">
             <div class="panel-title">
-              <span>💾 Video Thành Phẩm Đã Render (D:\banve)</span>
-              <span class="badge badge-gpu" id="banveBadgeCount">0 video</span>
+              <span>💾 Video Thành Phẩm Tool V2 (D:\video tool v2)</span>
+              <span class="badge badge-gpu" id="banveBadgeCount">0 video V2</span>
             </div>
             <div class="panel-actions">
-              <button class="btn btn-outline" style="font-size: 11px; padding: 5px 10px;" onclick="openFolder('banve')">📂 Mở Thư Mục</button>
+              <button class="btn btn-outline" style="font-size: 11px; padding: 5px 10px;" onclick="openFolder('banve')">📂 Mở Thư Mục V2</button>
             </div>
           </div>
           <div class="panel-body" style="max-height: 280px;">
@@ -728,15 +728,15 @@
         const data = await res.json();
         
         const countText = data.total_count > 200 
-          ? `${data.total_count} video (hiển thị 200 gần nhất · ${data.total_size_mb} MB)` 
-          : `${data.total_count} video (${data.total_size_mb} MB)`;
+          ? `${data.total_count} video V2 (hiển thị 200 gần nhất · ${data.total_size_mb} MB)` 
+          : `${data.total_count} video V2 (${data.total_size_mb} MB)`;
         document.getElementById('banveBadgeCount').textContent = countText;
         const tbody = document.getElementById('banveTableBody');
 
         if (!data.files || data.files.length === 0) {
           if (lastBanveFingerprint !== 'empty') {
             lastBanveFingerprint = 'empty';
-            tbody.innerHTML = `<tr><td colspan="5" class="empty-state"><div class="empty-icon">💾</div>Chưa có video thành phẩm nào trong D:\\banve</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="5" class="empty-state"><div class="empty-icon">💾</div>Chưa có video thành phẩm nào của Tool V2 trong D:\\video tool v2</td></tr>`;
           }
           return;
         }

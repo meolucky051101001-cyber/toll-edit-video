@@ -16,8 +16,10 @@ ROOT = Path(__file__).resolve().parent
 ENV = read_environment(ROOT)
 WORKSPACE = Path(ENV.get("AUTODUB_WORKSPACE", str(ROOT.parent / "workspace")))
 INPUT = Path(ENV.get("AUTODUB_INPUT_DIR", r"D:\video phôi"))
-_env_output = Path(ENV.get("AUTODUB_OUTPUT_DIR", r"D:\banve"))
-OUTPUT = _env_output if (_env_output.is_dir() and any(_env_output.iterdir())) or not Path(r"D:\banve").is_dir() else Path(r"D:\banve")
+_env_output = Path(ENV.get("AUTODUB_OUTPUT_DIR", r"D:\video tool v2")).resolve()
+if not _env_output.is_dir():
+    _env_output.mkdir(parents=True, exist_ok=True)
+OUTPUT = _env_output
 TEMPLATE = ROOT / "templates" / "dashboard.html"
 STAGES = [
  ("input", "Tiếp nhận video"), ("extract_audio", "Tách âm thanh"),
