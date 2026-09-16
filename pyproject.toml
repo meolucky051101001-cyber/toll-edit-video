@@ -1,0 +1,20 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = [
+    "scratch",
+    ".venv",
+    "frontend",
+]
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+[tool.mypy]
+plugins = ["pydantic.mypy"]
+python_version = "3.12"
+files = ["backend"]
+check_untyped_defs = true
+ignore_missing_imports = true
