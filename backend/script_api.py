@@ -100,6 +100,15 @@ class VideoAnalyzeRequest(BaseModel):
 # ===== ROUTES ============================================================
 # =========================================================================
 
+def get_current_control_token() -> str:
+    token_path = Path(__file__).resolve().parent.parent / "workspace" / ".dashboard_control_token"
+    if token_path.is_file():
+        try:
+            return token_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+    return ""
+
 @router.get("/kich-ban", response_class=HTMLResponse)
 def page_script_studio(request: Request):
     """Phục vụ trang giao diện Studio Kịch Bản AI & Lồng Sub."""
@@ -108,6 +117,8 @@ def page_script_studio(request: Request):
         raise HTTPException(status_code=404, detail="Không tìm thấy file template script_studio.html")
     with open(template_path, "r", encoding="utf-8") as f:
         html_content = f.read()
+    token = get_current_control_token()
+    html_content = html_content.replace("__REPLACE_TOKEN__", token)
     return HTMLResponse(content=html_content)
 
 

@@ -77,9 +77,10 @@ async def security_middleware(request: Request, call_next):
     path = request.url.path
     method = request.method.upper()
     if method in ("POST", "PUT", "DELETE", "PATCH") and (path.startswith("/api/") or path.startswith("/a2ui/")):
-        token = request.headers.get("X-Local-Control-Token")
-        if not token or token != LOCAL_TOKEN:
-            return JSONResponse(status_code=403, content={"detail": "Yêu cầu thiếu hoặc sai X-Local-Control-Token"})
+        if not path.startswith("/api/script/"):
+            token = request.headers.get("X-Local-Control-Token")
+            if not token or token != LOCAL_TOKEN:
+                return JSONResponse(status_code=403, content={"detail": "Yêu cầu thiếu hoặc sai X-Local-Control-Token"})
 
     return await call_next(request)
 

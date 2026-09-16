@@ -1,6 +1,23 @@
 <!DOCTYPE html>
 <html lang="vi">
 <head>
+  <script>
+    window.LOCAL_TOKEN = "__REPLACE_TOKEN__";
+    const originalFetch = window.fetch;
+    window.fetch = async function() {
+      let [resource, config] = arguments;
+      if (resource && typeof resource === 'string' && resource.startsWith('/api/')) {
+        if (!config) config = {};
+        if (!config.headers) config.headers = {};
+        if (config.headers instanceof Headers) {
+          config.headers.append('X-Local-Control-Token', window.LOCAL_TOKEN);
+        } else {
+          config.headers['X-Local-Control-Token'] = window.LOCAL_TOKEN;
+        }
+      }
+      return originalFetch(resource, config);
+    };
+  </script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Studio Kịch Bản AI & Lồng Sub CapCut TTS</title>
@@ -1036,16 +1053,19 @@
       const body = document.getElementById('modalHooksBody');
       body.innerHTML = '';
       hooks.forEach(h => {
+        const hookContent = h.hook || h.text || '';
+        const overlayContent = h.overlay_text || '';
         const card = document.createElement('div');
         card.className = 'hook-option-card';
         card.onclick = () => {
-          document.getElementById('txtSelectedHook').value = h.text;
+          document.getElementById('txtSelectedHook').value = hookContent;
           closeHooksModal();
-          showStatus(`✅ Đã chọn Hook: "${h.text}"`);
+          showStatus(`✅ Đã chọn Hook: "${hookContent}"`);
         };
         card.innerHTML = `
           <div class="hook-type-badge">${h.type || 'Viral Hook'}</div>
-          <div class="hook-text">"${h.text}"</div>
+          <div class="hook-text">"${hookContent}"</div>
+          ${overlayContent ? `<div style="font-size:11px; color:#ec4899; font-weight:600;">🏷️ Chữ nổi: ${overlayContent}</div>` : ''}
         `;
         body.appendChild(card);
       });
@@ -1131,7 +1151,7 @@
       // Render cards
       scenesBox.innerHTML = '';
       scenes.forEach((sc, idx) => {
-        const words = (sc.speaker_text || '').trim().split(/\\s+/).filter(Boolean).length;
+        const words = (sc.speaker_text || '').trim().split(/\s+/).filter(Boolean).length;
         const estSec = (words / 2.4).toFixed(1);
 
         const card = document.createElement('div');
@@ -1174,7 +1194,7 @@
     function calculateTotalDuration() {
       let totalWords = 0;
       scenes.forEach(s => {
-        totalWords += (s.speaker_text || '').trim().split(/\\s+/).filter(Boolean).length;
+        totalWords += (s.speaker_text || '').trim().split(/\s+/).filter(Boolean).length;
       });
       return (totalWords / 2.4).toFixed(1);
     }
