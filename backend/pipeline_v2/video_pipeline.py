@@ -1460,4 +1460,13 @@ class VideoPipelineRunner:
         assert self.manifest is not None
         self.manifest.stage("deliver").metadata["published_output"] = published[0]
         self.manifest.stage("deliver").metadata["published_outputs"] = published
+        try:
+            from datetime import datetime, timezone
+            now_dt = datetime.now(timezone.utc)
+            total_elapsed = (now_dt - self.manifest.created_at).total_seconds()
+            from render_history import record_render_duration
+            for item in published:
+                record_render_duration(item["path"], total_elapsed)
+        except Exception:
+            pass
         return []

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Tool V1 - Giám Sát Video Phôi & Tiến Độ Render</title>
+  <title>Tool V2 - Giám Sát Video Phôi & Tiến Độ Render</title>
   <style>
     :root {
       --bg-dark: #0f141c;
@@ -92,6 +92,16 @@
     .video-column { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
     .video-column > .panel { flex-shrink: 0; }
     .monitor-column { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+    .monitor-column .queue-panel { flex: 0 0 240px; height: 240px; min-height: 0; }
+    .monitor-column .queue-panel > div[tabindex] { flex: 1 1 0; min-height: 0; max-height: none !important; overflow: auto; scrollbar-gutter: stable; overscroll-behavior: contain; }
+    .queue-panel .panel-header, .queue-panel #queueMessage { flex-shrink: 0; }
+    .queue-panel #queueMessage { font-size: 12px; line-height: 1.5; }
+    .queue-panel .data-table { table-layout: fixed; width: 100%; }
+    .queue-panel .data-table th:first-child { width: 85px; }
+    .queue-panel .data-table th:last-child { width: 90px; }
+    .queue-panel .data-table thead th { position: sticky; top: 0; z-index: 1; background: var(--bg-card); }
+    .queue-panel .data-table td:nth-child(2) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .queue-panel .data-table td { vertical-align: middle; }
     @media (max-width: 1100px) { .main-grid { grid-template-columns: 1fr; } .steps-grid { grid-template-columns: repeat(4, 1fr); } }
     
     .panel { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; display: flex; flex-direction: column; overflow: hidden; }
@@ -213,6 +223,7 @@
       <div class="hw-status">
         <a class="btn btn-outline" href="http://127.0.0.1:8088/" title="Mở dashboard Tool V1">Tool V1</a>
         <a class="btn btn-outline" href="http://127.0.0.1:8089/" title="Mở dashboard Tool V2">Tool V2</a>
+        <a class="btn btn-primary" href="/quy-trinh" style="background: linear-gradient(135deg, #2563eb, #06b6d4); border:none; font-weight:700;" title="Mở Studio Quy trình biên tập video & chống re-up">🎬 Quy Trình</a>
       <span class="badge badge-gpu">
         <span class="dot dot-green"></span>
         RTX 4050 (NVENC 8000k CUDA)
@@ -385,8 +396,22 @@
 
       </div>
 
-      <!-- RIGHT COLUMN: MIXER & LOG PANEL -->
+      <!-- RIGHT COLUMN: QUEUE, MIXER & LOG PANEL -->
       <div class="monitor-column">
+
+        <!-- QUEUE PANEL -->
+        <div class="panel queue-panel">
+          <div class="panel-header">
+            <div class="panel-title">⏳ Video đang chờ xử lý <span class="badge badge-gpu" id="queueBadge">0 video chờ</span></div>
+          </div>
+          <div id="queueMessage" role="status" style="padding:10px 20px;color:var(--text-muted);font-size:12px">Đang kết nối hàng đợi…</div>
+          <div style="max-height:320px;overflow:auto;padding:0 20px 12px" tabindex="0" aria-label="Danh sách video chờ">
+            <table class="data-table">
+              <thead><tr><th>Thứ tự chờ</th><th>Tên video / Link</th><th>Nguồn</th></tr></thead>
+              <tbody id="queueTableBody"></tbody>
+            </table>
+          </div>
+        </div>
 
         <!-- AUDIO MIXER CONTROL PANEL -->
         <div class="panel mixer-panel">
@@ -748,8 +773,70 @@
       }
     }
 
+      function repairMojibake(text) {
+        if (!text || (!text.includes('Ä') && !text.includes('Ã') && !text.includes('áº') && !text.includes('á»') && !text.includes('Ä‘') && !text.includes('Ä\''))) {
+          return text;
+        }
+        text = text.replace(/Ä ang/g, 'Đang')
+                   .replace(/Ä Ã£/g, 'Đã')
+                   .replace(/Ä Ã/g, 'Đã')
+                   .replace(/Ä‘/g, 'đ')
+                   .replace(/Ä'/g, 'đ')
+                   .replace(/Gá»[ \xa0?]?C/g, 'GỐC')
+                   .replace(/Sáº[ \xa0?]?CH/g, 'SẠCH')
+                   .replace(/KHÃ”NG/g, 'KHÔNG')
+                   .replace(/Ä á» I/g, 'ĐỜI')
+                   .replace(/Ä á»/g, 'Độ')
+                   .replace(/Ä iá» u/g, 'Điều')
+                   .replace(/Ä áº·c/g, 'Đặc')
+                   .replace(/Ä á»‹nh/g, 'Định')
+                   .replace(/Ä á»ƒ/g, 'Để')
+                   .replace(/Ä áº·t/g, 'Đặt')
+                   .replace(/Ä á» c/g, 'Đọc')
+                   .replace(/Ä áº§u/g, 'Đầu')
+                   .replace(/Ä áº¡i/g, 'Đại')
+                   .replace(/Ä áº£m/g, 'Đảm')
+                   .replace(/Ä áº¿n/g, 'Đến')
+                   .replace(/Ä á»“ng/g, 'Đồng')
+                   .replace(/Ä Ã³/g, 'Đó')
+                   .replace(/Ä Ã¢y/g, 'Đây')
+                   .replace(/Ä Æ°á»£c/g, 'Được')
+                   .replace(/Ä Æ°á» ng/g, 'Đường')
+                   .replace(/Ä iá»ƒm/g, 'Điểm');
+
+        try {
+          text = text.replace(/[\xc2-\xdf][\x80-\xbf\u20ac\u201a\u0192\u201e\u2026\u2020\u2021\u02c6\u2030\u0160\u2039\u0152\u017d\u2018\u2019\u201c\u201d\u2022\u2013\u2014\u02dc\u2122\u0161\u203a\u0153\u017e\u0178]|[\xe0-\xef][\x80-\xbf\u20ac\u201a\u0192\u201e\u2026\u2020\u2021\u02c6\u2030\u0160\u2039\u0152\u017d\u2018\u2019\u201c\u201d\u2022\u2013\u2014\u02dc\u2122\u0161\u203a\u0153\u017e\u0178]{2}/g, function(chunk) {
+            const cp1252Map = {
+              '\u20ac': 0x80, '\u201a': 0x82, '\u0192': 0x83, '\u201e': 0x84,
+              '\u2026': 0x85, '\u2020': 0x86, '\u2021': 0x87, '\u02c6': 0x88,
+              '\u2030': 0x89, '\u0160': 0x8a, '\u2039': 0x8b, '\u0152': 0x8c,
+              '\u017d': 0x8e, '\u2018': 0x91, '\u2019': 0x92, '\u201c': 0x93,
+              '\u201d': 0x94, '\u2022': 0x95, '\u2013': 0x96, '\u2014': 0x97,
+              '\u02dc': 0x98, '\u2122': 0x99, '\u0161': 0x9a, '\u203a': 0x9b,
+              '\u0153': 0x9c, '\u017e': 0x9e, '\u0178': 0x9f
+            };
+            const bytes = [];
+            for (let i = 0; i < chunk.length; i++) {
+              const ch = chunk[i];
+              const code = ch.charCodeAt(0);
+              if (code < 256) bytes.push(code);
+              else if (cp1252Map[ch]) bytes.push(cp1252Map[ch]);
+              else return chunk;
+            }
+            try {
+              return new TextDecoder('utf-8', {fatal: true}).decode(new Uint8Array(bytes));
+            } catch (e) {
+              return chunk;
+            }
+          });
+        } catch (e) {}
+
+        text = text.replace(/Ä /g, 'Đ').replace(/Ä/g, 'Đ');
+        return text;
+      }
       let logText = '', logPending = false, logDisconnected = false;
       function parseLogs(text) {
+        text = repairMojibake(text);
         const entries = [];
         for (const line of text.split('\n')) {
           if (!line.trim()) continue;
@@ -1175,7 +1262,33 @@
       }
     }
 
+    let queuePending = false;
+    async function fetchQueue() {
+      if (queuePending) return;
+      queuePending = true;
+      try {
+        const response = await fetch('/api/queue', {cache:'no-store', signal:AbortSignal.timeout(8000)});
+        if (!response.ok) throw new Error('Queue unavailable');
+        const data = await response.json();
+        const count = (data.items && Array.isArray(data.items)) ? data.items.length : 0;
+        document.getElementById('queueBadge').textContent = count + ' video chờ';
+        document.getElementById('queueMessage').textContent = data.message || 'Thứ tự xử lý từ trên xuống • Không bao gồm video đã lấy ra xử lý.';
+        document.getElementById('queueTableBody').innerHTML = (count > 0)
+          ? data.items.map(item =>
+            '<tr><td style="font-variant-numeric: tabular-nums;"><span style="display:inline-block;padding:1px 6px;border-radius:10px;background:#1e293b;border:1px solid #334155;font-weight:700;font-size:11px;">#' + escapeHtml(String(item.position)) + '</span></td><td style="font-weight:500;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(item.name) + '">' +
+            escapeHtml(item.name) + '</td><td><span class="badge" style="background:rgba(59,130,246,0.15);color:#93c5fd;border:1px solid rgba(59,130,246,0.3);font-size:11px;padding:2px 6px;border-radius:4px;">' + escapeHtml(item.source || 'Telegram') + '</span></td></tr>').join('')
+          : '<tr><td colspan="3" class="empty-state">' + (data.available ? 'Không có video đang chờ.' : 'Chưa có dữ liệu hàng đợi trực tiếp.') + '</td></tr>';
+        const valQueueEl = document.getElementById('valQueue');
+        if (valQueueEl && !valQueueEl.textContent.includes('Đã tạm dừng')) {
+          valQueueEl.textContent = count > 0 ? (count + ' video chờ') : (data.available ? '0 video chờ' : 'Chưa có dữ liệu hàng đợi');
+        }
+      } catch (error) {
+        document.getElementById('queueMessage').textContent = 'Chưa kết nối được hàng đợi; dữ liệu cũ (nếu có) chưa được cập nhật.';
+      } finally { queuePending = false; }
+    }
+
     function refreshAll() {
+      fetchQueue();
       loadMixerSettings();
       applyLogZoom();
       fetchStatus();
@@ -1187,6 +1300,7 @@
     // Auto-refresh loops
     refreshAll();
     setInterval(fetchStatus, 1500);
+    setInterval(fetchQueue, 2500);
     setInterval(fetchPhoi, 4000);
     setInterval(fetchBanve, 5000);
     setInterval(fetchLogs, 2500);

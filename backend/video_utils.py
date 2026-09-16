@@ -3,6 +3,8 @@ import sys
 import subprocess
 import time
 import uuid
+import logging
+logger = logging.getLogger(__name__)
 import io
 if isinstance(sys.stdout, io.TextIOWrapper):
     try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -41,17 +43,13 @@ def separate_vocals_demucs(
     segment_seconds=None,
     timeout_seconds=300,
 ):
-    """
-    Tách vocal bằng BS-RoFormer, tự động fallback về Demucs fine-tuned.
-
-    Tên hàm cũ được giữ để không phá API V1/V2.
-    Trả về (vocals_path, no_vocals_path)
-    """
-    from ai.source_separation import separate_vocals
-
+    """Use V2's isolated source-separation policy; never import V1 helpers."""
+    try:
+        from .ai.source_separation import separate_vocals
+    except ImportError:
+        from ai.source_separation import separate_vocals
     return separate_vocals(
-        input_audio_path,
-        output_dir,
+        input_audio_path, output_dir,
         segment_seconds=segment_seconds,
         timeout_seconds=timeout_seconds,
     )
@@ -134,6 +132,128 @@ def mix_audio_pydub(
         if original_popen is not None:
             subprocess.Popen = original_popen
 
+
+def build_canvas_render_graph(
+    video_path: str,
+    original_w: int,
+    original_h: int,
+    delogo_parts: list,
+    srt_filter_str: str,
+):
+    """
+    Xây dựng filter FFmpeg chuyển đổi tỷ lệ (9:16, 16:9, 1:1) và lồng background chống re-up.
+    """
+    try:
+        from canvas_settings import get_canvas_settings
+        cfg = get_canvas_settings()
+    except Exception:
+        cfg = {"aspect_ratio": "original", "bg_type": "none"}
+
+    aspect = str(cfg.get("aspect_ratio", "original")).lower()
+    bg_type = str(cfg.get("bg_type", "blur")).lower()
+    video_scale = float(cfg.get("video_scale", 0.88))
+    mirror = bool(cfg.get("mirror", False))
+    blur_sigma = int(cfg.get("blur_sigma", 25))
+    darken = float(cfg.get("darken_bg", 0.35))
+    rimax = round(max(0.1, 1.0 - darken), 2)
+    bg_color = cfg.get("bg_color", "#0a0e17")
+    bg_image = cfg.get("bg_image", "")
+
+    anti_reup_enabled = bool(cfg.get("anti_reup_enabled", False))
+    # Nếu tắt chế độ chống re-up, hoặc giữ nguyên tỷ lệ gốc và không dùng nền/lật/scale:
+    if not anti_reup_enabled or (aspect == "original" and (bg_type == "none" or (video_scale >= 0.99 and not mirror and bg_type not in ("blur", "video_motion")))):
+        filter_parts = list(delogo_parts)
+        filter_parts.append(srt_filter_str)
+        return ["-vf", ",".join(filter_parts)], [], "0:v"
+
+    # Tính toán kích thước khung hình đích (tw, th)
+    if aspect == "9:16":
+        tw, th = 1080, 1920
+    elif aspect == "16:9":
+        tw, th = 1920, 1080
+    elif aspect == "1:1":
+        tw, th = 1080, 1080
+    else:  # "original"
+        tw, th = original_w, original_h
+
+    tw = int(tw) & ~1
+    th = int(th) & ~1
+
+    fw = max(100, int(tw * video_scale)) & ~1
+    fh = max(100, int(th * video_scale)) & ~1
+    flip_str = "hflip," if mirror else ""
+
+    # Delogo xử lý trên luồng video gốc trước khi tách nền/tiền cảnh
+    delogo_chain = ",".join(delogo_parts)
+    if delogo_chain:
+        base_stage = f"[0:v]{delogo_chain}[v_clean];"
+        v_in = "[v_clean]"
+    else:
+        base_stage = ""
+        v_in = "[0:v]"
+
+    extra_inputs = []
+
+    if bg_type == "blur":
+        # Nhân đôi luồng: 1 luồng làm nền mờ Gaussian phủ kín khung, 1 luồng làm video chính ở giữa
+        fc = (
+            f"{base_stage}"
+            f"{v_in}split=2[bg_in][fg_in];"
+            f"[bg_in]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur={blur_sigma}:5,setsar=1,colorlevels=rimax={rimax}:gimax={rimax}:bimax={rimax}[bg];"
+            f"[fg_in]{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[comp];"
+            f"[comp]{srt_filter_str}[outv]"
+        )
+    elif bg_type == "image" and bg_image and os.path.isfile(bg_image):
+        extra_inputs = ["-loop", "1", "-i", bg_image]
+        fc = (
+            f"{base_stage}"
+            f"[2:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
+            f"{v_in}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[comp];"
+            f"[comp]{srt_filter_str}[outv]"
+        )
+    elif bg_type == "video_motion":
+        # Nền video chuyển động (sóng biển, biển xanh, rừng cây,...) lặp vô tận chống quét re-up
+        try:
+            from canvas_settings import resolve_motion_bg_path
+            bg_motion_file = cfg.get("bg_motion_file", "song_bien.mp4")
+            real_motion_path = resolve_motion_bg_path(bg_motion_file)
+        except Exception:
+            real_motion_path = ""
+        if real_motion_path and os.path.isfile(real_motion_path):
+            extra_inputs = ["-stream_loop", "-1", "-i", real_motion_path]
+            fc = (
+                f"{base_stage}"
+                f"[2:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
+                f"{v_in}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2[comp];"
+                f"[comp]{srt_filter_str}[outv]"
+            )
+        else:
+            # Fallback nền mờ nếu chưa tải xong file motion
+            fc = (
+                f"{base_stage}"
+                f"{v_in}split=2[bg_in][fg_in];"
+                f"[bg_in]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur={blur_sigma}:5,setsar=1,colorlevels=rimax={rimax}:gimax={rimax}:bimax={rimax}[bg];"
+                f"[fg_in]{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2[comp];"
+                f"[comp]{srt_filter_str}[outv]"
+            )
+    else:
+        # Nền màu (đen hoặc mã màu hex tùy chỉnh)
+        safe_color = bg_color.replace("#", "0x")
+        fc = (
+            f"{base_stage}"
+            f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
+            f"{v_in}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[comp];"
+            f"[comp]{srt_filter_str}[outv]"
+        )
+
+    return ["-filter_complex", fc], extra_inputs, "[outv]"
+
+
 def process_video(
     video_path,
     srt_path,
@@ -169,12 +289,18 @@ def process_video(
 
     print("Processing final video with styled subtitles, auto-delogo and hardware encoder...")
     
-    # Tạo bản copy an toàn ASCII ở thư mục gốc backend để FFmpeg filter subtitles không bị dính ký tự Unicode
+    # Tạo bản copy an toàn ASCII ở thư mục temp_subs để FFmpeg filter subtitles không bị dính ký tự Unicode
     import shutil
     import uuid
     base_dir = os.path.dirname(os.path.abspath(__file__))
+    temp_subs_dir = os.path.join(base_dir, "temp_subs")
+    try:
+        os.makedirs(temp_subs_dir, exist_ok=True)
+    except Exception:
+        temp_subs_dir = base_dir
+
     unique_sub_name = f"temp_burn_{int(time.time())}_{uuid.uuid4().hex[:6]}" + (".ass" if srt_path.endswith('.ass') else ".srt")
-    safe_sub_path = os.path.join(base_dir, unique_sub_name)
+    safe_sub_path = os.path.join(temp_subs_dir, unique_sub_name)
     try:
         shutil.copy2(srt_path, safe_sub_path)
         srt_to_use = safe_sub_path
@@ -188,15 +314,21 @@ def process_video(
         
     try:
         filter_parts = []
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        try:
+            original_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            original_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        finally:
+            cap.release()
+        w, h = original_w, original_h
+        if w <= 0 or h <= 0:
+            raise ValueError("Invalid video dimensions")
+        logger.info("V2 render size source=%dx%d output=%dx%d", original_w, original_h, w, h)
         
         # Xóa sạch toàn bộ watermark ở cả 4 góc video (Logo Tiểu Hồng Thư và ID tác giả nhảy trên/dưới)
         if delogo:
             try:
-                import cv2
-                cap = cv2.VideoCapture(video_path)
-                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                cap.release()
                 
                 if w > 0 and h > 0:
                     # 1. Góc dưới phải (Logo đáy)
@@ -231,37 +363,37 @@ def process_video(
                 print(f"Lưu ý: Không thể cấu hình delogo ({d_err})")
                 
         if srt_to_use.endswith('.ass'):
-            filter_parts.append(f"subtitles='{srt_escaped}'")
+            srt_filter_str = f"subtitles='{srt_escaped}'"
         else:
-            filter_parts.append(f"subtitles='{srt_escaped}':force_style='{style_str}'")
-            
-        filter_complex = ",".join(filter_parts)
+            srt_filter_str = f"subtitles='{srt_escaped}':force_style='{style_str}'"
+
+        filter_args, extra_inputs, video_map = build_canvas_render_graph(
+            video_path, w, h, filter_parts, srt_filter_str
+        )
         
         video_bitrate_kbps = 8000
         b_v = f"{video_bitrate_kbps}k"
         
-        # Danh sách các bộ mã hóa video theo thứ tự ưu tiên tốc độ cao nhất:
-        # 1. h264_nvenc (NVIDIA GPU Hardware)
-        # 2. h264_mf (Windows MediaFoundation Hardware)
-        # 3. libx264 (CPU Đa nhân tối ưu veryfast)
+        # GPU-only: failed NVENC must not silently become a long CPU job.
         encoders_to_try = [
             ['h264_nvenc', '-preset', 'p4', '-tune', 'hq', '-b:v', b_v, '-spatial-aq', '1'],
             ['h264_nvenc', '-preset', 'fast', '-b:v', b_v],
-            ['h264_mf', '-b:v', b_v],
-            ['libx264', '-preset', 'veryfast', '-crf', '20', '-threads', '0']
         ]
         
         for enc_args in encoders_to_try:
             encoder_name = enc_args[0]
+            encoder_started = time.monotonic()
+            logger.info("V2 render start encoder=%s", encoder_name)
             cmd = [
                 'ffmpeg',
                 '-y',
-                '-threads', '0',
+                '-threads', '4',
+                '-filter_threads', '2',
+                '-hwaccel', 'cuda',
                 '-i', video_path,
                 '-i', mixed_audio_path,
-                '-vf', filter_complex,
-                '-af', 'apad',
-                '-map', '0:v',
+            ] + extra_inputs + filter_args + [
+                '-map', video_map,
                 '-map', '1:a',
                 '-c:v', encoder_name
             ] + enc_args[1:] + [
@@ -272,6 +404,9 @@ def process_video(
                 '-map_metadata', '-1',
                 '-fflags', '+bitexact',
                 '-shortest',
+                # Default shortest buffering can retain seconds of raw 4K60
+                # frames; audio is continuous, so a one-second window suffices.
+                '-shortest_buf_duration', '1',
                 output_video_path
             ]
             
@@ -292,10 +427,16 @@ def process_video(
                     timeout=command_timeout,
                 )
                 if proc.returncode == 0 and os.path.exists(output_video_path) and os.path.getsize(output_video_path) > 10000:
+                    logger.info("V2 render complete encoder=%s seconds=%.2f bytes=%d",
+                                encoder_name, time.monotonic()-encoder_started,
+                                os.path.getsize(output_video_path))
                     print(f"Render video thành công bằng encoder: {encoder_name}")
                     return True
                 else:
                     err_snippet = proc.stderr[-400:] if proc.stderr else ""
+                    logger.warning("V2 render fallback encoder=%s seconds=%.2f exit=%s reason=%s",
+                                   encoder_name, time.monotonic()-encoder_started,
+                                   proc.returncode, err_snippet)
                     print(f"Encoder {encoder_name} không thành công ({proc.returncode}): {err_snippet}")
             except subprocess.TimeoutExpired as enc_err:
                 print(f"Encoder {encoder_name} vượt quá deadline render ({enc_err}).")

@@ -143,7 +143,21 @@ def create_backup(root: Path, files: List[Path], timestamp: str) -> Path:
     return backup_dir
 
 
-def generate_manifest(root: Path, target_subdirs: List[str], create_backup_flag: bool = True) -> Dict[str, object]:
+def test_evidence(log_path: Path | None) -> Dict[str, object]:
+    if log_path is None:
+        return {"status": "NOT_RUN", "count": None}
+    text = log_path.read_text(encoding="utf-8", errors="replace")
+    match = re.search(r"Ran (\d+) tests? in [0-9.]+s\s+OK\s*(?:\n|$)", text)
+    if not match or re.search(r"^FAILED\b", text, re.MULTILINE):
+        raise ValueError("Test log does not prove a successful completed suite")
+    count = int(match.group(1))
+    return {"status": f"{count}/{count} PASS", "count": count,
+            "log_path": str(log_path.resolve()), "log_sha256": hash_file_sha256(log_path)}
+
+
+def generate_manifest(root: Path, target_subdirs: List[str], create_backup_flag: bool = True,
+                      test_log: Path | None = None, release_tag: str = "v2-unverified") -> Dict[str, object]:
+    evidence = test_evidence(test_log)
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     files = collect_release_files(root, target_subdirs)
 
@@ -178,11 +192,12 @@ def generate_manifest(root: Path, target_subdirs: List[str], create_backup_flag:
 
     metadata = {
         "timestamp": timestamp,
-        "release_tag": "v2-pipeline-phase5",
+        "release_tag": release_tag,
         "file_count": len(files),
         "manifest_sha256_file": str(manifest_file.relative_to(root)),
         "backup_dir": str(backup_path.relative_to(root)) if backup_path else None,
-        "test_suite_status": "296/296 PASS",
+        "test_suite_status": evidence["status"],
+        "test_evidence": evidence,
         "security_hygiene": "PASS",
     }
     meta_file = root / "RELEASE_METADATA.json"
@@ -196,6 +211,8 @@ def main():
     parser = argparse.ArgumentParser(description="Generate SHA256 Release Manifest for Tool V2")
     parser.add_argument("--no-backup", action="store_true", help="Skip creating release backup")
     parser.add_argument("--verify", action="store_true", help="Verify existing manifest against files")
+    parser.add_argument("--test-log", type=Path, help="Completed unittest log; no test success is assumed")
+    parser.add_argument("--release-tag", default="v2-unverified")
     args = parser.parse_args()
 
     if args.verify:
@@ -226,7 +243,8 @@ def main():
             sys.exit(1)
 
     subdirs = ["backend", "scripts", "tests"]
-    generate_manifest(ROOT, subdirs, create_backup_flag=not args.no_backup)
+    generate_manifest(ROOT, subdirs, create_backup_flag=not args.no_backup,
+                      test_log=args.test_log, release_tag=args.release_tag)
 
 
 if __name__ == "__main__":

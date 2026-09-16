@@ -218,6 +218,9 @@ _ocr_models = {}
 
 
 def _run_paddle_ocr(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    # Models are already cached locally. Import-time host probing can block
+    # every new job on remote DNS/TLS even though no download is required.
+    os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
     from paddleocr import PaddleOCR
 
     key = (str(payload.get("ocr_version", "PP-OCRv6")), str(payload.get("engine", "onnxruntime")))
@@ -229,6 +232,7 @@ def _run_paddle_ocr(payload: Mapping[str, Any]) -> Dict[str, Any]:
             use_doc_unwarping=False,
             use_textline_orientation=False,
             engine=str(payload.get("engine", "onnxruntime")),
+            device="gpu:0",
         )
     ocr = _ocr_models[key]
     images = []

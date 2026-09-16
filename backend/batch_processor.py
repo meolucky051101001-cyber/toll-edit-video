@@ -37,7 +37,7 @@ DEFAULT_INPUT_DIR = os.path.abspath(
     os.getenv("AUTODUB_INPUT_DIR", r"D:\video_input")
 )
 DEFAULT_OUTPUT_DIR = os.path.abspath(
-    os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve")
+    os.getenv("AUTODUB_OUTPUT_DIR", r"D:\video tool v2")
 )
 os.makedirs(WORKSPACE, exist_ok=True)
 

@@ -326,7 +326,7 @@ def run_preflight(
     checks.extend(_strong_model_checks(root, env))
 
     workspace = Path(env.get("AUTODUB_WORKSPACE", str(root / "workspace")))
-    output = Path(env.get("AUTODUB_OUTPUT_DIR", r"D:\banve"))
+    output = Path(env.get("AUTODUB_OUTPUT_DIR", r"D:\video tool v2"))
     for name, directory in (("workspace", workspace), ("output", output)):
         error = _writable_directory(directory)
         checks.append(

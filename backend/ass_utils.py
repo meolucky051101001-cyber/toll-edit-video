@@ -74,6 +74,54 @@ def _rounded_box(width, height, radius=12):
     )
 
 
+def _held_tracking_blocks(segments, video_duration=None):
+    """Visual lifetime independent of translated page/audio boundaries."""
+    keys = ('start', 'end', 'x_pct', 'max_x_pct', 'y_pct', 'max_y_pct')
+    unique = {}
+    for seg in segments:
+        blocks = getattr(seg, 'tracking_blocks', None) or []
+        # OCR boxes jitter (and can contain a partial last observation). Keep
+        # the confirmed caption footprint stable within a nearby vertical band,
+        # but never union a genuine move across the screen into a huge card.
+        bands = []
+        for block in sorted(blocks, key=lambda b: _block_value(b, 'start', 0)):
+            values = {k: float(_block_value(block, k, 0)) for k in keys}
+            if values['end'] <= values['start']:
+                continue
+            if bands:
+                band = bands[-1]
+                low = min(b['y_pct'] for b in band)
+                high = max(b['max_y_pct'] for b in band)
+                nearby = (abs((low + high) - (values['y_pct'] + values['max_y_pct'])) <= .04
+                          and max(high, values['max_y_pct']) - min(low, values['y_pct']) <= .10
+                          and values['start'] - max(b['end'] for b in band) <= 1.0)
+            else:
+                nearby = False
+            if not nearby:
+                bands.append([])
+            bands[-1].append(values)
+        stable_blocks = []
+        for band in bands:
+            bounds = {k: (max if k.startswith('max_') else min)(b[k] for b in band)
+                      for k in keys[2:]}
+            stable_blocks.extend(dict(b, **bounds) for b in band)
+        for block in stable_blocks:
+            values = tuple(float(_block_value(block, k, 0)) for k in keys)
+            if values[1] > values[0]:
+                unique[values] = dict(zip(keys, values))
+    blocks = sorted(unique.values(), key=lambda b: (b['start'], b['end']))
+    held = []
+    for block in blocks:
+        following = [b['start'] for b in blocks if b['start'] > block['start'] + .0001]
+        end = block['end'] + 1.0
+        if following:
+            end = max(block['end'], min(end, min(following)))
+        if video_duration is not None:
+            end = min(end, video_duration)
+        held.append(dict(block, end=end))
+    return held
+
+
 def generate_ass_file(
     dialogue_segments,
     floating_segments,
@@ -85,6 +133,7 @@ def generate_ass_file(
     font_name="Arial",
     font_color="&H00000000",
     font_weight=2,
+    video_duration=None,
 ):
     """Generate an ASS subtitle file.
     
@@ -167,11 +216,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
     def format_time(td):
-        total_seconds = int(td.total_seconds())
+        ticks = max(0, round(td.total_seconds() * 100))
+        total_seconds, centiseconds = divmod(ticks, 100)
         hours = total_seconds // 3600
         minutes = (total_seconds % 3600) // 60
         seconds = total_seconds % 60
-        centiseconds = int(td.microseconds / 10000)
         return f"{hours}:{minutes:02d}:{seconds:02d}.{centiseconds:02d}"
 
     if dialogue_segments:
@@ -191,6 +240,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 ):
                     seg.best_block = None
         groups = []
+        held_tracks = _held_tracking_blocks(dialogue_segments, video_duration)
         for seg in dialogue_segments:
             source_id = getattr(seg, "source_segment_id", None) or seg.index
             if not groups or groups[-1][0] != source_id:
@@ -205,8 +255,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 if pages[0].start.total_seconds() - 0.30001 <= first:
                     pages[0].start = timedelta(seconds=max(0, min(
                         pages[0].start.total_seconds(), first)))
-                pages[-1].end = timedelta(seconds=max(
-                    pages[-1].end.total_seconds(), last))
+                held_end = max((b['end'] for b in held_tracks
+                    if any(abs(b['start'] - float(_block_value(t, 'start', 0))) < .0001
+                           for t in tracks)), default=last)
+                pages[-1].end = timedelta(seconds=held_end)
         for i in range(len(groups) - 1):
             boundary = groups[i + 1][1][0].start
             for page in groups[i][1]:
@@ -255,6 +307,21 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             seg_s, seg_e = start_time.total_seconds(), end_time.total_seconds()
             blocks = sorted(getattr(seg, "tracking_blocks", None) or [],
                             key=lambda b: _block_value(b, "start", 0.0))
+            relevant = [b for b in held_tracks if b['end'] > seg_s and b['start'] < seg_e]
+            if relevant:
+                # Concurrent source tracks must remain covered even when the
+                # translated text has already switched to the next page.
+                boundaries = sorted({seg_s, seg_e} | {
+                    max(seg_s, min(seg_e, b[k])) for b in relevant for k in ('start', 'end')})
+                blocks = []
+                for left, right in zip(boundaries, boundaries[1:]):
+                    active = [b for b in relevant if b['start'] < right and b['end'] > left]
+                    if active:
+                        blocks.append(dict(start=left, end=right,
+                            x_pct=min(b['x_pct'] for b in active),
+                            max_x_pct=max(b['max_x_pct'] for b in active),
+                            y_pct=min(b['y_pct'] for b in active),
+                            max_y_pct=max(b['max_y_pct'] for b in active)))
             blocks = _transition_cover_blocks(blocks)
             cursor = seg_s
             for b in blocks:
@@ -262,7 +329,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 right = min(seg_e, float(_block_value(b, "end", seg_e)))
                 if right <= left or right <= cursor:
                     continue
-                # Tracking gaps mean the source disappeared: hide both layers.
+                # A remaining gap is longer than the one-second visual hold.
                 left = max(left, cursor)
                 sub_events.append({"start": left, "end": right, "block": b})
                 cursor = right
@@ -275,6 +342,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 ev_end = timedelta(seconds=event["end"])
                 start_str = format_time(ev_start)
                 end_str = format_time(ev_end)
+                # Sub-centisecond tracking cuts otherwise become zero-length
+                # ASS events and can paint a second sentence on one frame.
+                if start_str == end_str:
+                    continue
 
                 b = event["block"]
                 if b:
@@ -343,24 +414,36 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     text_cover_w = actual_text_w + (sticker_padding_x * 2)
                     text_cover_h = required_text_h + (sticker_padding_y * 2)
 
-                    # HARD LIMIT: Cover must ALWAYS be <= 90% of canvas width, leaving at least 5% margin on each side
-                    max_allowed_cover_w = max_allowed_w
-                    target_visible_w = min(max(min_cover_w, text_cover_w), max_allowed_cover_w)
+                    # Keep the normal 5% side margins, but never at the cost of
+                    # exposing a verified source caption.  Some creators place
+                    # burned-in text almost edge-to-edge; those captions need a
+                    # full-width cover while translated text still wraps at the
+                    # normal 90% limit.
+                    source_needs_edge_cover = (
+                        source_left_pct < 0.05
+                        or source_right_pct > 0.95
+                        or min_cover_w > max_allowed_w
+                    )
+                    max_source_cover_w = canvas_x if source_needs_edge_cover else max_allowed_w
+                    target_visible_w = min(
+                        max(min_cover_w, text_cover_w), max_source_cover_w
+                    )
                     target_visible_h = min(canvas_y, max(min_cover_h, text_cover_h))
 
                     # Because BgStyle has Outline=outline, ASS drawing dimensions
                     # produce a visible box of size (draw_w + outline*2, draw_h + outline*2)
                     draw_w = max(4, target_visible_w - (outline * 2))
                     # Even widths allow exact integer-pixel centering.
-                    draw_w = min(max_allowed_cover_w, 2 * math.ceil(draw_w / 2))
+                    draw_w = min(max_source_cover_w, 2 * math.ceil(draw_w / 2))
                     draw_h = max(4, target_visible_h - (outline * 2))
 
                     # Lock horizontal position; only Y follows the subtitle track.
                     draw_x = chinese_center_x - draw_w / 2
                     draw_y = chinese_center_y - (draw_h // 2)
 
-                    # Clamp to screen margins: always leave at least 5% margin on each side
-                    min_margin = int(canvas_x * 0.05)
+                    # Verified edge-to-edge source text is the only case allowed
+                    # to use the side margins; otherwise preserve the 5% inset.
+                    min_margin = 0 if source_needs_edge_cover else int(canvas_x * 0.05)
                     if draw_x < min_margin:
                         draw_x = min_margin
                     if draw_x + draw_w > canvas_x - min_margin:

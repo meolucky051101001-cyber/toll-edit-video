@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import os
 import sys
 import time
@@ -36,7 +36,7 @@ async def process_video(video_path: Path):
     job_dir = workspace_dir / f"batch_{base_name}"
     job_dir.mkdir(parents=True, exist_ok=True)
     
-    output_dir = Path(os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve")).resolve()
+    output_dir = Path(os.getenv("AUTODUB_OUTPUT_DIR", r"D:\video tool v2")).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     final_dest = output_dir / f"Dubbed_{base_name}.mp4"
     

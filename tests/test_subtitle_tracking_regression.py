@@ -38,7 +38,8 @@ class SubtitleRegressionTests(unittest.TestCase):
             lines = [l for l in path.read_text(encoding="utf-8-sig").splitlines()
                      if l.startswith("Dialogue: 1,")]
         self.assertIn("0:00:00.00,0:00:01.80", lines[0])
-        self.assertIn("0:00:01.80,0:00:03.20", lines[1])
+        self.assertIn("0:00:01.80,0:00:02.10", lines[1])
+        self.assertIn("0:00:02.10,0:00:04.20", lines[-1])
         self.assertEqual(first.end.total_seconds(), 2)
         self.assertEqual(second.start.total_seconds(), 2)
 
@@ -128,11 +129,14 @@ class SubtitleRegressionTests(unittest.TestCase):
                               NS(start=1.6,end=2.,x_pct=.6,max_x_pct=.9,y_pct=.8,max_y_pct=.85)]
         text=self.render(item)
         bg=[l for l in text.splitlines() if l.startswith("Dialogue: 0,")]
-        self.assertEqual(len(bg),1)
-        self.assertIn("0:00:01.60,0:00:02.00",bg[0])
+        # New visual contract: bridge the 0.6s absence, then hold one second.
+        self.assertEqual(len(bg),2)
+        self.assertIn("0:00:01.20,0:00:01.60",bg[0])
+        self.assertIn("0:00:01.60,0:00:03.00",bg[1])
         texts=[l for l in text.splitlines() if l.startswith("Dialogue: 1,")]
-        self.assertEqual(len(texts),1)
-        self.assertIn("0:00:01.60,0:00:02.00",texts[0])
+        self.assertEqual(len(texts),2)
+        self.assertIn("0:00:01.20,0:00:01.60",texts[0])
+        self.assertIn("0:00:01.60,0:00:03.00",texts[1])
 
     def test_real_ocr_path_excludes_package_and_batches_every_segment(self):
         class Frame:
@@ -202,7 +206,8 @@ class SubtitleRegressionTests(unittest.TestCase):
             self.assertTrue(events)
             for event in events:
                 end = event.split(",")[2]
-                self.assertLessEqual(end, "0:00:01.10")
+                self.assertLessEqual(end, "0:00:02.10")
+            self.assertIn("0:00:02.07", events[-1])
             sys.modules.pop("backend.ocr_utils",None)
 
 

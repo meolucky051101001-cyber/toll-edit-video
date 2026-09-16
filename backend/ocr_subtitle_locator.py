@@ -108,7 +108,13 @@ def _geometry_score(
     height = bottom - top
     if not (0.0 <= left < right <= 1.0 and 0.03 <= top < bottom <= 0.96):
         return None
-    if width < 0.025 or width > 0.90 + 1e-9 or height < 0.007 or height > 0.14:
+    # Burned-in captions can legitimately run almost edge-to-edge (the source
+    # may even crop the first/last glyph).  Rejecting boxes wider than 90%
+    # drops their geometry and makes ASS fall back to text-only rendering with
+    # no white cover.  Wide scene/package text is still protected by the
+    # transcript-match and static-text checks below, so width alone must not
+    # disqualify an otherwise valid ASR-matched subtitle.
+    if width < 0.025 or width > 1.0 + 1e-9 or height < 0.007 or height > 0.14:
         return None
 
     pixel_aspect = (width * max(frame_width, 1)) / (
@@ -402,8 +408,32 @@ def select_chinese_subtitle_band(
         # changing text or matching ASR remains eligible.
         if len(seen_segments - {None}) >= 2 and not matching_segments:
             return False
-        return not (len(seen_segments) >= 3 and
-                    len(matching_segments) / len(seen_segments) < 0.6)
+        if len(seen_segments) >= 3 and len(matching_segments) / len(seen_segments) < 0.6:
+            # Overlapping acquisition windows can observe ONE genuine caption
+            # under the preceding/current/following ASR IDs. These are not
+            # three independent proofs of a persistent product label.
+            # Recover only a strongly matched phrase, temporally bracketed by
+            # different validated captions at the same position. A coincident
+            # second line or a long-lived label remains ineligible.
+            if not item.strong_text_match or len(_chinese_text(item.block['text'])) < 6:
+                return False
+            first = min(other.block['sample_time'] for other in related)
+            last = max(other.block['sample_time'] for other in related)
+            if last - first > 4.0:
+                return False
+            neighbours = [other for other in candidates if other.strong_text_match
+                and not other.composite
+                and SequenceMatcher(None, other.normalized_text, item.normalized_text,
+                                    autojunk=False).ratio() < .5
+                and abs(other.center_y - item.center_y) <= .018
+                and abs((other.block['max_y_pct'] - other.block['y_pct']) -
+                        (item.block['max_y_pct'] - item.block['y_pct'])) <= .022]
+            if any(abs(other.block['sample_time'] - seen.block['sample_time']) < .02
+                   for other in neighbours for seen in related):
+                return False
+            return (any(0 < first - other.block['sample_time'] <= 2.0 for other in neighbours)
+                    and any(0 < other.block['sample_time'] - last <= 2.0 for other in neighbours))
+        return True
 
     strong_candidates = [item for item in candidates if item.strong_text_match and reliable(item)]
     chosen_cluster: Optional[List[_Candidate]] = None

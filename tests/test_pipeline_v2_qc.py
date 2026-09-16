@@ -225,7 +225,8 @@ class ReportOnlyGuaranteeTests(unittest.TestCase):
                         str(output_pattern).replace("%06d", "{:06d}".format(index))
                     )
                     out_path.write_bytes(b"fake png")
-                return mock.Mock(returncode=0, stdout="", stderr="")
+                from tests.test_pixel_cover_qc import _mock_pts
+                return mock.Mock(returncode=0, stdout="", stderr=_mock_pts(cmd))
 
             run_command.side_effect = fake_command
 

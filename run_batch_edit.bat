@@ -2,7 +2,7 @@
 chcp 65001 >nul
 title Auto Batch Video Dubbing Processor
 if not defined AUTODUB_INPUT_DIR set "AUTODUB_INPUT_DIR=D:\video_input"
-if not defined AUTODUB_OUTPUT_DIR set "AUTODUB_OUTPUT_DIR=D:\banve"
+if not defined AUTODUB_OUTPUT_DIR set "AUTODUB_OUTPUT_DIR=D:\video tool v2"
 echo ========================================================
 echo   AUTO BATCH VIDEO DUBBING PROCESSOR (OFFLINE / LOCAL)
 echo ========================================================

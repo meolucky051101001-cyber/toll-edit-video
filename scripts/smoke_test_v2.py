@@ -20,9 +20,24 @@ try:
 except Exception:
     pass
 
-from environment import read_environment
+from environment import load_environment, read_environment
 from pipeline_v2.config import PipelineSettings
-from pipeline_v2.video_pipeline import VideoPipelineRequest, VideoPipelineRunner
+from pipeline_v2.video_pipeline import PIPELINE_IMPLEMENTATION_VERSION, VideoPipelineRequest, VideoPipelineRunner
+from social_downloader import sanitize_exception
+
+
+def validate_qc_report(data, qc_allowed):
+    if qc_allowed is not True:
+        raise RuntimeError("QC did not explicitly allow delivery")
+    checks = data.get("checks", [])
+    names = [check.get("name") for check in checks]
+    if len(checks) < 13 or len(set(names)) != len(names) or any(not name for name in names):
+        raise RuntimeError("Expected at least 13 distinct named QC checks")
+    if any(check.get("status") not in {"pass", "warning", "skipped"} for check in checks):
+        raise RuntimeError("QC contains error or invalid status")
+    for required in ("pixel_cover_qc", "tts_integrity"):
+        if not any(check.get("name") == required and check.get("status") == "pass" for check in checks):
+            raise RuntimeError(required + " must pass")
 
 
 def enforce_clean_smoke_directory(work_dir: Path, retries: int = 5, delay: float = 0.5) -> None:
@@ -91,6 +106,7 @@ async def run_smoke_test(args: Optional[argparse.Namespace] = None):
     if args is None:
         args = parse_args()
 
+    load_environment(ROOT / "backend")
     env = read_environment(ROOT / "backend")
     settings = PipelineSettings.from_env(env)
     print(f"Loaded pipeline settings: mode={settings.mode}, auto_gender={settings.enable_auto_gender}")
@@ -135,7 +151,8 @@ async def run_smoke_test(args: Optional[argparse.Namespace] = None):
         voice_param = "vi-VN-HoaiMyNeural"
         print(f"Using voice source: {voice_source} ({voice_param})")
 
-    work_dir = ROOT / "workspace" / "smoke_test_run"
+    settings = replace(settings, enable_rvc=with_rvc)
+    work_dir = ROOT / "workspace" / "smoke_test_run" / datetime.now(timezone.utc).strftime("run-%Y%m%d-%H%M%S-%f")
     enforce_clean_smoke_directory(work_dir)
     out_video = work_dir / "Dubbed_smoke_test.mp4"
 
@@ -148,6 +165,7 @@ async def run_smoke_test(args: Optional[argparse.Namespace] = None):
         voice_source=voice_source,
         voice_param=voice_param,
         rvc_model_path=rvc_model,
+        progress=lambda stage, state: print(f"Stage {stage}: {state}", flush=True),
     )
 
     run_start_utc = datetime.now(timezone.utc)
@@ -157,7 +175,15 @@ async def run_smoke_test(args: Optional[argparse.Namespace] = None):
     runner = VideoPipelineRunner(request)
     print("Starting VideoPipelineRunner...")
     start_time = time.time()
-    result = await runner.run()
+    try:
+        result = await runner.run()
+    except Exception as exc:
+        failure = {"status": "FAIL", "error": sanitize_exception(exc),
+                   "elapsed_seconds": round(time.time() - start_time, 2),
+                   "run_start_utc": run_start_iso}
+        (work_dir / "smoke_summary.json").write_text(json.dumps(failure), encoding="utf-8")
+        print(f"FAIL: {failure['error']}")
+        return 1
     elapsed = time.time() - start_time
     print(f"Pipeline completed in {elapsed:.1f}s. Result: {result}")
 
@@ -188,6 +214,11 @@ async def run_smoke_test(args: Optional[argparse.Namespace] = None):
         return 1
 
     qc_data = json.loads(qc_file.read_text(encoding="utf-8"))
+    try:
+        validate_qc_report(qc_data, result.qc_allowed)
+    except RuntimeError as exc:
+        print(f"FAIL: {exc}")
+        return 1
     print(f"SUCCESS: QC summary = {qc_data.get('summary')}")
 
     # Verify QC gate allowed
@@ -236,8 +267,8 @@ async def run_smoke_test(args: Optional[argparse.Namespace] = None):
         return 1
     pipe_ver = manifest.metadata.get("pipeline_implementation_version")
     print(f"SUCCESS: Pipeline implementation version = {pipe_ver}")
-    if pipe_ver != "2.6.0":
-        print(f"FAIL: Expected pipeline version 2.6.0, got {pipe_ver}")
+    if pipe_ver != PIPELINE_IMPLEMENTATION_VERSION:
+        print(f"FAIL: Expected pipeline version {PIPELINE_IMPLEMENTATION_VERSION}, got {pipe_ver}")
         return 1
 
     manifest_created_at = manifest.created_at

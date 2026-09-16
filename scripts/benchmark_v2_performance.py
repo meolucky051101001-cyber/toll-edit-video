@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import hashlib
 import logging
 import os
 import subprocess
@@ -16,7 +17,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -45,6 +46,9 @@ class ResourceStats:
     peak_vram_mb: float = 0.0
     delta_vram_mb: float = 0.0
     sample_count: int = 0
+    vram_valid_samples: int = 0
+    vram_read_errors: int = 0
+    vram_source: str = "nvidia-smi whole GPU"
 
 
 class ResourceMonitor:
@@ -58,18 +62,13 @@ class ResourceMonitor:
         self._baseline_vram_mb: float = 0.0
         self._peak_vram_mb: float = 0.0
         self._has_cuda: bool = False
-        try:
-            import torch
-            self._has_cuda = torch.cuda.is_available()
-            if self._has_cuda:
-                torch.cuda.reset_peak_memory_stats()
-        except Exception:
-            self._has_cuda = False
+        self._vram_valid_samples = 0
+        self._vram_read_errors = 0
 
     def start(self) -> None:
         self._running = True
         self._ram_samples.clear()
-        self._baseline_vram_mb = self._get_vram_mb()
+        self._baseline_vram_mb = self._get_vram_mb() or 0.0
         self._peak_vram_mb = self._baseline_vram_mb
         if self._has_cuda:
             try:
@@ -94,7 +93,7 @@ class ResourceMonitor:
         except Exception:
             return 0.0
 
-    def _get_vram_mb(self) -> float:
+    def _get_vram_mb(self) -> Optional[float]:
         try:
             res = subprocess.run(
                 ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
@@ -104,16 +103,13 @@ class ResourceMonitor:
                 creationflags=0x08000000 if os.name == "nt" else 0,
             )
             if res.returncode == 0 and res.stdout.strip():
-                return float(res.stdout.strip().splitlines()[0])
+                value = float(res.stdout.strip().splitlines()[0])
+                self._vram_valid_samples += 1
+                return value
         except Exception:
             pass
-        if not self._has_cuda:
-            return 0.0
-        try:
-            import torch
-            return torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
-        except Exception:
-            return 0.0
+        self._vram_read_errors += 1
+        return None
 
     def _monitor_loop(self) -> None:
         while self._running:
@@ -121,16 +117,16 @@ class ResourceMonitor:
             if ram > 0:
                 self._ram_samples.append(ram)
             vram = self._get_vram_mb()
-            if vram > self._peak_vram_mb:
+            if vram is not None and vram > self._peak_vram_mb:
                 self._peak_vram_mb = vram
             time.sleep(self.interval)
 
     def stop(self) -> ResourceStats:
         self._running = False
         if self._thread:
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=2.5)
         final_vram = self._get_vram_mb()
-        if final_vram > self._peak_vram_mb:
+        if final_vram is not None and final_vram > self._peak_vram_mb:
             self._peak_vram_mb = final_vram
         peak_ram = max(self._ram_samples) if self._ram_samples else 0.0
         avg_ram = sum(self._ram_samples) / max(len(self._ram_samples), 1)
@@ -142,6 +138,8 @@ class ResourceMonitor:
             peak_vram_mb=round(self._peak_vram_mb, 2),
             delta_vram_mb=round(delta_vram, 2),
             sample_count=len(self._ram_samples),
+            vram_valid_samples=self._vram_valid_samples,
+            vram_read_errors=self._vram_read_errors,
         )
 
 
@@ -275,10 +273,6 @@ def parse_manifest_timings(
         is_cache_hit = False
         if live_events and live_events.get(stage_name) == "cache_hit":
             is_cache_hit = True
-        elif mode == "warm" and stage.status.value == "completed":
-            # In warm mode, any completed stage not re-executed live was reused from cache
-            if not live_durations or stage_name not in live_durations:
-                is_cache_hit = True
 
         if is_cache_hit:
             dur = 0.00
@@ -327,14 +321,16 @@ async def run_single_benchmark(
     if actual_duration <= 0.0:
         actual_duration = round(duration_minutes * 60.0, 2)
 
-    job_dir = work_dir / f"bench_{int(duration_minutes * 60)}s"
+    source_key = hashlib.sha256(str(video_path.resolve()).encode()).hexdigest()[:12]
+    job_dir = work_dir / f"bench_{source_key}_{int(duration_minutes * 60)}s"
     output_video = job_dir / "output.mp4"
     if mode == "cold" and job_dir.exists():
-        import shutil
-        shutil.rmtree(job_dir, ignore_errors=True)
+        raise RuntimeError("Cold benchmark requires a fresh job directory")
+    if mode == "warm" and not simulate and not job_dir.exists():
+        raise RuntimeError("Warm benchmark requires a preceding cold run")
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    settings = PipelineSettings(
+    settings = replace(PipelineSettings.from_env(os.environ),
         mode=PipelineMode.V2,
         enable_stage_cache=True,
         enable_gpu_process_isolation=enable_gpu_isolation,
@@ -454,7 +450,8 @@ async def run_single_benchmark(
         if not result.qc_allowed:
             status = f"QC_BLOCKED: {result.qc_reason}"
     except Exception as exc:
-        status = f"FAILED: {exc}"
+        from social_downloader import sanitize_exception
+        status = f"FAILED: {sanitize_exception(exc)}"
         error_count += 1
         if runner.manifest:
             stages, rewrite_rounds, _ = parse_manifest_timings(
@@ -468,6 +465,9 @@ async def run_single_benchmark(
         res_stats = monitor.stop()
 
     ratio = round(total_time / max(0.01, actual_duration), 2)
+    if res_stats.vram_valid_samples == 0 and status == "SUCCESS":
+        status = "MEASUREMENT_UNAVAILABLE: no whole-GPU VRAM readings"
+        error_count += 1
     return BenchmarkResult(
         duration_minutes=duration_minutes,
         actual_duration_seconds=actual_duration,
@@ -484,7 +484,10 @@ async def run_single_benchmark(
         status=status,
         video_source=str(video_path),
         stages=stages,
-        metadata={"rvc_enabled": rvc_model_path is not None},
+        metadata={"rvc_enabled": rvc_model_path is not None,
+                  "simulated": False, "job_directory": str(job_dir),
+                  "resource_measurement": asdict(res_stats),
+                  "configured_settings": settings.cache_payload()},
     )
 
 
@@ -531,6 +534,10 @@ def print_benchmark_summary(results: List[BenchmarkResult]) -> None:
 async def main_async(args: argparse.Namespace) -> int:
     durations = [float(d.strip()) for d in args.durations.split(",") if d.strip()]
     modes = [m.strip().lower() for m in args.modes.split(",") if m.strip()]
+    if not durations or any(d <= 0 for d in durations) or not modes or any(m not in {"cold", "warm"} for m in modes):
+        raise ValueError("Positive durations and cold/warm modes are required")
+    if not args.simulate and modes != ["cold"] and modes != ["cold", "warm"]:
+        raise ValueError("Real benchmarks must start with cold, optionally followed by warm")
     output_report = Path(args.output_report)
     output_report.parent.mkdir(parents=True, exist_ok=True)
 
@@ -544,11 +551,11 @@ async def main_async(args: argparse.Namespace) -> int:
             rvc_model_path = p
             logger.info("RVC enabled for benchmark using model: %s", rvc_model_path)
         else:
-            logger.warning("RVC model not found at '%s', continuing without RVC", p)
+            raise FileNotFoundError("Requested RVC model is missing")
 
     results: List[BenchmarkResult] = []
-    temp_dir_ctx = tempfile.TemporaryDirectory(prefix="v2_benchmark_")
-    work_dir = Path(temp_dir_ctx.name)
+    work_dir = PROJECT_ROOT / "workspace" / "benchmark_runs" / datetime.now(timezone.utc).strftime("run-%Y%m%d-%H%M%S-%f")
+    work_dir.mkdir(parents=True, exist_ok=False)
 
     try:
         # Resolve target benchmark video(s)
@@ -575,7 +582,9 @@ async def main_async(args: argparse.Namespace) -> int:
                 # Benchmark up to 2 distinct real videos for robust multi-video coverage
                 video_paths = real_candidates[:2]
 
-        for dur in durations:
+        if not video_paths and not args.simulate:
+            raise FileNotFoundError("A real speech video is required for production benchmark")
+        for dur in (durations[:1] if video_paths else durations):
             duration_seconds = dur * 60.0
             clips_to_test: List[Path] = []
             if video_paths:
@@ -593,6 +602,8 @@ async def main_async(args: argparse.Namespace) -> int:
 
             for clip_path in clips_to_test:
                 for mode in modes:
+                    if mode == "warm" and results and not results[-1].status.startswith("SUCCESS"):
+                        break
                     logger.info(
                         "Running benchmark: %s, %.1f minutes, %s mode (RVC: %s)...",
                         clip_path.name,
@@ -610,6 +621,9 @@ async def main_async(args: argparse.Namespace) -> int:
                         rvc_model_path=rvc_model_path,
                     )
                     results.append(res)
+                    output_report.write_text(json.dumps({"status": "IN_PROGRESS",
+                        "artifact_directory": str(work_dir), "results": [asdict(r) for r in results]},
+                        ensure_ascii=False, indent=2), encoding="utf-8")
                     logger.info(
                         "Done %s Act:%.1fs %s: %.2fs (Ratio: %.2fx), Peak RAM: %.1fMB, VRAM Total: %.1fMB, VRAM Delta: %.1fMB",
                         clip_path.name,
@@ -640,7 +654,10 @@ async def main_async(args: argparse.Namespace) -> int:
             pass
 
         # Save JSON artifact
+        from ai.model_policy import current_model_policy
+        policy = current_model_policy()
         json_data = {
+            "artifact_directory": str(work_dir),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "hardware": {
                 "gpu": gpu_info,
@@ -648,10 +665,12 @@ async def main_async(args: argparse.Namespace) -> int:
                 "python": sys.version.split()[0],
             },
             "pipeline_configuration": {
-                "speed_profile": os.getenv("MODEL_SPEED_PROFILE", "fast (Whisper + Demucs)"),
-                "asr_backend": "faster-whisper (cuda fp16)",
-                "vocal_separation": "Meta Demucs htdemucs",
-                "ffmpeg_encoder": "h264_nvenc",
+                "speed_profile": policy.speed_profile,
+                "configured_asr_backend": policy.asr_backend,
+                "configured_whisper_model": policy.whisper_model,
+                "configured_separator": policy.separator_backend,
+                "configured_demucs_model": policy.demucs_primary_model,
+                "encoder_note": "Inspect retained render artifacts/logs for actual selected encoder",
                 "rvc_enabled": rvc_model_path is not None,
                 "rvc_model": str(rvc_model_path) if rvc_model_path else None,
                 "cache_policy": "per-stage content hash (warm runs reuse cached artifacts)",
@@ -663,13 +682,13 @@ async def main_async(args: argparse.Namespace) -> int:
         output_report.write_text(json.dumps(json_data, indent=2, ensure_ascii=False), encoding="utf-8")
         logger.info("Saved benchmark report to: %s", output_report)
 
-        any_failed = any(r.error_count > 0 or "FAILED" in r.status for r in results)
+        any_failed = not results or any(r.error_count > 0 or not r.status.startswith("SUCCESS") for r in results)
         if any_failed:
             logger.error("Benchmark finished with failures!")
             return 1
         return 0
     finally:
-        temp_dir_ctx.cleanup()
+        logger.info("Benchmark artifacts retained at: %s", work_dir)
 
 
 def main() -> None:

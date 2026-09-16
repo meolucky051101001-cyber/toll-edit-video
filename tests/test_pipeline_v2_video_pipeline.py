@@ -235,8 +235,8 @@ class VideoPipelineEndToEndTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(len(archived), 1)
 
-    def test_cache_version_2_10_0_invalidates_2_9_0_manifest(self):
-        """Adaptive sampling invalidates older OCR and cover artifacts."""
+    def test_cache_version_2_12_0_invalidates_2_10_0_manifest(self):
+        """VFR decoding and final acceptance changes invalidate old artifacts."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.mp4"
@@ -251,19 +251,19 @@ class VideoPipelineEndToEndTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-            # Create an existing manifest under version 2.9.0.
+            # Create an existing manifest under version 2.10.0.
             with mock.patch(
                 "backend.pipeline_v2.video_pipeline.PIPELINE_IMPLEMENTATION_VERSION",
-                "2.9.0",
+                "2.10.0",
             ):
                 manifest_v27 = VideoPipelineRunner(request)._load_or_create_manifest()
-                self.assertEqual(manifest_v27.metadata["pipeline_implementation_version"], "2.9.0")
+                self.assertEqual(manifest_v27.metadata["pipeline_implementation_version"], "2.10.0")
 
-            # Now run under the current implementation (2.10.0).
+            # Now run under the current implementation (2.12.0).
             runner_v28 = VideoPipelineRunner(request)
             manifest_v28 = runner_v28._load_or_create_manifest()
 
-            self.assertEqual(manifest_v28.metadata["pipeline_implementation_version"], "2.10.0")
+            self.assertEqual(manifest_v28.metadata["pipeline_implementation_version"], "2.12.0")
             self.assertNotEqual(
                 manifest_v27.fingerprints.config_sha256,
                 manifest_v28.fingerprints.config_sha256,

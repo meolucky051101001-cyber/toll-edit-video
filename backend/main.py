@@ -36,7 +36,7 @@ app.add_middleware(
 )
 
 WORKSPACE = os.getenv("AUTODUB_WORKSPACE", str(BASE_DIR.parent / "workspace"))
-OUTPUT_DIR = os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve")
+OUTPUT_DIR = os.getenv("AUTODUB_OUTPUT_DIR", r"D:\video tool v2")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 os.makedirs(WORKSPACE, exist_ok=True)
 
@@ -113,10 +113,14 @@ async def api_get_logs():
         return {"logs": "Chưa có log nào."}
     
     try:
-        with open(log_file, 'r', encoding='utf-8') as f:
+        with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
             lines = f.readlines()
-            # Lấy 100 dòng cuối để không bị quá nặng
-            return {"logs": "".join(lines[-100:])}
+            content = "".join(lines[-100:])
+            try:
+                from mojibake_repair import repair_vietnamese_mojibake
+                return {"logs": repair_vietnamese_mojibake(content)}
+            except Exception:
+                return {"logs": content}
     except Exception as e:
         return {"logs": f"Lỗi khi đọc log: {e}"}
 

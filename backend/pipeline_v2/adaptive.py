@@ -129,26 +129,20 @@ def decide_ocr_from_scores(
 
 
 def decide_ocr(video_path: PathLike, sample_count: int = 8) -> AdaptiveDecision:
-    """Use lightweight CPU vision to find persistent subtitle-like text bands."""
+    """GPU-decode sparse previews, then run a lightweight text-band heuristic."""
 
     try:
         import cv2
     except ImportError:
         return AdaptiveDecision(True, "opencv_unavailable", 0.0)
-    capture = cv2.VideoCapture(str(video_path))
-    if not capture.isOpened():
-        return AdaptiveDecision(True, "video_probe_failed", 0.0)
     try:
-        total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total_frames <= 0:
-            return AdaptiveDecision(True, "frame_count_unavailable", 0.0)
+        try:
+            from ..video_sampling import sample_video_frames
+        except ImportError:
+            from video_sampling import sample_video_frames
+        frames = sample_video_frames(video_path, sample_count, max_width=720)
         scores = []
-        for index in range(1, sample_count + 1):
-            frame_index = int(total_frames * index / (sample_count + 1))
-            capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-            ok, frame = capture.read()
-            if not ok:
-                continue
+        for frame in frames:
             height, width = frame.shape[:2]
             region = frame[
                 int(height * 0.40) : int(height * 0.94),
@@ -173,8 +167,6 @@ def decide_ocr(video_path: PathLike, sample_count: int = 8) -> AdaptiveDecision:
         return decide_ocr_from_scores(scores)
     except Exception:
         return AdaptiveDecision(True, "lightweight_text_probe_failed", 0.0)
-    finally:
-        capture.release()
 
 
 def probe_video_dimensions(
@@ -245,5 +237,4 @@ def choose_output_dimensions(
     width = max(2, int(source_width * scale) // 2 * 2)
     height = max(2, int(source_height * scale) // 2 * 2)
     return width, height
-
 

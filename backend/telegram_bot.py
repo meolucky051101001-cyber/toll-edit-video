@@ -93,7 +93,7 @@ WORKSPACE = os.path.abspath(
     )
 )
 INPUT_DIR = os.path.abspath(os.getenv("AUTODUB_INPUT_DIR", r"D:\video phôi"))
-OUTPUT_DIR = os.path.abspath(os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve"))
+OUTPUT_DIR = os.path.abspath(os.getenv("AUTODUB_OUTPUT_DIR", r"D:\video tool v2"))
 os.makedirs(WORKSPACE, exist_ok=True)
 
 logging.basicConfig(
@@ -251,27 +251,20 @@ async def process_v2_telegram_job(
         status_msg,
         delivery_copy_path=str(paths.delivery_copy),
     )
+    elapsed_seconds = time.time() - started_at
+    try:
+        from render_history import record_render_duration
+        record_render_duration(str(paths.delivery_copy), elapsed_seconds)
+    except Exception as exc:
+        logger.warning("Không thể ghi nhận render_history: %s", exc)
     caption = build_v2_completion_caption(
         title=title,
         output_directory=OUTPUT_DIR,
-        elapsed_seconds=time.time() - started_at,
+        elapsed_seconds=elapsed_seconds,
         remaining_jobs=global_queue.qsize(),
     )
-    final_video = paths.final_video
-    if not Path(final_video).is_file() and paths.delivery_copy and Path(paths.delivery_copy).is_file():
-        final_video = paths.delivery_copy
-
-    if context and chat_id and Path(final_video).is_file():
-        await send_video_safely(
-            context,
-            chat_id,
-            str(final_video),
-            caption,
-            status_msg,
-            url_or_filename or title,
-        )
-    else:
-        await safe_edit_status(status_msg, caption, parse_mode="Markdown")
+    # Lưu trực tiếp vào thư mục máy tính (D:\video tool v2), không gửi file video lên Telegram
+    await safe_edit_status(status_msg, caption, parse_mode="Markdown")
 
 
 def snapshot_legacy_telegram_run(
@@ -306,7 +299,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "3️⃣ Dịch phụ đề sang Tiếng Việt (Gemini 3.7 Flash)\n"
         "4️⃣ Tách giọng & giữ nhạc nền (BS-RoFormer, fallback Demucs)\n"
         "5️⃣ Lồng tiếng Tiếng Việt (Microsoft Neural TTS)\n"
-        "6️⃣ Xuất video chất lượng cao lưu vào `D:\\banve`\n\n"
+        "6️⃣ Xuất video chất lượng cao lưu vào `D:\\video tool v2`\n\n"
         "📌 *Lệnh hỗ trợ:*\n"
         "• `/llm` - Cấu hình mô hình AI dịch thuật (Google Gemini / OpenAI GPT-4o / DeepSeek V4)\n"
         "• `/batch` - Tự động quét & edit hàng loạt video trong thư mục `D:\\video_input` trên máy\n"
@@ -907,11 +900,11 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # Copy sang máy tính người dùng
         try:
             import shutil
-            downloads_dir = r"D:\banve"
+            downloads_dir = OUTPUT_DIR
             os.makedirs(downloads_dir, exist_ok=True)
             local_save_path = os.path.join(downloads_dir, f"Dubbed_{base_name}.mp4")
             shutil.copy2(final_video, local_save_path)
-            caption_lines.append(f"💾 Đã tự động lưu vào máy:\n`D:\\banve`\n")
+            caption_lines.append(f"💾 Đã tự động lưu vào máy:\n`{OUTPUT_DIR}`\n")
         except Exception as e:
             logger.error(f"Lỗi khi copy vào máy: {e}")
 
@@ -1249,11 +1242,11 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
         caption_lines = [f"🎬 Video đã lồng tiếng Việt\n"]
         try:
             import shutil
-            downloads_dir = r"D:\banve"
+            downloads_dir = OUTPUT_DIR
             os.makedirs(downloads_dir, exist_ok=True)
             local_save_path = os.path.join(downloads_dir, f"Dubbed_{base_name}.mp4")
             shutil.copy2(final_video, local_save_path)
-            caption_lines.append(f"💾 Đã tự động lưu vào máy:\n`D:\\banve`\n")
+            caption_lines.append(f"💾 Đã tự động lưu vào máy:\n`{OUTPUT_DIR}`\n")
         except Exception as e:
             logger.error(f"Lỗi khi copy vào máy: {e}")
 

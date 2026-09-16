@@ -39,8 +39,9 @@ def build_expected_cover_timeline(
        screen (e.g. is_subtitle=True) are kept; packaging / background text in the lower screen
        (e.g. is_subtitle=False or is_packaging=True) is excluded. Never falls back to discarded blocks.
     3. No fake covers: Segments lacking OCR geometry emit no expected cover event (unverified).
-    4. Block gap splitting: Multiple tracking blocks in a segment separated by > 1.0s gap are split
-       into separate visual events.
+    4. Block splitting: Multiple tracking blocks in a segment are split into
+       separate visual events when they are separated by > 1.0s or when the
+       tracked subtitle jumps to a materially different screen position.
     5. Hold 1.0s & continuous bridging: Covers hold 1.0s after text disappears, or bridge continuously
        to the next event if it begins within 1.0s.
     6. Video end clamping: Events are clamped to video_duration if provided.
@@ -98,7 +99,11 @@ def build_expected_cover_timeline(
             key=lambda x: (float(_prop(x, "start", 0.0)), float(_prop(x, "end", 0.0))),
         )
 
-        # Split into clusters if gap between adjacent blocks > 1.0s
+        # Split into clusters if the subtitle disappears for > 1.0s *or* the
+        # tracked rectangle jumps to a different screen position.  The latter
+        # matters for videos that move a subtitle from the bottom to the top
+        # inside one ASR sentence.  Merging those blocks would create one huge
+        # union rectangle and make QC reject a correctly tracked pair of covers.
         clusters: List[List[Any]] = []
         current_cluster: List[Any] = []
         cluster_end = -1.0
@@ -109,7 +114,35 @@ def build_expected_cover_timeline(
                 current_cluster.append(b)
                 cluster_end = b_end
             else:
-                if (b_start - cluster_end) > 1.0:
+                previous = current_cluster[-1]
+                previous_cx = (
+                    float(_prop(previous, "x_pct", 0.1))
+                    + float(_prop(previous, "max_x_pct", 0.9))
+                ) / 2.0
+                previous_cy = (
+                    float(_prop(previous, "y_pct", 0.8))
+                    + float(_prop(previous, "max_y_pct", 0.9))
+                ) / 2.0
+                current_cx = (
+                    float(_prop(b, "x_pct", 0.1))
+                    + float(_prop(b, "max_x_pct", 0.9))
+                ) / 2.0
+                current_cy = (
+                    float(_prop(b, "y_pct", 0.8))
+                    + float(_prop(b, "max_y_pct", 0.9))
+                ) / 2.0
+                # Overlapping boxes often represent different words on the
+                # same subtitle line, so their horizontal centres may differ
+                # substantially.  Treat geometry as a movement only at a
+                # temporal boundary (allowing normal one-frame tracker jitter).
+                temporally_separate = b_start >= (
+                    cluster_end - max(0.05, frame_dur * 1.5)
+                )
+                position_jump = temporally_separate and (
+                    abs(current_cy - previous_cy) > 0.04
+                    or abs(current_cx - previous_cx) > 0.10
+                )
+                if (b_start - cluster_end) > 1.0 or position_jump:
                     clusters.append(current_cluster)
                     current_cluster = [b]
                     cluster_end = b_end
@@ -372,7 +405,7 @@ def inspect_frame_pixel_coverage(
     active = covers
     if timestamp is not None:
         t = float(timestamp)
-        active = [c for c in covers if c[0] <= t < (c[1] - 0.01)]
+        active = [c for c in covers if c[0] <= t < c[1]]
     if not active:
         return {"checked": False, "reason": "no_active_covers_at_timestamp"}
 

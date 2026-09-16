@@ -153,36 +153,25 @@ def extract_video_frames_base64(video_path, context_start_seconds=None, context_
         return []
     try:
         import cv2
-        cap = cv2.VideoCapture(video_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if context_start_seconds is not None and context_end_seconds is not None and float(context_end_seconds) > float(context_start_seconds):
-            start = max(0.0, float(context_start_seconds))
-            span = float(context_end_seconds) - start
-            positions = [("msec", (start + span * i / (num_frames + 1)) * 1000.0) for i in range(1, num_frames + 1)]
-        elif total_frames > 0:
-            step = max(total_frames // (num_frames + 1), 1)
-            positions = [("frame", i * step) for i in range(1, num_frames + 1)]
-        else:
-            positions = []
-            
+        try:
+            from ..video_sampling import sample_video_frames
+        except ImportError:
+            from video_sampling import sample_video_frames
+        frames = sample_video_frames(video_path, num_frames,
+                                     context_start_seconds, context_end_seconds)
         b64_list = []
-        for position_type, position in positions:
-            if position_type == "msec":
-                cap.set(cv2.CAP_PROP_POS_MSEC, position)
-            else:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, position)
-            ret, frame = cap.read()
-            if ret:
-                _, buffer = cv2.imencode('.jpg', frame)
+        for frame in frames:
+            ok, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ok:
                 b64_str = base64.b64encode(buffer).decode('utf-8')
                 b64_list.append(b64_str)
-        cap.release()
         return b64_list
     except Exception as img_e:
         logger.debug(f"Không thể trích xuất ảnh từ video: {img_e}")
         return []
 
 _gemini_unhealthy_until = 0.0
+_gemini_transient_failures = 0
 
 
 def is_gemini_available() -> bool:
@@ -195,6 +184,14 @@ def mark_gemini_unhealthy(cooldown_seconds: float = 300.0) -> None:
     logger.warning("Gemini marked unhealthy; cooling down for %g seconds", cooldown_seconds)
 
 
+def _gemini_transient_failure():
+    global _gemini_transient_failures
+    _gemini_transient_failures += 1
+    if _gemini_transient_failures >= 2:
+        mark_gemini_unhealthy(300.0)
+        _gemini_transient_failures = 0
+
+
 def translate_with_gemini(
     texts,
     target_lang="vi",
@@ -205,6 +202,7 @@ def translate_with_gemini(
     prior_context=None,
     **kwargs
 ):
+    global _gemini_transient_failures
     api_key = api_key or os.getenv("GEMINI_API_KEY", "")
     if not api_key:
         return None
@@ -239,43 +237,40 @@ def translate_with_gemini(
         models_to_try = current_model_policy().gemini_candidates[:2]
         response = None
         for model in models_to_try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
             payload = {"contents": [{"parts": parts}]}
-            headers = {"Content-Type": "application/json"}
+            headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
             try:
                 logger.info(f"Đang gọi Google Gemini: {model}...")
                 # Reduced timeout from 60s to 20s to prevent stalling pipeline
                 response = requests.post(url, json=payload, headers=headers, timeout=20)
                 if response.status_code == 200:
-                    logger.info(f"Gọi thành công Gemini {model}!")
-                    break
-                elif response.status_code in (429, 403, 400, 503):
+                    result = response.json()
+                    text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    match = re.search(r'\[.*\]', text, re.DOTALL)
+                    translated = json.loads(match.group(0) if match else text)
+                    if (isinstance(translated, list) and len(translated) == len(texts)
+                            and all(isinstance(item, str) and item.strip() for item in translated)):
+                        _gemini_transient_failures = 0
+                        logger.info(f"Gọi thành công Gemini {model}!")
+                        return translated
+                    _gemini_transient_failure()
+                elif response.status_code in (429, 403, 401):
                     logger.warning(f"Lỗi gọi {model} (HTTP {response.status_code}) - cooldown activated")
                     mark_gemini_unhealthy(300.0)
                     break
                 else:
                     logger.warning(f"Lỗi gọi {model} (HTTP {response.status_code})")
-            except requests.exceptions.Timeout:
-                logger.warning(f"Gemini {model} timeout sau 20s - cooldown activated")
-                mark_gemini_unhealthy(180.0)
-                break
+                    if response.status_code >= 500:
+                        _gemini_transient_failure()
             except Exception as req_e:
-                logger.warning(f"Lỗi kết nối {model}: {req_e}")
+                logger.warning("Gemini %s failed: %s", model, type(req_e).__name__)
+                _gemini_transient_failure()
+            if not is_gemini_available():
+                break
                 
-        if not response or response.status_code != 200:
-            return None
-            
-        result = response.json()
-        text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-        match = re.search(r'\[.*\]', text, re.DOTALL)
-        if match:
-            text = match.group(0)
-            
-        translated = json.loads(text)
-        if len(translated) == len(texts):
-            return translated
     except Exception as e:
-        logger.warning(f"Lỗi dịch Gemini: {e}")
+        logger.warning("Lỗi dịch Gemini: %s", type(e).__name__)
     return None
 
 def translate_with_openai(
