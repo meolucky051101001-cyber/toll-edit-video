@@ -1096,6 +1096,14 @@ async def api_handle_a2ui_action(payload: dict = Body(...)):
     }
 
 
+try:
+    from workflow_api import router as workflow_router
+    app.include_router(workflow_router)
+    logger.info("Mounted Studio Quy Trình workflow_router successfully.")
+except Exception as _we:
+    logger.warning("Failed to mount workflow_router: %s", _we)
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("AUTODUB_PORT", "8088"))
