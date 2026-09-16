@@ -858,7 +858,17 @@ async def api_get_banve():
     total_size = 0
     total_render_sec = 0
     try:
+        v2_history_file = output_dir / ".render_history_v2.json"
+        v2_names = set()
+        if v2_history_file.exists():
+            try:
+                v2_names = set(json.loads(v2_history_file.read_text(encoding="utf-8")).keys())
+            except Exception:
+                pass
+
         for f in sorted(os.listdir(output_dir), reverse=True):
+            if f.startswith("Dubbed_queue_") or f in v2_names:
+                continue
             full_path = output_dir / f
             if full_path.is_file() and f.lower().endswith(SUPPORTED_EXTENSIONS):
                 size_b = full_path.stat().st_size

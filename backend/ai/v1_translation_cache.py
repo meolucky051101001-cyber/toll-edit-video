@@ -3,7 +3,21 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
+
+
+MOJIBAKE_PATTERNS = re.compile(
+    r'[\xc2-\xdf][\x80-\xbf\u20ac\u201a\u0192\u201e\u2026\u2020\u2021\u02c6\u2030\u0160\u2039\u0152\u017d\u2018\u2019\u201c\u201d\u2022\u2013\u2014\u02dc\u2122\u0161\u203a\u0153\u017e\u0178]|'
+    r'[\xe0-\xef][\x80-\xbf\u20ac\u201a\u0192\u201e\u2026\u2020\u2021\u02c6\u2030\u0160\u2039\u0152\u017d\u2018\u2019\u201c\u201d\u2022\u2013\u2014\u02dc\u2122\u0161\u203a\u0153\u017e\u0178]{2}|'
+    r'Ã¢|Ã¡|Ã|Ä‘|Ä|áº|á»|á»™|cÅ|dÃ|báº¡ng|vá» e'
+)
+
+
+def is_mojibake(text: str) -> bool:
+    if not isinstance(text, str):
+        return False
+    return bool(MOJIBAKE_PATTERNS.search(text))
 
 
 def cache_key(parts, models, account):
@@ -16,15 +30,23 @@ def cache_root():
 
 
 def read_cache(key, count, target_lang):
+    cache_file = cache_root() / (key + ".json")
     try:
-        data = json.loads((cache_root() / (key + ".json")).read_text(encoding="utf-8"))
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
         texts = data["texts"]
         if not isinstance(texts, list) or len(texts) != count:
             return None
         if not all(isinstance(t, str) and t.strip() for t in texts):
             return None
-        if target_lang.lower().startswith("vi") and any("\u4e00" <= c <= "\u9fff" for t in texts for c in t):
-            return None
+        if target_lang.lower().startswith("vi"):
+            if any("\u4e00" <= c <= "\u9fff" for t in texts for c in t):
+                return None
+            if any(is_mojibake(t) for t in texts):
+                try:
+                    cache_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return None
         if not isinstance(data.get("model"), str):
             return None
         return data
@@ -33,6 +55,8 @@ def read_cache(key, count, target_lang):
 
 
 def write_cache(key, texts, model):
+    if not isinstance(texts, list) or any(is_mojibake(t) for t in texts):
+        return
     temporary = None
     try:
         root = cache_root()

@@ -51,11 +51,18 @@ Yêu cầu TỐI QUAN TRỌNG:
 5. KHỚP KHẨU HÌNH & THỜI LƯỢNG (LIP-SYNC): Văn bản dịch dùng để lồng tiếng (TTS), độ dài âm tiết của câu tiếng Việt PHẢI TƯƠNG ĐƯƠNG VỚI CÂU GỐC để khớp hoàn hảo khẩu hình miệng của nhân vật.
 6. THUẬT NGỮ KIẾN TRÚC & ĐỜI SỐNG: '三合院' dịch là 'nhà tam hợp viện / nhà ba gian', '占地' dịch là 'diện tích đất', '大气' dịch là 'bề thế, sang trọng / đẳng cấp' (tuyệt đối không dịch thành 'dấu chân', 'khí quyển').
 7. LỌC HOẶC VIỆT HÓA CÂU KÊU GỌI (CTA): Các câu kêu gọi Douyin/TikTok như '回复888', '关注我', '点赞' hãy dịch khéo thành lời kêu gọi tự nhiên ngắn gọn (ví dụ: 'để lại bình luận bên dưới nhé' hoặc 'liên hệ ngay nhé'), không dịch máy số hiệu thô thiển.
-8. Ngữ cảnh nối tiếp: Vì phụ đề thường bị ngắt giữa chừng, hãy đọc cả đoạn để dịch sao cho ý nối liền mạch trơn tru.
+8. BẮT LỖI ĐỒNG ÂM ASR DO NHẬN DẠNG GIỌNG NÓI (WHISPER): Phụ đề tiếng Trung gốc được trích xuất bằng ASR nên thường xuất hiện các từ đồng âm/gần âm sai trong video review, handmade, đồ gia dụng. Hãy dùng ngữ cảnh sản phẩm để tự động sửa:
+   - '天手章' hoặc '手张' -> hiểu đúng là '贴手帐' hoặc '手帐' (dán sổ tay / chơi sổ Bullet Journal / planner); tuyệt đối KHÔNG dịch thành 'chương tay' hay 'quả trứng'.
+   - '怪蛋' -> hiểu đúng là '怪诞' (kỳ ảo, kỳ thú, độc lạ); KHÔNG dịch thành 'quả trứng quái'.
+   - '风味感' trong ngữ cảnh đồ dùng/thủ công -> hiểu đúng là '氛围感' (cảm giác không gian chill / vibe nghệ thuật); KHÔNG dịch thành 'hương vị ẩm thực' hay 'phong vị'.
+   - '苏打' khi nói về keo dán/băng keo -> hiểu đúng là '胶带' / '调色板贴纸' (băng dính Washi Tape / sticker bảng màu); KHÔNG dịch thành nước sô-đa.
+   - '叶芝麦' -> hiểu đúng là '叶之脉' (gân của chiếc lá); dịch thoát ý tự nhiên.
+   - '可思线' -> hiểu đúng là '可撕线' (đường răng cưa dễ xé).
+9. NGỮ CẢNH NỐI TIẾP: Vì phụ đề thường bị ngắt giữa chừng, hãy đọc cả đoạn để dịch sao cho ý nối liền mạch trơn tru.
 """
     if with_vision:
-        prompt += "7. TRỰC QUAN: Hãy kết hợp các bức ảnh đính kèm từ video để chọn đại từ nhân xưng và danh từ chính xác tuyệt đối với ngữ cảnh.\n"
-    prompt += "8. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.\n"
+        prompt += "10. TRỰC QUAN: Hãy kết hợp các bức ảnh đính kèm từ video để chọn đại từ nhân xưng và danh từ chính xác tuyệt đối với ngữ cảnh.\n"
+    prompt += "11. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.\n"
     prompt += "Dữ liệu:\n"
     if prior_context:
         prompt += "Ngữ cảnh nối tiếp từ batch trước (không dịch lại):\n"
@@ -177,6 +184,7 @@ def translate_with_gemini(
                 logger.info(f"Đang gọi Google Gemini: {model}...")
                 response = requests.post(url, json=payload, headers=headers,
                                          timeout=(min(5.0, remaining / 2), min(25.0, remaining / 2)))
+                response.encoding = "utf-8"
                 if response.status_code == 200:
                     result = response.json()
                     parts_out = result.get("candidates", [{}])[0].get("content", {}).get("parts", [])
@@ -186,6 +194,11 @@ def translate_with_gemini(
                     if not isinstance(translated, list) or len(translated) != len(texts) or not all(
                             isinstance(t, str) and t.strip() for t in translated):
                         raise ValueError("Invalid translation array")
+                    try:
+                        from mojibake_repair import repair_vietnamese_mojibake
+                        translated = [repair_vietnamese_mojibake(t) for t in translated]
+                    except Exception:
+                        pass
                     if write_cache:
                         write_cache(cache_k, translated, model)
                     with _gemini_health_lock:
@@ -484,6 +497,11 @@ def translate_subtitles(
             translated_texts_valid = False
 
     if translated_texts_valid:
+        try:
+            from mojibake_repair import repair_vietnamese_mojibake
+            translated_texts = [repair_vietnamese_mojibake(t) for t in translated_texts]
+        except Exception:
+            pass
         idx = 0
         for segment in srt_segments:
             if not segment.content:
