@@ -1103,6 +1103,13 @@ try:
 except Exception as _we:
     logger.warning("Failed to mount workflow_router: %s", _we)
 
+try:
+    from script_api import router as script_router
+    app.include_router(script_router)
+    logger.info("Mounted Studio Kịch Bản script_router successfully.")
+except Exception as _se:
+    logger.warning("Failed to mount script_router: %s", _se)
+
 
 if __name__ == "__main__":
     import uvicorn
