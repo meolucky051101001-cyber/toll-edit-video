@@ -3,19 +3,33 @@
 :: SCRIPT KHỞI ĐỘNG AUTO VIDEO DUBBING BOT
 :: ==========================================
 
-:: Đặt đường dẫn môi trường cho Node.js (nếu cần)
-set PATH=%PATH%;C:\Program Files\nodejs
+set "PROJECT_DIR=%~dp0"
+set "PYTHON_EXE=%PROJECT_DIR%backend\venv\Scripts\python.exe"
 
-:: Khởi động Frontend (Log Viewer) ngầm
-cd C:\Users\admin\.gemini\antigravity\scratch\video-dubbing-app\frontend
-start /b cmd /c "npm run dev"
+if not exist "%PYTHON_EXE%" (
+  echo [ERROR] Chua co backend\venv. Hay tao venv va cai requirements.txt truoc.
+  pause
+  exit /b 1
+)
 
-:: Đợi 2 giây để Frontend kịp chạy
-ping 127.0.0.1 -n 3 > NUL
+:: Kiểm tra riêng cho Tool V1; không yêu cầu hoặc kích hoạt Pipeline V2.
+cd /d "%PROJECT_DIR%backend"
+"%PYTHON_EXE%" v1_preflight.py --project-root "%PROJECT_DIR%" --interface all
+if errorlevel 1 (
+  echo [ERROR] Preflight that bai. Sua cac muc error o tren roi chay lai.
+  pause
+  exit /b 1
+)
 
-:: Dọn dẹp tiến trình telegram_bot cũ nếu có để tránh chạy trùng lặp
-powershell -Command "Get-CimInstance Win32_Process -Filter \"Name like 'python%'\" | Where-Object { $_.CommandLine -like '*telegram_bot.py*' } | Stop-Process -Force" >NUL 2>&1
+:: Đảm bảo Dashboard Tool V1 (cổng 8088) đang chạy
+netstat -ano | findstr ":8088" >nul
+if errorlevel 1 (
+  echo [Tool V1] Dang khoi dong Dashboard tren cong 8088...
+  start /b "" "%PYTHON_EXE%" main.py
+  timeout /t 2 /nobreak >nul
+)
 
-:: Khởi động Backend (Telegram Bot) ngầm
-cd C:\Users\admin\.gemini\antigravity\scratch\video-dubbing-app\backend
-start /b C:\Users\admin\.gemini\antigravity\scratch\video-dubbing-app\backend\venv\Scripts\python.exe telegram_bot.py
+:: Khởi động Telegram Bot Tool V1
+echo [Tool V1] Dang khoi dong Telegram Bot...
+start /b "" "%PYTHON_EXE%" telegram_bot.py
+echo [Tool V1] Khoi dong thanh cong! Dashboard dang chay tai http://127.0.0.1:8088

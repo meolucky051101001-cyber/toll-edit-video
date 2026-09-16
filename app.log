@@ -1,0 +1,853 @@
+2026-09-05 10:57:33,570 - telegram.ext.Application - INFO - Application started
+2026-09-05 15:11:17,715 - social_downloader - INFO - Đang bóc tách Xiaohongshu: http://xhslink.com/o/4trnVWbIVhH
+2026-09-05 15:11:18,784 - social_downloader - INFO - Đã giải mã thành công link XHS: http://xhslink.com/o/4trnVWbIVhH -> https://www.xiaohongshu.com/discovery/item/674781a6000000000702b1bd?app_platform
+2026-09-05 15:11:19,993 - social_downloader - INFO - Đã tìm thấy luồng video XHS GỐC SẠCH KHÔNG LOGO: http://sns-video-qn.xhscdn.com/pre_post/1040g2t031angfc1u7c7047egti70ik068jvfo3o
+2026-09-05 15:11:19,999 - social_downloader - INFO - Đang tải video XHS GỐC KHÔNG WATERMARK bằng đa luồng: http://sns-video-qn.xhscdn.com/pre_post/1040g2t031angfc1u7c7047egti70ik068jvfo3o
+2026-09-05 15:11:55,240 - social_downloader - INFO - Tải thành công video XHS GỐC KHÔNG WATERMARK: C:\tool v1\workspace\downloads\1788595877_8b3a73f0_Bjd四分甜妹妆过程.mp4
+2026-09-05 15:12:35,637 - faster_whisper - INFO - Processing audio with duration 01:53.649
+2026-09-05 15:12:36,375 - faster_whisper - INFO - VAD filter removed 00:00.000 of audio
+2026-09-05 15:12:37,690 - faster_whisper - INFO - Detected language 'zh' with probability 1.00
+2026-09-05 15:13:03,528 - ocr_utils - INFO - Bắt đầu OCR toàn diện trên video C:\tool v1\workspace\downloads\1788595877_8b3a73f0_Bjd四分甜妹妆过程.mp4
+2026-09-05 15:13:26,611 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 15:13:41,541 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 15:13:56,845 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 15:14:12,344 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 15:14:28,817 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 15:14:41,981 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 15:14:53,866 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 15:15:04,818 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 15:15:17,548 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 15:15:29,607 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 15:15:33,492 - ocr_utils - INFO - PP-OCRv6 Tiny completed 3 sampled frames via onnxruntime
+2026-09-05 15:15:33,822 - ocr_utils - INFO - 🎯 Global Subtitle Band detected (asr_match, support=123): Top=0.740, Bottom=0.816
+2026-09-05 15:15:33,822 - ocr_utils - INFO - Sync (Subtitle Band): '今天我们来画蜜桃双子的另一只全' -> Y: 0.758 - 0.801
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '是带一点微笑的妹妹' -> Y: 0.756 - 0.803
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '所以我们的妆面设计也需要做一点' -> Y: 0.758 - 0.801
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '这个视频会展示上妆的全过程' -> Y: 0.754 - 0.804
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '以及提供一些妆面思路' -> Y: 0.755 - 0.802
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '首先我们先用丙烯颜料画出底稿' -> Y: 0.756 - 0.802
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '然后因为这只娃的表情带点微笑' -> Y: 0.756 - 0.802
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '所以我们卧残要画成带一点弧度的' -> Y: 0.744 - 0.787
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '在线条确定后再把线条颜色加深' -> Y: 0.755 - 0.801
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '然后用丙烯画出嘴唇的唇形和底色' -> Y: 0.756 - 0.803
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '注意微笑的嘴巴上唇不要画的太厚' -> Y: 0.757 - 0.800
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '不可以超过下唇的厚度' -> Y: 0.758 - 0.801
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '再用屏息给眼睛上一层底色' -> Y: 0.741 - 0.790
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '以及画出眉毛的形状' -> Y: 0.770 - 0.815
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '这个时候会有一些笔触' -> Y: 0.757 - 0.801
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '所以我们要用粉色色粉' -> Y: 0.743 - 0.788
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '给刚才打底的地方加深一遍' -> Y: 0.773 - 0.814
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '然后我们开始铺色' -> Y: 0.754 - 0.804
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '画上腮红以及冷暖色调的渐变' -> Y: 0.758 - 0.800
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '这只的鼻子我们可以画的红一些' -> Y: 0.754 - 0.804
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '增加一些甜美的感觉' -> Y: 0.752 - 0.804
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '铺色结束后我们再给整体加深一遍' -> Y: 0.755 - 0.803
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '眼部的细节也要优化一下' -> Y: 0.756 - 0.803
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '用饼锡画出双眼皮卧残的层次感' -> Y: 0.752 - 0.804
+2026-09-05 15:15:33,823 - ocr_utils - INFO - Sync (Subtitle Band): '接下来我们开始画线条' -> Y: 0.756 - 0.803
+2026-09-05 15:15:33,824 - ocr_utils - INFO - Sync (Subtitle Band): '还是和之前一样' -> Y: 0.756 - 0.802
+2026-09-05 15:15:33,824 - ocr_utils - INFO - Sync (Subtitle Band): '先画出主线条' -> Y: 0.755 - 0.802
+2026-09-05 15:15:33,824 - ocr_utils - INFO - Sync (Subtitle Band): '再从空隙处画一些短睫毛加密' -> Y: 0.754 - 0.803
+2026-09-05 15:15:33,824 - ocr_utils - INFO - Sync (Subtitle Band): '这只我们眼尾的睫毛要加长一些' -> Y: 0.755 - 0.802
+2026-09-05 15:15:33,824 - ocr_utils - INFO - Sync (Subtitle Band): '可以增加一点媚态感' -> Y: 0.756 - 0.803
+2026-09-05 15:15:33,824 - ocr_utils - INFO - Sync (Subtitle Band): '眉毛的画法也是一样' -> Y: 0.754 - 0.804
+2026-09-05 15:15:33,824 - ocr_utils - INFO - Sync (Subtitle Band): '这只的眉毛用色可以加深一些' -> Y: 0.752 - 0.804
+2026-09-05 15:15:33,824 - ocr_utils - INFO - Sync (Subtitle Band): '太淡的话会显得过于弱态' -> Y: 0.752 - 0.804
+2026-09-05 15:15:33,824 - ocr_utils - INFO - Sync (Subtitle Band): '睫毛的立体感也要画出来' -> Y: 0.758 - 0.803
+2026-09-05 15:15:33,824 - ocr_utils - INFO - Sync (Subtitle Band): '用白色饼锡颜料在睫毛的根部描出' -> Y: 0.756 - 0.801
+2026-09-05 15:15:33,824 - ocr_utils - INFO - Sync (Subtitle Band): '眉头也需要画几根哦' -> Y: 0.756 - 0.803
+2026-09-05 15:15:33,824 - ocr_utils - INFO - Sync (Subtitle Band): '这样整体的毛流就会立体很多' -> Y: 0.756 - 0.802
+2026-09-05 15:15:33,824 - ocr_utils - INFO - Sync (Subtitle Band): '完善一下细节就可以喷消光定妆了' -> Y: 0.756 - 0.803
+2026-09-05 15:15:33,824 - ocr_utils - INFO - Sync (Subtitle Band): '喜欢整体仙气一点的我们可以在定' -> Y: 0.744 - 0.790
+2026-09-05 15:15:33,824 - ocr_utils - INFO - Sync (Subtitle Band): '这样就画完了' -> Y: 0.755 - 0.803
+2026-09-05 15:15:33,824 - ocr_utils - INFO - Sync (Subtitle Band): '戴上假发看看效果吧' -> Y: 0.757 - 0.801
+2026-09-05 15:15:35,539 - ai.translation - INFO - Translating subtitles...
+2026-09-05 15:15:37,293 - ai.translation - INFO - Đang gọi Google Gemini: gemini-3.8-flash...
+2026-09-05 15:15:44,883 - ai.translation - WARNING - Lỗi gọi gemini-3.8-flash (HTTP 503)
+2026-09-05 15:15:44,883 - ai.translation - INFO - Đang gọi Google Gemini: gemini-3.7-flash...
+2026-09-05 15:15:53,866 - ai.translation - INFO - Gọi thành công Gemini gemini-3.7-flash!
+2026-09-05 15:15:53,867 - ai.translation - INFO - LLM translation successful.
+2026-09-05 15:16:51,515 - faiss.loader - INFO - Loading faiss with AVX2 support.
+2026-09-05 15:16:51,515 - faiss.loader - INFO - Could not load library with AVX2 support due to:
+ModuleNotFoundError("No module named 'faiss.swigfaiss_avx2'")
+2026-09-05 15:16:51,515 - faiss.loader - INFO - Loading faiss.
+2026-09-05 15:16:51,592 - faiss.loader - INFO - Successfully loaded faiss.
+2026-09-05 15:16:58,600 - fairseq.tasks.text_to_speech - INFO - Please install tensorboardX: pip install tensorboardX
+2026-09-05 15:17:00,652 - rvc_python.configs.config - INFO - Found GPU NVIDIA GeForce RTX 4050 Laptop GPU
+2026-09-05 15:17:00,666 - rvc_python.modules.vc.modules - INFO - Loading: C:\tool v1\backend\..\MyVoiceModel_v2\mi-giong_cua_toi_v2.pth
+2026-09-05 15:17:02,562 - fairseq.tasks.hubert_pretraining - INFO - current directory is C:\tool v1
+2026-09-05 15:17:02,562 - fairseq.tasks.hubert_pretraining - INFO - HubertPretrainingTask Config {'_name': 'hubert_pretraining', 'data': 'metadata', 'fine_tuning': False, 'labels': ['km'], 'label_dir': 'label', 'label_rate': 50.0, 'sample_rate': 16000, 'normalize': False, 'enable_padding': False, 'max_keep_size': None, 'max_sample_size': 250000, 'min_sample_size': 32000, 'single_target': False, 'random_crop': True, 'pad_audio': False}
+2026-09-05 15:17:02,601 - fairseq.models.hubert.hubert - INFO - HubertModel Config: {'_name': 'hubert', 'label_rate': 50.0, 'extractor_mode': default, 'encoder_layers': 12, 'encoder_embed_dim': 768, 'encoder_ffn_embed_dim': 3072, 'encoder_attention_heads': 12, 'activation_fn': gelu, 'layer_type': transformer, 'dropout': 0.1, 'attention_dropout': 0.1, 'activation_dropout': 0.0, 'encoder_layerdrop': 0.05, 'dropout_input': 0.1, 'dropout_features': 0.1, 'final_dim': 256, 'untie_final_proj': True, 'layer_norm_first': False, 'conv_feature_layers': '[(512,10,5)] + [(512,3,2)] * 4 + [(512,2,2)] * 2', 'conv_bias': False, 'logit_temp': 0.1, 'target_glu': False, 'feature_grad_mult': 0.1, 'mask_length': 10, 'mask_prob': 0.8, 'mask_selection': static, 'mask_other': 0.0, 'no_mask_overlap': False, 'mask_min_space': 1, 'mask_channel_length': 10, 'mask_channel_prob': 0.0, 'mask_channel_selection': static, 'mask_channel_other': 0.0, 'no_mask_channel_overlap': False, 'mask_channel_min_space': 1, 'conv_pos': 128, 'conv_pos_groups': 16, 'latent_temp': [2.0, 0.5, 0.999995], 'skip_masked': False, 'skip_nomask': False, 'checkpoint_activations': False, 'required_seq_len_multiple': 2, 'depthwise_conv_kernel_size': 31, 'attn_type': '', 'pos_enc_type': 'abs', 'fp16': False}
+2026-09-05 15:17:10,090 - rvc_python.modules.vc.pipeline - INFO - Loading rmvpe model - base_models/rmvpe.pth
+2026-09-05 15:19:27,541 - google_drive_uploader - WARNING - Chưa cấu hình xác thực Google Drive API (cần gdrive_service_account.json hoặc gdrive_oauth_client.json)
+2026-09-05 16:11:45,991 - telegram.ext.Application - ERROR - No error handlers are registered, logging exception.
+Traceback (most recent call last):
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 101, in map_httpcore_exceptions
+    yield
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 394, in handle_async_request
+    resp = await self._pool.handle_async_request(req)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection_pool.py", line 256, in handle_async_request
+    raise exc from None
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection_pool.py", line 236, in handle_async_request
+    response = await connection.handle_async_request(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection.py", line 103, in handle_async_request
+    return await self._connection.handle_async_request(request)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\http11.py", line 136, in handle_async_request
+    raise exc
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\http11.py", line 106, in handle_async_request
+    ) = await self._receive_response_headers(**kwargs)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\http11.py", line 177, in _receive_response_headers
+    event = await self._receive_event(timeout=timeout)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\http11.py", line 217, in _receive_event
+    data = await self._network_stream.read(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_backends\anyio.py", line 32, in read
+    with map_exceptions(exc_map):
+  File "C:\Users\admin\AppData\Local\Programs\Python\Python310\lib\contextlib.py", line 153, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_exceptions.py", line 14, in map_exceptions
+    raise to_exc(exc) from exc
+httpcore.ReadError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_httpxrequest.py", line 279, in do_request
+    res = await self._client.request(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1540, in request
+    return await self.send(request, auth=auth, follow_redirects=follow_redirects)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1629, in send
+    response = await self._send_handling_auth(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1657, in _send_handling_auth
+    response = await self._send_handling_redirects(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1694, in _send_handling_redirects
+    response = await self._send_single_request(request)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1730, in _send_single_request
+    response = await transport.handle_async_request(request)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 393, in handle_async_request
+    with map_httpcore_exceptions():
+  File "C:\Users\admin\AppData\Local\Programs\Python\Python310\lib\contextlib.py", line 153, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 118, in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+httpx.ReadError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_utils\networkloop.py", line 161, in network_retry_loop
+    await do_action()
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_utils\networkloop.py", line 154, in do_action
+    action_cb_task.result()
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_updater.py", line 340, in polling_action_cb
+    updates = await self.bot.get_updates(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_extbot.py", line 680, in get_updates
+    updates = await super().get_updates(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 4767, in get_updates
+    await self._post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 712, in _post
+    return await self._do_post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_extbot.py", line 378, in _do_post
+    return await super()._do_post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 741, in _do_post
+    result = await request.post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_baserequest.py", line 198, in post
+    result = await self._request_wrapper(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_baserequest.py", line 305, in _request_wrapper
+    code, payload = await self.do_request(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_httpxrequest.py", line 303, in do_request
+    raise NetworkError(f"httpx.{err.__class__.__name__}: {err}") from err
+telegram.error.NetworkError: httpx.ReadError: 
+2026-09-05 16:11:47,005 - telegram.ext.Application - ERROR - No error handlers are registered, logging exception.
+Traceback (most recent call last):
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 101, in map_httpcore_exceptions
+    yield
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 394, in handle_async_request
+    resp = await self._pool.handle_async_request(req)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection_pool.py", line 256, in handle_async_request
+    raise exc from None
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection_pool.py", line 236, in handle_async_request
+    response = await connection.handle_async_request(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection.py", line 101, in handle_async_request
+    raise exc
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection.py", line 78, in handle_async_request
+    stream = await self._connect(request)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection.py", line 124, in _connect
+    stream = await self._network_backend.connect_tcp(**kwargs)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_backends\auto.py", line 31, in connect_tcp
+    return await self._backend.connect_tcp(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_backends\anyio.py", line 113, in connect_tcp
+    with map_exceptions(exc_map):
+  File "C:\Users\admin\AppData\Local\Programs\Python\Python310\lib\contextlib.py", line 153, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_exceptions.py", line 14, in map_exceptions
+    raise to_exc(exc) from exc
+httpcore.ConnectError: [Errno 11001] getaddrinfo failed
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_httpxrequest.py", line 279, in do_request
+    res = await self._client.request(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1540, in request
+    return await self.send(request, auth=auth, follow_redirects=follow_redirects)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1629, in send
+    response = await self._send_handling_auth(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1657, in _send_handling_auth
+    response = await self._send_handling_redirects(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1694, in _send_handling_redirects
+    response = await self._send_single_request(request)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1730, in _send_single_request
+    response = await transport.handle_async_request(request)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 393, in handle_async_request
+    with map_httpcore_exceptions():
+  File "C:\Users\admin\AppData\Local\Programs\Python\Python310\lib\contextlib.py", line 153, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 118, in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+httpx.ConnectError: [Errno 11001] getaddrinfo failed
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_utils\networkloop.py", line 161, in network_retry_loop
+    await do_action()
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_utils\networkloop.py", line 154, in do_action
+    action_cb_task.result()
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_updater.py", line 340, in polling_action_cb
+    updates = await self.bot.get_updates(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_extbot.py", line 680, in get_updates
+    updates = await super().get_updates(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 4767, in get_updates
+    await self._post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 712, in _post
+    return await self._do_post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_extbot.py", line 378, in _do_post
+    return await super()._do_post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 741, in _do_post
+    result = await request.post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_baserequest.py", line 198, in post
+    result = await self._request_wrapper(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_baserequest.py", line 305, in _request_wrapper
+    code, payload = await self.do_request(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_httpxrequest.py", line 303, in do_request
+    raise NetworkError(f"httpx.{err.__class__.__name__}: {err}") from err
+telegram.error.NetworkError: httpx.ConnectError: [Errno 11001] getaddrinfo failed
+2026-09-05 16:21:04,650 - social_downloader - INFO - Đang bóc tách Xiaohongshu: http://xhslink.com/o/AZ8d0Ios9X6
+2026-09-05 16:21:05,875 - social_downloader - INFO - Đã giải mã thành công link XHS: http://xhslink.com/o/AZ8d0Ios9X6 -> https://www.xiaohongshu.com/discovery/item/6a9aeebe0000000029013399?app_platform
+2026-09-05 16:21:08,821 - social_downloader - INFO - Đã tìm thấy luồng video XHS GỐC SẠCH KHÔNG LOGO: http://sns-video-qn.xhscdn.com/pre_post/1040g2t0324mvn1r6n2l05pg3f6chhnlhnd2jifg
+2026-09-05 16:21:08,823 - social_downloader - INFO - Đang tải video XHS GỐC KHÔNG WATERMARK bằng đa luồng: http://sns-video-qn.xhscdn.com/pre_post/1040g2t0324mvn1r6n2l05pg3f6chhnlhnd2jifg
+2026-09-05 16:21:39,293 - social_downloader - INFO - Tải thành công video XHS GỐC KHÔNG WATERMARK: C:\tool v1\workspace\downloads\1788600064_6fb867ad_是谁挖到了萌萌的书本式小收纳我不说.mp4
+2026-09-05 16:21:46,561 - telegram.ext.Application - ERROR - No error handlers are registered, logging exception.
+Traceback (most recent call last):
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 101, in map_httpcore_exceptions
+    yield
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 394, in handle_async_request
+    resp = await self._pool.handle_async_request(req)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection_pool.py", line 256, in handle_async_request
+    raise exc from None
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection_pool.py", line 236, in handle_async_request
+    response = await connection.handle_async_request(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection.py", line 103, in handle_async_request
+    return await self._connection.handle_async_request(request)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\http11.py", line 136, in handle_async_request
+    raise exc
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\http11.py", line 106, in handle_async_request
+    ) = await self._receive_response_headers(**kwargs)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\http11.py", line 177, in _receive_response_headers
+    event = await self._receive_event(timeout=timeout)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\http11.py", line 217, in _receive_event
+    data = await self._network_stream.read(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_backends\anyio.py", line 32, in read
+    with map_exceptions(exc_map):
+  File "C:\Users\admin\AppData\Local\Programs\Python\Python310\lib\contextlib.py", line 153, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_exceptions.py", line 14, in map_exceptions
+    raise to_exc(exc) from exc
+httpcore.ReadError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_httpxrequest.py", line 279, in do_request
+    res = await self._client.request(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1540, in request
+    return await self.send(request, auth=auth, follow_redirects=follow_redirects)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1629, in send
+    response = await self._send_handling_auth(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1657, in _send_handling_auth
+    response = await self._send_handling_redirects(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1694, in _send_handling_redirects
+    response = await self._send_single_request(request)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1730, in _send_single_request
+    response = await transport.handle_async_request(request)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 393, in handle_async_request
+    with map_httpcore_exceptions():
+  File "C:\Users\admin\AppData\Local\Programs\Python\Python310\lib\contextlib.py", line 153, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 118, in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+httpx.ReadError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_utils\networkloop.py", line 161, in network_retry_loop
+    await do_action()
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_utils\networkloop.py", line 154, in do_action
+    action_cb_task.result()
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_updater.py", line 340, in polling_action_cb
+    updates = await self.bot.get_updates(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_extbot.py", line 680, in get_updates
+    updates = await super().get_updates(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 4767, in get_updates
+    await self._post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 712, in _post
+    return await self._do_post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_extbot.py", line 378, in _do_post
+    return await super()._do_post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 741, in _do_post
+    result = await request.post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_baserequest.py", line 198, in post
+    result = await self._request_wrapper(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_baserequest.py", line 305, in _request_wrapper
+    code, payload = await self.do_request(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_httpxrequest.py", line 303, in do_request
+    raise NetworkError(f"httpx.{err.__class__.__name__}: {err}") from err
+telegram.error.NetworkError: httpx.ReadError: 
+2026-09-05 16:22:18,428 - faster_whisper - INFO - Processing audio with duration 00:25.403
+2026-09-05 16:22:18,608 - faster_whisper - INFO - VAD filter removed 00:00.000 of audio
+2026-09-05 16:22:19,144 - faster_whisper - INFO - Detected language 'zh' with probability 0.98
+2026-09-05 16:22:29,724 - ocr_utils - INFO - Bắt đầu OCR toàn diện trên video C:\tool v1\workspace\downloads\1788600064_6fb867ad_是谁挖到了萌萌的书本式小收纳我不说.mp4
+2026-09-05 16:22:46,454 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 16:22:55,643 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 16:23:02,285 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 16:23:10,911 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 16:23:12,548 - telegram.ext.Application - ERROR - No error handlers are registered, logging exception.
+Traceback (most recent call last):
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 101, in map_httpcore_exceptions
+    yield
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 394, in handle_async_request
+    resp = await self._pool.handle_async_request(req)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection_pool.py", line 256, in handle_async_request
+    raise exc from None
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection_pool.py", line 236, in handle_async_request
+    response = await connection.handle_async_request(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection.py", line 103, in handle_async_request
+    return await self._connection.handle_async_request(request)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\http11.py", line 136, in handle_async_request
+    raise exc
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\http11.py", line 106, in handle_async_request
+    ) = await self._receive_response_headers(**kwargs)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\http11.py", line 177, in _receive_response_headers
+    event = await self._receive_event(timeout=timeout)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\http11.py", line 217, in _receive_event
+    data = await self._network_stream.read(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_backends\anyio.py", line 32, in read
+    with map_exceptions(exc_map):
+  File "C:\Users\admin\AppData\Local\Programs\Python\Python310\lib\contextlib.py", line 153, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_exceptions.py", line 14, in map_exceptions
+    raise to_exc(exc) from exc
+httpcore.ReadError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_httpxrequest.py", line 279, in do_request
+    res = await self._client.request(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1540, in request
+    return await self.send(request, auth=auth, follow_redirects=follow_redirects)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1629, in send
+    response = await self._send_handling_auth(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1657, in _send_handling_auth
+    response = await self._send_handling_redirects(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1694, in _send_handling_redirects
+    response = await self._send_single_request(request)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1730, in _send_single_request
+    response = await transport.handle_async_request(request)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 393, in handle_async_request
+    with map_httpcore_exceptions():
+  File "C:\Users\admin\AppData\Local\Programs\Python\Python310\lib\contextlib.py", line 153, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 118, in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+httpx.ReadError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_utils\networkloop.py", line 161, in network_retry_loop
+    await do_action()
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_utils\networkloop.py", line 154, in do_action
+    action_cb_task.result()
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_updater.py", line 340, in polling_action_cb
+    updates = await self.bot.get_updates(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_extbot.py", line 680, in get_updates
+    updates = await super().get_updates(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 4767, in get_updates
+    await self._post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 712, in _post
+    return await self._do_post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_extbot.py", line 378, in _do_post
+    return await super()._do_post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 741, in _do_post
+    result = await request.post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_baserequest.py", line 198, in post
+    result = await self._request_wrapper(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_baserequest.py", line 305, in _request_wrapper
+    code, payload = await self.do_request(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_httpxrequest.py", line 303, in do_request
+    raise NetworkError(f"httpx.{err.__class__.__name__}: {err}") from err
+telegram.error.NetworkError: httpx.ReadError: 
+2026-09-05 16:23:21,000 - ocr_utils - INFO - PP-OCRv6 Tiny completed 9 sampled frames via onnxruntime
+2026-09-05 16:23:21,054 - ocr_utils - INFO - 🎯 Global Subtitle Band detected (asr_match, support=53): Top=0.770, Bottom=0.816
+2026-09-05 16:23:21,054 - ocr_utils - INFO - Sync (Subtitle Band): '分享一个书本样式的小收纳' -> Y: 0.773 - 0.812
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '拆开的时候就感觉买对了' -> Y: 0.773 - 0.812
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '送了贴纸' -> Y: 0.774 - 0.812
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '真的很像缩小版的书籍啊' -> Y: 0.772 - 0.812
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '比手掌还小' -> Y: 0.774 - 0.811
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '这个尺寸真的可以做到走哪带哪的' -> Y: 0.775 - 0.811
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '打开看看里面长什么样吧' -> Y: 0.773 - 0.812
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '是八格分装' -> Y: 0.773 - 0.812
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '上面可以拆分成三格' -> Y: 0.773 - 0.812
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '一大两小' -> Y: 0.770 - 0.815
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '开掉隔层后感觉能装更多小东西了' -> Y: 0.773 - 0.812
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '下面就是四个独立的小格子' -> Y: 0.770 - 0.814
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '迅速填满' -> Y: 0.774 - 0.812
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '不用的时候就合起来' -> Y: 0.773 - 0.811
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '这扣起来的流程和我的手账本一样' -> Y: 0.774 - 0.810
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '真的太猛了' -> Y: 0.773 - 0.812
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '而且外壳非常适合DIY' -> Y: 0.770 - 0.812
+2026-09-05 16:23:21,055 - ocr_utils - INFO - Sync (Subtitle Band): '这谁不挤头白脸的入手一个啊' -> Y: 0.773 - 0.812
+2026-09-05 16:23:26,156 - ai.translation - INFO - Translating subtitles...
+2026-09-05 16:23:26,875 - ai.translation - INFO - Đang gọi Google Gemini: gemini-3.8-flash...
+2026-09-05 16:23:47,828 - ai.translation - INFO - Gọi thành công Gemini gemini-3.8-flash!
+2026-09-05 16:23:47,834 - ai.translation - INFO - LLM translation successful.
+2026-09-05 16:24:44,266 - google_drive_uploader - WARNING - Chưa cấu hình xác thực Google Drive API (cần gdrive_service_account.json hoặc gdrive_oauth_client.json)
+2026-09-05 16:24:45,752 - social_downloader - INFO - Đang bóc tách Xiaohongshu: http://xhslink.com/o/1NWZGeyrceL
+2026-09-05 16:24:49,662 - social_downloader - INFO - Đã giải mã thành công link XHS: http://xhslink.com/o/1NWZGeyrceL -> https://www.xiaohongshu.com/discovery/item/6a955aa0000000000402a706?app_platform
+2026-09-05 16:24:50,895 - social_downloader - INFO - Đã tìm thấy luồng video XHS GỐC SẠCH KHÔNG LOGO: http://sns-video-qn.xhscdn.com/1040g00g324hc897e7ajg5ov22if9if25qipk0a0
+2026-09-05 16:24:50,895 - social_downloader - INFO - Đang tải video XHS GỐC KHÔNG WATERMARK bằng đa luồng: http://sns-video-qn.xhscdn.com/1040g00g324hc897e7ajg5ov22if9if25qipk0a0
+2026-09-05 16:24:56,496 - telegram.ext.Application - ERROR - No error handlers are registered, logging exception.
+Traceback (most recent call last):
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 101, in map_httpcore_exceptions
+    yield
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 394, in handle_async_request
+    resp = await self._pool.handle_async_request(req)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection_pool.py", line 256, in handle_async_request
+    raise exc from None
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection_pool.py", line 236, in handle_async_request
+    response = await connection.handle_async_request(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\connection.py", line 103, in handle_async_request
+    return await self._connection.handle_async_request(request)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\http11.py", line 136, in handle_async_request
+    raise exc
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\http11.py", line 106, in handle_async_request
+    ) = await self._receive_response_headers(**kwargs)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\http11.py", line 177, in _receive_response_headers
+    event = await self._receive_event(timeout=timeout)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_async\http11.py", line 217, in _receive_event
+    data = await self._network_stream.read(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_backends\anyio.py", line 32, in read
+    with map_exceptions(exc_map):
+  File "C:\Users\admin\AppData\Local\Programs\Python\Python310\lib\contextlib.py", line 153, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpcore\_exceptions.py", line 14, in map_exceptions
+    raise to_exc(exc) from exc
+httpcore.ReadError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_httpxrequest.py", line 279, in do_request
+    res = await self._client.request(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1540, in request
+    return await self.send(request, auth=auth, follow_redirects=follow_redirects)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1629, in send
+    response = await self._send_handling_auth(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1657, in _send_handling_auth
+    response = await self._send_handling_redirects(
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1694, in _send_handling_redirects
+    response = await self._send_single_request(request)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_client.py", line 1730, in _send_single_request
+    response = await transport.handle_async_request(request)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 393, in handle_async_request
+    with map_httpcore_exceptions():
+  File "C:\Users\admin\AppData\Local\Programs\Python\Python310\lib\contextlib.py", line 153, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "C:\tool v1\backend\venv\lib\site-packages\httpx\_transports\default.py", line 118, in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+httpx.ReadError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_utils\networkloop.py", line 161, in network_retry_loop
+    await do_action()
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_utils\networkloop.py", line 154, in do_action
+    action_cb_task.result()
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_updater.py", line 340, in polling_action_cb
+    updates = await self.bot.get_updates(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_extbot.py", line 680, in get_updates
+    updates = await super().get_updates(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 4767, in get_updates
+    await self._post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 712, in _post
+    return await self._do_post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_extbot.py", line 378, in _do_post
+    return await super()._do_post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 741, in _do_post
+    result = await request.post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_baserequest.py", line 198, in post
+    result = await self._request_wrapper(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_baserequest.py", line 305, in _request_wrapper
+    code, payload = await self.do_request(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_httpxrequest.py", line 303, in do_request
+    raise NetworkError(f"httpx.{err.__class__.__name__}: {err}") from err
+telegram.error.NetworkError: httpx.ReadError: 
+2026-09-05 16:25:31,592 - social_downloader - INFO - Tải thành công video XHS GỐC KHÔNG WATERMARK: C:\tool v1\workspace\downloads\1788600285_0940866c_貌美又刺耳的薄巧胶带.mp4
+2026-09-05 16:26:06,280 - faster_whisper - INFO - Processing audio with duration 00:17.810
+2026-09-05 16:26:06,383 - faster_whisper - INFO - VAD filter removed 00:01.666 of audio
+2026-09-05 16:26:06,882 - faster_whisper - INFO - Detected language 'zh' with probability 1.00
+2026-09-05 16:26:11,345 - ocr_utils - INFO - Bắt đầu OCR toàn diện trên video C:\tool v1\workspace\downloads\1788600285_0940866c_貌美又刺耳的薄巧胶带.mp4
+2026-09-05 16:26:28,061 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 16:26:40,459 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 16:26:46,086 - ocr_utils - INFO - PP-OCRv6 Tiny completed 3 sampled frames via onnxruntime
+2026-09-05 16:26:46,100 - ocr_utils - INFO - 🎯 Global Subtitle Band detected (asr_match, support=21): Top=0.757, Bottom=0.794
+2026-09-05 16:26:46,100 - ocr_utils - INFO - Sync (Subtitle Band): '是上次没到的那个美味剥点胶带' -> Y: 0.761 - 0.789
+2026-09-05 16:26:46,100 - ocr_utils - INFO - Sync (Subtitle Band): '吃了两种款的薄荞剥点' -> Y: 0.760 - 0.791
+2026-09-05 16:26:46,100 - ocr_utils - INFO - Sync (Subtitle Band): '一个薄荞绿' -> Y: 0.761 - 0.790
+2026-09-05 16:26:46,100 - ocr_utils - INFO - Sync (Subtitle Band): '一个薄荞咔' -> Y: 0.761 - 0.790
+2026-09-05 16:26:46,100 - ocr_utils - INFO - Sync (Subtitle Band): '食物非常非常好看' -> Y: 0.760 - 0.791
+2026-09-05 16:26:46,100 - ocr_utils - INFO - Sync (Subtitle Band): '但是适用下来有个缺点' -> Y: 0.759 - 0.792
+2026-09-05 16:26:46,100 - ocr_utils - INFO - Sync (Subtitle Band): '就是撕起来声音很刺耳' -> Y: 0.758 - 0.792
+2026-09-05 16:26:46,100 - ocr_utils - INFO - Sync (Subtitle Band): '晚上用它打包能把隔壁家吵醒' -> Y: 0.761 - 0.792
+2026-09-05 16:26:46,994 - ai.translation - INFO - Translating subtitles...
+2026-09-05 16:26:50,824 - ai.translation - INFO - Đang gọi Google Gemini: gemini-3.8-flash...
+2026-09-05 16:27:07,668 - ai.translation - INFO - Gọi thành công Gemini gemini-3.8-flash!
+2026-09-05 16:27:07,670 - ai.translation - INFO - LLM translation successful.
+2026-09-05 16:28:04,719 - google_drive_uploader - WARNING - Chưa cấu hình xác thực Google Drive API (cần gdrive_service_account.json hoặc gdrive_oauth_client.json)
+2026-09-05 16:56:42,402 - telegram.ext.Application - INFO - Application started
+2026-09-05 17:00:08,190 - social_downloader - INFO - Đang bóc tách Xiaohongshu: http://xhslink.com/o/AZ8d0Ios9X6
+2026-09-05 17:00:09,171 - social_downloader - INFO - Đã giải mã thành công link XHS: http://xhslink.com/o/AZ8d0Ios9X6 -> https://www.xiaohongshu.com/discovery/item/6a9aeebe0000000029013399?app_platform
+2026-09-05 17:00:09,231 - social_downloader - INFO - Đã tìm thấy luồng video XHS GỐC SẠCH KHÔNG LOGO: http://sns-video-qn.xhscdn.com/pre_post/1040g2t0324mvn1r6n2l05pg3f6chhnlhnd2jifg
+2026-09-05 17:00:09,236 - social_downloader - INFO - Đang tải video XHS GỐC KHÔNG WATERMARK bằng đa luồng: http://sns-video-qn.xhscdn.com/pre_post/1040g2t0324mvn1r6n2l05pg3f6chhnlhnd2jifg
+2026-09-05 17:00:15,700 - social_downloader - INFO - Tải thành công video XHS GỐC KHÔNG WATERMARK: C:\tool v1\workspace\downloads\1788602407_586b781d_是谁挖到了萌萌的书本式小收纳我不说.mp4
+2026-09-05 17:00:42,189 - faster_whisper - INFO - Processing audio with duration 00:25.403
+2026-09-05 17:00:42,623 - faster_whisper - INFO - VAD filter removed 00:00.000 of audio
+2026-09-05 17:00:43,582 - faster_whisper - INFO - Detected language 'zh' with probability 0.98
+2026-09-05 17:00:52,573 - ocr_utils - INFO - Bắt đầu OCR toàn diện trên video C:\tool v1\workspace\downloads\1788602407_586b781d_是谁挖到了萌萌的书本式小收纳我不说.mp4
+2026-09-05 17:01:03,032 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:01:09,646 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:01:15,898 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:01:22,324 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:01:31,401 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:01:39,368 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:01:46,808 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:01:53,604 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:02:00,613 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:02:09,054 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:02:18,022 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:02:26,102 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:02:33,721 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:02:40,074 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:02:46,500 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:02:53,640 - ocr_utils - INFO - PP-OCRv6 Tiny completed 10 sampled frames via onnxruntime
+2026-09-05 17:02:54,274 - ocr_utils - INFO - 🎯 Global Subtitle Band detected (asr_match, support=90): Top=0.770, Bottom=0.814
+2026-09-05 17:02:54,274 - ocr_utils - INFO - Sync (Subtitle Band): '分享一个书本样式的小收纳' -> Y: 0.772 - 0.812
+2026-09-05 17:02:54,275 - ocr_utils - INFO - Sync (Subtitle Band): '拆开的时候就感觉买对了' -> Y: 0.772 - 0.812
+2026-09-05 17:02:54,275 - ocr_utils - INFO - Sync (Subtitle Band): '送了贴纸' -> Y: 0.775 - 0.811
+2026-09-05 17:02:54,275 - ocr_utils - INFO - Sync (Subtitle Band): '谁懂' -> Y: 0.774 - 0.812
+2026-09-05 17:02:54,276 - ocr_utils - INFO - Sync (Subtitle Band): '这个尺寸真的可以做到走哪带哪的' -> Y: 0.775 - 0.811
+2026-09-05 17:02:54,276 - ocr_utils - INFO - Sync (Subtitle Band): '上面可以拆分成三格' -> Y: 0.773 - 0.812
+2026-09-05 17:02:54,276 - ocr_utils - INFO - Sync (Subtitle Band): '一大两小' -> Y: 0.771 - 0.813
+2026-09-05 17:02:54,277 - ocr_utils - INFO - Sync (Subtitle Band): '开掉隔层后感觉能装更多小东西了' -> Y: 0.773 - 0.812
+2026-09-05 17:02:54,277 - ocr_utils - INFO - Sync (Subtitle Band): '下面就是四个独立的小格子' -> Y: 0.771 - 0.812
+2026-09-05 17:02:54,277 - ocr_utils - INFO - Sync (Subtitle Band): '迅速填满' -> Y: 0.771 - 0.812
+2026-09-05 17:02:54,277 - ocr_utils - INFO - Sync (Subtitle Band): '不用的时候就合起来' -> Y: 0.774 - 0.810
+2026-09-05 17:02:54,277 - ocr_utils - INFO - Sync (Subtitle Band): '真的太猛了' -> Y: 0.773 - 0.812
+2026-09-05 17:02:54,278 - ocr_utils - INFO - Sync (Subtitle Band): '而且外壳非常适合DIY' -> Y: 0.770 - 0.812
+2026-09-05 17:02:54,278 - ocr_utils - INFO - Sync (Subtitle Band): '这谁不挤头白脸的入手一个啊' -> Y: 0.774 - 0.810
+2026-09-05 17:02:55,174 - ai.translation - INFO - Translating subtitles...
+2026-09-05 17:02:55,913 - ai.translation - INFO - Đang gọi Google Gemini: gemini-3.8-flash...
+2026-09-05 17:03:05,473 - ai.translation - WARNING - Lỗi gọi gemini-3.8-flash (HTTP 503)
+2026-09-05 17:03:05,473 - ai.translation - INFO - Đang gọi Google Gemini: gemini-3.7-flash...
+2026-09-05 17:03:31,450 - ai.translation - INFO - Gọi thành công Gemini gemini-3.7-flash!
+2026-09-05 17:03:31,453 - ai.translation - INFO - LLM translation successful.
+2026-09-05 17:03:41,189 - faiss.loader - INFO - Loading faiss with AVX2 support.
+2026-09-05 17:03:41,192 - faiss.loader - INFO - Could not load library with AVX2 support due to:
+ModuleNotFoundError("No module named 'faiss.swigfaiss_avx2'")
+2026-09-05 17:03:41,192 - faiss.loader - INFO - Loading faiss.
+2026-09-05 17:03:41,279 - faiss.loader - INFO - Successfully loaded faiss.
+2026-09-05 17:03:44,609 - fairseq.tasks.text_to_speech - INFO - Please install tensorboardX: pip install tensorboardX
+2026-09-05 17:03:46,639 - rvc_python.configs.config - INFO - Found GPU NVIDIA GeForce RTX 4050 Laptop GPU
+2026-09-05 17:03:46,644 - rvc_python.modules.vc.modules - INFO - Loading: C:\tool v1\backend\..\MyVoiceModel_v2\mi-giong_cua_toi_v2.pth
+2026-09-05 17:03:48,397 - fairseq.tasks.hubert_pretraining - INFO - current directory is C:\tool v1
+2026-09-05 17:03:48,397 - fairseq.tasks.hubert_pretraining - INFO - HubertPretrainingTask Config {'_name': 'hubert_pretraining', 'data': 'metadata', 'fine_tuning': False, 'labels': ['km'], 'label_dir': 'label', 'label_rate': 50.0, 'sample_rate': 16000, 'normalize': False, 'enable_padding': False, 'max_keep_size': None, 'max_sample_size': 250000, 'min_sample_size': 32000, 'single_target': False, 'random_crop': True, 'pad_audio': False}
+2026-09-05 17:03:48,438 - fairseq.models.hubert.hubert - INFO - HubertModel Config: {'_name': 'hubert', 'label_rate': 50.0, 'extractor_mode': default, 'encoder_layers': 12, 'encoder_embed_dim': 768, 'encoder_ffn_embed_dim': 3072, 'encoder_attention_heads': 12, 'activation_fn': gelu, 'layer_type': transformer, 'dropout': 0.1, 'attention_dropout': 0.1, 'activation_dropout': 0.0, 'encoder_layerdrop': 0.05, 'dropout_input': 0.1, 'dropout_features': 0.1, 'final_dim': 256, 'untie_final_proj': True, 'layer_norm_first': False, 'conv_feature_layers': '[(512,10,5)] + [(512,3,2)] * 4 + [(512,2,2)] * 2', 'conv_bias': False, 'logit_temp': 0.1, 'target_glu': False, 'feature_grad_mult': 0.1, 'mask_length': 10, 'mask_prob': 0.8, 'mask_selection': static, 'mask_other': 0.0, 'no_mask_overlap': False, 'mask_min_space': 1, 'mask_channel_length': 10, 'mask_channel_prob': 0.0, 'mask_channel_selection': static, 'mask_channel_other': 0.0, 'no_mask_channel_overlap': False, 'mask_channel_min_space': 1, 'conv_pos': 128, 'conv_pos_groups': 16, 'latent_temp': [2.0, 0.5, 0.999995], 'skip_masked': False, 'skip_nomask': False, 'checkpoint_activations': False, 'required_seq_len_multiple': 2, 'depthwise_conv_kernel_size': 31, 'attn_type': '', 'pos_enc_type': 'abs', 'fp16': False}
+2026-09-05 17:03:56,132 - rvc_python.modules.vc.pipeline - INFO - Loading rmvpe model - base_models/rmvpe.pth
+2026-09-05 17:04:51,944 - google_drive_uploader - WARNING - Chưa cấu hình xác thực Google Drive API (cần gdrive_service_account.json hoặc gdrive_oauth_client.json)
+2026-09-05 17:04:53,430 - social_downloader - INFO - Đang bóc tách Xiaohongshu: http://xhslink.com/o/1NWZGeyrceL
+2026-09-05 17:04:54,559 - social_downloader - INFO - Đã giải mã thành công link XHS: http://xhslink.com/o/1NWZGeyrceL -> https://www.xiaohongshu.com/discovery/item/6a955aa0000000000402a706?app_platform
+2026-09-05 17:04:54,609 - social_downloader - INFO - Đã tìm thấy luồng video XHS GỐC SẠCH KHÔNG LOGO: http://sns-video-qn.xhscdn.com/1040g00g324hc897e7ajg5ov22if9if25qipk0a0
+2026-09-05 17:04:54,610 - social_downloader - INFO - Đang tải video XHS GỐC KHÔNG WATERMARK bằng đa luồng: http://sns-video-qn.xhscdn.com/1040g00g324hc897e7ajg5ov22if9if25qipk0a0
+2026-09-05 17:05:09,544 - social_downloader - INFO - Tải thành công video XHS GỐC KHÔNG WATERMARK: C:\tool v1\workspace\downloads\1788602692_e27290e3_貌美又刺耳的薄巧胶带.mp4
+2026-09-05 17:05:46,787 - faster_whisper - INFO - Processing audio with duration 00:17.810
+2026-09-05 17:05:46,905 - faster_whisper - INFO - VAD filter removed 00:01.666 of audio
+2026-09-05 17:05:47,366 - faster_whisper - INFO - Detected language 'zh' with probability 1.00
+2026-09-05 17:05:52,316 - ocr_utils - INFO - Bắt đầu OCR toàn diện trên video C:\tool v1\workspace\downloads\1788602692_e27290e3_貌美又刺耳的薄巧胶带.mp4
+2026-09-05 17:06:07,694 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:06:22,277 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:06:36,613 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:06:50,577 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:07:05,114 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:07:16,764 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:07:26,981 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:07:37,191 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:07:48,577 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 17:07:57,658 - ocr_utils - INFO - PP-OCRv6 Tiny completed 10 sampled frames via onnxruntime
+2026-09-05 17:07:57,801 - ocr_utils - INFO - 🎯 Global Subtitle Band detected (asr_match, support=59): Top=0.757, Bottom=0.794
+2026-09-05 17:07:57,801 - ocr_utils - INFO - Sync (Subtitle Band): '是上次没到的那个美味剥点胶带' -> Y: 0.761 - 0.789
+2026-09-05 17:07:57,801 - ocr_utils - INFO - Sync (Subtitle Band): '吃了两种款的薄荞剥点' -> Y: 0.761 - 0.790
+2026-09-05 17:07:57,802 - ocr_utils - INFO - Sync (Subtitle Band): '一个薄荞绿' -> Y: 0.761 - 0.790
+2026-09-05 17:07:57,802 - ocr_utils - INFO - Sync (Subtitle Band): '一个薄荞咔' -> Y: 0.758 - 0.792
+2026-09-05 17:07:57,802 - ocr_utils - INFO - Sync (Subtitle Band): '但是适用下来有个缺点' -> Y: 0.760 - 0.792
+2026-09-05 17:07:57,802 - ocr_utils - INFO - Sync (Subtitle Band): '就是撕起来声音很刺耳' -> Y: 0.759 - 0.792
+2026-09-05 17:07:57,802 - ocr_utils - INFO - Sync (Subtitle Band): '晚上用它打包能把隔壁家吵醒' -> Y: 0.757 - 0.793
+2026-09-05 17:07:58,711 - ai.translation - INFO - Translating subtitles...
+2026-09-05 17:08:01,744 - ai.translation - INFO - Đang gọi Google Gemini: gemini-3.8-flash...
+2026-09-05 17:08:11,634 - ai.translation - INFO - Gọi thành công Gemini gemini-3.8-flash!
+2026-09-05 17:08:11,638 - ai.translation - INFO - LLM translation successful.
+2026-09-05 17:09:06,456 - google_drive_uploader - WARNING - Chưa cấu hình xác thực Google Drive API (cần gdrive_service_account.json hoặc gdrive_oauth_client.json)
+2026-09-05 17:34:19,180 - __main__ - ERROR - Error processing video: File is too big
+Traceback (most recent call last):
+  File "C:\tool v1\backend\telegram_bot.py", line 910, in process_single_video
+    file = await context.bot.get_file(file_id)
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_extbot.py", line 1977, in get_file
+    return await super().get_file(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 4119, in get_file
+    result = await self._post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 712, in _post
+    return await self._do_post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_extbot.py", line 378, in _do_post
+    return await super()._do_post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 741, in _do_post
+    result = await request.post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_baserequest.py", line 198, in post
+    result = await self._request_wrapper(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_baserequest.py", line 375, in _request_wrapper
+    raise exception
+telegram.error.BadRequest: File is too big
+2026-09-05 17:34:21,776 - __main__ - ERROR - Error processing video: File is too big
+Traceback (most recent call last):
+  File "C:\tool v1\backend\telegram_bot.py", line 910, in process_single_video
+    file = await context.bot.get_file(file_id)
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_extbot.py", line 1977, in get_file
+    return await super().get_file(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 4119, in get_file
+    result = await self._post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 712, in _post
+    return await self._do_post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_extbot.py", line 378, in _do_post
+    return await super()._do_post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 741, in _do_post
+    result = await request.post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_baserequest.py", line 198, in post
+    result = await self._request_wrapper(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_baserequest.py", line 375, in _request_wrapper
+    raise exception
+telegram.error.BadRequest: File is too big
+2026-09-05 17:34:23,065 - __main__ - ERROR - Error processing video: File is too big
+Traceback (most recent call last):
+  File "C:\tool v1\backend\telegram_bot.py", line 910, in process_single_video
+    file = await context.bot.get_file(file_id)
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_extbot.py", line 1977, in get_file
+    return await super().get_file(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 4119, in get_file
+    result = await self._post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 712, in _post
+    return await self._do_post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\ext\_extbot.py", line 378, in _do_post
+    return await super()._do_post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\_bot.py", line 741, in _do_post
+    result = await request.post(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_baserequest.py", line 198, in post
+    result = await self._request_wrapper(
+  File "C:\tool v1\backend\venv\lib\site-packages\telegram\request\_baserequest.py", line 375, in _request_wrapper
+    raise exception
+telegram.error.BadRequest: File is too big
+2026-09-05 18:52:41,434 - social_downloader - INFO - Đang bóc tách Xiaohongshu: http://xhslink.com/o/3mSzK1mCdQm
+2026-09-05 18:52:43,735 - social_downloader - INFO - Đã giải mã thành công link XHS: http://xhslink.com/o/3mSzK1mCdQm -> https://www.xiaohongshu.com/discovery/item/68eb2212000000000402985e?app_platform
+2026-09-05 18:52:44,854 - social_downloader - INFO - Đã tìm thấy luồng video XHS GỐC SẠCH KHÔNG LOGO: http://sns-video-qn.xhscdn.com/pre_post/1040g2t031nha3ao7l8l05pgebt42pg46biokm0g
+2026-09-05 18:52:44,854 - social_downloader - INFO - Đang tải video XHS GỐC KHÔNG WATERMARK bằng đa luồng: http://sns-video-qn.xhscdn.com/pre_post/1040g2t031nha3ao7l8l05pgebt42pg46biokm0g
+2026-09-05 18:53:41,642 - social_downloader - INFO - Tải thành công video XHS GỐC KHÔNG WATERMARK: C:\tool v1\workspace\downloads\1788609160_be6ebec3_胶带底座的单手操作大法.mp4
+2026-09-05 18:54:27,042 - faster_whisper - INFO - Processing audio with duration 00:30.951
+2026-09-05 18:54:27,432 - faster_whisper - INFO - VAD filter removed 00:00.000 of audio
+2026-09-05 18:54:28,051 - faster_whisper - INFO - Detected language 'zh' with probability 0.99
+2026-09-05 18:54:51,762 - ocr_utils - INFO - Bắt đầu OCR toàn diện trên video C:\tool v1\workspace\downloads\1788609160_be6ebec3_胶带底座的单手操作大法.mp4
+2026-09-05 18:55:52,601 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 18:56:41,891 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 18:57:23,515 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 18:58:08,340 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 18:58:47,066 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 18:59:25,206 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:00:05,391 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:00:47,300 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:01:28,291 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:02:07,590 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:02:47,012 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:03:26,973 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:04:05,934 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:04:45,571 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:05:21,312 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:06:02,609 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:06:42,574 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:07:21,453 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:07:24,339 - ocr_utils - INFO - 🎯 Global Subtitle Band detected (asr_match, support=131): Top=0.825, Bottom=0.878
+2026-09-05 19:07:24,339 - ocr_utils - INFO - Sync (Subtitle Band): '得力的胶带底座我也是买了几次了' -> Y: 0.836 - 0.869
+2026-09-05 19:07:24,346 - ocr_utils - INFO - Sync (Subtitle Band): '但这个单手操作容易松动' -> Y: 0.836 - 0.869
+2026-09-05 19:07:24,346 - ocr_utils - INFO - Sync (Subtitle Band): '然后我就刷到了这个汽车防滑垫' -> Y: 0.835 - 0.868
+2026-09-05 19:07:24,348 - ocr_utils - INFO - Sync (Subtitle Band): '它是双面附膜的' -> Y: 0.835 - 0.869
+2026-09-05 19:07:24,348 - ocr_utils - INFO - Sync (Subtitle Band): '把它直接贴在桌子上' -> Y: 0.835 - 0.869
+2026-09-05 19:07:24,349 - ocr_utils - INFO - Sync (Subtitle Band): '再把胶带底座放上去' -> Y: 0.835 - 0.869
+2026-09-05 19:07:24,350 - ocr_utils - INFO - Sync (Subtitle Band): '用力晃也能稳住' -> Y: 0.834 - 0.871
+2026-09-05 19:07:24,351 - ocr_utils - INFO - Sync (Subtitle Band): '底部也不会有胶痕' -> Y: 0.833 - 0.871
+2026-09-05 19:07:24,351 - ocr_utils - INFO - Sync (Subtitle Band): '如果觉得底部多余的地方不好看' -> Y: 0.835 - 0.868
+2026-09-05 19:07:24,351 - ocr_utils - INFO - Sync (Subtitle Band): '直接贴合底部' -> Y: 0.833 - 0.869
+2026-09-05 19:07:24,352 - ocr_utils - INFO - Sync (Subtitle Band): '把多余的剪去' -> Y: 0.833 - 0.869
+2026-09-05 19:07:24,353 - ocr_utils - INFO - Sync (Subtitle Band): '最后这样居中粘上去就行了' -> Y: 0.834 - 0.870
+2026-09-05 19:07:24,354 - ocr_utils - INFO - Sync (Subtitle Band): '这样既没有多余的部分裸露出来' -> Y: 0.826 - 0.860
+2026-09-05 19:07:24,355 - ocr_utils - INFO - Sync (Subtitle Band): '还能丝滑单手操作,真的太牛了,' -> Y: 0.836 - 0.869
+2026-09-05 19:07:25,254 - ai.translation - INFO - Translating subtitles...
+2026-09-05 19:07:36,743 - ai.translation - INFO - Đang gọi Google Gemini: gemini-3.8-flash...
+2026-09-05 19:08:01,299 - ai.translation - WARNING - Lỗi gọi gemini-3.8-flash (HTTP 503)
+2026-09-05 19:08:01,299 - ai.translation - INFO - Đang gọi Google Gemini: gemini-3.7-flash...
+2026-09-05 19:08:10,952 - ai.translation - INFO - Gọi thành công Gemini gemini-3.7-flash!
+2026-09-05 19:08:10,962 - ai.translation - INFO - LLM translation successful.
+2026-09-05 19:11:43,257 - google_drive_uploader - WARNING - Chưa cấu hình xác thực Google Drive API (cần gdrive_service_account.json hoặc gdrive_oauth_client.json)
+2026-09-05 19:11:46,098 - social_downloader - INFO - Đang bóc tách Xiaohongshu: http://xhslink.com/o/6nH1r1Tr3UW
+2026-09-05 19:11:47,381 - social_downloader - INFO - Đã giải mã thành công link XHS: http://xhslink.com/o/6nH1r1Tr3UW -> https://www.xiaohongshu.com/discovery/item/67efc007000000000900c065?app_platform
+2026-09-05 19:11:48,842 - social_downloader - INFO - Đã tìm thấy luồng video XHS GỐC SẠCH KHÔNG LOGO: http://sns-video-qn.xhscdn.com/pre_post/1040g2t031frqb0s8g67g5of7ioc41hjjvniphho
+2026-09-05 19:11:48,842 - social_downloader - INFO - Đang tải video XHS GỐC KHÔNG WATERMARK bằng đa luồng: http://sns-video-qn.xhscdn.com/pre_post/1040g2t031frqb0s8g67g5of7ioc41hjjvniphho
+2026-09-05 19:12:15,276 - social_downloader - INFO - Tải thành công video XHS GỐC KHÔNG WATERMARK: C:\tool v1\workspace\downloads\1788610305_87ee40c8_你需要的mini立牌收纳展示.mp4
+2026-09-05 19:12:56,879 - faster_whisper - INFO - Processing audio with duration 00:30.549
+2026-09-05 19:12:57,259 - faster_whisper - INFO - VAD filter removed 00:01.349 of audio
+2026-09-05 19:12:57,788 - faster_whisper - INFO - Detected language 'zh' with probability 0.99
+2026-09-05 19:13:12,707 - ocr_utils - INFO - Bắt đầu OCR toàn diện trên video C:\tool v1\workspace\downloads\1788610305_87ee40c8_你需要的mini立牌收纳展示.mp4
+2026-09-05 19:13:43,244 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:14:17,883 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:14:39,056 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:15:25,985 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:15:55,228 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:16:36,583 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:17:03,703 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:17:44,587 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:18:15,230 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:18:56,060 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:19:25,439 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:19:58,844 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:20:28,976 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:20:48,422 - ocr_utils - INFO - PP-OCRv6 Tiny completed 7 sampled frames via onnxruntime
+2026-09-05 19:20:48,460 - ocr_utils - INFO - No reliable Chinese subtitle band detected (video without subtitles or only static packaging/logos).
+2026-09-05 19:20:49,353 - ai.translation - INFO - Translating subtitles...
+2026-09-05 19:20:58,334 - ai.translation - INFO - Đang gọi Google Gemini: gemini-3.8-flash...
+2026-09-05 19:21:07,179 - ai.translation - WARNING - Lỗi gọi gemini-3.8-flash (HTTP 503)
+2026-09-05 19:21:07,179 - ai.translation - INFO - Đang gọi Google Gemini: gemini-3.7-flash...
+2026-09-05 19:21:14,723 - ai.translation - INFO - Gọi thành công Gemini gemini-3.7-flash!
+2026-09-05 19:21:14,736 - ai.translation - INFO - LLM translation successful.
+2026-09-05 19:21:50,592 - google_drive_uploader - WARNING - Chưa cấu hình xác thực Google Drive API (cần gdrive_service_account.json hoặc gdrive_oauth_client.json)
+2026-09-05 19:21:52,182 - social_downloader - INFO - Đang bóc tách Xiaohongshu: http://xhslink.com/o/8cGEr7TEuHs
+2026-09-05 19:21:53,265 - social_downloader - INFO - Đã giải mã thành công link XHS: http://xhslink.com/o/8cGEr7TEuHs -> https://www.xiaohongshu.com/discovery/item/69ecbee300000000230146de?app_platform
+2026-09-05 19:21:54,362 - social_downloader - INFO - Đã tìm thấy luồng video XHS GỐC SẠCH KHÔNG LOGO: http://sns-video-qn.xhscdn.com/pre_post/1040g2t031vcs7fnc2a005n9lnalkldk90mshkcg
+2026-09-05 19:21:54,367 - social_downloader - INFO - Đang tải video XHS GỐC KHÔNG WATERMARK bằng đa luồng: http://sns-video-qn.xhscdn.com/pre_post/1040g2t031vcs7fnc2a005n9lnalkldk90mshkcg
+2026-09-05 19:22:16,227 - social_downloader - INFO - Tải thành công video XHS GỐC KHÔNG WATERMARK: C:\tool v1\workspace\downloads\1788610911_66ac1098_0r助力一整个muji转角书桌.mp4
+2026-09-05 19:22:47,660 - faster_whisper - INFO - Processing audio with duration 00:22.615
+2026-09-05 19:22:47,871 - faster_whisper - INFO - VAD filter removed 00:00.000 of audio
+2026-09-05 19:22:48,311 - faster_whisper - INFO - Detected language 'zh' with probability 0.97
+2026-09-05 19:23:08,232 - ocr_utils - INFO - Bắt đầu OCR toàn diện trên video C:\tool v1\workspace\downloads\1788610911_66ac1098_0r助力一整个muji转角书桌.mp4
+2026-09-05 19:23:37,427 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:24:00,173 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:24:20,377 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:24:41,126 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:25:03,397 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:25:28,455 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:25:53,453 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:26:15,025 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:26:39,392 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:27:05,651 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:27:32,407 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:28:02,964 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:28:30,152 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:28:59,647 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:29:27,309 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:29:32,804 - ocr_utils - INFO - PP-OCRv6 Tiny completed 4 sampled frames via onnxruntime
+2026-09-05 19:29:33,871 - ocr_utils - INFO - 🎯 Global Subtitle Band detected (asr_match, support=97): Top=0.812, Bottom=0.856
+2026-09-05 19:29:33,871 - ocr_utils - INFO - Sync (Subtitle Band): '连圆助力一整个MUJI转角书桌' -> Y: 0.815 - 0.854
+2026-09-05 19:29:33,871 - ocr_utils - INFO - Sync (Subtitle Band): '首先是两个文件盒' -> Y: 0.816 - 0.855
+2026-09-05 19:29:33,871 - ocr_utils - INFO - Sync (Subtitle Band): '再来一个笔盒' -> Y: 0.816 - 0.855
+2026-09-05 19:29:33,884 - ocr_utils - INFO - Sync (Subtitle Band): '一个迷你置物盒' -> Y: 0.816 - 0.855
+2026-09-05 19:29:33,884 - ocr_utils - INFO - Sync (Subtitle Band): '透明笔筒' -> Y: 0.816 - 0.855
+2026-09-05 19:29:33,884 - ocr_utils - INFO - Sync (Subtitle Band): '加留言卡' -> Y: 0.816 - 0.855
+2026-09-05 19:29:33,884 - ocr_utils - INFO - Sync (Subtitle Band): '一个圆笔筒' -> Y: 0.814 - 0.856
+2026-09-05 19:29:33,885 - ocr_utils - INFO - Sync (Subtitle Band): '接下来是第二层' -> Y: 0.817 - 0.854
+2026-09-05 19:29:33,886 - ocr_utils - INFO - Sync (Subtitle Band): '磨砂分隔盒' -> Y: 0.816 - 0.855
+2026-09-05 19:29:33,887 - ocr_utils - INFO - Sync (Subtitle Band): '小号分隔盒' -> Y: 0.815 - 0.856
+2026-09-05 19:29:33,887 - ocr_utils - INFO - Sync (Subtitle Band): '带来一个小笔盒' -> Y: 0.816 - 0.855
+2026-09-05 19:29:33,887 - ocr_utils - INFO - Sync (Subtitle Band): '两本相册' -> Y: 0.816 - 0.855
+2026-09-05 19:29:33,888 - ocr_utils - INFO - Sync (Subtitle Band): '透明容器盒' -> Y: 0.816 - 0.855
+2026-09-05 19:29:33,889 - ocr_utils - INFO - Sync (Subtitle Band): '一次性打包配齐' -> Y: 0.814 - 0.855
+2026-09-05 19:29:33,889 - ocr_utils - INFO - Sync (Subtitle Band): '圆你MUJI书桌MODE' -> Y: 0.814 - 0.855
+2026-09-05 19:29:34,876 - ai.translation - INFO - Translating subtitles...
+2026-09-05 19:29:37,805 - ai.translation - INFO - Đang gọi Google Gemini: gemini-3.8-flash...
+2026-09-05 19:29:51,431 - ai.translation - WARNING - Lỗi gọi gemini-3.8-flash (HTTP 503)
+2026-09-05 19:29:51,431 - ai.translation - INFO - Đang gọi Google Gemini: gemini-3.7-flash...
+2026-09-05 19:29:58,605 - ai.translation - INFO - Gọi thành công Gemini gemini-3.7-flash!
+2026-09-05 19:29:58,608 - ai.translation - INFO - LLM translation successful.
+2026-09-05 19:31:20,714 - google_drive_uploader - WARNING - Chưa cấu hình xác thực Google Drive API (cần gdrive_service_account.json hoặc gdrive_oauth_client.json)
+2026-09-05 19:31:22,263 - social_downloader - INFO - Đang bóc tách Xiaohongshu: http://xhslink.com/o/7yOuHAPwtSF
+2026-09-05 19:31:30,396 - social_downloader - INFO - Đã giải mã thành công link XHS: http://xhslink.com/o/7yOuHAPwtSF -> https://www.xiaohongshu.com/discovery/item/69e9e5b10000000020000803?app_platform
+2026-09-05 19:31:31,641 - social_downloader - INFO - Đã tìm thấy luồng video XHS GỐC SẠCH KHÔNG LOGO: http://sns-video-qn.xhscdn.com/pre_post/1040g2t031va34ru22il05njat3k094peqeaehd0
+2026-09-05 19:31:31,641 - social_downloader - INFO - Đang tải video XHS GỐC KHÔNG WATERMARK bằng đa luồng: http://sns-video-qn.xhscdn.com/pre_post/1040g2t031va34ru22il05njat3k094peqeaehd0
+2026-09-05 19:32:23,635 - social_downloader - INFO - Tải thành công video XHS GỐC KHÔNG WATERMARK: C:\tool v1\workspace\downloads\1788611481_5a3d9d4a_反骨收纳这样用.mp4
+2026-09-05 19:32:56,564 - faster_whisper - INFO - Processing audio with duration 00:26.910
+2026-09-05 19:32:56,826 - faster_whisper - INFO - VAD filter removed 00:00.000 of audio
+2026-09-05 19:32:57,257 - faster_whisper - INFO - Detected language 'zh' with probability 0.99
+2026-09-05 19:33:17,691 - ocr_utils - INFO - Bắt đầu OCR toàn diện trên video C:\tool v1\workspace\downloads\1788611481_5a3d9d4a_反骨收纳这样用.mp4
+2026-09-05 19:34:04,678 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:34:37,878 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:35:13,639 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:35:48,308 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:36:40,578 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:37:15,291 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:37:50,105 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:38:25,390 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:39:00,914 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:39:34,309 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:40:08,504 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:40:42,593 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:41:18,218 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:41:53,171 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:42:26,433 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:43:00,980 - ocr_utils - INFO - PP-OCRv6 Tiny completed 12 sampled frames via onnxruntime
+2026-09-05 19:43:13,156 - ocr_utils - INFO - PP-OCRv6 Tiny completed 9 sampled frames via onnxruntime
+2026-09-05 19:43:14,679 - ocr_utils - INFO - 🎯 Global Subtitle Band detected (asr_match, support=79): Top=0.850, Bottom=0.931
+2026-09-05 19:43:14,679 - ocr_utils - INFO - Sync (Subtitle Band): '不知道买过多少收纳盒' -> Y: 0.851 - 0.891
+2026-09-05 19:43:14,679 - ocr_utils - INFO - Sync (Subtitle Band): '还是被这个清透度吓了一大跳' -> Y: 0.852 - 0.889
+2026-09-05 19:43:14,679 - ocr_utils - INFO - Sync (Subtitle Band): '硬度很高' -> Y: 0.850 - 0.929
+2026-09-05 19:43:14,679 - ocr_utils - INFO - Sync (Subtitle Band): '不会随便变形' -> Y: 0.852 - 0.889
+2026-09-05 19:43:14,679 - ocr_utils - INFO - Sync (Subtitle Band): '也没有异味和毛边' -> Y: 0.852 - 0.889
+2026-09-05 19:43:14,694 - ocr_utils - INFO - Sync (Subtitle Band): '75的只能遗憾退场' -> Y: 0.851 - 0.889
+2026-09-05 19:43:14,695 - ocr_utils - INFO - Sync (Subtitle Band): '既然横着竖着都行' -> Y: 0.851 - 0.888
+2026-09-05 19:43:14,696 - ocr_utils - INFO - Sync (Subtitle Band): '放立牌简直神了' -> Y: 0.852 - 0.889
+2026-09-05 19:43:14,696 - ocr_utils - INFO - Sync (Subtitle Band): '一人一个单间' -> Y: 0.851 - 0.890
+2026-09-05 19:43:14,696 - ocr_utils - INFO - Sync (Subtitle Band): '太完美了' -> Y: 0.852 - 0.889
+2026-09-05 19:43:14,697 - ocr_utils - INFO - Sync (Subtitle Band): '其他收纳盒应该也能这样放立牌' -> Y: 0.852 - 0.889
+2026-09-05 19:43:14,698 - ocr_utils - INFO - Sync (Subtitle Band): '下次再见 拜拜' -> Y: 0.852 - 0.889
+2026-09-05 19:43:16,614 - ai.translation - INFO - Translating subtitles...
+2026-09-05 19:43:26,927 - ai.translation - INFO - Đang gọi Google Gemini: gemini-3.8-flash...
+2026-09-05 19:43:50,141 - ai.translation - WARNING - Lỗi gọi gemini-3.8-flash (HTTP 503)
+2026-09-05 19:43:50,145 - ai.translation - INFO - Đang gọi Google Gemini: gemini-3.7-flash...
+2026-09-05 19:43:57,726 - ai.translation - INFO - Gọi thành công Gemini gemini-3.7-flash!
+2026-09-05 19:43:57,726 - ai.translation - INFO - LLM translation successful.
+2026-09-05 19:46:52,420 - google_drive_uploader - WARNING - Chưa cấu hình xác thực Google Drive API (cần gdrive_service_account.json hoặc gdrive_oauth_client.json)
+2026-09-05 20:14:50,005 - telegram.ext.Application - INFO - Application started

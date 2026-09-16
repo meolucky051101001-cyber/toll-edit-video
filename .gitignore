@@ -1,55 +1,38 @@
-# Python virtual environments
-backend/venv/
-backend/venv_old/
-venv/
-env/
-ENV/
-*.env
-.env
 backend/.env
+.env
 
-# Python cache & compiled files
 __pycache__/
-*.py[cod]
-*$py.class
+*.pyc
+*.pyo
 
-# Temporary workspace & render files
-workspace/*
-!workspace/.gitkeep
-backend/workspace/
-backend/downloads/
-*.mp4
-*.mp3
-*.wav
-*.jpg
-*.png
-*.ass
-*.srt
-temp_burn*
-backend/temp_burn*
-debug_out.txt
-err_check_pipeline.txt
+node_modules/
 
-# Lock files
-*.lock
-bot_instance.lock
-backend/bot_instance.lock
+cache/
+temp/
+tmp/
+downloads/
+outputs/
+logs/
+runtime_logs/
 
-# Log files
-*.log
-backend/app.log
+*.part
+*.downloading
 
-# Large Installer files
-*.exe
+.venv/
+venv/
+model_venv/
+workspace/
 
-# Large RVC models / weights (Upload separately or via Git LFS if needed)
+models/
+weights/
+*.pt
 *.pth
-*.index
-*.onnx
+*.bin
+*.safetensors
 
-# System & OS metadata
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/
-
+master_plan.txt
+*.control_token
+workspace/.dashboard_control_token
+voice_cache/
+backend/voice_cache/
+*.tmp
