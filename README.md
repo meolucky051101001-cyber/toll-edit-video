@@ -1,4 +1,4 @@
-# 🎬 Hệ Sinh Thái AutoDub AI & Video Research Ecosystem
+﻿# 🎬 Hệ Sinh Thái AutoDub AI & Video Research Ecosystem
 
 Hệ sinh thái tự động hóa toàn diện quy trình **Nghiên cứu nội dung video xu hướng**, **Tải & Bóc tách không logo**, **Dịch thuật phụ đề bằng AI**, **Lồng tiếng Voice Clone**, **Xóa / Che phụ đề gốc thông minh**, **Biên tập chống re-up** và **Giám sát kết xuất GPU thời gian thực**.
 
@@ -15,8 +15,8 @@ flowchart TD
     end
 
     subgraph S2["2. Bóc Tách Âm Thanh & Nhận Dạng (ASR)"]
-        D -->|Demucs htdemucs_ft| E[Tách Vocal & Nhạc Nền]
-        E -->|Faster-Whisper Large-v3| F[Timestamp Phụ Đề Gốc]
+        D -->|Demucs htdemucs_ft / BS-RoFormer| E[Tách Vocal & Nhạc Nền]
+        E -->|Faster-Whisper Large-v3 / Qwen3-ASR| F[Timestamp Phụ Đề Gốc]
     end
 
     subgraph S3["3. Dịch Thuật Đa Tầng & Lồng Tiếng AI"]
@@ -86,21 +86,25 @@ cd "C:\tool v1"
 
 Phiên bản nâng cấp chuyên sâu giải quyết triệt để các bài toán che mờ phụ đề video ngắn phức tạp:
 
+- **Tách Vocal sạch**: **BS-RoFormer**, fallback Demucs `htdemucs_ft`.
+- **Nhận diện giọng nói**: **Qwen3-ASR 0.6B + ForcedAligner 0.6B**, fallback Whisper Large-v3.
 - **Multi-zone Dynamic Cover Timeline**: Tự động phát hiện và theo dõi phụ đề thay đổi theo từng khung hình (`build_expected_cover_timeline`). Thuật toán gộp cụm thông minh (*cluster-based interval union*) loại bỏ hoàn toàn hiện tượng nhấp nháy (flickering), không bị đứt đuôi phụ đề hay che nhầm vào chữ nền/bao bì sản phẩm.
 - **Bộ Kiểm Thử Chất Lượng Độc Lập (Cover QC Suite)**: 16 bài kiểm thử nghiêm ngặt bao gồm các tình huống: Onset trễ, Early exit, Hold gap, Đổi vị trí bất ngờ, Video thời lượng dài (>30 phút).
 - **Dynamic Video Sampling**: Điều chỉnh tần số lấy mẫu khung hình thích ứng (adaptive fps) theo tốc độ nói và mật độ chữ xuất hiện, giảm 65% thời gian chạy OCR.
 - **Quản lý Canvas & Tỷ lệ khung hình**: Hỗ trợ chuẩn hóa canvas tự động (`canvas_settings.py`), giữ nguyên tỷ lệ khung hình gốc khi chèn dải che mờ thẩm mỹ.
+- **Giới hạn tài nguyên theo batch**: Dịch/OCR/TTS/RVC có batch checkpoint, mixer tạo voice bus phân tầng để không vượt giới hạn dòng lệnh Windows, streaming segment an toàn.
+- **Tài liệu bàn giao & Rollout**: Xem phạm vi bàn giao tại [`VERSIONS.md`](VERSIONS.md), feature flags và rollback tại [`docs/pipeline_v2_rollout.md`](docs/pipeline_v2_rollout.md).
 
 #### 💡 Hướng dẫn chạy nhanh Tool V2:
 ```powershell
-# Chuyển sang nhánh Tool V2
+# Di chuyển vào thư mục Tool V2
 cd "C:\tool v2"
 git checkout tool-v2
 
-# Khởi động Dashboard giám sát V2
-python backend/dashboard_monitor.py
+# Khởi chạy Telegram Bot & Dashboard V2
+.\start_bot.bat
 
-# Truy cập giao diện: http://127.0.0.1:8089
+# Truy cập Dashboard: http://127.0.0.1:8089
 ```
 
 ---

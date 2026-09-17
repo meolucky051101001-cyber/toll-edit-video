@@ -6,15 +6,161 @@ import requests
 import subprocess
 import sys
 import logging
+from urllib.parse import urlsplit, urlunsplit
+
+try:
+    from .pipeline_v2.atomic_io import atomic_replace_file
+    from .douyin_direct import (
+        DouyinDirectError,
+        configured_cookie_file,
+        resolve_douyin_video,
+    )
+    from .pipeline_v2.download_validation import (
+        DownloadValidationError,
+        probe_downloaded_video,
+        require_complete_response,
+        require_partial_content,
+    )
+except ImportError:  # Running telegram_bot.py directly from backend/ on Windows.
+    from pipeline_v2.atomic_io import atomic_replace_file
+    from douyin_direct import (
+        DouyinDirectError,
+        configured_cookie_file,
+        resolve_douyin_video,
+    )
+    from pipeline_v2.download_validation import (
+        DownloadValidationError,
+        probe_downloaded_video,
+        require_complete_response,
+        require_partial_content,
+    )
 
 logger = logging.getLogger(__name__)
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 
+
+def sanitize_url(url: str) -> str:
+    """Redact sensitive query parameters like xsec_token, token, secret, api_key from URLs for safe logging."""
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+        parsed = urlparse(url)
+        if not parsed.query:
+            return url
+        sensitive_keys = {
+            "xsec_token", "token", "api_key", "secret", "auth",
+            "signature", "key", "shareredid", "share_id", "password",
+            "access_token", "sign", "sig", "pass", "ticket", "session",
+            "credential", "hash",
+        }
+        qsl = parse_qsl(parsed.query, keep_blank_values=True)
+        sanitized_qsl = [
+            (k, "[REDACTED]" if k.lower() in sensitive_keys else v)
+            for k, v in qsl
+        ]
+        return urlunparse(parsed._replace(query=urlencode(sanitized_qsl)))
+    except Exception:
+        return re.sub(r"(xsec_token|token|api_key|secret|shareRedId|share_id|sign|sig|pass|ticket|session)=[^&]+", r"\1=[REDACTED]", str(url), flags=re.IGNORECASE)
+
+
+_URL_REGEX = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
+
+
+def sanitize_text(text: str) -> str:
+    """Scrub sensitive query parameters from any URLs found within a string."""
+    if not text:
+        return ""
+    text_str = str(text)
+
+    def _replace_match(m: re.Match) -> str:
+        raw_url = m.group(0)
+        return sanitize_url(raw_url)
+
+    return _URL_REGEX.sub(_replace_match, text_str)
+
+
+def sanitize_exception(exc: BaseException, include_traceback: bool = False) -> str:
+    """Format an exception with all embedded URLs sanitized of sensitive query params."""
+    if exc is None:
+        return ""
+    if include_traceback:
+        import traceback
+        tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        return sanitize_text("".join(tb_lines))
+    return sanitize_text(str(exc))
+
+
+class SensitiveUrlFilter(logging.Filter):
+    """Logging filter that scrubs sensitive query parameters from all log messages, args, and tracebacks."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if isinstance(record.msg, str):
+                record.msg = sanitize_text(record.msg)
+            elif record.msg is not None:
+                record.msg = sanitize_text(str(record.msg))
+
+            if record.args:
+                if isinstance(record.args, dict):
+                    record.args = {
+                        k: (sanitize_text(v) if isinstance(v, str) else v)
+                        for k, v in record.args.items()
+                    }
+                elif isinstance(record.args, (tuple, list)):
+                    record.args = tuple(
+                        sanitize_text(a) if isinstance(a, str) else (
+                            sanitize_exception(a) if isinstance(a, BaseException) else a
+                        )
+                        for a in record.args
+                    )
+
+            if record.exc_info:
+                import traceback
+                raw_tb = "".join(traceback.format_exception(*record.exc_info))
+                record.exc_text = sanitize_text(raw_tb)
+                record.exc_info = None
+
+            if record.exc_text:
+                record.exc_text = sanitize_text(record.exc_text)
+        except Exception:
+            pass
+        return True
+
+
+logger.addFilter(SensitiveUrlFilter())
+
+
 USER_AGENTS = {
     "mobile": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
     "desktop": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 }
+
+# Do not shorten this list: the same originVideoKey is not available from every
+# XHS CDN/ISP combination. Ordering keeps the long-standing clean-origin patch.
+XHS_ORIGIN_CDN_DOMAINS = (
+    'http://sns-video-qn.xhscdn.com',
+    'https://sns-video-qn.xhscdn.com',
+    'http://sns-video-bd.xhscdn.com',
+    'https://sns-video-bd.xhscdn.com',
+    'http://sns-video-qc.xhscdn.com',
+    'https://sns-video-qc.xhscdn.com',
+    'http://sns-video-hw.xhscdn.com',
+    'https://sns-video-hw.xhscdn.com',
+    'http://sns-video-al.xhscdn.com',
+    'https://sns-video-al.xhscdn.com',
+    'http://sns-video-ws.xhscdn.com',
+    'https://sns-video-ws.xhscdn.com',
+    'http://sns-video-ct.xhscdn.com',
+    'https://sns-video-ct.xhscdn.com',
+    'http://sns-video-tx.xhscdn.com',
+    'https://sns-video-tx.xhscdn.com',
+    'http://sns-video-v27.xhscdn.com',
+    'http://sns-video-v26.xhscdn.com',
+    'http://sns-video-v25.xhscdn.com',
+    'http://sns-video-v24.xhscdn.com',
+)
 
 def clean_filename(title: str, max_len: int = 40) -> str:
     """Lọc bỏ ký tự đặc biệt để đặt tên file an toàn trên Windows"""
@@ -26,22 +172,37 @@ def clean_filename(title: str, max_len: int = 40) -> str:
     return cleaned[:max_len] or "social_video"
 
 def download_file_stream(url: str, dest_path: str, headers: dict = None, timeout: tuple = (10, 30)) -> bool:
-    """Tải file theo luồng (chunk) để tiết kiệm RAM và tránh đơ máy"""
+    """Stream to a sibling temp file, ffprobe it, then publish atomically."""
+    temporary_path = f"{dest_path}.{uuid.uuid4().hex}.downloading"
     try:
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
         req_headers = headers or {"User-Agent": USER_AGENTS["desktop"]}
         with requests.get(url, headers=req_headers, stream=True, timeout=timeout) as response:
-            response.raise_for_status()
-            with open(dest_path, "wb") as f:
+            require_complete_response(response.status_code, response.headers)
+            with open(temporary_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=512 * 1024):  # 512KB per chunk
                     if chunk:
                         f.write(chunk)
-        return os.path.exists(dest_path) and os.path.getsize(dest_path) > 10000
+                f.flush()
+                os.fsync(f.fileno())
+        actual_size = os.path.getsize(temporary_path)
+        expected_size = response.headers.get("Content-Length")
+        if expected_size is not None and actual_size != int(expected_size):
+            raise DownloadValidationError(
+                "Downloaded byte size {} differs from Content-Length {}".format(
+                    actual_size, expected_size
+                )
+            )
+        if actual_size <= 10000:
+            raise DownloadValidationError("Downloaded video is unexpectedly small")
+        probe_downloaded_video(temporary_path)
+        atomic_replace_file(temporary_path, dest_path)
+        return True
     except Exception as e:
-        logger.error(f"Lỗi tải stream từ {url[:60]}: {e}")
-        if os.path.exists(dest_path):
-            try: os.remove(dest_path)
-            except: pass
+        logger.error(f"Lỗi tải stream từ {sanitize_url(url)}: {sanitize_exception(e)}")
+        if os.path.exists(temporary_path):
+            try: os.remove(temporary_path)
+            except OSError: pass
         return False
 
 def extract_douyin_video_id(url: str) -> str:
@@ -75,7 +236,7 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
     """
     Tải video Douyin / TikTok không logo (Full HD) qua API giải mã trực tiếp.
     """
-    logger.info(f"Đang giải mã Douyin/TikTok không logo: {url}")
+    logger.info(f"Đang giải mã Douyin/TikTok không logo: {sanitize_url(url)}")
     
     # Chuẩn hóa link nếu là link tìm kiếm trên web có modal_id
     video_id = extract_douyin_video_id(url)
@@ -84,7 +245,30 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
         target_urls.insert(0, f"https://www.douyin.com/video/{video_id}")
         target_urls.insert(1, f"https://www.iesdouyin.com/share/video/{video_id}/")
 
-    # Chiến lược 1: TikWM Multi-platform API
+    resolver_error = ""
+
+    # Chiến lược 1 (chỉ Douyin): API web chính chủ + X-Bogus, dựa trên
+    # jiji262/douyin-downloader. Ưu tiên luồng CDN sạch có bitrate cao nhất.
+    if video_id and any(host in url.lower() for host in ("douyin.com", "iesdouyin.com")):
+        try:
+            info = resolve_douyin_video(video_id)
+            safe_title = clean_filename(info.title)
+            target_path = os.path.join(output_dir, f"{prefix}_{safe_title}.mp4")
+            for media_url in info.media_urls:
+                if download_file_stream(
+                    media_url,
+                    target_path,
+                    headers=dict(info.download_headers),
+                    timeout=(10, 90),
+                ):
+                    logger.info("Tải thành công Douyin trực tiếp: %s", target_path)
+                    return True, target_path, info.title, ""
+            resolver_error = "Douyin đã trả metadata nhưng các CDN video đều thất bại"
+        except DouyinDirectError as exc:
+            resolver_error = str(exc)
+            logger.warning("Douyin direct resolver không thành công: %s", resolver_error)
+
+    # Chiến lược 2: TikWM Multi-platform API (không cần cookie).
     for t_url in target_urls:
         try:
             api_url = "https://www.tikwm.com/api/"
@@ -106,9 +290,10 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
                             logger.info(f"Tải thành công Douyin/TikTok không logo: {target_path}")
                             return True, target_path, title, ""
         except Exception as e:
-            logger.warning(f"TikWM thử link {t_url} lỗi: {e}")
+            logger.warning(f"TikWM thử link {sanitize_url(t_url)} lỗi: {e}")
 
-    return False, "", "", "Không thể bóc tách link Douyin qua API"
+    error = resolver_error or "Không thể bóc tách link Douyin/TikTok qua API"
+    return False, "", "", error
 
 import urllib.request
 import concurrent.futures
@@ -118,8 +303,10 @@ def download_parallel_range(url: str, dest_path: str, workers: int = 6, max_retr
     Tải file bằng đa luồng HTTP Range song song với cơ chế tự động resume khi rớt mạng.
     Tăng tốc độ tải file từ máy chủ CDN quốc tế lên gấp 5-10 lần và đảm bảo không bị timeout.
     """
+    part_paths = []
+    assembled_path = None
     try:
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
         req = urllib.request.Request(url, method='HEAD')
         req.add_header('User-Agent', USER_AGENTS["desktop"])
         with urllib.request.urlopen(req, timeout=8) as resp:
@@ -128,8 +315,11 @@ def download_parallel_range(url: str, dest_path: str, workers: int = 6, max_retr
         if total_size <= 0:
             return False
 
+        workers = max(1, min(int(workers), total_size))
         chunk_size = total_size // workers
-        tmp_base = dest_path + "_tmp"
+        # Each URL attempt gets isolated parts. Reusing leftovers from another
+        # CDN candidate can produce a byte-perfect size with mixed content.
+        tmp_base = "{}.{}.range".format(dest_path, uuid.uuid4().hex)
 
         def _download_part(start, end, part_num):
             part_name = f"{tmp_base}_{part_num}.part"
@@ -152,6 +342,13 @@ def download_parallel_range(url: str, dest_path: str, workers: int = 6, max_retr
                         p_req.add_header('User-Agent', USER_AGENTS["desktop"])
                         p_req.add_header('Range', f'bytes={current_start}-{end}')
                         with urllib.request.urlopen(p_req, timeout=12) as p_resp:
+                            require_partial_content(
+                                getattr(p_resp, "status", p_resp.getcode()),
+                                p_resp.headers,
+                                current_start,
+                                end,
+                                total_size,
+                            )
                             with open(part_name, 'ab') as f:
                                 while True:
                                     if getattr(shared_state, 'stop_requested', False):
@@ -170,13 +367,18 @@ def download_parallel_range(url: str, dest_path: str, workers: int = 6, max_retr
                 if current_start == prev_start:
                     # No progress made despite success (EOF reached early)
                     break
-            return part_name, True
+            expected_part_size = end - start + 1
+            return part_name, (
+                current_start == end + 1
+                and os.path.getsize(part_name) == expected_part_size
+            )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             futures = []
             for i in range(workers):
                 start = i * chunk_size
                 end = total_size - 1 if i == workers - 1 else (start + chunk_size - 1)
+                part_paths.append(f"{tmp_base}_{i}.part")
                 futures.append(executor.submit(_download_part, start, end, i))
             results = [f.result() for f in futures]
 
@@ -184,17 +386,33 @@ def download_parallel_range(url: str, dest_path: str, workers: int = 6, max_retr
             if not ok or not os.path.exists(p):
                 return False
 
-        with open(dest_path, 'wb') as out_f:
+        assembled_path = f"{dest_path}.{uuid.uuid4().hex}.assembling"
+        with open(assembled_path, 'wb') as out_f:
             for p, _ in results:
                 with open(p, 'rb') as in_f:
-                    out_f.write(in_f.read())
-                try: os.remove(p)
-                except: pass
+                    while True:
+                        chunk = in_f.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        out_f.write(chunk)
+            out_f.flush()
+            os.fsync(out_f.fileno())
 
-        return os.path.exists(dest_path) and os.path.getsize(dest_path) > 10000
+        if os.path.getsize(assembled_path) != total_size:
+            raise DownloadValidationError("Merged Range download has the wrong byte size")
+        probe_downloaded_video(assembled_path)
+        atomic_replace_file(assembled_path, dest_path)
+        return True
     except Exception as e:
-        logger.warning(f"Parallel Range download error for {url[:60]}: {e}")
+        logger.warning(f"Parallel Range download error for {sanitize_url(url)}: {e}")
         return False
+    finally:
+        for temporary in [*part_paths, assembled_path]:
+            if temporary and os.path.exists(temporary):
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
 
 # =========================================================================
 # 2. BÓC TÁCH XIAOHONGSHU (REDNOTE)
@@ -203,7 +421,7 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
     """
     Tải video Xiaohongshu (Tiểu Hồng Thư) không logo chất lượng cao
     """
-    logger.info(f"Đang bóc tách Xiaohongshu: {url}")
+    logger.info(f"Đang bóc tách Xiaohongshu: {sanitize_url(url)}")
     os.makedirs(output_dir, exist_ok=True)
     try:
         import json
@@ -231,11 +449,23 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
 
         if res is None:
             return False, "", "", "Không thể kết nối đến máy chủ Tiểu Hồng Thư (Hết thời gian chờ / Timeout mạng)"
+        if res.status_code != 200:
+            return (
+                False,
+                "",
+                "",
+                "Máy chủ Tiểu Hồng Thư trả về HTTP {} sau 2 lần thử".format(
+                    res.status_code
+                ),
+            )
 
         real_url = res.url
         
         # 1. Kiểm tra nếu link đã bị xóa / hết hạn (XHS tự động chuyển hướng về trang chủ hoặc /explore)
-        clean_real = real_url.rstrip('/').lower()
+        parsed_real = urlsplit(real_url)
+        clean_real = urlunsplit(
+            (parsed_real.scheme, parsed_real.netloc, parsed_real.path, "", "")
+        ).rstrip('/').lower()
         if clean_real in ["https://www.xiaohongshu.com", "http://www.xiaohongshu.com", "https://xiaohongshu.com", 
                           "https://www.xiaohongshu.com/explore", "http://www.xiaohongshu.com/explore",
                           "https://www.xiaohongshu.com/discovery", "http://www.xiaohongshu.com/discovery"]:
@@ -263,35 +493,13 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
                     # ƯU TIÊN SỐ 1: Bóc tách originVideoKey (Video GỐC SẠCH 100% KHÔNG WATERMARK/LOGO)
                     origin_key = video.get("consumer", {}).get("originVideoKey")
                     if origin_key:
-                        origin_domains = [
-                            'http://sns-video-qn.xhscdn.com',
-                            'https://sns-video-qn.xhscdn.com',
-                            'http://sns-video-bd.xhscdn.com',
-                            'https://sns-video-bd.xhscdn.com',
-                            'http://sns-video-qc.xhscdn.com',
-                            'https://sns-video-qc.xhscdn.com',
-                            'http://sns-video-hw.xhscdn.com',
-                            'https://sns-video-hw.xhscdn.com',
-                            'http://sns-video-al.xhscdn.com',
-                            'https://sns-video-al.xhscdn.com',
-                            'http://sns-video-ws.xhscdn.com',
-                            'https://sns-video-ws.xhscdn.com',
-                            'http://sns-video-ct.xhscdn.com',
-                            'https://sns-video-ct.xhscdn.com',
-                            'http://sns-video-tx.xhscdn.com',
-                            'https://sns-video-tx.xhscdn.com',
-                            'http://sns-video-v27.xhscdn.com',
-                            'http://sns-video-v26.xhscdn.com',
-                            'http://sns-video-v25.xhscdn.com',
-                            'http://sns-video-v24.xhscdn.com',
-                        ]
-                        for dom in origin_domains:
+                        for dom in XHS_ORIGIN_CDN_DOMAINS:
                             test_origin_url = f"{dom}/{origin_key}"
                             try:
                                 h_res = requests.head(test_origin_url, headers=headers, timeout=4)
                                 if h_res.status_code == 200 and int(h_res.headers.get("Content-Length", 0)) > 10000:
                                     origin_video_url = test_origin_url
-                                    logger.info(f"Đã tìm thấy luồng video XHS GỐC SẠCH KHÔNG LOGO: {test_origin_url}")
+                                    logger.info(f"Đã tìm thấy luồng video XHS GỐC SẠCH KHÔNG LOGO: {sanitize_url(test_origin_url)}")
                                     break
                             except:
                                 pass
@@ -317,7 +525,7 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
 
         # 3. TẢI VIDEO GỐC SẠCH KHÔNG LOGO BẰNG RANGE MULTI-THREAD
         if origin_video_url:
-            logger.info(f"Đang tải video XHS GỐC KHÔNG WATERMARK bằng đa luồng: {origin_video_url}")
+            logger.info(f"Đang tải video XHS GỐC KHÔNG WATERMARK bằng đa luồng: {sanitize_url(origin_video_url)}")
             if download_parallel_range(origin_video_url, target_path, workers=6):
                 logger.info(f"Tải thành công video XHS GỐC KHÔNG WATERMARK: {target_path}")
                 return True, target_path, title, ""
@@ -328,7 +536,7 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
 
         # 4. Dự phòng: Quét các luồng stream backup
         for v_url in backup_stream_urls:
-            logger.info(f"Thử tải luồng backup stream: {v_url[:80]}...")
+            logger.info(f"Thử tải luồng backup stream: {sanitize_url(v_url)}")
             if download_file_stream(v_url, target_path, headers=headers, timeout=(10, 40)):
                 logger.info(f"Tải thành công video XHS (stream): {target_path}")
                 return True, target_path, title, ""
@@ -370,7 +578,7 @@ def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
         if v_id:
             clean_target_url = f"https://www.douyin.com/video/{v_id}"
 
-    logger.info(f"Sử dụng Universal Downloader cho: {clean_target_url}")
+    logger.info(f"Sử dụng Universal Downloader cho: {sanitize_url(clean_target_url)}")
     safe_output_template = os.path.join(output_dir, f"{prefix}_%(title).30s.%(ext)s")
     
     cmd_download = [
@@ -384,21 +592,33 @@ def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
         "--retries", "3",
         "--user-agent", USER_AGENTS["desktop"],
         "--referer", "https://www.douyin.com/",
-        clean_target_url
     ]
+    if "douyin.com" in lower_url:
+        cookie_file = configured_cookie_file()
+        if cookie_file:
+            cmd_download.extend(["--cookies", cookie_file])
+    cmd_download.append(clean_target_url)
     
     try:
+        configured_timeout = float(
+            os.getenv("SOCIAL_DOWNLOAD_TIMEOUT_SECONDS", "0")
+        )
         proc = subprocess.run(
             cmd_download,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=configured_timeout if configured_timeout > 0 else None,
             creationflags=CREATE_NO_WINDOW
         )
         
         downloaded = [f for f in os.listdir(output_dir) if f.startswith(prefix) and f.endswith(".mp4")]
         if downloaded:
             final_path = os.path.join(output_dir, downloaded[0])
+            try:
+                probe_downloaded_video(final_path)
+            except DownloadValidationError as probe_error:
+                logger.warning("yt-dlp output failed ffprobe validation: %s", probe_error)
+                return False, "", "", str(probe_error)
             return True, final_path, downloaded[0], ""
         else:
             return False, "", "", proc.stderr[:400] if proc.stderr else "Không tìm thấy file sau khi tải"

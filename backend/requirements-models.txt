@@ -1,0 +1,5 @@
+# Isolated high-quality model runtime for Pipeline v2.3.
+# Install into backend/model_venv, never into backend/venv.
+qwen-asr==0.0.6
+audio-separator[gpu]==0.47.0
+paddleocr==3.7.0

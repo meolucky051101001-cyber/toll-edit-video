@@ -1,0 +1,15 @@
+{
+  "timestamp": "20260916-065932",
+  "release_tag": "v2-2.12.0-code-handoff",
+  "file_count": 135,
+  "manifest_sha256_file": "RELEASE_MANIFEST.sha256",
+  "backup_dir": "backups\\v2-release-20260916-065932",
+  "test_suite_status": "102/102 PASS",
+  "test_evidence": {
+    "status": "102/102 PASS",
+    "count": 102,
+    "log_path": "C:\\tool v2\\workspace\\repair-20260915-final\\code-handoff-tests-02.log",
+    "log_sha256": "c0aba68727282d95bec401aae6c31b7c6b94656f0f5663bd79fccc1425c1bc06"
+  },
+  "security_hygiene": "PASS"
+}

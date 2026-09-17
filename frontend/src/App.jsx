@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react'
 import './App.css'
 
-// Using window.require for Electron IPC since contextIsolation is false
-const ipcRenderer = window.require ? window.require('electron').ipcRenderer : null;
+// Electron exposes only the two file-picker operations through a sandboxed
+// preload bridge. Browser preview mode intentionally has no desktop access.
+const desktopBridge = window.autodub || null;
 
 function App() {
   const [selectedFolder, setSelectedFolder] = useState(null);
@@ -18,6 +19,8 @@ function App() {
   const [activeLeftTab, setActiveLeftTab] = useState('media');
   const [subtitles, setSubtitles] = useState([]);
   const [processLog, setProcessLog] = useState('');
+  const [voiceSource, setVoiceSource] = useState('edge');
+  const [voiceConfig, setVoiceConfig] = useState('');
   
   // Log viewer state
   const [showLogs, setShowLogs] = useState(false);
@@ -51,8 +54,8 @@ function App() {
   };
 
   const handleSelectFolder = async () => {
-    if (ipcRenderer) {
-      const result = await ipcRenderer.invoke('dialog:openDirectory');
+    if (desktopBridge) {
+      const result = await desktopBridge.openDirectory();
       if (result && result.folderPath) {
         setSelectedFolder(result.folderPath);
         setVideos(result.videoFiles);
@@ -66,8 +69,8 @@ function App() {
   };
 
   const handleSelectFiles = async () => {
-    if (ipcRenderer) {
-      const result = await ipcRenderer.invoke('dialog:openFiles');
+    if (desktopBridge) {
+      const result = await desktopBridge.openFiles();
       if (result && result.videoFiles.length > 0) {
         setSelectedFolder(result.folderPath);
         setVideos(prev => [...prev, ...result.videoFiles]);
@@ -127,8 +130,14 @@ function App() {
       const formData = new FormData();
       formData.append('video_path', filePath);
       formData.append('target_lang', 'vi');
-      formData.append('voice_source', 'edge');
-      formData.append('voice_param', 'vi-VN-HoaiMyNeural');
+      formData.append('voice_source', voiceSource);
+      formData.append(
+        'voice_param',
+        voiceSource === 'rvc'
+          ? voiceConfig.trim()
+          : 'vi-VN-HoaiMyNeural'
+      );
+      formData.append('api_key', voiceSource === 'fpt' ? voiceConfig.trim() : '');
 
       const res = await fetch('http://127.0.0.1:8000/api/process_video', {
         method: 'POST',
@@ -184,8 +193,14 @@ function App() {
       const formData = new FormData();
       formData.append('url', urlInput.trim());
       formData.append('target_lang', 'vi');
-      formData.append('voice_source', 'edge');
-      formData.append('voice_param', 'vi-VN-HoaiMyNeural');
+      formData.append('voice_source', voiceSource);
+      formData.append(
+        'voice_param',
+        voiceSource === 'rvc'
+          ? voiceConfig.trim()
+          : 'vi-VN-HoaiMyNeural'
+      );
+      formData.append('api_key', voiceSource === 'fpt' ? voiceConfig.trim() : '');
 
       const res = await fetch('http://127.0.0.1:8000/api/process_url', {
         method: 'POST',
@@ -513,16 +528,36 @@ function App() {
                   <div className="prop-section-title">🎤 Giọng lồng tiếng</div>
                   <div style={{marginBottom: '8px'}}>
                     <span className="prop-label" style={{width: 'auto', marginBottom: '4px', display: 'block'}}>Nguồn giọng</span>
-                    <select className="prop-select" defaultValue="edge">
+                    <select
+                      className="prop-select"
+                      value={voiceSource}
+                      onChange={event => {
+                        setVoiceSource(event.target.value);
+                        setVoiceConfig('');
+                      }}
+                    >
                       <option value="edge">Edge TTS (Miễn phí)</option>
                       <option value="fpt">FPT AI (API Key)</option>
-                      <option value="elevenlabs">ElevenLabs (API Key)</option>
                       <option value="rvc">RVC Model (Offline)</option>
                     </select>
                   </div>
                   <div>
-                    <span className="prop-label" style={{width: 'auto', marginBottom: '4px', display: 'block'}}>API Key / Model</span>
-                    <input className="prop-input-full" placeholder="Nhập API Key hoặc đường dẫn model..." />
+                    <span className="prop-label" style={{width: 'auto', marginBottom: '4px', display: 'block'}}>
+                      {voiceSource === 'rvc' ? 'Đường dẫn model .pth' : 'FPT API Key'}
+                    </span>
+                    <input
+                      className="prop-input-full"
+                      value={voiceConfig}
+                      disabled={voiceSource === 'edge'}
+                      onChange={event => setVoiceConfig(event.target.value)}
+                      placeholder={
+                        voiceSource === 'rvc'
+                          ? 'D:\\models\\voice.pth (để trống để tự tìm model)'
+                          : voiceSource === 'fpt'
+                            ? 'Nhập FPT API Key...'
+                            : 'Edge TTS không cần cấu hình'
+                      }
+                    />
                   </div>
                 </div>
 
