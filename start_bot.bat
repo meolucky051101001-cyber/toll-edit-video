@@ -14,7 +14,7 @@ if not exist "%PYTHON_EXE%" (
 
 :: Fail early with a readable dependency/config report.
 cd /d "%PROJECT_DIR%backend"
-"%PYTHON_EXE%" -m pipeline_v2.preflight --project-root "%PROJECT_DIR%" --interface all
+"%PYTHON_EXE%" -m pipeline_v2.preflight --project-root "%PROJECT_DIR:~0,-1%" --interface telegram
 if errorlevel 1 (
   echo [ERROR] Preflight that bai. Sua cac muc error o tren roi chay lai.
   pause
