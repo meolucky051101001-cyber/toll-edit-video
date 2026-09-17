@@ -1,0 +1,4183 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Studio Quy Trình - Giám Sát Biên Tập & Chống Re-up Video</title>
+  <style>
+    :root {
+      --bg-darkest: #090d14;
+      --bg-dark: #0f1520;
+      --bg-panel: #151d2a;
+      --bg-card: #1a2434;
+      --bg-card-hover: #222f44;
+      --border: #263449;
+      --border-light: #374761;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --accent: #06b6d4;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    body { background-color: var(--bg-darkest); color: var(--text); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+    /* TOPBAR */
+    header {
+      background: #111824;
+      border-bottom: 1px solid var(--border);
+      height: 56px;
+      padding: 0 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-shrink: 0;
+      z-index: 100;
+      gap: 12px;
+    }
+    .top-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
+    .logo-badge {
+      background: linear-gradient(135deg, #3b82f6, #06b6d4);
+      color: #fff;
+      padding: 5px 10px;
+      border-radius: 8px;
+      font-weight: 800;
+      font-size: 12px;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .video-title-bar {
+      font-size: 13px;
+      font-weight: 600;
+      color: #e2e8f0;
+      max-width: 220px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex-shrink: 1;
+    }
+
+    /* VERSION TOGGLE GROUP (FEATURE 1) */
+    .version-toggle-group {
+      display: inline-flex;
+      align-items: center;
+      background: #0b111a;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 2px;
+      gap: 2px;
+      flex-shrink: 0;
+    }
+    .version-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 5px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.15s;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+    }
+    .version-btn:hover:not(:disabled) {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.06);
+    }
+    .version-btn.active-final {
+      background: linear-gradient(135deg, #059669, #10b981);
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(16, 185, 129, 0.35);
+    }
+    .version-btn.active-raw {
+      background: linear-gradient(135deg, #2563eb, #3b82f6);
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(59, 130, 246, 0.35);
+    }
+    .version-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .ratio-selector-group {
+      display: flex;
+      align-items: center;
+      background: #0d131d;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 2px;
+      gap: 2px;
+      flex-shrink: 0;
+    }
+    .ratio-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 4px 9px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .ratio-btn:hover { color: #fff; background: rgba(255,255,255,0.05); }
+    .ratio-btn.active { background: var(--primary); color: #fff; box-shadow: 0 2px 8px rgba(59, 130, 246, 0.35); }
+
+    .top-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+    
+    /* MASTER ANTI-REUP HEADER PILL (FEATURE 3) */
+    .header-anti-reup-pill {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      background: #0d1420;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 5px 12px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+      user-select: none;
+    }
+    .header-anti-reup-pill.enabled {
+      border-color: #10b981;
+      background: rgba(16, 185, 129, 0.16);
+      color: #34d399;
+      box-shadow: 0 0 10px rgba(16, 185, 129, 0.25);
+    }
+    .header-anti-reup-pill.disabled {
+      border-color: #475569;
+      background: #141c28;
+      color: #94a3b8;
+    }
+    .anti-reup-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #10b981;
+      box-shadow: 0 0 6px #10b981;
+    }
+    .header-anti-reup-pill.disabled .anti-reup-dot {
+      background: #64748b;
+      box-shadow: none;
+    }
+
+    .btn {
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      border: 1px solid transparent;
+      transition: all 0.15s;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .btn-outline { background: #172130; border-color: var(--border); color: #cbd5e1; }
+    .btn-outline:hover { background: #202c40; color: #fff; }
+    .btn-primary { background: #2563eb; color: #fff; }
+    .btn-primary:hover { background: #1d4ed8; }
+    .btn-success { background: #059669; color: #fff; }
+    .btn-success:hover { background: #047857; }
+    .btn-danger { background: #dc2626; color: #fff; }
+    .btn-danger:hover { background: #b91c1c; }
+
+    /* MAIN STUDIO WORKSPACE LAYOUT (3 COLUMNS) */
+    .studio-workspace {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 290px minmax(0, 1fr) 360px;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    /* LEFT SIDEBAR: MEDIA LIBRARY */
+    .media-sidebar {
+      background: var(--bg-dark);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .sidebar-header {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #121a26;
+      gap: 6px;
+    }
+    .sidebar-title { font-size: 13px; font-weight: 700; color: #e2e8f0; display: flex; align-items: center; gap: 6px; }
+    .search-box {
+      padding: 8px 14px;
+      border-bottom: 1px solid var(--border);
+      background: #0c121b;
+    }
+    .search-input {
+      width: 100%;
+      background: #151f2d;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      color: #fff;
+      font-size: 12px;
+      outline: none;
+    }
+    .search-input:focus { border-color: var(--primary); }
+    .filter-tabs {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--border);
+      background: #0e1522;
+      transition: all 0.2s ease;
+    }
+    .filter-btn {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid transparent;
+      color: var(--text-dim);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 6px 2px;
+      border-radius: 6px;
+      cursor: pointer;
+      text-align: center;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      transition: all 0.2s ease;
+    }
+    .filter-btn:hover {
+      background: rgba(255, 255, 255, 0.07);
+      color: var(--text);
+    }
+    .filter-btn.active {
+      background: #1c2738;
+      color: #38bdf8;
+      border-color: rgba(56, 189, 248, 0.35);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    }
+    .filter-count {
+      font-size: 10px;
+      font-weight: 700;
+      opacity: 0.85;
+    }
+    .filter-btn.active .count-warn { color: #fbbf24; }
+    .filter-btn.active .count-done { color: #34d399; }
+    .media-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .media-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .media-card:hover { background: var(--bg-card-hover); border-color: var(--border-light); transform: translateY(-1px); }
+    .media-card.active { border-color: var(--primary); background: rgba(59, 130, 246, 0.15); box-shadow: 0 0 10px rgba(59, 130, 246, 0.2); }
+    .media-thumb {
+      width: 44px;
+      height: 44px;
+      border-radius: 6px;
+      background: #111824;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      flex-shrink: 0;
+      border: 1px solid var(--border);
+    }
+    .media-info { flex: 1; min-width: 0; }
+    .media-name { font-size: 12px; font-weight: 600; color: #f1f5f9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 3px; }
+    .media-meta { font-size: 11px; color: var(--text-muted); display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .badge-pill { font-size: 9px; padding: 2px 6px; border-radius: 10px; font-weight: 700; text-transform: uppercase; }
+    .badge-done { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    .badge-pending { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+    .badge-local { background: rgba(14, 165, 233, 0.2); color: #38bdf8; }
+
+    /* CENTER AREA: CANVAS & CONTROLS & TIMELINE */
+    .center-stage {
+      display: flex;
+      flex-direction: column;
+      background: #0b0f17;
+      min-height: 0;
+      overflow: hidden;
+      position: relative;
+    }
+    .canvas-viewport-container {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 14px;
+      position: relative;
+      overflow: hidden;
+      background: radial-gradient(circle at center, #141c2b 0%, #080c13 100%);
+    }
+
+    /* DRAG AND DROP OVERLAY */
+    .drag-drop-overlay {
+      position: absolute;
+      inset: 12px;
+      border: 2px dashed #38bdf8;
+      background: rgba(14, 165, 233, 0.15);
+      border-radius: 12px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 99;
+      pointer-events: none;
+      font-size: 16px;
+      font-weight: 700;
+      color: #38bdf8;
+      backdrop-filter: blur(2px);
+    }
+
+    /* THE EDITING CANVAS */
+    .studio-canvas {
+      position: relative;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      background: #000;
+    }
+    .canvas-9-16 { width: 340px; height: 604px; max-height: calc(100vh - 240px); }
+    .canvas-16-9 { width: 860px; height: 483px; max-width: 92%; max-height: calc(100vh - 240px); }
+    .canvas-1-1 { width: 490px; height: 490px; max-height: calc(100vh - 240px); }
+    .canvas-original { width: 440px; height: 580px; max-height: calc(100vh - 240px); }
+
+    /* BACKGROUND LAYER BEHIND MAIN VIDEO */
+    .canvas-bg-layer {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      z-index: 1;
+      pointer-events: none;
+      transition: opacity 0.2s;
+    }
+    .canvas-bg-video-blur {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 130%;
+      height: 130%;
+      transform: translate(-50%, -50%);
+      object-fit: cover;
+      filter: blur(25px) brightness(0.65);
+    }
+    .canvas-bg-video-motion {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 100%;
+      height: 100%;
+      transform: translate(-50%, -50%);
+      object-fit: cover;
+      display: none;
+      pointer-events: none;
+    }
+    .canvas-bg-solid {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    /* FOREGROUND VIDEO CONTAINER */
+    .canvas-fg-container {
+      position: relative;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      height: 100%;
+      transition: all 0.2s ease;
+    }
+    .canvas-main-video {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      display: block;
+      transition: transform 0.2s ease, border-radius 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    /* REALTIME SUBTITLE OVERLAY */
+    .canvas-subtitle-overlay {
+      position: absolute;
+      bottom: 40px;
+      left: 20px;
+      right: 20px;
+      z-index: 10;
+      text-align: center;
+      pointer-events: none;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+    .sub-vietnamese-text {
+      background: rgba(0, 0, 0, 0.75);
+      color: #ffffff;
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 16px;
+      font-weight: 700;
+      text-shadow: 0 2px 4px rgba(0,0,0,0.8), 0 0 2px #000;
+      display: inline-block;
+      width: 100%;
+      max-width: 100%;
+      box-sizing: border-box;
+      text-align: center;
+      line-height: 1.35;
+      word-break: break-word;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      letter-spacing: 0.3px;
+    }
+    .sub-original-text {
+      font-size: 12px;
+      color: #94a3b8;
+      background: rgba(0, 0, 0, 0.6);
+      padding: 2px 10px;
+      border-radius: 4px;
+      display: inline-block;
+    }
+
+    /* PLAYBACK CONTROLLER BAR */
+    .playback-controls-bar {
+      background: #101622;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      height: 50px;
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+      z-index: 20;
+    }
+    .controls-left, .controls-center, .controls-right { display: flex; align-items: center; gap: 8px; }
+    .ctrl-btn {
+      background: transparent;
+      border: none;
+      color: #cbd5e1;
+      font-size: 13px;
+      padding: 6px 9px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.15s;
+    }
+    .ctrl-btn:hover { background: #1c2638; color: #fff; }
+    .ctrl-btn-play {
+      background: var(--primary);
+      color: #fff;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      justify-content: center;
+      padding: 0;
+      font-size: 14px;
+    }
+    .ctrl-btn-play:hover { background: var(--primary-hover); transform: scale(1.05); }
+    .time-display { font-size: 12px; font-weight: 700; font-family: monospace; color: #38bdf8; background: #0c121b; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); }
+    
+    /* SPEED CONTROL ("TUA NHANH HAY CHẬM") */
+    .speed-pills { display: flex; align-items: center; background: #0c121b; border: 1px solid var(--border); border-radius: 6px; padding: 2px; }
+    .speed-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-dim);
+      padding: 3px 7px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .speed-btn:hover { color: #fff; }
+    .speed-btn.active { background: #2563eb; color: #fff; }
+
+    /* INTERACTIVE VIDEO SCRUBBER BAR */
+    .video-scrubber-wrapper {
+      padding: 8px 16px 5px;
+      background: #0e1420;
+      cursor: pointer;
+      user-select: none;
+      position: relative;
+      border-top: 1px solid var(--border);
+    }
+    .video-scrubber-track {
+      position: relative;
+      height: 6px;
+      background: #1e293b;
+      border-radius: 4px;
+      transition: height 0.15s ease;
+    }
+    .video-scrubber-wrapper:hover .video-scrubber-track,
+    .video-scrubber-wrapper.scrubbing .video-scrubber-track {
+      height: 8px;
+    }
+    .scrubber-buffered-bar {
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 0%;
+      background: rgba(255, 255, 255, 0.18);
+      border-radius: 4px;
+      pointer-events: none;
+    }
+    .scrubber-progress-bar {
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 0%;
+      background: linear-gradient(90deg, #0284c7, #38bdf8);
+      border-radius: 4px;
+      box-shadow: 0 0 10px rgba(56, 189, 248, 0.6);
+      pointer-events: none;
+    }
+    .scrubber-playhead-thumb {
+      position: absolute;
+      top: 50%;
+      left: 0%;
+      transform: translate(-50%, -50%);
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #ffffff;
+      border: 2px solid #0284c7;
+      box-shadow: 0 0 8px rgba(2, 132, 199, 0.9);
+      cursor: grab;
+      transition: transform 0.1s ease;
+      pointer-events: none;
+    }
+    .video-scrubber-wrapper:hover .scrubber-playhead-thumb,
+    .video-scrubber-wrapper.scrubbing .scrubber-playhead-thumb {
+      transform: translate(-50%, -50%) scale(1.3);
+      background: #38bdf8;
+      border-color: #ffffff;
+      box-shadow: 0 0 12px rgba(56, 189, 248, 1);
+    }
+    .scrubber-hover-preview {
+      position: absolute;
+      bottom: 24px;
+      left: 0;
+      transform: translateX(-50%);
+      background: #1e293b;
+      color: #38bdf8;
+      font-family: monospace;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 5px;
+      border: 1px solid #38bdf8;
+      pointer-events: none;
+      white-space: nowrap;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.6);
+      display: none;
+      z-index: 30;
+    }
+
+    /* MOTION BACKGROUND PRESET CARDS */
+    .motion-preset-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      margin-top: 6px;
+    }
+    .motion-card {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: #141c28;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .motion-card:hover {
+      background: #1c2738;
+      border-color: #38bdf8;
+      transform: translateY(-1px);
+    }
+    .motion-card.active {
+      background: rgba(14, 165, 233, 0.16);
+      border-color: #38bdf8;
+      box-shadow: 0 0 14px rgba(56, 189, 248, 0.25);
+    }
+    .motion-card-icon {
+      font-size: 22px;
+      width: 38px;
+      height: 38px;
+      border-radius: 8px;
+      background: #0f172a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      border: 1px solid var(--border);
+    }
+    .motion-card-info { flex: 1; min-width: 0; }
+    .motion-card-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 2px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .motion-card-desc {
+      font-size: 11px;
+      color: var(--text-dim);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .motion-card-badge {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 12px;
+      background: #1e293b;
+      color: var(--text-muted);
+      flex-shrink: 0;
+    }
+    .motion-card.active .motion-card-badge { background: #0284c7; color: #fff; }
+
+    /* MULTI-TRACK TIMELINE (BOTTOM) */
+    .timeline-container {
+      height: 170px;
+      background: #0e131d;
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      overflow: hidden;
+      border-top: 1px solid var(--border);
+    }
+    .timeline-ruler {
+      height: 22px;
+      background: #131b27;
+      border-bottom: 1px solid var(--border);
+      position: relative;
+      overflow: hidden;
+    }
+    .ruler-marks { display: flex; width: 100%; height: 100%; align-items: center; font-size: 10px; color: var(--text-dim); font-family: monospace; }
+    .ruler-mark { position: absolute; top: 3px; }
+    .timeline-tracks {
+      flex: 1;
+      position: relative;
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding: 6px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .timeline-playhead {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: #ef4444;
+      z-index: 50;
+      pointer-events: none;
+      box-shadow: 0 0 6px #ef4444;
+    }
+    .timeline-playhead::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: -5px;
+      width: 12px;
+      height: 12px;
+      background: #ef4444;
+      clip-path: polygon(50% 100%, 0 0, 100% 0);
+    }
+    .track-row {
+      display: flex;
+      align-items: center;
+      height: 34px;
+      background: #141c28;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      position: relative;
+      overflow: hidden;
+    }
+    .track-header {
+      width: 120px;
+      height: 100%;
+      background: #182232;
+      border-right: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 10px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #cbd5e1;
+      flex-shrink: 0;
+      z-index: 5;
+    }
+    .track-content { flex: 1; height: 100%; position: relative; overflow: hidden; }
+    .sub-clip {
+      position: absolute;
+      top: 3px;
+      bottom: 3px;
+      background: linear-gradient(135deg, #1e3a8a, #0284c7);
+      border: 1px solid #38bdf8;
+      border-radius: 4px;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 0 6px;
+      display: flex;
+      align-items: center;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      cursor: pointer;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+      transition: background 0.15s;
+    }
+    .sub-clip:hover { background: linear-gradient(135deg, #2563eb, #0ea5e9); border-color: #fff; }
+    .video-strip-block {
+      position: absolute;
+      top: 3px;
+      bottom: 3px;
+      left: 0;
+      right: 0;
+      background: linear-gradient(90deg, #1e293b, #334155);
+      border: 1px solid #475569;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      font-size: 11px;
+      color: #94a3b8;
+    }
+    .audio-strip-block {
+      position: absolute;
+      top: 3px;
+      bottom: 3px;
+      left: 0;
+      right: 0;
+      background: linear-gradient(90deg, #064e3b, #059669);
+      border: 1px solid #10b981;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      font-size: 11px;
+      color: #a7f3d0;
+    }
+
+    /* RIGHT SIDEBAR: 4 TABS */
+    .settings-sidebar {
+      background: var(--bg-dark);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .panel-tabs {
+      display: flex;
+      background: #111823;
+      border-bottom: 1px solid var(--border);
+      padding: 6px 8px 0;
+      gap: 3px;
+      flex-shrink: 0;
+    }
+    .panel-tab {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 7px 9px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      border-top-left-radius: 6px;
+      border-top-right-radius: 6px;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    .panel-tab:hover { color: #fff; }
+    .panel-tab.active { background: var(--bg-dark); color: #38bdf8; border: 1px solid var(--border); border-bottom-color: var(--bg-dark); }
+    .panel-content { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 14px; }
+
+    /* STEP CARDS (TAB 1) */
+    .step-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .step-card-top { display: flex; justify-content: space-between; align-items: center; }
+    .step-badge-num {
+      background: #1e293b;
+      color: #94a3b8;
+      font-size: 10px;
+      font-weight: 800;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .step-title-text { font-size: 12px; font-weight: 700; color: #fff; }
+    .step-status-chip { font-size: 10px; padding: 2px 8px; border-radius: 12px; font-weight: 700; }
+    .step-ready { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    .step-waiting { background: rgba(148, 163, 184, 0.2); color: #94a3b8; }
+    .mini-audio { width: 100%; height: 26px; filter: invert(0.85) hue-rotate(180deg); }
+
+    /* FORM GROUPS (TAB 2 & 3) */
+    .form-section-title { font-size: 12px; font-weight: 800; text-transform: uppercase; color: #38bdf8; letter-spacing: 0.8px; margin-bottom: 6px; }
+    .form-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+    .form-label { font-size: 12px; font-weight: 600; color: #cbd5e1; display: flex; justify-content: space-between; }
+    .form-slider-row { display: flex; align-items: center; gap: 10px; }
+    .form-slider { flex: 1; accent-color: var(--primary); cursor: pointer; }
+    .form-slider-val { font-size: 12px; font-weight: 700; color: #38bdf8; width: 44px; text-align: right; }
+    .color-presets { display: flex; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
+    .color-swatch {
+      width: 26px;
+      height: 26px;
+      border-radius: 6px;
+      border: 2px solid transparent;
+      cursor: pointer;
+      transition: transform 0.15s;
+    }
+    .color-swatch:hover { transform: scale(1.1); }
+    .color-swatch.active { border-color: #fff; box-shadow: 0 0 8px rgba(255,255,255,0.4); }
+    .switch-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; }
+    .switch-label { font-size: 12px; font-weight: 600; color: #cbd5e1; }
+    .switch-toggle {
+      position: relative;
+      display: inline-block;
+      width: 40px;
+      height: 22px;
+    }
+    .switch-toggle input { opacity: 0; width: 0; height: 0; }
+    .switch-slider {
+      position: absolute;
+      cursor: pointer;
+      inset: 0;
+      background-color: #334155;
+      transition: .2s;
+      border-radius: 22px;
+    }
+    .switch-slider:before {
+      position: absolute;
+      content: "";
+      height: 16px;
+      width: 16px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: .2s;
+      border-radius: 50%;
+    }
+    input:checked + .switch-slider { background-color: var(--primary); }
+    input:checked + .switch-slider:before { transform: translateX(18px); }
+
+    /* MASTER BANNER IN TAB 3 (FEATURE 3) */
+    .anti-reup-master-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: linear-gradient(135deg, #0f1d32, #16263e);
+      border: 1px solid #1e3a5f;
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-bottom: 8px;
+      transition: all 0.2s;
+    }
+    .anti-reup-master-banner.disabled {
+      background: #121824;
+      border-color: #263449;
+    }
+    .master-banner-left { display: flex; align-items: center; gap: 10px; }
+    .master-banner-icon { font-size: 24px; }
+    .master-banner-title { font-size: 13px; font-weight: 700; color: #f1f5f9; }
+    .master-banner-desc { font-size: 11px; color: #94a3b8; }
+
+    /* TAB 4: BATCH FOLDER FRAMING (FEATURE 4) */
+    .folder-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+    .folder-chip {
+      background: #172233;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 3px 8px;
+      font-size: 11px;
+      color: #38bdf8;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .folder-chip:hover { background: #223249; color: #fff; border-color: #38bdf8; }
+    .batch-summary-box {
+      background: #111824;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 11px;
+      line-height: 1.5;
+      color: #cbd5e1;
+    }
+    .batch-progress-box {
+      background: #0f1724;
+      border: 1px solid #1e3a5f;
+      border-radius: 8px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .batch-progress-bar-wrap {
+      height: 10px;
+      background: #1a2536;
+      border-radius: 5px;
+      overflow: hidden;
+    }
+    .batch-progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #10b981, #06b6d4);
+      width: 0%;
+      transition: width 0.3s;
+      box-shadow: 0 0 10px rgba(16, 185, 129, 0.7);
+    }
+    .batch-completed-list {
+      max-height: 200px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .batch-completed-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #141c28;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 11px;
+    }
+    .batch-completed-name {
+      font-weight: 600;
+      color: #f1f5f9;
+      max-width: 180px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* TOAST NOTIFICATION */
+    #toastMsg {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #1e293b;
+      color: #fff;
+      border: 1px solid var(--border-light);
+      padding: 12px 20px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      z-index: 9999;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      display: none;
+      align-items: center;
+      gap: 10px;
+    }
+
+    /* TRACK STATUS BADGES & STYLING */
+    .track-row {
+      display: flex;
+      align-items: center;
+      min-height: 36px;
+      background: #141c28;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      position: relative;
+      overflow: hidden;
+      transition: all 0.2s ease;
+    }
+    .track-header {
+      width: 220px !important;
+      min-width: 220px;
+      height: 100%;
+      background: #182232;
+      border-right: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      padding: 0 10px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #cbd5e1;
+      flex-shrink: 0;
+    }
+    .track-status-pill {
+      font-size: 9.5px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      white-space: nowrap;
+    }
+    .pill-active-ai {
+      background: rgba(14, 165, 233, 0.25);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.4);
+    }
+    .pill-disabled {
+      background: rgba(100, 116, 139, 0.2);
+      color: #94a3b8;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+    }
+    .pill-active-cn {
+      background: rgba(99, 102, 241, 0.2);
+      color: #a5b4fc;
+      border: 1px solid rgba(165, 180, 252, 0.35);
+    }
+    .pill-muted {
+      background: rgba(71, 85, 105, 0.2);
+      color: #64748b;
+    }
+    .track-disabled {
+      background: rgba(15, 23, 42, 0.6) !important;
+      border: 1px dashed rgba(148, 163, 184, 0.25) !important;
+      opacity: 0.75;
+    }
+    .empty-track-msg {
+      font-size: 11px;
+      color: var(--text-dim);
+      padding-left: 12px;
+      line-height: 34px;
+      user-select: none;
+    }
+    .empty-track-disabled {
+      font-size: 11px;
+      color: #64748b;
+      padding-left: 12px;
+      line-height: 34px;
+      font-weight: 600;
+      user-select: none;
+    }
+    .sub-clip-cn-done {
+      background: #312e81 !important;
+      border-color: #6366f1 !important;
+      color: #c7d2fe !important;
+    }
+    .sub-clip-cn-pending {
+      background: #1e293b !important;
+      border-color: #f59e0b !important;
+      color: #fde68a !important;
+    }
+    .sub-clip-ai-active {
+      background: #0284c7 !important;
+      border-color: #38bdf8 !important;
+      color: #ffffff !important;
+      box-shadow: 0 0 8px rgba(56, 189, 248, 0.35) !important;
+    }
+
+    /* CAPCUT EXPORT MODAL STYLING */
+    .export-modal-backdrop {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.85);
+      backdrop-filter: blur(8px);
+      z-index: 1000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+    }
+    .export-modal-dialog {
+      background: #111827;
+      border: 1px solid #2d3748;
+      border-radius: 14px;
+      width: 640px;
+      max-width: 95vw;
+      max-height: 90vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 25px 60px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(255, 255, 255, 0.08);
+      overflow: hidden;
+      animation: modalFadeIn 0.2s ease-out;
+    }
+    @keyframes modalFadeIn {
+      from { opacity: 0; transform: scale(0.96); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    .export-modal-header {
+      padding: 16px 20px;
+      background: #162032;
+      border-bottom: 1px solid #263449;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .export-modal-header h3 {
+      font-size: 16px;
+      font-weight: 700;
+      color: #f1f5f9;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .export-modal-close {
+      background: transparent;
+      border: none;
+      color: #94a3b8;
+      font-size: 18px;
+      cursor: pointer;
+      padding: 4px;
+      border-radius: 4px;
+      transition: color 0.15s;
+    }
+    .export-modal-close:hover { color: #f1f5f9; background: rgba(255,255,255,0.06); }
+    .export-modal-body {
+      padding: 20px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .export-section-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    .export-pill-group {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .export-pill {
+      background: #1a2434;
+      border: 1px solid #2b394e;
+      color: #cbd5e1;
+      padding: 7px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .export-pill:hover {
+      background: #233147;
+      border-color: #3b82f6;
+      color: #ffffff;
+    }
+    .export-pill.active {
+      background: #0284c7;
+      border-color: #38bdf8;
+      color: #ffffff;
+      box-shadow: 0 0 10px rgba(56, 189, 248, 0.4);
+    }
+    .export-modal-footer {
+      padding: 14px 20px;
+      background: #162032;
+      border-top: 1px solid #263449;
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 10px;
+    }
+
+    /* CAPCUT INTERACTIVE SUBTITLE TRANSFORM BOX & HANDLES */
+    .canvas-subtitle-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 15;
+      pointer-events: none;
+      overflow: hidden;
+      display: flex;
+    }
+    .capcut-transform-box {
+      position: absolute;
+      pointer-events: auto;
+      cursor: grab;
+      user-select: none;
+      display: inline-flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      transition: box-shadow 0.15s ease;
+      left: 50%;
+      top: 80%;
+      transform: translate(-50%, -50%);
+      padding: 0;
+      border: 1.5px dashed rgba(56, 189, 248, 0.7);
+      border-radius: 8px;
+      width: max-content;
+      max-width: 92%;
+      box-sizing: border-box;
+    }
+    .capcut-transform-box:hover,
+    .capcut-transform-box.active {
+      border: 1.5px solid #38bdf8 !important;
+      box-shadow: 0 0 14px rgba(56, 189, 248, 0.5) !important;
+    }
+    .capcut-transform-box.dragging {
+      cursor: grabbing !important;
+      opacity: 0.95;
+    }
+    .capcut-mini-toolbar {
+      position: absolute;
+      bottom: calc(100% + 8px);
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      background: rgba(15, 23, 42, 0.95);
+      border: 1px solid rgba(56, 189, 248, 0.7);
+      backdrop-filter: blur(8px);
+      border-radius: 6px;
+      padding: 3px 6px;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.75);
+      z-index: 30;
+      white-space: nowrap;
+      transition: opacity 0.15s ease;
+    }
+    .capcut-mini-btn {
+      background: #1e293b;
+      border: 1px solid #334155;
+      color: #f1f5f9;
+      padding: 3px 7px;
+      font-size: 11px;
+      font-weight: 700;
+      border-radius: 4px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      transition: all 0.15s;
+    }
+    .capcut-mini-btn:hover {
+      background: #0284c7;
+      border-color: #38bdf8;
+      color: #ffffff;
+    }
+    .capcut-handle {
+      position: absolute;
+      background: #ffffff;
+      border: 2px solid #0284c7;
+      border-radius: 50%;
+      z-index: 25;
+      width: 10px;
+      height: 10px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+      transition: transform 0.1s ease;
+    }
+    .capcut-handle:hover {
+      transform: scale(1.3);
+      border-color: #38bdf8;
+      background: #e0f2fe;
+    }
+    .handle-nw { top: -5px; left: -5px; cursor: nwse-resize; }
+    .handle-ne { top: -5px; right: -5px; cursor: nesw-resize; }
+    .handle-sw { bottom: -5px; left: -5px; cursor: nesw-resize; }
+    .handle-se { bottom: -5px; right: -5px; cursor: nwse-resize; }
+    .handle-w {
+      top: 50%; left: -4px; transform: translateY(-50%);
+      width: 6px; height: 16px; border-radius: 3px; cursor: ew-resize;
+    }
+    .handle-e {
+      top: 50%; right: -4px; transform: translateY(-50%);
+      width: 6px; height: 16px; border-radius: 3px; cursor: ew-resize;
+    }
+    .handle-n {
+      left: 50%; top: -4px; transform: translateX(-50%);
+      height: 6px; width: 16px; border-radius: 3px; cursor: ns-resize;
+    }
+    .handle-s {
+      left: 50%; bottom: -4px; transform: translateX(-50%);
+      height: 6px; width: 16px; border-radius: 3px; cursor: ns-resize;
+    }
+
+
+    /* STICKY FOOTER AT BOTTOM OF RIGHT SIDEBAR */
+    .sidebar-sticky-footer {
+      flex-shrink: 0;
+      padding: 10px 14px;
+      background: #0d131d;
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      box-shadow: 0 -4px 14px rgba(0, 0, 0, 0.45);
+      z-index: 20;
+    }
+    .btn-reset-sidebar {
+      flex: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      background: rgba(239, 68, 68, 0.1);
+      color: #fca5a5;
+      border: 1px solid rgba(239, 68, 68, 0.35);
+      border-radius: 6px;
+      padding: 9px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .btn-reset-sidebar:hover {
+      background: rgba(239, 68, 68, 0.22);
+      border-color: #ef4444;
+      color: #ffffff;
+      transform: translateY(-1px);
+      box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3);
+    }
+    .btn-save-sidebar {
+      flex: 1.2;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      background: linear-gradient(135deg, #059669, #10b981);
+      color: #ffffff;
+      border: none;
+      border-radius: 6px;
+      padding: 9px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-shadow: 0 2px 6px rgba(16, 185, 129, 0.3);
+    }
+    .btn-save-sidebar:hover {
+      background: linear-gradient(135deg, #047857, #059669);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 10px rgba(16, 185, 129, 0.45);
+    }
+
+  </style>
+</head>
+<body>
+
+  <!-- TOP HEADER -->
+  <header>
+    <div class="top-left">
+      <div class="logo-badge">
+        <span>🎬</span>
+        <span>STUDIO QUY TRÌNH</span>
+      </div>
+
+      <div class="video-title-bar" id="topVideoTitle">Chưa chọn video...</div>
+      
+      <!-- FEATURE 1: VERSION SWITCHER (BẢN HOÀN TẤT vs VIDEO GỐC) -->
+      <div class="version-toggle-group" id="versionToggleGroup" title="Chuyển đổi giữa Bản Hoàn Tất (đã lồng tiếng & che sub) và Video Phôi Gốc">
+        <button class="version-btn active-final" id="btnVersionFinal" onclick="switchVideoVersion('final')">
+          ✨ Bản Hoàn Tất (Lồng Tiếng & Che Sub)
+        </button>
+        <button class="version-btn" id="btnVersionRaw" onclick="switchVideoVersion('raw')">
+          📹 Video Gốc (Phôi)
+        </button>
+      </div>
+
+      <!-- RATIO QUICK SWITCHER -->
+      <div class="ratio-selector-group">
+        <button class="ratio-btn" data-ratio="9:16" onclick="setRatio('9:16')">📱 9:16 (Dọc)</button>
+        <button class="ratio-btn" data-ratio="16:9" onclick="setRatio('16:9')">📺 16:9 (Ngang)</button>
+        <button class="ratio-btn" data-ratio="1:1" onclick="setRatio('1:1')">⏹ 1:1</button>
+        <button class="ratio-btn active" data-ratio="original" onclick="setRatio('original')">🎯 Gốc</button>
+      </div>
+    </div>
+
+    <div class="top-right">
+      <!-- FEATURE 3: MASTER ANTI-REUP HEADER PILL -->
+      <div class="header-anti-reup-pill disabled" id="headerAntiReupPill" onclick="toggleMasterAntiReupFromHeader()" title="Bấm để Bật hoặc Tắt nhanh chế độ chèn khung chống re-up">
+        <span class="anti-reup-dot" id="headerAntiReupDot"></span>
+        <span id="headerAntiReupText">⚪ Chống Re-up: TẮT</span>
+      </div>
+
+      <button class="btn btn-primary" onclick="openExportModal()" style="background: linear-gradient(135deg, #0284c7, #2563eb); font-weight: 700; display: inline-flex; align-items: center; gap: 6px; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);" title="Xuất video tùy chọn độ phân giải, bitrate kbps, và xuất file SRT giống CapCut">
+        🚀 Xuất Video (CapCut)
+      </button>
+      <button class="btn btn-success" onclick="saveSettingsForBatch()" title="Lưu cấu hình cho tiến trình render video hàng loạt">
+        💾 Lưu Khung Hàng Loạt
+      </button>
+      <a class="btn btn-outline" href="http://127.0.0.1:8088/" title="Về Dashboard Tool V1">Tool V1</a>
+      <a class="btn btn-outline" href="http://127.0.0.1:8089/" title="Về Dashboard Tool V2">Tool V2</a>
+      <a class="btn btn-primary" href="/kich-ban" style="background: linear-gradient(135deg, #8b5cf6, #ec4899); border:none; font-weight:700;" title="Mở Studio Kịch Bản AI & Lồng Sub (CapCut TTS)">✍️ Kịch Bản</a>
+      <button class="btn btn-outline" onclick="loadWorkflowData()">🔄</button>
+    </div>
+  </header>
+
+  <!-- 3-COLUMN WORKSPACE -->
+  <div class="studio-workspace">
+
+    <!-- LEFT: MEDIA GALLERY -->
+    <div class="media-sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-title">
+          <span>📁 Thư Viện Video</span>
+          <span id="videoCountBadge" style="font-size: 11px; color: var(--text-dim); font-weight: normal;">(0 video)</span>
+        </div>
+        <!-- FEATURE 2: LOCAL FILE PICKER BUTTON -->
+        <input type="file" id="localVideoPicker" accept="video/mp4,video/mkv,video/mov,video/webm,video/avi" style="display:none;" onchange="handleLocalVideoSelect(event)">
+        <button class="btn btn-outline" style="font-size:11px; padding:4px 8px;" onclick="document.getElementById('localVideoPicker').click()" title="Chọn tệp video bất kỳ từ máy tính để xem thử">
+          📂 Mở Từ Máy
+        </button>
+      </div>
+      
+      <div class="search-box">
+        <input type="text" id="searchInput" class="search-input" placeholder="Tìm tên video..." oninput="renderMediaList()">
+      </div>
+
+      <div class="filter-tabs" id="filterTabsContainer">
+        <button class="filter-btn active" id="btnFilterAll" onclick="setFilter('all', this)" title="Tất cả video trong thư viện">Tất cả</button>
+        <button class="filter-btn" id="btnFilterUnedited" onclick="setFilter('unedited', this)" title="Video chưa hoàn tất quy trình biên tập">Chưa edit</button>
+        <button class="filter-btn" id="btnFilterEdited" onclick="setFilter('edited', this)" title="Video đã hoàn tất quy trình biên tập">Đã edit</button>
+        <button class="filter-btn" id="btnFilterLocal" onclick="setFilter('local', this)" style="display: none;" title="Video nạp từ máy tính">📁 Từ máy</button>
+      </div>
+
+      <div class="media-list" id="mediaList">
+        <!-- Dynamically rendered -->
+      </div>
+    </div>
+
+    <!-- CENTER: CANVAS & PLAYBACK & MULTI-TRACK TIMELINE -->
+    <div class="center-stage" id="centerStage" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDrop(event)">
+      
+      <!-- DRAG AND DROP OVERLAY -->
+      <div class="drag-drop-overlay" id="dragDropOverlay">
+        📥 Thả tệp video vào đây để mở ngay trong Studio
+      </div>
+
+      <!-- VIEWPORT -->
+      <div class="canvas-viewport-container">
+        
+        <!-- THE EDITING CANVAS -->
+        <div class="studio-canvas canvas-original" id="studioCanvas">
+          
+          <!-- BACKGROUND LAYER (MOTION VIDEO / BLUR / COLOR / IMAGE) -->
+          <div class="canvas-bg-layer" id="canvasBgLayer">
+            <video class="canvas-bg-video-blur" id="bgBlurVideo" muted playsinline></video>
+            <video class="canvas-bg-video-motion" id="bgMotionVideo" muted playsinline loop></video>
+            <div class="canvas-bg-solid" id="bgSolid"></div>
+          </div>
+
+          <!-- FOREGROUND MAIN VIDEO -->
+          <div class="canvas-fg-container" id="fgContainer">
+            <video class="canvas-main-video" id="mainPlayer" playsinline></video>
+          </div>
+
+          <!-- REALTIME SUBTITLE OVERLAY -->
+          <div class="canvas-subtitle-overlay" id="subtitleOverlay">
+            <div class="capcut-transform-box active" id="subtitleInteractiveBox" title="Bấm và kéo để di chuyển vị trí, kéo các nút góc để phóng to/thu nhỏ như trong CapCut">
+              <!-- Mini Floating Toolbar on video -->
+              <div class="capcut-mini-toolbar" id="capcutMiniToolbar">
+                <label class="capcut-mini-btn" title="Đổi màu chữ trực tiếp">
+                  🎨 Chữ
+                  <input type="color" id="quickTextColorPicker" value="#000000" style="position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none;" oninput="updateSubFontColor(this.value)">
+                </label>
+                <label class="capcut-mini-btn" title="Đổi màu khung nền trực tiếp">
+                  🏷️ Nền
+                  <input type="color" id="quickBgColorPicker" value="#ffffff" style="position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none;" oninput="updateSubBgColor(this.value)">
+                </label>
+                <button type="button" class="capcut-mini-btn" onclick="quickStepFontSize(-2)" title="Thu nhỏ chữ">A-</button>
+                <button type="button" class="capcut-mini-btn" onclick="quickStepFontSize(2)" title="Phóng to chữ">A+</button>
+                <button type="button" class="capcut-mini-btn" onclick="resetSubtitleStyleToDefault()" title="Khôi phục tiêu chuẩn mặc định">↺ Mặc định</button>
+              </div>
+
+              <!-- Main Subtitle Text and Background Box -->
+              <div class="sub-vietnamese-text" id="subVietnameseText" style="cursor: grab;">
+                hôm nay khui sáu mươi cuộn băng dính washi
+              </div>
+              <div class="sub-original-text" id="subOriginalText" style="display: none;">Phụ đề gốc</div>
+
+              <!-- 8 CapCut Resize & Transform Handles -->
+              <div class="capcut-handle handle-nw" data-handle="nw" title="Kéo để phóng to/thu nhỏ"></div>
+              <div class="capcut-handle handle-ne" data-handle="ne" title="Kéo để phóng to/thu nhỏ"></div>
+              <div class="capcut-handle handle-sw" data-handle="sw" title="Kéo để phóng to/thu nhỏ"></div>
+              <div class="capcut-handle handle-se" data-handle="se" title="Kéo để phóng to/thu nhỏ"></div>
+              <div class="capcut-handle handle-w" data-handle="w" title="Kéo để co giãn chiều rộng khung"></div>
+              <div class="capcut-handle handle-e" data-handle="e" title="Kéo để co giãn chiều rộng khung"></div>
+              <div class="capcut-handle handle-n" data-handle="n" title="Kéo để co giãn chiều cao khung"></div>
+              <div class="capcut-handle handle-s" data-handle="s" title="Kéo để co giãn chiều cao khung"></div>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- INTERACTIVE VIDEO SCRUBBER BAR -->
+      <div class="video-scrubber-wrapper" id="videoScrubberWrapper" title="Kéo hoặc bấm để tua nhanh chậm video mượt mà">
+        <div class="scrubber-hover-preview" id="scrubberHoverPreview">
+          <span id="scrubberHoverTime">00:00.00</span>
+        </div>
+        <div class="video-scrubber-track" id="videoScrubberTrack">
+          <div class="scrubber-buffered-bar" id="scrubberBufferedBar"></div>
+          <div class="scrubber-progress-bar" id="scrubberProgressBar"></div>
+          <div class="scrubber-playhead-thumb" id="scrubberThumb"></div>
+        </div>
+      </div>
+
+      <!-- PLAYBACK CONTROLS BAR -->
+      <div class="playback-controls-bar">
+        <div class="controls-left">
+          <button class="ctrl-btn ctrl-btn-play" id="btnPlay" onclick="togglePlay()" title="Phát / Tạm dừng (Phím Space)">▶</button>
+          <div class="time-display" id="timecodeDisplay">00:00.00 / 00:00.00</div>
+        </div>
+
+        <div class="controls-center">
+          <!-- SPEED CONTROL ("TUA NHANH HAY CHẬM") -->
+          <span style="font-size: 11px; color: var(--text-dim); font-weight: 700;">Tốc độ:</span>
+          <div class="speed-pills">
+            <button class="speed-btn" data-speed="0.25" onclick="setSpeed(0.25, this)">0.25x</button>
+            <button class="speed-btn" data-speed="0.5" onclick="setSpeed(0.5, this)">0.5x</button>
+            <button class="speed-btn" data-speed="0.75" onclick="setSpeed(0.75, this)">0.75x</button>
+            <button class="speed-btn active" data-speed="1.0" onclick="setSpeed(1.0, this)">1.0x</button>
+            <button class="speed-btn" data-speed="1.25" onclick="setSpeed(1.25, this)">1.25x</button>
+            <button class="speed-btn" data-speed="1.5" onclick="setSpeed(1.5, this)">1.5x</button>
+            <button class="speed-btn" data-speed="2.0" onclick="setSpeed(2.0, this)">2.0x</button>
+            <button class="speed-btn" data-speed="3.0" onclick="setSpeed(3.0, this)">3.0x</button>
+          </div>
+        </div>
+
+        <div class="controls-right">
+          <input type="range" id="volumeSlider" min="0" max="1" step="0.05" value="1" style="width: 65px; accent-color: var(--primary);" oninput="setVolume(this.value)">
+          <button class="ctrl-btn" onclick="toggleFullscreen()" title="Toàn màn hình">⛶</button>
+        </div>
+      </div>
+
+      <!-- MULTI-TRACK TIMELINE -->
+      <div class="timeline-container">
+        <div class="timeline-tracks" id="timelineTracks" onclick="seekTimeline(event)">
+          
+          <!-- TRACK 1: CHINESE SUBTITLES TRACK -->
+          <div class="track-row" id="chineseTrackRow">
+            <div class="track-header" id="chineseTrackHeader" style="display: flex; justify-content: space-between; align-items: center;">
+              <span>🇨🇳 Phụ đề Trung</span>
+              <span class="track-status-pill pill-muted" id="chineseTrackStatus">--</span>
+            </div>
+            <div class="track-content" id="chineseSubtitlesTrack">
+              <!-- Chinese subtitle clips rendered dynamically -->
+            </div>
+          </div>
+
+          <!-- TRACK 2: VIETNAMESE AI SUBTITLES TRACK -->
+          <div class="track-row" id="aiTrackRow">
+            <div class="track-header" id="aiTrackHeader" style="display: flex; justify-content: space-between; align-items: center;">
+              <span>💬 Phụ đề AI</span>
+              <span class="track-status-pill pill-muted" id="aiTrackStatus">--</span>
+            </div>
+            <div class="track-content" id="subtitlesTrack">
+              <!-- Vietnamese AI subtitle clips rendered dynamically -->
+            </div>
+          </div>
+
+          <!-- VIDEO TRACK -->
+          <div class="track-row">
+            <div class="track-header">🎬 Video chính</div>
+            <div class="track-content">
+              <div class="video-strip-block" id="videoStripLabel">Video Track</div>
+            </div>
+          </div>
+
+          <!-- AUDIO TRACK -->
+          <div class="track-row">
+            <div class="track-header">🎵 Âm thanh mix</div>
+            <div class="track-content">
+              <div class="audio-strip-block" id="audioStripLabel">Giọng đọc AI RVC + Nhạc nền BGM</div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+    </div>
+
+    <!-- RIGHT: 4 TABS INSPECTOR & ANTI RE-UP SETTINGS & BATCH FOLDER -->
+    <div class="settings-sidebar">
+      
+      <!-- TABS -->
+      <div class="panel-tabs">
+        <button class="panel-tab active" onclick="switchTab('subtitle-style', this)">✍️ Kiểu Chữ & Nền</button>
+        <button class="panel-tab" onclick="switchTab('framing', this)">📐 Khung hình</button>
+        <button class="panel-tab" onclick="switchTab('anti-reup', this)">🛡️ Chống Re-up</button>
+        <button class="panel-tab" onclick="switchTab('batch-folder', this)">📁 Đóng Khung Thư Mục</button>
+      </div>
+
+      <!-- TAB 1: 6 PIPELINE STEPS -->
+      <div class="panel-content" id="tabSubtitleStyle" style="display: flex; flex-direction: column; gap: 14px;">
+        
+
+        <!-- CapCut Direct Interaction Tip -->
+        <div style="background: rgba(14, 165, 233, 0.1); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px; padding: 8px 10px; display: flex; align-items: center; gap: 8px;">
+          <span style="font-size: 18px;">✨</span>
+          <div style="font-size: 11px; color: #cbd5e1; line-height: 1.4;">
+            <strong style="color: #38bdf8;">Chuẩn CapCut:</strong> Bấm giữ chuột vào khung chữ trên video để <strong>kéo di chuyển vị trí</strong>, hoặc kéo các <strong>nút tròn ở 4 góc</strong> để phóng to / thu nhỏ trực tiếp!
+          </div>
+        </div>
+
+        <!-- Group 1: Chữ Phụ Đề (Font, Color, Size, Bold) -->
+        <div class="form-section">
+          <div class="form-section-title" style="display: flex; justify-content: space-between; align-items: center;">
+            <span>🔤 Font Chữ & Màu Chữ</span>
+            <span style="font-size: 10px; color: #38bdf8; font-weight: 600;">Tiêu chuẩn</span>
+          </div>
+
+          <!-- Font Family -->
+          <div style="margin-bottom: 10px;">
+            <label class="form-label" style="font-size: 11px; margin-bottom: 4px;">Phông chữ (Font Family):</label>
+            <select id="subFontFamilySelect" class="form-select" style="width: 100%; background: #162032; border: 1px solid #28374d; color: #f1f5f9; padding: 6px 10px; border-radius: 6px; font-size: 12px; font-weight: 600;" onchange="updateSubFontFamily(this.value)">
+              <option value="Arial" selected>Arial (Tiêu chuẩn mặc định)</option>
+              <option value="Roboto">Roboto (Chuẩn hiện đại Google)</option>
+              <option value="Montserrat">Montserrat (Bo tròn, trẻ trung)</option>
+              <option value="Be Vietnam Pro">Be Vietnam Pro (Tối ưu Tiếng Việt)</option>
+              <option value="Open Sans">Open Sans (Rõ nét, dễ đọc)</option>
+              <option value="Segoe UI">Segoe UI (Thanh thoát)</option>
+            </select>
+          </div>
+
+          <!-- Font Color -->
+          <div style="margin-bottom: 10px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+              <label class="form-label" style="font-size: 11px; margin-bottom: 0;">Màu chữ:</label>
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <input type="color" id="subFontColorPicker" value="#000000" style="width: 26px; height: 24px; padding: 0; border: none; border-radius: 4px; cursor: pointer; background: transparent;" oninput="updateSubFontColor(this.value)">
+                <span id="subFontColorHex" style="font-family: monospace; font-size: 11px; color: #cbd5e1; font-weight: 700;">#000000</span>
+              </div>
+            </div>
+            <!-- Quick preset color pills for text -->
+            <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px;">
+              <button type="button" class="export-pill active" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubFontColorPreset('#000000', this)">⚫ Đen (Mặc định)</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubFontColorPreset('#ffffff', this)">⚪ Trắng</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubFontColorPreset('#facc15', this)">🟡 Vàng</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubFontColorPreset('#38bdf8', this)">🔵 Xanh</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubFontColorPreset('#ef4444', this)">🔴 Đỏ</button>
+            </div>
+          </div>
+
+          <!-- Font Size Slider -->
+          <div style="margin-bottom: 10px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+              <label class="form-label" style="font-size: 11px; margin-bottom: 0;">Kích thước chữ:</label>
+              <span id="subFontSizeVal" class="form-slider-val" style="font-size: 12px;">18px</span>
+            </div>
+            <input type="range" id="subFontSizeSlider" min="12" max="36" step="1" value="18" class="form-slider" oninput="updateSubFontSize(this.value)">
+          </div>
+
+          <!-- Bold Toggle -->
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.06);">
+            <span class="switch-label" style="font-size: 11.5px;">Chữ in đậm (Bold)</span>
+            <label class="switch-toggle">
+              <input type="checkbox" id="chkSubBold" checked onchange="updateSubBold(this.checked)">
+              <span class="switch-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Group 2: Khung Nền Phụ Đề (Background Box Styling) -->
+        <div class="form-section">
+          <div class="form-section-title" style="display: flex; justify-content: space-between; align-items: center;">
+            <span>🏷️ Khung Nền Phụ Đề</span>
+            <span style="font-size: 10px; color: #10b981; font-weight: 600;">Mặc định: Trắng</span>
+          </div>
+
+          <!-- Background Color -->
+          <div style="margin-bottom: 10px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+              <label class="form-label" style="font-size: 11px; margin-bottom: 0;">Màu khung nền:</label>
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <input type="color" id="subBgColorPicker" value="#ffffff" style="width: 26px; height: 24px; padding: 0; border: none; border-radius: 4px; cursor: pointer; background: transparent;" oninput="updateSubBgColor(this.value)">
+                <span id="subBgColorHex" style="font-family: monospace; font-size: 11px; color: #cbd5e1; font-weight: 700;">#FFFFFF</span>
+              </div>
+            </div>
+            <!-- Quick preset color pills for background (Default white highlighted) -->
+            <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px;">
+              <button type="button" class="export-pill active" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubBgColorPreset('#ffffff', this)">⚪ Trắng (Mặc định)</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubBgColorPreset('#000000', this)">⚫ Đen</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubBgColorPreset('#fef08a', this)">🟡 Vàng nhạt</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubBgColorPreset('#e0f2fe', this)">🔵 Xanh nhạt</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubBgColorPreset('#fce7f3', this)">🌸 Hồng phấn</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubBgColorPreset('#f1f5f9', this)">🔘 Xám nhạt</button>
+            </div>
+          </div>
+
+          <!-- Background Opacity Slider -->
+          <div style="margin-bottom: 10px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+              <label class="form-label" style="font-size: 11px; margin-bottom: 0;">Độ mờ đục khung nền (Opacity):</label>
+              <span id="subBgOpacityVal" class="form-slider-val" style="font-size: 12px;">100%</span>
+            </div>
+            <input type="range" id="subBgOpacitySlider" min="20" max="100" step="5" value="100" class="form-slider" oninput="updateSubBgOpacity(this.value)">
+          </div>
+
+          <!-- Kích thước to nhỏ khung nền: Lề ngang (Padding X) -->
+          <div style="margin-bottom: 10px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+              <label class="form-label" style="font-size: 11px; margin-bottom: 0;">Độ rộng lề ngang (Padding X):</label>
+              <span id="subPaddingXVal" class="form-slider-val" style="font-size: 12px;">16px</span>
+            </div>
+            <input type="range" id="subPaddingXSlider" min="6" max="40" step="2" value="16" class="form-slider" oninput="updateSubPaddingX(this.value)">
+          </div>
+
+          <!-- Kích thước to nhỏ khung nền: Lề dọc (Padding Y) -->
+          <div style="margin-bottom: 10px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+              <label class="form-label" style="font-size: 11px; margin-bottom: 0;">Độ cao lề dọc (Padding Y):</label>
+              <span id="subPaddingYVal" class="form-slider-val" style="font-size: 12px;">8px</span>
+            </div>
+            <input type="range" id="subPaddingYSlider" min="2" max="24" step="1" value="8" class="form-slider" oninput="updateSubPaddingY(this.value)">
+          </div>
+
+                    <!-- Vị trí dọc trên video (Position Y) -->
+          <div style="margin-bottom: 10px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+              <label class="form-label" style="font-size: 11px; margin-bottom: 0;">Vị trí dọc (Kéo lên/xuống trên video):</label>
+              <span id="subPosYVal" class="form-slider-val" style="font-size: 12px;">80%</span>
+            </div>
+            <input type="range" id="subPosYSlider" min="10" max="95" step="1" value="80" class="form-slider" oninput="updateSubPosY(this.value)">
+          </div>
+
+          <!-- Bo góc khung nền (Border Radius) -->
+          <div>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+              <label class="form-label" style="font-size: 11px; margin-bottom: 0;">Bo góc khung nền (Radius):</label>
+              <span id="subRadiusVal" class="form-slider-val" style="font-size: 12px;">8px</span>
+            </div>
+            <input type="range" id="subRadiusSlider" min="0" max="24" step="2" value="8" class="form-slider" oninput="updateSubRadius(this.value)">
+          </div>
+        </div>
+
+        <!-- Action Buttons: Reset Standard & Save -->
+        <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 4px;">
+          <button class="btn btn-outline" style="width: 100%; justify-content: center; font-weight: 700; color: #cbd5e1; border-color: #334155; padding: 7px 12px; font-size: 12px;" onclick="resetSubtitleStyleToDefault()">
+            ↺ Khôi Phục Tiêu Chuẩn Mặc Định
+          </button>
+          <button class="btn btn-success" style="width: 100%; justify-content: center; font-weight: 700; padding: 8px 12px; font-size: 12px;" onclick="saveSettingsForBatch()">
+            💾 Lưu Khung Hàng Loạt
+          </button>
+        </div>
+
+      </div>
+
+      <!-- TAB 2: RATIO & FRAMING -->
+      <div class="panel-content" id="tabFraming" style="display: none;">
+        <div class="form-section-title">Cài Đặt Tỷ Lệ & Khung Hình</div>
+
+        <div class="form-group">
+          <label class="form-label">Tỷ lệ xuất bản hàng loạt:</label>
+          <div class="ratio-selector-group" style="width: 100%; justify-content: space-around;">
+            <button class="ratio-btn" data-ratio="9:16" onclick="setRatio('9:16')">9:16 (Dọc)</button>
+            <button class="ratio-btn" data-ratio="16:9" onclick="setRatio('16:9')">16:9 (Ngang)</button>
+            <button class="ratio-btn" data-ratio="1:1" onclick="setRatio('1:1')">1:1 (Vuông)</button>
+            <button class="ratio-btn" data-ratio="original" onclick="setRatio('original')">Gốc</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <div class="form-label">
+            <span>Co dãn video chính (Scale):</span>
+            <span class="form-slider-val" id="valScale">88%</span>
+          </div>
+          <div class="form-slider-row">
+            <input type="range" class="form-slider" id="sliderScale" min="60" max="100" value="88" oninput="updateScale(this.value)">
+          </div>
+          <span style="font-size: 11px; color: var(--text-dim);">Thu nhỏ video từ 80-90% để lộ phông nền giúp né bộ quét bản quyền khung hình của TikTok/Facebook.</span>
+        </div>
+
+        <div class="form-group">
+          <div class="form-label">
+            <span>Bo góc viền video (Corner Radius):</span>
+            <span class="form-slider-val" id="valRadius">16px</span>
+          </div>
+          <div class="form-slider-row">
+            <input type="range" class="form-slider" id="sliderRadius" min="0" max="40" value="16" oninput="updateRadius(this.value)">
+          </div>
+        </div>
+
+        <div class="switch-row">
+          <span class="switch-label">Đổ bóng viền video (Drop Shadow)</span>
+          <label class="switch-toggle">
+            <input type="checkbox" id="chkShadow" checked onchange="updateShadow(this.checked)">
+            <span class="switch-slider"></span>
+          </label>
+        </div>
+
+        <div class="switch-row">
+          <span class="switch-label">Lật ngang video (Mirror / Flip Horizontal)</span>
+          <label class="switch-toggle">
+            <input type="checkbox" id="chkMirror" onchange="updateMirror(this.checked)">
+            <span class="switch-slider"></span>
+          </label>
+        </div>
+        <span style="font-size: 11px; color: var(--text-dim);">Lật ngang là thủ thuật kinh điển chống quét trùng lặp video.</span>
+
+      </div>
+
+      <!-- TAB 3: ANTI RE-UP BACKGROUND (FEATURE 3) -->
+      <div class="panel-content" id="tabAntiReup" style="display: none;">
+        
+        <!-- MASTER ON/OFF BANNER -->
+        <div class="anti-reup-master-banner disabled" id="antiReupBanner">
+          <div class="master-banner-left">
+            <span class="master-banner-icon" id="masterBannerIcon">⚪</span>
+            <div>
+              <div class="master-banner-title" id="masterBannerTitle">Chế Độ Chống Re-up: ĐÃ TẮT</div>
+              <div class="master-banner-desc" id="antiReupBannerDesc">Video phát toàn khung nguyên bản, không chèn phông nền</div>
+            </div>
+          </div>
+          <label class="switch-toggle" style="transform: scale(1.15);">
+            <input type="checkbox" id="masterAntiReupSwitch" onchange="toggleMasterAntiReup(this.checked)">
+            <span class="switch-slider"></span>
+          </label>
+        </div>
+
+        <div id="antiReupSettingsContent">
+          <!-- MIRROR / FLIP HORIZONTAL SWITCH (TAB 3) -->
+          <div class="switch-row" style="background: #141c28; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); margin-bottom: 12px;">
+            <div>
+              <span class="switch-label" style="font-weight: 700; color: #f1f5f9; display: flex; align-items: center; gap: 6px;">
+                <span>🔄</span>
+                <span>Lật ngược video (Mirror ngang chống quét)</span>
+              </span>
+              <div style="font-size: 11px; color: var(--text-dim); margin-top: 3px;">
+                Lật đối xứng hình ảnh video để né bộ quét bản quyền. Phụ đề tiếng Việt vẫn giữ nguyên chuẩn, không bị lật ngược chữ.
+              </div>
+            </div>
+            <label class="switch-toggle" style="flex-shrink: 0; margin-left: 10px;">
+              <input type="checkbox" id="chkMirrorAntiReup" onchange="updateMirror(this.checked)">
+              <span class="switch-slider"></span>
+            </label>
+          </div>
+          <div class="form-section-title">Lồng Background Chống Re-up</div>
+
+          <div class="form-group">
+            <label class="form-label">Kiểu phông nền phía sau:</label>
+            <select id="selBgType" class="search-input" onchange="updateBgType(this.value)">
+              <option value="video_motion">🌊 Video chuyển động (Sóng biển, Cảnh biển, Rừng cây... - Khuyên dùng)</option>
+              <option value="blur">✨ Mờ nền video gốc (Blurred Backdrop)</option>
+              <option value="color">🎨 Màu đơn sắc / Gradient</option>
+              <option value="image">🖼️ Hình ảnh nền tĩnh tùy chọn</option>
+              <option value="none">🚫 Không dùng nền (Viền đen)</option>
+            </select>
+          </div>
+
+          <!-- MOTION BACKGROUND VIDEO SELECTION -->
+          <div id="boxMotionOptions" style="display: none;">
+            <div class="form-label" style="margin-bottom: 6px;">
+              <span>Chọn mẫu video nền chuyển động:</span>
+              <span style="font-size: 10px; color: #38bdf8;" id="motionCountBadge">3 mẫu</span>
+            </div>
+
+            <div class="motion-preset-grid" id="motionPresetGrid">
+              <!-- Rendered dynamically -->
+            </div>
+
+            <div class="form-group" style="margin-top: 10px;">
+              <label class="form-label">Tên hoặc đường dẫn video nền tùy chỉnh (.mp4):</label>
+              <input type="text" id="inputBgMotionFile" class="search-input" placeholder="Ví dụ: song_bien.mp4 hoặc D:\\bg.mp4" onchange="updateCustomMotion(this.value)">
+            </div>
+          </div>
+
+          <div id="boxBlurOptions">
+            <div class="form-group">
+              <div class="form-label">
+                <span>Độ mờ nền (Gaussian Blur):</span>
+                <span class="form-slider-val" id="valBlur">25px</span>
+              </div>
+              <div class="form-slider-row">
+                <input type="range" class="form-slider" id="sliderBlur" min="5" max="50" value="25" oninput="updateBlur(this.value)">
+              </div>
+            </div>
+
+            <div class="form-group">
+              <div class="form-label">
+                <span>Độ làm tối nền (Darken):</span>
+                <span class="form-slider-val" id="valDarken">35%</span>
+              </div>
+              <div class="form-slider-row">
+                <input type="range" class="form-slider" id="sliderDarken" min="0" max="80" value="35" oninput="updateDarken(this.value)">
+              </div>
+            </div>
+          </div>
+
+          <div id="boxColorOptions" style="display: none;">
+            <div class="form-group">
+              <label class="form-label">Chọn mã màu nền:</label>
+              <input type="color" id="inputBgColor" value="#0a0e17" style="width:100%; height:34px; border:none; cursor:pointer;" onchange="updateColor(this.value)">
+              <div class="color-presets">
+                <div class="color-swatch active" style="background:#0a0e17;" onclick="updateColor('#0a0e17')"></div>
+                <div class="color-swatch" style="background:#1e293b;" onclick="updateColor('#1e293b')"></div>
+                <div class="color-swatch" style="background:#0f172a;" onclick="updateColor('#0f172a')"></div>
+                <div class="color-swatch" style="background:#2e1065;" onclick="updateColor('#2e1065')"></div>
+                <div class="color-swatch" style="background:#701a75;" onclick="updateColor('#701a75')"></div>
+                <div class="color-swatch" style="background:#022c22;" onclick="updateColor('#022c22')"></div>
+              </div>
+            </div>
+          </div>
+
+          <div id="boxImageOptions" style="display: none;">
+            <div class="form-group">
+              <label class="form-label">Đường dẫn tệp ảnh nền trên máy:</label>
+              <input type="text" id="inputBgImage" class="search-input" placeholder="Ví dụ: D:\background.jpg" onchange="updateImage(this.value)">
+            </div>
+          </div>
+        </div>
+
+        <button class="btn btn-primary" style="margin-top: 10px; width: 100%; justify-content: center;" onclick="saveSettingsForBatch()">
+          💾 Lưu Cấu Hình Cho Toàn Bộ Video Hàng Loạt
+        </button>
+
+      </div>
+
+      <!-- TAB 4: BATCH FOLDER FRAMING (FEATURE 4) -->
+      <div class="panel-content" id="tabBatchFolder" style="display: none;">
+        <div class="form-section-title">📁 Đóng Khung Thư Mục Hàng Loạt</div>
+        <span style="font-size: 11px; color: var(--text-dim); line-height: 1.4;">
+          Tự động chèn phông nền chuyển động, căn tỷ lệ (9:16/16:9), bo góc và đổ bóng cho toàn bộ video trong thư mục bằng GPU NVIDIA NVENC siêu tốc.
+        </span>
+
+        <!-- INPUT FOLDER -->
+        <div class="form-group">
+          <label class="form-label">Thư mục video đầu vào:</label>
+          <input type="text" id="batchInputFolder" class="search-input" value="D:\banve" placeholder="Ví dụ: D:\banve hoặc D:\video phôi">
+          <div class="folder-chips">
+            <span class="folder-chip" onclick="setBatchInputFolder('D:\\banve')">D:\banve</span>
+            <span class="folder-chip" onclick="setBatchInputFolder('D:\\video phôi')">D:\video phôi</span>
+            <span class="folder-chip" onclick="setBatchInputFolder('C:\\tool v1\\workspace\\downloads')">Downloads</span>
+          </div>
+        </div>
+
+        <!-- OUTPUT FOLDER -->
+        <div class="form-group">
+          <label class="form-label">Thư mục xuất video đã đóng khung:</label>
+          <input type="text" id="batchOutputFolder" class="search-input" value="D:\banve\chong_reup" placeholder="Ví dụ: D:\banve\chong_reup">
+          <div class="folder-chips">
+            <span class="folder-chip" onclick="setBatchOutputFolder('D:\\banve\\chong_reup')">D:\banve\chong_reup</span>
+            <span class="folder-chip" onclick="setBatchOutputFolder('D:\\video phôi\\da_dong_khung')">Phôi Đóng Khung</span>
+          </div>
+        </div>
+
+        <!-- SCAN BUTTON -->
+        <button class="btn btn-outline" style="width: 100%; justify-content: center;" onclick="scanBatchFolder()">
+          🔍 Quét Video Trong Thư Mục
+        </button>
+
+        <!-- CURRENT SETTINGS SUMMARY BOX -->
+        <div class="batch-summary-box" id="batchSettingsSummary">
+          <div style="font-weight: 700; color: #38bdf8; margin-bottom: 4px;">⚡ Cấu hình sẽ áp dụng:</div>
+          <div id="batchSummaryRatio">Tỷ lệ: 9:16 (Dọc)</div>
+          <div id="batchSummaryBg">Phông nền: Video chuyển động (Sóng Biển)</div>
+          <div id="batchSummaryScale">Co dãn: 88% | Bo góc: 16px</div>
+          <div style="color: #10b981; font-weight: 700; margin-top: 4px;">🚀 Bộ tăng tốc: GPU NVIDIA NVENC (~12s/video)</div>
+        </div>
+
+        <!-- SCAN RESULTS LIST -->
+        <div id="batchScanResultsBox" style="display: none;">
+          <div class="form-label">
+            <span>Video tìm thấy:</span>
+            <span id="batchFoundCount" style="color: #38bdf8; font-weight: 700;">0 video</span>
+          </div>
+          <div id="batchFileList" style="max-height: 140px; overflow-y: auto; background: #0c121b; border: 1px solid var(--border); border-radius: 6px; padding: 6px; font-size: 11px; display: flex; flex-direction: column; gap: 4px;">
+            <!-- File items -->
+          </div>
+        </div>
+
+        <!-- ACTION BUTTONS -->
+        <div style="display: flex; gap: 8px;">
+          <button class="btn btn-success" id="btnStartBatchFraming" style="flex: 1; justify-content: center;" onclick="startBatchFraming()">
+            🚀 BẮT ĐẦU ĐÓNG KHUNG HÀNG LOẠT
+          </button>
+          <button class="btn btn-danger" id="btnStopBatchFraming" style="display: none;" onclick="stopBatchFraming()">
+            ⏹ Dừng
+          </button>
+        </div>
+
+        <!-- PROGRESS BOX -->
+        <div class="batch-progress-box" id="batchProgressBox" style="display: none;">
+          <div style="display: flex; justify-content: space-between; font-size: 11px; font-weight: 700;">
+            <span id="batchProgressStatusText" style="color: #38bdf8;">Đang xử lý...</span>
+            <span id="batchProgressPctText" style="color: #10b981;">0%</span>
+          </div>
+          <div class="batch-progress-bar-wrap">
+            <div class="batch-progress-fill" id="batchProgressFill"></div>
+          </div>
+          <div style="font-size: 11px; color: var(--text-dim);" id="batchProgressCurFile">Đang khởi tạo...</div>
+        </div>
+
+        <!-- COMPLETED VIDEOS PREVIEW -->
+        <div id="batchCompletedBox" style="display: none;">
+          <div class="form-label" style="margin-bottom: 6px;">
+            <span>🎉 Video đã đóng khung xong:</span>
+            <span id="batchCompletedCount" style="color: #10b981; font-weight: 700;">0</span>
+          </div>
+          <div class="batch-completed-list" id="batchCompletedList">
+            <!-- Completed items with preview buttons -->
+          </div>
+        </div>
+
+      </div>
+
+      <!-- STICKY BOTTOM ACTIONS AT BOTTOM OF RIGHT COLUMN -->
+      <div class="sidebar-sticky-footer" id="sidebarStickyFooter">
+        <button type="button" class="btn-reset-sidebar" id="btnResetSidebar" onclick="resetSidebarSettingsToDefault()" title="Bấm để khôi phục toàn bộ kiểu chữ, khung nền trắng, tỷ lệ về tiêu chuẩn mặc định ban đầu">
+          <span style="font-size: 14px;">↺</span>
+          <span>Reset Về Mặc Định</span>
+        </button>
+        <button type="button" class="btn-save-sidebar" id="btnSaveSidebar" onclick="saveSettingsForBatch()" title="Lưu cấu hình này áp dụng cho toàn bộ video hàng loạt">
+          <span>💾</span>
+          <span>Lưu Cấu Hình</span>
+        </button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- TOAST NOTIFICATION -->
+  <div id="toastMsg">✅ Đã lưu cấu hình thành công!</div>
+
+  <script>
+    // State
+    let videos = [];
+    let currentVideo = null;
+    let currentVideoData = null;
+    let currentVideoVersion = 'final'; // 'final' or 'raw'
+    let currentSubtitles = [];
+    let currentPlaybackSpeed = 1.0;
+    let isScrubbing = false;
+    let wasPlayingBeforeScrub = false;
+    let availableMotionBgs = [];
+    let batchStatusPollTimer = null;
+    let scannedBatchFiles = [];
+
+    let canvasSettings = {
+      anti_reup_enabled: false,
+      aspect_ratio: 'original',
+      bg_type: 'video_motion',
+      bg_color: '#0a0e17',
+      bg_image: '',
+      bg_motion_file: 'song_bien.mp4',
+      video_scale: 0.88,
+      border_radius: 16,
+      drop_shadow: true,
+      mirror: false,
+      blur_sigma: 25,
+      darken_bg: 0.35
+    };
+    let currentFilter = 'all';
+
+    const mainPlayer = document.getElementById('mainPlayer');
+    const bgBlurVideo = document.getElementById('bgBlurVideo');
+    const bgMotionVideo = document.getElementById('bgMotionVideo');
+    const studioCanvas = document.getElementById('studioCanvas');
+    const canvasBgLayer = document.getElementById('canvasBgLayer');
+    const subtitleOverlay = document.getElementById('subtitleOverlay');
+    const subVietnameseText = document.getElementById('subVietnameseText');
+    const subOriginalText = document.getElementById('subOriginalText');
+    const btnPlay = document.getElementById('btnPlay');
+    const timecodeDisplay = document.getElementById('timecodeDisplay');
+    const playhead = document.getElementById('playhead');
+    const subtitlesTrack = document.getElementById('subtitlesTrack');
+    const videoScrubberWrapper = document.getElementById('videoScrubberWrapper');
+    const videoScrubberTrack = document.getElementById('videoScrubberTrack');
+    const scrubberProgressBar = document.getElementById('scrubberProgressBar');
+    const scrubberBufferedBar = document.getElementById('scrubberBufferedBar');
+    const scrubberThumb = document.getElementById('scrubberThumb');
+    const scrubberHoverPreview = document.getElementById('scrubberHoverPreview');
+    const scrubberHoverTime = document.getElementById('scrubberHoverTime');
+
+    // SYNC MAIN VIDEO WITH BLUR & MOTION BACKGROUND VIDEOS
+    mainPlayer.addEventListener('play', () => {
+      if (canvasSettings.anti_reup_enabled) {
+        if (canvasSettings.bg_type === 'blur') bgBlurVideo.play().catch(() => {});
+        if (canvasSettings.bg_type === 'video_motion') bgMotionVideo.play().catch(() => {});
+      }
+      btnPlay.innerText = '⏸';
+      applyPlaybackSpeed();
+    });
+    mainPlayer.addEventListener('pause', () => {
+      bgBlurVideo.pause();
+      bgMotionVideo.pause();
+      btnPlay.innerText = '▶';
+    });
+    mainPlayer.addEventListener('timeupdate', () => {
+      if (canvasSettings.anti_reup_enabled && canvasSettings.bg_type === 'blur' && Math.abs(bgBlurVideo.currentTime - mainPlayer.currentTime) > 0.15) {
+        bgBlurVideo.currentTime = mainPlayer.currentTime;
+      }
+      updateTimecode();
+      updateSubtitlesOverlay();
+      updatePlayhead();
+      updateScrubberUI();
+    });
+    mainPlayer.addEventListener('progress', () => {
+      updateBufferedProgress();
+    });
+    mainPlayer.addEventListener('loadedmetadata', () => {
+      updateTimecode();
+      renderRulerMarks();
+      renderSubtitlesTimeline();
+      updateScrubberUI();
+      applyPlaybackSpeed();
+    });
+
+    function togglePlay() {
+      if (mainPlayer.paused) {
+        mainPlayer.play().catch(() => {});
+      } else {
+        mainPlayer.pause();
+      }
+    }
+
+    function skipTime(delta) {
+      const dur = mainPlayer.duration || 0;
+      const target = Math.max(0, Math.min(dur, mainPlayer.currentTime + delta));
+      mainPlayer.currentTime = target;
+      if (canvasSettings.anti_reup_enabled && canvasSettings.bg_type === 'blur') bgBlurVideo.currentTime = target;
+      updateTimecode();
+      updatePlayhead();
+      updateScrubberUI();
+    }
+
+    // SPEED CONTROL ("TUA NHANH HAY CHẬM")
+    function setSpeed(speed, el) {
+      currentPlaybackSpeed = parseFloat(speed);
+      applyPlaybackSpeed();
+      document.querySelectorAll('.speed-btn').forEach(b => {
+        const s = parseFloat(b.dataset.speed || b.innerText);
+        b.classList.toggle('active', Math.abs(s - currentPlaybackSpeed) < 0.05);
+      });
+      showToast(`⚡ Tốc độ phát: ${currentPlaybackSpeed}x`);
+    }
+
+    function applyPlaybackSpeed() {
+      if (mainPlayer) {
+        mainPlayer.playbackRate = currentPlaybackSpeed;
+        mainPlayer.defaultPlaybackRate = currentPlaybackSpeed;
+      }
+      if (bgBlurVideo) {
+        bgBlurVideo.playbackRate = currentPlaybackSpeed;
+        bgBlurVideo.defaultPlaybackRate = currentPlaybackSpeed;
+      }
+      if (bgMotionVideo) {
+        bgMotionVideo.playbackRate = currentPlaybackSpeed;
+        bgMotionVideo.defaultPlaybackRate = currentPlaybackSpeed;
+      }
+    }
+
+    // INTERACTIVE SCRUBBER CONTROLLER
+    function updateScrubberUI(customRatio = null) {
+      const dur = mainPlayer.duration || 0;
+      if (dur <= 0) {
+        scrubberProgressBar.style.width = '0%';
+        scrubberThumb.style.left = '0%';
+        return;
+      }
+      const ratio = (customRatio !== null) ? customRatio : (mainPlayer.currentTime / dur);
+      const pct = Math.max(0, Math.min(100, ratio * 100));
+      scrubberProgressBar.style.width = `${pct}%`;
+      scrubberThumb.style.left = `${pct}%`;
+    }
+
+    function updateBufferedProgress() {
+      const dur = mainPlayer.duration || 0;
+      if (dur > 0 && mainPlayer.buffered.length > 0) {
+        const end = mainPlayer.buffered.end(mainPlayer.buffered.length - 1);
+        const pct = Math.min(100, (end / dur) * 100);
+        scrubberBufferedBar.style.width = `${pct}%`;
+      }
+    }
+
+    function initScrubberEvents() {
+      function seekAtClientX(clientX) {
+        const rect = videoScrubberTrack.getBoundingClientRect();
+        const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+        const targetTime = ratio * (mainPlayer.duration || 0);
+        mainPlayer.currentTime = targetTime;
+        if (canvasSettings.anti_reup_enabled && canvasSettings.bg_type === 'blur') bgBlurVideo.currentTime = targetTime;
+        updateScrubberUI(ratio);
+        updatePlayhead();
+        updateTimecode();
+      }
+
+      videoScrubberWrapper.addEventListener('mousemove', (e) => {
+        const rect = videoScrubberTrack.getBoundingClientRect();
+        const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        scrubberHoverPreview.style.display = 'block';
+        scrubberHoverPreview.style.left = `${ratio * 100}%`;
+        const dur = mainPlayer.duration || 0;
+        scrubberHoverTime.innerText = formatTime(ratio * dur);
+      });
+
+      videoScrubberWrapper.addEventListener('mouseleave', () => {
+        if (!isScrubbing) scrubberHoverPreview.style.display = 'none';
+      });
+
+      videoScrubberWrapper.addEventListener('mousedown', (e) => {
+        isScrubbing = true;
+        videoScrubberWrapper.classList.add('scrubbing');
+        wasPlayingBeforeScrub = !mainPlayer.paused;
+        if (wasPlayingBeforeScrub) mainPlayer.pause();
+        seekAtClientX(e.clientX);
+      });
+
+      window.addEventListener('mousemove', (e) => {
+        if (isScrubbing) {
+          seekAtClientX(e.clientX);
+        }
+      });
+
+      window.addEventListener('mouseup', () => {
+        if (isScrubbing) {
+          isScrubbing = false;
+          videoScrubberWrapper.classList.remove('scrubbing');
+          scrubberHoverPreview.style.display = 'none';
+          if (wasPlayingBeforeScrub) mainPlayer.play().catch(() => {});
+        }
+      });
+    }
+
+    // TIMELINE DRAGGABLE PLAYHEAD
+    let isTimelineDragging = false;
+    function initTimelineDragEvents() {
+      const tracksEl = document.getElementById('timelineTracks');
+      const rulerEl = document.getElementById('timelineRuler');
+
+      function seekTimelineAt(clientX) {
+        const rect = tracksEl.getBoundingClientRect();
+        const headerW = 120;
+        const availableW = rect.width - headerW;
+        if (availableW <= 0) return;
+        const ratio = Math.max(0, Math.min(1, (clientX - rect.left - headerW) / availableW));
+        const targetTime = ratio * (mainPlayer.duration || 0);
+        mainPlayer.currentTime = targetTime;
+        if (canvasSettings.anti_reup_enabled && canvasSettings.bg_type === 'blur') bgBlurVideo.currentTime = targetTime;
+        updatePlayhead();
+        updateScrubberUI();
+        updateTimecode();
+      }
+
+      [tracksEl, rulerEl].filter(Boolean).forEach(el => {
+        el.addEventListener('mousedown', (e) => {
+          isTimelineDragging = true;
+          seekTimelineAt(e.clientX);
+        });
+      });
+
+      window.addEventListener('mousemove', (e) => {
+        if (isTimelineDragging) seekTimelineAt(e.clientX);
+      });
+
+      window.addEventListener('mouseup', () => {
+        isTimelineDragging = false;
+      });
+    }
+
+    // GLOBAL KEYBOARD HOTKEYS
+    window.addEventListener('keydown', (e) => {
+      if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
+      if (e.code === 'Space') {
+        e.preventDefault();
+        togglePlay();
+      } else if (e.code === 'ArrowLeft') {
+        e.preventDefault();
+        skipTime(e.shiftKey ? -1 : -5);
+      } else if (e.code === 'ArrowRight') {
+        e.preventDefault();
+        skipTime(e.shiftKey ? 1 : 5);
+      } else if (e.key === 'j' || e.key === 'J') {
+        skipTime(-5);
+      } else if (e.key === 'k' || e.key === 'K') {
+        togglePlay();
+      } else if (e.key === 'l' || e.key === 'L') {
+        skipTime(5);
+      }
+    });
+
+    function setVolume(val) {
+      mainPlayer.volume = parseFloat(val);
+    }
+
+    function formatTime(secs) {
+      if (isNaN(secs) || secs < 0) secs = 0;
+      const m = Math.floor(secs / 60);
+      const s = Math.floor(secs % 60);
+      const ms = Math.floor((secs % 1) * 100);
+      return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(2, '0')}`;
+    }
+
+    function updateTimecode() {
+      const cur = formatTime(mainPlayer.currentTime);
+      const dur = formatTime(mainPlayer.duration || 0);
+      timecodeDisplay.innerText = `${cur} / ${dur}`;
+    }
+
+    function updatePlayhead() {
+      if (!playhead) return;
+      const dur = mainPlayer.duration || 1;
+      const pct = (mainPlayer.currentTime / dur) * 100;
+      playhead.style.left = `${Math.min(100, pct)}%`;
+    }
+
+    function seekTimeline(e) {
+      const rect = document.getElementById('timelineTracks').getBoundingClientRect();
+      const clickX = e.clientX - rect.left - 120;
+      const trackWidth = rect.width - 120;
+      if (clickX >= 0 && trackWidth > 0) {
+        const pct = clickX / trackWidth;
+        const targetTime = pct * (mainPlayer.duration || 0);
+        mainPlayer.currentTime = Math.max(0, Math.min(mainPlayer.duration || 0, targetTime));
+      }
+    }
+
+    // REALTIME SUBTITLE SYNCHRONIZATION
+    function updateSubtitlesOverlay() {
+      const isSubtitleEditTab = document.getElementById('tabSubtitleStyle') && document.getElementById('tabSubtitleStyle').style.display !== 'none';
+      
+      // If watching final video version and NOT in subtitle edit tab, hide overlay
+      if (currentVideoVersion === 'final' && !isSubtitleEditTab) {
+        subtitleOverlay.style.display = 'none';
+        return;
+      }
+
+      subtitleOverlay.style.display = 'flex';
+      applySubtitlePosition();
+
+      const t = mainPlayer.currentTime || 0;
+      let activeSub = currentSubtitles ? currentSubtitles.find(s => t >= s.start && t <= s.end) : null;
+      
+      // If no subtitle at exact second but in edit mode, pick first or closest subtitle so box is always interactive
+      if (!activeSub && isSubtitleEditTab && currentSubtitles && currentSubtitles.length) {
+        activeSub = currentSubtitles[0];
+      }
+
+      if (activeSub) {
+        subVietnameseText.innerText = activeSub.text;
+        if (activeSub.original_text && activeSub.original_text !== activeSub.text) {
+          subOriginalText.style.display = 'inline-block';
+          subOriginalText.innerText = activeSub.original_text;
+        } else {
+          subOriginalText.style.display = 'none';
+        }
+      } else if (!currentSubtitles || !currentSubtitles.length) {
+        subVietnameseText.innerText = 'hôm nay khui sáu mươi cuộn băng dính washi';
+        subOriginalText.style.display = 'none';
+      }
+    }
+
+    // ==========================================
+    // FEATURE 1: VERSION SWITCHER (FINAL vs RAW)
+    // ==========================================
+    function switchVideoVersion(ver) {
+      currentVideoVersion = ver;
+      const btnFinal = document.getElementById('btnVersionFinal');
+      const btnRaw = document.getElementById('btnVersionRaw');
+
+      const savedTime = mainPlayer.currentTime || 0;
+      const wasPlaying = !mainPlayer.paused;
+
+      if (ver === 'final') {
+        if (!currentVideoData || !currentVideoData.final_video_url) {
+          showToast('⚠️ Video này chưa có bản hoàn tất đã lồng tiếng!');
+          return;
+        }
+        btnFinal.className = 'version-btn active-final';
+        btnRaw.className = 'version-btn';
+        mainPlayer.src = currentVideoData.final_video_url;
+        bgBlurVideo.src = currentVideoData.final_video_url;
+        subtitleOverlay.style.display = 'none';
+        document.getElementById('audioStripLabel').innerText = 'Giọng đọc AI RVC đã lồng vào video hoàn tất';
+        document.getElementById('videoStripLabel').innerText = 'Video thành phẩm (Đã che sub gốc & ghép phụ đề cứng)';
+        showToast('✨ Đang xem Bản Hoàn Tất (Lồng tiếng AI & Che sub)');
+      } else {
+        btnFinal.className = 'version-btn';
+        btnRaw.className = 'version-btn active-raw';
+        const rawUrl = (currentVideoData && currentVideoData.raw_video_url) ? currentVideoData.raw_video_url : (currentVideo ? currentVideo.video_url : '');
+        if (rawUrl) {
+          mainPlayer.src = rawUrl;
+          bgBlurVideo.src = rawUrl;
+        }
+        document.getElementById('audioStripLabel').innerText = 'Giọng đọc AI RVC + Nhạc nền BGM';
+        document.getElementById('videoStripLabel').innerText = 'Video phôi gốc';
+        showToast('📹 Đang xem Video Phôi Gốc');
+      }
+
+      mainPlayer.load();
+      bgBlurVideo.load();
+      mainPlayer.onloadedmetadata = () => {
+        if (savedTime < (mainPlayer.duration || 0)) {
+          mainPlayer.currentTime = savedTime;
+        }
+        if (wasPlaying) mainPlayer.play().catch(() => {});
+      };
+      applyCanvasVisuals();
+      updateSubtitlesOverlay();
+    }
+
+    function updateVersionButtonsState(data) {
+      const btnFinal = document.getElementById('btnVersionFinal');
+      const btnRaw = document.getElementById('btnVersionRaw');
+
+      if (data && data.has_final) {
+        btnFinal.disabled = false;
+        btnFinal.innerHTML = '✨ Bản Hoàn Tất (Đã Lồng Tiếng & Che Sub)';
+        btnFinal.title = 'Bấm để xem video thành phẩm đã hoàn tất';
+        if (currentVideoVersion === 'final') {
+          btnFinal.className = 'version-btn active-final';
+          btnRaw.className = 'version-btn';
+        } else {
+          btnFinal.className = 'version-btn';
+          btnRaw.className = 'version-btn active-raw';
+        }
+      } else {
+        btnFinal.disabled = true;
+        btnFinal.innerHTML = '✨ Bản Hoàn Tất (Chưa có)';
+        btnFinal.title = 'Video này chưa chạy xong bước 6 để tạo bản hoàn tất';
+        currentVideoVersion = 'raw';
+        btnFinal.className = 'version-btn';
+        btnRaw.className = 'version-btn active-raw';
+      }
+    }
+
+    // ==========================================
+    // FEATURE 2: LOCAL FILE PICKER & DRAG/DROP
+    // ==========================================
+    function handleLocalVideoSelect(e) {
+      const file = e.target.files && e.target.files[0];
+      if (file) loadLocalFileToStudio(file);
+      e.target.value = '';
+    }
+
+    function handleDragOver(e) {
+      e.preventDefault();
+      document.getElementById('dragDropOverlay').style.display = 'flex';
+    }
+
+    function handleDragLeave(e) {
+      if (e.target.id === 'dragDropOverlay' || e.target.id === 'centerStage') {
+        document.getElementById('dragDropOverlay').style.display = 'none';
+      }
+    }
+
+    function handleDrop(e) {
+      e.preventDefault();
+      document.getElementById('dragDropOverlay').style.display = 'none';
+      const file = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (file && (file.type.startsWith('video/') || /\.(mp4|mkv|mov|webm|avi)$/i.test(file.name))) {
+        loadLocalFileToStudio(file);
+      } else if (file) {
+        showToast('⚠️ Vui lòng chọn tệp video hợp lệ (.mp4, .mkv, .mov...)');
+      }
+    }
+
+    function loadLocalFileToStudio(file) {
+      const blobUrl = URL.createObjectURL(file);
+      const stem = file.name.replace(/\.[^/.]+$/, "");
+      const sizeMb = (file.size / (1024 * 1024)).toFixed(2);
+
+      const localItem = {
+        stem: stem,
+        filename: file.name,
+        source: 'local',
+        size_mb: sizeMb,
+        is_local: true,
+        video_url: blobUrl,
+        raw_video_url: blobUrl,
+        final_video_url: '',
+        has_final: false,
+        steps: {
+          step1: { ready: false },
+          step2: { ready: false },
+          step3: { ready: false },
+          step3_5: { ready: false },
+          step4: { ready: false },
+          step5: { ready: false },
+          step6: { ready: false }
+        },
+        subtitles: []
+      };
+
+      videos.unshift(localItem);
+      document.getElementById('videoCountBadge').innerText = `(${videos.length} video)`;
+      renderMediaList();
+      selectVideo(localItem);
+      showToast(`📂 Đã nạp video từ máy: ${file.name}`);
+    }
+
+    // ==========================================
+    // FEATURE 3: MASTER ANTI-REUP SWITCH
+    // ==========================================
+    function toggleMasterAntiReupFromHeader() {
+      const newState = !canvasSettings.anti_reup_enabled;
+      toggleMasterAntiReup(newState);
+    }
+
+    function toggleMasterAntiReup(enabled) {
+      canvasSettings.anti_reup_enabled = Boolean(enabled);
+      syncAntiReupUI();
+      applyCanvasVisuals();
+      saveSettingsForBatch(false); // Lưu ngầm cấu hình
+      showToast(enabled ? '🛡️ Chế độ Chống Re-up: ĐÃ BẬT' : '⚪ Chế độ Chống Re-up: ĐÃ TẮT (Giữ nguyên gốc)');
+    }
+
+    function syncAntiReupUI() {
+      const isEn = Boolean(canvasSettings.anti_reup_enabled);
+      
+      // Header pill
+      const pill = document.getElementById('headerAntiReupPill');
+      const pillText = document.getElementById('headerAntiReupText');
+      if (pill) {
+        pill.className = 'header-anti-reup-pill ' + (isEn ? 'enabled' : 'disabled');
+        pillText.innerText = isEn ? '🛡️ Chống Re-up: BẬT' : '⚪ Chống Re-up: TẮT';
+      }
+
+      // Tab 3 banner
+      const banner = document.getElementById('antiReupBanner');
+      const bIcon = document.getElementById('masterBannerIcon');
+      const bTitle = document.getElementById('masterBannerTitle');
+      const bDesc = document.getElementById('antiReupBannerDesc');
+      const bSwitch = document.getElementById('masterAntiReupSwitch');
+      if (banner) {
+        banner.className = 'anti-reup-master-banner ' + (isEn ? '' : 'disabled');
+        bIcon.innerText = isEn ? '🛡️' : '⚪';
+        bTitle.innerText = isEn ? 'Chế Độ Chống Re-up: ĐANG BẬT' : 'Chế Độ Chống Re-up: ĐÃ TẮT';
+        bDesc.innerText = isEn ? 'Áp dụng chèn phông nền, lồng khung bo góc và co dãn video' : 'Video phát toàn khung nguyên bản, không chèn phông nền';
+        if (bSwitch) bSwitch.checked = isEn;
+      }
+
+      // Settings content opacity
+      const content = document.getElementById('antiReupSettingsContent');
+      if (content) {
+        content.style.opacity = isEn ? '1' : '0.5';
+        content.style.pointerEvents = isEn ? 'auto' : 'none';
+      }
+
+      updateBatchSummaryBox();
+    }
+
+    // ==========================================
+    // FEATURE 4: BATCH FOLDER FRAMING TAB
+    // ==========================================
+    function setBatchInputFolder(path) {
+      document.getElementById('batchInputFolder').value = path;
+    }
+
+    function setBatchOutputFolder(path) {
+      document.getElementById('batchOutputFolder').value = path;
+    }
+
+    function updateBatchSummaryBox() {
+      const summaryRatio = document.getElementById('batchSummaryRatio');
+      const summaryBg = document.getElementById('batchSummaryBg');
+      const summaryScale = document.getElementById('batchSummaryScale');
+      if (!summaryRatio) return;
+
+      const r = canvasSettings.aspect_ratio || '9:16';
+      summaryRatio.innerText = `Tỷ lệ: ${r === '9:16' ? '9:16 (Dọc)' : r === '16:9' ? '16:9 (Ngang)' : r}`;
+      
+      let bgName = 'Video chuyển động (Sóng biển)';
+      if (canvasSettings.bg_type === 'video_motion') {
+        bgName = `Video chuyển động (${canvasSettings.bg_motion_file || 'Sóng Biển'})`;
+      } else if (canvasSettings.bg_type === 'blur') {
+        bgName = 'Mờ nền video gốc (Blur)';
+      } else if (canvasSettings.bg_type === 'color') {
+        bgName = `Màu nền (${canvasSettings.bg_color || '#0a0e17'})`;
+      }
+      summaryBg.innerText = `Phông nền: ${bgName}`;
+
+      const sc = Math.round((canvasSettings.video_scale || 0.88) * 100);
+      const rad = canvasSettings.border_radius || 16;
+      summaryScale.innerText = `Co dãn: ${sc}% | Bo góc: ${rad}px | Lật: ${canvasSettings.mirror ? 'Có' : 'Không'}`;
+    }
+
+    async function scanBatchFolder() {
+      const folderPath = document.getElementById('batchInputFolder').value.trim();
+      if (!folderPath) {
+        showToast('⚠️ Vui lòng nhập đường dẫn thư mục');
+        return;
+      }
+      showToast('🔍 Đang quét video trong thư mục...');
+      try {
+        const res = await fetch('/api/workflow/batch-framing/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Local-Control-Token': '__REPLACE_TOKEN__' },
+          body: JSON.stringify({ folder_path: folderPath })
+        });
+        const data = await res.json();
+        if (data.status === 'ok') {
+          scannedBatchFiles = data.videos || data.files || [];
+          const totalSizeMb = scannedBatchFiles.reduce((sum, f) => sum + (f.size_mb || 0), 0).toFixed(1);
+          
+          document.getElementById('batchScanResultsBox').style.display = 'block';
+          document.getElementById('batchFoundCount').innerText = `${scannedBatchFiles.length} video (${totalSizeMb} MB)`;
+          
+          const listEl = document.getElementById('batchFileList');
+          listEl.innerHTML = '';
+          scannedBatchFiles.forEach(f => {
+            const item = document.createElement('div');
+            item.style.display = 'flex';
+            item.style.justifyContent = 'space-between';
+            item.style.alignItems = 'center';
+            item.style.padding = '4px 8px';
+            item.style.background = '#141c28';
+            item.style.borderRadius = '4px';
+            item.innerHTML = `
+              <span style="color:#f1f5f9; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px;" title="${f.name}">🎬 ${f.name}</span>
+              <span style="color:#94a3b8; font-size:10px;">${f.size_mb} MB</span>
+            `;
+            listEl.appendChild(item);
+          });
+          showToast(`✅ Đã tìm thấy ${scannedBatchFiles.length} video`);
+        } else {
+          showToast(`❌ Lỗi: ${data.message || 'Không tìm thấy video'}`);
+        }
+      } catch (err) {
+        showToast('❌ Không thể kết nối máy chủ để quét thư mục');
+      }
+    }
+
+    async function startBatchFraming() {
+      const inFolder = document.getElementById('batchInputFolder').value.trim();
+      const outFolder = document.getElementById('batchOutputFolder').value.trim();
+      if (!inFolder) {
+        showToast('⚠️ Vui lòng chọn thư mục đầu vào');
+        return;
+      }
+
+      const payload = {
+        input_folder: inFolder,
+        output_folder: outFolder,
+        settings: canvasSettings
+      };
+
+      try {
+        const res = await fetch('/api/workflow/batch-framing/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Local-Control-Token': '__REPLACE_TOKEN__' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.status === 'ok') {
+          showToast('🚀 Đã bắt đầu tiến trình đóng khung hàng loạt bằng GPU NVENC!');
+          document.getElementById('btnStartBatchFraming').style.display = 'none';
+          document.getElementById('btnStopBatchFraming').style.display = 'inline-flex';
+          document.getElementById('batchProgressBox').style.display = 'flex';
+          startBatchStatusPolling();
+        } else {
+          showToast(`❌ ${data.message || 'Không thể bắt đầu'}`);
+        }
+      } catch (err) {
+        showToast('❌ Lỗi kết nối khi khởi động tiến trình');
+      }
+    }
+
+    async function stopBatchFraming() {
+      try {
+        await fetch('/api/workflow/batch-framing/stop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Local-Control-Token': '__REPLACE_TOKEN__' }
+        });
+        showToast('⏹ Đã gửi lệnh dừng tiến trình');
+      } catch (e) {}
+    }
+
+    function startBatchStatusPolling() {
+      if (batchStatusPollTimer) clearInterval(batchStatusPollTimer);
+      batchStatusPollTimer = setInterval(pollBatchStatus, 1500);
+      pollBatchStatus();
+    }
+
+    async function pollBatchStatus() {
+      try {
+        const res = await fetch('/api/workflow/batch-framing/status');
+        if (!res.ok) return;
+        const st = await res.json();
+
+        const pBox = document.getElementById('batchProgressBox');
+        const pFill = document.getElementById('batchProgressFill');
+        const pText = document.getElementById('batchProgressStatusText');
+        const pPct = document.getElementById('batchProgressPctText');
+        const pCur = document.getElementById('batchProgressCurFile');
+
+        if (st.status === 'running' || st.status === 'starting') {
+          pBox.style.display = 'flex';
+          pFill.style.width = `${st.percent || 0}%`;
+          pPct.innerText = `${st.percent || 0}%`;
+          pText.innerText = `Đang xử lý: ${st.current || 0} / ${st.total || 0} video`;
+          pCur.innerText = st.current_file ? `▶ Đang render GPU: ${st.current_file}` : 'Đang xử lý...';
+          document.getElementById('btnStartBatchFraming').style.display = 'none';
+          document.getElementById('btnStopBatchFraming').style.display = 'inline-flex';
+        } else {
+          // Done or idle
+          if (batchStatusPollTimer) {
+            clearInterval(batchStatusPollTimer);
+            batchStatusPollTimer = null;
+          }
+          document.getElementById('btnStartBatchFraming').style.display = 'inline-flex';
+          document.getElementById('btnStopBatchFraming').style.display = 'none';
+
+          if (st.status === 'done') {
+            pFill.style.width = '100%';
+            pPct.innerText = '100%';
+            pText.innerText = '🎉 Hoàn tất đóng khung!';
+            pCur.innerText = st.message || 'Đã hoàn tất tất cả video';
+            showToast('🎉 Đã hoàn tất đóng khung chống re-up cho toàn bộ thư mục!');
+          }
+        }
+
+        // Render completed files list
+        if (st.completed_files && st.completed_files.length) {
+          const compBox = document.getElementById('batchCompletedBox');
+          const compList = document.getElementById('batchCompletedList');
+          compBox.style.display = 'block';
+          document.getElementById('batchCompletedCount').innerText = `${st.completed_files.length} video`;
+          compList.innerHTML = '';
+          
+          st.completed_files.forEach(f => {
+            const row = document.createElement('div');
+            row.className = 'batch-completed-item';
+            row.innerHTML = `
+              <div class="batch-completed-name" title="${f.name}">✅ ${f.name}</div>
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span style="color:#94a3b8; font-size:10px;">${f.size_mb} MB</span>
+                <button class="btn btn-outline" style="font-size:10px; padding:2px 6px;" onclick="previewRenderedVideo('${f.url}', '${f.name}')">
+                  ▶ Xem Thử
+                </button>
+              </div>
+            `;
+            compList.appendChild(row);
+          });
+        }
+
+      } catch (e) {}
+    }
+
+    function previewRenderedVideo(url, name) {
+      mainPlayer.src = url;
+      bgBlurVideo.src = url;
+      mainPlayer.load();
+      bgBlurVideo.load();
+      mainPlayer.play().catch(() => {});
+      document.getElementById('topVideoTitle').innerText = `[Thành phẩm] ${name}`;
+      showToast(`🎬 Đang xem thử video vừa đóng khung: ${name}`);
+    }
+
+    // ==========================================
+    // CANVAS ASPECT RATIO & VISUAL STYLING
+    // ==========================================
+    function setRatio(ratio) {
+      canvasSettings.aspect_ratio = ratio;
+      document.querySelectorAll('.ratio-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.ratio === ratio);
+      });
+      applyCanvasVisuals();
+      updateBatchSummaryBox();
+    }
+
+    function updateScale(val) {
+      canvasSettings.video_scale = parseInt(val) / 100;
+      document.getElementById('valScale').innerText = `${val}%`;
+      applyCanvasVisuals();
+      updateBatchSummaryBox();
+    }
+
+    function updateRadius(val) {
+      canvasSettings.border_radius = parseInt(val);
+      document.getElementById('valRadius').innerText = `${val}px`;
+      applyCanvasVisuals();
+      updateBatchSummaryBox();
+    }
+
+    function updateShadow(val) {
+      canvasSettings.drop_shadow = Boolean(val);
+      syncSubtitleControlsFromSettings();
+      applySubtitleVisuals();
+      applyCanvasVisuals();
+    }
+
+    function updateMirror(val) {
+      canvasSettings.mirror = Boolean(val);
+      const chk1 = document.getElementById('chkMirror');
+      const chk2 = document.getElementById('chkMirrorAntiReup');
+      if (chk1) chk1.checked = canvasSettings.mirror;
+      if (chk2) chk2.checked = canvasSettings.mirror;
+
+      if (canvasSettings.mirror && currentVideoVersion === 'final') {
+        // Tự động chuyển sang xem phôi với phụ đề HTML đè lên để video lật nhưng phụ đề không bị lật ngược chữ
+        switchVideoVersion('raw');
+        showToast('🔄 Đã BẬT lật ngược video. Tự động chuyển xem video phôi để phụ đề tiếng Việt chuẩn không bị lật ngược!');
+      } else {
+        showToast(val ? '🔄 Đã BẬT lật ngược video (Phụ đề tiếng Việt giữ nguyên chuẩn)' : '⚪ Đã TẮT lật ngược video');
+      }
+      applyCanvasVisuals();
+      updateBatchSummaryBox();
+      saveSettingsForBatch(false);
+    }
+
+    function updateBgType(val) {
+      canvasSettings.bg_type = val;
+      document.getElementById('boxMotionOptions').style.display = (val === 'video_motion') ? 'block' : 'none';
+      document.getElementById('boxBlurOptions').style.display = (val === 'blur') ? 'block' : 'none';
+      document.getElementById('boxColorOptions').style.display = (val === 'color') ? 'block' : 'none';
+      document.getElementById('boxImageOptions').style.display = (val === 'image') ? 'block' : 'none';
+      applyCanvasVisuals();
+      updateBatchSummaryBox();
+    }
+
+    function selectMotionBg(filename, el) {
+      canvasSettings.bg_motion_file = filename;
+      document.getElementById('inputBgMotionFile').value = filename;
+      document.querySelectorAll('.motion-card').forEach(c => {
+        const isMatch = (c.dataset.file === filename);
+        c.classList.toggle('active', isMatch);
+        const badge = c.querySelector('.motion-card-badge');
+        if (badge) badge.innerText = isMatch ? 'Đang dùng' : 'Chọn';
+      });
+      applyCanvasVisuals();
+      updateBatchSummaryBox();
+      showToast(`🎬 Đã chọn background chuyển động: ${filename}`);
+    }
+
+    function updateCustomMotion(path) {
+      canvasSettings.bg_motion_file = path.trim();
+      applyCanvasVisuals();
+      updateBatchSummaryBox();
+    }
+
+    function updateBlur(val) {
+      canvasSettings.blur_sigma = parseInt(val);
+      document.getElementById('valBlur').innerText = `${val}px`;
+      applyCanvasVisuals();
+    }
+
+    function updateDarken(val) {
+      canvasSettings.darken_bg = parseInt(val) / 100;
+      document.getElementById('valDarken').innerText = `${val}%`;
+      applyCanvasVisuals();
+    }
+
+    function updateColor(color) {
+      canvasSettings.bg_color = color;
+      document.getElementById('inputBgColor').value = color;
+      document.querySelectorAll('.color-swatch').forEach(s => {
+        s.classList.toggle('active', s.style.backgroundColor === color);
+      });
+      applyCanvasVisuals();
+      updateBatchSummaryBox();
+    }
+
+    function updateImage(path) {
+      canvasSettings.bg_image = path;
+      applyCanvasVisuals();
+    }
+
+    function resolveMotionBgStreamUrl(filenameOrPath) {
+      const fn = filenameOrPath || 'song_bien.mp4';
+      const found = availableMotionBgs.find(b => b.filename === fn || b.id === fn || b.path.endsWith(fn));
+      if (found && found.url) return found.url;
+      if (fn.includes('/') || fn.includes('\\')) {
+        return `/api/workflow/stream-file?path=${encodeURIComponent(fn)}`;
+      }
+      return `/api/workflow/stream-file?path=C:/tool%20v1/workspace/motion_backgrounds/${encodeURIComponent(fn)}`;
+    }
+
+    function applyCanvasVisuals() {
+      applySubtitleVisuals();
+      // 1. Ratio class
+      studioCanvas.className = 'studio-canvas';
+      if (canvasSettings.aspect_ratio === '9:16') studioCanvas.classList.add('canvas-9-16');
+      else if (canvasSettings.aspect_ratio === '16:9') studioCanvas.classList.add('canvas-16-9');
+      else if (canvasSettings.aspect_ratio === '1:1') studioCanvas.classList.add('canvas-1-1');
+      else studioCanvas.classList.add('canvas-original');
+
+      // 2. Anti-Reup Master Switch check:
+      if (!canvasSettings.anti_reup_enabled) {
+        // TẮT CHỐNG RE-UP: Ẩn hoàn toàn background, video gốc toàn khung nguyên bản, KHÔNG LẬT
+        canvasBgLayer.style.display = 'none';
+        bgMotionVideo.pause();
+        bgBlurVideo.pause();
+        mainPlayer.style.transform = 'scale(1.0)';
+        mainPlayer.style.borderRadius = '0px';
+        mainPlayer.style.boxShadow = 'none';
+        return;
+      }
+
+      // BẬT CHỐNG RE-UP: Hiện background layer và áp dụng tỉ lệ, bo góc, bóng
+      canvasBgLayer.style.display = 'block';
+
+      const bgSolid = document.getElementById('bgSolid');
+      
+      if (canvasSettings.bg_type === 'video_motion') {
+        bgBlurVideo.style.display = 'none';
+        bgSolid.style.display = 'none';
+        bgMotionVideo.style.display = 'block';
+
+        const motionUrl = resolveMotionBgStreamUrl(canvasSettings.bg_motion_file || 'song_bien.mp4');
+        if (!bgMotionVideo.src.includes(encodeURIComponent(canvasSettings.bg_motion_file || 'song_bien.mp4')) && bgMotionVideo.src !== motionUrl) {
+          bgMotionVideo.src = motionUrl;
+          bgMotionVideo.load();
+        }
+        if (!mainPlayer.paused) {
+          bgMotionVideo.play().catch(() => {});
+        }
+      } else if (canvasSettings.bg_type === 'blur') {
+        bgMotionVideo.style.display = 'none';
+        bgBlurVideo.style.display = 'block';
+        bgSolid.style.display = 'none';
+        const darken = canvasSettings.darken_bg ?? 0.35;
+        const brightness = Math.max(0.1, 1 - darken);
+        bgBlurVideo.style.filter = `blur(${canvasSettings.blur_sigma || 25}px) brightness(${brightness})`;
+      } else if (canvasSettings.bg_type === 'color') {
+        bgBlurVideo.style.display = 'none';
+        bgMotionVideo.style.display = 'none';
+        bgSolid.style.display = 'block';
+        bgSolid.style.backgroundColor = canvasSettings.bg_color || '#0a0e17';
+        bgSolid.style.backgroundImage = 'none';
+      } else if (canvasSettings.bg_type === 'image' && canvasSettings.bg_image) {
+        bgBlurVideo.style.display = 'none';
+        bgMotionVideo.style.display = 'none';
+        bgSolid.style.display = 'block';
+        bgSolid.style.backgroundImage = `url('/api/workflow/stream-file?path=${encodeURIComponent(canvasSettings.bg_image)}')`;
+        bgSolid.style.backgroundSize = 'cover';
+        bgSolid.style.backgroundPosition = 'center';
+      } else {
+        bgBlurVideo.style.display = 'none';
+        bgMotionVideo.style.display = 'none';
+        bgSolid.style.display = 'block';
+        bgSolid.style.backgroundColor = '#000000';
+      }
+
+      // 3. Foreground Video transformation
+      const scale = canvasSettings.video_scale || 0.88;
+      // Đảm bảo không bao giờ bị lật chữ: Chỉ lật video khi đang xem phôi (sub là lớp HTML riêng biệt)
+      // Nếu đang xem bản hoàn tất đã nướng sub vào video frame thì không áp dụng scaleX(-1) để tránh bị ngược chữ
+      const shouldMirror = canvasSettings.mirror && (currentVideoVersion !== 'final');
+      const mirror = shouldMirror ? 'scaleX(-1) ' : '';
+      mainPlayer.style.transform = `${mirror}scale(${scale})`;
+      mainPlayer.style.borderRadius = `${canvasSettings.border_radius || 0}px`;
+      if (canvasSettings.drop_shadow) {
+        mainPlayer.style.boxShadow = '0 12px 36px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.08)';
+      } else {
+        mainPlayer.style.boxShadow = 'none';
+      }
+    }
+
+    // TABS SWITCHER
+    function switchTab(tabId, el) {
+      document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
+      el.classList.add('active');
+      const tabSub = document.getElementById('tabSubtitleStyle');
+      const tabFr = document.getElementById('tabFraming');
+      const tabAr = document.getElementById('tabAntiReup');
+      const tabBf = document.getElementById('tabBatchFolder');
+
+      if (tabSub) {
+        tabSub.style.display = (tabId === 'subtitle-style') ? 'flex' : 'none';
+        if (tabId === 'subtitle-style' && currentVideo && currentVideoVersion === 'final') {
+          switchVideoVersion('raw');
+          showToast('🎬 Đã chuyển sang Video Phôi để bạn chỉnh sửa phụ đề trực tiếp trên màn hình!');
+        }
+      }
+      if (tabFr) tabFr.style.display = (tabId === 'framing') ? 'flex' : 'none';
+      if (tabAr) tabAr.style.display = (tabId === 'anti-reup') ? 'flex' : 'none';
+      if (tabBf) tabBf.style.display = (tabId === 'batch-folder') ? 'flex' : 'none';
+    }
+
+    // LOAD WORKFLOW DATA FROM SERVER
+    async function loadWorkflowData() {
+      try {
+        // 1. Fetch canvas settings
+        const cfgRes = await fetch('/api/canvas-settings');
+        if (cfgRes.ok) {
+          const cfgData = await cfgRes.json();
+          canvasSettings = Object.assign(canvasSettings, cfgData);
+          syncSubtitleControlsFromSettings();
+          applySubtitlePosition();
+          
+          if (cfgData.motion_backgrounds && cfgData.motion_backgrounds.length) {
+            availableMotionBgs = cfgData.motion_backgrounds;
+            renderMotionPresetCards(availableMotionBgs);
+          }
+
+          // Sync UI controls with settings
+          document.getElementById('selBgType').value = canvasSettings.bg_type || 'video_motion';
+          document.getElementById('sliderScale').value = Math.round((canvasSettings.video_scale || 0.88) * 100);
+          document.getElementById('valScale').innerText = `${Math.round((canvasSettings.video_scale || 0.88) * 100)}%`;
+          document.getElementById('sliderRadius').value = canvasSettings.border_radius || 16;
+          document.getElementById('valRadius').innerText = `${canvasSettings.border_radius || 16}px`;
+          document.getElementById('chkShadow').checked = canvasSettings.drop_shadow !== false;
+          document.getElementById('chkMirror').checked = Boolean(canvasSettings.mirror);
+          const chkAnti = document.getElementById('chkMirrorAntiReup');
+          if (chkAnti) chkAnti.checked = Boolean(canvasSettings.mirror);
+          document.getElementById('sliderBlur').value = canvasSettings.blur_sigma || 25;
+          document.getElementById('valBlur').innerText = `${canvasSettings.blur_sigma || 25}px`;
+          document.getElementById('sliderDarken').value = Math.round((canvasSettings.darken_bg || 0.35) * 100);
+          document.getElementById('valDarken').innerText = `${Math.round((canvasSettings.darken_bg || 0.35) * 100)}%`;
+          
+          if (canvasSettings.bg_motion_file) {
+            document.getElementById('inputBgMotionFile').value = canvasSettings.bg_motion_file;
+            document.querySelectorAll('.motion-card').forEach(c => {
+              const isMatch = (c.dataset.file === canvasSettings.bg_motion_file);
+              c.classList.toggle('active', isMatch);
+              const badge = c.querySelector('.motion-card-badge');
+              if (badge) badge.innerText = isMatch ? 'Đang dùng' : 'Chọn';
+            });
+          }
+
+          syncAntiReupUI();
+          updateBgType(canvasSettings.bg_type || 'video_motion');
+          setRatio(canvasSettings.aspect_ratio || 'original');
+        }
+
+        // 2. Fetch video list
+        const vRes = await fetch('/api/workflow/videos');
+        if (vRes.ok) {
+          const vData = await vRes.json();
+          // Retain local videos if any were added
+          const localVideos = videos.filter(v => v.is_local);
+          videos = [...localVideos, ...(vData.videos || [])];
+          document.getElementById('videoCountBadge').innerText = `(${videos.length} video)`;
+          renderMediaList();
+          if (videos.length && !currentVideo) {
+            selectVideo(videos[0]);
+          }
+        }
+
+        // 3. Auto poll batch framing status
+        pollBatchStatus();
+      } catch (err) {
+        console.error('Lỗi khi tải dữ liệu workflow:', err);
+      }
+    }
+
+    function setFilter(filt, el) {
+      currentFilter = filt;
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      el.classList.add('active');
+      renderMediaList();
+    }
+
+    function renderMediaList() {
+      const q = (document.getElementById('searchInput').value || '').toLowerCase().trim();
+      const listEl = document.getElementById('mediaList');
+      listEl.innerHTML = '';
+
+      // Tính số lượng cho từng bộ lọc
+      let countAll = videos.length;
+      let countUnedited = 0;
+      let countEdited = 0;
+      let countLocal = 0;
+
+      videos.forEach(v => {
+        const doneCount = Object.values(v.steps || {}).filter(Boolean).length;
+        const isComp = doneCount >= 6 || Boolean(v.has_final) || Boolean(v.steps && v.steps.step6);
+        if (isComp) countEdited++;
+        else countUnedited++;
+        if (v.is_local) countLocal++;
+      });
+
+      const bAll = document.getElementById('btnFilterAll');
+      const bUn = document.getElementById('btnFilterUnedited');
+      const bEd = document.getElementById('btnFilterEdited');
+      const bLoc = document.getElementById('btnFilterLocal');
+      const filterContainer = document.getElementById('filterTabsContainer');
+
+      if (bAll) bAll.innerHTML = `Tất cả <span class="filter-count">(${countAll})</span>`;
+      if (bUn) bUn.innerHTML = `Chưa edit <span class="filter-count count-warn">(${countUnedited})</span>`;
+      if (bEd) bEd.innerHTML = `Đã edit <span class="filter-count count-done">(${countEdited})</span>`;
+      if (bLoc) {
+        bLoc.innerHTML = `📁 Từ máy <span class="filter-count">(${countLocal})</span>`;
+        bLoc.style.display = countLocal > 0 ? 'flex' : 'none';
+        if (filterContainer) {
+          filterContainer.style.gridTemplateColumns = countLocal > 0 ? 'repeat(4, 1fr)' : 'repeat(3, 1fr)';
+        }
+      }
+
+      const filtered = videos.filter(v => {
+        const doneCount = Object.values(v.steps || {}).filter(Boolean).length;
+        const isComp = doneCount >= 6 || Boolean(v.has_final) || Boolean(v.steps && v.steps.step6);
+
+        if (currentFilter === 'unedited' && isComp) return false;
+        if (currentFilter === 'edited' && !isComp) return false;
+        if (currentFilter === 'local' && !v.is_local) return false;
+        if (q && !v.filename.toLowerCase().includes(q)) return false;
+        return true;
+      });
+
+      if (!filtered.length) {
+        listEl.innerHTML = '<div style="font-size:12px; color:var(--text-dim); text-align:center; padding:20px;">Không có video nào.</div>';
+        return;
+      }
+
+      filtered.forEach(v => {
+        const card = document.createElement('div');
+        card.className = 'media-card' + (currentVideo && currentVideo.stem === v.stem ? ' active' : '');
+        const doneCount = Object.values(v.steps || {}).filter(Boolean).length;
+        const isCompleted = doneCount >= 6;
+        
+        let pillHtml = `<span class="badge-pill ${isCompleted ? 'badge-done' : 'badge-pending'}">${isCompleted ? 'Hoàn tất' : `${doneCount}/6 Bước`}</span>`;
+        if (v.is_local) {
+          pillHtml = `<span class="badge-pill badge-local">Tệp từ máy</span>`;
+        }
+
+        card.innerHTML = `
+          <div class="media-thumb">${v.is_local ? '📂' : '🎬'}</div>
+          <div class="media-info">
+            <div class="media-name" title="${v.filename}">${v.filename}</div>
+            <div class="media-meta">
+              <span>${v.size_mb} MB</span>
+              ${pillHtml}
+            </div>
+          </div>
+        `;
+        card.onclick = () => selectVideo(v);
+        listEl.appendChild(card);
+      });
+    }
+
+    async function selectVideo(v) {
+      currentVideo = v;
+      document.getElementById('topVideoTitle').innerText = v.filename;
+      renderMediaList();
+
+      if (v.is_local) {
+        // Tệp cục bộ được người dùng mở từ máy
+        currentVideoData = {
+          stem: v.stem,
+          video_url: v.video_url,
+          raw_video_url: v.video_url,
+          final_video_url: '',
+          has_final: false,
+          subtitles: []
+        };
+        currentVideoVersion = 'raw';
+        updateVersionButtonsState(currentVideoData);
+
+        mainPlayer.src = v.video_url;
+        bgBlurVideo.src = v.video_url;
+        mainPlayer.load();
+        bgBlurVideo.load();
+        currentSubtitles = [];
+        renderSubtitlesTimeline();
+        renderStepsStatus(v.steps);
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/workflow/video-data?stem=${encodeURIComponent(v.stem)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        currentVideoData = data;
+
+        // 1. Determine active version & button states
+        currentVideoVersion = data.has_final ? 'final' : 'raw';
+        updateVersionButtonsState(data);
+
+        // 2. Load active video url into player
+        const activeUrl = (currentVideoVersion === 'final' && data.final_video_url) ? data.final_video_url : (data.video_url || data.raw_video_url);
+
+        if (activeUrl) {
+          mainPlayer.src = activeUrl;
+          bgBlurVideo.src = activeUrl;
+          mainPlayer.load();
+          bgBlurVideo.load();
+        }
+
+        // 3. Subtitles
+        currentSubtitles = data.subtitles || [];
+        renderSubtitlesTimeline();
+
+        // 4. Render 6 Steps
+        renderStepsStatus(data.steps);
+
+        applyCanvasVisuals();
+        updateSubtitlesOverlay();
+
+      } catch (e) {
+        console.error('Lỗi khi nạp dữ liệu video:', e);
+      }
+    }
+
+    function renderStepsStatus(steps) {
+      if (!document.getElementById('step1Status')) return;
+      if (!steps) return;
+
+      // Step 1
+      const s1 = steps.step1 || {};
+      const s1El = document.getElementById('step1Status');
+      const s1Audio = document.getElementById('step1Audio');
+      if (s1.ready && s1.audio_url) {
+        s1El.className = 'step-status-chip step-ready';
+        s1El.innerText = '✅ Đã trích';
+        s1Audio.src = s1.audio_url;
+        document.getElementById('step1PlayerBox').style.display = 'block';
+      } else {
+        s1El.className = 'step-status-chip step-waiting';
+        s1El.innerText = 'Chờ';
+        document.getElementById('step1PlayerBox').style.display = 'none';
+      }
+
+      // Step 2
+      const s2 = steps.step2 || {};
+      const s2El = document.getElementById('step2Status');
+      s2El.className = 'step-status-chip ' + (s2.ready ? 'step-ready' : 'step-waiting');
+      s2El.innerText = s2.ready ? '✅ Đã tách' : 'Chờ';
+
+      // Step 3
+      const s3 = steps.step3 || {};
+      const s3El = document.getElementById('step3Status');
+      s3El.className = 'step-status-chip ' + (s3.ready ? 'step-ready' : 'step-waiting');
+      s3El.innerText = s3.ready ? `✅ ${s3.count || 0} câu` : 'Chờ';
+
+      // Step 3.5
+      const s35 = steps.step3_5 || {};
+      const s35El = document.getElementById('step35Status');
+      s35El.className = 'step-status-chip ' + (s35.ready ? 'step-ready' : 'step-waiting');
+      s35El.innerText = s35.ready ? '✅ Đã quét' : 'Chờ';
+
+      // Step 4
+      const s4 = steps.step4 || {};
+      const s4El = document.getElementById('step4Status');
+      s4El.className = 'step-status-chip ' + (s4.ready ? 'step-ready' : 'step-waiting');
+      s4El.innerText = s4.ready ? `✅ ${s4.count || 0} câu dịch` : 'Chờ';
+
+      // Step 5
+      const s5 = steps.step5 || {};
+      const s5El = document.getElementById('step5Status');
+      const s5Audio = document.getElementById('step5Audio');
+      if (s5.ready && s5.audio_url) {
+        s5El.className = 'step-status-chip step-ready';
+        s5El.innerText = '✅ Đã lồng tiếng';
+        s5Audio.src = s5.audio_url;
+        document.getElementById('step5PlayerBox').style.display = 'block';
+      } else {
+        s5El.className = 'step-status-chip step-waiting';
+        s5El.innerText = 'Chờ';
+        document.getElementById('step5PlayerBox').style.display = 'none';
+      }
+
+      // Step 6
+      const s6 = steps.step6 || {};
+      const s6El = document.getElementById('step6Status');
+      s6El.className = 'step-status-chip ' + (s6.ready ? 'step-ready' : 'step-waiting');
+      s6El.innerText = s6.ready ? '✅ Hoàn tất' : 'Chờ';
+    }
+
+    function renderRulerMarks() {
+      const ruler = document.getElementById('rulerMarks');
+      if (!ruler) return;
+      ruler.innerHTML = '';
+      const dur = mainPlayer.duration || 60;
+      const step = dur > 120 ? 20 : dur > 60 ? 10 : 5;
+      for (let s = 0; s <= dur; s += step) {
+        const mark = document.createElement('div');
+        mark.className = 'ruler-mark';
+        mark.style.left = `calc(120px + ${(s / dur) * 100}% * (1 - 120px / 100%))`;
+        mark.innerText = formatTime(s).slice(0, 5);
+        ruler.appendChild(mark);
+      }
+    }
+
+    function renderSubtitlesTimeline() {
+      const subAiTrack = document.getElementById('subtitlesTrack');
+      const subCnTrack = document.getElementById('chineseSubtitlesTrack');
+      const aiStatus = document.getElementById('aiTrackStatus');
+      const cnStatus = document.getElementById('chineseTrackStatus');
+      const aiRow = document.getElementById('aiTrackRow');
+
+      if (subAiTrack) subAiTrack.innerHTML = '';
+      if (subCnTrack) subCnTrack.innerHTML = '';
+
+      const dur = mainPlayer.duration || 1;
+      
+      // Kiểm tra trạng thái đã có phụ đề AI hay chưa
+      const hasAiSub = Boolean(currentVideoData && (currentVideoData.has_ai_sub || (currentVideoData.steps && currentVideoData.steps.step4 && currentVideoData.steps.step4.ready)));
+      const hasChineseSub = Boolean(currentVideoData && (currentVideoData.has_chinese_sub || (currentVideoData.steps && currentVideoData.steps.step3 && currentVideoData.steps.step3.ready)));
+
+      // 1. CẬP NHẬT TRACK PHỤ ĐỀ TIẾNG TRUNG
+      const cnSubs = (currentVideoData && currentVideoData.chinese_subtitles && currentVideoData.chinese_subtitles.length) 
+        ? currentVideoData.chinese_subtitles 
+        : (currentSubtitles ? currentSubtitles.filter(s => s.original_text) : []);
+
+      if (cnStatus) {
+        if (cnSubs.length > 0) {
+          cnStatus.className = 'track-status-pill pill-active-cn';
+          cnStatus.innerText = `🇨🇳 ${cnSubs.length} câu`;
+        } else {
+          cnStatus.className = 'track-status-pill pill-muted';
+          cnStatus.innerText = '⚪ Chưa có';
+        }
+      }
+
+      if (!cnSubs.length) {
+        if (subCnTrack) {
+          subCnTrack.innerHTML = '<span class="empty-track-msg">Chưa có phụ đề tiếng Trung (Whisper ASR)</span>';
+        }
+      } else if (subCnTrack) {
+        cnSubs.forEach(sub => {
+          const clip = document.createElement('div');
+          // Khi chưa có sub AI: hiển thị nổi bật viền vàng cam; khi đã có sub AI: màu tím/lam đồng bộ
+          clip.className = hasAiSub ? 'sub-clip sub-clip-cn-done' : 'sub-clip sub-clip-cn-pending';
+          const leftPct = (sub.start / dur) * 100;
+          const widthPct = Math.max(0.8, ((sub.end - sub.start) / dur) * 100);
+          clip.style.left = `${leftPct}%`;
+          clip.style.width = `${widthPct}%`;
+          const txt = sub.text || sub.original_text || '';
+          clip.title = `[${sub.start_str || formatTime(sub.start)} -> ${sub.end_str || formatTime(sub.end)}]
+🇨🇳 ${txt}`;
+          clip.innerText = txt;
+          clip.onclick = (e) => {
+            e.stopPropagation();
+            mainPlayer.currentTime = sub.start;
+            mainPlayer.play().catch(() => {});
+          };
+          subCnTrack.appendChild(clip);
+        });
+      }
+
+      // 2. CẬP NHẬT TRACK PHỤ ĐỀ AI (TIẾNG VIỆT) - BÁO HIỆU MÀU SẮC
+      const aiSubs = (currentVideoData && currentVideoData.vietnamese_subtitles && currentVideoData.vietnamese_subtitles.length) 
+        ? currentVideoData.vietnamese_subtitles 
+        : (hasAiSub ? currentSubtitles : []);
+
+      if (hasAiSub && aiSubs.length > 0) {
+        // ĐÃ CHÈN PHỤ ĐỀ AI: Hiển thị rực rỡ MÀU XANH DƯƠNG
+        if (aiStatus) {
+          aiStatus.className = 'track-status-pill pill-active-ai';
+          aiStatus.innerText = `✅ Đã chèn (${aiSubs.length} câu)`;
+        }
+        if (aiRow) aiRow.classList.remove('track-disabled');
+
+        aiSubs.forEach(sub => {
+          const clip = document.createElement('div');
+          clip.className = 'sub-clip sub-clip-ai-active';
+          const leftPct = (sub.start / dur) * 100;
+          const widthPct = Math.max(0.8, ((sub.end - sub.start) / dur) * 100);
+          clip.style.left = `${leftPct}%`;
+          clip.style.width = `${widthPct}%`;
+          clip.title = `[${sub.start_str || formatTime(sub.start)} -> ${sub.end_str || formatTime(sub.end)}]
+🇻🇳 ${sub.text}`;
+          clip.innerText = sub.text;
+          clip.onclick = (e) => {
+            e.stopPropagation();
+            mainPlayer.currentTime = sub.start;
+            mainPlayer.play().catch(() => {});
+          };
+          subAiTrack.appendChild(clip);
+        });
+      } else {
+        // CHƯA CÓ PHỤ ĐỀ AI: Hiển thị MÀU XÁM KIỂU BỊ TẮT ĐỂ BÁO HIỆU
+        if (aiStatus) {
+          aiStatus.className = 'track-status-pill pill-disabled';
+          aiStatus.innerText = '⚪ Chưa chèn';
+        }
+        if (aiRow) aiRow.classList.add('track-disabled');
+        if (subAiTrack) {
+          subAiTrack.innerHTML = '<span class="empty-track-disabled">⚪ Chưa có phụ đề AI (Màu xám - Chưa chèn phụ đề vào video)</span>';
+        }
+      }
+    }
+
+    // SAVE SETTINGS FOR BATCH RENDERING
+    async function saveSettingsForBatch(showNotification = true) {
+      try {
+        const res = await fetch('/api/canvas-settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Local-Control-Token': '__REPLACE_TOKEN__' },
+          body: JSON.stringify(canvasSettings)
+        });
+        if (res.ok) {
+          if (showNotification) {
+            showToast('✅ Đã lưu cấu hình tỷ lệ và background áp dụng cho toàn bộ video hàng loạt!');
+          }
+        } else {
+          if (showNotification) showToast('❌ Lỗi khi lưu cấu hình');
+        }
+      } catch (e) {
+        if (showNotification) showToast('❌ Lỗi kết nối máy chủ');
+      }
+    }
+
+    function showToast(msg) {
+      const t = document.getElementById('toastMsg');
+      t.innerText = msg;
+      t.style.display = 'flex';
+      setTimeout(() => { t.style.display = 'none'; }, 3500);
+    }
+
+    function toggleFullscreen() {
+      if (!document.fullscreenElement) {
+        studioCanvas.requestFullscreen().catch(() => {});
+      } else {
+        document.exitFullscreen().catch(() => {});
+      }
+    }
+
+    function renderMotionPresetCards(bgs) {
+      const grid = document.getElementById('motionPresetGrid');
+      if (!grid || !bgs || !bgs.length) return;
+      document.getElementById('motionCountBadge').innerText = `${bgs.length} mẫu`;
+      grid.innerHTML = '';
+      bgs.forEach(b => {
+        const isCurrent = (canvasSettings.bg_motion_file === b.filename);
+        const card = document.createElement('div');
+        card.className = 'motion-card' + (isCurrent ? ' active' : '');
+        card.dataset.file = b.filename;
+        card.onclick = () => selectMotionBg(b.filename, card);
+        card.innerHTML = `
+          <div class="motion-card-icon">${b.icon || '🎬'}</div>
+          <div class="motion-card-info">
+            <div class="motion-card-title">${b.title}</div>
+            <div class="motion-card-desc">${b.desc}</div>
+          </div>
+          <div class="motion-card-badge">${isCurrent ? 'Đang dùng' : 'Chọn'}</div>
+        `;
+        grid.appendChild(card);
+      });
+    }
+
+    // Initial Load
+    window.addEventListener('DOMContentLoaded', () => {
+      initScrubberEvents();
+      initTimelineDragEvents();
+      loadWorkflowData();
+      initCapcutInteractiveEngine();
+      syncSubtitleControlsFromSettings();
+    });
+
+    // ==========================================
+    // CAPCUT EXPORT MODAL CONTROLLER
+    // ==========================================
+    let exportConfig = {
+      resolution: '1080p',
+      bitrate_kbps: 8000,
+      fps: '30',
+      format: 'mp4'
+    };
+
+    function openExportModal() {
+      if (!currentVideo) {
+        showToast('⚠️ Vui lòng chọn một video từ danh sách để xuất!');
+        return;
+      }
+      document.getElementById('exportModalVideoName').innerText = `🎬 Video: ${currentVideo.filename}`;
+      document.getElementById('chkExportAntiReup').checked = Boolean(canvasSettings.anti_reup_enabled);
+      document.getElementById('exportProgressBox').style.display = 'none';
+      document.getElementById('exportSuccessResult').style.display = 'none';
+      document.getElementById('btnStartExport').disabled = false;
+      document.getElementById('btnStartExport').innerText = '🚀 Bắt Đầu Xuất Video';
+      document.getElementById('exportModal').style.display = 'flex';
+    }
+
+    function closeExportModal() {
+      document.getElementById('exportModal').style.display = 'none';
+    }
+
+    function setExportPill(group, val, el) {
+      exportConfig[group] = val;
+      const parent = el.parentElement;
+      parent.querySelectorAll('.export-pill').forEach(p => p.classList.remove('active'));
+      el.classList.add('active');
+    }
+
+    function setExportBitrate(kbps, el) {
+      exportConfig.bitrate_kbps = parseInt(kbps);
+      document.getElementById('exportBitrateInput').value = kbps;
+      const parent = el.parentElement;
+      parent.querySelectorAll('.export-pill').forEach(p => p.classList.remove('active'));
+      el.classList.add('active');
+    }
+
+    function enableCustomBitrate(el) {
+      const parent = el.parentElement;
+      parent.querySelectorAll('.export-pill').forEach(p => p.classList.remove('active'));
+      el.classList.add('active');
+      document.getElementById('exportBitrateInput').focus();
+    }
+
+    function syncCustomBitrate(val) {
+      exportConfig.bitrate_kbps = parseInt(val) || 8000;
+    }
+
+    function downloadDirectSrt(type) {
+      if (!currentVideo) {
+        showToast('⚠️ Chưa chọn video');
+        return;
+      }
+      const url = `/api/workflow/download-srt?stem=${encodeURIComponent(currentVideo.stem)}&type=${type}`;
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = '';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      showToast(`📥 Đang tải tệp phụ đề .SRT (${type})`);
+    }
+
+    async function executeCustomExport() {
+      if (!currentVideo) return;
+      const btn = document.getElementById('btnStartExport');
+      const progressBox = document.getElementById('exportProgressBox');
+      const progressText = document.getElementById('exportProgressStatusText');
+      const successBox = document.getElementById('exportSuccessResult');
+
+      btn.disabled = true;
+      btn.innerText = '⏳ Đang xuất video...';
+      progressBox.style.display = 'flex';
+      successBox.style.display = 'none';
+      progressText.innerText = '⏳ Đang mã hóa video GPU NVENC... Vui lòng đợi trong giây lát!';
+
+      const selectedSrtRadio = document.querySelector('input[name="exportSrtType"]:checked');
+      const srtType = selectedSrtRadio ? selectedSrtRadio.value : 'translated';
+      const exportSrt = document.getElementById('chkExportSrt').checked;
+      const outFolder = document.getElementById('exportOutputFolder').value.trim() || 'D:\\banve';
+      const useAntiReup = document.getElementById('chkExportAntiReup').checked;
+
+      const payload = {
+        stem: currentVideo.stem,
+        resolution: exportConfig.resolution,
+        bitrate_kbps: exportConfig.bitrate_kbps,
+        fps: exportConfig.fps,
+        format: exportConfig.format,
+        export_srt: exportSrt,
+        srt_type: srtType,
+        output_folder: outFolder,
+        use_anti_reup: useAntiReup,
+        canvas_settings: canvasSettings
+      };
+
+      try {
+        const res = await fetch('/api/workflow/export-custom', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.status === 'ok') {
+          btn.innerText = '✅ Đã Xuất Thành Công';
+          progressText.innerText = '🎉 Hoàn tất xuất bản video!';
+          successBox.style.display = 'block';
+          document.getElementById('exportSuccessMsg').innerText = `🎉 Đã xuất thành công: ${data.filename} (${data.size_mb} MB)${data.exported_srt ? ' kèm tệp .SRT' : ''}`;
+          
+          const btnPreview = document.getElementById('btnExportPreviewResult');
+          btnPreview.onclick = () => {
+            previewRenderedVideo(data.stream_url, data.filename);
+            closeExportModal();
+          };
+          showToast(`🎉 Xuất video thành công: ${data.filename}`);
+        } else {
+          btn.disabled = false;
+          btn.innerText = '🚀 Bắt Đầu Xuất Video';
+          progressText.innerText = `❌ Lỗi: ${data.detail || data.message || 'Không thể xuất video'}`;
+          showToast(`❌ Lỗi xuất video: ${data.detail || 'Thất bại'}`);
+        }
+      } catch (err) {
+        btn.disabled = false;
+        btn.innerText = '🚀 Bắt Đầu Xuất Video';
+        progressText.innerText = '❌ Lỗi kết nối tới máy chủ render';
+        showToast('❌ Lỗi kết nối máy chủ khi xuất video');
+      }
+    }
+
+    // ==========================================
+    // SUBTITLE & BACKGROUND STYLING CONTROLLER
+    // ==========================================
+    function updateSubFontFamily(val) {
+      canvasSettings.sub_font_name = val;
+      applySubtitleVisuals();
+    }
+
+    function updateSubFontColor(val) {
+      canvasSettings.sub_font_color = val;
+      const hexEl = document.getElementById('subFontColorHex');
+      if (hexEl) hexEl.innerText = val.toUpperCase();
+      const pickEl = document.getElementById('subFontColorPicker');
+      if (pickEl) pickEl.value = val;
+      applySubtitleVisuals();
+    }
+
+    function setSubFontColorPreset(val, el) {
+      canvasSettings.sub_font_color = val;
+      const pickEl = document.getElementById('subFontColorPicker');
+      if (pickEl) pickEl.value = val;
+      const hexEl = document.getElementById('subFontColorHex');
+      if (hexEl) hexEl.innerText = val.toUpperCase();
+      if (el && el.parentElement) {
+        el.parentElement.querySelectorAll('.export-pill').forEach(p => p.classList.remove('active'));
+        el.classList.add('active');
+      }
+      applySubtitleVisuals();
+    }
+
+    let subAutoSaveTimer = null;
+    function triggerAutoSaveSettings() {
+      if (subAutoSaveTimer) clearTimeout(subAutoSaveTimer);
+      subAutoSaveTimer = setTimeout(() => {
+        saveSettingsForBatch(false);
+      }, 600);
+    }
+
+    function updateSubFontSize(val) {
+      const num = parseInt(val) || 18;
+      canvasSettings.sub_font_size = num;
+      const slider = document.getElementById('subFontSizeSlider');
+      if (slider && slider.value != num) slider.value = num;
+      const valEl = document.getElementById('subFontSizeVal');
+      if (valEl) valEl.innerText = `${num}px`;
+      applySubtitleVisuals();
+      triggerAutoSaveSettings();
+    }
+
+    function updateSubBold(val) {
+      canvasSettings.sub_font_bold = Boolean(val);
+      const chk = document.getElementById('chkSubBold');
+      if (chk && chk.checked !== Boolean(val)) chk.checked = Boolean(val);
+      applySubtitleVisuals();
+      triggerAutoSaveSettings();
+    }
+
+    function updateSubFontColor(val) {
+      canvasSettings.sub_font_color = val;
+      const hexEl = document.getElementById('subFontColorHex');
+      if (hexEl) hexEl.innerText = val.toUpperCase();
+      const pickEl = document.getElementById('subFontColorPicker');
+      if (pickEl && pickEl.value !== val) pickEl.value = val;
+      applySubtitleVisuals();
+      triggerAutoSaveSettings();
+    }
+
+    function updateSubBgColor(val) {
+      canvasSettings.sub_bg_color = val;
+      const hexEl = document.getElementById('subBgColorHex');
+      if (hexEl) hexEl.innerText = val.toUpperCase();
+      const pickEl = document.getElementById('subBgColorPicker');
+      if (pickEl && pickEl.value !== val) pickEl.value = val;
+      applySubtitleVisuals();
+      triggerAutoSaveSettings();
+    }
+
+    function setSubBgColorPreset(val, el) {
+      canvasSettings.sub_bg_color = val;
+      const pickEl = document.getElementById('subBgColorPicker');
+      if (pickEl) pickEl.value = val;
+      const hexEl = document.getElementById('subBgColorHex');
+      if (hexEl) hexEl.innerText = val.toUpperCase();
+      if (el && el.parentElement) {
+        el.parentElement.querySelectorAll('.export-pill').forEach(p => p.classList.remove('active'));
+        el.classList.add('active');
+      }
+      applySubtitleVisuals();
+      triggerAutoSaveSettings();
+    }
+
+    function updateSubBgOpacity(val) {
+      const pct = parseInt(val) || 100;
+      canvasSettings.sub_bg_opacity = pct / 100.0;
+      const slider = document.getElementById('subBgOpacitySlider');
+      if (slider && slider.value != pct) slider.value = pct;
+      const valEl = document.getElementById('subBgOpacityVal');
+      if (valEl) valEl.innerText = `${pct}%`;
+      applySubtitleVisuals();
+      triggerAutoSaveSettings();
+    }
+
+    function updateSubPaddingX(val) {
+      const num = parseInt(val) || 16;
+      canvasSettings.sub_box_padding_x = num;
+      const slider = document.getElementById('subPaddingXSlider');
+      if (slider && slider.value != num) slider.value = num;
+      const valEl = document.getElementById('subPaddingXVal');
+      if (valEl) valEl.innerText = `${num}px`;
+      applySubtitleVisuals();
+      triggerAutoSaveSettings();
+    }
+
+    function updateSubPaddingY(val) {
+      const num = parseInt(val) || 8;
+      canvasSettings.sub_box_padding_y = num;
+      const slider = document.getElementById('subPaddingYSlider');
+      if (slider && slider.value != num) slider.value = num;
+      const valEl = document.getElementById('subPaddingYVal');
+      if (valEl) valEl.innerText = `${num}px`;
+      applySubtitleVisuals();
+      triggerAutoSaveSettings();
+    }
+
+    function updateSubRadius(val) {
+      const num = parseInt(val) || 8;
+      canvasSettings.sub_box_radius = num;
+      const slider = document.getElementById('subRadiusSlider');
+      if (slider && slider.value != num) slider.value = num;
+      const valEl = document.getElementById('subRadiusVal');
+      if (valEl) valEl.innerText = `${num}px`;
+      applySubtitleVisuals();
+      triggerAutoSaveSettings();
+    }
+
+    function applySubtitleVisuals() {
+      const fontName = canvasSettings.sub_font_name || 'Arial';
+      const fontColor = canvasSettings.sub_font_color || '#000000';
+      const fontSize = (canvasSettings.sub_font_size || 18) + 'px';
+      const isBold = canvasSettings.sub_font_bold !== false;
+      const bgColor = canvasSettings.sub_bg_color || '#ffffff';
+      const opacity = canvasSettings.sub_bg_opacity !== undefined ? canvasSettings.sub_bg_opacity : 1.0;
+      const padX = (canvasSettings.sub_box_padding_x || 16) + 'px';
+      const padY = (canvasSettings.sub_box_padding_y || 8) + 'px';
+      const radius = (canvasSettings.sub_box_radius || 8) + 'px';
+
+      // Convert hex to rgba for live preview
+      let r = 255, g = 255, b = 255;
+      const s = String(bgColor).replace('#', '').trim();
+      if (s.length === 6) {
+        r = parseInt(s.substring(0, 2), 16) || 255;
+        g = parseInt(s.substring(2, 4), 16) || 255;
+        b = parseInt(s.substring(4, 6), 16) || 255;
+      }
+      const rgbaBg = `rgba(${r}, ${g}, ${b}, ${opacity})`;
+
+      // 1. Update Subtitle Overlay on Video Player
+      const subEl = document.getElementById('subVietnameseText');
+      if (subEl) {
+        subEl.style.fontFamily = fontName;
+        subEl.style.color = fontColor;
+        subEl.style.fontSize = fontSize;
+        subEl.style.fontWeight = isBold ? '700' : '400';
+        subEl.style.backgroundColor = rgbaBg;
+        subEl.style.padding = `${padY} ${padX}`;
+        subEl.style.borderRadius = radius;
+        if (fontColor.toLowerCase() === '#ffffff' || fontColor.toLowerCase() === '#fff') {
+          subEl.style.textShadow = '0 1px 3px rgba(0,0,0,0.8), 0 0 1px #000';
+        } else {
+          subEl.style.textShadow = 'none';
+        }
+      }
+
+      // 2. Update Sample Preview Card in Sidebar
+      const sampleEl = document.getElementById('subSamplePreviewText');
+      if (sampleEl) {
+        sampleEl.style.fontFamily = fontName;
+        sampleEl.style.color = fontColor;
+        sampleEl.style.fontSize = fontSize;
+        sampleEl.style.fontWeight = isBold ? '700' : '400';
+        sampleEl.style.backgroundColor = rgbaBg;
+        sampleEl.style.padding = `${padY} ${padX}`;
+        sampleEl.style.borderRadius = radius;
+        if (fontColor.toLowerCase() === '#ffffff' || fontColor.toLowerCase() === '#fff') {
+          sampleEl.style.textShadow = '0 1px 3px rgba(0,0,0,0.8), 0 0 1px #000';
+        } else {
+          sampleEl.style.textShadow = 'none';
+        }
+      }
+    }
+
+    function resetSubtitleStyleToDefault() {
+      canvasSettings.sub_font_name = 'Arial';
+      canvasSettings.sub_font_color = '#000000';
+      canvasSettings.sub_font_size = 18;
+      canvasSettings.sub_font_bold = true;
+      canvasSettings.sub_bg_color = '#ffffff';
+      canvasSettings.sub_bg_opacity = 1.0;
+      canvasSettings.sub_box_padding_x = 16;
+      canvasSettings.sub_box_padding_y = 8;
+      canvasSettings.sub_box_radius = 8;
+      canvasSettings.sub_pos_x_pct = 0.50;
+      canvasSettings.sub_pos_y_pct = 0.80;
+
+      syncSubtitleControlsFromSettings();
+      applySubtitleVisuals();
+      showToast('↺ Đã khôi phục kiểu chữ & khung nền về tiêu chuẩn mặc định!');
+    }
+
+    function syncSubtitleControlsFromSettings() {
+      const fontName = canvasSettings.sub_font_name || 'Arial';
+      const fontColor = canvasSettings.sub_font_color || '#000000';
+      const fontSize = canvasSettings.sub_font_size || 18;
+      const isBold = canvasSettings.sub_font_bold !== false;
+      const bgColor = canvasSettings.sub_bg_color || '#ffffff';
+      const opacity = canvasSettings.sub_bg_opacity !== undefined ? Math.round(canvasSettings.sub_bg_opacity * 100) : 100;
+      const padX = canvasSettings.sub_box_padding_x || 16;
+      const padY = canvasSettings.sub_box_padding_y || 8;
+      const radius = canvasSettings.sub_box_radius || 8;
+
+      if (document.getElementById('subFontFamilySelect')) document.getElementById('subFontFamilySelect').value = fontName;
+      if (document.getElementById('subFontColorPicker')) document.getElementById('subFontColorPicker').value = fontColor;
+      if (document.getElementById('subFontColorHex')) document.getElementById('subFontColorHex').innerText = fontColor.toUpperCase();
+      if (document.getElementById('subFontSizeSlider')) document.getElementById('subFontSizeSlider').value = fontSize;
+      if (document.getElementById('subFontSizeVal')) document.getElementById('subFontSizeVal').innerText = `${fontSize}px`;
+      if (document.getElementById('chkSubBold')) document.getElementById('chkSubBold').checked = isBold;
+
+      if (document.getElementById('subBgColorPicker')) document.getElementById('subBgColorPicker').value = bgColor;
+      if (document.getElementById('subBgColorHex')) document.getElementById('subBgColorHex').innerText = bgColor.toUpperCase();
+      if (document.getElementById('subBgOpacitySlider')) document.getElementById('subBgOpacitySlider').value = opacity;
+      if (document.getElementById('subBgOpacityVal')) document.getElementById('subBgOpacityVal').innerText = `${opacity}%`;
+      if (document.getElementById('subPaddingXSlider')) document.getElementById('subPaddingXSlider').value = padX;
+      if (document.getElementById('subPaddingXVal')) document.getElementById('subPaddingXVal').innerText = `${padX}px`;
+      if (document.getElementById('subPaddingYSlider')) document.getElementById('subPaddingYSlider').value = padY;
+      if (document.getElementById('subPaddingYVal')) document.getElementById('subPaddingYVal').innerText = `${padY}px`;
+      if (document.getElementById('subRadiusSlider')) document.getElementById('subRadiusSlider').value = radius;
+      if (document.getElementById('subRadiusVal')) document.getElementById('subRadiusVal').innerText = `${radius}px`;
+      const posY = (canvasSettings.sub_pos_y_pct !== undefined) ? Math.round(canvasSettings.sub_pos_y_pct * 100) : 80;
+      if (document.getElementById('subPosYSlider')) document.getElementById('subPosYSlider').value = posY;
+      if (document.getElementById('subPosYVal')) document.getElementById('subPosYVal').innerText = `${posY}%`;
+      applySubtitlePosition();
+    }
+
+
+    // ==========================================
+    // CAPCUT ON-CANVAS DRAG & RESIZE ENGINE
+    // ==========================================
+    let isSubDragging = false;
+    let isSubResizing = false;
+    let activeSubHandle = null;
+    let dragStartX = 0, dragStartY = 0;
+    let startSubPosX = 0.50, startSubPosY = 0.80;
+    let startSubFontSize = 18;
+    let startSubPadX = 16, startSubPadY = 8;
+
+    function initCapcutInteractiveEngine() {
+      const box = document.getElementById('subtitleInteractiveBox');
+      const overlay = document.getElementById('subtitleOverlay');
+      if (!box || !overlay) return;
+
+      box.addEventListener('mousedown', (e) => {
+        // If clicking inside quick picker buttons or color inputs, don't drag
+        if (e.target.closest('.capcut-mini-toolbar')) return;
+
+        const handle = e.target.closest('.capcut-handle');
+        if (handle) {
+          // START RESIZING
+          isSubResizing = true;
+          isSubDragging = false;
+          activeSubHandle = handle.dataset.handle;
+          dragStartX = e.clientX;
+          dragStartY = e.clientY;
+          startSubFontSize = canvasSettings.sub_font_size || 18;
+          startSubPadX = canvasSettings.sub_box_padding_x || 16;
+          startSubPadY = canvasSettings.sub_box_padding_y || 8;
+          e.preventDefault();
+          e.stopPropagation();
+        } else {
+          // START DRAGGING (MOVE POSITION)
+          isSubDragging = true;
+          isSubResizing = false;
+          box.classList.add('dragging');
+          dragStartX = e.clientX;
+          dragStartY = e.clientY;
+          startSubPosX = (canvasSettings.sub_pos_x_pct !== undefined) ? canvasSettings.sub_pos_x_pct : 0.50;
+          startSubPosY = (canvasSettings.sub_pos_y_pct !== undefined) ? canvasSettings.sub_pos_y_pct : 0.80;
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      });
+
+      window.addEventListener('mousemove', (e) => {
+        if (!isSubDragging && !isSubResizing) return;
+
+        const overlayRect = overlay.getBoundingClientRect();
+        if (!overlayRect.width || !overlayRect.height) return;
+
+        if (isSubDragging) {
+          const dx = (e.clientX - dragStartX) / overlayRect.width;
+          const dy = (e.clientY - dragStartY) / overlayRect.height;
+          const newX = Math.max(0.08, Math.min(0.92, startSubPosX + dx));
+          const newY = Math.max(0.08, Math.min(0.95, startSubPosY + dy));
+          canvasSettings.sub_pos_x_pct = newX;
+          canvasSettings.sub_pos_y_pct = newY;
+          applySubtitlePosition();
+
+          const posYSlider = document.getElementById('subPosYSlider');
+          if (posYSlider) {
+            posYSlider.value = Math.round(newY * 100);
+            document.getElementById('subPosYVal').innerText = `${Math.round(newY * 100)}%`;
+          }
+        } else if (isSubResizing) {
+          const dx = e.clientX - dragStartX;
+          const dy = e.clientY - dragStartY;
+
+          if (['se', 'nw', 'ne', 'sw'].includes(activeSubHandle)) {
+            // Corner handles: Kéo vào kéo ra phóng to thu nhỏ toàn diện (Font size)
+            let scaleDelta = (activeSubHandle === 'se' || activeSubHandle === 'sw') ? (dx + dy) / 8 : (-dx - dy) / 8;
+            if (activeSubHandle === 'sw') scaleDelta = (-dx + dy) / 8;
+            if (activeSubHandle === 'ne') scaleDelta = (dx - dy) / 8;
+
+            const newFontSize = Math.max(12, Math.min(48, Math.round(startSubFontSize + scaleDelta)));
+            canvasSettings.sub_font_size = newFontSize;
+            updateSubFontSize(newFontSize);
+          } else if (activeSubHandle === 'e' || activeSubHandle === 'w') {
+            // Side handles: Kéo rộng / thu hẹp lề ngang (Padding X)
+            const delta = (activeSubHandle === 'e') ? dx : -dx;
+            const newPadX = Math.max(6, Math.min(50, Math.round(startSubPadX + delta / 3)));
+            canvasSettings.sub_box_padding_x = newPadX;
+            updateSubPaddingX(newPadX);
+          } else if (activeSubHandle === 's' || activeSubHandle === 'n') {
+            // Top/bottom handles: Tăng / giảm lề dọc (Padding Y)
+            const delta = (activeSubHandle === 's') ? dy : -dy;
+            const newPadY = Math.max(2, Math.min(30, Math.round(startSubPadY + delta / 3)));
+            canvasSettings.sub_box_padding_y = newPadY;
+            updateSubPaddingY(newPadY);
+          }
+        }
+      });
+
+      window.addEventListener('mouseup', () => {
+        let changed = false;
+        if (isSubDragging) {
+          isSubDragging = false;
+          box.classList.remove('dragging');
+          changed = true;
+        }
+        if (isSubResizing) {
+          isSubResizing = false;
+          activeSubHandle = null;
+          changed = true;
+        }
+        if (changed) {
+          triggerAutoSaveSettings();
+        }
+      });
+    }
+
+    function applySubtitlePosition() {
+      const box = document.getElementById('subtitleInteractiveBox');
+      if (!box) return;
+      const posX = ((canvasSettings.sub_pos_x_pct !== undefined) ? canvasSettings.sub_pos_x_pct : 0.50) * 100;
+      const posY = ((canvasSettings.sub_pos_y_pct !== undefined) ? canvasSettings.sub_pos_y_pct : 0.80) * 100;
+      box.style.left = `${posX}%`;
+      box.style.top = `${posY}%`;
+    }
+
+    function updateSubPosY(val) {
+      const pct = parseInt(val) || 80;
+      canvasSettings.sub_pos_y_pct = pct / 100.0;
+      const valEl = document.getElementById('subPosYVal');
+      if (valEl) valEl.innerText = `${pct}%`;
+      applySubtitlePosition();
+    }
+
+    function quickStepFontSize(step) {
+      const curr = canvasSettings.sub_font_size || 18;
+      const next = Math.max(12, Math.min(48, curr + step));
+      updateSubFontSize(next);
+    }
+
+
+    // RESET ALL SIDEBAR SETTINGS TO STANDARD FACTORY DEFAULT
+    function resetSidebarSettingsToDefault() {
+      // 1. Reset Subtitle style & position
+      canvasSettings.sub_font_name = 'Arial';
+      canvasSettings.sub_font_color = '#000000';
+      canvasSettings.sub_font_size = 18;
+      canvasSettings.sub_font_bold = true;
+      canvasSettings.sub_bg_color = '#ffffff';
+      canvasSettings.sub_bg_opacity = 1.0;
+      canvasSettings.sub_box_padding_x = 16;
+      canvasSettings.sub_box_padding_y = 8;
+      canvasSettings.sub_box_radius = 8;
+      canvasSettings.sub_pos_x_pct = 0.50;
+      canvasSettings.sub_pos_y_pct = 0.80;
+
+      // 2. Reset Framing & Anti-reup
+      canvasSettings.aspect_ratio = 'original';
+      canvasSettings.video_scale = 0.88;
+      canvasSettings.border_radius = 16;
+      canvasSettings.drop_shadow = true;
+      canvasSettings.mirror = false;
+      canvasSettings.anti_reup_enabled = false;
+      canvasSettings.bg_type = 'video_motion';
+      canvasSettings.bg_motion_file = 'song_bien.mp4';
+      canvasSettings.blur_sigma = 25;
+      canvasSettings.darken_bg = 0.35;
+
+      // 3. Synchronize all UI controls and visuals
+      syncSubtitleControlsFromSettings();
+      applySubtitleVisuals();
+      applyCanvasVisuals();
+      syncAntiReupUI();
+      updateBgType(canvasSettings.bg_type);
+      setRatio(canvasSettings.aspect_ratio);
+
+      // 4. Save to server and notify
+      saveSettingsForBatch(false);
+      showToast('↺ Đã reset toàn bộ cài đặt (chữ đen, nền trắng, vị trí chuẩn) về mặc định!');
+    }
+
+  </script>
+
+  <!-- CAPCUT-STYLE VIDEO EXPORT MODAL -->
+  <div class="export-modal-backdrop" id="exportModal" onclick="if(event.target===this) closeExportModal()">
+    <div class="export-modal-dialog">
+      <div class="export-modal-header">
+        <h3>🚀 Xuất Video & Phụ Đề (Chuẩn CapCut)</h3>
+        <button class="export-modal-close" onclick="closeExportModal()">✕</button>
+      </div>
+      <div class="export-modal-body">
+        
+        <!-- Target video name & Output folder -->
+        <div style="background: #162032; padding: 12px; border-radius: 8px; border: 1px solid #263449;">
+          <div style="font-size: 13px; font-weight: 700; color: #f1f5f9; margin-bottom: 6px;" id="exportModalVideoName">🎬 Video: --</div>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <span style="font-size: 11px; color: #94a3b8; white-space: nowrap;">Thư mục xuất:</span>
+            <input type="text" id="exportOutputFolder" class="form-input" style="flex: 1; padding: 4px 8px; font-size: 12px; height: 28px;" value="D:\banve">
+          </div>
+        </div>
+
+        <!-- 1. Resolution (Độ phân giải) -->
+        <div>
+          <div class="export-section-title">1. Độ phân giải (Resolution)</div>
+          <div class="export-pill-group" id="groupResolution">
+            <button class="export-pill active" data-val="1080p" onclick="setExportPill('resolution', '1080p', this)">1080p (Full HD)</button>
+            <button class="export-pill" data-val="2k" onclick="setExportPill('resolution', '2k', this)">2K (1440p)</button>
+            <button class="export-pill" data-val="4k" onclick="setExportPill('resolution', '4k', this)">4K (Ultra HD)</button>
+            <button class="export-pill" data-val="720p" onclick="setExportPill('resolution', '720p', this)">720p (HD)</button>
+          </div>
+        </div>
+
+        <!-- 2. Bitrate (Tốc độ bit - kbps) -->
+        <div>
+          <div class="export-section-title">2. Tốc độ bit (Bitrate kbps giống CapCut)</div>
+          <div class="export-pill-group" id="groupBitrate" style="margin-bottom: 8px;">
+            <button class="export-pill active" data-val="8000" onclick="setExportBitrate(8000, this)">Chuẩn (8,000 kbps)</button>
+            <button class="export-pill" data-val="12000" onclick="setExportBitrate(12000, this)">Cao (12,000 kbps)</button>
+            <button class="export-pill" data-val="20000" onclick="setExportBitrate(20000, this)">Rất cao (20,000 kbps)</button>
+            <button class="export-pill" data-val="4000" onclick="setExportBitrate(4000, this)">Tiết kiệm (4,000 kbps)</button>
+            <button class="export-pill" data-val="custom" onclick="enableCustomBitrate(this)">Tùy chỉnh...</button>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <input type="number" id="exportBitrateInput" class="form-input" style="width: 140px; padding: 4px 8px; font-size: 13px;" value="8000" min="1000" max="100000" step="500" oninput="syncCustomBitrate(this.value)">
+            <span style="font-size: 12px; color: #94a3b8;">kbps (Khuyên dùng 8,000 - 15,000 cho TikTok/Reels)</span>
+          </div>
+        </div>
+
+        <!-- 3. Frame rate & Format -->
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+          <div>
+            <div class="export-section-title">3. Tốc độ khung hình (FPS)</div>
+            <div class="export-pill-group" id="groupFps">
+              <button class="export-pill active" data-val="30" onclick="setExportPill('fps', '30', this)">30 fps</button>
+              <button class="export-pill" data-val="60" onclick="setExportPill('fps', '60', this)">60 fps</button>
+              <button class="export-pill" data-val="original" onclick="setExportPill('fps', 'original', this)">Gốc</button>
+            </div>
+          </div>
+          <div>
+            <div class="export-section-title">4. Định dạng Video</div>
+            <div class="export-pill-group" id="groupFormat">
+              <button class="export-pill active" data-val="mp4" onclick="setExportPill('format', 'mp4', this)">MP4</button>
+              <button class="export-pill" data-val="mov" onclick="setExportPill('format', 'mov', this)">MOV</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 5. Subtitle & SRT Export Option (Giống CapCut) -->
+        <div style="background: #141d2c; border: 1px solid #233147; border-radius: 8px; padding: 12px;">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+            <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; color: #f1f5f9; cursor: pointer;">
+              <input type="checkbox" id="chkExportSrt" checked style="accent-color: #0284c7; width: 16px; height: 16px;">
+              Xuất kèm tệp phụ đề (.SRT) cùng thư mục video
+            </label>
+          </div>
+          
+          <div style="display: flex; gap: 12px; margin-bottom: 10px; padding-left: 24px;">
+            <label style="font-size: 12px; color: #cbd5e1; cursor: pointer; display: flex; align-items: center; gap: 4px;">
+              <input type="radio" name="exportSrtType" value="translated" checked style="accent-color: #0284c7;"> Phụ đề tiếng Việt (.srt)
+            </label>
+            <label style="font-size: 12px; color: #cbd5e1; cursor: pointer; display: flex; align-items: center; gap: 4px;">
+              <input type="radio" name="exportSrtType" value="chinese" style="accent-color: #0284c7;"> Phụ đề tiếng Trung (.srt)
+            </label>
+            <label style="font-size: 12px; color: #cbd5e1; cursor: pointer; display: flex; align-items: center; gap: 4px;">
+              <input type="radio" name="exportSrtType" value="bilingual" style="accent-color: #0284c7;"> Song ngữ Trung - Việt (.srt)
+            </label>
+          </div>
+
+          <!-- Quick download buttons directly to browser -->
+          <div style="display: flex; gap: 6px; padding-left: 24px;">
+            <button class="btn btn-outline" style="font-size: 11px; padding: 3px 8px;" onclick="downloadDirectSrt('translated')">📥 Tải SRT Tiếng Việt</button>
+            <button class="btn btn-outline" style="font-size: 11px; padding: 3px 8px;" onclick="downloadDirectSrt('chinese')">📥 Tải SRT Tiếng Trung</button>
+            <button class="btn btn-outline" style="font-size: 11px; padding: 3px 8px;" onclick="downloadDirectSrt('bilingual')">📥 Tải SRT Song Ngữ</button>
+          </div>
+        </div>
+
+        <!-- 6. Anti-Reup toggle option in export -->
+        <div style="display: flex; align-items: center; justify-content: space-between; background: #141d2c; border: 1px solid #233147; border-radius: 8px; padding: 10px 12px;">
+          <div>
+            <div style="font-size: 12px; font-weight: 700; color: #f1f5f9;">🛡️ Áp dụng khung chống Re-up của Studio</div>
+            <div style="font-size: 11px; color: #94a3b8;">Lồng background chuyển động/blur, bo góc và lật video theo cấu hình đã chọn</div>
+          </div>
+          <label class="switch-toggle">
+            <input type="checkbox" id="chkExportAntiReup">
+            <span class="switch-slider"></span>
+          </label>
+        </div>
+
+        <!-- Export Progress / Result Box -->
+        <div id="exportProgressBox" style="display: none; flex-direction: column; gap: 8px; background: #162032; border: 1px solid #263449; border-radius: 8px; padding: 12px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 12px; font-weight: 700; color: #38bdf8;" id="exportProgressStatusText">⏳ Đang render GPU NVENC...</span>
+          </div>
+          <div class="progress-track" style="height: 6px; background: #1e293b; border-radius: 3px; overflow: hidden;">
+            <div id="exportProgressFill" style="width: 100%; height: 100%; background: linear-gradient(90deg, #0284c7, #38bdf8); animation: pulse 1.5s infinite;"></div>
+          </div>
+          <div id="exportSuccessResult" style="display: none; margin-top: 4px;">
+            <div style="color: #34d399; font-size: 12px; font-weight: 700; margin-bottom: 6px;" id="exportSuccessMsg">🎉 Xuất video thành công!</div>
+            <div style="display: flex; gap: 8px;">
+              <button class="btn btn-primary" style="font-size: 11px; padding: 4px 10px;" id="btnExportPreviewResult" onclick="">▶ Xem Thử Video Vừa Xuất</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <div class="export-modal-footer">
+        <button class="btn btn-outline" onclick="closeExportModal()">Đóng</button>
+        <button class="btn btn-primary" id="btnStartExport" style="background: linear-gradient(135deg, #0284c7, #2563eb); font-weight: 700; padding: 8px 18px;" onclick="executeCustomExport()">
+          🚀 Bắt Đầu Xuất Video
+        </button>
+      </div>
+    </div>
+  </div>
+</body>
+
+</html>

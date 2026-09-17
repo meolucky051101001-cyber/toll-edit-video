@@ -1,0 +1,1416 @@
+"""Non-blocking media quality-control reports for pipeline v2.
+
+QC findings are diagnostic only in phase 2. A report always keeps
+``blocking`` false and ``delivery_allowed`` true, even when errors are found.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import re
+import subprocess
+import tempfile
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+
+from .artifact_store import ArtifactStore
+from .atomic_io import atomic_write_json
+from .models import utc_now
+
+
+PathLike = Union[str, os.PathLike]
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class QCSettings:
+    duration_tolerance_seconds: float = 0.5
+    duration_tolerance_ratio: float = 0.01
+    silence_noise_db: float = -50.0
+    silence_min_seconds: float = 2.0
+    target_lufs_min: float = -16.0
+    target_lufs_max: float = -14.0
+    true_peak_max_dbtp: float = -1.0
+    clipping_risk_db: float = -0.1
+    subtitle_safe_margin_x_pct: float = 0.05
+    subtitle_safe_margin_y_pct: float = 0.05
+    sample_frames: bool = True
+    command_timeout_seconds: float = 120.0
+    gate_policy: str = "block"
+    diagnostic_max_samples: int = 30
+
+
+@dataclass(frozen=True)
+class QCCheck:
+    name: str
+    status: str
+    message: str
+    metrics: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class QCReport:
+    video_path: str
+    generated_at: str = field(default_factory=utc_now)
+    mode: str = "report_only"
+    blocking: bool = False
+    delivery_allowed: bool = True
+    overall: str = "ok"
+    checks: List[QCCheck] = field(default_factory=list)
+    media: Dict[str, Any] = field(default_factory=dict)
+    metrics: Dict[str, Any] = field(default_factory=dict)
+    diagnostic_artifacts: List[Dict[str, Any]] = field(default_factory=list)
+
+    def add(
+        self,
+        name: str,
+        status: str,
+        message: str,
+        metrics: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        if status not in {"pass", "info", "warning", "error", "skipped"}:
+            raise ValueError("Unsupported QC status: {!r}".format(status))
+        self.checks.append(
+            QCCheck(name=name, status=status, message=message, metrics=metrics or {})
+        )
+
+    def finalize(self) -> None:
+        self.overall = (
+            "issues_found"
+            if any(check.status in {"warning", "error"} for check in self.checks)
+            else "ok"
+        )
+        # These phase-2 guarantees must not depend on findings.
+        self.blocking = False
+        self.delivery_allowed = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        counts = {status: 0 for status in ("pass", "info", "warning", "error", "skipped")}
+        for check in self.checks:
+            counts[check.status] += 1
+        return {
+            "schema_version": 1,
+            "generated_at": self.generated_at,
+            "mode": self.mode,
+            "blocking": self.blocking,
+            "delivery_allowed": self.delivery_allowed,
+            "overall": self.overall,
+            "video_path": self.video_path,
+            "summary": counts,
+            "checks": [asdict(check) for check in self.checks],
+            "media": self.media,
+            "metrics": self.metrics,
+            "diagnostic_artifacts": self.diagnostic_artifacts,
+        }
+
+
+@dataclass(frozen=True)
+class QCGateDecision:
+    allowed: bool
+    policy: str
+    reason: str
+    blocking_checks: Sequence[str] = ()
+
+
+def evaluate_qc_gate(report: Union[QCReport, Mapping[str, Any]], policy: Any) -> QCGateDecision:
+    """Apply the phase-8 rollout policy without changing the QC evidence."""
+
+    policy_value = str(getattr(policy, "value", policy)).lower()
+    if isinstance(report, QCReport):
+        checks = [asdict(check) for check in report.checks]
+    else:
+        checks = list(report.get("checks", []))
+    errors = [
+        str(check.get("name", "unknown"))
+        for check in checks
+        if check.get("status") == "error"
+    ]
+    if policy_value == "block" and errors:
+        return QCGateDecision(
+            False,
+            policy_value,
+            "QC gate blocked delivery because critical errors were reported",
+            tuple(errors),
+        )
+    if errors:
+        return QCGateDecision(
+            True,
+            policy_value,
+            "QC errors were reported but rollout policy allows delivery",
+            tuple(errors),
+        )
+    return QCGateDecision(True, policy_value, "QC gate allows delivery")
+
+
+def _run_command(command: Sequence[str], timeout: float) -> subprocess.CompletedProcess:
+    creation_flags = 0
+    if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+        creation_flags = subprocess.CREATE_NO_WINDOW
+    return subprocess.run(
+        list(command),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        creationflags=creation_flags,
+    )
+
+
+def probe_media(
+    path: PathLike,
+    ffprobe_binary: str = "ffprobe",
+    timeout: float = 30.0,
+) -> Dict[str, Any]:
+    command = [
+        ffprobe_binary,
+        "-v",
+        "error",
+        "-show_entries",
+        (
+            "format=duration,format_name,size,bit_rate:"
+            "stream=index,codec_type,codec_name,width,height,duration,"
+            "avg_frame_rate,r_frame_rate,sample_rate,channels,channel_layout"
+        ),
+        "-of",
+        "json",
+        str(path),
+    ]
+    result = _run_command(command, timeout=timeout)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "ffprobe returned an error")
+    return json.loads(result.stdout)
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _frame_rate_or_none(value: Any) -> Optional[float]:
+    """Parse ffprobe frame-rate values such as ``30000/1001`` safely."""
+    if value is None:
+        return None
+    try:
+        raw = str(value).strip()
+        if "/" in raw:
+            numerator, denominator = raw.split("/", 1)
+            denominator_value = float(denominator)
+            if denominator_value == 0:
+                return None
+            rate = float(numerator) / denominator_value
+        else:
+            rate = float(raw)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    return rate if 0.1 <= rate <= 1000.0 else None
+
+
+def _video_frame_rate(probe: Optional[Mapping[str, Any]], default: float = 30.0) -> float:
+    """Return the video's measured average/rate metadata with a safe fallback."""
+    if probe is not None:
+        for stream in probe.get("streams", []):
+            if stream.get("codec_type") != "video":
+                continue
+            for field_name in ("avg_frame_rate", "r_frame_rate"):
+                rate = _frame_rate_or_none(stream.get(field_name))
+                if rate is not None:
+                    return rate
+    return float(default)
+
+
+def _duration_seconds(probe: Mapping[str, Any]) -> Optional[float]:
+    duration = _float_or_none(dict(probe.get("format", {})).get("duration"))
+    if duration is not None:
+        return duration
+    durations = [
+        value
+        for value in (
+            _float_or_none(stream.get("duration")) for stream in probe.get("streams", [])
+        )
+        if value is not None
+    ]
+    return max(durations) if durations else None
+
+
+def _stream_duration_seconds(
+    probe: Mapping[str, Any], codec_type: str
+) -> Optional[float]:
+    durations = [
+        value
+        for value in (
+            _float_or_none(stream.get("duration"))
+            for stream in probe.get("streams", [])
+            if stream.get("codec_type") == codec_type
+        )
+        if value is not None
+    ]
+    return max(durations) if durations else _duration_seconds(probe)
+
+
+def _streams(probe: Mapping[str, Any], kind: str) -> List[Mapping[str, Any]]:
+    return [
+        stream
+        for stream in probe.get("streams", [])
+        if stream.get("codec_type") == kind
+    ]
+
+
+def _analyse_audio(
+    path: Path,
+    settings: QCSettings,
+    ffmpeg_binary: str,
+) -> Tuple[Dict[str, Any], List[QCCheck]]:
+    metrics: Dict[str, Any] = {}
+    checks: List[QCCheck] = []
+    loudness_command = [
+        ffmpeg_binary,
+        "-hide_banner",
+        "-nostats",
+        "-i",
+        str(path),
+        "-map",
+        "0:a:0",
+        "-af",
+        "ebur128=peak=true",
+        "-f",
+        "null",
+        "-",
+    ]
+    loudness = _run_command(loudness_command, settings.command_timeout_seconds)
+    if loudness.returncode != 0:
+        checks.append(
+            QCCheck(
+                "audio_loudness",
+                "error",
+                loudness.stderr.strip()[-1000:] or "FFmpeg loudness analysis failed",
+            )
+        )
+    else:
+        integrated_matches = re.findall(
+            r"^\s*I:\s*(-?(?:\d+(?:\.\d+)?|inf))\s+LUFS",
+            loudness.stderr,
+            flags=re.MULTILINE | re.IGNORECASE,
+        )
+        peak_matches = re.findall(
+            r"^\s*Peak:\s*(-?(?:\d+(?:\.\d+)?|inf))\s+dBFS",
+            loudness.stderr,
+            flags=re.MULTILINE | re.IGNORECASE,
+        )
+        integrated = _float_or_none(integrated_matches[-1]) if integrated_matches else None
+        true_peak = _float_or_none(peak_matches[-1]) if peak_matches else None
+        metrics.update({"integrated_lufs": integrated, "true_peak_dbtp": true_peak})
+        if integrated is None:
+            checks.append(
+                QCCheck("audio_loudness", "warning", "Integrated loudness was not parsed")
+            )
+        elif settings.target_lufs_min <= integrated <= settings.target_lufs_max:
+            checks.append(
+                QCCheck(
+                    "audio_loudness",
+                    "pass",
+                    "Integrated loudness is inside the target range",
+                    {"integrated_lufs": integrated},
+                )
+            )
+        else:
+            checks.append(
+                QCCheck(
+                    "audio_loudness",
+                    "warning",
+                    "Integrated loudness is outside the -16 to -14 LUFS target",
+                    {"integrated_lufs": integrated},
+                )
+            )
+
+        if true_peak is None:
+            checks.append(
+                QCCheck("audio_true_peak", "warning", "True peak was not parsed")
+            )
+        elif true_peak >= settings.clipping_risk_db:
+            checks.append(
+                QCCheck(
+                    "audio_true_peak",
+                    "warning",
+                    "Peak is close to 0 dBFS and may clip",
+                    {"true_peak_dbtp": true_peak},
+                )
+            )
+        elif true_peak > settings.true_peak_max_dbtp:
+            checks.append(
+                QCCheck(
+                    "audio_true_peak",
+                    "warning",
+                    "True peak exceeds the -1 dBTP target",
+                    {"true_peak_dbtp": true_peak},
+                )
+            )
+        else:
+            checks.append(
+                QCCheck(
+                    "audio_true_peak",
+                    "pass",
+                    "True peak is within target",
+                    {"true_peak_dbtp": true_peak},
+                )
+            )
+
+    silence_command = [
+        ffmpeg_binary,
+        "-hide_banner",
+        "-nostats",
+        "-i",
+        str(path),
+        "-map",
+        "0:a:0",
+        "-af",
+        "silencedetect=noise={}dB:d={}".format(
+            settings.silence_noise_db, settings.silence_min_seconds
+        ),
+        "-f",
+        "null",
+        "-",
+    ]
+    silence = _run_command(silence_command, settings.command_timeout_seconds)
+    if silence.returncode != 0:
+        checks.append(
+            QCCheck(
+                "long_silence",
+                "error",
+                silence.stderr.strip()[-1000:] or "FFmpeg silence analysis failed",
+            )
+        )
+    else:
+        durations = [
+            float(value)
+            for value in re.findall(r"silence_duration:\s*([0-9.]+)", silence.stderr)
+        ]
+        metrics["long_silence_count"] = len(durations)
+        metrics["long_silence_total_seconds"] = round(sum(durations), 3)
+        if durations:
+            checks.append(
+                QCCheck(
+                    "long_silence",
+                    "warning",
+                    "Detected silence intervals at or above the configured duration",
+                    {
+                        "count": len(durations),
+                        "total_seconds": round(sum(durations), 3),
+                        "longest_seconds": round(max(durations), 3),
+                    },
+                )
+            )
+        else:
+            checks.append(
+                QCCheck("long_silence", "pass", "No unexpectedly long silence detected")
+            )
+    return metrics, checks
+
+
+def _parse_srt_timestamp(value: str) -> float:
+    match = re.fullmatch(r"(\d+):(\d{2}):(\d{2})[,.](\d{3})", value.strip())
+    if not match:
+        raise ValueError("Invalid SRT timestamp: {!r}".format(value))
+    hours, minutes, seconds, milliseconds = (int(item) for item in match.groups())
+    return hours * 3600 + minutes * 60 + seconds + milliseconds / 1000.0
+
+
+def _load_segments(path: Path) -> List[Dict[str, Any]]:
+    if path.suffix.lower() == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        if isinstance(payload, dict):
+            payload = payload.get("segments", [])
+        if not isinstance(payload, list):
+            raise ValueError("Segment JSON must be a list or contain a segments list")
+        return [dict(item) for item in payload]
+    if path.suffix.lower() == ".srt":
+        content = path.read_text(encoding="utf-8-sig").replace("\r\n", "\n")
+        segments = []
+        for block in re.split(r"\n\s*\n", content.strip()):
+            lines = block.splitlines()
+            if len(lines) < 3 or "-->" not in lines[1]:
+                continue
+            start, end = (item.strip() for item in lines[1].split("-->", 1))
+            segments.append(
+                {
+                    "id": int(lines[0].strip()),
+                    "start": _parse_srt_timestamp(start),
+                    "end": _parse_srt_timestamp(end),
+                    "text": "\n".join(lines[2:]).strip(),
+                }
+            )
+        return segments
+    raise ValueError("Segments must be supplied as .json or .srt")
+
+
+def _check_segments(path: Path) -> Tuple[Dict[str, Any], List[QCCheck]]:
+    segments = _load_segments(path)
+    checks: List[QCCheck] = []
+    metrics: Dict[str, Any] = {"segment_count": len(segments)}
+    if not segments:
+        return metrics, [QCCheck("segments", "warning", "No subtitle segments found")]
+
+    invalid_ranges = []
+    empty_text = []
+    missing_audio = []
+    timing_failures = []
+    timing_overflow_seconds = {}
+    untranslated_source = []
+    timing_metadata_count = 0
+    translation_metadata_count = 0
+    tts_metadata_count = 0
+    silent_fallback_ids = []
+    numeric_ids = []
+    for position, segment in enumerate(segments, 1):
+        segment_id = segment.get("id", segment.get("index", position))
+        try:
+            numeric_ids.append(int(segment_id))
+        except (TypeError, ValueError):
+            pass
+        start = _float_or_none(segment.get("start"))
+        end = _float_or_none(segment.get("end"))
+        if start is None or end is None or start < 0 or end <= start:
+            invalid_ranges.append(segment_id)
+        text = str(segment.get("text", segment.get("content", ""))).strip()
+        if not text:
+            empty_text.append(segment_id)
+        audio_value = segment.get("audio_path")
+        if audio_value:
+            audio_path = Path(str(audio_value))
+            if not audio_path.is_absolute():
+                audio_path = path.parent / audio_path
+            if not audio_path.is_file():
+                missing_audio.append(segment_id)
+        if "timing_fits" in segment:
+            timing_metadata_count += 1
+            actual_duration = _float_or_none(segment.get("actual_audio_duration"))
+            target_duration = _float_or_none(segment.get("target_audio_duration"))
+            if segment.get("timing_fits") is False:
+                timing_failures.append(segment_id)
+            if actual_duration is not None and target_duration is not None:
+                overflow = actual_duration - target_duration
+                if overflow > 0.08:
+                    timing_overflow_seconds[str(segment_id)] = round(overflow, 3)
+                    if segment_id not in timing_failures:
+                        timing_failures.append(segment_id)
+        if "is_silent_fallback" in segment:
+            tts_metadata_count += 1
+            if bool(segment.get("is_silent_fallback", False)):
+                silent_fallback_ids.append(segment_id)
+        original_text = str(segment.get("orig_content") or "").strip()
+        if original_text:
+            translation_metadata_count += 1
+            if (
+                original_text == text
+                and any("\u4e00" <= character <= "\u9fff" for character in original_text)
+            ):
+                untranslated_source.append(segment_id)
+
+    missing_ids = []
+    if numeric_ids:
+        unique_ids = set(numeric_ids)
+        missing_ids = sorted(set(range(min(unique_ids), max(unique_ids) + 1)) - unique_ids)
+    duplicate_ids = sorted(
+        segment_id for segment_id in set(numeric_ids) if numeric_ids.count(segment_id) > 1
+    )
+    metrics.update(
+        {
+            "invalid_range_count": len(invalid_ranges),
+            "empty_text_count": len(empty_text),
+            "missing_audio_count": len(missing_audio),
+            "missing_ids": missing_ids,
+            "duplicate_ids": duplicate_ids,
+            "timing_failure_count": len(timing_failures),
+            "timing_failure_ids": timing_failures,
+            "timing_overflow_seconds": timing_overflow_seconds,
+            "untranslated_source_count": len(untranslated_source),
+            "untranslated_source_ids": untranslated_source,
+            "tts_degraded_segments": len(silent_fallback_ids),
+            "tts_degraded_segment_ids": silent_fallback_ids,
+        }
+    )
+    problems = invalid_ranges or empty_text or missing_audio or missing_ids or duplicate_ids
+    if problems:
+        checks.append(
+            QCCheck(
+                "segments",
+                "error",
+                "Missing or invalid segment data was detected",
+                metrics,
+            )
+        )
+    else:
+        checks.append(QCCheck("segments", "pass", "All segment records are complete", metrics))
+    if timing_metadata_count == 0:
+        checks.append(
+            QCCheck("segment_timing", "skipped", "No measured audio timing metadata")
+        )
+    elif timing_failures:
+        checks.append(
+            QCCheck(
+                "segment_timing",
+                "error",
+                "Measured dubbing audio exceeds one or more segment windows",
+                {
+                    "segment_ids": timing_failures,
+                    "overflow_seconds": timing_overflow_seconds,
+                },
+            )
+        )
+    else:
+        checks.append(
+            QCCheck(
+                "segment_timing",
+                "pass",
+                "All measured dubbing audio fits its segment window",
+            )
+        )
+    if translation_metadata_count == 0:
+        checks.append(
+            QCCheck(
+                "translation_fallback",
+                "skipped",
+                "No source translation metadata was supplied",
+            )
+        )
+    elif untranslated_source:
+        checks.append(
+            QCCheck(
+                "translation_fallback",
+                "error",
+                "Chinese source text remained unchanged in translated subtitles",
+                {"segment_ids": untranslated_source},
+            )
+        )
+    else:
+        checks.append(
+            QCCheck(
+                "translation_fallback",
+                "pass",
+                "No unchanged Chinese source fallback was detected",
+            )
+        )
+    if tts_metadata_count == 0:
+        checks.append(
+            QCCheck(
+                "tts_integrity",
+                "skipped",
+                "No TTS audio generation metadata was supplied",
+            )
+        )
+    elif silent_fallback_ids:
+        checks.append(
+            QCCheck(
+                "tts_integrity",
+                "error",
+                "Silent fallback audio was generated for spoken segments due to TTS failures",
+                {
+                    "degraded_segment_ids": silent_fallback_ids,
+                    "degraded_count": len(silent_fallback_ids),
+                    "total_segments": len(segments),
+                },
+            )
+        )
+    else:
+        checks.append(
+            QCCheck(
+                "tts_integrity",
+                "pass",
+                "All spoken segments have audio generated without silent fallback",
+                {
+                    "degraded_count": 0,
+                    "total_segments": len(segments),
+                },
+            )
+        )
+    return metrics, checks
+
+
+def _check_ass_safe_area(
+    path: Path, settings: QCSettings
+) -> Tuple[Dict[str, Any], List[QCCheck]]:
+    content = path.read_text(encoding="utf-8-sig", errors="replace")
+    width_match = re.search(r"^PlayResX:\s*([0-9.]+)", content, re.MULTILINE)
+    height_match = re.search(r"^PlayResY:\s*([0-9.]+)", content, re.MULTILINE)
+    positions = [
+        (float(x), float(y))
+        for x, y in re.findall(
+            r"\\pos\(\s*(-?[0-9.]+)\s*,\s*(-?[0-9.]+)\s*\)", content
+        )
+    ]
+    metrics = {"position_count": len(positions)}
+    if not width_match or not height_match:
+        return metrics, [
+            QCCheck(
+                "subtitle_safe_area",
+                "warning",
+                "ASS PlayResX/PlayResY is missing; safe area could not be verified",
+            )
+        ]
+    width = float(width_match.group(1))
+    height = float(height_match.group(1))
+    metrics.update({"play_res_x": width, "play_res_y": height})
+    if not positions:
+        return metrics, [
+            QCCheck(
+                "subtitle_safe_area",
+                "info",
+                "No explicit ASS position tags found; style-based placement was not estimated",
+                metrics,
+            )
+        ]
+    min_x = width * settings.subtitle_safe_margin_x_pct
+    max_x = width * (1.0 - settings.subtitle_safe_margin_x_pct)
+    min_y = height * settings.subtitle_safe_margin_y_pct
+    max_y = height * (1.0 - settings.subtitle_safe_margin_y_pct)
+    outside = [
+        {"x": x, "y": y}
+        for x, y in positions
+        if x < min_x or x > max_x or y < min_y or y > max_y
+    ]
+    metrics["outside_anchor_count"] = len(outside)
+    if outside:
+        return metrics, [
+            QCCheck(
+                "subtitle_safe_area",
+                "warning",
+                "Some ASS position anchors are outside the configured safe area",
+                {**metrics, "examples": outside[:10]},
+            )
+        ]
+    return metrics, [
+        QCCheck(
+            "subtitle_safe_area",
+            "pass",
+            "ASS position anchors are inside the configured safe area",
+            metrics,
+        )
+    ]
+
+
+def plan_diagnostic_samples(
+    duration: float,
+    extra_samples: Optional[Sequence[Tuple[str, float]]] = None,
+    max_samples: Optional[int] = 30,
+) -> List[Tuple[str, float]]:
+    """Select diagnostic sample points with an optional total budget cap (inclusive of baseline).
+
+    Rules:
+    1. Guaranteed baseline samples: first (0.0), middle (duration / 2.0), last (duration - 0.1), tail (duration - 0.25).
+    2. Extra sample candidates are deduplicated by label.
+    3. If max_samples is specified (e.g. 30), total output samples (baseline + extra)
+       strictly does NOT exceed max_samples.
+    4. If extra candidates exceed the remaining budget, failure/position-shift samples are
+       retained ahead of boundary/OCR diagnostics and routine transition samples. Each priority
+       tier is sampled evenly over time when that tier alone exceeds the available slots.
+    """
+    clamped_dur = max(0.1, float(duration))
+
+    baseline_points = [
+        ("first", 0.0),
+        ("middle", round(clamped_dur / 2.0, 2)),
+        ("last", round(max(0.0, clamped_dur - 0.1), 2)),
+        ("tail", round(max(0.0, clamped_dur - 0.25), 2)),
+    ]
+
+    unique_baseline: List[Tuple[str, float]] = []
+    seen_baseline_t = set()
+    for lbl, t in baseline_points:
+        t_clamped = round(max(0.0, min(t, max(0.0, clamped_dur - 0.05))), 2)
+        if t_clamped not in seen_baseline_t:
+            seen_baseline_t.add(t_clamped)
+            unique_baseline.append((lbl, t_clamped))
+
+    raw_extras: List[Tuple[str, float]] = []
+    seen_labels = {lbl for lbl, _ in unique_baseline}
+
+    for label, timestamp in (extra_samples or []):
+        if label in seen_labels:
+            continue
+        t_rounded = round(max(0.0, min(float(timestamp), max(0.0, clamped_dur - 0.05))), 2)
+        seen_labels.add(label)
+        raw_extras.append((label, t_rounded))
+
+    if max_samples is not None:
+        budget = max(len(unique_baseline), int(max_samples))
+        remaining_budget = budget - len(unique_baseline)
+        if len(raw_extras) <= remaining_budget:
+            selected_extras = raw_extras
+        else:
+            def priority(label: str) -> int:
+                normalized = str(label).lower()
+                if normalized.startswith(("cover_fail_", "boundary_shift_", "cover_shift_")):
+                    return 0
+                if normalized.startswith((
+                    "boundary_",
+                    "cover_onset_",
+                    "cover_exit_",
+                    "cover_hold_",
+                    "weak_ocr_",
+                    "near_edge_",
+                )):
+                    return 1
+                return 2
+
+            def evenly_select(items: List[Tuple[str, float]], limit: int) -> List[Tuple[str, float]]:
+                ordered = sorted(items, key=lambda x: (x[1], x[0]))
+                if limit <= 0:
+                    return []
+                if len(ordered) <= limit:
+                    return ordered
+                if limit == 1:
+                    return [ordered[0]]
+                step = (len(ordered) - 1) / (limit - 1)
+                indices = [round(i * step) for i in range(limit)]
+                return [ordered[index] for index in indices]
+
+            selected_extras = []
+            for tier in (0, 1, 2):
+                slots = remaining_budget - len(selected_extras)
+                if slots <= 0:
+                    break
+                tier_items = [item for item in raw_extras if priority(item[0]) == tier]
+                selected_extras.extend(evenly_select(tier_items, slots))
+        all_samples = unique_baseline + selected_extras
+        all_samples.sort(key=lambda s: (s[1], s[0]))
+        return all_samples[:budget]
+    else:
+        seen_times = {s[1] for s in raw_extras}
+        baseline_to_add = [(lbl, t) for lbl, t in unique_baseline if t not in seen_times]
+        all_samples = raw_extras + baseline_to_add
+        all_samples.sort(key=lambda s: (s[1], s[0]))
+        return all_samples
+
+
+def _sample_frames(
+    video_path: Path,
+    duration: float,
+    diagnostics_directory: Path,
+    ffmpeg_binary: str,
+    timeout: float,
+    extra_samples: Optional[Sequence[Tuple[str, float]]] = None,
+    max_samples: Optional[int] = 30,
+    fps: float = 30.0,
+) -> Tuple[List[Dict[str, Any]], List[QCCheck]]:
+    store = ArtifactStore(diagnostics_directory)
+    samples = plan_diagnostic_samples(duration, extra_samples, max_samples=max_samples)
+    artifacts: List[Dict[str, Any]] = []
+    failures: List[str] = []
+    measured_fps = max(1.0, float(fps))
+
+    # Select by presentation time, not nominal/average FPS. Multiple labels
+    # can share one decoded frame; metadata must record its actual PTS.
+    samples_by_time: Dict[float, List[Tuple[str, float]]] = {}
+    for label, timestamp in samples:
+        samples_by_time.setdefault(max(0.0, float(timestamp)), []).append((label, timestamp))
+    selected_times = sorted(samples_by_time)
+
+    if not selected_times:
+        return artifacts, [
+            QCCheck("frame_samples", "skipped", "No diagnostic frame was requested")
+        ]
+
+    diagnostics_directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".frame_batch_", dir=str(diagnostics_directory)
+    ) as temporary_directory:
+        temporary_root = Path(temporary_directory)
+        output_pattern = temporary_root / "sample_%06d.png"
+        select_expression = "+".join(
+            "gte(t\\,{0:.9f})*(isnan(prev_selected_t)+lt(prev_selected_t\\,{0:.9f}))".format(timestamp)
+            for timestamp in selected_times
+        )
+        command = [
+            ffmpeg_binary,
+            "-hide_banner",
+            "-loglevel",
+            "info",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vf",
+            "setpts=PTS-STARTPTS,select={},scale='min(960,iw)':-2,showinfo".format(select_expression),
+            "-fps_mode",
+            "vfr",
+            "-start_number",
+            "0",
+            "-frames:v",
+            str(len(selected_times)),
+            "-vcodec",
+            "png",
+            "-f",
+            "image2",
+            str(output_pattern),
+        ]
+        try:
+            result = _run_command(command, timeout)
+            if result.returncode != 0:
+                failures.extend(label for label, _ in samples)
+            else:
+                frame_times = [float(value) for value in re.findall(
+                    r"\bpts_time:([-+0-9.eE]+)", result.stderr or "")]
+                pending = list(selected_times)
+                for output_index, actual_time in enumerate(frame_times):
+                    decoded_frame = temporary_root / "sample_{:06d}.png".format(output_index)
+                    reached = [t for t in pending if t <= actual_time + 0.00001]
+                    labels = [label for t in reached for label in samples_by_time[t]]
+                    pending = [t for t in pending if t not in reached]
+                    if not decoded_frame.is_file() or decoded_frame.stat().st_size == 0:
+                        failures.extend(label for label, _ in labels)
+                        continue
+                    for label, timestamp in labels:
+                        key = "frames/{}.png".format(label)
+                        record = store.put_file(
+                            key,
+                            decoded_frame,
+                            metadata={
+                                "timestamp_seconds": actual_time,
+                                "requested_timestamp_seconds": round(timestamp, 3),
+                                "sampling_output_index": output_index,
+                                "timestamp_basis": "decoded_pts",
+                                "source_fps": round(measured_fps, 6),
+                            },
+                        )
+                        artifacts.append(record.to_dict())
+                failures.extend(label for t in pending for label, _ in samples_by_time[t])
+        except (OSError, subprocess.SubprocessError):
+            failures.extend(label for label, _ in samples)
+
+    extraction_metrics = {
+        "requested_samples": len(samples),
+        "decoded_unique_frames": len({a['metadata']['timestamp_seconds'] for a in artifacts}),
+        "ffmpeg_invocations": 1,
+        "fps": round(measured_fps, 6),
+        "created": len(artifacts),
+    }
+    if failures:
+        return artifacts, [
+            QCCheck(
+                "frame_samples",
+                "warning",
+                "One or more diagnostic frames could not be extracted",
+                {**extraction_metrics, "failed": failures},
+            )
+        ]
+    return artifacts, [
+        QCCheck(
+            "frame_samples",
+            "pass",
+            "Created diagnostic frames in one sequential decode",
+            extraction_metrics,
+        )
+    ]
+
+
+def run_report_only_qc(
+    video_path: PathLike,
+    report_path: PathLike,
+    audio_path: Optional[PathLike] = None,
+    segments_path: Optional[PathLike] = None,
+    ass_path: Optional[PathLike] = None,
+    diagnostics_directory: Optional[PathLike] = None,
+    settings: Optional[QCSettings] = None,
+    ffmpeg_binary: str = "ffmpeg",
+    ffprobe_binary: str = "ffprobe",
+) -> QCReport:
+    """Collect QC diagnostics and atomically publish a non-blocking report."""
+
+    config = settings or QCSettings()
+    video = Path(video_path)
+    report = QCReport(video_path=str(video))
+    video_probe: Optional[Dict[str, Any]] = None
+    video_fps = 30.0
+
+    if not video.is_file():
+        report.add("video_file", "error", "Final video file is missing")
+    else:
+        report.add("video_file", "pass", "Final video file exists", {"size_bytes": video.stat().st_size})
+        try:
+            video_probe = probe_media(
+                video,
+                ffprobe_binary=ffprobe_binary,
+                timeout=min(config.command_timeout_seconds, 30.0),
+            )
+            report.media["video"] = video_probe
+            video_fps = _video_frame_rate(video_probe)
+            report.metrics["video_fps"] = round(video_fps, 6)
+            video_streams = _streams(video_probe, "video")
+            audio_streams = _streams(video_probe, "audio")
+            report.add(
+                "video_stream",
+                "pass" if video_streams else "error",
+                "Final output has a video stream" if video_streams else "Final output has no video stream",
+                {"count": len(video_streams)},
+            )
+            report.add(
+                "audio_stream",
+                "pass" if audio_streams else "error",
+                "Final output has an audio stream" if audio_streams else "Final output has no audio stream",
+                {"count": len(audio_streams)},
+            )
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+            report.add("media_probe", "error", "Could not probe final video: {}".format(exc))
+
+    audio = Path(audio_path) if audio_path is not None else video
+    if not audio.is_file():
+        report.add("audio_file", "error", "Audio file for analysis is missing")
+    else:
+        audio_probe: Optional[Dict[str, Any]] = None
+        try:
+            audio_probe = probe_media(
+                audio,
+                ffprobe_binary=ffprobe_binary,
+                timeout=min(config.command_timeout_seconds, 30.0),
+            )
+            report.media["audio_analysis_source"] = audio_probe
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+            report.add("audio_probe", "error", "Could not probe analysis audio: {}".format(exc))
+
+        if video_probe is not None and audio_probe is not None:
+            video_duration = _stream_duration_seconds(video_probe, "video")
+            audio_duration = _stream_duration_seconds(audio_probe, "audio")
+            if video_duration is not None and audio_duration is not None:
+                delta = abs(video_duration - audio_duration)
+                allowed = max(
+                    config.duration_tolerance_seconds,
+                    video_duration * config.duration_tolerance_ratio,
+                )
+                report.metrics.update(
+                    {
+                        "video_duration_seconds": video_duration,
+                        "audio_duration_seconds": audio_duration,
+                        "duration_delta_seconds": delta,
+                        "duration_tolerance_seconds": allowed,
+                    }
+                )
+                report.add(
+                    "duration_delta",
+                    "pass" if delta <= allowed else "warning",
+                    "Audio/video duration difference is within tolerance"
+                    if delta <= allowed
+                    else "Audio/video duration difference exceeds tolerance",
+                    {"delta_seconds": round(delta, 3), "allowed_seconds": round(allowed, 3)},
+                )
+            else:
+                report.add("duration_delta", "warning", "Duration metadata is unavailable")
+
+        try:
+            audio_metrics, audio_checks = _analyse_audio(audio, config, ffmpeg_binary)
+            report.metrics.update(audio_metrics)
+            report.checks.extend(audio_checks)
+        except (OSError, subprocess.SubprocessError) as exc:
+            report.add("audio_analysis", "error", "Could not run audio analysis: {}".format(exc))
+
+    if segments_path is None:
+        report.add("segments", "skipped", "No segment manifest/SRT was supplied")
+    else:
+        segments = Path(segments_path)
+        if not segments.is_file():
+            report.add("segments", "error", "Segment manifest/SRT is missing")
+        else:
+            try:
+                segment_metrics, segment_checks = _check_segments(segments)
+                report.metrics.update(segment_metrics)
+                report.checks.extend(segment_checks)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                report.add("segments", "error", "Could not inspect segments: {}".format(exc))
+
+    subtitles = Path(ass_path) if ass_path is not None else None
+    if ass_path is None:
+        report.add("subtitle_safe_area", "skipped", "No ASS subtitle file was supplied")
+    else:
+        subtitles = Path(ass_path)
+        if not subtitles.is_file():
+            report.add("subtitle_safe_area", "error", "ASS subtitle file is missing")
+        else:
+            try:
+                subtitle_metrics, subtitle_checks = _check_ass_safe_area(subtitles, config)
+                report.metrics["subtitle_safe_area"] = subtitle_metrics
+                report.checks.extend(subtitle_checks)
+                if segments_path is not None and Path(segments_path).suffix.lower() == '.json':
+                    from .cover_qc import inspect_covers
+                    coverage = inspect_covers(_load_segments(Path(segments_path)),
+                                              subtitles.read_text(encoding='utf-8-sig'),
+                                              video_duration=_duration_seconds(video_probe) if video_probe is not None else None,
+                                              fps=video_fps)
+                    report.metrics['source_cover'] = coverage
+                    report.add('source_cover', 'error' if coverage['failures'] else 'pass',
+                               'Known source rectangles must remain inside a timed cover', coverage)
+                    if coverage['unverified_segments']:
+                        report.add('source_cover_unverified', 'warning',
+                                   'No source geometry; visual cover cannot be verified',
+                                   {'segment_ids': coverage['unverified_segments']})
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                report.add("subtitle_safe_area", "error", "Could not inspect ASS file: {}".format(exc))
+
+    video_duration = _duration_seconds(video_probe) if video_probe is not None else None
+    if not config.sample_frames:
+        report.add("frame_samples", "skipped", "Frame sampling is disabled")
+    elif not video.is_file() or video_duration is None or video_duration <= 0:
+        report.add("frame_samples", "skipped", "Video duration is unavailable for frame sampling")
+    else:
+        # Load ASS covers early if available so diagnostic sampling can anchor directly to real cover events
+        ass_covers = []
+        cw, ch = 1080, 1920
+        if subtitles is not None and Path(subtitles).is_file():
+            try:
+                from .cover_qc import parse_ass_covers
+                ass_covers, cw, ch = parse_ass_covers(Path(subtitles).read_text(encoding="utf-8-sig"))
+            except Exception:
+                pass
+
+        # Collect specialized diagnostic sample points
+        diagnostic_points: List[Tuple[str, float]] = []
+        loaded_segs = []
+        if segments_path is not None and Path(segments_path).is_file():
+            try:
+                loaded_segs = _load_segments(Path(segments_path))
+            except Exception:
+                pass
+
+        expected_cover_timeline = []
+        if loaded_segs:
+            try:
+                from .cover_qc import build_expected_cover_timeline
+                expected_cover_timeline = build_expected_cover_timeline(
+                    loaded_segs,
+                    video_duration=video_duration,
+                    fps=video_fps,
+                )
+            except (TypeError, ValueError):
+                expected_cover_timeline = []
+
+        if ass_covers:
+            # 1. Primary: Sample directly from actual ASS covers
+            total_covers = len(ass_covers)
+            selected_cov_indices = set()
+            if total_covers <= 15:
+                selected_cov_indices.update(range(total_covers))
+            else:
+                selected_cov_indices.add(0)
+                selected_cov_indices.add(total_covers - 1)
+                cov_shifts = []
+                for i in range(len(ass_covers) - 1):
+                    c1, c2 = ass_covers[i], ass_covers[i + 1]
+                    if abs(c1[3] - c2[3]) > (ch * 0.03):
+                        cov_shifts.append(i + 1)
+                for s_idx in cov_shifts[:8]:
+                    selected_cov_indices.add(s_idx)
+                rem = 15 - len(selected_cov_indices)
+                if rem > 0:
+                    step = (total_covers - 1) / max(1, rem + 1)
+                    for k in range(1, rem + 1):
+                        selected_cov_indices.add(round(k * step))
+
+            for idx in sorted(selected_cov_indices):
+                c = ass_covers[idx]
+                c_start, c_end = c[0], c[1]
+                dur = max(0.05, c_end - c_start)
+                onset_offset = min(0.06, max(0.02, dur * 0.15))
+                onset_t = round(max(0.05, min(c_start + onset_offset, max(0.05, video_duration - 0.1))), 2)
+                mid_t = round(max(0.05, min((c_start + c_end) / 2.0, max(0.05, video_duration - 0.1))), 2)
+                exit_t = round(max(0.05, min(c_end - onset_offset, max(0.05, video_duration - 0.1))), 2)
+
+                diagnostic_points.append((f"cover_onset_{idx}", onset_t))
+                diagnostic_points.append((f"cover_mid_{idx}", mid_t))
+                if dur > 0.2:
+                    diagnostic_points.append((f"cover_exit_{idx}", exit_t))
+
+                # Boundary shift pre-transition frame
+                if idx > 0 and idx in selected_cov_indices:
+                    prev_c = ass_covers[idx - 1]
+                    if abs(prev_c[3] - c[3]) > (ch * 0.03):
+                        pre_shift = round(max(0.05, min(prev_c[1] - 0.05, video_duration - 0.1)), 2)
+                        diagnostic_points.append((f"cover_shift_{idx}_pre", pre_shift))
+
+            # 2. Hold grace rule check: verify cover continues holding after source Chinese text ends
+            if loaded_segs:
+                for s_idx, seg in enumerate(loaded_segs):
+                    blocks = seg.get("tracking_blocks") or ([seg["best_block"]] if seg.get("best_block") else [])
+                    if blocks:
+                        src_end = max(float(b.get("end", 0.0)) for b in blocks)
+                        matching = [c for c in ass_covers if c[0] <= src_end <= c[1] + 0.05]
+                        for c in matching:
+                            if c[1] >= src_end + 0.3:
+                                hold_t = round(min(c[1] - 0.06, src_end + 0.5), 2)
+                                if 0.05 <= hold_t <= video_duration - 0.05:
+                                    diagnostic_points.append((f"cover_hold_{s_idx}", hold_t))
+                                    break
+        elif loaded_segs:
+            # Fallback when ASS covers are unavailable: sample from segments.json
+            shift_indices = []
+            prev_y = None
+            for idx, seg in enumerate(loaded_segs):
+                cur_y = seg.get("y_pct") or seg.get("max_y_pct")
+                if prev_y is not None and cur_y is not None and abs(float(cur_y) - float(prev_y)) > 0.04:
+                    shift_indices.append(idx)
+                if cur_y is not None:
+                    prev_y = cur_y
+
+            total_segs = len(loaded_segs)
+            selected_indices = set()
+            if total_segs <= 30:
+                selected_indices.update(range(total_segs))
+            else:
+                selected_indices.add(0)
+                selected_indices.add(total_segs - 1)
+                remaining_budget = 30 - len(selected_indices)
+                if len(shift_indices) > remaining_budget:
+                    step = (len(shift_indices) - 1) / max(1, remaining_budget - 1)
+                    for k in range(remaining_budget):
+                        selected_indices.add(shift_indices[round(k * step)])
+                else:
+                    selected_indices.update(shift_indices)
+                if len(selected_indices) < 30:
+                    grid = [round(i * (total_segs - 1) / 29.0) for i in range(30)]
+                    for pt in grid:
+                        selected_indices.add(pt)
+                        if len(selected_indices) >= 30:
+                            break
+
+            for idx in sorted(selected_indices):
+                seg = loaded_segs[idx]
+                start_sec = float(seg.get("start", 0.0))
+                end_sec = float(seg.get("end", 0.0))
+                duration_seg = max(0.05, end_sec - start_sec)
+                onset_offset = min(0.06, max(0.02, duration_seg * 0.15))
+                sample_time = max(0.05, min(start_sec + onset_offset, max(0.05, video_duration - 0.1)))
+                label = f"boundary_shift_{idx}" if idx in shift_indices else f"transition_{idx}"
+                diagnostic_points.append((label, round(sample_time, 2)))
+
+        # Diagnostic frame at weak OCR and near-edge candidates
+        if loaded_segs:
+            weak_i, edge_i = 0, 0
+            for seg in loaded_segs:
+                blocks = seg.get("tracking_blocks") or ([seg["best_block"]] if seg.get("best_block") else [])
+                for b in blocks:
+                    prob = float(b.get("prob", 1.0) or 1.0)
+                    t = float(b.get("sample_time", b.get("start", 0.0)))
+                    if prob < 0.65 and weak_i < 3:
+                        diagnostic_points.append((f"weak_ocr_{weak_i}", t))
+                        weak_i += 1
+                    x1 = float(b.get("x_pct", 0.1))
+                    x2 = float(b.get("max_x_pct", 0.9))
+                    if (x1 < 0.08 or x2 > 0.92) and edge_i < 3:
+                        diagnostic_points.append((f"near_edge_{edge_i}", t))
+                        edge_i += 1
+
+        if "coverage" in locals() and coverage.get("failures"):
+            for f_idx, fail_item in enumerate(coverage["failures"][:3]):
+                fail_t = float(fail_item.get("start", 0.0))
+                diagnostic_points.append((f"cover_fail_{f_idx}", fail_t))
+
+        diagnostics = Path(diagnostics_directory or (Path(report_path).parent / "qc_diagnostics"))
+        try:
+            frame_artifacts, frame_checks = _sample_frames(
+                video,
+                video_duration,
+                diagnostics,
+                ffmpeg_binary,
+                config.command_timeout_seconds,
+                extra_samples=diagnostic_points,
+                max_samples=getattr(config, "diagnostic_max_samples", 30),
+                fps=video_fps,
+            )
+            report.diagnostic_artifacts.extend(frame_artifacts)
+            report.checks.extend(frame_checks)
+
+            # Pixel-level inspection on sampled diagnostic frames
+            if subtitles is not None and Path(subtitles).is_file() and frame_artifacts:
+                pol = getattr(config, "gate_policy", getattr(config, "qc_gate_policy", None))
+                gate_policy_str = str(getattr(pol, "value", pol) if pol is not None else os.getenv("QC_GATE_POLICY", "block")).lower()
+                is_block = gate_policy_str == "block"
+                try:
+                    from .cover_qc import parse_ass_covers, inspect_frame_pixel_coverage
+                    if not ass_covers:
+                        ass_covers, cw, ch = parse_ass_covers(Path(subtitles).read_text(encoding="utf-8-sig"))
+
+                    expected_cover_prefixes = (
+                        "cover_onset_",
+                        "cover_mid_",
+                        "cover_exit_",
+                        "cover_hold_",
+                        "cover_shift_",
+                        "cover_fail_",
+                        "transition_",
+                        "boundary_mid_",
+                        "boundary_exit_",
+                        "boundary_shift_",
+                    )
+
+                    pixel_results = []
+                    for art in frame_artifacts:
+                        key_name = art.get("key") or art.get("artifact_key", "")
+                        fpath = diagnostics / key_name
+                        ts = art.get("metadata", {}).get("timestamp_seconds", art.get("timestamp_seconds"))
+                        if not fpath.is_file():
+                            continue
+
+                        # Check if this frame was sampled specifically expecting an active cover
+                        base_name = Path(key_name).name
+                        is_expected_cover = any(
+                            base_name.startswith(p) or key_name.startswith(f"frames/{p}") or key_name.startswith(p)
+                            for p in expected_cover_prefixes
+                        )
+
+                        sample_time = float(ts) if ts is not None else None
+                        expected_regions = []
+                        if sample_time is not None:
+                            expected_regions = [
+                                {
+                                    "segment_id": event.segment_id,
+                                    "x_pct": event.x_pct,
+                                    "max_x_pct": event.max_x_pct,
+                                    "y_pct": event.y_pct,
+                                    "max_y_pct": event.max_y_pct,
+                                    "text": event.text,
+                                }
+                                for event in expected_cover_timeline
+                                if event.src_start <= sample_time < event.src_end
+                            ]
+
+                        pix_res = inspect_frame_pixel_coverage(
+                            fpath,
+                            ass_covers,
+                            canvas_w=cw,
+                            canvas_h=ch,
+                            timestamp=ts,
+                            expected_regions=expected_regions,
+                        )
+                        if pix_res.get("checked"):
+                            # If expected cover frame produced 0 boxes checked (degenerate cover box)
+                            if is_expected_cover and pix_res.get("boxes_checked", 0) == 0:
+                                pix_res["all_boxes_filled"] = False
+                                pix_res["reason"] = "expected_cover_missing_or_degenerate"
+                            pixel_results.append(pix_res)
+                        else:
+                            # checked=False: no active covers found in ASS at timestamp
+                            if is_expected_cover:
+                                # FAIL-CLOSED: Frame was sampled expecting an active cover, but none existed!
+                                pixel_results.append({
+                                    "checked": True,
+                                    "frame": fpath.name,
+                                    "timestamp": ts,
+                                    "boxes_checked": 0,
+                                    "all_boxes_filled": False,
+                                    "reason": f"expected_cover_missing_or_late ({pix_res.get('reason', 'no_active_covers')})",
+                                    "details": [],
+                                })
+
+                    if pixel_results:
+                        all_filled = all(r.get("all_boxes_filled") for r in pixel_results)
+                        overflow_frames = sum(
+                            1 for result in pixel_results
+                            if result.get("overflow_detected")
+                        )
+                        uncovered_source_frames = sum(
+                            1 for result in pixel_results
+                            if any(
+                                not region.get("geometry_covered", False)
+                                for region in result.get("expected_region_checks", [])
+                            )
+                        )
+                        report.metrics["pixel_cover_qc"] = {
+                            "checked_frames": len(pixel_results),
+                            "all_boxes_filled": all_filled,
+                            "overflow_frames": overflow_frames,
+                            "uncovered_source_frames": uncovered_source_frames,
+                            "results": pixel_results,
+                        }
+                        qc_status = "pass" if all_filled else ("error" if is_block else "warning")
+                        report.add(
+                            "pixel_cover_qc",
+                            qc_status,
+                            "Output frame pixels verified for visual subtitle cover fill"
+                            if all_filled
+                            else "Some output frame pixels showed incomplete cover fill (exposed source text / insufficient cover)",
+                            {
+                                "checked_frames": len(pixel_results),
+                                "overflow_frames": overflow_frames,
+                                "uncovered_source_frames": uncovered_source_frames,
+                                "gate_policy": gate_policy_str,
+                            },
+                        )
+                    else:
+                        # Fail-closed: Subtitles were provided but no sampled frame pixel result could be produced
+                        report.metrics["pixel_cover_qc"] = {
+                            "checked_frames": 0,
+                            "all_boxes_filled": False,
+                            "reason": "no_pixel_results_generated",
+                        }
+                        qc_status = "error" if is_block else "warning"
+                        report.add(
+                            "pixel_cover_qc",
+                            qc_status,
+                            "ASS covers were expected but no sampled frame pixel result could be produced for verification",
+                            {"checked_frames": 0, "gate_policy": gate_policy_str},
+                        )
+                except Exception as exc:
+                    logger.debug("Pixel cover check error: %s", exc)
+                    report.metrics["pixel_cover_qc"] = {
+                        "checked_frames": 0,
+                        "all_boxes_filled": False,
+                        "error": str(exc),
+                    }
+                    report.add(
+                        "pixel_cover_qc",
+                        "error" if is_block else "warning",
+                        f"Failed to execute pixel cover QC: {exc}",
+                        {"checked_frames": 0, "gate_policy": gate_policy_str},
+                    )
+        except (OSError, subprocess.SubprocessError) as exc:
+            report.add("frame_samples", "warning", "Could not sample frames: {}".format(exc))
+
+    # Partial frame extraction is not proof of complete visual verification.
+    # Keep report-only diagnostics permissive, but block delivery in strict mode.
+    policy = str(getattr(config.gate_policy, "value", config.gate_policy)).lower()
+    if policy == "block":
+        report.checks = [QCCheck(c.name, "error", c.message, c.metrics)
+                         if c.name == "frame_samples" and c.status == "warning" else c
+                         for c in report.checks]
+    report.finalize()
+    atomic_write_json(report_path, report.to_dict())
+    return report
+
+
+def build_argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Create a non-blocking pipeline v2 QC report")
+    parser.add_argument("--video", required=True, help="Final rendered video")
+    parser.add_argument("--report", required=True, help="Output qc_report.json")
+    parser.add_argument("--audio", help="Optional mixed audio to compare/analyse")
+    parser.add_argument("--segments", help="Optional segment JSON or SRT")
+    parser.add_argument("--ass", help="Optional ASS subtitle file")
+    parser.add_argument("--diagnostics-dir", help="Directory for first/middle/last frames")
+    parser.add_argument("--no-frame-samples", action="store_true")
+    parser.add_argument("--ffmpeg", default="ffmpeg")
+    parser.add_argument("--ffprobe", default="ffprobe")
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_argument_parser().parse_args(argv)
+    settings = QCSettings(sample_frames=not args.no_frame_samples)
+    report = run_report_only_qc(
+        video_path=args.video,
+        report_path=args.report,
+        audio_path=args.audio,
+        segments_path=args.segments,
+        ass_path=args.ass,
+        diagnostics_directory=args.diagnostics_dir,
+        settings=settings,
+        ffmpeg_binary=args.ffmpeg,
+        ffprobe_binary=args.ffprobe,
+    )
+    print(json.dumps(report.to_dict()["summary"], ensure_ascii=False))
+    # Findings never fail a render or delivery in phase 2.
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

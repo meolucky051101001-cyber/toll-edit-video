@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "a28137d6a966aaf8a34c2d6fa891fe01ff65383f",
+  "cases": [
+    {
+      "id": "clean-audio-no-burned-subtitles",
+      "purpose": "Control case for future adaptive Demucs and OCR skipping",
+      "input_path": null,
+      "expected": {
+        "speech": true,
+        "background_music_or_noise": false,
+        "burned_subtitles": false
+      },
+      "baseline_result": null
+    },
+    {
+      "id": "music-noise-with-burned-subtitles",
+      "purpose": "Full-path quality and OCR placement case",
+      "input_path": null,
+      "expected": {
+        "speech": true,
+        "background_music_or_noise": true,
+        "burned_subtitles": true
+      },
+      "baseline_result": null
+    },
+    {
+      "id": "dense-or-long-dialogue",
+      "purpose": "Timing, memory and resume stress case",
+      "input_path": null,
+      "expected": {
+        "speech": true,
+        "dense_segments": true
+      },
+      "baseline_result": null
+    }
+  ]
+}

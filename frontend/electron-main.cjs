@@ -3,7 +3,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'local', privileges: { supportFetchAPI: true, bypassCSP: true, secure: true, corsEnabled: true } }
+  { scheme: 'local', privileges: { supportFetchAPI: true, secure: true, corsEnabled: true } }
 ]);
 
 
@@ -15,8 +15,10 @@ function createWindow() {
     width: 1280,
     height: 720,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      preload: path.join(__dirname, 'preload.cjs'),
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
       webSecurity: true,
       allowRunningInsecureContent: false,
     },
@@ -31,18 +33,23 @@ function createWindow() {
     mainWindow.setAlwaysOnTop(false);
   });
 
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+
   // Setup CSP
+  const isDev = !app.isPackaged;
+  const contentSecurityPolicy = isDev
+    ? "default-src 'self' http://localhost:5173; script-src 'self' http://localhost:5173; style-src 'self' 'unsafe-inline' http://localhost:5173; img-src 'self' data: blob: local:; media-src 'self' blob: local:; connect-src 'self' http://127.0.0.1:8000 http://localhost:8000 http://localhost:5173 ws://localhost:5173;"
+    : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: local:; media-src 'self' blob: local:; connect-src 'self' http://127.0.0.1:8000 http://localhost:8000;";
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({
       responseHeaders: {
         ...details.responseHeaders,
-        'Content-Security-Policy': ["default-src 'self' 'unsafe-inline' data: blob: http: https: ws: wss: local:;"]
+        'Content-Security-Policy': [contentSecurityPolicy]
       }
     });
   });
 
   // Load React App
-  const isDev = !app.isPackaged;
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
@@ -62,6 +69,18 @@ function createWindow() {
       });
       pythonProcess.stdout.on('data', (data) => console.log(`Backend: ${data}`));
       pythonProcess.stderr.on('data', (data) => console.error(`Backend Err: ${data}`));
+      pythonProcess.on('error', (error) => {
+          console.error("Failed to start python backend", error);
+          dialog.showErrorBox(
+            "AutoDub backend failed",
+            `Không thể chạy ${pythonExecutable}. Hãy tạo backend\\venv và cài requirements.txt.\n\n${error.message}`
+          );
+      });
+      pythonProcess.on('exit', (code, signal) => {
+          if (code !== 0 && mainWindow && !mainWindow.isDestroyed()) {
+              console.error(`Backend exited unexpectedly (code=${code}, signal=${signal})`);
+          }
+      });
   } catch (e) {
       console.error("Failed to start python backend", e);
   }
