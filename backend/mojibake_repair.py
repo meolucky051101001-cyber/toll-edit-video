@@ -104,17 +104,20 @@ def repair_vietnamese_mojibake(text: str) -> str:
     text = text.replace("Ä", "Đ")
     return text
 
-files_to_repair = [
-    r"C:\tool v1\backend\social_downloader.py",
-    r"C:\tool v1\backend\ai\translation.py"
-]
+if __name__ == "__main__":
+    import os
+    files_to_repair = [
+        r"C:\tool v1\backend\social_downloader.py",
+        r"C:\tool v1\backend\ai\translation.py"
+    ]
 
-for fpath in files_to_repair:
-    with open(fpath, "r", encoding="utf-8") as f:
-        content = f.read()
-    repaired = repair_vietnamese_mojibake(content)
-    # Validate syntax before saving
-    ast.parse(repaired)
-    with open(fpath, "w", encoding="utf-8") as f:
-        f.write(repaired)
-    print(f"Repaired and saved: {fpath}")
+    for fpath in files_to_repair:
+        if os.path.exists(fpath):
+            with open(fpath, "r", encoding="utf-8") as f:
+                content = f.read()
+            repaired = repair_vietnamese_mojibake(content)
+            # Validate syntax before saving
+            ast.parse(repaired)
+            with open(fpath, "w", encoding="utf-8") as f:
+                f.write(repaired)
+            print(f"Repaired and saved: {fpath}")

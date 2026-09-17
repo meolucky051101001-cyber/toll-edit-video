@@ -263,8 +263,21 @@ async def process_v2_telegram_job(
         elapsed_seconds=elapsed_seconds,
         remaining_jobs=global_queue.qsize(),
     )
-    # Lưu trực tiếp vào thư mục máy tính (D:\video tool v2), không gửi file video lên Telegram
-    await safe_edit_status(status_msg, caption, parse_mode="Markdown")
+    final_video = paths.final_video
+    if not Path(final_video).is_file() and paths.delivery_copy and Path(paths.delivery_copy).is_file():
+        final_video = paths.delivery_copy
+
+    if context and chat_id and Path(final_video).is_file():
+        await send_video_safely(
+            context,
+            chat_id,
+            str(final_video),
+            caption,
+            status_msg,
+            url_or_filename or title,
+        )
+    else:
+        await safe_edit_status(status_msg, caption, parse_mode="Markdown")
 
 
 def snapshot_legacy_telegram_run(

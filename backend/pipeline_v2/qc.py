@@ -11,6 +11,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
@@ -38,6 +39,7 @@ class QCSettings:
     sample_frames: bool = True
     command_timeout_seconds: float = 120.0
     gate_policy: str = "block"
+    diagnostic_max_samples: int = 30
 
 
 @dataclass(frozen=True)
@@ -170,7 +172,7 @@ def probe_media(
         (
             "format=duration,format_name,size,bit_rate:"
             "stream=index,codec_type,codec_name,width,height,duration,"
-            "sample_rate,channels,channel_layout"
+            "avg_frame_rate,r_frame_rate,sample_rate,channels,channel_layout"
         ),
         "-of",
         "json",
@@ -187,6 +189,38 @@ def _float_or_none(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _frame_rate_or_none(value: Any) -> Optional[float]:
+    """Parse ffprobe frame-rate values such as ``30000/1001`` safely."""
+    if value is None:
+        return None
+    try:
+        raw = str(value).strip()
+        if "/" in raw:
+            numerator, denominator = raw.split("/", 1)
+            denominator_value = float(denominator)
+            if denominator_value == 0:
+                return None
+            rate = float(numerator) / denominator_value
+        else:
+            rate = float(raw)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    return rate if 0.1 <= rate <= 1000.0 else None
+
+
+def _video_frame_rate(probe: Optional[Mapping[str, Any]], default: float = 30.0) -> float:
+    """Return the video's measured average/rate metadata with a safe fallback."""
+    if probe is not None:
+        for stream in probe.get("streams", []):
+            if stream.get("codec_type") != "video":
+                continue
+            for field_name in ("avg_frame_rate", "r_frame_rate"):
+                rate = _frame_rate_or_none(stream.get(field_name))
+                if rate is not None:
+                    return rate
+    return float(default)
 
 
 def _duration_seconds(probe: Mapping[str, Any]) -> Optional[float]:
@@ -670,8 +704,9 @@ def plan_diagnostic_samples(
     2. Extra sample candidates are deduplicated by label.
     3. If max_samples is specified (e.g. 30), total output samples (baseline + extra)
        strictly does NOT exceed max_samples.
-    4. If extra candidates exceed remaining budget (max_samples - len(baseline)), candidate points
-       are sampled evenly to maximize temporal and scenario coverage.
+    4. If extra candidates exceed the remaining budget, failure/position-shift samples are
+       retained ahead of boundary/OCR diagnostics and routine transition samples. Each priority
+       tier is sampled evenly over time when that tier alone exceeds the available slots.
     """
     clamped_dur = max(0.1, float(duration))
 
@@ -706,10 +741,40 @@ def plan_diagnostic_samples(
         if len(raw_extras) <= remaining_budget:
             selected_extras = raw_extras
         else:
-            raw_extras.sort(key=lambda x: (x[1], x[0]))
-            step = (len(raw_extras) - 1) / max(1, remaining_budget - 1)
-            selected_indices = {round(i * step) for i in range(remaining_budget)}
-            selected_extras = [raw_extras[i] for i in sorted(selected_indices)]
+            def priority(label: str) -> int:
+                normalized = str(label).lower()
+                if normalized.startswith(("cover_fail_", "boundary_shift_", "cover_shift_")):
+                    return 0
+                if normalized.startswith((
+                    "boundary_",
+                    "cover_onset_",
+                    "cover_exit_",
+                    "cover_hold_",
+                    "weak_ocr_",
+                    "near_edge_",
+                )):
+                    return 1
+                return 2
+
+            def evenly_select(items: List[Tuple[str, float]], limit: int) -> List[Tuple[str, float]]:
+                ordered = sorted(items, key=lambda x: (x[1], x[0]))
+                if limit <= 0:
+                    return []
+                if len(ordered) <= limit:
+                    return ordered
+                if limit == 1:
+                    return [ordered[0]]
+                step = (len(ordered) - 1) / (limit - 1)
+                indices = [round(i * step) for i in range(limit)]
+                return [ordered[index] for index in indices]
+
+            selected_extras = []
+            for tier in (0, 1, 2):
+                slots = remaining_budget - len(selected_extras)
+                if slots <= 0:
+                    break
+                tier_items = [item for item in raw_extras if priority(item[0]) == tier]
+                selected_extras.extend(evenly_select(tier_items, slots))
         all_samples = unique_baseline + selected_extras
         all_samples.sort(key=lambda s: (s[1], s[0]))
         return all_samples[:budget]
@@ -728,71 +793,115 @@ def _sample_frames(
     ffmpeg_binary: str,
     timeout: float,
     extra_samples: Optional[Sequence[Tuple[str, float]]] = None,
-    max_samples: Optional[int] = None,
+    max_samples: Optional[int] = 30,
+    fps: float = 30.0,
 ) -> Tuple[List[Dict[str, Any]], List[QCCheck]]:
     store = ArtifactStore(diagnostics_directory)
     samples = plan_diagnostic_samples(duration, extra_samples, max_samples=max_samples)
     artifacts: List[Dict[str, Any]] = []
-    failures = []
+    failures: List[str] = []
+    measured_fps = max(1.0, float(fps))
+
+    # Select by presentation time, not nominal/average FPS. Multiple labels
+    # can share one decoded frame; metadata must record its actual PTS.
+    samples_by_time: Dict[float, List[Tuple[str, float]]] = {}
     for label, timestamp in samples:
-        key = "frames/{}.png".format(label)
-        staged = store.staging_path(key)
+        samples_by_time.setdefault(max(0.0, float(timestamp)), []).append((label, timestamp))
+    selected_times = sorted(samples_by_time)
+
+    if not selected_times:
+        return artifacts, [
+            QCCheck("frame_samples", "skipped", "No diagnostic frame was requested")
+        ]
+
+    diagnostics_directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".frame_batch_", dir=str(diagnostics_directory)
+    ) as temporary_directory:
+        temporary_root = Path(temporary_directory)
+        output_pattern = temporary_root / "sample_%06d.png"
+        select_expression = "+".join(
+            "gte(t\\,{0:.9f})*(isnan(prev_selected_t)+lt(prev_selected_t\\,{0:.9f}))".format(timestamp)
+            for timestamp in selected_times
+        )
         command = [
             ffmpeg_binary,
             "-hide_banner",
             "-loglevel",
-            "error",
-            "-ss",
-            "{:.3f}".format(timestamp),
+            "info",
+            "-y",
             "-i",
             str(video_path),
-            "-frames:v",
-            "1",
             "-vf",
-            "scale='min(960,iw)':-2",
+            "setpts=PTS-STARTPTS,select={},scale='min(960,iw)':-2,showinfo".format(select_expression),
+            "-fps_mode",
+            "vfr",
+            "-start_number",
+            "0",
+            "-frames:v",
+            str(len(selected_times)),
             "-vcodec",
             "png",
             "-f",
             "image2",
-            "-y",
-            str(staged),
+            str(output_pattern),
         ]
         try:
             result = _run_command(command, timeout)
-            if result.returncode != 0 or not staged.is_file() or staged.stat().st_size == 0:
-                failures.append(label)
-                try:
-                    staged.unlink()
-                except FileNotFoundError:
-                    pass
-                continue
-            record = store.commit_staged(
-                staged,
-                key,
-                metadata={"timestamp_seconds": round(timestamp, 3)},
-            )
-            artifacts.append(record.to_dict())
+            if result.returncode != 0:
+                failures.extend(label for label, _ in samples)
+            else:
+                frame_times = [float(value) for value in re.findall(
+                    r"\bpts_time:([-+0-9.eE]+)", result.stderr or "")]
+                pending = list(selected_times)
+                for output_index, actual_time in enumerate(frame_times):
+                    decoded_frame = temporary_root / "sample_{:06d}.png".format(output_index)
+                    reached = [t for t in pending if t <= actual_time + 0.00001]
+                    labels = [label for t in reached for label in samples_by_time[t]]
+                    pending = [t for t in pending if t not in reached]
+                    if not decoded_frame.is_file() or decoded_frame.stat().st_size == 0:
+                        failures.extend(label for label, _ in labels)
+                        continue
+                    for label, timestamp in labels:
+                        key = "frames/{}.png".format(label)
+                        record = store.put_file(
+                            key,
+                            decoded_frame,
+                            metadata={
+                                "timestamp_seconds": actual_time,
+                                "requested_timestamp_seconds": round(timestamp, 3),
+                                "sampling_output_index": output_index,
+                                "timestamp_basis": "decoded_pts",
+                                "source_fps": round(measured_fps, 6),
+                            },
+                        )
+                        artifacts.append(record.to_dict())
+                failures.extend(label for t in pending for label, _ in samples_by_time[t])
         except (OSError, subprocess.SubprocessError):
-            failures.append(label)
-            try:
-                staged.unlink()
-            except FileNotFoundError:
-                pass
+            failures.extend(label for label, _ in samples)
+
+    extraction_metrics = {
+        "requested_samples": len(samples),
+        "decoded_unique_frames": len({a['metadata']['timestamp_seconds'] for a in artifacts}),
+        "ffmpeg_invocations": 1,
+        "fps": round(measured_fps, 6),
+        "created": len(artifacts),
+    }
     if failures:
         return artifacts, [
             QCCheck(
                 "frame_samples",
                 "warning",
                 "One or more diagnostic frames could not be extracted",
-                {"failed": failures, "created": len(artifacts)},
+                {**extraction_metrics, "failed": failures},
             )
         ]
     return artifacts, [
         QCCheck(
             "frame_samples",
             "pass",
-            "Created first, middle and last diagnostic frames",
-            {"created": len(artifacts)},
+            "Created diagnostic frames in one sequential decode",
+            extraction_metrics,
         )
     ]
 
@@ -814,6 +923,7 @@ def run_report_only_qc(
     video = Path(video_path)
     report = QCReport(video_path=str(video))
     video_probe: Optional[Dict[str, Any]] = None
+    video_fps = 30.0
 
     if not video.is_file():
         report.add("video_file", "error", "Final video file is missing")
@@ -826,6 +936,8 @@ def run_report_only_qc(
                 timeout=min(config.command_timeout_seconds, 30.0),
             )
             report.media["video"] = video_probe
+            video_fps = _video_frame_rate(video_probe)
+            report.metrics["video_fps"] = round(video_fps, 6)
             video_streams = _streams(video_probe, "video")
             audio_streams = _streams(video_probe, "audio")
             report.add(
@@ -907,6 +1019,7 @@ def run_report_only_qc(
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 report.add("segments", "error", "Could not inspect segments: {}".format(exc))
 
+    subtitles = Path(ass_path) if ass_path is not None else None
     if ass_path is None:
         report.add("subtitle_safe_area", "skipped", "No ASS subtitle file was supplied")
     else:
@@ -921,7 +1034,9 @@ def run_report_only_qc(
                 if segments_path is not None and Path(segments_path).suffix.lower() == '.json':
                     from .cover_qc import inspect_covers
                     coverage = inspect_covers(_load_segments(Path(segments_path)),
-                                              subtitles.read_text(encoding='utf-8-sig'))
+                                              subtitles.read_text(encoding='utf-8-sig'),
+                                              video_duration=_duration_seconds(video_probe) if video_probe is not None else None,
+                                              fps=video_fps)
                     report.metrics['source_cover'] = coverage
                     report.add('source_cover', 'error' if coverage['failures'] else 'pass',
                                'Known source rectangles must remain inside a timed cover', coverage)
@@ -956,6 +1071,18 @@ def run_report_only_qc(
                 loaded_segs = _load_segments(Path(segments_path))
             except Exception:
                 pass
+
+        expected_cover_timeline = []
+        if loaded_segs:
+            try:
+                from .cover_qc import build_expected_cover_timeline
+                expected_cover_timeline = build_expected_cover_timeline(
+                    loaded_segs,
+                    video_duration=video_duration,
+                    fps=video_fps,
+                )
+            except (TypeError, ValueError):
+                expected_cover_timeline = []
 
         if ass_covers:
             # 1. Primary: Sample directly from actual ASS covers
@@ -1052,7 +1179,8 @@ def run_report_only_qc(
                 duration_seg = max(0.05, end_sec - start_sec)
                 onset_offset = min(0.06, max(0.02, duration_seg * 0.15))
                 sample_time = max(0.05, min(start_sec + onset_offset, max(0.05, video_duration - 0.1)))
-                diagnostic_points.append((f"transition_{idx}", round(sample_time, 2)))
+                label = f"boundary_shift_{idx}" if idx in shift_indices else f"transition_{idx}"
+                diagnostic_points.append((label, round(sample_time, 2)))
 
         # Diagnostic frame at weak OCR and near-edge candidates
         if loaded_segs:
@@ -1085,6 +1213,8 @@ def run_report_only_qc(
                 ffmpeg_binary,
                 config.command_timeout_seconds,
                 extra_samples=diagnostic_points,
+                max_samples=getattr(config, "diagnostic_max_samples", 30),
+                fps=video_fps,
             )
             report.diagnostic_artifacts.extend(frame_artifacts)
             report.checks.extend(frame_checks)
@@ -1127,7 +1257,30 @@ def run_report_only_qc(
                             for p in expected_cover_prefixes
                         )
 
-                        pix_res = inspect_frame_pixel_coverage(fpath, ass_covers, canvas_w=cw, canvas_h=ch, timestamp=ts)
+                        sample_time = float(ts) if ts is not None else None
+                        expected_regions = []
+                        if sample_time is not None:
+                            expected_regions = [
+                                {
+                                    "segment_id": event.segment_id,
+                                    "x_pct": event.x_pct,
+                                    "max_x_pct": event.max_x_pct,
+                                    "y_pct": event.y_pct,
+                                    "max_y_pct": event.max_y_pct,
+                                    "text": event.text,
+                                }
+                                for event in expected_cover_timeline
+                                if event.src_start <= sample_time < event.src_end
+                            ]
+
+                        pix_res = inspect_frame_pixel_coverage(
+                            fpath,
+                            ass_covers,
+                            canvas_w=cw,
+                            canvas_h=ch,
+                            timestamp=ts,
+                            expected_regions=expected_regions,
+                        )
                         if pix_res.get("checked"):
                             # If expected cover frame produced 0 boxes checked (degenerate cover box)
                             if is_expected_cover and pix_res.get("boxes_checked", 0) == 0:
@@ -1150,9 +1303,22 @@ def run_report_only_qc(
 
                     if pixel_results:
                         all_filled = all(r.get("all_boxes_filled") for r in pixel_results)
+                        overflow_frames = sum(
+                            1 for result in pixel_results
+                            if result.get("overflow_detected")
+                        )
+                        uncovered_source_frames = sum(
+                            1 for result in pixel_results
+                            if any(
+                                not region.get("geometry_covered", False)
+                                for region in result.get("expected_region_checks", [])
+                            )
+                        )
                         report.metrics["pixel_cover_qc"] = {
                             "checked_frames": len(pixel_results),
                             "all_boxes_filled": all_filled,
+                            "overflow_frames": overflow_frames,
+                            "uncovered_source_frames": uncovered_source_frames,
                             "results": pixel_results,
                         }
                         qc_status = "pass" if all_filled else ("error" if is_block else "warning")
@@ -1162,7 +1328,12 @@ def run_report_only_qc(
                             "Output frame pixels verified for visual subtitle cover fill"
                             if all_filled
                             else "Some output frame pixels showed incomplete cover fill (exposed source text / insufficient cover)",
-                            {"checked_frames": len(pixel_results), "gate_policy": gate_policy_str},
+                            {
+                                "checked_frames": len(pixel_results),
+                                "overflow_frames": overflow_frames,
+                                "uncovered_source_frames": uncovered_source_frames,
+                                "gate_policy": gate_policy_str,
+                            },
                         )
                     else:
                         # Fail-closed: Subtitles were provided but no sampled frame pixel result could be produced
@@ -1194,6 +1365,13 @@ def run_report_only_qc(
         except (OSError, subprocess.SubprocessError) as exc:
             report.add("frame_samples", "warning", "Could not sample frames: {}".format(exc))
 
+    # Partial frame extraction is not proof of complete visual verification.
+    # Keep report-only diagnostics permissive, but block delivery in strict mode.
+    policy = str(getattr(config.gate_policy, "value", config.gate_policy)).lower()
+    if policy == "block":
+        report.checks = [QCCheck(c.name, "error", c.message, c.metrics)
+                         if c.name == "frame_samples" and c.status == "warning" else c
+                         for c in report.checks]
     report.finalize()
     atomic_write_json(report_path, report.to_dict())
     return report

@@ -73,7 +73,7 @@ V2_STAGE_ORDER = (
 # Bump this value whenever artifact semantics change.  It participates in the
 # manifest fingerprint so an upgraded runner cannot silently reuse output from
 # an older implementation that happened to have the same environment flags.
-PIPELINE_IMPLEMENTATION_VERSION = "2.10.0"
+PIPELINE_IMPLEMENTATION_VERSION = "2.12.0"
 
 
 class QCGateBlocked(RuntimeError):
@@ -471,31 +471,31 @@ class VideoPipelineRunner:
         for name in names:
             self.manifest.start_stage(name)
         self.manifest_store.save(self.manifest)
-        await asyncio.gather(*(self._notify(name, "running") for name in names))
-        results = await asyncio.gather(
-            self._ocr_stage(transcript),
-            self._translate_stage(transcript),
-            return_exceptions=True,
-        )
-        first_error = None
-        for name, result in zip(names, results):
-            if isinstance(result, BaseException):
-                self.manifest.fail_stage(name, str(result), type(result).__name__)
-                first_error = first_error or result
-                await self._notify(name, "failed")
-            else:
+        async def finish_stage(name, operation):
+            try:
+                result = await operation
                 artifacts = list(result or [])
                 if not artifacts:
-                    error = RuntimeError(
+                    raise RuntimeError(
                         "Stage {!r} produced no artifacts".format(name)
                     )
-                    self.manifest.fail_stage(name, str(error), type(error).__name__)
-                    first_error = first_error or error
-                    await self._notify(name, "failed")
-                else:
-                    self.manifest.complete_stage(name, artifacts)
-                    await self._notify(name, "completed")
-        self.manifest_store.save(self.manifest)
+                self.manifest.complete_stage(name, artifacts)
+                self.manifest_store.save(self.manifest)
+                await self._notify(name, "completed")
+            except BaseException as error:
+                self.manifest.fail_stage(name, str(error), type(error).__name__)
+                self.manifest_store.save(self.manifest)
+                await self._notify(name, "failed")
+                raise
+
+        # Record completion immediately, not when the slower sibling finishes.
+        # Wait for both even on failure so no worker is left writing a checkpoint.
+        results = await asyncio.gather(
+            finish_stage("ocr", self._ocr_stage(transcript)),
+            finish_stage("translate", self._translate_stage(transcript)),
+            return_exceptions=True,
+        )
+        first_error = next((r for r in results if isinstance(r, BaseException)), None)
         if first_error is not None:
             raise first_error
 

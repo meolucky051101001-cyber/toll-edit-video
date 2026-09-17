@@ -1,6 +1,8 @@
 import cv2
+import json
 import logging
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -142,6 +144,42 @@ def stabilize_samples(samples):
     return result
 
 
+class OCRBlock:
+    def __init__(
+        self,
+        text,
+        start,
+        end,
+        x_pct,
+        max_x_pct,
+        y_pct,
+        max_y_pct,
+        prob=1.0,
+        sample_segment_id=None,
+        sample_time=0.0,
+        is_subtitle=None,
+        is_packaging=None,
+        is_static=None,
+        in_subtitle_band=None,
+        type=None,
+    ):
+        self.text = text
+        self.start = start
+        self.end = end
+        self.x_pct = x_pct
+        self.max_x_pct = max_x_pct
+        self.y_pct = y_pct
+        self.max_y_pct = max_y_pct
+        self.prob = prob
+        self.sample_segment_id = sample_segment_id
+        self.sample_time = sample_time
+        self.is_subtitle = is_subtitle
+        self.is_packaging = is_packaging
+        self.is_static = is_static
+        self.in_subtitle_band = in_subtitle_band
+        self.type = type
+
+
 def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=None, srt_segments=None, **kwargs):
     logger.info(f"Bắt đầu OCR toàn diện trên video {video_path}")
 
@@ -161,18 +199,43 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
         cap.release()
         raise ValueError("Video has invalid dimensions")
 
-    class OCRBlock:
-        def __init__(self, text, start, end, x_pct, max_x_pct, y_pct, max_y_pct, prob=1.0, sample_segment_id=None, sample_time=0.0):
-            self.text = text
-            self.start = start
-            self.end = end
-            self.x_pct = x_pct
-            self.max_x_pct = max_x_pct
-            self.y_pct = y_pct
-            self.max_y_pct = max_y_pct
-            self.prob = prob
-            self.sample_segment_id = sample_segment_id
-            self.sample_time = sample_time
+    # OpenCV's time seek can land seconds late on irregular VFR streams.
+    # Normalize only the OCR analysis copy, never the source/render output.
+    if kwargs.get("adaptive", False) and not kwargs.get("_ocr_proxy", False):
+        try:
+            probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=r_frame_rate,avg_frame_rate", "-of", "json", str(video_path)],
+                capture_output=True, text=True, timeout=15,
+                creationflags=0x08000000 if os.name == "nt" else 0)
+            from fractions import Fraction
+            stream = json.loads(probe.stdout)["streams"][0]
+            nominal = float(Fraction(stream["r_frame_rate"]))
+            average = float(Fraction(stream["avg_frame_rate"]))
+            irregular = average > 0 and abs(nominal-average) / average > .02
+        except (OSError, ValueError, KeyError, IndexError, ZeroDivisionError, subprocess.SubprocessError):
+            irregular = False
+        if irregular:
+            cap.release()
+            import time
+            proxy_started = time.monotonic()
+            with tempfile.TemporaryDirectory(prefix="v2-ocr-proxy-") as folder:
+                proxy = Path(folder) / "analysis.mp4"
+                subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-i", str(video_path),
+                    "-vf", "fps=10,scale_cuda=720:-2:format=nv12",
+                    "-an", "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "lossless", str(proxy)],
+                    check=True, capture_output=True, timeout=240,
+                    creationflags=0x08000000 if os.name == "nt" else 0)
+                proxy_seconds = time.monotonic() - proxy_started
+                proxy_kwargs = dict(kwargs, _ocr_proxy=True, end_time=duration)
+                result = perform_video_ocr(str(proxy), target_lang, sample_rate, api_key,
+                                           srt_segments, **proxy_kwargs)
+                if kwargs.get("metrics") is not None:
+                    kwargs["metrics"].update(ocr_proxy=True, proxy_fps=10,
+                        proxy_encoder="h264_nvenc", proxy_seconds=round(proxy_seconds, 3),
+                        source_width=width, source_height=height)
+                return result[0], width, height, result[3]
+
 
     all_blocks = []
 

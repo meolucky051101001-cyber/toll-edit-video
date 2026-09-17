@@ -11,6 +11,7 @@ from typing import Dict, Optional
 
 SHARED_HISTORY_FILE = Path(r"D:\banve\.render_history.json")
 V2_HISTORY_FILE = Path(os.getenv("TOOL_V2_RENDER_HISTORY", r"D:\banve\.render_history_v2.json"))
+HISTORY_FILE = V2_HISTORY_FILE
 
 
 def format_duration(seconds: float) -> str:
@@ -124,7 +125,8 @@ def record_render_duration(video_name_or_path: str, duration_seconds: float) -> 
     clean_name = os.path.basename(video_name_or_path)
     dur_int = int(round(duration_seconds))
 
-    for history_file in [SHARED_HISTORY_FILE, V2_HISTORY_FILE, Path(r"D:\video tool v2\.render_history.json")]:
+    target_files = [HISTORY_FILE]
+    for history_file in target_files:
         try:
             meta: Dict[str, int] = {}
             if history_file.exists():
