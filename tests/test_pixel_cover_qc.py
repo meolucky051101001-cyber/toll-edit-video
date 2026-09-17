@@ -3,10 +3,55 @@
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 from PIL import Image
 import numpy as np
 
 from backend.pipeline_v2.cover_qc import inspect_frame_pixel_coverage, parse_ass_covers
+
+
+def _mock_pts(cmd):
+    """Generate fake ffmpeg showinfo stderr with pts_time matching selected timestamps."""
+    import re
+    if isinstance(cmd, (list, tuple)):
+        vf_arg = ""
+        for i, arg in enumerate(cmd):
+            if arg == "-vf" and i + 1 < len(cmd):
+                vf_arg = cmd[i + 1]
+                break
+        if not vf_arg:
+            vf_arg = " ".join(str(c) for c in cmd)
+    else:
+        vf_arg = str(cmd)
+
+    timestamps = [float(m) for m in re.findall(r"gte\(t\\?,([0-9.]+)\)", vf_arg)]
+    if not timestamps:
+        if isinstance(cmd, (list, tuple)) and "-frames:v" in cmd:
+            count = int(cmd[cmd.index("-frames:v") + 1])
+            timestamps = [float(i) for i in range(count)]
+        else:
+            timestamps = [0.0]
+    lines = [
+        f"[Parsed_showinfo_4 @ 000000] n:{i} pts:{int(t*1000)} pts_time:{t:.6f}"
+        for i, t in enumerate(timestamps)
+    ]
+    return "\n".join(lines)
+
+
+def _handle_mock_ffmpeg(cmd, payload=b"dummy"):
+    """Materialize batch or single frame outputs and return success with mock pts stderr."""
+    if "-frames:v" in cmd:
+        count = int(cmd[cmd.index("-frames:v") + 1])
+        output_pattern = Path(cmd[-1])
+        output_pattern.parent.mkdir(parents=True, exist_ok=True)
+        for index in range(count):
+            out_path = Path(str(output_pattern).replace("%06d", "{:06d}".format(index)))
+            out_path.write_bytes(payload)
+    elif str(cmd[-1]) != "-":
+        out_path = Path(cmd[-1])
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(payload)
+    return mock.Mock(returncode=0, stdout="", stderr=_mock_pts(cmd))
 
 
 class TestPixelCoverQC(unittest.TestCase):
@@ -203,15 +248,7 @@ class TestPixelCoverQC(unittest.TestCase):
                     mock_res.stderr = ""
                     return mock_res
                 elif "ffmpeg" in cmd_str:
-                    # Write dummy output frame
-                    if str(cmd[-1]) != "-":
-                        out_path = Path(cmd[-1])
-                        out_path.parent.mkdir(parents=True, exist_ok=True)
-                        out_path.write_bytes(b"dummy frame")
-                    mock_res = mock.Mock(returncode=0)
-                    mock_res.stdout = ""
-                    mock_res.stderr = ""
-                    return mock_res
+                    return _handle_mock_ffmpeg(cmd, payload=b"dummy frame")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             with mock.patch("backend.pipeline_v2.qc._run_command", side_effect=fake_run_command):
@@ -287,14 +324,7 @@ class TestPixelCoverQC(unittest.TestCase):
                             mock_res.stderr = ""
                             return mock_res
                         elif "ffmpeg" in cmd_str:
-                            if str(cmd[-1]) != "-":
-                                out_path = Path(cmd[-1])
-                                out_path.parent.mkdir(parents=True, exist_ok=True)
-                                out_path.write_bytes(b"dummy")
-                            mock_res = mock.Mock(returncode=0)
-                            mock_res.stdout = ""
-                            mock_res.stderr = ""
-                            return mock_res
+                            return _handle_mock_ffmpeg(cmd, payload=b"dummy")
                         return mock.Mock(returncode=0, stdout="", stderr="")
 
                     with mock.patch("backend.pipeline_v2.qc._run_command", side_effect=fake_run_command):
@@ -315,16 +345,17 @@ class TestPixelCoverQC(unittest.TestCase):
 
                     keys = [a.get("key", "") for a in report.diagnostic_artifacts]
                     transition_keys = [k for k in keys if "transition_" in k]
+                    shift_keys = [k for k in keys if "boundary_shift_" in k]
+                    timeline_keys = transition_keys + shift_keys
 
-                    # 1. Total transition samples must NEVER exceed 30
-                    self.assertLessEqual(len(transition_keys), 30)
+                    # 1. Total transition and shift samples fill remaining budget after 4 baseline frames (30 - 4 = 26)
+                    self.assertLessEqual(len(timeline_keys), 26)
 
                     # 2. For 26 segments (<= 30), all 26 must be present
-                    if count == 26:
-                        self.assertEqual(len(transition_keys), 26)
-                    else:
-                        # For 40, 49, 100 segments, should fill the full 30 budget
-                        self.assertEqual(len(transition_keys), 30)
+                    self.assertEqual(len(timeline_keys), 26)
+
+                    # Total diagnostic frames (including baseline) must strictly be <= 30
+                    self.assertLessEqual(len(keys), 30)
 
                     # 3. Head (transition_0) must ALWAYS be sampled
                     self.assertIn("frames/transition_0.png", keys)
@@ -333,7 +364,7 @@ class TestPixelCoverQC(unittest.TestCase):
                     self.assertIn(f"frames/transition_{count - 1}.png", keys)
 
                     # 5. Position shift must be preserved
-                    self.assertIn(f"frames/transition_{shift_idx}.png", keys)
+                    self.assertIn(f"frames/boundary_shift_{shift_idx}.png", keys)
 
     def test_boundary_transition_sampling_detects_onset_exit_and_shift(self):
         import json
@@ -366,11 +397,7 @@ class TestPixelCoverQC(unittest.TestCase):
                     mock_res.stderr = ""
                     return mock_res
                 elif "ffmpeg" in cmd_str:
-                    if str(cmd[-1]) != "-":
-                        out_path = Path(cmd[-1])
-                        out_path.parent.mkdir(parents=True, exist_ok=True)
-                        out_path.write_bytes(b"dummy")
-                    return mock.Mock(returncode=0, stdout="", stderr="")
+                    return _handle_mock_ffmpeg(cmd, payload=b"dummy")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             with mock.patch("backend.pipeline_v2.qc._run_command", side_effect=fake_run_command):
@@ -427,11 +454,7 @@ class TestPixelCoverQC(unittest.TestCase):
                     mock_res.stderr = ""
                     return mock_res
                 elif "ffmpeg" in cmd_str:
-                    if str(cmd[-1]) != "-":
-                        out_path = Path(cmd[-1])
-                        out_path.parent.mkdir(parents=True, exist_ok=True)
-                        out_path.write_bytes(b"dummy")
-                    return mock.Mock(returncode=0, stdout="", stderr="")
+                    return _handle_mock_ffmpeg(cmd, payload=b"dummy")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             with mock.patch("backend.pipeline_v2.qc._run_command", side_effect=fake_run_command):
@@ -492,14 +515,10 @@ class TestPixelCoverQC(unittest.TestCase):
                     mock_res.stderr = ""
                     return mock_res
                 elif "ffmpeg" in cmd_str:
-                    if str(cmd[-1]) != "-":
-                        out_path = Path(cmd[-1])
-                        out_path.parent.mkdir(parents=True, exist_ok=True)
-                        out_path.write_bytes(b"dummy")
-                    return mock.Mock(returncode=0, stdout="", stderr="")
+                    return _handle_mock_ffmpeg(cmd, payload=b"dummy")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
-            def fake_inspect_pixel(fpath, ass_covers, canvas_w=1080, canvas_h=1920, timestamp=None):
+            def fake_inspect_pixel(fpath, ass_covers, canvas_w=1080, canvas_h=1920, timestamp=None, **kwargs):
                 t = float(timestamp or 0.0)
                 # Cover only exists at [2.0, 4.0]! At t < 2.0s, cover is missing!
                 if t < 2.0:
@@ -565,11 +584,7 @@ class TestPixelCoverQC(unittest.TestCase):
                     mock_res.stderr = ""
                     return mock_res
                 elif "ffmpeg" in cmd_str:
-                    if str(cmd[-1]) != "-":
-                        out_path = Path(cmd[-1])
-                        out_path.parent.mkdir(parents=True, exist_ok=True)
-                        out_path.write_bytes(b"dummy")
-                    return mock.Mock(returncode=0, stdout="", stderr="")
+                    return _handle_mock_ffmpeg(cmd, payload=b"dummy")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             with mock.patch("backend.pipeline_v2.qc._run_command", side_effect=fake_run_command):

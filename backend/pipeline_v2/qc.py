@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import subprocess
@@ -22,6 +23,7 @@ from .models import utc_now
 
 
 PathLike = Union[str, os.PathLike]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
