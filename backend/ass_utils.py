@@ -80,6 +80,10 @@ def _held_tracking_blocks(segments, video_duration=None):
     unique = {}
     for seg in segments:
         blocks = getattr(seg, 'tracking_blocks', None) or []
+        if not blocks and getattr(seg, 'best_block', None):
+            best = getattr(seg, 'best_block')
+            if not _excluded_source(best):
+                blocks = [best]
         # OCR boxes jitter (and can contain a partial last observation). Keep
         # the confirmed caption footprint stable within a nearby vertical band,
         # but never union a genuine move across the screen into a huge card.
@@ -161,7 +165,8 @@ def generate_ass_file(
 
     sticker_padding_x = 8
     sticker_padding_y = 6
-    max_allowed_w = int(canvas_x * 0.90)
+    min_margin = math.ceil(canvas_x * 0.05)
+    max_allowed_w = canvas_x - 2 * min_margin
     text_max_w = max_allowed_w - (outline * 2) - (sticker_padding_x * 2)
 
     # Initialize font measurement if available
@@ -249,6 +254,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         for _, pages in groups:
             tracks = [b for page in pages for b in
                       (getattr(page, "tracking_blocks", None) or [])]
+            if not tracks:
+                for page in pages:
+                    best = getattr(page, "best_block", None)
+                    if best and not _excluded_source(best):
+                        tracks.append(best)
             if tracks:
                 first = min(float(_block_value(b, "start", 0)) for b in tracks)
                 last = max(float(_block_value(b, "end", 0)) for b in tracks)
@@ -257,12 +267,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         pages[0].start.total_seconds(), first)))
                 held_end = max((b['end'] for b in held_tracks
                     if any(abs(b['start'] - float(_block_value(t, 'start', 0))) < .0001
-                           for t in tracks)), default=last)
+                           for t in tracks)), default=last + 1.0)
                 pages[-1].end = timedelta(seconds=held_end)
         for i in range(len(groups) - 1):
             boundary = groups[i + 1][1][0].start
             for page in groups[i][1]:
-                page.end = min(page.end, boundary)
+                gap = (boundary - page.end).total_seconds()
+                if 0.0 < gap <= 0.5:
+                    page.end = boundary
+                else:
+                    page.end = min(page.end, boundary)
         dialogue_segments = [s for s in dialogue_segments if s.end > s.start]
         if clean_incomplete_segment_stops is not None:
             dialogue_segments = clean_incomplete_segment_stops(dialogue_segments)
@@ -295,6 +309,36 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         else:
             processed_segments = list(dialogue_segments)
 
+        # Collect baseline centers for the global subtitle band to lock vertical jitter across sentences
+        main_track_centers = []
+        main_track_heights = []
+        for s in processed_segments:
+            blist = [b for b in (getattr(s, "tracking_blocks", None) or []) if not _excluded_source(b)]
+            if not blist and getattr(s, "best_block", None):
+                bb = getattr(s, "best_block")
+                if not _excluded_source(bb):
+                    blist = [bb]
+            for b in blist:
+                y1 = float(_block_value(b, "y_pct", 0.0))
+                y2 = float(_block_value(b, "max_y_pct", 0.0))
+                if 0.0 < y1 < y2 < 1.0:
+                    cy = (y1 + y2) * 0.5
+                    if cy >= 0.45:
+                        main_track_centers.append(cy)
+                        main_track_heights.append(y2 - y1)
+
+        if main_track_centers:
+            sorted_centers = sorted(main_track_centers)
+            sorted_heights = sorted(main_track_heights)
+            med_center_pct = sorted_centers[len(sorted_centers) // 2]
+            med_h_pct = sorted_heights[len(sorted_heights) // 2]
+            locked_center_y = int(med_center_pct * canvas_y)
+            locked_track_h = max(line_h, int(med_h_pct * canvas_y))
+        else:
+            med_center_pct = main_y_pct + (line_h / (2.0 * max(1, canvas_y)))
+            locked_center_y = int(main_y_pct * canvas_y) + (line_h // 2)
+            locked_track_h = line_h
+
         for seg in processed_segments:
             start_time = seg.start
             end_time = seg.end
@@ -302,11 +346,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if not text:
                 continue
 
-
             sub_events = []
             seg_s, seg_e = start_time.total_seconds(), end_time.total_seconds()
+            if seg_e <= seg_s:
+                continue
+
             blocks = sorted(getattr(seg, "tracking_blocks", None) or [],
                             key=lambda b: _block_value(b, "start", 0.0))
+            blocks = [b for b in blocks if not _excluded_source(b)]
             relevant = [b for b in held_tracks if b['end'] > seg_s and b['start'] < seg_e]
             if relevant:
                 # Concurrent source tracks must remain covered even when the
@@ -333,57 +380,38 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 left = max(left, cursor)
                 sub_events.append({"start": left, "end": right, "block": b})
                 cursor = right
-            if cursor < seg_e and not blocks:
-                sub_events.append({"start": cursor, "end": seg_e,
-                                   "block": getattr(seg, "best_block", None) if not blocks else None})
+            if cursor < seg_e:
+                last_b = blocks[-1] if blocks else getattr(seg, "best_block", None)
+                sub_events.append({
+                    "start": cursor,
+                    "end": seg_e,
+                    "block": last_b if not _excluded_source(last_b) else None,
+                })
 
             for event in sub_events:
                 ev_start = timedelta(seconds=event["start"])
                 ev_end = timedelta(seconds=event["end"])
                 start_str = format_time(ev_start)
                 end_str = format_time(ev_end)
-                # Sub-centisecond tracking cuts otherwise become zero-length
-                # ASS events and can paint a second sentence on one frame.
                 if start_str == end_str:
                     continue
 
                 b = event["block"]
-                if b:
-                    raw_y_pct = (
-                        b.get("y_pct")
-                        if isinstance(b, dict)
-                        else getattr(b, "y_pct", None)
-                    )
-                    raw_max_y_pct = (
-                        b.get("max_y_pct")
-                        if isinstance(b, dict)
-                        else getattr(b, "max_y_pct", None)
-                    )
-                    source_left_pct = (
-                        b.get("x_pct")
-                        if isinstance(b, dict)
-                        else getattr(b, "x_pct", None)
-                    )
-                    source_right_pct = (
-                        b.get("max_x_pct")
-                        if isinstance(b, dict)
-                        else getattr(b, "max_x_pct", None)
+                if b and not _excluded_source(b):
+                    raw_y_pct = float(_block_value(b, "y_pct", 0.0))
+                    raw_max_y_pct = float(_block_value(b, "max_y_pct", 0.0))
+                    source_left_pct = float(_block_value(b, "x_pct", 0.0))
+                    source_right_pct = float(_block_value(b, "max_x_pct", 0.0))
+                    has_source = (
+                        0.0 <= source_left_pct < source_right_pct <= 1.0
+                        and 0.0 <= raw_y_pct < raw_max_y_pct <= 1.0
                     )
                 else:
+                    has_source = False
                     raw_y_pct = None
                     raw_max_y_pct = None
                     source_left_pct = None
                     source_right_pct = None
-
-                has_source = (
-                    b is not None
-                    and source_left_pct is not None
-                    and source_right_pct is not None
-                    and raw_y_pct is not None
-                    and raw_max_y_pct is not None
-                    and 0.0 <= source_left_pct < source_right_pct <= 1.0
-                    and 0.0 <= raw_y_pct < raw_max_y_pct <= 1.0
-                )
 
                 lines = _wrap_text(text, text_max_w)
                 formatted_text = "\\N".join(line.replace("\\", "／").replace("{", "｛").replace("}", "｝") for line in lines)
@@ -394,56 +422,39 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 required_text_h = num_lines * line_h
 
                 if has_source:
-                    chinese_w = int((source_right_pct - source_left_pct) * canvas_x)
-                    chinese_h = int((raw_max_y_pct - raw_y_pct) * canvas_y)
-                    # Keep the card centered on the video, not on OCR's X center.
-                    chinese_center_x = canvas_x / 2
-                    chinese_center_y = int(
-                        ((raw_y_pct + raw_max_y_pct) * 0.5) * canvas_y
-                    )
+                    chinese_center_x = canvas_x // 2
+                    raw_cy_pct = (raw_y_pct + raw_max_y_pct) * 0.5
+                    raw_h = int((raw_max_y_pct - raw_y_pct) * canvas_y)
+                    if abs(raw_cy_pct - med_center_pct) <= 0.04:
+                        chinese_center_y = locked_center_y
+                        chinese_h = max(raw_h, locked_track_h)
+                    else:
+                        chinese_center_y = int(raw_cy_pct * canvas_y)
+                        chinese_h = raw_h
 
-                    # Cover box dimensions:
-                    # Must cover at least the entire Chinese text with small padding
                     min_cover_w = math.ceil(2 * max(
                         chinese_center_x - source_left_pct * canvas_x,
                         source_right_pct * canvas_x - chinese_center_x,
                     )) + (sticker_padding_x * 2)
                     min_cover_h = chinese_h + (sticker_padding_y * 2)
 
-                    # Expand if translated Vietnamese text is wider or taller (supports 2 lines)
                     text_cover_w = actual_text_w + (sticker_padding_x * 2)
                     text_cover_h = required_text_h + (sticker_padding_y * 2)
 
-                    # Keep the normal 5% side margins, but never at the cost of
-                    # exposing a verified source caption.  Some creators place
-                    # burned-in text almost edge-to-edge; those captions need a
-                    # full-width cover while translated text still wraps at the
-                    # normal 90% limit.
-                    source_needs_edge_cover = (
-                        source_left_pct < 0.05
-                        or source_right_pct > 0.95
-                        or min_cover_w > max_allowed_w
-                    )
-                    max_source_cover_w = canvas_x if source_needs_edge_cover else max_allowed_w
+                    max_source_cover_w = max_allowed_w
                     target_visible_w = min(
                         max(min_cover_w, text_cover_w), max_source_cover_w
                     )
                     target_visible_h = min(canvas_y, max(min_cover_h, text_cover_h))
 
-                    # Because BgStyle has Outline=outline, ASS drawing dimensions
-                    # produce a visible box of size (draw_w + outline*2, draw_h + outline*2)
                     draw_w = max(4, target_visible_w - (outline * 2))
-                    # Even widths allow exact integer-pixel centering.
                     draw_w = min(max_source_cover_w, 2 * math.ceil(draw_w / 2))
                     draw_h = max(4, target_visible_h - (outline * 2))
 
-                    # Lock horizontal position; only Y follows the subtitle track.
                     draw_x = chinese_center_x - draw_w / 2
                     draw_y = chinese_center_y - (draw_h // 2)
 
-                    # Verified edge-to-edge source text is the only case allowed
-                    # to use the side margins; otherwise preserve the 5% inset.
-                    min_margin = 0 if source_needs_edge_cover else int(canvas_x * 0.05)
+                    min_margin = math.ceil(canvas_x * 0.05)
                     if draw_x < min_margin:
                         draw_x = min_margin
                     if draw_x + draw_w > canvas_x - min_margin:
@@ -460,11 +471,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     text_line = f"{{\\an8\\pos({text_cx:g},{text_cy})}}{formatted_text}"
                     ass_content += f"Dialogue: 1,{start_str},{end_str},TextStyle,,0,0,0,,{text_line}\n"
                 else:
-                    # When no subtitle exists, DO NOT emit a default BgStyle cover box in the middle of the screen!
-                    # Only render the text cleanly at the default subtitle position.
                     text_cx = canvas_x // 2
                     text_cy = max(0, min(int(main_y_pct * canvas_y), canvas_y - required_text_h))
-                    text_line = f"{{\\an8\\pos({text_cx},{text_cy})}}{formatted_text}"
+                    text_line = f"{{\\an8\\pos({text_cx:g},{text_cy})}}{formatted_text}"
                     ass_content += f"Dialogue: 1,{start_str},{end_str},TextStyle,,0,0,0,,{text_line}\n"
 
     with codecs.open(output_path, "w", "utf-8-sig") as f:
