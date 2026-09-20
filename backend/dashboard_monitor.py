@@ -57,12 +57,12 @@ UI_STEPS = [
     (
         "step2",
         "Nhận Diện & Dịch Thuật AI",
-        "Whisper ASR · Gemini 3.8 ➔ 3.5 Flash",
+        "Whisper ASR · Gemini 3.8 ➔ 3.5 & Lite Backup",
         ["transcribe", "ocr", "translate", "timing"],
         "🤖",
         [
             "Chuyển giọng sang chữ (Whisper Large-v3)",
-            "Dịch thuật ngữ cảnh (Gemini 3.8 ➔ 3.5)",
+            "Dịch thuật ngữ cảnh (Gemini 3.8 ➔ 3.5 & Lite)",
             "Căn vị trí Sub 0.01s (Khung 9:16 / 16:9)",
         ],
     ),

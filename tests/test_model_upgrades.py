@@ -20,7 +20,9 @@ class ModelPolicyTests(unittest.TestCase):
         self.assertEqual(policy.paddle_ocr_version, "PP-OCRv6")
         self.assertEqual(policy.gemini_model, "gemini-3.8-flash")
         self.assertEqual(policy.gemini_candidates[0], "gemini-3.8-flash")
-        self.assertIn("gemini-3.7-flash", policy.gemini_candidates)
+        self.assertIn("gemini-3.5-flash-lite", policy.gemini_candidates)
+        self.assertIn("gemini-3.1-flash-lite", policy.gemini_candidates)
+        self.assertIn("gemini-flash-lite-latest", policy.gemini_candidates)
         self.assertNotIn("deepseek-v4", policy.deepseek_candidates)
 
     def test_invalid_backend_is_rejected(self):

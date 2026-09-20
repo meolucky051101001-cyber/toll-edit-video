@@ -435,10 +435,11 @@ def process_video(
         video_bitrate_kbps = 8000
         b_v = f"{video_bitrate_kbps}k"
         
-        # GPU-only: failed NVENC must not silently become a long CPU job.
+        # GPU-first NVENC with CPU libx264 fallback for long video resilience (e.g. NVENC session limit on RTX 4050)
         encoders_to_try = [
             ['h264_nvenc', '-preset', 'p4', '-tune', 'hq', '-b:v', b_v, '-spatial-aq', '1'],
             ['h264_nvenc', '-preset', 'fast', '-b:v', b_v],
+            ['libx264', '-preset', 'veryfast', '-crf', '22'],
         ]
         
         for enc_args in encoders_to_try:
@@ -450,7 +451,10 @@ def process_video(
                 '-y',
                 '-threads', '4',
                 '-filter_threads', '2',
-                '-hwaccel', 'cuda',
+            ]
+            if encoder_name == 'h264_nvenc':
+                cmd += ['-hwaccel', 'cuda']
+            cmd += [
                 '-i', video_path,
                 '-i', mixed_audio_path,
             ] + extra_inputs + filter_args + [

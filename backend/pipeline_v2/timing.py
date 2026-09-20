@@ -375,11 +375,16 @@ class GeminiTimingRewriter:
                     break
                 url = (
                     "https://generativelanguage.googleapis.com/v1beta/models/"
-                    "{}:generateContent?key={}".format(model, self.api_key)
+                    "{}:generateContent".format(model)
                 )
+                headers = {
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": self.api_key,
+                }
                 try:
                     response = http_requests.post(
                         url,
+                        headers=headers,
                         json={"contents": [{"parts": [{"text": prompt}]}]},
                         timeout=self.timeout_seconds,
                     )
@@ -422,6 +427,18 @@ class GeminiTimingRewriter:
 
 
 def probe_audio_duration(path: PathLike, ffprobe_binary: str = "ffprobe") -> float:
+    # 1. Thử đọc nhanh header âm thanh bằng soundfile (in-process, < 0.1ms, tránh spawn hàng nghìn subprocess trên Windows)
+    try:
+        ext = Path(path).suffix.lower()
+        if ext in (".wav", ".flac", ".ogg", ".mp3", ".m4a"):
+            import soundfile as sf
+            info = sf.info(str(path))
+            if info.duration > 0:
+                return float(info.duration)
+    except Exception:
+        pass
+
+    # 2. Fallback sang ffprobe cho các định dạng container video hoặc khi soundfile không đọc được
     result = subprocess.run(
         [
             ffprobe_binary,
