@@ -43,6 +43,56 @@ def _is_translation_error_payload(value):
     )
 
 
+def _parse_json_array(raw_text):
+    """Robustly extract and parse a JSON array of strings from LLM text output."""
+    if not raw_text or not isinstance(raw_text, str):
+        return None
+    text = raw_text.strip()
+
+    # Strip markdown code blocks ```json ... ``` or ``` ... ```
+    if "```" in text:
+        m = re.search(r'```(?:json)?\s*(\[[\s\S]*?\])\s*```', text, re.IGNORECASE)
+        if m:
+            text = m.group(1).strip()
+        else:
+            text = re.sub(r'```(?:json)?', '', text, flags=re.IGNORECASE)
+            text = text.replace('```', '').strip()
+
+    # Find the outermost array brackets [...]
+    start_idx = text.find('[')
+    end_idx = text.rfind(']')
+    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+        text = text[start_idx:end_idx + 1]
+
+    # Try standard json.loads first
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return parsed
+    except Exception:
+        pass
+
+    # Clean trailing commas: [ "a", "b", ] -> [ "a", "b" ]
+    cleaned = re.sub(r',\s*([\]\}])', r'\1', text)
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, list):
+            return parsed
+    except Exception:
+        pass
+
+    # Fallback to ast.literal_eval for single-quoted Python-style lists
+    try:
+        import ast
+        parsed = ast.literal_eval(cleaned)
+        if isinstance(parsed, list):
+            return [str(x) for x in parsed]
+    except Exception:
+        pass
+
+    return None
+
+
 def _validate_fallback_translation(source_text, translated_text, provider):
     if _is_translation_error_payload(translated_text):
         raise RuntimeError(
@@ -50,6 +100,13 @@ def _validate_fallback_translation(source_text, translated_text, provider):
                 provider, str(translated_text or "")[:120]
             )
         )
+    import unicodedata
+    translated_text = unicodedata.normalize("NFC", str(translated_text or ""))
+    try:
+        from mojibake_repair import repair_vietnamese_mojibake
+        translated_text = repair_vietnamese_mojibake(translated_text)
+    except Exception:
+        pass
     translated = normalize_subtitle_text(translated_text)
     if not translated:
         raise RuntimeError("{} returned no subtitle text after cleanup".format(provider))
@@ -117,6 +174,12 @@ Yêu cầu TỐI QUAN TRỌNG:
    - '苏打' khi nói về keo dán/băng keo -> hiểu đúng là '胶带' / '调色板贴纸' (băng dính Washi Tape / sticker bảng màu); KHÔNG dịch thành nước sô-đa.
    - '叶芝麦' -> hiểu đúng là '叶之脉' (gân của chiếc lá); dịch thoát ý tự nhiên.
    - '可思线' -> hiểu đúng là '可撕线' (đường răng cưa dễ xé).
+   - '比耶' -> tạo dáng chữ V / giơ tay chữ V (tạo dáng khi chụp ảnh, tuyệt đối KHÔNG dịch thành bia hay 'Bière').
+   - '出片' -> chụp ảnh đẹp / lên hình đẹp / có ảnh ưng ý (tuyệt đối KHÔNG dịch thành 'ra khỏi bộ phim').
+   - '修图' / '修好' -> chỉnh sửa ảnh / sửa ảnh xong (tuyệt đối KHÔNG dịch thành 'khắc phục' hay 'sửa chữa đồ đạc').
+   - '去路人' -> xóa người qua đường / xóa người lạ khỏi ảnh (tính năng xóa người trong app ảnh, KHÔNG dịch thành 'đặt hàng người qua đường').
+   - '小腿' -> bắp chân / cẳng chân (KHÔNG dịch thành 'bê').
+   - '顶前面' / '往后面推' -> đẩy về phía trước / lùi về phía sau một chút.
 """
     if with_vision:
         prompt += "8. TRỰC QUAN: Hãy kết hợp các bức ảnh đính kèm từ video để chọn đại từ nhân xưng và danh từ chính xác tuyệt đối với ngữ cảnh.\n"
@@ -155,7 +218,7 @@ Yêu cầu TỐI QUAN TRỌNG:
     prompt += json.dumps(texts, ensure_ascii=False)
     return prompt
 
-def extract_video_frames_base64(video_path, context_start_seconds=None, context_end_seconds=None, num_frames=5):
+def extract_video_frames_base64(video_path, context_start_seconds=None, context_end_seconds=None, num_frames=3):
     if not video_path or not os.path.exists(video_path):
         return []
     try:
@@ -168,7 +231,11 @@ def extract_video_frames_base64(video_path, context_start_seconds=None, context_
                                      context_start_seconds, context_end_seconds)
         b64_list = []
         for frame in frames:
-            ok, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            h, w = frame.shape[:2]
+            if w > 640:
+                scale = 640.0 / w
+                frame = cv2.resize(frame, (640, int(h * scale)), interpolation=cv2.INTER_AREA)
+            ok, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
             if ok:
                 b64_str = base64.b64encode(buffer).decode('utf-8')
                 b64_list.append(b64_str)
@@ -195,7 +262,7 @@ def _gemini_transient_failure():
     global _gemini_transient_failures
     _gemini_transient_failures += 1
     if _gemini_transient_failures >= 2:
-        mark_gemini_unhealthy(300.0)
+        mark_gemini_unhealthy(15.0)
         _gemini_transient_failures = 0
 
 
@@ -207,6 +274,7 @@ def translate_with_gemini(
     context_start_seconds=None,
     context_end_seconds=None,
     prior_context=None,
+    timeout=None,
     **kwargs
 ):
     global _gemini_transient_failures
@@ -229,7 +297,7 @@ def translate_with_gemini(
         )
         parts = [{"text": prompt}]
         
-        frames = extract_video_frames_base64(video_path, context_start_seconds, context_end_seconds)
+        frames = extract_video_frames_base64(video_path, context_start_seconds, context_end_seconds, num_frames=3)
         for b64 in frames:
             parts.append({
                 "inline_data": {
@@ -240,7 +308,6 @@ def translate_with_gemini(
         if frames:
             logger.info(f"Đã đính kèm {len(frames)} ảnh từ video vào Gemini Vision.")
         
-        # Limit candidates to at most 2 to avoid cascading delays
         models_to_try = current_model_policy().gemini_candidates[:2]
         response = None
         for model in models_to_try:
@@ -249,29 +316,66 @@ def translate_with_gemini(
             headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
             try:
                 logger.info(f"Đang gọi Google Gemini: {model}...")
-                # Reduced timeout from 60s to 20s to prevent stalling pipeline
-                response = requests.post(url, json=payload, headers=headers, timeout=20)
+                request_timeout = timeout if timeout is not None else int(os.getenv("GEMINI_TRANSLATION_TIMEOUT", "20"))
+                response = requests.post(url, json=payload, headers=headers, timeout=request_timeout)
                 response.encoding = "utf-8"
                 if response.status_code == 200:
                     result = response.json()
-                    text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-                    match = re.search(r'\[.*\]', text, re.DOTALL)
-                    translated = json.loads(match.group(0) if match else text)
-                    if (isinstance(translated, list) and len(translated) == len(texts)
-                            and all(isinstance(item, str) and item.strip() for item in translated)):
-                        try:
-                            from mojibake_repair import repair_vietnamese_mojibake
-                            translated = [repair_vietnamese_mojibake(t) for t in translated]
-                        except Exception:
-                            pass
-                        _gemini_transient_failures = 0
-                        logger.info(f"Gọi thành công Gemini {model}!")
-                        return translated
+                    candidates = result.get("candidates", [])
+                    if candidates:
+                        parts_out = candidates[0].get("content", {}).get("parts", [])
+                        raw_text = "".join(p.get("text", "") for p in parts_out if not p.get("thought")).strip()
+                        translated = _parse_json_array(raw_text)
+                        if (isinstance(translated, list) and len(translated) == len(texts)
+                                and all(isinstance(item, str) and item.strip() for item in translated)):
+                            try:
+                                from mojibake_repair import repair_vietnamese_mojibake
+                                translated = [repair_vietnamese_mojibake(t) for t in translated]
+                            except Exception:
+                                pass
+                            _gemini_transient_failures = 0
+                            logger.info(f"Gọi thành công Gemini {model}!")
+                            return translated
+                        elif isinstance(translated, list) and len(texts) >= 4 and len(translated) != len(texts):
+                            logger.warning(
+                                "Gemini %s trả về %d câu cho %d câu gốc. Đang kích hoạt chia nhỏ thích ứng (divide-and-conquer)...",
+                                model, len(translated), len(texts)
+                            )
+                            mid = len(texts) // 2
+                            left_kwargs = dict(kwargs)
+                            right_kwargs = dict(kwargs)
+                            budgets = kwargs.get("duration_budgets")
+                            if budgets and len(budgets) == len(texts):
+                                left_kwargs["duration_budgets"] = budgets[:mid]
+                                right_kwargs["duration_budgets"] = budgets[mid:]
+                            left_res = translate_with_gemini(
+                                texts[:mid], target_lang=target_lang, api_key=api_key,
+                                video_path=video_path, context_start_seconds=context_start_seconds,
+                                prior_context=prior_context, timeout=timeout, **left_kwargs
+                            )
+                            if left_res and len(left_res) == mid:
+                                combined_prior = list(prior_context or [])
+                                for s, t in zip(texts[:mid], left_res):
+                                    combined_prior.append({"source": s, "translated": t})
+                                right_res = translate_with_gemini(
+                                    texts[mid:], target_lang=target_lang, api_key=api_key,
+                                    video_path=video_path, context_end_seconds=context_end_seconds,
+                                    prior_context=combined_prior[-4:], timeout=timeout, **right_kwargs
+                                )
+                                if right_res and len(right_res) == len(texts) - mid:
+                                    logger.info("Ghép nối thành công %d câu từ hai nửa batch Gemini!", len(texts))
+                                    return left_res + right_res
                     _gemini_transient_failure()
-                elif response.status_code in (429, 403, 401):
-                    logger.warning(f"Lỗi gọi {model} (HTTP {response.status_code}) - cooldown activated")
+                elif response.status_code in (401, 403):
+                    logger.warning(f"Lỗi xác thực {model} (HTTP {response.status_code}) - cooldown activated")
                     mark_gemini_unhealthy(300.0)
                     break
+                elif response.status_code == 429:
+                    logger.warning(f"Lỗi giới hạn tần suất {model} (HTTP 429), chuyển sang model dự phòng...")
+                    time.sleep(1.0)
+                elif response.status_code == 503:
+                    logger.warning(f"Lỗi máy chủ Google quá tải {model} (HTTP 503), chuyển sang model dự phòng...")
+                    time.sleep(1.0)
                 else:
                     logger.warning(f"Lỗi gọi {model} (HTTP {response.status_code})")
                     if response.status_code >= 500:
@@ -343,13 +447,35 @@ def translate_with_openai(
                 if resp.status_code == 200:
                     data = resp.json()
                     text = data["choices"][0]["message"]["content"].strip()
-                    match = re.search(r'\[.*\]', text, re.DOTALL)
-                    if match:
-                        text = match.group(0)
-                    translated = json.loads(text)
-                    if len(translated) == len(texts):
+                    translated = _parse_json_array(text)
+                    if isinstance(translated, list) and len(translated) == len(texts):
                         logger.info(f"Dịch thành công bằng OpenAI ChatGPT ({om})!")
                         return translated
+                    elif isinstance(translated, list) and len(texts) >= 4 and len(translated) != len(texts):
+                        logger.warning("OpenAI %s trả về lệch số lượng câu (%d thay vì %d). Chia nhỏ batch...", om, len(translated), len(texts))
+                        mid = len(texts) // 2
+                        left_kwargs = dict(kwargs)
+                        right_kwargs = dict(kwargs)
+                        budgets = kwargs.get("duration_budgets")
+                        if budgets and len(budgets) == len(texts):
+                            left_kwargs["duration_budgets"] = budgets[:mid]
+                            right_kwargs["duration_budgets"] = budgets[mid:]
+                        left_res = translate_with_openai(
+                            texts[:mid], target_lang=target_lang, api_key=api_key,
+                            video_path=video_path, context_start_seconds=context_start_seconds,
+                            prior_context=prior_context, model=om, **left_kwargs
+                        )
+                        if left_res and len(left_res) == mid:
+                            combined_prior = list(prior_context or [])
+                            for s, t in zip(texts[:mid], left_res):
+                                combined_prior.append({"source": s, "translated": t})
+                            right_res = translate_with_openai(
+                                texts[mid:], target_lang=target_lang, api_key=api_key,
+                                video_path=video_path, context_end_seconds=context_end_seconds,
+                                prior_context=combined_prior[-4:], model=om, **right_kwargs
+                            )
+                            if right_res and len(right_res) == len(texts) - mid:
+                                return left_res + right_res
                 else:
                     logger.warning(f"Lỗi OpenAI ({om}) HTTP {resp.status_code}: {resp.text[:200]}")
             except Exception as o_err:
@@ -403,13 +529,33 @@ def translate_with_deepseek(
                 if resp.status_code == 200:
                     data = resp.json()
                     text = data["choices"][0]["message"]["content"].strip()
-                    match = re.search(r'\[.*\]', text, re.DOTALL)
-                    if match:
-                        text = match.group(0)
-                    translated = json.loads(text)
-                    if len(translated) == len(texts):
+                    translated = _parse_json_array(text)
+                    if isinstance(translated, list) and len(translated) == len(texts):
                         logger.info(f"Dịch thành công bằng DeepSeek ({dm})!")
                         return translated
+                    elif isinstance(translated, list) and len(texts) >= 4 and len(translated) != len(texts):
+                        logger.warning("DeepSeek %s trả về lệch số lượng câu (%d thay vì %d). Chia nhỏ batch...", dm, len(translated), len(texts))
+                        mid = len(texts) // 2
+                        left_kwargs = dict(kwargs)
+                        right_kwargs = dict(kwargs)
+                        budgets = kwargs.get("duration_budgets")
+                        if budgets and len(budgets) == len(texts):
+                            left_kwargs["duration_budgets"] = budgets[:mid]
+                            right_kwargs["duration_budgets"] = budgets[mid:]
+                        left_res = translate_with_deepseek(
+                            texts[:mid], target_lang=target_lang, api_key=api_key,
+                            prior_context=prior_context, model=dm, **left_kwargs
+                        )
+                        if left_res and len(left_res) == mid:
+                            combined_prior = list(prior_context or [])
+                            for s, t in zip(texts[:mid], left_res):
+                                combined_prior.append({"source": s, "translated": t})
+                            right_res = translate_with_deepseek(
+                                texts[mid:], target_lang=target_lang, api_key=api_key,
+                                prior_context=combined_prior[-4:], model=dm, **right_kwargs
+                            )
+                            if right_res and len(right_res) == len(texts) - mid:
+                                return left_res + right_res
                 else:
                     logger.warning(f"Lỗi DeepSeek ({dm}) HTTP {resp.status_code}: {resp.text[:200]}")
             except Exception as d_err:
@@ -566,7 +712,29 @@ def translate_subtitles(
                 "AI translation left CJK source unchanged at positions: %s",
                 ", ".join(str(position) for position in unchanged_cjk),
             )
-            translated_texts_valid = False
+            # Dịch bù chọn lọc cho từng câu bị sót chữ Hán bằng fallback để không làm mất các câu đã dịch tốt
+            for position in unchanged_cjk:
+                idx = position - 1
+                src = texts[idx]
+                try:
+                    retranslated = _translate_with_resilient_fallback(src, target_lang)
+                    if retranslated and not (_contains_cjk(src) and normalize_subtitle_text(src) == normalize_subtitle_text(retranslated)):
+                        translated_texts[idx] = retranslated
+                        logger.info("Dịch bù thành công CJK câu %d qua fallback: %s", position, retranslated)
+                except Exception as fb_err:
+                    logger.warning("Dịch bù câu %d thất bại: %s", position, fb_err)
+
+            # Kiểm tra lại xem còn câu nào chưa được dịch thoát chữ Hán không
+            still_unchanged = [
+                position
+                for position, (source, translated) in enumerate(
+                    zip(texts, translated_texts), 1
+                )
+                if _contains_cjk(source)
+                and normalize_subtitle_text(source) == str(translated).strip()
+            ]
+            if still_unchanged:
+                translated_texts_valid = False
 
     if translated_texts_valid:
         idx = 0
