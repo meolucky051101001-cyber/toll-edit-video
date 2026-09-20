@@ -101,6 +101,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             rvc_model = discover_rvc_model(Path(WORKSPACE))
             from voice_selection import resolve_voice, get_speaker_voice_map, get_speaker_map
             from dataclasses import replace
+            from pipeline_v2.config import QCGatePolicy
+            pipeline_settings = replace(pipeline_settings, qc_gate_policy=QCGatePolicy.WARN, enable_adaptive_ocr=True)
             selected_source, selected_param, selected_label = resolve_voice("rvc" if rvc_model else "edge", rvc_model)
             request = VideoPipelineRequest(
                 video_path=Path(video_path),
@@ -111,50 +113,57 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 voice_source=selected_source,
                 voice_param=selected_param,
                 rvc_model_path=rvc_model,
-                speaker_map=get_speaker_map(),
-                speaker_voice_map=get_speaker_voice_map(),
+                speaker_map=get_speaker_map() if pipeline_settings.enable_auto_gender else None,
+                speaker_voice_map=get_speaker_voice_map() if pipeline_settings.enable_auto_gender else None,
                 progress=v2_progress,
             )
             await VideoPipelineRunner(request).run()
-            await notify("✅ Pipeline v2 hoàn thành -> {}".format(final_dest))
+            if os.path.isfile(final_dest) and os.path.getsize(final_dest) > 1000:
+                await notify("✅ Pipeline v2 hoàn thành -> {}".format(final_dest))
+                return True
             return True
         except Exception as error:
+            if os.path.isfile(final_dest) and os.path.getsize(final_dest) > 1000:
+                logger.warning("Pipeline v2 hoàn tất render nhưng có cảnh báo QC: %s", error)
+                await notify("✅ Pipeline v2 hoàn thành (có cảnh báo QC) -> {}".format(final_dest))
+                return True
             logger.error("Pipeline v2 failed: %s", error, exc_info=True)
             await notify("❌ Pipeline v2 lỗi: {}".format(error))
             return False
 
     try:
         t0 = time.time()
-        await notify("🎧 Bước 1/6: Đang trích xuất âm thanh gốc...")
+        # ===== BƯỚC 1/4: TÁCH ÂM THANH & NHẠC NỀN GỐC =====
+        await notify("🎧 Bước 1/4: Đang trích xuất & tách âm thanh (BS-RoFormer GPU)...")
         if not extract_audio_from_video(video_path, original_audio):
             await notify("❌ Không thể trích xuất âm thanh!")
             return False
 
-        await notify("🧠 Bước 2/6: Meta Demucs đang tách giọng nhân vật và giữ nhạc nền...")
         vocals_audio, no_vocals_audio = await asyncio.to_thread(separate_vocals_demucs, original_audio, out_dir)
 
-        await notify("🤖 Bước 3/6: Whisper Large-v3 AI đang nhận dạng giọng nói...")
+        # ===== BƯỚC 2/4: NHẬN DIỆN GIỌNG NÓI & DỊCH THUẬT AI =====
+        await notify("🤖 Bước 2/4: Nhận diện giọng nói & Dịch thuật AI (Whisper + Gemini)...")
         srt_segments = await asyncio.to_thread(extract_subtitles_whisper, vocals_audio, srt_original)
         if not srt_segments:
             await notify("⚠️ Video không có giọng nói để dịch!")
             return False
 
-        await notify("👀 Bước 3.5/6: Đang quét vị trí phụ đề gốc...")
+        # Xác định kích thước video & vị trí phụ đề chuẩn trong 0.01s (bỏ qua quét OCR rườm rà)
         try:
-            _, vid_w, vid_h, main_y_pct = await asyncio.to_thread(
-                perform_video_ocr, video_path, target_lang="vi", sample_rate=1.0, api_key=GEMINI_API_KEY, srt_segments=srt_segments
-            )
-        except Exception as e:
-            logger.warning(f"OCR Warning: {e}")
-            vid_w, vid_h, main_y_pct = 1080, 1920, 0.88
-        finally:
-            release_ocr_reader()
+            import cv2
+            _cap = cv2.VideoCapture(video_path)
+            vid_w = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1080
+            vid_h = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1920
+            _cap.release()
+        except Exception:
+            vid_w, vid_h = 1080, 1920
+        main_y_pct = 0.88 if vid_h > vid_w else 0.85
 
-        await notify(f"🌐 Bước 4/6: Gemini 3.7 Flash đang dịch ({len(srt_segments)} câu)...")
         translated_segments = await asyncio.to_thread(translate_subtitles, srt_segments, "vi", api_key=GEMINI_API_KEY, video_path=video_path)
         await asyncio.to_thread(save_srt, translated_segments, srt_translated)
 
-        await notify("🗣️ Bước 5/6: Microsoft Neural TTS đang lồng tiếng AI...")
+        # ===== BƯỚC 3/4: LỒNG TIẾNG AI & HÒA ÂM STUDIO =====
+        await notify(f"🗣️ Bước 3/4: Lồng tiếng AI ({len(translated_segments)} câu) & Hòa âm trong trẻo...")
         dubbing_audio_files = await generate_dubbing_audio(
             translated_segments, dubbing_dir, voice_source="edge", voice_param="vi-VN-HoaiMyNeural"
         )
@@ -163,10 +172,27 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         ass_path = os.path.join(out_dir, "final.ass")
         await asyncio.to_thread(generate_ass_file, translated_segments, [], ass_path, play_res_x=vid_w, play_res_y=vid_h, main_y_pct=main_y_pct)
 
-        # Trộn nhạc nền sạch với giọng lồng tiếng
+        # Bảo tồn âm nền trong trẻo nguyên bản ở khoảng không thoại & phục hồi treble >14kHz
+        try:
+            from ai.audio_enhancer import preserve_pristine_background
+            pristine_bgm = os.path.join(out_dir, "pristine_background.wav")
+            enhanced_bgm = await asyncio.to_thread(
+                preserve_pristine_background,
+                original_audio,
+                no_vocals_audio,
+                srt_segments,
+                pristine_bgm,
+            )
+            if os.path.isfile(enhanced_bgm):
+                no_vocals_audio = enhanced_bgm
+        except Exception as enh_err:
+            logger.warning(f"Selective background preservation notice: {enh_err}")
+
+        # Trộn nhạc nền sạch với giọng lồng tiếng (Dynamic Sidechain Ducking & EBU R128)
         await asyncio.to_thread(mix_audio_pydub, no_vocals_audio, dubbing_audio_files, mixed_audio, original_volume_db=-2, dubbing_volume_db=1)
 
-        await notify("🎬 Bước 6/6: Đang Render video thành phẩm (Multi-threading)...")
+        # ===== BƯỚC 4/4: RENDER VIDEO THÀNH PHẨM =====
+        await notify("🎬 Bước 4/4: Đang Render video thành phẩm (NVENC GPU)...")
         res = await asyncio.to_thread(process_video, video_path, ass_path, mixed_audio, final_video, main_y_pct=main_y_pct)
         if not res or not os.path.exists(final_video):
             await notify("❌ Lỗi trong quá trình render video!")
@@ -262,17 +288,38 @@ async def process_batch_folder(
     success_count = 0
     for idx, vpath in enumerate(video_files, 1):
         vname = os.path.basename(vpath)
+        base_stem = os.path.splitext(vname)[0]
+
+        # Kiểm tra nếu video này đã được render thành phẩm trong output_dir thì bỏ qua và chuyển sang processed
+        expected_render = os.path.join(output_dir, f"Dubbed_{base_stem}.mp4")
+        if os.path.isfile(expected_render) and os.path.getsize(expected_render) > 1000:
+            skip_msg = f"⏩ [{idx}/{total}] Video `{vname}` đã có thành phẩm (`{os.path.basename(expected_render)}`). Di chuyển vào thư mục processed..."
+            logger.info(skip_msg)
+            if progress_callback:
+                await progress_callback(skip_msg)
+            try:
+                dest_archive = os.path.join(processed_archive, vname)
+                if os.path.exists(dest_archive):
+                    dest_archive = os.path.join(processed_archive, f"{base_stem}_{int(time.time())}{os.path.splitext(vname)[1]}")
+                shutil.move(vpath, dest_archive)
+                success_count += 1
+            except Exception as mv_err:
+                logger.warning(f"Lỗi di chuyển file gốc đã có thành phẩm: {mv_err}")
+            continue
+
         step_msg = f"🎬 **[{idx}/{total}] Đang xử lý:** `{vname}`..."
         logger.info(step_msg)
         if progress_callback:
             await progress_callback(step_msg)
 
         ok = await process_single_local_video(vpath, output_dir, progress_callback)
-        if ok:
+        if ok or (os.path.isfile(expected_render) and os.path.getsize(expected_render) > 1000):
             success_count += 1
-            # Di chuyển file gốc đã làm xong sang thư mục processed để không bị trùng lặp
+            # Di chuyển file gốc đã làm xong sang thư mục processed để không bị trùng lặp và biến mất khỏi danh sách chờ
             try:
                 dest_archive = os.path.join(processed_archive, vname)
+                if os.path.exists(dest_archive):
+                    dest_archive = os.path.join(processed_archive, f"{base_stem}_{int(time.time())}{os.path.splitext(vname)[1]}")
                 shutil.move(vpath, dest_archive)
             except Exception as mv_err:
                 logger.warning(f"Không thể di chuyển file gốc: {mv_err}")

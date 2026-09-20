@@ -1324,9 +1324,34 @@ class VideoPipelineRunner:
 
         with tempfile.TemporaryDirectory(prefix="mix-v2-", dir=self.work_directory) as work:
             output = Path(work) / "mixed_v2.wav"
+            bg_audio = self._background_audio()
+            try:
+                orig_audio = self._artifact_path("audio/original.wav")
+                if orig_audio.is_file() and bg_audio.is_file() and orig_audio != bg_audio:
+                    from ai.audio_enhancer import preserve_pristine_background
+                    enhanced_bg = Path(work) / "enhanced_bg.wav"
+                    raw_segs = self._load_segments("transcript/segments.json")
+                    segments = []
+                    for seg in raw_segs:
+                        s_val = getattr(seg, "start", 0.0)
+                        e_val = getattr(seg, "end", s_val)
+                        s_sec = s_val.total_seconds() if hasattr(s_val, "total_seconds") else float(s_val or 0.0)
+                        e_sec = e_val.total_seconds() if hasattr(e_val, "total_seconds") else float(e_val or s_sec)
+                        segments.append({"start": s_sec, "end": e_sec})
+                    await asyncio.to_thread(
+                        preserve_pristine_background,
+                        orig_audio,
+                        bg_audio,
+                        segments,
+                        enhanced_bg,
+                    )
+                    if enhanced_bg.is_file():
+                        bg_audio = enhanced_bg
+            except Exception as exc:
+                logger.warning("Failed to enhance background audio: %s", exc)
             await asyncio.to_thread(
                 mix_audio_ffmpeg,
-                self._background_audio(),
+                bg_audio,
                 self._audio_infos(),
                 output,
                 FFmpegMixSettings(

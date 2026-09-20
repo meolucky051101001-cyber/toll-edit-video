@@ -236,6 +236,36 @@ class DouyinDirectTests(unittest.TestCase):
         resolver.assert_called_once_with("7676769981752790308")
         tikwm.assert_not_called()
 
+    def test_social_downloader_falls_back_to_so9_when_direct_fails(self):
+        from backend import social_downloader
+        from backend.douyin_direct import DouyinDirectError
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            social_downloader,
+            "resolve_douyin_video",
+            side_effect=DouyinDirectError("Blocked 403"),
+        ) as direct_resolver, patch.object(
+            social_downloader,
+            "resolve_douyin_so9",
+            return_value=(True, "https://cdn.example/so9.mp4", "so9_title", ""),
+        ) as so9_resolver, patch.object(
+            social_downloader, "download_file_stream", return_value=True
+        ), patch.object(
+            social_downloader.requests, "post"
+        ) as tikwm:
+            ok, path, title, error = social_downloader.download_douyin_tiktok(
+                "https://www.douyin.com/video/7676769981752790308",
+                directory,
+                "job",
+            )
+        self.assertTrue(ok)
+        self.assertTrue(path.endswith("job_so9_title.mp4"))
+        self.assertEqual(title, "so9_title")
+        self.assertEqual(error, "")
+        direct_resolver.assert_called_once_with("7676769981752790308")
+        so9_resolver.assert_called_once()
+        tikwm.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

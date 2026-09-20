@@ -371,6 +371,11 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
             bottom = min(1, (cache_bottom*height-crop_y_start)/(crop_y_end-crop_y_start)+.02)
             frame_cache = SubtitleFrameCache(top, bottom)
         logger.info("OCR probes=%d, band_support=%d, visual reuse=%s", len(seeds), probe_band.support, frame_cache is not None)
+        if kwargs.get("band_only", False) and cache_region_found:
+            cap.release()
+            fast_y = (cache_top + cache_bottom) / 2.0
+            logger.info("⚡ Fast OCR band detected: main_y_pct=%.4f (Skipping dense frame tracking)", fast_y)
+            return [], width, height, fast_y
 
     def flush_frames():
         nonlocal ocr_frame_count
@@ -547,22 +552,24 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                     selected = stabilize_samples(band.selected_by_sample.get(s_key, []))
                     tracking = []
                     for position, row in enumerate(selected):
-                        left = max(seg_s, row["sample_time"] - interval / 2) if position == 0 else max(row["sample_time"] - interval / 2, (
-                            selected[position - 1]["sample_time"] + row["sample_time"]
-                        ) / 2.0)
-                        previous = selected[position - 1] if position else None
-                        same_caption = previous is not None and (
-                            abs(row["y_pct"] - previous["y_pct"]) <= .012
-                            and abs(row["max_y_pct"] - previous["max_y_pct"]) <= .012)
-                        if position and row["sample_time"] - previous["sample_time"] <= (.80001 if same_caption else .40001):
-                            # Bridge a single missed sample, not a real long absence.
-                            left = (selected[position - 1]["sample_time"] + row["sample_time"]) / 2
-                        # Never stretch a detection to the end of a long ASR cue.
-                        # Last confirmed presence expires within 0.4s, leaving
-                        # headroom below the requested 0.5s disappearance limit.
-                        right = min(seg_e, row["sample_time"] + 0.4) if position == len(selected) - 1 else min(row["sample_time"] + 0.4, (
-                            row["sample_time"] + selected[position + 1]["sample_time"]
-                        ) / 2.0)
+                        if position == 0:
+                            if row["sample_time"] - 0.45 > seg.start.total_seconds():
+                                left = row["sample_time"] - 0.4
+                            else:
+                                left = seg_s
+                        else:
+                            left = (selected[position - 1]["sample_time"] + row["sample_time"]) / 2.0
+
+                        if position == len(selected) - 1:
+                            if row["sample_time"] + 0.45 < seg.end.total_seconds():
+                                right = row["sample_time"] + 0.4
+                            else:
+                                right = seg.end.total_seconds() + 0.3
+                                if duration > 0:
+                                    right = min(right, duration)
+                        else:
+                            right = (row["sample_time"] + selected[position + 1]["sample_time"]) / 2.0
+
                         if right > left:
                             tracking.append(OCRBlock(
                                 **{key: row[key] for key in
@@ -570,19 +577,33 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                                 start=max(seg_s, left), end=min(seg_e, right),
                                 prob=row.get("prob", 0.0),
                                 sample_segment_id=s_key, sample_time=row["sample_time"],
+                                is_subtitle=True, is_packaging=False, is_static=False,
+                                in_subtitle_band=True, type="subtitle",
                             ))
                     seg.tracking_blocks = tracking
 
+                    best_end = seg_e
+                    if tracking:
+                        best_end = tracking[-1].end
                     seg.best_block = OCRBlock(
                         text=b["text"],
                         start=seg_s,
-                        end=seg_e,
+                        end=best_end,
                         x_pct=b["x_pct"],
                         max_x_pct=b["max_x_pct"],
                         y_pct=b["y_pct"],
                         max_y_pct=b["max_y_pct"],
                         prob=b.get("prob", 1.0),
+                        is_subtitle=True,
+                        is_packaging=False,
+                        is_static=False,
+                        in_subtitle_band=True,
+                        type="subtitle",
                     )
+                    seg.is_subtitle = True
+                    seg.in_subtitle_band = True
+                    seg.is_packaging = False
+                    seg.is_static = False
                     seg.y_pct = b["y_pct"]
                     seg.max_y_pct = b["max_y_pct"]
                     logger.info(f"Sync (Subtitle Band): '{str(getattr(seg, 'content', ''))[:15]}' -> Y: {seg.y_pct:.3f} - {seg.max_y_pct:.3f}")
@@ -590,6 +611,10 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                     # No subtitle found for this segment: do NOT assign random Chinese block!
                     seg.best_block = None
                     seg.tracking_blocks = []
+                    seg.is_subtitle = False
+                    seg.in_subtitle_band = False
+                    seg.is_packaging = False
+                    seg.is_static = False
                     seg.y_pct = global_med_top
                     seg.max_y_pct = global_med_bottom
     else:
@@ -599,7 +624,14 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
             for seg in srt_segments:
                 seg.best_block = None
                 seg.tracking_blocks = []
+                seg.is_subtitle = False
+                seg.in_subtitle_band = False
+                seg.is_packaging = False
+                seg.is_static = False
                 seg.y_pct = 0.85
                 seg.max_y_pct = 0.90
+
+    if kwargs.get("metrics") is not None:
+        kwargs["metrics"]["mode"] = "adaptive" if is_adaptive else "uniform"
 
     return [], width, height, main_y_pct

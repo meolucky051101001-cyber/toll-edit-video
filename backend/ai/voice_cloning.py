@@ -408,13 +408,15 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
     return None
 
 async def generate_dubbing_audio(translated_segments, output_folder, voice_source="edge", voice_param="vi-VN-HoaiMyNeural", api_key=""):
-    print(f"Generating TTS for dubbing using {voice_source} (Parallel)...")
+    print(f"Generating TTS for dubbing using {voice_source} (Parallel with concurrency pool=15)...")
     os.makedirs(output_folder, exist_ok=True)
     
-    tasks = [
-        generate_single_tts(seg, output_folder, voice_source, voice_param, api_key)
-        for seg in translated_segments
-    ]
-    
+    semaphore = asyncio.Semaphore(15)
+
+    async def _bounded_single_tts(seg):
+        async with semaphore:
+            return await generate_single_tts(seg, output_folder, voice_source, voice_param, api_key)
+
+    tasks = [_bounded_single_tts(seg) for seg in translated_segments]
     results = await asyncio.gather(*tasks)
     return [res for res in results if res is not None]

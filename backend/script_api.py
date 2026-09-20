@@ -37,12 +37,12 @@ router = APIRouter(tags=["Script Studio"])
 # Lock đồng bộ để tránh tràn VRAM / quá tải API cùng lúc
 SCRIPT_PROCESS_LOCK = threading.Lock()
 
-# Thư mục lưu trữ workspace kịch bản & file âm thanh, phụ đề
+# Thư mục lưu trữ workspace kịch bản & file âm thanh, phụ đề (tuyệt đối không lưu vào D:\banve hoặc D:\video phôi)
 def _get_script_workspace() -> Path:
     candidates = [
-        Path(r"D:\banve\script_workspace"),
-        Path(r"D:\video phôi\script_workspace"),
-        Path(__file__).resolve().parent / "script_workspace",
+        Path(__file__).resolve().parent.parent / "workspace" / "script_workspace",
+        Path(r"C:\tool v2\workspace\script_workspace"),
+        Path(__file__).resolve().parent / "workspace" / "script_workspace",
     ]
     for c in candidates:
         try:
@@ -50,7 +50,7 @@ def _get_script_workspace() -> Path:
             return c
         except Exception:
             continue
-    fallback = Path(__file__).resolve().parent / "script_workspace"
+    fallback = Path(__file__).resolve().parent.parent / "workspace" / "script_workspace"
     fallback.mkdir(parents=True, exist_ok=True)
     return fallback
 
@@ -66,6 +66,8 @@ PREVIEWS_DIR.mkdir(parents=True, exist_ok=True)
 class HookRequest(BaseModel):
     topic: str
     num_hooks: int = 6
+    hook_duration: int = 7
+    hook_type: str = "anti_copyright"
 
 class ScriptGenerateRequest(BaseModel):
     topic: str
@@ -74,6 +76,8 @@ class ScriptGenerateRequest(BaseModel):
     style: str = "Chuyên gia cuốn hút & thực chiến"
     hook_text: str = ""
     custom_instruction: str = ""
+    hook_duration: int = 7
+    persona_gender: str = "neutral"
 
 class PreviewTTSRequest(BaseModel):
     text: str
@@ -94,6 +98,9 @@ class VideoAnalyzeRequest(BaseModel):
     genre: str = "review"
     style: str = "Chuyên gia cuốn hút & thực chiến"
     custom_instruction: str = ""
+    hook_duration: int = 7
+    persona_gender: str = "neutral"
+
 
 
 # =========================================================================
@@ -180,7 +187,9 @@ def api_analyze_video(req: VideoAnalyzeRequest):
             video_path=clean_path,
             genre=req.genre,
             style=req.style,
-            custom_instruction=req.custom_instruction
+            custom_instruction=req.custom_instruction,
+            hook_duration=float(getattr(req, "hook_duration", 7) or 7),
+            persona=getattr(req, "persona_gender", "auto") or "auto"
         )
         return {
             "status": "success",
@@ -199,7 +208,12 @@ def api_analyze_video(req: VideoAnalyzeRequest):
 def api_generate_hooks(req: HookRequest):
     """Sinh 6 biến thể Hook giật tít cho chủ đề theo phong cách hook-generator."""
     try:
-        hooks = generate_viral_hooks(req.topic, num_hooks=req.num_hooks)
+        hooks = generate_viral_hooks(
+            topic=req.topic,
+            num_hooks=req.num_hooks,
+            hook_duration=int(getattr(req, "hook_duration", 7) or 7),
+            mode=getattr(req, "hook_type", "anti_copyright") or "anti_copyright"
+        )
         return {"status": "success", "hooks": hooks}
     except Exception as e:
         logger.error(f"Lỗi api_generate_hooks: {e}", exc_info=True)
@@ -216,7 +230,9 @@ def api_generate_script(req: ScriptGenerateRequest):
             duration_target=req.duration_target,
             style=req.style,
             hook_text=req.hook_text or None,
-            custom_instruction=req.custom_instruction
+            custom_instruction=req.custom_instruction,
+            hook_duration=float(getattr(req, "hook_duration", 7) or 7),
+            persona=getattr(req, "persona_gender", "auto") or "auto"
         )
         return {"status": "success", "script": script}
     except Exception as e:

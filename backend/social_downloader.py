@@ -2,6 +2,8 @@ import os
 import re
 import time
 import uuid
+import json
+import urllib.parse
 import requests
 import subprocess
 import sys
@@ -220,14 +222,69 @@ def extract_douyin_video_id(url: str) -> str:
     # 3. Nếu là shortlink v.douyin.com
     if "v.douyin.com" in url:
         try:
-            res = requests.get(url, headers={"User-Agent": USER_AGENTS["mobile"]}, allow_redirects=True, timeout=10)
-            sub_match = re.search(r'/(?:video|note)/(\d+)', res.url) or re.search(r'modal_id=(\d+)', res.url)
+            res = requests.get(url, headers={"User-Agent": USER_AGENTS["mobile"]}, allow_redirects=False, timeout=10)
+            loc = res.headers.get("Location") or ""
+            sub_match = re.search(r'/(?:video|note)/(\d+)', loc) or re.search(r'modal_id=(\d+)', loc)
             if sub_match:
                 return sub_match.group(1)
+            res2 = requests.get(url, headers={"User-Agent": USER_AGENTS["mobile"]}, allow_redirects=True, timeout=10)
+            sub_match2 = re.search(r'/(?:video|note)/(\d+)', res2.url) or re.search(r'modal_id=(\d+)', res2.url)
+            if sub_match2:
+                return sub_match2.group(1)
         except Exception as e:
             logger.warning(f"Error redirecting shortlink: {e}")
             
     return ""
+
+def resolve_douyin_so9(url: str, video_id: str = "") -> tuple:
+    """
+    Bóc tách link video Douyin không watermark Full HD qua dịch vụ SO9.
+    Trả về (success, video_url, title, error_message).
+    """
+    candidate_urls = []
+    if video_id:
+        candidate_urls.append(f"https://www.douyin.com/video/{video_id}")
+    if url and url not in candidate_urls:
+        candidate_urls.append(url)
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Referer': 'https://so9.vn/9downloader/douyin',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+    }
+
+    last_err = ""
+    for target in candidate_urls:
+        try:
+            encoded_url = urllib.parse.quote(target.strip(), safe='')
+            so9_url = f"https://so9.vn/9downloader/douyin?link={encoded_url}"
+            res = requests.get(so9_url, headers=headers, timeout=25)
+            if res.status_code != 200:
+                last_err = f"SO9 trả về HTTP {res.status_code}"
+                continue
+
+            match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>', res.text)
+            if not match:
+                last_err = "Không tìm thấy dữ liệu __NEXT_DATA__ từ SO9"
+                continue
+
+            payload = json.loads(match.group(1))
+            d_data = payload.get("props", {}).get("pageProps", {}).get("downloadData")
+            if isinstance(d_data, dict):
+                video_info = d_data.get("data", {})
+                video_url = video_info.get("video")
+                title = video_info.get("title") or (f"douyin_{video_id}" if video_id else "douyin_video")
+                if video_url:
+                    logger.info("Bóc tách Douyin thành công qua SO9: %s", sanitize_url(video_url))
+                    return True, video_url, title, ""
+                else:
+                    last_err = d_data.get("message") or "SO9 không trả về link tải video"
+        except Exception as exc:
+            last_err = f"Lỗi kết nối SO9: {exc}"
+            logger.warning(f"SO9 resolver gặp lỗi với link {sanitize_url(target)}: {exc}")
+
+    return False, "", "", last_err or "Bóc tách SO9 thất bại"
 
 # =========================================================================
 # 1. BÓC TÁCH DOUYIN & TIKTOK (NO WATERMARK)
@@ -237,9 +294,12 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
     Tải video Douyin / TikTok không logo (Full HD) qua API giải mã trực tiếp.
     """
     logger.info(f"Đang giải mã Douyin/TikTok không logo: {sanitize_url(url)}")
+    os.makedirs(output_dir, exist_ok=True)
+    lower_url = url.lower()
+    is_douyin = any(k in lower_url for k in ["douyin.com", "iesdouyin.com"])
     
     # Chuẩn hóa link nếu là link tìm kiếm trên web có modal_id
-    video_id = extract_douyin_video_id(url)
+    video_id = extract_douyin_video_id(url) if is_douyin else ""
     target_urls = [url]
     if video_id:
         target_urls.insert(0, f"https://www.douyin.com/video/{video_id}")
@@ -268,7 +328,22 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
             resolver_error = str(exc)
             logger.warning("Douyin direct resolver không thành công: %s", resolver_error)
 
-    # Chiến lược 2: TikWM Multi-platform API (không cần cookie).
+    # Chiến lược 2 (Dự phòng tối ưu khi Direct bị chặn 403 / cookie hết hạn): SO9 Downloader
+    if is_douyin:
+        try:
+            logger.info("Thử bóc tách Douyin qua SO9 Resolver...")
+            ok, v_url, v_title, err = resolve_douyin_so9(url, video_id=video_id)
+            if ok and v_url:
+                safe_title = clean_filename(v_title or (f"douyin_{video_id}" if video_id else "douyin_video"))
+                target_path = os.path.join(output_dir, f"{prefix}_{safe_title}.mp4")
+                if download_file_stream(v_url, target_path):
+                    logger.info(f"Tải thành công Douyin không logo qua SO9: {target_path}")
+                    return True, target_path, v_title, ""
+                logger.warning("Tải luồng video từ SO9 thất bại, chuyển sang chiến lược tiếp theo.")
+        except Exception as e_so9:
+            logger.warning(f"SO9 Downloader gặp lỗi: {e_so9}")
+
+    # Chiến lược 3: TikWM Multi-platform API (TikTok và dự phòng Douyin)
     for t_url in target_urls:
         try:
             api_url = "https://www.tikwm.com/api/"

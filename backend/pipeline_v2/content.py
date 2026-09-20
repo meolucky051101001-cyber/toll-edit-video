@@ -82,6 +82,9 @@ def merge_ocr_geometry(
     return merged
 
 
+merge_runtime_segments = merge_ocr_geometry
+
+
 def discover_rvc_model(workspace: Path) -> Optional[Path]:
     workspace_path = Path(workspace).resolve()
     search_dirs = [

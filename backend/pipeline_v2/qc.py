@@ -804,8 +804,6 @@ def _sample_frames(
     failures: List[str] = []
     measured_fps = max(1.0, float(fps))
 
-    # Select by presentation time, not nominal/average FPS. Multiple labels
-    # can share one decoded frame; metadata must record its actual PTS.
     samples_by_time: Dict[float, List[Tuple[str, float]]] = {}
     for label, timestamp in samples:
         samples_by_time.setdefault(max(0.0, float(timestamp)), []).append((label, timestamp))

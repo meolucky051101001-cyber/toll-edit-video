@@ -85,7 +85,31 @@ def mix_audio_pydub(
     except Exception:
         if original_volume_db is None: original_volume_db = -2.0
         if dubbing_volume_db is None: dubbing_volume_db = 1.0
-    print(f"Mixing audio tracks using pydub (BGM={original_volume_db}dB, Dubbing={dubbing_volume_db}dB)...")
+    try:
+        from pipeline_v2.mixer import FFmpegMixSettings, mix_audio_ffmpeg
+        settings = FFmpegMixSettings(
+            background_gain_db=float(original_volume_db),
+            voice_gain_db=float(dubbing_volume_db),
+            duck_threshold=0.025,
+            duck_ratio=8.0,
+            duck_attack_ms=20.0,
+            duck_release_ms=300.0,
+            target_lufs=-14.0,
+            true_peak_dbtp=-1.0,
+        )
+        print("Mixing audio with studio FFmpeg Sidechain Ducking & EBU R128...")
+        mix_audio_ffmpeg(
+            background_audio=original_audio_path,
+            dubbing_audio_files=dubbing_audio_files,
+            output_path=output_mixed_audio_path,
+            settings=settings,
+            timeout_seconds=max(600.0, len(dubbing_audio_files) * 5.0),
+        )
+        if os.path.isfile(output_mixed_audio_path) and os.path.getsize(output_mixed_audio_path) > 0:
+            return output_mixed_audio_path
+    except Exception as exc:
+        print(f"FFmpeg dynamic mixer notice: {exc}. Falling back to pydub mix...")
+
     original_popen = None
     try:
         import subprocess
@@ -187,32 +211,70 @@ def build_canvas_render_graph(
     delogo_chain = ",".join(delogo_parts)
     if delogo_chain:
         base_stage = f"[0:v]{delogo_chain}[v_clean];"
-        v_in = "[v_clean]"
+        v_clean = "[v_clean]"
     else:
         base_stage = ""
-        v_in = "[0:v]"
+        v_clean = "[0:v]"
+
+    # Hardsub xử lý trực tiếp trên luồng video gốc (v_clean) để đảm bảo
+    # tọa độ OCR bounding box che khít 100% phụ đề gốc tiếng Trung
+    # trước khi video được scale hoặc lồng ghép vào canvas nền.
+    if srt_filter_str:
+        sub_stage = f"{v_clean}{srt_filter_str}[fg_subbed];"
+        fg_in = "[fg_subbed]"
+    else:
+        sub_stage = ""
+        fg_in = v_clean
+
+    auto_crop_black_bars = bool(cfg.get("auto_crop_black_bars", True))
+    crop_padding = int(cfg.get("crop_padding", 0))
+    crop_prefix = ""
+    if auto_crop_black_bars:
+        try:
+            from workflow_api import detect_letterbox_crop
+            crop_box = detect_letterbox_crop(video_path, padding=crop_padding)
+            if crop_box:
+                crop_prefix = f"crop={crop_box['w']}:{crop_box['h']}:{crop_box['x']}:{crop_box['y']},"
+        except Exception:
+            crop_prefix = ""
 
     extra_inputs = []
 
     if bg_type == "blur":
-        # Nhân đôi luồng: 1 luồng làm nền mờ Gaussian phủ kín khung, 1 luồng làm video chính ở giữa
+        # Nền mờ Gaussian phủ kín khung [bg] từ video gốc sạch (chưa burn sub), video chính ở giữa [fg] có sub
         fc = (
             f"{base_stage}"
-            f"{v_in}split=2[bg_in][fg_in];"
-            f"[bg_in]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur={blur_sigma}:5,setsar=1,colorlevels=rimax={rimax}:gimax={rimax}:bimax={rimax}[bg];"
-            f"[fg_in]{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[comp];"
-            f"[comp]{srt_filter_str}[outv]"
+            f"{v_clean}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur={blur_sigma}:5,setsar=1,colorlevels=rimax={rimax}:gimax={rimax}:bimax={rimax}[bg];"
+            f"{sub_stage}"
+            f"{fg_in}{crop_prefix}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[outv]"
         )
-    elif bg_type == "image" and bg_image and os.path.isfile(bg_image):
-        extra_inputs = ["-loop", "1", "-i", bg_image]
-        fc = (
-            f"{base_stage}"
-            f"[2:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
-            f"{v_in}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[comp];"
-            f"[comp]{srt_filter_str}[outv]"
-        )
+    elif bg_type == "image":
+        try:
+            from canvas_settings import resolve_image_bg_path
+            bg_image_file = cfg.get("bg_image_file", "tia_sang_vang_ngoi_sao.jpg")
+            real_image_path = resolve_image_bg_path(bg_image_file or bg_image)
+        except Exception:
+            real_image_path = bg_image
+
+        if real_image_path and os.path.isfile(real_image_path):
+            extra_inputs = ["-loop", "1", "-i", real_image_path]
+            fc = (
+                f"{base_stage}"
+                f"[2:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
+                f"{sub_stage}"
+                f"{fg_in}{crop_prefix}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2[outv]"
+            )
+        else:
+            safe_color = bg_color.replace("#", "0x")
+            fc = (
+                f"{base_stage}"
+                f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
+                f"{sub_stage}"
+                f"{fg_in}{crop_prefix}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2[outv]"
+            )
     elif bg_type == "video_motion":
         # Nền video chuyển động (sóng biển, biển xanh, rừng cây,...) lặp vô tận chống quét re-up
         try:
@@ -226,19 +288,18 @@ def build_canvas_render_graph(
             fc = (
                 f"{base_stage}"
                 f"[2:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
-                f"{v_in}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
-                f"[bg][fg]overlay=(W-w)/2:(H-h)/2[comp];"
-                f"[comp]{srt_filter_str}[outv]"
+                f"{sub_stage}"
+                f"{fg_in}{crop_prefix}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2[outv]"
             )
         else:
             # Fallback nền mờ nếu chưa tải xong file motion
             fc = (
                 f"{base_stage}"
-                f"{v_in}split=2[bg_in][fg_in];"
-                f"[bg_in]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur={blur_sigma}:5,setsar=1,colorlevels=rimax={rimax}:gimax={rimax}:bimax={rimax}[bg];"
-                f"[fg_in]{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
-                f"[bg][fg]overlay=(W-w)/2:(H-h)/2[comp];"
-                f"[comp]{srt_filter_str}[outv]"
+                f"{v_clean}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur={blur_sigma}:5,setsar=1,colorlevels=rimax={rimax}:gimax={rimax}:bimax={rimax}[bg];"
+                f"{sub_stage}"
+                f"{fg_in}{crop_prefix}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2[outv]"
             )
     else:
         # Nền màu (đen hoặc mã màu hex tùy chỉnh)
@@ -246,9 +307,9 @@ def build_canvas_render_graph(
         fc = (
             f"{base_stage}"
             f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
-            f"{v_in}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[comp];"
-            f"[comp]{srt_filter_str}[outv]"
+            f"{sub_stage}"
+            f"{fg_in}{crop_prefix}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[outv]"
         )
 
     return ["-filter_complex", fc], extra_inputs, "[outv]"

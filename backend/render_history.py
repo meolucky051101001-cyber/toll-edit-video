@@ -9,8 +9,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
-SHARED_HISTORY_FILE = Path(r"D:\banve\.render_history.json")
-V2_HISTORY_FILE = Path(os.getenv("TOOL_V2_RENDER_HISTORY", r"D:\banve\.render_history_v2.json"))
+WORKSPACE_DIR = Path(__file__).resolve().parent.parent / "workspace"
+SHARED_HISTORY_FILE = Path(r"C:\tool v1\workspace\.render_history.json")
+V2_HISTORY_FILE = Path(os.getenv("TOOL_V2_RENDER_HISTORY", str(WORKSPACE_DIR / ".render_history_v2.json")))
 HISTORY_FILE = V2_HISTORY_FILE
 
 
@@ -31,16 +32,15 @@ def format_duration(seconds: float) -> str:
 
 
 def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int]:
-    """Đọc toàn bộ lịch sử thời gian render từ các file lịch sử và job manifest V2."""
+    """Đọc toàn bộ lịch sử thời gian render từ các file lịch sử trong workspace và job manifest V2."""
     meta: Dict[str, int] = {}
 
-    # 1. Đọc từ các file history JSON trong D:\banve
-    target_dir = Path(output_dir) if output_dir else Path(r"D:\banve")
+    # 1. Đọc từ các file history JSON trong workspace (tuyệt đối không tạo file rác trong D:\banve hay output_dir)
     history_files = [
-        target_dir / ".render_history.json",
-        target_dir / ".render_history_v2.json",
-        SHARED_HISTORY_FILE,
         V2_HISTORY_FILE,
+        WORKSPACE_DIR / ".render_history.json",
+        SHARED_HISTORY_FILE,
+        Path(r"C:\tool v2\workspace\.render_history.json"),
     ]
     for hf in history_files:
         if hf.exists():

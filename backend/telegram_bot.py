@@ -225,8 +225,8 @@ async def run_pipeline_v2_for_telegram(
         voice_source=selected_source,
         voice_param=selected_param,
         rvc_model_path=rvc_model,
-        speaker_map=get_speaker_map(),
-        speaker_voice_map=get_speaker_voice_map(),
+        speaker_map=get_speaker_map() if settings.enable_auto_gender else None,
+        speaker_voice_map=get_speaker_voice_map() if settings.enable_auto_gender else None,
         progress=progress,
     )
     return await VideoPipelineRunner(request).run()
@@ -721,12 +721,12 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
             )
             return
 
-        # ===== BƯỚC 2: TÁCH ÂM THANH =====
+        # ===== BƯỚC 1/4: TÁCH ÂM THANH & NHẠC NỀN GỐC =====
         start_time = time.time()
         await safe_edit_status(
             status_msg,
             f"✅ *Tải thành công!*\n`{url}`\n\n"
-            "🎧 *Bước 2/6:* Đang trích xuất âm thanh gốc...",
+            "🎧 *Bước 1/4:* Đang tách giọng nhân vật & nhạc nền (BS-RoFormer GPU)...",
             parse_mode="Markdown"
         )
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
@@ -735,156 +735,99 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await safe_edit_status(status_msg, f"❌ Không thể trích xuất âm thanh từ video.\n`{url}`", parse_mode="Markdown")
             return
 
-        # ===== BƯỚC 2.5: TÁCH VOCAL BẰNG DEMUCS =====
-        await safe_edit_status(
-            status_msg,
-            f"🎧 *Trích xuất xong!*\n`{url}`\n\n"
-            "🧠 *Bước 2.5/6:* BS-RoFormer đang tách giọng nhân vật khỏi nhạc nền...",
-            parse_mode="Markdown"
-        )
         from video_utils import separate_vocals_demucs
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
         vocals_audio, no_vocals_audio = await asyncio.to_thread(separate_vocals_demucs, original_audio, out_dir)
 
-        # ===== BƯỚC 3: NHẬN DẠNG GIỌNG NÓI =====
+        # ===== BƯỚC 2/4: NHẬN DIỆN GIỌNG NÓI & DỊCH THUẬT AI =====
         await safe_edit_status(
             status_msg,
-            f"🧠 *Tách âm thanh nền xong!*\n`{url}`\n\n"
-            "🤖 *Bước 3/6:* Qwen3-ASR đang nhận dạng và căn timestamp từ vocal sạch...",
+            f"🎧 *Tách âm thanh xong!*\n`{url}`\n\n"
+            "🤖 *Bước 2/4:* Nhận diện lời thoại & Dịch thuật AI (Whisper + Gemini)...",
             parse_mode="Markdown"
         )
-        # Sử dụng vocals_audio (giọng sạch) thay vì original_audio
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
         srt_segments = await asyncio.to_thread(extract_subtitles_whisper, vocals_audio, srt_original)
+        if not srt_segments:
+            await safe_edit_status(status_msg, f"⚠️ Video không có giọng nói để dịch.\n`{url}`", parse_mode="Markdown")
+            return
 
-        # ===== BƯỚC 3.5: KIỂM TRA VỊ TRÍ PHỤ ĐỀ CHÍNH VÀ QUÉT PHỤ ĐỀ CÂM =====
-        await safe_edit_status(status_msg, "👀 *Bước 3.5/6:* Đang quét vùng phụ đề cố định (OCR)...", parse_mode="Markdown")
-        from ocr_utils import perform_video_ocr, extract_silent_subtitles_from_gaps
-        from ass_utils import generate_ass_file
+        # Xác định kích thước video & vị trí phụ đề chuẩn trong 0.01s (bỏ qua quét OCR rườm rà)
         try:
-            if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-            _, vid_w, vid_h, main_y_pct = await asyncio.to_thread(perform_video_ocr, video_path, target_lang="vi", sample_rate=1.0, api_key=GEMINI_API_KEY, srt_segments=srt_segments)
-            
-            floating_segments = []
-            
-            # XỬ LÝ THỜI GIAN CHUẨN KHI LÀM SUB & LỒNG TIẾNG (Chống lệch giọng)
-            import datetime
-            for i in range(len(srt_segments) - 1):
-                if srt_segments[i].end > srt_segments[i+1].start:
-                    new_end = srt_segments[i+1].start - datetime.timedelta(seconds=0.05)
-                    if new_end > srt_segments[i].start:
-                        srt_segments[i].end = new_end
-                    else:
-                        srt_segments[i].end = srt_segments[i].start + datetime.timedelta(seconds=0.1)
+            import cv2
+            _cap = cv2.VideoCapture(video_path)
+            vid_w = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1080
+            vid_h = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1920
+            _cap.release()
+        except Exception:
+            vid_w, vid_h = 1080, 1920
+        main_y_pct = 0.88 if vid_h > vid_w else 0.85
+        floating_segments = []
 
-            for i, seg in enumerate(srt_segments, 1):
-                seg.index = i
-        except Exception as e:
-            logger.error(f"OCR Error: {e}", exc_info=True)
-            vid_w, vid_h, main_y_pct, floating_segments = 1920, 1080, 0.88, []
-        finally:
-            from ocr_utils import release_ocr_reader
-            release_ocr_reader()
+        import datetime
+        for i in range(len(srt_segments) - 1):
+            if srt_segments[i].end > srt_segments[i+1].start:
+                new_end = srt_segments[i+1].start - datetime.timedelta(seconds=0.05)
+                if new_end > srt_segments[i].start:
+                    srt_segments[i].end = new_end
+                else:
+                    srt_segments[i].end = srt_segments[i].start + datetime.timedelta(seconds=0.1)
 
-        # ===== BƯỚC 4: DỊCH PHỤ ĐỀ =====
-        await safe_edit_status(
-            status_msg,
-            f"🤖 *Nhận dạng xong ({len(srt_segments)} đoạn)!*\n`{url}`\n\n"
-            "🌐 *Bước 4/6:* Đang dùng Gemini AI để dịch chuẩn ngữ cảnh...",
-            parse_mode="Markdown"
-        )
+        for i, seg in enumerate(srt_segments, 1):
+            seg.index = i
+
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
         translated_segments = await asyncio.to_thread(translate_subtitles, srt_segments, "vi", api_key=GEMINI_API_KEY, video_path=video_path)
         await asyncio.to_thread(save_srt, translated_segments, srt_translated)
 
-        # (Di chuyển BƯỚC 4.5 xuống sau BƯỚC 5 để đồng bộ thời gian biến mất của phụ đề với audio)
-
-        # ===== BƯỚC 5: LỒNG TIẾNG =====
-        # Khôi phục giọng RVC (Đáng yêu / Chí Mai)
-        rvc_model_path = None
-        search_dirs = [
-            os.path.join(os.path.dirname(__file__), "..", "MyVoiceModel_v2"),
-            os.path.join(WORKSPACE, "..", "MyVoiceModel_v2"),
-            os.path.join(WORKSPACE, "MyVoiceModel_v2"),
-            os.path.join(WORKSPACE, "models", "rvc"),
-            os.path.join(os.path.dirname(__file__), "..", "models", "rvc"),
-        ]
-        for d in search_dirs:
-            if os.path.exists(d):
-                for f in sorted(os.listdir(d)):
-                    if f.endswith(".pth"):
-                        candidate = os.path.join(d, f)
-                        try:
-                            if os.path.getsize(candidate) > 1024:
-                                rvc_model_path = candidate
-                                break
-                        except OSError:
-                            continue
-            if rvc_model_path:
-                break
-                    
-        v_source = "rvc" if rvc_model_path else "edge"
-        v_label = "Giọng Chí Mai (RVC)" if v_source == "rvc" else "Giọng Hoài My"
+        # ===== BƯỚC 3/4: LỒNG TIẾNG AI & HÒA ÂM STUDIO =====
         await safe_edit_status(
             status_msg,
-            f"🗣️ *Bước 5/6:* Đang lồng tiếng AI ({v_label})...",
+            f"🌐 *Dịch xong ({len(translated_segments)} đoạn)!*\n`{url}`\n\n"
+            "🗣️ *Bước 3/4:* Đang lồng tiếng AI & Hòa âm trong trẻo...",
             parse_mode="Markdown"
         )
-        if rvc_model_path:
-            v_param = rvc_model_path
-        else:
-            # from audio_analysis import detect_gender
-            # gender = detect_gender(vocals_audio)
-            # v_param = "vi-VN-HoaiMyNeural" if gender == "female" else "vi-VN-NamMinhNeural"
-            v_param = "vi-VN-HoaiMyNeural"  # Tạm thời cố định giọng nữ
-        
+        if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
         dubbing_audio_files = await generate_dubbing_audio(
-            translated_segments, dubbing_dir, voice_source=v_source, voice_param=v_param
+            translated_segments, dubbing_dir, voice_source="edge", voice_param="vi-VN-HoaiMyNeural"
         )
-        
-        # ĐỒNG BỘ THỜI GIAN BIẾN MẤT CỦA PHỤ ĐỀ THEO GIỌNG ĐỌC
-        import datetime
-        for i, audio_info in enumerate(dubbing_audio_files):
-            if audio_info:
-                idx = audio_info["index"]
-                actual_duration = audio_info.get("actual_audio_duration", 0)
-                # Cập nhật end time của đoạn sub tương ứng để nó biến mất NGAY khi đọc xong
-                for seg in translated_segments:
-                    if seg.index == idx and actual_duration > 0:
-                        new_end = seg.start + datetime.timedelta(seconds=actual_duration + 0.1) # Thêm 0.1s cho tự nhiên
-                        seg.end = new_end
-                        break
-                        
-        # CHỐNG ĐÈ SUB (Anti-Overlap): Đảm bảo sub trước phải biến mất trước khi sub sau xuất hiện
-        for i in range(len(translated_segments) - 1):
-            if translated_segments[i].end > translated_segments[i+1].start:
-                safe_end = translated_segments[i+1].start - datetime.timedelta(seconds=0.05)
-                if safe_end > translated_segments[i].start:
-                    translated_segments[i].end = safe_end
-                else:
-                    translated_segments[i].end = translated_segments[i].start + datetime.timedelta(seconds=0.1)
-        
-        # ===== BƯỚC 4.5: TẠO FILE ASS (CÓ SUB DỊCH ĐÃ ĐỒNG BỘ TIMING) =====
+
+        # Căn chỉnh phụ đề ASS
+        from ass_utils import generate_ass_file
         ass_path = os.path.join(out_dir, "final.ass")
         await asyncio.to_thread(generate_ass_file, translated_segments, floating_segments, ass_path, play_res_x=vid_w, play_res_y=vid_h, main_y_pct=main_y_pct)
         sub_file_to_use = ass_path
-        
-        # Mix giọng tiếng Việt vào nền nhạc KHÔNG CÓ LỜI (no_vocals_audio)
+
+        # Bảo tồn âm nền trong trẻo nguyên bản ở khoảng không thoại & phục hồi treble >14kHz
+        try:
+            from ai.audio_enhancer import preserve_pristine_background
+            pristine_bgm = os.path.join(out_dir, "pristine_background.wav")
+            enhanced_bgm = await asyncio.to_thread(
+                preserve_pristine_background,
+                original_audio,
+                no_vocals_audio,
+                srt_segments,
+                pristine_bgm,
+            )
+            if os.path.isfile(enhanced_bgm):
+                no_vocals_audio = enhanced_bgm
+        except Exception as enh_err:
+            logger.warning(f"Selective background preservation notice: {enh_err}")
+
+        # Mix giọng tiếng Việt vào nền nhạc KHÔNG CÓ LỜI (Dynamic Sidechain Ducking & EBU R128)
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
         await asyncio.to_thread(mix_audio_pydub, no_vocals_audio, dubbing_audio_files, mixed_audio, original_volume_db=-2, dubbing_volume_db=1)
 
-        # ===== BƯỚC 6: XUẤT VIDEO =====
+        # ===== BƯỚC 4/4: XUẤT VIDEO =====
         await safe_edit_status(
             status_msg,
-            f"👀 *Quét chữ xong!*\n`{url}`\n\n"
-            "🎬 *Bước 6/6:* Đang render video (NVENC)...\n"
+            f"🎧 *Hòa âm xong!*\n`{url}`\n\n"
+            "🎬 *Bước 4/4:* Đang render video (NVENC GPU)...\n"
             "⏳ Đây là bước cuối cùng...",
             parse_mode="Markdown"
         )
-        # Lấy lại main_y_pct nếu có, nếu không thì dùng mặc định 88%
-        y_pct = locals().get('main_y_pct', 0.88)
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-        res = await asyncio.to_thread(process_video, video_path, sub_file_to_use, mixed_audio, final_video, main_y_pct=y_pct, delogo=False)
+        res = await asyncio.to_thread(process_video, video_path, sub_file_to_use, mixed_audio, final_video, main_y_pct=main_y_pct, delogo=False)
         if not res: raise Exception("Tiến trình render video bị lỗi hoặc đã bị hủy bằng lệnh /stop!")
 
         try:
@@ -1108,127 +1051,87 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-        await safe_edit_status(status_msg, "🎧 Đang tách âm thanh...")
+        # ===== BƯỚC 1/4: TÁCH ÂM THANH & NHẠC NỀN GỐC =====
+        await safe_edit_status(status_msg, "🎧 Bước 1/4: Đang tách giọng & nhạc nền (BS-RoFormer GPU)...")
         import shared_state
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
         await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
 
-        # ===== BƯỚC 2.5: TÁCH VOCAL BẰNG DEMUCS =====
-        await safe_edit_status(status_msg, "🎧 Đang tách giọng khỏi nhạc nền (BS-RoFormer / Demucs fallback)...")
         from video_utils import separate_vocals_demucs
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
         vocals_audio, no_vocals_audio = await asyncio.to_thread(separate_vocals_demucs, original_audio, out_dir)
 
-        # ===== BƯỚC 3: NHẬN DẠNG GIỌNG NÓI =====
-        await safe_edit_status(status_msg, "🤖 Qwen3-ASR đang nhận dạng và căn timestamp từ vocal sạch...")
+        # ===== BƯỚC 2/4: NHẬN DIỆN GIỌNG NÓI & DỊCH THUẬT AI =====
+        await safe_edit_status(status_msg, "🤖 Bước 2/4: Nhận diện giọng nói & Dịch thuật AI (Whisper + Gemini)...")
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
         srt_segments = await asyncio.to_thread(extract_subtitles_whisper, vocals_audio, srt_original)
+        if not srt_segments:
+            await safe_edit_status(status_msg, "⚠️ Video không có giọng nói để dịch.")
+            return
 
-        # ===== BƯỚC 3.5: KIỂM TRA VỊ TRÍ PHỤ ĐỀ CHÍNH VÀ QUÉT PHỤ ĐỀ CÂM =====
-        await safe_edit_status(status_msg, "👀 Đang quét vùng phụ đề cố định (OCR)...", parse_mode="Markdown")
-        from ocr_utils import perform_video_ocr, extract_silent_subtitles_from_gaps
-        from ass_utils import generate_ass_file
+        # Xác định kích thước video & vị trí phụ đề chuẩn trong 0.01s (bỏ qua quét OCR rườm rà)
         try:
-            if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-            _, vid_w, vid_h, main_y_pct = await asyncio.to_thread(perform_video_ocr, video_path, target_lang="vi", sample_rate=1.0, api_key=GEMINI_API_KEY, srt_segments=srt_segments)
-            
-            floating_segments = []
-            
-            import datetime
-            for i in range(len(srt_segments) - 1):
-                if srt_segments[i].end > srt_segments[i+1].start:
-                    new_end = srt_segments[i+1].start - datetime.timedelta(seconds=0.05)
-                    if new_end > srt_segments[i].start:
-                        srt_segments[i].end = new_end
-                    else:
-                        srt_segments[i].end = srt_segments[i].start + datetime.timedelta(seconds=0.1)
+            import cv2
+            _cap = cv2.VideoCapture(video_path)
+            vid_w = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1080
+            vid_h = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1920
+            _cap.release()
+        except Exception:
+            vid_w, vid_h = 1080, 1920
+        main_y_pct = 0.88 if vid_h > vid_w else 0.85
+        floating_segments = []
 
-            for i, seg in enumerate(srt_segments, 1):
-                seg.index = i
-        except Exception as e:
-            logger.error(f"OCR Error: {e}", exc_info=True)
-            vid_w, vid_h, main_y_pct, floating_segments = 1920, 1080, 0.88, []
-        finally:
-            from ocr_utils import release_ocr_reader
-            release_ocr_reader()
+        import datetime
+        for i in range(len(srt_segments) - 1):
+            if srt_segments[i].end > srt_segments[i+1].start:
+                new_end = srt_segments[i+1].start - datetime.timedelta(seconds=0.05)
+                if new_end > srt_segments[i].start:
+                    srt_segments[i].end = new_end
+                else:
+                    srt_segments[i].end = srt_segments[i].start + datetime.timedelta(seconds=0.1)
 
-        # ===== BƯỚC 4: DỊCH PHỤ ĐỀ =====
-        await safe_edit_status(status_msg, f"🌐 Đang dịch {len(srt_segments)} đoạn phụ đề (Có hỗ trợ AI Vision)...")
+        for i, seg in enumerate(srt_segments, 1):
+            seg.index = i
+
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
         translated_segments = await asyncio.to_thread(translate_subtitles, srt_segments, "vi", api_key=GEMINI_API_KEY, video_path=video_path)
         await asyncio.to_thread(save_srt, translated_segments, srt_translated)
 
-        # ===== BƯỚC 5: LỒNG TIẾNG =====
+        # ===== BƯỚC 3/4: LỒNG TIẾNG AI & HÒA ÂM STUDIO =====
+        await safe_edit_status(status_msg, f"🗣️ Bước 3/4: Lồng tiếng AI ({len(translated_segments)} đoạn) & Hòa âm trong trẻo...")
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-        # Khôi phục giọng RVC (Đáng yêu / Chí Mai)
-        rvc_model_path = None
-        search_dirs = [
-            os.path.join(os.path.dirname(__file__), "..", "MyVoiceModel_v2"),
-            os.path.join(WORKSPACE, "..", "MyVoiceModel_v2"),
-            os.path.join(WORKSPACE, "MyVoiceModel_v2"),
-            os.path.join(WORKSPACE, "models", "rvc"),
-            os.path.join(os.path.dirname(__file__), "..", "models", "rvc"),
-        ]
-        for d in search_dirs:
-            if os.path.exists(d):
-                for f in sorted(os.listdir(d)):
-                    if f.endswith(".pth"):
-                        candidate = os.path.join(d, f)
-                        try:
-                            if os.path.getsize(candidate) > 1024:
-                                rvc_model_path = candidate
-                                break
-                        except OSError:
-                            continue
-            if rvc_model_path:
-                break
-                    
-        v_source = "rvc" if rvc_model_path else "edge"
-        v_label = "Giọng Chí Mai (RVC)" if v_source == "rvc" else "Giọng Hoài My"
-        await safe_edit_status(status_msg, f"🗣️ Đang lồng tiếng AI ({v_label})...")
-        if rvc_model_path:
-            v_param = rvc_model_path
-        else:
-            v_param = "vi-VN-HoaiMyNeural"  # Tạm thời cố định giọng nữ
-        
         dubbing_audio_files = await generate_dubbing_audio(
-            translated_segments, dubbing_dir, voice_source=v_source, voice_param=v_param
+            translated_segments, dubbing_dir, voice_source="edge", voice_param="vi-VN-HoaiMyNeural"
         )
-        
-        # ĐỒNG BỘ THỜI GIAN BIẾN MẤT CỦA PHỤ ĐỀ THEO GIỌNG ĐỌC
-        import datetime
-        for i, audio_info in enumerate(dubbing_audio_files):
-            if audio_info:
-                idx = audio_info["index"]
-                actual_duration = audio_info.get("actual_audio_duration", 0)
-                for seg in translated_segments:
-                    if seg.index == idx and actual_duration > 0:
-                        new_end = seg.start + datetime.timedelta(seconds=actual_duration + 0.1)
-                        seg.end = new_end
-                        break
 
-        # CHỐNG ĐÈ SUB (Anti-Overlap): Đảm bảo sub trước phải biến mất trước khi sub sau xuất hiện
-        for i in range(len(translated_segments) - 1):
-            if translated_segments[i].end > translated_segments[i+1].start:
-                safe_end = translated_segments[i+1].start - datetime.timedelta(seconds=0.05)
-                if safe_end > translated_segments[i].start:
-                    translated_segments[i].end = safe_end
-                else:
-                    translated_segments[i].end = translated_segments[i].start + datetime.timedelta(seconds=0.1)
-
-        # ===== BƯỚC 4.5: TẠO FILE ASS (CÓ SUB DỊCH ĐÃ ĐỒNG BỘ TIMING) =====
+        from ass_utils import generate_ass_file
         ass_path = os.path.join(out_dir, "final.ass")
         await asyncio.to_thread(generate_ass_file, translated_segments, floating_segments, ass_path, play_res_x=vid_w, play_res_y=vid_h, main_y_pct=main_y_pct)
         sub_file_to_use = ass_path
 
+        # Bảo tồn âm nền trong trẻo nguyên bản ở khoảng không thoại & phục hồi treble >14kHz
+        try:
+            from ai.audio_enhancer import preserve_pristine_background
+            pristine_bgm = os.path.join(out_dir, "pristine_background.wav")
+            enhanced_bgm = await asyncio.to_thread(
+                preserve_pristine_background,
+                original_audio,
+                no_vocals_audio,
+                srt_segments,
+                pristine_bgm,
+            )
+            if os.path.isfile(enhanced_bgm):
+                no_vocals_audio = enhanced_bgm
+        except Exception as enh_err:
+            logger.warning(f"Selective background preservation notice: {enh_err}")
+
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
         await asyncio.to_thread(mix_audio_pydub, no_vocals_audio, dubbing_audio_files, mixed_audio, original_volume_db=-2, dubbing_volume_db=1)
 
-        # ===== BƯỚC 6: XUẤT VIDEO =====
-        await safe_edit_status(status_msg, "🎬 Đang render video (NVENC)...")
-        y_pct = locals().get('main_y_pct', 0.88)
+        # ===== BƯỚC 4/4: XUẤT VIDEO =====
+        await safe_edit_status(status_msg, "🎬 Bước 4/4: Đang render video (NVENC GPU)...")
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-        res = await asyncio.to_thread(process_video, video_path, sub_file_to_use, mixed_audio, final_video, main_y_pct=y_pct, delogo=False)
+        res = await asyncio.to_thread(process_video, video_path, sub_file_to_use, mixed_audio, final_video, main_y_pct=main_y_pct, delogo=False)
         if not res: raise Exception("Tiến trình render video bị lỗi hoặc đã bị hủy bằng lệnh /stop!")
 
         try:

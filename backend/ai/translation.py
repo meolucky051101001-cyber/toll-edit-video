@@ -308,14 +308,14 @@ def translate_with_gemini(
         if frames:
             logger.info(f"Đã đính kèm {len(frames)} ảnh từ video vào Gemini Vision.")
         
-        models_to_try = current_model_policy().gemini_candidates[:2]
+        models_to_try = current_model_policy().gemini_candidates
         response = None
         for model in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
             payload = {"contents": [{"parts": parts}]}
             headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
             try:
-                logger.info(f"Đang gọi Google Gemini: {model}...")
+                logger.info(f"Đang gọi Google Gemini ({model})...")
                 request_timeout = timeout if timeout is not None else int(os.getenv("GEMINI_TRANSLATION_TIMEOUT", "20"))
                 response = requests.post(url, json=payload, headers=headers, timeout=request_timeout)
                 response.encoding = "utf-8"
@@ -334,7 +334,7 @@ def translate_with_gemini(
                             except Exception:
                                 pass
                             _gemini_transient_failures = 0
-                            logger.info(f"Gọi thành công Gemini {model}!")
+                            logger.info(f"Dịch thành công bằng Google Gemini ({model})!")
                             return translated
                         elif isinstance(translated, list) and len(texts) >= 4 and len(translated) != len(texts):
                             logger.warning(
@@ -365,29 +365,36 @@ def translate_with_gemini(
                                 if right_res and len(right_res) == len(texts) - mid:
                                     logger.info("Ghép nối thành công %d câu từ hai nửa batch Gemini!", len(texts))
                                     return left_res + right_res
-                    _gemini_transient_failure()
+                    logger.warning("Gemini %s không trả về định dạng JSON hợp lệ, chuyển sang model backup kế tiếp...", model)
+                    continue
                 elif response.status_code in (401, 403):
-                    logger.warning(f"Lỗi xác thực {model} (HTTP {response.status_code}) - cooldown activated")
+                    logger.warning(f"Lỗi xác thực API Key cho {model} (HTTP {response.status_code}) - cooldown activated")
                     mark_gemini_unhealthy(300.0)
                     break
                 elif response.status_code == 429:
-                    logger.warning(f"Lỗi giới hạn tần suất {model} (HTTP 429), chuyển sang model dự phòng...")
-                    time.sleep(1.0)
+                    logger.warning(f"Lỗi giới hạn tần suất {model} (HTTP 429 Rate Limit) -> Tự động backup sang model tiếp theo...")
+                    time.sleep(0.5)
+                    continue
                 elif response.status_code == 503:
-                    logger.warning(f"Lỗi máy chủ Google quá tải {model} (HTTP 503), chuyển sang model dự phòng...")
-                    time.sleep(1.0)
+                    logger.warning(f"Lỗi máy chủ Google quá tải {model} (HTTP 503 High Demand) -> Tự động backup sang model tiếp theo...")
+                    time.sleep(0.5)
+                    continue
+                elif response.status_code == 404:
+                    logger.warning(f"Model {model} không khả dụng (HTTP 404) -> Tự động backup sang model tiếp theo...")
+                    continue
                 else:
-                    logger.warning(f"Lỗi gọi {model} (HTTP {response.status_code})")
-                    if response.status_code >= 500:
-                        _gemini_transient_failure()
+                    logger.warning(f"Lỗi gọi {model} (HTTP {response.status_code}) -> Tự động backup sang model tiếp theo...")
+                    continue
             except Exception as req_e:
-                logger.warning("Gemini %s failed: %s", model, type(req_e).__name__)
+                logger.warning("Gemini %s gặp lỗi (%s: %s) -> Tự động backup sang model tiếp theo...", model, type(req_e).__name__, req_e)
                 _gemini_transient_failure()
-            if not is_gemini_available():
-                break
-                
+                continue
+
+        logger.warning("Tất cả các model Gemini trong danh sách backup (%s) đều không thực hiện được batch này.", ", ".join(models_to_try))
+        if _gemini_transient_failures == 0:
+            _gemini_transient_failure()
     except Exception as e:
-        logger.warning("Lỗi dịch Gemini: %s", type(e).__name__)
+        logger.warning("Lỗi ngoài dự kiến trong translate_with_gemini: %s", type(e).__name__)
     return None
 
 def translate_with_openai(

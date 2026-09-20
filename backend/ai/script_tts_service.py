@@ -7,28 +7,73 @@ import asyncio
 import json
 import logging
 import os
+import math
 import subprocess
+import shutil
 import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import requests
 from pydub import AudioSegment
 
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+
 logger = logging.getLogger(__name__)
 
+TTS_DURATION_TOLERANCE = 0.3
+TTS_MAX_REWRITE_ATTEMPTS = 2
+
+def clean_fs_path(p: str | Path) -> Path:
+    """Chuyển đổi đường dẫn từ Electron (local:///) hoặc chuỗi sang Path native của hệ điều hành."""
+    if isinstance(p, Path):
+        return p
+    s = str(p or "").strip()
+    if s.startswith("local:///"):
+        s = s[len("local:///"):]
+    import urllib.parse
+    s = urllib.parse.unquote(s)
+    return Path(s)
+
+
+def resolve_capcut_api_dir() -> Optional[Path]:
+    """
+    Tìm thư mục chứa CapCut SDK (capcut-tts-api) theo thứ tự ưu tiên:
+    1. Biến môi trường CAPCUT_API_DIR
+    2. Thư mục bundled trong dự án (PROJECT_ROOT / 'capcut-tts-api')
+    3. Thư mục cha (WORKSPACE_PARENT / 'capcut-tts-api')
+    4. Thư mục hiện tại hoặc sys.path
+    """
+    candidates = []
+    env_path = os.getenv("CAPCUT_API_DIR")
+    if env_path:
+        candidates.append(Path(env_path))
+
+    this_file = Path(__file__).resolve()
+    # parents[2] = project root (video-dubbing-app)
+    candidates.append(this_file.parents[2] / "capcut-tts-api")
+    # parents[3] = scratch directory
+    if len(this_file.parents) > 3:
+        candidates.append(this_file.parents[3] / "capcut-tts-api")
+
+    for p in candidates:
+        if p.exists() and (p / "capcut_tts_api").exists():
+            return p.resolve()
+
+    for p in candidates:
+        if p.exists():
+            return p.resolve()
+
+    return None
+
+
 # Thêm đường dẫn capcut-tts-api vào sys.path nếu cần
-_candidate_capcut_paths = [
-    Path(os.getenv("CAPCUT_API_DIR", "")),
-    Path(r"C:\Users\admin\.gemini\antigravity\scratch\capcut-tts-api"),
-    Path(__file__).resolve().parents[3] / "capcut-tts-api",
-    Path(__file__).resolve().parents[2] / "capcut-tts-api",
-]
-for _p in _candidate_capcut_paths:
-    if _p and _p.exists() and str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-        break
+_CAPCUT_API_DIR = resolve_capcut_api_dir()
+if _CAPCUT_API_DIR and str(_CAPCUT_API_DIR) not in sys.path:
+    sys.path.insert(0, str(_CAPCUT_API_DIR))
 
 try:
     from capcut_tts_api import CapCutClient
@@ -106,15 +151,36 @@ CAPCUT_VOICES = [
 ]
 
 
+def get_voice_metadata(voice_id: str) -> Optional[Dict[str, Any]]:
+    """Tìm metadata của giọng đọc từ CAPCUT_VOICES."""
+    for v in CAPCUT_VOICES:
+        if v.get("id") == voice_id:
+            return v
+    return None
+
+
+def get_edge_fallback_voice(voice_id: str) -> str:
+    """Xác định giọng Edge TTS dự phòng chuẩn xác theo giới tính của giọng CapCut."""
+    meta = get_voice_metadata(voice_id)
+    if meta:
+        gender = meta.get("gender", "").lower()
+        if gender == "male":
+            return "vi-VN-NamMinhNeural"
+        elif gender == "female":
+            return "vi-VN-HoaiMyNeural"
+    
+    # Fallback cho voice không nằm trong metadata
+    logger.warning(f"Không tìm thấy metadata cho voice '{voice_id}', mặc định dùng Hoài My (Nữ).")
+    return "vi-VN-HoaiMyNeural"
+
+
 def format_srt_time(seconds: float) -> str:
-    """Chuyển đổi giây sang định dạng SRT 00:00:00,000"""
-    hrs = int(seconds // 3600)
-    mins = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    millis = int(round((seconds - int(seconds)) * 1000))
-    if millis >= 1000:
-        secs += 1
-        millis = 0
+    """Chuyển đổi giây sang định dạng SRT 00:00:00,000 sử dụng integer milliseconds chuẩn xác."""
+    total_ms = max(0, int(round(seconds * 1000)))
+    hrs = total_ms // 3600000
+    mins = (total_ms % 3600000) // 60000
+    secs = (total_ms % 60000) // 1000
+    millis = total_ms % 1000
     return f"{hrs:02d}:{mins:02d}:{secs:02d},{millis:03d}"
 
 
@@ -166,7 +232,8 @@ def generate_single_tts(text: str, output_file: str | Path, voice: str = "BV562_
 
     # 3. Fallback sang Edge TTS nếu CapCut TTS gặp sự cố
     import edge_tts
-    fallback_voice = "vi-VN-HoaiMyNeural" if "female" in voice.lower() or "mai" in voice.lower() else "vi-VN-NamMinhNeural"
+    fallback_voice = get_edge_fallback_voice(voice)
+    logger.info(f"Sử dụng Edge TTS fallback voice: {fallback_voice} cho giọng gốc {voice}")
     async def _run_fallback():
         comm = edge_tts.Communicate(text, fallback_voice)
         await comm.save(str(output_path))
@@ -175,18 +242,139 @@ def generate_single_tts(text: str, output_file: str | Path, voice: str = "BV562_
     return audio.duration_seconds
 
 
+def split_scene_into_subtitle_chunks(
+    text: str,
+    start_time: float,
+    duration: float,
+    max_chars: int = 35
+) -> List[Dict[str, Any]]:
+    """Tách câu thoại phân cảnh thành các cụm phụ đề ngắn gọn chuẩn TikTok/Reels (< 35 ký tự)."""
+    words = text.strip().split()
+    if not words:
+        return []
+    chunks = []
+    curr_chunk = []
+    for w in words:
+        candidate = " ".join(curr_chunk + [w])
+        if len(candidate) <= max_chars or not curr_chunk:
+            curr_chunk.append(w)
+        else:
+            chunks.append(" ".join(curr_chunk))
+            curr_chunk = [w]
+    if curr_chunk:
+        chunks.append(" ".join(curr_chunk))
+
+    total_words = len(words)
+    result = []
+    curr_t = start_time
+    for chunk in chunks:
+        c_words = len(chunk.split())
+        c_dur = duration * (c_words / total_words) if total_words > 0 else duration
+        c_end = curr_t + c_dur
+        result.append({
+            "text": chunk,
+            "start": round(curr_t, 3),
+            "end": round(c_end, 3)
+        })
+        curr_t = c_end
+    return result
+
+
+def fit_audio_to_scene_window(
+    audio_path: str | Path,
+    target_duration: float,
+    available_window: float,
+    output_path: Optional[str | Path] = None,
+    max_speedup_ratio: float = 1.08,
+    fade_out_ms: int = 80
+) -> Tuple[Path, float, str]:
+    """
+    Đảm bảo audio phân cảnh không bao giờ tràn qua cửa sổ khả dụng (available_window)
+    của phân cảnh tiếp theo, triệt tiêu hoàn toàn hiện tượng lồng tiếng chồng chéo (audio overlap).
+
+    Quy tắc an toàn:
+    1. duration <= available_window + 0.15s:
+       Giữ nguyên audio gốc (status: 'pass' hoặc 'best_effort').
+    2. available_window < duration <= available_window * max_speedup_ratio (1.08x):
+       Áp dụng time-stretch (atempo) nhẹ bằng ffmpeg để khớp chính xác window mà không làm biến dạng giọng đọc (status: 'fitted').
+    3. duration > available_window * max_speedup_ratio:
+       Cắt an toàn (trim) tại available_window kèm fade-out 80ms ở cuối để tránh tiếng pop/click (status: 'trimmed').
+
+    Trả về: (fitted_file_path, fitted_duration, status_label)
+    """
+    src_path = Path(audio_path)
+    if not src_path.exists():
+        raise FileNotFoundError(f"Không tìm thấy file audio: {src_path}")
+
+    dst_path = Path(output_path) if output_path else src_path.parent / f"{src_path.stem}_fitted{src_path.suffix}"
+    audio = AudioSegment.from_file(str(src_path))
+    curr_dur = audio.duration_seconds
+
+    # Trường hợp 1: Audio nằm trọn vẹn trong window khả dụng
+    if curr_dur <= available_window:
+        if dst_path.resolve() != src_path.resolve():
+            shutil.copy2(src_path, dst_path)
+        status = "pass" if abs(curr_dur - target_duration) <= TTS_DURATION_TOLERANCE else "best_effort"
+        return dst_path, round(curr_dur, 2), status
+
+    # Trường hợp 2: Dài hơn window nhưng <= 1.08x window -> Áp dụng time-stretch (atempo)
+    if curr_dur <= available_window * max_speedup_ratio:
+        speed_factor = round(curr_dur / available_window, 4)
+        speed_factor = max(1.0, min(1.08, speed_factor))
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-i", str(src_path),
+            "-filter:a", f"atempo={speed_factor:.4f}",
+            "-vn", str(dst_path)
+        ]
+        stretched = False
+        try:
+            res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=15)
+            if res.returncode == 0 and dst_path.exists():
+                fitted_audio = AudioSegment.from_file(str(dst_path))
+                dur_res = fitted_audio.duration_seconds
+                if dur_res <= available_window + 0.02:
+                    return dst_path, round(min(dur_res, available_window), 2), "fitted"
+                else:
+                    audio = fitted_audio
+                    stretched = True
+        except Exception as e:
+            logger.warning(f"Lỗi time-stretch qua ffmpeg: {e}")
+
+        # Fallback trim with fade-out nếu atempo không khả dụng hoặc vẫn dài
+        target_ms = int(round(available_window * 1000))
+        trimmed = audio[:target_ms]
+        if len(trimmed) > fade_out_ms:
+            trimmed = trimmed.fade_out(fade_out_ms)
+        trimmed.export(str(dst_path), format=dst_path.suffix.lstrip(".") or "mp3")
+        return dst_path, round(available_window, 2), "fitted"
+
+    # Trường hợp 3: Vượt quá 1.08x window -> Trim an toàn với 80ms fade-out
+    target_ms = int(round(available_window * 1000))
+    trimmed = audio[:target_ms]
+    if len(trimmed) > fade_out_ms:
+        trimmed = trimmed.fade_out(fade_out_ms)
+    trimmed.export(str(dst_path), format=dst_path.suffix.lstrip(".") or "mp3")
+    final_dur = round(len(trimmed) / 1000.0, 2)
+    return dst_path, final_dur, "trimmed"
+
+
 def render_full_script_tts(
     scenes: List[Dict[str, Any]],
     voice: str = "BV562_streaming",
     workspace_dir: Optional[str | Path] = None,
-    pause_between_scenes_ms: int = 350
+    pause_between_scenes_ms: int = 350,
+    video_duration: Optional[float] = None,
+    api_key: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Sinh audio hoàn chỉnh cho toàn bộ kịch bản bằng CapCut TTS:
-    - Sinh file audio cho từng cảnh.
-    - Đo thời lượng thực tế từng cảnh.
-    - Tạo file SRT chuẩn xác từng miligiây.
-    - Ghép thành track audio duy nhất có độ giãn nghỉ tự nhiên.
+    Sinh audio hoàn chỉnh cho toàn bộ kịch bản bằng CapCut TTS kết hợp Closed-Loop Rewrite:
+    - Với từng phân cảnh: Sinh TTS, đo thời lượng thực tế (actual_duration).
+    - So sánh với target_duration: Nếu lệch > 0.3s, tự động kích hoạt Closed-Loop Rewrite tối đa 2 lần.
+    - Áp dụng Safe Fitting (fit_audio_to_scene_window): Tuyệt đối không cho phép âm thanh phân cảnh
+      tràn sang phân cảnh tiếp theo, triệt tiêu hoàn toàn voice overlap.
+    - Xây dựng audio track dạng Master Timeline: Đặt audio từng phân cảnh chuẩn xác tại planned_start.
+      Loại bỏ hoàn toàn audio drift (không bị dồn trễ lũy kế khi scene trước dài hay ngắn).
+    - Tạo file SRT chuẩn xác từng cụm phụ đề ngắn (< 35 ký tự) bám theo timeline giọng đọc thực tế.
     """
     job_id = f"script_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     if workspace_dir is None:
@@ -198,61 +386,205 @@ def render_full_script_tts(
     segments_dir = workspace_dir / "segments"
     segments_dir.mkdir(parents=True, exist_ok=True)
 
-    full_audio = AudioSegment.empty()
-    pause_audio = AudioSegment.silent(duration=pause_between_scenes_ms)
-
-    srt_entries = []
     processed_scenes = []
-    current_time_seconds = 0.0
 
     for i, scene in enumerate(scenes):
-        scene_idx = scene.get("index", i + 1)
-        text = str(scene.get("speaker_text", "")).strip()
+        scene_idx = scene.get("index", scene.get("scene_idx", i + 1))
+        curr_text = str(scene.get("speaker_text") or scene.get("voiceover") or scene.get("text") or "").strip()
         segment_file = segments_dir / f"scene_{scene_idx:02d}.mp3"
 
-        # Sinh TTS
-        duration = generate_single_tts(text, segment_file, voice=voice)
-        
-        # Throttle giữa các request để tránh bị CapCut rate-limit
+        # Lấy mốc thời gian kế hoạch (planned timeline)
+        planned_start = scene.get("planned_start")
+        if planned_start is None:
+            planned_start = scene.get("start_seconds", 0.0)
+        planned_start = float(planned_start or 0.0)
+
+        planned_end = scene.get("planned_end")
+        if planned_end is None:
+            planned_end = scene.get("end_seconds")
+        if planned_end is not None:
+            planned_end = float(planned_end)
+        else:
+            planned_end = planned_start + 3.0
+
+        target_dur = scene.get("target_duration")
+        if target_dur is None:
+            target_dur = scene.get("duration_seconds")
+        if target_dur is not None:
+            target_dur = float(target_dur)
+        else:
+            target_dur = round(planned_end - planned_start, 2)
+
+        prev_scene = scenes[i - 1] if i > 0 else None
+        next_scene = scenes[i + 1] if i < len(scenes) - 1 else None
+
+        # Pass 1: Sinh TTS lần đầu
+        initial_dur = generate_single_tts(curr_text, segment_file, voice=voice)
         if i < len(scenes) - 1:
-            time.sleep(0.5)
+            time.sleep(0.3)
 
-        scene_audio = AudioSegment.from_file(str(segment_file))
-        if len(full_audio) > 0:
-            full_audio += pause_audio
-            current_time_seconds += (pause_between_scenes_ms / 1000.0)
+        initial_delta = round(initial_dur - target_dur, 2)
+        candidates = [(0, abs(initial_delta), initial_dur, curr_text, segment_file)]
+        attempts_made = 0
 
-        start_time = current_time_seconds
-        end_time = start_time + duration
+        # Closed-Loop Rewrite nếu vượt tolerance (+-0.3s)
+        if abs(initial_delta) > TTS_DURATION_TOLERANCE:
+            logger.info(
+                f"[Closed-Loop TTS] Cảnh #{scene_idx} lệch thời lượng: actual={initial_dur:.2f}s, target={target_dur:.2f}s (delta={initial_delta:+.2f}s). "
+                f"Đang kích hoạt AI viết lại..."
+            )
+            for attempt in range(1, TTS_MAX_REWRITE_ATTEMPTS + 1):
+                attempts_made += 1
+                try:
+                    from ai.scriptwriting import rewrite_scene_for_duration
+                    rewritten = rewrite_scene_for_duration(
+                        scene={**scene, "speaker_text": curr_text},
+                        target_duration=target_dur,
+                        actual_duration=candidates[-1][2],
+                        api_key=api_key,
+                        previous_scene=prev_scene,
+                        next_scene=next_scene,
+                        profile=scene.get("profile")
+                    )
+                    new_text = str(rewritten.get("speaker_text", "")).strip()
+                    if new_text and new_text != curr_text:
+                        retry_file = segments_dir / f"scene_{scene_idx:02d}_retry{attempt}.mp3"
+                        dur_retry = generate_single_tts(new_text, retry_file, voice=voice)
+                        delta_retry = round(dur_retry - target_dur, 2)
+                        logger.info(
+                            f"[Closed-Loop TTS] Cảnh #{scene_idx} retry {attempt}: duration={dur_retry:.2f}s (delta={delta_retry:+.2f}s)"
+                        )
+                        candidates.append((attempt, abs(delta_retry), dur_retry, new_text, retry_file))
+                        if abs(delta_retry) <= TTS_DURATION_TOLERANCE:
+                            break
+                        curr_text = new_text
+                    else:
+                        break
+                except Exception as rw_err:
+                    logger.warning(f"Lỗi closed-loop rewrite scene #{scene_idx}: {rw_err}")
+                    break
 
-        # Tạo mục SRT
-        srt_entry = f"{i + 1}\n{format_srt_time(start_time)} --> {format_srt_time(end_time)}\n{text}\n"
-        srt_entries.append(srt_entry)
+        # Chọn ứng viên có abs(delta) nhỏ nhất
+        best_candidate = min(candidates, key=lambda c: c[1])
+        selected_attempt, best_abs_delta, best_dur, best_text, best_file = best_candidate
 
-        full_audio += scene_audio
-        current_time_seconds += duration
+        # Xác định available_window an toàn cho cảnh này để chống tràn sang cảnh sau
+        if next_scene is not None:
+            ns_start = next_scene.get("planned_start")
+            if ns_start is None:
+                ns_start = next_scene.get("start_seconds")
+            ns_start = float(ns_start) if ns_start is not None else planned_end
+            available_window = max(0.5, ns_start - planned_start)
+        else:
+            if video_duration and float(video_duration) > planned_start:
+                available_window = max(target_dur, float(video_duration) - planned_start)
+            else:
+                available_window = max(0.5, planned_end - planned_start)
 
-        scene_copy = dict(scene)
-        scene_copy["start_seconds"] = round(start_time, 3)
-        scene_copy["end_seconds"] = round(end_time, 3)
-        scene_copy["actual_duration"] = round(duration, 2)
-        scene_copy["audio_file"] = str(segment_file)
-        scene_copy["audio_filename"] = f"{job_id}/segments/{segment_file.name}"
-        processed_scenes.append(scene_copy)
+        # Trạng thái ban đầu
+        if selected_attempt == 0 and best_abs_delta <= TTS_DURATION_TOLERANCE:
+            duration_status = "pass"
+        elif selected_attempt > 0 and best_abs_delta <= TTS_DURATION_TOLERANCE:
+            duration_status = "rewritten"
+        else:
+            duration_status = "best_effort"
 
-    # Xuất file audio gộp
+        # Safe Fitting: đảm bảo audio không bao giờ tràn qua available_window
+        fitted_file = segments_dir / f"scene_{scene_idx:02d}_fitted.mp3"
+        final_file, final_dur, fit_status = fit_audio_to_scene_window(
+            best_file,
+            target_duration=target_dur,
+            available_window=available_window,
+            output_path=fitted_file
+        )
+
+        if fit_status in ("fitted", "trimmed"):
+            duration_status = fit_status
+
+        final_delta = round(final_dur - target_dur, 2)
+        actual_end = round(planned_start + final_dur, 3)
+
+        sc_copy = dict(scene)
+        sc_copy["speaker_text"] = best_text
+        sc_copy["word_count"] = len(best_text.split())
+        sc_copy["planned_start"] = round(planned_start, 3)
+        sc_copy["planned_end"] = round(planned_end, 3)
+        sc_copy["target_duration"] = round(target_dur, 2)
+        sc_copy["initial_duration"] = round(initial_dur, 2)
+        sc_copy["initial_delta"] = initial_delta
+        sc_copy["rewrite_attempts"] = attempts_made
+        sc_copy["selected_attempt"] = selected_attempt
+        sc_copy["actual_start"] = round(planned_start, 3)
+        sc_copy["actual_end"] = actual_end
+        sc_copy["actual_duration"] = round(final_dur, 2)
+        sc_copy["final_delta"] = final_delta
+        sc_copy["duration_delta"] = final_delta
+        sc_copy["duration_status"] = duration_status
+
+        # Aliases tương thích ngược
+        sc_copy["start_seconds"] = round(planned_start, 3)
+        sc_copy["end_seconds"] = actual_end
+        sc_copy["duration_seconds"] = round(final_dur, 2)
+        sc_copy["audio_file"] = str(final_file)
+        sc_copy["audio_filename"] = f"{job_id}/segments/{final_file.name}"
+
+        processed_scenes.append(sc_copy)
+
+    # Xây dựng Master Timeline Audio Track (No Audio Drift)
+    max_planned_end = max((s["planned_end"] for s in processed_scenes), default=0.0)
+    max_actual_end = max((s["actual_end"] for s in processed_scenes), default=0.0)
+    total_timeline_sec = max(float(video_duration or 0.0), max_planned_end, max_actual_end)
+
+    total_timeline_ms = int(math.ceil(total_timeline_sec * 1000)) + 300
+    master_audio = AudioSegment.silent(duration=total_timeline_ms)
+
+    # Đặt audio từng phân cảnh tại planned_start chính xác (đã được safe fit)
+    for sc in processed_scenes:
+        sc_audio = AudioSegment.from_file(sc["audio_file"])
+        pos_ms = max(0, int(round(sc["planned_start"] * 1000)))
+        master_audio = master_audio.overlay(sc_audio, position=pos_ms)
+
+    # Cắt gọn master audio đúng tổng thời lượng
+    if total_timeline_sec > 0:
+        master_audio = master_audio[:int(math.ceil(total_timeline_sec * 1000))]
+
     final_audio_path = workspace_dir / "full_voiceover.mp3"
-    full_audio.export(str(final_audio_path), format="mp3")
+    master_audio.export(str(final_audio_path), format="mp3")
 
-    # Xuất file SRT
+    # Xây dựng phụ đề SRT dạng cụm ngắn (< 35 ký tự) chuẩn TikTok/Reels căn theo timeline thực tế
+    srt_entries = []
+    srt_idx = 1
+    for i, sc in enumerate(processed_scenes):
+        sc_text = sc["speaker_text"]
+        sc_start = sc["planned_start"]
+        sc_dur = sc["actual_duration"]
+        sc_end = sc["actual_end"]
+        if i < len(processed_scenes) - 1:
+            next_start = processed_scenes[i + 1]["planned_start"]
+            if sc_end > next_start:
+                sc_end = next_start
+                sc_dur = max(0.1, sc_end - sc_start)
+
+        chunks = split_scene_into_subtitle_chunks(sc_text, sc_start, sc_dur, max_chars=35)
+        sc["subtitle_chunks"] = chunks
+        for ch in chunks:
+            c_s = ch["start"]
+            c_e = min(ch["end"], sc_end)
+            if c_s >= c_e:
+                continue
+            srt_entry = f"{srt_idx}\n{format_srt_time(c_s)} --> {format_srt_time(c_e)}\n{ch['text']}\n"
+            srt_entries.append(srt_entry)
+            srt_idx += 1
+
     srt_content = "\n".join(srt_entries) + "\n"
     srt_file_path = workspace_dir / "subtitles.srt"
     with open(srt_file_path, "w", encoding="utf-8") as f:
         f.write(srt_content)
 
     return {
+        "status": "success",
         "job_id": job_id,
-        "total_duration": round(current_time_seconds, 2),
+        "total_duration": round(master_audio.duration_seconds, 2),
         "audio_path": str(final_audio_path),
         "audio_filename": f"{job_id}/full_voiceover.mp3",
         "srt_path": str(srt_file_path),
@@ -262,17 +594,85 @@ def render_full_script_tts(
     }
 
 
+def mix_voice_with_bgm(
+    voice_audio_path: str | Path,
+    bgm_audio_path: str | Path,
+    output_path: str | Path,
+    bgm_volume_db: float = -18.0,
+    ducking_db: float = -12.0
+) -> str:
+    """Trộn track lồng tiếng với nhạc nền BGM tự động ducking (hạ âm lượng BGM khi có thoại)."""
+    voice = AudioSegment.from_file(str(voice_audio_path))
+    bgm = AudioSegment.from_file(str(bgm_audio_path))
+
+    # Hạ âm lượng BGM cơ bản + ducking
+    bgm_ducked = bgm + (bgm_volume_db + ducking_db)
+
+    # Lặp BGM nếu ngắn hơn voice
+    if len(bgm_ducked) < len(voice):
+        loops = int(math.ceil(len(voice) / len(bgm_ducked)))
+        bgm_ducked = bgm_ducked * loops
+    bgm_ducked = bgm_ducked[:len(voice)]
+
+    mixed = bgm_ducked.overlay(voice)
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    mixed.export(str(out), format="mp3")
+    return str(out)
+
+
+def get_media_duration(file_path: str | Path) -> float:
+    """Lấy thời lượng chính xác của video hoặc audio bằng ffprobe (fallback sang cv2)."""
+    p = clean_fs_path(file_path)
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(p)
+    ]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        dur = float(proc.stdout.strip())
+        if dur > 0:
+            return dur
+    except Exception as probe_err:
+        logger.warning(f"ffprobe không đo được duration cho {p}: {probe_err}")
+
+    # Fallback qua OpenCV nếu là file video
+    try:
+        import cv2
+        cap = cv2.VideoCapture(str(p))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+        cap.release()
+        if fps > 0 and total > 0:
+            return round(float(total / fps), 3)
+    except Exception:
+        pass
+
+    return 0.0
+
+
 def burn_script_to_video(
-    video_path: str,
-    audio_path: str,
-    srt_path: str,
-    output_path: str
+    video_path: str | Path,
+    audio_path: str | Path,
+    srt_path: str | Path,
+    output_path: str | Path
 ) -> str:
     """
     Lồng tiếng CapCut và dập phụ đề SRT vào video nền bằng FFmpeg.
+    ĐẢM BẢO thời lượng video xuất ra khớp chuẩn xác với thời lượng video gốc
+    (Audio ngắn hơn sẽ được pad im lặng, audio dài hơn sẽ được trim, không dùng -shortest làm mất video).
     """
     out_file = Path(output_path)
     out_file.parent.mkdir(parents=True, exist_ok=True)
+
+    clean_video = str(clean_fs_path(video_path))
+    clean_audio = str(clean_fs_path(audio_path))
+
+    # 1. Đo thời lượng video gốc
+    source_duration = get_media_duration(clean_video)
+    logger.info(f"Thời lượng video gốc: {source_duration:.2f}s")
 
     # Chuẩn hóa đường dẫn srt cho FFmpeg Windows (thay \ bằng / và escape dấu :)
     clean_srt = str(Path(srt_path).resolve()).replace("\\", "/")
@@ -280,28 +680,36 @@ def burn_script_to_video(
         drive, rest = clean_srt.split(":", 1)
         clean_srt = f"{drive}\\:{rest}"
 
-    # Lệnh FFmpeg: Thay thế/trộn audio và gắn phụ đề
     # Font chữ to, viền đen nổi bật chuẩn TikTok/Reels
     subtitle_filter = (
         f"subtitles='{clean_srt}':force_style='FontSize=18,PrimaryColour=&H00FFFFFF,"
         f"OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=35'"
     )
 
+    # 2. Xử lý audio filter: pad silence nếu audio ngắn hơn, trim nếu audio dài hơn
+    if source_duration > 0:
+        filter_complex = (
+            f"[0:v]{subtitle_filter}[v];"
+            f"[1:a]apad=whole_dur={source_duration},atrim=0:{source_duration}[a]"
+        )
+        duration_args = ["-t", str(round(source_duration, 3))]
+    else:
+        filter_complex = f"[0:v]{subtitle_filter}[v]"
+        duration_args = []
+
     cmd = [
         "ffmpeg", "-y",
-        "-i", str(video_path),
-        "-i", str(audio_path),
-        "-filter_complex", f"[0:v]{subtitle_filter}[v]",
+        "-i", clean_video,
+        "-i", clean_audio,
+        "-filter_complex", filter_complex,
         "-map", "[v]",
-        "-map", "1:a",
+        "-map", "[a]" if source_duration > 0 else "1:a",
         "-c:v", "libx264",
         "-preset", "fast",
         "-crf", "22",
         "-c:a", "aac",
         "-b:a", "192k",
-        "-shortest",
-        str(out_file)
-    ]
+    ] + duration_args + [str(out_file)]
 
     logger.info(f"Đang chạy FFmpeg: {' '.join(cmd)}")
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

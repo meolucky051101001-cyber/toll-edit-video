@@ -20,6 +20,9 @@ def _prepare_legacy_imports() -> None:
     backend_directory = Path(__file__).resolve().parents[1]
     if str(backend_directory) not in sys.path:
         sys.path.insert(0, str(backend_directory))
+    import ai
+    if "ai.voice_cloning" in sys.modules:
+        setattr(ai, "voice_cloning", sys.modules["ai.voice_cloning"])
 
 
 async def generate_tts_audio_v2(
@@ -57,7 +60,7 @@ async def generate_tts_audio_v2(
             seg_gender = str(getattr(segment, "gender", "female") or "female").lower()
             speaker_id = str(getattr(segment, "speaker_id", "") or "").strip()
             mapped_voice = None
-            if speaker_voice_map:
+            if speaker_voice_map and (voice_source != "rvc" or enable_auto_gender):
                 candidate = None
                 if speaker_id and speaker_id in speaker_voice_map:
                     candidate = speaker_voice_map[speaker_id]
@@ -67,11 +70,16 @@ async def generate_tts_audio_v2(
                 # Only use candidate if it is valid for the current voice_source/provider
                 if candidate:
                     cand_str = str(candidate).strip()
-                    if voice_source == "capcut" and cand_str.startswith("BV"):
-                        mapped_voice = cand_str
-                    elif voice_source == "edge" and cand_str.startswith("vi-"):
-                        mapped_voice = cand_str
-                    elif voice_source == "fpt" and cand_str in {"banmai", "leminh", "myan", "thuminh", "giahuy"}:
+                    if voice_source == "capcut":
+                        if cand_str.startswith("BV") or cand_str.startswith("multi_"):
+                            mapped_voice = cand_str
+                    elif voice_source == "edge":
+                        if cand_str.startswith("vi-"):
+                            mapped_voice = cand_str
+                    elif voice_source == "fpt":
+                        if cand_str in {"banmai", "leminh", "myan", "thuminh", "giahuy"}:
+                            mapped_voice = cand_str
+                    elif not voice_source or voice_source == "auto":
                         mapped_voice = cand_str
 
             target = max((segment.end - segment.start).total_seconds(), 0.1)
@@ -86,7 +94,7 @@ async def generate_tts_audio_v2(
                 ))
                 if is_silent and not strict_provider:
                     try:
-                        capcut_voice = "BV075_streaming" if seg_gender == "male" else "BV562_streaming"
+                        capcut_voice = "BV075_streaming" if (enable_auto_gender and seg_gender == "male") else "BV562_streaming"
                         await asyncio.to_thread(_run_capcut_tts, text, str(raw), capcut_voice)
                         if raw.is_file() and raw.stat().st_size > 256:
                             is_silent = False
@@ -96,7 +104,7 @@ async def generate_tts_audio_v2(
 
             is_silent_fallback = False
             if mapped_voice:
-                if voice_source == "capcut" or mapped_voice.startswith("BV"):
+                if voice_source == "capcut" or mapped_voice.startswith("BV") or mapped_voice.startswith("multi_"):
                     await asyncio.to_thread(_run_capcut_tts, text, str(raw), mapped_voice)
                 elif voice_source == "fpt" or mapped_voice in {"banmai", "leminh", "myan", "thuminh", "giahuy"}:
                     await generate_tts_fpt(text, str(raw), api_key, voice=mapped_voice)
@@ -107,21 +115,27 @@ async def generate_tts_audio_v2(
                         mapped_voice, edge_pitch=pitch, edge_rate=rate
                     )
             elif voice_source == "capcut":
-                await asyncio.to_thread(_run_capcut_tts, text, str(raw), voice_param)
-            elif enable_auto_gender and seg_gender == "male" and voice_source != "fpt":
-                try:
-                    await asyncio.to_thread(
-                        _run_capcut_tts, text, str(raw), "BV075_streaming"
-                    )
-                except Exception:
-                    is_silent_fallback = await _synthesize_edge_with_rescue(
-                        "vi-VN-NamMinhNeural", edge_rate="+5%", edge_pitch="+0Hz"
-                    )
+                capcut_v = "BV075_streaming" if (enable_auto_gender and seg_gender == "male") else voice_param
+                await asyncio.to_thread(_run_capcut_tts, text, str(raw), capcut_v)
+            elif voice_source == "edge":
+                edge_v = (
+                    "vi-VN-NamMinhNeural"
+                    if (enable_auto_gender and seg_gender == "male")
+                    else (voice_param if voice_param.startswith("vi-") else "vi-VN-HoaiMyNeural")
+                )
+                pitch = "+15Hz" if edge_v == "vi-VN-HoaiMyNeural" else "+0Hz"
+                rate = "+15%" if edge_v == "vi-VN-HoaiMyNeural" else "+5%"
+                is_silent_fallback = await _synthesize_edge_with_rescue(
+                    edge_v, edge_pitch=pitch, edge_rate=rate
+                )
             elif voice_source == "fpt":
                 try:
-                    # Explicit FPT selection must not be replaced by the gender route.
-                    selected_voice = voice_param if not voice_param.startswith("vi-") else "banmai"
-                    await generate_tts_fpt(text, str(raw), api_key, voice=selected_voice)
+                    fpt_v = (
+                        "leminh"
+                        if (enable_auto_gender and seg_gender == "male")
+                        else (voice_param if not voice_param.startswith("vi-") else "banmai")
+                    )
+                    await generate_tts_fpt(text, str(raw), api_key, voice=fpt_v)
                 except FPTQuotaError as exc:
                     if strict_provider:
                         raise RuntimeError(
@@ -131,9 +145,10 @@ async def generate_tts_audio_v2(
                         "vi-VN-HoaiMyNeural", edge_rate="+5%"
                     )
             elif voice_source == "rvc":
+                rvc_voice = "BV075_streaming" if (enable_auto_gender and seg_gender == "male") else "BV562_streaming"
                 try:
                     await asyncio.to_thread(
-                        _run_capcut_tts, text, str(raw), "BV562_streaming"
+                        _run_capcut_tts, text, str(raw), rvc_voice
                     )
                 except Exception:
                     is_silent_fallback = await _synthesize_edge_with_rescue(
