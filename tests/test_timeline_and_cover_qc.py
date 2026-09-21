@@ -713,6 +713,21 @@ class TestRealQCFailureDetections(unittest.TestCase):
             # On 9c4f070, this assertion FAILS (returns 'pass' instead of 'error'):
             self.assertEqual(src_check.status, "error", "Unbridged gap (100ms) between adjacent subtitles must fail QC")
 
+    def test_watermark_collision_detected_and_cleared(self):
+        from backend.pipeline_v2.cover_qc import check_watermark_collision
+        # Canvas 1280x720 (Landscape 16:9). Watermark zone is X >= 1066.24 (0.833), Y >= 612 (0.85).
+        # Case 1: Overlapping cover box reaching X=1200, Y=660
+        overlapping_cover = [(10.0, 15.0, 400.0, 620.0, 1200.0, 680.0)]
+        res_overlap = check_watermark_collision(overlapping_cover, 1280, 720)
+        self.assertTrue(res_overlap["has_collision"])
+        self.assertEqual(res_overlap["collision_count"], 1)
+
+        # Case 2: Snug safe cover box clamped to X=1040, Y=660 (well before 1066)
+        safe_cover = [(10.0, 15.0, 400.0, 620.0, 1040.0, 680.0)]
+        res_safe = check_watermark_collision(safe_cover, 1280, 720)
+        self.assertFalse(res_safe["has_collision"])
+        self.assertEqual(res_safe["collision_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -259,11 +259,11 @@ class VideoPipelineEndToEndTests(unittest.IsolatedAsyncioTestCase):
                 manifest_v27 = VideoPipelineRunner(request)._load_or_create_manifest()
                 self.assertEqual(manifest_v27.metadata["pipeline_implementation_version"], "2.10.0")
 
-            # Now run under the current implementation (2.13.1).
+            # Now run under the current implementation (2.13.2).
             runner_v28 = VideoPipelineRunner(request)
             manifest_v28 = runner_v28._load_or_create_manifest()
 
-            self.assertEqual(manifest_v28.metadata["pipeline_implementation_version"], "2.13.1")
+            self.assertEqual(manifest_v28.metadata["pipeline_implementation_version"], "2.13.2")
             self.assertNotEqual(
                 manifest_v27.fingerprints.config_sha256,
                 manifest_v28.fingerprints.config_sha256,

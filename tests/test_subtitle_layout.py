@@ -274,6 +274,35 @@ class SubtitleLayoutTests(unittest.TestCase):
             self.assertLessEqual(width, 648)
             self.assertGreaterEqual(x, 36)
 
+    def test_landscape_bottom_subtitle_avoids_watermark(self):
+        # Long subtitle at bottom (y_pct=0.85) in 1920x1080 (Landscape)
+        from backend.pipeline_v2.segments import GeometryBlock
+        long_text = "Lúc thì cào lại đống đất bị dẫm loạn, hơn mười ngày sau, mảng bùn ẩm nứt ra một đường nhỏ."
+        seg = RuntimeSegment(
+            index=1, start=timedelta(seconds=600), end=timedelta(seconds=605),
+            content=long_text,
+            best_block=GeometryBlock(text="有时把踩乱的泥土扒回去十多天后湿润的泥块裂开了一条细缝", start=600, end=605,
+                                     x_pct=0.18, max_x_pct=0.82, y_pct=0.84, max_y_pct=0.89)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "watermark_clearance.ass"
+            generate_ass_file([seg], [], path, play_res_x=1920, play_res_y=1080)
+            content = path.read_text(encoding="utf-8-sig")
+            bg_line = next(l for l in content.splitlines() if ",BgStyle," in l)
+            match = re.search(r"\\pos\((\d+),(\d+)\).*?m (\d+) [\d.]+ l [\d.]+ [\d.]+ b [\d.]+ [\d.]+ [\d.]+ (\d+)", bg_line)
+            self.assertIsNotNone(match)
+            x, y, width, height = map(int, match.groups())
+            # Scaled canvas for 1920x1080 is 1280x720.
+            # Red seal watermark in Douyin video starts at X >= 1626 in 1080p -> X >= 1084 in 720p canvas.
+            # Safe limit is 0.82 * 1280 = 1049.
+            right_edge = x + width
+            self.assertLessEqual(right_edge, 1050)
+            # Must have at least 34 px clearance on 720p canvas (51+ px in 1080p)
+            self.assertLess(right_edge, 1084)
+            # Text should wrap to 2 lines instead of stretching across the screen
+            text_lines = [l for l in content.splitlines() if ",TextStyle," in l]
+            self.assertTrue(any(r"\N" in tl for tl in text_lines))
+
 
 if __name__ == "__main__":
     unittest.main()

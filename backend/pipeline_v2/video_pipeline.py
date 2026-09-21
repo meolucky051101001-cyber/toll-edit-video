@@ -77,8 +77,9 @@ V2_STAGE_ORDER = (
 # Bump this value whenever artifact semantics change.  It participates in the
 # manifest fingerprint so an upgraded runner cannot silently reuse output from
 # an older implementation that happened to have the same environment flags.
-PIPELINE_IMPLEMENTATION_VERSION = "2.13.1"
-TRANSLATION_CHECKPOINT_VERSION = 2
+PIPELINE_IMPLEMENTATION_VERSION = "2.13.2"
+TRANSLATION_CHECKPOINT_VERSION = 3
+TRANSLATION_CONTEXT_WINDOW = 12
 
 
 class QCGateBlocked(RuntimeError):
@@ -805,6 +806,7 @@ class VideoPipelineRunner:
         prior_context: List[Dict[str, str]] = []
         translation_batches: List[Dict[str, Any]] = []
         for batch_number, batch in enumerate(batches, 1):
+            recent_context = prior_context[-TRANSLATION_CONTEXT_WINDOW:]
             checkpoint_key = "translation/batches/{:05d}.json".format(batch_number)
             input_fingerprint = fingerprint_json(
                 {
@@ -812,12 +814,12 @@ class VideoPipelineRunner:
                     "pipeline_implementation_version": PIPELINE_IMPLEMENTATION_VERSION,
                     "segments": segments_to_dicts(batch),
                     "target_lang": self.request.target_lang,
-                    "prior_context": prior_context[-4:],
+                    "prior_context": recent_context,
                     "glossary": dict(self.request.glossary or {}),
                     "entity_map": dict(self.request.entity_map or {}),
                     "speaker_map": dict(self.request.speaker_map or {}),
                     "translation_checkpoint_version": TRANSLATION_CHECKPOINT_VERSION,
-                    "quality_policy": "strict_llm_context_v2",
+                    "quality_policy": "strict_llm_context_v3",
                 }
             )
             checkpoint_path = self.artifact_store.path_for(checkpoint_key)
@@ -825,11 +827,19 @@ class VideoPipelineRunner:
             if checkpoint_path.is_file():
                 try:
                     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-                    if checkpoint.get("input_fingerprint") == input_fingerprint:
+                    if (
+                        checkpoint.get("input_fingerprint") == input_fingerprint
+                        and checkpoint.get("checkpoint_version") == TRANSLATION_CHECKPOINT_VERSION
+                    ):
+                        batch_quality = dict(checkpoint.get("quality") or {})
+                        if (
+                            batch_quality.get("provider_kind") != "llm"
+                            or batch_quality.get("provider") not in {"gemini", "openai", "deepseek"}
+                        ):
+                            raise RuntimeError("Translation checkpoint lacks verified LLM provenance")
                         candidate_batch = segments_from_dicts(checkpoint["segments"])
                         validate_translated_batch(batch, candidate_batch)
                         translated_batch = candidate_batch
-                        batch_quality = dict(checkpoint.get("quality") or {})
                         artifacts.append(
                             self.artifact_store.record_existing(checkpoint_key)
                         )
@@ -851,13 +861,13 @@ class VideoPipelineRunner:
                         batch_quality.clear()
                         translated_batch = await asyncio.to_thread(
                             translate_subtitles,
-                            batch,
+                            segments_from_dicts(segments_to_dicts(batch)),
                             self.request.target_lang,
                             self.request.api_key,
                             str(self.video_path),
                             context_start_seconds=batch[0].start.total_seconds(),
                             context_end_seconds=batch[-1].end.total_seconds(),
-                            prior_context=prior_context[-4:],
+                            prior_context=recent_context,
                             strict=True,
                             enable_g4f=False,
                             timeout=60,
@@ -877,7 +887,10 @@ class VideoPipelineRunner:
                             ],
                         )
                         validate_translated_batch(batch, translated_batch)
-                        if batch_quality.get("provider_kind") != "llm":
+                        if (
+                            batch_quality.get("provider_kind") != "llm"
+                            or batch_quality.get("provider") not in {"gemini", "openai", "deepseek"}
+                        ):
                             raise RuntimeError(
                                 "Strict V2 translation refused non-LLM batch {}".format(
                                     batch_number
@@ -922,7 +935,7 @@ class VideoPipelineRunner:
                     "translated": str(segment.content),
                     "speaker_id": str(getattr(segment, "speaker_id", "") or ""),
                 }
-                for segment in translated_batch[-3:]
+                for segment in translated_batch[-TRANSLATION_CONTEXT_WINDOW:]
             )
 
         artifacts.extend([

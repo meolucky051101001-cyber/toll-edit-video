@@ -169,6 +169,15 @@ def generate_ass_file(
     max_allowed_w = canvas_x - 2 * min_margin
     text_max_w = max_allowed_w - (outline * 2) - (sticker_padding_x * 2)
 
+    # Watermark protection zone (bottom-right red seal at X >= 0.8468, Y >= 0.9074 on landscape videos)
+    is_landscape = canvas_x > canvas_y
+    if is_landscape:
+        watermark_x_limit = int(canvas_x * (1574.0 / 1920.0))  # <= 1049px on 720p canvas, <= 1574px in 1080p
+        safe_bottom_text_max_w = int(canvas_x * 0.65)
+    else:
+        watermark_x_limit = canvas_x - min_margin
+        safe_bottom_text_max_w = text_max_w
+
     # Initialize font measurement if available
     measure = None
     if subtitle_measure is not None:
@@ -284,9 +293,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if split_subtitle_sentences is not None and split_segment_text is not None:
             try:
                 for seg in dialogue_segments:
+                    blist = [b for b in (getattr(seg, "tracking_blocks", None) or []) if not _excluded_source(b)]
+                    if not blist and getattr(seg, "best_block", None):
+                        bb = getattr(seg, "best_block")
+                        if not _excluded_source(bb):
+                            blist = [bb]
+                    seg_y_val = (
+                        (float(_block_value(blist[0], "y_pct", 0.0)) + float(_block_value(blist[0], "max_y_pct", 0.0))) * 0.5
+                        if blist else float(getattr(seg, "y_pct", main_y_pct) or main_y_pct)
+                    )
+                    effective_split_w = safe_bottom_text_max_w if (is_landscape and seg_y_val >= 0.80) else text_max_w
                     parts = []
                     for sentence in split_subtitle_sentences(seg.content):
-                        lines = _wrap_text(sentence, text_max_w)
+                        lines = _wrap_text(sentence, effective_split_w)
                         sentence_parts = list(
                             " ".join(lines[offset : offset + 2])
                             for offset in range(0, len(lines), 2)
@@ -297,7 +316,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                             choices = []
                             for cut in range(3, len(words) - 2):
                                 a, b = " ".join(words[:cut]), " ".join(words[cut:])
-                                if len(_wrap_text(a, text_max_w)) <= 2 and len(_wrap_text(b, text_max_w)) <= 2:
+                                if len(_wrap_text(a, effective_split_w)) <= 2 and len(_wrap_text(b, effective_split_w)) <= 2:
                                     choices.append((abs(cut - len(words) / 2), a, b))
                             if choices:
                                 _, a, b = min(choices)
@@ -413,7 +432,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     source_left_pct = None
                     source_right_pct = None
 
-                lines = _wrap_text(text, text_max_w)
+                is_near_bottom = False
+                if is_landscape:
+                    if has_source:
+                        raw_cy_pct = (raw_y_pct + raw_max_y_pct) * 0.5
+                        is_near_bottom = (
+                            raw_cy_pct >= 0.80
+                            or (abs(raw_cy_pct - med_center_pct) <= 0.04 and (locked_center_y / max(1, canvas_y)) >= 0.80)
+                        )
+                    else:
+                        is_near_bottom = main_y_pct >= 0.80
+
+                effective_text_w = safe_bottom_text_max_w if is_near_bottom else text_max_w
+                lines = _wrap_text(text, effective_text_w)
                 formatted_text = "\\N".join(line.replace("\\", "／").replace("{", "｛").replace("}", "｝") for line in lines)
                 num_lines = len(lines)
                 actual_text_w = math.ceil(
@@ -432,41 +463,72 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         chinese_center_y = int(raw_cy_pct * canvas_y)
                         chinese_h = raw_h
 
-                    min_cover_w = math.ceil(2 * max(
-                        chinese_center_x - source_left_pct * canvas_x,
-                        source_right_pct * canvas_x - chinese_center_x,
-                    )) + (sticker_padding_x * 2)
+                    if is_near_bottom:
+                        # 1. Geometry required to fully cover Chinese source subtitle
+                        src_l = source_left_pct * canvas_x
+                        src_r = source_right_pct * canvas_x
+                        need_x1 = src_l - sticker_padding_x
+                        need_x2 = src_r + sticker_padding_x
+
+                        # 2. Geometry required to fit translated text centered at chinese_center_x
+                        text_cover_w = actual_text_w + (sticker_padding_x * 2)
+                        text_x1 = chinese_center_x - (text_cover_w / 2.0)
+                        text_x2 = chinese_center_x + (text_cover_w / 2.0)
+
+                        # Bounding box must cover both source subtitle and translated text
+                        box_x1 = min(need_x1, text_x1)
+                        box_x2 = max(need_x2, text_x2)
+
+                        min_margin = math.ceil(canvas_x * 0.05)
+                        box_x1 = max(min_margin, box_x1)
+
+                        # In landscape bottom area, protect watermark seal (X <= watermark_x_limit)
+                        if box_x2 > watermark_x_limit:
+                            excess = box_x2 - watermark_x_limit
+                            if box_x1 - excess >= min_margin and (box_x1 - excess) <= need_x1:
+                                box_x1 -= excess
+                                box_x2 = watermark_x_limit
+                            else:
+                                box_x2 = watermark_x_limit
+
+                        draw_x = round(box_x1)
+                        draw_w = max(4, round(box_x2 - box_x1))
+                        draw_w = 2 * math.ceil(draw_w / 2)
+                        if draw_x + draw_w > watermark_x_limit:
+                            draw_x = max(min_margin, watermark_x_limit - draw_w)
+                            if draw_x + draw_w > watermark_x_limit:
+                                draw_w = 2 * ((watermark_x_limit - draw_x) // 2)
+                    else:
+                        min_cover_w = math.ceil(2 * max(
+                            chinese_center_x - source_left_pct * canvas_x,
+                            source_right_pct * canvas_x - chinese_center_x,
+                        )) + (sticker_padding_x * 2)
+                        text_cover_w = actual_text_w + (sticker_padding_x * 2)
+                        target_visible_w = min(
+                            max(min_cover_w, text_cover_w), max_allowed_w
+                        )
+                        draw_w = max(4, target_visible_w - (outline * 2))
+                        draw_w = min(max_allowed_w, 2 * math.ceil(draw_w / 2))
+                        draw_x = chinese_center_x - draw_w // 2
+                        min_margin = math.ceil(canvas_x * 0.05)
+                        if draw_x < min_margin:
+                            draw_x = min_margin
+                        elif draw_x + draw_w > canvas_x - min_margin:
+                            draw_x = max(min_margin, canvas_x - min_margin - draw_w)
+
                     min_cover_h = chinese_h + (sticker_padding_y * 2)
-
-                    text_cover_w = actual_text_w + (sticker_padding_x * 2)
                     text_cover_h = required_text_h + (sticker_padding_y * 2)
-
-                    max_source_cover_w = max_allowed_w
-                    target_visible_w = min(
-                        max(min_cover_w, text_cover_w), max_source_cover_w
-                    )
                     target_visible_h = min(canvas_y, max(min_cover_h, text_cover_h))
 
-                    draw_w = max(4, target_visible_w - (outline * 2))
-                    draw_w = min(max_source_cover_w, 2 * math.ceil(draw_w / 2))
                     draw_h = max(4, target_visible_h - (outline * 2))
-
-                    draw_x = chinese_center_x - draw_w / 2
                     draw_y = chinese_center_y - (draw_h // 2)
-
-                    min_margin = math.ceil(canvas_x * 0.05)
-                    if draw_x < min_margin:
-                        draw_x = min_margin
-                    if draw_x + draw_w > canvas_x - min_margin:
-                        draw_x = max(min_margin, canvas_x - min_margin - draw_w)
-
                     draw_y = max(0, min(draw_y, canvas_y - draw_h - (outline * 2)))
 
                     draw_cmd = "{\\p1}" + _rounded_box(draw_w, draw_h) + "{\\p0}"
                     bg_line = f"{{\\an7\\pos({draw_x:g},{draw_y})}}{draw_cmd}"
                     ass_content += f"Dialogue: 0,{start_str},{end_str},BgStyle,,0,0,0,,{bg_line}\n"
 
-                    text_cx = chinese_center_x
+                    text_cx = draw_x + (draw_w / 2.0)
                     text_cy = draw_y + max(0, (draw_h - required_text_h) // 2)
                     text_line = f"{{\\an8\\pos({text_cx:g},{text_cy})}}{formatted_text}"
                     ass_content += f"Dialogue: 1,{start_str},{end_str},TextStyle,,0,0,0,,{text_line}\n"

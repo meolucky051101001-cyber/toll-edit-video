@@ -28,6 +28,8 @@ BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
+import argparse
+
 # Load .env configuration
 env_file = BASE_DIR / ".env"
 if env_file.is_file():
@@ -38,7 +40,21 @@ if env_file.is_file():
                 k, v = line.split("=", 1)
                 os.environ[k.strip()] = v.strip().strip('"').strip("'")
 
-benchmark_log_file = BASE_DIR.parent / "workspace" / "benchmark_runs" / "e2e_verify_job" / "verification_run.log"
+parser = argparse.ArgumentParser(description="Run offline verification benchmark for Tool V2")
+parser.add_argument("--cold", action="store_true", default=True, help="Run as fresh cold benchmark in e2e_cold_verify_job")
+parser.add_argument("--warm", action="store_true", help="Run warm benchmark in e2e_verify_job")
+parser.add_argument("--benchmark-dir", type=str, default=None, help="Custom benchmark output directory")
+parser.add_argument("--skip-clean", action="store_true", help="Do not wipe job directory before running")
+cli_args, _ = parser.parse_known_args()
+
+if cli_args.benchmark_dir:
+    benchmark_dir = Path(cli_args.benchmark_dir)
+elif cli_args.warm:
+    benchmark_dir = BASE_DIR.parent / "workspace" / "benchmark_runs" / "e2e_verify_job"
+else:
+    benchmark_dir = BASE_DIR.parent / "workspace" / "benchmark_runs" / "e2e_cold_verify_job"
+
+benchmark_log_file = benchmark_dir / "verification_run.log"
 benchmark_log_file.parent.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
@@ -100,13 +116,17 @@ async def main():
         logger.error(f"Source video not found: {source_video}")
         sys.exit(1)
 
-    benchmark_dir = Path(r"C:\tool v2\workspace\benchmark_runs\e2e_verify_job")
     job_dir = benchmark_dir / "job"
     output_dir = benchmark_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     final_output_path = output_dir / "verified_douyin_13m20s.mp4"
 
-    # Enforce fresh benchmark job run under pipeline v2.13.0
+    # Enforce fresh cold benchmark run when requested
+    if not cli_args.skip_clean and not cli_args.warm:
+        if job_dir.exists():
+            logger.info(f"Cleaning existing job directory for 100% cold run: {job_dir}")
+            shutil.rmtree(str(job_dir), ignore_errors=True)
+
     pipeline_v2_dir = job_dir / "pipeline_v2"
     manifest_file = pipeline_v2_dir / "job_manifest.json"
 
@@ -118,7 +138,8 @@ async def main():
     settings = PipelineSettings.from_env()
 
     logger.info("=" * 80)
-    logger.info("OFFLINE END-TO-END VERIFICATION RUN — PIPELINE V2.13.0")
+    mode_str = "WARM BENCHMARK" if cli_args.warm else "100% COLD BENCHMARK (NO CACHE)"
+    logger.info(f"OFFLINE END-TO-END VERIFICATION RUN — PIPELINE V2.13.2 [{mode_str}]")
     logger.info("=" * 80)
     logger.info(f"Source: {source_video} ({source_video.stat().st_size / (1024*1024):.1f} MB)")
     logger.info(f"Benchmark Dir: {benchmark_dir}")
@@ -201,9 +222,21 @@ async def main():
         sample_timestamps,
     )
 
+    # Segment count from timed segments
+    segment_count = 0
+    timed_seg_file = pipeline_v2_dir / "artifacts" / "timed_segments.json"
+    if timed_seg_file.is_file():
+        try:
+            segs = json.loads(timed_seg_file.read_text(encoding="utf-8"))
+            segment_count = len(segs)
+        except Exception:
+            pass
+
     summary = {
         "status": "success" if result.qc_allowed else "qc_failed",
-        "pipeline_version": "2.13.0",
+        "pipeline_version": "2.13.2",
+        "benchmark_mode": "warm" if cli_args.warm else "cold",
+        "segment_count": segment_count,
         "total_wall_time_seconds": round(total_wall_time, 2),
         "total_wall_time_formatted": f"{total_m}m {total_s}s",
         "stage_durations_seconds": manifest_stages,

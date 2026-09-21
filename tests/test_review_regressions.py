@@ -1,6 +1,7 @@
 """Regression tests for model changes, real stage wiring and desktop settings."""
 import asyncio
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -49,7 +50,7 @@ class PipelineRegressionTests(unittest.IsolatedAsyncioTestCase):
         def translate(batch, *args, **kwargs):
             calls.append(1)
             kwargs.get("quality_metadata", {}).update(
-                {"provider": "test-llm", "provider_kind": "llm"}
+                {"provider": "gemini", "provider_kind": "llm"}
             )
             batch[0].orig_content = batch[0].content
             batch[0].content = "Bản dịch {}".format(len(calls))
@@ -62,7 +63,7 @@ class PipelineRegressionTests(unittest.IsolatedAsyncioTestCase):
             first = self.runner()
             await first._translate_stage([segment()])
             context = first._load_json("translation/context.json")
-            self.assertEqual(context["batches"][0]["provider"], "test-llm")
+            self.assertEqual(context["batches"][0]["provider"], "gemini")
             self.assertEqual(context["batches"][0]["provider_kind"], "llm")
             resumed = self.runner()
             await resumed._translate_stage([segment()])
@@ -79,6 +80,68 @@ class PipelineRegressionTests(unittest.IsolatedAsyncioTestCase):
             await changed._translate_stage([segment()])
             self.assertEqual(len(calls), 4)
             self.assertEqual(changed._load_segments("translation/segments.json")[0].content, "Bản dịch 4")
+
+    async def test_translation_retry_keeps_original_chinese_source(self):
+        calls = []
+
+        def translate(batch, *args, **kwargs):
+            calls.append(batch[0].content)
+            kwargs["quality_metadata"].update({"provider": "gemini", "provider_kind": "llm"})
+            batch[0].orig_content = batch[0].content
+            batch[0].content = "你好" if len(calls) == 1 else "Xin chào"
+            return batch
+
+        module = SimpleNamespace(translate_subtitles=translate)
+        with mock.patch.dict(sys.modules, {"ai.translation": module}), mock.patch(
+            "backend.pipeline_v2.video_pipeline.asyncio.sleep", new_callable=mock.AsyncMock
+        ):
+            runner = self.runner()
+            await runner._translate_stage([segment()])
+        self.assertEqual(calls, ["你好", "你好"])
+        self.assertEqual(runner._load_segments("translation/segments.json")[0].content, "Xin chào")
+
+    async def test_translation_rejects_checkpoint_without_provider_provenance(self):
+        calls = []
+
+        def translate(batch, *args, **kwargs):
+            calls.append(1)
+            kwargs["quality_metadata"].update({"provider": "gemini", "provider_kind": "llm"})
+            batch[0].orig_content = batch[0].content
+            batch[0].content = "Xin chào"
+            return batch
+
+        module = SimpleNamespace(translate_subtitles=translate)
+        with mock.patch.dict(sys.modules, {"ai.translation": module}):
+            runner = self.runner()
+            await runner._translate_stage([segment()])
+            checkpoint_path = runner.artifact_store.path_for("translation/batches/00001.json")
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint["quality"] = {}
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+            await self.runner()._translate_stage([segment()])
+        self.assertEqual(len(calls), 2)
+
+    async def test_long_video_batches_carry_recent_translation_context(self):
+        self.request = replace(
+            self.request,
+            settings=replace(self.request.settings, translation_batch_segments=13),
+        )
+        contexts = []
+
+        def translate(batch, *args, **kwargs):
+            contexts.append(list(kwargs["prior_context"]))
+            kwargs["quality_metadata"].update({"provider": "gemini", "provider_kind": "llm"})
+            for item in batch:
+                item.orig_content = item.content
+                item.content = "Câu dịch {}".format(item.index)
+            return batch
+
+        transcript = [replace(segment(), index=index) for index in range(1, 15)]
+        with mock.patch.dict(sys.modules, {"ai.translation": SimpleNamespace(translate_subtitles=translate)}):
+            await self.runner()._translate_stage(transcript)
+        self.assertEqual(len(contexts), 2)
+        self.assertEqual(len(contexts[1]), 12)
+        self.assertEqual(contexts[1][-1]["translated"], "Câu dịch 13")
 
     async def test_disabled_cache_does_not_restore_completed_batch(self):
         self.request = replace(self.request, settings=replace(self.request.settings, enable_stage_cache=False))

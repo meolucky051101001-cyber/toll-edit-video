@@ -27,7 +27,9 @@ class SubtitleFrameCache:
             delta = np.abs(gray.astype(np.int16)-old_gray.astype(np.int16))
             changed = np.logical_xor(edges, old_edges).sum()
             ink = max(1, np.logical_or(edges, old_edges).sum())
-            if delta.mean() <= 6 and changed / ink <= 0.12:
+            edge_ratio = changed / ink
+            mean_delta = delta.mean()
+            if (edge_ratio <= 0.12 and mean_delta <= 8.0) or (edge_ratio <= 0.08 and mean_delta <= 12.0) or (mean_delta <= 6.0 and edge_ratio <= 0.15):
                 self.hits += 1
                 return result
         return None

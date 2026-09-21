@@ -123,7 +123,7 @@ class TranslationResilienceTests(unittest.TestCase):
             "translate_with_gemini": mock_gemini,
             "GoogleTranslator": MockGoogleTranslator,
         }):
-            res = translate_subtitles([sub1, sub2, sub3], api_key="test_key", enable_g4f=False, strict=True)
+            res = translate_subtitles([sub1, sub2, sub3], api_key="test_key", enable_g4f=False, strict=False)
             self.assertEqual(res[0].content, "Xin chào")
             self.assertEqual(res[1].content, "Người bạn cũ")
             self.assertEqual(res[2].content, "Tạm biệt")

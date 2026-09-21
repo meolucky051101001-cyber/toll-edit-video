@@ -396,7 +396,7 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
             # Padding notices nearby second lines or small vertical movement.
             top = max(0, (cache_top*height-crop_y_start)/ (crop_y_end-crop_y_start)-.02)
             bottom = min(1, (cache_bottom*height-crop_y_start)/(crop_y_end-crop_y_start)+.02)
-            frame_cache = SubtitleFrameCache(top, bottom)
+            frame_cache = SubtitleFrameCache(top, bottom, max_age=2.5)
         logger.info("OCR probes=%d, band_support=%d, visual reuse=%s", len(seeds), probe_band.support, frame_cache is not None)
         if kwargs.get("band_only", False) and cache_region_found:
             cap.release()

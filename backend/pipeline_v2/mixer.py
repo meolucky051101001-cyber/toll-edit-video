@@ -366,7 +366,9 @@ def build_ffmpeg_mix_command(
     for dub in dubs:
         command.extend(["-i", dub["path"]])
 
-    limiter_linear = 10 ** (config.true_peak_dbtp / 20.0)
+    # Apply 0.2 dB headroom to alimiter to prevent transient overshoot above target true peak
+    limiter_target_db = min(config.true_peak_dbtp, config.true_peak_dbtp - 0.2)
+    limiter_linear = 10 ** (limiter_target_db / 20.0)
     filters = []
     if dubs:
         voice_labels = []

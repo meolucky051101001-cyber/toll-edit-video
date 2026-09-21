@@ -205,13 +205,15 @@ Yêu cầu TỐI QUAN TRỌNG:
 5. KHỚP KHẨU HÌNH & THỜI LƯỢNG (LIP-SYNC): Văn bản dịch dùng để lồng tiếng (TTS), độ dài âm tiết của câu tiếng Việt PHẢI TƯƠNG ĐƯƠNG VỚI CÂU GỐC để khớp hoàn hảo khẩu hình miệng của nhân vật (không được dịch quá dài khiến AI phải đọc quá nhanh, và không được dịch quá cụt khiến AI đọc xong trước khi nhân vật khép miệng).
 6. ĐẶT DẤU NGẮT NGHỈ (DẤU PHẨY, DẤU CHẤM) CHUẨN XÁC THEO LỜI NÓI GỐC:
    Văn bản dịch dùng để lồng tiếng (TTS) và hiển thị phụ đề. Giọng đọc TTS chỉ ngắt nghỉ, lấy hơi khi gặp dấu phẩy (,) hoặc dấu chấm kết câu (. ! ?).
-   - Nếu câu gốc có dấu ngắt nghỉ (dấu phẩy ， hoặc khoảng ngắt vế): BẮT BUỘC đặt dấu phẩy (,) vào câu dịch tại đúng vị trí ngắt nghỉ tương ứng để giọng đọc AI thở và ngắt nghỉ tự nhiên theo đúng câu nói gốc.
-   - Ngay cả khi câu gốc từ nhận dạng giọng nói (ASR) bị thiếu dấu: Nếu câu gồm nhiều vế, có trạng ngữ, liên từ hoặc điểm ngắt nghỉ tự nhiên của lời nói, BẮT BUỘC phải đặt dấu phẩy (,) để phân tách các vế.
+   - BẮT BUỘC viết hoa chữ cái đầu tiên của mỗi câu.
+   - BẮT BUỘC đặt dấu phẩy (,) phân tách các vế trong câu ghép, câu có trạng ngữ, liên từ (như 'khi...', 'nếu...', 'nhưng...', 'lúc thì...'):
+     * CÂU DÀI NỐI NHIỀU Ý BẮT BUỘC PHẢI CÓ DẤU PHẨY ĐỂ AI THỞ TỰ NHIÊN (ví dụ: 'Một trận rung chấn kinh hoàng, chia cắt nó khỏi đàn đang di cư, nó rơi xuống khe đá núi lửa.', 'Lúc thì cào lại đống đất bị dẫm loạn, hơn mười ngày sau, mảng bùn ẩm nứt ra một đường nhỏ.').
    - Nếu câu nói ngắn, liền một hơi không có ngắt nghỉ thì KHÔNG tự ý chèn dấu ngắt nghỉ ("nếu không thì thôi").
-   - Chỉ đặt dấu kết câu (. ! ?) khi đã kết thúc một câu hoàn chỉnh trọn vẹn ý nghĩa; TUYỆT ĐỐI KHÔNG chèn dấu chấm (.) ở giữa câu lửng hoặc ở cuối các vế câu chưa hết ý.
-   - KHÔNG dùng dấu ba chấm (... hoặc …).
+   - Kết thúc một câu hoàn chỉnh trọn vẹn ý nghĩa: BẮT BUỘC có dấu kết câu (. ! ?). Tuyệt đối không để câu hoàn chỉnh kết thúc cụt ngủn không dấu.
+   - TUYỆT ĐỐI KHÔNG dùng dấu ba chấm (... hoặc …).
 7. NGỮ CẢNH NỐI TIẾP: Vì phụ đề thường bị ngắt giữa chừng, hãy đọc cả đoạn để dịch sao cho ý nối liền mạch trơn tru.
-    BẮT BUỘC giữ nguyên cách viết tên riêng, loài vật và đại từ đã xuất hiện trong phần ngữ cảnh batch trước. Không dịch lại tên riêng theo âm hoặc theo nghĩa tiếng Anh; ví dụ tên đã dịch là "A Thích" thì các batch sau phải tiếp tục dùng đúng "A Thích", không đổi thành "Assassin", "Assin" hay "Sát thủ".
+    BẮT BUỘC giữ nguyên cách viết tên riêng, loài vật và đại từ đã xuất hiện trong phần ngữ cảnh batch trước, không dịch lại theo nghĩa.
+    Tên nhân vật chính là 'A Thích' (阿特): BẮT BUỘC giữ nguyên xuyên suốt là 'A Thích', TUYỆT ĐỐI KHÔNG đổi thành 'Assassin', 'Assin', 'Sát thủ' hay bất kỳ tên nào khác!
     KHÔNG dùng dấu ba chấm (... hoặc …). Hệ thống sẽ chuyển phụ đề sang câu kế tiếp tại dấu kết câu; vẫn giữ đúng số phần tử JSON theo đầu vào.
 8. BẮT LỖI ĐỒNG ÂM ASR DO NHẬN DẠNG GIỌNG NÓI (WHISPER): Phụ đề tiếng Trung gốc được trích xuất bằng ASR nên thường xuất hiện các từ đồng âm/gần âm sai trong video review, handmade, đồ gia dụng. Hãy dùng ngữ cảnh sản phẩm để tự động sửa:
    - '天手章' hoặc '手张' -> hiểu đúng là '贴手帐' hoặc '手帐' (dán sổ tay / chơi sổ Bullet Journal / planner); tuyệt đối KHÔNG dịch thành 'chương tay' hay 'quả trứng'.
@@ -608,6 +610,177 @@ Dữ liệu:
     return None
 
 
+def ensure_speech_pauses_and_entity(source_texts, translated_texts, entity_map=None, prior_context=None):
+    """Normalize translated texts with proper capitalization, pauses, and entity names."""
+    if not translated_texts or len(source_texts) != len(translated_texts):
+        return translated_texts
+
+    forbidden_variants = [
+        (re.compile(r"\b(?:assassin|assin|sát thủ|thích khách)\b", re.IGNORECASE), "A Thích"),
+    ]
+
+    intro_adverbial_pattern = re.compile(
+        r"^(?P<lead>(?:Trước khi|Sau khi|Đến khi|Khi|Nếu|Dù|Tuy|Mặc dù|Vì|Do|Nhờ|Để|Sau đó|Trước đó|Từ đó|Về sau|Sau này|Lúc này|Đến nay|Hiện tại|Cuối cùng|Đồng thời|Mặt khác|Thậm chí|Ngược lại)\s+[^,]{0,35}?)\s+(?=(?:nhất định|sẽ|thì|đều|lại|vẫn|phải|liền|đành|buộc phải|không thể|đã|nó|họ|anh|cô|chúng|ông|bà|tôi|bạn|là|đang|cũng)\b)",
+        re.IGNORECASE,
+    )
+    clause_split_patterns = [
+        re.compile(r"(\s+)(nhưng\b|mà\b|cho nên\b|thế nhưng\b|tuy nhiên\b|thậm chí\b|ngược lại\b|do đó\b|vì vậy\b|vì thế\b|đồng thời\b|bởi vậy\b|mặt khác\b)", re.IGNORECASE),
+        re.compile(r"(\s+)(khi\s+bạn\b|khi\s+mùa\b|khi\s+nó\b|đến\s+khi\b|đến\s+chập\s+tối\b|ngày\s+hôm\s+sau\b|ngày\s+hôm\s+trước\b|hơn\s+mười\s+ngày\s+sau\b|mấy\s+ngày\s+sau\b|vài\s+ngày\s+sau\b|ngay\s+sau\s+đó\b|ít\s+lâu\s+sau\b)", re.IGNORECASE),
+        re.compile(r"(\s+)(chia\s+cắt\s+nó\b|nó\s+rơi\s+xuống\b|nó\s+rơi\s+vào\b|đúng\s+vào\s+lúc\b|lúc\s+này\b|đúng\s+lúc\s+này\b)", re.IGNORECASE),
+        re.compile(r"(\s+)(lúc\s+thì\b|khi\s+thì\b|nhưng\s+ngày\s+nào\b|cuối\s+cùng\s+vẫn\b|cuối\s+cùng\s+chậm\s+chạp\b|và\s+rồi\b|rồi\s+lại\b)", re.IGNORECASE),
+    ]
+    mid_word_pattern = re.compile(
+        r"(\s+)(sẽ\b|đã\b|đang\b|lại\b|vẫn\b|để\b|thì\b|và\b|cũng\b|liền\b|đều\b|khiến\b|cho\b|bị\b|được\b|nhưng\b|mà\b|bởi\b|do\b|tuy\b|là\b)",
+        re.IGNORECASE,
+    )
+
+    out = []
+    for src, tr in zip(source_texts, translated_texts):
+        clean = normalize_subtitle_text(str(tr or "")).strip()
+        if not clean:
+            out.append(clean)
+            continue
+
+        for pat, replacement in forbidden_variants:
+            if "a thích" not in clean.lower():
+                clean = pat.sub(replacement, clean)
+
+        first_char = clean[0]
+        if first_char.isalpha() and not first_char.isupper():
+            clean = first_char.upper() + clean[1:]
+
+        clean = re.sub(r"\s*[\.]{2,}\s*", ", ", clean)
+        clean = re.sub(r"\s*…\s*", ", ", clean)
+        clean = normalize_subtitle_text(clean)
+
+        src_has_pause = any(p in src for p in ("，", ",", "；", ";", "、"))
+        words = clean.split()
+        if (src_has_pause or len(words) >= 8) and "," not in clean:
+            m_intro = intro_adverbial_pattern.search(clean)
+            if m_intro and len(clean) - m_intro.end("lead") >= 6:
+                clean = m_intro.group("lead") + "," + clean[m_intro.end("lead"):]
+            else:
+                for pat in clause_split_patterns:
+                    m = pat.search(clean)
+                    if m and m.start() >= 10 and len(clean) - m.end() >= 6:
+                        clean = clean[:m.start()] + "," + clean[m.start():]
+                        break
+            clean = normalize_subtitle_text(clean)
+
+        if (src_has_pause or len(words) >= 11) and "," not in clean:
+            candidates = []
+            for m in mid_word_pattern.finditer(clean):
+                if m.start() >= 10 and len(clean) - m.end() >= 8:
+                    dist = abs((len(clean) / 2) - m.start())
+                    candidates.append((dist, m.start()))
+            if candidates:
+                candidates.sort(key=lambda x: x[0])
+                best_pos = candidates[0][1]
+                clean = clean[:best_pos] + "," + clean[best_pos:]
+                clean = normalize_subtitle_text(clean)
+
+        # Fallback to source pause ratio if source has pause but translation still lacks comma
+        words = clean.split()
+        if (src_has_pause or len(words) >= 12) and "," not in clean and len(words) >= 6:
+            pause_chars = [i for i, c in enumerate(src) if c in ("，", ",", "；", ";", "、")]
+            ratio = pause_chars[0] / max(len(src), 1) if pause_chars else 0.45
+            split_idx = max(2, min(len(words) - 2, round(len(words) * ratio)))
+            if split_idx < len(words) and words[split_idx].lower() == "thích" and words[split_idx - 1].lower() == "a":
+                split_idx += 1
+            clean = " ".join(words[:split_idx]) + ", " + " ".join(words[split_idx:])
+            clean = normalize_subtitle_text(clean)
+
+        # Long sentence (>= 18 words) secondary pause
+        words = clean.split()
+        if len(words) >= 18 and clean.count(",") == 1:
+            parts = clean.split(",", 1)
+            for i, p in enumerate(parts):
+                p_words = p.strip().split()
+                if len(p_words) >= 10:
+                    cand = []
+                    for m in mid_word_pattern.finditer(p):
+                        if m.start() >= 10 and len(p) - m.end() >= 8:
+                            cand.append((abs((len(p) / 2) - m.start()), m.start()))
+                    if cand:
+                        cand.sort(key=lambda x: x[0])
+                        bpos = cand[0][1]
+                        parts[i] = p[:bpos] + "," + p[bpos:]
+                        clean = ",".join(parts)
+                        clean = normalize_subtitle_text(clean)
+                        break
+
+        src_ends_terminal = any(str(src).strip().endswith(p) for p in ("。", "！", "？", ".", "!", "?"))
+        words = clean.split()
+        if not clean.endswith((".", "!", "?", ",", ";", ":")):
+            if not bool(re.search(r"(?i)\b(thì|mà|nhưng|hoặc|và|lại|khi|lúc|sau|trước|đến)$", clean)):
+                if src_ends_terminal or len(words) >= 6:
+                    clean += "."
+
+        out.append(clean)
+
+    return out
+
+
+def validate_translation_batch_quality(
+    source_texts,
+    translated_texts,
+    prior_context=None,
+    entity_map=None,
+    glossary=None,
+    strict=True,
+):
+    """Quality gate validating a batch of translated subtitles before TTS / persistence."""
+    reasons = []
+    if not isinstance(translated_texts, (list, tuple)):
+        return False, ["Bản dịch không phải là danh sách hợp lệ"]
+    if len(source_texts) != len(translated_texts):
+        return False, [f"Số câu dịch ({len(translated_texts)}) không khớp số câu gốc ({len(source_texts)})"]
+
+    forbidden_variants = ["assassin", "assin", "sát thủ", "thích khách"]
+
+    for idx, (src, trans) in enumerate(zip(source_texts, translated_texts), 1):
+        raw_tr = str(trans or "").strip()
+        if not raw_tr:
+            reasons.append(f"Câu {idx} rỗng nội dung")
+            continue
+
+        if "..." in raw_tr or "…" in raw_tr:
+            reasons.append(f"Câu {idx} chứa dấu ba chấm ('...'): '{raw_tr}'")
+
+        if _contains_cjk(raw_tr):
+            reasons.append(f"Câu {idx} còn sót chữ Hán (CJK): '{raw_tr}'")
+
+        clean_tr = normalize_subtitle_text(raw_tr).strip()
+        if not clean_tr:
+            reasons.append(f"Câu {idx} rỗng nội dung sau chuẩn hóa")
+            continue
+
+        first_char = clean_tr[0]
+        if first_char.isalpha() and not first_char.isupper():
+            reasons.append(f"Câu {idx} chưa viết hoa chữ cái đầu: '{clean_tr}'")
+
+        for bad in forbidden_variants:
+            if bad in clean_tr.lower() and "a thích" not in clean_tr.lower():
+                reasons.append(
+                    f"Câu {idx} dùng biến thể sai lệch '{bad}' thay vì 'A Thích': '{clean_tr}'"
+                )
+
+        words = clean_tr.split()
+        src_has_comma = any(p in src for p in ("，", ",", "；", ";", "、"))
+        tr_has_comma = "," in clean_tr
+
+        if src_has_comma and len(words) >= 6 and not tr_has_comma:
+            reasons.append(
+                f"Câu {idx} là câu nhiều vế (nguồn có ngắt nghỉ) nhưng thiếu dấu phẩy: '{clean_tr}'"
+            )
+        elif len(words) >= 14 and not tr_has_comma:
+            reasons.append(
+                f"Câu {idx} dài ({len(words)} từ) nối nhiều ý nhưng thiếu dấu phẩy ngắt nghỉ: '{clean_tr}'"
+            )
+
+    return len(reasons) == 0, reasons
+
+
 def translate_subtitles(
     srt_segments,
     target_lang="vi",
@@ -625,6 +798,7 @@ def translate_subtitles(
 ):
     logger.info("Translating subtitles...")
     kwargs = dict(kwargs)
+    quality_metadata = kwargs.get("quality_metadata")
     if glossary is not None:
         kwargs["glossary"] = glossary
     if entity_map is not None:
@@ -647,6 +821,8 @@ def translate_subtitles(
     else: # auto / gemini
         providers_order = ["gemini", "openai", "deepseek"]
         
+    used_provider = None
+    provider_kind = None
     for p in providers_order:
         if translated_texts:
             break
@@ -660,6 +836,9 @@ def translate_subtitles(
                     prior_context=prior_context,
                     **kwargs
                 )
+                if translated_texts:
+                    used_provider = "gemini"
+                    provider_kind = "llm"
         elif p == "openai":
             o_key = os.getenv("OPENAI_API_KEY", "")
             if o_key:
@@ -670,6 +849,9 @@ def translate_subtitles(
                     prior_context=prior_context,
                     **kwargs
                 )
+                if translated_texts:
+                    used_provider = "openai"
+                    provider_kind = "llm"
         elif p == "deepseek":
             d_key = os.getenv("DEEPSEEK_API_KEY", "")
             if d_key:
@@ -678,34 +860,67 @@ def translate_subtitles(
                     prior_context=prior_context,
                     **kwargs
                 )
+                if translated_texts:
+                    used_provider = "deepseek"
+                    provider_kind = "llm"
                 
     # Fallback Tier: G4F Free
-    if not translated_texts and enable_g4f:
+    if not translated_texts and enable_g4f and not strict:
         logger.info("Trying ChatGPT (G4F) API...")
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(translate_with_g4f, texts, target_lang)
             try:
                 translated_texts = future.result(timeout=40)
+                if translated_texts:
+                    used_provider = "g4f"
+                    provider_kind = "free_llm"
             except concurrent.futures.TimeoutError:
                 logger.warning("G4F phản hồi quá lâu (quá 40s), hủy để tránh treo bot.")
                 translated_texts = None
             except Exception as e:
                 logger.warning(f"Lỗi G4F: {e}")
                 translated_texts = None
-        
+
+    if strict:
+        if not translated_texts or len(translated_texts) != len(texts):
+            raise RuntimeError("Strict translation mode requires a complete LLM translation without machine fallback")
+        if any(_contains_cjk(str(t or "")) for t in translated_texts):
+            raise RuntimeError("Strict translation mode requires a complete LLM translation without CJK text")
+
     if isinstance(translated_texts, list):
         translated_texts = [
             normalize_subtitle_text(item) if isinstance(item, str) else item
             for item in translated_texts
         ]
         translated_texts = clean_incomplete_segment_stops(translated_texts)
+        translated_texts = ensure_speech_pauses_and_entity(
+            texts,
+            translated_texts,
+            entity_map=entity_map or kwargs.get("entity_map"),
+            prior_context=prior_context,
+        )
+
     translated_texts_valid = bool(
         translated_texts
         and len(translated_texts) == len(texts)
         and all(isinstance(item, str) and item.strip() for item in translated_texts)
     )
-    if translated_texts_valid:
+    if translated_texts_valid and strict:
+        is_valid, reasons = validate_translation_batch_quality(
+            texts,
+            translated_texts,
+            prior_context=prior_context,
+            entity_map=entity_map or kwargs.get("entity_map"),
+            glossary=glossary or kwargs.get("glossary"),
+            strict=True,
+        )
+        if not is_valid:
+            raise RuntimeError(
+                f"Strict translation mode requires a complete LLM translation conforming to quality rules: {'; '.join(reasons)}"
+            )
+
+    if translated_texts_valid and not strict:
         unchanged_cjk = [
             position
             for position, (source, translated) in enumerate(
@@ -744,6 +959,9 @@ def translate_subtitles(
                 translated_texts_valid = False
 
     if translated_texts_valid:
+        if isinstance(quality_metadata, dict):
+            quality_metadata["provider"] = used_provider
+            quality_metadata["provider_kind"] = provider_kind
         idx = 0
         for segment in srt_segments:
             if not segment.content:
@@ -753,7 +971,10 @@ def translate_subtitles(
             idx += 1
         logger.info("LLM translation successful.")
         return srt_segments
-    
+
+    if strict:
+        raise RuntimeError("Strict translation mode requires a complete LLM translation without machine fallback")
+
     logger.info("Falling back to Google Translate...")
     failed_segments = []
     for segment in srt_segments:
