@@ -161,7 +161,7 @@ def mix_audio_pydub(
     except Exception:
         if original_volume_db is None: original_volume_db = -2.0
         if dubbing_volume_db is None: dubbing_volume_db = 1.0
-    print(f"Mixing audio tracks using pydub (BGM={original_volume_db}dB, Dubbing={dubbing_volume_db}dB)...")
+    print(f"Mixing audio tracks using adaptive pydub (BGM={original_volume_db}dB, Dubbing={dubbing_volume_db}dB, Auto-Ducking=Enabled)...")
     original_popen = None
     try:
         import subprocess
@@ -174,36 +174,17 @@ def mix_audio_pydub(
                 super().__init__(*args, **kwargs)
         subprocess.Popen = PopenNoWindow
         
-        from pydub import AudioSegment
-        
-        # Load audio gốc và giảm âm lượng
-        mixed = AudioSegment.from_file(original_audio_path)
-        mixed = mixed + original_volume_db
-        
-        # Chèn từng file lồng tiếng (Khớp chính xác 100% thời gian với Subtitle)
-        for dub in dubbing_audio_files:
-            if not os.path.exists(dub["path"]):
-                if strict:
-                    raise FileNotFoundError(
-                        "Missing dubbing audio: {}".format(dub["path"])
-                    )
-                continue
-            dub_audio = AudioSegment.from_file(dub["path"])
-            # Tăng âm lượng giọng đọc nếu cần
-            dub_audio = dub_audio + dubbing_volume_db
-            
-            position_ms = int(dub["start"] * 1000)
-            mixed = mixed.overlay(dub_audio, position=position_ms)
-            
-        mixed.export(output_mixed_audio_path, format="wav")
-        return output_mixed_audio_path
+        from v1_audio_mixer import mix_adaptive_audio
+        return mix_adaptive_audio(
+            bgm_path=original_audio_path,
+            dubbing_audio_files=dubbing_audio_files,
+            output_path=output_mixed_audio_path,
+            base_bgm_gain_db=original_volume_db,
+            base_voice_gain_db=dubbing_volume_db,
+        )
     except Exception as e:
-        print(f"PyDub error: {e}. Fallback to original audio.")
-        if strict:
-            raise RuntimeError("PyDub legacy mix failed") from e
-        import shutil
-        shutil.copy(original_audio_path, output_mixed_audio_path)
-        return output_mixed_audio_path
+        # A background-only file must never masquerade as a successful dub.
+        raise RuntimeError("Adaptive mix failed; dubbed audio was not published") from e
     finally:
         if original_popen is not None:
             subprocess.Popen = original_popen

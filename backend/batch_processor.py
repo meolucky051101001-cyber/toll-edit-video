@@ -230,7 +230,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         job_tracker.update_step(3, "Bước 3/6: Faster-Whisper Large-v3 Turbo nhận dạng giọng nói...", percent=40)
         srt_segments = await checkpoints.subtitles(
             "transcribe", vocals_audio,
-            lambda: asyncio.to_thread(extract_subtitles_whisper, vocals_audio, srt_original),
+            lambda: asyncio.to_thread(extract_subtitles_whisper, vocals_audio, srt_original, original_audio_path=original_audio),
             srt_original)
         if not srt_segments:
             await notify("⚠️ Video không có giọng nói để dịch!")

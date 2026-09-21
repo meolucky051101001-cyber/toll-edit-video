@@ -12,6 +12,15 @@ from urllib.parse import unquote
 from pathlib import Path
 from typing import Optional
 
+# Load .env local file
+env_file = Path(__file__).resolve().parent / ".env"
+if env_file.exists():
+    with open(env_file, "r", encoding="utf-8") as f:
+        for line in f:
+            if "=" in line and not line.strip().startswith("#"):
+                k, v = line.strip().split("=", 1)
+                os.environ[k.strip()] = v.strip().strip('"').strip("'")
+
 # The API in this worktree is Tool V1 only, regardless of inherited variables.
 os.environ["PIPELINE_MODE"] = "legacy"
 
@@ -687,11 +696,100 @@ async def api_get_queue():
     if not path.is_file():
         return {"items": [], "available": False, "message": "Chưa kết nối hàng đợi Telegram. Cần khởi động lại bot để bật tính năng."}
     try:
-        data = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
+        data = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8-sig"))
         alive = job_tracker._pid_is_running(int(data.get("pid") or 0))
         return {**data, "available": alive, "message": "" if alive else "Bot đã dừng; danh sách là bản ghi cuối cùng."}
     except (OSError, ValueError, TypeError):
         raise HTTPException(503, "Không đọc được hàng đợi Telegram")
+
+
+@app.post("/api/queue/process")
+async def api_process_queue(request: Request):
+    """Kích hoạt xử lý lại danh sách video đang đợi trong hàng chờ Telegram."""
+    queue_file = Path(WORKSPACE) / "telegram_queue.json"
+    if not queue_file.is_file():
+        return {"status": "empty", "message": "Không tìm thấy hàng chờ video."}
+
+    try:
+        import json, time
+        data = json.loads(await asyncio.to_thread(queue_file.read_text, encoding="utf-8-sig"))
+        items = data.get("items", [])
+        if not items:
+            return {"status": "empty", "message": "Hàng chờ hiện đang trống."}
+
+        # 1. Gỡ cờ pause nếu Tool V1 đang bị tạm dừng
+        pause_flag = Path(WORKSPACE) / "control" / "v1.pause"
+        try:
+            pause_flag.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        # 2. Ghi cờ kích hoạt để bot đang chạy nhặt việc ngay lập tức
+        trigger_flag = Path(WORKSPACE) / "telegram_queue_trigger.flag"
+        trigger_flag.write_text(str(time.time()), encoding="utf-8")
+
+        # 3. Kiểm tra xem telegram_bot.py có đang chạy không. Nếu chưa chạy thì khởi động
+        alive = False
+        pid = data.get("pid")
+        if pid and job_tracker._pid_is_running(int(pid)):
+            alive = True
+        else:
+            import psutil
+            for p in psutil.process_iter(['pid', 'cmdline']):
+                try:
+                    cmdline = p.info.get('cmdline') or []
+                    if any('telegram_bot.py' in str(arg) for arg in cmdline):
+                        alive = True
+                        break
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+
+        if not alive:
+            python = BASE_DIR / "venv" / "Scripts" / "python.exe"
+            if not python.exists():
+                python = Path(sys.executable)
+            import subprocess
+            subprocess.Popen(
+                [str(python), str(BASE_DIR / "background_service.py"), "--service", "telegram"],
+                cwd=str(BASE_DIR),
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            return {
+                "status": "started",
+                "count": len(items),
+                "message": f"Đã khởi động Bot và kích hoạt xử lý {len(items)} video trong hàng chờ!"
+            }
+
+        return {
+            "status": "processing",
+            "count": len(items),
+            "message": f"Đã gửi lệnh xử lý {len(items)} video trong hàng chờ!"
+        }
+    except Exception as e:
+        logger.exception("Lỗi api_process_queue")
+        raise HTTPException(500, f"Lỗi kích hoạt hàng chờ: {str(e)}")
+
+
+@app.post("/api/queue/clear")
+async def api_clear_queue(request: Request):
+    """Xóa sạch các video đang đợi trong hàng chờ Telegram."""
+    queue_file = Path(WORKSPACE) / "telegram_queue.json"
+    clear_flag = Path(WORKSPACE) / "telegram_queue_clear.flag"
+    try:
+        import json, time
+        # Ghi cờ xóa cho bot đang chạy
+        clear_flag.write_text(str(time.time()), encoding="utf-8")
+        # Đồng thời cập nhật file snapshot json ngay lập tức
+        if queue_file.is_file():
+            payload = {"items": [], "updated_at": time.time(), "pid": 0}
+            queue_file.write_text(json.dumps(payload), encoding="utf-8")
+        return {"status": "cleared", "message": "Đã xóa toàn bộ video trong hàng chờ."}
+    except Exception as e:
+        logger.exception("Lỗi api_clear_queue")
+        raise HTTPException(500, f"Lỗi xóa hàng chờ: {str(e)}")
 
 def _check_input_request(request):
     if request.headers.get("X-Dashboard-Input") != "1" or request.headers.get("origin") not in (None, "http://127.0.0.1:8088", "http://localhost:8088"):
@@ -858,11 +956,11 @@ async def api_get_banve():
     total_size = 0
     total_render_sec = 0
     try:
-        v2_history_file = output_dir / ".render_history_v2.json"
+        v2_workspace_history = Path(r"C:\tool v2\workspace\.render_history_v2.json")
         v2_names = set()
-        if v2_history_file.exists():
+        if v2_workspace_history.exists():
             try:
-                v2_names = set(json.loads(v2_history_file.read_text(encoding="utf-8")).keys())
+                v2_names = set(json.loads(v2_workspace_history.read_text(encoding="utf-8")).keys())
             except Exception:
                 pass
 

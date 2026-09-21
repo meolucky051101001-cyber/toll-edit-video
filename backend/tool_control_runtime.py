@@ -53,10 +53,21 @@ def install(application, namespace, key):
                     pass
                 await asyncio.sleep(2)
         app.bot_data['_control_heartbeat']=asyncio.create_task(heartbeat())
+        queue_watcher_fn = namespace.get('queue_signal_watcher')
+        if queue_watcher_fn:
+            app.bot_data['_queue_watcher'] = asyncio.create_task(queue_watcher_fn(app))
+        enqueue_pending_fn = namespace.get('enqueue_pending_queue_jobs')
+        if enqueue_pending_fn:
+            asyncio.create_task(enqueue_pending_fn(app))
+        enqueue_v2_fn = namespace.get('enqueue_interrupted_v2_jobs')
+        if enqueue_v2_fn:
+            asyncio.create_task(enqueue_v2_fn(app))
     application.post_init=initialized
     previous_shutdown=application.post_shutdown
     async def shutdown(app):
         task=app.bot_data.pop('_control_heartbeat',None)
         if task: task.cancel()
+        q_watcher = app.bot_data.pop('_queue_watcher', None)
+        if q_watcher: q_watcher.cancel()
         if previous_shutdown: await previous_shutdown(app)
     application.post_shutdown=shutdown

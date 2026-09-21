@@ -19,54 +19,116 @@ LOCK = threading.Lock()
 FLAGS = Path(r"C:\tool v1\workspace\control")
 FLAGS.mkdir(parents=True, exist_ok=True)
 
+CONTROL_DIRS = [
+    Path(r"C:\tool v1\workspace\control"),
+    Path(r"C:\tool v2\workspace\control"),
+]
+for _cd in CONTROL_DIRS:
+    _cd.mkdir(parents=True, exist_ok=True)
+
+def get_control_paths(key, filename):
+    own = ROOTS[key].parent / "workspace" / "control" / filename
+    paths = [own]
+    for d in CONTROL_DIRS:
+        p = d / filename
+        if p not in paths:
+            paths.append(p)
+    return paths
+
 def processes(key):
     root = ROOTS[key]
-    scripts = {str(root / name).lower() for name in ("background_service.py", "main.py", "dashboard_monitor.py", "telegram_bot.py")}
+    root_str = str(root.parent).lower()
+    scripts = {
+        str(root / name).lower()
+        for name in (
+            "background_service.py",
+            "main.py",
+            "dashboard_monitor.py",
+            "telegram_bot.py",
+            "batch_processor.py",
+            "gpu_worker.py",
+            "model_runner.py",
+            "model_runtime_runner.py",
+        )
+    }
     found = []
     for p in psutil.process_iter(["name"]):
         try:
             name = (p.info["name"] or "").lower()
-            if not name.startswith("python"):
+            if not (name.startswith("python") or name.startswith("ffmpeg") or name.startswith("ffprobe")):
                 continue
-            args = p.cmdline() or []
-            for arg in args[1:]:
-                candidate = Path(arg)
-                if not candidate.is_absolute():
-                    try:
-                        candidate = Path(p.cwd()) / candidate
-                    except (psutil.Error, OSError):
-                        pass
-                if str(candidate).lower() in scripts:
-                    found.append((p, candidate.name))
-                    break
+            cmd = [str(c).lower() for c in (p.cmdline() or [])]
+            cmd_str = " ".join(cmd)
+            if "tool_control.py" in cmd_str:
+                continue
+
+            is_match = False
+            if root_str in cmd_str or (key == "v1" and r"c:\tool v1" in cmd_str) or (key == "v2" and r"c:\tool v2" in cmd_str):
+                is_match = True
+            if not is_match:
+                for arg in cmd[1:]:
+                    candidate = Path(arg)
+                    if not candidate.is_absolute():
+                        try:
+                            candidate = Path(p.cwd()) / candidate
+                        except (psutil.Error, OSError):
+                            pass
+                    if str(candidate).lower() in scripts:
+                        is_match = True
+                        break
+            if is_match:
+                script_name = "worker"
+                for s in ("main.py", "dashboard_monitor.py", "telegram_bot.py", "background_service.py", "batch_processor.py", "gpu_worker.py", "model_runner.py", "model_runtime_runner.py"):
+                    if s in cmd_str:
+                        script_name = s
+                        break
+                found.append((p, script_name))
         except (psutil.Error, OSError):
             continue
     return found
 
 def read_telemetry(key):
-    try:
-        return json.loads((FLAGS / (key + '.json')).read_text(encoding='utf-8'))
-    except (OSError, ValueError):
-        return {}
+    best = {}
+    best_at = -1
+    for p in get_control_paths(key, key + '.json'):
+        if p.is_file():
+            try:
+                data = json.loads(p.read_text(encoding='utf-8'))
+                at = float(data.get('at') or 0)
+                if at > best_at:
+                    best_at = at
+                    best = data
+            except (OSError, ValueError):
+                pass
+    return best
 
 def status(key):
+    paused = any(p.exists() for p in get_control_paths(key, key + '.pause'))
     procs = processes(key)
     bots = [p.pid for p, name in procs if name == 'telegram_bot.py']
     data = read_telemetry(key)
-    fresh = data.get('pid') in bots and time.time() - data.get('at', 0) < 8
+    fresh = data.get('pid') in bots and time.time() - data.get('at', 0) < 12
     dashboard = False
     try:
-        with urllib.request.urlopen('http://127.0.0.1:%s/api/status' % PORTS[key], timeout=0.8) as response:
+        with urllib.request.urlopen('http://127.0.0.1:%s/api/status' % PORTS[key], timeout=2.0) as response:
             dashboard = response.status == 200
     except Exception:
         pass
-    ready = bool(fresh and data.get('polling') and dashboard)
-    state = 'running' if ready else 'stopped' if not bots else 'partial'
+
+    if paused:
+        state = 'stopped'
+    elif fresh and data.get('polling') and dashboard:
+        state = 'running'
+    elif not bots and not dashboard:
+        state = 'stopped'
+    else:
+        state = 'partial'
+
     return dict(key=key, state=state, dashboard=dashboard, bot=bool(bots),
                 heartbeat=bool(fresh), polling=bool(fresh and data.get('polling')),
                 busy=bool(data.get('busy')) if fresh else None,
                 queue=data.get('queue', 0) if fresh else None,
-                paused=(FLAGS / (key + '.pause')).exists())
+                paused=paused)
 
 def launch(key, service):
     root = ROOTS[key]
@@ -99,66 +161,52 @@ def _get_dashboard_token(key='v1'):
 
 def stop_and_release(key):
     """
-    Dừng triệt để toàn bộ bot, batch processor, worker và giải phóng toàn bộ RAM/VRAM.
-    Được gọi khi người dùng chủ động tắt tool hoặc khi chuyển sang tool khác.
+    Dừng triệt để toàn bộ bot, dashboard, batch processor, worker và giải phóng toàn bộ RAM & VRAM.
+    Được gọi khi người dùng chủ động tắt tool hoặc khi chuyển đổi giữa các tool.
     """
-    FLAGS.mkdir(parents=True, exist_ok=True)
-    flag = FLAGS / (key + '.pause')
-    flag.write_text('paused', encoding='utf-8')
-
-    root = ROOTS[key]
-    root_str = str(root).lower()
-
-    # 1. Nếu là Tool V1, kiểm tra xem có batch đang chạy không
-    batch_active = False
-    if key == 'v1':
+    # 1. Đặt cờ pause ngay lập tức trên tất cả thư mục điều khiển
+    for p in get_control_paths(key, key + '.pause'):
         try:
-            with urllib.request.urlopen('http://127.0.0.1:8088/api/status', timeout=0.8) as r:
-                batch_active = bool(json.load(r).get('active'))
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text('paused', encoding='utf-8')
         except Exception:
             pass
-        if batch_active:
-            token = _get_dashboard_token('v1')
-            headers = {'Content-Type': 'application/json', 'X-Dashboard-Input': '1'}
-            if token:
-                headers['X-Local-Control-Token'] = token
-            log_path = Path(r"C:\tool v1\workspace\service_logs\tool_control.log")
-            try:
-                req = urllib.request.Request(
-                    'http://127.0.0.1:8088/api/stop-batch',
-                    data=b'{}',
-                    headers=headers
-                )
-                with urllib.request.urlopen(req, timeout=1.5) as resp:
-                    if resp.status == 200:
-                        time.sleep(0.5)
-            except urllib.error.HTTPError as e:
-                try:
-                    with open(log_path, "a", encoding="utf-8") as lf:
-                        lf.write(f"Dashboard /api/stop-batch rejected with HTTP {e.code}: {e.reason}\n")
-                except Exception:
-                    pass
-            except Exception as e:
-                try:
-                    with open(log_path, "a", encoding="utf-8") as lf:
-                        lf.write(f"Failed to reach dashboard /api/stop-batch: {e}\n")
-                except Exception:
-                    pass
 
-    # 2. Thu thập toàn bộ tiến trình liên quan đến Tool (trừ tool_control.py)
+    root = ROOTS[key]
+    root_str = str(root.parent).lower()
+
+    # 2. Dừng batch đang xử lý (nếu có)
+    if key == 'v1':
+        try:
+            with urllib.request.urlopen('http://127.0.0.1:8088/api/status', timeout=1.0) as r:
+                if json.load(r).get('active'):
+                    token = _get_dashboard_token('v1')
+                    headers = {'Content-Type': 'application/json', 'X-Dashboard-Input': '1'}
+                    if token:
+                        headers['X-Local-Control-Token'] = token
+                    req = urllib.request.Request('http://127.0.0.1:8088/api/stop-batch', data=b'{}', headers=headers)
+                    urllib.request.urlopen(req, timeout=1.5)
+        except Exception:
+            pass
+    elif key == 'v2':
+        try:
+            req = urllib.request.Request('http://127.0.0.1:8089/api/stop-batch', data=b'{}', headers={'Content-Type': 'application/json'})
+            urllib.request.urlopen(req, timeout=1.5)
+        except Exception:
+            pass
+
+    # 3. Thu thập TOÀN BỘ tiến trình thuộc về Tool (kể cả supervisor, worker, render...)
     targets = {}
-    restart_main_needed = batch_active
-
     for p in psutil.process_iter(['name']):
         try:
             name = (p.info['name'] or '').lower()
             if not (name.startswith('python') or name.startswith('ffmpeg') or name.startswith('ffprobe')):
                 continue
-            cmd = [c.lower() for c in (p.cmdline() or [])]
+            cmd = [str(c).lower() for c in (p.cmdline() or [])]
             cmd_str = ' '.join(cmd)
 
-            # Bộ điều khiển trung tâm phải luôn sống
-            if 'tool_control.py' in cmd_str:
+            # Bảo vệ bộ điều khiển trung tâm 8090 và các test runner
+            if any(k in cmd_str for k in ('tool_control.py', 'test_', 'unittest', 'pytest')):
                 continue
 
             is_tool_proc = False
@@ -166,52 +214,42 @@ def stop_and_release(key):
                 is_tool_proc = True
 
             if is_tool_proc:
-                # Bot telegram hoặc supervisor telegram
-                if 'telegram_bot.py' in cmd_str or ('background_service.py' in cmd_str and 'telegram' in cmd_str):
-                    targets[p.pid] = p
-                    try:
-                        for child in p.children(recursive=True):
-                            ch_cmd = ' '.join([c.lower() for c in (child.cmdline() or [])])
-                            if 'tool_control.py' not in ch_cmd:
-                                targets[child.pid] = child
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-                # Tiến trình ffmpeg / ffprobe do tool sinh ra trong lúc xử lý
-                elif name.startswith('ffmpeg') or name.startswith('ffprobe'):
-                    targets[p.pid] = p
+                targets[p.pid] = p
+                try:
+                    for child in p.children(recursive=True):
+                        ch_cmd = ' '.join([str(c).lower() for c in (child.cmdline() or [])])
+                        if not any(k in ch_cmd for k in ('tool_control.py', 'test_', 'unittest', 'pytest')):
+                            targets[child.pid] = child
+
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
 
-    # 3. Gửi lệnh terminate tới tất cả các tiến trình mục tiêu
+    # 4. Gửi tín hiệu terminate tới các tiến trình
     for pid, p in list(targets.items()):
         try:
             p.terminate()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
 
-    # Chờ tiến trình dừng
+    # Chờ tiến trình thoát
     gone, alive = psutil.wait_procs(list(targets.values()), timeout=2.0)
 
-    # Force kill nếu còn tiến trình sống sót
+    # 5. Cưỡng chế kill dứt điểm các tiến trình còn lại (kể cả worker GPU/CUDA)
     if alive:
         for p in alive:
             try:
                 p.kill()
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
-        psutil.wait_procs(alive, timeout=1.5)
+            try:
+                os.system(f"taskkill /F /T /PID {p.pid} >nul 2>&1")
+            except Exception:
+                pass
+        psutil.wait_procs(alive, timeout=1.0)
 
-    # 4. Nếu cần giải phóng VRAM của main.py (khi có batch chạy trên V1):
-    if restart_main_needed and key == 'v1':
-        for p, name in processes('v1'):
-            if name == 'main.py':
-                try:
-                    p.kill()
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-        # background_service sẽ tự động tạo main.py mới trong 0.5s sạch 100% VRAM
-
-    # 5. Ghi đè telemetry thành đã dừng
+    # 6. Ghi đè telemetry thành đã dừng
     telemetry = {
         'pid': None,
         'at': time.time(),
@@ -220,25 +258,35 @@ def stop_and_release(key):
         'paused': True,
         'polling': False
     }
-    FLAGS.mkdir(parents=True, exist_ok=True)
-    try:
-        (FLAGS / (key + '.json')).write_text(json.dumps(telemetry), encoding='utf-8')
-    except Exception:
-        pass
-
-    # Xóa file tạm
-    for tmp in FLAGS.glob(key + '.*.tmp'):
+    for p in get_control_paths(key, key + '.json'):
         try:
-            tmp.unlink(missing_ok=True)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(telemetry), encoding='utf-8')
         except Exception:
             pass
 
+    # 7. Xóa các file tạm
+    for d in CONTROL_DIRS:
+        for tmp in d.glob(key + '.*.tmp'):
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
     return True
 
+def stop_all_tools():
+    """Tắt cả hai tool và giải phóng 100% RAM & GPU VRAM."""
+    stop_and_release('v1')
+    stop_and_release('v2')
+    return 'Đã tắt cả hai Tool và giải phóng toàn bộ RAM & VRAM.'
+
 def change(key, action):
+    if action == 'off_all':
+        return stop_all_tools()
+
     if key not in ROOTS or action not in ('on', 'off'):
         raise ValueError('Yêu cầu không hợp lệ.')
-    flag = FLAGS / (key + '.pause')
 
     if action == 'off':
         stop_and_release(key)
@@ -246,16 +294,16 @@ def change(key, action):
 
     if action == 'on':
         other = 'v2' if key == 'v1' else 'v1'
-        # Tự động tắt và giải phóng toàn bộ tool đối diện nếu đang chạy để nhường GPU & tránh xung đột
-        other_flag = FLAGS / (other + '.pause')
-        other_procs = processes(other)
-        other_bots = [p for p, name in other_procs if name == 'telegram_bot.py']
-        if other_bots or not other_flag.exists():
-            stop_and_release(other)
-            time.sleep(0.5)
+        # RÀNG BUỘC ĐỘC QUYỀN: Bắt buộc tắt và giải phóng 100% tool đối diện trước
+        stop_and_release(other)
+        time.sleep(0.5)
 
-        # Xóa cờ pause để cho phép khởi động
-        flag.unlink(missing_ok=True)
+        # Xóa cờ pause của tool được kích hoạt
+        for p in get_control_paths(key, key + '.pause'):
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                pass
 
         procs_found = processes(key)
         names = [name for _, name in procs_found]
@@ -264,7 +312,7 @@ def change(key, action):
         if not any(n in names for n in ('main.py', 'dashboard_monitor.py')):
             launch(key, 'dashboard')
 
-        # Khởi động telegram bot
+        # Đảm bảo telegram bot đang hoạt động
         data = read_telemetry(key)
         bots = [p for p, name in procs_found if name == 'telegram_bot.py']
         fresh = any(data.get('pid') == p.pid for p in bots) and (time.time() - data.get('at', 0) < 8)
@@ -275,14 +323,42 @@ def change(key, action):
         if 'telegram_bot.py' not in names or not fresh:
             launch(key, 'telegram')
 
-        # Chờ tối đa 3 giây để bot khởi động
-        for _ in range(6):
+        # Chờ bot và dashboard sẵn sàng (tối đa 6 giây)
+        for _ in range(12):
             time.sleep(0.5)
             check_procs = processes(key)
-            if any(name == 'telegram_bot.py' for _, name in check_procs):
+            check_bots = [p.pid for p, name in check_procs if name == 'telegram_bot.py']
+            check_data = read_telemetry(key)
+            if check_bots and (check_data.get('pid') in check_bots) and check_data.get('polling'):
                 break
 
-        return f'Đã bật Tool {key.upper()} thành công!'
+        return f'Đã bật Tool {key.upper()} thành công (Đã tắt Tool {other.upper()} & giải phóng RAM/VRAM).'
+
+def apply_boot_defaults():
+    """
+    Thiết lập trạng thái mặc định khi mở máy tính:
+    - Tool V1: BẬT
+    - Tool V2: TẮT (ghi cờ v2.pause, giải phóng RAM/VRAM)
+    """
+    try:
+        # 1. Khóa và dọn Tool V2
+        stop_and_release('v2')
+        # 2. Mở khóa Tool V1
+        for p in get_control_paths('v1', 'v1.pause'):
+            try: p.unlink(missing_ok=True)
+            except Exception: pass
+        # 3. Khởi chạy dịch vụ Tool V1
+        procs = processes('v1')
+        names = [name for _, name in procs]
+        if not any(n in names for n in ('main.py', 'dashboard_monitor.py')):
+            launch('v1', 'dashboard')
+        data = read_telemetry('v1')
+        bots = [p for p, name in procs if name == 'telegram_bot.py']
+        fresh = any(data.get('pid') == p.pid for p in bots) and (time.time() - data.get('at', 0) < 8)
+        if 'telegram_bot.py' not in names or not fresh:
+            launch('v1', 'telegram')
+    except Exception:
+        pass
 
 def change_voice(voice_id):
     for key in ROOTS:
@@ -298,263 +374,380 @@ def change_voice(voice_id):
     voice_selection.save(voice_id)
     return 'Đã lưu: ' + voice_selection.selected()['label'] + '. Video tiếp theo sẽ dùng giọng này.'
 
-HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Điều khiển V1 / V2</title>
+HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Điều khiển Tool V1 / V2</title>
 <style>
   * { box-sizing: border-box; }
   html, body {
     margin: 0;
-    padding: 14px 16px;
-    background-color: #131b26;
-    color: #f1f5f9;
+    padding: 10px 14px;
+    background-color: #0b111a;
+    color: #e2e8f0;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    font-size: 13px;
-    line-height: 1.5;
+    font-size: 12px;
+    line-height: 1.4;
   }
-  h2 {
-    font-size: 15px;
-    font-weight: 700;
-    color: #ffffff;
-    margin: 0 0 12px;
-    letter-spacing: -0.2px;
-  }
-  .tools {
+  .header {
     display: flex;
-    gap: 12px;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
     flex-wrap: wrap;
+    gap: 6px;
   }
-  .tool {
-    flex: 1 1 calc(50% - 6px);
-    min-width: 260px;
-    background-color: #1a2433;
-    border: 1px solid #2a374a;
-    border-radius: 8px;
-    padding: 12px 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .tool > div:first-child {
+  .title-group {
     display: flex;
     align-items: center;
     gap: 8px;
+  }
+  h2 {
+    font-size: 13.5px;
+    font-weight: 700;
+    color: #ffffff;
+    margin: 0;
+    letter-spacing: -0.2px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .badge-rule {
+    font-size: 11px;
+    color: #94a3b8;
+    background: #1e293b;
+    border: 1px solid #334155;
+    padding: 2px 7px;
+    border-radius: 4px;
+  }
+  .tools {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .tool {
+    background-color: #141d2b;
+    border: 1px solid #233144;
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .tool.active {
+    border-color: #10b981;
+    box-shadow: 0 0 10px rgba(16, 185, 129, 0.12);
+  }
+  .tool.inactive {
+    opacity: 0.85;
+  }
+  .tool-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .tool-title {
+    display: flex;
+    align-items: center;
+    gap: 7px;
     font-size: 13px;
+    font-weight: 700;
+    color: #f8fafc;
+  }
+  .status-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .status-badge.running {
+    background-color: rgba(16, 185, 129, 0.15);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+  }
+  .status-badge.stopped {
+    background-color: rgba(100, 116, 139, 0.15);
+    color: #94a3b8;
+    border: 1px solid rgba(100, 116, 139, 0.3);
+  }
+  .status-badge.pending {
+    background-color: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    border: 1px solid rgba(245, 158, 11, 0.3);
   }
   .dot {
-    width: 9px;
-    height: 9px;
+    width: 7px;
+    height: 7px;
     border-radius: 50%;
     display: inline-block;
-    background-color: #64748b;
-    flex-shrink: 0;
   }
-  .dot.running { background-color: #10b981; box-shadow: 0 0 6px rgba(16,185,129,0.5); }
-  .dot.stopped { background-color: #ef4444; }
-  .dot.partial { background-color: #f59e0b; box-shadow: 0 0 6px rgba(245,158,11,0.5); }
-  small {
+  .dot.running { background-color: #10b981; box-shadow: 0 0 5px #10b981; }
+  .dot.stopped { background-color: #64748b; }
+  .dot.pending { background-color: #f59e0b; box-shadow: 0 0 5px #f59e0b; }
+  .tool-metrics {
+    font-size: 11px;
     color: #94a3b8;
-    font-size: 11.5px;
-    line-height: 1.4;
+    line-height: 1.3;
   }
   .tool-actions {
     display: flex;
     align-items: center;
-    gap: 10px;
+    justify-content: space-between;
+    gap: 8px;
     margin-top: 2px;
-    flex-wrap: wrap;
   }
   button, a {
-    font-size: 12px;
+    font-size: 11.5px;
     border-radius: 6px;
     border: 1px solid #334155;
     background-color: #1e293b;
     color: #f1f5f9;
-    padding: 5px 10px;
+    padding: 4px 9px;
     text-decoration: none;
     cursor: pointer;
-    transition: background-color 0.15s, border-color 0.15s;
+    transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
   button:hover:not(:disabled), a:hover {
     background-color: #273549;
     border-color: #3b82f6;
   }
-  button:disabled {
-    opacity: 0.55;
-    cursor: wait;
+  button:disabled, button[aria-disabled="true"] {
+    opacity: 0.5;
+    cursor: not-allowed;
+    pointer-events: none;
   }
-  button[role=switch] {
+  .switch-btn {
+    border: 0;
+    background: transparent;
+    padding: 0;
+    cursor: pointer;
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    border: 0;
-    background: transparent;
-    padding: 2px 0;
-    touch-action: pan-y;
     user-select: none;
-    vertical-align: middle;
-    cursor: pointer;
   }
   .switch-track {
-    display: inline-block;
-    position: relative;
-    width: 48px;
-    height: 26px;
-    border-radius: 13px;
+    width: 44px;
+    height: 24px;
     background-color: #334155;
+    border-radius: 12px;
     border: 1px solid #475569;
+    position: relative;
     transition: background-color 0.25s, border-color 0.25s;
+    flex-shrink: 0;
   }
   .switch-thumb {
+    width: 18px;
+    height: 18px;
+    background-color: #ffffff;
+    border-radius: 50%;
     position: absolute;
     top: 2px;
     left: 2px;
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    background-color: #ffffff;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
     transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4);
   }
-  button[role=switch][aria-checked=true] .switch-track {
+  .switch-btn.is-active .switch-track {
     background-color: #059669;
     border-color: #10b981;
   }
-  button[role=switch][aria-checked=true] .switch-thumb {
-    transform: translateX(22px);
+  .switch-btn.is-active .switch-thumb {
+    transform: translateX(20px);
   }
-  button[role=switch][data-state=partial] .switch-track {
+  .switch-btn.is-pending .switch-track {
     background-color: #b45309;
     border-color: #f59e0b;
   }
-  .switch-label {
-    min-width: 28px;
+  .switch-label-text {
+    font-size: 11.5px;
     font-weight: 700;
-    font-size: 12px;
-    color: #f1f5f9;
+    color: #e2e8f0;
+    min-width: 24px;
   }
-  .switch-label.pending {
-    color: #fbbf24;
-    font-style: italic;
+  .switch-label-text.on { color: #34d399; }
+  .switch-label-text.off { color: #94a3b8; }
+  .switch-label-text.pending { color: #fbbf24; font-style: italic; }
+
+  .actions-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+    flex-wrap: wrap;
   }
-  @media (prefers-reduced-motion: reduce) {
-    .switch-track, .switch-thumb { transition: none; }
+  .btn-stop-all {
+    background-color: #241419;
+    border-color: #7f1d1d;
+    color: #fca5a5;
+    font-weight: 600;
+    padding: 5px 12px;
+    border-radius: 6px;
+    font-size: 11.5px;
+  }
+  .btn-stop-all:hover:not(:disabled) {
+    background-color: #3b141e;
+    border-color: #ef4444;
+    color: #fee2e2;
   }
   #message {
-    margin-top: 10px;
-    color: #cbd5e1;
-    font-size: 12px;
+    padding: 5px 10px;
+    background: #111827;
+    border: 1px solid #1f2937;
+    border-radius: 6px;
+    color: #93c5fd;
+    font-size: 11.5px;
     line-height: 1.4;
+    margin-bottom: 8px;
+  }
+  #message.error {
+    color: #fca5a5;
+    border-color: #7f1d1d;
+  }
+  #message.success {
+    color: #6ee7b7;
+    border-color: #065f46;
   }
   .voice-section {
-    margin-top: 14px;
-    border-top: 1px solid #233144;
-    padding-top: 12px;
+    border-top: 1px solid #1e293b;
+    padding-top: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
   }
   .voice-section label {
-    font-size: 13px;
-    font-weight: 700;
-    color: #ffffff;
-    display: block;
-    margin-bottom: 4px;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: #cbd5e1;
+    white-space: nowrap;
   }
   .voice-controls {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     align-items: center;
-    margin-top: 8px;
-    flex-wrap: wrap;
+    flex-grow: 1;
+    justify-content: flex-end;
   }
   select {
-    background-color: #101622;
-    color: #ffffff;
+    background-color: #0f172a;
+    color: #f8fafc;
     border: 1px solid #334155;
     border-radius: 6px;
-    padding: 6px 10px;
-    font-size: 12px;
-    max-width: 100%;
+    padding: 4px 8px;
+    font-size: 11.5px;
     outline: none;
+    max-width: 250px;
   }
-  select:focus {
-    border-color: #3b82f6;
-  }
+  select:focus { border-color: #3b82f6; }
   #save-voice {
     background-color: #2563eb;
     border-color: #3b82f6;
     color: #ffffff;
+    padding: 4px 10px;
   }
-  #save-voice:hover:not(:disabled) {
-    background-color: #1d4ed8;
-  }
-  button:focus-visible, a:focus-visible, select:focus-visible {
-    outline: 2px solid #38bdf8;
-    outline-offset: 2px;
-  }
+  #save-voice:hover:not(:disabled) { background-color: #1d4ed8; }
 </style>
 </head>
 <body>
-<h2>Tool & Telegram bot</h2>
+<div class="header">
+  <div class="title-group">
+    <h2>⚡ Bộ điều khiển Tool V1 & V2</h2>
+    <span class="badge-rule">Chế độ độc quyền: Bật 1 Tool duy nhất hoặc Tắt cả 2</span>
+  </div>
+</div>
+
 <div class="tools" id="tools"></div>
-<div id="message" role="status">Đang kiểm tra dịch vụ…</div>
+
+<div class="actions-bar">
+  <button id="btn-off-all" class="btn-stop-all" onclick="stopAll()" title="Dừng triệt để cả 2 tool và giải phóng toàn bộ RAM & VRAM">
+    ⏹ Tắt cả 2 Tool (Giải phóng 100% RAM & VRAM)
+  </button>
+  <div id="message" role="status" style="margin-bottom:0; flex-grow:1;">Đang tải trạng thái hệ thống…</div>
+</div>
+
 <section class="voice-section">
-  <label for="voice">Giọng lồng tiếng · dùng chung V1 / V2 và Telegram</label>
-  <small>Chọn giọng để tự lưu khi tool rảnh. Giọng đã lưu hiển thị bên dưới.</small>
+  <label for="voice">Giọng lồng tiếng (Dùng chung):</label>
   <div class="voice-controls">
     <select id="voice" onchange="saveVoice()" disabled></select>
-    <button id="save-voice" onclick="saveVoice()" disabled>Lưu giọng</button>
+    <button id="save-voice" onclick="saveVoice()" disabled>Lưu</button>
+    <small id="voice-status" style="color:#94a3b8; font-size:11px; margin-left:4px;"></small>
   </div>
-  <small id="voice-status" role="status" style="margin-top: 6px;">Đang tải danh sách giọng…</small>
 </section>
+
 <script>
-const token='__TOKEN__';
-let pending=false;
-let pendingAction=null;
-let states=[];
-let dragStart=null;
-let suppressClickUntil=0;
+const token = '__TOKEN__';
+let pending = false;
+let pendingTarget = null;
+let states = [];
 
 function renderTools() {
   const container = document.getElementById('tools');
+  const btnOffAll = document.getElementById('btn-off-all');
+  if (btnOffAll) btnOffAll.disabled = pending;
+
   if (!container || !states.length) return;
+
   container.innerHTML = states.map(s => {
-    const isThisPending = pending && pendingAction && pendingAction.key === s.key;
-    const isOffPending = isThisPending && pendingAction.action === 'off';
-    const isOnPending = isThisPending && pendingAction.action === 'on';
+    const isThisPending = pending && (pendingTarget === s.key || pendingTarget === 'all');
+    const isRunning = (s.state === 'running');
+    const isPartial = (s.state === 'partial');
+    const isActive = isRunning || isPartial || s.bot || (!s.paused);
 
-    let isChecked = s.state === 'running';
-    // Khi đang tắt/giải phóng: giữ công tắc ở bên phải cho tới khi server hoàn tất việc giải phóng!
-    if (isOffPending) isChecked = true;
-    // Khi đang bật: giữ công tắc ở bên trái cho tới khi server khởi động xong!
-    if (isOnPending) isChecked = false;
+    let badgeClass = 'stopped';
+    let badgeText = 'Đã tắt';
+    if (isThisPending) {
+      badgeClass = 'pending';
+      badgeText = 'Đang xử lý…';
+    } else if (isRunning) {
+      badgeClass = 'running';
+      badgeText = 'Đang bật';
+    } else if (isPartial) {
+      badgeClass = 'pending';
+      badgeText = 'Đang khởi động';
+    }
 
-    let switchLabel = isOffPending ? 'Đang giải phóng…' : isOnPending ? 'Đang bật…' : (s.state === 'running' ? 'Bật' : s.state === 'stopped' ? 'Tắt' : 'Chờ');
-    let stateBadge = s.state === 'running' ? 'Đang chạy' : s.state === 'stopped' ? 'Đã tắt' : 'Chưa sẵn sàng';
-    if (isOffPending) stateBadge = 'Đang giải phóng RAM/VRAM…';
-    if (isOnPending) stateBadge = 'Đang khởi động…';
-
-    const botStatus = s.polling ? 'polling hoạt động' : (s.bot ? 'đang khởi động' : 'đã tắt');
-    const queueStatus = s.busy ? ' · Đang xử lý' : (s.queue ? ' · ' + s.queue + ' video chờ' : '');
+    const botStatus = s.polling ? 'Bot: Polling ✓' : (s.bot ? 'Bot: Khởi động' : 'Bot: Tắt');
+    const queueStatus = s.busy ? ' (Đang xử lý)' : (s.queue ? ` (${s.queue} video chờ)` : '');
+    const dashStatus = s.dashboard ? 'Dashboard: Online' : 'Dashboard: Offline';
+    const switchClass = isThisPending ? 'is-pending' : (isActive ? 'is-active' : '');
+    const switchLabel = isThisPending ? 'Chờ…' : (isActive ? 'BẬT' : 'TẮT');
+    const switchLabelClass = isThisPending ? 'pending' : (isActive ? 'on' : 'off');
+    const targetUrl = `http://127.0.0.1:${s.key === 'v1' ? 8088 : 8089}/`;
 
     return `
-      <div class="tool">
-        <div>
-          <span class="dot ${isThisPending ? 'partial' : s.state}"></span>
-          <b>Tool ${s.key.toUpperCase()}</b> · ${stateBadge}
+      <div class="tool ${isActive ? 'active' : 'inactive'}">
+        <div class="tool-top">
+          <div class="tool-title">
+            <span class="dot ${isThisPending ? 'pending' : (isActive ? 'running' : 'stopped')}"></span>
+            Tool ${s.key.toUpperCase()}
+          </div>
+          <span class="status-badge ${badgeClass}">
+            ${badgeText}
+          </span>
         </div>
-        <small>Dashboard: ${s.dashboard ? 'online' : 'offline'} · Bot: ${botStatus}${queueStatus}</small>
+        <div class="tool-metrics">
+          <span>${dashStatus}</span> · <span>${botStatus}${queueStatus}</span>
+        </div>
         <div class="tool-actions">
-          <button role="switch"
-            aria-label="Bật tắt Tool ${s.key.toUpperCase()} và Telegram bot"
-            aria-checked="${isChecked}"
-            data-state="${isThisPending ? 'partial' : s.state}"
-            title="Bấm để bật hoặc tắt Tool"
+          <button class="switch-btn ${switchClass}"
+            role="switch"
+            aria-checked="${isActive}"
+            aria-label="Bật hoặc tắt Tool ${s.key.toUpperCase()}"
+            title="${isActive ? 'Bấm để TẮT Tool ' + s.key.toUpperCase() + ' và giải phóng tài nguyên' : 'Bấm để BẬT Tool ' + s.key.toUpperCase() + ' (Sẽ tự động tắt tool còn lại)'}"
             ${pending ? 'disabled' : ''}
-            onclick="toggle('${s.key}', '${s.state === 'running' ? 'off' : 'on'}')">
+            onclick="toggleTool('${s.key}', ${isActive})">
             <span class="switch-track" aria-hidden="true">
               <span class="switch-thumb"></span>
             </span>
-            <span class="switch-label ${isThisPending ? 'pending' : ''}">${switchLabel}</span>
+            <span class="switch-label-text ${switchLabelClass}">${switchLabel}</span>
           </button>
-          ${s.state === 'partial' && !pending ? `<button onclick="toggle('${s.key}','on')">Khởi động bổ sung</button>` : ''}
-          <a target="_top" href="http://127.0.0.1:${s.key === 'v1' ? 8088 : 8089}/">Dashboard ↗</a>
+          <a href="${targetUrl}" target="_top" title="Mở trang quản lý Tool ${s.key.toUpperCase()}">Mở Dashboard ↗</a>
         </div>
       </div>
     `;
@@ -563,28 +756,33 @@ function renderTools() {
 
 async function refresh() {
   try {
-    const r = await fetch('/status', { signal: AbortSignal.timeout(6000) });
+    const r = await fetch('/status', { signal: AbortSignal.timeout(5000) });
     if (!r.ok) throw Error();
     states = await r.json();
     if (!pending) renderTools();
   } catch(e) {
     if (!pending) {
-      document.getElementById('message').textContent = 'Đang kết nối lại bộ điều khiển...';
+      const msg = document.getElementById('message');
+      if (msg) msg.textContent = 'Đang kết nối lại bộ điều khiển (Port 8090)...';
     }
   }
 }
 
-async function toggle(key, action) {
+async function toggleTool(key, currentlyActive) {
   if (pending) return;
+  const action = currentlyActive ? 'off' : 'on';
+  const other = key === 'v1' ? 'v2' : 'v1';
+
   pending = true;
-  pendingAction = { key, action };
+  pendingTarget = key;
   renderTools();
 
   const msgElem = document.getElementById('message');
+  msgElem.className = '';
   if (action === 'off') {
-    msgElem.textContent = `⏳ Đang dừng Tool ${key.toUpperCase()} và giải phóng toàn bộ RAM, GPU VRAM...`;
+    msgElem.textContent = `⏳ Đang tắt Tool ${key.toUpperCase()} và giải phóng toàn bộ RAM & VRAM...`;
   } else {
-    msgElem.textContent = `⏳ Đang khởi động Tool ${key.toUpperCase()} và kiểm tra bot...`;
+    msgElem.textContent = `⏳ Đang dọn sạch Tool ${other.toUpperCase()} & khởi động Tool ${key.toUpperCase()}...`;
   }
 
   try {
@@ -592,15 +790,58 @@ async function toggle(key, action) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Control-Token': token },
       body: JSON.stringify({ key, action }),
-      signal: AbortSignal.timeout(18000)
+      signal: AbortSignal.timeout(20000)
     });
     const d = await r.json();
-    msgElem.textContent = (r.ok ? '✅ ' : '⚠️ ') + (d.message || 'Thao tác hoàn tất.');
+    if (r.ok) {
+      msgElem.className = 'success';
+      msgElem.textContent = '✅ ' + (d.message || 'Thao tác hoàn tất.');
+    } else {
+      msgElem.className = 'error';
+      msgElem.textContent = '⚠️ ' + (d.message || 'Có lỗi xảy ra.');
+    }
   } catch(e) {
-    msgElem.textContent = e.name === 'TimeoutError' ? 'Lệnh đang được hoàn tất ngầm...' : ('Lỗi: ' + (e.message || 'Không gửi được lệnh.'));
+    msgElem.className = 'error';
+    msgElem.textContent = e.name === 'TimeoutError' ? 'Lệnh đang được hoàn tất ngầm...' : ('Lỗi kết nối: ' + e.message);
   } finally {
     pending = false;
-    pendingAction = null;
+    pendingTarget = null;
+    await refresh();
+    renderTools();
+  }
+}
+
+async function stopAll() {
+  if (pending) return;
+  pending = true;
+  pendingTarget = 'all';
+  renderTools();
+
+  const msgElem = document.getElementById('message');
+  msgElem.className = '';
+  msgElem.textContent = '⏳ Đang tắt cả 2 Tool và giải phóng 100% RAM & GPU VRAM...';
+
+  try {
+    const r = await fetch('/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Control-Token': token },
+      body: JSON.stringify({ action: 'off_all' }),
+      signal: AbortSignal.timeout(20000)
+    });
+    const d = await r.json();
+    if (r.ok) {
+      msgElem.className = 'success';
+      msgElem.textContent = '✅ ' + (d.message || 'Đã tắt cả hai Tool.');
+    } else {
+      msgElem.className = 'error';
+      msgElem.textContent = '⚠️ ' + (d.message || 'Có lỗi xảy ra.');
+    }
+  } catch(e) {
+    msgElem.className = 'error';
+    msgElem.textContent = 'Lỗi: ' + e.message;
+  } finally {
+    pending = false;
+    pendingTarget = null;
     await refresh();
     renderTools();
   }
@@ -627,9 +868,9 @@ async function loadVoices() {
     select.value = d.selected.id;
     select.disabled = false;
     document.getElementById('save-voice').disabled = false;
-    document.getElementById('voice-status').textContent = 'Đang lưu: ' + d.selected.label;
+    document.getElementById('voice-status').textContent = 'Đang dùng: ' + d.selected.label;
   } catch(e) {
-    document.getElementById('voice-status').textContent = 'Không tải được cấu hình giọng. Hãy tải lại trang.';
+    document.getElementById('voice-status').textContent = 'Không tải được giọng.';
   }
 }
 
@@ -647,10 +888,10 @@ async function saveVoice() {
     const d = await r.json();
     if (!r.ok) throw Error(d.message || 'Không lưu được giọng');
     await loadVoices();
-    document.getElementById('voice-status').textContent = d.message;
+    document.getElementById('voice-status').textContent = 'Đã lưu: ' + d.message;
   } catch(e) {
     await loadVoices();
-    alert('Giọng chưa được đổi: ' + e.message);
+    alert('Không đổi được giọng: ' + e.message);
   } finally {
     button.disabled = false;
     select.disabled = false;
@@ -659,8 +900,7 @@ async function saveVoice() {
 
 loadVoices();
 refresh();
-setInterval(() => { if (!pending && !dragStart) refresh(); }, 3000);
-document.getElementById('message').textContent = 'Xanh: dashboard + bot hoạt động · Đỏ: bộ xử lý/bot đã tắt · Vàng: đang chuyển trạng thái.';
+setInterval(() => { if (!pending) refresh(); }, 3000);
 </script></body></html>"""
 
 class Handler(BaseHTTPRequestHandler):
@@ -707,9 +947,22 @@ def ensure_single_controller():
     except Exception: parent_pid = -1
 
     try:
-        with urllib.request.urlopen('http://127.0.0.1:8090/status', timeout=1) as resp:
-            if resp.status == 200:
-                return 'already_running'
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _s:
+            _s.settimeout(0.5)
+            if _s.connect_ex(('127.0.0.1', 8090)) == 0:
+                try:
+                    with urllib.request.urlopen('http://127.0.0.1:8090/status', timeout=2) as resp:
+                        if resp.status == 200:
+                            return 'already_running'
+                except Exception:
+                    time.sleep(1)
+                    try:
+                        with urllib.request.urlopen('http://127.0.0.1:8090/status', timeout=2) as resp:
+                            if resp.status == 200:
+                                return 'already_running'
+                    except Exception:
+                        pass
     except Exception:
         pass
 
@@ -731,7 +984,8 @@ def ensure_single_controller():
     return 'proceed'
 
 class SingleInstanceServer(ThreadingHTTPServer):
-    allow_reuse_address = True
+    allow_reuse_address = False
+
 
 if __name__ == '__main__':
     log_path = Path(r"C:\tool v1\workspace\service_logs\tool_control.log")
@@ -756,4 +1010,9 @@ if __name__ == '__main__':
                 with open(log_path, "a", encoding="utf-8") as lf:
                     lf.write(f"Failed to bind 8090: {e}\n")
                 raise SystemExit(0)
+
+    # Áp dụng mặc định khi khởi động máy: Tool V1 BẬT, Tool V2 TẮT
+    threading.Thread(target=apply_boot_defaults, daemon=True).start()
     server.serve_forever()
+
+

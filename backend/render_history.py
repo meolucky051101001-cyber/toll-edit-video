@@ -9,8 +9,9 @@ import tempfile
 from pathlib import Path
 from typing import Dict, Optional
 
-HISTORY_FILE = Path(r"D:\banve\.render_history.json")
-LOCK_FILE = Path(r"D:\banve\.render_history.lock")
+WORKSPACE_DIR = Path(__file__).resolve().parent.parent / "workspace"
+HISTORY_FILE = WORKSPACE_DIR / ".render_history.json"
+LOCK_FILE = WORKSPACE_DIR / ".render_history.lock"
 
 def format_duration(seconds: float) -> str:
     """Định dạng giây sang dạng Xp Ys hoặc Xs."""
@@ -28,20 +29,25 @@ def format_duration(seconds: float) -> str:
     return f"{s}s"
 
 def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int]:
-    """Đọc toàn bộ lịch sử thời gian render từ file D:\banve\.render_history.json và cache runtime."""
-    history_file = (output_dir / ".render_history.json") if output_dir else HISTORY_FILE
+    """Đọc toàn bộ lịch sử thời gian render từ workspace và cache runtime (tuyệt đối không tạo file trong output_dir)."""
+    history_files = [
+        HISTORY_FILE,
+        Path(r"C:\tool v2\workspace\.render_history_v2.json"),
+        Path(r"C:\tool v2\workspace\.render_history.json"),
+    ]
     meta: Dict[str, int] = {}
-    if history_file.exists():
-        try:
-            raw = json.loads(history_file.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                for k, v in raw.items():
-                    if isinstance(v, (int, float)) and v > 0:
-                        meta[k] = int(v)
-                    elif isinstance(v, dict) and "duration_seconds" in v:
-                        meta[k] = int(v["duration_seconds"])
-        except Exception:
-            pass
+    for hf in history_files:
+        if hf.exists():
+            try:
+                raw = json.loads(hf.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    for k, v in raw.items():
+                        if isinstance(v, (int, float)) and v > 0:
+                            meta.setdefault(k, int(v))
+                        elif isinstance(v, dict) and "duration_seconds" in v:
+                            meta.setdefault(k, int(v["duration_seconds"]))
+            except Exception:
+                pass
 
     # Đọc bổ sung từ job_status.json nếu chưa có
     workspace_candidates = [

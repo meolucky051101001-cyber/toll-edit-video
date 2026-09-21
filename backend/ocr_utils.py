@@ -439,6 +439,48 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                     seg.tracking_blocks = []
                     seg.y_pct = global_med_top
                     seg.max_y_pct = global_med_bottom
+
+        # BỔ SUNG CÂU THOẠI TỪ OCR (Nếu ASR bị nhạc to át mất câu)
+        try:
+            recovered_subs = recover_missing_subtitles_from_ocr(
+                all_blocks=all_blocks,
+                srt_segments=srt_segments,
+                band=band,
+                duration=duration,
+            )
+            if recovered_subs:
+                logger.info(f"🎯 OCR Fallback phát hiện {len(recovered_subs)} câu phụ đề bị ASR bỏ sót: {[r['text'] for r in recovered_subs]}")
+                import srt
+                from datetime import timedelta
+                for rec in recovered_subs:
+                    new_seg = srt.Subtitle(
+                        index=len(srt_segments) + 1,
+                        start=timedelta(seconds=rec["start"]),
+                        end=timedelta(seconds=rec["end"]),
+                        content=rec["text"],
+                    )
+                    b = rec["best_block"]
+                    new_seg.best_block = OCRBlock(
+                        text=getattr(b, "text", "") if hasattr(b, "text") else b.get("text", ""),
+                        start=rec["start"],
+                        end=rec["end"],
+                        x_pct=getattr(b, "x_pct", 0.0) if hasattr(b, "x_pct") else b.get("x_pct", 0.0),
+                        max_x_pct=getattr(b, "max_x_pct", 1.0) if hasattr(b, "max_x_pct") else b.get("max_x_pct", 1.0),
+                        y_pct=getattr(b, "y_pct", global_med_top) if hasattr(b, "y_pct") else b.get("y_pct", global_med_top),
+                        max_y_pct=getattr(b, "max_y_pct", global_med_bottom) if hasattr(b, "max_y_pct") else b.get("max_y_pct", global_med_bottom),
+                        prob=getattr(b, "prob", 1.0) if hasattr(b, "prob") else b.get("prob", 1.0),
+                    )
+                    new_seg.y_pct = new_seg.best_block.y_pct
+                    new_seg.max_y_pct = new_seg.best_block.max_y_pct
+                    new_seg.tracking_blocks = []
+                    srt_segments.append(new_seg)
+
+                # Sort by start time and re-index
+                srt_segments.sort(key=lambda s: s.start)
+                for idx, s in enumerate(srt_segments, start=1):
+                    s.index = idx
+        except Exception as ocr_rec_err:
+            logger.warning(f"OCR subtitle recovery error: {ocr_rec_err}")
     else:
         logger.info("No reliable Chinese subtitle band detected (video without subtitles or only static packaging/logos).")
         main_y_pct = 0.85
@@ -450,3 +492,102 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                 seg.max_y_pct = 0.90
 
     return [], width, height, main_y_pct
+
+
+def recover_missing_subtitles_from_ocr(all_blocks, srt_segments, band, duration=None):
+    """
+    Recover missing speech segments from reliable OCR blocks in the Chinese Subtitle Band
+    that were missed by Whisper ASR (e.g. drowned out by loud music).
+    """
+    if not all_blocks or getattr(band, "support", 0) <= 0 or getattr(band, "mode", "") == "default":
+        return []
+
+    # 1. Collect existing segment intervals
+    existing_intervals = []
+    if srt_segments:
+        for seg in srt_segments:
+            existing_intervals.append((seg.start.total_seconds() - 0.5, seg.end.total_seconds() + 0.5))
+
+    # 2. Filter candidate blocks in subtitle band
+    candidates = []
+    for b in all_blocks:
+        def value(name, default=None):
+            return b.get(name, default) if isinstance(b, dict) else getattr(b, name, default)
+        if (value('is_packaging') is True or value('is_static') is True
+                or value('is_subtitle') is False or value('in_subtitle_band') is False
+                or str(value('type', '')).lower() in ('packaging', 'logo', 'watermark', 'background')):
+            continue
+        prob = float(getattr(b, "prob", 1.0) if hasattr(b, "prob") else b.get("prob", 1.0))
+        text = str(getattr(b, "text", "") if hasattr(b, "text") else b.get("text", "")).strip()
+        y_pct = float(getattr(b, "y_pct", 0.0) if hasattr(b, "y_pct") else b.get("y_pct", 0.0))
+        sample_time = float(getattr(b, "sample_time", 0.0) if hasattr(b, "sample_time") else b.get("sample_time", 0.0))
+
+        # Check band alignment
+        if not (band.top - 0.035 <= y_pct <= band.bottom + 0.035):
+            continue
+        # Check text quality: at least 2 Chinese characters
+        ch_chars = [c for c in text if "\u3400" <= c <= "\u9fff"]
+        if prob < 0.60 or len(ch_chars) < 2:
+            continue
+        # Check if already covered by ASR
+        covered = any(st <= sample_time <= et for st, et in existing_intervals)
+        if covered:
+            continue
+        candidates.append(b)
+
+    if not candidates:
+        return []
+
+    # 3. Group consecutive frames of the same subtitle
+    def get_st(blk):
+        return float(getattr(blk, "sample_time", 0.0) if hasattr(blk, "sample_time") else blk.get("sample_time", 0.0))
+
+    candidates.sort(key=get_st)
+    clusters = []
+    current_cluster = [candidates[0]]
+    for b in candidates[1:]:
+        prev_time = get_st(current_cluster[-1])
+        from difflib import SequenceMatcher
+        def caption_text(item):
+            return str(item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', '')).strip()
+        same_caption = SequenceMatcher(None, caption_text(current_cluster[0]), caption_text(b), autojunk=False).ratio() >= 0.8
+        if get_st(b) - prev_time <= 1.5 and same_caption:
+            current_cluster.append(b)
+        else:
+            clusters.append(current_cluster)
+            current_cluster = [b]
+    if current_cluster:
+        clusters.append(current_cluster)
+
+    # 4. Convert clusters to recovered Subtitle segments
+    recovered = []
+    for cluster in clusters:
+        times = [get_st(b) for b in cluster]
+        if len(set(times)) < 2:
+            continue
+        start_t = max(0.0, min(times) - 0.3)
+        end_t = max(times) + 0.5
+        if duration and duration > 0:
+            end_t = min(end_t, duration)
+        if end_t - start_t < 0.8 and len(cluster) < 2:
+            continue
+
+        def get_prob_len(blk):
+            p = float(getattr(blk, "prob", 0.0) if hasattr(blk, "prob") else blk.get("prob", 0.0))
+            t = str(getattr(blk, "text", "") if hasattr(blk, "text") else blk.get("text", ""))
+            return (p, len(t))
+
+        best_block = max(cluster, key=get_prob_len)
+        text = str(getattr(best_block, "text", "") if hasattr(best_block, "text") else best_block.get("text", "")).strip()
+        if not text:
+            continue
+
+        recovered.append({
+            "start": start_t,
+            "end": end_t,
+            "text": text,
+            "best_block": best_block,
+            "samples": cluster,
+        })
+
+    return recovered

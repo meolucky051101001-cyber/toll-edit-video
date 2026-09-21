@@ -37,12 +37,12 @@ router = APIRouter(tags=["Script Studio"])
 # Lock đồng bộ để tránh tràn VRAM / quá tải API cùng lúc
 SCRIPT_PROCESS_LOCK = threading.Lock()
 
-# Thư mục lưu trữ workspace kịch bản & file âm thanh, phụ đề
+# Thư mục lưu trữ workspace kịch bản & file âm thanh, phụ đề (tuyệt đối không lưu vào D:\banve hoặc D:\video phôi)
 def _get_script_workspace() -> Path:
     candidates = [
-        Path(r"D:\banve\script_workspace"),
-        Path(r"D:\video phôi\script_workspace"),
-        Path(__file__).resolve().parent / "script_workspace",
+        Path(__file__).resolve().parent.parent / "workspace" / "script_workspace",
+        Path(r"C:\tool v1\workspace\script_workspace"),
+        Path(__file__).resolve().parent / "workspace" / "script_workspace",
     ]
     for c in candidates:
         try:
@@ -50,7 +50,7 @@ def _get_script_workspace() -> Path:
             return c
         except Exception:
             continue
-    fallback = Path(__file__).resolve().parent / "script_workspace"
+    fallback = Path(__file__).resolve().parent.parent / "workspace" / "script_workspace"
     fallback.mkdir(parents=True, exist_ok=True)
     return fallback
 
@@ -66,6 +66,8 @@ PREVIEWS_DIR.mkdir(parents=True, exist_ok=True)
 class HookRequest(BaseModel):
     topic: str
     num_hooks: int = 6
+    hook_duration: int = 7
+    hook_type: str = "anti_copyright"
 
 class ScriptGenerateRequest(BaseModel):
     topic: str
@@ -74,6 +76,8 @@ class ScriptGenerateRequest(BaseModel):
     style: str = "Chuyên gia cuốn hút & thực chiến"
     hook_text: str = ""
     custom_instruction: str = ""
+    hook_duration: int = 7
+    persona_gender: str = "neutral"
 
 class PreviewTTSRequest(BaseModel):
     text: str
@@ -88,12 +92,34 @@ class BurnVideoRequest(BaseModel):
     audio_filename: str
     srt_filename: str
     output_filename: str = ""
+    hook_card_text: Optional[str] = None
+    hook_card_bg_color: Optional[str] = "#A52A3A"
+    hook_card_show_badge: bool = False
+    hook_card_badge_text: Optional[str] = ""
+    hook_card_duration: Optional[float] = 4.5
+
+class AutoPipelineRequest(BaseModel):
+    video_path: str
+    genre: str = "review"
+    style: str = "Chuyên gia cuốn hút & thực chiến"
+    custom_instruction: str = ""
+    voice: str = "BV562_streaming"
+    persona: str = "auto"
+    hook_duration: int = 7
+    anti_copyright: bool = True
+    hook_card_text: Optional[str] = None
+    hook_card_bg_color: str = "#A52A3A"
+    hook_card_show_badge: bool = False
+    hook_card_badge_text: str = ""
 
 class VideoAnalyzeRequest(BaseModel):
     video_path: str
     genre: str = "review"
     style: str = "Chuyên gia cuốn hút & thực chiến"
     custom_instruction: str = ""
+    hook_duration: int = 7
+    persona_gender: str = "neutral"
+
 
 
 # =========================================================================
@@ -180,7 +206,9 @@ def api_analyze_video(req: VideoAnalyzeRequest):
             video_path=clean_path,
             genre=req.genre,
             style=req.style,
-            custom_instruction=req.custom_instruction
+            custom_instruction=req.custom_instruction,
+            hook_duration=float(getattr(req, "hook_duration", 7) or 7),
+            persona=getattr(req, "persona_gender", "auto") or "auto"
         )
         return {
             "status": "success",
@@ -199,7 +227,12 @@ def api_analyze_video(req: VideoAnalyzeRequest):
 def api_generate_hooks(req: HookRequest):
     """Sinh 6 biến thể Hook giật tít cho chủ đề theo phong cách hook-generator."""
     try:
-        hooks = generate_viral_hooks(req.topic, num_hooks=req.num_hooks)
+        hooks = generate_viral_hooks(
+            topic=req.topic,
+            num_hooks=req.num_hooks,
+            hook_duration=int(getattr(req, "hook_duration", 7) or 7),
+            mode=getattr(req, "hook_type", "anti_copyright") or "anti_copyright"
+        )
         return {"status": "success", "hooks": hooks}
     except Exception as e:
         logger.error(f"Lỗi api_generate_hooks: {e}", exc_info=True)
@@ -216,7 +249,9 @@ def api_generate_script(req: ScriptGenerateRequest):
             duration_target=req.duration_target,
             style=req.style,
             hook_text=req.hook_text or None,
-            custom_instruction=req.custom_instruction
+            custom_instruction=req.custom_instruction,
+            hook_duration=float(getattr(req, "hook_duration", 7) or 7),
+            persona=getattr(req, "persona_gender", "auto") or "auto"
         )
         return {"status": "success", "script": script}
     except Exception as e:
@@ -286,7 +321,12 @@ def api_burn_video(req: BurnVideoRequest):
             video_path=clean_video_path,
             audio_path=str(audio_file),
             srt_path=str(srt_file),
-            output_path=str(out_path)
+            output_path=str(out_path),
+            hook_card_text=req.hook_card_text,
+            hook_card_bg_color=req.hook_card_bg_color or "#A52A3A",
+            hook_card_show_badge=req.hook_card_show_badge,
+            hook_card_badge_text=req.hook_card_badge_text or "",
+            hook_card_duration=req.hook_card_duration or 4.5,
         )
         return {
             "status": "success",
@@ -296,6 +336,98 @@ def api_burn_video(req: BurnVideoRequest):
         }
     except Exception as e:
         logger.error(f"Lỗi api_burn_video: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
+    finally:
+        SCRIPT_PROCESS_LOCK.release()
+
+
+@router.post("/api/script/auto-pipeline")
+def api_auto_pipeline(req: AutoPipelineRequest):
+    """
+    TỰ ĐỘNG HÓA TOÀN BỘ PIPELINE CHO 1 VIDEO (1-CLICK AUTO PIPELINE):
+    1. AI Gemini Vision xem video, phân tích tình huống và lên kịch bản + Hook né bản quyền.
+    2. CapCut TTS lồng tiếng toàn bộ phân cảnh, căn chỉnh timeline và xuất file SRT.
+    3. FFmpeg dập audio giọng đọc, phụ đề SRT và Thẻ Text Hook Drama vào video thành phẩm.
+    """
+    if not SCRIPT_PROCESS_LOCK.acquire(blocking=False):
+        return {"status": "error", "message": "Hệ thống đang xử lý tác vụ khác. Vui lòng đợi hoàn tất!"}
+    try:
+        clean_video_path = req.video_path.replace("local:///", "").replace("/", "\\").strip()
+        if not os.path.exists(clean_video_path):
+            return {"status": "error", "message": f"Không tìm thấy file video: {clean_video_path}"}
+
+        logger.info(f"[AUTO-PIPELINE] Bắt đầu tự động hóa từ A-Z cho video: {clean_video_path}")
+
+        # BƯỚC 1: Phân tích video & lên kịch bản + hook
+        logger.info("[AUTO-PIPELINE] Bước 1: Gemini Vision phân tích video & bóc tách tình huống...")
+        script = analyze_video_and_generate_script(
+            video_path=clean_video_path,
+            genre=req.genre,
+            style=req.style,
+            custom_instruction=req.custom_instruction,
+            hook_duration=float(req.hook_duration or 7),
+            persona=req.persona or "auto",
+            voice=req.voice
+        )
+        scenes = script.get("scenes", [])
+        if not scenes:
+            raise RuntimeError("Không tạo được phân cảnh kịch bản từ video.")
+
+        # Xác định câu Hook Card
+        card_text = (req.hook_card_text or "").strip()
+        if not card_text:
+            sc1 = scenes[0]
+            card_text = sc1.get("text_overlay") or script.get("title") or ""
+
+        # BƯỚC 2: CapCut TTS thu âm & tạo phụ đề SRT
+        logger.info(f"[AUTO-PIPELINE] Bước 2: CapCut TTS thu âm ({len(scenes)} cảnh) giọng {req.voice} & tạo file SRT...")
+        render_res = render_full_script_tts(
+            scenes=scenes,
+            voice=req.voice,
+            workspace_dir=str(SCRIPT_WORKSPACE),
+            video_duration=script.get("video_duration")
+        )
+        audio_filename = render_res["audio_filename"]
+        srt_filename = render_res["srt_filename"]
+
+        audio_file = SCRIPT_WORKSPACE / audio_filename
+        srt_file = SCRIPT_WORKSPACE / srt_filename
+
+        # BƯỚC 3: Dập tiếng, phụ đề và Text Hook Drama vào video
+        logger.info("[AUTO-PIPELINE] Bước 3: FFmpeg dập tiếng, sub và Text Hook Drama...")
+        out_name = f"AutoDone_{Path(clean_video_path).stem}_{int(time.time())}.mp4"
+        out_path = SCRIPT_WORKSPACE / out_name
+
+        final_path = burn_script_to_video(
+            video_path=clean_video_path,
+            audio_path=str(audio_file),
+            srt_path=str(srt_file),
+            output_path=str(out_path),
+            hook_card_text=card_text,
+            hook_card_bg_color=req.hook_card_bg_color or "#A52A3A",
+            hook_card_show_badge=req.hook_card_show_badge,
+            hook_card_badge_text=req.hook_card_badge_text or "",
+            hook_card_duration=float(req.hook_duration or 4.5)
+        )
+
+        logger.info(f"[AUTO-PIPELINE] Hoàn tất 100%! Xuất video: {final_path}")
+
+        return {
+            "status": "success",
+            "script": script,
+            "scenes": scenes,
+            "audio_filename": audio_filename,
+            "srt_filename": srt_filename,
+            "audio_stream_url": f"/api/script/stream/{audio_filename}",
+            "srt_download_url": f"/api/script/stream/{srt_filename}",
+            "final_video": final_path,
+            "video_stream_url": f"/api/script/stream/{out_name}",
+            "hook_text": card_text,
+            "total_duration": render_res.get("total_duration", 0),
+            "message": f"🎉 Tự động hóa hoàn tất 100%! Video đã được lồng tiếng, dập sub và tạo Hook thành công."
+        }
+    except Exception as e:
+        logger.error(f"[AUTO-PIPELINE] Lỗi tự động hóa: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
     finally:
         SCRIPT_PROCESS_LOCK.release()

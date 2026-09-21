@@ -1,6 +1,7 @@
 import os
 import sys
 import io
+from pathlib import Path
 if isinstance(sys.stdout, io.TextIOWrapper):
     try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception: pass
@@ -116,7 +117,7 @@ def _merge_short_fragments(segments):
         merged.append(current)
     return merged
 
-def _transcribe_once(audio_path, model_name, num_workers, download_root=None):
+def _transcribe_once(audio_path, model_name, num_workers, download_root=None, original_audio_path=None):
     """Run one ASR model and always release its CPU/GPU memory."""
 
     import torch, gc
@@ -198,7 +199,48 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None):
             start, end = _word_aligned_bounds(segment)
             transcribed_segments.append({"start": start, "end": end, "text": text})
 
-        return _merge_short_fragments(transcribed_segments)
+        merged_fast = _merge_short_fragments(transcribed_segments)
+        
+        # Tự động phát hiện original.wav nếu chưa truyền vào
+        if original_audio_path is None:
+            p = Path(audio_path)
+            for cand in [
+                p.parent / "original.wav",
+                p.parents[1] / "original.wav" if len(p.parents) > 1 else None,
+                p.parents[2] / "original.wav" if len(p.parents) > 2 else None,
+            ]:
+                if cand and cand.is_file():
+                    original_audio_path = str(cand)
+                    break
+
+        if original_audio_path and os.path.exists(original_audio_path):
+            try:
+                try:
+                    from .v1_conditional_asr import run_conditional_asr
+                except ImportError:
+                    from ai.v1_conditional_asr import run_conditional_asr
+                subs = [
+                    srt.Subtitle(
+                        index=i,
+                        start=timedelta(seconds=seg["start"]),
+                        end=timedelta(seconds=seg["end"]),
+                        content=seg["text"].strip(),
+                    )
+                    for i, seg in enumerate(merged_fast, start=1)
+                ]
+                refined = run_conditional_asr(
+                    original_audio_path=original_audio_path,
+                    initial_segments=subs,
+                    whisper_model=model,
+                )
+                return [
+                    {"start": s.start.total_seconds(), "end": s.end.total_seconds(), "text": s.content}
+                    for s in refined
+                ]
+            except Exception as cond_err:
+                logging.getLogger(__name__).warning("Conditional ASR fallback skipped: %s", cond_err)
+
+        return merged_fast
     finally:
         if model is not None:
             del model
@@ -208,7 +250,7 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None):
         print("🧹 Đã giải phóng bộ nhớ RAM/VRAM của Whisper AI.")
 
 
-def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2):
+def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, original_audio_path=None):
     """Transcribe with V1's fast model, falling back to the proven model."""
 
     policy = current_v1_model_policy()
@@ -229,6 +271,7 @@ def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2):
                 model_name,
                 num_workers,
                 download_root=whisper_cache,
+                original_audio_path=original_audio_path,
             )
             selected_model = model_name
             break

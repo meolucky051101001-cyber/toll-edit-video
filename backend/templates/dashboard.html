@@ -521,6 +521,14 @@ window.fetch = async function() {
           <div class="panel queue-panel">
             <div class="panel-header">
               <div class="panel-title">⏳ Video đang chờ xử lý <span class="badge badge-gpu" id="queueBadge">Telegram</span></div>
+              <div class="panel-actions" style="display: flex; gap: 8px; align-items: center;">
+                <button class="btn btn-primary" id="btnProcessQueue" onclick="processQueue()" style="font-size: 11px; padding: 4px 10px; background: #059669; border-color: #10b981;" title="Tiếp tục xử lý ngay các link video đang đợi trong hàng chờ (hữu ích sau khi rớt mạng hoặc bot bị ngắt)">
+                  ▶️ Xử lý hàng chờ
+                </button>
+                <button class="btn btn-outline" id="btnClearQueue" onclick="clearQueue()" style="font-size: 11px; padding: 4px 8px; color: #f87171; border-color: rgba(248,113,113,0.3);" title="Xóa sạch các video đang đợi trong hàng chờ">
+                  🗑️ Xóa
+                </button>
+              </div>
             </div>
             <div id="queueMessage" role="status" style="padding:10px 20px;color:var(--text-muted);font-size:12px">Đang kết nối hàng đợi…</div>
             <div style="max-height:320px;overflow:auto;padding:0 20px 12px" tabindex="0" aria-label="Danh sách video chờ">
@@ -1351,6 +1359,72 @@ let inputUploading=false;
       } finally { queuePending = false; }
     }
     setInterval(fetchQueue, 2500);
+
+    async function processQueue() {
+      const btn = document.getElementById('btnProcessQueue');
+      const msg = document.getElementById('queueMessage');
+      if (btn) btn.disabled = true;
+      try {
+        if (msg) msg.textContent = '⏳ Đang gửi lệnh kích hoạt xử lý hàng chờ...';
+        const res = await fetch('/api/queue/process', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok && data.status !== 'empty') {
+          if (msg) {
+            msg.textContent = '✅ ' + (data.message || 'Đã kích hoạt xử lý hàng chờ thành công!');
+            msg.style.color = '#34d399';
+          }
+          await fetchQueue();
+        } else {
+          if (msg) {
+            msg.textContent = (data.status === 'empty' ? 'ℹ️ ' : '❌ ') + (data.detail || data.message || 'Không thể kích hoạt hàng chờ');
+            msg.style.color = data.status === 'empty' ? '#38bdf8' : '#f87171';
+          }
+        }
+      } catch (err) {
+        if (msg) {
+          msg.textContent = '❌ Lỗi kết nối: ' + err.message;
+          msg.style.color = '#f87171';
+        }
+      } finally {
+        setTimeout(() => {
+          if (btn) btn.disabled = false;
+          if (msg) msg.style.color = 'var(--text-muted)';
+        }, 3000);
+      }
+    }
+
+    async function clearQueue() {
+      if (!confirm('Bạn có chắc muốn xóa tất cả video đang chờ trong hàng đợi không?')) return;
+      const btn = document.getElementById('btnClearQueue');
+      const msg = document.getElementById('queueMessage');
+      if (btn) btn.disabled = true;
+      try {
+        const res = await fetch('/api/queue/clear', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          if (msg) {
+            msg.textContent = '🗑️ ' + (data.message || 'Đã xóa sạch hàng chờ.');
+            msg.style.color = '#38bdf8';
+          }
+          await fetchQueue();
+        } else {
+          if (msg) {
+            msg.textContent = '❌ Lỗi: ' + (data.detail || data.message);
+            msg.style.color = '#f87171';
+          }
+        }
+      } catch (err) {
+        if (msg) {
+          msg.textContent = '❌ Lỗi kết nối: ' + err.message;
+          msg.style.color = '#f87171';
+        }
+      } finally {
+        setTimeout(() => {
+          if (btn) btn.disabled = false;
+          if (msg) msg.style.color = 'var(--text-muted)';
+        }, 2000);
+      }
+    }
     // ===== MIXER AUDIO CONTROLS =====
     async function loadMixerSettings() {
       try {

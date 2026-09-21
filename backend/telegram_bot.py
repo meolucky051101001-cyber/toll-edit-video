@@ -343,6 +343,7 @@ from telegram_queue_monitor import MonitoredQueue
 global_queue = MonitoredQueue()
 queue_counter = 0
 worker_task = None
+GLOBAL_BOT_APP = None
 
 async def send_video_safely(context, chat_id, final_video, caption, status_msg, url_or_filename):
     file_size = os.path.getsize(final_video)
@@ -453,9 +454,9 @@ async def video_worker():
                         await asyncio.sleep(2)
                 if isinstance(job, dict):
                     if job['type'] == 'url':
-                        await process_single_url(job['update'], job['context'], job['url'], job['pos'])
+                        await process_single_url(job.get('update'), job.get('context'), job['url'], job.get('pos', 1), chat_id=job.get('chat_id'))
                     elif job['type'] == 'video':
-                        await process_single_video(job['update'], job['context'], job['file_id'], job['filename'], job['pos'])
+                        await process_single_video(job.get('update'), job.get('context'), job.get('file_id'), job.get('filename') or 'video.mp4', job.get('pos', 1), chat_id=job.get('chat_id'))
                     elif job['type'] == 'resume_v2':
                         from pipeline_v2.config import PipelineSettings
                         from pipeline_v2.resume import resume_video_job
@@ -506,19 +507,33 @@ async def video_worker():
             logger.info("Worker queue cancelled.")
             break
 
-async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, pos: int = 1):
+async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, pos: int = 1, chat_id: int = None):
     import job_tracker
     job_tracker.start_video("Video từ Telegram", pos, pos + global_queue.qsize())
     original_url = url
-    chat_id = update.message.chat_id
+    target_chat_id = chat_id or (update.message.chat_id if update and hasattr(update, 'message') and update.message else None)
 
     # Thông báo bắt đầu
     remaining = global_queue.qsize()
-    status_msg = await update.message.reply_text(
-        f"▶️ *Đang xử lý Video thứ {pos} trong hàng đợi:*\n`{url}`\n\n"
-        f"⏳ Phía sau còn {remaining} video đang chờ...",
-        parse_mode="Markdown"
-    )
+    status_msg = None
+    if update and hasattr(update, 'message') and update.message:
+        try:
+            status_msg = await update.message.reply_text(
+                f"▶️ *Đang xử lý Video thứ {pos} trong hàng đợi:*\n`{url}`\n\n"
+                f"⏳ Phía sau còn {remaining} video đang chờ...",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+    elif target_chat_id and GLOBAL_BOT_APP and hasattr(GLOBAL_BOT_APP, "bot"):
+        try:
+            status_msg = await GLOBAL_BOT_APP.bot.send_message(
+                chat_id=target_chat_id,
+                text=f"▶️ *Đang tiếp tục xử lý Video thứ {pos} từ hàng chờ:*\n`{url}`\n\n⏳ Phía sau còn {remaining} video đang chờ...",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
 
     import subprocess
     import sys
@@ -547,9 +562,30 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
             parse_mode="Markdown"
         )
         
-        success, video_path, video_title, err_msg = await asyncio.to_thread(
-            download_social_video, url, download_dir, prefix
-        )
+        success = False
+        video_path = ""
+        video_title = ""
+        err_msg = ""
+        for attempt in range(3):
+            success, video_path, video_title, err_msg = await asyncio.to_thread(
+                download_social_video, url, download_dir, prefix
+            )
+            if success and os.path.exists(video_path):
+                break
+            is_net_err = any(k in (err_msg or '').lower() for k in [
+                'connection', 'timeout', 'timed out', 'network', 'connecterror', 'socket', 'gián đoạn', 'không thể kết nối'
+            ])
+            if is_net_err and attempt < 2:
+                wait_sec = 5 * (attempt + 1)
+                logger.warning(f"⚠️ Mạng gián đoạn khi tải {url}. Tự động thử lại sau {wait_sec}s (Lần {attempt+1}/3)...")
+                await safe_edit_status(
+                    status_msg,
+                    f"⚠️ *Mạng gián đoạn hoặc chập chờn!*\nĐang tự động thử tải lại sau {wait_sec}s (Lần {attempt+1}/3)...\n`{url}`",
+                    parse_mode="Markdown"
+                )
+                await asyncio.sleep(wait_sec)
+            else:
+                break
 
         if not success or not os.path.exists(video_path):
             await safe_edit_status(
@@ -952,17 +988,35 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str, filename: str, pos: int):
+async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str, filename: str, pos: int, chat_id: int = None):
     import job_tracker
     job_tracker.start_video(filename, pos, pos + global_queue.qsize())
-    status_msg = await update.message.reply_text(
-        f"▶️ *Đang xử lý Video tải lên (Thứ {pos} trong hàng đợi):*\n`{filename}`\n\n"
-        f"⏳ Phía sau còn {global_queue.qsize()} video đang chờ...",
-        parse_mode="Markdown"
-    )
+    status_msg = None
+    target_chat_id = chat_id or (update.message.chat_id if update and hasattr(update, 'message') and update.message else None)
+    if update and hasattr(update, 'message') and update.message:
+        try:
+            status_msg = await update.message.reply_text(
+                f"▶️ *Đang xử lý Video tải lên (Thứ {pos} trong hàng đợi):*\n`{filename}`\n\n"
+                f"⏳ Phía sau còn {global_queue.qsize()} video đang chờ...",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+    elif target_chat_id and GLOBAL_BOT_APP and hasattr(GLOBAL_BOT_APP, "bot"):
+        try:
+            status_msg = await GLOBAL_BOT_APP.bot.send_message(
+                chat_id=target_chat_id,
+                text=f"▶️ *Đang xử lý Video tải lên (Thứ {pos} từ hàng chờ):*\n`{filename}`\n\n⏳ Phía sau còn {global_queue.qsize()} video đang chờ...",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
 
     try:
-        file = await context.bot.get_file(file_id)
+        bot_client = context.bot if (context and hasattr(context, 'bot')) else getattr(GLOBAL_BOT_APP, 'bot', None)
+        if not bot_client:
+            raise RuntimeError("Bot client không khả dụng để tải video file_id")
+        file = await bot_client.get_file(file_id)
         download_dir = os.path.join(WORKSPACE, "downloads")
         os.makedirs(download_dir, exist_ok=True)
         
@@ -1234,8 +1288,100 @@ async def enqueue_interrupted_v2_jobs(application):
         worker_task = application.create_task(video_worker())
 
 
+async def enqueue_pending_queue_jobs(application=None):
+    """Tự động khôi phục các link còn tồn đọng trong telegram_queue.json sau khi khởi động hoặc rớt mạng."""
+    global queue_counter, worker_task
+    queue_file = Path(WORKSPACE) / "telegram_queue.json"
+    if not queue_file.is_file():
+        return 0
+    try:
+        import json
+        data = json.loads(queue_file.read_text(encoding="utf-8-sig"))
+        items = data.get("items", [])
+        if not items:
+            return 0
+
+        existing_names = set()
+        for j in list(global_queue._queue):
+            if isinstance(j, dict):
+                existing_names.add(j.get("url") or j.get("filename") or j.get("name"))
+            else:
+                existing_names.add(str(j))
+
+        restored = 0
+        for item in items:
+            target = item.get("url") or item.get("name")
+            if not target or target in existing_names:
+                continue
+            queue_counter += 1
+            if str(target).startswith("http"):
+                await global_queue.put({
+                    "type": "url",
+                    "pos": queue_counter,
+                    "url": target,
+                    "chat_id": item.get("chat_id"),
+                    "update": None,
+                    "context": None
+                })
+                existing_names.add(target)
+                restored += 1
+            elif item.get("type") == "video" and item.get("file_id"):
+                await global_queue.put({
+                    "type": "video",
+                    "pos": queue_counter,
+                    "file_id": item.get("file_id"),
+                    "filename": item.get("filename") or target,
+                    "chat_id": item.get("chat_id"),
+                    "update": None,
+                    "context": None
+                })
+                existing_names.add(target)
+                restored += 1
+
+        if restored > 0:
+            logger.info(f"🔄 Đã tự động nạp {restored} video từ hàng chờ cũ vào xử lý.")
+            if worker_task is None or worker_task.done():
+                if application and hasattr(application, "create_task"):
+                    worker_task = application.create_task(video_worker())
+                else:
+                    worker_task = asyncio.create_task(video_worker())
+        return restored
+    except Exception as e:
+        logger.warning(f"Lỗi khi nạp hàng chờ từ telegram_queue.json: {e}")
+        return 0
+
+async def queue_signal_watcher(application=None):
+    """Lắng nghe tín hiệu kích hoạt xử lý hàng chờ hoặc xóa hàng chờ từ Dashboard."""
+    global worker_task
+    trigger_flag = Path(WORKSPACE) / "telegram_queue_trigger.flag"
+    clear_flag = Path(WORKSPACE) / "telegram_queue_clear.flag"
+
+    while True:
+        try:
+            if clear_flag.exists():
+                try: clear_flag.unlink(missing_ok=True)
+                except Exception: pass
+                global_queue.clear()
+                logger.info("🗑️ Đã nhận lệnh xóa sạch hàng đợi từ Dashboard.")
+
+            if trigger_flag.exists():
+                try: trigger_flag.unlink(missing_ok=True)
+                except Exception: pass
+                restored = await enqueue_pending_queue_jobs(application)
+                logger.info(f"▶️ Đã nhận lệnh kích hoạt hàng chờ từ Dashboard. Đã nạp {restored} video.")
+                if worker_task is None or worker_task.done():
+                    if application and hasattr(application, "create_task"):
+                        worker_task = application.create_task(video_worker())
+                    else:
+                        worker_task = asyncio.create_task(video_worker())
+        except Exception as e:
+            logger.debug(f"Lỗi queue_signal_watcher: {e}")
+        await asyncio.sleep(1.5)
+
+
 def main():
     # Dam bao chi co duy nhat 1 tien trinh Telegram Bot chay tai 1 thoi diem
+
     import msvcrt
     lock_file_path = os.path.join(WORKSPACE, "bot_instance.lock")
     try:
@@ -1293,6 +1439,8 @@ def main():
                 .request(request)
                 .build()
             )
+            global GLOBAL_BOT_APP
+            GLOBAL_BOT_APP = app
 
             # Đăng ký handlers
             app.add_handler(CommandHandler("start", cmd_start))

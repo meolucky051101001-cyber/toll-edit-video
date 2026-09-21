@@ -11,16 +11,237 @@ import re
 import time
 import threading
 import subprocess
+import hashlib
 from pathlib import Path
 from typing import Optional, Dict, Any, List
+import cv2
+import numpy as np
+import asyncio
+from urllib.parse import unquote
 from fastapi import APIRouter, HTTPException, Query, Body, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 
-from canvas_settings import get_canvas_settings, save_canvas_settings, get_available_motion_backgrounds, resolve_motion_bg_path
+from canvas_settings import (
+    get_canvas_settings,
+    save_canvas_settings,
+    get_available_motion_backgrounds,
+    resolve_motion_bg_path,
+    get_available_image_backgrounds,
+    resolve_image_bg_path
+)
 
 logger = logging.getLogger("workflow_api")
 
 router = APIRouter()
+
+def detect_letterbox_crop(video_path: str, padding: int = 0) -> Optional[Dict[str, int]]:
+    """
+    Tự động phát hiện viền đen trên và dưới của video (letterboxing).
+    Bảo toàn nội dung tuyệt đối: Quét đa khung hình (10%, 25%, 50%, 75%, 90%),
+    lấy ranh giới an toàn nhất (min(top), max(bottom)).
+    Áp dụng bù lề an toàn padding:
+      - padding < 0 (ví dụ -6px): Nới rộng vùng video ra ngoài, đảm bảo 0% che vào nội dung.
+      - padding > 0 (ví dụ +4px): Gọt nhẹ vào trong để loại bỏ vệt xám mờ cạnh viền đen cũ.
+    Trả về dict {'w': cw, 'h': ch, 'x': cx, 'y': cy, 'top': top, 'bottom': bottom, 'orig_w': w, 'orig_h': h}
+    """
+    try:
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return None
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if w <= 0 or h <= 0 or total_frames <= 0:
+            cap.release()
+            return None
+        
+        sample_indices = [int(total_frames * p) for p in [0.10, 0.25, 0.50, 0.75, 0.90]]
+        crops = []
+        for idx in sample_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                continue
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            row_max = np.max(gray, axis=1)
+            top = 0
+            while top < (h // 2 - 60) and row_max[top] < 22:
+                top += 1
+            bottom = h
+            while bottom > (h // 2 + 60) and row_max[bottom - 1] < 22:
+                bottom -= 1
+            crops.append((top, bottom, 0, w))
+        cap.release()
+        if not crops:
+            return None
+        # Conservative: Lấy mép cao nhất của top, thấp nhất của bottom để bảo toàn toàn bộ nội dung
+        top = min(c[0] for c in crops)
+        bottom = max(c[1] for c in crops)
+
+        # Chỉ áp dụng nếu có viền đen trên hoặc dưới đáng kể (>= 16px)
+        if top < 16 and (h - bottom) < 16:
+            return None
+
+        # Áp dụng bù lề an toàn padding do người dùng kiểm soát
+        if padding != 0:
+            top = max(0, min(h // 2 - 40, top + padding))
+            bottom = min(h, max(h // 2 + 40, bottom - padding))
+
+        # Luôn giữ 100% chiều ngang (2 bên sát mép, không thu nhỏ hay cắt ngang)
+        cw = (w // 2) * 2
+        ch = ((bottom - top) // 2) * 2
+        cx = 0
+        cy = (top // 2) * 2
+        if cw < 50 or ch < 50:
+            return None
+        return {
+            'w': cw, 'h': ch, 'x': cx, 'y': cy,
+            'top': top, 'bottom': bottom,
+            'orig_w': w, 'orig_h': h
+        }
+    except Exception as e:
+        logger.warning(f"Lỗi khi detect letterbox crop cho {video_path}: {e}")
+        return None
+
+def probe_stream_durations(file_path: str) -> Dict[str, Optional[float]]:
+    """
+    Lấy thời lượng chính xác của luồng video và audio để tránh lỗi đơ hình
+    khi video phôi bị cắt sớm hơn âm thanh (Asymmetric Stream Truncation).
+    """
+    durations = {"video": None, "audio": None, "format": None}
+    try:
+        cmd = [
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_streams", "-show_format", str(file_path)
+        ]
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if p.returncode == 0:
+            data = json.loads(p.stdout)
+            fmt_dur = data.get("format", {}).get("duration")
+            if fmt_dur:
+                durations["format"] = float(fmt_dur)
+            for s in data.get("streams", []):
+                ctype = s.get("codec_type")
+                sdur = s.get("duration")
+                if ctype in ("video", "audio") and sdur:
+                    try:
+                        durations[ctype] = float(sdur)
+                    except ValueError:
+                        pass
+    except Exception as e:
+        logger.warning(f"Lỗi khi probe stream durations cho {file_path}: {e}")
+    return durations
+
+def generate_smart_thumb_mask(video_path: str, tw: int = 1080, th: int = 1920, padding: int = 0) -> Optional[Dict[str, Any]]:
+    """
+    Phương án 1: Tự động phát hiện và bảo vệ thẻ chữ thumb trắng ở phía trên.
+    Tạo ra một Alpha Mask (tw x th) chuẩn 8-bit grayscale:
+      - Vùng viền đen: alpha = 0 (trong suốt để lộ nền vàng / sóng biển).
+      - Vùng thẻ chữ thumb: alpha = 255 (giữ nguyên gốc 100% sắc nét, viền nét đen và đổ bóng).
+      - Vùng video chính ở giữa: alpha = 255 (giữ nguyên gốc 100%).
+      - Khử răng cưa mịn mép bằng GaussianBlur (5, 5).
+    Trả về Dict chứa {'mask_path': str, 'thumb_found': bool, 'y_vid_top': int, 'y_vid_bot': int}
+    """
+    try:
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return None
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if w <= 0 or h <= 0 or total_frames <= 0:
+            cap.release()
+            return None
+
+        sample_pts = [0.10, 0.25, 0.50, 0.75, 0.90] if total_frames > 5 else [0.0]
+        sample_indices = [int(total_frames * p) for p in sample_pts]
+        top_list = []
+        bot_list = []
+        thumb_contours = []
+
+        for idx in sample_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                continue
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            row_max = np.max(gray, axis=1)
+
+            thresh = max(22, min(50, int(np.mean(row_max[:5])) + 12))
+            mid = h // 2
+            yt = mid
+            while yt > 0 and row_max[yt] >= thresh:
+                yt -= 1
+            yb = mid
+            while yb < h - 1 and row_max[yb] >= thresh:
+                yb += 1
+
+            top_list.append(yt)
+            bot_list.append(yb)
+
+            if yt > 20:
+                top_part = gray[:yt, :]
+                _, bin_top = cv2.threshold(top_part, 160, 255, cv2.THRESH_BINARY)
+                cnts, _ = cv2.findContours(bin_top, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for c in cnts:
+                    if cv2.contourArea(c) > (w * yt * 0.08):
+                        thumb_contours.append(c)
+
+        cap.release()
+        if not top_list or not bot_list:
+            return None
+
+        # Ranh giới an toàn: min của top để không lẹm vào video, max của bottom
+        top = min(top_list)
+        bottom = max(bot_list)
+
+        # Kiểm tra xem có viền đen đáng kể hoặc có thumb không
+        if top < 16 and (h - bottom) < 16 and not thumb_contours:
+            return None
+
+        mask = np.zeros((th, tw), dtype=np.uint8)
+        sx = tw / float(w)
+        sy = th / float(h)
+
+        scaled_ytop = max(0, min(th, int(top * sy)))
+        scaled_ybot = max(0, min(th, int(bottom * sy)))
+
+        # Khóa bảo vệ vùng video chính ở giữa
+        mask[scaled_ytop:scaled_ybot, :] = 255
+
+        thumb_found = False
+        thumb_box_info = None
+        if thumb_contours:
+            best_cnt = max(thumb_contours, key=cv2.contourArea)
+            scaled_cnt = (best_cnt * [sx, sy]).astype(np.int32)
+            hull = cv2.convexHull(scaled_cnt)
+            cv2.drawContours(mask[:scaled_ytop, :], [hull], -1, 255, -1)
+            thumb_found = True
+            bx, by, bw_b, bh_b = cv2.boundingRect(scaled_cnt)
+            thumb_box_info = {
+                "x": int(bx), "y": int(by), "w": int(bw_b), "h": int(bh_b)
+            }
+
+        mask = cv2.GaussianBlur(mask, (5, 5), 0)
+
+        out_dir = WORKSPACE / "temp_masks"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        h_str = hashlib.md5(f"{video_path}_{top}_{bottom}_{thumb_found}".encode()).hexdigest()[:10]
+        out_file = out_dir / f"mask_{h_str}_{tw}x{th}.png"
+        cv2.imwrite(str(out_file), mask)
+
+        return {
+            "mask_path": str(out_file).replace("\\", "/"),
+            "thumb_found": thumb_found,
+            "thumb_box": thumb_box_info,
+            "y_vid_top": scaled_ytop,
+            "y_vid_bot": scaled_ybot,
+            "top": top,
+            "bottom": bottom
+        }
+    except Exception as e:
+        logger.warning(f"Lỗi khi tạo smart thumb mask cho {video_path}: {e}")
+        return None
 
 def build_custom_ass_file(job_dir: Path, cfg: Dict[str, Any], tw: int = 1080, th: int = 1920) -> Optional[Path]:
     """
@@ -247,7 +468,7 @@ async def serve_workflow_page():
 
 @router.get("/api/canvas-settings")
 async def api_get_canvas_settings():
-    """Lấy cấu hình tỷ lệ và background hiện tại kèm danh sách motion backgrounds."""
+    """Lấy cấu hình tỷ lệ và background hiện tại kèm danh sách motion & image backgrounds."""
     import importlib, canvas_settings
     try:
         importlib.reload(canvas_settings)
@@ -255,6 +476,7 @@ async def api_get_canvas_settings():
         pass
     cfg = canvas_settings.get_canvas_settings()
     cfg["motion_backgrounds"] = canvas_settings.get_available_motion_backgrounds()
+    cfg["image_backgrounds"] = canvas_settings.get_available_image_backgrounds()
     return cfg
 
 
@@ -278,6 +500,91 @@ async def api_get_motion_backgrounds():
     except Exception:
         pass
     return {"motion_backgrounds": canvas_settings.get_available_motion_backgrounds()}
+
+
+@router.get("/api/workflow/image-backgrounds")
+async def api_get_image_backgrounds():
+    """Lấy danh sách các ảnh nền có sẵn (Tia sáng vàng ngôi sao, xanh neon, đỏ cam,...)."""
+    import importlib, canvas_settings
+    try:
+        importlib.reload(canvas_settings)
+    except Exception:
+        pass
+    return {"image_backgrounds": canvas_settings.get_available_image_backgrounds()}
+
+
+@router.get("/api/workflow/detect-crop")
+async def api_detect_crop(path: str = Query(...), padding: int = Query(0)):
+    """Tự động phát hiện viền đen kèm tọa độ vùng video an toàn tuyệt đối và thẻ chữ thumb để trực quan hóa trên Canvas."""
+    clean_p = unquote(path).strip().strip('"').strip("'")
+    if not clean_p or not os.path.isfile(clean_p):
+        return JSONResponse({"status": "error", "message": "Tệp không tồn tại"}, status_code=404)
+    crop_info = detect_letterbox_crop(clean_p, padding=padding)
+    thumb_info = generate_smart_thumb_mask(clean_p, tw=1080, th=1920, padding=padding)
+    return JSONResponse({
+        "status": "ok",
+        "has_letterbox": crop_info is not None,
+        "crop_box": crop_info,
+        "thumb_info": thumb_info
+    })
+
+FOLDER_PICKER_LOCK = asyncio.Lock()
+
+@router.api_route("/api/workflow/choose-folder", methods=["GET", "POST"])
+async def api_choose_workflow_folder(
+    request: Request,
+    initial_dir: Optional[str] = Query(None),
+    title: Optional[str] = Query(None),
+    must_exist: bool = Query(True)
+):
+    """Mở hộp thoại chọn thư mục Windows trực tiếp (Folder Picker Dialog)."""
+    initial = initial_dir or ""
+    dialog_title = title or "Chọn thư mục"
+    need_exist = must_exist
+
+    if request.method == "POST":
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                initial = body.get("initial_dir") or body.get("path") or initial
+                dialog_title = body.get("title") or dialog_title
+                if "must_exist" in body:
+                    need_exist = bool(body["must_exist"])
+        except Exception:
+            pass
+
+    initial = str(initial).strip().strip('"').strip("'")
+    if not initial or not Path(initial).is_dir():
+        if initial and Path(initial).parent.is_dir():
+            initial = str(Path(initial).parent)
+        else:
+            initial = str(INPUT_DIR if "đầu vào" in dialog_title.lower() or "input" in dialog_title.lower() else OUTPUT_DIR)
+
+    if FOLDER_PICKER_LOCK.locked():
+        raise HTTPException(status_code=409, detail="Hộp thoại chọn thư mục đang mở trên màn hình.")
+
+    async with FOLDER_PICKER_LOCK:
+        import sys
+        script_path = ROOT / "choose_video_folder.py"
+        python_exe = sys.executable
+
+        proc = await asyncio.create_subprocess_exec(
+            python_exe, str(script_path), initial, dialog_title, str(need_exist).lower(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+            if proc.returncode != 0:
+                raise HTTPException(status_code=500, detail="Không mở được cửa sổ chọn thư mục Windows.")
+            res = json.loads(stdout.decode("utf-8", errors="replace"))
+            return {"status": "ok", "path": res.get("path", "")}
+        except asyncio.TimeoutError:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.communicate()
+            raise HTTPException(status_code=408, detail="Quá thời gian chọn thư mục.")
 
 
 @router.get("/api/workflow/videos")
@@ -530,9 +837,17 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
     batch_framing_stop_flag.clear()
     
     aspect = str(cfg.get("aspect_ratio", "9:16")).lower()
-    bg_type = str(cfg.get("bg_type", "video_motion")).lower()
+    bg_type = str(cfg.get("bg_type", "image")).lower()
+    motion_bg_enabled = bool(cfg.get("motion_bg_enabled", False))
+    if motion_bg_enabled:
+        bg_type = "video_motion"
+    elif bg_type == "video_motion" and not motion_bg_enabled:
+        bg_type = "image"
+        
     bg_motion_file = str(cfg.get("bg_motion_file", "song_bien.mp4"))
-    video_scale = float(cfg.get("video_scale", 0.85))
+    bg_image_file = str(cfg.get("bg_image_file", "tia_sang_vang_ngoi_sao.jpg"))
+    auto_crop_black_bars = bool(cfg.get("auto_crop_black_bars", True))
+    video_scale = float(cfg.get("video_scale", 1.0))
     mirror = bool(cfg.get("mirror", False))
     delogo = bool(cfg.get("delogo", False))
 
@@ -614,28 +929,129 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
                 style_str = build_ass_force_style(cfg, default_font_size=16)
                 srt_filter = f",subtitles='{clean_srt}':force_style='{style_str}'"
 
-        extra_inputs = []
-        if bg_type == "video_motion" and real_motion_path and os.path.isfile(real_motion_path):
-            extra_inputs = ["-stream_loop", "-1", "-i", real_motion_path]
-            fc = (
-                f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
-                f"[0:v]{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
-                f"[bg][fg]overlay=(W-w)/2:(H-h)/2{srt_filter}[outv]"
-            )
-        elif bg_type == "blur":
-            fc = (
-                f"[0:v]split=2[bg_in][fg_in];"
-                f"[bg_in]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur=25:5,setsar=1,colorlevels=rimax=0.65:gimax=0.65:bimax=0.65[bg];"
-                f"[fg_in]{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
-                f"[bg][fg]overlay=(W-w)/2:(H-h)/2{srt_filter}[outv]"
-            )
+        # Kiểm tra bất đối xứng thời lượng video vs audio (ngăn ngừa đơ hình ở cuối)
+        stream_durs = probe_stream_durations(str(input_v))
+        v_dur = stream_durs.get("video")
+        a_dur = stream_durs.get("audio") or stream_durs.get("format")
+        duration_args = []
+        if v_dur and a_dur and (v_dur < a_dur - 1.0):
+            logger.info(f"Video {v_file.name} có luồng video ({v_dur:.2f}s) ngắn hơn audio ({a_dur:.2f}s) -> Tự động cắt khớp {v_dur:.2f}s để tránh đơ màn hình")
+            duration_args = ["-t", f"{v_dur:.3f}"]
+
+        protect_top_thumb = bool(cfg.get("protect_top_thumb", True))
+        crop_padding = int(cfg.get("crop_padding", 0))
+        smart_mask_info = None
+        if protect_top_thumb:
+            smart_mask_info = generate_smart_thumb_mask(str(input_v), tw=tw, th=th, padding=crop_padding)
+
+        if smart_mask_info and smart_mask_info.get("thumb_found"):
+            # PHƯƠNG ÁN 1: Tự động bảo vệ thẻ chữ Thumb trên, che toàn bộ viền đen trên & dưới bằng nền mới
+            mask_file = smart_mask_info["mask_path"]
+            if bg_type == "video_motion" and real_motion_path and os.path.isfile(real_motion_path):
+                extra_inputs = ["-stream_loop", "-1", "-i", real_motion_path, "-loop", "1", "-i", mask_file]
+                fc = (
+                    f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
+                    f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
+                    f"[2:v]scale={tw}:{th},setsar=1[msk];"
+                    f"[fg][msk]alphamerge[fg_alpha];"
+                    f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
+                )
+            elif bg_type == "image":
+                real_image_path = resolve_image_bg_path(bg_image_file)
+                if real_image_path and os.path.isfile(real_image_path):
+                    extra_inputs = ["-loop", "1", "-i", real_image_path, "-loop", "1", "-i", mask_file]
+                    fc = (
+                        f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
+                        f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
+                        f"[2:v]scale={tw}:{th},setsar=1[msk];"
+                        f"[fg][msk]alphamerge[fg_alpha];"
+                        f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
+                    )
+                else:
+                    safe_color = cfg.get("bg_color", "#f59e0b").replace("#", "0x")
+                    extra_inputs = ["-loop", "1", "-i", mask_file]
+                    fc = (
+                        f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
+                        f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
+                        f"[1:v]scale={tw}:{th},setsar=1[msk];"
+                        f"[fg][msk]alphamerge[fg_alpha];"
+                        f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
+                    )
+            elif bg_type == "blur":
+                extra_inputs = ["-loop", "1", "-i", mask_file]
+                fc = (
+                    f"[0:v]split=2[v_orig][v_bg];"
+                    f"[v_bg]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur=25:5,setsar=1,colorlevels=rimax=0.65:gimax=0.65:bimax=0.65[bg];"
+                    f"[v_orig]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
+                    f"[1:v]scale={tw}:{th},setsar=1[msk];"
+                    f"[fg][msk]alphamerge[fg_alpha];"
+                    f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
+                )
+            else:
+                safe_color = cfg.get("bg_color", "#f59e0b").replace("#", "0x")
+                extra_inputs = ["-loop", "1", "-i", mask_file]
+                fc = (
+                    f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
+                    f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
+                    f"[1:v]scale={tw}:{th},setsar=1[msk];"
+                    f"[fg][msk]alphamerge[fg_alpha];"
+                    f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
+                )
         else:
-            safe_color = cfg.get("bg_color", "#0a0e17").replace("#", "0x")
-            fc = (
-                f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
-                f"[0:v]{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
-                f"[bg][fg]overlay=(W-w)/2:(H-h)/2{srt_filter}[outv]"
-            )
+            # Tự động cắt bỏ 2 viền đen trên/dưới của video phôi nếu có
+            crop_prefix = ""
+            if auto_crop_black_bars:
+                crop_box = detect_letterbox_crop(str(input_v), padding=crop_padding)
+                if crop_box:
+                    crop_prefix = f"crop={crop_box['w']}:{crop_box['h']}:{crop_box['x']}:{crop_box['y']},"
+
+            # Chế độ co dãn: Khi video_scale >= 0.99 (mặc định), giữ nguyên 100% chiều ngang, 2 bên sát mép (x=0)
+            # Background chỉ che 2 phần đen trên và dưới
+            if video_scale >= 0.99:
+                scale_fg = f"{crop_prefix}{flip_str}scale={tw}:-2,setsar=1"
+                overlay_coord = "0:(H-h)/2"
+            else:
+                scale_fg = f"{crop_prefix}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1"
+                overlay_coord = "(W-w)/2:(H-h)/2"
+
+            extra_inputs = []
+            if bg_type == "video_motion" and real_motion_path and os.path.isfile(real_motion_path):
+                extra_inputs = ["-stream_loop", "-1", "-i", real_motion_path]
+                fc = (
+                    f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
+                    f"[0:v]{scale_fg}[fg];"
+                    f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
+                )
+            elif bg_type == "image":
+                real_image_path = resolve_image_bg_path(bg_image_file)
+                if real_image_path and os.path.isfile(real_image_path):
+                    extra_inputs = ["-loop", "1", "-i", real_image_path]
+                    fc = (
+                        f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
+                        f"[0:v]{scale_fg}[fg];"
+                        f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
+                    )
+                else:
+                    safe_color = cfg.get("bg_color", "#f59e0b").replace("#", "0x")
+                    fc = (
+                        f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
+                        f"[0:v]{scale_fg}[fg];"
+                        f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
+                    )
+            elif bg_type == "blur":
+                fc = (
+                    f"[0:v]split=2[bg_in][fg_in];"
+                    f"[bg_in]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur=25:5,setsar=1,colorlevels=rimax=0.65:gimax=0.65:bimax=0.65[bg];"
+                    f"[fg_in]{scale_fg}[fg];"
+                    f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
+                )
+            else:
+                safe_color = cfg.get("bg_color", "#f59e0b").replace("#", "0x")
+                fc = (
+                    f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
+                    f"[0:v]{scale_fg}[fg];"
+                    f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
+                )
 
         # Thử mã hóa bằng GPU NVENC trước, nếu lỗi thì fallback sang CPU x264
         cmd_nvenc = [
@@ -652,12 +1068,13 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
             "-b:a", "192k",
             "-movflags", "+faststart",
             "-shortest",
+        ] + duration_args + [
             str(out_path)
         ]
 
         success = False
         try:
-            res = subprocess.run(cmd_nvenc, capture_output=True, text=True, timeout=300)
+            res = subprocess.run(cmd_nvenc, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
             if res.returncode == 0 and out_path.exists() and out_path.stat().st_size > 1000:
                 success = True
         except Exception as e:
@@ -679,10 +1096,11 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
                 "-b:a", "192k",
                 "-movflags", "+faststart",
                 "-shortest",
+            ] + duration_args + [
                 str(out_path)
             ]
             try:
-                res2 = subprocess.run(cmd_cpu, capture_output=True, text=True, timeout=300)
+                res2 = subprocess.run(cmd_cpu, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
                 if res2.returncode == 0 and out_path.exists() and out_path.stat().st_size > 1000:
                     success = True
             except Exception as e2:
@@ -903,10 +1321,18 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
 
     # Thiết lập bộ lọc FFmpeg
     extra_inputs = []
-    video_scale = float(cfg.get("video_scale", 0.85))
+    video_scale = float(cfg.get("video_scale", 1.0))
     mirror = bool(cfg.get("mirror", False))
-    bg_type = str(cfg.get("bg_type", "video_motion")).lower()
+    bg_type = str(cfg.get("bg_type", "image")).lower()
+    motion_bg_enabled = bool(cfg.get("motion_bg_enabled", False))
+    if motion_bg_enabled:
+        bg_type = "video_motion"
+    elif bg_type == "video_motion" and not motion_bg_enabled:
+        bg_type = "image"
+
     bg_motion_file = str(cfg.get("bg_motion_file", "song_bien.mp4"))
+    bg_image_file = str(cfg.get("bg_image_file", "tia_sang_vang_ngoi_sao.jpg"))
+    auto_crop_black_bars = bool(cfg.get("auto_crop_black_bars", True))
 
     # Audio input
     audio_source = final_video if final_video else source_video
@@ -931,37 +1357,144 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
         style_str = build_ass_force_style(cfg, default_font_size=18)
         srt_filter = f",subtitles='{clean_srt}':force_style='{style_str}'"
 
+    # Kiểm tra bất đối xứng thời lượng video vs audio (ngăn ngừa đơ hình ở cuối)
+    stream_durs = probe_stream_durations(str(v_input_path))
+    v_dur = stream_durs.get("video")
+    a_dur = stream_durs.get("audio") or stream_durs.get("format")
+    duration_args = []
+    if v_dur and a_dur and (v_dur < a_dur - 1.0):
+        logger.info(f"Video {v_input_path} có luồng video ({v_dur:.2f}s) ngắn hơn audio ({a_dur:.2f}s) -> Tự động cắt khớp {v_dur:.2f}s để tránh đơ màn hình")
+        duration_args = ["-t", f"{v_dur:.3f}"]
+
+    protect_top_thumb = bool(cfg.get("protect_top_thumb", True))
+    crop_padding = int(cfg.get("crop_padding", 0))
+    smart_mask_info = None
+
     if use_anti_reup:
         real_motion_path = resolve_motion_bg_path(bg_motion_file) if bg_type == "video_motion" else ""
-        if bg_type == "video_motion" and real_motion_path and os.path.isfile(real_motion_path):
-            extra_inputs = ["-stream_loop", "-1", "-i", real_motion_path]
-            fc = (
-                f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
-                f"[0:v]{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
-                f"[bg][fg]overlay=(W-w)/2:(H-h)/2{srt_filter}[outv]"
-            )
-        elif bg_type == "blur":
-            fc = (
-                f"[0:v]split=2[bg_in][fg_in];"
-                f"[bg_in]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur=25:5,setsar=1,colorlevels=rimax=0.65:gimax=0.65:bimax=0.65[bg];"
-                f"[fg_in]{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
-                f"[bg][fg]overlay=(W-w)/2:(H-h)/2{srt_filter}[outv]"
-            )
+        if protect_top_thumb:
+            smart_mask_info = generate_smart_thumb_mask(str(v_input_path), tw=tw, th=th, padding=crop_padding)
+
+        if smart_mask_info and smart_mask_info.get("thumb_found"):
+            # PHƯƠNG ÁN 1: Tự động bảo vệ thẻ chữ Thumb trên, che toàn bộ viền đen trên & dưới bằng nền mới
+            mask_file = smart_mask_info["mask_path"]
+            if bg_type == "video_motion" and real_motion_path and os.path.isfile(real_motion_path):
+                extra_inputs = ["-stream_loop", "-1", "-i", real_motion_path, "-loop", "1", "-i", mask_file]
+                fc = (
+                    f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
+                    f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
+                    f"[2:v]scale={tw}:{th},setsar=1[msk];"
+                    f"[fg][msk]alphamerge[fg_alpha];"
+                    f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
+                )
+            elif bg_type == "image":
+                real_image_path = resolve_image_bg_path(bg_image_file)
+                if real_image_path and os.path.isfile(real_image_path):
+                    extra_inputs = ["-loop", "1", "-i", real_image_path, "-loop", "1", "-i", mask_file]
+                    fc = (
+                        f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
+                        f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
+                        f"[2:v]scale={tw}:{th},setsar=1[msk];"
+                        f"[fg][msk]alphamerge[fg_alpha];"
+                        f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
+                    )
+                else:
+                    safe_color = cfg.get("bg_color", "#f59e0b").replace("#", "0x")
+                    extra_inputs = ["-loop", "1", "-i", mask_file]
+                    fc = (
+                        f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
+                        f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
+                        f"[1:v]scale={tw}:{th},setsar=1[msk];"
+                        f"[fg][msk]alphamerge[fg_alpha];"
+                        f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
+                    )
+            elif bg_type == "blur":
+                extra_inputs = ["-loop", "1", "-i", mask_file]
+                fc = (
+                    f"[0:v]split=2[v_orig][v_bg];"
+                    f"[v_bg]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur=25:5,setsar=1,colorlevels=rimax=0.65:gimax=0.65:bimax=0.65[bg];"
+                    f"[v_orig]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
+                    f"[1:v]scale={tw}:{th},setsar=1[msk];"
+                    f"[fg][msk]alphamerge[fg_alpha];"
+                    f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
+                )
+            else:
+                safe_color = cfg.get("bg_color", "#f59e0b").replace("#", "0x")
+                extra_inputs = ["-loop", "1", "-i", mask_file]
+                fc = (
+                    f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
+                    f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
+                    f"[1:v]scale={tw}:{th},setsar=1[msk];"
+                    f"[fg][msk]alphamerge[fg_alpha];"
+                    f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
+                )
         else:
-            safe_color = cfg.get("bg_color", "#0a0e17").replace("#", "0x")
-            fc = (
-                f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
-                f"[0:v]{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1[fg];"
-                f"[bg][fg]overlay=(W-w)/2:(H-h)/2{srt_filter}[outv]"
-            )
+            # Chế độ thông thường khi không có thumb card trên
+            crop_prefix = ""
+            if auto_crop_black_bars:
+                crop_box = detect_letterbox_crop(str(v_input_path), padding=crop_padding)
+                if crop_box:
+                    crop_prefix = f"crop={crop_box['w']}:{crop_box['h']}:{crop_box['x']}:{crop_box['y']},"
+
+            # Chế độ co dãn: Khi video_scale >= 0.99 (mặc định), giữ nguyên 100% chiều ngang, 2 bên sát mép (x=0)
+            # Background chỉ che 2 phần đen trên và dưới
+            if video_scale >= 0.99:
+                scale_fg = f"{crop_prefix}{flip_str}scale={tw}:-2,setsar=1"
+                overlay_coord = "0:(H-h)/2"
+            else:
+                scale_fg = f"{crop_prefix}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1"
+                overlay_coord = "(W-w)/2:(H-h)/2"
+
+            if bg_type == "video_motion" and real_motion_path and os.path.isfile(real_motion_path):
+                extra_inputs = ["-stream_loop", "-1", "-i", real_motion_path]
+                fc = (
+                    f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
+                    f"[0:v]{scale_fg}[fg];"
+                    f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
+                )
+            elif bg_type == "image":
+                real_image_path = resolve_image_bg_path(bg_image_file)
+                if real_image_path and os.path.isfile(real_image_path):
+                    extra_inputs = ["-loop", "1", "-i", real_image_path]
+                    fc = (
+                        f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
+                        f"[0:v]{scale_fg}[fg];"
+                        f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
+                    )
+                else:
+                    safe_color = cfg.get("bg_color", "#f59e0b").replace("#", "0x")
+                    fc = (
+                        f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
+                        f"[0:v]{scale_fg}[fg];"
+                        f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
+                    )
+            elif bg_type == "blur":
+                fc = (
+                    f"[0:v]split=2[bg_in][fg_in];"
+                    f"[bg_in]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur=25:5,setsar=1,colorlevels=rimax=0.65:gimax=0.65:bimax=0.65[bg];"
+                    f"[fg_in]{scale_fg}[fg];"
+                    f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
+                )
+            else:
+                safe_color = cfg.get("bg_color", "#f59e0b").replace("#", "0x")
+                fc = (
+                    f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
+                    f"[0:v]{scale_fg}[fg];"
+                    f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
+                )
     else:
         # Không chống re-up: Xuất kích thước chuẩn
+        crop_prefix = ""
+        if auto_crop_black_bars:
+            crop_box = detect_letterbox_crop(str(v_input_path), padding=crop_padding)
+            if crop_box:
+                crop_prefix = f"crop={crop_box['w']}:{crop_box['h']}:{crop_box['x']}:{crop_box['y']},"
+
         if final_video and not mirror:
-            # Dùng trực tiếp final video đã nướng sub
-            fc = f"[0:v]scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1[outv]"
+            fc = f"[0:v]{crop_prefix}scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1[outv]"
             v_input_path = final_video
         else:
-            fc = f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1{srt_filter}[outv]"
+            fc = f"[0:v]{crop_prefix}{flip_str}scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1{srt_filter}[outv]"
 
     # Lắp ráp lệnh FFmpeg
     cmd_inputs = ["ffmpeg", "-y", "-i", str(v_input_path)]
@@ -971,10 +1504,8 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
     # Thêm audio input nếu khác video input
     map_audio = "0:a?"
     if str(audio_input_path) != str(v_input_path):
+        audio_idx = cmd_inputs.count("-i")
         cmd_inputs.extend(["-i", str(audio_input_path)])
-        audio_idx = len(cmd_inputs) // 2 - 1
-        # Tìm index của audio input
-        audio_idx = 1 if len(extra_inputs) == 0 else 2
         map_audio = f"{audio_idx}:a?"
 
     fps_args = ["-r", fps] if fps in ("24", "30", "60") else []
@@ -994,12 +1525,13 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
         "-b:a", "192k",
         "-movflags", "+faststart",
         "-shortest",
+    ] + duration_args + [
         str(out_path)
     ]
 
     success = False
     try:
-        res = subprocess.run(cmd_nvenc, capture_output=True, text=True, timeout=600)
+        res = subprocess.run(cmd_nvenc, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
         if res.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 1000:
             success = True
     except Exception as e:
@@ -1021,9 +1553,10 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
             "-b:a", "192k",
             "-movflags", "+faststart",
             "-shortest",
+        ] + duration_args + [
             str(out_path)
         ]
-        res_cpu = subprocess.run(cmd_cpu, capture_output=True, text=True, timeout=900)
+        res_cpu = subprocess.run(cmd_cpu, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
         if res_cpu.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 1000:
             success = True
 

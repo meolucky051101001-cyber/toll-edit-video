@@ -15,13 +15,15 @@ except ImportError:
     from v1_stage_metrics import stage
 
 @stage("asr_worker_total")
-def extract_subtitles_isolated(audio_path, output_srt_path):
+def extract_subtitles_isolated(audio_path, output_srt_path, original_audio_path=None):
     try:
         from ..batch_control import run
     except ImportError:
         from batch_control import run
     worker = Path(__file__).resolve().parents[1]/'model_workers'/'v1_asr_worker.py'
     settings = {'stage': 'asr-v1', 'worker': fingerprint(worker),
+                'recovery': fingerprint(Path(__file__).with_name('v1_conditional_asr.py')),
+                'original_audio': fingerprint(original_audio_path) if original_audio_path and os.path.isfile(original_audio_path) else None,
                 'implementation': fingerprint(Path(__file__).with_name('transcription.py')),
                 'policy': fingerprint(Path(__file__).with_name('v1_model_policy.py')),
                 'env': {k: v for k, v in os.environ.items() if k.startswith(('V1_WHISPER_', 'V1_ASR_'))}}
@@ -40,7 +42,10 @@ def extract_subtitles_isolated(audio_path, output_srt_path):
     env = dict(os.environ, V1_ASR_REUSE='0', PYTHONIOENCODING='utf-8')
     with tempfile.TemporaryDirectory(prefix='v1-asr-') as folder:
         result = Path(folder)/'result.srt'
-        run([str(python), str(worker), str(Path(audio_path).resolve()), str(result)],
+        cmd = [str(python), str(worker), str(Path(audio_path).resolve()), str(result)]
+        if original_audio_path and os.path.exists(original_audio_path):
+            cmd.append(str(Path(original_audio_path).resolve()))
+        run(cmd,
             check=True, timeout=600, env=env, cwd=str(worker.parents[1]),
             creationflags=(getattr(subprocess, 'CREATE_NO_WINDOW', 0) |
                            getattr(subprocess, 'NORMAL_PRIORITY_CLASS', 0)),

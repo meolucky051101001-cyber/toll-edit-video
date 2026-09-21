@@ -7,4 +7,5 @@ from ai.transcription import extract_subtitles_whisper
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
-    extract_subtitles_whisper(sys.argv[1], sys.argv[2], num_workers=1)
+    orig_audio = sys.argv[3] if len(sys.argv) > 3 else None
+    extract_subtitles_whisper(sys.argv[1], sys.argv[2], num_workers=1, original_audio_path=orig_audio)
