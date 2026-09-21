@@ -439,24 +439,27 @@ def probe_audio_duration(path: PathLike, ffprobe_binary: str = "ffprobe") -> flo
         pass
 
     # 2. Fallback sang ffprobe cho các định dạng container video hoặc khi soundfile không đọc được
-    result = subprocess.run(
-        [
-            ffprobe_binary,
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=30,
-        creationflags=_creation_flags(),
-    )
+    try:
+        result = subprocess.run(
+            [
+                ffprobe_binary,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            creationflags=_creation_flags(),
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ffprobe timed out after 30s for: {path}")
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "ffprobe duration failed")
     return float(result.stdout.strip())
@@ -485,15 +488,18 @@ def fit_audio_to_window(
     if abs(applied - 1.0) > 0.001:
         command.extend(["-filter:a", "atempo={:.6f}".format(applied)])
     command.extend(["-vn", str(output_path)])
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=120,
-        creationflags=_creation_flags(),
-    )
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            creationflags=_creation_flags(),
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"FFmpeg audio fitting timed out after 120s for: {input_path}")
     if result.returncode != 0 or not Path(output_path).is_file():
         raise RuntimeError(result.stderr.strip() or "FFmpeg audio fitting failed")
     output_duration = probe_audio_duration(output_path, ffprobe_binary)

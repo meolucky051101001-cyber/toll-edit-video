@@ -2,6 +2,7 @@ import os
 import asyncio
 import re
 import random
+import shutil
 import threading
 import subprocess
 import logging
@@ -228,7 +229,6 @@ async def generate_tts_fpt(text, output_path, api_key, voice="banmai", speed="0"
         else:
             raise Exception(f"Lỗi kết nối FPT API: {response.status_code}")
 
-rvc_semaphore = asyncio.Semaphore(1)
 
 async def apply_rvc_clone(
     input_audio,
@@ -344,15 +344,23 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
                         ratio = duration_s / expected_s
                         ratio = min(ratio, 1.8) 
                         temp_speed = audio_path.replace(".mp3", "_speed.mp3")
-                        import subprocess, shutil
-                        subprocess.run(["ffmpeg", "-y", "-i", audio_path, "-filter:a", f"atempo={ratio:.2f}", temp_speed], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
+                        subprocess.run(
+                            ["ffmpeg", "-y", "-v", "error", "-i", audio_path, "-filter:a", f"atempo={ratio:.2f}", temp_speed],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
+                            check=True,
+                        )
                         if os.path.exists(temp_speed):
                             shutil.move(temp_speed, audio_path)
                         
                     temp_filtered = audio_path.replace(".mp3", "_filtered.mp3")
                     clear_filter = "highpass=f=100,equalizer=f=3500:width_type=q:width=1.5:g=3,treble=g=3,acompressor=threshold=-15dB:ratio=3:attack=5:release=50:makeup=5dB"
-                    import subprocess, shutil
-                    subprocess.run(["ffmpeg", "-y", "-i", audio_path, "-filter:a", clear_filter, temp_filtered], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-v", "error", "-i", audio_path, "-filter:a", clear_filter, temp_filtered],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
+                        check=True,
+                    )
                     if os.path.exists(temp_filtered):
                         shutil.move(temp_filtered, audio_path)
                 else:
@@ -378,10 +386,13 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
                 if expected_s > 0 and duration_s > expected_s + 0.3:
                     ratio = duration_s / expected_s
                     ratio = min(ratio, 2.0)
-                    import subprocess
-                    subprocess.run(["ffmpeg", "-y", "-i", temp_edge_rvc, "-filter:a", f"atempo={ratio}", audio_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-v", "error", "-i", temp_edge_rvc, "-filter:a", f"atempo={ratio}", audio_path],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
+                        check=True,
+                    )
                 else:
-                    import shutil
                     shutil.copy(temp_edge_rvc, audio_path)
                 
                 try:

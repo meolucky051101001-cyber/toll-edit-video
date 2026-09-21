@@ -43,6 +43,44 @@ def _is_translation_error_payload(value):
     )
 
 
+def _subdivide_and_retry(translate_fn, texts, *, target_lang, api_key,
+                          prior_context, model, provider_label="LLM", **kwargs):
+    """Chia batch làm đôi khi LLM trả về sai số lượng câu, dịch từng nửa rồi ghép lại.
+
+    ``translate_fn`` phải có signature ``(texts, target_lang=, api_key=, prior_context=, model=, **kwargs)``
+    và trả về ``list[str] | None``.
+    """
+    mid = len(texts) // 2
+    left_kwargs = dict(kwargs)
+    right_kwargs = dict(kwargs)
+    budgets = kwargs.get("duration_budgets")
+    if budgets and len(budgets) == len(texts):
+        left_kwargs["duration_budgets"] = budgets[:mid]
+        right_kwargs["duration_budgets"] = budgets[mid:]
+    if "context_end_seconds" in left_kwargs:
+        left_kwargs.pop("context_end_seconds", None)
+    if "context_start_seconds" in right_kwargs:
+        right_kwargs.pop("context_start_seconds", None)
+    left_res = translate_fn(
+        texts[:mid], target_lang=target_lang, api_key=api_key,
+        prior_context=prior_context, model=model, **left_kwargs
+    )
+    if left_res and len(left_res) == mid:
+        combined_prior = list(prior_context or [])
+        for s, t in zip(texts[:mid], left_res):
+            combined_prior.append({"source": s, "translated": t})
+        # Cập nhật prior_context cho nửa phải
+        right_kwargs.pop("prior_context", None)
+        right_res = translate_fn(
+            texts[mid:], target_lang=target_lang, api_key=api_key,
+            prior_context=combined_prior[-4:], model=model, **right_kwargs
+        )
+        if right_res and len(right_res) == len(texts) - mid:
+            logger.info("Ghép nối thành công %d câu từ hai nửa batch %s!", len(texts), provider_label)
+            return left_res + right_res
+    return None
+
+
 def _parse_json_array(raw_text):
     """Robustly extract and parse a JSON array of strings from LLM text output."""
     if not raw_text or not isinstance(raw_text, str):
@@ -341,30 +379,14 @@ def translate_with_gemini(
                                 "Gemini %s trả về %d câu cho %d câu gốc. Đang kích hoạt chia nhỏ thích ứng (divide-and-conquer)...",
                                 model, len(translated), len(texts)
                             )
-                            mid = len(texts) // 2
-                            left_kwargs = dict(kwargs)
-                            right_kwargs = dict(kwargs)
-                            budgets = kwargs.get("duration_budgets")
-                            if budgets and len(budgets) == len(texts):
-                                left_kwargs["duration_budgets"] = budgets[:mid]
-                                right_kwargs["duration_budgets"] = budgets[mid:]
-                            left_res = translate_with_gemini(
-                                texts[:mid], target_lang=target_lang, api_key=api_key,
+                            split_res = _subdivide_and_retry(
+                                translate_with_gemini, texts, target_lang=target_lang, api_key=api_key,
+                                prior_context=prior_context, model=model, provider_label="Gemini",
                                 video_path=video_path, context_start_seconds=context_start_seconds,
-                                prior_context=prior_context, timeout=timeout, **left_kwargs
+                                context_end_seconds=context_end_seconds, timeout=timeout, **kwargs
                             )
-                            if left_res and len(left_res) == mid:
-                                combined_prior = list(prior_context or [])
-                                for s, t in zip(texts[:mid], left_res):
-                                    combined_prior.append({"source": s, "translated": t})
-                                right_res = translate_with_gemini(
-                                    texts[mid:], target_lang=target_lang, api_key=api_key,
-                                    video_path=video_path, context_end_seconds=context_end_seconds,
-                                    prior_context=combined_prior[-4:], timeout=timeout, **right_kwargs
-                                )
-                                if right_res and len(right_res) == len(texts) - mid:
-                                    logger.info("Ghép nối thành công %d câu từ hai nửa batch Gemini!", len(texts))
-                                    return left_res + right_res
+                            if split_res:
+                                return split_res
                     logger.warning("Gemini %s không trả về định dạng JSON hợp lệ, chuyển sang model backup kế tiếp...", model)
                     continue
                 elif response.status_code in (401, 403):
@@ -460,29 +482,14 @@ def translate_with_openai(
                         return translated
                     elif isinstance(translated, list) and len(texts) >= 4 and len(translated) != len(texts):
                         logger.warning("OpenAI %s trả về lệch số lượng câu (%d thay vì %d). Chia nhỏ batch...", om, len(translated), len(texts))
-                        mid = len(texts) // 2
-                        left_kwargs = dict(kwargs)
-                        right_kwargs = dict(kwargs)
-                        budgets = kwargs.get("duration_budgets")
-                        if budgets and len(budgets) == len(texts):
-                            left_kwargs["duration_budgets"] = budgets[:mid]
-                            right_kwargs["duration_budgets"] = budgets[mid:]
-                        left_res = translate_with_openai(
-                            texts[:mid], target_lang=target_lang, api_key=api_key,
+                        split_res = _subdivide_and_retry(
+                            translate_with_openai, texts, target_lang=target_lang, api_key=api_key,
+                            prior_context=prior_context, model=om, provider_label="OpenAI",
                             video_path=video_path, context_start_seconds=context_start_seconds,
-                            prior_context=prior_context, model=om, **left_kwargs
+                            context_end_seconds=context_end_seconds, **kwargs
                         )
-                        if left_res and len(left_res) == mid:
-                            combined_prior = list(prior_context or [])
-                            for s, t in zip(texts[:mid], left_res):
-                                combined_prior.append({"source": s, "translated": t})
-                            right_res = translate_with_openai(
-                                texts[mid:], target_lang=target_lang, api_key=api_key,
-                                video_path=video_path, context_end_seconds=context_end_seconds,
-                                prior_context=combined_prior[-4:], model=om, **right_kwargs
-                            )
-                            if right_res and len(right_res) == len(texts) - mid:
-                                return left_res + right_res
+                        if split_res:
+                            return split_res
                 else:
                     logger.warning(f"Lỗi OpenAI ({om}) HTTP {resp.status_code}: {resp.text[:200]}")
             except Exception as o_err:
@@ -542,27 +549,12 @@ def translate_with_deepseek(
                         return translated
                     elif isinstance(translated, list) and len(texts) >= 4 and len(translated) != len(texts):
                         logger.warning("DeepSeek %s trả về lệch số lượng câu (%d thay vì %d). Chia nhỏ batch...", dm, len(translated), len(texts))
-                        mid = len(texts) // 2
-                        left_kwargs = dict(kwargs)
-                        right_kwargs = dict(kwargs)
-                        budgets = kwargs.get("duration_budgets")
-                        if budgets and len(budgets) == len(texts):
-                            left_kwargs["duration_budgets"] = budgets[:mid]
-                            right_kwargs["duration_budgets"] = budgets[mid:]
-                        left_res = translate_with_deepseek(
-                            texts[:mid], target_lang=target_lang, api_key=api_key,
-                            prior_context=prior_context, model=dm, **left_kwargs
+                        split_res = _subdivide_and_retry(
+                            translate_with_deepseek, texts, target_lang=target_lang, api_key=api_key,
+                            prior_context=prior_context, model=dm, provider_label="DeepSeek", **kwargs
                         )
-                        if left_res and len(left_res) == mid:
-                            combined_prior = list(prior_context or [])
-                            for s, t in zip(texts[:mid], left_res):
-                                combined_prior.append({"source": s, "translated": t})
-                            right_res = translate_with_deepseek(
-                                texts[mid:], target_lang=target_lang, api_key=api_key,
-                                prior_context=combined_prior[-4:], model=dm, **right_kwargs
-                            )
-                            if right_res and len(right_res) == len(texts) - mid:
-                                return left_res + right_res
+                        if split_res:
+                            return split_res
                 else:
                     logger.warning(f"Lỗi DeepSeek ({dm}) HTTP {resp.status_code}: {resp.text[:200]}")
             except Exception as d_err:

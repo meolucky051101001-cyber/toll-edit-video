@@ -449,6 +449,7 @@ def process_video(
             cmd = [
                 'ffmpeg',
                 '-y',
+                '-v', 'warning',
                 '-threads', '4',
                 '-filter_threads', '2',
             ]

@@ -115,6 +115,14 @@ def is_v2_bot_running():
                 pid = int(d.get("pid") or 0)
                 if pid and (now - float(d.get("at", 0)) < 15):
                     return True
+                # Even if heartbeat timestamp is slightly old, direct O(1) PID check avoids scanning all OS processes
+                if pid:
+                    import psutil
+                    if psutil.pid_exists(pid):
+                        proc = psutil.Process(pid)
+                        cmd = " ".join(proc.cmdline() or [])
+                        if "telegram_bot.py" in cmd:
+                            return True
             except Exception:
                 pass
     if now - _last_bot_check < 5.0:
@@ -147,6 +155,20 @@ def is_v2_batch_running():
         if BATCH_PROCESS.poll() is None:
             return True
         BATCH_PROCESS = None
+    batch_ctrl = WORKSPACE / "control" / "batch.json"
+    if batch_ctrl.is_file():
+        try:
+            d = json.loads(batch_ctrl.read_text(encoding="utf-8"))
+            pid = int(d.get("pid") or 0)
+            if pid:
+                import psutil
+                if psutil.pid_exists(pid):
+                    proc = psutil.Process(pid)
+                    cmd = " ".join(proc.cmdline() or [])
+                    if "batch_processor.py" in cmd:
+                        return True
+        except Exception:
+            pass
     now = time.time()
     if now - _last_batch_check < 2.0:
         return _cached_batch_alive
@@ -182,9 +204,11 @@ def read_status():
         try:
             import sqlite3
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1)
-            row = conn.execute("SELECT COUNT(*) FROM jobs WHERE state = 'queued'").fetchone()
-            q_count = row[0] if row else 0
-            conn.close()
+            try:
+                row = conn.execute("SELECT COUNT(*) FROM jobs WHERE state = 'queued'").fetchone()
+                q_count = row[0] if row else 0
+            finally:
+                conn.close()
         except Exception:
             pass
 
@@ -492,7 +516,7 @@ async def open_folder(folder: str = Form(...)):
         await asyncio.to_thread(os.startfile, str(target), "open", "", None, 1)
     except OSError:
         raise HTTPException(500, "Windows không mở được thư mục.")
-    return {"message": "Đã gửi yêu cầu mở thư mục"}
+    return {"status": "ok", "message": "Đã mở thư mục thành công."}
 
 @app.post("/api/run-batch")
 async def api_run_batch():
@@ -564,6 +588,13 @@ async def api_run_batch():
             stderr=subprocess.STDOUT,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
+        log_fp.close()  # Parent không cần FD nữa, child đã kế thừa
+        try:
+            batch_ctrl = WORKSPACE / "control" / "batch.json"
+            batch_ctrl.parent.mkdir(parents=True, exist_ok=True)
+            batch_ctrl.write_text(json.dumps({"pid": BATCH_PROCESS.pid, "at": time.time()}), encoding="utf-8")
+        except Exception:
+            pass
         return JSONResponse(
             status_code=202,
             content={
@@ -601,6 +632,27 @@ async def api_stop_batch():
                 stopped = True
             except Exception:
                 pass
+
+    # Direct check via batch.json before scanning OS
+    batch_ctrl = WORKSPACE / "control" / "batch.json"
+    if batch_ctrl.is_file():
+        try:
+            d = json.loads(batch_ctrl.read_text(encoding="utf-8"))
+            pid = int(d.get("pid") or 0)
+            if pid:
+                import psutil
+                if psutil.pid_exists(pid):
+                    proc = psutil.Process(pid)
+                    for child in proc.children(recursive=True):
+                        try:
+                            child.kill()
+                        except Exception:
+                            pass
+                    proc.kill()
+                    stopped = True
+            batch_ctrl.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     try:
         import psutil
@@ -660,27 +712,29 @@ def read_queue():
         try:
             import sqlite3
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT id, payload FROM jobs WHERE state = 'queued' ORDER BY id ASC"
-            ).fetchall()
-            for idx, r in enumerate(rows, 1):
-                try:
-                    payload = json.loads(r["payload"])
-                except Exception:
-                    payload = {}
-                name = str(payload.get("filename") or payload.get("url") or "")
-                if not name and payload.get("path"):
-                    name = Path(payload["path"]).name
-                if not name:
-                    name = f"Video #{r['id']}"
-                source = "Batch" if payload.get("type") == "local" else "Telegram"
-                items.append({
-                    "position": idx,
-                    "name": name,
-                    "source": source
-                })
-            conn.close()
+            try:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT id, payload FROM jobs WHERE state = 'queued' ORDER BY id ASC"
+                ).fetchall()
+                for idx, r in enumerate(rows, 1):
+                    try:
+                        payload = json.loads(r["payload"])
+                    except Exception:
+                        payload = {}
+                    name = str(payload.get("filename") or payload.get("url") or "")
+                    if not name and payload.get("path"):
+                        name = Path(payload["path"]).name
+                    if not name:
+                        name = f"Video #{r['id']}"
+                    source = "Batch" if payload.get("type") == "local" else "Telegram"
+                    items.append({
+                        "position": idx,
+                        "name": name,
+                        "source": source
+                    })
+            finally:
+                conn.close()
             return {
                 "items": items,
                 "available": alive,
@@ -717,279 +771,11 @@ async def api_get_queue():
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     page = TEMPLATE.read_text(encoding="utf-8")
-    page = page.replace("TOOL V1", "TOOL V2").replace("Tool V1 Legacy", "Tool V2 · Giám sát")
-    page = page.replace('href="/a2ui"', 'href="http://127.0.0.1:8088/a2ui"')
-    page = page.replace('onclick="startBatch()"', '')
     # Replace paths separately in HTML and JavaScript so backslashes remain valid.
     head, script = page.split("<script>", 1)
-    head = head.replace(r"D:\video phôi", html.escape(str(INPUT))).replace(r"D:\banve", html.escape(str(OUTPUT)) + " · thư mục dùng chung nếu cùng cấu hình")
-    script = script.replace(r"D:\\video phôi", str(INPUT).replace("\\", "\\\\")).replace(r"D:\\banve", str(OUTPUT).replace("\\", "\\\\"))
-    page = head + "<script>" + script
-    override = r'''
-    renderStatus = function(state) {
-      const isPaused = state.is_paused || state.status === 'stopped';
-      const isRunning = !isPaused && (state.active || state.batch_running || state.status === 'running');
-      const statusTitle = document.getElementById('statusTitle');
-      const bar = document.getElementById('progressBar');
-      const btnStop = document.getElementById('btnStop');
-      const btnRunHero = document.getElementById('btnRunHero');
-      const btnRunPanel = document.getElementById('btnRunPanel');
-
-      if (btnStop) btnStop.style.display = isRunning ? 'inline-flex' : 'none';
-      if (btnRunHero) btnRunHero.style.display = isRunning ? 'none' : 'inline-flex';
-      if (btnRunPanel) {
-        btnRunPanel.disabled = isRunning;
-        btnRunPanel.style.opacity = isRunning ? '0.5' : '1';
-        btnRunPanel.style.cursor = isRunning ? 'not-allowed' : 'pointer';
-      }
-
-      if (isPaused) {
-        statusTitle.innerHTML = '<span class="dot dot-red" style="background-color:#ef4444;box-shadow:0 0 6px rgba(239,68,68,0.5);"></span> TOOL V2 · ĐÃ TẮT (ĐÃ GIẢI PHÓNG VRAM)';
-        document.getElementById('pctText').textContent = 'Đã tắt';
-        bar.style.width = '0%';
-        bar.style.background = '#475569';
-        bar.style.boxShadow = 'none';
-        bar.setAttribute('aria-valuenow', '0');
-      } else {
-        const dotColor = isRunning ? '#f59e0b' : (state.status === 'completed' ? '#10b981' : state.status === 'error' ? '#ef4444' : '#10b981');
-        const dotShadow = isRunning ? 'rgba(245,158,11,0.5)' : (state.status === 'error' ? 'rgba(239,68,68,0.5)' : 'rgba(16,185,129,0.5)');
-        const titleText = isRunning ? 'ĐANG XỬ LÝ & RENDER NGẦM' : (state.status === 'completed' ? 'HOÀN TẤT' : state.status === 'error' ? 'CÓ LỖI' : 'HỆ THỐNG SẴN SÀNG');
-        statusTitle.innerHTML = '<span class="dot" style="background-color:' + dotColor + ';box-shadow:0 0 6px ' + dotShadow + ';"></span> TOOL V2 · ' + titleText;
-        document.getElementById('pctText').textContent = state.percent + '%';
-        bar.style.width = state.percent + '%';
-        bar.style.background = '';
-        bar.style.boxShadow = '';
-        bar.setAttribute('aria-valuenow', String(state.percent));
-      }
-
-      document.getElementById('currentVideoName').textContent = state.video_name || (isPaused ? 'Tool V2 hiện đang tắt' : (isRunning ? 'Đang chuẩn bị xử lý video...' : 'Chưa có video V2'));
-      document.getElementById('stepDescription').textContent = state.message + (state.updated_at ? ' • Cập nhật: ' + state.updated_at : '');
-      bar.setAttribute('role', 'progressbar');
-
-      const elSec = Number(state.elapsed_seconds) || 0;
-      document.getElementById('valElapsed').textContent = elSec ? `${formatTime(elSec)} (${elSec}s)` : '00:00';
-      document.getElementById('valEta').textContent = '--';
-      const qCount = Number(state.queue_count) || 0;
-      document.getElementById('valQueue').textContent = isPaused ? 'Đã tạm dừng' : (qCount > 0 ? (qCount + ' video chờ') : '0 video chờ');
-
-      const labels = {pending:'Chờ xử lý', running:'Đang chạy', completed:'Hoàn thành', skipped:'Bỏ qua', failed:'Lỗi', stopped:'Đã dừng'};
-      const icons = ['🎧','🤖','🗣️','🎬'];
-      const grid = document.querySelector('.steps-grid');
-      grid.className = 'steps-grid v2-steps-4';
-      grid.setAttribute('role', 'list');
-      grid.setAttribute('aria-label', 'Quy trình 4 bước Tool V2');
-      const stagesToRender = (state.ui_steps && state.ui_steps.length === 4) ? state.ui_steps : V2_STAGES;
-      grid.innerHTML = stagesToRender.map((s, i) => {
-        const cls = {completed:'completed', running:'active', failed:'failed', skipped:'skipped', stopped:'stopped'}[s.status] || '';
-        const durText = (s.duration_seconds !== undefined && s.duration_seconds !== null)
-          ? (s.status === 'completed' ? `✓ ${s.duration_seconds}s` : (s.status === 'running' ? `⏱ ${s.duration_seconds}s` : `${s.duration_seconds}s`))
-          : (s.status === 'completed' ? '✓ Xong' : (s.status === 'running' ? '⏱ Đang chạy' : '--'));
-
-        const subtasks = s.subtasks || [];
-        const subtasksHtml = subtasks.map((taskText, tIdx) => {
-          let bullet = '○';
-          let itemCls = '';
-          if (s.status === 'completed') {
-            bullet = '✓';
-            itemCls = 'done';
-          } else if (s.status === 'running') {
-            bullet = '▸';
-            itemCls = 'running';
-          }
-          return '<div class="v2-subtask-item ' + itemCls + '">' +
-                 '<span class="v2-subtask-bullet">' + bullet + '</span>' +
-                 '<span>' + escapeHtml(taskText) + '</span></div>';
-        }).join('');
-
-        return '<div role="listitem" class="step-item ' + cls + '"' + (s.status === 'running' ? ' aria-current="step"' : '') + '>' +
-          '<div class="v2-step-header">' +
-            '<div class="v2-step-icon-wrap">' +
-              '<span class="v2-step-icon" aria-hidden="true">' + (s.icon || icons[i]) + '</span>' +
-              '<span class="v2-step-number">BƯỚC ' + String(i + 1).padStart(2, '0') + '</span>' +
-            '</div>' +
-            '<span class="v2-step-status">' + (labels[s.status] || 'Chờ xử lý') + '</span>' +
-          '</div>' +
-          '<div class="v2-step-name">' + escapeHtml(s.label) + '</div>' +
-          (s.model ? '<div class="v2-step-model" title="' + escapeHtml(s.model) + '">' + escapeHtml(s.model) + '</div>' : '') +
-          '<div class="v2-subtasks-box">' + subtasksHtml + '</div>' +
-          '<div class="v2-step-footer">' +
-            '<span style="font-size:10.5px;color:var(--text-muted);">Thời gian:</span>' +
-            '<div class="v2-step-duration" title="Thời gian chạy thực tế bước ' + (i + 1) + '">' + durText + '</div>' +
-          '</div>' +
-        '</div>';
-      }).join('');
-    };
-    fetchStatus = async function() {
-      if (statusRequestPending) return;
-      statusRequestPending = true;
-      try {
-        const response = await fetch('/api/status', {cache:'no-store', signal:AbortSignal.timeout(8000)});
-        if (!response.ok) throw new Error('Không đọc được trạng thái');
-        renderStatus(await response.json());
-      } catch (error) {
-        document.getElementById('stepDescription').textContent = 'Mất kết nối trạng thái V2; dữ liệu hiển thị có thể đã cũ.';
-      } finally { statusRequestPending = false; }
-    };
-    '''
-    override = "const V2_STAGES = " + json.dumps([
-        {
-            "label": item[1],
-            "model": item[2],
-            "icon": item[4],
-            "subtasks": item[5],
-            "status": "pending"
-        } for item in UI_STEPS
-    ], ensure_ascii=False) + ";\n" + override
-    page = page.replace("    // Auto-refresh loops", override + "\n    // Auto-refresh loops")
-    page = page.replace("</style>", """
-      .steps-grid.v2-steps-4 {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 14px;
-        margin-top: 14px;
-      }
-      .v2-steps-4 .step-item {
-        position: relative;
-        display: flex;
-        flex-direction: column;
-        background: linear-gradient(155deg, #141d2a 0%, #0d131d 100%);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 12px;
-        padding: 14px 14px 12px;
-        transition: all 0.25s ease;
-        text-align: left;
-        min-height: 235px;
-        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
-      }
-      .v2-steps-4 .step-item:hover {
-        border-color: rgba(56, 189, 248, 0.35);
-        transform: translateY(-2px);
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-      }
-      .v2-steps-4 .v2-step-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: 8px;
-        width: 100%;
-      }
-      .v2-steps-4 .v2-step-icon-wrap {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-      .v2-steps-4 .v2-step-icon {
-        font-size: 22px;
-        line-height: 1;
-      }
-      .v2-steps-4 .v2-step-number {
-        font-size: 11px;
-        letter-spacing: 1.2px;
-        font-weight: 800;
-        color: #94a3b8;
-        background: rgba(255, 255, 255, 0.05);
-        padding: 2px 7px;
-        border-radius: 4px;
-        border: 1px solid rgba(255, 255, 255, 0.07);
-      }
-      .v2-steps-4 .v2-step-status {
-        font-size: 10.5px;
-        line-height: 1.2;
-        padding: 3px 9px;
-        border-radius: 20px;
-        background: #1e293b;
-        color: #94a3b8;
-        font-weight: 600;
-      }
-      .v2-steps-4 .v2-step-name {
-        font-size: 13.5px;
-        line-height: 1.35;
-        font-weight: 700;
-        color: #f1f5f9;
-        margin-bottom: 6px;
-      }
-      .v2-steps-4 .v2-step-model {
-        font-size: 10px;
-        line-height: 1.3;
-        color: #38bdf8;
-        background: rgba(56, 189, 248, 0.1);
-        border: 1px solid rgba(56, 189, 248, 0.25);
-        border-radius: 5px;
-        padding: 3px 8px;
-        margin-bottom: 10px;
-        font-weight: 600;
-        display: inline-block;
-        width: fit-content;
-      }
-      .v2-steps-4 .v2-subtasks-box {
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-        margin-top: 4px;
-        margin-bottom: 12px;
-        background: rgba(11, 16, 23, 0.6);
-        border: 1px solid rgba(255, 255, 255, 0.04);
-        border-radius: 8px;
-        padding: 8px 10px;
-        flex: 1;
-      }
-      .v2-steps-4 .v2-subtask-item {
-        font-size: 11px;
-        color: #cbd5e1;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        line-height: 1.3;
-      }
-      .v2-steps-4 .v2-subtask-bullet {
-        font-weight: 800;
-        font-size: 11px;
-        color: #64748b;
-        flex-shrink: 0;
-        min-width: 12px;
-      }
-      .v2-steps-4 .v2-step-footer {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-top: auto;
-        padding-top: 8px;
-        border-top: 1px solid rgba(255, 255, 255, 0.05);
-      }
-      .v2-steps-4 .v2-step-duration {
-        font-size: 11px;
-        font-weight: 700;
-        font-variant-numeric: tabular-nums;
-        color: #94a3b8;
-        padding: 2px 7px;
-        border-radius: 4px;
-        background: #0f172a80;
-      }
-      .v2-steps-4 .step-item.active {
-        background: linear-gradient(155deg, #162b46 0%, #0f1d30 100%);
-        border-color: #38bdf8;
-        box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.3), 0 8px 28px rgba(56, 189, 248, 0.2);
-      }
-      .v2-steps-4 .active .v2-step-name { color: #38bdf8; }
-      .v2-steps-4 .active .v2-step-status { color: #38bdf8; background: rgba(56, 189, 248, 0.2); font-weight: 700; animation: pulse 1.5s infinite; }
-      .v2-steps-4 .active .v2-step-duration { color: #38bdf8; background: rgba(30, 58, 138, 0.6); }
-      .v2-steps-4 .active .v2-subtask-item.running { color: #38bdf8; font-weight: 600; }
-      .v2-steps-4 .active .v2-subtask-item.running .v2-subtask-bullet { color: #38bdf8; }
-      .v2-steps-4 .step-item.completed {
-        background: linear-gradient(155deg, #0e2b26 0%, #0a1f1b 100%);
-        border-color: rgba(16, 185, 129, 0.45);
-      }
-      .v2-steps-4 .completed .v2-step-name { color: #34d399; }
-      .v2-steps-4 .completed .v2-step-status { color: #34d399; background: rgba(16, 185, 129, 0.2); }
-      .v2-steps-4 .completed .v2-step-duration { color: #34d399; background: rgba(6, 78, 59, 0.5); }
-      .v2-steps-4 .completed .v2-subtask-bullet { color: #34d399; }
-      .v2-steps-4 .completed .v2-subtask-item { color: #e2e8f0; }
-      .v2-steps-4 .step-item.failed { border-color: #f87171; background: #311e29; }
-      .v2-steps-4 .failed .v2-step-status { color: #fca5a5; background: #ef444420; }
-      @media(max-width:1100px){.steps-grid.v2-steps-4{grid-template-columns:repeat(2,minmax(0,1fr));}}
-      @media(max-width:600px){.steps-grid.v2-steps-4{grid-template-columns:1fr;gap:10px;}}
-      </style>""")
-    return page
+    head = head.replace(r"D:\video phôi", html.escape(str(INPUT))).replace(r"D:\video tool v2", html.escape(str(OUTPUT)))
+    script = script.replace(r"D:\\video phôi", str(INPUT).replace("\\", "\\\\")).replace(r"D:\\video tool v2", str(OUTPUT).replace("\\", "\\\\"))
+    return head + "<script>" + script
 
 from workflow_api import router as workflow_router
 app.include_router(workflow_router)

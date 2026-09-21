@@ -6,7 +6,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from .timing import TimingPolicy, fit_audio_to_window
 
@@ -23,6 +23,25 @@ def _prepare_legacy_imports() -> None:
     import ai
     if "ai.voice_cloning" in sys.modules:
         setattr(ai, "voice_cloning", sys.modules["ai.voice_cloning"])
+
+
+def resolve_mapped_voice(voice_source, speaker_voice_map, speaker_id, gender,
+                         enable_auto_gender=False):
+    """Resolve an explicit mapping without crossing provider boundaries.
+
+    Fixed RVC keeps its configured base voice even when old speaker metadata exists.
+    """
+    if not speaker_voice_map or voice_source == "rvc":
+        return None
+    candidate = speaker_voice_map.get(speaker_id, speaker_voice_map.get(gender))
+    voice = str(candidate or "").strip()
+    if voice_source == "capcut":
+        return voice if voice.startswith(("BV", "multi_")) else None
+    if voice_source == "edge":
+        return voice if voice.startswith("vi-") else None
+    if voice_source == "fpt":
+        return voice if voice in {"banmai", "leminh", "myan", "thuminh", "giahuy"} else None
+    return voice or None if voice_source in ("", "auto") else None
 
 
 async def generate_tts_audio_v2(
@@ -59,28 +78,9 @@ async def generate_tts_audio_v2(
             segment.content = text
             seg_gender = str(getattr(segment, "gender", "female") or "female").lower()
             speaker_id = str(getattr(segment, "speaker_id", "") or "").strip()
-            mapped_voice = None
-            if speaker_voice_map and (voice_source != "rvc" or enable_auto_gender):
-                candidate = None
-                if speaker_id and speaker_id in speaker_voice_map:
-                    candidate = speaker_voice_map[speaker_id]
-                elif seg_gender in speaker_voice_map:
-                    candidate = speaker_voice_map[seg_gender]
-
-                # Only use candidate if it is valid for the current voice_source/provider
-                if candidate:
-                    cand_str = str(candidate).strip()
-                    if voice_source == "capcut":
-                        if cand_str.startswith("BV") or cand_str.startswith("multi_"):
-                            mapped_voice = cand_str
-                    elif voice_source == "edge":
-                        if cand_str.startswith("vi-"):
-                            mapped_voice = cand_str
-                    elif voice_source == "fpt":
-                        if cand_str in {"banmai", "leminh", "myan", "thuminh", "giahuy"}:
-                            mapped_voice = cand_str
-                    elif not voice_source or voice_source == "auto":
-                        mapped_voice = cand_str
+            mapped_voice = resolve_mapped_voice(
+                voice_source, speaker_voice_map, speaker_id, seg_gender, enable_auto_gender
+            )
 
             target = max((segment.end - segment.start).total_seconds(), 0.1)
 

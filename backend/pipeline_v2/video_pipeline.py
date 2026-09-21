@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -52,6 +53,9 @@ from .timing import (
 from .tts import generate_tts_audio_v2
 
 
+logger = logging.getLogger(__name__)
+
+
 V2_STAGE_ORDER = (
     "input",
     "extract_audio",
@@ -73,7 +77,7 @@ V2_STAGE_ORDER = (
 # Bump this value whenever artifact semantics change.  It participates in the
 # manifest fingerprint so an upgraded runner cannot silently reuse output from
 # an older implementation that happened to have the same environment flags.
-PIPELINE_IMPLEMENTATION_VERSION = "2.12.0"
+PIPELINE_IMPLEMENTATION_VERSION = "2.12.1"
 
 
 class QCGateBlocked(RuntimeError):
@@ -488,16 +492,27 @@ class VideoPipelineRunner:
                 await self._notify(name, "failed")
                 raise
 
-        # Record completion immediately, not when the slower sibling finishes.
-        # Wait for both even on failure so no worker is left writing a checkpoint.
-        results = await asyncio.gather(
-            finish_stage("ocr", self._ocr_stage(transcript)),
-            finish_stage("translate", self._translate_stage(transcript)),
-            return_exceptions=True,
-        )
-        first_error = next((r for r in results if isinstance(r, BaseException)), None)
-        if first_error is not None:
-            raise first_error
+        # Cancel sibling immediately on failure instead of waiting for the
+        # slower task (which may hold GPU / API quota for minutes).
+        tasks = [
+            asyncio.ensure_future(finish_stage("ocr", self._ocr_stage(transcript))),
+            asyncio.ensure_future(finish_stage("translate", self._translate_stage(transcript))),
+        ]
+        try:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            # If any task raised, cancel the remaining siblings immediately.
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            # Propagate the first exception.
+            for t in done:
+                if t.exception() is not None:
+                    raise t.exception()
+        except asyncio.CancelledError:
+            for t in tasks:
+                t.cancel()
+            raise
 
     def _completed_valid(self, name: str, allow_empty: bool = False) -> bool:
         assert self.manifest is not None
@@ -567,6 +582,7 @@ class VideoPipelineRunner:
                     }
                 )
                 del warnings[:-50]
+                self.manifest_store.save(self.manifest)
 
     @staticmethod
     def _check_stopped() -> None:
@@ -1312,6 +1328,38 @@ class VideoPipelineRunner:
             )
             return [self.artifact_store.put_file("audio/mixed_legacy.wav", output)]
 
+    async def _prepare_mix_background(self, work: Path) -> Path:
+        """Enhance in a worker thread; retain the separated track on failure."""
+        bg_audio = self._background_audio()
+        try:
+            orig_audio = self._artifact_path("audio/original.wav")
+            if orig_audio.is_file() and bg_audio.is_file() and orig_audio != bg_audio:
+                try:
+                    from ..ai.audio_enhancer import preserve_pristine_background
+                except ImportError:
+                    from ai.audio_enhancer import preserve_pristine_background
+                enhanced_bg = work / "enhanced_bg.wav"
+                raw_segs = self._load_segments("transcript/segments.json")
+                segments = []
+                for seg in raw_segs:
+                    s_val = getattr(seg, "start", 0.0)
+                    e_val = getattr(seg, "end", s_val)
+                    s_sec = s_val.total_seconds() if hasattr(s_val, "total_seconds") else float(s_val or 0.0)
+                    e_sec = e_val.total_seconds() if hasattr(e_val, "total_seconds") else float(e_val or s_sec)
+                    segments.append({"start": s_sec, "end": e_sec})
+                await asyncio.to_thread(
+                    preserve_pristine_background,
+                    orig_audio,
+                    bg_audio,
+                    segments,
+                    enhanced_bg,
+                )
+                if enhanced_bg.is_file():
+                    bg_audio = enhanced_bg
+        except Exception as exc:
+            logger.warning("Failed to enhance background audio: %s", exc)
+        return bg_audio
+
     async def _mix_v2_stage(self) -> Sequence[ArtifactRecord]:
         bgm_gain, voice_gain = -2.0, 1.0
         try:
@@ -1324,31 +1372,7 @@ class VideoPipelineRunner:
 
         with tempfile.TemporaryDirectory(prefix="mix-v2-", dir=self.work_directory) as work:
             output = Path(work) / "mixed_v2.wav"
-            bg_audio = self._background_audio()
-            try:
-                orig_audio = self._artifact_path("audio/original.wav")
-                if orig_audio.is_file() and bg_audio.is_file() and orig_audio != bg_audio:
-                    from ai.audio_enhancer import preserve_pristine_background
-                    enhanced_bg = Path(work) / "enhanced_bg.wav"
-                    raw_segs = self._load_segments("transcript/segments.json")
-                    segments = []
-                    for seg in raw_segs:
-                        s_val = getattr(seg, "start", 0.0)
-                        e_val = getattr(seg, "end", s_val)
-                        s_sec = s_val.total_seconds() if hasattr(s_val, "total_seconds") else float(s_val or 0.0)
-                        e_sec = e_val.total_seconds() if hasattr(e_val, "total_seconds") else float(e_val or s_sec)
-                        segments.append({"start": s_sec, "end": e_sec})
-                    await asyncio.to_thread(
-                        preserve_pristine_background,
-                        orig_audio,
-                        bg_audio,
-                        segments,
-                        enhanced_bg,
-                    )
-                    if enhanced_bg.is_file():
-                        bg_audio = enhanced_bg
-            except Exception as exc:
-                logger.warning("Failed to enhance background audio: %s", exc)
+            bg_audio = await self._prepare_mix_background(Path(work))
             await asyncio.to_thread(
                 mix_audio_ffmpeg,
                 bg_audio,
