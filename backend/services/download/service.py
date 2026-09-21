@@ -134,6 +134,10 @@ class DownloadService:
         """Starts the fixed worker pool and bounded download queue."""
         await self.queue_manager.start()
 
+    async def process_download(self, download_id: str) -> None:
+        """Public entrypoint to process a download job directly or from worker queue."""
+        await self._process_download_job(download_id)
+
     def recover_interrupted_jobs(self) -> int:
         """Marks any dangling in-progress jobs from previous server runs as interrupted."""
         count = 0

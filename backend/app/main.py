@@ -134,12 +134,12 @@ async def lifespan(app: FastAPI):
     async def handle_download(payload: dict[str, Any]) -> None:
         job_id = payload.get("job_id")
         if job_id and hasattr(app.state, "download"):
-            await app.state.download.process_job(job_id)
+            await app.state.download.process_download(job_id)
 
     async def handle_search(payload: dict[str, Any]) -> None:
         job_id = payload.get("job_id")
         if job_id and hasattr(app.state, "search"):
-            await app.state.search.pipeline(job_id)
+            await app.state.search.run(job_id)
 
     system_worker_pool.register_handler("dubbing", handle_dubbing)
     system_worker_pool.register_handler("download", handle_download)

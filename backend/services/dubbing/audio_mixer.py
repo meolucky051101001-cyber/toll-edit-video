@@ -71,6 +71,28 @@ class AudioMixer:
             )
             stdout, stderr = await proc.communicate()
 
+            if proc.returncode != 0 and "matches no streams" in stderr.decode(errors="ignore"):
+                logger.info("Source video has no audio stream; falling back to direct mux without ducking filter")
+                cmd_fallback = [
+                    self.ffmpeg,
+                    "-y",
+                    "-i", source_video_path,
+                    "-i", voiceover_audio_path,
+                    "-map", "0:v:0",
+                    "-map", "1:a:0",
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-shortest",
+                    output_video_path,
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd_fallback,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+
             if proc.returncode == 0 and os.path.isfile(output_video_path):
                 logger.info("Successfully mixed dubbed video: %s", output_video_path)
                 return voiceover_audio_path, output_video_path

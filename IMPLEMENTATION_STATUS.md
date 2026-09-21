@@ -69,14 +69,15 @@ Last Updated: 2026-09-21 (Phases 8-11 Completed, Auto-Dubbing, Multi-Platform Ma
   - `test_xiaohongshu.py`: 17 passed
 
 ### 2.2 Frontend Playwright E2E Suite
-- **Total Tests Collected:** 20 items
-- **Passed:** 20 (100%)
+- **Total Tests Collected:** 21 items across 6 spec files
+- **Passed:** 21 (100%)
 - **Failed:** 0
 - **Duration:** ~27s
 - **Specs Breakdown:**
   - `cookies.spec.ts`: 1 passed
   - `downloads.spec.ts`: 4 passed
   - `imports.spec.ts`: 1 passed
+  - `research-default.spec.ts`: 1 passed
   - `search.spec.ts`: 3 passed
   - `xiaohongshu.spec.ts`: 11 passed
 

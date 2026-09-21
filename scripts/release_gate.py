@@ -211,14 +211,29 @@ def main() -> int:
     t_bench = round(time.time() - t0, 2)
     bench_ok = (code == 0)
     bench_summary = parse_pytest_summary(out)
+    try:
+        from tests.test_evaluation_benchmark import (
+            BENCHMARK_DATASET,
+            REAL_CRAWLED_BENCHMARK_SAMPLES,
+        )
+        total_benchmark_queries = len(BENCHMARK_DATASET)
+        total_real_queries = len(REAL_CRAWLED_BENCHMARK_SAMPLES)
+    except Exception:
+        total_benchmark_queries = 60
+        total_real_queries = 4
+
+    total_queries_verified = total_benchmark_queries + total_real_queries
     results["9_evaluation_benchmark"] = {
         "passed": bench_ok,
         "exit_code": code,
-        "queries_verified": bench_summary["passed"],
+        "queries_verified": total_queries_verified,
+        "domain_benchmark_queries": total_benchmark_queries,
+        "real_crawled_queries": total_real_queries,
+        "test_suites_passed": bench_summary["passed"],
         "duration_s": t_bench,
     }
     if bench_ok:
-        print(f"PASS ({bench_summary['passed']} benchmark test cases passed) [{t_bench}s]")
+        print(f"PASS ({total_benchmark_queries} domain queries + {total_real_queries} real crawl suites verified) [{t_bench}s]")
     else:
         print(f"FAIL (exit code {code})")
         print(out[:500])

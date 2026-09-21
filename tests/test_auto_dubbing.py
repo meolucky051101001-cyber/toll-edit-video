@@ -1,5 +1,8 @@
+import asyncio
 import os
+import shutil
 import wave
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,8 +10,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.main import app
+from backend.core.config import settings
 from backend.core.database import Base
 from backend.models import Video
+from backend.models.download_job import DownloadJob
 from backend.schemas.dubbing import DubbingRequest
 from backend.services.dubbing.service import DubbingService
 from backend.services.dubbing.tts_adapter import (
@@ -65,9 +70,16 @@ async def test_offline_fallback_tts_synthesizes_valid_audio(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_edge_tts_adapter_fallback_on_network_error(tmp_path):
+async def test_edge_tts_adapter_fallback_on_network_error(tmp_path, monkeypatch):
+    import edge_tts
+
+    async def mock_failing_save(*args, **kwargs):
+        raise ConnectionError("Simulated edge-tts network failure")
+
+    monkeypatch.setattr(edge_tts.Communicate, "save", mock_failing_save)
+
     fallback = OfflineFallbackTTSAdapter()
-    adapter = EdgeTTSAdapter(fallback=fallback)
+    adapter = EdgeTTSAdapter(fallback=fallback, allow_fallback=True)
     out_file = str(tmp_path / "test_fallback_switch.mp3")
 
     # If edge-tts network fails or is mocked, it should gracefully fall back to WAV
@@ -79,6 +91,7 @@ async def test_edge_tts_adapter_fallback_on_network_error(tmp_path):
 
     assert os.path.isfile(path)
     assert duration > 0
+    assert path.endswith(".wav")
 
 
 @pytest.mark.anyio
@@ -148,3 +161,102 @@ def test_dubbing_api_endpoints():
         # 2. Get non-existent job
         res_404 = client.get("/api/dubbing/jobs/non-existent-job-id")
         assert res_404.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_dubbing_service_idempotency_prevents_duplicate_runs(memory_db):
+    with memory_db() as db:
+        vid = Video(
+            id="v-idem-1",
+            platform="douyin",
+            platform_video_id="dy_idem_1",
+            url="https://www.douyin.com/video/idem1",
+            canonical_url="https://www.douyin.com/video/idem1",
+            fingerprint="fp_idem",
+            title="Idempotency Test Video",
+            search_query="test",
+            search_job_id="job-idem",
+            script_analysis={"remake_script_vi": {"intro": "Intro", "body": ["Body"], "cta": "CTA"}},
+        )
+        db.add(vid)
+        db.commit()
+
+    tts = OfflineFallbackTTSAdapter()
+    service = DubbingService(sessions=memory_db, tts=tts)
+
+    with memory_db() as db:
+        req = DubbingRequest(video_id="v-idem-1", voice_id="vi-VN-HoaiMyNeural")
+        job, out = service._create_job_record(req, db)
+
+    # Concurrently execute process_dubbing multiple times
+    results = await asyncio.gather(
+        service.process_dubbing(job.id),
+        service.process_dubbing(job.id),
+        service.process_dubbing(job.id),
+        return_exceptions=True,
+    )
+
+    for r in results:
+        assert not isinstance(r, Exception)
+
+    with memory_db() as db:
+        final_job = service.get_job(job.id, db)
+        assert final_job is not None
+        assert final_job.status == "completed"
+
+
+@pytest.mark.anyio
+async def test_dubbing_service_resolves_downloaded_video_and_mixes(memory_db, tmp_path, monkeypatch):
+    test_download_dir = tmp_path / "downloads"
+    test_download_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(settings, "download_dir", test_download_dir)
+
+    # Seed source video file in download_dir
+    src_fixture = Path("tests/fixtures/tiny_valid.mp4")
+    target_filename = "douyin_dy_mix_1_dl123456.mp4"
+    target_path = test_download_dir / target_filename
+    shutil.copyfile(src_fixture, target_path)
+    assert target_path.is_file()
+
+    with memory_db() as db:
+        vid = Video(
+            id="v-mix-1",
+            platform="douyin",
+            platform_video_id="dy_mix_1",
+            url="https://www.douyin.com/video/mix1",
+            canonical_url="https://www.douyin.com/video/mix1",
+            fingerprint="fp_mix",
+            title="Video Mixing Test",
+            search_query="test",
+            search_job_id="job-mix",
+            script_analysis={"remake_script_vi": {"intro": "Hello", "body": ["Content"], "cta": "Bye"}},
+        )
+        db.add(vid)
+        db.commit()
+
+        # Seed completed download job with relative_path pointing to downloaded video
+        dl_job = DownloadJob(
+            id="dl-job-1",
+            video_id="v-mix-1",
+            platform="douyin",
+            status="completed",
+            relative_path=target_filename,
+        )
+        db.add(dl_job)
+        db.commit()
+
+    tts = OfflineFallbackTTSAdapter()
+    service = DubbingService(sessions=memory_db, tts=tts)
+
+    with memory_db() as db:
+        req = DubbingRequest(video_id="v-mix-1", voice_id="vi-VN-HoaiMyNeural")
+        job, out = service._create_job_record(req, db)
+
+    await service.process_dubbing(job.id)
+
+    with memory_db() as db:
+        final_job = service.get_job(job.id, db)
+        assert final_job is not None
+        assert final_job.status == "completed"
+        assert final_job.video_url is not None
+        assert final_job.video_url.endswith(".mp4")

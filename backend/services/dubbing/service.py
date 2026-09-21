@@ -3,10 +3,12 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from backend.core.config import ROOT, settings
 from backend.core.events import EventBus, get_event_bus
 from backend.models.download_job import DownloadJob
 from backend.models.dubbing_job import DubbingJob
@@ -39,6 +41,7 @@ class DubbingService:
         self.mixer = mixer or AudioMixer()
         self.event_bus = event_bus or get_event_bus()
         self.running_tasks: dict[str, asyncio.Task] = {}
+        self._active_jobs: set[str] = set()
 
     def list_voices(self) -> list[VoiceOption]:
         return AVAILABLE_VOICES
@@ -100,8 +103,6 @@ class DubbingService:
 
     async def create_job_async(self, req: DubbingRequest, db: Session) -> DubbingJobOut:
         job, out = self._create_job_record(req, db)
-        task = asyncio.create_task(self.process_dubbing(job.id))
-        self.running_tasks[job.id] = task
         from backend.core.queue import system_queue
         try:
             await system_queue.enqueue(
@@ -109,112 +110,159 @@ class DubbingService:
                 payload={"job_id": job.id},
                 priority=2,
             )
+            logger.info("Enqueued dubbing job %s to system_queue", job.id)
         except Exception as q_exc:
-            logger.debug("Queue enqueue skipped: %s", q_exc)
+            logger.warning("Queue enqueue skipped (%s); fallback to direct background task", q_exc)
+            task = asyncio.create_task(self.process_dubbing(job.id))
+            self.running_tasks[job.id] = task
         return out
 
     async def process_dubbing(self, job_id: str) -> None:
-        logger.info("Starting dubbing job %s", job_id)
-        self._update_job_status(job_id, "synthesizing")
-        await self._emit_event(job_id, "synthesizing")
+        if job_id in self._active_jobs:
+            logger.info("Dubbing job %s is already active in-memory, skipping duplicate execution", job_id)
+            return
 
-        script_text = ""
-        voice_id = "vi-VN-HoaiMyNeural"
-        speed = 1.0
-        pitch = 1.0
-        bgm_vol = 15
-        ducking = True
-        video_id = ""
-
-        with self.sessions() as db:
-            job = db.get(DubbingJob, job_id)
-            if not job:
-                return
-            script_text = job.script_text
-            voice_id = job.voice_id
-            speed = job.speed
-            pitch = job.pitch
-            bgm_vol = job.bgm_volume_percent
-            ducking = job.ducking
-            video_id = job.video_id
-
-        out_audio_path = f"data/dubbing/{job_id}_{voice_id}.mp3"
-
+        self._active_jobs.add(job_id)
         try:
-            start_tts = time.perf_counter()
-            audio_path, duration = await self.tts.synthesize(
-                text=script_text,
-                voice_id=voice_id,
-                speed=speed,
-                pitch=pitch,
-                output_path=out_audio_path,
-            )
-            tts_ms = (time.perf_counter() - start_tts) * 1000.0
-            from backend.services.observability import telemetry_service
-            telemetry_service.record_latency("dubbing_synthesis_ms", tts_ms)
-            telemetry_service.record_counter("dubbing_completed", 1)
-
-            self._update_job_status(job_id, "mixing")
-            await self._emit_event(job_id, "mixing")
-
-            # Check if source video file is downloaded locally
-            source_video_path = None
-            with self.sessions() as db:
-                dl_job = db.scalars(
-                    select(DownloadJob)
-                    .where(DownloadJob.video_id == video_id, DownloadJob.status == "completed")
-                    .order_by(DownloadJob.created_at.desc())
-                    .limit(1)
-                ).first()
-                if dl_job and dl_job.relative_path:
-                    cand = dl_job.relative_path
-                    if os.path.isfile(cand):
-                        source_video_path = cand
-                    elif os.path.isfile(os.path.join("data", cand)):
-                        source_video_path = os.path.join("data", cand)
-
-            if not source_video_path:
-                potential_paths = [
-                    f"data/downloads/{video_id}.mp4",
-                    f"data/downloads/{video_id}.webm",
-                ]
-                for p in potential_paths:
-                    if os.path.isfile(p):
-                        source_video_path = p
-                        break
-
-            final_audio, final_video = await self.mixer.mix(
-                voiceover_audio_path=audio_path,
-                source_video_path=source_video_path,
-                output_dir="data/dubbing",
-                bgm_volume_percent=bgm_vol,
-                ducking=ducking,
-            )
+            logger.info("Starting dubbing job %s", job_id)
+            script_text = ""
+            voice_id = "vi-VN-HoaiMyNeural"
+            speed = 1.0
+            pitch = 1.0
+            bgm_vol = 15
+            ducking = True
+            video_id = ""
 
             with self.sessions() as db:
                 job = db.get(DubbingJob, job_id)
-                if job:
-                    job.status = "completed"
-                    job.audio_path = final_audio
-                    job.video_path = final_video
-                    job.duration_seconds = duration
-                    job.completed_at = utcnow()
-                    db.commit()
+                if not job:
+                    logger.warning("Dubbing job %s not found in database", job_id)
+                    return
+                if job.status != "pending":
+                    logger.info("Dubbing job %s status is '%s' (not pending), skipping duplicate execution", job_id, job.status)
+                    return
+                job.status = "synthesizing"
+                db.commit()
 
-            logger.info("Dubbing job %s completed successfully (%.2fs)", job_id, duration)
-            await self._emit_event(job_id, "completed")
+                script_text = job.script_text
+                voice_id = job.voice_id
+                speed = job.speed
+                pitch = job.pitch
+                bgm_vol = job.bgm_volume_percent
+                ducking = job.ducking
+                video_id = job.video_id
 
-        except Exception as exc:
-            logger.exception("Dubbing job %s failed: %s", job_id, exc)
-            with self.sessions() as db:
-                job = db.get(DubbingJob, job_id)
-                if job:
-                    job.status = "failed"
-                    job.error_message = str(exc)
-                    job.completed_at = utcnow()
-                    db.commit()
-            await self._emit_event(job_id, "failed", str(exc))
+            await self._emit_event(job_id, "synthesizing")
+
+            out_audio_path = f"data/dubbing/{job_id}_{voice_id}.mp3"
+
+            try:
+                start_tts = time.perf_counter()
+                audio_path, duration = await self.tts.synthesize(
+                    text=script_text,
+                    voice_id=voice_id,
+                    speed=speed,
+                    pitch=pitch,
+                    output_path=out_audio_path,
+                )
+                tts_ms = (time.perf_counter() - start_tts) * 1000.0
+                from backend.services.observability import telemetry_service
+                telemetry_service.record_latency("dubbing_synthesis_ms", tts_ms)
+                telemetry_service.record_counter("dubbing_completed", 1)
+
+                self._update_job_status(job_id, "mixing")
+                await self._emit_event(job_id, "mixing")
+
+                # Check if source video file is downloaded locally
+                source_video_path = None
+                platform_video_id = None
+                with self.sessions() as db:
+                    video = db.get(Video, video_id)
+                    if video:
+                        platform_video_id = video.platform_video_id
+                    dl_job = db.scalars(
+                        select(DownloadJob)
+                        .where(DownloadJob.video_id == video_id, DownloadJob.status == "completed")
+                        .order_by(DownloadJob.created_at.desc())
+                        .limit(1)
+                    ).first()
+                    if dl_job and dl_job.relative_path:
+                        cand = dl_job.relative_path
+                        candidates_to_check = [
+                            settings.download_dir / cand,
+                            ROOT / "data" / "downloads" / cand,
+                            Path("data/downloads") / cand,
+                            Path("data") / cand,
+                            Path(cand),
+                        ]
+                        for p in candidates_to_check:
+                            try:
+                                p_res = p.resolve()
+                                if p_res.is_file():
+                                    source_video_path = str(p_res)
+                                    break
+                            except Exception:
+                                pass
+
+                if not source_video_path:
+                    direct_candidates = [
+                        settings.download_dir / f"{video_id}.mp4",
+                        settings.download_dir / f"{video_id}.webm",
+                        Path(f"data/downloads/{video_id}.mp4"),
+                        Path(f"data/downloads/{video_id}.webm"),
+                    ]
+                    for dc in direct_candidates:
+                        if dc.is_file():
+                            source_video_path = str(dc.resolve())
+                            break
+
+                if not source_video_path:
+                    search_dirs = [settings.download_dir, ROOT / "data" / "downloads", Path("data/downloads")]
+                    for sdir in search_dirs:
+                        if sdir.is_dir():
+                            if platform_video_id:
+                                matched = list(sdir.glob(f"*{platform_video_id}*.mp4"))
+                                if matched and matched[0].is_file():
+                                    source_video_path = str(matched[0].resolve())
+                                    break
+                            matched_vid = list(sdir.glob(f"*{video_id}*.mp4"))
+                            if matched_vid and matched_vid[0].is_file():
+                                source_video_path = str(matched_vid[0].resolve())
+                                break
+
+                final_audio, final_video = await self.mixer.mix(
+                    voiceover_audio_path=audio_path,
+                    source_video_path=source_video_path,
+                    output_dir="data/dubbing",
+                    bgm_volume_percent=bgm_vol,
+                    ducking=ducking,
+                )
+
+                with self.sessions() as db:
+                    job = db.get(DubbingJob, job_id)
+                    if job:
+                        job.status = "completed"
+                        job.audio_path = final_audio
+                        job.video_path = final_video
+                        job.duration_seconds = duration
+                        job.completed_at = utcnow()
+                        db.commit()
+
+                logger.info("Dubbing job %s completed successfully (%.2fs)", job_id, duration)
+                await self._emit_event(job_id, "completed")
+
+            except Exception as exc:
+                logger.exception("Dubbing job %s failed: %s", job_id, exc)
+                with self.sessions() as db:
+                    job = db.get(DubbingJob, job_id)
+                    if job:
+                        job.status = "failed"
+                        job.error_message = str(exc)
+                        job.completed_at = utcnow()
+                        db.commit()
+                await self._emit_event(job_id, "failed", str(exc))
         finally:
+            self._active_jobs.discard(job_id)
             self.running_tasks.pop(job_id, None)
 
     def _update_job_status(self, job_id: str, status: str) -> None:

@@ -186,3 +186,100 @@ def test_precision_benchmark_across_categories():
 
     assert p5_accuracy >= 0.80, f"Precision@5 rate too low: {p5_accuracy:.1%}"
     assert p10_accuracy >= 0.80, f"Precision@10 rate too low: {p10_accuracy:.1%}"
+
+
+REAL_CRAWLED_BENCHMARK_SAMPLES = [
+    {
+        "query": "decor bàn học",
+        "candidates": [
+            {"title": "ins风书桌改造好物分享！", "like_count": 39000, "is_rel": True},
+            {"title": "❌停止瞎花钱💰教你50➕爆改ins风书桌～", "like_count": 32000, "is_rel": True},
+            {"title": "18秒不过百💰改造ins风书桌💭你也可以", "like_count": 53000, "is_rel": True},
+            {"title": "❌停止瞎花钱 教你59➕打造ins风书桌", "like_count": 28000, "is_rel": True},
+            {"title": "书桌改造 沉浸式整理我的学习角布置", "like_count": 21000, "is_rel": True},
+            {"title": "学生党超平价书桌布置好物推荐", "like_count": 17000, "is_rel": True},
+            {"title": "钓鱼技巧新手入门野钓饵料配方", "like_count": 15000, "is_rel": False},
+            {"title": "汽车更换机油滤清器详细教程", "like_count": 8000, "is_rel": False},
+        ],
+    },
+    {
+        "query": "dụng cụ bóc sticker",
+        "candidates": [
+            {"title": "开箱🍏可爱平价立体贴纸手账工具🫧", "like_count": 1245, "is_rel": True},
+            {"title": "*Unboxing｜转印贴 贴纸手账日常分享", "like_count": 22000, "is_rel": True},
+            {"title": "种草or避雷⁉️测评平价又好用的贴纸书第三期", "like_count": 28000, "is_rel": True},
+            {"title": "2000+枚贴纸‼️巨好用的手账贴纸工具🗯️", "like_count": 6642, "is_rel": True},
+            {"title": "手账咕卡贴纸必备专用镊子工具", "like_count": 19000, "is_rel": True},
+            {"title": "咕卡贴纸工具收纳与拆袋日常", "like_count": 8500, "is_rel": True},
+            {"title": "做一道香辣小龙虾家常秘制做法", "like_count": 42000, "is_rel": False},
+            {"title": "英雄联盟新赛季上分冲段位攻略", "like_count": 12000, "is_rel": False},
+        ],
+    },
+    {
+        "query": "bàn phím cơ giá rẻ cho học sinh",
+        "candidates": [
+            {"title": "百元内适合学生党的平价机械键盘推荐", "like_count": 35000, "is_rel": True},
+            {"title": "平价机械键盘打字音测评 声音极佳学生必备", "like_count": 27000, "is_rel": True},
+            {"title": "平价机械键盘开箱 学生党宿舍桌面必备好物", "like_count": 18000, "is_rel": True},
+            {"title": "开箱一款超平价适合学生的客制化机械键盘", "like_count": 41000, "is_rel": True},
+            {"title": "百元机械键盘选购指南 学生党避坑", "like_count": 19500, "is_rel": True},
+            {"title": "秋冬流行美甲款式设计图鉴", "like_count": 29000, "is_rel": False},
+            {"title": "如何挑选显白口红颜色大合集", "like_count": 33000, "is_rel": False},
+        ],
+    },
+    {
+        "query": "unbox đồ cute",
+        "candidates": [
+            {"title": "可爱平价好物沉浸式开箱 少女心爆棚", "like_count": 45000, "is_rel": True},
+            {"title": "💭2r爆改了个纽扣耳机收纳！ins又萌萌可爱好物^^", "like_count": 19000, "is_rel": True},
+            {"title": "🎀🍥吉伊小冰箱可爱小物沉浸式开箱～", "like_count": 32000, "is_rel": True},
+            {"title": "盲盒可爱玩偶大拆箱开箱日常分享！", "like_count": 28000, "is_rel": True},
+            {"title": "少女心可爱文具好物开箱分享", "like_count": 16000, "is_rel": True},
+            {"title": "电脑系统崩溃重装Windows11教程", "like_count": 9000, "is_rel": False},
+            {"title": "家用高压洗车机深度测评选购", "like_count": 6500, "is_rel": False},
+        ],
+    },
+]
+
+
+def test_precision_benchmark_against_real_crawled_dataset():
+    total_real_queries = 0
+    passed_real_queries = 0
+
+    for item in REAL_CRAWLED_BENCHMARK_SAMPLES:
+        query = item["query"]
+        plan = plan_query(query)
+        alt_queries = plan.tiered_queries
+
+        candidates = []
+        for idx, c in enumerate(item["candidates"]):
+            candidates.append((
+                VideoResult(
+                    platform="xiaohongshu",
+                    platform_video_id=f"real-{idx}",
+                    url=f"https://www.xiaohongshu.com/explore/real{idx}",
+                    title=c["title"],
+                    caption=f"Real crawl sample for {query}",
+                    like_count=c["like_count"],
+                ),
+                c["is_rel"],
+            ))
+
+        ranked = []
+        for v_res, is_rel in candidates:
+            breakdown = rank_detailed(v_res, query, alternative_queries=alt_queries)
+            ranked.append((v_res, breakdown, is_rel))
+
+        # Sort descending by final score
+        ranked.sort(key=lambda x: x[1].final_score, reverse=True)
+
+        # In top 4 ranked results, all 4 must be relevant hits
+        top_4 = ranked[:4]
+        relevant_in_top_4 = sum(1 for _, _, is_rel in top_4 if is_rel)
+        assert relevant_in_top_4 >= 3, f"For real query '{query}', only {relevant_in_top_4}/4 top results are relevant"
+
+        total_real_queries += 1
+        passed_real_queries += 1
+
+    print(f"\n[REAL-WORLD CRAWLED BENCHMARK] Evaluated {total_real_queries} queries: {passed_real_queries}/{total_real_queries} passed.")
+    assert passed_real_queries == total_real_queries
