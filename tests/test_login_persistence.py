@@ -1,11 +1,10 @@
-import json
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from backend.services.browser_service import BrowserService
 from backend.services.douyin_browser_service import DouyinBrowserService
-from backend.core.config import Settings
 
 
 @pytest.mark.anyio
@@ -13,8 +12,8 @@ async def test_xhs_inspect_recognizes_session_cookies_without_dom_avatar(tmp_pat
     svc = BrowserService(profile=tmp_path)
     mock_context = MagicMock()
     mock_context.cookies = AsyncMock(return_value=[
-        {"name": "web_session", "value": "030037ada85203699669", "domain": ".rednote.com"},
-        {"name": "id_token", "value": "VjEAAKYBlQc69to0QYHy", "domain": ".rednote.com"},
+        {"name": "web_session", "value": "mock_web_session_val", "domain": ".rednote.com"},
+        {"name": "id_token", "value": "mock_id_token_val", "domain": ".rednote.com"},
     ])
     mock_context.storage_state = AsyncMock()
     svc.context = mock_context
@@ -185,3 +184,37 @@ async def test_browser_close_persists_auth_state(tmp_path: Path):
 
     mock_context.storage_state.assert_called_once()
     mock_context.close.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_xhs_stale_cookie_cannot_override_login_redirect(tmp_path: Path):
+    svc = BrowserService(profile=tmp_path)
+    mock_context = MagicMock()
+    mock_context.cookies = AsyncMock(return_value=[
+        {"name": "web_session", "value": "mock_web_session_val", "domain": ".rednote.com"},
+        {"name": "id_token", "value": "mock_id_token_val", "domain": ".rednote.com"},
+    ])
+    mock_context.storage_state = AsyncMock()
+    svc.context = mock_context
+
+    mock_page = MagicMock()
+    mock_page.is_closed.return_value = False
+    mock_page.url = "https://www.rednote.com/?source=tourist_search"
+    mock_page.title = AsyncMock(return_value="rednote search")
+    
+    # Body has no login keyword, DOM avatar not found
+    mock_locator = MagicMock()
+    mock_locator.inner_text = AsyncMock(return_value="Decor ideas and trends")
+    mock_locator.all = AsyncMock(return_value=[])
+    mock_locator.count = AsyncMock(return_value=0)
+    mock_locator.first = mock_locator
+    mock_locator.input_value = AsyncMock(return_value="decor")
+    mock_page.locator.return_value = mock_locator
+
+    state = await svc.inspect(mock_page)
+
+    assert state == "login_required"
+    assert svc.diagnostics["is_authenticated"] is True
+    # storage_state should be auto-persisted
+    mock_context.storage_state.assert_called_once()
+

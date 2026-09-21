@@ -1,7 +1,6 @@
 import asyncio
 from unittest.mock import patch
 
-import pytest
 from backend.models import SearchJob
 from backend.providers.base import SearchFilters, SearchProvider
 from backend.schemas.contracts import VideoResult

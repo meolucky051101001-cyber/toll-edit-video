@@ -1,13 +1,14 @@
 import json
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from backend.models.video import Video
-from backend.schemas.script_analysis import ScriptAnalysisOut, RemakeScriptVI
-from backend.services.ai_service import AIService, generate_fallback_script_analysis
-from backend.providers.ai.base import AIProvider, AIError
-from backend.core.config import Settings
+import pytest
 from pydantic import SecretStr
+
+from backend.core.config import Settings
+from backend.models.video import Video
+from backend.providers.ai.base import AIError, AIProvider
+from backend.schemas.script_analysis import RemakeScriptVI, ScriptAnalysisOut
+from backend.services.ai_service import AIService, generate_fallback_script_analysis
 
 
 def make_video(vid_id, platform, pvid, url, title, caption="", hashtags=None):

@@ -1,14 +1,13 @@
 import pytest
 
 from backend.schemas.contracts import VideoResult
-from backend.services.ranking_service import intent_constraints, rank_detailed
+from backend.services.ranking_service import rank_detailed
 from backend.services.translator import (
     extract_action,
     extract_subject,
     is_valid_action_match,
     is_valid_subject_match,
     normalize_vietnamese,
-    plan_query,
     plan_query_async,
     restore_vietnamese_phrases,
 )
@@ -190,6 +189,7 @@ def test_adaptive_target_candidates_formula():
 
 def test_recommendation_and_guess_filtering_selectors():
     import inspect
+
     from backend.providers.douyin.provider import DouyinProvider
     from backend.providers.xiaohongshu.provider import XiaohongshuProvider
 

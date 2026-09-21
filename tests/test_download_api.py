@@ -19,10 +19,10 @@ def test_client(sessions, tmp_path, monkeypatch):
             yield db
 
     app.dependency_overrides[get_db] = override
-    download_svc = DownloadService(sessions, download_dir=dl_dir)
-    app.state.download = download_svc
 
     with TestClient(app) as client:
+        download_svc = DownloadService(sessions, download_dir=dl_dir)
+        app.state.download = download_svc
         yield client, dl_dir, sessions
 
     app.dependency_overrides.clear()

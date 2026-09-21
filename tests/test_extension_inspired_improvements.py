@@ -1,18 +1,18 @@
 import asyncio
+
 import httpx
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from backend.core.database import Base
-from backend.models.video import Video
 from backend.models.download_job import DownloadJob
+from backend.models.video import Video
 from backend.schemas.downloads import ResolvedMedia
 from backend.services.download.base import BaseDownloadAdapter, DownloadAdapterError
 from backend.services.download.douyin_adapter import DouyinDownloadAdapter
-from backend.services.download.xhs_adapter import XhsDownloadAdapter
-from backend.services.download.browser_resolver import BrowserMediaResolver
 from backend.services.download.service import DownloadService
+from backend.services.download.xhs_adapter import XhsDownloadAdapter
 
 
 def test_douyin_adapter_prefers_higher_resolution_over_higher_bitrate(monkeypatch):

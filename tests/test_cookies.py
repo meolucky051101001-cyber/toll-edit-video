@@ -1,14 +1,12 @@
 import json
 from pathlib import Path
+
 import httpx
-import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.main import app
 from backend.core.config import settings
 from backend.models.video import Video
 from backend.services.cookie_service import (
-    cookie_dict_to_str,
     extract_cookies_from_auth_file,
     inspect_cookie_tokens,
     mask_cookie_preview,
@@ -75,6 +73,8 @@ def test_api_cookie_settings(client: TestClient, monkeypatch):
     orig_dy = settings.douyin_cookie
     saved_calls = []
     monkeypatch.setattr("backend.api.settings._save_env_values", lambda vals: saved_calls.append(vals))
+    # Ensure hermetic environment where browser session defaults to empty
+    monkeypatch.setattr("backend.services.cookie_service.get_browser_session_cookie", lambda platform: "")
 
     try:
         # Test GET /api/settings/cookies
@@ -84,21 +84,69 @@ def test_api_cookie_settings(client: TestClient, monkeypatch):
         assert "xiaohongshu" in data
         assert "douyin" in data
 
-        # Test POST /api/settings/cookies
-        test_cookie = "a1=test_val; web_session=sess_val; webId=wid_val"
+        # Test POST /api/settings/cookies with valid synthetic cookies that do NOT match DUMMY_SUBSTRINGS
+        synth_xhs = "a1=synth_valid_a1_token_123; web_session=synth_valid_session_token_456; webId=synth_valid_webid_789"
+        synth_dy = "ttwid=1%7Csynth_valid_ttwid_token; s_v_web_id=verify_synth_valid_svwid; sessionid=synth_valid_sessionid_789"
         res_post = client.post(
             "/api/settings/cookies",
-            json={"xhs_cookie": test_cookie, "douyin_cookie": "ttwid=test_ttwid; sessionid=test_sess"},
+            json={"xhs_cookie": synth_xhs, "douyin_cookie": synth_dy},
         )
         assert res_post.status_code == 200
         updated = res_post.json()
         assert updated["xiaohongshu"]["has_cookie"] is True
+        assert updated["xiaohongshu"]["is_custom"] is True
         assert updated["douyin"]["has_cookie"] is True
+        assert updated["douyin"]["is_custom"] is True
 
         # Verify settings updated in runtime and saved was called without touching disk .env
-        assert settings.xhs_cookie == test_cookie
+        assert settings.xhs_cookie == synth_xhs
+        assert settings.douyin_cookie == synth_dy
         assert len(saved_calls) == 1
         assert "XHS_COOKIE" in saved_calls[0]
+        assert "DOUYIN_COOKIE" in saved_calls[0]
+    finally:
+        settings.xhs_cookie = orig_xhs
+        settings.douyin_cookie = orig_dy
+
+
+def test_api_rejects_dummy_cookies_fallback_to_session(client: TestClient, monkeypatch):
+    # Save originals
+    orig_xhs = settings.xhs_cookie
+    orig_dy = settings.douyin_cookie
+    monkeypatch.setattr("backend.api.settings._save_env_values", lambda vals: None)
+
+    # 1. When no browser session exists, submitting dummy cookies results in has_cookie=False and is_custom=False
+    monkeypatch.setattr("backend.services.cookie_service.get_browser_session_cookie", lambda platform: "")
+    try:
+        dummy_xhs = "a1=test_val; web_session=sess_val; webId=wid_val"
+        dummy_dy = "ttwid=test_ttwid; sessionid=test_sess"
+        res = client.post(
+            "/api/settings/cookies",
+            json={"xhs_cookie": dummy_xhs, "douyin_cookie": dummy_dy},
+        )
+        assert res.status_code == 200
+        data = res.json()
+        # Even though settings was patched, is_dummy_cookie prevents dummy cookies from being used as active
+        assert data["xiaohongshu"]["has_cookie"] is False
+        assert data["xiaohongshu"]["is_custom"] is False
+        assert data["douyin"]["has_cookie"] is False
+        assert data["douyin"]["is_custom"] is False
+
+        # 2. When authentic browser session exists, dummy input falls back to session
+        mock_sessions = {
+            "xiaohongshu": "a1=synth_browser_a1; web_session=synth_browser_sess; webId=synth_browser_wid",
+            "douyin": "ttwid=1%7Csynth_browser_ttwid; s_v_web_id=verify_browser; sessionid=synth_browser_sess",
+        }
+        monkeypatch.setattr("backend.services.cookie_service.get_browser_session_cookie", lambda plat: mock_sessions.get(plat, ""))
+        res_fallback = client.get("/api/settings/cookies")
+        assert res_fallback.status_code == 200
+        data_fb = res_fallback.json()
+        assert data_fb["xiaohongshu"]["has_cookie"] is True
+        assert data_fb["xiaohongshu"]["is_custom"] is False
+        assert data_fb["xiaohongshu"]["has_browser_session"] is True
+        assert data_fb["douyin"]["has_cookie"] is True
+        assert data_fb["douyin"]["is_custom"] is False
+        assert data_fb["douyin"]["has_browser_session"] is True
     finally:
         settings.xhs_cookie = orig_xhs
         settings.douyin_cookie = orig_dy

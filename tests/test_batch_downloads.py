@@ -1,4 +1,3 @@
-import pytest
 from backend.models.video import Video
 
 
