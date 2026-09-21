@@ -28,8 +28,11 @@ async def status(request: Request):
 
 @router.post("/open")
 async def open_browser(request: Request):
+    browser = request.app.state.browser
+    if browser.lock.locked():
+        raise HTTPException(409, "Không thể mở lại trình duyệt khi tìm kiếm đang chạy.")
     try:
-        return await request.app.state.browser.open()
+        return await browser.open()
     except ProviderUnavailableError as error:
         raise HTTPException(503, str(error)) from None
 
@@ -91,12 +94,16 @@ async def get_screenshot(request: Request, crop: str | None = None):
 @router.post("/refresh_qr")
 async def refresh_xiaohongshu_qr(request: Request):
     browser = request.app.state.browser
+    if browser.lock.locked():
+        raise HTTPException(409, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
     return await browser.refresh_qr()
 
 
 @router.post("/click")
 async def click_xiaohongshu(payload: ClickPayload, request: Request):
     browser = request.app.state.browser
+    if browser.lock.locked():
+        raise HTTPException(409, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
     try:
         page = browser.get_active_page()
     except Exception:
@@ -113,6 +120,8 @@ async def click_xiaohongshu(payload: ClickPayload, request: Request):
 @router.post("/drag")
 async def drag_xiaohongshu(payload: DragPayload, request: Request):
     browser = request.app.state.browser
+    if browser.lock.locked():
+        raise HTTPException(409, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
     try:
         page = browser.get_active_page()
     except Exception:
@@ -136,8 +145,11 @@ async def douyin_status(request: Request):
 
 @douyin_router.post("/open")
 async def open_douyin_browser(request: Request):
+    browser = request.app.state.douyin_browser
+    if browser.lock.locked():
+        raise HTTPException(409, "Không thể mở lại trình duyệt khi tìm kiếm đang chạy.")
     try:
-        return await request.app.state.douyin_browser.open()
+        return await browser.open()
     except ProviderUnavailableError as error:
         raise HTTPException(503, str(error)) from None
 
@@ -220,12 +232,16 @@ async def inspect_cards(request: Request):
 @douyin_router.post("/refresh_qr")
 async def refresh_douyin_qr(request: Request):
     browser = request.app.state.douyin_browser
+    if browser.lock.locked():
+        raise HTTPException(409, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
     return await browser.refresh_qr()
 
 
 @douyin_router.post("/click")
 async def click_douyin(payload: ClickPayload, request: Request):
     browser = request.app.state.douyin_browser
+    if browser.lock.locked():
+        raise HTTPException(409, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
     try:
         page = browser.get_active_page()
     except Exception:
@@ -242,6 +258,8 @@ async def click_douyin(payload: ClickPayload, request: Request):
 @douyin_router.post("/drag")
 async def drag_douyin(payload: DragPayload, request: Request):
     browser = request.app.state.douyin_browser
+    if browser.lock.locked():
+        raise HTTPException(409, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
     try:
         page = browser.get_active_page()
     except Exception:

@@ -11,11 +11,11 @@ try {
     if (-not (Test-Path -LiteralPath $pythonExe) -or -not (Test-Path -LiteralPath $nextScript) -or -not (Test-Path -LiteralPath 'frontend\.next\BUILD_ID')) {
         throw 'Setup is missing. Run scripts\setup_windows.bat first.'
     }
-    $backendListening = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
+    $backendListening = Get-NetTCPConnection -LocalPort 8010 -State Listen -ErrorAction SilentlyContinue
     $frontendListening = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
     if ($backendListening -and $frontendListening) {
         try {
-            $health = Invoke-RestMethod 'http://127.0.0.1:8000/api/health' -TimeoutSec 2 -ErrorAction Stop
+            $health = Invoke-RestMethod 'http://127.0.0.1:8010/api/health' -TimeoutSec 2 -ErrorAction Stop
             $page = Invoke-WebRequest 'http://127.0.0.1:3000' -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
             if ($health.app -eq 'ai-video-research-tool' -and $page.StatusCode -eq 200) {
                 Write-Host 'Video Research is already running: http://localhost:3000' -ForegroundColor Green
@@ -31,7 +31,7 @@ try {
         } catch {}
     }
 
-    foreach ($port in @(3000, 8000)) {
+    foreach ($port in @(3000, 8010)) {
         $listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
         if ($listener) { throw "Port $port is already in use. If this tool is running, open http://localhost:3000 or run stop.bat. No other process was stopped." }
     }
@@ -47,7 +47,7 @@ try {
         }
     }
     foreach ($folder in @('data', 'logs')) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
-    $backend = Start-Process -FilePath $pythonExe -ArgumentList @('-m','uvicorn','backend.app.main:app','--host','127.0.0.1','--port','8000') -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $projectRoot 'logs\backend.log') -RedirectStandardError (Join-Path $projectRoot 'logs\backend-error.log')
+    $backend = Start-Process -FilePath $pythonExe -ArgumentList @('-m','uvicorn','backend.app.main:app','--host','127.0.0.1','--port','8010') -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $projectRoot 'logs\backend.log') -RedirectStandardError (Join-Path $projectRoot 'logs\backend-error.log')
     $startedProcesses += @{ id = $backend.Id; started = $backend.StartTime.ToUniversalTime().ToString('o'); startTicks = [string]$backend.StartTime.ToUniversalTime().Ticks; service = 'backend' }
     $startedProcesses | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $stateFile -Encoding UTF8
     $nodeExe = (Get-Command node.exe).Source
@@ -58,7 +58,7 @@ try {
     for ($i = 0; $i -lt 60; $i++) {
         if ($backend.HasExited -or $frontend.HasExited) { throw 'A server stopped during startup. See logs\backend-error.log and logs\frontend-error.log.' }
         try {
-            $health = Invoke-RestMethod 'http://127.0.0.1:8000/api/health' -TimeoutSec 2
+            $health = Invoke-RestMethod 'http://127.0.0.1:8010/api/health' -TimeoutSec 2
             $page = Invoke-WebRequest 'http://127.0.0.1:3000' -UseBasicParsing -TimeoutSec 2
             if ($health.app -eq 'ai-video-research-tool' -and $page.StatusCode -eq 200) { $ready = $true; break }
         } catch { Start-Sleep -Milliseconds 500 }

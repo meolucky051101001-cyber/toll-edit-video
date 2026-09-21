@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import logging
 import re
+import time
 from collections.abc import Callable
 from typing import cast
 
@@ -9,6 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.core.config import settings
+from backend.core.events import EventBus
+from backend.core.events import event_bus as default_event_bus
 from backend.models import JobVideo, SearchJob, SearchPlan, SearchQuery, Video
 from backend.models.video import utcnow
 from backend.providers.base import ProviderError, SearchProvider, UserActionRequired
@@ -23,7 +26,8 @@ from backend.services.identity_policy import (
     resolve_xhs_short_link_async,
     validate_result_identity,
 )
-from backend.services.ranking_service import rank
+from backend.services.metric_service import MetricService
+from backend.services.ranking_service import rank_detailed
 from backend.services.translator import is_cjk, plan_query_async
 
 TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
@@ -36,10 +40,22 @@ class SearchService:
         sessions: sessionmaker[Session],
         factory: Callable[[Platform, bool], SearchProvider] = get_provider,
         ai: AIService | None = None,
+        event_bus: EventBus | None = None,
+        metric_service: MetricService | None = None,
     ):
         self.sessions = sessions
         self.factory = factory
         self.ai = ai
+        self.event_bus = event_bus if event_bus is not None else default_event_bus
+        self.metric_service = (
+            metric_service
+            if metric_service is not None
+            else MetricService(
+                sessions=sessions,
+                event_bus=self.event_bus,
+                throttle_seconds=settings.metric_snapshot_throttle_seconds,
+            )
+        )
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.lock = asyncio.Lock()
         self.platform_locks: dict[str, asyncio.Lock] = {}
@@ -63,8 +79,20 @@ class SearchService:
                 for key, value in values.items():
                     setattr(job, key, value)
                 db.commit()
+                if self.event_bus:
+                    self.event_bus.publish_nowait("search:update", {
+                        "job_id": job.id,
+                        "status": job.status,
+                        "processed_count": job.processed_count,
+                        "requested_limit": job.requested_limit,
+                        "found_count": job.found_count,
+                        "error_message": job.error_message,
+                    })
 
     async def cancel(self, job_id: str) -> None:
+        event = self.waiters.get(job_id)
+        if event:
+            event.set()
         task = self.tasks.get(job_id)
         if task:
             task.cancel()
@@ -79,6 +107,15 @@ class SearchService:
                         f"Đã dừng theo yêu cầu. Đã lưu an toàn {job.processed_count} video trong phiên."
                     )
                 db.commit()
+                if self.event_bus:
+                    self.event_bus.publish_nowait("search:update", {
+                        "job_id": job.id,
+                        "status": "cancelled",
+                        "processed_count": job.processed_count,
+                        "requested_limit": job.requested_limit,
+                        "found_count": job.found_count,
+                        "error_message": job.error_message,
+                    })
 
     async def shutdown(self) -> None:
         for job_id in list(self.tasks):
@@ -102,8 +139,13 @@ class SearchService:
             db.commit()
 
     async def run(self, job_id: str) -> None:
+        start_time = time.perf_counter()
         try:
             await self.pipeline(job_id)
+            duration_ms = (time.perf_counter() - start_time) * 1000.0
+            from backend.services.observability import telemetry_service
+            telemetry_service.record_latency("search_crawl_ms", duration_ms)
+            telemetry_service.record_counter("searches_completed", 1)
         except asyncio.CancelledError:
             self.update(job_id, status="cancelled", completed_at=utcnow())
             raise
@@ -149,7 +191,7 @@ class SearchService:
                                 current = db.get(SearchJob, job_id)
                                 assert current is not None
                                 remaining = provider_limit - current.provider_counts.get(platform, 0)
-                                if remaining <= 0:
+                                if remaining <= 0 or current.processed_count >= current.requested_limit:
                                     break
                                 db.add(SearchQuery(job_id=job_id, platform=platform, query=term))
                                 db.commit()
@@ -223,6 +265,13 @@ class SearchService:
                                     alternative_queries=queries,
                                     original_query=query,
                                 )
+                            with self.sessions() as db:
+                                current = db.get(SearchJob, job_id)
+                                if current and (
+                                    current.provider_counts.get(platform, 0) >= provider_limit
+                                    or current.processed_count >= current.requested_limit
+                                ):
+                                    break
                     finally:
                         self.deadlines.pop(job_id, None)
                         await provider.close()
@@ -279,6 +328,10 @@ class SearchService:
             plan = db.get(SearchPlan, job_id)
             assert plan is not None
             owner = db.get(SearchJob, job_id)
+            if owner and outcome:
+                owner.actual_ai_model = outcome.actual_model
+                owner.ai_fallback_occurred = outcome.fallback_occurred
+                owner.ai_latency_ms = outcome.latency_ms
             plan.queries = (outcome.queries if outcome else [original])[
                 : settings.max_queries if owner and owner.is_mock else 3
             ]
@@ -330,8 +383,40 @@ class SearchService:
                 assert job is not None
                 for result in validated_batch:
                     job.found_count += 1
+                    detail = rank_detailed(result, ranking_target, alternative_queries=alternative_queries)
+                    scores = (detail.relevance, detail.quality, detail.final_score)
+
+                    is_rejected = False
+                    reject_reason = None
+                    if job.min_relevance is not None:
+                        if detail.missing_mandatory_intents:
+                            is_rejected = True
+                            reject_reason = f"Thiếu ý định bắt buộc: {', '.join(detail.missing_mandatory_intents)}"
+                        elif detail.relevance < job.min_relevance:
+                            is_rejected = True
+                            reject_reason = f"Độ liên quan thấp ({detail.relevance:.1f} < {job.min_relevance:.1f})"
+                        elif detail.matched_negative_tokens:
+                            is_rejected = True
+                            reject_reason = f"Trùng từ khóa tiêu cực: {', '.join(detail.matched_negative_tokens)}"
+
+                    if is_rejected:
+                        job.rejected_count += 1
+                        diag = dict(job.diagnostics or {})
+                        rejected_list = list(diag.get("rejected_candidates", []))
+                        if len(rejected_list) < 50:
+                            rejected_list.append({
+                                "video_id": result.platform_video_id,
+                                "platform": platform,
+                                "title": result.title or "(Không tiêu đề)",
+                                "url": str(result.url),
+                                "relevance": round(detail.relevance, 1),
+                                "reason": reject_reason,
+                            })
+                        diag["rejected_candidates"] = rejected_list
+                        job.diagnostics = diag
+                        continue
+
                     existing = find_existing(db, result)
-                    scores = rank(result, ranking_target, alternative_queries=alternative_queries)
                     if existing is None and (
                         job.processed_count >= job.requested_limit
                         or job.provider_counts.get(platform, 0) >= provider_limit
@@ -357,9 +442,21 @@ class SearchService:
                             relevance_score=scores[0],
                             quality_score=scores[1],
                             final_score=scores[2],
+                            velocity_score=detail.velocity_score,
+                            virality_score=detail.virality_score,
                         )
                         db.add(existing)
                         db.flush()
+                        self.metric_service.record_snapshot(
+                            video_id=existing.id,
+                            like_count=existing.like_count,
+                            comment_count=existing.comment_count,
+                            share_count=existing.share_count,
+                            favorite_count=existing.favorite_count,
+                            view_count=existing.view_count,
+                            source="search",
+                            db=db,
+                        )
                     else:
                         job.duplicate_count += 1
                         existing.share_url = merge_share_url(
@@ -387,6 +484,8 @@ class SearchService:
                             existing.published_at = result.published_at
                         if not existing.hashtags and result.hashtags:
                             existing.hashtags = result.hashtags
+                        existing.velocity_score = detail.velocity_score
+                        existing.virality_score = detail.virality_score
                         for field in (
                             "like_count",
                             "comment_count",
@@ -397,6 +496,16 @@ class SearchService:
                             value = getattr(result, field)
                             if value is not None:
                                 setattr(existing, field, value)
+                        self.metric_service.record_snapshot(
+                            video_id=existing.id,
+                            like_count=existing.like_count,
+                            comment_count=existing.comment_count,
+                            share_count=existing.share_count,
+                            favorite_count=existing.favorite_count,
+                            view_count=existing.view_count,
+                            source="search",
+                            db=db,
+                        )
                     if (
                         job.processed_count < job.requested_limit
                         and job.provider_counts.get(platform, 0) < provider_limit
@@ -409,6 +518,8 @@ class SearchService:
                                 relevance_score=scores[0],
                                 quality_score=scores[1],
                                 final_score=scores[2],
+                                velocity_score=detail.velocity_score,
+                                virality_score=detail.virality_score,
                             )
                         )
                         job.processed_count += 1
@@ -423,12 +534,14 @@ class SearchService:
         event = self.waiters.get(job_id)
         if not event:
             return False
+        self.update(job_id, status="resuming")
         event.set()
         return True
 
     def resume_all_waiting(self) -> int:
         count = 0
-        for event in list(self.waiters.values()):
+        for job_id, event in list(self.waiters.items()):
+            self.update(job_id, status="resuming")
             event.set()
             count += 1
         return count
@@ -442,9 +555,11 @@ class SearchService:
         if deadline:
             deadline.reschedule(None)
         self.update(job_id, status=gate.state, error_message=str(gate))
+        timeout_seconds = getattr(settings, "browser_interaction_timeout", 1800)
         try:
-            async with asyncio.timeout(1800):
+            async with asyncio.timeout(timeout_seconds):
                 await event.wait()
+            self.update(job_id, status="resuming")
             self.update(job_id, status="searching", error_message=None)
         finally:
             self.waiters.pop(job_id, None)

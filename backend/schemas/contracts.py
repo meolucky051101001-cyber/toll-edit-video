@@ -1,21 +1,65 @@
 from collections.abc import Mapping
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Literal, Self
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
-Platform = Literal["douyin", "xiaohongshu"]
+Platform = Literal["douyin", "xiaohongshu", "tiktok", "youtube_shorts", "mock"]
+
+
+class PlatformCapabilities(BaseModel):
+    id: str
+    name: str
+    display_name: str
+    supports_headless: bool = True
+    supports_video_download: bool = True
+    supports_metrics: bool = True
+    supports_hashtags: bool = True
+    requires_login_for_search: bool = False
+    auth_domains: list[str] = Field(default_factory=list)
+    icon_name: str = "video"
+    is_enabled: bool = True
+    description: str = ""
+
 VideoStatus = Literal["new", "saved", "skipped", "used", "favorite"]
+JobStatus = Literal[
+    "pending",
+    "expanding_query",
+    "searching",
+    "ranking",
+    "waiting_for_login",
+    "waiting_for_user",
+    "resuming",
+    "completed",
+    "interrupted",
+    "failed",
+    "cancelled",
+]
+VALID_JOB_STATUSES: set[str] = {
+    "pending",
+    "expanding_query",
+    "searching",
+    "ranking",
+    "waiting_for_login",
+    "waiting_for_user",
+    "resuming",
+    "completed",
+    "interrupted",
+    "failed",
+    "cancelled",
+}
 
 
 class SearchRequest(BaseModel):
-    mode: Literal["mock", "xiaohongshu", "douyin"] | None = None
+    mode: Literal["mock", "xiaohongshu", "douyin", "tiktok", "youtube_shorts"] | None = None
     use_ai: bool = False
     selected_queries: list[str] | None = Field(default=None, min_length=1, max_length=10)
     query: str = Field(min_length=1, max_length=300)
-    platforms: list[Platform] = Field(default=["douyin", "xiaohongshu"], min_length=1, max_length=2)
+    platforms: list[Platform] = Field(default=["douyin", "xiaohongshu"], min_length=1, max_length=5)
     limit: int = Field(default=50, ge=1, le=200)
+    min_relevance: float | None = Field(default=None, ge=0.0, le=100.0)
 
     @field_validator("selected_queries")
     @classmethod
@@ -43,6 +87,7 @@ class SearchRequest(BaseModel):
 
 class SearchFilters(BaseModel):
     minimum_likes: int = 0
+    minimum_relevance: float = 0.0
 
 
 def validate_url_policy(
@@ -76,8 +121,22 @@ def validate_url_policy(
         trusted = ("xiaohongshu.com", "rednote.com", "xhslink.com")
     elif platform == "douyin":
         trusted = ("douyin.com", "iesdouyin.com")
+    elif platform == "tiktok":
+        trusted = ("tiktok.com", "vm.tiktok.com")
+    elif platform == "youtube_shorts":
+        trusted = ("youtube.com", "youtu.be")
     else:
-        trusted = ("xiaohongshu.com", "rednote.com", "xhslink.com", "douyin.com", "iesdouyin.com")
+        trusted = (
+            "xiaohongshu.com",
+            "rednote.com",
+            "xhslink.com",
+            "douyin.com",
+            "iesdouyin.com",
+            "tiktok.com",
+            "vm.tiktok.com",
+            "youtube.com",
+            "youtu.be",
+        )
 
     is_trusted_platform_host = any(host == h or host.endswith("." + h) for h in trusted)
 
@@ -198,6 +257,8 @@ class VideoOut(VideoResult):
     relevance_score: float
     quality_score: float
     final_score: float
+    velocity_score: float = 0.0
+    virality_score: float = 0.0
     script_analysis: dict | None = None
     created_at: datetime
     updated_at: datetime
@@ -212,12 +273,25 @@ class VideoPatch(BaseModel):
     status: VideoStatus
 
 
+class PlatformErrorCode(str, Enum):
+    LOGIN_REQUIRED = "LOGIN_REQUIRED"
+    CAPTCHA_REQUIRED = "CAPTCHA_REQUIRED"
+    NAVIGATION_FAILED = "NAVIGATION_FAILED"
+    SELECTOR_CHANGED = "SELECTOR_CHANGED"
+    SESSION_EXPIRED = "SESSION_EXPIRED"
+    NETWORK_BLOCKED = "NETWORK_BLOCKED"
+
+
 class JobOut(BaseModel):
     import_source: str | None = None
     queries: list[str] = Field(default_factory=list)
     ai_source: str | None = None
     ai_warning: str | None = None
     query_expansion: dict | None = None
+    actual_ai_model: str | None = None
+    ai_fallback_occurred: bool = False
+    ai_latency_ms: float | None = None
+    diagnostics: dict | None = None
     model_config = ConfigDict(from_attributes=True)
     id: str
     original_query: str
@@ -227,6 +301,7 @@ class JobOut(BaseModel):
     found_count: int
     processed_count: int
     duplicate_count: int
+    rejected_count: int = 0
     provider_counts: dict[str, int]
     created_at: datetime
     started_at: datetime | None
@@ -238,3 +313,45 @@ class JobOut(BaseModel):
     @classmethod
     def timestamps_utc(cls, value: datetime | None) -> datetime | None:
         return value.replace(tzinfo=timezone.utc) if value and value.tzinfo is None else value
+
+
+class MetricSnapshotOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    video_id: str
+    like_count: int | None = None
+    comment_count: int | None = None
+    share_count: int | None = None
+    favorite_count: int | None = None
+    view_count: int | None = None
+    captured_at: datetime
+    source: str = "search"
+    delta_likes: int | None = None
+    delta_comments: int | None = None
+    delta_shares: int | None = None
+    delta_favorites: int | None = None
+    delta_views: int | None = None
+    elapsed_seconds: float | None = None
+
+    @field_validator("captured_at")
+    @classmethod
+    def captured_at_utc(cls, value: datetime) -> datetime:
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+class MetricHistoryOut(BaseModel):
+    video_id: str
+    total_snapshots: int
+    snapshots: list[MetricSnapshotOut]
+
+
+class ViralityBreakdownOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    video_id: str
+    virality_score: float
+    velocity_score: float
+    hourly_velocity: float
+    acceleration: float
+    age_bucket: str
+    spread_ratio: float
+

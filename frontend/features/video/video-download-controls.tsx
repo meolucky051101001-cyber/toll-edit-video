@@ -17,6 +17,7 @@ import {
   getVideoActiveDownload,
   requestVideoDownload,
 } from "@/lib/api";
+import { useSSEListener } from "@/lib/use-event-source";
 import type { DownloadJobOut, Video } from "@/types";
 
 interface VideoDownloadControlsProps {
@@ -58,12 +59,49 @@ export function VideoDownloadControls({ video }: VideoDownloadControlsProps) {
     };
   }, [video.id, video.is_mock]);
 
-  // Polling when active
+  // Real-time SSE updates for download progress
+  useSSEListener<{
+    download_id?: string;
+    video_id?: string;
+    platform?: Video["platform"];
+    status?: DownloadJobOut["status"];
+    bytes_downloaded?: number;
+    total_bytes?: number | null;
+    progress_percent?: number | null;
+    file_size?: number | null;
+    retry_count?: number;
+    error_code?: string | null;
+    error_message?: string | null;
+    adapter_version?: string | null;
+    created_at?: string;
+    updated_at?: string;
+  }>("download:update", (data) => {
+    if (data?.download_id && (data.download_id === job?.id || data.video_id === video.id)) {
+      setJob((prev) => ({
+        id: data.download_id!,
+        video_id: data.video_id || video.id,
+        platform: data.platform || video.platform,
+        status: data.status || prev?.status || "queued",
+        bytes_downloaded: data.bytes_downloaded ?? prev?.bytes_downloaded ?? 0,
+        total_bytes: data.total_bytes !== undefined ? data.total_bytes : (prev?.total_bytes ?? null),
+        progress_percent: data.progress_percent !== undefined ? data.progress_percent : (prev?.progress_percent ?? null),
+        file_size: data.file_size !== undefined ? data.file_size : (prev?.file_size ?? null),
+        retry_count: data.retry_count ?? prev?.retry_count ?? 0,
+        error_code: data.error_code !== undefined ? data.error_code : (prev?.error_code ?? null),
+        error_message: data.error_message !== undefined ? data.error_message : (prev?.error_message ?? null),
+        adapter_version: data.adapter_version !== undefined ? data.adapter_version : (prev?.adapter_version ?? null),
+        created_at: data.created_at ?? prev?.created_at ?? new Date().toISOString(),
+        updated_at: data.updated_at ?? prev?.updated_at ?? new Date().toISOString(),
+      }));
+    }
+  });
+
+  // Fallback polling when active (in case SSE stream is disconnected)
   const jobId = job?.id;
   const jobStatus = job?.status;
 
   useEffect(() => {
-    if (!jobId || !jobStatus || !["queued", "resolving", "downloading"].includes(jobStatus)) {
+    if (!jobId || !jobStatus || !["queued", "resolving", "downloading", "validating", "retry_wait"].includes(jobStatus)) {
       return;
     }
 
@@ -126,9 +164,16 @@ export function VideoDownloadControls({ video }: VideoDownloadControlsProps) {
     );
   }
 
-  // Active states: queued, resolving, downloading
+  // Active states: queued, resolving, downloading, validating, retry_wait
   const isActive =
-    job && ["queued", "resolving", "downloading"].includes(job.status);
+    job &&
+    [
+      "queued",
+      "resolving",
+      "downloading",
+      "validating",
+      "retry_wait",
+    ].includes(job.status);
 
   return (
     <div className="video-download-area" data-testid="download-controls">
@@ -158,30 +203,38 @@ export function VideoDownloadControls({ video }: VideoDownloadControlsProps) {
         </Button>
       )}
 
-      {/* State 2: Queued or Resolving */}
-      {isActive && (job.status === "queued" || job.status === "resolving") && (
-        <div className="download-active-box">
-          <div className="download-status-line">
-            <Loader2 size={13} className="animate-spin text-accent" />
-            <span className="download-status-text">
-              {job.status === "queued"
-                ? "Đang chờ hàng đợi..."
-                : "Đang lấy địa chỉ media..."}
-            </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleCancelDownload}
-              disabled={busy}
-              className="download-cancel-btn"
-              title="Hủy tải"
-            >
-              <X size={13} />
-              <span>Hủy</span>
-            </Button>
+      {/* State 2: Queued, Resolving, Validating, or Retry Wait */}
+      {isActive &&
+        (job.status === "queued" ||
+          job.status === "resolving" ||
+          job.status === "validating" ||
+          job.status === "retry_wait") && (
+          <div className="download-active-box">
+            <div className="download-status-line">
+              <Loader2 size={13} className="animate-spin text-accent" />
+              <span className="download-status-text">
+                {job.status === "queued"
+                  ? "Đang chờ hàng đợi..."
+                  : job.status === "resolving"
+                    ? "Đang lấy địa chỉ media..."
+                    : job.status === "validating"
+                      ? "Đang kiểm tra tệp video..."
+                      : "Đang chờ thử lại..."}
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleCancelDownload}
+                disabled={busy}
+                className="download-cancel-btn"
+                title="Hủy tải"
+              >
+                <X size={13} />
+                <span>Hủy</span>
+              </Button>
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
       {/* State 3: Downloading with progress */}
       {isActive && job.status === "downloading" && (

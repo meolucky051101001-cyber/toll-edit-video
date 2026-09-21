@@ -9,11 +9,25 @@ DownloadJobStatus = Literal[
     "queued",
     "resolving",
     "downloading",
+    "validating",
     "completed",
+    "retry_wait",
     "failed",
     "cancelled",
     "interrupted",
 ]
+
+VALID_DOWNLOAD_JOB_STATUSES: set[str] = {
+    "queued",
+    "resolving",
+    "downloading",
+    "validating",
+    "completed",
+    "retry_wait",
+    "failed",
+    "cancelled",
+    "interrupted",
+}
 
 
 class ResolvedMedia(BaseModel):
@@ -40,6 +54,7 @@ class DownloadJobOut(BaseModel):
     total_bytes: int | None = None
     progress_percent: float | None = None
     file_size: int | None = None
+    retry_count: int = 0
     error_code: str | None = None
     error_message: str | None = None
     adapter_version: str | None = None

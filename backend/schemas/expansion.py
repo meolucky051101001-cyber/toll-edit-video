@@ -60,6 +60,10 @@ class ExpansionOutcome(BaseModel):
     warning: str | None = None
     error_code: str | None = None
     cached: bool = False
+    configured_model: str | None = None
+    actual_model: str | None = None
+    fallback_occurred: bool = False
+    latency_ms: float | None = None
 
 
 class ExpandRequest(BaseModel):

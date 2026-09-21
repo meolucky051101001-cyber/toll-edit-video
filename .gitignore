@@ -20,3 +20,7 @@ playwright-report/
 
 .codex-*
 scratch/
+*.zip
+release_gate_report.json
+data_schema.sql
+database_metrics.json

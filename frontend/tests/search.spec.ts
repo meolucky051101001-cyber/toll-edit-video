@@ -4,7 +4,7 @@ test("mock search → results → save → library → reload; filters and skip"
   page,
   request,
 }) => {
-  await page.goto("/");
+  await page.goto("/?mode=mock");
   await page
     .getByRole("checkbox", { name: "Tự tạo từ khóa AI khi tìm" })
     .uncheck();
@@ -63,7 +63,7 @@ test("mock search → results → save → library → reload; filters and skip"
 });
 
 test("cancel a running job", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/?mode=mock");
   await page
     .getByRole("checkbox", { name: "Tự tạo từ khóa AI khi tìm" })
     .uncheck();
@@ -104,7 +104,7 @@ test("preview fixture → edit queries → persisted manual search; invalidates 
       },
     });
   });
-  await page.goto("/");
+  await page.goto("/?mode=mock");
   const topic = page.getByRole("textbox", { name: "Chủ đề tìm kiếm" });
   await topic.fill("AI UI test");
   await page

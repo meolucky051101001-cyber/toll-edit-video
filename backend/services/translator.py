@@ -86,6 +86,54 @@ PHRASE_DICTIONARY: dict[str, list[str]] = {
     "sua rua mat cho da dau": ["油皮洗面奶推荐", "控油洁面测评", "油痘肌洗面奶"],
     "sua rua mat": ["洗面奶测评", "平价洗面奶推荐", "温和洁面"],
 
+    # Mỹ phẩm & Skincare bổ sung
+    "ke mat": ["眼线教程", "新手画眼线", "眼线技巧"],
+    "skincare": ["护肤流程", "日常护肤", "沉浸式护肤"],
+    "phan phu": ["定妆散粉", "控油散粉", "定妆粉饼"],
+    "tay trang": ["温和卸妆", "卸妆油推荐", "卸妆清洁"],
+    "duong am": ["修护面霜", "保湿补水", "滋润面霜"],
+    "cham soc toc": ["护发分享", "柔顺秀发", "养发护发"],
+    "mut tan kem nen": ["美妆蛋推荐", "气垫粉扑", "底妆粉扑"],
+    "mut tan": ["美妆蛋", "粉扑", "底妆工具"],
+
+    # Thời trang bổ sung
+    "outfit di hoc": ["学生日常OOTD", "大学穿搭", "减龄穿搭"],
+    "outfit mua thu": ["秋季穿搭", "秋日OOTD", "温柔风穿搭"],
+    "outfit": ["日常穿搭", "OOTD", "穿搭分享"],
+    "ao len co lo": ["高领毛衣穿搭", "宽松毛衣搭配", "秋冬毛衣"],
+    "ao len": ["毛衣穿搭", "秋冬毛衣", "温柔风毛衣"],
+    "ao blazer": ["西装外套穿搭", "韩系西装搭配", "通勤西装"],
+    "blazer": ["西装外套穿搭", "廓形西装", "韩系西装"],
+    "vay hoa nhi": ["法式碎花裙", "复古碎花连衣裙", "夏日碎花裙"],
+    "vay hoa": ["碎花裙穿搭", "夏日连衣裙", "法式复古裙"],
+    "set do the thao": ["运动套装穿搭", "休闲运动风", "冬季运动套装"],
+    "do the thao": ["运动风穿搭", "运动套装", "休闲穿搭"],
+    "nguoi lun": ["小个子穿搭", "显高穿搭", "小个子显高技巧"],
+
+    # Thủ công bổ sung
+    "lam gom": ["手工陶艺", "陶艺体验", "拉胚日常"],
+    "gom": ["陶艺制作", "手工陶瓷", "手作陶瓷"],
+    "gap hoa giay": ["折纸花教程", "手工折纸", "立体纸花"],
+    "hoa giay": ["折纸花", "手工纸花", "折纸教程"],
+    "moc len thu bong": ["毛线玩偶钩织", "新手钩织玩偶", "钩针玩偶教程"],
+    "thu bong": ["毛线玩偶", "钩织玩偶", "手作玩偶"],
+    "bang keo washi": ["手账和纸胶带", "手账胶带", "咕卡胶带"],
+    "washi tape": ["和纸胶带", "手账胶带", "胶带分装"],
+
+    # Ẩm thực bổ sung
+    "pho bo": ["牛肉粉做法", "自制牛肉米粉", "家庭版牛肉粉"],
+    "pho": ["自制米粉", "牛肉粉教程", "家庭版米粉"],
+    "mang ot": ["自制泡椒竹笋", "腌制酸辣竹笋", "酸辣竹笋做法"],
+
+    # Công nghệ & Đời sống bổ sung
+    "chuot khong day": ["无线静音鼠标", "蓝牙无线鼠标", "办公无线鼠标"],
+    "tai nghe bluetooth": ["无线蓝牙耳机", "主动降噪耳机", "平价蓝牙耳机"],
+    "day sac nhanh": ["快充数据线", "多功能快充线", "Type-C快充线"],
+    "may uon toc": ["自动卷发棒", "蛋卷棒教程", "新手卷发棒"],
+    "may say toc": ["高速吹风机", "负离子吹风机", "便携吹风机"],
+    "hop dung my pham": ["化妆品收纳盒", "桌面亚克力收纳", "护肤品收纳置物架"],
+    "binh giu nhiet": ["大容量保温杯", "高颜值保温水杯", "不锈钢保温杯"],
+
     # Công nghệ / Bàn phím cơ
     "review ban phim co": ["机械键盘测评", "机械键盘推荐", "平价机械键盘"],
     "ban phim co gia re": ["百元机械键盘", "平价机械键盘推荐", "性价比机械键盘"],
@@ -170,7 +218,7 @@ SUBJECT_MAP: dict[str, dict[str, list[str]]] = {
     "xe dap": {"primary": ["自行车"], "natural": ["单车"], "narrow": ["公路车"]},
     "dong ho": {"primary": ["手表"], "natural": ["腕表"], "narrow": ["平价手表"]},
     "may anh": {"primary": ["相机"], "natural": ["微单相机"], "narrow": ["照相机"]},
-    "may quay": {"primary": ["摄像机"], "natural": ["运动相机"], "narrow": ["vlog相机"]},
+    "may quay": {"primary": ["摄像机"], "natural": ["运动相机", "相机"], "narrow": ["vlog相机"]},
     "may khoan": {"primary": ["电钻"], "natural": ["手电钻"], "narrow": ["家用电钻"]},
     "thu am": {"primary": ["录音"], "natural": ["翻唱录音"], "narrow": ["录音日常"]},
     "van phong pham": {"primary": ["文具"], "natural": ["手账文具"], "narrow": ["学生文具"]},
@@ -181,7 +229,7 @@ SUBJECT_MAP: dict[str, dict[str, list[str]]] = {
     "phong ngu": {"primary": ["卧室"], "natural": ["房间布置"], "narrow": ["温馨卧室"]},
     "son moi": {"primary": ["口红"], "natural": ["热门色号"], "narrow": ["显白口红"]},
     "son": {"primary": ["口红"], "natural": ["热门色号"], "narrow": ["显白口红"]},
-    "my pham": {"primary": ["美妆"], "natural": ["彩妆"], "narrow": ["平价美妆"]},
+    "my pham": {"primary": ["美妆", "化妆品"], "natural": ["彩妆", "护肤品"], "narrow": ["平价美妆"]},
     "trang diem": {"primary": ["化妆"], "natural": ["日常妆容"], "narrow": ["新手化妆"]},
     "duong da": {"primary": ["护肤"], "natural": ["护肤分享"], "narrow": ["敏肌护肤"]},
     "phoi do": {"primary": ["穿搭"], "natural": ["日常穿搭"], "narrow": ["OOTD"]},
@@ -198,7 +246,7 @@ SUBJECT_MAP: dict[str, dict[str, list[str]]] = {
     "banh bao": {"primary": ["包子"], "natural": ["做包子"], "narrow": ["包子教程"]},
     "banh mi": {"primary": ["面包"], "natural": ["自制面包"], "narrow": ["法棍"]},
     "banh cuon": {"primary": ["肠粉"], "natural": ["自制肠粉"], "narrow": ["肠粉做法"]},
-    "banh xeo": {"primary": ["越南煎饼"], "natural": ["脆皮煎饼"], "narrow": ["煎饼做法"]},
+    "banh xeo": {"primary": ["越南煎饼"], "natural": ["脆皮煎饼", "煎饼"], "narrow": ["煎饼做法"]},
     "lam banh": {"primary": ["烘焙"], "natural": ["甜品"], "narrow": ["做蛋糕"]},
     "sua chua": {"primary": ["酸奶"], "natural": ["自制酸奶"], "narrow": ["酸奶教程"]},
     "sua hat": {"primary": ["豆浆"], "natural": ["自制豆浆"], "narrow": ["植物奶"]},
@@ -215,16 +263,30 @@ SUBJECT_MAP: dict[str, dict[str, list[str]]] = {
     "son mong tay": {"primary": ["美甲"], "natural": ["显白美甲"], "narrow": ["美甲款式"]},
     "nail": {"primary": ["美甲"], "natural": ["显白美甲"], "narrow": ["美甲款式"]},
     "vlog": {"primary": ["日常"], "natural": ["沉浸式日常"], "narrow": ["vlog"]},
+    "ke mat": {"primary": ["眼线"], "natural": ["眼线教程"], "narrow": ["新手画眼线"]},
+    "skincare": {"primary": ["护肤"], "natural": ["日常护肤"], "narrow": ["护肤流程"]},
+    "phan phu": {"primary": ["散粉"], "natural": ["控油散粉"], "narrow": ["定妆粉饼"]},
+    "tay trang": {"primary": ["卸妆"], "natural": ["温和卸妆"], "narrow": ["卸妆油"]},
+    "duong am": {"primary": ["保湿"], "natural": ["修护面霜"], "narrow": ["面霜"]},
+    "cham soc toc": {"primary": ["护发"], "natural": ["养发"], "narrow": ["柔顺秀发"]},
+    "ao len": {"primary": ["毛衣"], "natural": ["秋冬毛衣"], "narrow": ["温柔风毛衣"]},
+    "blazer": {"primary": ["西装"], "natural": ["西装外套"], "narrow": ["通勤西装"]},
+    "vay hoa": {"primary": ["碎花裙"], "natural": ["复古碎花裙", "碎花"], "narrow": ["法式连衣裙"]},
+    "do the thao": {"primary": ["运动套装"], "natural": ["运动风", "运动"], "narrow": ["休闲运动"]},
+    "lam gom": {"primary": ["陶艺"], "natural": ["手工陶艺"], "narrow": ["拉胚"]},
+    "hoa giay": {"primary": ["折纸花"], "natural": ["手工纸花", "折纸"], "narrow": ["折纸教程"]},
+    "pho bo": {"primary": ["牛肉粉"], "natural": ["自制米粉"], "narrow": ["牛肉粉教程"]},
+    "mang ot": {"primary": ["泡椒竹笋"], "natural": ["酸辣竹笋", "竹笋"], "narrow": ["腌制竹笋"]},
 }
 
 ACTION_MAP: dict[str, list[str]] = {
     "unbox": ["开箱", "拆箱"],
     "ubox": ["开箱", "拆箱"],
-    "khui": ["开箱", "拆箱"],
+    "khui": ["开箱", "拆箱", "拆盲盒", "拆"],
     "dap hop": ["开箱", "拆箱"],
     "mo hop": ["开箱", "拆箱"],
     "decor": ["布置", "改造"],
-    "trang tri": ["布置", "改造"],
+    "trang tri": ["布置", "改造", "手账", "装饰"],
     "phoi do": ["穿搭", "搭配"],
     "review": ["测评", "试色"],
     "danh gia": ["测评"],
@@ -646,6 +708,65 @@ def fast_online_translate(text: str) -> str | None:
     return None
 
 
+# Tool + purpose must remain together; broad expansion must not erase either.
+COMPOUND_INTENTS = [
+    (["nhip", "tweezers", "镊子", "鑷子"],
+     ["sticker", "stickers", "贴纸", "貼紙"],
+     ["贴纸镊子", "手账贴纸镊子", "贴纸专用镊子"]),
+    (["nhip", "kep", "tweezers", "镊子", "鑷子"],
+     ["mi", "eyelash", "睫毛"],
+     ["睫毛镊子", "嫁接睫毛镊子", "睫毛专用镊子"]),
+    (["khuon", "mould", "mold", "模具"],
+     ["banh", "cake", "baking", "烘焙", "蛋糕"],
+     ["烘焙模具", "蛋糕模具", "烘焙蛋糕模具"]),
+    (["co", "brush", "刷"],
+     ["trang diem", "makeup", "danh nen", "化妆", "底妆"],
+     ["化妆刷", "粉底刷", "底妆刷"]),
+    (["mut", "bong mut", "sponge", "puff", "粉扑", "美妆蛋"],
+     ["trang diem", "makeup", "danh nen", "化妆", "底妆"],
+     ["美妆蛋", "粉扑", "气垫粉扑"]),
+    (["but", "pen", "笔"],
+     ["nail", "ve mong", "mong tay", "美甲"],
+     ["美甲彩绘笔", "美甲拉线笔", "美甲笔"]),
+    (["giay", "paper", "纸"],
+     ["goi hoa", "hoa", "花", "包花"],
+     ["包花纸", "鲜花包装纸", "花束包装纸"]),
+    (["hop dung", "hop", "ke", "box", "storage", "收纳盒", "收纳"],
+     ["my pham", "son", "makeup", "cosmetics", "化妆品", "护肤品"],
+     ["化妆品收纳盒", "护肤品收纳", "桌面化妆品收纳"]),
+    (["binh", "ly", "cup", "bottle", "杯"],
+     ["giu nhiet", "thermal", "insulated", "保温"],
+     ["保温杯", "保温水杯", "大容量保温杯"]),
+    (["tai nghe", "headphone", "earphone", "耳机"],
+     ["bluetooth", "khong day", "wireless", "蓝牙", "无线"],
+     ["蓝牙耳机", "无线蓝牙耳机", "降噪蓝牙耳机"]),
+    (["chuot", "mouse", "鼠标"],
+     ["khong day", "bluetooth", "wireless", "无线", "蓝牙"],
+     ["无线鼠标", "蓝牙无线鼠标", "静音无线鼠标"]),
+    (["day sac", "cap sac", "cable", "数据线", "充电线"],
+     ["sac nhanh", "fast charge", "quick charge", "快充"],
+     ["快充数据线", "快充电线", "快充线"]),
+    (["may uon", "may lam", "curler", "卷发棒"],
+     ["toc", "hair", "卷发", "发型"],
+     ["卷发棒", "自动卷发棒", "电卷棒"]),
+    (["may say", "dryer", "吹风机"],
+     ["toc", "hair", "吹发", "头发"],
+     ["吹风机", "高速吹风机", "负离子吹风机"]),
+]
+
+
+def compound_intent(query: str) -> tuple[list[list[str]], list[str]] | None:
+    normalized = normalize_vietnamese(query)
+    def matches(alias: str) -> bool:
+        if is_cjk(alias):
+            return alias in normalized
+        return bool(re.search(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", normalized))
+    for tool, purpose, queries in COMPOUND_INTENTS:
+        if any(matches(a) for a in tool) and any(matches(a) for a in purpose):
+            return [tool, purpose], queries
+    return None
+
+
 def plan_query(query: str) -> QueryPlan:
     raw_query = query.strip()
     if is_cjk(raw_query):
@@ -756,6 +877,14 @@ def generate_tiered_queries(
             for k in sorted(MODIFIER_MAP.keys(), key=len, reverse=True)
             if re.search(r"\b" + re.escape(k) + r"\b", norm)
         ]
+
+    compound = compound_intent(raw_query)
+    if compound:
+        _, precise_queries = compound
+        prefix = "".join(group[0] for group in groups)
+        action_terms = ACTION_MAP.get(action, []) if action else []
+        suffix = action_terms[0] if action_terms else ""
+        return [prefix + term + suffix for term in precise_queries]
 
     candidates: list[str] = []
 

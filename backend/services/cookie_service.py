@@ -1,6 +1,5 @@
 import json
 import logging
-from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
 

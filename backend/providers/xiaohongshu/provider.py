@@ -91,11 +91,12 @@ class XiaohongshuProvider(SearchProvider):
     async def gate(self, page: Page, partial: list[VideoResult]) -> None:
         state = await self.browser.inspect(page)
         if state in {"login_required", "verification_required", "restricted"}:
-            if self.auto_elevate and getattr(self.browser, "is_currently_headless", False):
-                try:
-                    await self.browser.elevate_to_headful()
-                except Exception:
-                    pass
+            if state in {"login_required", "verification_required"}:
+                if self.auto_elevate and getattr(self.browser, "is_currently_headless", False):
+                    try:
+                        await self.browser.elevate_to_headful()
+                    except Exception:
+                        pass
             raise UserActionRequired(
                 "waiting_for_login" if state == "login_required" else "waiting_for_user",
                 MESSAGES[state],
@@ -115,10 +116,31 @@ class XiaohongshuProvider(SearchProvider):
     ) -> list[VideoResult]:
         if hasattr(self.browser, "release_blocked_page"):
             await self.browser.release_blocked_page()
+        if not self.auto_elevate:
+            if hasattr(self.browser, "ensure_headless_session"):
+                await self.browser.ensure_headless_session()
+            elif hasattr(self.browser, "reset_headful_session"):
+                self.browser.reset_headful_session()
         async with self.browser.lock:
             results: list[VideoResult] = []
             try:
-                page = await self.browser.ensure_open()
+                base = getattr(self.browser, "base_url", "https://www.rednote.com")
+                direct_url = (
+                    f"{base}/search_result?keyword="
+                    f"{quote(query)}&source=web_explore_feed&type=51"
+                )
+                try:
+                    page = await self.browser.ensure_open(
+                        headless_override=True if not self.auto_elevate else None,
+                        initial_url=direct_url,
+                    )
+                except TypeError:
+                    try:
+                        page = await self.browser.ensure_open(
+                            headless_override=True if not self.auto_elevate else None,
+                        )
+                    except TypeError:
+                        page = await self.browser.ensure_open()
                 # Pre-check gate only if already restricted or verification required
                 initial_state = await self.browser.inspect(page)
                 if initial_state in {"verification_required", "restricted"}:
@@ -135,18 +157,14 @@ class XiaohongshuProvider(SearchProvider):
                         on_current_results = True
 
                 if not on_current_results:
-                    direct_url = (
-                        f"{base}/search_result?keyword="
-                        f"{quote(query)}&source=web_explore_feed&type=51"
-                    )
                     await page.goto(direct_url, wait_until="domcontentloaded", timeout=30000)
                     try:
                         await page.wait_for_selector(
                             'section.note-item, div.note-item, .search-result-item, [class*="note-item"], a[href*="/explore/"]',
-                            timeout=1500,
+                            timeout=6000,
                         )
                     except Error:
-                        await page.wait_for_timeout(800)
+                        await page.wait_for_timeout(1500)
                     # Auto dismiss guest modal / prompt if opened on direct navigation
                     try:
                         await page.keyboard.press("Escape")
@@ -218,8 +236,8 @@ class XiaohongshuProvider(SearchProvider):
                         pass
 
                 candidates: dict[str, dict[str, object]] = {}
-                max_scrolls = max(15, int(limit * 1.2))
-                target_candidates = min(max(limit * 2, 20), 50)
+                max_scrolls = min(max(5, int(limit * 0.8)), 12)
+                target_candidates = min(max(limit * 2, 15), 35)
                 prev_count = 0
                 stale_scrolls = 0
 
@@ -250,6 +268,9 @@ class XiaohongshuProvider(SearchProvider):
                                 let card = el.closest('section.note-item, div.note-item, .search-result-item, [class*="note-item"], [class*="NoteItem"]') || el;
                                 // Ignore injected recommendation boxes / unrelated suggestions
                                 if (card.closest('.recommend-box, .guess-you-like, .related-search, [class*="recommend"], [class*="guess"], [class*="related-query"], [class*="advertise"]')) {
+                                    continue;
+                                }
+                                if (card.querySelector('[class*="live"], .live-tag, [data-e2e*="live"]') || card.innerText.includes('直播中')) {
                                     continue;
                                 }
                                 // Verify this card doesn't wrap multiple notes. If it does, narrow down to the element holding only `el`
@@ -403,7 +424,7 @@ class XiaohongshuProvider(SearchProvider):
 
                     scroll_px = random.randint(800, 1150)
                     await page.mouse.wheel(0, scroll_px)
-                    await page.wait_for_timeout(random.randint(250, 400))
+                    await page.wait_for_timeout(random.randint(150, 250))
 
                     if len(candidates) == prev_count:
                         stale_scrolls += 1
@@ -444,7 +465,8 @@ class XiaohongshuProvider(SearchProvider):
                     if title and is_card_video:
                         card_likes = parse_count_text(str(cand.get("like_text"))) if cand.get("like_text") else None
                         if card_likes is None or card_likes >= filters.minimum_likes:
-                            duration_sec = parse_duration_seconds(cand.get("duration_text"))
+                            duration_raw = cand.get("duration_text")
+                            duration_sec = parse_duration_seconds(str(duration_raw) if duration_raw is not None else None)
                             tags = extract_hashtags(str(title))
                             vr = VideoResult(
                                 platform="xiaohongshu",

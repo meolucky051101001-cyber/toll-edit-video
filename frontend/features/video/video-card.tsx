@@ -12,10 +12,13 @@ import {
   Film,
   Info,
   Sparkles,
+  Mic,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { VideoDownloadControls } from "./video-download-controls";
+import { VideoMetricHistory } from "./video-metric-history";
 import { ScriptAnalysisModal } from "./script-analysis-modal";
+import { VideoDubbingModal } from "./video-dubbing-modal";
 import {
   Dialog,
   DialogContent,
@@ -58,6 +61,7 @@ export function VideoCard({
   const [imageFailed, setImageFailed] = useState(false);
   const [open, setOpen] = useState(false);
   const [scriptOpen, setScriptOpen] = useState(false);
+  const [dubbingOpen, setDubbingOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -206,6 +210,26 @@ export function VideoCard({
             <span className="relevance">
               {Math.round(video.relevance_score)}% phù hợp
             </span>
+            {video.virality_score != null && video.virality_score > 0 && (
+              <span
+                className="virality-pill"
+                title={`Điểm lan truyền: ${Math.round(video.virality_score)}/100 (Tốc độ: ${Math.round(video.velocity_score || 0)})`}
+                style={{
+                  background: "linear-gradient(135deg, #ff4d4f18, #ff7a4525)",
+                  color: "#d4380d",
+                  border: "1px solid #ffa39e",
+                  borderRadius: "9999px",
+                  padding: "1px 7px",
+                  fontSize: "0.72rem",
+                  fontWeight: 600,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "2px",
+                }}
+              >
+                🔥 {Math.round(video.virality_score)}
+              </span>
+            )}
           </div>
           <button
             className="card-title"
@@ -270,6 +294,27 @@ export function VideoCard({
             >
               <Sparkles size={13} style={{ color: "#9333ea" }} />
               <span>Kịch bản AI</span>
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setDubbingOpen(true)}
+              title="Tự động lồng tiếng AI tiếng Việt (Auto-Dubbing)"
+              aria-label="Lồng tiếng AI"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.25rem",
+                background: "linear-gradient(135deg, rgba(79, 70, 229, 0.08) 0%, rgba(124, 58, 237, 0.12) 100%)",
+                borderColor: "#a5b4fc",
+                color: "#4338ca",
+                fontWeight: 600,
+                fontSize: "0.8rem",
+                padding: "0 8px",
+              }}
+            >
+              <Mic size={13} style={{ color: "#4f46e5" }} />
+              <span>Lồng tiếng</span>
             </Button>
             {!video.is_mock && (
               <a
@@ -361,6 +406,7 @@ export function VideoCard({
                   : "Metadata đọc từ trang video. Các trường chưa đọc được để trống. Liên kết có thể yêu cầu đăng nhập Xiaohongshu."}
           </div>
           <input aria-label="URL video" value={primaryUrl} readOnly />
+          {!video.is_mock && <VideoMetricHistory video={video} />}
           <div className="modal-download-section" style={{ margin: "10px 0" }}>
             <VideoDownloadControls video={video} />
           </div>
@@ -401,6 +447,24 @@ export function VideoCard({
               <Sparkles size={14} style={{ color: "#9333ea" }} />
               Kịch bản AI
             </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setOpen(false);
+                setDubbingOpen(true);
+              }}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.25rem",
+                borderColor: "#a5b4fc",
+                color: "#4338ca",
+                fontWeight: 600,
+              }}
+            >
+              <Mic size={14} style={{ color: "#4f46e5" }} />
+              Lồng tiếng AI
+            </Button>
             <Button variant="outline" onClick={copy}>
               {copied ? "Đã copy" : "Copy URL"}
             </Button>
@@ -428,6 +492,11 @@ export function VideoCard({
         video={video}
         open={scriptOpen}
         onOpenChange={setScriptOpen}
+      />
+      <VideoDubbingModal
+        video={video}
+        open={dubbingOpen}
+        onOpenChange={setDubbingOpen}
       />
     </>
   );

@@ -1,5 +1,7 @@
 import os
+
 import win32com.client
+
 
 def get_desktop_dir():
     # Use win32com to query user's desktop

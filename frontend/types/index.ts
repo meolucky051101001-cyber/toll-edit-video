@@ -1,4 +1,4 @@
-export type Platform = "douyin" | "xiaohongshu";
+export type Platform = "douyin" | "xiaohongshu" | "tiktok" | "youtube_shorts" | "mock";
 export type VideoStatus = "new" | "saved" | "skipped" | "used" | "favorite";
 export interface Video {
   imported_from?: string | null;
@@ -21,11 +21,24 @@ export interface Video {
   relevance_score: number;
   quality_score: number;
   final_score: number;
+  velocity_score?: number;
+  virality_score?: number;
   status: VideoStatus;
   is_mock: boolean;
   script_analysis?: ScriptAnalysis | null;
   search_query: string;
   search_job_id: string;
+}
+export interface ViralityBreakdown {
+  video_id: string;
+  virality_score: number;
+  hourly_velocity: number;
+  acceleration: number;
+  age_bucket: string;
+  spread_ratio: number;
+  snapshot_count: number;
+  momentum_bonus: number;
+  calculated_at: string;
 }
 export interface QueryExpansion {
   original_query: string;
@@ -52,6 +65,22 @@ export interface ExpansionOutcome {
   warning: string | null;
   error_code: string | null;
   cached: boolean;
+  configured_model?: string | null;
+  actual_model?: string | null;
+  fallback_occurred?: boolean;
+  latency_ms?: number | null;
+}
+export interface RejectedCandidate {
+  video_id: string;
+  platform: Platform;
+  title: string;
+  url: string;
+  relevance: number;
+  reason: string;
+}
+export interface JobDiagnostics {
+  rejected_candidates?: RejectedCandidate[];
+  [key: string]: unknown;
 }
 export interface Job {
   import_source?: string | null;
@@ -67,6 +96,12 @@ export interface Job {
   found_count: number;
   processed_count: number;
   duplicate_count: number;
+  rejected_count?: number;
+  min_relevance?: number | null;
+  diagnostics?: JobDiagnostics | null;
+  actual_ai_model?: string | null;
+  ai_fallback_occurred?: boolean;
+  ai_latency_ms?: number | null;
   provider_counts: Record<string, number>;
   created_at: string;
   error_message: string | null;
@@ -102,7 +137,9 @@ export type DownloadJobStatus =
   | "queued"
   | "resolving"
   | "downloading"
+  | "validating"
   | "completed"
+  | "retry_wait"
   | "failed"
   | "cancelled"
   | "interrupted";
@@ -116,6 +153,7 @@ export interface DownloadJobOut {
   total_bytes: number | null;
   progress_percent: number | null;
   file_size: number | null;
+  retry_count?: number;
   error_code: string | null;
   error_message: string | null;
   adapter_version: string | null;
@@ -147,13 +185,155 @@ export interface RemakeScriptVI {
   cta: string;
 }
 
+export interface StoryboardScene {
+  scene_number: number;
+  timestamp_range: string;
+  visual_action: string;
+  spoken_narration: string;
+  on_screen_text?: string;
+  sound_music?: string;
+}
+
 export interface ScriptAnalysis {
   video_id: string;
   hook_3s: string;
   core_points: string[];
   retention_tactics: string[];
   remake_script_vi: RemakeScriptVI;
+  storyboard?: StoryboardScene[];
+  analysis_basis?: string;
+  analysis_version?: string;
+  model_used?: string;
   source: string;
   cached: boolean;
+  created_at?: string;
 }
+
+export interface VideoMetricSnapshot {
+  id: string;
+  video_id: string;
+  like_count: number | null;
+  comment_count: number | null;
+  share_count: number | null;
+  favorite_count: number | null;
+  view_count: number | null;
+  captured_at: string;
+  source: string;
+  delta_likes?: number | null;
+  delta_comments?: number | null;
+  delta_shares?: number | null;
+  delta_favorites?: number | null;
+  delta_views?: number | null;
+  elapsed_seconds?: number | null;
+}
+
+export interface MetricHistory {
+  video_id: string;
+  total_snapshots: number;
+  snapshots: VideoMetricSnapshot[];
+}
+
+export interface VoiceOption {
+  id: string;
+  name: string;
+  gender: string;
+  accent: string;
+  provider: string;
+  description: string;
+}
+
+export interface DubbingRequest {
+  video_id: string;
+  script_text?: string | null;
+  voice_id?: string;
+  speed?: number;
+  pitch?: number;
+  bgm_volume_percent?: number;
+  ducking?: boolean;
+}
+
+export interface DubbingJobOut {
+  id: string;
+  video_id: string;
+  status: "pending" | "synthesizing" | "mixing" | "completed" | "failed";
+  voice_id: string;
+  script_text: string;
+  audio_url?: string | null;
+  video_url?: string | null;
+  duration_seconds?: number | null;
+  error_message?: string | null;
+  created_at: string;
+  completed_at?: string | null;
+}
+
+export interface DubbingVoicesResponse {
+  voices: VoiceOption[];
+}
+
+export interface PlatformCapabilities {
+  id: string;
+  name: string;
+  display_name: string;
+  supports_headless: boolean;
+  supports_video_download: boolean;
+  supports_metrics: boolean;
+  supports_hashtags: boolean;
+  requires_login_for_search: boolean;
+  auth_domains: string[];
+  icon_name: string;
+  is_enabled: boolean;
+  description: string;
+}
+
+export interface PlatformsResponse {
+  platforms: PlatformCapabilities[];
+  total: number;
+}
+
+export interface QueueStatusResponse {
+  queue_name: string;
+  backend: string;
+  max_size: number;
+  current_size: number;
+  dead_letter_size: number;
+  is_full: boolean;
+  active_workers: number;
+  max_workers: number;
+}
+
+export interface SystemMetricsResponse {
+  total_requests: number;
+  error_count: number;
+  error_rate: number;
+  active_jobs: number;
+  latencies: Record<
+    string,
+    {
+      count: number;
+      p50_ms: number;
+      p95_ms: number;
+      p99_ms: number;
+      avg_ms: number;
+      min_ms: number;
+      max_ms: number;
+    }
+  >;
+  counters: Record<string, number>;
+  uptime_seconds: number;
+}
+
+export interface ReleaseReadinessCheck {
+  name: string;
+  passed: boolean;
+  details: string;
+}
+
+export interface ReleaseReadinessResponse {
+  is_ready: boolean;
+  status: "ready" | "degraded" | "blocked";
+  checks: ReleaseReadinessCheck[];
+  generated_at: string;
+}
+
+
 

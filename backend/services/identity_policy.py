@@ -95,11 +95,41 @@ def extract_douyin_id(raw_url: str | None) -> str | None:
         return None
 
 
+TIKTOK_VIDEO_REGEX = re.compile(r"/video/(\d{15,25})(?:/|\?|$)")
+YOUTUBE_SHORTS_REGEX = re.compile(r"/shorts/([a-zA-Z0-9_-]{8,15})(?:/|\?|$)")
+
+
+def extract_tiktok_id(raw_url: str | None) -> str | None:
+    if not raw_url:
+        return None
+    try:
+        p = urlsplit(raw_url)
+        match = TIKTOK_VIDEO_REGEX.search(p.path or "")
+        return match.group(1) if match else None
+    except Exception:
+        return None
+
+
+def extract_youtube_shorts_id(raw_url: str | None) -> str | None:
+    if not raw_url:
+        return None
+    try:
+        p = urlsplit(raw_url)
+        match = YOUTUBE_SHORTS_REGEX.search(p.path or "")
+        return match.group(1) if match else None
+    except Exception:
+        return None
+
+
 def extract_platform_id(platform: str, raw_url: str | None) -> str | None:
     if platform == "xiaohongshu":
         return extract_note_id(raw_url)
     if platform == "douyin":
         return extract_douyin_id(raw_url)
+    if platform == "tiktok":
+        return extract_tiktok_id(raw_url)
+    if platform == "youtube_shorts":
+        return extract_youtube_shorts_id(raw_url)
     return None
 
 

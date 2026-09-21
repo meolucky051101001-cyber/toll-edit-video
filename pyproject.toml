@@ -1,6 +1,12 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+filterwarnings = [
+    "ignore:.*starlette.testclient.*:DeprecationWarning",
+    "ignore:.*BlockingPortal alias is deprecated.*:DeprecationWarning",
+    "ignore:.*Using `httpx` with `starlette.testclient` is deprecated.*",
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
+]
 [tool.ruff]
 line-length = 100
 target-version = "py312"

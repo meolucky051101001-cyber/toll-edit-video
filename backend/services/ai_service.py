@@ -11,7 +11,7 @@ from backend.core.config import Settings
 from backend.providers.ai.base import AIError, AIProvider
 from backend.providers.ai.registry import get_ai_provider
 from backend.schemas.expansion import ExpansionOutcome, QueryExpansion
-from backend.schemas.script_analysis import RemakeScriptVI, ScriptAnalysisOut
+from backend.schemas.script_analysis import RemakeScriptVI, ScriptAnalysisOut, StoryboardScene
 
 logger = logging.getLogger("research")
 
@@ -79,11 +79,16 @@ class AIService:
                     payload = QueryExpansion.model_validate_json(raw)
                     if payload.original_query != query:
                         raise ValueError("Original query mismatch")
+                    meta = getattr(provider, "last_call_meta", {}) or {}
                     outcome = ExpansionOutcome(
                         original_query=query,
                         source="gemini",
                         expansion=payload,
                         queries=payload.queries(self.config.max_queries),
+                        configured_model=str(meta.get("configured_model") or self.config.ai_model),
+                        actual_model=str(meta.get("actual_model") or self.config.ai_model),
+                        fallback_occurred=bool(meta.get("fallback_occurred", False)),
+                        latency_ms=float(meta["latency_ms"]) if meta.get("latency_ms") is not None else None,
                     )
                     self.cache[query] = (time.monotonic(), outcome)
                     while len(self.cache) > 64:
@@ -172,6 +177,41 @@ def generate_fallback_script_analysis(video_id: str, video_data: dict) -> Script
     ]
     cta_vi = "Bấm lưu lại ngay để áp dụng và follow kênh để cập nhật thêm nhiều bí quyết hay nhé!"
 
+    storyboard = [
+        StoryboardScene(
+            scene_number=1,
+            timestamp_range="0:00 - 0:03",
+            visual_action=f"Cận cảnh chi tiết {topic}, góc quay động lôi cuốn",
+            spoken_narration=intro_vi,
+            on_screen_text=f"BÍ QUYẾT: {topic[:25]}",
+            sound_music="Nhạc beat dồn dập, hiệu ứng swoosh bắt tai",
+        ),
+        StoryboardScene(
+            scene_number=2,
+            timestamp_range="0:03 - 0:15",
+            visual_action=f"Thao tác thực tế hoặc mở hộp trải nghiệm {topic}",
+            spoken_narration=body_vi[0],
+            on_screen_text="BƯỚC 1: NGUYÊN TẮC CỐT LÕI",
+            sound_music="Nhạc nền trending nhịp điệu nhanh",
+        ),
+        StoryboardScene(
+            scene_number=3,
+            timestamp_range="0:15 - 0:30",
+            visual_action=f"So sánh kết quả trước - sau hoặc trải nghiệm tính năng nổi bật của {topic}",
+            spoken_narration=f"{body_vi[1]} {body_vi[2]}",
+            on_screen_text="BƯỚC 2: TỐI ƯU HIỆU QUẢ",
+            sound_music="Nhạc nền cao trào, sound effect ding",
+        ),
+        StoryboardScene(
+            scene_number=4,
+            timestamp_range="0:30 - 0:45",
+            visual_action="Tổng kết thành phẩm hoặc kêu gọi tương tác trực diện với màn hình",
+            spoken_narration=cta_vi,
+            on_screen_text="LƯU & FOLLOW NGAY",
+            sound_music="Nhạc kết thúc vui tươi, sound effect click",
+        ),
+    ]
+
     return ScriptAnalysisOut(
         video_id=video_id,
         hook_3s=hook_3s,
@@ -182,6 +222,10 @@ def generate_fallback_script_analysis(video_id: str, video_data: dict) -> Script
             body=body_vi,
             cta=cta_vi,
         ),
+        storyboard=storyboard,
+        analysis_basis="metadata",
+        analysis_version="v2.0",
+        model_used="fallback",
         source="fallback",
         cached=False,
     )

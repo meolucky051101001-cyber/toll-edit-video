@@ -9,6 +9,7 @@ from backend.services.translator import (
     ACTION_MAP,
     MANDATORY_MAP,
     SUBJECT_MAP,
+    compound_intent,
     extract_mandatory_attributes,
     is_valid_action_match,
     is_valid_subject_match,
@@ -47,9 +48,14 @@ class RankBreakdown:
     relevance: float
     quality: float
     final_score: float
+    virality_score: float = 0.0
+    velocity_score: float = 0.0
     matched_query: str = ""
     matched_tokens: list[str] = field(default_factory=list)
     missing_core_tokens: list[str] = field(default_factory=list)
+    missing_mandatory_intents: list[str] = field(default_factory=list)
+    provenance: dict[str, list[str]] = field(default_factory=dict)
+    matched_negative_tokens: list[str] = field(default_factory=list)
 
 
 def tokens(value: str) -> set[str]:
@@ -80,6 +86,10 @@ def intent_constraints(query: str) -> list[tuple[str, list[str], float]]:
     """
     groups: list[tuple[str, list[str], float]] = []
     norm = normalize_vietnamese(query)
+    compound = compound_intent(query)
+    if compound:
+        for aliases in compound[0]:
+            groups.append((aliases[0], aliases, 20.0))
     for name in sorted(SUBJECT_MAP, key=len, reverse=True):
         aliases = [alias for tier in SUBJECT_MAP[name].values() for alias in tier]
         if phrase_matches(query, name) and is_valid_subject_match(query, norm, name):
@@ -119,6 +129,7 @@ def rank_detailed(
     result: VideoResult,
     query: str,
     alternative_queries: list[str] | None = None,
+    negative_keywords: list[str] | None = None,
 ) -> RankBreakdown:
     candidates = [query]
     if alternative_queries:
@@ -128,13 +139,14 @@ def rank_detailed(
 
     title = tokens(result.title or "")
     caption = tokens(result.caption or "")
-    tags = tokens(" ".join(result.hashtags))
+    tags = tokens(" ".join(result.hashtags or []))
     target_tokens = title | caption | tags
 
     best_relevance = 0.0
     best_cand = candidates[0]
     best_matched_tokens: list[str] = []
     best_missing_core: list[str] = []
+    best_provenance: dict[str, list[str]] = {}
 
     for cand in candidates:
         wanted = tokens(cand)
@@ -169,6 +181,11 @@ def rank_detailed(
                     else 1.0
                 )
                 rel = min(100.0, 60.0 * core_coverage + 25.0 * title_core + 15.0 * mod_coverage)
+
+                # Chống spam mô tả: nếu từ khóa cốt lõi chỉ xuất hiện sâu trong caption dài (>50 ký tự)
+                # mà hoàn toàn không có trong tiêu đề hoặc hashtag, áp mức trần liên quan
+                if not (core_matched & (title | tags)) and len(result.caption or "") > 50:
+                    rel = min(rel, 35.0)
         else:
             coverage = len(matched) / max(len(wanted), 1)
             title_match = len(wanted & title) / max(len(wanted), 1)
@@ -179,6 +196,11 @@ def rank_detailed(
             best_cand = cand
             best_matched_tokens = sorted(matched)
             best_missing_core = sorted(core_wanted - core_matched)
+            best_provenance = {
+                "title": sorted(matched & title),
+                "caption": sorted(matched & caption),
+                "hashtags": sorted(matched & tags),
+            }
 
     relevance = best_relevance
     if len(candidates) > 1 and best_relevance >= 40.0:
@@ -191,11 +213,26 @@ def rank_detailed(
             relevance = min(100.0, relevance + 5.0)
 
     # Do not let a broad alternative erase the original subject or attributes.
-    evidence = [result.title or "", result.caption or "", *result.hashtags]
+    evidence = [result.title or "", result.caption or "", *(result.hashtags or [])]
+    missing_mandatory: list[str] = []
     for name, aliases, ceiling in intent_constraints(query):
         if not any(phrase_matches(part, alias) for part in evidence for alias in aliases):
             relevance = min(relevance, ceiling)
             best_missing_core.append(name)
+            missing_mandatory.append(name)
+
+    # Negative keyword penalty
+    matched_negatives: list[str] = []
+    if negative_keywords:
+        for neg in negative_keywords:
+            if neg and neg.strip():
+                neg_norm = neg.strip()
+                if any(phrase_matches(part, neg_norm) for part in evidence):
+                    matched_negatives.append(neg_norm)
+
+    if matched_negatives:
+        relevance = min(15.0, relevance * 0.25)
+
     metrics = [
         (result.like_count, 100000),
         (result.comment_count, 5000),
@@ -215,16 +252,25 @@ def rank_detailed(
         )
         days = max(0, (datetime.now(timezone.utc) - published).days)
         freshness = math.exp(-days / 60)
-    quality = 100 * (0.85 * engagement + 0.15 * freshness)
+
+    from backend.services.virality_service import compute_virality
+    virality = compute_virality(result)
+
+    quality = 100 * (0.60 * engagement + 0.15 * freshness + 0.25 * (virality.virality_score / 100.0))
     final_score = relevance * (0.8 + 0.2 * quality / 100)
 
     return RankBreakdown(
         relevance=round(relevance, 2),
         quality=round(quality, 2),
         final_score=round(final_score, 2),
+        virality_score=virality.virality_score,
+        velocity_score=virality.velocity_score,
         matched_query=best_cand,
         matched_tokens=best_matched_tokens,
         missing_core_tokens=best_missing_core,
+        missing_mandatory_intents=missing_mandatory,
+        provenance=best_provenance,
+        matched_negative_tokens=matched_negatives,
     )
 
 
@@ -232,6 +278,43 @@ def rank(
     result: VideoResult,
     query: str,
     alternative_queries: list[str] | None = None,
+    negative_keywords: list[str] | None = None,
 ) -> tuple[float, float, float]:
-    detail = rank_detailed(result, query, alternative_queries=alternative_queries)
+    detail = rank_detailed(
+        result, query, alternative_queries=alternative_queries, negative_keywords=negative_keywords
+    )
     return detail.relevance, detail.quality, detail.final_score
+
+
+def recalculate_scores_from_virality(
+    relevance: float,
+    like_count: int | None = None,
+    comment_count: int | None = None,
+    favorite_count: int | None = None,
+    share_count: int | None = None,
+    published_at: datetime | None = None,
+    virality_score: float = 0.0,
+) -> tuple[float, float]:
+    """Recalculates quality_score and final_score given an updated virality_score and engagement."""
+    metrics = [
+        (like_count, 100000),
+        (comment_count, 5000),
+        (favorite_count, 20000),
+        (share_count, 10000),
+    ]
+    known = [
+        min(1, math.log1p(value) / math.log1p(cap)) for value, cap in metrics if value is not None
+    ]
+    engagement = sum(known) / len(known) if known else 0
+    freshness = 0.0
+    if published_at:
+        pub = (
+            published_at.replace(tzinfo=timezone.utc)
+            if published_at.tzinfo is None
+            else published_at
+        )
+        days = max(0, (datetime.now(timezone.utc) - pub).days)
+        freshness = math.exp(-days / 60)
+    quality = 100.0 * (0.60 * engagement + 0.15 * freshness + 0.25 * (virality_score / 100.0))
+    final_score = relevance * (0.8 + 0.2 * quality / 100.0)
+    return round(quality, 2), round(final_score, 2)

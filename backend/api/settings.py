@@ -123,7 +123,11 @@ async def sync_douyin_upstream_cookie(cookie: str, base_url: str) -> bool:
 
 @router.get("/cookies")
 async def get_cookie_settings():
-    from backend.services.cookie_service import get_browser_session_cookie, inspect_cookie_tokens, is_dummy_cookie
+    from backend.services.cookie_service import (
+        get_browser_session_cookie,
+        inspect_cookie_tokens,
+        is_dummy_cookie,
+    )
 
     xhs_session = get_browser_session_cookie("xiaohongshu")
     douyin_session = get_browser_session_cookie("douyin")

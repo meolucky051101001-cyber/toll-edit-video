@@ -96,11 +96,12 @@ class DouyinProvider(SearchProvider):
     async def gate(self, page: Page, partial: list[VideoResult] | None = None) -> None:
         state = await self.browser.inspect(page)
         if state in {"login_required", "verification_required", "restricted"}:
-            if self.auto_elevate and getattr(self.browser, "is_currently_headless", False):
-                try:
-                    await self.browser.elevate_to_headful()
-                except Exception:
-                    pass
+            if state in {"login_required", "verification_required"}:
+                if self.auto_elevate and getattr(self.browser, "is_currently_headless", False):
+                    try:
+                        await self.browser.elevate_to_headful()
+                    except Exception:
+                        pass
             raise UserActionRequired(
                 "waiting_for_login" if state == "login_required" else "waiting_for_user",
                 MESSAGES[state],
@@ -118,24 +119,41 @@ class DouyinProvider(SearchProvider):
         filters: SearchFilters,
         on_batch: Callable[[list[VideoResult]], Awaitable[None]] | None = None,
     ) -> list[VideoResult]:
+        if not self.auto_elevate:
+            if hasattr(self.browser, "ensure_headless_session"):
+                await self.browser.ensure_headless_session()
+            elif hasattr(self.browser, "reset_headful_session"):
+                self.browser.reset_headful_session()
         async with self.browser.lock:
             if hasattr(self.browser, "release_blocked_page"):
                 await self.browser.release_blocked_page()
             results: list[VideoResult] = []
             try:
-                page = await self.browser.ensure_open()
+                base = getattr(self.browser, "base_url", "https://www.douyin.com")
+                direct_url = f"{base}/search/{quote(query)}?type=video"
+                try:
+                    page = await self.browser.ensure_open(
+                        initial_url=direct_url,
+                        headless_override=True if not self.auto_elevate else None,
+                    )
+                except TypeError:
+                    try:
+                        page = await self.browser.ensure_open(
+                            headless_override=True if not self.auto_elevate else None,
+                        )
+                    except TypeError:
+                        page = await self.browser.ensure_open()
                 # Pre-check gate only if already restricted or verification required
                 initial_state = await self.browser.inspect(page)
                 if initial_state in {"verification_required", "restricted"}:
                     await self.gate(page, results)
-                base = getattr(self.browser, "base_url", "https://www.douyin.com")
 
-                direct_url = f"{base}/search/{quote(query)}?type=video"
-                await page.goto(direct_url, wait_until="domcontentloaded", timeout=30000)
+                if page.url != direct_url and not unquote(urlsplit(page.url).path).startswith("/search"):
+                    await page.goto(direct_url, wait_until="domcontentloaded", timeout=30000)
                 try:
-                    await page.wait_for_selector('a[href*="/video/"], [data-e2e="search-box"]', timeout=2000)
+                    await page.wait_for_selector('a[href*="/video/"]', timeout=7000)
                 except Error:
-                    await page.wait_for_timeout(1000)
+                    await page.wait_for_timeout(1500)
                 await self.gate(page, results)
                 current_url = urlsplit(page.url)
                 unquoted_path = unquote(current_url.path)
@@ -154,8 +172,8 @@ class DouyinProvider(SearchProvider):
                         )
 
                 candidates: dict[str, dict[str, str | None]] = {}
-                max_scrolls = max(15, int(limit * 1.2))
-                target_candidates = min(max(limit * 2, 20), 50)
+                max_scrolls = min(max(5, int(limit * 0.8)), 15)
+                target_candidates = min(max(limit * 2, 20), 40)
                 prev_count = 0
                 stale_scrolls = 0
 
@@ -165,15 +183,43 @@ class DouyinProvider(SearchProvider):
                         """els => {
                             const res = [];
                             for (const e of els) {
-                                const card = e.closest('li, [class*="search-result-card"], [class*="card"], [class*="item"], [class*="search-result"]');
+                                const card = e.closest('li, [data-e2e*="card"], [class*="search-result-card"], [class*="search-card"], [class*="card"], [class*="item"], [class*="search-result"]') || e.parentElement;
                                 if (!card) continue;
-                                if (card.closest('.guess-words, [data-e2e="search_guess_words"], [class*="recommend"], [class*="hot-search"], [class*="ad-"]')) continue;
+                                if (card.closest('.guess-words, [data-e2e="search_guess_words"], [class*="recommend"], [class*="hot-search"], [class*="ad-"], [class*="billboard"], [class*="related-search"]')) continue;
+                                if (
+                                    card.querySelector('[class*="live"], [class*="living"], .living, [data-e2e*="live"]') ||
+                                    card.innerText.includes('直播中') ||
+                                    card.innerText.includes('进入直播') ||
+                                    card.querySelector('a[href*="/live/"]') ||
+                                    (e.href && e.href.includes('/live/'))
+                                ) {
+                                    continue;
+                                }
                                 const img = card ? (card.querySelector('img') || e.querySelector('img')) : e.querySelector('img');
-                                const cover = img ? (img.currentSrc || img.src || img.getAttribute('data-src')) : null;
-                                const title = card ? (card.querySelector('[class*="title"], [class*="desc"], p, h3')?.innerText?.trim() || null) : null;
-                                const author = card ? (card.querySelector('[class*="author"], [class*="name"], .author')?.innerText?.trim() || null) : null;
+                                const cover = img ? (img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('data-origin')) : null;
+                                
+                                // Title extraction: prioritize img.alt, then title/aria-label, then inner text elements
+                                let title = img ? (img.getAttribute('alt') || '').trim() : '';
+                                if (!title || title.length < 2) {
+                                    title = (e.getAttribute('title') || card.getAttribute('title') || e.getAttribute('aria-label') || '').trim();
+                                }
+                                if (!title || title.length < 2) {
+                                    const titleEl = card.querySelector('[data-e2e*="desc"], [class*="title-text"], [class*="title"], [class*="desc"], [class*="caption"], [class*="info"] p, p, h3, h4');
+                                    if (titleEl && titleEl.innerText) {
+                                        title = titleEl.innerText.trim();
+                                    }
+                                }
+                                if (!title || title.length < 2) {
+                                    const rawText = (card.innerText || '').trim();
+                                    const lines = rawText.split('\\n').map(l => l.trim()).filter(l => l.length > 2 && !/^\\d+(\\.\\d+)?[wkW万千]?$/.test(l));
+                                    if (lines.length > 0) {
+                                        title = lines[0];
+                                    }
+                                }
+
+                                const author = card ? (card.querySelector('[data-e2e*="author"], [class*="author"], [class*="account"], [class*="user-name"], [class*="name"] a, a[href*="/user/"]')?.innerText?.trim() || null) : null;
                                 const authorLink = card ? (card.querySelector('a[href*="/user/"]')?.href || null) : null;
-                                const likeText = card ? (card.querySelector('[class*="like"], [class*="count"]')?.innerText?.trim() || null) : null;
+                                const likeText = card ? (card.querySelector('[data-e2e*="like"], [class*="like"], [class*="digg"], [class*="count"]')?.innerText?.trim() || null) : null;
                                 const durationEl = card ? (
                                     card.querySelector('[class*="duration"], [class*="time-tag"], [class*="time_tag"], span.time') ||
                                     Array.from(card.querySelectorAll('span, div')).find(s => /^\\d{1,2}:\\d{2}(:\\d{2})?$/.test(s.innerText ? s.innerText.trim() : ''))
@@ -182,7 +228,7 @@ class DouyinProvider(SearchProvider):
                                 res.push({
                                     href: e.href,
                                     cover: cover,
-                                    title: title,
+                                    title: title || null,
                                     author: author,
                                     author_link: authorLink,
                                     like_text: likeText,
@@ -227,17 +273,19 @@ class DouyinProvider(SearchProvider):
 
                     scroll_px = random.randint(800, 1150)
                     await page.mouse.wheel(0, scroll_px)
-                    await page.wait_for_timeout(random.randint(250, 400))
+                    await page.wait_for_timeout(random.randint(150, 300))
 
                     if len(candidates) == prev_count:
                         stale_scrolls += 1
                         if stale_scrolls in (2, 3):
                             try:
                                 await page.keyboard.press("PageDown")
-                                await page.wait_for_timeout(250)
+                                await page.wait_for_timeout(300)
                             except Exception:
                                 pass
-                        if stale_scrolls >= 4:
+                        if stale_scrolls >= 4 and prev_count > 0:
+                            break
+                        elif stale_scrolls >= 6:
                             break
                     else:
                         stale_scrolls = 0
@@ -289,7 +337,7 @@ class DouyinProvider(SearchProvider):
                             link = str(cand["link"])
                             candidate_cover = cand.get("cover")
                             try:
-                                await detail.goto(link, wait_until="domcontentloaded", timeout=6000)
+                                await detail.goto(link, wait_until="domcontentloaded", timeout=4000)
                                 await self.gate(detail, results)
                                 try:
                                     await detail.wait_for_selector(

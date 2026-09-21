@@ -1,6 +1,8 @@
-import os
 import math
+import os
+
 from PIL import Image, ImageDraw
+
 
 def create_base_canvas(size=512, c1=(124, 58, 237), c2=(67, 56, 202), radius=110):
     img = Image.new('RGBA', (size, size), (0, 0, 0, 0))

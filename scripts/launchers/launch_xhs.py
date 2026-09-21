@@ -13,7 +13,7 @@ sys.path.insert(0, str(XHS_DIR))
 os.chdir(str(XHS_DIR))
 sys.argv[0] = str(XHS_DIR / "main.py")
 
-from source import XHS, Settings
+from source import XHS, Settings  # noqa: E402
 
 
 async def main() -> None:

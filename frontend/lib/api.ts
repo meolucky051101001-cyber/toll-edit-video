@@ -22,8 +22,22 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   }
   return response.json() as Promise<T>;
 }
-export const platformName = (value: string) =>
-  value === "douyin" ? "Douyin" : "Xiaohongshu";
+export const platformName = (value: string) => {
+  switch (value) {
+    case "douyin":
+      return "Douyin";
+    case "xiaohongshu":
+      return "Xiaohongshu";
+    case "tiktok":
+      return "TikTok";
+    case "youtube_shorts":
+      return "YouTube Shorts";
+    case "mock":
+      return "Dữ liệu mẫu";
+    default:
+      return value;
+  }
+};
 export const statusName: Record<string, string> = {
   new: "Mới",
   saved: "Đã lưu",
@@ -34,8 +48,11 @@ export const statusName: Record<string, string> = {
   expanding_query: "Đang tạo từ khóa AI",
   waiting_for_login: "Chờ đăng nhập",
   waiting_for_user: "Cần xác minh / giải CAPTCHA",
+  resuming: "Đang tiếp tục lượt tìm…",
   searching: "Đang tìm kiếm",
   ranking: "Đang xếp hạng",
+  validating: "Đang kiểm tra tệp…",
+  retry_wait: "Đang chờ thử lại…",
   completed: "Hoàn tất",
   cancelled: "Đã hủy",
   interrupted: "Bị gián đoạn",
@@ -77,6 +94,21 @@ export function isTrustedPlatformUrl(url: string, platform: string): boolean {
         host.endsWith(".douyin.com") ||
         host === "iesdouyin.com" ||
         host.endsWith(".iesdouyin.com")
+      );
+    }
+    if (platform === "tiktok") {
+      return (
+        host === "tiktok.com" ||
+        host.endsWith(".tiktok.com") ||
+        host === "vm.tiktok.com" ||
+        host.endsWith(".vm.tiktok.com")
+      );
+    }
+    if (platform === "youtube_shorts") {
+      return (
+        host === "youtube.com" ||
+        host.endsWith(".youtube.com") ||
+        host === "youtu.be"
       );
     }
     return false;
@@ -193,4 +225,50 @@ export async function analyzeVideoScript(
     body: JSON.stringify({ force_refresh: forceRefresh }),
   });
 }
+
+export async function getDubbingVoices(): Promise<import("@/types").DubbingVoicesResponse> {
+  return api<import("@/types").DubbingVoicesResponse>("/dubbing/voices");
+}
+
+export async function createDubbingJob(
+  data: import("@/types").DubbingRequest
+): Promise<import("@/types").DubbingJobOut> {
+  return api<import("@/types").DubbingJobOut>("/dubbing/jobs", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function getDubbingJob(
+  jobId: string
+): Promise<import("@/types").DubbingJobOut> {
+  return api<import("@/types").DubbingJobOut>(`/dubbing/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function getVideoDubbings(
+  videoId: string
+): Promise<import("@/types").DubbingJobOut[]> {
+  return api<import("@/types").DubbingJobOut[]>(`/videos/${encodeURIComponent(videoId)}/dubbing`);
+}
+
+export function getDubbingFileUrl(filename: string): string {
+  return `/api/dubbing/files/${encodeURIComponent(filename)}`;
+}
+
+export async function getPlatforms(): Promise<import("@/types").PlatformsResponse> {
+  return api<import("@/types").PlatformsResponse>("/platforms");
+}
+
+export async function getQueueStatus(): Promise<import("@/types").QueueStatusResponse> {
+  return api<import("@/types").QueueStatusResponse>("/system/queue-status");
+}
+
+export async function getSystemMetrics(): Promise<import("@/types").SystemMetricsResponse> {
+  return api<import("@/types").SystemMetricsResponse>("/system/metrics");
+}
+
+export async function getReleaseReadiness(): Promise<import("@/types").ReleaseReadinessResponse> {
+  return api<import("@/types").ReleaseReadinessResponse>("/system/release-readiness");
+}
+
 

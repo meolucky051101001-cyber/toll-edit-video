@@ -21,10 +21,10 @@ Double-click **start.bat** ở thư mục gốc. Script sẽ kiểm tra port, kh
 
 - Ứng dụng: http://localhost:3000
 - Health UI: http://localhost:3000/health
-- Backend: http://127.0.0.1:8000/api/health
-- API docs: http://127.0.0.1:8000/docs
+- Backend: http://127.0.0.1:8010/api/health
+- API docs: http://127.0.0.1:8010/docs
 
-Nếu port 3000 hoặc 8000 đang dùng, script báo lỗi và không dừng chương trình khác. Nếu vừa sửa code frontend, chạy lại setup để build trước khi start.
+Nếu port 3000 hoặc 8010 đang dùng, script báo lỗi và không dừng chương trình khác. Nếu vừa sửa code frontend, chạy lại setup để build trước khi start.
 
 ## 3. Dừng tool
 
@@ -134,7 +134,7 @@ E2E tạo dữ liệu mẫu trong DB ứng dụng, không xóa thư viện của
 Chạy dev (hai cửa sổ PowerShell riêng, bắt đầu ở root dự án):
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8010
 ```
 
 ```powershell

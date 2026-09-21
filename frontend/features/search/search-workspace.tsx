@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/error-banner";
 import { api, platformName, statusName } from "@/lib/api";
 import { useResource } from "@/lib/use-resource";
+import { useSSEListener } from "@/lib/use-event-source";
 import type { Job, Page, Platform, Settings } from "@/types";
 import { VideoGrid } from "@/features/video/video-grid";
 
@@ -30,13 +31,15 @@ import { BrowserControls } from "./browser-controls";
 
 const terminal = ["completed", "failed", "cancelled", "interrupted"];
 
-export type SearchMode = "mock" | "xiaohongshu" | "douyin";
+export type SearchMode = "mock" | "xiaohongshu" | "douyin" | "tiktok" | "youtube_shorts";
 
 export function parseSearchMode(raw: string | null | undefined): SearchMode {
-  if (!raw) return "mock";
+  if (!raw) return "xiaohongshu";
   const normalized = raw.trim().toLowerCase();
   if (normalized === "xiaohongshu") return "xiaohongshu";
   if (normalized === "douyin") return "douyin";
+  if (normalized === "tiktok") return "tiktok";
+  if (normalized === "youtube_shorts" || normalized === "youtube") return "youtube_shorts";
   return "mock";
 }
 
@@ -54,9 +57,9 @@ export function SearchWorkspace() {
 }
 export function normalizeLimitForMode(currentLimit: number, targetMode: string): number {
   const allowed =
-    targetMode === "xiaohongshu" || targetMode === "douyin"
-      ? [5, 10, 20, 50, 100]
-      : [20, 50, 100, 200];
+    targetMode === "mock"
+      ? [20, 50, 100, 200]
+      : [5, 10, 20, 50, 100];
   if (allowed.includes(currentLimit)) {
     return currentLimit;
   }
@@ -74,16 +77,15 @@ function SearchSession({
 }) {
   const router = useRouter();
   const [mode, setMode] = useState<SearchMode>(initialMode);
-  const [useAI, setUseAI] = useState(false);
+  const [userEnabledAI, setUserEnabledAI] = useState<boolean | null>(null);
   const [choice, setChoice] = useState<QueryChoice | null>(null);
   const settings = useResource<Settings>("/settings");
+  const useAI = userEnabledAI !== null ? userEnabledAI : Boolean(settings.data?.ai_available);
   const [query, setQuery] = useState(initialQuery);
   const [platforms, setPlatforms] = useState<Platform[]>(
-    initialMode === "douyin"
-      ? ["douyin"]
-      : initialMode === "xiaohongshu"
-        ? ["xiaohongshu"]
-        : ["douyin", "xiaohongshu"],
+    initialMode === "mock"
+      ? ["douyin", "xiaohongshu"]
+      : [initialMode as Platform],
   );
   const [limit, setLimit] = useState(() => normalizeLimitForMode(20, initialMode));
   const [jobId, setJobId] = useState<string | null>(initialJob);
@@ -97,8 +99,19 @@ function SearchSession({
     jobs: number;
   }>("/stats", 5000);
   const recent = useResource<Page<Job>>("/search/jobs", 5000);
+
+  useSSEListener("search:update", (data: { job_id?: string; status?: string }) => {
+    if (jobId && data?.job_id === jobId) {
+      job.refresh();
+      if (data.status && terminal.includes(data.status)) {
+        stats.refresh();
+        recent.refresh();
+      }
+    }
+  });
+
   const isRunning = Boolean(
-    jobId && job.data && ["searching", "ranking", "expanding_query"].includes(job.data.status),
+    jobId && job.data && ["searching", "ranking", "expanding_query", "resuming"].includes(job.data.status),
   );
   const active = Boolean(
     jobId && (!job.data || !terminal.includes(job.data.status)),
@@ -110,7 +123,7 @@ function SearchSession({
       choice?.topic === query.trim().replace(/\s+/g, " ")
         ? selectedTerms(choice.text)
         : [];
-    const isReal = mode === "xiaohongshu" || mode === "douyin";
+    const isReal = mode !== "mock";
     if (
       terms.length > (isReal ? 3 : 10) ||
       terms.some((v) => v.length > 300)
@@ -141,11 +154,9 @@ function SearchSession({
           query,
           mode,
           platforms:
-            mode === "xiaohongshu"
-              ? ["xiaohongshu"]
-              : mode === "douyin"
-                ? ["douyin"]
-                : platforms,
+            mode === "mock"
+              ? platforms
+              : [mode as Platform],
           limit: normalizeLimitForMode(limit, mode),
           use_ai: useAI,
           selected_queries: terms.length ? terms : undefined,
@@ -199,7 +210,11 @@ function SearchSession({
             ? "Dữ liệu mẫu"
             : mode === "douyin"
               ? "Douyin thật"
-              : "Xiaohongshu thật"}
+              : mode === "xiaohongshu"
+                ? "Xiaohongshu thật"
+                : mode === "tiktok"
+                  ? "TikTok Global"
+                  : "YouTube Shorts"}
         </span>
       </div>
       <div className="stats-strip">
@@ -239,18 +254,16 @@ function SearchSession({
                 const newMode = parseSearchMode(e.target.value);
                 setMode(newMode);
                 setLimit((prev) => normalizeLimitForMode(prev, newMode));
-                if (newMode === "douyin") {
-                  setPlatforms(["douyin"]);
-                } else if (newMode === "xiaohongshu") {
-                  setPlatforms(["xiaohongshu"]);
-                } else {
+                if (newMode === "mock") {
                   setPlatforms(["douyin", "xiaohongshu"]);
+                } else {
+                  setPlatforms([newMode as Platform]);
                 }
               }}
             >
               <option value="xiaohongshu">Xiaohongshu thật (Nền tảng trực tiếp)</option>
               <option value="douyin">Douyin thật (Nền tảng trực tiếp)</option>
-              <option value="mock">Dữ liệu mẫu (Thử nghiệm offline)</option>
+              <option value="mock">Dữ liệu mẫu (Thử nghiệm offline & Mock Multi-Platform)</option>
             </select>
           </label>
           <div className="search-input-row">
@@ -274,16 +287,17 @@ function SearchSession({
                   ? "Đang tìm kiếm…"
                   : mode === "mock"
                     ? "Tìm video mẫu"
-                    : mode === "douyin"
-                      ? "Tìm trên Douyin thật"
-                      : "Tìm trên Xiaohongshu thật"}
+                    : `Tìm trên ${platformName(mode)} thật`}
               <ArrowRight size={17} />
             </Button>
           </div>
           <div className="search-options">
             <div className="row wrap">
               <span className="muted" style={{ fontWeight: 500 }}>Tìm trên:</span>
-              {(["douyin", "xiaohongshu"] as Platform[]).map((p) => {
+              {(mode === "mock"
+                ? (["xiaohongshu", "douyin", "tiktok", "youtube_shorts"] as Platform[])
+                : (["xiaohongshu", "douyin"] as Platform[])
+              ).map((p) => {
                 const isSelected =
                   mode === "mock"
                     ? platforms.includes(p)
@@ -313,8 +327,8 @@ function SearchSession({
                       readOnly
                       style={{ cursor: "pointer", pointerEvents: "none" }}
                     />
-                    <span className={p === "douyin" ? "dy-mark" : "red-mark"}>
-                      {p === "douyin" ? "♪" : "小红书"}
+                    <span className={p === "douyin" ? "dy-mark" : p === "xiaohongshu" ? "red-mark" : "platform-mark"}>
+                      {p === "douyin" ? "♪" : p === "xiaohongshu" ? "小红书" : p === "tiktok" ? "TT" : "YT"}
                     </span>
                     <span>{platformName(p)} {mode !== "mock" && "thật"}</span>
                   </button>
@@ -328,7 +342,7 @@ function SearchSession({
                 value={limit}
                 onChange={(e) => setLimit(Number(e.target.value))}
               >
-                {(mode === "xiaohongshu" || mode === "douyin"
+                {(mode !== "mock"
                   ? [5, 10, 20, 50, 100]
                   : [20, 50, 100, 200]
                 ).map((n) => (
@@ -344,7 +358,7 @@ function SearchSession({
               <input
                 type="checkbox"
                 checked={useAI}
-                onChange={(e) => setUseAI(e.target.checked)}
+                onChange={(e) => setUserEnabledAI(e.target.checked)}
                 disabled={busy}
               />
               Tự tạo từ khóa AI khi tìm
@@ -451,6 +465,9 @@ function SearchSession({
                 Đã quét: {job.data.found_count ?? 0} thẻ
               </span>
               <span>
+                Bị loại trừ: <strong style={{ color: "#b91c1c" }}>{job.data.rejected_count ?? 0}</strong> video
+              </span>
+              <span>
                 Douyin: {job.data.provider_counts?.douyin ?? 0} · RED:{" "}
                 {job.data.provider_counts?.xiaohongshu ?? 0}
               </span>
@@ -462,10 +479,64 @@ function SearchSession({
               ℹ️ Đã quét hết kết quả phù hợp trên trang ({job.data.processed_count} video). Số lượng {job.data.requested_limit} là trần mục tiêu tối đa.
             </p>
           )}
+          {job.data && (job.data.ai_source || job.data.actual_ai_model) && (
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.4rem", flexWrap: "wrap" }}>
+              <span className="muted" style={{ fontSize: "0.82rem" }}>Nguồn dịch:</span>
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.3rem",
+                  fontSize: "0.78rem",
+                  padding: "0.15rem 0.5rem",
+                  borderRadius: "999px",
+                  background: job.data.actual_ai_model || job.data.ai_source === "gemini" ? "#eff6ff" : "#f0fdf4",
+                  color: job.data.actual_ai_model || job.data.ai_source === "gemini" ? "#1d4ed8" : "#15803d",
+                  border: `1px solid ${job.data.actual_ai_model || job.data.ai_source === "gemini" ? "#bfdbfe" : "#bbf7d0"}`,
+                  fontWeight: 600,
+                }}
+              >
+                {job.data.actual_ai_model
+                  ? `Gemini AI: ${job.data.actual_ai_model}${job.data.ai_fallback_occurred ? " (fallback)" : ""}`
+                  : job.data.ai_source === "dictionary"
+                  ? "Từ điển chuyên ngành"
+                  : job.data.ai_source === "original"
+                  ? "Query gốc"
+                  : "Từ điển / Fallback"}
+                {typeof job.data.ai_latency_ms === "number" && (
+                  <span style={{ opacity: 0.75, fontWeight: 400 }}>({Math.round(job.data.ai_latency_ms)}ms)</span>
+                )}
+              </span>
+            </div>
+          )}
           {job.data && job.data.queries?.length > 0 && (
-            <p className="job-queries">
-              Từ khóa đã dùng: {job.data.queries.join(" · ")}
+            <p className="job-queries" style={{ marginTop: "0.4rem" }}>
+              Truy vấn thực tế gửi nền tảng:{" "}
+              {job.data.queries.map((q, i) => (
+                <span key={i} style={{ display: "inline-block", background: "#f1f5f9", padding: "0.1rem 0.45rem", borderRadius: "4px", margin: "0 0.2rem", fontWeight: 500, fontSize: "0.82rem" }}>
+                  {q}
+                </span>
+              ))}
             </p>
+          )}
+          {job.data?.diagnostics?.rejected_candidates && job.data.diagnostics.rejected_candidates.length > 0 && (
+            <details style={{ marginTop: "0.6rem", border: "1px solid #fed7aa", borderRadius: "8px", background: "#fff7ed", padding: "0.5rem 0.75rem" }}>
+              <summary style={{ cursor: "pointer", fontWeight: 600, color: "#c2410c", fontSize: "0.85rem" }}>
+                🛡️ Video bị loại trừ bởi Precision Gate ({job.data.diagnostics.rejected_candidates.length})
+              </summary>
+              <div style={{ marginTop: "0.5rem", maxHeight: "200px", overflowY: "auto", fontSize: "0.8rem" }}>
+                {job.data.diagnostics.rejected_candidates.map((cand, idx) => (
+                  <div key={idx} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0.3rem 0", borderBottom: "1px dashed #fdba74", gap: "0.5rem" }}>
+                    <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={cand.title}>
+                      [{cand.platform === "douyin" ? "Douyin" : "RED"}] {cand.title}
+                    </span>
+                    <span style={{ color: "#9a3412", fontWeight: 500, fontSize: "0.78rem", whiteSpace: "nowrap" }}>
+                      {cand.reason}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </details>
           )}
           <ErrorBanner message={job.data?.ai_warning ?? ""} />
           <ErrorBanner message={job.data?.error_message ?? ""} />
@@ -559,8 +630,7 @@ function SearchSession({
                     waiting
                     refresh={job.refresh}
                     platform={
-                      (job.data.platforms && job.data.platforms[0]) ||
-                      (mode === "douyin" ? "douyin" : "xiaohongshu")
+                      job.data.platforms?.[0] === "douyin" ? "douyin" : "xiaohongshu"
                     }
                   />
                 </div>

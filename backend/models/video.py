@@ -41,6 +41,8 @@ class Video(Base):
     relevance_score: Mapped[float] = mapped_column(default=0)
     quality_score: Mapped[float] = mapped_column(default=0)
     final_score: Mapped[float] = mapped_column(default=0)
+    velocity_score: Mapped[float] = mapped_column(default=0.0, index=True)
+    virality_score: Mapped[float] = mapped_column(default=0.0, index=True)
     status: Mapped[str] = mapped_column(String(20), default="new", index=True)
     is_mock: Mapped[bool] = mapped_column(default=False)
     script_analysis: Mapped[dict | None] = mapped_column(JSON, default=None, nullable=True)

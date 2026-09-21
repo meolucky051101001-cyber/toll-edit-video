@@ -1,4 +1,5 @@
 import json
+import time
 
 import httpx
 
@@ -27,7 +28,7 @@ translated_query should be a concise faithful Chinese translation of the origina
 """
 
 SCRIPT_SYSTEM_PROMPT = """You are an expert viral short-form video producer and scriptwriter for TikTok, Douyin, Reels, and Xiaohongshu.
-Analyze the provided video metadata (title, caption, hashtags, duration, engagement) to deconstruct why it works and rewrite it as a high-converting Vietnamese short-form video script.
+Analyze the provided video metadata (title, caption, hashtags, duration, engagement) to deconstruct why it works and rewrite it as a high-converting Vietnamese short-form video script and shot-by-shot storyboard.
 Output JSON conforming strictly to the requested schema.
 - hook_3s: Deconstruct the first 3 seconds hook and explain why it stops the scroll.
 - core_points: 3 to 5 key points or value drops of the video.
@@ -36,7 +37,17 @@ Output JSON conforming strictly to the requested schema.
   - intro: 3-5s punchy Vietnamese opening hook.
   - body: Step-by-step Vietnamese body script (list of short spoken sentences and visual cues).
   - cta: Engaging Vietnamese call-to-action (save, share, comment).
-Always write remake_script_vi in natural, engaging Vietnamese.
+- storyboard: 3 to 5 sequential scenes detailing:
+  - scene_number: 1, 2, 3...
+  - timestamp_range: e.g. "0:00 - 0:03", "0:03 - 0:10"
+  - visual_action: Camera angle, actors, gestures, props, transitions.
+  - spoken_narration: Spoken voiceover or dialogue in natural Vietnamese.
+  - on_screen_text: Text overlays, stickers, highlight keywords on screen.
+  - sound_music: BGM mood and sound effect (SFX) cues (e.g. pop, ding, swoosh).
+- analysis_basis: "multimodal_metadata"
+- analysis_version: "v2.0"
+- model_used: "gemini"
+Always write remake_script_vi and storyboard narrations in natural, engaging Vietnamese.
 """
 
 
@@ -46,6 +57,7 @@ class GeminiAIProvider(AIProvider):
     def __init__(self, config: Settings, transport: httpx.AsyncBaseTransport | None = None):
         self.config = config
         self.transport = transport
+        self.last_call_meta: dict[str, object] = {}
 
     async def _call_gemini(self, system_prompt: str, user_content: str, schema: dict) -> str:
         if not self.config.ai_api_key.get_secret_value():
@@ -80,6 +92,7 @@ class GeminiAIProvider(AIProvider):
             },
         }
         response = None
+        start_time = time.monotonic()
         for current_model in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{current_model}:generateContent"
             try:
@@ -108,6 +121,13 @@ class GeminiAIProvider(AIProvider):
                 continue
 
             if response.status_code == 200:
+                elapsed_ms = round((time.monotonic() - start_time) * 1000, 2)
+                self.last_call_meta = {
+                    "configured_model": self.config.ai_model,
+                    "actual_model": current_model,
+                    "fallback_occurred": (current_model != self.config.ai_model),
+                    "latency_ms": elapsed_ms,
+                }
                 break
             if response.status_code in (429, 500, 502, 503, 504) and current_model != models_to_try[-1]:
                 continue

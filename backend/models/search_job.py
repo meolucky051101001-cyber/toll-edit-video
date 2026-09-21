@@ -18,7 +18,13 @@ class SearchJob(Base):
     found_count: Mapped[int] = mapped_column(default=0)
     processed_count: Mapped[int] = mapped_column(default=0)
     duplicate_count: Mapped[int] = mapped_column(default=0)
+    rejected_count: Mapped[int] = mapped_column(default=0)
+    min_relevance: Mapped[float | None] = mapped_column(default=None, nullable=True)
     provider_counts: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)
+    diagnostics: Mapped[dict | None] = mapped_column(JSON, default=dict, nullable=True)
+    actual_ai_model: Mapped[str | None] = mapped_column(default=None, nullable=True)
+    ai_fallback_occurred: Mapped[bool] = mapped_column(default=False, nullable=True)
+    ai_latency_ms: Mapped[float | None] = mapped_column(default=None, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -47,3 +53,6 @@ class JobVideo(Base):
     relevance_score: Mapped[float]
     quality_score: Mapped[float]
     final_score: Mapped[float]
+    velocity_score: Mapped[float | None] = mapped_column(default=0.0, nullable=True)
+    virality_score: Mapped[float | None] = mapped_column(default=0.0, nullable=True)
+

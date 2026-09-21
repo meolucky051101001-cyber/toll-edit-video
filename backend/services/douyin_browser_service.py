@@ -1,6 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
+from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
 from playwright.async_api import BrowserContext, Error, Page, Playwright, async_playwright
@@ -38,7 +39,9 @@ class DouyinBrowserService:
         self.profile = profile or ROOT / "data/browser/douyin"
         self.headless = headless
         self.hybrid_headless = hybrid_headless
-        self.is_currently_headless = False
+        self.default_hybrid_headless = hybrid_headless
+        self.force_headful_session = False
+        self.is_currently_headless = headless
         self.driver: Playwright | None = None
         self.context: BrowserContext | None = None
         self.page: Page | None = None
@@ -48,12 +51,18 @@ class DouyinBrowserService:
         self.state = "closed"
         self.base_url = DOUYIN_HOME
         self.diagnostics: dict = {}
+        self.allow_media = False
+
+    def set_allow_media(self, allow: bool) -> None:
+        self.allow_media = allow
 
     def should_run_headless(self) -> bool:
-        if self.headless:
-            return True
+        if getattr(self, "force_headful_session", False):
+            return False
         if not getattr(self, "hybrid_headless", True):
             return False
+        if self.headless:
+            return True
         auth_file = self.profile / "auth_state.json"
         if auth_file.exists():
             try:
@@ -65,13 +74,26 @@ class DouyinBrowserService:
                 pass
         return False
 
+    def reset_headful_session(self) -> None:
+        self.force_headful_session = False
+        self.hybrid_headless = getattr(self, "default_hybrid_headless", True)
+
+    async def ensure_headless_session(self) -> None:
+        if getattr(self, "force_headful_session", False):
+            self.reset_headful_session()
+            if getattr(self, "is_currently_headless", True) is False and self.context:
+                await self._close()
+        else:
+            self.reset_headful_session()
+
     async def elevate_to_headful(self) -> Page:
+        self.force_headful_session = True
+        self.hybrid_headless = False
         if not getattr(self, "is_currently_headless", False):
-            return self.page or await self.ensure_open()
+            return self.page or await self.ensure_open(headless_override=False)
         current_url = self.page.url if self.page and not self.page.is_closed() else None
         await self._close()
-        self.hybrid_headless = False
-        page = await self.ensure_open()
+        page = await self.ensure_open(headless_override=False)
         if current_url and not current_url.startswith("about:"):
             try:
                 await page.goto(current_url, wait_until="domcontentloaded", timeout=15000)
@@ -120,14 +142,17 @@ class DouyinBrowserService:
             "is_blocked_tab": bool(self.blocked_page and not self.blocked_page.is_closed()),
         }
 
-    async def ensure_open(self) -> Page:
+    async def ensure_open(self, headless_override: bool | None = None, initial_url: str | None = None) -> Page:
         if self.page and not self.page.is_closed():
             return self.page
         await self._close()
         self.profile.mkdir(parents=True, exist_ok=True)
         try:
             self.driver = await async_playwright().start()
-            effective_headless = self.should_run_headless()
+            if headless_override is not None:
+                effective_headless = headless_override
+            else:
+                effective_headless = self.should_run_headless()
             self.is_currently_headless = effective_headless
             self.context = await self.driver.chromium.launch_persistent_context(
                 str(self.profile),
@@ -141,8 +166,29 @@ class DouyinBrowserService:
                 args=[
                     "--no-sandbox",
                     "--disable-infobars",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-first-run",
+                    "--no-default-browser-check",
                 ],
             )
+
+            # Anti-bot stealth injection to mask automated Playwright fingerprints
+            STEALTH_INIT_SCRIPT = """
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined,
+            });
+            if (!window.chrome) {
+                window.chrome = {};
+            }
+            if (!window.chrome.runtime) {
+                window.chrome.runtime = {};
+            }
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['zh-CN', 'zh', 'en'],
+            });
+            """
+            await self.context.add_init_script(STEALTH_INIT_SCRIPT)
 
             TRACKER_DOMAINS = (
                 "sensorsdata.cn",
@@ -157,14 +203,21 @@ class DouyinBrowserService:
             async def block_resources(route):
                 req = route.request
                 url = req.url.lower()
-                if (
-                    req.resource_type in {"media", "font"}
-                    or any(url.endswith(ext) or ext + "?" in url for ext in HEAVY_EXTENSIONS)
-                    or any(domain in url for domain in TRACKER_DOMAINS)
-                ):
+                if any(domain in url for domain in TRACKER_DOMAINS):
                     await route.abort()
-                else:
-                    await route.continue_()
+                    return
+                # Only block media when allow_media is False (e.g. during search card scraping)
+                if not getattr(self, "allow_media", False):
+                    if (
+                        req.resource_type in {"media", "font"}
+                        or any(url.endswith(ext) or ext + "?" in url for ext in HEAVY_EXTENSIONS)
+                    ):
+                        await route.abort()
+                        return
+                elif req.resource_type == "font":
+                    await route.abort()
+                    return
+                await route.continue_()
 
             await self.context.route("**/*", block_resources)
             # Restore saved session cookies if present
@@ -176,14 +229,18 @@ class DouyinBrowserService:
                     cookies = auth_data.get("cookies", [])
                     if cookies:
                         persisted = persist_auth_cookies(cookies)
-                        await self.context.add_cookies(persisted)
+                        await self.context.add_cookies(cast(Any, persisted))
                 except Exception:
                     pass
 
             # Inject custom cookie from settings if configured (skip dummy/test strings)
             if settings.douyin_cookie:
                 try:
-                    from backend.services.cookie_service import is_dummy_cookie, parse_cookie_str, persist_auth_cookies
+                    from backend.services.cookie_service import (
+                        is_dummy_cookie,
+                        parse_cookie_str,
+                        persist_auth_cookies,
+                    )
                     if not is_dummy_cookie(settings.douyin_cookie):
                         tokens = parse_cookie_str(settings.douyin_cookie)
                         if tokens:
@@ -192,7 +249,7 @@ class DouyinBrowserService:
                                 for k, v in tokens.items()
                             ]
                             persisted_custom = persist_auth_cookies(custom_cookies)
-                            await self.context.add_cookies(persisted_custom)
+                            await self.context.add_cookies(cast(Any, persisted_custom))
                 except Exception:
                     pass
 
@@ -200,8 +257,10 @@ class DouyinBrowserService:
                 self.context.pages[0] if self.context.pages else await self.context.new_page()
             )
             self.page.set_default_timeout(10000)
-            await self.page.goto(self.base_url, wait_until="domcontentloaded", timeout=30000)
-            await self.page.wait_for_timeout(1500)
+            nav_target = initial_url or self.base_url
+            await self.page.goto(nav_target, wait_until="domcontentloaded", timeout=30000)
+            if not initial_url:
+                await self.page.wait_for_timeout(1500)
             await self.inspect(self.page)
             return self.page
         except Error:
@@ -265,7 +324,7 @@ class DouyinBrowserService:
 
             # Check for dismissible login modal / mask
             login_modal = page.locator(
-                "#login-panel:visible, .login-mask:visible, [class*='login-panel']:visible, [class*='login-modal']:visible"
+                "#login-panel:visible, .login-mask:visible, [class*='login-panel']:visible, [class*='login-modal']:visible, [class*='login-dialog']:visible"
             )
             login_modal_visible = (await login_modal.count()) > 0
 
@@ -273,7 +332,7 @@ class DouyinBrowserService:
             if login_modal_visible and not captcha_visible:
                 try:
                     close_btn = page.locator(
-                        ".login-panel-close:visible, .dy-account-close:visible, [data-e2e='close-icon']:visible, #login-panel [class*='close']:visible, .login-mask [class*='close']:visible, [aria-label='关闭']:visible"
+                        ".login-panel-close:visible, .dy-account-close:visible, [data-e2e='close-icon']:visible, #login-panel [class*='close']:visible, .login-mask [class*='close']:visible, [aria-label='关闭']:visible, [aria-label='Close']:visible, .semi-modal-close:visible, [data-e2e='modal-close-button']:visible"
                     ).first
                     if await close_btn.count() > 0:
                         await close_btn.click(timeout=800)
@@ -406,7 +465,8 @@ class DouyinBrowserService:
                 self.driver = None
             self.state = "closed"
             self.is_currently_headless = False
-            self.hybrid_headless = True
+            self.hybrid_headless = getattr(self, "default_hybrid_headless", True)
+            self.force_headful_session = False
 
     async def close(self) -> None:
         async with self.lock:

@@ -4,6 +4,7 @@ from backend.importers.mediacrawler import ParsedImport
 from backend.models import ImportBatch, ImportOrigin, JobVideo, SearchJob, Video
 from backend.models.video import utcnow
 from backend.services.dedup_service import canonical_url, find_existing, fingerprint
+from backend.services.metric_service import MetricService
 from backend.services.ranking_service import rank
 
 
@@ -77,6 +78,16 @@ def commit_import(parsed: ParsedImport, db: Session) -> dict:
             db.add(video)
             db.flush()
             db.add(ImportOrigin(video_id=video.id, batch_id=job.id))
+            MetricService().record_snapshot(
+                video_id=video.id,
+                like_count=video.like_count,
+                comment_count=video.comment_count,
+                share_count=video.share_count,
+                favorite_count=video.favorite_count,
+                view_count=video.view_count,
+                source="import",
+                db=db,
+            )
         # Imported snapshots do not overwrite existing metadata or user's status.
         db.add(
             JobVideo(

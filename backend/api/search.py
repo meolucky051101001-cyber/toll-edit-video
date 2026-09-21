@@ -7,7 +7,7 @@ from backend.core.database import get_db
 from backend.models import ImportBatch, SearchJob, SearchPlan
 from backend.schemas.contracts import JobOut, SearchRequest
 from backend.schemas.expansion import ExpandRequest, ExpansionOutcome
-from backend.services.translator import plan_query, plan_query_async
+from backend.services.translator import plan_query_async
 
 router = APIRouter(prefix="/api/search", tags=["search"])
 
@@ -18,9 +18,10 @@ async def create_search(payload: SearchRequest, request: Request, db: Session = 
         raise HTTPException(429, "Đã có 10 lượt tìm chờ xử lý. Vui lòng đợi hoặc hủy bớt.")
     use_mock = payload.mode == "mock" if payload.mode else settings.use_mock_provider
     if not use_mock:
-        if payload.platforms not in [["xiaohongshu"], ["douyin"]] or payload.limit > 100:
+        valid_platforms = {"xiaohongshu", "douyin"}
+        if len(payload.platforms) != 1 or payload.platforms[0] not in valid_platforms or payload.limit > 100:
             raise HTTPException(
-                422, "Tìm thật hỗ trợ Xiaohongshu hoặc Douyin, tối đa 100 video/lượt."
+                422, "Tìm thật hỗ trợ Xiaohongshu hoặc Douyin, tối đa 100 video/lượt. Các nền tảng khác vui lòng thử ở chế độ Dữ liệu mẫu (Mock)."
             )
         if payload.selected_queries and len(payload.selected_queries) > 3:
             raise HTTPException(
@@ -30,6 +31,7 @@ async def create_search(payload: SearchRequest, request: Request, db: Session = 
         original_query=payload.query,
         platforms=payload.platforms,
         requested_limit=payload.limit,
+        min_relevance=payload.min_relevance if payload.min_relevance is not None else (40.0 if not use_mock else None),
         is_mock=use_mock,
     )
     db.add(job)
@@ -114,4 +116,5 @@ async def resume_job(job_id: str, request: Request, db: Session = Depends(get_db
         raise HTTPException(
             409, "Lượt tìm này không chờ tiếp tục. Nếu ứng dụng đã khởi động lại, hãy tạo lượt mới."
         )
-    return job
+    db.expire_all()
+    return get_job(job_id, db)

@@ -10,7 +10,6 @@ import {
   Save,
   Check,
   Sparkles,
-  Info,
   Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -19,7 +18,7 @@ import {
   saveCookieSettings,
   syncBrowserCookies,
 } from "@/lib/api";
-import type { CookiePlatformStatus, CookieSettingsData } from "@/types";
+import type { CookieSettingsData } from "@/types";
 
 export function CookieSettings() {
   const [data, setData] = useState<CookieSettingsData | null>(null);
@@ -35,23 +34,27 @@ export function CookieSettings() {
 
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
-  const loadSettings = async () => {
-    try {
-      setLoading(true);
-      const res = await getCookieSettings();
-      setData(res);
-    } catch {
-      setMessage({
-        type: "error",
-        text: "Không tải được trạng thái Cookie. Hãy kiểm tra kết nối backend.",
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
 
   useEffect(() => {
-    loadSettings();
+    let ignore = false;
+    getCookieSettings()
+      .then((res) => {
+        if (!ignore) setData(res);
+      })
+      .catch(() => {
+        if (!ignore) {
+          setMessage({
+            type: "error",
+            text: "Không tải được trạng thái Cookie. Hãy kiểm tra kết nối backend.",
+          });
+        }
+      })
+      .finally(() => {
+        if (!ignore) setLoading(false);
+      });
+    return () => {
+      ignore = true;
+    };
   }, []);
 
   const handleSaveXhs = async () => {

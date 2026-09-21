@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { SlidersHorizontal, Search, Film, Download, CheckSquare } from "lucide-react";
+import { SlidersHorizontal, Search, Film, Download } from "lucide-react";
 import { useResource } from "@/lib/use-resource";
 import { batchDownloadVideos } from "@/lib/api";
 import type { Page, Video } from "@/types";
@@ -175,6 +175,8 @@ export function VideoGrid({
           onChange={(e) => filter(setSort, e.target.value)}
         >
           <option value="best">Phù hợp nhất</option>
+          <option value="virality">Xu hướng lan truyền (Virality)</option>
+          <option value="velocity">Tốc độ tăng trưởng (Velocity)</option>
           <option value="likes">Nhiều lượt thích</option>
           <option value="newest">Mới nhất</option>
           <option value="comments">Nhiều bình luận</option>

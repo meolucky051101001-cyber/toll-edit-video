@@ -1,6 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
+from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
 from playwright.async_api import BrowserContext, Error, Page, Playwright, async_playwright
@@ -38,7 +39,9 @@ class BrowserService:
         self.profile = profile or ROOT / "data/browser/xiaohongshu"
         self.headless = headless
         self.hybrid_headless = hybrid_headless
-        self.is_currently_headless = False
+        self.default_hybrid_headless = hybrid_headless
+        self.force_headful_session = False
+        self.is_currently_headless = headless
         self.driver: Playwright | None = None
         self.context: BrowserContext | None = None
         self.page: Page | None = None
@@ -50,10 +53,12 @@ class BrowserService:
         self.diagnostics: dict = {}
 
     def should_run_headless(self) -> bool:
-        if self.headless:
-            return True
+        if getattr(self, "force_headful_session", False):
+            return False
         if not getattr(self, "hybrid_headless", True):
             return False
+        if self.headless:
+            return True
         auth_file = self.profile / "auth_state.json"
         if auth_file.exists():
             try:
@@ -65,13 +70,26 @@ class BrowserService:
                 pass
         return False
 
+    def reset_headful_session(self) -> None:
+        self.force_headful_session = False
+        self.hybrid_headless = getattr(self, "default_hybrid_headless", True)
+
+    async def ensure_headless_session(self) -> None:
+        if getattr(self, "force_headful_session", False):
+            self.reset_headful_session()
+            if getattr(self, "is_currently_headless", True) is False and self.context:
+                await self._close()
+        else:
+            self.reset_headful_session()
+
     async def elevate_to_headful(self) -> Page:
+        self.force_headful_session = True
+        self.hybrid_headless = False
         if not getattr(self, "is_currently_headless", False):
-            return self.page or await self.ensure_open()
+            return self.page or await self.ensure_open(headless_override=False)
         current_url = self.page.url if self.page and not self.page.is_closed() else None
         await self._close()
-        self.hybrid_headless = False
-        page = await self.ensure_open()
+        page = await self.ensure_open(headless_override=False)
         if current_url and not current_url.startswith("about:"):
             try:
                 await page.goto(current_url, wait_until="domcontentloaded", timeout=15000)
@@ -157,14 +175,21 @@ class BrowserService:
             pass
         return "https://www.rednote.com"
 
-    async def ensure_open(self) -> Page:
+    async def ensure_open(
+        self,
+        headless_override: bool | None = None,
+        initial_url: str | None = None,
+    ) -> Page:
         if self.page and not self.page.is_closed():
             return self.page
         await self._close()
         self.profile.mkdir(parents=True, exist_ok=True)
         try:
             self.driver = await async_playwright().start()
-            effective_headless = self.should_run_headless()
+            if headless_override is not None:
+                effective_headless = headless_override
+            else:
+                effective_headless = self.should_run_headless()
             self.is_currently_headless = effective_headless
             self.context = await self.driver.chromium.launch_persistent_context(
                 str(self.profile),
@@ -178,8 +203,28 @@ class BrowserService:
                 args=[
                     "--no-sandbox",
                     "--disable-infobars",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-first-run",
+                    "--no-default-browser-check",
                 ],
             )
+
+            STEALTH_INIT_SCRIPT = """
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined,
+            });
+            if (!window.chrome) {
+                window.chrome = {};
+            }
+            if (!window.chrome.runtime) {
+                window.chrome.runtime = {};
+            }
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['zh-CN', 'zh', 'en'],
+            });
+            """
+            await self.context.add_init_script(STEALTH_INIT_SCRIPT)
 
             TRACKER_DOMAINS = (
                 "sensorsdata.cn",
@@ -213,14 +258,18 @@ class BrowserService:
                     cookies = auth_data.get("cookies", [])
                     if cookies:
                         persisted = persist_auth_cookies(cookies)
-                        await self.context.add_cookies(persisted)
+                        await self.context.add_cookies(cast(Any, persisted))
                 except Exception:
                     pass
 
             # Inject custom cookie from settings if configured (skip dummy/test strings)
             if settings.xhs_cookie:
                 try:
-                    from backend.services.cookie_service import is_dummy_cookie, parse_cookie_str, persist_auth_cookies
+                    from backend.services.cookie_service import (
+                        is_dummy_cookie,
+                        parse_cookie_str,
+                        persist_auth_cookies,
+                    )
                     if not is_dummy_cookie(settings.xhs_cookie):
                         tokens = parse_cookie_str(settings.xhs_cookie)
                         if tokens:
@@ -232,7 +281,7 @@ class BrowserService:
                                 for k, v in tokens.items()
                             ]
                             persisted_custom = persist_auth_cookies(custom_cookies)
-                            await self.context.add_cookies(persisted_custom)
+                            await self.context.add_cookies(cast(Any, persisted_custom))
                 except Exception:
                     pass
 
@@ -241,13 +290,14 @@ class BrowserService:
                 self.context.pages[0] if self.context.pages else await self.context.new_page()
             )
             self.page.set_default_timeout(10000)
-            target_home = f"{self.base_url}/explore"
+            target_home = initial_url or f"{self.base_url}/explore"
             # No stealth scripts, proxy changes, cookie import, or private endpoints.
             await self.page.goto(target_home, wait_until="domcontentloaded", timeout=30000)
-            await self.page.wait_for_timeout(1500)
+            await self.page.wait_for_timeout(1000)
             await self.inspect(self.page)
             return self.page
         except Error:
+            navigation_failed = self.page is not None
             # A navigation failure can happen after Chrome already launched. Close the
             # partial context so it cannot keep the persistent profile locked.
             try:
@@ -255,6 +305,8 @@ class BrowserService:
             except Error:
                 pass
             self.state = "network_error"
+            if navigation_failed:
+                raise ProviderUnavailableError("Chrome đã mở nhưng không tải được trang Xiaohongshu/Rednote. Hãy kiểm tra kết nối và mở lại nền tảng trong trình duyệt riêng; lỗi này không đồng nghĩa thiếu Chromium.") from None
             raise ProviderUnavailableError(
                 "Không mở được trình duyệt Xiaohongshu. Kiểm tra Chromium đã cài và đóng phiên dùng cùng profile."
             ) from None
@@ -309,7 +361,7 @@ class BrowserService:
             if login_modal_visible:
                 try:
                     close_btn = page.locator(
-                        ".icon-btn-wrapper.close-button:visible, .close-button:visible, .close:visible, [aria-label='关闭']:visible, [aria-label='Close']:visible"
+                        ".icon-btn-wrapper.close-button:visible, .close-button:visible, .close:visible, [aria-label='关闭']:visible, [aria-label='Close']:visible, .dyn-modal-close:visible, svg.close-button:visible, .ant-modal-close:visible, .reds-modal [class*='close']:visible"
                     ).first
                     if await close_btn.count() > 0:
                         await close_btn.click(timeout=800)
@@ -323,10 +375,14 @@ class BrowserService:
 
             if self.state in {"restricted", "verification_required"}:
                 pass
+            elif (
+                "/login" in parts.path or "/website-login" in parts.path
+                or "tourist_search" in parse_qs(parts.query).get("source", [])
+            ):
+                # A stale cookie is not evidence that the server accepted the session.
+                self.state = "login_required"
             elif is_authenticated:
                 self.state = "page_available"
-            elif "/login" in parts.path or "/website-login" in parts.path:
-                self.state = "login_required"
             elif login_modal_visible:
                 # If notes or video elements are present, the page is usable despite the modal
                 note_items = await page.locator("section.note-item, div.note-item, .search-result-item, a[href*='/explore/']").count()
@@ -443,7 +499,8 @@ class BrowserService:
                 self.driver = None
             self.state = "closed"
             self.is_currently_headless = False
-            self.hybrid_headless = True
+            self.hybrid_headless = getattr(self, "default_hybrid_headless", True)
+            self.force_headful_session = False
 
     async def close(self) -> None:
         async with self.lock:
