@@ -129,7 +129,10 @@ class DouyinDirectTests(unittest.TestCase):
             douyin_direct.DOUYIN_DETAIL_PATH,
             {"aid": "6383", "aweme_id": "7676769981752790308"},
         )
-        self.assertIn("a_bogus=", signed)
+        if douyin_direct.ABogus is not None:
+            self.assertIn("a_bogus=", signed)
+        else:
+            self.assertIn("X-Bogus=", signed)
 
     def test_xbogus_matches_upstream_vector(self):
         from backend.douyin_direct import DOUYIN_USER_AGENT, _XBogus

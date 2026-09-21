@@ -68,7 +68,7 @@ async def generate_tts_audio_v2(
     config = policy or TimingPolicy()
     output = Path(output_directory)
     output.mkdir(parents=True, exist_ok=True)
-    semaphore = asyncio.Semaphore(3)
+    semaphore = asyncio.Semaphore(int(os.getenv("TTS_CONCURRENCY", "3")))
 
     async def one(segment: Any) -> Dict[str, Any]:
         async with semaphore:

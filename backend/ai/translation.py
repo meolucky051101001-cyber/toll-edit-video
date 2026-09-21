@@ -199,13 +199,21 @@ def build_translation_prompt(
 Nhiệm vụ: Dịch mảng JSON chứa các câu phụ đề dưới đây sang {lang_name}.
 Yêu cầu TỐI QUAN TRỌNG:
 1. BẮT BUỘC giữ nguyên số lượng phần tử của mảng JSON. Mỗi câu gốc tương ứng đúng 1 câu dịch. Không tự ý gộp câu hay tách câu để đảm bảo khớp thời gian hiển thị (timing).
-2. DỊCH CHUẨN XÁC NHƯNG HẤP DẪN: Ưu tiên dịch đúng nghĩa đen và bóng của câu chữ. Giữ văn phong tự nhiên, cuốn hút, có chút thiên hướng mạng xã hội để đăng video.
+2. DỊCH CHUẨN XÁC, TỰ NHIÊN, HẤP DẪN: Ưu tiên dịch đúng nghĩa đen và bóng của câu chữ. Giữ văn phong tự nhiên, cuốn hút, có chút thiên hướng mạng xã hội để đăng video. Viết hoa chữ cái đầu câu hoặc sau dấu kết câu theo đúng ngữ pháp tiếng Việt.
 3. XỬ LÝ TỪ NGỮ VĂN HOA/THƠ CA: Các video Douyin thường dùng câu chữ hoa mỹ. Ví dụ '懒春秋' mang ý nghĩa 'thư thái, nhàn hạ' chứ KHÔNG PHẢI là 'lười biếng'. Hãy dịch thoát ý, sang trọng.
 4. TUYỆT ĐỐI KHÔNG lạm dụng từ tiếng Anh. Ưu tiên tiếng Việt thuần túy.
 5. KHỚP KHẨU HÌNH & THỜI LƯỢNG (LIP-SYNC): Văn bản dịch dùng để lồng tiếng (TTS), độ dài âm tiết của câu tiếng Việt PHẢI TƯƠNG ĐƯƠNG VỚI CÂU GỐC để khớp hoàn hảo khẩu hình miệng của nhân vật (không được dịch quá dài khiến AI phải đọc quá nhanh, và không được dịch quá cụt khiến AI đọc xong trước khi nhân vật khép miệng).
-6. Ngữ cảnh nối tiếp: Vì phụ đề thường bị ngắt giữa chừng, hãy đọc cả đoạn để dịch sao cho ý nối liền mạch trơn tru.
-    KHÔNG dùng dấu ba chấm (... hoặc …), kể cả đầu/cuối đoạn bị ngắt. TUYỆT ĐỐI KHÔNG chèn dấu chấm (.) giữa câu lửng hoặc ở cuối các vế câu chưa hết ý. Chỉ đặt dấu kết câu (. ! ?) khi đã kết thúc một câu hoàn chỉnh trọn vẹn ý nghĩa. Hệ thống sẽ chuyển phụ đề sang câu kế tiếp tại dấu kết câu; vẫn giữ đúng số phần tử JSON theo đầu vào.
-7. BẮT LỖI ĐỒNG ÂM ASR DO NHẬN DẠNG GIỌNG NÓI (WHISPER): Phụ đề tiếng Trung gốc được trích xuất bằng ASR nên thường xuất hiện các từ đồng âm/gần âm sai trong video review, handmade, đồ gia dụng. Hãy dùng ngữ cảnh sản phẩm để tự động sửa:
+6. ĐẶT DẤU NGẮT NGHỈ (DẤU PHẨY, DẤU CHẤM) CHUẨN XÁC THEO LỜI NÓI GỐC:
+   Văn bản dịch dùng để lồng tiếng (TTS) và hiển thị phụ đề. Giọng đọc TTS chỉ ngắt nghỉ, lấy hơi khi gặp dấu phẩy (,) hoặc dấu chấm kết câu (. ! ?).
+   - Nếu câu gốc có dấu ngắt nghỉ (dấu phẩy ， hoặc khoảng ngắt vế): BẮT BUỘC đặt dấu phẩy (,) vào câu dịch tại đúng vị trí ngắt nghỉ tương ứng để giọng đọc AI thở và ngắt nghỉ tự nhiên theo đúng câu nói gốc.
+   - Ngay cả khi câu gốc từ nhận dạng giọng nói (ASR) bị thiếu dấu: Nếu câu gồm nhiều vế, có trạng ngữ, liên từ hoặc điểm ngắt nghỉ tự nhiên của lời nói, BẮT BUỘC phải đặt dấu phẩy (,) để phân tách các vế.
+   - Nếu câu nói ngắn, liền một hơi không có ngắt nghỉ thì KHÔNG tự ý chèn dấu ngắt nghỉ ("nếu không thì thôi").
+   - Chỉ đặt dấu kết câu (. ! ?) khi đã kết thúc một câu hoàn chỉnh trọn vẹn ý nghĩa; TUYỆT ĐỐI KHÔNG chèn dấu chấm (.) ở giữa câu lửng hoặc ở cuối các vế câu chưa hết ý.
+   - KHÔNG dùng dấu ba chấm (... hoặc …).
+7. NGỮ CẢNH NỐI TIẾP: Vì phụ đề thường bị ngắt giữa chừng, hãy đọc cả đoạn để dịch sao cho ý nối liền mạch trơn tru.
+    BẮT BUỘC giữ nguyên cách viết tên riêng, loài vật và đại từ đã xuất hiện trong phần ngữ cảnh batch trước. Không dịch lại tên riêng theo âm hoặc theo nghĩa tiếng Anh; ví dụ tên đã dịch là "A Thích" thì các batch sau phải tiếp tục dùng đúng "A Thích", không đổi thành "Assassin", "Assin" hay "Sát thủ".
+    KHÔNG dùng dấu ba chấm (... hoặc …). Hệ thống sẽ chuyển phụ đề sang câu kế tiếp tại dấu kết câu; vẫn giữ đúng số phần tử JSON theo đầu vào.
+8. BẮT LỖI ĐỒNG ÂM ASR DO NHẬN DẠNG GIỌNG NÓI (WHISPER): Phụ đề tiếng Trung gốc được trích xuất bằng ASR nên thường xuất hiện các từ đồng âm/gần âm sai trong video review, handmade, đồ gia dụng. Hãy dùng ngữ cảnh sản phẩm để tự động sửa:
    - '天手章' hoặc '手张' -> hiểu đúng là '贴手帐' hoặc '手帐' (dán sổ tay / chơi sổ Bullet Journal / planner); tuyệt đối KHÔNG dịch thành 'chương tay' hay 'quả trứng'.
    - '怪蛋' -> hiểu đúng là '怪诞' (kỳ ảo, kỳ thú, độc lạ); KHÔNG dịch thành 'quả trứng quái'.
    - '风味感' trong ngữ cảnh đồ dùng/thủ công -> hiểu đúng là '氛围感' (cảm giác không gian chill / vibe nghệ thuật); KHÔNG dịch thành 'hương vị ẩm thực' hay 'phong vị'.
@@ -220,8 +228,8 @@ Yêu cầu TỐI QUAN TRỌNG:
    - '顶前面' / '往后面推' -> đẩy về phía trước / lùi về phía sau một chút.
 """
     if with_vision:
-        prompt += "8. TRỰC QUAN: Hãy kết hợp các bức ảnh đính kèm từ video để chọn đại từ nhân xưng và danh từ chính xác tuyệt đối với ngữ cảnh.\n"
-    prompt += "9. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.\n"
+        prompt += "9. TRỰC QUAN: Hãy kết hợp các bức ảnh đính kèm từ video để chọn đại từ nhân xưng và danh từ chính xác tuyệt đối với ngữ cảnh.\n"
+    prompt += "10. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.\n"
     if duration_budgets and len(duration_budgets) == len(texts):
         prompt += (
             "10. NGÂN SÁCH THỜI LƯỢNG cho từng phần tử, cùng thứ tự với mảng gốc:\n"
@@ -571,9 +579,9 @@ def translate_with_g4f(texts, target_lang="vi"):
 Nhiệm vụ: Dịch mảng JSON chứa các câu phụ đề dưới đây sang {lang_name}.
 Yêu cầu TỐI QUAN TRỌNG:
 1. BẮT BUỘC giữ nguyên số lượng phần tử của mảng JSON.
-2. Dịch tự nhiên, cuốn hút, chuẩn văn phong video ngắn mạng xã hội.
-3. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.
-4. KHÔNG dùng dấu ba chấm (... hoặc …). Chỉ dùng dấu chấm (. ! ?) khi kết thúc câu hoàn chỉnh, TUYỆT ĐỐI KHÔNG chèn dấu chấm ở cuối câu lửng hoặc vế câu chưa hết ý; giữ nguyên số phần tử JSON.
+2. Dịch tự nhiên, cuốn hút, chuẩn văn phong video ngắn mạng xã hội. Viết hoa chữ cái đầu câu.
+3. Đặt dấu phẩy (,) tại các vế câu / chỗ ngắt nghỉ tự nhiên của câu nói gốc để lồng tiếng TTS có nhịp thở. Nếu câu ngắn nói liền một hơi thì không thêm dấu. Chỉ dùng dấu chấm (. ! ?) khi kết thúc câu hoàn chỉnh, không đặt dấu chấm ở câu lửng. KHÔNG dùng dấu ba chấm (... hoặc …).
+4. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown; giữ nguyên số phần tử JSON.
 Dữ liệu:
 """
         prompt += json.dumps(texts, ensure_ascii=False)

@@ -76,6 +76,8 @@ class TestMultiLLMTranslation(unittest.TestCase):
         self.assertIn("SPEAKER MAP", prompt)
         self.assertIn("Người kể chuyện", prompt)
         self.assertIn("Ngày xửa ngày xưa", prompt)
+        self.assertIn("A Thích", prompt)
+        self.assertIn("Assassin", prompt)
 
     @patch("backend.ai.translation.translate_with_deepseek")
     def test_translate_subtitles_forwards_glossary_and_maps(self, mock_deepseek):

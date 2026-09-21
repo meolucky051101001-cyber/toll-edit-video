@@ -814,6 +814,49 @@
       return `${m}:${s}`;
     }
 
+    let latestStatusState = null;
+    let lastStatusReceivedAt = 0;
+
+    function tickLiveClocks() {
+      if (!latestStatusState) return;
+      const isPaused = latestStatusState.is_paused || latestStatusState.status === 'stopped';
+      const isRunning = !isPaused && (latestStatusState.active || latestStatusState.batch_running || latestStatusState.status === 'running');
+      if (!isRunning) return;
+
+      const deltaSec = Math.floor((Date.now() - lastStatusReceivedAt) / 1000);
+      if (deltaSec <= 0) return;
+
+      // Update live elapsed time
+      const baseElSec = Number(latestStatusState.elapsed_seconds) || 0;
+      const currentElSec = baseElSec + deltaSec;
+      const valElapsedEl = document.getElementById('valElapsed');
+      if (valElapsedEl) {
+        valElapsedEl.textContent = `${formatTime(currentElSec)} (${currentElSec}s)`;
+      }
+
+      // Update live ETA countdown
+      const valEtaEl = document.getElementById('valEta');
+      if (valEtaEl && latestStatusState.eta_seconds !== null && latestStatusState.eta_seconds !== undefined) {
+        const baseEta = Number(latestStatusState.eta_seconds);
+        const currentEta = Math.max(0, baseEta - deltaSec);
+        if (currentEta <= 0) {
+          valEtaEl.textContent = 'Sắp hoàn tất (vài giây...)';
+        } else {
+          valEtaEl.textContent = `~${formatTime(currentEta)} (còn ${currentEta}s)`;
+        }
+      }
+
+      // Update live active stage duration
+      const activeStageDur = document.querySelector('.v2-steps-4 .step-item.active .v2-step-duration');
+      if (activeStageDur && latestStatusState.ui_steps) {
+        const activeStep = latestStatusState.ui_steps.find(st => st.status === 'running');
+        if (activeStep && activeStep.duration_seconds !== undefined && activeStep.duration_seconds !== null) {
+          const currentStageDur = Number(activeStep.duration_seconds) + deltaSec;
+          activeStageDur.textContent = `⏱ ${currentStageDur}s`;
+        }
+      }
+    }
+
     let statusRequestPending = false;
     let displayedVideoKey = '';
     const DEFAULT_V2_STAGES = [
@@ -880,6 +923,9 @@
     }
 
     function renderStatus(state) {
+      latestStatusState = state;
+      lastStatusReceivedAt = Date.now();
+
       const isPaused = state.is_paused || state.status === 'stopped';
       const isRunning = !isPaused && (state.active || state.batch_running || state.status === 'running');
       const statusTitle = document.getElementById('statusTitle');
@@ -920,8 +966,24 @@
       bar.setAttribute('role', 'progressbar');
 
       const elSec = Number(state.elapsed_seconds) || 0;
-      document.getElementById('valElapsed').textContent = elSec ? `${formatTime(elSec)} (${elSec}s)` : '00:00';
-      document.getElementById('valEta').textContent = '--';
+      document.getElementById('valElapsed').textContent = elSec ? `${formatTime(elSec)} (${elSec}s)` : (isRunning ? '00:01 (1s)' : '00:00');
+
+      const valEtaEl = document.getElementById('valEta');
+      if (valEtaEl) {
+        const etaSec = (state.eta_seconds !== null && state.eta_seconds !== undefined) ? Number(state.eta_seconds) : null;
+        if (state.status === 'completed' || state.percent >= 100) {
+          valEtaEl.textContent = '00:00 (Hoàn tất)';
+        } else if (isRunning && etaSec !== null && !isNaN(etaSec)) {
+          if (etaSec <= 0) {
+            valEtaEl.textContent = 'Sắp hoàn tất (vài giây...)';
+          } else {
+            valEtaEl.textContent = `~${formatTime(etaSec)} (còn ${etaSec}s)`;
+          }
+        } else {
+          valEtaEl.textContent = '--';
+        }
+      }
+
       const qCount = Number(state.queue_count) || 0;
       document.getElementById('valQueue').textContent = isPaused ? 'Đã tạm dừng' : (qCount > 0 ? (qCount + ' video chờ') : '0 video chờ');
 
@@ -1618,6 +1680,7 @@
     // Auto-refresh loops
     refreshAll();
     setInterval(fetchStatus, 1500);
+    setInterval(tickLiveClocks, 1000);
     setInterval(fetchQueue, 2500);
     setInterval(fetchPhoi, 4000);
     setInterval(fetchBanve, 5000);

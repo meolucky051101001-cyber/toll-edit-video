@@ -190,6 +190,41 @@ def is_v2_batch_running():
         pass
     return _cached_batch_alive
 
+def is_v2_worker_running(workspace=None, job_id=None):
+    """Kiểm tra xem có bất kỳ tiến trình xử lý video nào của Tool V2 đang chạy không."""
+    ws = str(workspace or WORKSPACE).lower()
+    try:
+        import psutil
+        v2_keywords = (
+            "render_douyin_v2.py",
+            "render_video_phoi.py",
+            "render_local_video.py",
+            "batch_processor.py",
+            "telegram_bot.py",
+            "pipeline_v2",
+            "gpu_worker",
+        )
+        for p in psutil.process_iter(['name']):
+            if 'python' not in (p.info.get('name') or '').lower():
+                continue
+            try:
+                cmd_parts = p.cmdline() or []
+                cmd = " ".join(cmd_parts).lower()
+                if any(part == '-c' for part in cmd_parts):
+                    continue
+                if any(kw in cmd for kw in v2_keywords):
+                    if job_id and job_id.lower() in cmd:
+                        return True
+                    if ws in cmd:
+                        return True
+                    if ('tool v2' in ws or 'tool_v2' in ws) and ('tool v2' in cmd or 'tool_v2' in cmd or 'workspace' in cmd):
+                        return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except Exception:
+        pass
+    return False
+
 def read_status():
     candidates = sorted(WORKSPACE.glob("*/pipeline_v2/job_manifest.json"),
                         key=lambda p: p.stat().st_mtime, reverse=True)
@@ -231,6 +266,7 @@ def read_status():
     ]
 
     result = {"stages": stage_list, "ui_steps": ui_step_list, "percent": 0, "video_name": "", "elapsed_seconds": 0,
+              "eta_seconds": None,
               "message": "Chưa có tác vụ nào đang chạy.",
               "status": "stopped" if paused else ("running" if batch_alive else "idle"),
               "is_paused": paused,
@@ -243,8 +279,8 @@ def read_status():
         result["message"] = "⏸ Tool V2 đang TẮT. Toàn bộ tiến trình bot và bộ nhớ VRAM đã được giải phóng."
         return result
 
-    # Kiểm tra log tiến độ xử lý batch nếu batch_processor đang chạy
-    if batch_alive:
+    # Kiểm tra log tiến độ xử lý batch nếu batch_processor đang chạy và chưa có manifest
+    if batch_alive and not candidates:
         log_paths = [
             WORKSPACE / "service_logs" / "batch_processor.log",
             ROOT / "app.log",
@@ -314,6 +350,8 @@ def read_status():
     data = json.loads(path.read_text(encoding="utf-8"))
     records = data.get("stages", {})
     now = datetime.now(timezone.utc)
+    job_id = data.get("job_id") or path.parent.parent.name
+    worker_alive = is_v2_worker_running(workspace=WORKSPACE, job_id=job_id)
 
     result["stages"] = [
         {"key": key, "label": label, "status": records.get(key, {}).get("status", "pending")}
@@ -334,6 +372,12 @@ def read_status():
                     t0 = datetime.fromisoformat(st_started.replace("Z", "+00:00"))
                     t1 = datetime.fromisoformat(st_finished.replace("Z", "+00:00"))
                     sub_durations.append(max(0.0, (t1 - t0).total_seconds()))
+                except Exception:
+                    pass
+            elif st_started and st_data.get("status") == "running":
+                try:
+                    t0 = datetime.fromisoformat(st_started.replace("Z", "+00:00"))
+                    sub_durations.append(max(0.0, (now - t0).total_seconds()))
                 except Exception:
                     pass
 
@@ -370,7 +414,11 @@ def read_status():
         delivered = True
     failed = [s["label"] for s in result["stages"] if s["status"] == "failed"]
     running = [s["label"] for s in result["stages"] if s["status"] == "running"]
-    active = batch_alive or (bot_alive and bool(running))
+    
+    # Active if worker/batch/bot is alive and task not completed/failed/paused
+    active = not paused and not delivered and not failed and (
+        batch_alive or worker_alive or (bot_alive and bool(running))
+    )
     result["active"] = active
     result["batch_running"] = batch_alive
 
@@ -379,32 +427,57 @@ def read_status():
         result["percent"] = 100 if delivered else min(99, int(finished / len(STAGES) * 100))
         result["message"] = ("Đã xuất thành phẩm trước đó. Tool V2 hiện đang TẮT (VRAM đã giải phóng)." if delivered else
                              "Tool V2 hiện đang TẮT. Toàn bộ tiến trình bot và bộ nhớ VRAM đã được giải phóng.")
+        result["step"] = current_step or 0
     else:
-        result["percent"] = 100 if delivered else min(99, int(finished / len(STAGES) * 100))
+        # Progress calculation
+        progress_count = finished + (0.5 if running else 0)
+        pct = 100 if delivered else min(99, max(5 if active else 0, int((progress_count / len(STAGES)) * 100)))
+        result["percent"] = pct
+
         if failed:
             result["status"] = "error"
             result["message"] = "Lỗi tại: " + ", ".join(failed)
+            result["step"] = current_step or 1
         elif delivered:
             result["status"] = "completed"
             result["message"] = "Đã xuất thành phẩm."
             result["step"] = 4
         elif active:
             result["status"] = "running"
-            result["message"] = ("Đang xử lý hàng loạt video..." if batch_alive else "Đang thực thi: " + (", ".join(running) if running else "Khởi tạo..."))
-            result["step"] = current_step
+            result["message"] = ("Đang xử lý hàng loạt video..." if batch_alive else ("Đang thực thi: " + (", ".join(running) if running else "Đang thực hiện quy trình V2...")))
+            result["step"] = current_step or 1
         else:
             result["status"] = "recorded"
             result["message"] = ("Bước ghi nhận: " + ", ".join(running) if running else "Chưa hoàn tất.") + " Trạng thái lưu trên đĩa; chưa xác minh tiến trình còn chạy."
+            result["step"] = current_step or 1
 
+    # Elapsed seconds calculation
     try:
         started = datetime.fromisoformat(data["created_at"].replace("Z", "+00:00"))
-        if delivered or failed or paused or (not bot_alive and not batch_alive):
+        if active:
+            result["elapsed_seconds"] = max(0, int((now - started).total_seconds()))
+        else:
             ended = datetime.fromisoformat(data["updated_at"].replace("Z", "+00:00"))
             result["elapsed_seconds"] = max(0, int((ended - started).total_seconds()))
-        else:
-            result["elapsed_seconds"] = max(0, int((now - started).total_seconds()))
     except (ValueError, KeyError, TypeError):
-        pass
+        result["elapsed_seconds"] = 0
+
+    # ETA (Estimated remaining time in seconds)
+    if delivered or result["percent"] >= 100:
+        result["eta_seconds"] = 0
+    elif active and result["elapsed_seconds"] > 0:
+        eff_pct = max(result["percent"], 5)
+        rem_dyn = max(5, int((result["elapsed_seconds"] / (eff_pct / 100.0)) - result["elapsed_seconds"]))
+        src_dur = data.get("metadata", {}).get("source_duration_seconds")
+        if src_dur and result["elapsed_seconds"] < 45:
+            est_from_src = max(30, int(src_dur * 0.3))
+            alpha = min(1.0, result["elapsed_seconds"] / 45.0)
+            result["eta_seconds"] = int((1.0 - alpha) * max(10, est_from_src - result["elapsed_seconds"]) + alpha * rem_dyn)
+        else:
+            result["eta_seconds"] = rem_dyn
+    else:
+        result["eta_seconds"] = None
+
     return result
 
 @app.get("/api/status")

@@ -29,6 +29,7 @@ class FFmpegMixSettings:
     loudness_range: float = 11.0
     voice_chunk_seconds: float = 300.0
     max_inputs_per_pass: int = 64
+    output_sample_rate: int = 48000
 
     def __post_init__(self) -> None:
         if not 0.000001 <= self.duck_threshold <= 1.0:
@@ -427,6 +428,8 @@ def build_ffmpeg_mix_command(
             "[mix_out]",
             "-c:a",
             "pcm_s24le",
+            "-ar",
+            str(config.output_sample_rate),
             "-f",
             "wav",
             str(output_path),

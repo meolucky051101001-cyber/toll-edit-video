@@ -118,7 +118,7 @@ def _group_fast_speech_windows(segments, max_seconds=4.8, max_characters=48):
             previous = grouped[-1]
             gap = float(item["start"]) - float(previous["end"])
             duration = float(item["end"]) - float(previous["start"])
-            text = _join_aligned_tokens(previous["text"], item["text"])
+            text = _join_aligned_tokens(previous["text"], item["text"], join_cjk_lines_with_comma=True)
             if (0 <= gap <= 0.20 and duration <= max_seconds
                     and len(text.replace(" ", "")) <= max_characters):
                 previous["end"] = item["end"]
@@ -128,7 +128,7 @@ def _group_fast_speech_windows(segments, max_seconds=4.8, max_characters=48):
     return grouped
 
 
-def _join_aligned_tokens(left, right):
+def _join_aligned_tokens(left, right, join_cjk_lines_with_comma=False):
     left = str(left or "")
     right = str(right or "")
     if not left:
@@ -136,6 +136,9 @@ def _join_aligned_tokens(left, right):
     if not right:
         return left
     cjk = lambda value: any("\u3400" <= character <= "\u9fff" for character in value)
+    if join_cjk_lines_with_comma and cjk(left[-1:]) and cjk(right[:1]):
+        if not left.endswith(("，", "。", "！", "？", "；", "：", "、", ",", ".", "!", "?", ";", ":")):
+            return left + "，" + right
     if cjk(left[-1:]) or cjk(right[:1]) or right[:1] in "，。！？；：、,.!?;:":
         return left + right
     if left.endswith((" ", "\n")) or right.startswith((" ", "\n")):
@@ -274,6 +277,7 @@ def _extract_subtitles_faster_whisper(
             # Coarse segment timestamps can span the entire silence before the
             # next speaker. Word timestamps provide the actual audible window.
             word_timestamps=True,
+            initial_prompt="这是一段带有标点符号的中文视频，包含逗号，句号！",
         )
         
         transcribed_segments = []

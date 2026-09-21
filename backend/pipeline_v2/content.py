@@ -47,10 +47,15 @@ def validate_translated_batch(
             raise RuntimeError(
                 "Translation returned empty text for segment {}".format(original.index)
             )
-        contains_cjk = any("\u4e00" <= character <= "\u9fff" for character in source_text)
-        if contains_cjk and translated_text == source_text:
+        source_contains_cjk = any(
+            "\u3400" <= character <= "\u9fff" for character in source_text
+        )
+        translated_contains_cjk = any(
+            "\u3400" <= character <= "\u9fff" for character in translated_text
+        )
+        if source_contains_cjk and translated_contains_cjk:
             raise RuntimeError(
-                "Translation left CJK source unchanged for segment {}".format(
+                "Translation retained CJK text for segment {}".format(
                     original.index
                 )
             )

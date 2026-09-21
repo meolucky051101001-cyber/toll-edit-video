@@ -55,7 +55,12 @@ class SubtitleTextTests(unittest.TestCase):
                     patch.dict(translate_subtitles.__globals__, {
                         "translate_with_gemini": gemini, "GoogleTranslator": google,
                     }):
-                result = translate_subtitles([segment("真漂亮")], api_key="test", enable_g4f=False, strict=True)
+                result = translate_subtitles(
+                    [segment("真漂亮")],
+                    api_key="test",
+                    enable_g4f=False,
+                    strict=use_llm,
+                )
                 self.assertEqual(result[0].content, "Đẹp nha")
                 self.assertEqual(result[0].orig_content, "真漂亮")
                 gemini.assert_called_once()

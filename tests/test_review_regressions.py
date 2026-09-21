@@ -48,6 +48,9 @@ class PipelineRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         def translate(batch, *args, **kwargs):
             calls.append(1)
+            kwargs.get("quality_metadata", {}).update(
+                {"provider": "test-llm", "provider_kind": "llm"}
+            )
             batch[0].orig_content = batch[0].content
             batch[0].content = "Bản dịch {}".format(len(calls))
             return batch
@@ -58,6 +61,9 @@ class PipelineRegressionTests(unittest.IsolatedAsyncioTestCase):
         ):
             first = self.runner()
             await first._translate_stage([segment()])
+            context = first._load_json("translation/context.json")
+            self.assertEqual(context["batches"][0]["provider"], "test-llm")
+            self.assertEqual(context["batches"][0]["provider_kind"], "llm")
             resumed = self.runner()
             await resumed._translate_stage([segment()])
             self.assertEqual(len(calls), 1)

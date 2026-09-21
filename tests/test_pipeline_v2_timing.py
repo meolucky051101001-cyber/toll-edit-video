@@ -105,6 +105,40 @@ class TimingSolverTests(unittest.TestCase):
         self.assertEqual(requests[0].source_segment_id, 9)
         self.assertLess(requests[0].max_characters, len(segment.content.replace(" ", "")))
 
+    def test_split_merges_short_introductory_clauses(self):
+        segment = RuntimeSegment(
+            index=146,
+            start=timedelta(seconds=585.04),
+            end=timedelta(seconds=587.76),
+            content="Sau này, tôi đã học được cách sử dụng vỏ trái cây để bảo vệ những con rồng non.",
+            source_segment_id=146,
+        )
+        solved = solve_segment_timing([segment])
+        # Short clause "Sau này," (< 4 words) must not be isolated into a 0.3s micro-segment
+        # Instead, it splits into balanced clauses where each clause has at least 4 words
+        for s in solved.segments:
+            self.assertGreaterEqual(len(s.content.split()), 4)
+            dur = (s.end - s.start).total_seconds()
+            self.assertGreaterEqual(dur, 1.0)
+        self.assertEqual(
+            "".join(s.content for s in solved.segments).replace(" ", ""),
+            segment.content.replace(" ", ""),
+        )
+
+    def test_split_merges_short_phrases_in_compound_sentences(self):
+        segment = RuntimeSegment(
+            index=154,
+            start=timedelta(seconds=618.34),
+            end=timedelta(seconds=622.48),
+            content="Assassin, tuy nhiên, đi một mình đến một con mương khác, và một con rồng miệng lạ đi theo anh ta, giữ lại nhiều hơn.",
+            source_segment_id=154,
+        )
+        solved = solve_segment_timing([segment])
+        # Must not create 1-2 word fragments like "Assassin," or "tuy nhiên,"
+        for s in solved.segments:
+            self.assertGreaterEqual(len(s.content.split()), 4)
+
+
 
 class AudioFitIntegrationTests(unittest.TestCase):
     def test_short_audio_is_not_slowed_below_normal_speed(self):

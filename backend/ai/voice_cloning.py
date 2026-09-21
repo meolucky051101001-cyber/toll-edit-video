@@ -12,7 +12,7 @@ from pydub import AudioSegment
 logger = logging.getLogger(__name__)
 
 edge_semaphore = asyncio.Semaphore(1)
-capcut_semaphore = threading.Semaphore(2)
+capcut_semaphore = threading.Semaphore(int(os.getenv("CAPCUT_CONCURRENCY", "3")))
 rvc_semaphore = asyncio.Semaphore(1)
 global_rvc_instance = None
 global_rvc_model_path = None
@@ -116,11 +116,14 @@ async def generate_tts_edge(
         raise RuntimeError("Edge TTS failed after {} attempts".format(attempts)) from last_error
 
 def _run_capcut_tts_once(
-    text, output_path, voice="BV562_streaming", poll_interval=3.0
+    text, output_path, voice="BV562_streaming", poll_interval=None
 ):
     import json, requests, time
     from capcut_tts_api import CapCutClient
     client = CapCutClient()
+
+    if poll_interval is None:
+        poll_interval = float(os.getenv("CAPCUT_POLL_INTERVAL", "1.5"))
     
     res = client.create_tts_task(texts=text, voice=voice)
     task_id = res["data"]["tasks"][0]["id"]
@@ -152,7 +155,7 @@ def _run_capcut_tts(
     voice="BV562_streaming",
     attempts=3,
     retry_delays=(2.0, 5.0),
-    poll_interval=3.0,
+    poll_interval=None,
 ):
     import time
 
