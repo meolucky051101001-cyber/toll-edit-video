@@ -404,7 +404,12 @@ def main() -> int:
         )
     print(f"Release scorecard saved to: {report_path}\n")
 
-    return 0 if (all_passed and is_live_requested) else (0 if all_passed else 1)
+    require_live = ("--require-live" in sys.argv) or (os.environ.get("REQUIRE_LIVE") == "1")
+    if require_live and (not is_live_requested or not results.get("11_live_crawl_acceptance", {}).get("passed")):
+        print("ERROR: --require-live is active but Stage 11 (Live Crawl) was skipped or failed. Release gate rejected with exit code 2.\n")
+        return 2
+
+    return 0 if all_passed else 1
 
 
 if __name__ == "__main__":

@@ -172,3 +172,79 @@ def test_exact_hashtag_filter_flag():
     assert detail_match.relevance > 70.0
     assert detail_lack.relevance <= 20.0
     assert any("#ootd" in m for m in detail_lack.missing_mandatory_intents)
+
+
+# ---------------------------------------------------------------------------
+# Test 6: Strict Negative and Alias Tests (#decor, #decorbanhoc, #decor_ban_hoc, #decorbanhocx)
+# ---------------------------------------------------------------------------
+def test_strict_hashtag_negative_and_alias_cases():
+    """Verifies that substring matches (#decor, #decorbanhocx) fail, while exact & alias succeed."""
+    target_query = "#decorbanhoc"
+
+    # 1. Substring #decor -> MUST FAIL (Negative case)
+    vid_decor = make_test_video(
+        title="Decor góc phòng siêu đẹp",
+        caption="Tổng hợp đồ decor",
+        hashtags=["decor"],
+    )
+    detail_decor = rank_detailed(vid_decor, target_query)
+    assert detail_decor.relevance <= 20.0, f"Expected relevance <= 20.0 for #decor, got {detail_decor.relevance}"
+    assert any("#decorbanhoc" in m for m in detail_decor.missing_mandatory_intents)
+
+    # 2. Superstring #decorbanhocx -> MUST FAIL (Negative case)
+    vid_decorx = make_test_video(
+        title="Decor góc học tập",
+        caption="Decor ban hoc",
+        hashtags=["decorbanhocx"],
+    )
+    detail_decorx = rank_detailed(vid_decorx, target_query)
+    assert detail_decorx.relevance <= 20.0, f"Expected relevance <= 20.0 for #decorbanhocx, got {detail_decorx.relevance}"
+    assert any("#decorbanhoc" in m for m in detail_decorx.missing_mandatory_intents)
+
+    # 3. Exact #decorbanhoc -> MUST PASS (Positive case)
+    vid_exact = make_test_video(
+        title="Góc học tập ấm cúng",
+        caption="Decor ban hoc",
+        hashtags=["decorbanhoc"],
+    )
+    detail_exact = rank_detailed(vid_exact, target_query)
+    assert detail_exact.relevance >= 70.0
+    assert not detail_exact.missing_mandatory_intents
+
+    # 4. Normalized alias #decor_ban_hoc -> MUST PASS (Positive case)
+    vid_alias = make_test_video(
+        title="Góc học tập ấm cúng",
+        caption="Decor ban hoc",
+        hashtags=["decor_ban_hoc"],
+    )
+    detail_alias = rank_detailed(vid_alias, target_query)
+    assert detail_alias.relevance >= 70.0
+    assert not detail_alias.missing_mandatory_intents
+
+    # 5. Declared Chinese alias #书桌布置 -> MUST PASS (Positive case)
+    vid_zh_alias = make_test_video(
+        title="书桌布置日常",
+        caption="桌面搭配",
+        hashtags=["书桌布置"],
+    )
+    detail_zh_alias = rank_detailed(vid_zh_alias, target_query)
+    assert detail_zh_alias.relevance >= 70.0
+    assert not detail_zh_alias.missing_mandatory_intents
+
+
+def test_ai_translation_does_not_substitute_strict_hashtag():
+    """Verifies that Chinese translation in title does NOT count as hashtag match when strict hashtag is required."""
+    vid_no_tag_but_chinese_title = make_test_video(
+        title="书桌布置分享",
+        caption="我的小书桌",
+        hashtags=["daily", "vlog"],  # No hashtag matching #decorbanhoc
+    )
+    detail = rank_detailed(
+        vid_no_tag_but_chinese_title,
+        "#decorbanhoc",
+        alternative_queries=["书桌布置", "桌面改造"],
+        exact_hashtag=True,
+    )
+    # Even though title matches Chinese translation "书桌布置", it lacks #decorbanhoc hashtag
+    assert detail.relevance <= 20.0
+    assert any("#decorbanhoc" in m for m in detail.missing_mandatory_intents)

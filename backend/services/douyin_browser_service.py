@@ -475,20 +475,26 @@ class DouyinBrowserService:
         async with self.lock:
             await self._close()
 
-    async def screenshot_note_images(self, note_url: str, save_dir: Path) -> list[Path]:
-        """Screenshots individual images from a Douyin note/image post by stepping through slides."""
+    async def screenshot_note_images(
+        self,
+        note_url: str,
+        save_dir: Path,
+        page: Page | None = None,
+        max_slides: int | None = None,
+    ) -> list[Path]:
+        """Captures individual high-resolution screenshots for each slide of a Douyin image/note album."""
         save_dir.mkdir(parents=True, exist_ok=True)
         saved_paths: list[Path] = []
-        page: Page | None = None
         created_page = False
         try:
-            if not self.context:
-                await self.ensure_open()
-            if self.context:
-                page = await self.context.new_page()
-                created_page = True
-            else:
-                page = self.page
+            if page is None:
+                if not self.context:
+                    await self.ensure_open()
+                if self.context:
+                    page = await self.context.new_page()
+                    created_page = True
+                else:
+                    page = self.page
 
             if not page or page.is_closed():
                 return saved_paths
@@ -498,42 +504,46 @@ class DouyinBrowserService:
             except Exception:
                 pass
 
-            await page.goto(note_url, wait_until="domcontentloaded", timeout=25000)
-            await asyncio.sleep(1.5)
+            if created_page:
+                await page.goto(note_url, wait_until="domcontentloaded", timeout=25000)
+                await asyncio.sleep(1.5)
 
-            # Detect indicator for total slides (e.g. "1/5", "2 / 6")
-            max_slides = 20
-            try:
-                indicator_text = await page.locator(
-                    "[class*='indicator'], [class*='slider-tag'], [class*='pagination'], [class*='count']"
-                ).evaluate_all("els => els.map(e => e.innerText).join(' ')")
-                import re
+            # Detect indicator for total slides (e.g. "1/5", "2 / 6") if max_slides not specified
+            if max_slides is None:
+                max_slides = 20
+                try:
+                    indicator_text = await page.locator(
+                        "[class*='indicator'], [class*='slider-tag'], [class*='pagination'], [class*='count']"
+                    ).evaluate_all("els => els.map(e => e.innerText).join(' ')")
+                    import re
 
-                m_ind = re.search(r"\d+\s*/\s*(\d+)", str(indicator_text))
-                if m_ind:
-                    total_from_ind = int(m_ind.group(1))
-                    if 1 <= total_from_ind <= 50:
-                        max_slides = total_from_ind
-            except Exception:
-                pass
+                    m_ind = re.search(r"\d+\s*/\s*(\d+)", str(indicator_text))
+                    if m_ind:
+                        total_from_ind = int(m_ind.group(1))
+                        if 1 <= total_from_ind <= 50:
+                            max_slides = total_from_ind
+                except Exception:
+                    pass
 
             seen_sources: set[str] = set()
             consecutive_duplicate_steps = 0
             start_loop_time = asyncio.get_running_loop().time()
             max_duration_seconds = 30.0
 
+            first_slide_src: str | None = None
             for _ in range(max_slides):
                 if asyncio.get_running_loop().time() - start_loop_time > max_duration_seconds:
                     logger.debug("Reached timeout while capturing note slides from %s", note_url)
                     break
 
-                # Query current active slide image
+                # Query current active slide image and mark it in DOM
                 slide_img = await page.evaluate(
                     """() => {
                         const container = document.querySelector('[data-e2e="note-detail"], .slider-video, [class*="slider"], [class*="carousel"]') || document.body;
+                        container.querySelectorAll('img[data-current-active-slide="true"]').forEach(el => el.removeAttribute('data-current-active-slide'));
                         const imgs = Array.from(container.querySelectorAll('img')).filter(img => {
                             const r = img.getBoundingClientRect();
-                            return r.width >= 200 && r.height >= 200 && r.bottom > 0 && r.top < window.innerHeight;
+                            return r.width >= 150 && r.height >= 150 && r.bottom > 0 && r.top < window.innerHeight;
                         });
                         if (!imgs.length) return null;
                         imgs.sort((a, b) => {
@@ -542,22 +552,35 @@ class DouyinBrowserService:
                             return (rb.width * rb.height) - (ra.width * ra.height);
                         });
                         const best = imgs[0];
+                        best.setAttribute('data-current-active-slide', 'true');
                         return best.currentSrc || best.src || best.getAttribute('data-src') || best.getAttribute('data-origin') || null;
                     }"""
                 )
+
+                if slide_img:
+                    src_str = str(slide_img)
+                    if first_slide_src is None:
+                        first_slide_src = src_str
+                    elif src_str == first_slide_src and len(saved_paths) >= 1:
+                        logger.debug("Cycled back to initial slide (%s), stopping capture.", src_str)
+                        break
 
                 found_new = False
                 if slide_img and str(slide_img) not in seen_sources:
                     seen_sources.add(str(slide_img))
                     out_file = save_dir / f"{len(saved_paths) + 1:03d}.png"
-                    card = page.locator(
-                        "[data-e2e='note-detail'] img, .slider-video img, [class*='slider'] img, [class*='carousel'] img"
-                    ).first
+                    card = page.locator("img[data-current-active-slide='true']").first
                     try:
                         if await card.count() > 0:
                             await card.screenshot(path=str(out_file))
                         else:
-                            await page.screenshot(path=str(out_file))
+                            fallback_card = page.locator(
+                                "[data-e2e='note-detail'] img, .slider-video img, [class*='slider'] img"
+                            ).first
+                            if await fallback_card.count() > 0:
+                                await fallback_card.screenshot(path=str(out_file))
+                            else:
+                                await page.screenshot(path=str(out_file))
                         if out_file.exists() and out_file.stat().st_size > 0:
                             saved_paths.append(out_file)
                             found_new = True

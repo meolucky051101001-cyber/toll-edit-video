@@ -66,6 +66,12 @@ export function normalizeLimitForMode(currentLimit: number, targetMode: string):
   return 20;
 }
 
+export function mapSortByToGridSort(sortBy: string): string {
+  if (sortBy === "most_liked") return "likes";
+  if (sortBy === "newest") return "newest";
+  return "best";
+}
+
 function SearchSession({
   initialQuery,
   initialJob,
@@ -150,7 +156,17 @@ function SearchSession({
       }
     }
 
+    const hasHashtag = /#([^\s#]+)/.test(query) || query.trim().startsWith("#");
+    if (exactHashtag && !hasHashtag) {
+      setError("Vui lòng nhập thẻ hashtag với ký tự # (ví dụ: #decorbanhoc) khi bật chế độ Khớp chính xác Hashtag.");
+      setBusy(false);
+      return;
+    }
+
     try {
+      const extractedTag = hasHashtag
+        ? (query.match(/#([^\s#]+)/)?.[1] || query.trim().replace(/^#+/, "").split(/\s+/)[0])
+        : undefined;
       const result = await api<Job>("/search", {
         method: "POST",
         body: JSON.stringify({
@@ -166,10 +182,8 @@ function SearchSession({
           sort_by: sortBy,
           publish_time: publishTime,
           content_type: contentType,
-          exact_hashtag: exactHashtag || query.trim().startsWith("#"),
-          target_hashtag: query.trim().startsWith("#")
-            ? query.trim().replace(/^#+/, "").split(/\s+/)[0]
-            : undefined,
+          exact_hashtag: exactHashtag || hasHashtag,
+          target_hashtag: extractedTag,
         }),
       });
       setJobId(result.id);
@@ -307,6 +321,11 @@ function SearchSession({
               <strong style={{ background: "#ccfbf1", padding: "0.1rem 0.4rem", borderRadius: "4px" }}>
                 {query.trim()}
               </strong>
+            </div>
+          )}
+          {exactHashtag && !query.includes("#") && (
+            <div style={{ margin: "-0.5rem 0 0.5rem 0.25rem", fontSize: "0.82rem", color: "#b45309", display: "flex", alignItems: "center", gap: "0.35rem" }}>
+              <span>⚠️ Vui lòng nhập thêm thẻ #hashtag (ví dụ: #decorbanhoc) vào ô tìm kiếm để lọc chính xác thẻ.</span>
             </div>
           )}
           <div className="search-options">
@@ -712,7 +731,7 @@ function SearchSession({
         </section>
       )}
       {jobId ? (
-        <VideoGrid key={jobId} jobId={jobId} />
+        <VideoGrid key={jobId} jobId={jobId} initialSort={mapSortByToGridSort(sortBy)} />
       ) : (
         <>
           <div className="section-heading">

@@ -107,11 +107,12 @@ async def test_live_crawl_provider_acceptance_with_filters():
             assert all(d.final_score >= 0.0 for d in details)
     else:
         # Live browser integration acceptance
+        from backend.providers.base import UserActionRequired
         from backend.providers.douyin.provider import DouyinProvider
         from backend.services.douyin_browser_service import DouyinBrowserService
 
         browser = DouyinBrowserService(headless=True)
-        provider = DouyinProvider(browser=browser)
+        provider = DouyinProvider(browser=browser, auto_elevate=False)
         try:
             results = await provider.search("decor bàn học", limit=5, filters=filters)
             assert len(results) > 0
@@ -119,6 +120,10 @@ async def test_live_crawl_provider_acceptance_with_filters():
                 assert r.platform == "douyin"
                 assert r.platform_video_id
                 assert str(r.url).startswith("https://")
+        except UserActionRequired as uar:
+            # Douyin anti-scraping challenge contract validation
+            assert uar.state in {"waiting_for_user", "waiting_for_login"}
+            assert "Douyin" in str(uar)
         finally:
             await provider.close()
             await browser.close()

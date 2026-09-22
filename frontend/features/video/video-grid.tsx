@@ -11,13 +11,15 @@ import { ErrorBanner } from "@/components/error-banner";
 export function VideoGrid({
   jobId,
   library = false,
+  initialSort = "best",
 }: {
   jobId?: string;
   library?: boolean;
+  initialSort?: string;
 }) {
   const [platform, setPlatform] = useState("");
   const [status, setStatus] = useState(library ? "saved" : "");
-  const [sort, setSort] = useState("best");
+  const [sort, setSort] = useState(initialSort);
   const [relevance, setRelevance] = useState("0");
   const [likes, setLikes] = useState("0");
   const [duration, setDuration] = useState("");

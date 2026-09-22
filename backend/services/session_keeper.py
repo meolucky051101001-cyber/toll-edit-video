@@ -80,24 +80,83 @@ class SessionKeepAliveService:
     async def ping_platform(self, platform: str, browser_service: Any = None) -> bool:
         """Sends a lightweight ping to keep cookies fresh if browser service is available and not busy."""
         if not browser_service:
-            self.last_heartbeat[platform] = time.time()
-            return True
+            logger.debug("No browser service available for %s ping", platform)
+            return False
 
         if hasattr(browser_service, "lock") and browser_service.lock.locked():
             logger.debug("Skipping session ping for %s: browser is currently busy", platform)
             return False
 
-        try:
-            async with browser_service.lock:
-                page = getattr(browser_service, "page", None)
-                if page and not page.is_closed():
-                    target_url = "https://www.douyin.com/" if platform == "douyin" else "https://www.xiaohongshu.com/explore"
-                    await page.evaluate(f"() => fetch('{target_url}', {{ method: 'HEAD' }}).catch(() => {{}})")
-                    self.last_heartbeat[platform] = time.time()
-                    logger.info("Session heartbeat sent for %s", platform)
-                    return True
-        except Exception as err:
-            logger.warning("Session heartbeat error for %s: %s", platform, err)
+        target_url = "https://www.douyin.com/" if platform == "douyin" else "https://www.xiaohongshu.com/explore"
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                async with browser_service.lock:
+                    page = getattr(browser_service, "page", None)
+                    if not page or page.is_closed():
+                        return False
+
+                    ping_res = await page.evaluate(
+                        f"""async () => {{
+                            const controller = new AbortController();
+                            const timeoutId = setTimeout(() => controller.abort(), 8000);
+                            try {{
+                                const res = await fetch('{target_url}', {{
+                                    method: 'HEAD',
+                                    signal: controller.signal,
+                                    credentials: 'include'
+                                }});
+                                clearTimeout(timeoutId);
+                                return {{
+                                    ok: res.ok || (res.status >= 200 && res.status < 400),
+                                    status: res.status
+                                }};
+                            }} catch (e) {{
+                                clearTimeout(timeoutId);
+                                return {{ ok: false, error: String(e), status: 0 }};
+                            }}
+                        }}"""
+                    )
+
+                    if isinstance(ping_res, dict) and ping_res.get("ok"):
+                        login_ok = True
+                        if hasattr(browser_service, "is_logged_in"):
+                            try:
+                                login_ok = await browser_service.is_logged_in()
+                            except Exception:
+                                pass
+
+                        if login_ok:
+                            self.last_heartbeat[platform] = time.time()
+                            logger.info(
+                                "Session heartbeat succeeded for %s (status=%s)",
+                                platform,
+                                ping_res.get("status"),
+                            )
+                            return True
+                        else:
+                            logger.warning("Session heartbeat failed for %s: user session logged out", platform)
+                            return False
+                    else:
+                        logger.warning(
+                            "Session heartbeat ping returned unsuccessful status for %s (attempt %d/%d): %s",
+                            platform,
+                            attempt + 1,
+                            max_retries,
+                            ping_res,
+                        )
+            except Exception as err:
+                logger.warning(
+                    "Session heartbeat error for %s (attempt %d/%d): %s",
+                    platform,
+                    attempt + 1,
+                    max_retries,
+                    err,
+                )
+
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1.0)
+
         return False
 
     async def _heartbeat_loop(self) -> None:

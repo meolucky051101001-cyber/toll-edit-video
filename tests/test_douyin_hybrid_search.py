@@ -528,5 +528,3 @@ async def test_search_service_defense_in_depth_post_filtering(sessions):
         reasons = [c["reason"] for c in rejected_candidates]
         assert any("Định dạng không khớp" in r for r in reasons)
         assert any("Thời gian đăng không thỏa mãn" in r for r in reasons)
-
-

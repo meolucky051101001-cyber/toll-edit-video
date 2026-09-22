@@ -132,7 +132,33 @@ def intent_constraints(query: str) -> list[tuple[str, list[str], float]]:
     return groups
 
 
+def normalize_hashtag_str(tag: str) -> str:
+    cleaned = normalize_vietnamese(tag).lstrip("#").strip().lower()
+    return cleaned.replace("_", "").replace("-", "").replace(" ", "")
+
+
+HASHTAG_ALIAS_MAP: dict[str, set[str]] = {
+    "decorbanhoc": {"decorbanhoc", "trangtribanhoc", "gocbanhoc", "书桌布置", "桌面改造", "桌搭"},
+    "decorphongngu": {"decorphongngu", "trangtriphongngu", "gocphongngu", "卧室布置", "房间布置"},
+    "decorbanlamviec": {"decorbanlamviec", "trangtribanlamviec", "goclamviec", "办公桌布置", "工位改造"},
+    "banphimco": {"banphimco", "banphim", "机械键盘", "客制化键盘"},
+    "meotrimunan": {"meotrimunan", "trimunan", "去闭口", "祛闭口"},
+    "trimun": {"trimun", "tri_mun", "祛痘", "战痘"},
+    "kemchongnang": {"kemchongnang", "防晒", "防晒霜"},
+    "suaruamat": {"suaruamat", "洁面", "洗面奶"},
+    "duongda": {"duongda", "护肤", "护肤流程"},
+    "phoido": {"phoido", "穿搭", "日常穿搭", "ootd"},
+    "ootd": {"ootd", "dailyootd", "今日穿搭", "穿搭"},
+}
+
+CANONICAL_HASHTAG_MAP: dict[str, str] = {}
+for canonical_tag, tag_aliases in HASHTAG_ALIAS_MAP.items():
+    for a in tag_aliases:
+        CANONICAL_HASHTAG_MAP[normalize_hashtag_str(a)] = canonical_tag
+
+
 def rank_detailed(
+
     result: VideoResult,
     query: str,
     alternative_queries: list[str] | None = None,
@@ -141,6 +167,9 @@ def rank_detailed(
     target_hashtag: str | None = None,
 ) -> RankBreakdown:
     candidates = [query]
+    norm_q = normalize_hashtag_str(query)
+    if norm_q in HASHTAG_SEGMENTATION_MAP:
+        candidates.append(HASHTAG_SEGMENTATION_MAP[norm_q])
     if alternative_queries:
         for alt in alternative_queries:
             if alt and alt not in candidates:
@@ -150,9 +179,16 @@ def rank_detailed(
     caption = tokens(result.caption or "")
     expanded_tags_list: list[str] = []
     for t in (result.hashtags or []):
-        expanded_tags_list.append(str(t))
-        norm_t = normalize_vietnamese(str(t)).replace("_", "").replace("-", "")
-        if norm_t in HASHTAG_SEGMENTATION_MAP:
+        raw_t = str(t)
+        expanded_tags_list.append(raw_t)
+        norm_t = normalize_hashtag_str(raw_t)
+        expanded_tags_list.append(norm_t)
+        canonical = CANONICAL_HASHTAG_MAP.get(norm_t)
+        if canonical:
+            expanded_tags_list.append(canonical)
+            if canonical in HASHTAG_SEGMENTATION_MAP:
+                expanded_tags_list.append(HASHTAG_SEGMENTATION_MAP[canonical])
+        elif norm_t in HASHTAG_SEGMENTATION_MAP:
             expanded_tags_list.append(HASHTAG_SEGMENTATION_MAP[norm_t])
     tags = tokens(" ".join(expanded_tags_list))
     target_tokens = title | caption | tags
@@ -261,35 +297,28 @@ def rank_detailed(
     video_clean_tags: list[str] = [
         str(h).strip().lstrip("#") for h in video_raw_hashtags if str(h).strip()
     ]
-    norm_video_tags = [
-        normalize_vietnamese(vt).replace("_", "").replace("-", "") for vt in video_clean_tags
-    ]
 
     hashtag_matched = False
     matched_hashtag_names: list[str] = []
 
     if active_target_tag:
-        norm_target = (
-            normalize_vietnamese(active_target_tag).lstrip("#").replace("_", "").replace("-", "")
-        )
-        segmented_target = HASHTAG_SEGMENTATION_MAP.get(norm_target, norm_target)
-        target_tag_tokens = tokens(segmented_target) | {norm_target}
+        norm_target = normalize_hashtag_str(active_target_tag)
+        target_canonical = CANONICAL_HASHTAG_MAP.get(norm_target, norm_target)
 
-        for vt, nvt in zip(video_clean_tags, norm_video_tags, strict=True):
-            if norm_target == nvt or (len(norm_target) >= 3 and norm_target in nvt) or (len(nvt) >= 3 and nvt in norm_target):
+        for vt in video_clean_tags:
+            nvt = normalize_hashtag_str(vt)
+            vt_canonical = CANONICAL_HASHTAG_MAP.get(nvt, nvt)
+
+            # Strict equality after normalization or declared alias match ONLY
+            if norm_target == nvt or (
+                target_canonical == vt_canonical and target_canonical in HASHTAG_ALIAS_MAP
+            ):
                 hashtag_matched = True
                 matched_hashtag_names.append(vt)
-            elif alternative_queries and any(alias.lstrip("#").lower() in vt.lower() for alias in alternative_queries if alias):
-                hashtag_matched = True
-                matched_hashtag_names.append(vt)
-            else:
-                vt_toks = tokens(vt)
-                if vt_toks and (vt_toks & target_tag_tokens):
-                    hashtag_matched = True
-                    matched_hashtag_names.append(vt)
     elif video_clean_tags:
         query_core = tokens(query) - GENERIC_MODIFIERS
-        for vt, nvt in zip(video_clean_tags, norm_video_tags, strict=True):
+        for vt in video_clean_tags:
+            nvt = normalize_hashtag_str(vt)
             segmented_vt = HASHTAG_SEGMENTATION_MAP.get(nvt, vt)
             vt_toks = tokens(segmented_vt) | tokens(vt)
             if vt_toks and (vt_toks & query_core):

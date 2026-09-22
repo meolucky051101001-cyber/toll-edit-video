@@ -100,7 +100,7 @@ def test_session_keep_alive_service(tmp_path):
         mock_browser.lock = asyncio.Lock()
         mock_page = MagicMock()
         mock_page.is_closed = MagicMock(return_value=False)
-        mock_page.evaluate = AsyncMock(return_value=None)
+        mock_page.evaluate = AsyncMock(return_value={"ok": True, "status": 200})
         mock_browser.page = mock_page
 
         ok = await service.ping_platform("douyin", mock_browser)

@@ -1,3 +1,5 @@
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -36,6 +38,22 @@ async def create_search(payload: SearchRequest, request: Request, db: Session = 
     )
     db.add(job)
     db.flush()
+
+    query_text = payload.query.strip()
+    raw_tags = re.findall(r"#([^\s#]+)", query_text)
+    has_tag_in_query = bool(raw_tags or query_text.startswith("#"))
+
+    if payload.exact_hashtag and not has_tag_in_query and not payload.target_hashtag:
+        raise HTTPException(
+            400,
+            "Khi bật chế độ khớp chính xác hashtag, truy vấn phải chứa thẻ hashtag (ví dụ: #decorbanhoc) hoặc cung cấp target_hashtag.",
+        )
+
+    target_hashtag = payload.target_hashtag or (
+        raw_tags[0] if raw_tags else (query_text.lstrip("#").split()[0] if query_text.startswith("#") else None)
+    )
+    exact_hashtag = bool(payload.exact_hashtag or has_tag_in_query)
+
     db.add(
         SearchPlan(
             job_id=job.id,
@@ -48,10 +66,8 @@ async def create_search(payload: SearchRequest, request: Request, db: Session = 
                 "sort_by": payload.sort_by,
                 "publish_time": payload.publish_time,
                 "content_type": payload.content_type,
-                "exact_hashtag": payload.exact_hashtag or payload.query.strip().startswith("#"),
-                "target_hashtag": payload.target_hashtag or (
-                    payload.query.strip().lstrip("#").split()[0] if payload.query.strip().startswith("#") else None
-                ),
+                "exact_hashtag": exact_hashtag,
+                "target_hashtag": target_hashtag,
             },
         )
     )

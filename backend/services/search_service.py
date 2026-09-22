@@ -394,7 +394,7 @@ class SearchService:
                         result,
                         ranking_target,
                         alternative_queries=alternative_queries,
-                        exact_hashtag=bool(job_filters.exact_hashtag or query.strip().startswith("#")),
+                        exact_hashtag=bool(job_filters.exact_hashtag or ranking_target.strip().startswith("#")),
                         target_hashtag=job_filters.target_hashtag,
                     )
                     scores = (detail.relevance, detail.quality, detail.final_score)
@@ -425,10 +425,10 @@ class SearchService:
                             reject_reason = f"Thời gian đăng không thỏa mãn bộ lọc ({job_filters.publish_time})"
 
                     # Strict hashtag match guard
-                    if not is_rejected and (job_filters.exact_hashtag or query.strip().startswith("#")):
+                    if not is_rejected and (job_filters.exact_hashtag or ranking_target.strip().startswith("#")):
                         if detail.missing_mandatory_intents and any(m.startswith("#") for m in detail.missing_mandatory_intents):
                             is_rejected = True
-                            reject_reason = f"Không khớp thẻ hashtag yêu cầu ({job_filters.target_hashtag or query.strip()})"
+                            reject_reason = f"Không khớp thẻ hashtag yêu cầu ({job_filters.target_hashtag or ranking_target.strip()})"
 
                     if not is_rejected and job.min_relevance is not None:
                         if detail.missing_mandatory_intents:
