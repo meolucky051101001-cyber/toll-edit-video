@@ -189,3 +189,84 @@ class GeminiAIProvider(AIProvider):
             user_content=json.dumps(video_data, ensure_ascii=False),
             schema=ScriptAnalysisOut.model_json_schema(),
         )
+
+    async def embed_text(self, text: str) -> list[float]:
+        """Generates text embedding vector using Gemini text-embedding-004."""
+        if not self.config.ai_api_key.get_secret_value() or not self.config.ai_free_tier_confirmed:
+            return []
+
+        url = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent"
+        body = {
+            "model": "models/text-embedding-004",
+            "content": {
+                "parts": [{"text": text[:2048]}]
+            }
+        }
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.config.ai_timeout, transport=self.transport, follow_redirects=False
+            ) as client:
+                resp = await client.post(
+                    url,
+                    json=body,
+                    headers={
+                        "x-goog-api-key": self.config.ai_api_key.get_secret_value(),
+                        "Content-Type": "application/json",
+                    },
+                )
+            if resp.status_code == 200:
+                data = resp.json()
+                vals = data.get("embedding", {}).get("values", [])
+                if isinstance(vals, list) and vals:
+                    return [float(v) for v in vals]
+            return []
+        except Exception:
+            return []
+
+    async def extract_image_text(self, image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        """Extracts visible Chinese/Vietnamese text from image using Gemini Multimodal Vision."""
+        if not self.config.ai_api_key.get_secret_value() or not self.config.ai_free_tier_confirmed:
+            return ""
+        import base64
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.config.ai_model}:generateContent"
+        body = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": "Trích xuất toàn bộ chữ (tiếng Trung hoặc tiếng Việt) xuất hiện trong bức ảnh này một cách trung thực nhất. Chỉ trả về văn bản trích xuất, không thêm lời bình."},
+                        {
+                            "inlineData": {
+                                "mimeType": mime_type,
+                                "data": b64,
+                            }
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 2048,
+            }
+        }
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.config.ai_timeout, transport=self.transport, follow_redirects=False
+            ) as client:
+                resp = await client.post(
+                    url,
+                    json=body,
+                    headers={
+                        "x-goog-api-key": self.config.ai_api_key.get_secret_value(),
+                        "Content-Type": "application/json",
+                    },
+                )
+            if resp.status_code == 200:
+                data = resp.json()
+                candidates = data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    return "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+            return ""
+        except Exception:
+            return ""

@@ -77,10 +77,9 @@ function SearchSession({
 }) {
   const router = useRouter();
   const [mode, setMode] = useState<SearchMode>(initialMode);
-  const [userEnabledAI, setUserEnabledAI] = useState<boolean | null>(null);
+  const [useAI, setUseAI] = useState(false);
   const [choice, setChoice] = useState<QueryChoice | null>(null);
   const settings = useResource<Settings>("/settings");
-  const useAI = userEnabledAI !== null ? userEnabledAI : Boolean(settings.data?.ai_available);
   const [query, setQuery] = useState(initialQuery);
   const [platforms, setPlatforms] = useState<Platform[]>(
     initialMode === "mock"
@@ -88,6 +87,9 @@ function SearchSession({
       : [initialMode as Platform],
   );
   const [limit, setLimit] = useState(() => normalizeLimitForMode(20, initialMode));
+  const [sortBy, setSortBy] = useState<"relevance" | "most_liked" | "newest">("relevance");
+  const [publishTime, setPublishTime] = useState<"all" | "day" | "week" | "six_months">("all");
+  const [contentType, setContentType] = useState<"all" | "video" | "image_text">("all");
   const [jobId, setJobId] = useState<string | null>(initialJob);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -160,6 +162,9 @@ function SearchSession({
           limit: normalizeLimitForMode(limit, mode),
           use_ai: useAI,
           selected_queries: terms.length ? terms : undefined,
+          sort_by: sortBy,
+          publish_time: publishTime,
+          content_type: contentType,
         }),
       });
       setJobId(result.id);
@@ -335,30 +340,76 @@ function SearchSession({
                 );
               })}
             </div>
-            <label className="row muted">
-              Số kết quả
-              <select
-                aria-label="Số kết quả"
-                value={limit}
-                onChange={(e) => setLimit(Number(e.target.value))}
-              >
-                {(mode !== "mock"
-                  ? [5, 10, 20, 50, 100]
-                  : [20, 50, 100, 200]
-                ).map((n) => (
-                  <option key={n} value={n}>
-                    {n} video
-                  </option>
-                ))}
-              </select>
-            </label>
+            <div className="row wrap" style={{ gap: "10px", alignItems: "center" }}>
+              <label className="row muted">
+                Số kết quả
+                <select
+                  aria-label="Số kết quả"
+                  value={limit}
+                  onChange={(e) => setLimit(Number(e.target.value))}
+                >
+                  {(mode !== "mock"
+                    ? [5, 10, 20, 50, 100]
+                    : [20, 50, 100, 200]
+                  ).map((n) => (
+                    <option key={n} value={n}>
+                      {n} kết quả
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {mode === "douyin" && (
+                <>
+                  <label className="row muted">
+                    Sắp xếp
+                    <select
+                      aria-label="Thứ tự sắp xếp"
+                      value={sortBy}
+                      disabled={busy}
+                      onChange={(e) => setSortBy(e.target.value as "relevance" | "most_liked" | "newest")}
+                    >
+                      <option value="relevance">Tổng hợp (Chuẩn)</option>
+                      <option value="most_liked">Nhiều like nhất</option>
+                      <option value="newest">Mới nhất</option>
+                    </select>
+                  </label>
+                  <label className="row muted">
+                    Thời gian
+                    <select
+                      aria-label="Thời gian đăng"
+                      value={publishTime}
+                      disabled={busy}
+                      onChange={(e) => setPublishTime(e.target.value as "all" | "day" | "week" | "six_months")}
+                    >
+                      <option value="all">Mọi lúc</option>
+                      <option value="day">24h qua</option>
+                      <option value="week">1 tuần qua</option>
+                      <option value="six_months">6 tháng qua</option>
+                    </select>
+                  </label>
+                  <label className="row muted">
+                    Định dạng
+                    <select
+                      aria-label="Loại nội dung"
+                      value={contentType}
+                      disabled={busy}
+                      onChange={(e) => setContentType(e.target.value as "all" | "video" | "image_text")}
+                    >
+                      <option value="all">Tất cả</option>
+                      <option value="video">Chỉ Video</option>
+                      <option value="image_text">Chỉ 图文 (Ảnh)</option>
+                    </select>
+                  </label>
+                </>
+              )}
+            </div>
           </div>
           <div className="row wrap" style={{ alignItems: "center", gap: "1rem" }}>
             <label className="row ai-toggle">
               <input
                 type="checkbox"
                 checked={useAI}
-                onChange={(e) => setUserEnabledAI(e.target.checked)}
+                onChange={(e) => setUseAI(e.target.checked)}
                 disabled={busy}
               />
               Tự tạo từ khóa AI khi tìm

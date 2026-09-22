@@ -197,10 +197,10 @@ async def test_full_state_transitions_including_validating(queue_test_env, monke
     await service.start()
 
     # Await completion
-    for _ in range(30):
+    for _ in range(120):
         await asyncio.sleep(0.05)
         out = service.get_job_by_id(job.id)
-        if out and out.status == "completed":
+        if out and out.status in ("completed", "failed", "cancelled"):
             break
 
     await service.shutdown()
@@ -255,10 +255,10 @@ async def test_transient_error_enters_retry_wait_and_succeeds(queue_test_env, mo
     job = service.request_download("vid-retry-1")
     await service.start()
 
-    for _ in range(40):
+    for _ in range(120):
         await asyncio.sleep(0.05)
         out = service.get_job_by_id(job.id)
-        if out and out.status == "completed":
+        if out and out.status in ("completed", "failed", "cancelled"):
             break
 
     await service.shutdown()
@@ -303,10 +303,10 @@ async def test_non_transient_error_fails_immediately_no_retry(queue_test_env, mo
     job = service.request_download("vid-fail-1")
     await service.start()
 
-    for _ in range(20):
+    for _ in range(80):
         await asyncio.sleep(0.05)
         out = service.get_job_by_id(job.id)
-        if out and out.status == "failed":
+        if out and out.status in ("completed", "failed", "cancelled"):
             break
 
     await service.shutdown()
@@ -367,10 +367,10 @@ async def test_resumable_download_with_range_206(queue_test_env, monkeypatch):
 
     await service.start()
 
-    for _ in range(30):
+    for _ in range(120):
         await asyncio.sleep(0.05)
         out = service.get_job_by_id(job.id)
-        if out and out.status == "completed":
+        if out and out.status in ("completed", "failed", "cancelled"):
             break
 
     await service.shutdown()

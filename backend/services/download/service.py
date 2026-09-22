@@ -91,12 +91,14 @@ class DownloadService:
         max_retries: int | None = None,
         retry_base_delay: float | None = None,
         event_bus: EventBus | None = None,
+        ai_service: Any | None = None,
     ):
         self.sessions = sessions
         self.xhs_adapter = xhs_adapter or XhsDownloadAdapter(settings.xhs_downloader_url)
         self.douyin_adapter = douyin_adapter or DouyinDownloadAdapter(settings.douyin_downloader_url)
         self.browser_resolver = browser_resolver
         self.event_bus = event_bus if event_bus is not None else default_event_bus
+        self.ai_service = ai_service
 
         self.queue_capacity = queue_capacity or settings.download_queue_capacity
         self.worker_count = worker_count or settings.download_worker_count
@@ -297,7 +299,7 @@ class DownloadService:
                 )
                 if completed and completed.relative_path:
                     full_path = self.download_dir / completed.relative_path
-                    if full_path.is_file():
+                    if full_path.is_file() or full_path.is_dir():
                         return self._to_out(completed)
 
             # Create new queued job
@@ -467,6 +469,29 @@ class DownloadService:
                             assert v is not None
                             target_video = v
 
+                        if getattr(target_video, "media_type", None) == "image_text":
+                            self._update_job_status(download_id, "downloading")
+                            try:
+                                album_res = await asyncio.wait_for(
+                                    self._download_image_album(download_id, target_video),
+                                    timeout=float(settings.download_timeout_seconds),
+                                )
+                                if album_res == "retry":
+                                    continue
+                                return
+                            except asyncio.TimeoutError:
+                                if self._should_retry("download_timeout", download_id):
+                                    if await self._handle_retry_wait(
+                                        download_id, "download_timeout", "Quá thời gian tối đa để tải album ảnh."
+                                    ):
+                                        continue
+                                self._fail_job(
+                                    download_id,
+                                    "download_timeout",
+                                    "Quá thời gian tối đa cho phép để tải album ảnh.",
+                                )
+                                return
+
                         try:
                             resolved = await adapter.resolve(target_video)
                         except DownloadAdapterError as dae:
@@ -563,6 +588,135 @@ class DownloadService:
                         continue
                 self._fail_job(download_id, "unexpected_error", "Lỗi không xác định khi xử lý tải video.")
                 return
+
+    async def _download_image_album(
+        self,
+        download_id: str,
+        video: Video,
+    ) -> str:
+        sanitized_id = re.sub(r"[^a-zA-Z0-9_-]", "", video.platform_video_id or video.id[:12])
+        album_folder_name = f"{video.platform}_{sanitized_id}_{download_id[:8]}"
+        final_dir = self.download_dir / album_folder_name
+        temp_album_dir = self.temp_dir / f"{download_id}_album"
+        temp_album_dir.mkdir(parents=True, exist_ok=True)
+
+        images = list(video.images or [])
+        downloaded_files: list[Path] = []
+        http_success = True
+
+        if images:
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Referer": "https://www.douyin.com/" if video.platform == "douyin" else "https://www.xiaohongshu.com/",
+            }
+            try:
+                async with create_safe_async_client(
+                    timeout=httpx.Timeout(30.0, connect=10.0),
+                ) as client:
+                    for idx, img_url in enumerate(images):
+                        if download_id in self.cancelled_jobs:
+                            shutil.rmtree(temp_album_dir, ignore_errors=True)
+                            return "cancelled"
+                        if not await is_safe_media_url_async(img_url):
+                            http_success = False
+                            break
+                        try:
+                            resp = await client.get(img_url, headers=headers)
+                            if resp.status_code == 200 and len(resp.content) > 0:
+                                img_path = temp_album_dir / f"{idx + 1:03d}.jpg"
+                                await asyncio.to_thread(img_path.write_bytes, resp.content)
+                                downloaded_files.append(img_path)
+                            elif resp.status_code == 403:
+                                logger.info(
+                                    "CDN returned 403 hotlink protection for %s; falling back to screenshot.",
+                                    img_url,
+                                )
+                                http_success = False
+                                break
+                            else:
+                                http_success = False
+                                break
+                        except Exception as e:
+                            logger.warning("HTTP image download failed for %s: %s", img_url, e)
+                            http_success = False
+                            break
+            except Exception as e:
+                logger.warning("Client error in image album download: %s", e)
+                http_success = False
+
+        if not images or not http_success or len(downloaded_files) == 0:
+            for f in temp_album_dir.glob("*"):
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+            douyin_browser = getattr(self.browser_resolver, "douyin_browser", None)
+            if douyin_browser and video.url:
+                logger.info("Using DouyinBrowserService.screenshot_note_images fallback for %s", video.url)
+                try:
+                    screenshot_paths = await douyin_browser.screenshot_note_images(video.url, temp_album_dir)
+                    downloaded_files = screenshot_paths
+                except Exception as ex:
+                    logger.warning("Screenshot fallback failed for %s: %s", video.url, ex)
+
+        if download_id in self.cancelled_jobs:
+            shutil.rmtree(temp_album_dir, ignore_errors=True)
+            return "cancelled"
+
+        self._update_job_status(download_id, "validating")
+        valid_files = [f for f in temp_album_dir.iterdir() if f.is_file() and f.stat().st_size > 0]
+        if not valid_files:
+            shutil.rmtree(temp_album_dir, ignore_errors=True)
+            self._fail_job(download_id, "empty_file", "Không thể tải hoặc chụp ảnh từ ghi chú.")
+            return "failed"
+
+        if final_dir.exists():
+            shutil.rmtree(final_dir, ignore_errors=True)
+        shutil.move(str(temp_album_dir), str(final_dir))
+
+        total_size = sum(f.stat().st_size for f in final_dir.iterdir() if f.is_file())
+        with self.sessions() as db:
+            j = db.get(DownloadJob, download_id)
+            if j:
+                j.status = "completed"
+                j.relative_path = album_folder_name
+                j.file_size = total_size
+                j.bytes_downloaded = total_size
+                j.total_bytes = total_size
+                j.error_code = None
+                j.error_message = None
+                db.commit()
+                if self.event_bus:
+                    self.event_bus.publish_nowait("download:update", self._to_event_payload(j))
+
+        # Phase 3: OCR enrichment for carousel notes
+        try:
+            if self.ai_service:
+                first_img = next(
+                    (f for f in sorted(final_dir.iterdir()) if f.suffix.lower() in (".jpg", ".jpeg", ".png")),
+                    None,
+                )
+                if first_img:
+                    img_bytes = first_img.read_bytes()
+                    mime = "image/png" if first_img.suffix.lower() == ".png" else "image/jpeg"
+                    provider = getattr(self.ai_service, "factory", lambda cfg: None)(getattr(self.ai_service, "config", None))
+                    if provider and hasattr(provider, "extract_image_text"):
+                        ocr_res = await provider.extract_image_text(img_bytes, mime_type=mime)
+                        if ocr_res:
+                            with self.sessions() as db:
+                                v = db.get(Video, video.id)
+                                if v:
+                                    sa = dict(v.script_analysis or {})
+                                    sa["ocr_text"] = ocr_res
+                                    v.script_analysis = sa
+                                    db.commit()
+        except Exception as ocr_err:
+            logger.debug("OCR enrichment skipped: %s", ocr_err)
+
+        return "completed"
 
     async def _download_stream(
         self,

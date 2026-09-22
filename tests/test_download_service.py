@@ -40,6 +40,17 @@ class FakeDownloadAdapter(BaseDownloadAdapter):
 
 @pytest.fixture
 def download_test_env(tmp_path, monkeypatch):
+    import socket
+    real_getaddrinfo = socket.getaddrinfo
+
+    def mock_getaddrinfo(host, port, *args, **kwargs):
+        if host in ("sns-video-bd.xhscdn.com", "aweme.snssdk.com"):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("180.163.26.1", port))]
+        return real_getaddrinfo(host, port, *args, **kwargs)
+
+    monkeypatch.setattr("socket.getaddrinfo", mock_getaddrinfo)
+    monkeypatch.setattr("backend.services.download.network.socket.getaddrinfo", mock_getaddrinfo)
+
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     sessions = sessionmaker(engine, expire_on_commit=False)
@@ -58,6 +69,17 @@ def download_test_env(tmp_path, monkeypatch):
 
 
 def test_ssrf_validation(monkeypatch):
+    import socket
+    real_getaddrinfo = socket.getaddrinfo
+
+    def mock_getaddrinfo(host, port, *args, **kwargs):
+        if host in ("sns-video-bd.xhscdn.com", "aweme.snssdk.com"):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("180.163.26.1", port))]
+        return real_getaddrinfo(host, port, *args, **kwargs)
+
+    monkeypatch.setattr("socket.getaddrinfo", mock_getaddrinfo)
+    monkeypatch.setattr("backend.services.download.network.socket.getaddrinfo", mock_getaddrinfo)
+
     assert is_safe_media_url("https://sns-video-bd.xhscdn.com/video.mp4")
     assert is_safe_media_url("https://aweme.snssdk.com/video.mp4")
 
@@ -564,20 +586,27 @@ async def test_overall_download_job_timeout(download_test_env, monkeypatch):
 
 @pytest.mark.anyio
 async def test_dns_cache_and_async_resolution():
+    import asyncio
+    import socket
+    from unittest.mock import AsyncMock, patch
+
     from backend.services.download.network import (
         _DNS_CACHE,
         resolve_and_validate_host_async,
         resolve_and_validate_host_sync,
     )
 
-    # Resolve example.com
-    ips_async = await resolve_and_validate_host_async("example.com", 443)
-    assert len(ips_async) > 0
-    assert ("example.com", 443) in _DNS_CACHE
+    fake_addr_info = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+    loop = asyncio.get_running_loop()
+    with patch.object(loop, "getaddrinfo", new_callable=AsyncMock, return_value=fake_addr_info):
+        # Resolve example.com
+        ips_async = await resolve_and_validate_host_async("example.com", 443)
+        assert len(ips_async) > 0
+        assert ("example.com", 443) in _DNS_CACHE
 
-    # Synchronous resolution uses cache
-    ips_sync = resolve_and_validate_host_sync("example.com", 443)
-    assert ips_sync == ips_async
+        # Synchronous resolution uses cache
+        ips_sync = resolve_and_validate_host_sync("example.com", 443)
+        assert ips_sync == ips_async
 
 
 

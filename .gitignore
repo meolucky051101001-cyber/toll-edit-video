@@ -2,6 +2,8 @@
 .venv/
 data/*
 !data/.gitkeep
+!data/benchmarks/
+!data/benchmarks/**
 logs/*
 !logs/.gitkeep
 node_modules/

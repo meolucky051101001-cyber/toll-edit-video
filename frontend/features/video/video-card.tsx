@@ -186,12 +186,32 @@ export function VideoCard({
               </small>
             </div>
           )}
-          {video.duration_seconds != null && formatDuration(video.duration_seconds) && (
+          {video.media_type === "image_text" ? (
+            <span
+              style={{
+                position: "absolute",
+                bottom: "8px",
+                right: "8px",
+                background: "rgba(0, 0, 0, 0.75)",
+                color: "#fef08a",
+                fontSize: "0.72rem",
+                fontWeight: 600,
+                padding: "2px 6px",
+                borderRadius: "4px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "3px",
+              }}
+              title="Nội dung dạng hình ảnh / 图文 (Carousel)"
+            >
+              🖼️ 图文
+            </span>
+          ) : video.duration_seconds != null && formatDuration(video.duration_seconds) ? (
             <span className="duration">
               <Play size={10} fill="currentColor" />
               {formatDuration(video.duration_seconds)}
             </span>
-          )}
+          ) : null}
           {video.status !== "new" && (
             <span className="saved-badge">{statusName[video.status]}</span>
           )}
@@ -199,6 +219,22 @@ export function VideoCard({
         <div className="card-body">
           <div className="card-meta">
             <span>{sourceLabel}</span>
+            {video.media_type === "image_text" && (
+              <span
+                style={{
+                  background: "#fef9c3",
+                  color: "#854d0e",
+                  border: "1px solid #fde047",
+                  borderRadius: "9999px",
+                  padding: "1px 7px",
+                  fontSize: "0.72rem",
+                  fontWeight: 600,
+                }}
+                title="Bài đăng dạng ảnh / 图文"
+              >
+                🖼️ 图文 {video.images && video.images.length > 0 ? `(${video.images.length} ảnh)` : ""}
+              </span>
+            )}
             {video.search_query && (
               <span
                 className="query-pill"

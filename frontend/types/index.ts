@@ -23,12 +23,27 @@ export interface Video {
   final_score: number;
   velocity_score?: number;
   virality_score?: number;
+  media_type?: "video" | "image_text";
+  images?: string[];
   status: VideoStatus;
   is_mock: boolean;
   script_analysis?: ScriptAnalysis | null;
   search_query: string;
   search_job_id: string;
 }
+
+export type SearchSortBy = "relevance" | "most_liked" | "newest";
+export type SearchPublishTime = "all" | "day" | "week" | "six_months";
+export type SearchContentType = "all" | "video" | "image_text";
+
+export interface SearchFilters {
+  minimum_likes?: number;
+  minimum_relevance?: number;
+  sort_by?: SearchSortBy;
+  publish_time?: SearchPublishTime;
+  content_type?: SearchContentType;
+}
+
 export interface ViralityBreakdown {
   video_id: string;
   virality_score: number;

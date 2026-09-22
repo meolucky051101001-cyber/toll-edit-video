@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
@@ -9,6 +10,8 @@ from playwright.async_api import BrowserContext, Error, Page, Playwright, async_
 from backend.core.config import ROOT, settings
 from backend.providers.base import ProviderUnavailableError
 from backend.providers.douyin.parser import classify_page
+
+logger = logging.getLogger("douyin.browser")
 
 DOUYIN_HOME = "https://www.douyin.com"
 MESSAGES = {
@@ -471,3 +474,139 @@ class DouyinBrowserService:
     async def close(self) -> None:
         async with self.lock:
             await self._close()
+
+    async def screenshot_note_images(self, note_url: str, save_dir: Path) -> list[Path]:
+        """Screenshots individual images from a Douyin note/image post by stepping through slides."""
+        save_dir.mkdir(parents=True, exist_ok=True)
+        saved_paths: list[Path] = []
+        page: Page | None = None
+        created_page = False
+        try:
+            if not self.context:
+                await self.ensure_open()
+            if self.context:
+                page = await self.context.new_page()
+                created_page = True
+            else:
+                page = self.page
+
+            if not page or page.is_closed():
+                return saved_paths
+
+            try:
+                await page.set_viewport_size({"width": 1280, "height": 900})
+            except Exception:
+                pass
+
+            await page.goto(note_url, wait_until="domcontentloaded", timeout=25000)
+            await asyncio.sleep(1.5)
+
+            # Detect indicator for total slides (e.g. "1/5", "2 / 6")
+            max_slides = 20
+            try:
+                indicator_text = await page.locator(
+                    "[class*='indicator'], [class*='slider-tag'], [class*='pagination'], [class*='count']"
+                ).evaluate_all("els => els.map(e => e.innerText).join(' ')")
+                import re
+
+                m_ind = re.search(r"\d+\s*/\s*(\d+)", str(indicator_text))
+                if m_ind:
+                    total_from_ind = int(m_ind.group(1))
+                    if 1 <= total_from_ind <= 50:
+                        max_slides = total_from_ind
+            except Exception:
+                pass
+
+            seen_sources: set[str] = set()
+            consecutive_duplicate_steps = 0
+            start_loop_time = asyncio.get_running_loop().time()
+            max_duration_seconds = 30.0
+
+            for _ in range(max_slides):
+                if asyncio.get_running_loop().time() - start_loop_time > max_duration_seconds:
+                    logger.debug("Reached timeout while capturing note slides from %s", note_url)
+                    break
+
+                # Query current active slide image
+                slide_img = await page.evaluate(
+                    """() => {
+                        const container = document.querySelector('[data-e2e="note-detail"], .slider-video, [class*="slider"], [class*="carousel"]') || document.body;
+                        const imgs = Array.from(container.querySelectorAll('img')).filter(img => {
+                            const r = img.getBoundingClientRect();
+                            return r.width >= 200 && r.height >= 200 && r.bottom > 0 && r.top < window.innerHeight;
+                        });
+                        if (!imgs.length) return null;
+                        imgs.sort((a, b) => {
+                            const ra = a.getBoundingClientRect();
+                            const rb = b.getBoundingClientRect();
+                            return (rb.width * rb.height) - (ra.width * ra.height);
+                        });
+                        const best = imgs[0];
+                        return best.currentSrc || best.src || best.getAttribute('data-src') || best.getAttribute('data-origin') || null;
+                    }"""
+                )
+
+                found_new = False
+                if slide_img and str(slide_img) not in seen_sources:
+                    seen_sources.add(str(slide_img))
+                    out_file = save_dir / f"{len(saved_paths) + 1:03d}.png"
+                    card = page.locator(
+                        "[data-e2e='note-detail'] img, .slider-video img, [class*='slider'] img, [class*='carousel'] img"
+                    ).first
+                    try:
+                        if await card.count() > 0:
+                            await card.screenshot(path=str(out_file))
+                        else:
+                            await page.screenshot(path=str(out_file))
+                        if out_file.exists() and out_file.stat().st_size > 0:
+                            saved_paths.append(out_file)
+                            found_new = True
+                    except Exception:
+                        pass
+
+                if found_new:
+                    consecutive_duplicate_steps = 0
+                else:
+                    consecutive_duplicate_steps += 1
+                    if consecutive_duplicate_steps >= 2 and len(saved_paths) >= 1:
+                        break
+
+                # Advance to next slide via button or keyboard
+                next_btn = page.locator(
+                    "[class*='arrow-right'], [class*='slider-arrow-right'], [class*='switch-right'], [class*='btn-next'], [data-e2e*='next'], button[aria-label*='下一']"
+                ).first
+                clicked = False
+                try:
+                    if await next_btn.count() > 0 and await next_btn.is_visible():
+                        await next_btn.click(timeout=800)
+                        clicked = True
+                except Exception:
+                    pass
+
+                if not clicked:
+                    try:
+                        await page.keyboard.press("ArrowRight")
+                    except Exception:
+                        pass
+
+                await asyncio.sleep(0.4)
+
+            # Fallback if no large images were screenshot
+            if not saved_paths:
+                fallback_file = save_dir / "001.png"
+                card = page.locator("[data-e2e='note-detail'], .note-detail, .slider-video, [class*='slider']").first
+                if await card.count() > 0:
+                    await card.screenshot(path=str(fallback_file))
+                else:
+                    await page.screenshot(path=str(fallback_file))
+                saved_paths.append(fallback_file)
+
+        except Exception as err:
+            logger.warning("Failed screenshotting note images from %s: %s", note_url, err)
+        finally:
+            if created_page and page and not page.is_closed():
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+        return saved_paths

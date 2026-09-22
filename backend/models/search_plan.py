@@ -15,4 +15,5 @@ class SearchPlan(Base):
     queries: Mapped[list[str]] = mapped_column(JSON, default=list)
     expansion: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     source: Mapped[str] = mapped_column(default="original")
+    filters: Mapped[dict | None] = mapped_column(JSON, default=dict, nullable=True)
     warning: Mapped[str | None]

@@ -60,6 +60,9 @@ class SearchRequest(BaseModel):
     platforms: list[Platform] = Field(default=["douyin", "xiaohongshu"], min_length=1, max_length=5)
     limit: int = Field(default=50, ge=1, le=200)
     min_relevance: float | None = Field(default=None, ge=0.0, le=100.0)
+    sort_by: Literal["relevance", "most_liked", "newest"] = "relevance"
+    publish_time: Literal["all", "day", "week", "six_months"] = "all"
+    content_type: Literal["all", "video", "image_text"] = "all"
 
     @field_validator("selected_queries")
     @classmethod
@@ -88,6 +91,9 @@ class SearchRequest(BaseModel):
 class SearchFilters(BaseModel):
     minimum_likes: int = 0
     minimum_relevance: float = 0.0
+    sort_by: Literal["relevance", "most_liked", "newest"] = "relevance"
+    publish_time: Literal["all", "day", "week", "six_months"] = "all"
+    content_type: Literal["all", "video", "image_text"] = "all"
 
 
 def validate_url_policy(
@@ -175,12 +181,18 @@ class VideoResult(BaseModel):
     share_count: int | None = Field(None, ge=0)
     favorite_count: int | None = Field(None, ge=0)
     view_count: int | None = Field(None, ge=0)
+    media_type: Literal["video", "image_text"] = "video"
+    images: list[str] = Field(default_factory=list)
+    velocity_score: float | None = None
     is_mock: bool = False
 
     @model_validator(mode="before")
     @classmethod
     def infer_mock_and_identity(cls, data: Any) -> Any:
         if isinstance(data, dict):
+            if "favorite_count" not in data and "collect_count" in data:
+                data = dict(data)
+                data["favorite_count"] = data["collect_count"]
             raw_url = str(data.get("url") or "")
             if "is_mock" not in data or data["is_mock"] is None:
                 try:
@@ -240,6 +252,20 @@ class VideoResult(BaseModel):
     @classmethod
     def published_utc(cls, value: datetime | None) -> datetime | None:
         return value.replace(tzinfo=timezone.utc) if value and value.tzinfo is None else value
+
+    @field_validator("images", mode="before")
+    @classmethod
+    def normalize_images(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(v) for v in value if v]
+        return []
+
+    @field_validator("media_type", mode="before")
+    @classmethod
+    def normalize_media_type(cls, value: Any) -> str:
+        return value or "video"
 
 
 def update_video_result(video: VideoResult, **updates: object) -> VideoResult:

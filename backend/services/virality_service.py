@@ -78,8 +78,8 @@ def compute_virality(
         delta_likes = (s_curr.like_count or 0) - (s_prev.like_count or 0)
         hourly_velocity = max(0.0, float(delta_likes) / dt_hours)
     else:
-        like_count = getattr(video, "like_count", 0) or 0
-        hourly_velocity = max(0.0, float(like_count) / max(age_hours, 0.5))
+        likes = getattr(video, "like_count", 0) or 0
+        hourly_velocity = max(0.0, float(likes) / age_hours)
 
     # 3. Acceleration calculation
     if snapshots and len(snapshots) >= 3:
@@ -201,3 +201,8 @@ class ViralityService:
             self.event_bus.publish_nowait("video:virality_update", payload)
 
         return metrics
+
+
+def compute_engagement_velocity(video: Any) -> float:
+    """Convenience helper returning the normalized velocity score (0-100)."""
+    return compute_virality(video).velocity_score

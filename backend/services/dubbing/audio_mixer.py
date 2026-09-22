@@ -3,14 +3,27 @@ import logging
 import os
 import shutil
 
+from backend.core.config import ROOT
+
 logger = logging.getLogger("dubbing.mixer")
+
+
+def resolve_ffmpeg_binary(ffmpeg_bin: str | None = None) -> str | None:
+    """Resolves FFmpeg binary, prioritizing local portable bin directory."""
+    if ffmpeg_bin and os.path.isfile(ffmpeg_bin):
+        return ffmpeg_bin
+    local_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    local_bin = ROOT / "bin" / local_name
+    if local_bin.is_file() and os.access(local_bin, os.X_OK | os.R_OK):
+        return str(local_bin)
+    return shutil.which("ffmpeg")
 
 
 class AudioMixer:
     """Muxes voiceover audio with video or creates an independent audio asset."""
 
     def __init__(self, ffmpeg_bin: str | None = None):
-        self.ffmpeg = ffmpeg_bin or shutil.which("ffmpeg")
+        self.ffmpeg = resolve_ffmpeg_binary(ffmpeg_bin)
 
     async def mix(
         self,

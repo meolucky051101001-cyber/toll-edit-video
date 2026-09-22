@@ -103,7 +103,7 @@ test("default AI toggle is false on initial load and submits use_ai: false witho
     route.fulfill({ json: { items: [], total: 0, page: 1 } }),
   );
 
-  await page.goto("/");
+  await page.goto("/?mode=mock");
   const aiCheckbox = page.getByRole("checkbox", {
     name: "Tự tạo từ khóa AI khi tìm",
   });
@@ -160,7 +160,7 @@ test("mode switch: mock 200 -> XHS normalizes limit to 20 in UI and payload", as
     route.fulfill({ json: { items: [], total: 0, page: 1 } }),
   );
 
-  await page.goto("/");
+  await page.goto("/?mode=mock");
   const limitSelect = page.getByRole("combobox", { name: "Số kết quả", exact: true });
   await limitSelect.selectOption("200");
   await expect(limitSelect).toHaveValue("200");
@@ -224,7 +224,7 @@ test("mode switch: mock 200 -> Douyin normalizes limit to 20 in UI and payload",
     route.fulfill({ json: { items: [], total: 0, page: 1 } }),
   );
 
-  await page.goto("/");
+  await page.goto("/?mode=mock");
   const limitSelect = page.getByRole("combobox", { name: "Số kết quả", exact: true });
   await limitSelect.selectOption("200");
   await expect(limitSelect).toHaveValue("200");

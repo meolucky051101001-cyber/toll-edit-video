@@ -318,3 +318,40 @@ def recalculate_scores_from_virality(
     quality = 100.0 * (0.60 * engagement + 0.15 * freshness + 0.25 * (virality_score / 100.0))
     final_score = relevance * (0.8 + 0.2 * quality / 100.0)
     return round(quality, 2), round(final_score, 2)
+
+
+def cosine_similarity(v1: list[float], v2: list[float]) -> float:
+    """Calculates cosine similarity between two numeric vectors in [-1.0, 1.0]."""
+    if not v1 or not v2 or len(v1) != len(v2):
+        return 0.0
+    dot_product = sum(a * b for a, b in zip(v1, v2))
+    norm_a = math.sqrt(sum(a * a for a in v1))
+    norm_b = math.sqrt(sum(b * b for b in v2))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return max(0.0, min(1.0, dot_product / (norm_a * norm_b)))
+
+
+def compute_hybrid_score(
+    lexical_relevance: float,
+    semantic_similarity: float | None = None,
+    quality_score: float = 0.0,
+    semantic_weight: float = 0.5,
+    lexical_weight: float = 0.3,
+    quality_weight: float = 0.2,
+) -> float:
+    """
+    Computes hybrid ranking score.
+    If semantic_similarity is present, blends semantic + lexical + quality.
+    Otherwise falls back gracefully to standard lexical ranking.
+    """
+    if semantic_similarity is not None and 0.0 <= semantic_similarity <= 1.0:
+        norm_sem = semantic_similarity * 100.0
+        hybrid = (
+            semantic_weight * norm_sem
+            + lexical_weight * lexical_relevance
+            + quality_weight * quality_score
+        )
+        return round(hybrid, 2)
+    # Standard formula fallback
+    return round(lexical_relevance * (0.8 + 0.2 * quality_score / 100.0), 2)

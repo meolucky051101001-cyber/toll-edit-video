@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 XHS_NOTE_REGEX = re.compile(
     r"/(?:explore|search_result|discovery/item)/([0-9a-fA-F]{24})(?:/|\?|$)"
 )
-DOUYIN_VIDEO_REGEX = re.compile(r"/video/(\d{15,25})(?:/|\?|$)")
+DOUYIN_VIDEO_REGEX = re.compile(r"/(?:video|note)/(\d{15,25})(?:/|\?|$)")
 
 XHS_NOTE_HOSTS = ("xiaohongshu.com", "rednote.com")
 XHS_TRUSTED_HOSTS = ("xiaohongshu.com", "rednote.com", "xhslink.com")

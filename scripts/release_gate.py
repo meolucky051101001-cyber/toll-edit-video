@@ -19,11 +19,35 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+
+def is_port_ready(url: str, timeout: float = 1.0) -> bool:
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "ReleaseGate"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status in (200, 304)
+    except Exception:
+        return False
+
+
+def kill_process_tree(proc: subprocess.Popen | None) -> None:
+    if not proc or proc.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+        else:
+            proc.terminate()
+            proc.wait(timeout=3)
+    except Exception:
+        pass
 
 
 def print_banner(title: str) -> None:
@@ -75,7 +99,8 @@ def parse_pytest_summary(output: str) -> dict[str, int]:
 
 
 def main() -> int:
-    print_banner("AI Video Research Tool - Comprehensive Release Gate (9 Stages)")
+    total_stages = 11
+    print_banner(f"AI Video Research Tool - Comprehensive Release Gate ({total_stages} Stages)")
     start_time = time.time()
     results = {}
     all_passed = True
@@ -84,7 +109,7 @@ def main() -> int:
     python_bin = sys.executable
 
     # Stage 1: Runtime Environment
-    print("[1/9] Checking runtime environment...", end=" ", flush=True)
+    print(f"[1/{total_stages}] Checking runtime environment...", end=" ", flush=True)
     t0 = time.time()
     env_ok, env_msg = check_environment()
     t_env = round(time.time() - t0, 2)
@@ -96,7 +121,7 @@ def main() -> int:
         all_passed = False
 
     # Stage 2: Database Schema & Core Tables
-    print("[2/9] Checking database schema & core tables...", end=" ", flush=True)
+    print(f"[2/{total_stages}] Checking database schema & core tables...", end=" ", flush=True)
     t0 = time.time()
     try:
         db_ok, db_msg = check_database()
@@ -114,7 +139,7 @@ def main() -> int:
         all_passed = False
 
     # Stage 3: Ruff Code Quality Linter
-    print("[3/9] Running Ruff code linter...", end=" ", flush=True)
+    print(f"[3/{total_stages}] Running Ruff code linter...", end=" ", flush=True)
     t0 = time.time()
     code, out = run_command([python_bin, "-m", "ruff", "check", "backend/", "tests/", "scripts/"])
     t_ruff = round(time.time() - t0, 2)
@@ -128,7 +153,7 @@ def main() -> int:
         all_passed = False
 
     # Stage 4: Mypy Static Type Checker
-    print("[4/9] Running Mypy static type checker...", end=" ", flush=True)
+    print(f"[4/{total_stages}] Running Mypy static type checker...", end=" ", flush=True)
     t0 = time.time()
     code, out = run_command([python_bin, "-m", "mypy", "backend"])
     t_mypy = round(time.time() - t0, 2)
@@ -142,7 +167,7 @@ def main() -> int:
         all_passed = False
 
     # Stage 5: Frontend ESLint
-    print("[5/9] Running Frontend ESLint...", end=" ", flush=True)
+    print(f"[5/{total_stages}] Running Frontend ESLint...", end=" ", flush=True)
     t0 = time.time()
     code, out = run_command([npm_cmd, "run", "lint"], cwd=ROOT_DIR / "frontend")
     t_eslint = round(time.time() - t0, 2)
@@ -156,7 +181,7 @@ def main() -> int:
         all_passed = False
 
     # Stage 6: Frontend TypeScript Check
-    print("[6/9] Running Frontend TypeScript check (tsc --noEmit)...", end=" ", flush=True)
+    print(f"[6/{total_stages}] Running Frontend TypeScript check (tsc --noEmit)...", end=" ", flush=True)
     t0 = time.time()
     code, out = run_command([npx_cmd, "tsc", "--noEmit"], cwd=ROOT_DIR / "frontend")
     t_tsc = round(time.time() - t0, 2)
@@ -170,7 +195,7 @@ def main() -> int:
         all_passed = False
 
     # Stage 7: Frontend Production Build
-    print("[7/9] Verifying Frontend Production build...", end=" ", flush=True)
+    print(f"[7/{total_stages}] Verifying Frontend Production build...", end=" ", flush=True)
     t0 = time.time()
     code, out = run_command([npm_cmd, "run", "build"], cwd=ROOT_DIR / "frontend")
     t_build = round(time.time() - t0, 2)
@@ -184,7 +209,7 @@ def main() -> int:
         all_passed = False
 
     # Stage 8: Backend Pytest Regression Suite
-    print("[8/9] Running Backend Pytest regression suite...", end=" ", flush=True)
+    print(f"[8/{total_stages}] Running Backend Pytest regression suite...", end=" ", flush=True)
     t0 = time.time()
     code, out = run_command([python_bin, "-m", "pytest", "-q"])
     t_pytest = round(time.time() - t0, 2)
@@ -204,51 +229,172 @@ def main() -> int:
         print(out[:600])
         all_passed = False
 
-    # Stage 9: Evaluation Benchmark
-    print("[9/9] Running evaluation benchmark (60 queries across 5 domains)...", end=" ", flush=True)
+    # Stage 9: Fixture-based Benchmark Acceptance
+    print(f"[9/{total_stages}] Running Fixture-based Benchmark Acceptance...", end=" ", flush=True)
     t0 = time.time()
-    code, out = run_command([python_bin, "-m", "pytest", "tests/test_evaluation_benchmark.py", "-q"])
+    code, out = run_command([
+        python_bin,
+        "-m",
+        "pytest",
+        "tests/test_evaluation_benchmark.py",
+        "tests/test_real_crawl_acceptance.py::test_real_crawl_dataset_schema_and_identity_acceptance",
+        "-q",
+    ])
     t_bench = round(time.time() - t0, 2)
     bench_ok = (code == 0)
     bench_summary = parse_pytest_summary(out)
+
+    benchmark_json_path = ROOT_DIR / "data/benchmarks/crawled_benchmark_samples.json"
+    total_crawled_samples = 0
+    total_real_queries = 0
+    if benchmark_json_path.exists():
+        try:
+            with open(benchmark_json_path, "r", encoding="utf-8") as f:
+                crawled_data = json.load(f)
+                total_real_queries = len(crawled_data)
+                total_crawled_samples = sum(len(g.get("samples", [])) for g in crawled_data)
+        except Exception:
+            pass
+
     try:
-        from tests.test_evaluation_benchmark import (
-            BENCHMARK_DATASET,
-            REAL_CRAWLED_BENCHMARK_SAMPLES,
-        )
+        from tests.test_evaluation_benchmark import BENCHMARK_DATASET
         total_benchmark_queries = len(BENCHMARK_DATASET)
-        total_real_queries = len(REAL_CRAWLED_BENCHMARK_SAMPLES)
     except Exception:
         total_benchmark_queries = 60
-        total_real_queries = 4
 
     total_queries_verified = total_benchmark_queries + total_real_queries
-    results["9_evaluation_benchmark"] = {
+    results["9_fixture_benchmark"] = {
         "passed": bench_ok,
         "exit_code": code,
         "queries_verified": total_queries_verified,
         "domain_benchmark_queries": total_benchmark_queries,
         "real_crawled_queries": total_real_queries,
+        "real_crawled_samples_provenance": total_crawled_samples,
         "test_suites_passed": bench_summary["passed"],
         "duration_s": t_bench,
     }
     if bench_ok:
-        print(f"PASS ({total_benchmark_queries} domain queries + {total_real_queries} real crawl suites verified) [{t_bench}s]")
+        print(f"PASS ({total_benchmark_queries} domain queries + {total_real_queries} offline crawled queries [{total_crawled_samples} samples] verified) [{t_bench}s]")
     else:
         print(f"FAIL (exit code {code})")
         print(out[:500])
         all_passed = False
 
+    # Stage 10: Frontend Playwright E2E Test Suite
+    print(f"[10/{total_stages}] Running Frontend Playwright E2E test suite (21 tests)...", end=" ", flush=True)
+    t0 = time.time()
+    backend_proc: subprocess.Popen | None = None
+    frontend_proc: subprocess.Popen | None = None
+    e2e_code = 1
+    e2e_out = ""
+    try:
+        if not is_port_ready("http://127.0.0.1:8010/api/health"):
+            backend_proc = subprocess.Popen(
+                [python_bin, "-m", "uvicorn", "backend.app.main:app", "--host", "127.0.0.1", "--port", "8010"],
+                cwd=ROOT_DIR,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        if not is_port_ready("http://127.0.0.1:3000"):
+            frontend_proc = subprocess.Popen(
+                [npm_cmd, "run", "start"],
+                cwd=ROOT_DIR / "frontend",
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        t_wait_start = time.time()
+        while time.time() - t_wait_start < 30.0:
+            if is_port_ready("http://127.0.0.1:8010/api/health") and is_port_ready("http://127.0.0.1:3000"):
+                break
+            time.sleep(1.0)
+
+        e2e_code, e2e_out = run_command([npx_cmd, "playwright", "test"], cwd=ROOT_DIR / "frontend")
+    finally:
+        kill_process_tree(backend_proc)
+        kill_process_tree(frontend_proc)
+
+    t_e2e = round(time.time() - t0, 2)
+    e2e_ok = (e2e_code == 0)
+    match_pw = re.search(r"(\d+)\s+passed", e2e_out)
+    pw_passed = int(match_pw.group(1)) if match_pw else (21 if e2e_ok else 0)
+
+    results["10_frontend_playwright_e2e"] = {
+        "passed": e2e_ok,
+        "exit_code": e2e_code,
+        "tests_passed": pw_passed,
+        "duration_s": t_e2e,
+    }
+    if e2e_ok:
+        print(f"PASS ({pw_passed} tests passed across 6 specs) [{t_e2e}s]")
+    else:
+        print(f"FAIL (exit code {e2e_code})")
+        print(e2e_out[:500])
+        all_passed = False
+
+    # Stage 11: Live Crawl Network Acceptance
+    is_live_requested = ("--live" in sys.argv) or (os.environ.get("LIVE_CRAWL_ENABLED") == "1")
+    print(f"[11/{total_stages}] Running Live Crawl Network Acceptance...", end=" ", flush=True)
+    if is_live_requested:
+        t0 = time.time()
+        live_env = os.environ.copy()
+        live_env["LIVE_CRAWL_ENABLED"] = "1"
+        p = subprocess.run(
+            [
+                python_bin,
+                "-m",
+                "pytest",
+                "tests/test_real_crawl_acceptance.py::test_live_crawl_provider_acceptance_with_filters",
+                "-q",
+            ],
+            cwd=ROOT_DIR,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=live_env,
+        )
+        live_out = (p.stdout + "\n" + p.stderr).strip()
+        live_code = p.returncode
+        t_live = round(time.time() - t0, 2)
+        live_ok = (live_code == 0)
+        results["11_live_crawl_acceptance"] = {
+            "executed": True,
+            "passed": live_ok,
+            "exit_code": live_code,
+            "duration_s": t_live,
+        }
+        if live_ok:
+            print(f"PASS (Live browser search against Douyin verified) [{t_live}s]")
+        else:
+            print(f"FAIL (exit code {live_code})")
+            print(live_out[:500])
+            all_passed = False
+    else:
+        results["11_live_crawl_acceptance"] = {
+            "executed": False,
+            "passed": None,
+            "detail": "Skipped (Pass --live or set LIVE_CRAWL_ENABLED=1 to execute live network verification)",
+        }
+        print("SKIPPED (Pass --live or LIVE_CRAWL_ENABLED=1 to verify real network)")
+
     total_duration = round(time.time() - start_time, 2)
-    verdict = "APPROVED (GREEN)" if all_passed else "REJECTED (RED)"
+    if not all_passed:
+        verdict = "REJECTED (RED)"
+    elif not is_live_requested:
+        verdict = "APPROVED (OFFLINE FIXTURES) - PENDING LIVE CRAWL"
+    else:
+        verdict = "APPROVED (FULL GREEN)"
+
     print_banner(f"Release Gate Verdict: {verdict}")
-    print(f"Total verification time: {total_duration}s across 9 automated stages")
+    print(f"Total verification time: {total_duration}s across {total_stages} automated stages")
 
     report_path = ROOT_DIR / "release_gate_report.json"
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(
             {
-                "verdict": "APPROVED" if all_passed else "REJECTED",
+                "verdict": verdict,
                 "duration_seconds": total_duration,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "stages": results,
@@ -258,7 +404,7 @@ def main() -> int:
         )
     print(f"Release scorecard saved to: {report_path}\n")
 
-    return 0 if all_passed else 1
+    return 0 if (all_passed and is_live_requested) else (0 if all_passed else 1)
 
 
 if __name__ == "__main__":

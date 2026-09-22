@@ -4,6 +4,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
+from datetime import timedelta
 from typing import cast
 
 from sqlalchemy import select
@@ -173,6 +174,9 @@ class SearchService:
                 return
             query, platforms, limit = job.original_query, job.platforms, job.requested_limit
             use_mock = job.is_mock
+            plan = db.get(SearchPlan, job_id)
+            plan_filters = plan.filters if plan and plan.filters else {}
+            job_filters = SearchFilters(**plan_filters) if plan_filters else SearchFilters()
         queries = await self.prepare_queries(job_id, query)
         if not use_mock:
             queries = queries[:3]
@@ -225,14 +229,14 @@ class SearchService:
                                         results = await provider.search(
                                             term,
                                             query_limit,
-                                            SearchFilters(),
+                                            job_filters,
                                             on_batch=on_batch,
                                         )
                                     else:
                                         results = await provider.search(
                                             term,
                                             query_limit,
-                                            SearchFilters(),
+                                            job_filters,
                                         )
                                     break
                                 except UserActionRequired as gate:
@@ -246,7 +250,7 @@ class SearchService:
                                             alternative_queries=queries,
                                             original_query=query,
                                         )
-                                    await self.wait_for_user(job_id, gate)
+                                    await self.wait_for_user(job_id, gate, provider=provider)
                             logger.info(
                                 "job=%s provider=%s query=%r results=%d",
                                 job_id,
@@ -381,6 +385,9 @@ class SearchService:
             with self.sessions() as db:
                 job = db.get(SearchJob, job_id)
                 assert job is not None
+                plan = db.get(SearchPlan, job_id)
+                plan_filters = plan.filters if plan and plan.filters else {}
+                job_filters = SearchFilters(**plan_filters) if plan_filters else SearchFilters()
                 for result in validated_batch:
                     job.found_count += 1
                     detail = rank_detailed(result, ranking_target, alternative_queries=alternative_queries)
@@ -388,7 +395,30 @@ class SearchService:
 
                     is_rejected = False
                     reject_reason = None
-                    if job.min_relevance is not None:
+
+                    # Defense-in-depth: content_type filter
+                    if job_filters.content_type != "all":
+                        if job_filters.content_type == "video" and result.media_type != "video":
+                            is_rejected = True
+                            reject_reason = "Định dạng không khớp: chỉ lấy video"
+                        elif job_filters.content_type == "image_text" and result.media_type != "image_text":
+                            is_rejected = True
+                            reject_reason = "Định dạng không khớp: chỉ lấy bài viết / hình ảnh"
+
+                    # Defense-in-depth: publish_time filter
+                    if not is_rejected and job_filters.publish_time != "all" and result.published_at:
+                        now = utcnow()
+                        delta_map = {
+                            "day": timedelta(days=1),
+                            "week": timedelta(days=7),
+                            "six_months": timedelta(days=182),
+                        }
+                        max_age = delta_map.get(job_filters.publish_time)
+                        if max_age and (now - result.published_at) > max_age:
+                            is_rejected = True
+                            reject_reason = f"Thời gian đăng không thỏa mãn bộ lọc ({job_filters.publish_time})"
+
+                    if not is_rejected and job.min_relevance is not None:
                         if detail.missing_mandatory_intents:
                             is_rejected = True
                             reject_reason = f"Thiếu ý định bắt buộc: {', '.join(detail.missing_mandatory_intents)}"
@@ -433,6 +463,8 @@ class SearchService:
                             None,
                             str(result.share_url) if result.share_url else None,
                         )
+                        values.pop("velocity_score", None)
+                        values.pop("virality_score", None)
                         existing = Video(
                             **values,
                             canonical_url=canon_u,
@@ -484,6 +516,10 @@ class SearchService:
                             existing.published_at = result.published_at
                         if not existing.hashtags and result.hashtags:
                             existing.hashtags = result.hashtags
+                        if getattr(result, "media_type", None) and existing.media_type != result.media_type:
+                            existing.media_type = result.media_type
+                        if getattr(result, "images", None) and not existing.images:
+                            existing.images = result.images
                         existing.velocity_score = detail.velocity_score
                         existing.virality_score = detail.virality_score
                         for field in (
@@ -546,7 +582,12 @@ class SearchService:
             count += 1
         return count
 
-    async def wait_for_user(self, job_id: str, gate: UserActionRequired) -> None:
+    async def wait_for_user(
+        self,
+        job_id: str,
+        gate: UserActionRequired,
+        provider: SearchProvider | None = None,
+    ) -> None:
         event = asyncio.Event()
         self.waiters[job_id] = event
         deadline = self.deadlines.get(job_id)
@@ -556,12 +597,50 @@ class SearchService:
             deadline.reschedule(None)
         self.update(job_id, status=gate.state, error_message=str(gate))
         timeout_seconds = getattr(settings, "browser_interaction_timeout", 1800)
+
+        monitor_task: asyncio.Task[None] | None = None
+        if provider and hasattr(provider, "browser"):
+            async def _check_auto_resume() -> None:
+                while not event.is_set():
+                    try:
+                        await asyncio.sleep(2.0)
+                        browser = getattr(provider, "browser", None)
+                        if browser and hasattr(browser, "inspect"):
+                            page = None
+                            if hasattr(browser, "get_active_page"):
+                                try:
+                                    page = browser.get_active_page()
+                                except Exception:
+                                    pass
+                            elif hasattr(browser, "page"):
+                                page = browser.page
+                            if page and not getattr(page, "is_closed", lambda: True)():
+                                current_state = await browser.inspect(page)
+                                if current_state == "page_available":
+                                    logger.info(
+                                        "Auto-resume: CAPTCHA / verification cleared on page %s for job %s",
+                                        getattr(page, "url", ""),
+                                        job_id,
+                                    )
+                                    event.set()
+                                    break
+                    except Exception:
+                        pass
+
+            monitor_task = asyncio.create_task(_check_auto_resume())
+
         try:
             async with asyncio.timeout(timeout_seconds):
                 await event.wait()
             self.update(job_id, status="resuming")
             self.update(job_id, status="searching", error_message=None)
         finally:
+            if monitor_task and not monitor_task.done():
+                monitor_task.cancel()
+                try:
+                    await monitor_task
+                except asyncio.CancelledError:
+                    pass
             self.waiters.pop(job_id, None)
             if deadline:
                 deadline.reschedule(

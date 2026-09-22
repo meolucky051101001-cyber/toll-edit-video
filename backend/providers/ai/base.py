@@ -19,3 +19,11 @@ class AIProvider(ABC):
     async def analyze_script(self, video_data: dict) -> str:
         """Return raw structured JSON for script analysis."""
         raise NotImplementedError
+
+    async def embed_text(self, text: str) -> list[float]:
+        """Return embedding vector for text."""
+        return []
+
+    async def extract_image_text(self, image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+        """Return extracted text from image."""
+        return ""

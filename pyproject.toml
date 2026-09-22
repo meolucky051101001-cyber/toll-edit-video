@@ -1,6 +1,9 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "live_acceptance: marks tests as live crawl acceptance tests",
+]
 filterwarnings = [
     "ignore:.*starlette.testclient.*:DeprecationWarning",
     "ignore:.*BlockingPortal alias is deprecated.*:DeprecationWarning",

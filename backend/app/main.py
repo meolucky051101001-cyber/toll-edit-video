@@ -41,11 +41,13 @@ from backend.services.observability import telemetry_service
 from backend.services.search_service import SearchService
 from backend.services.virality_service import ViralityService
 
+logger = logging.getLogger("app.main")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(bind=engine)
     try:
         with engine.connect() as conn:
             cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(videos)").fetchall()]
@@ -55,6 +57,14 @@ async def lifespan(app: FastAPI):
                 conn.exec_driver_sql("ALTER TABLE videos ADD COLUMN velocity_score FLOAT DEFAULT 0.0")
             if "virality_score" not in cols and "id" in cols:
                 conn.exec_driver_sql("ALTER TABLE videos ADD COLUMN virality_score FLOAT DEFAULT 0.0")
+            if "media_type" not in cols and "id" in cols:
+                conn.exec_driver_sql("ALTER TABLE videos ADD COLUMN media_type VARCHAR(20) DEFAULT 'video'")
+            if "images" not in cols and "id" in cols:
+                conn.exec_driver_sql("ALTER TABLE videos ADD COLUMN images JSON")
+
+            sp_cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(search_plans)").fetchall()]
+            if "filters" not in sp_cols and "job_id" in sp_cols:
+                conn.exec_driver_sql("ALTER TABLE search_plans ADD COLUMN filters JSON")
 
             jv_cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(job_videos)").fetchall()]
             if "velocity_score" not in jv_cols and "job_id" in jv_cols:
@@ -76,8 +86,14 @@ async def lifespan(app: FastAPI):
             if "ai_latency_ms" not in sj_cols and "id" in sj_cols:
                 conn.exec_driver_sql("ALTER TABLE search_jobs ADD COLUMN ai_latency_ms FLOAT")
             conn.commit()
-    except Exception:
-        pass
+
+            # Verify critical columns are present
+            v_cols_check = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(videos)").fetchall()]
+            if "media_type" not in v_cols_check or "images" not in v_cols_check:
+                raise RuntimeError("Essential columns 'media_type' or 'images' missing from videos table after migration.")
+    except Exception as e:
+        logger.exception("Database migration failed: %s", e)
+        raise RuntimeError(f"Database schema migration failed: {e}") from e
     app.state.event_bus = event_bus
     app.state.metrics = MetricService(
         SessionLocal,
@@ -115,9 +131,17 @@ async def lifespan(app: FastAPI):
             douyin_browser_service=app.state.douyin_browser,
         ),
         event_bus=app.state.event_bus,
+        ai_service=app.state.ai,
     )
     app.state.download.recover_interrupted_jobs()
     await app.state.download.start()
+
+    from backend.services.session_keeper import SessionKeepAliveService
+    app.state.session_keeper = SessionKeepAliveService(
+        douyin_browser=app.state.douyin_browser,
+        xhs_browser=app.state.browser,
+    )
+    await app.state.session_keeper.start()
 
     from backend.core.queue import system_worker_pool
 
@@ -147,12 +171,16 @@ async def lifespan(app: FastAPI):
 
     await system_worker_pool.start()
     yield
-    await system_worker_pool.stop()
-    await app.state.download.shutdown()
-    await app.state.search.shutdown()
-    await app.state.browser.close()
-    await app.state.douyin_browser.close()
-    engine.dispose()
+    try:
+        await system_worker_pool.stop()
+        if hasattr(app.state, "session_keeper"):
+            await app.state.session_keeper.stop()
+        await app.state.download.shutdown()
+        await app.state.search.shutdown()
+        await app.state.browser.close()
+        await app.state.douyin_browser.close()
+    finally:
+        engine.dispose()
 
 
 app = FastAPI(title="AI Video Research Tool", version="0.2.0", lifespan=lifespan)
@@ -216,8 +244,8 @@ async def validation_error(request: Request, error: RequestValidationError):
 
 @app.exception_handler(Exception)
 async def unexpected_error(request: Request, error: Exception):
-    logging.getLogger("research").error(
-        "request_path=%s error_type=%s", request.url.path, type(error).__name__
+    logging.getLogger("research").exception(
+        "Unhandled error request_path=%s error_type=%s", request.url.path, type(error).__name__
     )
     return JSONResponse(
         status_code=500, content={"detail": "Ứng dụng gặp lỗi. Xem logs/app.log rồi thử lại."}

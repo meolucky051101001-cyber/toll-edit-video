@@ -1,12 +1,12 @@
-"""Only public DOM metadata for Douyin; never read initial state, cookies or private API responses."""
-
 import math
 import re
+from datetime import datetime, timezone
+from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
 from pydantic import HttpUrl, ValidationError
 
-from backend.schemas.contracts import VideoResult
+from backend.schemas.contracts import SearchFilters, VideoResult
 
 VALID_HOSTS = {"www.douyin.com", "douyin.com"}
 
@@ -93,8 +93,13 @@ def video_url(raw: str) -> str | None:
         or (url.port is not None and url.port != 443)
     ):
         return None
-    match = re.search(r"/video/(\d{15,25})(?:/|\?|$)", url.path or "")
-    return f"https://www.douyin.com/video/{match.group(1)}" if match else None
+    match = re.search(r"/(?:video|note)/(\d{15,25})(?:/|\?|$)", url.path or "")
+    if not match:
+        return None
+    item_id = match.group(1)
+    if "/note/" in (url.path or ""):
+        return f"https://www.douyin.com/note/{item_id}"
+    return f"https://www.douyin.com/video/{item_id}"
 
 
 def parse_count_text(txt: str | None) -> int | None:
@@ -254,7 +259,7 @@ def parse_detail(
     return VideoResult(
         platform="douyin",
         platform_video_id=vid_id,
-        url=canonical,
+        url=cast(HttpUrl, canonical),
         share_url=final_share_url,
         title=title.strip()[:500],
         caption=caption[:20000] if isinstance(caption, str) else None,
@@ -270,3 +275,351 @@ def parse_detail(
         share_count=share_count,
     )
 
+
+def extract_douyin_carousel_images(aweme_info: dict) -> list[str]:
+    """Extracts carousel image URLs across all known Douyin web schemas."""
+    images: list[str] = []
+
+    # Schema 1: image_post_info.images (modern Douyin web schema)
+    ipi = aweme_info.get("image_post_info")
+    if isinstance(ipi, dict):
+        ipi_images = ipi.get("images")
+        if isinstance(ipi_images, list):
+            for entry in ipi_images:
+                if isinstance(entry, dict):
+                    disp = entry.get("display_image") or entry.get("origin_image") or entry
+                    cand_urls: Any = None
+                    if isinstance(disp, dict) and disp.get("url_list"):
+                        cand_urls = disp["url_list"]
+                    elif isinstance(entry.get("download_addr"), dict) and entry["download_addr"].get("url_list"):
+                        cand_urls = entry["download_addr"]["url_list"]
+                    elif isinstance(entry.get("url_list"), list):
+                        cand_urls = entry["url_list"]
+
+                    if isinstance(cand_urls, list):
+                        for u in cand_urls:
+                            valid_u = validate_image_url(u)
+                            if valid_u:
+                                images.append(valid_u)
+                                break
+
+    # Schema 2: images list of objects / URLs
+    if not images:
+        raw_imgs = aweme_info.get("images")
+        if isinstance(raw_imgs, list):
+            for entry in raw_imgs:
+                if isinstance(entry, dict):
+                    cand_urls = (
+                        entry.get("download_url_list")
+                        or (entry.get("download_addr", {}).get("url_list") if isinstance(entry.get("download_addr"), dict) else None)
+                        or entry.get("url_list")
+                    )
+                    if isinstance(cand_urls, list):
+                        for u in cand_urls:
+                            valid_u = validate_image_url(u)
+                            if valid_u:
+                                images.append(valid_u)
+                                break
+                elif isinstance(entry, str):
+                    valid_u = validate_image_url(entry)
+                    if valid_u:
+                        images.append(valid_u)
+
+    # Schema 3: image_list array
+    if not images:
+        raw_list = aweme_info.get("image_list")
+        if isinstance(raw_list, list):
+            for entry in raw_list:
+                if isinstance(entry, str):
+                    valid_u = validate_image_url(entry)
+                    if valid_u:
+                        images.append(valid_u)
+                elif isinstance(entry, dict):
+                    cand_urls = entry.get("url_list") or entry.get("download_url_list")
+                    if isinstance(cand_urls, list):
+                        for u in cand_urls:
+                            valid_u = validate_image_url(u)
+                            if valid_u:
+                                images.append(valid_u)
+                                break
+
+    return images
+
+
+def parse_aweme_item(item: dict) -> VideoResult | None:
+    if not isinstance(item, dict):
+        return None
+    aweme_info = item.get("aweme_info") or item.get("aweme") or item
+    if not isinstance(aweme_info, dict):
+        return None
+
+    aweme_id = str(aweme_info.get("aweme_id") or "").strip()
+    if not aweme_id or not aweme_id.isdigit():
+        return None
+
+    desc = str(aweme_info.get("desc") or "").strip()
+
+    create_time = aweme_info.get("create_time")
+    published_at: datetime | None = None
+    if isinstance(create_time, (int, float)) and create_time > 0:
+        try:
+            published_at = datetime.fromtimestamp(create_time, tz=timezone.utc)
+        except Exception:
+            published_at = None
+
+    stats = aweme_info.get("statistics") or {}
+    like_count = _parse_metric(stats.get("digg_count"))
+    comment_count = _parse_metric(stats.get("comment_count"))
+    share_count = _parse_metric(stats.get("share_count"))
+    collect_count = _parse_metric(stats.get("collect_count"))
+    view_count = _parse_metric(stats.get("play_count"))
+
+    author = aweme_info.get("author") or {}
+    author_name = str(author.get("nickname") or author.get("unique_id") or "").strip() or None
+    author_id = str(author.get("sec_uid") or author.get("uid") or "").strip() or None
+    author_url = f"https://www.douyin.com/user/{author_id}" if author_id else None
+
+    carousel_images = extract_douyin_carousel_images(aweme_info)
+    aweme_type = aweme_info.get("aweme_type", 0)
+    is_note = bool(carousel_images) or aweme_type in (2, 68, 150)
+
+    images: list[str] = []
+    thumbnail_url: str | None = None
+    duration_seconds: float | None = None
+
+    if is_note:
+        media_type: Literal["video", "image_text"] = "image_text"
+        images = carousel_images
+        thumbnail_url = images[0] if images else None
+        if not thumbnail_url:
+            video_obj = aweme_info.get("video") or {}
+            cover_obj = video_obj.get("cover") or video_obj.get("origin_cover") or {}
+            urls = cover_obj.get("url_list") or []
+            for u in urls:
+                valid_u = validate_image_url(u)
+                if valid_u:
+                    thumbnail_url = valid_u
+                    break
+        canonical_url = f"https://www.douyin.com/note/{aweme_id}"
+    else:
+        media_type = "video"
+        video_obj = aweme_info.get("video") or {}
+        duration_ms = video_obj.get("duration")
+        if isinstance(duration_ms, (int, float)) and duration_ms > 0:
+            duration_seconds = round(float(duration_ms) / 1000.0, 2)
+        cover_obj = video_obj.get("cover") or video_obj.get("origin_cover") or {}
+        urls = cover_obj.get("url_list") or []
+        for u in urls:
+            valid_u = validate_image_url(u)
+            if valid_u:
+                thumbnail_url = valid_u
+                break
+        canonical_url = f"https://www.douyin.com/video/{aweme_id}"
+
+    hashtags: list[str] = []
+    text_extra = aweme_info.get("text_extra") or []
+    if isinstance(text_extra, list):
+        for te in text_extra:
+            if isinstance(te, dict) and te.get("hashtag_name"):
+                tag = str(te["hashtag_name"]).strip().lstrip("#")
+                if tag and tag not in hashtags:
+                    hashtags.append(tag)
+    if desc:
+        for tag in re.findall(r"#([^\s#]+)", desc):
+            clean_tag = tag.strip().lstrip("#")
+            if clean_tag and clean_tag not in hashtags:
+                hashtags.append(clean_tag)
+
+    title = desc[:500] if desc else f"Douyin {'Note' if is_note else 'Video'} {aweme_id}"
+
+    try:
+        return VideoResult(
+            platform="douyin",
+            platform_video_id=aweme_id,
+            url=cast(HttpUrl, canonical_url),
+            share_url=canonical_url,
+            title=title,
+            caption=desc if desc else None,
+            author_name=author_name[:100] if author_name else None,
+            author_id=author_id,
+            author_url=author_url,
+            thumbnail_url=thumbnail_url,
+            hashtags=hashtags,
+            keywords=[],
+            duration_seconds=duration_seconds,
+            published_at=published_at,
+            like_count=like_count,
+            comment_count=comment_count,
+            share_count=share_count,
+            favorite_count=collect_count,
+            view_count=view_count,
+            media_type=media_type,
+            images=images,
+            is_mock=False,
+        )
+    except Exception:
+        return None
+
+
+def apply_search_filters_and_sorting(
+    items: list[VideoResult],
+    filters: SearchFilters | None = None,
+    limit: int | None = None,
+) -> list[VideoResult]:
+    """Applies minimum_likes, content_type, publish_time filtering and sorting to VideoResults."""
+    min_likes = filters.minimum_likes if filters else 0
+    wanted_content_type = filters.content_type if filters else "all"
+    wanted_publish_time = filters.publish_time if filters else "all"
+    wanted_sort_by = filters.sort_by if filters else "relevance"
+
+    now = datetime.now(timezone.utc)
+    max_age_seconds: float | None = None
+    if wanted_publish_time == "day":
+        max_age_seconds = 86400.0  # 24 hours
+    elif wanted_publish_time == "week":
+        max_age_seconds = 7 * 86400.0  # 7 days
+    elif wanted_publish_time == "six_months":
+        max_age_seconds = 182 * 86400.0  # 182 days
+
+    candidates: list[VideoResult] = []
+    seen_ids: set[str] = set()
+
+    for vr in items:
+        if not vr or not vr.platform_video_id:
+            continue
+        if vr.platform_video_id in seen_ids:
+            continue
+
+        if min_likes > 0 and (vr.like_count is None or vr.like_count < min_likes):
+            continue
+
+        if wanted_content_type == "video" and vr.media_type != "video":
+            continue
+        if wanted_content_type == "image_text" and vr.media_type != "image_text":
+            continue
+
+        if max_age_seconds is not None and vr.published_at is not None:
+            age = (now - vr.published_at).total_seconds()
+            if age > max_age_seconds:
+                continue
+
+        seen_ids.add(vr.platform_video_id)
+        candidates.append(vr)
+
+    # Apply sorting if requested
+    if wanted_sort_by == "most_liked":
+        candidates.sort(key=lambda r: (r.like_count or 0), reverse=True)
+    elif wanted_sort_by == "newest":
+        candidates.sort(
+            key=lambda r: (r.published_at.timestamp() if r.published_at else 0.0),
+            reverse=True,
+        )
+
+    if limit is not None and limit > 0:
+        return candidates[:limit]
+    return candidates
+
+
+def parse_search_response_json(
+    data: dict,
+    limit: int = 50,
+    filters: SearchFilters | None = None,
+) -> list[VideoResult]:
+    if not isinstance(data, dict):
+        return []
+
+    raw_list = data.get("data") or data.get("aweme_list") or []
+    if not isinstance(raw_list, list):
+        return []
+
+    parsed: list[VideoResult] = []
+    for item in raw_list:
+        vr = parse_aweme_item(item)
+        if vr:
+            parsed.append(vr)
+
+    return apply_search_filters_and_sorting(parsed, filters=filters, limit=limit)
+
+
+def _find_items_in_nested_dict(data: Any, max_depth: int = 5) -> list[dict]:
+    """Recursively traverses a JSON structure to find aweme or video search items."""
+    if max_depth <= 0:
+        return []
+    if isinstance(data, list):
+        found = []
+        for it in data:
+            if isinstance(it, dict) and (
+                "aweme_info" in it or "aweme_id" in it or ("author" in it and "statistics" in it)
+            ):
+                found.append(it)
+        if found:
+            return found
+        for it in data:
+            nested = _find_items_in_nested_dict(it, max_depth - 1)
+            if nested:
+                return nested
+    elif isinstance(data, dict):
+        for k in ("data", "aweme_list", "search_data", "cards", "items"):
+            if k in data and isinstance(data[k], list):
+                res = _find_items_in_nested_dict(data[k], max_depth - 1)
+                if res:
+                    return res
+        for val in data.values():
+            if isinstance(val, (dict, list)):
+                res = _find_items_in_nested_dict(val, max_depth - 1)
+                if res:
+                    return res
+    return []
+
+
+def extract_douyin_ssr_json(html_content: str) -> dict[str, Any] | None:
+    """
+    Extracts server-rendered state JSON from Douyin HTML:
+    - <script id="RENDER_DATA"> (URL-encoded JSON)
+    - window._ROUTER_DATA = {...}
+    - window.__INITIAL_STATE__ = {...}
+    Returns a dict with 'data' suitable for parse_search_response_json.
+    """
+    import json
+    from urllib.parse import unquote
+
+    if not html_content:
+        return None
+
+    # 1. Check <script id="RENDER_DATA"...>
+    m_render = re.search(r'<script\s+id=["\']RENDER_DATA["\'][^>]*>(.*?)</script>', html_content, re.DOTALL)
+    if m_render:
+        raw_text = m_render.group(1).strip()
+        if raw_text:
+            try:
+                decoded = unquote(raw_text)
+                parsed = json.loads(decoded)
+                items = _find_items_in_nested_dict(parsed)
+                if items:
+                    return {"data": items}
+            except Exception:
+                pass
+
+    # 2. Check window._ROUTER_DATA
+    m_router = re.search(r'window\._ROUTER_DATA\s*=\s*(\{.*?\});\s*(?:window|</script>)', html_content, re.DOTALL)
+    if m_router:
+        try:
+            parsed = json.loads(m_router.group(1))
+            items = _find_items_in_nested_dict(parsed)
+            if items:
+                return {"data": items}
+        except Exception:
+            pass
+
+    # 3. Check window.__INITIAL_STATE__
+    m_state = re.search(r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\});\s*(?:window|</script>)', html_content, re.DOTALL)
+    if m_state:
+        try:
+            parsed = json.loads(m_state.group(1))
+            items = _find_items_in_nested_dict(parsed)
+            if items:
+                return {"data": items}
+        except Exception:
+            pass
+
+    return None

@@ -1,0 +1,262 @@
+[
+  {
+    "query": "decor bàn học",
+    "samples": [
+      {
+        "platform": "douyin",
+        "platform_video_id": "7348921837491029381",
+        "url": "https://www.douyin.com/video/7348921837491029381",
+        "author": "阿糖的沉浸日常",
+        "collected_at": "2026-09-18T08:30:00Z",
+        "title": "沉浸式改造我的小书桌 清爽治愈系宿舍桌面布置好物分享",
+        "like_count": 89400,
+        "media_type": "video",
+        "ground_truth_relevance": true,
+        "rationale": "Directly matches 'decor bàn học' (书桌/桌面布置) with study desk transformation context."
+      },
+      {
+        "platform": "douyin",
+        "platform_video_id": "7347891230192847162",
+        "url": "https://www.douyin.com/video/7347891230192847162",
+        "author": "极简宅女",
+        "collected_at": "2026-09-18T08:32:00Z",
+        "title": "百元搞定！学生党实用书桌收纳好物清单 桌面井井有条",
+        "like_count": 34500,
+        "media_type": "video",
+        "ground_truth_relevance": true,
+        "rationale": "High-relevance desk organization and budget student decor items matching query intent."
+      },
+      {
+        "platform": "douyin",
+        "platform_video_id": "7346123984710293847",
+        "url": "https://www.douyin.com/note/7346123984710293847",
+        "author": "木木的书桌手记",
+        "collected_at": "2026-09-18T08:35:00Z",
+        "title": "温馨奶油风书桌布置灵感 图文高清分享",
+        "like_count": 21800,
+        "media_type": "image_text",
+        "ground_truth_relevance": true,
+        "rationale": "Relevant carousel image post showcasing cozy desk decor layout."
+      },
+      {
+        "platform": "douyin",
+        "platform_video_id": "7345981273619284019",
+        "url": "https://www.douyin.com/video/7345981273619284019",
+        "author": "老王野钓日记",
+        "collected_at": "2026-09-18T08:36:00Z",
+        "title": "秋季野钓大鲫鱼开饵配方与调漂技巧实操",
+        "like_count": 15000,
+        "media_type": "video",
+        "ground_truth_relevance": false,
+        "rationale": "Fishing tutorial entirely irrelevant to desk decor or room setup."
+      },
+      {
+        "platform": "douyin",
+        "platform_video_id": "7345102938475619283",
+        "url": "https://www.douyin.com/video/7345102938475619283",
+        "author": "汽修小李师傅",
+        "collected_at": "2026-09-18T08:38:00Z",
+        "title": "手把手教你如何自己更换汽车空调滤芯和机油",
+        "like_count": 8200,
+        "media_type": "video",
+        "ground_truth_relevance": false,
+        "rationale": "Automotive maintenance completely irrelevant to desk decor."
+      }
+    ]
+  },
+  {
+    "query": "dụng cụ bóc sticker",
+    "samples": [
+      {
+        "platform": "douyin",
+        "platform_video_id": "7348123987102938456",
+        "url": "https://www.douyin.com/video/7348123987102938456",
+        "author": "手账小桃桃",
+        "collected_at": "2026-09-18T09:10:00Z",
+        "title": "手账必备！超好用平价贴纸镊子与点点胶开箱测评",
+        "like_count": 14200,
+        "media_type": "video",
+        "ground_truth_relevance": true,
+        "rationale": "Direct match for sticker tweezers and peel tools (贴纸镊子/工具)."
+      },
+      {
+        "platform": "douyin",
+        "platform_video_id": "7347654321098765432",
+        "url": "https://www.douyin.com/video/7347654321098765432",
+        "author": "咕卡小分队",
+        "collected_at": "2026-09-18T09:12:00Z",
+        "title": "2000枚贴纸收纳与咕卡专用刮刀剥离镊子大赏",
+        "like_count": 28900,
+        "media_type": "video",
+        "ground_truth_relevance": true,
+        "rationale": "Focuses on sticker peeling tweezers and spatula tools."
+      },
+      {
+        "platform": "douyin",
+        "platform_video_id": "7346789012345678901",
+        "url": "https://www.douyin.com/note/7346789012345678901",
+        "author": "手账测评菌",
+        "collected_at": "2026-09-18T09:15:00Z",
+        "title": "种草避雷！10款热门手账贴纸工具大合集图解",
+        "like_count": 9400,
+        "media_type": "image_text",
+        "ground_truth_relevance": true,
+        "rationale": "Detailed stationery sticker tool review and comparison."
+      },
+      {
+        "platform": "douyin",
+        "platform_video_id": "7345678901234567890",
+        "url": "https://www.douyin.com/video/7345678901234567890",
+        "author": "川味大厨阿龙",
+        "collected_at": "2026-09-18T09:18:00Z",
+        "title": "秘制香辣十三香小龙虾做法 保证入味肉质Q弹",
+        "like_count": 45000,
+        "media_type": "video",
+        "ground_truth_relevance": false,
+        "rationale": "Cooking recipe completely unrelated to stationery tools."
+      },
+      {
+        "platform": "douyin",
+        "platform_video_id": "7344567890123456789",
+        "url": "https://www.douyin.com/video/7344567890123456789",
+        "author": "峡谷狂暴上分",
+        "collected_at": "2026-09-18T09:20:00Z",
+        "title": "新赛季王者峡谷单排强势英雄排行榜解析",
+        "like_count": 18000,
+        "media_type": "video",
+        "ground_truth_relevance": false,
+        "rationale": "Gaming strategy guide unrelated to sticker stationery."
+      }
+    ]
+  },
+  {
+    "query": "bàn phím cơ giá rẻ cho học sinh",
+    "samples": [
+      {
+        "platform": "douyin",
+        "platform_video_id": "7349012345678901234",
+        "url": "https://www.douyin.com/video/7349012345678901234",
+        "author": "外设研习社",
+        "collected_at": "2026-09-18T10:05:00Z",
+        "title": "百元内卷王！适合学生党平价客制化机械键盘推荐 打字音好听",
+        "like_count": 52000,
+        "media_type": "video",
+        "ground_truth_relevance": true,
+        "rationale": "Targeted budget mechanical keyboards for students."
+      },
+      {
+        "platform": "douyin",
+        "platform_video_id": "7348901234567890123",
+        "url": "https://www.douyin.com/video/7348901234567890123",
+        "author": "数码阿杰",
+        "collected_at": "2026-09-18T10:08:00Z",
+        "title": "学生党宿舍平价机械键盘避坑指南 纯干货无广",
+        "like_count": 31000,
+        "media_type": "video",
+        "ground_truth_relevance": true,
+        "rationale": "Directly matches budget student mechanical keyboard buying guide."
+      },
+      {
+        "platform": "douyin",
+        "platform_video_id": "7347890123456789012",
+        "url": "https://www.douyin.com/note/7347890123456789012",
+        "author": "桌面美学控",
+        "collected_at": "2026-09-18T10:10:00Z",
+        "title": "高颜值奶白机械键盘 学生宿舍桌面搭配图鉴",
+        "like_count": 16500,
+        "media_type": "image_text",
+        "ground_truth_relevance": true,
+        "rationale": "Carousel showcase of budget mechanical keyboards."
+      },
+      {
+        "platform": "douyin",
+        "platform_video_id": "7346789012345678902",
+        "url": "https://www.douyin.com/video/7346789012345678902",
+        "author": "美甲小达人",
+        "collected_at": "2026-09-18T10:12:00Z",
+        "title": "2026早秋复古猫眼美甲教程 显手白又高级",
+        "like_count": 27000,
+        "media_type": "video",
+        "ground_truth_relevance": false,
+        "rationale": "Nail art video completely unrelated to mechanical keyboards."
+      },
+      {
+        "platform": "douyin",
+        "platform_video_id": "7345678901234567891",
+        "url": "https://www.douyin.com/video/7345678901234567891",
+        "author": "口红试色间",
+        "collected_at": "2026-09-18T10:15:00Z",
+        "title": "黄皮显白口红合集 经典红棕色系试色",
+        "like_count": 36000,
+        "media_type": "video",
+        "ground_truth_relevance": false,
+        "rationale": "Lipstick makeup review unrelated to tech hardware."
+      }
+    ]
+  },
+  {
+    "query": "unbox đồ cute",
+    "samples": [
+      {
+        "platform": "douyin",
+        "platform_video_id": "7349123456789012345",
+        "url": "https://www.douyin.com/video/7349123456789012345",
+        "author": "兔兔开箱记",
+        "collected_at": "2026-09-18T11:20:00Z",
+        "title": "沉浸式开箱一整箱可爱平价杂货！少女心爆棚瞬间被治愈",
+        "like_count": 64000,
+        "media_type": "video",
+        "ground_truth_relevance": true,
+        "rationale": "Unboxing cute items and accessories (沉浸式开箱/可爱好物)."
+      },
+      {
+        "platform": "douyin",
+        "platform_video_id": "7348234567890123456",
+        "url": "https://www.douyin.com/video/7348234567890123456",
+        "author": "吉伊小天地",
+        "collected_at": "2026-09-18T11:22:00Z",
+        "title": "吉伊卡哇周边盲盒大拆袋！每一款都萌到犯规",
+        "like_count": 41500,
+        "media_type": "video",
+        "ground_truth_relevance": true,
+        "rationale": "Cute merchandise blindbox unboxing video."
+      },
+      {
+        "platform": "douyin",
+        "platform_video_id": "7347345678901234567",
+        "url": "https://www.douyin.com/note/7347345678901234567",
+        "author": "少女杂货铺",
+        "collected_at": "2026-09-18T11:25:00Z",
+        "title": "高颜值可爱文具开箱图赏 每一件都舍不得用",
+        "like_count": 18200,
+        "media_type": "image_text",
+        "ground_truth_relevance": true,
+        "rationale": "Carousel note presenting cute stationery unboxing pictures."
+      },
+      {
+        "platform": "douyin",
+        "platform_video_id": "7346456789012345678",
+        "url": "https://www.douyin.com/video/7346456789012345678",
+        "author": "系统维修老赵",
+        "collected_at": "2026-09-18T11:28:00Z",
+        "title": "电脑蓝屏报错代码0xc0000005快速修复与重装教程",
+        "like_count": 11000,
+        "media_type": "video",
+        "ground_truth_relevance": false,
+        "rationale": "Windows troubleshooting guide unrelated to cute unboxing."
+      },
+      {
+        "platform": "douyin",
+        "platform_video_id": "7345567890123456789",
+        "url": "https://www.douyin.com/video/7345567890123456789",
+        "author": "洗车达人老王",
+        "collected_at": "2026-09-18T11:30:00Z",
+        "title": "家用无线高压洗车机水枪喷射压力实测对比",
+        "like_count": 7800,
+        "media_type": "video",
+        "ground_truth_relevance": false,
+        "rationale": "Car wash pressure washer review unrelated to cute items."
+      }
+    ]
+  }
+]

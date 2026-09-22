@@ -44,6 +44,8 @@ class Video(Base):
     velocity_score: Mapped[float] = mapped_column(default=0.0, index=True)
     virality_score: Mapped[float] = mapped_column(default=0.0, index=True)
     status: Mapped[str] = mapped_column(String(20), default="new", index=True)
+    media_type: Mapped[str] = mapped_column(String(20), default="video", nullable=True)
+    images: Mapped[list[str] | None] = mapped_column(JSON, default=list, nullable=True)
     is_mock: Mapped[bool] = mapped_column(default=False)
     script_analysis: Mapped[dict | None] = mapped_column(JSON, default=None, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

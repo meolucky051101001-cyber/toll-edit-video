@@ -42,6 +42,13 @@ async def create_search(payload: SearchRequest, request: Request, db: Session = 
             use_ai=payload.use_ai,
             queries=payload.selected_queries or [],
             source="manual" if payload.selected_queries else "original",
+            filters={
+                "minimum_likes": 0,
+                "minimum_relevance": payload.min_relevance or 0.0,
+                "sort_by": payload.sort_by,
+                "publish_time": payload.publish_time,
+                "content_type": payload.content_type,
+            },
         )
     )
     db.commit()
