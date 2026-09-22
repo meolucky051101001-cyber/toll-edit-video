@@ -428,45 +428,50 @@ shared_state.stop_requested = False
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import shared_state
     shared_state.stop_requested = True
+    await update.message.reply_text("🛑 Đang gửi tín hiệu dừng an toàn cho các tác vụ đang chạy...")
+
+    # 1. Hủy hàng đợi công việc hiện tại
     global_queue.cancel()
-    # Interrupt only this V2 process's children before draining threaded work.
-    import psutil
-    for child in psutil.Process(os.getpid()).children(recursive=True):
-        try:
-            child.kill()
-        except psutil.Error:
-            pass
-    
-    # 1. Hủy ngay lập tức worker task nếu đang chạy
+    global queue_counter
+    queue_counter = 0
+
+    # 2. Hủy worker task và đợi dọn dẹp (tối đa 4s)
     global worker_task
     if worker_task and not worker_task.done():
         worker_task.cancel()
         try:
-            await worker_task
-        except asyncio.CancelledError:
+            await asyncio.wait_for(asyncio.shield(worker_task), timeout=4.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
             pass
-    
-    # 2. Xóa sạch hàng đợi
-    global_queue.cancel()
-            
-    global queue_counter
-    queue_counter = 0
-            
-    await update.message.reply_text("🛑 Đang dừng toàn bộ quá trình tải, bóc tách và render video...")
-    
-    # 3. Tiêu diệt tất cả các tiến trình con (yt-dlp, ffmpeg, demucs, ffprobe...)
+        except Exception as e:
+            logger.warning(f"Error waiting for worker task cancellation: {e}")
+
+    # 3. Yêu cầu các tiến trình con (FFmpeg, Whisper, yt-dlp...) dừng nhẹ nhàng
     try:
         import psutil
         current_process = psutil.Process(os.getpid())
         children = current_process.children(recursive=True)
         for child in children:
             try:
+                child.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        # Cho phép các tiến trình con tối đa 2.0s để giải phóng VRAM / file tạm
+        _, alive = psutil.wait_procs(children, timeout=2.0)
+        for child in alive:
+            try:
                 child.kill()
             except Exception:
                 pass
-        await update.message.reply_text("✅ Đã tiêu diệt xong các tiến trình chạy ngầm.")
+        await update.message.reply_text("✅ Đã dừng an toàn toàn bộ tiến trình.")
     except Exception as e:
-        logger.error(f"Error killing children: {e}")
+        logger.error(f"Error stopping children: {e}")
+        await update.message.reply_text("⚠️ Đã dừng hàng đợi nhưng có cảnh báo khi kiểm tra tiến trình con.")
+    finally:
+        # Khởi tạo lại worker task sẵn sàng cho các video tiếp theo mà không cần khởi động lại bot
+        shared_state.stop_requested = False
+        ensure_worker(context.application)
 
 import re
 from durable_adapter import DurableQueue

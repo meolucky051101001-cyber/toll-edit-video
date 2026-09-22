@@ -775,11 +775,45 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
     }
 
 
+def is_safe_stream_path(target_path: Path) -> bool:
+    """Kiểm tra đường dẫn file có nằm trong các thư mục được phép phục vụ không (chống Path Traversal)."""
+    allowed_roots: List[Path] = [
+        WORKSPACE.resolve(),
+        INPUT_DIR.resolve(),
+        OUTPUT_DIR.resolve(),
+        DOWNLOADS_DIR.resolve(),
+    ]
+    # Bổ sung các thư mục batch framing nếu đang hoạt động
+    for folder_key in ("input_folder", "output_folder"):
+        fld = batch_framing_state.get(folder_key)
+        if fld:
+            try:
+                allowed_roots.append(Path(fld).resolve())
+            except Exception:
+                pass
+
+    resolved = target_path.resolve()
+    for root in allowed_roots:
+        try:
+            if resolved == root or resolved.is_relative_to(root):
+                return True
+        except (ValueError, AttributeError):
+            try:
+                resolved.relative_to(root)
+                return True
+            except ValueError:
+                pass
+    return False
+
+
 @router.get("/api/workflow/stream-file")
 async def api_stream_workflow_file(path: str = Query(...)):
     """Stream file media an toàn cho trình phát web."""
     try:
         clean_p = Path(path).resolve()
+        if not is_safe_stream_path(clean_p):
+            raise HTTPException(status_code=403, detail="Truy cập tệp ngoài phạm vi được phép bị từ chối")
+
         if not clean_p.is_file():
             raise HTTPException(status_code=404, detail="Không tìm thấy tệp")
 
@@ -789,6 +823,8 @@ async def api_stream_workflow_file(path: str = Query(...)):
 
         media_type = mimetypes.guess_type(clean_p.name)[0] or "application/octet-stream"
         return FileResponse(str(clean_p), media_type=media_type)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Lỗi stream file: {e}")
         raise HTTPException(status_code=500, detail=str(e))

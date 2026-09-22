@@ -317,7 +317,7 @@ def _render_scalable_voice_bus(
     with concat_file.open("w", encoding="utf-8", newline="\n") as handle:
         handle.write("ffconcat version 1.0\n")
         for item in chunk_paths:
-            escaped = str(item.resolve()).replace("'", "'\\''")
+            escaped = item.resolve().as_posix().replace("'", "'\\''")
             handle.write("file '{}'\n".format(escaped))
         handle.flush()
         os.fsync(handle.fileno())
