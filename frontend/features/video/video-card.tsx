@@ -282,9 +282,27 @@ export function VideoCard({
           </button>
           <p className="author">{video.author_name ?? "Chưa rõ tác giả"}</p>
           <div className="hashtags">
-            {video.hashtags.slice(0, 3).map((tag) => (
-              <span key={tag}>#{tag}</span>
-            ))}
+            {video.hashtags.slice(0, 3).map((tag) => {
+              const cleanQuery = (video.search_query || "").toLowerCase().replace(/^#+/, "").trim();
+              const isMatch = Boolean(cleanQuery && tag.toLowerCase().includes(cleanQuery));
+              return (
+                <span
+                  key={tag}
+                  style={
+                    isMatch
+                      ? {
+                          background: "#ccfbf1",
+                          color: "#0f766e",
+                          fontWeight: 600,
+                          border: "1px solid #99f6e4",
+                        }
+                      : undefined
+                  }
+                >
+                  #{tag}
+                </span>
+              );
+            })}
           </div>
           <div className="engagement">
             <span>

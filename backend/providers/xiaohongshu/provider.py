@@ -360,6 +360,16 @@ class XiaohongshuProvider(SearchProvider):
                                 const authorLink = card.querySelector('a[href*="/user/profile/"]')?.href || null;
                                 const likeText = card.querySelector('.like-wrapper .count, [class*="like"] .count, .like-wrapper')?.innerText?.trim() || null;
                                 
+                                const tagEls = Array.from(card.querySelectorAll('.tag, [class*="tag"], a[href*="/tag/"], a[href*="/search_result"]'));
+                                const cardTags = tagEls.map(t => (t.innerText || '').trim().replace(/^#/, '')).filter(t => t.length > 0 && !t.includes(' '));
+                                const rawCardTags = (card.innerText || '').match(/#([^\\s#]+)/g) || [];
+                                for (const rh of rawCardTags) {
+                                    const cleanRh = rh.replace(/^#/, '').trim();
+                                    if (cleanRh && !cardTags.includes(cleanRh)) {
+                                        cardTags.push(cleanRh);
+                                    }
+                                }
+
                                 if (coverHref || note_id || title) {
                                     res.push({
                                         href: coverHref,
@@ -372,6 +382,7 @@ class XiaohongshuProvider(SearchProvider):
                                         author_link: authorLink,
                                         like_text: likeText,
                                         duration_text: durationText,
+                                        hashtags: cardTags,
                                     });
                                 }
                             }
@@ -417,6 +428,7 @@ class XiaohongshuProvider(SearchProvider):
                                 "author_link": item.get("author_link"),
                                 "like_text": item.get("like_text"),
                                 "duration_text": item.get("duration_text"),
+                                "hashtags": item.get("hashtags") or [],
                             }
                     video_count = sum(1 for c in candidates.values() if c.get("is_video") and c.get("title"))
                     if video_count >= limit or len(candidates) >= target_candidates:
@@ -468,6 +480,12 @@ class XiaohongshuProvider(SearchProvider):
                             duration_raw = cand.get("duration_text")
                             duration_sec = parse_duration_seconds(str(duration_raw) if duration_raw is not None else None)
                             tags = extract_hashtags(str(title))
+                            raw_cand_tags = cand.get("hashtags")
+                            cand_tags = raw_cand_tags if isinstance(raw_cand_tags, list) else []
+                            for ct in cand_tags:
+                                clean_ct = str(ct).strip().lstrip("#")
+                                if clean_ct and clean_ct not in tags:
+                                    tags.append(clean_ct)
                             vr = VideoResult(
                                 platform="xiaohongshu",
                                 platform_video_id=note_id,

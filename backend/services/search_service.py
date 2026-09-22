@@ -390,7 +390,13 @@ class SearchService:
                 job_filters = SearchFilters(**plan_filters) if plan_filters else SearchFilters()
                 for result in validated_batch:
                     job.found_count += 1
-                    detail = rank_detailed(result, ranking_target, alternative_queries=alternative_queries)
+                    detail = rank_detailed(
+                        result,
+                        ranking_target,
+                        alternative_queries=alternative_queries,
+                        exact_hashtag=bool(job_filters.exact_hashtag or query.strip().startswith("#")),
+                        target_hashtag=job_filters.target_hashtag,
+                    )
                     scores = (detail.relevance, detail.quality, detail.final_score)
 
                     is_rejected = False
@@ -417,6 +423,12 @@ class SearchService:
                         if max_age and (now - result.published_at) > max_age:
                             is_rejected = True
                             reject_reason = f"Thời gian đăng không thỏa mãn bộ lọc ({job_filters.publish_time})"
+
+                    # Strict hashtag match guard
+                    if not is_rejected and (job_filters.exact_hashtag or query.strip().startswith("#")):
+                        if detail.missing_mandatory_intents and any(m.startswith("#") for m in detail.missing_mandatory_intents):
+                            is_rejected = True
+                            reject_reason = f"Không khớp thẻ hashtag yêu cầu ({job_filters.target_hashtag or query.strip()})"
 
                     if not is_rejected and job.min_relevance is not None:
                         if detail.missing_mandatory_intents:

@@ -342,6 +342,17 @@ class DouyinProvider(SearchProvider):
                                     Array.from(card.querySelectorAll('span, div')).find(s => /^\\d{1,2}:\\d{2}(:\\d{2})?$/.test(s.innerText ? s.innerText.trim() : ''))
                                 ) : null;
                                 const durationText = durationEl ? durationEl.innerText.trim() : null;
+
+                                const tagEls = Array.from(card.querySelectorAll('a[href*="/hashtag/"], a[href*="/tag/"], [class*="tag"], [data-e2e*="tag"]'));
+                                const cardTags = tagEls.map(t => (t.innerText || '').trim().replace(/^#/, '')).filter(t => t.length > 0);
+                                const rawCardTags = (card.innerText || '').match(/#([^\\s#]+)/g) || [];
+                                for (const rh of rawCardTags) {
+                                    const cleanRh = rh.replace(/^#/, '').trim();
+                                    if (cleanRh && !cardTags.includes(cleanRh)) {
+                                        cardTags.push(cleanRh);
+                                    }
+                                }
+
                                 res.push({
                                     href: e.href,
                                     cover: cover,
@@ -351,6 +362,7 @@ class DouyinProvider(SearchProvider):
                                     like_text: likeText,
                                     duration_text: durationText,
                                     is_note: isNote,
+                                    hashtags: cardTags,
                                 });
                             }
                             return res;
@@ -375,6 +387,7 @@ class DouyinProvider(SearchProvider):
                                     "like_text": item.get("like_text"),
                                     "duration_text": item.get("duration_text"),
                                     "is_note": is_note,
+                                    "hashtags": item.get("hashtags") or [],
                                 }
                     video_count = sum(1 for c in candidates.values() if c.get("title"))
                     if (len(intercepted_results) + video_count) >= limit or len(candidates) >= target_candidates:
@@ -448,6 +461,12 @@ class DouyinProvider(SearchProvider):
                         if card_likes is None or card_likes >= filters.minimum_likes:
                             duration_sec = parse_duration_seconds(cand.get("duration_text")) if not is_note else None
                             tags = extract_hashtags(str(title))
+                            raw_cand_tags = cand.get("hashtags")
+                            cand_tags = raw_cand_tags if isinstance(raw_cand_tags, list) else []
+                            for ct in cand_tags:
+                                clean_ct = str(ct).strip().lstrip("#")
+                                if clean_ct and clean_ct not in tags:
+                                    tags.append(clean_ct)
                             vr = VideoResult(
                                 platform="douyin",
                                 platform_video_id=vid_id,

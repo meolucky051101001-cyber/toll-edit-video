@@ -72,6 +72,11 @@ PHRASE_DICTIONARY: dict[str, list[str]] = {
     "phoi do mua dong": ["冬季穿搭", "保暖显瘦穿搭", "冬日OOTD", "冬季日常穿搭"],
     "phoi do mua he": ["夏季穿搭", "清爽穿搭", "夏日穿搭"],
     "phoi do": ["日常穿搭", "显瘦穿搭", "OOTD", "穿搭灵感"],
+    "ootd": ["OOTD", "今日穿搭", "每日穿搭", "穿搭灵感"],
+    "daily ootd": ["每日OOTD", "日常穿搭", "今日穿搭"],
+    "vintage": ["复古风", "复古房间改造", "复古穿搭"],
+    "y2k": ["Y2K", "Y2K穿搭", "千禧风"],
+    "haul": ["好物分享", "好物开箱", "沉浸式开箱"],
     "son mong tay": ["显白美甲", "可爱美甲款式", "美甲教程"],
     "nail cute": ["可爱美甲款式", "少女心美甲", "显白美甲"],
 
@@ -359,8 +364,107 @@ def normalize_vietnamese(text: str) -> str:
 def is_cjk(text: str) -> bool:
     if not text:
         return False
-    cjk_count = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
-    return cjk_count >= max(1, len(text.replace(" ", "")) * 0.4)
+    clean = text.replace(" ", "").replace("#", "")
+    if not clean:
+        return False
+    cjk_count = sum(1 for c in clean if "\u4e00" <= c <= "\u9fff")
+    return cjk_count >= max(1, len(clean) * 0.4)
+
+
+HASHTAG_SEGMENTATION_MAP: dict[str, str] = {
+    "banphimco": "bàn phím cơ",
+    "banphim": "bàn phím",
+    "decorbanhoc": "decor bàn học",
+    "decorphongngu": "decor phòng ngủ",
+    "decorbanlamviec": "decor bàn làm việc",
+    "decorvintage": "decor vintage",
+    "vanphongpham": "văn phòng phẩm",
+    "dungcubocsticker": "dụng cụ bóc sticker",
+    "bocsticker": "bóc sticker",
+    "giamcan": "giảm cân",
+    "tangco": "tăng cơ",
+    "tangcolung": "tăng cơ lưng",
+    "tapgym": "tập gym",
+    "meotrimunan": "mẹo trị mụn ẩn",
+    "trimunan": "trị mụn ẩn",
+    "trimun": "trị mụn",
+    "tritham": "trị thâm",
+    "kemchongnang": "kem chống nắng",
+    "suaruamat": "sữa rửa mặt",
+    "duongda": "dưỡng da",
+    "duongam": "dưỡng ẩm",
+    "skincare": "skincare",
+    "sonmoi": "son môi",
+    "reviewson": "review son",
+    "trangdiem": "trang điểm",
+    "phoido": "phối đồ",
+    "phoidomuadong": "phối đồ mùa đông",
+    "phoidomuahe": "phối đồ mùa hè",
+    "sonmongtay": "sơn móng tay",
+    "lamdep": "làm đẹp",
+    "nauan": "nấu ăn",
+    "anvat": "ăn vặt",
+    "meocute": "mèo cute",
+    "nuoimeo": "nuôi mèo",
+    "nuoicho": "nuôi chó",
+    "suaxe": "sửa xe",
+    "suaxemay": "sửa xe máy",
+    "dongho": "đồng hồ",
+    "mayanh": "máy ảnh",
+    "maykhoan": "máy khoan",
+    "thuam": "thu âm",
+    "caphemuoi": "cà phê muối",
+    "trasua": "trà sữa",
+    "banhbao": "bánh bao",
+    "banhmi": "bánh mì",
+    "docute": "đồ cute",
+    "unbox": "unbox",
+    "daphop": "đập hộp",
+    "ootd": "ootd",
+    "haul": "haul",
+    "vintage": "vintage",
+    "y2k": "y2k",
+    "blindbox": "blind box",
+    "hopmu": "hộp mù",
+    "goclamviec": "góc làm việc",
+    "gocbanhoc": "góc bàn học",
+    "chamsocmeo": "chăm sóc mèo",
+    "suaxedap": "sửa xe đạp",
+}
+
+
+def extract_hashtag_intent(query: str) -> tuple[str, list[str]]:
+    """
+    Extracts hashtags from query, segments unspaced words, and returns:
+    (clean_query_text, list_of_raw_hashtags)
+    Examples:
+    - "#decorbanhoc" -> ("decor bàn học", ["decorbanhoc"])
+    - "phối đồ #ootd" -> ("phối đồ ootd", ["ootd"])
+    - "#banphimco giá rẻ" -> ("bàn phím cơ giá rẻ", ["banphimco"])
+    """
+    raw_tags = re.findall(r"#([^\s#]+)", query)
+    cleaned_query = query
+
+    for tag in raw_tags:
+        norm_tag = normalize_vietnamese(tag).replace("_", "").replace("-", "")
+        segmented = HASHTAG_SEGMENTATION_MAP.get(norm_tag)
+        if segmented:
+            cleaned_query = cleaned_query.replace(f"#{tag}", f" {segmented} ")
+        else:
+            parts = [p for p in re.split(r"[_\-]+", tag) if p]
+            if len(parts) > 1:
+                cleaned_query = cleaned_query.replace(f"#{tag}", f" {' '.join(parts)} ")
+            else:
+                cleaned_query = cleaned_query.replace(f"#{tag}", f" {tag} ")
+
+    cleaned_query = re.sub(r"^#+\s*", "", cleaned_query)
+    cleaned_query = re.sub(r"\s+", " ", cleaned_query).strip()
+
+    norm_full = normalize_vietnamese(query).lstrip("#").replace("_", "").replace("-", "")
+    if norm_full in HASHTAG_SEGMENTATION_MAP:
+        cleaned_query = HASHTAG_SEGMENTATION_MAP[norm_full]
+
+    return cleaned_query, raw_tags
 
 
 RESTORATION_MAP: dict[str, str] = {
@@ -775,10 +879,13 @@ def plan_query(query: str) -> QueryPlan:
             tiered_queries=[raw_query],
         )
 
-    norm = normalize_vietnamese(raw_query)
+    clean_query, raw_tags = extract_hashtag_intent(raw_query)
+    target_query = clean_query if clean_query else raw_query
+
+    norm = normalize_vietnamese(target_query)
     mandatory, groups = extract_mandatory_attributes(norm)
-    subject = extract_subject(raw_query, norm)
-    action = extract_action(raw_query, norm)
+    subject = extract_subject(target_query, norm)
+    action = extract_action(target_query, norm)
 
     modifiers: list[str] = []
     for key in sorted(MODIFIER_MAP.keys(), key=len, reverse=True):
@@ -786,7 +893,7 @@ def plan_query(query: str) -> QueryPlan:
             modifiers.append(key)
 
     tiered = generate_tiered_queries(
-        raw_query,
+        target_query,
         norm=norm,
         mandatory=mandatory,
         groups=groups,
@@ -795,8 +902,19 @@ def plan_query(query: str) -> QueryPlan:
         modifiers=modifiers,
     )
 
+    if raw_tags and tiered:
+        hashtag_tiered: list[str] = []
+        for q in tiered:
+            clean_q = q.lstrip("#")
+            hashtag_q = f"#{clean_q}"
+            if hashtag_q not in hashtag_tiered:
+                hashtag_tiered.append(hashtag_q)
+            if clean_q not in hashtag_tiered:
+                hashtag_tiered.append(clean_q)
+        tiered = hashtag_tiered[:3]
+
     return QueryPlan(
-        subject=subject or raw_query,
+        subject=subject or target_query,
         action=action,
         mandatory_attributes=mandatory,
         modifiers=modifiers,
@@ -812,10 +930,13 @@ async def plan_query_async(query: str) -> QueryPlan:
             tiered_queries=[raw_query],
         )
 
-    norm = normalize_vietnamese(raw_query)
+    clean_query, raw_tags = extract_hashtag_intent(raw_query)
+    target_query = clean_query if clean_query else raw_query
+
+    norm = normalize_vietnamese(target_query)
     mandatory, groups = extract_mandatory_attributes(norm)
-    subject = extract_subject(raw_query, norm)
-    action = extract_action(raw_query, norm)
+    subject = extract_subject(target_query, norm)
+    action = extract_action(target_query, norm)
 
     modifiers: list[str] = []
     for key in sorted(MODIFIER_MAP.keys(), key=len, reverse=True):
@@ -823,7 +944,7 @@ async def plan_query_async(query: str) -> QueryPlan:
             modifiers.append(key)
 
     tiered = generate_tiered_queries(
-        raw_query,
+        target_query,
         norm=norm,
         mandatory=mandatory,
         groups=groups,
@@ -832,18 +953,29 @@ async def plan_query_async(query: str) -> QueryPlan:
         modifiers=modifiers,
     )
 
-    if tiered == [raw_query] and not is_cjk(raw_query):
-        restored = restore_vietnamese_phrases(raw_query)
+    if tiered == [target_query] and not is_cjk(target_query):
+        restored = restore_vietnamese_phrases(target_query)
         online = await fast_online_translate_async(restored)
         if online:
             clean_online = re.sub(r"\s+", "", online)
             if any("\u4e00" <= c <= "\u9fff" for c in clean_online):
-                tiered = synthesize_tiered_from_translation(clean_online, raw_query)
-                if not subject or subject == raw_query:
+                tiered = synthesize_tiered_from_translation(clean_online, target_query)
+                if not subject or subject == target_query:
                     subject = clean_online
 
+    if raw_tags and tiered:
+        hashtag_tiered: list[str] = []
+        for q in tiered:
+            clean_q = q.lstrip("#")
+            hashtag_q = f"#{clean_q}"
+            if hashtag_q not in hashtag_tiered:
+                hashtag_tiered.append(hashtag_q)
+            if clean_q not in hashtag_tiered:
+                hashtag_tiered.append(clean_q)
+        tiered = hashtag_tiered[:3]
+
     return QueryPlan(
-        subject=subject or raw_query,
+        subject=subject or target_query,
         action=action,
         mandatory_attributes=mandatory,
         modifiers=modifiers,

@@ -90,6 +90,7 @@ function SearchSession({
   const [sortBy, setSortBy] = useState<"relevance" | "most_liked" | "newest">("relevance");
   const [publishTime, setPublishTime] = useState<"all" | "day" | "week" | "six_months">("all");
   const [contentType, setContentType] = useState<"all" | "video" | "image_text">("all");
+  const [exactHashtag, setExactHashtag] = useState(false);
   const [jobId, setJobId] = useState<string | null>(initialJob);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -165,6 +166,10 @@ function SearchSession({
           sort_by: sortBy,
           publish_time: publishTime,
           content_type: contentType,
+          exact_hashtag: exactHashtag || query.trim().startsWith("#"),
+          target_hashtag: query.trim().startsWith("#")
+            ? query.trim().replace(/^#+/, "").split(/\s+/)[0]
+            : undefined,
         }),
       });
       setJobId(result.id);
@@ -275,7 +280,7 @@ function SearchSession({
             <Search size={21} />
             <input
               aria-label="Chủ đề tìm kiếm"
-              placeholder="Ví dụ: unbox đồ cute, dụng cụ bóc sticker…"
+              placeholder="Ví dụ: unbox đồ cute, #decorbanhoc, #ootd, dụng cụ bóc sticker…"
               value={query}
               maxLength={300}
               onChange={(e) => setQuery(e.target.value)}
@@ -296,6 +301,14 @@ function SearchSession({
               <ArrowRight size={17} />
             </Button>
           </div>
+          {query.trim().startsWith("#") && (
+            <div style={{ margin: "-0.5rem 0 0.5rem 0.25rem", fontSize: "0.82rem", color: "#0f766e", display: "flex", alignItems: "center", gap: "0.35rem" }}>
+              <span>🏷️ Đang tìm theo Hashtag chính xác:</span>
+              <strong style={{ background: "#ccfbf1", padding: "0.1rem 0.4rem", borderRadius: "4px" }}>
+                {query.trim()}
+              </strong>
+            </div>
+          )}
           <div className="search-options">
             <div className="row wrap">
               <span className="muted" style={{ fontWeight: 500 }}>Tìm trên:</span>
@@ -413,6 +426,15 @@ function SearchSession({
                 disabled={busy}
               />
               Tự tạo từ khóa AI khi tìm
+            </label>
+            <label className="row ai-toggle" title="Chỉ giữ lại video có gắn đúng thẻ hashtag được yêu cầu">
+              <input
+                type="checkbox"
+                checked={exactHashtag || query.trim().startsWith("#")}
+                onChange={(e) => setExactHashtag(e.target.checked)}
+                disabled={busy || query.trim().startsWith("#")}
+              />
+              Khớp chính xác Hashtag (#)
             </label>
             {mode !== "mock" && (
               <span style={{ fontSize: "0.82rem", color: "#0f766e", background: "#f0fdfa", padding: "0.2rem 0.6rem", borderRadius: "999px", border: "1px solid #ccfbf1" }}>

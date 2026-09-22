@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from backend.schemas.contracts import VideoResult
 from backend.services.translator import (
     ACTION_MAP,
+    HASHTAG_SEGMENTATION_MAP,
     MANDATORY_MAP,
     SUBJECT_MAP,
     compound_intent,
@@ -75,7 +76,13 @@ def phrase_matches(text: str, phrase: str) -> bool:
     phrase = normalize_vietnamese(phrase)
     if re.search(r"[\u4e00-\u9fff]", phrase):
         return phrase in text
-    return bool(re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", text))
+    if bool(re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", text)):
+        return True
+    clean_text = text.replace("_", "").replace("-", "")
+    clean_phrase = phrase.replace(" ", "")
+    if clean_phrase and len(clean_phrase) >= 3 and clean_phrase in clean_text:
+        return True
+    return False
 
 
 def intent_constraints(query: str) -> list[tuple[str, list[str], float]]:
@@ -130,6 +137,8 @@ def rank_detailed(
     query: str,
     alternative_queries: list[str] | None = None,
     negative_keywords: list[str] | None = None,
+    exact_hashtag: bool = False,
+    target_hashtag: str | None = None,
 ) -> RankBreakdown:
     candidates = [query]
     if alternative_queries:
@@ -139,7 +148,13 @@ def rank_detailed(
 
     title = tokens(result.title or "")
     caption = tokens(result.caption or "")
-    tags = tokens(" ".join(result.hashtags or []))
+    expanded_tags_list: list[str] = []
+    for t in (result.hashtags or []):
+        expanded_tags_list.append(str(t))
+        norm_t = normalize_vietnamese(str(t)).replace("_", "").replace("-", "")
+        if norm_t in HASHTAG_SEGMENTATION_MAP:
+            expanded_tags_list.append(HASHTAG_SEGMENTATION_MAP[norm_t])
+    tags = tokens(" ".join(expanded_tags_list))
     target_tokens = title | caption | tags
 
     best_relevance = 0.0
@@ -213,7 +228,7 @@ def rank_detailed(
             relevance = min(100.0, relevance + 5.0)
 
     # Do not let a broad alternative erase the original subject or attributes.
-    evidence = [result.title or "", result.caption or "", *(result.hashtags or [])]
+    evidence = [result.title or "", result.caption or "", *expanded_tags_list]
     missing_mandatory: list[str] = []
     for name, aliases, ceiling in intent_constraints(query):
         if not any(phrase_matches(part, alias) for part in evidence for alias in aliases):
@@ -232,6 +247,65 @@ def rank_detailed(
 
     if matched_negatives:
         relevance = min(15.0, relevance * 0.25)
+
+    # Hashtag precision matching & scoring
+    raw_tags = re.findall(r"#([^\s#]+)", query)
+    is_hashtag_search = exact_hashtag or bool(raw_tags) or query.strip().startswith("#")
+    active_target_tag = target_hashtag or (
+        raw_tags[0]
+        if raw_tags
+        else (query.strip().lstrip("#").split()[0] if query.strip().startswith("#") else None)
+    )
+
+    video_raw_hashtags = result.hashtags or []
+    video_clean_tags: list[str] = [
+        str(h).strip().lstrip("#") for h in video_raw_hashtags if str(h).strip()
+    ]
+    norm_video_tags = [
+        normalize_vietnamese(vt).replace("_", "").replace("-", "") for vt in video_clean_tags
+    ]
+
+    hashtag_matched = False
+    matched_hashtag_names: list[str] = []
+
+    if active_target_tag:
+        norm_target = (
+            normalize_vietnamese(active_target_tag).lstrip("#").replace("_", "").replace("-", "")
+        )
+        segmented_target = HASHTAG_SEGMENTATION_MAP.get(norm_target, norm_target)
+        target_tag_tokens = tokens(segmented_target) | {norm_target}
+
+        for vt, nvt in zip(video_clean_tags, norm_video_tags, strict=True):
+            if norm_target == nvt or (len(norm_target) >= 3 and norm_target in nvt) or (len(nvt) >= 3 and nvt in norm_target):
+                hashtag_matched = True
+                matched_hashtag_names.append(vt)
+            elif alternative_queries and any(alias.lstrip("#").lower() in vt.lower() for alias in alternative_queries if alias):
+                hashtag_matched = True
+                matched_hashtag_names.append(vt)
+            else:
+                vt_toks = tokens(vt)
+                if vt_toks and (vt_toks & target_tag_tokens):
+                    hashtag_matched = True
+                    matched_hashtag_names.append(vt)
+    elif video_clean_tags:
+        query_core = tokens(query) - GENERIC_MODIFIERS
+        for vt, nvt in zip(video_clean_tags, norm_video_tags, strict=True):
+            segmented_vt = HASHTAG_SEGMENTATION_MAP.get(nvt, vt)
+            vt_toks = tokens(segmented_vt) | tokens(vt)
+            if vt_toks and (vt_toks & query_core):
+                hashtag_matched = True
+                matched_hashtag_names.append(vt)
+
+    if hashtag_matched:
+        hashtag_boost = 25.0 if is_hashtag_search else 15.0
+        relevance = min(100.0, relevance + hashtag_boost)
+        if "hashtags" not in best_provenance:
+            best_provenance["hashtags"] = []
+        best_provenance["hashtags"] = sorted(list(set(best_provenance["hashtags"] + matched_hashtag_names)))
+    elif is_hashtag_search and active_target_tag:
+        relevance = min(20.0, relevance * 0.3)
+        missing_mandatory.append(f"#{active_target_tag}")
+        best_missing_core.append(f"#{active_target_tag}")
 
     metrics = [
         (result.like_count, 100000),
@@ -279,9 +353,16 @@ def rank(
     query: str,
     alternative_queries: list[str] | None = None,
     negative_keywords: list[str] | None = None,
+    exact_hashtag: bool = False,
+    target_hashtag: str | None = None,
 ) -> tuple[float, float, float]:
     detail = rank_detailed(
-        result, query, alternative_queries=alternative_queries, negative_keywords=negative_keywords
+        result,
+        query,
+        alternative_queries=alternative_queries,
+        negative_keywords=negative_keywords,
+        exact_hashtag=exact_hashtag,
+        target_hashtag=target_hashtag,
     )
     return detail.relevance, detail.quality, detail.final_score
 

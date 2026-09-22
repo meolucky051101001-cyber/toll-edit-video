@@ -48,6 +48,10 @@ async def create_search(payload: SearchRequest, request: Request, db: Session = 
                 "sort_by": payload.sort_by,
                 "publish_time": payload.publish_time,
                 "content_type": payload.content_type,
+                "exact_hashtag": payload.exact_hashtag or payload.query.strip().startswith("#"),
+                "target_hashtag": payload.target_hashtag or (
+                    payload.query.strip().lstrip("#").split()[0] if payload.query.strip().startswith("#") else None
+                ),
             },
         )
     )

@@ -63,6 +63,8 @@ class SearchRequest(BaseModel):
     sort_by: Literal["relevance", "most_liked", "newest"] = "relevance"
     publish_time: Literal["all", "day", "week", "six_months"] = "all"
     content_type: Literal["all", "video", "image_text"] = "all"
+    exact_hashtag: bool = False
+    target_hashtag: str | None = None
 
     @field_validator("selected_queries")
     @classmethod
@@ -94,6 +96,8 @@ class SearchFilters(BaseModel):
     sort_by: Literal["relevance", "most_liked", "newest"] = "relevance"
     publish_time: Literal["all", "day", "week", "six_months"] = "all"
     content_type: Literal["all", "video", "image_text"] = "all"
+    exact_hashtag: bool = False
+    target_hashtag: str | None = None
 
 
 def validate_url_policy(

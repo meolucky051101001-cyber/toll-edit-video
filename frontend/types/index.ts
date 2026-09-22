@@ -42,6 +42,8 @@ export interface SearchFilters {
   sort_by?: SearchSortBy;
   publish_time?: SearchPublishTime;
   content_type?: SearchContentType;
+  exact_hashtag?: boolean;
+  target_hashtag?: string | null;
 }
 
 export interface ViralityBreakdown {
