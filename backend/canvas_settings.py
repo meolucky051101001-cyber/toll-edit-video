@@ -12,7 +12,14 @@ logger = logging.getLogger("canvas_settings")
 
 ROOT = Path(__file__).resolve().parent
 WORKSPACE = Path(os.getenv("AUTODUB_WORKSPACE", str(ROOT.parent / "workspace")))
-SETTINGS_FILE = WORKSPACE / "canvas_settings.json"
+def _resolve_settings_file() -> Path:
+    bot_system = WORKSPACE / "bot_system"
+    target = bot_system / "canvas_settings.json"
+    if target.exists() or bot_system.is_dir():
+        return target
+    return WORKSPACE / "canvas_settings.json"
+
+SETTINGS_FILE = _resolve_settings_file()
 MOTION_BG_DIR = WORKSPACE / "motion_backgrounds"
 IMAGE_BG_DIR = WORKSPACE / "background_images"
 
@@ -342,7 +349,7 @@ def save_canvas_settings(new_settings: Dict[str, Any]) -> Dict[str, Any]:
         current["protect_top_thumb"] = bool(current.get("protect_top_thumb", True))
         current["show_safe_guides"] = bool(current.get("show_safe_guides", True))
 
-        WORKSPACE.mkdir(parents=True, exist_ok=True)
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         SETTINGS_FILE.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
         logger.info(f"Đã lưu cấu hình canvas_settings: ratio={ratio}, bg={bg_type}, scale={scale}, image={current['bg_image_file']}, motion={current['bg_motion_file']}, padding={current['crop_padding']}")
         return {"status": "ok", "settings": current, "message": "Đã lưu cài đặt tỷ lệ và background thành công"}

@@ -159,7 +159,7 @@ class VideoPipelineRunner:
         self.work_directory.mkdir(parents=True, exist_ok=True)
         self.gpu_executor = GPUStageExecutor(
             self.v2_directory / "control",
-            self.job_directory.parent / "pipeline_v2_gpu.lock",
+            (self.job_directory.parent / "bot_system" / "pipeline_v2_gpu.lock") if (self.job_directory.parent / "bot_system").is_dir() else (self.job_directory.parent / "pipeline_v2_gpu.lock"),
             lock_timeout_seconds=request.settings.gpu_lock_timeout_seconds,
             stage_timeout_seconds=request.settings.stage_timeout_seconds,
         )

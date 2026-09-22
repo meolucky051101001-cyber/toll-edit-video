@@ -10,8 +10,15 @@ from pathlib import Path
 from typing import Dict, Optional
 
 WORKSPACE_DIR = Path(__file__).resolve().parent.parent / "workspace"
-SHARED_HISTORY_FILE = Path(r"C:\tool v1\workspace\.render_history.json")
-V2_HISTORY_FILE = Path(os.getenv("TOOL_V2_RENDER_HISTORY", str(WORKSPACE_DIR / ".render_history_v2.json")))
+def _resolve_v2_history():
+    bs = WORKSPACE_DIR / "bot_system"
+    target = bs / ".render_history_v2.json"
+    if target.exists() or bs.is_dir():
+        return target
+    return WORKSPACE_DIR / ".render_history_v2.json"
+
+SHARED_HISTORY_FILE = Path(r"C:\tool v1\workspace\bot_system\.render_history.json") if Path(r"C:\tool v1\workspace\bot_system\.render_history.json").exists() else Path(r"C:\tool v1\workspace\.render_history.json")
+V2_HISTORY_FILE = Path(os.getenv("TOOL_V2_RENDER_HISTORY", str(_resolve_v2_history())))
 HISTORY_FILE = V2_HISTORY_FILE
 
 
@@ -38,8 +45,13 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
     # 1. Đọc từ các file history JSON trong workspace (tuyệt đối không tạo file rác trong D:\banve hay output_dir)
     history_files = [
         V2_HISTORY_FILE,
+        WORKSPACE_DIR / "bot_system" / ".render_history_v2.json",
+        WORKSPACE_DIR / "bot_system" / ".render_history.json",
         WORKSPACE_DIR / ".render_history.json",
         SHARED_HISTORY_FILE,
+        Path(r"C:\tool v1\workspace\bot_system\.render_history.json"),
+        Path(r"C:\tool v1\workspace\.render_history.json"),
+        Path(r"C:\tool v2\workspace\bot_system\.render_history.json"),
         Path(r"C:\tool v2\workspace\.render_history.json"),
     ]
     for hf in history_files:
@@ -57,6 +69,7 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
 
     # 2. Đọc bổ sung từ job_status.json (nếu có)
     workspace_candidates = [
+        Path(r"C:\tool v1\workspace\bot_system\job_status.json"),
         Path(r"C:\tool v1\workspace\job_status.json"),
         Path(r"C:\tool v2\workspace\job_status.json"),
         Path(__file__).resolve().parents[1] / "workspace" / "job_status.json",

@@ -28,7 +28,7 @@ from telegram.error import NetworkError
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 try:
-    from .environment import load_environment
+    from .environment import load_environment, read_environment
     from .social_downloader import (
         SensitiveUrlFilter,
         sanitize_exception,
@@ -36,7 +36,7 @@ try:
         sanitize_url,
     )
 except ImportError:
-    from environment import load_environment
+    from environment import load_environment, read_environment
     from social_downloader import (
         SensitiveUrlFilter,
         sanitize_exception,
@@ -45,6 +45,13 @@ except ImportError:
     )
 
 load_environment(Path(__file__).resolve().parent)
+# Đảm bảo BOT_TOKEN và BOT_EXPECTED_USERNAME luôn ưu tiên file .env của Tool V2,
+# ngăn ngừa hoàn toàn nguy cơ bị rò rỉ hoặc ghi đè từ tiến trình Tool V1 qua tool_control
+_local_env = read_environment(Path(__file__).resolve().parent, environment={})
+if _local_env.get("BOT_TOKEN"):
+    os.environ["BOT_TOKEN"] = _local_env["BOT_TOKEN"]
+if _local_env.get("BOT_EXPECTED_USERNAME"):
+    os.environ["BOT_EXPECTED_USERNAME"] = _local_env["BOT_EXPECTED_USERNAME"]
 
 # ===== CẤU HÌNH =====
 def configured_secret(name):
@@ -462,9 +469,16 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error killing children: {e}")
 
 import re
-
 from durable_adapter import DurableQueue
-global_queue = DurableQueue(Path(WORKSPACE) / "queue_v2.sqlite3")
+
+def _resolve_v2_queue_path() -> Path:
+    bs = Path(WORKSPACE) / "bot_system"
+    target = bs / "queue_v2.sqlite3"
+    if target.exists() or bs.is_dir():
+        return target
+    return Path(WORKSPACE) / "queue_v2.sqlite3"
+
+global_queue = DurableQueue(_resolve_v2_queue_path())
 queue_counter = 0
 worker_task = None
 
@@ -509,7 +523,24 @@ async def run_durable_video(job):
             ok, video, title, error = await asyncio.to_thread(download_social_video,
                 job['url'], str(downloads), prefix)
             if not ok or not video or not Path(video).is_file():
-                raise RuntimeError(error or 'Download failed')
+                download_err = error or 'Không thể tải video từ link'
+                if "HTTP Error 403" in download_err or "Fresh cookies" in download_err:
+                    friendly_err = "Douyin chặn tải trực tiếp (yêu cầu cookie hoặc bị hạn chế truy cập)"
+                elif "timeout" in download_err.lower() or "quá lâu" in download_err.lower():
+                    friendly_err = "Hết thời gian chờ máy chủ video (Timeout)"
+                else:
+                    friendly_err = download_err[:200]
+                if status:
+                    await safe_edit_status(
+                        status,
+                        f"❌ *Không thể tải video từ link:*\n_{friendly_err}_\n\n"
+                        f"💡 *Gợi ý:*\n"
+                        f"• Nền tảng (Douyin/TikTok) đôi khi giới hạn tải link từ xa.\n"
+                        f"• Bạn hãy gửi lại link sau vài giây để Bot thử lại từ bộ nhớ cache.\n"
+                        f"• Hoặc tải video về và gửi trực tiếp file video (.mp4) vào Bot để xử lý ngay.",
+                        parse_mode="Markdown"
+                    )
+                raise RuntimeError(f"Download failed: {friendly_err}")
         elif job['type'] == 'video':
             remote = await context.bot.get_file(job['file_id'])
             video = str(downloads / (prefix + '.mp4'))
@@ -637,10 +668,14 @@ async def video_worker():
             except Exception as e:
                 global_queue.fail(e)
                 logger.error(f"Worker error: {e}")
-                try:
-                    await job['update'].message.reply_text("V2 xử lý lỗi. Công việc đã được lưu với trạng thái lỗi; hãy gửi lại nếu muốn thử lại.")
-                except Exception:
-                    logger.warning("Could not report job failure")
+                err_str = str(e)
+                if "Download failed:" not in err_str:
+                    try:
+                        await job['update'].message.reply_text(
+                            f"⚠️ V2 xử lý lỗi: {err_str[:150]}\nCông việc đã được lưu với trạng thái lỗi; hãy gửi lại nếu muốn thử lại."
+                        )
+                    except Exception:
+                        logger.warning("Could not report job failure")
             finally:
                 import gc, torch
                 gc.collect()
@@ -748,7 +783,9 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     # Dam bao chi co duy nhat 1 tien trinh Telegram Bot chay tai 1 thoi diem
     import msvcrt
-    lock_file_path = os.path.join(WORKSPACE, "bot_instance.lock")
+    bs = Path(WORKSPACE) / "bot_system"
+    lock_dir = bs if bs.is_dir() else Path(WORKSPACE)
+    lock_file_path = os.path.join(str(lock_dir), "bot_instance.lock")
     try:
         global _singleton_lock_file
         _singleton_lock_file = open(lock_file_path, "w")
@@ -783,6 +820,11 @@ def main():
 
     while True:
         try:
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            except Exception:
+                pass
             # Tăng timeout lên 120 giây để không bị Timed out khi gửi/tải video lớn
             request = HTTPXRequest(
                 connect_timeout=30,
@@ -828,6 +870,8 @@ def main():
                 timeout=30,
                 bootstrap_retries=-1,
             )
+        except (KeyboardInterrupt, SystemExit):
+            break
         except Exception as e:
             logger.error(f"Lỗi polling hoặc mạng gián đoạn: {e}. Đang tự động kết nối lại sau 5 giây...")
             print(f"⚠️ Mang chập chờn hoặc loi: {e}. Dang tu dong ket noi lai sau 5 giay...")

@@ -254,35 +254,62 @@ def resolve_douyin_so9(url: str, video_id: str = "") -> tuple:
         'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
     }
 
+    timeout_seconds = int(os.getenv("SO9_RESOLVER_TIMEOUT", "50"))
     last_err = ""
     for target in candidate_urls:
-        try:
-            encoded_url = urllib.parse.quote(target.strip(), safe='')
-            so9_url = f"https://so9.vn/9downloader/douyin?link={encoded_url}"
-            res = requests.get(so9_url, headers=headers, timeout=25)
-            if res.status_code != 200:
-                last_err = f"SO9 trả về HTTP {res.status_code}"
-                continue
+        # Thử tối đa 2 lần cho mỗi link: lần 1 kích hoạt crawl trên SO9 (nếu video mới chưa có cache),
+        # lần 2 nhận kết quả từ cache nếu lần 1 timeout hoặc đang pending.
+        for attempt in range(2):
+            try:
+                encoded_url = urllib.parse.quote(target.strip(), safe='')
+                so9_url = f"https://so9.vn/9downloader/douyin?link={encoded_url}"
+                logger.info(f"Đang phân giải Douyin qua SO9 (lần {attempt + 1}/2): {sanitize_url(target)}")
+                res = requests.get(so9_url, headers=headers, timeout=timeout_seconds)
+                if res.status_code != 200:
+                    last_err = f"SO9 trả về HTTP {res.status_code}"
+                    if attempt == 0:
+                        time.sleep(2)
+                        continue
+                    break
 
-            match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>', res.text)
-            if not match:
-                last_err = "Không tìm thấy dữ liệu __NEXT_DATA__ từ SO9"
-                continue
+                match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>', res.text)
+                if not match:
+                    last_err = "Không tìm thấy dữ liệu __NEXT_DATA__ từ SO9"
+                    if attempt == 0:
+                        time.sleep(2)
+                        continue
+                    break
 
-            payload = json.loads(match.group(1))
-            d_data = payload.get("props", {}).get("pageProps", {}).get("downloadData")
-            if isinstance(d_data, dict):
-                video_info = d_data.get("data", {})
-                video_url = video_info.get("video")
-                title = video_info.get("title") or (f"douyin_{video_id}" if video_id else "douyin_video")
-                if video_url:
-                    logger.info("Bóc tách Douyin thành công qua SO9: %s", sanitize_url(video_url))
-                    return True, video_url, title, ""
-                else:
-                    last_err = d_data.get("message") or "SO9 không trả về link tải video"
-        except Exception as exc:
-            last_err = f"Lỗi kết nối SO9: {exc}"
-            logger.warning(f"SO9 resolver gặp lỗi với link {sanitize_url(target)}: {exc}")
+                payload = json.loads(match.group(1))
+                d_data = payload.get("props", {}).get("pageProps", {}).get("downloadData")
+                if isinstance(d_data, dict):
+                    video_info = d_data.get("data", {}) or {}
+                    video_url = video_info.get("video")
+                    raw_title = str(video_info.get("title") or "").strip()
+                    title = raw_title or (f"douyin_{video_id}" if video_id else "douyin_video")
+                    if video_url:
+                        logger.info("Bóc tách Douyin thành công qua SO9: %s", sanitize_url(video_url))
+                        return True, video_url, title, ""
+                    else:
+                        msg = d_data.get("message") or "SO9 chưa sẵn sàng link tải video"
+                        last_err = msg
+                        if attempt == 0:
+                            logger.info(f"SO9 đang xử lý video ({msg}), chờ 3s thử lại...")
+                            time.sleep(3)
+                            continue
+            except requests.exceptions.Timeout:
+                last_err = f"SO9 hết thời gian chờ ({timeout_seconds}s)"
+                logger.warning(f"SO9 timeout lần {attempt + 1} với link {sanitize_url(target)}")
+                if attempt == 0:
+                    logger.info("SO9 có thể đang crawl video ngầm từ Douyin; thử lại lần 2 sau 3s...")
+                    time.sleep(3)
+                    continue
+            except Exception as exc:
+                last_err = f"Lỗi kết nối SO9: {exc}"
+                logger.warning(f"SO9 resolver gặp lỗi với link {sanitize_url(target)}: {exc}")
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
 
     return False, "", "", last_err or "Bóc tách SO9 thất bại"
 
@@ -336,7 +363,7 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
             if ok and v_url:
                 safe_title = clean_filename(v_title or (f"douyin_{video_id}" if video_id else "douyin_video"))
                 target_path = os.path.join(output_dir, f"{prefix}_{safe_title}.mp4")
-                if download_file_stream(v_url, target_path):
+                if download_file_stream(v_url, target_path, timeout=(15, 60)):
                     logger.info(f"Tải thành công Douyin không logo qua SO9: {target_path}")
                     return True, target_path, v_title, ""
                 logger.warning("Tải luồng video từ SO9 thất bại, chuyển sang chiến lược tiếp theo.")
@@ -696,7 +723,14 @@ def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
                 return False, "", "", str(probe_error)
             return True, final_path, downloaded[0], ""
         else:
-            return False, "", "", proc.stderr[:400] if proc.stderr else "Không tìm thấy file sau khi tải"
+            raw_err = proc.stderr or ""
+            if "403" in raw_err or "Forbidden" in raw_err or "Fresh cookies" in raw_err:
+                clean_err = "Douyin chặn truy cập trực tiếp (HTTP 403 / cần cookie)"
+            elif "timed out" in raw_err.lower() or "timeout" in raw_err.lower():
+                clean_err = "Quá thời gian chờ tải video từ máy chủ nguồn"
+            else:
+                clean_err = raw_err[:250].strip() if raw_err else "Không tìm thấy file sau khi tải"
+            return False, "", "", clean_err
     except subprocess.TimeoutExpired:
         return False, "", "", "Tải video quá lâu (>5 phút)"
     except Exception as e:

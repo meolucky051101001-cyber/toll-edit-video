@@ -17,6 +17,14 @@ from environment import read_environment
 ROOT = Path(__file__).resolve().parent
 ENV = read_environment(ROOT)
 WORKSPACE = Path(ENV.get("AUTODUB_WORKSPACE", str(ROOT.parent / "workspace")))
+
+def _resolve_queue_db() -> Path:
+    bs = WORKSPACE / "bot_system"
+    target = bs / "queue_v2.sqlite3"
+    if target.exists() or bs.is_dir():
+        return target
+    return WORKSPACE / "queue_v2.sqlite3"
+
 INPUT = Path(ENV.get("AUTODUB_INPUT_DIR", r"D:\video phôi"))
 _env_output = Path(ENV.get("AUTODUB_OUTPUT_DIR", r"D:\video tool v2")).resolve()
 if not _env_output.is_dir():
@@ -125,6 +133,10 @@ def is_v2_bot_running():
                             return True
             except Exception:
                 pass
+    ws_str = str(WORKSPACE).lower()
+    if 'tool v2' not in ws_str and 'tool_v2' not in ws_str:
+        return False
+
     if now - _last_bot_check < 5.0:
         return _cached_bot_alive
     _last_bot_check = now
@@ -169,6 +181,9 @@ def is_v2_batch_running():
                         return True
         except Exception:
             pass
+    ws_str = str(WORKSPACE).lower()
+    if 'tool v2' not in ws_str and 'tool_v2' not in ws_str:
+        return False
     now = time.time()
     if now - _last_batch_check < 2.0:
         return _cached_batch_alive
@@ -213,7 +228,7 @@ def is_v2_worker_running(workspace=None, job_id=None):
                 if any(part == '-c' for part in cmd_parts):
                     continue
                 if any(kw in cmd for kw in v2_keywords):
-                    if job_id and job_id.lower() in cmd:
+                    if job_id and len(job_id) >= 6 and job_id.lower() not in ("video", "default", "workspace") and job_id.lower() in cmd:
                         return True
                     if ws in cmd:
                         return True
@@ -233,7 +248,7 @@ def read_status():
     batch_alive = is_v2_batch_running()
     
     # Query pending jobs from SQLite queue
-    db_path = WORKSPACE / "queue_v2.sqlite3"
+    db_path = _resolve_queue_db()
     q_count = 0
     if db_path.is_file():
         try:
@@ -780,7 +795,7 @@ def read_queue():
     alive = bot_alive and not paused
     items = []
 
-    db_path = WORKSPACE / "queue_v2.sqlite3"
+    db_path = _resolve_queue_db()
     if db_path.is_file():
         try:
             import sqlite3
