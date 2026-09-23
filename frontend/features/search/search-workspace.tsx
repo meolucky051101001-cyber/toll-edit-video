@@ -11,7 +11,6 @@ import {
   Check,
   Clock3,
   ArrowRight,
-  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/error-banner";
@@ -641,10 +640,6 @@ function SearchSession({
                 (mode === "douyin" ? "douyin" : "xiaohongshu");
               const jobPlatformLabel =
                 jobPlatform === "douyin" ? "Douyin" : "Xiaohongshu";
-              const defaultLoginUrl =
-                jobPlatform === "douyin"
-                  ? "https://www.douyin.com"
-                  : "https://www.xiaohongshu.com/explore";
               const isLogin = job.data.status === "waiting_for_login";
 
               return (
@@ -684,28 +679,6 @@ function SearchSession({
                           : `⚠️ Nền tảng ${jobPlatformLabel} yêu cầu xác minh bảo mật`}
                       </span>
                     </div>
-
-                    <a
-                      href={defaultLoginUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: "0.4rem",
-                        background: "#0f766e",
-                        color: "#ffffff",
-                        padding: "0.45rem 0.9rem",
-                        borderRadius: "6px",
-                        fontSize: "0.85rem",
-                        fontWeight: 600,
-                        textDecoration: "none",
-                        boxShadow: "0 2px 6px rgba(15, 118, 110, 0.25)",
-                      }}
-                    >
-                      <ExternalLink size={15} />
-                      Đăng nhập trên {jobPlatformLabel}
-                    </a>
                   </div>
                   <p
                     style={{
@@ -715,7 +688,7 @@ function SearchSession({
                       marginBottom: "0.75rem",
                     }}
                   >
-                    Nền tảng <strong>{jobPlatformLabel}</strong> yêu cầu đăng nhập hoặc xác minh tài khoản. Bạn hãy nhấp vào nút đăng nhập bên cạnh để mở trang web trên trình duyệt của bạn (hoặc cấu hình Cookie trong Cài đặt), sau đó bấm <strong>Tiếp tục lượt tìm</strong>.
+                    Nền tảng <strong>{jobPlatformLabel}</strong> yêu cầu giải mã CAPTCHA hoặc xác thực phiên đăng nhập. Bạn có thể dùng các nút bên dưới để <strong>Mở cửa sổ giải CAPTCHA</strong> (kéo thanh trượt trực tiếp) hoặc <strong>Đăng nhập bằng mã QR</strong> (quét điện thoại không cần giải đố). Hệ thống sẽ tự động tiếp tục khi hoàn tất.
                   </p>
                   <BrowserControls
                     jobId={job.data.id}

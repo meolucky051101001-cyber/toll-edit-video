@@ -250,3 +250,82 @@ def test_douyin_adapter_uses_cookie_and_highest_bitrate(monkeypatch):
     # Assert highest bitrate was picked and unwatermarked (playwm -> play)
     assert resolved.media_url == "https://aweme.snssdk.com/aweme/v1/play/?video_id=high_1080p"
     assert resolved.headers.get("Cookie") == "ttwid=mock_ttwid; sessionid=mock_session"
+
+
+def test_extract_cookies_domain_filtering(tmp_path: Path):
+    auth_file = tmp_path / "auth_state.json"
+    data = {
+        "cookies": [
+            {"name": "sessionid", "value": "dy_sess_123", "domain": ".douyin.com"},
+            {"name": "ttwid", "value": "dy_ttwid_456", "domain": "www.douyin.com"},
+            {"name": "", "value": "douyin.com", "domain": "www.douyin.com"},  # empty name
+            {"name": "SID", "value": "google_val", "domain": ".google.com"},  # foreign domain
+            {"name": "web_session", "value": "xhs_sess_789", "domain": ".xiaohongshu.com"},
+        ]
+    }
+    auth_file.write_text(json.dumps(data), encoding="utf-8")
+
+    # Platform = douyin should only extract Douyin cookies
+    dy_extracted = extract_cookies_from_auth_file(auth_file, platform="douyin")
+    assert "sessionid=dy_sess_123" in dy_extracted
+    assert "ttwid=dy_ttwid_456" in dy_extracted
+    assert "google_val" not in dy_extracted
+    assert "xhs_sess_789" not in dy_extracted
+    assert "=douyin.com" not in dy_extracted
+
+    # Platform = xiaohongshu should only extract XHS cookies
+    xhs_extracted = extract_cookies_from_auth_file(auth_file, platform="xiaohongshu")
+    assert "web_session=xhs_sess_789" in xhs_extracted
+    assert "sessionid" not in xhs_extracted
+    assert "google_val" not in xhs_extracted
+
+
+def test_clean_and_classify_cookie_string():
+    from backend.services.cookie_service import clean_and_classify_cookie_string
+
+    dy_raw = "ttwid=1%7Cabc; s_v_web_id=verify_xyz; sessionid=my_session; other=foo"
+    res_dy = clean_and_classify_cookie_string(dy_raw)
+    assert res_dy["platform"] == "douyin"
+    assert res_dy["tokens"]["sessionid"] == "my_session"
+
+    xhs_raw = "a1=token_a1; web_session=token_sess; webId=wid_123"
+    res_xhs = clean_and_classify_cookie_string(xhs_raw)
+    assert res_xhs["platform"] == "xiaohongshu"
+    assert res_xhs["tokens"]["web_session"] == "token_sess"
+
+    unknown_raw = "foo=bar; baz=qux"
+    res_unk = clean_and_classify_cookie_string(unknown_raw)
+    assert res_unk["platform"] == "unknown"
+
+
+def test_api_quick_paste_cookies(client: TestClient, monkeypatch):
+    orig_xhs = settings.xhs_cookie
+    orig_dy = settings.douyin_cookie
+    saved = []
+    monkeypatch.setattr("backend.api.settings._save_env_values", lambda vals: saved.append(vals))
+
+    try:
+        # 1. Quick paste Douyin cookies
+        dy_raw = "ttwid=1%7Cpaste_dy; s_v_web_id=verify_paste; sessionid=sess_paste_dy"
+        res_dy = client.post("/api/settings/cookies/quick-paste", json={"raw_cookie": dy_raw})
+        assert res_dy.status_code == 200
+        data_dy = res_dy.json()
+        assert data_dy["ok"] is True
+        assert data_dy["platform"] == "douyin"
+        assert settings.douyin_cookie == dy_raw
+
+        # 2. Quick paste Xiaohongshu cookies
+        xhs_raw = "a1=paste_xhs_a1; web_session=paste_xhs_sess; webId=paste_xhs_wid"
+        res_xhs = client.post("/api/settings/cookies/quick-paste", json={"raw_cookie": xhs_raw})
+        assert res_xhs.status_code == 200
+        data_xhs = res_xhs.json()
+        assert data_xhs["ok"] is True
+        assert data_xhs["platform"] == "xiaohongshu"
+        assert settings.xhs_cookie == xhs_raw
+
+        # 3. Invalid / unknown string returns 400
+        res_inv = client.post("/api/settings/cookies/quick-paste", json={"raw_cookie": "invalid_cookie_str"})
+        assert res_inv.status_code == 400
+    finally:
+        settings.xhs_cookie = orig_xhs
+        settings.douyin_cookie = orig_dy

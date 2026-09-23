@@ -216,6 +216,18 @@ export async function syncBrowserCookies(platform: "xiaohongshu" | "douyin" | "a
   });
 }
 
+export async function quickPasteCookies(raw_cookie: string): Promise<{
+  ok: boolean;
+  platform: string;
+  message: string;
+  cookies: import("@/types").CookieSettingsData;
+}> {
+  return api("/settings/cookies/quick-paste", {
+    method: "POST",
+    body: JSON.stringify({ raw_cookie }),
+  });
+}
+
 export async function analyzeVideoScript(
   videoId: string,
   forceRefresh: boolean = false

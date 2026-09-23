@@ -62,6 +62,8 @@ class DouyinBrowserService:
     def should_run_headless(self) -> bool:
         if getattr(self, "force_headful_session", False):
             return False
+        if getattr(self, "sticky_headful", False):
+            return False
         if not getattr(self, "hybrid_headless", True):
             return False
         if self.headless:
@@ -77,20 +79,25 @@ class DouyinBrowserService:
                 pass
         return False
 
-    def reset_headful_session(self) -> None:
-        self.force_headful_session = False
-        self.hybrid_headless = getattr(self, "default_hybrid_headless", True)
+    def reset_headful_session(self, force: bool = False) -> None:
+        if force or not getattr(self, "sticky_headful", False):
+            self.force_headful_session = False
+            self.sticky_headful = False
+            self.hybrid_headless = getattr(self, "default_hybrid_headless", True)
 
     async def ensure_headless_session(self) -> None:
+        if getattr(self, "sticky_headful", False):
+            return
         if getattr(self, "force_headful_session", False):
-            self.reset_headful_session()
+            self.reset_headful_session(force=True)
             if getattr(self, "is_currently_headless", True) is False and self.context:
                 await self._close()
         else:
-            self.reset_headful_session()
+            self.reset_headful_session(force=True)
 
     async def elevate_to_headful(self) -> Page:
         self.force_headful_session = True
+        self.sticky_headful = True
         self.hybrid_headless = False
         if not getattr(self, "is_currently_headless", False):
             return self.page or await self.ensure_open(headless_override=False)
@@ -161,6 +168,7 @@ class DouyinBrowserService:
                 str(self.profile),
                 headless=effective_headless,
                 channel=settings.xhs_browser_channel,
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 900},
                 accept_downloads=False,
                 locale="zh-CN",
@@ -170,37 +178,110 @@ class DouyinBrowserService:
                     "--no-sandbox",
                     "--disable-infobars",
                     "--disable-blink-features=AutomationControlled",
+                    "--disable-features=IsolateOrigins,site-per-process",
                     "--disable-dev-shm-usage",
                     "--no-first-run",
                     "--no-default-browser-check",
+                    "--window-size=1280,900",
                 ],
             )
 
-            # Anti-bot stealth injection to mask automated Playwright fingerprints
+            # Enterprise stealth injection to mask automated Playwright fingerprints
             STEALTH_INIT_SCRIPT = """
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined,
-            });
+            // Overwrite webdriver on Navigator.prototype so navigator.hasOwnProperty('webdriver') === false
+            try {
+                delete Object.getPrototypeOf(navigator).webdriver;
+            } catch (e) {}
+            try {
+                Object.defineProperty(Navigator.prototype, 'webdriver', {
+                    get: () => undefined,
+                    configurable: true,
+                    enumerable: false,
+                });
+            } catch (e) {}
+
+            // Realistic window.chrome object
             if (!window.chrome) {
                 window.chrome = {};
             }
             if (!window.chrome.runtime) {
-                window.chrome.runtime = {};
+                window.chrome.runtime = {
+                    connect: () => {},
+                    sendMessage: () => {},
+                    id: undefined,
+                };
             }
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['zh-CN', 'zh', 'en'],
-            });
+            if (!window.chrome.loadTimes) {
+                window.chrome.loadTimes = () => ({
+                    requestTime: performance.now() / 1000,
+                    startLoadTime: performance.now() / 1000,
+                    commitLoadTime: performance.now() / 1000,
+                    finishDocumentLoadTime: performance.now() / 1000,
+                    firstPaintTime: performance.now() / 1000,
+                    firstPaintAfterLoadTime: 0,
+                    navigationType: 'Other',
+                    wasFetchedViaSpdy: false,
+                    wasNpnNegotiated: false,
+                    npnNegotiatedProtocol: 'unknown',
+                    wasAlternateProtocolAvailable: false,
+                    connectionInfo: 'http/1.1',
+                });
+            }
+            if (!window.chrome.csi) {
+                window.chrome.csi = () => ({
+                    startE: performance.now(),
+                    onloadT: performance.now(),
+                    pageT: performance.now(),
+                    tran: 15,
+                });
+            }
+            if (!window.chrome.app) {
+                window.chrome.app = {
+                    isInstalled: false,
+                    InstallState: { DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed" },
+                    RunningState: { CANNOT_RUN: "cannot_run", READY_TO_RUN: "ready_to_run", RUNNING: "running" },
+                    getIsInstalled: () => false,
+                    getDetails: () => null,
+                };
+            }
+
+            // Realistic languages
+            try {
+                Object.defineProperty(Navigator.prototype, 'languages', {
+                    get: () => ['zh-CN', 'zh', 'en-US', 'en'],
+                    configurable: true,
+                });
+            } catch (e) {}
+
+            // Standard plugins
+            try {
+                const makePlugin = (name, filename, description) => ({
+                    name,
+                    filename,
+                    description,
+                    length: 1,
+                    item: () => null,
+                    namedItem: () => null,
+                });
+                const pluginsList = [
+                    makePlugin('PDF Viewer', 'pdf-viewer.plugin', 'Portable Document Format'),
+                    makePlugin('Chrome PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+                    makePlugin('Chromium PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+                ];
+                Object.defineProperty(Navigator.prototype, 'plugins', {
+                    get: () => pluginsList,
+                    configurable: true,
+                });
+            } catch (e) {}
             """
             await self.context.add_init_script(STEALTH_INIT_SCRIPT)
 
+            # Unblock bds.snssdk.com / mon.snssdk.com / log.douyin.com so ByteDance Security SDK and CAPTCHA verify correctly
             TRACKER_DOMAINS = (
                 "sensorsdata.cn",
                 "growingio.com",
                 "hm.baidu.com",
                 "google-analytics.com",
-                "log.douyin.com",
-                "mon.snssdk.com",
-                "bds.snssdk.com",
             )
 
             async def block_resources(route):
@@ -455,6 +536,13 @@ class DouyinBrowserService:
                 try:
                     auth_file = self.profile / "auth_state.json"
                     await self.context.storage_state(path=str(auth_file))
+                    try:
+                        from backend.services.cookie_service import persist_auth_cookies
+                        raw_auth = json.loads(auth_file.read_text("utf-8"))
+                        raw_auth["cookies"] = persist_auth_cookies(raw_auth.get("cookies", []))
+                        auth_file.write_text(json.dumps(raw_auth, indent=2), encoding="utf-8")
+                    except Exception:
+                        pass
                 except Exception:
                     pass
                 await self.context.close()
@@ -468,8 +556,9 @@ class DouyinBrowserService:
                 self.driver = None
             self.state = "closed"
             self.is_currently_headless = False
-            self.hybrid_headless = getattr(self, "default_hybrid_headless", True)
-            self.force_headful_session = False
+            if not getattr(self, "sticky_headful", False):
+                self.hybrid_headless = getattr(self, "default_hybrid_headless", True)
+                self.force_headful_session = False
 
     async def close(self) -> None:
         async with self.lock:

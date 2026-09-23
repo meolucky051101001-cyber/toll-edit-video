@@ -1,4 +1,5 @@
 "use client";
+import { useState } from "react";
 import { Database, FlaskConical, Sparkles, Monitor, KeyRound } from "lucide-react";
 import { useResource } from "@/lib/use-resource";
 import { ErrorBanner } from "@/components/error-banner";
@@ -9,6 +10,7 @@ import { CookieSettings } from "@/features/settings/cookie-settings";
 
 export default function Page() {
   const settings = useResource<Settings>("/settings");
+  const [browserPlatform, setBrowserPlatform] = useState<"douyin" | "xiaohongshu">("douyin");
   return (
     <>
       <div className="page-heading">
@@ -74,7 +76,41 @@ export default function Page() {
         <section className="settings-panel">
           <Monitor size={23} />
           <h2>Trình duyệt & đăng nhập</h2>
-          <BrowserControls />
+          <div style={{ display: "flex", gap: "0.5rem", margin: "0.5rem 0 0.85rem 0" }}>
+            <button
+              type="button"
+              onClick={() => setBrowserPlatform("douyin")}
+              style={{
+                padding: "0.35rem 0.85rem",
+                borderRadius: "6px",
+                border: browserPlatform === "douyin" ? "2px solid #0f766e" : "1px solid #cbd5e1",
+                background: browserPlatform === "douyin" ? "rgba(15, 118, 110, 0.08)" : "#fff",
+                color: browserPlatform === "douyin" ? "#0f766e" : "#475569",
+                fontWeight: browserPlatform === "douyin" ? 600 : 500,
+                cursor: "pointer",
+                fontSize: "0.85rem",
+              }}
+            >
+              Douyin (TikTok Trung)
+            </button>
+            <button
+              type="button"
+              onClick={() => setBrowserPlatform("xiaohongshu")}
+              style={{
+                padding: "0.35rem 0.85rem",
+                borderRadius: "6px",
+                border: browserPlatform === "xiaohongshu" ? "2px solid #0f766e" : "1px solid #cbd5e1",
+                background: browserPlatform === "xiaohongshu" ? "rgba(15, 118, 110, 0.08)" : "#fff",
+                color: browserPlatform === "xiaohongshu" ? "#0f766e" : "#475569",
+                fontWeight: browserPlatform === "xiaohongshu" ? 600 : 500,
+                cursor: "pointer",
+                fontSize: "0.85rem",
+              }}
+            >
+              Xiaohongshu / RedNote
+            </button>
+          </div>
+          <BrowserControls key={browserPlatform} platform={browserPlatform} />
         </section>
       </div>
     </>

@@ -11,12 +11,14 @@ import {
   Check,
   Sparkles,
   Loader2,
+  ClipboardPaste,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   getCookieSettings,
   saveCookieSettings,
   syncBrowserCookies,
+  quickPasteCookies,
 } from "@/lib/api";
 import type { CookieSettingsData } from "@/types";
 
@@ -26,6 +28,7 @@ export function CookieSettings() {
   const [busyXhs, setBusyXhs] = useState(false);
   const [busyDy, setBusyDy] = useState(false);
   const [busySyncAll, setBusySyncAll] = useState(false);
+  const [busyPaste, setBusyPaste] = useState(false);
 
   const [editXhs, setEditXhs] = useState(false);
   const [editDy, setEditDy] = useState(false);
@@ -33,6 +36,41 @@ export function CookieSettings() {
   const [inputDy, setInputDy] = useState("");
 
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  const handleQuickPaste = async () => {
+    setBusyPaste(true);
+    setMessage(null);
+    try {
+      let text = "";
+      if (typeof navigator !== "undefined" && navigator.clipboard?.readText) {
+        try {
+          text = await navigator.clipboard.readText();
+        } catch {
+          // Clipboard read blocked by browser permissions
+        }
+      }
+      if (!text || !text.trim()) {
+        setMessage({
+          type: "error",
+          text: "Không đọc được bộ nhớ tạm. Hãy sao chép chuỗi Cookie trên trình duyệt của bạn rồi bấm lại nút này, hoặc dán thủ công vào từng ô bên dưới.",
+        });
+        return;
+      }
+      const res = await quickPasteCookies(text.trim());
+      setData(res.cookies);
+      setMessage({
+        type: res.ok ? "success" : "error",
+        text: res.message,
+      });
+    } catch (err) {
+      setMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Lỗi khi xử lý chuỗi Cookie từ bộ nhớ tạm.",
+      });
+    } finally {
+      setBusyPaste(false);
+    }
+  };
 
 
   useEffect(() => {
@@ -189,27 +227,63 @@ export function CookieSettings() {
       )}
 
       {/* Global Quick Action */}
-      <div className="cookie-quick-sync-strip">
-        <div className="quick-sync-info">
+      <div className="cookie-quick-sync-strip" style={{ flexWrap: "wrap", gap: "0.75rem" }}>
+        <div className="quick-sync-info" style={{ flex: 1, minWidth: "280px" }}>
           <Sparkles size={16} className="text-accent" />
           <span>
-            Đã đăng nhập ở cửa sổ trình duyệt? Bấm để trích xuất tự động vào cấu hình mà không cần copy tay.
+            Lấy Cookie siêu tốc: Nhập tự động từ trình duyệt công cụ hoặc dán nhanh chuỗi cookie từ Chrome cá nhân.
           </span>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleSyncAll}
-          disabled={busySyncAll}
-          className="sync-all-btn"
-        >
-          {busySyncAll ? (
-            <Loader2 size={14} className="animate-spin mr-1" />
-          ) : (
-            <RotateCcw size={14} className="mr-1" />
-          )}
-          <span>Đồng bộ từ trình duyệt (Cả 2 nền tảng)</span>
-        </Button>
+        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+          <Button
+            variant="default"
+            size="sm"
+            onClick={handleQuickPaste}
+            disabled={busyPaste}
+            style={{
+              background: "#0f766e",
+              color: "#ffffff",
+              fontWeight: 600,
+            }}
+          >
+            {busyPaste ? (
+              <Loader2 size={14} className="animate-spin mr-1" />
+            ) : (
+              <ClipboardPaste size={14} className="mr-1" />
+            )}
+            <span>Dán nhanh từ Clipboard</span>
+          </Button>
+
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleSyncAll}
+            disabled={busySyncAll}
+            className="sync-all-btn"
+          >
+            {busySyncAll ? (
+              <Loader2 size={14} className="animate-spin mr-1" />
+            ) : (
+              <RotateCcw size={14} className="mr-1" />
+            )}
+            <span>Đồng bộ từ trình duyệt</span>
+          </Button>
+        </div>
+      </div>
+
+      <div
+        style={{
+          margin: "-0.5rem 0 1rem 0",
+          padding: "0.6rem 0.9rem",
+          background: "#f0fdfa",
+          border: "1px solid #ccfbf1",
+          borderRadius: "6px",
+          fontSize: "0.82rem",
+          color: "#134e4a",
+          lineHeight: 1.5,
+        }}
+      >
+        💡 <strong>Mẹo 2 giây lấy Cookie từ Chrome/Edge cá nhân</strong>: Mở tab Douyin hoặc Xiaohongshu trên trình duyệt thường dùng → Nhấn <code>F12</code> (hoặc Chuột phải → Kiểm tra) → Vào tab <strong>Console</strong> → Gõ <code>copy(document.cookie)</code> rồi ấn Enter → Quay lại đây bấm nút <strong>Dán nhanh từ Clipboard</strong> là hoàn tất!
       </div>
 
       <div className="cookie-platforms-grid">

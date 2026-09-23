@@ -112,8 +112,11 @@ def inspect_cookie_tokens(cookie_str: str, platform: str) -> dict[str, Any]:
     }
 
 
-def extract_cookies_from_auth_file(auth_path: Path) -> str:
-    """Read Playwright auth_state.json and format into standard cookie string."""
+def extract_cookies_from_auth_file(auth_path: Path, platform: str | None = None) -> str:
+    """Read Playwright auth_state.json and format into standard cookie string.
+
+    Filters cookies by target platform domain to avoid oversized header pollution from third-party sites.
+    """
     if not auth_path.exists():
         return ""
     try:
@@ -121,7 +124,27 @@ def extract_cookies_from_auth_file(auth_path: Path) -> str:
         cookies = data.get("cookies", [])
         if not cookies or not isinstance(cookies, list):
             return ""
-        items = [f"{c['name']}={c['value']}" for c in cookies if isinstance(c, dict) and "name" in c and "value" in c]
+
+        allowed_domains: tuple[str, ...] | None = None
+        if platform == "douyin":
+            allowed_domains = ("douyin.com", "iesdouyin.com")
+        elif platform == "xiaohongshu":
+            allowed_domains = ("xiaohongshu.com", "rednote.com")
+
+        items: list[str] = []
+        for c in cookies:
+            if not isinstance(c, dict):
+                continue
+            name = str(c.get("name", "")).strip()
+            val = str(c.get("value", ""))
+            if not name:
+                continue
+            if allowed_domains:
+                domain = str(c.get("domain", "")).lower().lstrip(".")
+                if not any(domain == d or domain.endswith("." + d) for d in allowed_domains):
+                    continue
+            items.append(f"{name}={val}")
+
         return "; ".join(items)
     except Exception as err:
         logger.warning("Error reading auth state from %s: %s", auth_path, err)
@@ -136,4 +159,29 @@ def get_browser_session_cookie(platform: str) -> str:
         auth_file = ROOT / "data/browser/douyin/auth_state.json"
     else:
         return ""
-    return extract_cookies_from_auth_file(auth_file)
+    return extract_cookies_from_auth_file(auth_file, platform=platform)
+
+
+def clean_and_classify_cookie_string(raw: str) -> dict[str, Any]:
+    """Parse raw cookie string, detect target platform, and clean key tokens."""
+    tokens = parse_cookie_str(raw)
+    if not tokens:
+        return {"platform": "unknown", "cookie_str": "", "tokens": {}}
+
+    keys = set(tokens.keys())
+    dy_matches = sum(1 for t in DOUYIN_ESSENTIAL_TOKENS if t in keys)
+    xhs_matches = sum(1 for t in XHS_ESSENTIAL_TOKENS if t in keys)
+
+    if dy_matches > xhs_matches or "ttwid" in keys or "s_v_web_id" in keys:
+        platform = "douyin"
+    elif xhs_matches > 0 or "web_session" in keys or "a1" in keys or "webId" in keys:
+        platform = "xiaohongshu"
+    else:
+        platform = "unknown"
+
+    cleaned_str = cookie_dict_to_str(tokens)
+    return {
+        "platform": platform,
+        "cookie_str": cleaned_str,
+        "tokens": tokens,
+    }

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 from dotenv import set_key
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from backend.core.config import ROOT, settings
@@ -101,6 +101,10 @@ class CookieSyncRequest(BaseModel):
     platform: Literal["xiaohongshu", "douyin", "all"] = "all"
 
 
+class QuickPasteRequest(BaseModel):
+    raw_cookie: str = Field(..., max_length=30000)
+
+
 async def sync_douyin_upstream_cookie(cookie: str, base_url: str) -> bool:
     if not cookie or not base_url:
         return False
@@ -187,7 +191,15 @@ async def sync_browser_cookies(payload: CookieSyncRequest, request: Request):
             if browser.context:
                 cookies = await browser.context.cookies()
                 if cookies:
-                    xhs_cookie = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+                    xhs_cookie = "; ".join(
+                        f"{c['name']}={c['value']}"
+                        for c in cookies
+                        if c.get("name")
+                        and any(
+                            str(c.get("domain", "")).lower().endswith(d)
+                            for d in ("xiaohongshu.com", "rednote.com")
+                        )
+                    )
         except Exception:
             pass
         if not xhs_cookie:
@@ -205,7 +217,15 @@ async def sync_browser_cookies(payload: CookieSyncRequest, request: Request):
             if dy_browser.context:
                 cookies = await dy_browser.context.cookies()
                 if cookies:
-                    douyin_cookie = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+                    douyin_cookie = "; ".join(
+                        f"{c['name']}={c['value']}"
+                        for c in cookies
+                        if c.get("name")
+                        and any(
+                            str(c.get("domain", "")).lower().endswith(d)
+                            for d in ("douyin.com", "iesdouyin.com")
+                        )
+                    )
         except Exception:
             pass
         if not douyin_cookie:
@@ -229,3 +249,37 @@ async def sync_browser_cookies(payload: CookieSyncRequest, request: Request):
         "cookies": await get_cookie_settings(),
     }
 
+
+@router.post("/cookies/quick-paste")
+async def quick_paste_cookies(payload: QuickPasteRequest):
+    from backend.services.cookie_service import clean_and_classify_cookie_string
+
+    classified = clean_and_classify_cookie_string(payload.raw_cookie)
+    platform = classified.get("platform")
+    cookie_str = classified.get("cookie_str", "")
+
+    if platform == "unknown" or not cookie_str:
+        raise HTTPException(
+            400,
+            "Không nhận diện được Cookie hợp lệ của Douyin hoặc Xiaohongshu. Hãy kiểm tra chuỗi vừa dán.",
+        )
+
+    values: dict[str, str] = {}
+    if platform == "douyin":
+        values["DOUYIN_COOKIE"] = cookie_str
+        settings.douyin_cookie = cookie_str
+        await sync_douyin_upstream_cookie(cookie_str, settings.douyin_downloader_url)
+    elif platform == "xiaohongshu":
+        values["XHS_COOKIE"] = cookie_str
+        settings.xhs_cookie = cookie_str
+
+    if values:
+        _save_env_values(values)
+
+    platform_label = "Douyin" if platform == "douyin" else "Xiaohongshu"
+    return {
+        "ok": True,
+        "platform": platform,
+        "message": f"Đã nhận diện và lưu Cookie cho {platform_label} thành công!",
+        "cookies": await get_cookie_settings(),
+    }

@@ -1,8 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
-import { ExternalLink } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  QrCode,
+  Monitor,
+  RotateCcw,
+  X,
+  Smartphone,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/error-banner";
 import { api } from "@/lib/api";
@@ -45,9 +51,11 @@ export function BrowserControls({
 }) {
   const endpoint =
     platform === "douyin" ? "/browser/douyin" : "/browser/xiaohongshu";
-  const status = useResource<BrowserStatus>(endpoint, 5000);
+  const status = useResource<BrowserStatus>(endpoint, 4000);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [showQrModal, setShowQrModal] = useState(false);
+  const [qrTimestamp, setQrTimestamp] = useState(0);
 
   async function action(actionPath: string) {
     setBusy(true);
@@ -66,23 +74,156 @@ export function BrowserControls({
   const diag = status.data?.diagnostics;
   const platformLabel = platform === "douyin" ? "Douyin" : "Xiaohongshu";
   const displayHost = platform === "douyin" ? "douyin.com" : "xiaohongshu.com";
-  const loginUrl =
-    status.data?.login_url ||
-    (platform === "douyin"
-      ? "https://www.douyin.com"
-      : "https://www.xiaohongshu.com/explore");
+  const isAuthenticated = Boolean(diag?.is_authenticated);
 
   const isAuthRequired =
     status.data?.state === "login_required" ||
     status.data?.state === "verification_required" ||
-    (waiting && !diag?.is_authenticated);
+    (waiting && !isAuthenticated);
+
+  // Auto-refresh QR code or check login status periodically when QR modal is open
+  useEffect(() => {
+    if (!showQrModal) return;
+    const interval = setInterval(() => {
+      setQrTimestamp(Date.now());
+      status.refresh();
+      if (status.data?.diagnostics?.is_authenticated) {
+        setShowQrModal(false);
+        refresh?.();
+      }
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [showQrModal, status, refresh]);
+
+  const handleOpenQr = async () => {
+    setShowQrModal(true);
+    setQrTimestamp(Date.now());
+    // Ensure browser is running headful so QR code is actively loaded
+    if (!status.data?.open) {
+      await action(`${endpoint}/open`);
+    } else {
+      await action(`${endpoint}/refresh_qr`);
+    }
+  };
 
   return (
     <div className="browser-controls">
       <p>{status.data?.message ?? "Đang kiểm tra trình duyệt…"}</p>
 
-      {/* Direct Login Link Banner when auth is required */}
-      {isAuthRequired && (
+      {/* QR Code Modal / Popup */}
+      {showQrModal && (
+        <div
+          style={{
+            margin: "0.85rem 0",
+            padding: "1.2rem",
+            background: "#ffffff",
+            borderRadius: "10px",
+            border: "2px solid #0f766e",
+            boxShadow: "0 4px 20px rgba(15, 118, 110, 0.15)",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginBottom: "0.8rem",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <Smartphone size={18} style={{ color: "#0f766e" }} />
+              <strong style={{ fontSize: "0.95rem", color: "#0f766e" }}>
+                Đăng nhập siêu tốc bằng Mã QR {platformLabel}
+              </strong>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowQrModal(false)}
+              style={{
+                background: "transparent",
+                border: "none",
+                cursor: "pointer",
+                padding: "4px",
+                color: "#64748b",
+              }}
+              title="Đóng"
+            >
+              <X size={18} />
+            </button>
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: "1.25rem",
+              alignItems: "center",
+            }}
+          >
+            <div
+              style={{
+                width: "210px",
+                height: "210px",
+                border: "1px solid #cbd5e1",
+                borderRadius: "8px",
+                overflow: "hidden",
+                background: "#f8fafc",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={`/api${endpoint}/screenshot?crop=qr&t=${qrTimestamp}`}
+                alt={`Mã QR ${platformLabel}`}
+                style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                onError={(e) => {
+                  (e.target as HTMLImageElement).style.display = "none";
+                }}
+              />
+            </div>
+
+            <div style={{ flex: 1, minWidth: "240px", fontSize: "0.85rem", lineHeight: 1.6 }}>
+              <ol style={{ paddingLeft: "1.2rem", margin: "0 0 0.75rem 0", color: "#334155" }}>
+                <li>Mở app <strong>{platformLabel}</strong> trên điện thoại.</li>
+                <li>Vào phần <strong>Quét mã QR</strong> (ở góc trên cùng hoặc trang cá nhân).</li>
+                <li>Hướng camera vào mã bên cạnh để xác nhận đăng nhập.</li>
+                <li>Hệ thống sẽ <strong>tự động nhận diện đăng nhập</strong> trong 2 giây!</li>
+              </ol>
+
+              <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => {
+                    action(`${endpoint}/refresh_qr`);
+                    setQrTimestamp(Date.now());
+                  }}
+                >
+                  <RotateCcw size={14} className="mr-1" />
+                  Đổi mã QR mới
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => action(`${endpoint}/open`)}
+                >
+                  <Monitor size={14} className="mr-1" />
+                  Hiện cửa sổ trình duyệt lớn
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Direct Login / CAPTCHA Banner when auth or verification is required */}
+      {isAuthRequired && !showQrModal && (
         <div
           style={{
             margin: "0.75rem 0",
@@ -102,27 +243,43 @@ export function BrowserControls({
               marginBottom: "0.5rem",
             }}
           >
-            <a
-              href={loginUrl}
-              target="_blank"
-              rel="noopener noreferrer"
+            {/* Primary Action 1: Open Headful Window to solve CAPTCHA or Login directly */}
+            <Button
+              type="button"
+              disabled={busy}
+              onClick={() => action(`${endpoint}/open`)}
               style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "0.45rem",
-                padding: "0.55rem 1.1rem",
                 background: "#0f766e",
                 color: "#ffffff",
-                borderRadius: "6px",
                 fontWeight: 600,
                 fontSize: "0.9rem",
-                textDecoration: "none",
+                padding: "0.55rem 1.1rem",
+                height: "auto",
                 boxShadow: "0 2px 6px rgba(15, 118, 110, 0.25)",
               }}
             >
-              <ExternalLink size={16} />
-              Bấm vào đây để đăng nhập {platformLabel} ({displayHost})
-            </a>
+              <Monitor size={16} className="mr-1" />
+              Mở cửa sổ giải CAPTCHA / Đăng nhập
+            </Button>
+
+            {/* Primary Action 2: Quick QR Login */}
+            <Button
+              type="button"
+              variant="outline"
+              disabled={busy}
+              onClick={handleOpenQr}
+              style={{
+                borderColor: "#0f766e",
+                color: "#0f766e",
+                fontWeight: 600,
+                fontSize: "0.9rem",
+                padding: "0.55rem 1.1rem",
+                height: "auto",
+              }}
+            >
+              <QrCode size={16} className="mr-1" />
+              Đăng nhập bằng mã QR (2 giây)
+            </Button>
 
             {jobId && waiting && (
               <Button
@@ -150,7 +307,7 @@ export function BrowserControls({
               lineHeight: 1.45,
             }}
           >
-            💡 Liên kết sẽ mở trang chính của <strong>{platformLabel}</strong> trong tab mới trên trình duyệt của bạn. Sau khi đăng nhập (hoặc lưu Cookie trong Cài đặt), hãy bấm nút <strong>Tiếp tục lượt tìm</strong> để công cụ chạy ngầm cào video.
+            💡 Bấm <strong>Mở cửa sổ giải CAPTCHA</strong> để kéo thanh trượt trực tiếp trên màn hình, hoặc bấm <strong>Đăng nhập bằng mã QR</strong> để quét bằng điện thoại mà không cần giải đố. Phiên đăng nhập được lưu vĩnh viễn trên máy này.
           </p>
         </div>
       )}
@@ -167,7 +324,7 @@ export function BrowserControls({
           }}
         >
           <div style={{ fontWeight: 600, marginBottom: "0.25rem" }}>
-            Chẩn đoán kỹ thuật trình duyệt (Chạy ngầm):
+            Chẩn đoán kỹ thuật trình duyệt ({status.data.open ? "Đang mở" : "Chạy ngầm"}):
           </div>
           <div>
             <strong>Nền tảng kết nối:</strong>{" "}
@@ -175,13 +332,17 @@ export function BrowserControls({
           </div>
           <div>
             <strong>Xác thực:</strong>{" "}
-            {diag.is_authenticated ? (
+            {isAuthenticated ? (
               <span style={{ color: "#16a34a", fontWeight: 600 }}>
                 Đã đăng nhập ✓
               </span>
             ) : status.data.state === "login_required" ? (
               <span style={{ color: "#dc2626", fontWeight: 600 }}>
                 Yêu cầu đăng nhập
+              </span>
+            ) : status.data.state === "verification_required" ? (
+              <span style={{ color: "#b45309", fontWeight: 600 }}>
+                Cần giải mã CAPTCHA
               </span>
             ) : (
               "Chưa xác minh"
@@ -246,6 +407,15 @@ export function BrowserControls({
         >
           {busy ? "Đang xử lý…" : `Mở cửa sổ ${platformLabel}`}
         </Button>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={busy || status.data?.busy}
+          onClick={handleOpenQr}
+        >
+          <QrCode size={14} className="mr-1" />
+          Mã QR
+        </Button>
         {!jobId && status.data?.open && (
           <Button
             type="button"
@@ -253,12 +423,12 @@ export function BrowserControls({
             disabled={busy || status.data?.busy}
             onClick={() => action(`${endpoint}/close`)}
           >
-            Đóng trình duyệt riêng
+            Đóng trình duyệt
           </Button>
         )}
       </div>
       <p className="muted" style={{ marginTop: "0.5rem" }}>
-        Trình duyệt tìm kiếm chạy ngầm trong nền (Headless). Phiên đăng nhập được lưu an toàn trên máy này; tool không hỏi mật khẩu.
+        Trình duyệt tìm kiếm chạy ngầm hoặc hiện cửa sổ khi cần. Phiên đăng nhập được lưu an toàn trên máy này; tool không hỏi mật khẩu.
       </p>
       <ErrorBanner message={error || status.error} />
     </div>
