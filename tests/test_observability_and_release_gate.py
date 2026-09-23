@@ -73,6 +73,13 @@ def test_release_gate_functions():
 
 def test_release_readiness_probe_fail_closed_on_error():
     from unittest.mock import AsyncMock, patch
+
+    from backend.services.observability import telemetry_service
+
+    # Isolate telemetry service from earlier test runs to ensure clean test baseline
+    telemetry_service.clear()
+    telemetry_service.record_counter("http_requests_total", 10)
+
     with TestClient(app) as client:
         with patch.object(app.state.douyin_browser, "probe_live", new_callable=AsyncMock) as mock_dy, \
              patch.object(app.state.browser, "probe_live", new_callable=AsyncMock) as mock_xhs:
@@ -98,14 +105,30 @@ def test_release_readiness_probe_fail_closed_on_error():
             assert data2["is_ready"] is False
             assert data2["checks"]["live_providers"]["status"] == "FAIL"
 
-            # Case 3: Both succeed -> PASS
+            # Case 3: Both succeed cleanly without auth challenges -> READY
             mock_dy.side_effect = None
             mock_dy.return_value = (True, "HTTP 200: ready")
             mock_xhs.return_value = (True, "HTTP 200: ready")
             res3 = client.get("/api/system/release-readiness?probe=true")
             assert res3.status_code == 200
             data3 = res3.json()
+            assert data3["status"] == "READY"
+            assert data3["is_ready"] is True
             assert data3["checks"]["live_providers"]["status"] == "PASS"
+            assert data3["checks"]["providers"]["status"] == "PASS"
+            assert not any("standby" in w.lower() for w in data3.get("warnings", []))
+
+            # Case 4: Reachable (HTTP 200) but unverified session or auth challenge -> DEGRADED
+            mock_dy.return_value = (True, "HTTP 200: verification_required")
+            mock_xhs.return_value = (True, "HTTP 200: page_available")
+            res4 = client.get("/api/system/release-readiness?probe=true")
+            assert res4.status_code == 200
+            data4 = res4.json()
+            assert data4["status"] == "DEGRADED"
+            assert data4["is_ready"] is True
+            assert data4["checks"]["live_providers"]["status"] == "PASS"
+            assert data4["checks"]["providers"]["status"] == "PASS"
+            assert any("auth challenge" in w.lower() or "unverified session" in w.lower() for w in data4.get("warnings", []))
 
 
 @pytest.mark.anyio

@@ -182,14 +182,30 @@ async def get_release_readiness(
                         "status": "FAIL",
                         "detail": f"Live probe network failure: {live_probe_details}",
                     }
+                    checks["providers"] = {
+                        "status": "FAIL",
+                        "detail": f"Live probe network failure: douyin={dy_detail}, xhs={xhs_detail}",
+                    }
                     is_ready = False
                 else:
                     checks["live_providers"] = {
                         "status": "PASS",
                         "detail": f"All providers live verified: {live_probe_details}",
                     }
-                    if "login_required" in dy_detail or "verification_required" in dy_detail or "login_required" in xhs_detail or "verification_required" in xhs_detail:
-                        warnings.append(f"Provider auth challenge active: douyin={dy_detail}, xhs={xhs_detail}")
+                    checks["providers"] = {
+                        "status": "PASS",
+                        "detail": f"Provider browser services verified live: douyin={dy_detail}, xhs={xhs_detail}",
+                    }
+                    warnings = [w for w in warnings if "standby (not probed)" not in w]
+                    has_auth_challenge = (
+                        "login_required" in dy_detail
+                        or "verification_required" in dy_detail
+                        or "login_required" in xhs_detail
+                        or "verification_required" in xhs_detail
+                        or "page_available" in xhs_detail
+                    )
+                    if has_auth_challenge:
+                        warnings.append(f"Provider auth challenge / unverified session: douyin={dy_detail}, xhs={xhs_detail}")
     except Exception as exc:
         checks["providers"] = {"status": "FAIL", "detail": f"Provider check exception: {exc}"}
         if probe:

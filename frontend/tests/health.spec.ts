@@ -76,7 +76,7 @@ test.describe("System Health & Release Readiness UI", () => {
     expect(pageErrors).toEqual([]);
   });
 
-  test("triggers live probe and renders live network reachability breakdown", async ({
+  test("triggers live probe, verifies session distinction, and clears stale live data on refresh", async ({
     page,
   }) => {
     // Collect any page console errors or uncaught exceptions
@@ -96,13 +96,13 @@ test.describe("System Health & Release Readiness UI", () => {
           checks: {
             database: { status: "PASS", detail: "All 5 core tables verified" },
             worker_pool: { status: "PASS", detail: "Worker pool healthy (2 workers)" },
-            providers: { status: "PASS", detail: "Provider states operational" },
+            providers: { status: "PASS", detail: "Provider browser services verified live" },
             live_providers: {
               status: "PASS",
-              detail: "All providers live verified: {'douyin': {'reachable': True, 'state': 'HTTP 200: verification_required'}, 'xiaohongshu': {'reachable': True, 'state': 'HTTP 200: login_required'}}",
+              detail: "All providers live verified: {'douyin': {'reachable': True, 'state': 'HTTP 200: verification_required'}, 'xiaohongshu': {'reachable': True, 'state': 'HTTP 200: page_available'}}",
             },
           },
-          warnings: ["Provider auth challenge active: douyin=HTTP 200: verification_required, xhs=HTTP 200: login_required"],
+          warnings: ["Provider auth challenge / unverified session: douyin=HTTP 200: verification_required, xhs=HTTP 200: page_available"],
           live_probe: {
             douyin: {
               reachable: true,
@@ -110,7 +110,7 @@ test.describe("System Health & Release Readiness UI", () => {
             },
             xiaohongshu: {
               reachable: true,
-              state: "HTTP 200: login_required",
+              state: "HTTP 200: page_available",
             },
           },
         }),
@@ -128,19 +128,31 @@ test.describe("System Health & Release Readiness UI", () => {
     // Verify distinct Douyin status: Reachable but Auth Challenge Required
     const douyinCard = page.locator("[data-testid='live-probe-douyin']");
     await expect(douyinCard).toBeVisible();
-    await expect(douyinCard).toContainText("Đã kết nối: HTTP 200: verification_required");
+    await expect(douyinCard).toContainText("Kết nối mạng: Đã kết nối (HTTP 200)");
+    await expect(douyinCard).toContainText("Phát hiện thử thách xác minh bảo mật");
     await expect(page.locator("[data-testid='live-probe-douyin-badge']")).toContainText("CẦN XÁC MINH BẢO MẬT");
 
-    // Verify distinct Xiaohongshu status: Reachable but Login Required
+    // Verify Xiaohongshu status: Reachable but Unverified Session (must NOT show false READY)
     const xhsCard = page.locator("[data-testid='live-probe-xiaohongshu']");
     await expect(xhsCard).toBeVisible();
-    await expect(xhsCard).toContainText("Đã kết nối: HTTP 200: login_required");
-    await expect(page.locator("[data-testid='live-probe-xiaohongshu-badge']")).toContainText("CẦN ĐĂNG NHẬP PHIÊN");
+    await expect(xhsCard).toContainText("Kết nối mạng: Đã kết nối (HTTP 200)");
+    await expect(xhsCard).toContainText("Chưa xác minh phiên đăng nhập");
+    const xhsBadge = page.locator("[data-testid='live-probe-xiaohongshu-badge']");
+    await expect(xhsBadge).toContainText("CHƯA XÁC MINH PHIÊN");
+    await expect(xhsBadge).not.toContainText("ĐÃ KẾT NỐI (READY)");
 
     // Verify live_providers check card appears in the checks grid
     const liveProvidersCheck = page.locator("[data-testid='readiness-check-live_providers']");
     await expect(liveProvidersCheck).toBeVisible();
     await expect(liveProvidersCheck).toContainText("live providers (PASS)");
+
+    // Test clearing live probe results when user clicks "Làm mới"
+    const refreshBtn = page.getByRole("button", { name: "Làm mới" });
+    await refreshBtn.click();
+
+    // Verify live probe active badge and breakdown panel are cleared from DOM
+    await expect(page.locator("[data-testid='live-probe-active-badge']")).not.toBeVisible();
+    await expect(page.locator("[data-testid='live-probe-breakdown']")).not.toBeVisible();
 
     // Ensure no JavaScript exceptions occurred
     expect(pageErrors).toEqual([]);

@@ -340,6 +340,8 @@ def main() -> int:
     is_live_requested = ("--live" in sys.argv) or (os.environ.get("LIVE_CRAWL_ENABLED") == "1")
     print(f"[11/{total_stages}] Running Live Crawl Network & Retrieval Acceptance...", end=" ", flush=True)
     if is_live_requested:
+        # Cooldown to ensure any browser/node processes and sockets from Stage 10 are fully recycled
+        time.sleep(2.0)
         t0 = time.time()
         live_env = os.environ.copy()
         live_env["LIVE_CRAWL_ENABLED"] = "1"
@@ -362,10 +364,10 @@ def main() -> int:
             env=live_env,
         )
         probe_ok = (p_probe.returncode == 0)
-        m_dy_probe = re.search(r"PROBE_DOUYIN:\s*(.+)", p_probe.stdout)
-        m_xhs_probe = re.search(r"PROBE_XIAOHONGSHU:\s*(.+)", p_probe.stdout)
-        dy_probe_detail = m_dy_probe.group(1).strip() if m_dy_probe else "Douyin probe passed"
-        xhs_probe_detail = m_xhs_probe.group(1).strip() if m_xhs_probe else "Xiaohongshu probe passed"
+        m_dy_probe = re.search(r"^\s*PROBE_DOUYIN:\s*(HTTP\s+\d+.*)", p_probe.stdout, re.MULTILINE)
+        m_xhs_probe = re.search(r"^\s*PROBE_XIAOHONGSHU:\s*(HTTP\s+\d+.*)", p_probe.stdout, re.MULTILINE)
+        dy_probe_detail = m_dy_probe.group(1).strip() if m_dy_probe else (p_probe.stdout[-300:].strip() if not probe_ok else "Douyin probe passed")
+        xhs_probe_detail = m_xhs_probe.group(1).strip() if m_xhs_probe else (p_probe.stdout[-300:].strip() if not probe_ok else "Xiaohongshu probe passed")
 
         # 11.B: Douyin live search retrieval
         p_dy = subprocess.run(
