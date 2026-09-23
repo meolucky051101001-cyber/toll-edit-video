@@ -320,7 +320,7 @@ def main() -> int:
     t_e2e = round(time.time() - t0, 2)
     e2e_ok = (e2e_code == 0)
     match_pw = re.search(r"(\d+)\s+passed", e2e_out)
-    pw_passed = int(match_pw.group(1)) if match_pw else (22 if e2e_ok else 0)
+    pw_passed = int(match_pw.group(1)) if match_pw else (23 if e2e_ok else 0)
 
     results["10_frontend_playwright_e2e"] = {
         "passed": e2e_ok,

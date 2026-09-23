@@ -466,17 +466,18 @@ class BrowserService:
             ) from None
 
     async def probe_live(self) -> tuple[bool, str]:
-        """Probes live connectivity to Xiaohongshu by opening the page, inspecting HTTP response status and state."""
+        """Probes live connectivity to Xiaohongshu using a dedicated page to avoid interrupting active searches."""
+        probe_page: Page | None = None
         try:
-            page = await self.ensure_open()
-            state = await self.inspect(page)
-            http_status = getattr(self, "last_http_status", None)
-            if http_status is None:
-                resp = await page.goto(self.base_url or "https://www.xiaohongshu.com/explore", wait_until="domcontentloaded", timeout=20000)
-                if resp is not None:
-                    http_status = resp.status
-                    self.last_http_status = resp.status
-                state = await self.inspect(page)
+            await self.ensure_open()
+            if not self.context:
+                return False, "Browser context unavailable"
+            probe_page = await self.context.new_page()
+            target_url = self.base_url or "https://www.xiaohongshu.com/explore"
+            resp = await probe_page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
+            http_status = resp.status if resp is not None else None
+            self.last_http_status = http_status
+            state = await self.inspect(probe_page)
 
             is_http_ok = http_status is not None and 200 <= http_status < 400
             is_healthy = is_http_ok and state not in ("network_error", "closed", "restricted")
@@ -484,7 +485,15 @@ class BrowserService:
             return is_healthy, status_desc
         except Exception as exc:
             logger.warning("Xiaohongshu live probe failed: %s", exc)
+            self.last_http_status = None
             return False, f"error: {exc}"
+        finally:
+            if probe_page is not None:
+                try:
+                    if not probe_page.is_closed():
+                        await probe_page.close()
+                except Exception:
+                    pass
 
     async def inspect(self, page: Page) -> str:
         if page.is_closed():

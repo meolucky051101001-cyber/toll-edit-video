@@ -9,16 +9,16 @@ Hệ thống đã trải qua quy trình kiểm chuẩn tự động nghiêm ng�
 | STT | Giai Đoạn Kiểm Tra | Công Cụ / Lệnh Thực Thi | Kết Quả | Chi Tiết Nghiệm Thu |
 | :---: | :--- | :--- | :---: | :--- |
 | **1** | **Runtime Environment** | `check_environment()` | **PASS** | Python 3.12.14 verified (>= 3.11) [0.0s] |
-| **2** | **Database Schema** | `check_database()` | **PASS** | 5 bảng cốt lõi SQLite (`videos`, `search_jobs`, `job_videos`, `dubbing_jobs`, `video_metric_snapshots`) [0.36s] |
-| **3** | **Backend Code Linter** | `ruff check backend/ tests/ scripts/` | **0 errors** | Tuân thủ tuyệt đối chuẩn PEP8 / Ruff [0.09s] |
-| **4** | **Backend Static Types** | `mypy backend` | **0 errors** | 76/76 tập tin nguồn backend kiểm tra kiểu tĩnh hoàn hảo [0.33s] |
-| **5** | **Frontend Code Linter** | `npm run lint` | **0 errors, 0 warnings** | ESLint Next.js 16 / React 19 đạt chuẩn [8.73s] |
-| **6** | **Frontend Typecheck** | `npx tsc --noEmit` | **0 errors** | 0 lỗi TypeScript trên toàn bộ codebase frontend [2.16s] |
-| **7** | **Frontend Production Build** | `npm run build` | **SUCCESS** | Biên dịch tối ưu toàn bộ trang và API routes Next.js [14.84s] |
-| **8** | **Backend Pytest Suite** | `pytest -q` | **414/414 PASS** | Toàn bộ 414 ca kiểm thử hồi quy đạt chuẩn (0 failed) [146.51s] |
-| **9** | **Fixture Benchmark** | `pytest tests/test_evaluation_benchmark.py` | **PASS** | 60 truy vấn chuẩn + 4 bộ dữ liệu crawl thực tế (20 mẫu nguồn) [2.22s] |
-| **10** | **Playwright E2E Tests** | `npx playwright test` | **22/22 PASS** | 22 ca kiểm thử E2E trên 7 tập tin spec (bao gồm `health.spec.ts` mới) [31.12s] |
-| **11** | **Live Crawl Acceptance** | `python scripts/release_gate.py --live` | **OPERATIONAL** | Network Reachability: **PASS** (Douyin: HTTP 200, XHS: HTTP 200). Retrieval: minh bạch trạng thái CAPTCHA/Login [57.62s] |
+| **2** | **Database Schema** | `check_database()` | **PASS** | 5 bảng cốt lõi SQLite (`videos`, `search_jobs`, `job_videos`, `dubbing_jobs`, `video_metric_snapshots`) [0.9s] |
+| **3** | **Backend Code Linter** | `ruff check backend/ tests/ scripts/` | **0 errors** | Tuân thủ tuyệt đối chuẩn PEP8 / Ruff [0.11s] |
+| **4** | **Backend Static Types** | `mypy backend` | **0 errors** | 76/76 tập tin nguồn backend kiểm tra kiểu tĩnh hoàn hảo [0.44s] |
+| **5** | **Frontend Code Linter** | `npm run lint` | **0 errors, 0 warnings** | ESLint Next.js 16 / React 19 đạt chuẩn [9.26s] |
+| **6** | **Frontend Typecheck** | `npx tsc --noEmit` | **0 errors** | 0 lỗi TypeScript trên toàn bộ codebase frontend [4.81s] |
+| **7** | **Frontend Production Build** | `npm run build` | **SUCCESS** | Biên dịch tối ưu toàn bộ trang và API routes Next.js [26.32s] |
+| **8** | **Backend Pytest Suite** | `pytest -q` | **416/416 PASS** | Toàn bộ 416 ca kiểm thử hồi quy đạt chuẩn (0 failed) [150.82s] |
+| **9** | **Fixture Benchmark** | `pytest tests/test_evaluation_benchmark.py` | **PASS** | 60 truy vấn chuẩn + 4 bộ dữ liệu crawl thực tế (20 mẫu nguồn) [4.09s] |
+| **10** | **Playwright E2E Tests** | `npx playwright test` | **23/23 PASS** | 23 ca kiểm thử E2E trên 7 tập tin spec (bao gồm `health.spec.ts` kiểm chứng dữ liệu thật) [44.03s] |
+| **11** | **Live Crawl Acceptance** | `python scripts/release_gate.py --live` | **OPERATIONAL** | Network Reachability: **PASS** (Douyin: HTTP 200, XHS: HTTP 200). Retrieval: minh bạch trạng thái CAPTCHA/Login [105.15s] |
 
 **Phán quyết Cổng Phát hành (Verdict)**:  
 `APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH`  
@@ -41,33 +41,41 @@ Hệ thống đã trải qua quy trình kiểm chuẩn tự động nghiêm ng�
 
 ## 3. Các Cải Tiến Kỹ Thuật Đã Thực Hiện
 
-### A. Khắc Phục Mismatch Hợp Đồng Giao Diện Dashboard `/health` & Kiểm Thử E2E
-- **Vấn đề:** Backend endpoint `/api/system/release-readiness` trả về trường `checks` dưới dạng từ điển/object (`Record<string, CheckItem>`), trong khi giao diện cũ gọi `.map()` trực tiếp trên object này khiến React ném lỗi không bắt được tại runtime (`page.tsx:206`). Đồng thời, các trạng thái backend sử dụng chữ hoa (`READY`, `DEGRADED`, `BLOCKED`, `NOT_READY`).
-- **Giải pháp:**
-  1. Cập nhật `frontend/types/index.ts`: định nghĩa kiểu `ReleaseReadinessCheckItem { status, detail }`, `checks: Record<string, ReleaseReadinessCheckItem>` và union trạng thái `"READY" | "DEGRADED" | "BLOCKED" | "NOT_READY"`.
-  2. Cập nhật `frontend/app/health/page.tsx`: chuyển đổi sang duyệt bằng `Object.entries(readiness.data.checks).map(...)` với badge hiển thị chuẩn xác (`PASS`, `WARN`/`STANDBY`, `FAIL`/`UNINITIALIZED`) và gắn thuộc tính kiểm thử `data-testid="readiness-check-${name}"`.
-  3. Bổ sung bộ kiểm thử Playwright E2E mới [`frontend/tests/health.spec.ts`](file:///C:/Users/admin/Projects/ai-video-research-tool/frontend/tests/health.spec.ts): kiểm tra tiêu đề, thẻ tổng quan, hàng đợi tác vụ, độ trễ giám sát, ma trận năng lực và hành động nút "Làm mới", kiểm chứng không có ngoại lệ JavaScript trên console.
+### A. Khắc Phục Lỗi Dùng Lại HTTP Status Cũ Trong Live Probe (`browser_service.py` & `douyin_browser_service.py`)
+- **Vấn đề trước đây:** `ensure_open()` trả lại page đang mở mà không tải lại trang. `probe_live()` trước đó chỉ gửi request mới nếu `last_http_status` chưa có; nếu browser đã từng nhận HTTP 200 thì trong các lần probe sau sẽ tiếp tục báo 200 dù kết nối mạng thực tế đã bị đứt hoặc trả về 503. Đồng thời, việc điều hướng trên cùng `self.page` có thể làm gián đoạn tiến trình tìm kiếm hoặc phân trang đang chạy dở.
+- **Giải pháp triệt để:**
+  1. Trong `probe_live()`, khởi tạo một trang probe riêng biệt: `probe_page = await self.context.new_page()`.
+  2. Gửi một request điều hướng mạng hoàn toàn mới: `resp = await probe_page.goto(target_url, wait_until="domcontentloaded", timeout=20000)`.
+  3. Cập nhật trực tiếp `self.last_http_status = resp.status` từ phản hồi tươi mới của lần gọi đó (không bao giờ dùng lại trạng thái cũ).
+  4. Kiểm tra phân tích trang trên `probe_page` (`inspect(probe_page)`), sau đó đóng `probe_page` ngay lập tức trong khối `finally` (`await probe_page.close()`).
+  5. Tiến trình tìm kiếm trên `self.page` được bảo vệ 100% không bị can thiệp hay gián đoạn.
+  6. Bổ sung bài kiểm thử đơn vị `test_browser_service_probe_fresh_request_not_stale_status` và `test_douyin_browser_service_probe_fresh_request_not_stale_status` mô phỏng probe lần 1 trả HTTP 200, probe lần 2 trả HTTP 503 để chứng minh hệ thống phát hiện chính xác lỗi 503 ngay lập tức.
 
-### B. Fail-Closed & Dò Mạng Song Song Bất Đồng Bộ (`backend/api/observability.py`)
-- **Vấn đề:** Việc gọi dò mạng tuần tự tốn thời gian và nếu xảy ra ngoại lệ không được bao bọc có thể khiến backend trả về lỗi 500 hoặc báo sai trạng thái sẵn sàng.
-- **Giải pháp:**
-  1. Sử dụng `asyncio.gather(douyin_browser.probe_live(), browser.probe_live(), return_exceptions=True)` để thực hiện kiểm tra đồng thời cả 2 nền tảng.
-  2. Áp dụng nguyên tắc **Fail-Closed**: nếu xảy ra bất kỳ lỗi ngoại lệ hoặc timeout nào, hệ thống lập tức đặt `checks["live_providers"] = {"status": "FAIL"}`, `is_ready = False` và `overall_status = "BLOCKED"`.
-  3. Bổ sung bài test đơn vị `test_release_readiness_probe_fail_closed_on_error` trong `tests/test_observability_and_release_gate.py` (nâng tổng số test pytest lên 414 test pass).
+### B. Bổ Sung Thao Tác Live Probe Trên Dashboard & Phân Định Trực Quan Trạng Thái (`frontend/app/health/page.tsx`)
+- **Vấn đề trước đây:** Trang `/health` chỉ tải dữ liệu cơ bản `/system/release-readiness` (không có `?probe=true`); nút "Làm mới" cũng chỉ gọi lại endpoint cơ bản khiến dashboard chưa có thao tác vận hành kiểm tra mạng thật.
+- **Giải pháp triệt để:**
+  1. Thêm nút hành động chuyên dụng **"Kiểm tra kết nối live"** (`data-testid="run-live-probe-btn"`) cạnh nút "Làm mới", có trạng thái loading xoay spinner khi đang dò mạng.
+  2. Nút kích hoạt gọi trực tiếp `/api/system/release-readiness?probe=true` với thời gian chờ (timeout) 35s.
+  3. Khi có kết quả live probe, giao diện hiển thị badge `Dữ liệu Live Probe trực tiếp` và mở rộng bảng **"Trạng thái kết nối mạng thực tế & Xác thực người dùng (Live Reachability)"** (`data-testid="live-probe-breakdown"`).
+  4. Phân định rạch ròi giữa 3 trạng thái:
+     - **Đã kết nối (Reachable - HTTP 200)**: Thể hiện kết nối mạng tới nền tảng hoàn toàn thông suốt.
+     - **Cần xác thực/Đăng nhập (Auth Challenge Required)**: Ghi nhận rõ ràng "CẦN XÁC MINH BẢO MẬT (CAPTCHA)" cho Douyin và "CẦN ĐĂNG NHẬP PHIÊN" cho Xiaohongshu kèm thông tin hướng dẫn vận hành.
+     - **Lỗi kết nối mạng (Network Error)**: Ghi nhận lỗi HTTP 5xx, timeout hoặc exception nếu có.
 
-### C. Bằng Chứng Mã Trạng Thái HTTP Trực Tiếp Cho Dò Mạng (`browser_service.py` & `douyin_browser_service.py`)
-- **Vấn đề:** Cần bằng chứng kỹ thuật không thể chối cãi chứng minh trình duyệt đã kết nối thành công và không bị sập HTTP 500/503.
-- **Giải pháp:**
-  1. Lưu trữ thuộc tính `self.last_http_status: int | None` trên mỗi service trình duyệt.
-  2. Bắt giữ `response.status` ngay trong hàm `page.goto()`.
-  3. Trong `probe_live()`, kiểm tra nghiêm ngặt `200 <= status < 400` và định dạng chuỗi chi tiết: `HTTP 200: <trạng thái>`.
-  4. Cập nhật `scripts/release_gate.py` để trích xuất trực tiếp thông tin này vào trường `probe_reachability` của `release_gate_report.json`:
-     - Douyin: `HTTP 200: verification_required` (nhận diện qua iframe RMC NoCaptcha).
-     - Xiaohongshu: `HTTP 200: login_required` (nhận diện qua dialog đăng nhập).
+### C. Cô Lập Hoàn Toàn Bài Test Fail-Closed Khỏi Douyin Thật (`tests/test_observability_and_release_gate.py`)
+- **Vấn đề trước đây:** Bài test cũ chỉ mock `app.state.browser.probe_live` rồi gọi endpoint `?probe=true`. Do endpoint dùng `asyncio.gather` nên `douyin_browser.probe_live` còn lại vẫn chạy ra mạng Douyin thật, khiến unit test bị phụ thuộc mạng và profile máy trạm.
+- **Giải pháp triệt để:**
+  1. Mock đồng thời cả 2 provider: `app.state.douyin_browser.probe_live` và `app.state.browser.probe_live`.
+  2. Kiểm thử kịch bản 1: Douyin thành công, XHS ném `RuntimeError` -> xác nhận fail-closed (`status == "BLOCKED"`, `is_ready == False`, `checks["live_providers"]["status"] == "FAIL"`).
+  3. Kiểm thử kịch bản 2: Douyin ném `RuntimeError`, XHS thành công -> xác nhận fail-closed.
+  4. Kiểm thử kịch bản 3: Cả 2 thành công -> xác nhận `PASS` và `status == "READY"`.
+  5. Toàn bộ 8 bài test trong suite chạy hoàn toàn độc lập với mạng thật chỉ trong 0.27 giây.
 
-### D. Tự Động Hóa Đếm Spec & Đồng Bộ Báo Cáo Trong Release Gate (`scripts/release_gate.py`)
-- Stage 10 tự động phát hiện số lượng file spec kiểm thử (`glob("*.spec.ts")`), hiển thị chính xác `22 tests passed across 7 specs`.
-- Báo cáo [`release_gate_report.json`](file:///C:/Users/admin/Projects/ai-video-research-tool/release_gate_report.json) ghi nhận đầy đủ chi tiết của 11 giai đoạn, được cam kết vào Git và đảm bảo không rò rỉ bất kỳ thông tin nhạy cảm nào.
+### D. Nâng Cấp E2E Health Kiểm Chứng Dữ Liệu Readiness Thật & Thao Tác Live Probe (`frontend/tests/health.spec.ts`)
+- **Vấn đề trước đây:** Bài test E2E cũ chỉ kiểm tra tiêu đề và khung giao diện, không chờ hay xác nhận thẻ `readiness-check-*` xuất hiện trước khi kiểm tra lỗi console.
+- **Giải pháp triệt để:**
+  1. `test("waits for readiness response and renders check cards and scale telemetry")`: Chờ tường minh `page.waitForResponse` cho `/system/release-readiness`, xác nhận thẻ `data-testid="readiness-check-database"` hiển thị cùng trạng thái `database (PASS)`, xác nhận các thẻ `worker_pool`, `providers`, bấm nút "Làm mới", chờ phản hồi mới và kiểm chứng không có ngoại lệ JavaScript nào.
+  2. `test("triggers live probe and renders live network reachability breakdown")`: Bấm nút "Kiểm tra kết nối live", xác nhận xuất hiện badge `live-probe-active-badge`, bảng phân tích `live-probe-breakdown`, thẻ kiểm tra `readiness-check-live_providers` cùng các huy hiệu phân định "CẦN XÁC MINH BẢO MẬT" và "CẦN ĐĂNG NHẬP PHIÊN".
 
 ---
 

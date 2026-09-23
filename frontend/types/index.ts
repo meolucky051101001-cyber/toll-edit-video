@@ -344,12 +344,21 @@ export interface ReleaseReadinessCheckItem {
   detail: string;
 }
 
+export interface LiveProbePlatformDetail {
+  reachable: boolean;
+  state: string;
+}
+
 export interface ReleaseReadinessResponse {
   is_ready: boolean;
   status: "READY" | "DEGRADED" | "BLOCKED" | "NOT_READY" | "ready" | "degraded" | "blocked" | "not_ready";
   checks: Record<string, ReleaseReadinessCheckItem>;
   warnings?: string[];
   generated_at?: string;
+  live_probe?: {
+    douyin?: LiveProbePlatformDetail;
+    xiaohongshu?: LiveProbePlatformDetail;
+  };
 }
 
 

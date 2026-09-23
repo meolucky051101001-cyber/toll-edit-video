@@ -206,9 +206,12 @@ async def get_release_readiness(
     else:
         overall_status = "READY"
 
-    return {
+    res: dict[str, Any] = {
         "status": overall_status,
         "is_ready": is_ready,
         "checks": checks,
         "warnings": warnings,
     }
+    if probe and "live_probe_details" in locals():
+        res["live_probe"] = live_probe_details
+    return res

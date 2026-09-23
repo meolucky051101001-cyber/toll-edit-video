@@ -1,6 +1,8 @@
 "use client";
 
+import { useState } from "react";
 import { useResource } from "@/lib/use-resource";
+import { api } from "@/lib/api";
 import { ErrorBanner } from "@/components/error-banner";
 import type {
   Health,
@@ -21,6 +23,8 @@ import {
   Gauge,
   ExternalLink,
   RefreshCw,
+  Globe,
+  Radio,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -31,12 +35,36 @@ export default function HealthPage() {
   const readiness = useResource<ReleaseReadinessResponse>("/system/release-readiness", 5000);
   const platforms = useResource<PlatformsResponse>("/platforms", 10000);
 
+  const [isProbingLive, setIsProbingLive] = useState(false);
+  const [liveProbeData, setLiveProbeData] = useState<ReleaseReadinessResponse | null>(null);
+  const [liveProbeError, setLiveProbeError] = useState<string | null>(null);
+
+  const activeReadiness = liveProbeData || readiness.data;
+
+  async function handleRunLiveProbe() {
+    setIsProbingLive(true);
+    setLiveProbeError(null);
+    try {
+      const res = await api<ReleaseReadinessResponse>("/system/release-readiness?probe=true", {
+        signal: AbortSignal.timeout(35000),
+      });
+      setLiveProbeData(res);
+      readiness.refresh();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setLiveProbeError(msg);
+    } finally {
+      setIsProbingLive(false);
+    }
+  }
+
   function refreshAll() {
     health.refresh();
     queue.refresh();
     metrics.refresh();
     readiness.refresh();
     platforms.refresh();
+    setLiveProbeError(null);
   }
 
   const formatUptime = (seconds?: number) => {
@@ -49,18 +77,33 @@ export default function HealthPage() {
 
   return (
     <>
-      <div className="page-heading" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+      <div className="page-heading" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "0.75rem" }}>
         <div>
           <h1>Giám sát hệ thống & Chất lượng (Release Gate)</h1>
           <p>Trạng thái tải, hàng đợi tác vụ nền, độ trễ và ma trận nền tảng thời gian thực.</p>
         </div>
-        <Button variant="outline" size="sm" onClick={refreshAll} style={{ gap: "0.35rem" }}>
-          <RefreshCw size={14} />
-          Làm mới
-        </Button>
+        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+          <Button
+            variant="default"
+            size="sm"
+            onClick={handleRunLiveProbe}
+            disabled={isProbingLive}
+            data-testid="run-live-probe-btn"
+            style={{ gap: "0.35rem" }}
+          >
+            <Globe size={14} className={isProbingLive ? "animate-spin" : ""} />
+            {isProbingLive ? "Đang kiểm tra kết nối thật…" : "Kiểm tra kết nối live"}
+          </Button>
+          <Button variant="outline" size="sm" onClick={refreshAll} style={{ gap: "0.35rem" }}>
+            <RefreshCw size={14} />
+            Làm mới
+          </Button>
+        </div>
       </div>
 
-      <ErrorBanner message={health.error || queue.error || metrics.error} />
+      {(health.error || queue.error || metrics.error || liveProbeError) ? (
+        <ErrorBanner message={health.error || queue.error || metrics.error || liveProbeError || ""} />
+      ) : null}
 
       {/* Overview Cards */}
       <div className="stats-strip" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", marginBottom: "1.5rem" }}>
@@ -79,16 +122,16 @@ export default function HealthPage() {
               display: "flex",
               alignItems: "center",
               gap: "0.35rem",
-              color: readiness.data?.is_ready
+              color: activeReadiness?.is_ready
                 ? "#16a34a"
-                : readiness.data?.status?.toUpperCase() === "DEGRADED"
+                : activeReadiness?.status?.toUpperCase() === "DEGRADED"
                 ? "#ca8a04"
                 : "#dc2626",
             }}
           >
             <ShieldCheck size={18} />
             {(() => {
-              const s = readiness.data?.status?.toUpperCase();
+              const s = activeReadiness?.status?.toUpperCase();
               if (s === "READY") return "APPROVED";
               if (s === "DEGRADED") return "DEGRADED";
               if (s === "BLOCKED") return "BLOCKED";
@@ -205,13 +248,145 @@ export default function HealthPage() {
 
       {/* Release Readiness Checks */}
       <section className="settings-panel" style={{ marginTop: "1.5rem" }}>
-        <h2 style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "1.1rem" }}>
-          <ShieldCheck size={20} color="#16a34a" />
-          Tiêu chuẩn nghiệm thu phát hành (Release Gate Checks)
-        </h2>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
+          <h2 style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "1.1rem", margin: 0 }}>
+            <ShieldCheck size={20} color="#16a34a" />
+            Tiêu chuẩn nghiệm thu phát hành (Release Gate Checks)
+          </h2>
+          {liveProbeData && (
+            <span
+              data-testid="live-probe-active-badge"
+              style={{
+                fontSize: "0.75rem",
+                padding: "0.25rem 0.6rem",
+                borderRadius: "9999px",
+                backgroundColor: "#eff6ff",
+                color: "#1d4ed8",
+                fontWeight: 600,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.3rem",
+              }}
+            >
+              <Radio size={12} color="#2563eb" />
+              Dữ liệu Live Probe trực tiếp
+            </span>
+          )}
+        </div>
+
+        {/* Live Network Reachability Breakdown Panel */}
+        {activeReadiness?.live_probe && (
+          <div
+            data-testid="live-probe-breakdown"
+            style={{
+              marginTop: "1rem",
+              padding: "0.85rem 1rem",
+              borderRadius: "8px",
+              border: "1px solid #bfdbfe",
+              background: "#f0f9ff",
+            }}
+          >
+            <div style={{ fontSize: "0.85rem", fontWeight: 600, color: "#1e40af", marginBottom: "0.6rem", display: "flex", alignItems: "center", gap: "0.4rem" }}>
+              <Globe size={15} />
+              Trạng thái kết nối mạng thực tế & Xác thực người dùng (Live Reachability)
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: "0.75rem" }}>
+              {/* Douyin Live Status */}
+              {activeReadiness.live_probe.douyin && (() => {
+                const dy = activeReadiness.live_probe.douyin;
+                const isReachable = dy.reachable;
+                const isChallenge = dy.state.includes("verification_required") || dy.state.includes("challenge") || dy.state.includes("CAPTCHA");
+                return (
+                  <div
+                    data-testid="live-probe-douyin"
+                    style={{
+                      padding: "0.65rem 0.85rem",
+                      borderRadius: "6px",
+                      border: "1px solid #e2e8f0",
+                      background: "#ffffff",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.25rem" }}>
+                      <strong style={{ fontSize: "0.85rem" }}>Douyin (Trình duyệt thật)</strong>
+                      <span
+                        data-testid="live-probe-douyin-badge"
+                        style={{
+                          fontSize: "0.7rem",
+                          fontWeight: 700,
+                          padding: "0.15rem 0.5rem",
+                          borderRadius: "4px",
+                          backgroundColor: !isReachable ? "#fee2e2" : isChallenge ? "#fef3c7" : "#dcfce7",
+                          color: !isReachable ? "#991b1b" : isChallenge ? "#92400e" : "#166534",
+                        }}
+                      >
+                        {!isReachable ? "MẤT KẾT NỐI" : isChallenge ? "CẦN XÁC MINH BẢO MẬT" : "ĐÃ KẾT NỐI (READY)"}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: "0.75rem", color: "#475569" }}>
+                      {isReachable ? (
+                        <span>
+                          <strong style={{ color: "#16a34a" }}>Đã kết nối:</strong> {dy.state}
+                          {isChallenge && <div style={{ color: "#b45309", marginTop: "0.2rem" }}>* Cần mở trình duyệt hoặc giải CAPTCHA trạm làm việc để lấy video trực tiếp.</div>}
+                        </span>
+                      ) : (
+                        <span style={{ color: "#dc2626" }}>Lỗi kết nối mạng: {dy.state}</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Xiaohongshu Live Status */}
+              {activeReadiness.live_probe.xiaohongshu && (() => {
+                const xhs = activeReadiness.live_probe.xiaohongshu;
+                const isReachable = xhs.reachable;
+                const isLogin = xhs.state.includes("login_required") || xhs.state.includes("Login");
+                return (
+                  <div
+                    data-testid="live-probe-xiaohongshu"
+                    style={{
+                      padding: "0.65rem 0.85rem",
+                      borderRadius: "6px",
+                      border: "1px solid #e2e8f0",
+                      background: "#ffffff",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.25rem" }}>
+                      <strong style={{ fontSize: "0.85rem" }}>Xiaohongshu (Trình duyệt thật)</strong>
+                      <span
+                        data-testid="live-probe-xiaohongshu-badge"
+                        style={{
+                          fontSize: "0.7rem",
+                          fontWeight: 700,
+                          padding: "0.15rem 0.5rem",
+                          borderRadius: "4px",
+                          backgroundColor: !isReachable ? "#fee2e2" : isLogin ? "#fef3c7" : "#dcfce7",
+                          color: !isReachable ? "#991b1b" : isLogin ? "#92400e" : "#166534",
+                        }}
+                      >
+                        {!isReachable ? "MẤT KẾT NỐI" : isLogin ? "CẦN ĐĂNG NHẬP PHIÊN" : "ĐÃ KẾT NỐI (READY)"}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: "0.75rem", color: "#475569" }}>
+                      {isReachable ? (
+                        <span>
+                          <strong style={{ color: "#16a34a" }}>Đã kết nối:</strong> {xhs.state}
+                          {isLogin && <div style={{ color: "#b45309", marginTop: "0.2rem" }}>* Cần quét mã QR đăng nhập để duyệt feed tìm kiếm đầy đủ.</div>}
+                        </span>
+                      ) : (
+                        <span style={{ color: "#dc2626" }}>Lỗi kết nối mạng: {xhs.state}</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        )}
+
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "0.75rem", marginTop: "0.75rem" }}>
-          {readiness.data?.checks &&
-            Object.entries(readiness.data.checks).map(([name, chk]) => {
+          {activeReadiness?.checks &&
+            Object.entries(activeReadiness.checks).map(([name, chk]) => {
               const isPassed = chk.status === "PASS";
               const isWarn = chk.status === "WARN" || chk.status === "STANDBY";
               return (

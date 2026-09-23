@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.main import app
@@ -73,8 +74,11 @@ def test_release_gate_functions():
 def test_release_readiness_probe_fail_closed_on_error():
     from unittest.mock import AsyncMock, patch
     with TestClient(app) as client:
-        with patch.object(app.state.browser, "probe_live", new_callable=AsyncMock) as mock_xhs_probe:
-            mock_xhs_probe.side_effect = RuntimeError("Simulated network timeout")
+        with patch.object(app.state.douyin_browser, "probe_live", new_callable=AsyncMock) as mock_dy, \
+             patch.object(app.state.browser, "probe_live", new_callable=AsyncMock) as mock_xhs:
+            # Case 1: Douyin succeeds, XHS throws exception -> Fail-closed
+            mock_dy.return_value = (True, "HTTP 200: ready")
+            mock_xhs.side_effect = RuntimeError("Simulated XHS network timeout")
             res = client.get("/api/system/release-readiness?probe=true")
             assert res.status_code == 200
             data = res.json()
@@ -82,4 +86,100 @@ def test_release_readiness_probe_fail_closed_on_error():
             assert data["is_ready"] is False
             assert "live_providers" in data["checks"]
             assert data["checks"]["live_providers"]["status"] == "FAIL"
+
+            # Case 2: Douyin throws exception, XHS succeeds -> Fail-closed
+            mock_dy.side_effect = RuntimeError("Simulated Douyin connection refused")
+            mock_xhs.side_effect = None
+            mock_xhs.return_value = (True, "HTTP 200: ready")
+            res2 = client.get("/api/system/release-readiness?probe=true")
+            assert res2.status_code == 200
+            data2 = res2.json()
+            assert data2["status"] == "BLOCKED"
+            assert data2["is_ready"] is False
+            assert data2["checks"]["live_providers"]["status"] == "FAIL"
+
+            # Case 3: Both succeed -> PASS
+            mock_dy.side_effect = None
+            mock_dy.return_value = (True, "HTTP 200: ready")
+            mock_xhs.return_value = (True, "HTTP 200: ready")
+            res3 = client.get("/api/system/release-readiness?probe=true")
+            assert res3.status_code == 200
+            data3 = res3.json()
+            assert data3["checks"]["live_providers"]["status"] == "PASS"
+
+
+@pytest.mark.anyio
+async def test_browser_service_probe_fresh_request_not_stale_status():
+    from unittest.mock import AsyncMock, MagicMock
+
+    from backend.services.browser_service import BrowserService
+
+    service = BrowserService(headless=True)
+    mock_context = MagicMock()
+    mock_page = AsyncMock()
+    mock_page.is_closed = MagicMock(return_value=False)
+    mock_context.new_page = AsyncMock(return_value=mock_page)
+
+    service.context = mock_context
+    service.ensure_open = AsyncMock(return_value=mock_page)
+    service.inspect = AsyncMock(return_value="ready")
+
+    # 1. First probe: Server returns HTTP 200
+    mock_resp_200 = MagicMock(status=200)
+    mock_page.goto = AsyncMock(return_value=mock_resp_200)
+
+    ok1, desc1 = await service.probe_live()
+    assert ok1 is True
+    assert "HTTP 200" in desc1
+    assert service.last_http_status == 200
+    assert mock_page.close.await_count == 1
+
+    # 2. Second probe on same service instance: Server returns HTTP 503
+    mock_resp_503 = MagicMock(status=503)
+    mock_page.goto = AsyncMock(return_value=mock_resp_503)
+
+    ok2, desc2 = await service.probe_live()
+    # Must NOT reuse stale 200 from first probe!
+    assert ok2 is False
+    assert "HTTP 503" in desc2
+    assert service.last_http_status == 503
+    assert mock_page.close.await_count == 2
+
+
+@pytest.mark.anyio
+async def test_douyin_browser_service_probe_fresh_request_not_stale_status():
+    from unittest.mock import AsyncMock, MagicMock
+
+    from backend.services.douyin_browser_service import DouyinBrowserService
+
+    service = DouyinBrowserService(headless=True)
+    mock_context = MagicMock()
+    mock_page = AsyncMock()
+    mock_page.is_closed = MagicMock(return_value=False)
+    mock_context.new_page = AsyncMock(return_value=mock_page)
+
+    service.context = mock_context
+    service.ensure_open = AsyncMock(return_value=mock_page)
+    service.inspect = AsyncMock(return_value="ready")
+
+    # 1. First probe: Server returns HTTP 200
+    mock_resp_200 = MagicMock(status=200)
+    mock_page.goto = AsyncMock(return_value=mock_resp_200)
+
+    ok1, desc1 = await service.probe_live()
+    assert ok1 is True
+    assert "HTTP 200" in desc1
+    assert service.last_http_status == 200
+    assert mock_page.close.await_count == 1
+
+    # 2. Second probe on same service instance: Server returns HTTP 503
+    mock_resp_503 = MagicMock(status=503)
+    mock_page.goto = AsyncMock(return_value=mock_resp_503)
+
+    ok2, desc2 = await service.probe_live()
+    # Must NOT reuse stale 200 from first probe!
+    assert ok2 is False
+    assert "HTTP 503" in desc2
+    assert service.last_http_status == 503
+    assert mock_page.close.await_count == 2
 
