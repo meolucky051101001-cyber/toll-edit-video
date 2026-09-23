@@ -106,54 +106,76 @@ async def get_release_readiness(
     except Exception as exc:
         checks["worker_pool"] = {"status": "WARN", "detail": str(exc)}
 
-    # 5. Real Provider Readiness (Douyin & Xiaohongshu)
+    # 5. Provider Service Readiness
     try:
         browser = getattr(request.app.state, "browser", None)
         douyin_browser = getattr(request.app.state, "douyin_browser", None)
 
-        provider_details = {
-            "douyin": douyin_browser.state if douyin_browser else "uninitialized",
-            "xiaohongshu": browser.state if browser else "uninitialized",
-        }
-
-        if probe and douyin_browser and browser:
-            dy_ok, dy_detail = await douyin_browser.probe_live()
-            xhs_ok, xhs_detail = await browser.probe_live()
-            provider_details["douyin_live_probe"] = "PASS" if dy_ok else f"FAIL ({dy_detail})"
-            provider_details["xhs_live_probe"] = "PASS" if xhs_ok else f"FAIL ({xhs_detail})"
-            if not dy_ok or not xhs_ok:
-                checks["providers"] = {
-                    "status": "FAIL",
-                    "detail": f"Live probe failed: {provider_details}",
-                }
-                is_ready = False
-            else:
-                checks["providers"] = {
-                    "status": "PASS",
-                    "detail": f"All providers live verified: {provider_details}",
-                }
+        if browser is None or douyin_browser is None:
+            checks["providers"] = {
+                "status": "UNINITIALIZED",
+                "detail": f"Provider services uninitialized (douyin: {douyin_browser is not None}, xiaohongshu: {browser is not None})",
+            }
+            warnings.append("Provider browser services are uninitialized; system not ready for live operations")
+            is_ready = False
         else:
             has_error = (
-                (douyin_browser is not None and douyin_browser.state in ("network_error", "restricted"))
-                or (browser is not None and browser.state in ("network_error", "restricted"))
+                douyin_browser.state in ("network_error", "restricted")
+                or browser.state in ("network_error", "restricted")
             )
             if has_error:
                 checks["providers"] = {
                     "status": "FAIL",
-                    "detail": f"Provider in error state: {provider_details}",
+                    "detail": f"Provider in error state: douyin={douyin_browser.state}, xhs={browser.state}",
                 }
                 is_ready = False
+            elif douyin_browser.state == "closed" and browser.state == "closed":
+                checks["providers"] = {
+                    "status": "STANDBY",
+                    "detail": "Provider services configured and ready on standby. Pass ?probe=true for live network verification.",
+                }
+                warnings.append("Provider browser sessions on standby (not probed)")
             else:
                 checks["providers"] = {
                     "status": "PASS",
-                    "detail": f"Provider states operational: {provider_details}",
+                    "detail": f"Provider states operational: douyin={douyin_browser.state}, xhs={browser.state}",
                 }
+
+        # 6. Optional Live Provider Reachability Probe
+        if probe:
+            if browser is None or douyin_browser is None:
+                checks["live_providers"] = {
+                    "status": "FAIL",
+                    "detail": "Cannot run live probe: provider services are uninitialized",
+                }
+                is_ready = False
+            else:
+                dy_ok, dy_detail = await douyin_browser.probe_live()
+                xhs_ok, xhs_detail = await browser.probe_live()
+                live_probe_details = {
+                    "douyin": {"reachable": dy_ok, "state": dy_detail},
+                    "xiaohongshu": {"reachable": xhs_ok, "state": xhs_detail},
+                }
+                if not dy_ok or not xhs_ok:
+                    checks["live_providers"] = {
+                        "status": "FAIL",
+                        "detail": f"Live probe network failure: {live_probe_details}",
+                    }
+                    is_ready = False
+                else:
+                    checks["live_providers"] = {
+                        "status": "PASS",
+                        "detail": f"All providers live verified: {live_probe_details}",
+                    }
+                    if dy_detail in ("login_required", "verification_required") or xhs_detail in ("login_required", "verification_required"):
+                        warnings.append(f"Provider auth challenge active: douyin={dy_detail}, xhs={xhs_detail}")
     except Exception as exc:
         checks["providers"] = {"status": "WARN", "detail": str(exc)}
 
     # Determine overall gate status
     if not is_ready:
-        overall_status = "BLOCKED"
+        has_fail = any(c.get("status") == "FAIL" for c in checks.values() if isinstance(c, dict))
+        overall_status = "BLOCKED" if has_fail else "NOT_READY"
     elif warnings:
         overall_status = "DEGRADED"
     else:

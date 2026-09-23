@@ -1,0 +1,85 @@
+{
+  "verdict": "APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH",
+  "duration_seconds": 278.46,
+  "timestamp": "2026-09-23T09:38:16Z",
+  "stages": {
+    "1_environment": {
+      "passed": true,
+      "detail": "Python 3.12.14 verified",
+      "duration_s": 0.0
+    },
+    "2_database": {
+      "passed": true,
+      "detail": "SQLite database schema verified (5 core tables present)",
+      "duration_s": 0.51
+    },
+    "3_ruff_linter": {
+      "passed": true,
+      "exit_code": 0,
+      "duration_s": 0.12
+    },
+    "4_mypy_types": {
+      "passed": true,
+      "exit_code": 0,
+      "duration_s": 0.33
+    },
+    "5_frontend_eslint": {
+      "passed": true,
+      "exit_code": 0,
+      "duration_s": 21.3
+    },
+    "6_frontend_typecheck": {
+      "passed": true,
+      "exit_code": 0,
+      "duration_s": 2.91
+    },
+    "7_frontend_build": {
+      "passed": true,
+      "exit_code": 0,
+      "duration_s": 13.07
+    },
+    "8_backend_pytest": {
+      "passed": true,
+      "exit_code": 0,
+      "tests_passed": 413,
+      "tests_failed": 0,
+      "duration_s": 136.98
+    },
+    "9_fixture_benchmark": {
+      "passed": true,
+      "exit_code": 0,
+      "queries_verified": 64,
+      "domain_benchmark_queries": 60,
+      "real_crawled_queries": 4,
+      "real_crawled_samples_provenance": 20,
+      "test_suites_passed": 6,
+      "duration_s": 2.42
+    },
+    "10_frontend_playwright_e2e": {
+      "passed": true,
+      "exit_code": 0,
+      "tests_passed": 21,
+      "duration_s": 31.24
+    },
+    "11_live_crawl_acceptance": {
+      "executed": true,
+      "passed": false,
+      "workstation_operational": true,
+      "probe_reachability": {
+        "passed": true,
+        "exit_code": 0
+      },
+      "platforms": {
+        "douyin": {
+          "status": "BLOCKED (CHALLENGE_REQUIRED)",
+          "detail": "Douyin security verification/CAPTCHA challenge required on workstation"
+        },
+        "xiaohongshu": {
+          "status": "BLOCKED (LOGIN_REQUIRED)",
+          "detail": "Xiaohongshu user login session required on workstation"
+        }
+      },
+      "duration_s": 69.51
+    }
+  }
+}

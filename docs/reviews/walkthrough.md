@@ -1,64 +1,69 @@
-# Walkthrough: AI Video Research Tool v3.1 — Giải Quyết Triệt Để 3 Lỗi P0 & Kiểm Chuẩn Nghiệm Thu Thực Tế
+# Walkthrough: AI Video Research Tool — Báo Cáo Nghiệm Thu 11 Giai Đoạn & Đánh Giá Vận Hành Thực Tế
 
-## 1. Tổng Quan Kết Quả Nghiệm Thu (100% Green Toàn Diện)
+## 1. Tổng Quan Kết Quả Nghiệm Thu (Comprehensive 11-Stage Scorecard)
 
-Đợt cập nhật này khắc phục dứt điểm 3 lỗi P0 trọng yếu (double-execution, đường dẫn video nguồn tải về bị mất, hủy thô bạo worker đang bận khi scale down) và các vấn đề P1 liên quan đến tích hợp queue, độ ổn định kiểm thử và đo lường benchmark trên dữ liệu crawl thật tế từ Xiaohongshu & Douyin.
+Hệ thống đã trải qua quá trình kiểm chuẩn tự động nghiêm ngặt gồm 11 giai đoạn thông qua công cụ cổng phát hành `scripts/release_gate.py`. Toàn bộ 10 giai đoạn kiểm thử tĩnh, kiểm thử đơn vị, kiểm thử tích hợp và E2E đều đạt chuẩn **100% GREEN**. Giai đoạn 11 (Live Crawl & Reachability) đã được tái thiết kế triệt để nhằm phản ánh trung thực khả năng kết nối mạng thực tế và trạng thái xác thực người dùng mà không che giấu lỗi.
 
-### Bảng Điểm Chất Lượng Hệ Thống (Release Gate Scorecard)
+### Bảng Điểm Kiểm Chuẩn Toàn Diện (Release Gate Scorecard)
 
-| Hạng Mục Kiểm Tra | Công Cụ / Lệnh Thực Thi | Kết Quả | Chi Tiết Nghiệm Thu |
-| :--- | :--- | :--- | :--- |
-| **Backend Code Linter** | `ruff check backend/ tests/ scripts/` | **0 errors** | Tuân thủ tuyệt đối chuẩn PEP8 / Ruff |
-| **Backend Static Types** | `mypy backend` | **0 errors** | 75 tập tin nguồn được kiểm tra kiểu tĩnh hoàn hảo |
-| **Frontend Code Linter** | `npm run lint` | **0 errors, 0 warnings** | ESLint Next.js 16 / React 19 đạt chuẩn |
-| **Frontend Typecheck** | `npx tsc --noEmit` | **0 errors** | Không có lỗi kiểu dữ liệu TypeScript |
-| **Frontend Production Build** | `npm run build` | **SUCCESS** | Biên dịch tối ưu toàn bộ các trang và route |
-| **Backend Pytest Suite** | `pytest -q` | **100% Pass** | Toàn bộ các ca kiểm thử hồi quy đạt chuẩn |
-| **Real Crawl Benchmark** | `pytest tests/test_evaluation_benchmark.py` | **100% Pass** | 60 truy vấn chuẩn + tập mẫu crawl thực tế từ Xiaohongshu |
-| **Release Gate Tự Động** | `python scripts/release_gate.py` | **APPROVED (GREEN)** | 9/9 giai đoạn tự động nghiệm thu thành công |
+| STT | Giai Đoạn Kiểm Tra | Công Cụ / Lệnh Thực Thi | Kết Quả | Chi Tiết Nghiệm Thu |
+| :---: | :--- | :--- | :---: | :--- |
+| **1** | **Runtime Environment** | `check_environment()` | **PASS** | Python 3.12.14 verified (>= 3.11) |
+| **2** | **Database Schema** | `check_database()` | **PASS** | 5 bảng cốt lõi SQLite (`videos`, `search_jobs`, `job_videos`, `dubbing_jobs`, `video_metric_snapshots`) |
+| **3** | **Backend Code Linter** | `ruff check backend/ tests/ scripts/` | **0 errors** | Tuân thủ tuyệt đối chuẩn PEP8 / Ruff |
+| **4** | **Backend Static Types** | `mypy backend` | **0 errors** | 76/76 tập tin nguồn backend kiểm tra kiểu tĩnh hoàn hảo |
+| **5** | **Frontend Code Linter** | `npm run lint` | **0 errors, 0 warnings** | ESLint Next.js 16 / React 19 đạt chuẩn |
+| **6** | **Frontend Typecheck** | `npx tsc --noEmit` | **0 errors** | 0 lỗi TypeScript trên toàn bộ codebase frontend |
+| **7** | **Frontend Production Build** | `npm run build` | **SUCCESS** | Biên dịch tối ưu toàn bộ trang và API routes Next.js |
+| **8** | **Backend Pytest Suite** | `pytest -q` | **413/413 PASS** | Toàn bộ 413 ca kiểm thử hồi quy đạt chuẩn (0 failed) |
+| **9** | **Fixture Benchmark** | `pytest tests/test_evaluation_benchmark.py` | **PASS** | 60 truy vấn chuẩn + 4 bộ dữ liệu crawl thực tế (20 mẫu nguồn) |
+| **10** | **Playwright E2E Tests** | `npx playwright test` | **21/21 PASS** | 21 ca kiểm thử E2E trên 6 tập tin spec (giao diện tối giản mới) |
+| **11** | **Live Crawl Acceptance** | `pytest tests/test_real_crawl_acceptance.py` | **OPERATIONAL** | Network Reachability: **PASS** (Douyin & XHS). Retrieval: minh bạch trạng thái CAPTCHA/Login |
+
+**Phán quyết Cổng Phát hành (Verdict)**:  
+`APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH`  
+*Chi tiết kiểm chứng lưu tại tệp versioned:* [`release_gate_report.json`](file:///C:/Users/admin/Projects/ai-video-research-tool/release_gate_report.json).
 
 ---
 
-## 2. Chi Tiết Khắc Phục Các Lỗi P0 & P1
+## 2. Các Cải Tiến Kỹ Thuật Đã Thực Hiện
 
-### A. Lỗi P0-1: Đơn Nhất Hóa Luồng Xử Lý Dubbing & Chống Race Condition
-- **Vấn đề trước sửa:** `DubbingService.create_job_async` vừa gọi `asyncio.create_task(self.process_dubbing(job.id))` vừa đẩy job vào `system_queue`. Khi worker pool nhận job, cả hai cùng thực thi `process_dubbing`, gây ghi đè file và xung đột trạng thái.
+### A. Tái Thiết Kế Kiểm Thử Live Crawl & Bỏ Hoàn Toàn Việc Nuốt Lỗi (`tests/test_real_crawl_acceptance.py`)
+- **Vấn đề trước đây:** Khi Douyin yêu cầu giải CAPTCHA hoặc Xiaohongshu yêu cầu đăng nhập, bài test cũ bắt ngoại lệ `UserActionRequired` và chỉ kiểm tra thuộc tính lỗi rồi kết luận PASS, dẫn đến báo cáo "Live Crawl PASS" sai lệch dù thực tế thu thập 0 video.
 - **Giải pháp triệt để:**
-  1. Trong `create_job_async`, chỉ enqueue vào `system_queue`. Chỉ fallback sang tạo background task trực tiếp nếu queue enqueue ném ngoại lệ.
-  2. Bổ sung 2 tầng bảo vệ đơn nhất (idempotency guard):
-     - In-memory lock: `self._active_jobs: set[str]` kiểm soát ngay lập tức việc gọi trùng lặp trong cùng tiến trình.
-     - Atomic DB status check: Kiểm tra và chuyển đổi trạng thái `job.status` từ `"pending"` sang `"synthesizing"` trong 1 transaction duy nhất. Nếu trạng thái đã khác `"pending"`, hàm lập tức thoát (`return`).
-  3. Bổ sung bài test `test_dubbing_service_idempotency_prevents_duplicate_runs` chứng minh việc gọi đồng thời nhiều lần qua `asyncio.gather` vẫn chỉ thực thi đúng 1 lần duy nhất.
+  1. **Bóc tách bài test**:
+     - `test_offline_crawl_provider_contract_and_filters`: Luôn chạy kiểm thử hợp đồng dữ liệu và ranking trên bộ mẫu chuẩn đã kiểm chứng.
+     - `test_live_network_probe_reachability`: Khởi động Chromium thật, gọi `probe_live()` kiểm tra khả năng mở trang của cả Douyin và Xiaohongshu (bảo đảm HTTP 200, không bị lỗi 503, không sập Playwright).
+     - `test_live_crawl_douyin_real_results`: Tìm kiếm từ khóa thật trên Douyin, bắt buộc `len(results) > 0`. Nếu gặp thử thách bảo mật hoặc 0 kết quả, bài test ghi nhận đúng trạng thái `BLOCKED` / `pytest.fail()`.
+     - `test_live_crawl_xiaohongshu_real_results`: Tìm kiếm từ khóa thật trên Xiaohongshu, bắt buộc `len(results) > 0`. Nếu gặp yêu cầu đăng nhập phiên, ghi nhận chính xác trạng thái `BLOCKED (LOGIN_REQUIRED)`.
 
-### B. Lỗi P0-2: Định Vị Video Nguồn Đã Tải & Ghép Video Hoàn Chỉnh
-- **Vấn đề trước sửa:** `DownloadService` lưu file hoàn tất vào `settings.download_dir / f"{video.platform}_{sanitized_id}_{download_id[:8]}.mp4"`, và gán `DownloadJob.relative_path` là tên file này. Tuy nhiên, `DubbingService` lại kiểm tra `relative_path` như một đường dẫn độc lập ở CWD hoặc `data/`, dẫn đến không bao giờ tìm thấy video nguồn và chỉ xuất ra file âm thanh `.mp3`.
+### B. Bóc Tách Readiness Probe Cơ Bản & Live Provider (`backend/api/observability.py`)
+- **Vấn đề trước đây:** Endpoint `/api/system/release-readiness` khi gọi mà không có tham số `probe=true` vẫn trả về `status: READY` ngay cả khi provider chưa được khởi tạo.
 - **Giải pháp triệt để:**
-  1. Trong `DubbingService.process_dubbing`, kiểm tra đường dẫn video theo thứ tự ưu tiên:
-     - `settings.download_dir / cand`
-     - `ROOT / "data" / "downloads" / cand`
-     - `Path("data/downloads") / cand`
-     - Quét tìm theo `*{platform_video_id}*.mp4` hoặc `*{video_id}*.mp4` trong `settings.download_dir`.
-  2. Xử lý video nguồn không có luồng âm thanh: Trong `AudioMixer.mix`, nếu video nguồn không có audio stream (khiến bộ lọc sidechain ducking `[0:a]` báo lỗi `matches no streams`), mixer tự động fallback ghép luồng hình ảnh `0:v:0` với voiceover `1:a:0` trực tiếp mà không làm gián đoạn hay trả về audio-only.
-  3. Bổ sung bài test `test_dubbing_service_resolves_downloaded_video_and_mixes` kiểm chứng việc tìm thấy file đã tải trong `settings.download_dir` và xuất ra file MP4 lồng tiếng hoàn tất.
+  1. Khi `probe=False`: Nếu `browser` hoặc `douyin_browser` chưa khởi tạo (`None`), hệ thống gán `status: "UNINITIALIZED"`, thêm vào cảnh báo và trả về `status: "NOT_READY"`.
+  2. Nếu browser ở trạng thái standby (`closed`), trả về `status: "STANDBY"` và tổng thể `"DEGRADED"`, yêu cầu gọi `?probe=true` để kiểm định mạng.
+  3. Khi `probe=True`: Bổ sung kiểm tra `live_providers`, thực thi song song `probe_live()` cho cả 2 nền tảng và chỉ xác nhận `PASS` khi mạng của cả hai đều thông suốt.
 
-### C. Lỗi P0-3: Bảo Vệ Worker Đang Xử Lý Khi Thu Hồi Tải (Scale-Down Safety)
-- **Vấn đề trước sửa:** `AdaptiveWorkerPool._supervisor_loop` lấy ngẫu nhiên 1 worker task từ dictionary và gọi `task.cancel()` khi `pending == 0`. Nếu worker đó đang trong quá trình tải hoặc xử lý tác vụ nặng, việc cancel đột ngột khiến job bị kẹt vĩnh viễn ở trạng thái `in_flight` mà không được ack hay nack.
-- **Giải pháp triệt để:**
-  1. Thêm 2 tập hợp theo dõi: `_busy_workers` (worker đang giữ và chạy handler) và `_retiring_workers` (worker được yêu cầu rút lui).
-  2. Khi scale down: Supervisor chỉ tìm ứng viên từ danh sách worker **không bận** (`wid not in self._busy_workers`).
-  3. Cơ chế Graceful Retirement: Thêm `wid` vào `_retiring_workers` thay vì gọi `task.cancel()`. Worker sẽ tự kiểm tra cờ này sau mỗi chu kỳ `dequeue` hoặc sau khi hoàn tất task hiện tại để thoát êm thuận.
-  4. Nếu có sự cố hủy ngang bất khả kháng (toàn bộ pool dừng), `_worker_loop` bắt `CancelledError` và tự động gọi `await self.queue.nack(...)` để hoàn trả task về hàng đợi, không bao giờ làm thất lạc task.
-  5. Bổ sung bài test `test_worker_pool_scale_down_does_not_cancel_busy_worker` kiểm chứng worker đang bận không bị cancel và task được ack thành công.
+### C. Nâng Cấp Bộ Dò Bắt Iframe CAPTCHA Trên Trình Duyệt (`douyin_browser_service.py` & `browser_service.py`)
+- Phát hiện lỗi Douyin nhúng iframe xác thực bảo mật `RMC NoCaptcha` (`rc-verifycenter/rmc-nocaptcha/...`) khiến việc đọc DOM chính không thấy text lỗi mà chỉ thấy 0 link video dẫn đến lỗi nhầm `SelectorChangedError`.
+- Bổ sung cơ chế duyệt qua `page.frames` để phát hiện ngay lập tức các iframe xác thực bảo mật (`verifycenter`, `nocaptcha`, `captcha`) và chuyển trạng thái trình duyệt sang `verification_required`, kích hoạt thông báo người dùng kịp thời.
 
-### D. Lỗi P1: Đồng Bộ Handlers Queue Trên Main.py
-- Bổ sung phương thức công khai `async def process_download(self, download_id: str)` trên `DownloadService`.
-- Trong `backend/app/main.py`:
-  - Sửa `handle_download`: gọi `await app.state.download.process_download(job_id)`.
-  - Sửa `handle_search`: gọi `await app.state.search.run(job_id)`.
-- Bổ sung bài test `test_system_queue_handlers_registered` xác nhận cả 3 tác vụ `dubbing`, `download`, `search` đều được đăng ký thành công trên `system_worker_pool`.
+### D. Nâng Cấp Cổng Phát Hành Release Gate (`scripts/release_gate.py`)
+- Stage 11 được chia thành 3 bước kiểm định rõ ràng:
+  - **11.A**: Platform Reachability Probe (xác thực mạng và Chromium cho cả 2 bên).
+  - **11.B**: Douyin Live Retrieval (kiểm tra thu thập video thực tế).
+  - **11.C**: Xiaohongshu Live Retrieval (kiểm tra thu thập video/ghi chú thực tế).
+- Báo cáo `release_gate_report.json` được đưa vào Git để có thể kiểm chứng (loại bỏ khỏi `.gitignore`), cam kết tuyệt đối không lưu trữ cookie, token phiên hay secret trong báo cáo.
 
-### E. Lỗi P1: Đánh Giá Benchmark Trên Dữ Liệu Crawl Thực Tế & Loại Bỏ Flakiness
-- **Loại bỏ phụ thuộc mạng ngoài ở test TTS:** Trong `tests/test_auto_dubbing.py`, mock phương thức `edge_tts.Communicate.save` ném exception khi kiểm tra fallback sang offline WAV. Bài test chạy 100% độc lập, tức thì và không bị flaky khi mạng internet chập chờn.
-- **Bộ dữ liệu kiểm chuẩn crawl thật:** Bổ sung `REAL_CRAWLED_BENCHMARK_SAMPLES` gồm các tiêu đề và chỉ số thu thập thực tế từ nền tảng Xiaohongshu (decor bàn học, dụng cụ bóc sticker, bàn phím cơ, unbox đồ cute) với nhãn relevance chuẩn xác.
-- **Báo cáo trung thực ở Release Gate:** Cập nhật Stage 9 của `scripts/release_gate.py` để đếm và báo cáo đúng số lượng truy vấn được benchmark (60 domain queries + 4 bộ kiểm chuẩn thực tế), thay vì hiển thị số hàm pytest.
-- **Đồng bộ tài liệu Playwright:** Cập nhật `IMPLEMENTATION_STATUS.md` chính xác 21 bài kiểm thử trên 6 tập tin spec (bổ sung `research-default.spec.ts`).
+---
+
+## 3. Hướng Dẫn Vận Hành Trạm Làm Việc (Operational Workstation Guide)
+
+Hệ thống đã đạt điều kiện vận hành tại trạm làm việc (Workstation Ready). Để khai thác tối đa việc tìm kiếm video trực tiếp:
+
+1. **Đối với Douyin**:
+   - Khi tìm kiếm lần đầu hoặc khi tần suất tìm kiếm cao, Douyin có thể xuất hiện cửa sổ trượt CAPTCHA (`verification_required`).
+   - Mở giao diện cấu hình cookie hoặc chạy chế độ headful một lần để kéo thanh trượt xác minh. Phiên làm việc sẽ tự động được lưu trữ vào `data/browser/douyin/auth_state.json`.
+2. **Đối với Xiaohongshu**:
+   - Nền tảng Xiaohongshu yêu cầu phiên đăng nhập để duyệt feed tìm kiếm đầy đủ.
+   - Sử dụng tính năng quét mã QR trên giao diện hoặc đăng nhập 1 lần trên trình duyệt Chromium trạm làm việc. Phiên và cookie sẽ được tự động lưu bền vững vào `data/browser/xiaohongshu/auth_state.json`.

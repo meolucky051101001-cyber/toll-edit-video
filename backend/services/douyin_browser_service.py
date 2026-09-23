@@ -410,11 +410,19 @@ class DouyinBrowserService:
             has_user_element = ((await user_avatar.count()) > 0) or has_session_cookie
             is_authenticated = bool(has_user_element or has_session_cookie)
 
-            # Check for verification / captcha container
+            # Check for verification / captcha container or iframes
             captcha_box = page.locator(
                 "#captcha-verify-image, .captcha-verify-container:visible, .verify-bar-close:visible, [class*='captcha']:visible"
             )
             captcha_visible = (await captcha_box.count()) > 0
+            if not captcha_visible and hasattr(page, "frames"):
+                for f in page.frames:
+                    if f != page.main_frame:
+                        f_url = (f.url or "").lower()
+                        if "verifycenter" in f_url or "nocaptcha" in f_url or "verify" in f_url or "captcha" in f_url:
+                            captcha_visible = True
+                            break
+
             if captcha_visible:
                 self.state = "verification_required"
 

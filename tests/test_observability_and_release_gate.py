@@ -53,10 +53,11 @@ def test_release_readiness_api_endpoint():
         res = client.get("/api/system/release-readiness")
         assert res.status_code == 200
         data = res.json()
-        assert data["status"] in {"READY", "DEGRADED", "BLOCKED"}
+        assert data["status"] in {"READY", "DEGRADED", "BLOCKED", "NOT_READY"}
         assert "checks" in data
         assert "database" in data["checks"]
         assert "job_queue" in data["checks"]
+        assert "providers" in data["checks"]
 
 
 def test_release_gate_functions():

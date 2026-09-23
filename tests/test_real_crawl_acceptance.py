@@ -63,67 +63,135 @@ def test_real_crawl_dataset_schema_and_identity_acceptance():
 
 
 @pytest.mark.live_acceptance
-@pytest.mark.anyio
-async def test_live_crawl_provider_acceptance_with_filters():
-    """Validates real crawl provider search contract and filtering guarantees."""
-    # When LIVE_CRAWL_ENABLED=1 is in environment, run live against actual browser session;
-    # otherwise run against verified real-world crawl fixtures.
-    is_live_enabled = os.environ.get("LIVE_CRAWL_ENABLED") == "1"
-
+def test_offline_crawl_provider_contract_and_filters():
+    """Validates real crawl provider contract and ranking filters against benchmark samples."""
     filters = SearchFilters(
         sort_by="most_liked",
         publish_time="all",
         content_type="all",
     )
 
-    if not is_live_enabled:
-        with open(BENCHMARK_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
+    with open(BENCHMARK_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-        for group in data:
-            query = group["query"]
-            plan = plan_query(query)
+    for group in data:
+        query = group["query"]
+        plan = plan_query(query)
 
-            items = [
-                VideoResult(
-                    platform=s["platform"],
-                    platform_video_id=s["platform_video_id"],
-                    url=s["url"],
-                    title=s["title"],
-                    author_name=s["author"],
-                    like_count=s["like_count"],
-                    media_type=s.get("media_type", "video"),
-                )
-                for s in group["samples"]
-            ]
+        items = [
+            VideoResult(
+                platform=s["platform"],
+                platform_video_id=s["platform_video_id"],
+                url=s["url"],
+                title=s["title"],
+                author_name=s["author"],
+                like_count=s["like_count"],
+                media_type=s.get("media_type", "video"),
+            )
+            for s in group["samples"]
+        ]
 
-            # Verify sorting matches requested most_liked
+        # Verify sorting matches requested most_liked
+        if filters.sort_by == "most_liked":
             items.sort(key=lambda x: x.like_count or 0, reverse=True)
             for i in range(len(items) - 1):
                 assert (items[i].like_count or 0) >= (items[i + 1].like_count or 0)
 
-            # Verify ranking works accurately
-            details = [rank_detailed(item, query, alternative_queries=plan.tiered_queries) for item in items]
-            assert all(d.final_score >= 0.0 for d in details)
-    else:
-        # Live browser integration acceptance
-        from backend.providers.base import UserActionRequired
-        from backend.providers.douyin.provider import DouyinProvider
-        from backend.services.douyin_browser_service import DouyinBrowserService
+        # Verify ranking works accurately
+        details = [rank_detailed(item, query, alternative_queries=plan.tiered_queries) for item in items]
+        assert all(d.final_score >= 0.0 for d in details)
 
-        browser = DouyinBrowserService(headless=True)
-        provider = DouyinProvider(browser=browser, auto_elevate=False)
-        try:
-            results = await provider.search("decor bàn học", limit=5, filters=filters)
-            assert len(results) > 0
-            for r in results:
-                assert r.platform == "douyin"
-                assert r.platform_video_id
-                assert str(r.url).startswith("https://")
-        except UserActionRequired as uar:
-            # Douyin anti-scraping challenge contract validation
-            assert uar.state in {"waiting_for_user", "waiting_for_login"}
-            assert "Douyin" in str(uar)
-        finally:
-            await provider.close()
-            await browser.close()
+
+@pytest.mark.live_acceptance
+@pytest.mark.anyio
+async def test_live_network_probe_reachability():
+    """Validates that real Chromium browser instances can reach Douyin and Xiaohongshu networks."""
+    if os.environ.get("LIVE_CRAWL_ENABLED") != "1":
+        pytest.skip("Pass LIVE_CRAWL_ENABLED=1 to execute live network probe")
+
+    from backend.services.browser_service import BrowserService
+    from backend.services.douyin_browser_service import DouyinBrowserService
+
+    douyin_browser = DouyinBrowserService(headless=True)
+    xhs_browser = BrowserService(headless=True)
+    try:
+        dy_ok, dy_detail = await douyin_browser.probe_live()
+        xhs_ok, xhs_detail = await xhs_browser.probe_live()
+
+        assert dy_ok, f"Douyin live network reachability probe failed: {dy_detail}"
+        assert xhs_ok, f"Xiaohongshu live network reachability probe failed: {xhs_detail}"
+    finally:
+        await douyin_browser.close()
+        await xhs_browser.close()
+
+
+@pytest.mark.live_acceptance
+@pytest.mark.anyio
+async def test_live_crawl_douyin_real_results():
+    """Strictly validates that Douyin live search retrieves >= 1 real video item."""
+    if os.environ.get("LIVE_CRAWL_ENABLED") != "1":
+        pytest.skip("Pass LIVE_CRAWL_ENABLED=1 to execute live Douyin crawl")
+
+    from backend.providers.base import UserActionRequired
+    from backend.providers.douyin.provider import DouyinProvider
+    from backend.services.douyin_browser_service import DouyinBrowserService
+
+    browser = DouyinBrowserService(headless=True)
+    provider = DouyinProvider(browser=browser, auto_elevate=False)
+    filters = SearchFilters()
+
+    try:
+        results = await provider.search("decor", limit=3, filters=filters)
+    except UserActionRequired as uar:
+        pytest.fail(f"Douyin live crawl blocked by authentication/verification challenge: {uar}")
+    finally:
+        await provider.close()
+        await browser.close()
+
+    assert len(results) > 0, "Douyin live search returned 0 video results"
+    for r in results:
+        assert r.platform == "douyin"
+        assert r.platform_video_id
+        assert str(r.url).startswith("https://")
+
+
+@pytest.mark.live_acceptance
+@pytest.mark.anyio
+async def test_live_crawl_xiaohongshu_real_results():
+    """Strictly validates that Xiaohongshu live search retrieves >= 1 real note/video item."""
+    if os.environ.get("LIVE_CRAWL_ENABLED") != "1":
+        pytest.skip("Pass LIVE_CRAWL_ENABLED=1 to execute live Xiaohongshu crawl")
+
+    from backend.providers.base import UserActionRequired
+    from backend.providers.xiaohongshu.provider import XiaohongshuProvider
+    from backend.services.browser_service import BrowserService
+
+    browser = BrowserService(headless=True)
+    provider = XiaohongshuProvider(browser=browser, auto_elevate=False)
+    filters = SearchFilters(sort_by="most_liked", publish_time="all", content_type="all")
+
+    try:
+        results = await provider.search("sticker", limit=3, filters=filters)
+    except UserActionRequired as uar:
+        pytest.fail(f"Xiaohongshu live crawl blocked by authentication/login required: {uar}")
+    finally:
+        await provider.close()
+        await browser.close()
+
+    assert len(results) > 0, "Xiaohongshu live search returned 0 results"
+    for r in results:
+        assert r.platform == "xiaohongshu"
+        assert r.platform_video_id
+        assert str(r.url).startswith("https://")
+
+
+@pytest.mark.live_acceptance
+@pytest.mark.anyio
+async def test_live_crawl_provider_acceptance_with_filters():
+    """Compatibility runner for existing stage 11 caller."""
+    is_live_enabled = os.environ.get("LIVE_CRAWL_ENABLED") == "1"
+    if not is_live_enabled:
+        test_offline_crawl_provider_contract_and_filters()
+    else:
+        await test_live_network_probe_reachability()
+        await test_live_crawl_douyin_real_results()
