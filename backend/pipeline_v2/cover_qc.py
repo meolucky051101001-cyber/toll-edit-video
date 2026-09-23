@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import re
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 
 @dataclass
@@ -333,7 +333,10 @@ def inspect_covers(
             if cover_end > left
             and cover_start < right
             and x1 <= event.x_pct * w + 2
-            and x2 >= event.max_x_pct * w - 2
+            and (
+                x2 >= event.max_x_pct * w - 2
+                or (w > h and event.y_pct >= 0.80 and x2 >= min(event.max_x_pct * w - 2, int(w * (1574.0 / 1920.0))))
+            )
             and y1 <= event.y_pct * h + 2
             and y2 >= event.max_y_pct * h - 2
         )
@@ -486,6 +489,9 @@ def inspect_frame_pixel_coverage(
                 ry1 = int(float(region["y_pct"]) * fh)
                 rx2 = int(float(region["max_x_pct"]) * fw)
                 ry2 = int(float(region["max_y_pct"]) * fh)
+                if fw > fh and float(region.get("y_pct", 0.0)) >= 0.80:
+                    wm_limit_px = int(round(fw * (1574.0 / 1920.0)))
+                    rx2 = min(rx2, wm_limit_px)
             except (KeyError, TypeError, ValueError):
                 expected_region_checks.append({
                     "segment_id": region.get("segment_id") if isinstance(region, dict) else None,
@@ -599,3 +605,52 @@ def inspect_frame_pixel_coverage(
         }
     except Exception as exc:
         return {"checked": False, "error": str(exc)}
+
+
+def check_watermark_collision(
+    covers: Sequence[Tuple[float, float, float, float, float, float]],
+    canvas_w: int,
+    canvas_h: int,
+    watermark_box: Optional[Tuple[float, float, float, float]] = None,
+) -> Dict[str, Any]:
+    """Check if any ASS subtitle cover box collides with the watermark zone.
+    
+    Default watermark zone is the bottom-right corner for landscape videos:
+    x_pct >= 0.833, y_pct >= 0.85 (e.g. Douyin red seal '静默沸腾').
+    """
+    if watermark_box is None:
+        if canvas_w > canvas_h:
+            # Douyin red seal '静默沸腾' at bottom-right corner: X >= 1626/1920 (~0.846875), Y >= 980/1080 (~0.9074)
+            wm_x1 = (1626.0 / 1920.0) * canvas_w
+            wm_y1 = (980.0 / 1080.0) * canvas_h
+            wm_x2 = 1.000 * canvas_w
+            wm_y2 = 1.000 * canvas_h
+        else:
+            return {"has_collision": False, "collisions": [], "collision_count": 0, "checked_covers": len(covers)}
+    else:
+        wm_x1, wm_y1, wm_x2, wm_y2 = watermark_box
+
+    collisions = []
+    for c in covers:
+        c_start, c_end, x1, y1, x2, y2 = c
+        ix1 = max(x1, wm_x1)
+        iy1 = max(y1, wm_y1)
+        ix2 = min(x2, wm_x2)
+        iy2 = min(y2, wm_y2)
+        if ix2 > ix1 and iy2 > iy1:
+            overlap_w = ix2 - ix1
+            overlap_h = iy2 - iy1
+            collisions.append({
+                "start": round(c_start, 2),
+                "end": round(c_end, 2),
+                "cover_bbox": [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)],
+                "watermark_bbox": [round(wm_x1, 1), round(wm_y1, 1), round(wm_x2, 1), round(wm_y2, 1)],
+                "overlap_px": [round(overlap_w, 1), round(overlap_h, 1)],
+            })
+
+    return {
+        "has_collision": len(collisions) > 0,
+        "collisions": collisions,
+        "collision_count": len(collisions),
+        "checked_covers": len(covers),
+    }

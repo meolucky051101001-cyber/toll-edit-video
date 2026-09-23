@@ -38,7 +38,7 @@ def main():
     control_pause = (ROOT.parent / "workspace" / "control" / "v2.pause")
     delay = 5
     while True:
-        if service == "telegram" and control_pause.exists():
+        if control_pause.exists():
             time.sleep(2)
             continue
         started = time.monotonic()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -52,6 +53,9 @@ from .timing import (
 from .tts import generate_tts_audio_v2
 
 
+logger = logging.getLogger(__name__)
+
+
 V2_STAGE_ORDER = (
     "input",
     "extract_audio",
@@ -73,7 +77,9 @@ V2_STAGE_ORDER = (
 # Bump this value whenever artifact semantics change.  It participates in the
 # manifest fingerprint so an upgraded runner cannot silently reuse output from
 # an older implementation that happened to have the same environment flags.
-PIPELINE_IMPLEMENTATION_VERSION = "2.12.0"
+PIPELINE_IMPLEMENTATION_VERSION = "2.13.2"
+TRANSLATION_CHECKPOINT_VERSION = 3
+TRANSLATION_CONTEXT_WINDOW = 12
 
 
 class QCGateBlocked(RuntimeError):
@@ -153,7 +159,7 @@ class VideoPipelineRunner:
         self.work_directory.mkdir(parents=True, exist_ok=True)
         self.gpu_executor = GPUStageExecutor(
             self.v2_directory / "control",
-            self.job_directory.parent / "pipeline_v2_gpu.lock",
+            (self.job_directory.parent / "bot_system" / "pipeline_v2_gpu.lock") if (self.job_directory.parent / "bot_system").is_dir() else (self.job_directory.parent / "pipeline_v2_gpu.lock"),
             lock_timeout_seconds=request.settings.gpu_lock_timeout_seconds,
             stage_timeout_seconds=request.settings.stage_timeout_seconds,
         )
@@ -193,7 +199,9 @@ class VideoPipelineRunner:
 
         ocr_should_run = True
         if self.request.settings.enable_adaptive_ocr:
-            ocr_decision = await asyncio.to_thread(decide_ocr, self.video_path)
+            ocr_decision = await asyncio.to_thread(
+                decide_ocr, self.video_path, 24, transcript=transcript
+            )
             self.manifest.stage("ocr").metadata["adaptive_decision"] = {
                 "should_run": ocr_decision.should_run,
                 "reason": ocr_decision.reason,
@@ -488,16 +496,27 @@ class VideoPipelineRunner:
                 await self._notify(name, "failed")
                 raise
 
-        # Record completion immediately, not when the slower sibling finishes.
-        # Wait for both even on failure so no worker is left writing a checkpoint.
-        results = await asyncio.gather(
-            finish_stage("ocr", self._ocr_stage(transcript)),
-            finish_stage("translate", self._translate_stage(transcript)),
-            return_exceptions=True,
-        )
-        first_error = next((r for r in results if isinstance(r, BaseException)), None)
-        if first_error is not None:
-            raise first_error
+        # Cancel sibling immediately on failure instead of waiting for the
+        # slower task (which may hold GPU / API quota for minutes).
+        tasks = [
+            asyncio.ensure_future(finish_stage("ocr", self._ocr_stage(transcript))),
+            asyncio.ensure_future(finish_stage("translate", self._translate_stage(transcript))),
+        ]
+        try:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            # If any task raised, cancel the remaining siblings immediately.
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            # Propagate the first exception.
+            for t in done:
+                if t.exception() is not None:
+                    raise t.exception()
+        except asyncio.CancelledError:
+            for t in tasks:
+                t.cancel()
+            raise
 
     def _completed_valid(self, name: str, allow_empty: bool = False) -> bool:
         assert self.manifest is not None
@@ -567,6 +586,7 @@ class VideoPipelineRunner:
                     }
                 )
                 del warnings[:-50]
+                self.manifest_store.save(self.manifest)
 
     @staticmethod
     def _check_stopped() -> None:
@@ -784,7 +804,9 @@ class VideoPipelineRunner:
         translated_all: List[RuntimeSegment] = []
         artifacts: List[ArtifactRecord] = []
         prior_context: List[Dict[str, str]] = []
+        translation_batches: List[Dict[str, Any]] = []
         for batch_number, batch in enumerate(batches, 1):
+            recent_context = prior_context[-TRANSLATION_CONTEXT_WINDOW:]
             checkpoint_key = "translation/batches/{:05d}.json".format(batch_number)
             input_fingerprint = fingerprint_json(
                 {
@@ -792,10 +814,12 @@ class VideoPipelineRunner:
                     "pipeline_implementation_version": PIPELINE_IMPLEMENTATION_VERSION,
                     "segments": segments_to_dicts(batch),
                     "target_lang": self.request.target_lang,
-                    "prior_context": prior_context[-4:],
+                    "prior_context": recent_context,
                     "glossary": dict(self.request.glossary or {}),
                     "entity_map": dict(self.request.entity_map or {}),
                     "speaker_map": dict(self.request.speaker_map or {}),
+                    "translation_checkpoint_version": TRANSLATION_CHECKPOINT_VERSION,
+                    "quality_policy": "strict_llm_context_v3",
                 }
             )
             checkpoint_path = self.artifact_store.path_for(checkpoint_key)
@@ -803,7 +827,16 @@ class VideoPipelineRunner:
             if checkpoint_path.is_file():
                 try:
                     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-                    if checkpoint.get("input_fingerprint") == input_fingerprint:
+                    if (
+                        checkpoint.get("input_fingerprint") == input_fingerprint
+                        and checkpoint.get("checkpoint_version") == TRANSLATION_CHECKPOINT_VERSION
+                    ):
+                        batch_quality = dict(checkpoint.get("quality") or {})
+                        if (
+                            batch_quality.get("provider_kind") != "llm"
+                            or batch_quality.get("provider") not in {"gemini", "openai", "deepseek"}
+                        ):
+                            raise RuntimeError("Translation checkpoint lacks verified LLM provenance")
                         candidate_batch = segments_from_dicts(checkpoint["segments"])
                         validate_translated_batch(batch, candidate_batch)
                         translated_batch = candidate_batch
@@ -820,41 +853,81 @@ class VideoPipelineRunner:
                 ):
                     translated_batch = None
             if translated_batch is None:
-                translated_batch = await asyncio.to_thread(
-                    translate_subtitles,
-                    batch,
-                    self.request.target_lang,
-                    self.request.api_key,
-                    str(self.video_path),
-                    context_start_seconds=batch[0].start.total_seconds(),
-                    context_end_seconds=batch[-1].end.total_seconds(),
-                    prior_context=prior_context[-4:],
-                    strict=True,
-                    enable_g4f=False,
-                    glossary=self.request.glossary,
-                    entity_map=self.request.entity_map,
-                    speaker_map=self.request.speaker_map,
-                    duration_budgets=[
-                        {
-                            "seconds": round(max((segment.end - segment.start).total_seconds(), 0.1), 3),
-                            "max_characters": plan_segment(segment, TimingPolicy(
-                                atempo_min=self.request.settings.atempo_min,
-                                atempo_max=self.request.settings.atempo_max,
-                            )).character_budget,
-                        }
-                        for segment in batch
-                    ],
-                )
-                validate_translated_batch(batch, translated_batch)
+                batch_quality: Dict[str, Any] = {}
+                max_translate_retries = 3
+                last_translate_err = None
+                for attempt in range(max_translate_retries):
+                    try:
+                        batch_quality.clear()
+                        translated_batch = await asyncio.to_thread(
+                            translate_subtitles,
+                            segments_from_dicts(segments_to_dicts(batch)),
+                            self.request.target_lang,
+                            self.request.api_key,
+                            str(self.video_path),
+                            context_start_seconds=batch[0].start.total_seconds(),
+                            context_end_seconds=batch[-1].end.total_seconds(),
+                            prior_context=recent_context,
+                            strict=True,
+                            enable_g4f=False,
+                            timeout=60,
+                            glossary=self.request.glossary,
+                            entity_map=self.request.entity_map,
+                            speaker_map=self.request.speaker_map,
+                            quality_metadata=batch_quality,
+                            duration_budgets=[
+                                {
+                                    "seconds": round(max((segment.end - segment.start).total_seconds(), 0.1), 3),
+                                    "max_characters": plan_segment(segment, TimingPolicy(
+                                        atempo_min=self.request.settings.atempo_min,
+                                        atempo_max=self.request.settings.atempo_max,
+                                    )).character_budget,
+                                }
+                                for segment in batch
+                            ],
+                        )
+                        validate_translated_batch(batch, translated_batch)
+                        if (
+                            batch_quality.get("provider_kind") != "llm"
+                            or batch_quality.get("provider") not in {"gemini", "openai", "deepseek"}
+                        ):
+                            raise RuntimeError(
+                                "Strict V2 translation refused non-LLM batch {}".format(
+                                    batch_number
+                                )
+                            )
+                        last_translate_err = None
+                        break
+                    except Exception as err:
+                        last_translate_err = err
+                        if attempt < max_translate_retries - 1:
+                            logger.warning(
+                                "Translation batch attempt %d/%d failed (%s: %s). Retrying in 3s...",
+                                attempt + 1, max_translate_retries, type(err).__name__, err
+                            )
+                            await asyncio.sleep(3.0)
+                if last_translate_err is not None:
+                    raise last_translate_err
                 artifacts.append(
                     self.artifact_store.put_json(
                         checkpoint_key,
                         {
                             "input_fingerprint": input_fingerprint,
+                            "checkpoint_version": TRANSLATION_CHECKPOINT_VERSION,
+                            "quality": batch_quality,
                             "segments": segments_to_dicts(translated_batch),
                         },
                     )
                 )
+            translation_batches.append(
+                {
+                    "batch_number": batch_number,
+                    "first_segment_id": int(batch[0].index),
+                    "last_segment_id": int(batch[-1].index),
+                    "segment_count": len(batch),
+                    **dict(batch_quality or {}),
+                }
+            )
             translated_all.extend(translated_batch)
             prior_context.extend(
                 {
@@ -862,7 +935,7 @@ class VideoPipelineRunner:
                     "translated": str(segment.content),
                     "speaker_id": str(getattr(segment, "speaker_id", "") or ""),
                 }
-                for segment in translated_batch[-3:]
+                for segment in translated_batch[-TRANSLATION_CONTEXT_WINDOW:]
             )
 
         artifacts.extend([
@@ -879,6 +952,7 @@ class VideoPipelineRunner:
                     "entity_map": dict(self.request.entity_map or {}),
                     "speaker_map": dict(self.request.speaker_map or {}),
                     "prior_context_count": len(prior_context),
+                    "batches": translation_batches,
                 },
             ),
         ])
@@ -1119,134 +1193,174 @@ class VideoPipelineRunner:
         tts_by_index = {int(info["index"]): info for info in tts_infos}
         artifacts: List[ArtifactRecord] = []
         portable: List[Dict[str, Any]] = []
-        for batch_number, batch in enumerate(
-            chunked(tts_infos, self.request.settings.rvc_batch_segments), 1
-        ):
-            checkpoint_key = "rvc/batches/{:05d}.json".format(batch_number)
-            input_fingerprint = fingerprint_json(
-                {
-                    "cache_generation": self._batch_scope,
-                    "pipeline_implementation_version": PIPELINE_IMPLEMENTATION_VERSION,
-                    "tts": batch,
-                    "enable_auto_gender": self.request.settings.enable_auto_gender,
-                    "model": self.manifest.fingerprints.model_sha256.get("rvc", ""),
-                    "model_index": self.manifest.fingerprints.model_sha256.get("rvc_index", ""),
-                    "atempo_min": policy.atempo_min,
-                    "atempo_max": policy.atempo_max,
-                }
-            )
-            checkpoint_path = self.artifact_store.path_for(checkpoint_key)
-            restored = False
-            if checkpoint_path.is_file():
-                try:
-                    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-                    audio_records = [
-                        ArtifactRecord.from_dict(item)
-                        for item in checkpoint.get("audio_artifacts", [])
-                    ]
-                    if (
-                        checkpoint.get("input_fingerprint") == input_fingerprint
-                        and len(audio_records) == len(batch)
-                        and all(
-                            self.artifact_store.validate(record).valid
-                            for record in audio_records
-                        )
-                    ):
-                        artifacts.extend(audio_records)
-                        artifacts.append(self.artifact_store.record_existing(checkpoint_key))
-                        portable.extend(checkpoint["segments"])
-                        restored = True
-                except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-                    restored = False
-            if restored:
-                continue
 
-            with tempfile.TemporaryDirectory(
-                prefix="rvc-batch-", dir=self.work_directory
-            ) as work:
-                work_path = Path(work)
-                items_to_rvc = []
-                male_items = []
-                for info in batch:
-                    gender = str(info.get("gender", "female") or "female").lower()
-                    inp_path = str(self._artifact_path(info["artifact_key"]))
-                    if self.request.settings.enable_auto_gender and gender == "male":
-                        male_items.append({
-                            "index": info["index"],
-                            "output_path": inp_path,
-                        })
-                    else:
-                        items_to_rvc.append({
-                            "index": info["index"],
-                            "input_path": inp_path,
-                            "output_path": str(
-                                work_path / "{}_rvc.wav".format(info["index"])
-                            ),
-                        })
-
-                rvc_items_result = []
-                if items_to_rvc:
-                    payload = {
-                        "model_path": str(self.request.rvc_model_path),
-                        "items": items_to_rvc,
-                    }
-                    if self.request.settings.enable_gpu_process_isolation:
-                        result = await asyncio.to_thread(
-                            self.gpu_executor.run,
-                            "rvc",
-                            payload,
-                            self._resource_scaled_timeout(),
-                        )
-                    else:
-                        from .gpu_worker import run_request
-
-                        result = await asyncio.to_thread(
-                            run_request,
-                            {"schema_version": 1, "stage": "rvc", "payload": payload},
-                        )
-                    rvc_items_result = result.get("items", [])
-
-                all_items_result = male_items + rvc_items_result
-                batch_records = []
-                batch_infos = []
-                for item in all_items_result:
-                    index = int(item["index"])
-                    segment = segment_map[index]
-                    fitted = work_path / "{}_fitted.wav".format(index)
-                    fit = await asyncio.to_thread(
-                        fit_audio_to_window,
-                        item["output_path"],
-                        fitted,
-                        max((segment.end - segment.start).total_seconds(), 0.1),
-                        policy,
-                    )
-                    key = "rvc/{}.wav".format(index)
-                    record = self.artifact_store.put_file(key, fitted)
-                    batch_records.append(record)
-                    original_info = tts_by_index[index]
-                    batch_infos.append(
-                        {
-                            **original_info,
-                            "artifact_key": key,
-                            "path": None,
-                            "rvc_source_audio_duration": fit.source_duration_seconds,
-                            "target_audio_duration": fit.target_duration_seconds,
-                            "actual_audio_duration": fit.output_duration_seconds,
-                            "rvc_applied_atempo": fit.applied_atempo,
-                            "timing_fits": fit.fits,
-                        }
-                    )
-                checkpoint_record = self.artifact_store.put_json(
-                    checkpoint_key,
-                    {
-                        "input_fingerprint": input_fingerprint,
-                        "audio_artifacts": [record.to_dict() for record in batch_records],
-                        "segments": batch_infos,
-                    },
+        session = None
+        if self.request.settings.enable_gpu_process_isolation:
+            try:
+                from .rvc_session import RVCSession
+                session = RVCSession(
+                    control_directory=self.gpu_executor.control_directory,
+                    lock_path=self.gpu_executor.lock_path,
+                    python_executable=self.gpu_executor.python_executable,
+                    lock_timeout_seconds=self.gpu_executor.lock_timeout_seconds,
                 )
-                artifacts.extend(batch_records)
-                artifacts.append(checkpoint_record)
-                portable.extend(batch_infos)
+            except Exception as exc:
+                logger.warning("Could not start persistent RVCSession, falling back to per-batch: %s", exc)
+                session = None
+
+        try:
+            for batch_number, batch in enumerate(
+                chunked(tts_infos, self.request.settings.rvc_batch_segments), 1
+            ):
+                checkpoint_key = "rvc/batches/{:05d}.json".format(batch_number)
+                input_fingerprint = fingerprint_json(
+                    {
+                        "cache_generation": self._batch_scope,
+                        "pipeline_implementation_version": PIPELINE_IMPLEMENTATION_VERSION,
+                        "tts": batch,
+                        "enable_auto_gender": self.request.settings.enable_auto_gender,
+                        "model": self.manifest.fingerprints.model_sha256.get("rvc", ""),
+                        "model_index": self.manifest.fingerprints.model_sha256.get("rvc_index", ""),
+                        "atempo_min": policy.atempo_min,
+                        "atempo_max": policy.atempo_max,
+                    }
+                )
+                checkpoint_path = self.artifact_store.path_for(checkpoint_key)
+                restored = False
+                if checkpoint_path.is_file():
+                    try:
+                        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                        audio_records = [
+                            ArtifactRecord.from_dict(item)
+                            for item in checkpoint.get("audio_artifacts", [])
+                        ]
+                        if (
+                            checkpoint.get("input_fingerprint") == input_fingerprint
+                            and len(audio_records) == len(batch)
+                            and all(
+                                self.artifact_store.validate(record).valid
+                                for record in audio_records
+                            )
+                        ):
+                            artifacts.extend(audio_records)
+                            artifacts.append(self.artifact_store.record_existing(checkpoint_key))
+                            portable.extend(checkpoint["segments"])
+                            restored = True
+                    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                        restored = False
+                if restored:
+                    continue
+
+                with tempfile.TemporaryDirectory(
+                    prefix="rvc-batch-", dir=self.work_directory
+                ) as work:
+                    work_path = Path(work)
+                    items_to_rvc = []
+                    male_items = []
+                    for info in batch:
+                        gender = str(info.get("gender", "female") or "female").lower()
+                        inp_path = str(self._artifact_path(info["artifact_key"]))
+                        if self.request.settings.enable_auto_gender and gender == "male":
+                            male_items.append({
+                                "index": info["index"],
+                                "output_path": inp_path,
+                            })
+                        else:
+                            items_to_rvc.append({
+                                "index": info["index"],
+                                "input_path": inp_path,
+                                "output_path": str(
+                                    work_path / "{}_rvc.wav".format(info["index"])
+                                ),
+                            })
+
+                    rvc_items_result = []
+                    if items_to_rvc:
+                        payload = {
+                            "model_path": str(self.request.rvc_model_path),
+                            "items": items_to_rvc,
+                        }
+                        if session is not None:
+                            try:
+                                result = await asyncio.to_thread(
+                                    session.run,
+                                    payload,
+                                    self._resource_scaled_timeout(),
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "RVCSession batch failed, closing session and falling back to executor: %s",
+                                    exc,
+                                )
+                                session.close()
+                                session = None
+                                result = await asyncio.to_thread(
+                                    self.gpu_executor.run,
+                                    "rvc",
+                                    payload,
+                                    self._resource_scaled_timeout(),
+                                )
+                        elif self.request.settings.enable_gpu_process_isolation:
+                            result = await asyncio.to_thread(
+                                self.gpu_executor.run,
+                                "rvc",
+                                payload,
+                                self._resource_scaled_timeout(),
+                            )
+                        else:
+                            from .gpu_worker import run_request
+
+                            result = await asyncio.to_thread(
+                                run_request,
+                                {"schema_version": 1, "stage": "rvc", "payload": payload},
+                            )
+                        rvc_items_result = result.get("items", [])
+
+                    all_items_result = male_items + rvc_items_result
+                    batch_records = []
+                    batch_infos = []
+                    for item in all_items_result:
+                        index = int(item["index"])
+                        segment = segment_map[index]
+                        fitted = work_path / "{}_fitted.wav".format(index)
+                        fit = await asyncio.to_thread(
+                            fit_audio_to_window,
+                            item["output_path"],
+                            fitted,
+                            max((segment.end - segment.start).total_seconds(), 0.1),
+                            policy,
+                        )
+                        key = "rvc/{}.wav".format(index)
+                        record = self.artifact_store.put_file(key, fitted)
+                        batch_records.append(record)
+                        original_info = tts_by_index[index]
+                        batch_infos.append(
+                            {
+                                **original_info,
+                                "artifact_key": key,
+                                "path": None,
+                                "rvc_source_audio_duration": fit.source_duration_seconds,
+                                "target_audio_duration": fit.target_duration_seconds,
+                                "actual_audio_duration": fit.output_duration_seconds,
+                                "rvc_applied_atempo": fit.applied_atempo,
+                                "timing_fits": fit.fits,
+                            }
+                        )
+                    checkpoint_record = self.artifact_store.put_json(
+                        checkpoint_key,
+                        {
+                            "input_fingerprint": input_fingerprint,
+                            "audio_artifacts": [record.to_dict() for record in batch_records],
+                            "segments": batch_infos,
+                        },
+                    )
+                    artifacts.extend(batch_records)
+                    artifacts.append(checkpoint_record)
+                    portable.extend(batch_infos)
+        finally:
+            if session is not None:
+                session.close()
+
         artifacts.append(
             self.artifact_store.put_json(
                 "rvc/segments.json",
@@ -1312,6 +1426,38 @@ class VideoPipelineRunner:
             )
             return [self.artifact_store.put_file("audio/mixed_legacy.wav", output)]
 
+    async def _prepare_mix_background(self, work: Path) -> Path:
+        """Enhance in a worker thread; retain the separated track on failure."""
+        bg_audio = self._background_audio()
+        try:
+            orig_audio = self._artifact_path("audio/original.wav")
+            if orig_audio.is_file() and bg_audio.is_file() and orig_audio != bg_audio:
+                try:
+                    from ..ai.audio_enhancer import preserve_pristine_background
+                except ImportError:
+                    from ai.audio_enhancer import preserve_pristine_background
+                enhanced_bg = work / "enhanced_bg.wav"
+                raw_segs = self._load_segments("transcript/segments.json")
+                segments = []
+                for seg in raw_segs:
+                    s_val = getattr(seg, "start", 0.0)
+                    e_val = getattr(seg, "end", s_val)
+                    s_sec = s_val.total_seconds() if hasattr(s_val, "total_seconds") else float(s_val or 0.0)
+                    e_sec = e_val.total_seconds() if hasattr(e_val, "total_seconds") else float(e_val or s_sec)
+                    segments.append({"start": s_sec, "end": e_sec})
+                await asyncio.to_thread(
+                    preserve_pristine_background,
+                    orig_audio,
+                    bg_audio,
+                    segments,
+                    enhanced_bg,
+                )
+                if enhanced_bg.is_file():
+                    bg_audio = enhanced_bg
+        except Exception as exc:
+            logger.warning("Failed to enhance background audio: %s", exc)
+        return bg_audio
+
     async def _mix_v2_stage(self) -> Sequence[ArtifactRecord]:
         bgm_gain, voice_gain = -2.0, 1.0
         try:
@@ -1324,9 +1470,10 @@ class VideoPipelineRunner:
 
         with tempfile.TemporaryDirectory(prefix="mix-v2-", dir=self.work_directory) as work:
             output = Path(work) / "mixed_v2.wav"
+            bg_audio = await self._prepare_mix_background(Path(work))
             await asyncio.to_thread(
                 mix_audio_ffmpeg,
-                self._background_audio(),
+                bg_audio,
                 self._audio_infos(),
                 output,
                 FFmpegMixSettings(

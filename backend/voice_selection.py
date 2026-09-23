@@ -71,12 +71,12 @@ def resolve_voice(default_source, default_param):
 
 
 DEFAULT_SPEAKER_VOICE_MAP = {
-    "male": "vi-VN-NamMinhNeural",
-    "female": "vi-VN-HoaiMyNeural",
-    "SPEAKER_MALE_0": "vi-VN-NamMinhNeural",
-    "SPEAKER_MALE_1": "vi-VN-NamMinhNeural",
-    "SPEAKER_FEMALE_0": "vi-VN-HoaiMyNeural",
-    "SPEAKER_FEMALE_1": "vi-VN-HoaiMyNeural",
+    "male": "BV075_streaming",
+    "female": "BV562_streaming",
+    "SPEAKER_MALE_0": "BV075_streaming",
+    "SPEAKER_MALE_1": "BV075_streaming",
+    "SPEAKER_FEMALE_0": "BV562_streaming",
+    "SPEAKER_FEMALE_1": "BV562_streaming",
 }
 
 DEFAULT_SPEAKER_MAP = {

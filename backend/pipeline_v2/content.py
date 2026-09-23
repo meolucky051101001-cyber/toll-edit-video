@@ -47,10 +47,15 @@ def validate_translated_batch(
             raise RuntimeError(
                 "Translation returned empty text for segment {}".format(original.index)
             )
-        contains_cjk = any("\u4e00" <= character <= "\u9fff" for character in source_text)
-        if contains_cjk and translated_text == source_text:
+        source_contains_cjk = any(
+            "\u3400" <= character <= "\u9fff" for character in source_text
+        )
+        translated_contains_cjk = any(
+            "\u3400" <= character <= "\u9fff" for character in translated_text
+        )
+        if source_contains_cjk and translated_contains_cjk:
             raise RuntimeError(
-                "Translation left CJK source unchanged for segment {}".format(
+                "Translation retained CJK text for segment {}".format(
                     original.index
                 )
             )
@@ -80,6 +85,9 @@ def merge_ocr_geometry(
             segment.in_subtitle_band = getattr(source, "in_subtitle_band", None)
         merged.append(segment)
     return merged
+
+
+merge_runtime_segments = merge_ocr_geometry
 
 
 def discover_rvc_model(workspace: Path) -> Optional[Path]:

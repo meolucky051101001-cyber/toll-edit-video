@@ -124,10 +124,11 @@ class TranslationFailureTests(unittest.TestCase):
     def test_v2_strict_translation_rejects_source_text_fallback(self):
         translation = self._load_translation_with_failing_google()
         segment = SimpleNamespace(index=7, content="你好")
-        with self.assertRaisesRegex(RuntimeError, "segment indexes: 7"):
-            translation.translate_subtitles(
-                [segment], strict=True, enable_g4f=False
-            )
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "requires a complete LLM"):
+                translation.translate_subtitles(
+                    [segment], strict=True, enable_g4f=False
+                )
 
     def test_legacy_translation_can_still_use_source_fallback(self):
         translation = self._load_translation_with_failing_google()
@@ -137,26 +138,20 @@ class TranslationFailureTests(unittest.TestCase):
         )
         self.assertEqual(result[0].content, "你好")
 
-    def test_unchanged_gemini_cjk_is_retranslated_by_strict_fallback(self):
+    def test_strict_translation_rejects_partial_cjk_without_machine_fallback(self):
         translation = self._load_translation_with_failing_google()
 
-        class WorkingGoogleTranslator:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def translate(self, text):
-                return "Xin chào"
-
         segment = SimpleNamespace(index=3, content="你好")
-        with mock.patch.object(
-            translation, "translate_with_gemini", return_value=["你好"]
-        ), mock.patch.object(
-            translation, "GoogleTranslator", WorkingGoogleTranslator
-        ):
-            result = translation.translate_subtitles(
-                [segment], api_key="key", strict=True, enable_g4f=False
-            )
-        self.assertEqual(result[0].content, "Xin chào")
+        google = mock.Mock()
+        with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
+            translation, "translate_with_gemini", return_value=["Xin chào 你好"]
+        ), mock.patch.object(translation, "GoogleTranslator", google):
+            with self.assertRaisesRegex(RuntimeError, "requires a complete LLM"):
+                translation.translate_subtitles(
+                    [segment], api_key="key", strict=True, enable_g4f=False
+                )
+        google.assert_not_called()
+        self.assertEqual(segment.content, "你好")
 
     def test_google_error_payload_falls_back_to_mymemory(self):
         translation = self._load_translation_with_failing_google()
@@ -182,7 +177,7 @@ class TranslationFailureTests(unittest.TestCase):
             translation, "MyMemoryTranslator", WorkingMyMemoryTranslator
         ):
             result = translation.translate_subtitles(
-                [segment], strict=True, enable_g4f=False
+                [segment], strict=False, enable_g4f=False
             )
         self.assertEqual(result[0].content, "Xin chào")
 

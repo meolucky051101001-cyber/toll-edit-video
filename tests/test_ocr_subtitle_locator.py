@@ -27,7 +27,7 @@ class ChineseSubtitleLocatorTests(unittest.TestCase):
     def test_edge_to_edge_asr_matched_caption_keeps_geometry(self):
         speech = {5: "推重音KTO的到底有多少人"}
         detections = [
-            block(5, "推重音teto的到底有多少", 10 / 720, 716 / 720,
+            block(5, "推重音teto的到底有多少", 36 / 720, 684 / 720,
                   0.104, 0.149, 0.998),
         ]
 
@@ -36,10 +36,10 @@ class ChineseSubtitleLocatorTests(unittest.TestCase):
         self.assertEqual(selected.mode, "asr_match")
         self.assertIn(5, selected.selected_by_segment)
         self.assertAlmostEqual(
-            selected.selected_by_segment[5]["x_pct"], 10 / 720
+            selected.selected_by_segment[5]["x_pct"], 36 / 720
         )
         self.assertAlmostEqual(
-            selected.selected_by_segment[5]["max_x_pct"], 716 / 720
+            selected.selected_by_segment[5]["max_x_pct"], 684 / 720
         )
 
     def test_edge_to_edge_unmatched_scene_text_is_not_selected(self):
@@ -194,8 +194,8 @@ class SubtitleCoverGeometryTests(unittest.TestCase):
         )
         self.assertIsNotNone(match)
         box_x, box_y, box_width, box_height = map(int, match.groups())
-        self.assertEqual(box_x, 0)
-        self.assertEqual(box_width, 720)
+        self.assertEqual(box_x, 36)
+        self.assertEqual(box_width, 648)
         self.assertLessEqual(box_y, int(0.104 * 1280))
         self.assertGreaterEqual(box_y + box_height, int(0.149 * 1280))
 

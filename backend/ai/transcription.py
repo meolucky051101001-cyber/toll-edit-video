@@ -11,6 +11,7 @@ if isinstance(sys.stderr, io.TextIOWrapper):
 
 import srt
 from datetime import timedelta
+import threading
 
 from .model_policy import current_model_policy
 from .model_runtime import ModelRuntimeError, run_model_stage, runtime_module_available
@@ -118,7 +119,7 @@ def _group_fast_speech_windows(segments, max_seconds=4.8, max_characters=48):
             previous = grouped[-1]
             gap = float(item["start"]) - float(previous["end"])
             duration = float(item["end"]) - float(previous["start"])
-            text = _join_aligned_tokens(previous["text"], item["text"])
+            text = _join_aligned_tokens(previous["text"], item["text"], join_cjk_lines_with_comma=True)
             if (0 <= gap <= 0.20 and duration <= max_seconds
                     and len(text.replace(" ", "")) <= max_characters):
                 previous["end"] = item["end"]
@@ -128,7 +129,7 @@ def _group_fast_speech_windows(segments, max_seconds=4.8, max_characters=48):
     return grouped
 
 
-def _join_aligned_tokens(left, right):
+def _join_aligned_tokens(left, right, join_cjk_lines_with_comma=False):
     left = str(left or "")
     right = str(right or "")
     if not left:
@@ -136,6 +137,9 @@ def _join_aligned_tokens(left, right):
     if not right:
         return left
     cjk = lambda value: any("\u3400" <= character <= "\u9fff" for character in value)
+    if join_cjk_lines_with_comma and cjk(left[-1:]) and cjk(right[:1]):
+        if not left.endswith(("，", "。", "！", "？", "；", "：", "、", ",", ".", "!", "?", ";", ":")):
+            return left + "，" + right
     if cjk(left[-1:]) or cjk(right[:1]) or right[:1] in "，。！？；：、,.!?;:":
         return left + right
     if left.endswith((" ", "\n")) or right.startswith((" ", "\n")):
@@ -237,32 +241,84 @@ def _extract_subtitles_qwen(audio_path, output_srt_path, policy):
     return subtitles
 
 
-def _extract_subtitles_faster_whisper(
-    audio_path, output_srt_path, num_workers=2, model_name="large-v3", group_speech_windows=False
-):
-    from faster_whisper import WhisperModel
+_cached_whisper_model = None
+_cached_whisper_key = None
+_whisper_lock = threading.Lock()
 
-    print("Transcribing {} with Faster-Whisper {}...".format(audio_path, model_name))
-    import torch, gc
-    num_threads = max((os.cpu_count() or 4) - 1, 2)
+
+def release_whisper_model():
+    """Giải phóng mô hình Whisper khỏi RAM/VRAM khi cần nhường tài nguyên cho mô hình khác."""
+    global _cached_whisper_model, _cached_whisper_key
+    with _whisper_lock:
+        if _cached_whisper_model is not None:
+            del _cached_whisper_model
+            _cached_whisper_model = None
+            _cached_whisper_key = None
+            try:
+                import gc
+                import torch
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            print("🧹 Đã giải phóng bộ nhớ RAM/VRAM của Whisper AI.")
+
+
+def get_or_load_whisper_model(model_name: str, num_workers: int = 1):
+    """Lấy mô hình Whisper đã nạp trong bộ nhớ hoặc nạp mới nếu chưa có."""
+    global _cached_whisper_model, _cached_whisper_key
+    from faster_whisper import WhisperModel
+    import torch
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    compute_type = "int8_float16" if device == "cuda" else "int8"
+    cpu_threads = max((os.cpu_count() or 4) - 1, 2)
     worker_count = max(1, int(num_workers))
-    
-    if torch.cuda.is_available():
-        print(
-            "🚀 CUDA detected: {}. Loading Whisper {}...".format(
-                torch.cuda.get_device_name(0), model_name
+    cache_key = (model_name, device, compute_type, worker_count if device == "cuda" else cpu_threads)
+
+    with _whisper_lock:
+        if _cached_whisper_model is not None and _cached_whisper_key == cache_key:
+            return _cached_whisper_model
+
+        if device == "cuda":
+            print(
+                "🚀 CUDA detected: {}. Loading Whisper {}...".format(
+                    torch.cuda.get_device_name(0), model_name
+                )
             )
-        )
-        model = WhisperModel(
-            model_name,
-            device="cuda",
-            compute_type="int8_float16",
-            num_workers=worker_count,
-        )
-    else:
-        print("⚡ Loading Whisper {} on CPU ({} threads)...".format(model_name, num_threads))
-        model = WhisperModel(model_name, device="cpu", compute_type="int8", cpu_threads=num_threads)
-        
+            model = WhisperModel(
+                model_name,
+                device="cuda",
+                compute_type=compute_type,
+                num_workers=worker_count,
+            )
+        else:
+            print("⚡ Loading Whisper {} on CPU ({} threads)...".format(model_name, cpu_threads))
+            model = WhisperModel(
+                model_name,
+                device="cpu",
+                compute_type=compute_type,
+                cpu_threads=cpu_threads,
+            )
+
+        keep_loaded = os.getenv("AUTODUB_KEEP_WHISPER_LOADED", "1").strip().lower() not in ("0", "false", "no")
+        if keep_loaded:
+            _cached_whisper_model = model
+            _cached_whisper_key = cache_key
+        return model
+
+
+def _extract_subtitles_faster_whisper(
+    audio_path, output_srt_path, num_workers=2, model_name="large-v3", group_speech_windows=False,
+    initial_prompt=None, keep_loaded=None
+):
+    print("Transcribing {} with Faster-Whisper {}...".format(audio_path, model_name))
+    model = get_or_load_whisper_model(model_name=model_name, num_workers=num_workers)
+
+    if initial_prompt is None:
+        initial_prompt = "这是一段带有标点符号的中文视频，包含逗号，句号！"
+
     try:
         segments, info = model.transcribe(
             audio_path, 
@@ -274,6 +330,7 @@ def _extract_subtitles_faster_whisper(
             # Coarse segment timestamps can span the entire silence before the
             # next speaker. Word timestamps provide the actual audible window.
             word_timestamps=True,
+            initial_prompt=initial_prompt,
         )
         
         transcribed_segments = []
@@ -290,11 +347,13 @@ def _extract_subtitles_faster_whisper(
         
         return _write_srt_segments(merged_segments, output_srt_path)
     finally:
-        del model
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        print("🧹 Đã giải phóng bộ nhớ RAM/VRAM của Whisper AI.")
+        should_keep = (
+            keep_loaded
+            if keep_loaded is not None
+            else (os.getenv("AUTODUB_KEEP_WHISPER_LOADED", "1").strip().lower() not in ("0", "false", "no"))
+        )
+        if not should_keep:
+            release_whisper_model()
 
 
 def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2):

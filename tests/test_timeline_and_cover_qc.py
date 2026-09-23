@@ -39,7 +39,7 @@ import numpy as np
 from PIL import Image
 
 from backend.ocr_utils import OCRBlock
-from backend.pipeline_v2.content import merge_ocr_geometry
+from backend.pipeline_v2.content import merge_ocr_geometry, merge_runtime_segments
 from backend.pipeline_v2.cover_qc import (
     build_expected_cover_timeline,
     ExpectedCoverEvent,
@@ -69,6 +69,20 @@ def _create_synthetic_frame(file_path: Path, width: int = 1080, height: int = 19
     img = Image.fromarray(arr)
     file_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(file_path, format="PNG")
+
+
+def _create_synthetic_batch(command, width: int = 1080, height: int = 1920):
+    """Materialize all sequence outputs requested by one FFmpeg invocation."""
+    if "-frames:v" not in command:
+        return []
+    pattern = Path(command[-1])
+    count = int(command[command.index("-frames:v") + 1])
+    paths = []
+    for index in range(count):
+        path = Path(str(pattern).replace("%06d", "{:06d}".format(index)))
+        _create_synthetic_frame(path, width=width, height=height)
+        paths.append(path)
+    return paths
 
 
 class TestExpectedCoverTimeline(unittest.TestCase):
@@ -374,11 +388,11 @@ class TestExpectedCoverTimeline(unittest.TestCase):
                     mock_res.stderr = ""
                     return mock_res
                 elif "ffmpeg" in cmd_str:
-                    if str(cmd[-1]) != "-":
-                        out_path = Path(cmd[-1])
-                        _create_synthetic_frame(out_path, width=1080, height=1920)
-                        ffmpeg_frame_calls.append(out_path.name)
-                    return mock.Mock(returncode=0, stdout="", stderr="")
+                    if "-frames:v" in cmd:
+                        _create_synthetic_batch(cmd, width=1080, height=1920)
+                        ffmpeg_frame_calls.append(tuple(cmd))
+                    from tests.test_pixel_cover_qc import _mock_pts
+                    return mock.Mock(returncode=0, stdout="", stderr=_mock_pts(cmd))
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             with mock.patch("backend.pipeline_v2.qc._run_command", side_effect=fake_run_command):
@@ -390,8 +404,8 @@ class TestExpectedCoverTimeline(unittest.TestCase):
                     settings=QCSettings(sample_frames=True, diagnostic_max_samples=30),
                 )
 
-            self.assertLessEqual(len(ffmpeg_frame_calls), 30, "FFmpeg frame extraction calls must strictly NOT exceed budget of 30")
-            self.assertEqual(len(ffmpeg_frame_calls), 30, "Budget of 30 frames should be fully utilized when 50 candidates exist")
+            self.assertEqual(len(ffmpeg_frame_calls), 1, "All diagnostic frames must be extracted by one FFmpeg decode")
+            self.assertEqual(len(report.diagnostic_artifacts), 30, "Budget of 30 frame artifacts should be fully utilized")
             self.assertLessEqual(len(report.diagnostic_artifacts), 30, "Diagnostic artifacts count must not exceed 30")
 
     def test_segment_serialization_preserves_classification_metadata(self):
@@ -557,10 +571,9 @@ class TestRealQCFailureDetections(unittest.TestCase):
                 mock_res.stderr = ""
                 return mock_res
             elif "ffmpeg" in cmd_str:
-                if str(cmd[-1]) != "-":
-                    out_path = Path(cmd[-1])
-                    _create_synthetic_frame(out_path, width=1080, height=1920)
-                return mock.Mock(returncode=0, stdout="", stderr="")
+                _create_synthetic_batch(cmd, width=1080, height=1920)
+                from tests.test_pixel_cover_qc import _mock_pts
+                return mock.Mock(returncode=0, stdout="", stderr=_mock_pts(cmd))
             return mock.Mock(returncode=0, stdout="", stderr="")
 
         return video_file, report_file, ass_file, seg_file, fake_run_command
@@ -699,6 +712,21 @@ class TestRealQCFailureDetections(unittest.TestCase):
             self.assertIsNotNone(src_check)
             # On 9c4f070, this assertion FAILS (returns 'pass' instead of 'error'):
             self.assertEqual(src_check.status, "error", "Unbridged gap (100ms) between adjacent subtitles must fail QC")
+
+    def test_watermark_collision_detected_and_cleared(self):
+        from backend.pipeline_v2.cover_qc import check_watermark_collision
+        # Canvas 1280x720 (Landscape 16:9). Watermark zone is X >= 1066.24 (0.833), Y >= 612 (0.85).
+        # Case 1: Overlapping cover box reaching X=1200, Y=660
+        overlapping_cover = [(10.0, 15.0, 400.0, 620.0, 1200.0, 680.0)]
+        res_overlap = check_watermark_collision(overlapping_cover, 1280, 720)
+        self.assertTrue(res_overlap["has_collision"])
+        self.assertEqual(res_overlap["collision_count"], 1)
+
+        # Case 2: Snug safe cover box clamped to X=1040, Y=660 (well before 1066)
+        safe_cover = [(10.0, 15.0, 400.0, 620.0, 1040.0, 680.0)]
+        res_safe = check_watermark_collision(safe_cover, 1280, 720)
+        self.assertFalse(res_safe["has_collision"])
+        self.assertEqual(res_safe["collision_count"], 0)
 
 
 if __name__ == "__main__":

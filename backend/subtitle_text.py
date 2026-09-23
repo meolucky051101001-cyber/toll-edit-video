@@ -17,6 +17,8 @@ def normalize_subtitle_text(text):
     )
     text = re.sub(r"\s+", " ", text.replace(r"\N", " ")).strip()
     text = re.sub(r"\s+([,.!?;:])", r"\1", text)
+    text = re.sub(r",\s*,+", ",", text)
+    text = re.sub(r"[,;]+\s*([.!?])", r"\1", text)
     # Strip terminal dots from incomplete clauses ending in conjunctions/prepositions
     text = re.sub(
         r"(?i)\b(và|hoặc|hay|nhưng|mà|thì|là|của|với|về|cho|vì|như|rằng|đang|sẽ|đã|được|bị|bởi|tại|nếu|dù|tuy|khi|lúc|để|do)\s*\.+$",

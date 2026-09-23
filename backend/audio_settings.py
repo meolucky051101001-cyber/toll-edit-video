@@ -7,7 +7,14 @@ logger = logging.getLogger("audio_settings")
 
 ROOT = Path(__file__).resolve().parent
 WORKSPACE = Path(os.getenv("AUTODUB_WORKSPACE", str(ROOT.parent / "workspace")))
-SETTINGS_FILE = WORKSPACE / "audio_settings.json"
+def _resolve_settings_file() -> Path:
+    bot_system = WORKSPACE / "bot_system"
+    target = bot_system / "audio_settings.json"
+    if target.exists() or bot_system.is_dir():
+        return target
+    return WORKSPACE / "audio_settings.json"
+
+SETTINGS_FILE = _resolve_settings_file()
 
 DEFAULT_SETTINGS = {
     "bgm_volume_db": -2.0,
@@ -39,7 +46,7 @@ def save_audio_settings(bgm_volume_db: float, dubbing_volume_db: float) -> dict:
             "bgm_volume_db": round(bgm, 1),
             "dubbing_volume_db": round(dub, 1),
         }
-        WORKSPACE.mkdir(parents=True, exist_ok=True)
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         SETTINGS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         logger.info(f"Saved audio settings: BGM={bgm}dB, Dubbing={dub}dB")
         return {"status": "ok", **payload, "message": "Đã lưu cài đặt âm lượng thành công"}

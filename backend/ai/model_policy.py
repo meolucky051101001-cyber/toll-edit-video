@@ -55,8 +55,8 @@ class RuntimeModelPolicy:
     paddle_ocr_version: str = "PP-OCRv6"
     paddle_ocr_engine: str = "onnxruntime"
     gemini_model: str = "gemini-3.8-flash"
-    openai_model: str = "gpt-5.6-sol"
-    deepseek_model: str = "deepseek-v4-pro"
+    openai_model: str = "gpt-4o"
+    deepseek_model: str = "deepseek-chat"
     model_runtime_python: str = ""
     model_cache_directory: str = ""
 
@@ -118,9 +118,9 @@ class RuntimeModelPolicy:
                 env.get("PADDLE_OCR_ENGINE"), "onnxruntime"
             ),
             gemini_model=_clean(env.get("GEMINI_MODEL"), "gemini-3.8-flash"),
-            openai_model=_clean(env.get("OPENAI_MODEL"), "gpt-5.6-sol"),
+            openai_model=_clean(env.get("OPENAI_MODEL"), "gpt-4o"),
             deepseek_model=_clean(
-                env.get("DEEPSEEK_MODEL"), "deepseek-v4-pro"
+                env.get("DEEPSEEK_MODEL"), "deepseek-chat"
             ),
             model_runtime_python=runtime_python,
             model_cache_directory=_clean(
@@ -144,11 +144,16 @@ class RuntimeModelPolicy:
         return ordered_unique(
             self.gemini_model,
             "gemini-3.8-flash",
+            "gemini-3.1-flash-lite",
+            "gemini-3-flash-preview",
+            "gemini-3.1-flash-lite-preview",
+            "gemini-flash-lite-latest",
+            "gemini-flash-latest",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
             "gemini-3.7-flash",
             "gemini-3.6-flash",
-            "gemini-flash-latest",
             "gemini-3.5-flash",
-            "gemini-flash-lite-latest",
             "gemini-3.5-flash-lite",
         )
 
@@ -156,18 +161,16 @@ class RuntimeModelPolicy:
     def openai_candidates(self) -> Tuple[str, ...]:
         return ordered_unique(
             self.openai_model,
-            "gpt-5.6-sol",
-            "gpt-5.6-terra",
             "gpt-4o",
             "gpt-4o-mini",
+            "o3-mini",
+            "o1-mini",
         )
 
     @property
     def deepseek_candidates(self) -> Tuple[str, ...]:
         return ordered_unique(
             self.deepseek_model,
-            "deepseek-v4-pro",
-            "deepseek-v4-flash",
             "deepseek-chat",
             "deepseek-reasoner",
         )

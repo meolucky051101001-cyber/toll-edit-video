@@ -40,8 +40,8 @@ def _creation_flags() -> int:
 class TimingPolicy:
     atempo_min: float = 1.00
     atempo_max: float = 1.50
-    estimated_chars_per_second: float = 11.5
-    min_segment_seconds: float = 0.35
+    estimated_chars_per_second: float = 14.5
+    min_segment_seconds: float = 0.45
     max_rewrite_rounds: int = 2
 
     def __post_init__(self) -> None:
@@ -174,10 +174,22 @@ def _copy_segments(segments: Iterable[Any]) -> List[RuntimeSegment]:
     return [segment_from_dict(segment_to_dict(segment)) for segment in segments]
 
 
-def _split_clauses(text: str) -> List[str]:
+def _split_clauses(text: str, min_words: int = 4, min_chars: int = 15) -> List[str]:
     sentences = split_subtitle_sentences(text)
     if len(sentences) > 1:
-        return sentences
+        merged_sents: List[str] = []
+        for s in sentences:
+            if not merged_sents:
+                merged_sents.append(s)
+            elif len(merged_sents[-1].split()) < min_words or len(merged_sents[-1]) < min_chars:
+                merged_sents[-1] = merged_sents[-1] + " " + s
+            elif len(s.split()) < min_words or len(s) < min_chars:
+                merged_sents[-1] = merged_sents[-1] + " " + s
+            else:
+                merged_sents.append(s)
+        if len(merged_sents) > 1:
+            return merged_sents
+
     raw_parts = [
         part.strip()
         for part in re.split(r"(?<=[,.!?;:，。！？；：])\s*", text.strip())
@@ -196,8 +208,36 @@ def _split_clauses(text: str) -> List[str]:
             pending_prefix += part
     if pending_prefix and parts:
         parts[-1] += pending_prefix
-    if len(parts) > 1:
-        return parts
+
+    if len(parts) <= 1:
+        words = text.split()
+        if len(words) < 8:
+            return [text.strip()]
+        midpoint = len(words) // 2
+        return [" ".join(words[:midpoint]), " ".join(words[midpoint:])]
+
+    # Merge short comma-delimited parts into neighboring clauses to avoid micro-segments (< 4 words or < 15 chars)
+    merged: List[str] = []
+    for part in parts:
+        words_count = len(part.split())
+        chars_count = len(part)
+        if not merged:
+            merged.append(part)
+        elif len(merged[-1].split()) < min_words or len(merged[-1]) < min_chars:
+            merged[-1] = merged[-1] + " " + part
+        elif words_count < min_words or chars_count < min_chars:
+            merged[-1] = merged[-1] + " " + part
+        else:
+            merged.append(part)
+
+    # Ensure the first segment isn't a dangling micro-fragment
+    if len(merged) > 1 and (len(merged[0].split()) < min_words or len(merged[0]) < min_chars):
+        merged[1] = merged[0] + " " + merged[1]
+        merged.pop(0)
+
+    if len(merged) > 1:
+        return merged
+
     words = text.split()
     if len(words) < 8:
         return [text.strip()]
@@ -206,10 +246,14 @@ def _split_clauses(text: str) -> List[str]:
 
 
 def _split_segment(segment: RuntimeSegment) -> List[RuntimeSegment]:
+    total_duration = max((segment.end - segment.start).total_seconds(), 0.001)
+    if total_duration < 0.70:
+        return [segment]
     parts = _split_clauses(segment.content)
     if len(parts) <= 1:
         return [segment]
-    total_duration = max((segment.end - segment.start).total_seconds(), 0.001)
+    if (total_duration / len(parts)) < 0.30:
+        return [segment]
     weights = [max(normalized_character_count(part), 1) for part in parts]
     total_weight = sum(weights)
     current = segment.start
@@ -363,7 +407,7 @@ class GeminiTimingRewriter:
             ]
             prompt = (
                 "Rút gọn các câu tiếng Việt để lồng tiếng đúng thời lượng. Giữ nguyên ý, "
-                "đại từ, tên riêng và giọng điệu; không cắt cụt ý. Mỗi câu không vượt quá "
+                "đại từ, tên riêng, giọng điệu và dấu phẩy ngắt nghỉ (,); không cắt cụt ý. Mỗi câu không vượt quá "
                 "max_characters. Không dùng dấu ba chấm (... hoặc …); chỉ đặt dấu chấm (. ! ?) "
                 "khi hết câu hoàn chỉnh, tuyệt đối không chèn dấu chấm ở câu lửng. "
                 "Chỉ trả về JSON dạng [{\"id\":1,\"text\":\"Câu đã rút gọn\"}].\n"
@@ -375,11 +419,16 @@ class GeminiTimingRewriter:
                     break
                 url = (
                     "https://generativelanguage.googleapis.com/v1beta/models/"
-                    "{}:generateContent?key={}".format(model, self.api_key)
+                    "{}:generateContent".format(model)
                 )
+                headers = {
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": self.api_key,
+                }
                 try:
                     response = http_requests.post(
                         url,
+                        headers=headers,
                         json={"contents": [{"parts": [{"text": prompt}]}]},
                         timeout=self.timeout_seconds,
                     )
@@ -422,24 +471,39 @@ class GeminiTimingRewriter:
 
 
 def probe_audio_duration(path: PathLike, ffprobe_binary: str = "ffprobe") -> float:
-    result = subprocess.run(
-        [
-            ffprobe_binary,
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=30,
-        creationflags=_creation_flags(),
-    )
+    # 1. Thử đọc nhanh header âm thanh bằng soundfile (in-process, < 0.1ms, tránh spawn hàng nghìn subprocess trên Windows)
+    try:
+        ext = Path(path).suffix.lower()
+        if ext in (".wav", ".flac", ".ogg", ".mp3", ".m4a"):
+            import soundfile as sf
+            info = sf.info(str(path))
+            if info.duration > 0:
+                return float(info.duration)
+    except Exception:
+        pass
+
+    # 2. Fallback sang ffprobe cho các định dạng container video hoặc khi soundfile không đọc được
+    try:
+        result = subprocess.run(
+            [
+                ffprobe_binary,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            creationflags=_creation_flags(),
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ffprobe timed out after 30s for: {path}")
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "ffprobe duration failed")
     return float(result.stdout.strip())
@@ -468,15 +532,18 @@ def fit_audio_to_window(
     if abs(applied - 1.0) > 0.001:
         command.extend(["-filter:a", "atempo={:.6f}".format(applied)])
     command.extend(["-vn", str(output_path)])
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=120,
-        creationflags=_creation_flags(),
-    )
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            creationflags=_creation_flags(),
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"FFmpeg audio fitting timed out after 120s for: {input_path}")
     if result.returncode != 0 or not Path(output_path).is_file():
         raise RuntimeError(result.stderr.strip() or "FFmpeg audio fitting failed")
     output_duration = probe_audio_duration(output_path, ffprobe_binary)

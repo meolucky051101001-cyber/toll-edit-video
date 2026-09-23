@@ -72,16 +72,40 @@
     @keyframes moveStripes { 0% { background-position: 0 0; } 100% { background-position: 20px 0; } }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
     
-    /* Pipeline Steps Visualization */
-    .steps-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; margin-top: 20px; }
-    .step-item { background: #111722; border: 1px solid var(--border); border-radius: 10px; padding: 12px 8px; text-align: center; transition: all 0.2s; display: flex; flex-direction: column; align-items: center; gap: 6px; }
-    .step-item.active { background: rgba(59, 130, 246, 0.15); border-color: #3b82f6; box-shadow: 0 0 15px rgba(59, 130, 246, 0.2); }
-    .step-item.completed { background: rgba(16, 185, 129, 0.12); border-color: rgba(16, 185, 129, 0.4); }
-    .step-icon { font-size: 20px; }
-    .step-title { font-size: 11px; font-weight: 700; color: #cbd5e1; }
-    .step-tag { font-size: 10px; color: var(--text-muted); }
-    .step-item.completed .step-tag { color: #34d399; font-weight: bold; }
-    .step-item.active .step-tag { color: #60a5fa; font-weight: bold; }
+    /* Pipeline Steps Visualization (4 Bước Tinh Chỉnh Tool V2) */
+    .steps-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 14px; }
+    .steps-grid.v2-steps-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
+    .step-item { background: #111722; border: 1px solid var(--border); border-radius: 12px; padding: 14px 12px; text-align: center; transition: all 0.2s; display: flex; flex-direction: column; gap: 6px; position: relative; }
+    .v2-steps-4 .step-item { position: relative; display: flex; flex-direction: column; background: linear-gradient(155deg, #141d2a 0%, #0d131d 100%); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; padding: 14px 14px 12px; transition: all 0.25s ease; text-align: left; min-height: 235px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25); }
+    .v2-steps-4 .step-item:hover { border-color: rgba(56, 189, 248, 0.35); transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35); }
+    .v2-steps-4 .v2-step-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; width: 100%; }
+    .v2-steps-4 .v2-step-icon-wrap { display: flex; align-items: center; gap: 8px; }
+    .v2-steps-4 .v2-step-icon { font-size: 22px; line-height: 1; }
+    .v2-steps-4 .v2-step-number { font-size: 11px; letter-spacing: 1.2px; font-weight: 800; color: #94a3b8; background: rgba(255, 255, 255, 0.05); padding: 2px 7px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.07); }
+    .v2-steps-4 .v2-step-status { font-size: 10.5px; line-height: 1.2; padding: 3px 9px; border-radius: 20px; background: #1e293b; color: #94a3b8; font-weight: 600; }
+    .v2-steps-4 .v2-step-name { font-size: 13.5px; line-height: 1.35; font-weight: 700; color: #f1f5f9; margin-bottom: 6px; }
+    .v2-steps-4 .v2-step-model { font-size: 10px; line-height: 1.3; color: #38bdf8; background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 5px; padding: 3px 8px; margin-bottom: 10px; font-weight: 600; display: inline-block; width: fit-content; }
+    .v2-steps-4 .v2-subtasks-box { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; margin-bottom: 12px; background: rgba(11, 16, 23, 0.6); border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 8px; padding: 8px 10px; flex: 1; }
+    .v2-steps-4 .v2-subtask-item { font-size: 11px; color: #cbd5e1; display: flex; align-items: center; gap: 6px; line-height: 1.3; }
+    .v2-steps-4 .v2-subtask-bullet { font-weight: 800; font-size: 11px; color: #64748b; flex-shrink: 0; min-width: 12px; }
+    .v2-steps-4 .v2-step-footer { display: flex; align-items: center; justify-content: space-between; margin-top: auto; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.05); }
+    .v2-steps-4 .v2-step-duration { font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; color: #94a3b8; padding: 2px 7px; border-radius: 4px; background: #0f172a80; }
+    .v2-steps-4 .step-item.active { background: linear-gradient(155deg, #162b46 0%, #0f1d30 100%); border-color: #38bdf8; box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.3), 0 8px 28px rgba(56, 189, 248, 0.2); }
+    .v2-steps-4 .active .v2-step-name { color: #38bdf8; }
+    .v2-steps-4 .active .v2-step-status { color: #38bdf8; background: rgba(56, 189, 248, 0.2); font-weight: 700; animation: pulse 1.5s infinite; }
+    .v2-steps-4 .active .v2-step-duration { color: #38bdf8; background: rgba(30, 58, 138, 0.6); }
+    .v2-steps-4 .active .v2-subtask-item.running { color: #38bdf8; font-weight: 600; }
+    .v2-steps-4 .active .v2-subtask-item.running .v2-subtask-bullet { color: #38bdf8; }
+    .v2-steps-4 .step-item.completed { background: linear-gradient(155deg, #0e2b26 0%, #0a1f1b 100%); border-color: rgba(16, 185, 129, 0.45); }
+    .v2-steps-4 .completed .v2-step-name { color: #34d399; }
+    .v2-steps-4 .completed .v2-step-status { color: #34d399; background: rgba(16, 185, 129, 0.2); }
+    .v2-steps-4 .completed .v2-step-duration { color: #34d399; background: rgba(6, 78, 59, 0.5); }
+    .v2-steps-4 .completed .v2-subtask-bullet { color: #34d399; }
+    .v2-steps-4 .completed .v2-subtask-item { color: #e2e8f0; }
+    .v2-steps-4 .step-item.failed { border-color: #f87171; background: #311e29; }
+    .v2-steps-4 .failed .v2-step-status { color: #fca5a5; background: #ef444420; }
+    @media(max-width:1100px){.steps-grid.v2-steps-4{grid-template-columns:repeat(2,minmax(0,1fr));}}
+    @media(max-width:600px){.steps-grid.v2-steps-4{grid-template-columns:1fr;gap:10px;}}
     
     .stats-row { display: flex; gap: 20px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-muted); }
     .stat-chip { display: flex; align-items: center; gap: 6px; }
@@ -207,6 +231,154 @@
       border-color: #38bdf8 !important;
       color: #38bdf8 !important;
     }
+
+    /* V2 4-STEP PIPELINE CARD STYLES */
+    .steps-grid.v2-steps-4 {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 14px;
+    }
+    .v2-steps-4 .step-item {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      background: linear-gradient(155deg, #141d2a 0%, #0d131d 100%);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 14px 14px 12px;
+      transition: all 0.25s ease;
+      text-align: left;
+      min-height: 235px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    }
+    .v2-steps-4 .step-item:hover {
+      border-color: rgba(56, 189, 248, 0.35);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    }
+    .v2-steps-4 .v2-step-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      width: 100%;
+    }
+    .v2-steps-4 .v2-step-icon-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .v2-steps-4 .v2-step-icon {
+      font-size: 22px;
+      line-height: 1;
+    }
+    .v2-steps-4 .v2-step-number {
+      font-size: 11px;
+      letter-spacing: 1.2px;
+      font-weight: 800;
+      color: #94a3b8;
+      background: rgba(255, 255, 255, 0.05);
+      padding: 2px 7px;
+      border-radius: 4px;
+      border: 1px solid rgba(255, 255, 255, 0.07);
+    }
+    .v2-steps-4 .v2-step-status {
+      font-size: 10.5px;
+      line-height: 1.2;
+      padding: 3px 9px;
+      border-radius: 20px;
+      background: #1e293b;
+      color: #94a3b8;
+      font-weight: 600;
+    }
+    .v2-steps-4 .v2-step-name {
+      font-size: 13.5px;
+      line-height: 1.35;
+      font-weight: 700;
+      color: #f1f5f9;
+      margin-bottom: 6px;
+    }
+    .v2-steps-4 .v2-step-model {
+      font-size: 10px;
+      line-height: 1.3;
+      color: #38bdf8;
+      background: rgba(56, 189, 248, 0.1);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      border-radius: 5px;
+      padding: 3px 8px;
+      margin-bottom: 10px;
+      font-weight: 600;
+      display: inline-block;
+      width: fit-content;
+    }
+    .v2-steps-4 .v2-subtasks-box {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 4px;
+      margin-bottom: 12px;
+      background: rgba(11, 16, 23, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      border-radius: 8px;
+      padding: 8px 10px;
+      flex: 1;
+    }
+    .v2-steps-4 .v2-subtask-item {
+      font-size: 11px;
+      color: #cbd5e1;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      line-height: 1.3;
+    }
+    .v2-steps-4 .v2-subtask-bullet {
+      font-weight: 800;
+      font-size: 11px;
+      color: #64748b;
+      flex-shrink: 0;
+      min-width: 12px;
+    }
+    .v2-steps-4 .v2-step-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: auto;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .v2-steps-4 .v2-step-duration {
+      font-size: 11px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      color: #94a3b8;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: #0f172a80;
+    }
+    .v2-steps-4 .step-item.active {
+      background: linear-gradient(155deg, #162b46 0%, #0f1d30 100%);
+      border-color: #38bdf8;
+      box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.3), 0 8px 28px rgba(56, 189, 248, 0.2);
+    }
+    .v2-steps-4 .active .v2-step-name { color: #38bdf8; }
+    .v2-steps-4 .active .v2-step-status { color: #38bdf8; background: rgba(56, 189, 248, 0.2); font-weight: 700; animation: pulse 1.5s infinite; }
+    .v2-steps-4 .active .v2-step-duration { color: #38bdf8; background: rgba(30, 58, 138, 0.6); }
+    .v2-steps-4 .active .v2-subtask-item.running { color: #38bdf8; font-weight: 600; }
+    .v2-steps-4 .active .v2-subtask-item.running .v2-subtask-bullet { color: #38bdf8; }
+    .v2-steps-4 .step-item.completed {
+      background: linear-gradient(155deg, #0e2b26 0%, #0a1f1b 100%);
+      border-color: rgba(16, 185, 129, 0.45);
+    }
+    .v2-steps-4 .completed .v2-step-name { color: #34d399; }
+    .v2-steps-4 .completed .v2-step-status { color: #34d399; background: rgba(16, 185, 129, 0.2); }
+    .v2-steps-4 .completed .v2-step-duration { color: #34d399; background: rgba(6, 78, 59, 0.5); }
+    .v2-steps-4 .completed .v2-subtask-bullet { color: #34d399; }
+    .v2-steps-4 .completed .v2-subtask-item { color: #e2e8f0; }
+    .v2-steps-4 .step-item.failed { border-color: #f87171; background: #311e29; }
+    .v2-steps-4 .failed .v2-step-status { color: #fca5a5; background: #ef444420; }
+    @media(max-width:1100px){.steps-grid.v2-steps-4{grid-template-columns:repeat(2,minmax(0,1fr));}}
+    @media(max-width:600px){.steps-grid.v2-steps-4{grid-template-columns:1fr;gap:10px;}}
   </style>
 </head>
 <body>
@@ -216,7 +388,7 @@
       <div class="logo-badge">TOOL V2</div>
       <div>
         <div class="app-title">Bảng Điều Khiển Video Phôi & Giám Sát Render</div>
-        <div class="app-subtitle">Tự động lồng tiếng AI & Hardware Acceleration (RTX 4050 NVENC)</div>
+        <div class="app-subtitle">Quy trình 4 bước tinh chỉnh: BS-RoFormer GPU · Whisper ASR + Gemini 3.8 ➔ 3.5 & Lite · Lồng tiếng & Hòa âm Studio · NVIDIA NVENC h264</div>
       </div>
     </div>
     
@@ -255,6 +427,19 @@
       </div>
     </div>
 
+    <!-- AI MODEL STACK STATUS BAR -->
+    <div class="model-stack-bar" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:#111722; border:1px solid var(--border); border-radius:10px; padding:10px 16px; margin-bottom:4px; font-size:12px;">
+      <span style="font-weight:800; color:#38bdf8; display:flex; align-items:center; gap:6px; font-size:12.5px;">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+        Quy trình AI V2:
+      </span>
+      <span class="badge badge-gpu" style="background:rgba(56,189,248,0.12); color:#38bdf8; border:1px solid rgba(56,189,248,0.3); font-size:11px;">🎧 B1: BS-RoFormer GPU (SDR 12.9dB)</span>
+      <span class="badge badge-gpu" style="background:rgba(168,85,247,0.12); color:#c084fc; border:1px solid rgba(168,85,247,0.3); font-size:11px;">🤖 B2: Whisper ASR + Gemini 3.8 ➔ 3.5 & Lite</span>
+      <span class="badge badge-gpu" style="background:rgba(244,63,94,0.12); color:#fb7185; border:1px solid rgba(244,63,94,0.3); font-size:11px;">🗣️ B3: Neural TTS + Treble >14kHz & Ducking</span>
+      <span class="badge badge-gpu" style="background:rgba(16,185,129,0.12); color:#34d399; border:1px solid rgba(16,185,129,0.3); font-size:11px;">🎬 B4: RTX 4050 NVENC (Chống đơ video)</span>
+      <span class="badge" style="background:rgba(99,102,241,0.15); color:#a5b4fc; border:1px solid rgba(99,102,241,0.3); font-size:11px; margin-left:auto;">📁 Xuất: D:\video tool v2</span>
+    </div>
+
     <!-- HERO PROGRESS CARD -->
     <div class="hero-card">
       <div class="hero-top">
@@ -264,7 +449,7 @@
         </div>
         <div style="display: flex; gap: 8px;">
           <button class="btn btn-danger" id="btnStop" onclick="stopBatch()" style="display: none;">⏹ Dừng Xử Lý</button>
-          <button class="btn btn-success" id="btnRunHero" onclick="startBatch()">🚀 Bắt Đầu Xử Lý Video Phôi</button>
+          <button class="btn btn-success" id="btnRunHero">▶ Bắt đầu xử lý video</button>
         </div>
       </div>
 
@@ -279,42 +464,90 @@
         </div>
       </div>
 
-      <!-- 7 PIPELINE STEPS -->
-      <div class="steps-grid">
-        <div class="step-item" id="step1">
-          <div class="step-icon">🎧</div>
-          <div class="step-title">Bước 1</div>
-          <div class="step-tag">Tách âm (10%)</div>
+      <!-- 4 PIPELINE STEPS CỦA TOOL V2 -->
+      <div class="steps-grid v2-steps-4" role="list" aria-label="Quy trình 4 bước Tool V2">
+        <div role="listitem" class="step-item" id="step1">
+          <div class="v2-step-header">
+            <div class="v2-step-icon-wrap">
+              <span class="v2-step-icon">🎧</span>
+              <span class="v2-step-number">BƯỚC 01</span>
+            </div>
+            <span class="v2-step-status" id="step1-status">Chờ xử lý</span>
+          </div>
+          <div class="v2-step-name">Tách Âm & Giữ Nhạc Nền</div>
+          <div class="v2-step-model">BS-RoFormer GPU · SDR 12.9dB</div>
+          <div class="v2-subtasks-box">
+            <div class="v2-subtask-item"><span class="v2-subtask-bullet">○</span><span>Trích xuất âm thanh gốc 24kHz</span></div>
+            <div class="v2-subtask-item"><span class="v2-subtask-bullet">○</span><span>Tách giọng nói nhân vật (Vocal)</span></div>
+            <div class="v2-subtask-item"><span class="v2-subtask-bullet">○</span><span>Bảo tồn nhạc nền nguyên bản (Beat)</span></div>
+          </div>
+          <div class="v2-step-footer">
+            <span style="font-size:10.5px;color:var(--text-muted);">Thời gian:</span>
+            <div class="v2-step-duration" id="step1-dur">--</div>
+          </div>
         </div>
-        <div class="step-item" id="step2">
-          <div class="step-icon">🧠</div>
-          <div class="step-title">Bước 2</div>
-          <div class="step-tag">Demucs Fast (25%)</div>
+
+        <div role="listitem" class="step-item" id="step2">
+          <div class="v2-step-header">
+            <div class="v2-step-icon-wrap">
+              <span class="v2-step-icon">🤖</span>
+              <span class="v2-step-number">BƯỚC 02</span>
+            </div>
+            <span class="v2-step-status" id="step2-status">Chờ xử lý</span>
+          </div>
+          <div class="v2-step-name">Nhận Diện & Dịch Thuật AI</div>
+          <div class="v2-step-model">Whisper Large-v3 · Gemini 3.8 ➔ 3.5 & Lite</div>
+          <div class="v2-subtasks-box">
+            <div class="v2-subtask-item"><span class="v2-subtask-bullet">○</span><span>Chuyển giọng sang text (Whisper)</span></div>
+            <div class="v2-subtask-item"><span class="v2-subtask-bullet">○</span><span>Dịch thuật ngữ cảnh (Gemini 3.8 ➔ 3.5 & Lite)</span></div>
+            <div class="v2-subtask-item"><span class="v2-subtask-bullet">○</span><span>Căn tọa độ & vi chỉnh Sub 0.01s</span></div>
+          </div>
+          <div class="v2-step-footer">
+            <span style="font-size:10.5px;color:var(--text-muted);">Thời gian:</span>
+            <div class="v2-step-duration" id="step2-dur">--</div>
+          </div>
         </div>
-        <div class="step-item" id="step3">
-          <div class="step-icon">🤖</div>
-          <div class="step-title">Bước 3</div>
-          <div class="step-tag">Whisper ASR (40%)</div>
+
+        <div role="listitem" class="step-item" id="step3">
+          <div class="v2-step-header">
+            <div class="v2-step-icon-wrap">
+              <span class="v2-step-icon">🗣️</span>
+              <span class="v2-step-number">BƯỚC 03</span>
+            </div>
+            <span class="v2-step-status" id="step3-status">Chờ xử lý</span>
+          </div>
+          <div class="v2-step-name">Lồng Tiếng AI & Hòa Âm</div>
+          <div class="v2-step-model">Neural TTS · Treble >14kHz · Ducking</div>
+          <div class="v2-subtasks-box">
+            <div class="v2-subtask-item"><span class="v2-subtask-bullet">○</span><span>Tạo giọng lồng tiếng truyền cảm</span></div>
+            <div class="v2-subtask-item"><span class="v2-subtask-bullet">○</span><span>Khôi phục Treble >14kHz & khoảng lặng</span></div>
+            <div class="v2-subtask-item"><span class="v2-subtask-bullet">○</span><span>Hòa âm Ducking & Chuẩn EBU R128</span></div>
+          </div>
+          <div class="v2-step-footer">
+            <span style="font-size:10.5px;color:var(--text-muted);">Thời gian:</span>
+            <div class="v2-step-duration" id="step3-dur">--</div>
+          </div>
         </div>
-        <div class="step-item" id="step35">
-          <div class="step-icon">👀</div>
-          <div class="step-title">Bước 3.5</div>
-          <div class="step-tag">PP-OCRv6 (55%)</div>
-        </div>
-        <div class="step-item" id="step4">
-          <div class="step-icon">🌐</div>
-          <div class="step-title">Bước 4</div>
-          <div class="step-tag">Gemini Dịch (70%)</div>
-        </div>
-        <div class="step-item" id="step5">
-          <div class="step-icon">🗣️</div>
-          <div class="step-title">Bước 5</div>
-          <div class="step-tag">RVC Dub (85%)</div>
-        </div>
-        <div class="step-item" id="step6">
-          <div class="step-icon">🎬</div>
-          <div class="step-title">Bước 6</div>
-          <div class="step-tag">NVENC Render (95%)</div>
+
+        <div role="listitem" class="step-item" id="step4">
+          <div class="v2-step-header">
+            <div class="v2-step-icon-wrap">
+              <span class="v2-step-icon">🎬</span>
+              <span class="v2-step-number">BƯỚC 04</span>
+            </div>
+            <span class="v2-step-status" id="step4-status">Chờ xử lý</span>
+          </div>
+          <div class="v2-step-name">Render Video Thành Phẩm</div>
+          <div class="v2-step-model">NVIDIA NVENC · RTX 4050 8000k</div>
+          <div class="v2-subtasks-box">
+            <div class="v2-subtask-item"><span class="v2-subtask-bullet">○</span><span>Ghép phụ đề ASS & hòa âm đồng bộ</span></div>
+            <div class="v2-subtask-item"><span class="v2-subtask-bullet">○</span><span>Render GPU NVENC 8000k siêu tốc</span></div>
+            <div class="v2-subtask-item"><span class="v2-subtask-bullet">○</span><span>QC kiểm định & xuất thành phẩm</span></div>
+          </div>
+          <div class="v2-step-footer">
+            <span style="font-size:10.5px;color:var(--text-muted);">Thời gian:</span>
+            <div class="v2-step-duration" id="step4-dur">--</div>
+          </div>
         </div>
       </div>
 
@@ -323,7 +556,7 @@
         <div class="stat-chip">⏱ Đã chạy: <span class="stat-val" id="valElapsed">00:00</span></div>
         <div class="stat-chip">⏳ Ước tính còn lại (ETA): <span class="stat-val" id="valEta">--</span></div>
         <div class="stat-chip">📂 Hàng đợi video phôi: <span class="stat-val" id="valQueue">0 / 0</span></div>
-        <div class="stat-chip">📁 Thư mục xuất: <span class="stat-val">D:\banve</span></div>
+        <div class="stat-chip">📁 Thư mục xuất: <span class="stat-val">D:\video tool v2</span></div>
       </div>
     </div>
 
@@ -342,7 +575,7 @@
             </div>
             <div class="panel-actions">
               <button class="btn btn-outline" style="font-size: 11px; padding: 5px 10px;" onclick="openFolder('phoi')">📂 Mở Thư Mục</button>
-              <button class="btn btn-primary" style="font-size: 11px; padding: 5px 12px;" onclick="startBatch()">🚀 Chạy Ngay</button>
+              <button class="btn btn-primary" id="btnRunPanel" style="font-size: 11px; padding: 5px 12px;">▶ Bắt đầu xử lý</button>
             </div>
           </div>
           <div class="panel-body" style="max-height: 280px;">
@@ -581,103 +814,226 @@
       return `${m}:${s}`;
     }
 
+    let latestStatusState = null;
+    let lastStatusReceivedAt = 0;
+
+    function tickLiveClocks() {
+      if (!latestStatusState) return;
+      const isPaused = latestStatusState.is_paused || latestStatusState.status === 'stopped';
+      const isRunning = !isPaused && (latestStatusState.active || latestStatusState.batch_running || latestStatusState.status === 'running');
+      if (!isRunning) return;
+
+      const deltaSec = Math.floor((Date.now() - lastStatusReceivedAt) / 1000);
+      if (deltaSec <= 0) return;
+
+      // Update live elapsed time
+      const baseElSec = Number(latestStatusState.elapsed_seconds) || 0;
+      const currentElSec = baseElSec + deltaSec;
+      const valElapsedEl = document.getElementById('valElapsed');
+      if (valElapsedEl) {
+        valElapsedEl.textContent = `${formatTime(currentElSec)} (${currentElSec}s)`;
+      }
+
+      // Update live ETA countdown
+      const valEtaEl = document.getElementById('valEta');
+      if (valEtaEl && latestStatusState.eta_seconds !== null && latestStatusState.eta_seconds !== undefined) {
+        const baseEta = Number(latestStatusState.eta_seconds);
+        const currentEta = Math.max(0, baseEta - deltaSec);
+        if (currentEta <= 0) {
+          valEtaEl.textContent = 'Sắp hoàn tất (vài giây...)';
+        } else {
+          valEtaEl.textContent = `~${formatTime(currentEta)} (còn ${currentEta}s)`;
+        }
+      }
+
+      // Update live active stage duration
+      const activeStageDur = document.querySelector('.v2-steps-4 .step-item.active .v2-step-duration');
+      if (activeStageDur && latestStatusState.ui_steps) {
+        const activeStep = latestStatusState.ui_steps.find(st => st.status === 'running');
+        if (activeStep && activeStep.duration_seconds !== undefined && activeStep.duration_seconds !== null) {
+          const currentStageDur = Number(activeStep.duration_seconds) + deltaSec;
+          activeStageDur.textContent = `⏱ ${currentStageDur}s`;
+        }
+      }
+    }
+
     let statusRequestPending = false;
     let displayedVideoKey = '';
+    const DEFAULT_V2_STAGES = [
+      {
+        label: "Tách Âm & Giữ Nhạc Nền",
+        model: "BS-RoFormer GPU · SDR 12.9dB",
+        icon: "🎧",
+        subtasks: [
+          "Trích xuất âm thanh gốc 24kHz PCM",
+          "Tách giọng nói nhân vật (Vocal track)",
+          "Bảo tồn nhạc nền nguyên bản (Beat SDR 12.9dB)"
+        ],
+        status: "pending"
+      },
+      {
+        label: "Nhận Diện & Dịch Thuật AI",
+        model: "Whisper ASR · Gemini 3.8 ➔ 3.5 & Lite Backup",
+        icon: "🤖",
+        subtasks: [
+          "Chuyển giọng sang chữ (Whisper Large-v3)",
+          "Dịch thuật ngữ cảnh (Gemini 3.8 ➔ 3.5 & Lite)",
+          "Căn vị trí Sub 0.01s (Khung 9:16 / 16:9)"
+        ],
+        status: "pending"
+      },
+      {
+        label: "Lồng Tiếng & Hòa Âm Studio",
+        model: "Neural TTS · Treble >14kHz · Ducking",
+        icon: "🗣️",
+        subtasks: [
+          "Tạo giọng đọc AI truyền cảm (Neural TTS)",
+          "Phục hồi dải cao Treble >14kHz",
+          "Hòa âm Dynamic Ducking (Chuẩn EBU R128)"
+        ],
+        status: "pending"
+      },
+      {
+        label: "Render Video Thành Phẩm",
+        model: "NVIDIA NVENC · RTX 4050",
+        icon: "🎬",
+        subtasks: [
+          "Ghép phụ đề ASS & hòa âm đồng bộ",
+          "Render GPU phần cứng NVENC 8000k",
+          "Khớp luồng chống đơ & Xuất D:\\video tool v2"
+        ],
+        status: "pending"
+      }
+    ];
+
     async function fetchStatus() {
       if (statusRequestPending) return;
       statusRequestPending = true;
       try {
-        const res = await fetch('/api/status', {cache: 'no-store', signal: AbortSignal.timeout(8000)});
-        if (!res.ok) return;
-        const data = await res.json();
+        const response = await fetch('/api/status', {cache: 'no-store', signal: AbortSignal.timeout(8000)});
+        if (!response.ok) throw new Error('Không đọc được trạng thái');
+        const data = await response.json();
         renderStatus(data);
-      } catch (err) {
-        console.error('Error fetching status:', err);
+      } catch (error) {
+        const desc = document.getElementById('stepDescription');
+        if (desc) desc.textContent = 'Mất kết nối trạng thái V2; dữ liệu hiển thị có thể đã cũ.';
       } finally {
         statusRequestPending = false;
       }
     }
 
     function renderStatus(state) {
-      const step = Number(state.step) || 0;
-      const stepPercent = {1:10, 2:25, 3:40, 3.5:55, 4:70, 5:85, 6:95};
-      const videoDone = state.video_status === 'completed';
-      const percent = videoDone ? 100 : (state.active ? (stepPercent[step] || 5) :
-        Math.max(0, Math.min(100, Number(state.percent) || 0)));
-      state = {...state, percent};
-      const isRunning = state.active;
+      latestStatusState = state;
+      lastStatusReceivedAt = Date.now();
+
+      const isPaused = state.is_paused || state.status === 'stopped';
+      const isRunning = !isPaused && (state.active || state.batch_running || state.status === 'running');
       const statusTitle = document.getElementById('statusTitle');
-      const currentVideoName = document.getElementById('currentVideoName');
-      const stepDescription = document.getElementById('stepDescription');
-      const pctText = document.getElementById('pctText');
-      const progressBar = document.getElementById('progressBar');
+      const bar = document.getElementById('progressBar');
       const btnStop = document.getElementById('btnStop');
       const btnRunHero = document.getElementById('btnRunHero');
-      const videoKey = String(state.job_id) + ':' + state.video_name + ':' + state.start_time;
-      if (displayedVideoKey !== videoKey) {
-        progressBar.style.transition = 'none';
-        progressBar.style.width = '0%';
-        void progressBar.offsetWidth;
-        progressBar.style.transition = '';
-        displayedVideoKey = videoKey;
-      }
-      progressBar.setAttribute('role', 'progressbar');
-      progressBar.setAttribute('aria-valuemin', '0');
-      progressBar.setAttribute('aria-valuemax', '100');
-      progressBar.setAttribute('aria-valuenow', String(percent));
+      const btnRunPanel = document.getElementById('btnRunPanel');
 
-      if (isRunning) {
-        statusTitle.innerHTML = '<span class="dot dot-yellow"></span> ĐANG XỬ LÝ & RENDER NGẦM';
-        currentVideoName.textContent = state.video_name ?
-          'Video ' + state.queue_index + '/' + state.queue_total + ': ' + state.video_name : 'Đang chuẩn bị hàng đợi...';
-        stepDescription.textContent = state.step_name || 'Đang thực thi...';
-        pctText.textContent = `${state.percent}%`;
-        progressBar.style.width = `${state.percent}%`;
-        btnStop.style.display = 'inline-flex';
-        btnRunHero.style.display = 'none';
+      if (btnStop) btnStop.style.display = isRunning ? 'inline-flex' : 'none';
+      if (btnRunHero) btnRunHero.style.display = isRunning ? 'none' : 'inline-flex';
+      if (btnRunPanel) {
+        btnRunPanel.disabled = isRunning;
+        btnRunPanel.style.opacity = isRunning ? '0.5' : '1';
+        btnRunPanel.style.cursor = isRunning ? 'not-allowed' : 'pointer';
+      }
+
+      if (isPaused) {
+        statusTitle.innerHTML = '<span class="dot dot-red" style="background-color:#ef4444;box-shadow:0 0 6px rgba(239,68,68,0.5);"></span> TOOL V2 · ĐÃ TẮT (ĐÃ GIẢI PHÓNG VRAM)';
+        document.getElementById('pctText').textContent = 'Đã tắt';
+        bar.style.width = '0%';
+        bar.style.background = '#475569';
+        bar.style.boxShadow = 'none';
+        bar.setAttribute('aria-valuenow', '0');
       } else {
-        statusTitle.innerHTML = '<span class="dot dot-green"></span> HỆ THỐNG SẴN SÀNG';
-        currentVideoName.textContent = state.last_completed ? `Vừa hoàn thành: ${state.last_completed.video_name}` : 'Chưa có tác vụ nào đang chạy';
-        stepDescription.textContent = state.step_name || 'Sẵn sàng xử lý video';
-        pctText.textContent = `${state.percent || 0}%`;
-        progressBar.style.width = `${state.percent || 0}%`;
-        btnStop.style.display = 'none';
-        btnRunHero.style.display = 'inline-flex';
+        const dotColor = isRunning ? '#f59e0b' : (state.status === 'completed' ? '#10b981' : state.status === 'error' ? '#ef4444' : '#10b981');
+        const dotShadow = isRunning ? 'rgba(245,158,11,0.5)' : (state.status === 'error' ? 'rgba(239,68,68,0.5)' : 'rgba(16,185,129,0.5)');
+        const titleText = isRunning ? 'ĐANG XỬ LÝ & RENDER NGẦM' : (state.status === 'completed' ? 'HOÀN TẤT' : state.status === 'error' ? 'CÓ LỖI' : 'HỆ THỐNG SẴN SÀNG');
+        statusTitle.innerHTML = '<span class="dot" style="background-color:' + dotColor + ';box-shadow:0 0 6px ' + dotShadow + ';"></span> TOOL V2 · ' + titleText;
+        document.getElementById('pctText').textContent = state.percent + '%';
+        bar.style.width = state.percent + '%';
+        bar.style.background = '';
+        bar.style.boxShadow = '';
+        bar.setAttribute('aria-valuenow', String(state.percent));
       }
 
-      document.getElementById('valElapsed').textContent = formatTime(state.elapsed_seconds);
-      document.getElementById('valEta').textContent = state.eta_seconds ? `~${formatTime(state.eta_seconds)}` : '--';
-      document.getElementById('valQueue').textContent = `${state.queue_index || 0} / ${state.queue_total || 0}`;
+      document.getElementById('currentVideoName').textContent = state.video_name || (isPaused ? 'Tool V2 hiện đang tắt' : (isRunning ? 'Đang chuẩn bị xử lý video...' : 'Chưa có video V2'));
+      document.getElementById('stepDescription').textContent = state.message + (state.updated_at ? ' • Cập nhật: ' + state.updated_at : '');
+      bar.setAttribute('role', 'progressbar');
 
-      // Update Pipeline 7 steps
-      const currentStep = Number(state.step) || 0;
-      const stepElements = {
-        1: document.getElementById('step1'),
-        2: document.getElementById('step2'),
-        3: document.getElementById('step3'),
-        3.5: document.getElementById('step35'),
-        4: document.getElementById('step4'),
-        5: document.getElementById('step5'),
-        6: document.getElementById('step6'),
-      };
+      const elSec = Number(state.elapsed_seconds) || 0;
+      document.getElementById('valElapsed').textContent = elSec ? `${formatTime(elSec)} (${elSec}s)` : (isRunning ? '00:01 (1s)' : '00:00');
 
-      const stepKeys = [1, 2, 3, 3.5, 4, 5, 6];
-      stepKeys.forEach(k => {
-        const el = stepElements[k];
-        if (!el) return;
-        el.classList.remove('active', 'completed');
-        el.removeAttribute('aria-current');
-        if (videoDone) {
-          el.classList.add('completed');
-        } else if (isRunning || ['error', 'stopped', 'interrupted'].includes(state.status)) {
-          if (currentStep === k) {
-            el.classList.add('active');
-            el.setAttribute('aria-current', 'step');
-          } else if (currentStep > k) {
-            el.classList.add('completed');
+      const valEtaEl = document.getElementById('valEta');
+      if (valEtaEl) {
+        const etaSec = (state.eta_seconds !== null && state.eta_seconds !== undefined) ? Number(state.eta_seconds) : null;
+        if (state.status === 'completed' || state.percent >= 100) {
+          valEtaEl.textContent = '00:00 (Hoàn tất)';
+        } else if (isRunning && etaSec !== null && !isNaN(etaSec)) {
+          if (etaSec <= 0) {
+            valEtaEl.textContent = 'Sắp hoàn tất (vài giây...)';
+          } else {
+            valEtaEl.textContent = `~${formatTime(etaSec)} (còn ${etaSec}s)`;
           }
+        } else {
+          valEtaEl.textContent = '--';
         }
-      });
+      }
+
+      const qCount = Number(state.queue_count) || 0;
+      document.getElementById('valQueue').textContent = isPaused ? 'Đã tạm dừng' : (qCount > 0 ? (qCount + ' video chờ') : '0 video chờ');
+
+      const labels = {pending:'Chờ xử lý', running:'Đang chạy', completed:'Hoàn thành', skipped:'Bỏ qua', failed:'Lỗi', stopped:'Đã dừng'};
+      const icons = ['🎧','🤖','🗣️','🎬'];
+      const grid = document.querySelector('.steps-grid');
+      if (!grid) return;
+      grid.className = 'steps-grid v2-steps-4';
+      grid.setAttribute('role', 'list');
+      grid.setAttribute('aria-label', 'Quy trình 4 bước Tool V2');
+      const stagesToRender = (state.ui_steps && state.ui_steps.length === 4) ? state.ui_steps : DEFAULT_V2_STAGES;
+      grid.innerHTML = stagesToRender.map((s, i) => {
+        const cls = {completed:'completed', running:'active', failed:'failed', skipped:'skipped', stopped:'stopped'}[s.status] || '';
+        const durText = (s.duration_seconds !== undefined && s.duration_seconds !== null)
+          ? (s.status === 'completed' ? `✓ ${s.duration_seconds}s` : (s.status === 'running' ? `⏱ ${s.duration_seconds}s` : `${s.duration_seconds}s`))
+          : (s.status === 'completed' ? '✓ Xong' : (s.status === 'running' ? '⏱ Đang chạy' : '--'));
+
+        const subtasks = s.subtasks || [];
+        const subtasksHtml = subtasks.map((taskText, tIdx) => {
+          let bullet = '○';
+          let itemCls = '';
+          if (s.status === 'completed') {
+            bullet = '✓';
+            itemCls = 'done';
+          } else if (s.status === 'running') {
+            bullet = '▸';
+            itemCls = 'running';
+          }
+          return '<div class="v2-subtask-item ' + itemCls + '">' +
+                 '<span class="v2-subtask-bullet">' + bullet + '</span>' +
+                 '<span>' + escapeHtml(taskText) + '</span></div>';
+        }).join('');
+
+        return '<div role="listitem" class="step-item ' + cls + '"' + (s.status === 'running' ? ' aria-current="step"' : '') + '>' +
+          '<div class="v2-step-header">' +
+            '<div class="v2-step-icon-wrap">' +
+              '<span class="v2-step-icon" aria-hidden="true">' + (s.icon || icons[i]) + '</span>' +
+              '<span class="v2-step-number">BƯỚC ' + String(i + 1).padStart(2, '0') + '</span>' +
+            '</div>' +
+            '<span class="v2-step-status">' + (labels[s.status] || 'Chờ xử lý') + '</span>' +
+          '</div>' +
+          '<div class="v2-step-name">' + escapeHtml(s.label) + '</div>' +
+          (s.model ? '<div class="v2-step-model" title="' + escapeHtml(s.model) + '">' + escapeHtml(s.model) + '</div>' : '') +
+          '<div class="v2-subtasks-box">' + subtasksHtml + '</div>' +
+          '<div class="v2-step-footer">' +
+            '<span style="font-size:10.5px;color:var(--text-muted);">Thời gian:</span>' +
+            '<div class="v2-step-duration" title="Thời gian chạy thực tế bước ' + (i + 1) + '">' + durText + '</div>' +
+          '</div>' +
+        '</div>';
+      }).join('');
     }
 
     async function fetchPhoi() {
@@ -1133,7 +1489,7 @@
           method: 'POST', body: form, signal: AbortSignal.timeout(10000)
         });
         const data = await res.json();
-        if (!res.ok || data.status !== 'ok') {
+        if (!res.ok || (data.status && data.status !== 'ok')) {
           throw new Error(data.message || data.detail || 'Máy chủ không mở được thư mục.');
         }
       } catch (err) {
@@ -1185,6 +1541,26 @@
       const dub = parseFloat(document.getElementById('dubSlider').value);
       document.getElementById('bgmValText').textContent = (bgm > 0 ? '+' : '') + bgm.toFixed(1) + ' dB';
       document.getElementById('dubValText').textContent = (dub > 0 ? '+' : '') + dub.toFixed(1) + ' dB';
+
+      // Dynamically highlight matching preset tags
+      const bgmTags = document.querySelectorAll('#bgmSlider + .mixer-presets .mixer-tag');
+      bgmTags.forEach(tag => {
+        const m = tag.getAttribute('onclick')?.match(/setBgmPreset\(([-0-9.]+)\)/);
+        if (m && Math.abs(parseFloat(m[1]) - bgm) < 0.1) {
+          tag.classList.add('active');
+        } else {
+          tag.classList.remove('active');
+        }
+      });
+      const dubTags = document.querySelectorAll('#dubSlider + .mixer-presets .mixer-tag');
+      dubTags.forEach(tag => {
+        const m = tag.getAttribute('onclick')?.match(/setDubPreset\(([-0-9.]+)\)/);
+        if (m && Math.abs(parseFloat(m[1]) - dub) < 0.1) {
+          tag.classList.add('active');
+        } else {
+          tag.classList.remove('active');
+        }
+      });
     }
 
     function setBgmPreset(val) {
@@ -1298,9 +1674,13 @@
       fetchLogs();
     }
 
+    document.getElementById('btnRunHero')?.addEventListener('click', startBatch);
+    document.getElementById('btnRunPanel')?.addEventListener('click', startBatch);
+
     // Auto-refresh loops
     refreshAll();
     setInterval(fetchStatus, 1500);
+    setInterval(tickLiveClocks, 1000);
     setInterval(fetchQueue, 2500);
     setInterval(fetchPhoi, 4000);
     setInterval(fetchBanve, 5000);

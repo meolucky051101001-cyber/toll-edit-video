@@ -114,7 +114,7 @@ def _geometry_score(
     # no white cover.  Wide scene/package text is still protected by the
     # transcript-match and static-text checks below, so width alone must not
     # disqualify an otherwise valid ASR-matched subtitle.
-    if width < 0.025 or width > 1.0 + 1e-9 or height < 0.007 or height > 0.14:
+    if width < 0.025 or width > 0.90001 or height < 0.007 or height > 0.14:
         return None
 
     pixel_aspect = (width * max(frame_width, 1)) / (

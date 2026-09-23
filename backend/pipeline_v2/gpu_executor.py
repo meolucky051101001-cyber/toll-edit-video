@@ -103,9 +103,9 @@ class GPUStageExecutor:
                 except (OSError, json.JSONDecodeError):
                     response = {}
             if result.returncode != 0 or not response.get("success"):
-                detail = response.get("error") or result.stderr[-2000:] or result.stdout[-2000:]
+                detail = response.get("error") or result.stderr[-2000:].strip() or result.stdout[-2000:].strip()
                 raise GPUStageError(
-                    "GPU stage {!r} failed: {}".format(stage, detail or "unknown error")
+                    "GPU stage {!r} failed (rc={}): {}".format(stage, result.returncode, detail or "unknown error")
                 )
             if result.stdout.strip():
                 logger.info(

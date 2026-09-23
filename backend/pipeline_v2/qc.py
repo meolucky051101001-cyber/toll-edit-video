@@ -804,8 +804,6 @@ def _sample_frames(
     failures: List[str] = []
     measured_fps = max(1.0, float(fps))
 
-    # Select by presentation time, not nominal/average FPS. Multiple labels
-    # can share one decoded frame; metadata must record its actual PTS.
     samples_by_time: Dict[float, List[Tuple[str, float]]] = {}
     for label, timestamp in samples:
         samples_by_time.setdefault(max(0.0, float(timestamp)), []).append((label, timestamp))
@@ -1206,6 +1204,12 @@ def run_report_only_qc(
                 fail_t = float(fail_item.get("start", 0.0))
                 diagnostic_points.append((f"cover_fail_{f_idx}", fail_t))
 
+        # Targeted sampling at watermark reference frames if within video duration
+        if video_duration >= 600.0:
+            diagnostic_points.append(("watermark_zone_600", 600.0))
+        if video_duration >= 750.0:
+            diagnostic_points.append(("watermark_zone_750", 750.0))
+
         diagnostics = Path(diagnostics_directory or (Path(report_path).parent / "qc_diagnostics"))
         try:
             frame_artifacts, frame_checks = _sample_frames(
@@ -1227,9 +1231,27 @@ def run_report_only_qc(
                 gate_policy_str = str(getattr(pol, "value", pol) if pol is not None else os.getenv("QC_GATE_POLICY", "block")).lower()
                 is_block = gate_policy_str == "block"
                 try:
-                    from .cover_qc import parse_ass_covers, inspect_frame_pixel_coverage
+                    from .cover_qc import parse_ass_covers, inspect_frame_pixel_coverage, check_watermark_collision
                     if not ass_covers:
                         ass_covers, cw, ch = parse_ass_covers(Path(subtitles).read_text(encoding="utf-8-sig"))
+
+                    # Watermark collision check against bottom-right seal
+                    wm_res = check_watermark_collision(ass_covers, cw, ch)
+                    report.metrics["watermark_collision_qc"] = wm_res
+                    if wm_res["has_collision"]:
+                        report.add(
+                            "subtitle_watermark_collision",
+                            "error" if is_block else "warning",
+                            f"Phát hiện {wm_res['collision_count']} khung che phụ đề va chạm vùng watermark góc dưới phải",
+                            wm_res,
+                        )
+                    else:
+                        report.add(
+                            "subtitle_watermark_collision",
+                            "pass",
+                            "Toàn bộ khung phụ đề ASS cách ly an toàn khỏi vùng watermark góc dưới phải",
+                            wm_res,
+                        )
 
                     expected_cover_prefixes = (
                         "cover_onset_",
