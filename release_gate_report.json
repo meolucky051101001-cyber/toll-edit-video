@@ -1,7 +1,7 @@
 {
   "verdict": "APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH",
-  "duration_seconds": 319.11,
-  "timestamp": "2026-09-23T17:43:28Z",
+  "duration_seconds": 365.21,
+  "timestamp": "2026-09-23T18:17:40Z",
   "stages": {
     "1_environment": {
       "passed": true,
@@ -11,39 +11,39 @@
     "2_database": {
       "passed": true,
       "detail": "SQLite database schema verified (5 core tables present)",
-      "duration_s": 0.42
+      "duration_s": 0.51
     },
     "3_ruff_linter": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 0.09
+      "duration_s": 0.15
     },
     "4_mypy_types": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 1.05
+      "duration_s": 0.72
     },
     "5_frontend_eslint": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 10.26
+      "duration_s": 9.8
     },
     "6_frontend_typecheck": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 2.62
+      "duration_s": 2.89
     },
     "7_frontend_build": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 16.33
+      "duration_s": 18.29
     },
     "8_backend_pytest": {
       "passed": true,
       "exit_code": 0,
-      "tests_passed": 423,
+      "tests_passed": 426,
       "tests_failed": 0,
-      "duration_s": 162.49
+      "duration_s": 142.48
     },
     "9_fixture_benchmark": {
       "passed": true,
@@ -53,14 +53,14 @@
       "real_crawled_queries": 4,
       "real_crawled_samples_provenance": 20,
       "test_suites_passed": 6,
-      "duration_s": 5.26
+      "duration_s": 3.06
     },
     "10_frontend_playwright_e2e": {
       "passed": true,
       "exit_code": 0,
       "tests_passed": 25,
       "specs_count": 7,
-      "duration_s": 46.32
+      "duration_s": 41.3
     },
     "11_live_crawl_acceptance": {
       "executed": true,
@@ -82,7 +82,7 @@
           "detail": "Xiaohongshu user login session required on workstation"
         }
       },
-      "duration_s": 71.1
+      "duration_s": 140.88
     }
   }
 }

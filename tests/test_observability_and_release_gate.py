@@ -57,6 +57,8 @@ def test_release_readiness_api_endpoint():
         assert data["status"] in {"READY", "DEGRADED", "BLOCKED", "NOT_READY"}
         assert "is_ready" in data
         assert "workstation_ready" in data
+        # Without probe=true, live reachability is unverified, so workstation_ready must be False
+        assert data["workstation_ready"] is False
         assert "retrieval_ready" in data
         assert "checks" in data
         assert "database" in data["checks"]

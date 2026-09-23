@@ -251,10 +251,16 @@ async def get_release_readiness(
 
     # Clarify contracts:
     # - retrieval_ready: True ONLY when live retrieval is unblocked and operational without degradation
-    # - workstation_ready: True when core infrastructure (database, worker pool, network) is operational
+    # - workstation_ready: True when core infrastructure (database, worker pool, network) is operational.
+    #   When probe=False, live network reachability has not been verified, so workstation_ready is False (unverified).
+    #   When probe=True, workstation_ready requires database, worker pool, and live network probe to pass.
     # - is_ready: aligned with retrieval_ready (False when DEGRADED, BLOCKED, or NOT_READY)
+    db_ok = checks.get("database", {}).get("status") == "PASS"
+    worker_ok = checks.get("worker_pool", {}).get("status") == "PASS"
+    live_probe_ok = checks.get("live_providers", {}).get("status") == "PASS" if probe else False
+
+    workstation_ready = bool(db_ok and worker_ok and live_probe_ok)
     retrieval_ready = (overall_status == "READY")
-    workstation_ready = (overall_status not in ("BLOCKED", "NOT_READY"))
     is_ready = retrieval_ready
 
     res: dict[str, Any] = {

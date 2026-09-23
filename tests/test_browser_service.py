@@ -298,3 +298,126 @@ async def test_xhs_probe_network_error_503_or_timeout(tmp_path):
     ok_timeout, desc_timeout = await service.probe_live()
     assert ok_timeout is False
     assert "error" in desc_timeout
+
+
+@pytest.mark.anyio
+async def test_xhs_js_snippet_logged_in_evaluation(tmp_path):
+    import json
+    import subprocess
+
+    js_code = """
+    const evaluateUser = (userState) => {
+        const window = { __INITIAL_STATE__: userState ? { user: userState } : null };
+        try {
+            const u = window.__INITIAL_STATE__ && window.__INITIAL_STATE__.user;
+            if (!u || typeof u !== 'object') return null;
+            const raw = u.loggedIn;
+            if (typeof raw === 'boolean') return raw;
+            if (raw && typeof raw === 'object') {
+                if ('_value' in raw && typeof raw._value === 'boolean') return raw._value;
+                if ('value' in raw && typeof raw.value === 'boolean') return raw.value;
+            }
+            return null;
+        } catch (e) {
+            return 'ERROR: ' + e.message;
+        }
+    };
+    const results = {
+        bool_false: evaluateUser({ loggedIn: false }),
+        bool_true: evaluateUser({ loggedIn: true }),
+        ref_underscore_false: evaluateUser({ loggedIn: { _value: false } }),
+        ref_underscore_true: evaluateUser({ loggedIn: { _value: true } }),
+        ref_val_true: evaluateUser({ loggedIn: { value: true } }),
+        undefined_prop: evaluateUser({ loggedIn: undefined }),
+        null_user: evaluateUser(null),
+    };
+    console.log(JSON.stringify(results));
+    """
+    res = subprocess.run(["node", "-e", js_code], capture_output=True, text=True, check=True)
+    parsed = json.loads(res.stdout.strip())
+    assert parsed["bool_false"] is False
+    assert parsed["bool_true"] is True
+    assert parsed["ref_underscore_false"] is False
+    assert parsed["ref_underscore_true"] is True
+    assert parsed["ref_val_true"] is True
+    assert parsed["undefined_prop"] is None
+    assert parsed["null_user"] is None
+
+
+@pytest.mark.anyio
+async def test_xhs_guest_page_with_note_author_links_not_authenticated(tmp_path):
+    service = BrowserService(profile=tmp_path / "xhs_guest", headless=True)
+    mock_context = MagicMock()
+    mock_context.cookies = AsyncMock(return_value=[{"name": "web_session", "value": "guest_token"}])
+
+    mock_page = AsyncMock()
+    mock_page.is_closed = MagicMock(return_value=False)
+    mock_page.url = "https://www.xiaohongshu.com/explore"
+    mock_page.title = AsyncMock(return_value="小红书 - 发现美好世界")
+    mock_page.evaluate = AsyncMock(return_value=None)
+
+    def mock_locator(selector: str):
+        loc = AsyncMock()
+        loc.inner_text = AsyncMock(return_value="笔记列表")
+        loc.first = loc
+        loc.all = AsyncMock(return_value=[])
+        # If selector is scoped to sidebar / user-nav, return 0 (guest has no profile in sidebar)
+        if ".side-bar" in selector or ".user-nav" in selector:
+            loc.count = AsyncMock(return_value=0)
+        # Note cards in feed might have note author profile links
+        elif "profile" in selector:
+            loc.count = AsyncMock(return_value=5)
+        else:
+            loc.count = AsyncMock(return_value=0)
+        return loc
+
+    mock_page.locator = MagicMock(side_effect=mock_locator)
+    mock_page.frames = []
+    service.context = mock_context
+
+    state = await service.inspect(mock_page)
+    # Must NOT classify as authenticated since note author links do not count as user session element
+    assert state == "page_available"
+    assert service.diagnostics["is_authenticated"] is False
+
+
+@pytest.mark.anyio
+async def test_xhs_authenticated_with_hidden_login_button(tmp_path):
+    service = BrowserService(profile=tmp_path / "xhs_auth_hidden", headless=True)
+    mock_context = MagicMock()
+    mock_context.cookies = AsyncMock(return_value=[{"name": "web_session", "value": "valid_token"}])
+    mock_context.storage_state = AsyncMock()
+
+    mock_page = AsyncMock()
+    mock_page.is_closed = MagicMock(return_value=False)
+    mock_page.url = "https://www.xiaohongshu.com/explore"
+    mock_page.title = AsyncMock(return_value="小红书 - 发现美好世界")
+    mock_page.evaluate = AsyncMock(return_value=True)
+
+    def mock_locator(selector: str):
+        loc = AsyncMock()
+        loc.inner_text = AsyncMock(return_value="我的主页")
+        loc.first = loc
+        loc.all = AsyncMock(return_value=[])
+        # Scoped user element in sidebar is present
+        if ".side-bar" in selector and "avatar" in selector:
+            loc.count = AsyncMock(return_value=1)
+        # Login button with :visible returns 0 because hidden in DOM
+        elif ":visible" in selector and "登录" in selector:
+            loc.count = AsyncMock(return_value=0)
+        elif "captcha" in selector:
+            loc.count = AsyncMock(return_value=0)
+        elif "modal" in selector:
+            loc.count = AsyncMock(return_value=0)
+        else:
+            loc.count = AsyncMock(return_value=0)
+        return loc
+
+    mock_page.locator = MagicMock(side_effect=mock_locator)
+    mock_page.frames = []
+    service.context = mock_context
+
+    state = await service.inspect(mock_page)
+    assert state == "authenticated"
+    assert service.diagnostics["is_authenticated"] is True
+

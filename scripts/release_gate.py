@@ -341,12 +341,12 @@ def main() -> int:
     print(f"[11/{total_stages}] Running Live Crawl Network & Retrieval Acceptance...", end=" ", flush=True)
     if is_live_requested:
         # Cooldown to ensure any browser/node processes and sockets from Stage 10 are fully recycled
-        time.sleep(3.0)
+        time.sleep(5.0)
         t0 = time.time()
         live_env = os.environ.copy()
         live_env["LIVE_CRAWL_ENABLED"] = "1"
 
-        # 11.A: Platform reachability probe
+        # 11.A: Platform reachability probe (with 1 retry for transient post-E2E network/socket contention)
         p_probe = subprocess.run(
             [
                 python_bin,
@@ -363,6 +363,24 @@ def main() -> int:
             errors="replace",
             env=live_env,
         )
+        if p_probe.returncode != 0:
+            time.sleep(3.0)
+            p_probe = subprocess.run(
+                [
+                    python_bin,
+                    "-m",
+                    "pytest",
+                    "tests/test_real_crawl_acceptance.py::test_live_network_probe_reachability",
+                    "-q",
+                    "-s",
+                ],
+                cwd=ROOT_DIR,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=live_env,
+            )
         probe_ok = (p_probe.returncode == 0)
         m_dy_probe = re.search(r"^\s*PROBE_DOUYIN:\s*(HTTP\s+\d+.*)", p_probe.stdout, re.MULTILINE)
         m_xhs_probe = re.search(r"^\s*PROBE_XIAOHONGSHU:\s*(HTTP\s+\d+.*)", p_probe.stdout, re.MULTILINE)

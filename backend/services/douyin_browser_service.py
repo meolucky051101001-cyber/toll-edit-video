@@ -440,7 +440,7 @@ class DouyinBrowserService:
 
             # Check for verification / captcha container or iframes
             captcha_box = page.locator(
-                "#captcha-verify-image, .captcha-verify-container:visible, .verify-bar-close:visible, [class*='captcha']:visible"
+                "#captcha-verify-image:visible, .captcha-verify-container:visible, .verify-bar-close:visible, [class*='captcha']:visible"
             )
             captcha_visible = (await captcha_box.count()) > 0
             if not captcha_visible and hasattr(page, "frames"):
@@ -477,6 +477,9 @@ class DouyinBrowserService:
                     pass
 
             is_login_route = "/login" in parts.path
+
+            # Re-check login button visibility after modal close attempt
+            has_login_button = (await login_buttons.count()) > 0
 
             # Re-evaluate is_authenticated after modal dismissal attempt
             is_authenticated = bool(

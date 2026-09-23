@@ -529,16 +529,19 @@ class BrowserService:
                 except Exception:
                     pass
 
-            # Check for explicit login buttons / links (presence means user is NOT logged in)
+            # Check for explicit visible login buttons / links (presence means user is NOT logged in)
             login_buttons = page.locator(
-                "button:has-text('登录'), a:has-text('登录'), .login-btn, [class*='login-btn'], .side-bar :text('登录'), [aria-label*='登录'], :text('立即登录'), button:has-text('Log In'), button:has-text('Sign In')"
+                "button:has-text('登录'):visible, a:has-text('登录'):visible, .login-btn:visible, [class*='login-btn']:visible, .side-bar :text('登录'):visible, [aria-label*='登录']:visible, :text('立即登录'):visible, button:has-text('Log In'):visible, button:has-text('Sign In'):visible"
             )
             has_login_button = (await login_buttons.count()) > 0
 
-            # Account-specific identity elements (do NOT use generic sidebar tabs like '我' or 'Me' which appear for guests)
-            user_profile_link = page.locator(".side-bar a[href*='/user/profile/'], a[href*='/user/profile/']")
+            # Account-specific identity elements (do NOT use generic sidebar tabs like '我' or 'Me' which appear for guests,
+            # and do NOT match note author links in explore feed)
+            user_profile_link = page.locator(
+                ".side-bar a[href*='/user/profile/']:visible, .user-nav a[href*='/user/profile/']:visible"
+            )
             user_avatar = page.locator(
-                ".side-bar img[src*='avatar'], .side-bar img[src*='sns-webpic'], .side-bar [class*='avatar']:visible, [class*='user-avatar']:visible"
+                ".side-bar img[src*='avatar']:visible, .side-bar img[src*='sns-webpic']:visible, .side-bar [class*='avatar']:visible, .user-nav img[src*='avatar']:visible, .user-nav [class*='avatar']:visible"
             )
             has_user_element = ((await user_profile_link.count()) > 0) or ((await user_avatar.count()) > 0)
 
@@ -548,12 +551,14 @@ class BrowserService:
                 js_logged_in = await page.evaluate("""() => {
                     try {
                         const u = window.__INITIAL_STATE__ && window.__INITIAL_STATE__.user;
-                        if (!u) return null;
-                        const v = (u && typeof u === 'object' && '_value' in u.loggedIn) ? u.loggedIn._value : (
-                            (u && typeof u === 'object' && 'value' in u.loggedIn) ? u.loggedIn.value : u.loggedIn
-                        );
-                        if (typeof v === 'boolean') return v;
-                        return false;
+                        if (!u || typeof u !== 'object') return null;
+                        const raw = u.loggedIn;
+                        if (typeof raw === 'boolean') return raw;
+                        if (raw && typeof raw === 'object') {
+                            if ('_value' in raw && typeof raw._value === 'boolean') return raw._value;
+                            if ('value' in raw && typeof raw.value === 'boolean') return raw.value;
+                        }
+                        return null;
                     } catch (e) {
                         return null;
                     }
@@ -581,6 +586,9 @@ class BrowserService:
                     login_modal_visible = (await login_modal.count()) > 0
                 except Exception:
                     pass
+
+            # Re-check login button visibility after modal close attempt
+            has_login_button = (await login_buttons.count()) > 0
 
             is_login_route = (
                 "/login" in parts.path or "/website-login" in parts.path
