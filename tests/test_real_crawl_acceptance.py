@@ -117,6 +117,8 @@ async def test_live_network_probe_reachability():
     try:
         dy_ok, dy_detail = await douyin_browser.probe_live()
         xhs_ok, xhs_detail = await xhs_browser.probe_live()
+        print(f"\nPROBE_DOUYIN: {dy_detail}")
+        print(f"PROBE_XIAOHONGSHU: {xhs_detail}")
 
         assert dy_ok, f"Douyin live network reachability probe failed: {dy_detail}"
         assert xhs_ok, f"Xiaohongshu live network reachability probe failed: {xhs_detail}"

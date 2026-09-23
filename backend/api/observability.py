@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -150,8 +151,28 @@ async def get_release_readiness(
                 }
                 is_ready = False
             else:
-                dy_ok, dy_detail = await douyin_browser.probe_live()
-                xhs_ok, xhs_detail = await browser.probe_live()
+                probe_results = await asyncio.gather(
+                    douyin_browser.probe_live(),
+                    browser.probe_live(),
+                    return_exceptions=True,
+                )
+                dy_probe_res: Any = probe_results[0]
+                xhs_probe_res: Any = probe_results[1]
+
+                if isinstance(dy_probe_res, Exception):
+                    dy_ok, dy_detail = False, f"Exception: {dy_probe_res}"
+                elif isinstance(dy_probe_res, tuple) and len(dy_probe_res) == 2:
+                    dy_ok, dy_detail = bool(dy_probe_res[0]), str(dy_probe_res[1])
+                else:
+                    dy_ok, dy_detail = False, f"Unexpected probe result: {dy_probe_res}"
+
+                if isinstance(xhs_probe_res, Exception):
+                    xhs_ok, xhs_detail = False, f"Exception: {xhs_probe_res}"
+                elif isinstance(xhs_probe_res, tuple) and len(xhs_probe_res) == 2:
+                    xhs_ok, xhs_detail = bool(xhs_probe_res[0]), str(xhs_probe_res[1])
+                else:
+                    xhs_ok, xhs_detail = False, f"Unexpected probe result: {xhs_probe_res}"
+
                 live_probe_details = {
                     "douyin": {"reachable": dy_ok, "state": dy_detail},
                     "xiaohongshu": {"reachable": xhs_ok, "state": xhs_detail},
@@ -167,10 +188,14 @@ async def get_release_readiness(
                         "status": "PASS",
                         "detail": f"All providers live verified: {live_probe_details}",
                     }
-                    if dy_detail in ("login_required", "verification_required") or xhs_detail in ("login_required", "verification_required"):
+                    if "login_required" in dy_detail or "verification_required" in dy_detail or "login_required" in xhs_detail or "verification_required" in xhs_detail:
                         warnings.append(f"Provider auth challenge active: douyin={dy_detail}, xhs={xhs_detail}")
     except Exception as exc:
-        checks["providers"] = {"status": "WARN", "detail": str(exc)}
+        checks["providers"] = {"status": "FAIL", "detail": f"Provider check exception: {exc}"}
+        if probe:
+            checks["live_providers"] = {"status": "FAIL", "detail": f"Live probe exception: {exc}"}
+        is_ready = False
+        warnings.append(f"Provider service exception: {exc}")
 
     # Determine overall gate status
     if not is_ready:

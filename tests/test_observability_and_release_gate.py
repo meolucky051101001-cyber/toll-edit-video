@@ -68,3 +68,18 @@ def test_release_gate_functions():
     db_ok, db_msg = check_database()
     assert db_ok is True
     assert "SQLite" in db_msg
+
+
+def test_release_readiness_probe_fail_closed_on_error():
+    from unittest.mock import AsyncMock, patch
+    with TestClient(app) as client:
+        with patch.object(app.state.browser, "probe_live", new_callable=AsyncMock) as mock_xhs_probe:
+            mock_xhs_probe.side_effect = RuntimeError("Simulated network timeout")
+            res = client.get("/api/system/release-readiness?probe=true")
+            assert res.status_code == 200
+            data = res.json()
+            assert data["status"] == "BLOCKED"
+            assert data["is_ready"] is False
+            assert "live_providers" in data["checks"]
+            assert data["checks"]["live_providers"]["status"] == "FAIL"
+

@@ -79,15 +79,22 @@ export default function HealthPage() {
               display: "flex",
               alignItems: "center",
               gap: "0.35rem",
-              color: readiness.data?.is_ready ? "#16a34a" : "#ca8a04",
+              color: readiness.data?.is_ready
+                ? "#16a34a"
+                : readiness.data?.status?.toUpperCase() === "DEGRADED"
+                ? "#ca8a04"
+                : "#dc2626",
             }}
           >
             <ShieldCheck size={18} />
-            {readiness.data?.status === "ready"
-              ? "APPROVED"
-              : readiness.data?.status === "degraded"
-              ? "DEGRADED"
-              : "CHECKING"}
+            {(() => {
+              const s = readiness.data?.status?.toUpperCase();
+              if (s === "READY") return "APPROVED";
+              if (s === "DEGRADED") return "DEGRADED";
+              if (s === "BLOCKED") return "BLOCKED";
+              if (s === "NOT_READY") return "NOT READY";
+              return "CHECKING";
+            })()}
           </strong>
         </div>
 
@@ -203,32 +210,47 @@ export default function HealthPage() {
           Tiêu chuẩn nghiệm thu phát hành (Release Gate Checks)
         </h2>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "0.75rem", marginTop: "0.75rem" }}>
-          {readiness.data?.checks?.map((chk) => (
-            <div
-              key={chk.name}
-              style={{
-                padding: "0.75rem 1rem",
-                borderRadius: "8px",
-                border: "1px solid #e2e8f0",
-                background: chk.passed ? "#f0fdf4" : "#fef2f2",
-                display: "flex",
-                alignItems: "flex-start",
-                gap: "0.6rem",
-              }}
-            >
-              {chk.passed ? (
-                <CheckCircle2 size={18} color="#16a34a" style={{ marginTop: "0.15rem", flexShrink: 0 }} />
-              ) : (
-                <AlertTriangle size={18} color="#dc2626" style={{ marginTop: "0.15rem", flexShrink: 0 }} />
-              )}
-              <div>
-                <strong style={{ fontSize: "0.85rem", color: chk.passed ? "#15803d" : "#b91c1c", display: "block" }}>
-                  {chk.name}
-                </strong>
-                <span style={{ fontSize: "0.75rem", color: "#64748b" }}>{chk.details}</span>
-              </div>
-            </div>
-          ))}
+          {readiness.data?.checks &&
+            Object.entries(readiness.data.checks).map(([name, chk]) => {
+              const isPassed = chk.status === "PASS";
+              const isWarn = chk.status === "WARN" || chk.status === "STANDBY";
+              return (
+                <div
+                  key={name}
+                  data-testid={`readiness-check-${name}`}
+                  style={{
+                    padding: "0.75rem 1rem",
+                    borderRadius: "8px",
+                    border: "1px solid #e2e8f0",
+                    background: isPassed ? "#f0fdf4" : isWarn ? "#fefce8" : "#fef2f2",
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: "0.6rem",
+                  }}
+                >
+                  {isPassed ? (
+                    <CheckCircle2 size={18} color="#16a34a" style={{ marginTop: "0.15rem", flexShrink: 0 }} />
+                  ) : isWarn ? (
+                    <AlertTriangle size={18} color="#ca8a04" style={{ marginTop: "0.15rem", flexShrink: 0 }} />
+                  ) : (
+                    <AlertTriangle size={18} color="#dc2626" style={{ marginTop: "0.15rem", flexShrink: 0 }} />
+                  )}
+                  <div>
+                    <strong
+                      style={{
+                        fontSize: "0.85rem",
+                        color: isPassed ? "#15803d" : isWarn ? "#a16207" : "#b91c1c",
+                        display: "block",
+                        textTransform: "capitalize",
+                      }}
+                    >
+                      {name.replace(/_/g, " ")} ({chk.status})
+                    </strong>
+                    <span style={{ fontSize: "0.75rem", color: "#64748b" }}>{chk.detail}</span>
+                  </div>
+                </div>
+              );
+            })}
         </div>
       </section>
 

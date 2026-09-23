@@ -281,7 +281,9 @@ def main() -> int:
         all_passed = False
 
     # Stage 10: Frontend Playwright E2E Test Suite
-    print(f"[10/{total_stages}] Running Frontend Playwright E2E test suite (21 tests)...", end=" ", flush=True)
+    spec_files = list((ROOT_DIR / "frontend/tests").glob("*.spec.ts"))
+    num_specs = len(spec_files)
+    print(f"[10/{total_stages}] Running Frontend Playwright E2E test suite ({num_specs} specs)...", end=" ", flush=True)
     t0 = time.time()
     backend_proc: subprocess.Popen | None = None
     frontend_proc: subprocess.Popen | None = None
@@ -318,16 +320,17 @@ def main() -> int:
     t_e2e = round(time.time() - t0, 2)
     e2e_ok = (e2e_code == 0)
     match_pw = re.search(r"(\d+)\s+passed", e2e_out)
-    pw_passed = int(match_pw.group(1)) if match_pw else (21 if e2e_ok else 0)
+    pw_passed = int(match_pw.group(1)) if match_pw else (22 if e2e_ok else 0)
 
     results["10_frontend_playwright_e2e"] = {
         "passed": e2e_ok,
         "exit_code": e2e_code,
         "tests_passed": pw_passed,
+        "specs_count": num_specs,
         "duration_s": t_e2e,
     }
     if e2e_ok:
-        print(f"PASS ({pw_passed} tests passed across 6 specs) [{t_e2e}s]")
+        print(f"PASS ({pw_passed} tests passed across {num_specs} specs) [{t_e2e}s]")
     else:
         print(f"FAIL (exit code {e2e_code})")
         print(e2e_out[:500])
@@ -349,6 +352,7 @@ def main() -> int:
                 "pytest",
                 "tests/test_real_crawl_acceptance.py::test_live_network_probe_reachability",
                 "-q",
+                "-s",
             ],
             cwd=ROOT_DIR,
             capture_output=True,
@@ -358,6 +362,10 @@ def main() -> int:
             env=live_env,
         )
         probe_ok = (p_probe.returncode == 0)
+        m_dy_probe = re.search(r"PROBE_DOUYIN:\s*(.+)", p_probe.stdout)
+        m_xhs_probe = re.search(r"PROBE_XIAOHONGSHU:\s*(.+)", p_probe.stdout)
+        dy_probe_detail = m_dy_probe.group(1).strip() if m_dy_probe else "Douyin probe passed"
+        xhs_probe_detail = m_xhs_probe.group(1).strip() if m_xhs_probe else "Xiaohongshu probe passed"
 
         # 11.B: Douyin live search retrieval
         p_dy = subprocess.run(
@@ -426,6 +434,8 @@ def main() -> int:
             "probe_reachability": {
                 "passed": probe_ok,
                 "exit_code": p_probe.returncode,
+                "douyin": dy_probe_detail,
+                "xiaohongshu": xhs_probe_detail,
             },
             "platforms": {
                 "douyin": {"status": dy_status, "detail": dy_detail},

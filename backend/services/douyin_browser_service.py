@@ -55,6 +55,7 @@ class DouyinBrowserService:
         self.base_url = DOUYIN_HOME
         self.diagnostics: dict = {}
         self.allow_media = False
+        self.last_http_status: int | None = None
 
     def set_allow_media(self, allow: bool) -> None:
         self.allow_media = allow
@@ -342,7 +343,9 @@ class DouyinBrowserService:
             )
             self.page.set_default_timeout(10000)
             nav_target = initial_url or self.base_url
-            await self.page.goto(nav_target, wait_until="domcontentloaded", timeout=30000)
+            resp = await self.page.goto(nav_target, wait_until="domcontentloaded", timeout=30000)
+            if resp is not None:
+                self.last_http_status = resp.status
             if not initial_url:
                 await self.page.wait_for_timeout(1500)
             await self.inspect(self.page)
@@ -359,15 +362,25 @@ class DouyinBrowserService:
             ) from None
 
     async def probe_live(self) -> tuple[bool, str]:
-        """Probes live connectivity to Douyin by opening the page and inspecting state."""
+        """Probes live connectivity to Douyin by opening the page, inspecting HTTP response status and state."""
         try:
             page = await self.ensure_open()
             state = await self.inspect(page)
-            is_healthy = state not in ("network_error", "closed", "restricted")
-            return is_healthy, state
+            http_status = getattr(self, "last_http_status", None)
+            if http_status is None:
+                resp = await page.goto(self.base_url or DOUYIN_HOME, wait_until="domcontentloaded", timeout=20000)
+                if resp is not None:
+                    http_status = resp.status
+                    self.last_http_status = resp.status
+                state = await self.inspect(page)
+
+            is_http_ok = http_status is not None and 200 <= http_status < 400
+            is_healthy = is_http_ok and state not in ("network_error", "closed", "restricted")
+            status_desc = f"HTTP {http_status}: {state}" if http_status else state
+            return is_healthy, status_desc
         except Exception as exc:
             logger.warning("Douyin live probe failed: %s", exc)
-            return False, str(exc)
+            return False, f"error: {exc}"
 
     async def inspect(self, page: Page) -> str:
         if page.is_closed():

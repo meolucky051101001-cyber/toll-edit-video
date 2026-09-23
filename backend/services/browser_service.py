@@ -54,6 +54,7 @@ class BrowserService:
         self.state = "closed"
         self.base_url = "https://www.xiaohongshu.com"
         self.diagnostics: dict = {}
+        self.last_http_status: int | None = None
 
     def should_run_headless(self) -> bool:
         if getattr(self, "force_headful_session", False):
@@ -407,7 +408,9 @@ class BrowserService:
             for nav_url in nav_urls:
                 try:
                     logger.info("Xiaohongshu navigating to: %s", nav_url)
-                    await self.page.goto(nav_url, wait_until="domcontentloaded", timeout=30000)
+                    resp = await self.page.goto(nav_url, wait_until="domcontentloaded", timeout=30000)
+                    if resp is not None:
+                        self.last_http_status = resp.status
                     nav_success = True
                     if "xiaohongshu.com" in nav_url:
                         self.base_url = "https://www.xiaohongshu.com"
@@ -424,7 +427,9 @@ class BrowserService:
                         logger.warning("Received HTTP response code failure on %s; clearing cookies and retrying clean...", nav_url)
                         try:
                             await self.context.clear_cookies()
-                            await self.page.goto(nav_url, wait_until="domcontentloaded", timeout=30000)
+                            retry_resp = await self.page.goto(nav_url, wait_until="domcontentloaded", timeout=30000)
+                            if retry_resp is not None:
+                                self.last_http_status = retry_resp.status
                             nav_success = True
                             if "xiaohongshu.com" in nav_url:
                                 self.base_url = "https://www.xiaohongshu.com"
@@ -461,15 +466,25 @@ class BrowserService:
             ) from None
 
     async def probe_live(self) -> tuple[bool, str]:
-        """Probes live connectivity to Xiaohongshu by opening the page and inspecting state."""
+        """Probes live connectivity to Xiaohongshu by opening the page, inspecting HTTP response status and state."""
         try:
             page = await self.ensure_open()
             state = await self.inspect(page)
-            is_healthy = state not in ("network_error", "closed", "restricted")
-            return is_healthy, state
+            http_status = getattr(self, "last_http_status", None)
+            if http_status is None:
+                resp = await page.goto(self.base_url or "https://www.xiaohongshu.com/explore", wait_until="domcontentloaded", timeout=20000)
+                if resp is not None:
+                    http_status = resp.status
+                    self.last_http_status = resp.status
+                state = await self.inspect(page)
+
+            is_http_ok = http_status is not None and 200 <= http_status < 400
+            is_healthy = is_http_ok and state not in ("network_error", "closed", "restricted")
+            status_desc = f"HTTP {http_status}: {state}" if http_status else state
+            return is_healthy, status_desc
         except Exception as exc:
             logger.warning("Xiaohongshu live probe failed: %s", exc)
-            return False, str(exc)
+            return False, f"error: {exc}"
 
     async def inspect(self, page: Page) -> str:
         if page.is_closed():

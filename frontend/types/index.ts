@@ -339,17 +339,17 @@ export interface SystemMetricsResponse {
   uptime_seconds: number;
 }
 
-export interface ReleaseReadinessCheck {
-  name: string;
-  passed: boolean;
-  details: string;
+export interface ReleaseReadinessCheckItem {
+  status: "PASS" | "WARN" | "FAIL" | "UNINITIALIZED" | "STANDBY";
+  detail: string;
 }
 
 export interface ReleaseReadinessResponse {
   is_ready: boolean;
-  status: "ready" | "degraded" | "blocked";
-  checks: ReleaseReadinessCheck[];
-  generated_at: string;
+  status: "READY" | "DEGRADED" | "BLOCKED" | "NOT_READY" | "ready" | "degraded" | "blocked" | "not_ready";
+  checks: Record<string, ReleaseReadinessCheckItem>;
+  warnings?: string[];
+  generated_at?: string;
 }
 
 
