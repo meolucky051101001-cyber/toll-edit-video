@@ -1,8 +1,13 @@
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Literal, Self
+from typing import Any, Literal
 from urllib.parse import urlparse
+
+try:
+    from typing import Self
+except ImportError:
+    from typing_extensions import Self
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
@@ -338,6 +343,8 @@ class JobOut(BaseModel):
     completed_at: datetime | None
     error_message: str | None
     is_mock: bool
+    active_platform: str | None = None
+    waiting_reason: str | None = None
 
     @field_validator("created_at", "started_at", "completed_at")
     @classmethod

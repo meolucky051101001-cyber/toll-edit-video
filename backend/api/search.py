@@ -106,6 +106,10 @@ async def cancel_job(job_id: str, request: Request, db: Session = Depends(get_db
 
 def serialize_job(job: SearchJob, db: Session) -> JobOut:
     result = JobOut.model_validate(job)
+    if not result.active_platform and job.diagnostics and isinstance(job.diagnostics, dict):
+        result.active_platform = job.diagnostics.get("active_platform")
+    if not result.waiting_reason and job.diagnostics and isinstance(job.diagnostics, dict):
+        result.waiting_reason = job.diagnostics.get("waiting_reason")
     if db.get(ImportBatch, job.id):
         result.import_source = "mediacrawler"
     plan = db.get(SearchPlan, job.id)
@@ -139,9 +143,15 @@ async def resume_job(job_id: str, request: Request, db: Session = Depends(get_db
     if job.status not in {
         "waiting_for_login",
         "waiting_for_user",
-    } or not request.app.state.search.resume(job_id):
+    }:
         raise HTTPException(
             409, "Lượt tìm này không chờ tiếp tục. Nếu ứng dụng đã khởi động lại, hãy tạo lượt mới."
         )
+
+    can_resume, reason = await request.app.state.search.verify_and_resume(job_id)
+    if not can_resume:
+        raise HTTPException(409, detail=reason)
+
     db.expire_all()
     return get_job(job_id, db)
+

@@ -660,6 +660,7 @@ function SearchSession({
               job.data.status,
             ) && (() => {
               const jobPlatform =
+                (job.data?.active_platform as string) ||
                 (job.data?.platforms && job.data.platforms[0]) ||
                 (mode === "douyin" ? "douyin" : "xiaohongshu");
               const jobPlatformLabel =
@@ -712,14 +713,22 @@ function SearchSession({
                       marginBottom: "0.75rem",
                     }}
                   >
-                    Nền tảng <strong>{jobPlatformLabel}</strong> yêu cầu giải mã CAPTCHA hoặc xác thực phiên đăng nhập. Bạn có thể dùng các nút bên dưới để <strong>Mở cửa sổ giải CAPTCHA</strong> (kéo thanh trượt trực tiếp) hoặc <strong>Đăng nhập bằng mã QR</strong> (quét điện thoại không cần giải đố). Hệ thống sẽ tự động tiếp tục khi hoàn tất.
+                    {isLogin ? (
+                      <>
+                        Nền tảng <strong>{jobPlatformLabel}</strong> yêu cầu đăng nhập tài khoản. Vui lòng bấm <strong>Mở cửa sổ {jobPlatformLabel}</strong> hoặc <strong>Đăng nhập bằng mã QR</strong> để đăng nhập trực tiếp trên trình duyệt của công cụ.
+                      </>
+                    ) : (
+                      <>
+                        Nền tảng <strong>{jobPlatformLabel}</strong> yêu cầu giải mã thử thách bảo mật (CAPTCHA). Vui lòng bấm <strong>Mở cửa sổ {jobPlatformLabel}</strong> để hoàn thành xác minh trực tiếp.
+                      </>
+                    )}
                   </p>
                   <BrowserControls
                     jobId={job.data.id}
                     waiting
                     refresh={job.refresh}
                     platform={
-                      job.data.platforms?.[0] === "douyin" ? "douyin" : "xiaohongshu"
+                      jobPlatform === "douyin" ? "douyin" : "xiaohongshu"
                     }
                   />
                 </div>

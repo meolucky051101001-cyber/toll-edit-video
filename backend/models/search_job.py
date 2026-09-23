@@ -30,6 +30,8 @@ class SearchJob(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_message: Mapped[str | None]
     is_mock: Mapped[bool] = mapped_column(default=True)
+    active_platform: Mapped[str | None] = mapped_column(default=None, nullable=True)
+    waiting_reason: Mapped[str | None] = mapped_column(default=None, nullable=True)
 
 
 class SearchQuery(Base):

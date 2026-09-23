@@ -97,22 +97,23 @@ def intent_constraints(query: str) -> list[tuple[str, list[str], float]]:
     if compound:
         for aliases in compound[0]:
             groups.append((aliases[0], aliases, 20.0))
-    for name in sorted(SUBJECT_MAP, key=len, reverse=True):
-        aliases = [alias for tier in SUBJECT_MAP[name].values() for alias in tier]
-        if phrase_matches(query, name) and is_valid_subject_match(query, norm, name):
-            groups.append((name, [name, *aliases], 20.0))
-            break
     else:
-        # Use primary terms for recognition: broad expansion terms such as
-        # "popular shades" must not identify a specific product by themselves.
-        matches = [
-            (alias, name) for name, tiers in SUBJECT_MAP.items()
-            for alias in tiers["primary"] if phrase_matches(query, alias)
-        ]
-        if matches:
-            _, name = max(matches, key=lambda item: len(item[0]))
+        for name in sorted(SUBJECT_MAP, key=len, reverse=True):
             aliases = [alias for tier in SUBJECT_MAP[name].values() for alias in tier]
-            groups.append((name, [name, *aliases], 20.0))
+            if phrase_matches(query, name) and is_valid_subject_match(query, norm, name):
+                groups.append((name, [name, *aliases], 20.0))
+                break
+        else:
+            # Use primary terms for recognition: broad expansion terms such as
+            # "popular shades" must not identify a specific product by themselves.
+            matches = [
+                (alias, name) for name, tiers in SUBJECT_MAP.items()
+                for alias in tiers["primary"] if phrase_matches(query, alias)
+            ]
+            if matches:
+                _, name = max(matches, key=lambda item: len(item[0]))
+                aliases = [alias for tier in SUBJECT_MAP[name].values() for alias in tier]
+                groups.append((name, [name, *aliases], 20.0))
     for name in sorted(ACTION_MAP, key=len, reverse=True):
         aliases = ACTION_MAP[name]
         if (

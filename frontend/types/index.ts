@@ -108,6 +108,8 @@ export interface Job {
   id: string;
   original_query: string;
   platforms: Platform[];
+  active_platform?: Platform | string | null;
+  waiting_reason?: string | null;
   status: string;
   requested_limit: number;
   found_count: number;

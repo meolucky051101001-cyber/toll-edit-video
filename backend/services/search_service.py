@@ -62,6 +62,7 @@ class SearchService:
         self.platform_locks: dict[str, asyncio.Lock] = {}
         self.waiters: dict[str, asyncio.Event] = {}
         self.deadlines: dict[str, asyncio.Timeout] = {}
+        self.waiting_contexts: dict[str, tuple[SearchProvider, UserActionRequired, str]] = {}
 
     def get_platform_lock(self, platform: str) -> asyncio.Lock:
         if platform not in self.platform_locks:
@@ -77,8 +78,13 @@ class SearchService:
         with self.sessions() as db:
             job = db.get(SearchJob, job_id)
             if job:
+                diag = dict(job.diagnostics or {})
                 for key, value in values.items():
-                    setattr(job, key, value)
+                    if hasattr(job, key):
+                        setattr(job, key, value)
+                    if key in ("active_platform", "waiting_reason"):
+                        diag[key] = value
+                job.diagnostics = diag
                 db.commit()
                 if self.event_bus:
                     self.event_bus.publish_nowait("search:update", {
@@ -88,9 +94,12 @@ class SearchService:
                         "requested_limit": job.requested_limit,
                         "found_count": job.found_count,
                         "error_message": job.error_message,
+                        "active_platform": getattr(job, "active_platform", None) or diag.get("active_platform"),
+                        "waiting_reason": getattr(job, "waiting_reason", None) or diag.get("waiting_reason"),
                     })
 
     async def cancel(self, job_id: str) -> None:
+        self.waiting_contexts.pop(job_id, None)
         event = self.waiters.get(job_id)
         if event:
             event.set()
@@ -184,6 +193,7 @@ class SearchService:
             provider_limit = limit // len(platforms) + (platform_index < limit % len(platforms))
             if provider_limit == 0:
                 continue
+            self.update(job_id, active_platform=platform)
             lock_key = "mock" if use_mock else platform
             async with self.get_platform_lock(lock_key):
                 async with asyncio.timeout(settings.search_timeout) as deadline:
@@ -205,7 +215,7 @@ class SearchService:
                                 )
                             else:
                                 query_limit = remaining
-                            self.update(job_id, status="searching")
+                            self.update(job_id, status="searching", active_platform=platform)
 
                             streamed = False
 
@@ -240,6 +250,12 @@ class SearchService:
                                         )
                                     break
                                 except UserActionRequired as gate:
+                                    waiting_reason = "login_required" if gate.state == "waiting_for_login" else "verification_required"
+                                    self.update(
+                                        job_id,
+                                        active_platform=platform,
+                                        waiting_reason=waiting_reason,
+                                    )
                                     if gate.partial and not streamed:
                                         await self.persist_results(
                                             job_id,
@@ -250,7 +266,7 @@ class SearchService:
                                             alternative_queries=queries,
                                             original_query=query,
                                         )
-                                    await self.wait_for_user(job_id, gate, provider=provider)
+                                    await self.wait_for_user(job_id, gate, provider=provider, platform=platform)
                             logger.info(
                                 "job=%s provider=%s query=%r results=%d",
                                 job_id,
@@ -582,40 +598,113 @@ class SearchService:
         event = self.waiters.get(job_id)
         if not event:
             return False
-        self.update(job_id, status="resuming")
+        self.update(job_id, status="resuming", waiting_reason=None)
         event.set()
         return True
 
     def resume_all_waiting(self) -> int:
         count = 0
         for job_id, event in list(self.waiters.items()):
-            self.update(job_id, status="resuming")
+            self.update(job_id, status="resuming", waiting_reason=None)
             event.set()
             count += 1
         return count
+
+    async def verify_and_resume(self, job_id: str) -> tuple[bool, str]:
+        event = self.waiters.get(job_id)
+        if not event:
+            return False, "Lượt tìm này không ở trạng thái chờ tiếp tục hoặc đã bị hủy/dừng."
+
+        context = self.waiting_contexts.get(job_id)
+        if not context:
+            self.update(job_id, status="resuming", waiting_reason=None)
+            event.set()
+            return True, "Sẵn sàng tiếp tục."
+
+        provider, gate, platform = context
+        browser = getattr(provider, "browser", None)
+        if not browser:
+            self.update(job_id, status="resuming", waiting_reason=None)
+            event.set()
+            return True, "Sẵn sàng tiếp tục."
+
+        page = None
+        if hasattr(browser, "get_active_page"):
+            try:
+                page = browser.get_active_page()
+            except Exception:
+                pass
+        if not page and hasattr(browser, "page"):
+            page = browser.page
+
+        if not page or getattr(page, "is_closed", lambda: True)():
+            return False, f"Trình duyệt {platform.capitalize()} đã bị đóng. Vui lòng bấm 'Mở cửa sổ' để mở lại trình duyệt."
+
+        try:
+            current_state = await browser.inspect(page)
+        except Exception as e:
+            return False, f"Lỗi khi kiểm tra trình duyệt {platform.capitalize()}: {e}"
+
+        is_login_wait = gate.state == "waiting_for_login" or "login" in str(gate).lower()
+        if is_login_wait:
+            is_auth = (
+                current_state == "authenticated"
+                or bool(getattr(browser, "diagnostics", {}).get("is_authenticated"))
+            )
+            if not is_auth:
+                return (
+                    False,
+                    f"Trình duyệt {platform.capitalize()} chưa hoàn tất đăng nhập (trạng thái: {current_state}). "
+                    f"Vui lòng quét mã QR hoặc đăng nhập tài khoản trên cửa sổ trình duyệt trước khi tiếp tục.",
+                )
+        else:
+            # Waiting for challenge / CAPTCHA
+            if current_state in ("verification_required", "restricted", "network_error"):
+                return (
+                    False,
+                    f"Thử thách bảo mật (CAPTCHA) trên {platform.capitalize()} chưa được giải xong. "
+                    f"Vui lòng kéo thanh trượt xác minh trên màn hình trình duyệt.",
+                )
+            if current_state == "login_required":
+                return (
+                    False,
+                    f"Nền tảng {platform.capitalize()} chuyển sang yêu cầu đăng nhập. Vui lòng đăng nhập tài khoản.",
+                )
+
+        # Verification passed
+        self.update(job_id, status="resuming", waiting_reason=None)
+        event.set()
+        return True, "Xác minh thành công, đang tiếp tục tìm kiếm."
 
     async def wait_for_user(
         self,
         job_id: str,
         gate: UserActionRequired,
         provider: SearchProvider | None = None,
+        platform: str = "",
+        timeout_seconds: float | None = None,
     ) -> None:
         event = asyncio.Event()
         self.waiters[job_id] = event
+        if provider:
+            self.waiting_contexts[job_id] = (provider, gate, platform)
         deadline = self.deadlines.get(job_id)
         when = deadline.when() if deadline else None
         remaining = max(1.0, when - asyncio.get_running_loop().time()) if when else None
         if deadline:
             deadline.reschedule(None)
         self.update(job_id, status=gate.state, error_message=str(gate))
-        timeout_seconds = getattr(settings, "browser_interaction_timeout", 1800)
+        if timeout_seconds is None:
+            timeout_seconds = getattr(settings, "browser_interaction_timeout", 1800)
 
         monitor_task: asyncio.Task[None] | None = None
         if provider and hasattr(provider, "browser"):
+            poll_interval = 0.1 if timeout_seconds and timeout_seconds < 10.0 else 2.0
+
             async def _check_auto_resume() -> None:
                 while not event.is_set():
                     try:
-                        await asyncio.sleep(2.0)
+                        await asyncio.sleep(poll_interval)
                         browser = getattr(provider, "browser", None)
                         if browser and hasattr(browser, "inspect"):
                             page = None
@@ -624,18 +713,44 @@ class SearchService:
                                     page = browser.get_active_page()
                                 except Exception:
                                     pass
-                            elif hasattr(browser, "page"):
+                            if not page and hasattr(browser, "page"):
                                 page = browser.page
                             if page and not getattr(page, "is_closed", lambda: True)():
                                 current_state = await browser.inspect(page)
-                                if current_state == "page_available":
-                                    logger.info(
-                                        "Auto-resume: CAPTCHA / verification cleared on page %s for job %s",
-                                        getattr(page, "url", ""),
-                                        job_id,
+                                is_login_wait = gate.state == "waiting_for_login" or "login" in str(gate).lower()
+                                if is_login_wait:
+                                    is_auth = (
+                                        current_state == "authenticated"
+                                        or bool(getattr(browser, "diagnostics", {}).get("is_authenticated"))
                                     )
-                                    event.set()
-                                    break
+                                    if is_auth:
+                                        logger.info(
+                                            "Auto-resume: User authenticated on page %s for job %s",
+                                            getattr(page, "url", ""),
+                                            job_id,
+                                        )
+                                        event.set()
+                                        break
+                                else:
+                                    # CAPTCHA / verification challenge wait
+                                    if current_state in ("page_available", "authenticated"):
+                                        captcha_visible = False
+                                        if hasattr(page, "locator"):
+                                            try:
+                                                c_box = page.locator(
+                                                    "#captcha-verify-image:visible, .captcha-verify-container:visible, [class*='captcha']:visible"
+                                                )
+                                                captcha_visible = (await c_box.count()) > 0
+                                            except Exception:
+                                                captcha_visible = False
+                                        if not captcha_visible:
+                                            logger.info(
+                                                "Auto-resume: CAPTCHA / verification cleared on page %s for job %s",
+                                                getattr(page, "url", ""),
+                                                job_id,
+                                            )
+                                            event.set()
+                                            break
                     except Exception:
                         pass
 
@@ -644,7 +759,7 @@ class SearchService:
         try:
             async with asyncio.timeout(timeout_seconds):
                 await event.wait()
-            self.update(job_id, status="resuming")
+            self.update(job_id, status="resuming", waiting_reason=None)
             self.update(job_id, status="searching", error_message=None)
         finally:
             if monitor_task and not monitor_task.done():
@@ -653,6 +768,7 @@ class SearchService:
                     await monitor_task
                 except asyncio.CancelledError:
                     pass
+            self.waiting_contexts.pop(job_id, None)
             self.waiters.pop(job_id, None)
             if deadline:
                 deadline.reschedule(

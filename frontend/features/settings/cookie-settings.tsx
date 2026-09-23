@@ -231,7 +231,7 @@ export function CookieSettings() {
         <div className="quick-sync-info" style={{ flex: 1, minWidth: "280px" }}>
           <Sparkles size={16} className="text-accent" />
           <span>
-            Lấy Cookie siêu tốc: Nhập tự động từ trình duyệt công cụ hoặc dán nhanh chuỗi cookie từ Chrome cá nhân.
+            Đồng bộ Cookie: Tự động trích xuất từ trình duyệt của công cụ sau khi đăng nhập, hoặc dán chuỗi cookie dự phòng.
           </span>
         </div>
         <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
@@ -285,7 +285,7 @@ export function CookieSettings() {
           lineHeight: 1.5,
         }}
       >
-        💡 <strong>Mẹo 2 giây lấy Cookie từ Chrome/Edge cá nhân</strong>: Mở tab Douyin hoặc Xiaohongshu trên trình duyệt thường dùng → Nhấn <code>F12</code> (hoặc Chuột phải → Kiểm tra) → Vào tab <strong>Console</strong> → Gõ <code>copy(document.cookie)</code> rồi ấn Enter → Quay lại đây bấm nút <strong>Dán nhanh từ Clipboard</strong> là hoàn tất!
+        💡 <strong>Khuyến nghị chính thức</strong>: Đăng nhập hoặc giải CAPTCHA trực tiếp trên trình duyệt Chromium của công cụ (bằng cách bấm <strong>Mở cửa sổ</strong> hoặc <strong>Mã QR</strong> trên màn hình tìm kiếm). Sau khi đăng nhập, bấm <strong>Đồng bộ từ trình duyệt</strong> để nạp cookie vào hệ thống. Việc sao chép thủ công chuỗi cookie từ trình duyệt bên ngoài chỉ dùng làm phương án dự phòng khi cần thiết.
       </div>
 
       <div className="cookie-platforms-grid">

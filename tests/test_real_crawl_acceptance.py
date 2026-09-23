@@ -151,10 +151,16 @@ async def test_live_crawl_douyin_real_results():
         await browser.close()
 
     assert len(results) > 0, "Douyin live search returned 0 video results"
+    seen_ids = set()
     for r in results:
         assert r.platform == "douyin"
-        assert r.platform_video_id
-        assert str(r.url).startswith("https://")
+        assert r.platform_video_id and len(r.platform_video_id) >= 6
+        assert r.platform_video_id not in seen_ids, f"Duplicate Douyin ID: {r.platform_video_id}"
+        seen_ids.add(r.platform_video_id)
+        assert r.is_mock is False
+        assert "example.invalid" not in str(r.url)
+        assert "douyin.com" in str(r.url)
+        assert r.media_type == "video"
 
 
 @pytest.mark.live_acceptance
@@ -170,7 +176,7 @@ async def test_live_crawl_xiaohongshu_real_results():
 
     browser = BrowserService(headless=True)
     provider = XiaohongshuProvider(browser=browser, auto_elevate=False)
-    filters = SearchFilters(sort_by="most_liked", publish_time="all", content_type="all")
+    filters = SearchFilters(sort_by="most_liked", publish_time="all", content_type="video")
 
     try:
         results = await provider.search("sticker", limit=3, filters=filters)
@@ -181,10 +187,16 @@ async def test_live_crawl_xiaohongshu_real_results():
         await browser.close()
 
     assert len(results) > 0, "Xiaohongshu live search returned 0 results"
+    seen_ids = set()
     for r in results:
         assert r.platform == "xiaohongshu"
-        assert r.platform_video_id
-        assert str(r.url).startswith("https://")
+        assert r.platform_video_id and len(r.platform_video_id) >= 8
+        assert r.platform_video_id not in seen_ids, f"Duplicate XHS ID: {r.platform_video_id}"
+        seen_ids.add(r.platform_video_id)
+        assert r.is_mock is False
+        assert "example.invalid" not in str(r.url)
+        assert "xiaohongshu.com" in str(r.url) or "rednote.com" in str(r.url)
+        assert r.media_type == "video", f"Expected video media evidence for content_type=video, got {r.media_type}"
 
 
 @pytest.mark.live_acceptance
@@ -197,3 +209,4 @@ async def test_live_crawl_provider_acceptance_with_filters():
     else:
         await test_live_network_probe_reachability()
         await test_live_crawl_douyin_real_results()
+        await test_live_crawl_xiaohongshu_real_results()

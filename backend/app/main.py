@@ -79,6 +79,10 @@ async def lifespan(app: FastAPI):
                 conn.exec_driver_sql("ALTER TABLE search_jobs ADD COLUMN min_relevance FLOAT")
             if "diagnostics" not in sj_cols and "id" in sj_cols:
                 conn.exec_driver_sql("ALTER TABLE search_jobs ADD COLUMN diagnostics JSON")
+            if "active_platform" not in sj_cols and "id" in sj_cols:
+                conn.exec_driver_sql("ALTER TABLE search_jobs ADD COLUMN active_platform VARCHAR(50)")
+            if "waiting_reason" not in sj_cols and "id" in sj_cols:
+                conn.exec_driver_sql("ALTER TABLE search_jobs ADD COLUMN waiting_reason VARCHAR(100)")
             if "actual_ai_model" not in sj_cols and "id" in sj_cols:
                 conn.exec_driver_sql("ALTER TABLE search_jobs ADD COLUMN actual_ai_model VARCHAR")
             if "ai_fallback_occurred" not in sj_cols and "id" in sj_cols:

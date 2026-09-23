@@ -133,7 +133,7 @@ export function BrowserControls({
             <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
               <Smartphone size={18} style={{ color: "#0f766e" }} />
               <strong style={{ fontSize: "0.95rem", color: "#0f766e" }}>
-                Đăng nhập siêu tốc bằng Mã QR {platformLabel}
+                Đăng nhập bằng mã QR {platformLabel}
               </strong>
             </div>
             <button
@@ -189,7 +189,7 @@ export function BrowserControls({
                 <li>Mở app <strong>{platformLabel}</strong> trên điện thoại.</li>
                 <li>Vào phần <strong>Quét mã QR</strong> (ở góc trên cùng hoặc trang cá nhân).</li>
                 <li>Hướng camera vào mã bên cạnh để xác nhận đăng nhập.</li>
-                <li>Hệ thống sẽ <strong>tự động nhận diện đăng nhập</strong> trong 2 giây!</li>
+                <li>Hệ thống sẽ <strong>tự động nhận diện khi đăng nhập thành công</strong>.</li>
               </ol>
 
               <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
@@ -278,7 +278,7 @@ export function BrowserControls({
               }}
             >
               <QrCode size={16} className="mr-1" />
-              Đăng nhập bằng mã QR (2 giây)
+              Đăng nhập bằng mã QR
             </Button>
 
             {jobId && waiting && (
@@ -307,7 +307,7 @@ export function BrowserControls({
               lineHeight: 1.45,
             }}
           >
-            💡 Bấm <strong>Mở cửa sổ giải CAPTCHA</strong> để kéo thanh trượt trực tiếp trên màn hình, hoặc bấm <strong>Đăng nhập bằng mã QR</strong> để quét bằng điện thoại mà không cần giải đố. Phiên đăng nhập được lưu vĩnh viễn trên máy này.
+            💡 Người dùng tự xác thực trong Chromium của công cụ: quét mã QR hoặc giải CAPTCHA trực tiếp trên cửa sổ trình duyệt. Phiên đăng nhập được lưu trong hồ sơ cục bộ của công cụ, có thể hết hạn hoặc kích hoạt kiểm tra bảo mật định kỳ tùy chính sách của nền tảng.
           </p>
         </div>
       )}

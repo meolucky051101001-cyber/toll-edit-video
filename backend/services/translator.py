@@ -14,8 +14,11 @@ PHRASE_DICTIONARY: dict[str, list[str]] = {
     # Unbox / Đập hộp
     "unbox van phong pham cute": ["可爱文具开箱", "沉浸式文具开箱", "学生文具开箱"],
     "ubox van phong pham cute": ["可爱文具开箱", "沉浸式文具开箱", "学生文具开箱"],
+    "dap hop van phong pham cute": ["可爱文具开箱", "沉浸式文具开箱", "学生文具开箱"],
+    "van phong pham cute": ["可爱文具", "学生文具", "少女心文具"],
     "unbox van phong pham": ["文具开箱", "可爱文具开箱", "手账好物开箱", "学生文具开箱"],
     "ubox van phong pham": ["文具开箱", "可爱文具开箱", "手账好物开箱", "学生文具开箱"],
+    "dap hop van phong pham": ["文具开箱", "可爱文具开箱", "手账好物开箱", "学生文具开箱"],
     "ubox do cute": ["可爱好物开箱", "沉浸式开箱可爱", "少女心开箱"],
     "unbox do cute": ["可爱好物开箱", "沉浸式开箱可爱", "少女心开箱"],
     "mo hop do cute": ["可爱好物开箱", "沉浸式开箱可爱", "少女心开箱"],
@@ -26,6 +29,9 @@ PHRASE_DICTIONARY: dict[str, list[str]] = {
     "unbox blind box": ["盲盒开箱", "拆盲盒", "潮玩盲盒"],
     "unbox sticker": ["咕卡贴纸开箱", "贴纸开箱", "手账贴纸"],
     "dung cu boc sticker": ["咕卡工具", "贴纸镊子", "手账工具"],
+    "nhip gap sticker": ["贴纸镊子", "手账镊子", "咕卡镊子"],
+    "nhip sticker": ["贴纸镊子", "手账镊子", "咕卡镊子"],
+    "nhip": ["镊子"],
     "goi hang cute": ["可爱打包日常", "沉浸式打包", "治愈系打包"],
 
     "unbox dong ho": ["手表开箱", "腕表开箱", "平价手表开箱"],
@@ -52,6 +58,8 @@ PHRASE_DICTIONARY: dict[str, list[str]] = {
     "thu am": ["录音", "录音日常", "翻唱录音"],
 
     # Decor / Phòng & Bàn học
+    "decor ban hoc vintage": ["复古书桌布置", "复古桌面改造", "复古学生书桌"],
+    "ban hoc vintage": ["复古书桌", "复古桌面", "复古学生书桌"],
     "decor ban hoc": ["书桌布置", "桌面改造", "沉浸式书桌布置", "学生书桌"],
     "decor phong ngu": ["卧室改造", "房间布置", "温馨小卧室"],
     "decor ban lam viec": ["办公桌改造", "极简桌面", "桌搭"],
@@ -227,9 +235,12 @@ SUBJECT_MAP: dict[str, dict[str, list[str]]] = {
     "may khoan": {"primary": ["电钻"], "natural": ["手电钻"], "narrow": ["家用电钻"]},
     "thu am": {"primary": ["录音"], "natural": ["翻唱录音"], "narrow": ["录音日常"]},
     "van phong pham": {"primary": ["文具"], "natural": ["手账文具"], "narrow": ["学生文具"]},
+    "nhip gap sticker": {"primary": ["贴纸镊子"], "natural": ["手账贴纸镊子"], "narrow": ["咕卡镊子"]},
+    "nhip sticker": {"primary": ["贴纸镊子"], "natural": ["手账贴纸镊子"], "narrow": ["咕卡镊子"]},
+    "nhip": {"primary": ["镊子"], "natural": ["手账镊子"], "narrow": ["贴纸镊子"]},
     "sticker": {"primary": ["贴纸"], "natural": ["手账贴纸"], "narrow": ["咕卡贴纸"]},
     "so": {"primary": ["手账"], "natural": ["手账本"], "narrow": ["手账好物"]},
-    "ban hoc": {"primary": ["书桌"], "natural": ["桌面改造"], "narrow": ["学生书桌"]},
+    "ban hoc": {"primary": ["书桌"], "natural": ["桌面", "桌面改造", "桌搭"], "narrow": ["学生书桌"]},
     "ban lam viec": {"primary": ["办公桌"], "natural": ["极简桌面"], "narrow": ["桌搭"]},
     "phong ngu": {"primary": ["卧室"], "natural": ["房间布置"], "narrow": ["温馨卧室"]},
     "son moi": {"primary": ["口红"], "natural": ["热门色号"], "narrow": ["显白口红"]},
@@ -330,6 +341,7 @@ WORD_MAP: dict[str, list[str]] = {
     "van phong pham": ["文具"],
     "so": ["手账"],
     "but": ["笔"],
+    "nhip": ["镊子"],
     "sticker": ["贴纸", "咕卡"],
     "hop mu": ["盲盒"],
     "blindbox": ["盲盒"],
@@ -614,6 +626,12 @@ def is_valid_phrase_match(raw: str, norm: str, phrase: str) -> bool:
     elif phrase == "meo cute":
         if re.search(r"\bmẹo\b", raw, flags=re.IGNORECASE):
             return False
+    elif phrase == "pho":
+        if re.search(r"\bphố\b", raw, flags=re.IGNORECASE) or not re.search(
+            r"\b(?:pho|phở)\s+(?:bo|ga|ha\s+noi|tai|nam|sot\s+vang|xao|cuon|chua)\b|\b(?:an|nau|bat|to|quan|lam)\s+(?:pho|phở)\b",
+            norm,
+        ):
+            return False
     return True
 
 
@@ -756,6 +774,11 @@ def extract_mandatory_attributes(norm: str) -> tuple[list[str], list[list[str]]]
     elif "di hoc" in norm:
         names.append("di hoc")
         groups.append(["上学", "学生"])
+
+    # 5. Core product / tool detection
+    if "nhip" in norm or "tweezers" in norm:
+        names.append("nhip")
+        groups.append(["镊子", "鑷子"])
 
     return names, groups
 
@@ -1013,23 +1036,34 @@ def generate_tiered_queries(
     compound = compound_intent(raw_query)
     if compound:
         _, precise_queries = compound
-        prefix = "".join(group[0] for group in groups)
         action_terms = ACTION_MAP.get(action, []) if action else []
         suffix = action_terms[0] if action_terms else ""
-        return [prefix + term + suffix for term in precise_queries]
+        res: list[str] = []
+        for term in precise_queries:
+            prefix = "".join(grp[0] for grp in groups if not any(tok in term for tok in grp))
+            res.append(prefix + term + suffix)
+        return res
 
     candidates: list[str] = []
+
+    subj_data = SUBJECT_MAP.get(subject, {}) if subject else {}
+    subj_tokens = (subj_data.get("primary", []) + subj_data.get("natural", [])) if subj_data else []
 
     # 1. So khớp từ điển cụm từ chuyên sâu dài nhất trước
     for phrase, translations in sorted(
         PHRASE_DICTIONARY.items(), key=lambda item: len(item[0]), reverse=True
     ):
-        if phrase in norm:
+        if re.search(r"\b" + re.escape(phrase) + r"\b", norm):
             if not is_valid_phrase_match(raw_query, norm, phrase):
                 continue
+            if subject and subject not in phrase and subj_tokens:
+                if not any(any(st in term for st in subj_tokens) for term in translations):
+                    continue
             for term in translations:
                 # Nếu có thuộc tính bắt buộc, yêu cầu thoả mãn tất cả các nhóm (AND giữa các nhóm)
                 if not satisfies_all_attribute_groups(term, groups):
+                    continue
+                if subject and subject not in phrase and subj_tokens and not any(st in term for st in subj_tokens):
                     continue
                 if term not in candidates:
                     candidates.append(term)
