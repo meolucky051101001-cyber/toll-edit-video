@@ -55,6 +55,9 @@ def test_release_readiness_api_endpoint():
         assert res.status_code == 200
         data = res.json()
         assert data["status"] in {"READY", "DEGRADED", "BLOCKED", "NOT_READY"}
+        assert "is_ready" in data
+        assert "workstation_ready" in data
+        assert "retrieval_ready" in data
         assert "checks" in data
         assert "database" in data["checks"]
         assert "job_queue" in data["checks"]
@@ -91,6 +94,8 @@ def test_release_readiness_probe_fail_closed_on_error():
             data = res.json()
             assert data["status"] == "BLOCKED"
             assert data["is_ready"] is False
+            assert data["workstation_ready"] is False
+            assert data["retrieval_ready"] is False
             assert "live_providers" in data["checks"]
             assert data["checks"]["live_providers"]["status"] == "FAIL"
 
@@ -103,6 +108,8 @@ def test_release_readiness_probe_fail_closed_on_error():
             data2 = res2.json()
             assert data2["status"] == "BLOCKED"
             assert data2["is_ready"] is False
+            assert data2["workstation_ready"] is False
+            assert data2["retrieval_ready"] is False
             assert data2["checks"]["live_providers"]["status"] == "FAIL"
 
             # Case 3: Both succeed cleanly as authenticated -> READY
@@ -114,6 +121,8 @@ def test_release_readiness_probe_fail_closed_on_error():
             data3 = res3.json()
             assert data3["status"] == "READY"
             assert data3["is_ready"] is True
+            assert data3["workstation_ready"] is True
+            assert data3["retrieval_ready"] is True
             assert data3["checks"]["live_providers"]["status"] == "PASS"
             assert data3["checks"]["providers"]["status"] == "PASS"
             assert not any("standby" in w.lower() for w in data3.get("warnings", []))
@@ -129,7 +138,9 @@ def test_release_readiness_probe_fail_closed_on_error():
             assert res4.status_code == 200
             data4 = res4.json()
             assert data4["status"] == "DEGRADED"
-            assert data4["is_ready"] is True
+            assert data4["is_ready"] is False
+            assert data4["workstation_ready"] is True
+            assert data4["retrieval_ready"] is False
             assert data4["checks"]["live_providers"]["status"] == "PASS"
             assert data4["checks"]["providers"]["status"] == "PASS"
             assert data4["live_probe"]["xiaohongshu"]["session_state"] == "page_available"
@@ -142,6 +153,9 @@ def test_release_readiness_probe_fail_closed_on_error():
             assert res5.status_code == 200
             data5 = res5.json()
             assert data5["status"] == "DEGRADED"
+            assert data5["is_ready"] is False
+            assert data5["workstation_ready"] is True
+            assert data5["retrieval_ready"] is False
             assert data5["live_probe"]["douyin"]["session_state"] == "verification_required"
             assert data5["live_probe"]["xiaohongshu"]["session_state"] == "verification_required"
 
@@ -152,6 +166,9 @@ def test_release_readiness_probe_fail_closed_on_error():
             assert res6.status_code == 200
             data6 = res6.json()
             assert data6["status"] == "DEGRADED"
+            assert data6["is_ready"] is False
+            assert data6["workstation_ready"] is True
+            assert data6["retrieval_ready"] is False
             assert data6["live_probe"]["xiaohongshu"]["session_state"] == "login_required"
 
 

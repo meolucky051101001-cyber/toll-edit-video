@@ -249,9 +249,19 @@ async def get_release_readiness(
     else:
         overall_status = "READY"
 
+    # Clarify contracts:
+    # - retrieval_ready: True ONLY when live retrieval is unblocked and operational without degradation
+    # - workstation_ready: True when core infrastructure (database, worker pool, network) is operational
+    # - is_ready: aligned with retrieval_ready (False when DEGRADED, BLOCKED, or NOT_READY)
+    retrieval_ready = (overall_status == "READY")
+    workstation_ready = (overall_status not in ("BLOCKED", "NOT_READY"))
+    is_ready = retrieval_ready
+
     res: dict[str, Any] = {
         "status": overall_status,
         "is_ready": is_ready,
+        "workstation_ready": workstation_ready,
+        "retrieval_ready": retrieval_ready,
         "checks": checks,
         "warnings": warnings,
     }

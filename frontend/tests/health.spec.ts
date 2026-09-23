@@ -99,6 +99,8 @@ test.describe("System Health & Release Readiness UI", () => {
         body: JSON.stringify({
           status: "DEGRADED",
           is_ready: false,
+          workstation_ready: true,
+          retrieval_ready: false,
           checks: {
             database: { status: "PASS", detail: "All 5 core tables verified" },
             worker_pool: { status: "PASS", detail: "Worker pool healthy (2 workers)" },
@@ -185,6 +187,8 @@ test.describe("System Health & Release Readiness UI", () => {
         body: JSON.stringify({
           status: "DEGRADED",
           is_ready: false,
+          workstation_ready: true,
+          retrieval_ready: false,
           checks: {
             database: { status: "PASS", detail: "All 5 core tables verified" },
             worker_pool: { status: "PASS", detail: "Worker pool healthy (2 workers)" },
@@ -252,6 +256,8 @@ test.describe("System Health & Release Readiness UI", () => {
         body: JSON.stringify({
           status: "READY",
           is_ready: true,
+          workstation_ready: true,
+          retrieval_ready: true,
           checks: {
             database: { status: "PASS", detail: "All 5 core tables verified" },
             worker_pool: { status: "PASS", detail: "Worker pool healthy (2 workers)" },

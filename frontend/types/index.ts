@@ -353,6 +353,8 @@ export interface LiveProbePlatformDetail {
 
 export interface ReleaseReadinessResponse {
   is_ready: boolean;
+  workstation_ready?: boolean;
+  retrieval_ready?: boolean;
   status: "READY" | "DEGRADED" | "BLOCKED" | "NOT_READY" | "ready" | "degraded" | "blocked" | "not_ready";
   checks: Record<string, ReleaseReadinessCheckItem>;
   warnings?: string[];

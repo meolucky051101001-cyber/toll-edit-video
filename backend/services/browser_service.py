@@ -474,7 +474,7 @@ class BrowserService:
                 return False, "Browser context unavailable"
             probe_page = await self.context.new_page()
             target_url = self.base_url or "https://www.xiaohongshu.com/explore"
-            resp = await probe_page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
+            resp = await probe_page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
             http_status = resp.status if resp is not None else None
             self.last_http_status = http_status
             state = await self.inspect(probe_page)
@@ -529,12 +529,37 @@ class BrowserService:
                 except Exception:
                     pass
 
-            user_nav = page.locator(
-                ".side-bar a[href*='/user/profile/'], .side-bar :text('Me'), .side-bar :text('我'), .side-bar :text('Profile'), .side-bar :text('My Profile')"
+            # Check for explicit login buttons / links (presence means user is NOT logged in)
+            login_buttons = page.locator(
+                "button:has-text('登录'), a:has-text('登录'), .login-btn, [class*='login-btn'], .side-bar :text('登录'), [aria-label*='登录'], :text('立即登录'), button:has-text('Log In'), button:has-text('Sign In')"
             )
-            user_avatar = page.locator(".side-bar img[src*='avatar'], .side-bar [class*='avatar']:visible, [class*='user-avatar']:visible")
-            has_user_element = ((await user_nav.count()) > 0) or ((await user_avatar.count()) > 0)
-            is_authenticated = bool(has_session_cookie and has_user_element)
+            has_login_button = (await login_buttons.count()) > 0
+
+            # Account-specific identity elements (do NOT use generic sidebar tabs like '我' or 'Me' which appear for guests)
+            user_profile_link = page.locator(".side-bar a[href*='/user/profile/'], a[href*='/user/profile/']")
+            user_avatar = page.locator(
+                ".side-bar img[src*='avatar'], .side-bar img[src*='sns-webpic'], .side-bar [class*='avatar']:visible, [class*='user-avatar']:visible"
+            )
+            has_user_element = ((await user_profile_link.count()) > 0) or ((await user_avatar.count()) > 0)
+
+            # Check client-side Vue reactive user state if available (from window.__INITIAL_STATE__)
+            js_logged_in: bool | None = None
+            try:
+                js_logged_in = await page.evaluate("""() => {
+                    try {
+                        const u = window.__INITIAL_STATE__ && window.__INITIAL_STATE__.user;
+                        if (!u) return null;
+                        const v = (u && typeof u === 'object' && '_value' in u.loggedIn) ? u.loggedIn._value : (
+                            (u && typeof u === 'object' && 'value' in u.loggedIn) ? u.loggedIn.value : u.loggedIn
+                        );
+                        if (typeof v === 'boolean') return v;
+                        return false;
+                    } catch (e) {
+                        return null;
+                    }
+                }""")
+            except Exception:
+                js_logged_in = None
 
             login_modal = page.locator(
                 ".login-container:visible, .login-modal:visible, [class*='login-modal']:visible, .reds-modal.login-modal:visible"
@@ -557,8 +582,20 @@ class BrowserService:
                 except Exception:
                     pass
 
-            # Re-evaluate is_authenticated after modal dismissal attempt
-            is_authenticated = bool(has_session_cookie and has_user_element and not login_modal_visible)
+            is_login_route = (
+                "/login" in parts.path or "/website-login" in parts.path
+                or "tourist_search" in parse_qs(parts.query).get("source", [])
+            )
+
+            # Strict authentication: must have session cookie, user element, no modal, NO login buttons, no login route, and js_logged_in != False
+            is_authenticated = bool(
+                has_session_cookie
+                and has_user_element
+                and not login_modal_visible
+                and not has_login_button
+                and not is_login_route
+                and js_logged_in is not False
+            )
 
             # Check for verification / captcha container or iframes
             captcha_box = page.locator(
@@ -578,10 +615,7 @@ class BrowserService:
 
             if self.state in {"restricted", "verification_required"}:
                 pass
-            elif (
-                "/login" in parts.path or "/website-login" in parts.path
-                or "tourist_search" in parse_qs(parts.query).get("source", [])
-            ):
+            elif is_login_route:
                 # A stale cookie is not evidence that the server accepted the session.
                 self.state = "login_required"
             elif login_modal_visible:
@@ -619,6 +653,8 @@ class BrowserService:
                 "input_count": input_count,
                 "search_input_value": search_val,
                 "login_modal_visible": login_modal_visible,
+                "captcha_visible": captcha_visible,
+                "has_login_button": has_login_button,
                 "is_authenticated": is_authenticated,
                 "result_links_count": note_links,
                 "video_elements_count": video_count,

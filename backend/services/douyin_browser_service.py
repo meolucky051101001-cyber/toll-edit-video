@@ -370,7 +370,7 @@ class DouyinBrowserService:
                 return False, "Browser context unavailable"
             probe_page = await self.context.new_page()
             target_url = self.base_url or DOUYIN_HOME
-            resp = await probe_page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
+            resp = await probe_page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
             http_status = resp.status if resp is not None else None
             self.last_http_status = http_status
             state = await self.inspect(probe_page)
@@ -432,6 +432,12 @@ class DouyinBrowserService:
             has_user_element = (await user_avatar.count()) > 0
             is_authenticated = bool(has_session_cookie and has_user_element)
 
+            # Check for explicit login buttons / links (presence means user is NOT logged in)
+            login_buttons = page.locator(
+                "[data-e2e='login-button']:visible, button:has-text('登录'):visible, a:has-text('登录'):visible, .header-login-btn:visible, :text('登录'):visible"
+            )
+            has_login_button = (await login_buttons.count()) > 0
+
             # Check for verification / captcha container or iframes
             captcha_box = page.locator(
                 "#captcha-verify-image, .captcha-verify-container:visible, .verify-bar-close:visible, [class*='captcha']:visible"
@@ -470,12 +476,20 @@ class DouyinBrowserService:
                 except Exception:
                     pass
 
+            is_login_route = "/login" in parts.path
+
             # Re-evaluate is_authenticated after modal dismissal attempt
-            is_authenticated = bool(has_session_cookie and has_user_element and not login_modal_visible)
+            is_authenticated = bool(
+                has_session_cookie
+                and has_user_element
+                and not login_modal_visible
+                and not has_login_button
+                and not is_login_route
+            )
 
             if self.state in {"verification_required", "restricted"}:
                 pass
-            elif "/login" in parts.path:
+            elif is_login_route:
                 self.state = "login_required"
             elif login_modal_visible:
                 self.state = "login_required"
@@ -513,6 +527,7 @@ class DouyinBrowserService:
                 "search_input_value": search_val,
                 "login_modal_visible": login_modal_visible,
                 "captcha_visible": captcha_visible,
+                "has_login_button": has_login_button,
                 "is_authenticated": is_authenticated,
                 "result_links_count": note_links,
                 "video_elements_count": video_count,

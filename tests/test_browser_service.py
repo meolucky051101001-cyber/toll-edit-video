@@ -37,6 +37,7 @@ async def test_xhs_inspect_and_probe_authenticated(tmp_path):
 
     mock_page.locator = MagicMock(side_effect=mock_locator)
     mock_page.frames = []
+    mock_page.evaluate = AsyncMock(return_value=True)
     service.context = mock_context
 
     # Verify inspect() classifies as authenticated
@@ -54,6 +55,85 @@ async def test_xhs_inspect_and_probe_authenticated(tmp_path):
     assert is_healthy is True
     assert desc == "HTTP 200: authenticated"
     assert service.last_http_status == 200
+
+
+@pytest.mark.anyio
+async def test_xhs_guest_page_with_sidebar_and_stale_cookie_not_authenticated(tmp_path):
+    """Verifies that generic sidebar items (我/Me) and guest web_session cookies do not cause false authenticated state."""
+    service = BrowserService(profile=tmp_path / "xhs_guest_sidebar", headless=True)
+    mock_context = MagicMock()
+    # Real XHS sets web_session even for guest visitors
+    mock_context.cookies = AsyncMock(return_value=[{"name": "web_session", "value": "guest_cookie_val"}])
+
+    mock_page = AsyncMock()
+    mock_page.is_closed = MagicMock(return_value=False)
+    mock_page.url = "https://www.xiaohongshu.com/explore"
+    mock_page.title = AsyncMock(return_value="小红书 - 你的生活兴趣社区")
+
+    def mock_locator(selector: str):
+        loc = AsyncMock()
+        loc.inner_text = AsyncMock(return_value="发现 / 我")
+        # Sidebar has generic "我" or "Me", but NO user profile URL with ID and NO user avatar
+        if "/user/profile/" in selector or "avatar" in selector:
+            loc.count = AsyncMock(return_value=0)
+        # Login button is prominently visible on guest page
+        elif "button:has-text('登录')" in selector or ".login-btn" in selector or "登录" in selector:
+            loc.count = AsyncMock(return_value=1)
+        # No blocking modal or captcha
+        elif "modal" in selector or "container" in selector or "captcha" in selector or "verify" in selector:
+            loc.count = AsyncMock(return_value=0)
+        else:
+            loc.count = AsyncMock(return_value=0)
+        loc.first = loc
+        loc.all = AsyncMock(return_value=[])
+        return loc
+
+    mock_page.locator = MagicMock(side_effect=mock_locator)
+    mock_page.frames = []
+    # Client state confirms not logged in (loggedIn: false)
+    mock_page.evaluate = AsyncMock(return_value=False)
+    service.context = mock_context
+
+    state = await service.inspect(mock_page)
+    # Must be page_available (guest), NEVER authenticated
+    assert state == "page_available"
+    assert service.diagnostics["is_authenticated"] is False
+    assert service.diagnostics["has_login_button"] is True
+
+
+@pytest.mark.anyio
+async def test_xhs_inspect_overridden_by_js_logged_in_false(tmp_path):
+    """Verifies that if window.__INITIAL_STATE__.user.loggedIn is false, session is never classified as authenticated."""
+    service = BrowserService(profile=tmp_path / "xhs_js_override", headless=True)
+    mock_context = MagicMock()
+    mock_context.cookies = AsyncMock(return_value=[{"name": "web_session", "value": "some_token"}])
+
+    mock_page = AsyncMock()
+    mock_page.is_closed = MagicMock(return_value=False)
+    mock_page.url = "https://www.xiaohongshu.com/explore"
+    mock_page.title = AsyncMock(return_value="小红书")
+
+    def mock_locator(selector: str):
+        loc = AsyncMock()
+        loc.inner_text = AsyncMock(return_value="")
+        # Suppose a DOM avatar is present
+        if "avatar" in selector or "profile" in selector:
+            loc.count = AsyncMock(return_value=1)
+        else:
+            loc.count = AsyncMock(return_value=0)
+        loc.first = loc
+        loc.all = AsyncMock(return_value=[])
+        return loc
+
+    mock_page.locator = MagicMock(side_effect=mock_locator)
+    mock_page.frames = []
+    # Server/client state explicitly reports false
+    mock_page.evaluate = AsyncMock(return_value=False)
+    service.context = mock_context
+
+    state = await service.inspect(mock_page)
+    assert state == "page_available"
+    assert service.diagnostics["is_authenticated"] is False
 
 
 @pytest.mark.anyio

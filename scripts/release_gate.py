@@ -341,7 +341,7 @@ def main() -> int:
     print(f"[11/{total_stages}] Running Live Crawl Network & Retrieval Acceptance...", end=" ", flush=True)
     if is_live_requested:
         # Cooldown to ensure any browser/node processes and sockets from Stage 10 are fully recycled
-        time.sleep(2.0)
+        time.sleep(3.0)
         t0 = time.time()
         live_env = os.environ.copy()
         live_env["LIVE_CRAWL_ENABLED"] = "1"
