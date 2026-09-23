@@ -105,10 +105,10 @@ def test_release_readiness_probe_fail_closed_on_error():
             assert data2["is_ready"] is False
             assert data2["checks"]["live_providers"]["status"] == "FAIL"
 
-            # Case 3: Both succeed cleanly without auth challenges -> READY
+            # Case 3: Both succeed cleanly as authenticated -> READY
             mock_dy.side_effect = None
-            mock_dy.return_value = (True, "HTTP 200: ready")
-            mock_xhs.return_value = (True, "HTTP 200: ready")
+            mock_dy.return_value = (True, "HTTP 200: authenticated")
+            mock_xhs.return_value = (True, "HTTP 200: authenticated")
             res3 = client.get("/api/system/release-readiness?probe=true")
             assert res3.status_code == 200
             data3 = res3.json()
@@ -117,9 +117,13 @@ def test_release_readiness_probe_fail_closed_on_error():
             assert data3["checks"]["live_providers"]["status"] == "PASS"
             assert data3["checks"]["providers"]["status"] == "PASS"
             assert not any("standby" in w.lower() for w in data3.get("warnings", []))
+            assert data3["live_probe"]["douyin"]["session_state"] == "authenticated"
+            assert data3["live_probe"]["douyin"]["http_status"] == 200
+            assert data3["live_probe"]["xiaohongshu"]["session_state"] == "authenticated"
+            assert data3["live_probe"]["xiaohongshu"]["http_status"] == 200
 
-            # Case 4: Reachable (HTTP 200) but unverified session or auth challenge -> DEGRADED
-            mock_dy.return_value = (True, "HTTP 200: verification_required")
+            # Case 4: Reachable (HTTP 200) but unverified guest session -> DEGRADED
+            mock_dy.return_value = (True, "HTTP 200: authenticated")
             mock_xhs.return_value = (True, "HTTP 200: page_available")
             res4 = client.get("/api/system/release-readiness?probe=true")
             assert res4.status_code == 200
@@ -128,7 +132,27 @@ def test_release_readiness_probe_fail_closed_on_error():
             assert data4["is_ready"] is True
             assert data4["checks"]["live_providers"]["status"] == "PASS"
             assert data4["checks"]["providers"]["status"] == "PASS"
+            assert data4["live_probe"]["xiaohongshu"]["session_state"] == "page_available"
             assert any("auth challenge" in w.lower() or "unverified session" in w.lower() for w in data4.get("warnings", []))
+
+            # Case 5: Reachable but CAPTCHA verification required -> DEGRADED
+            mock_dy.return_value = (True, "HTTP 200: verification_required")
+            mock_xhs.return_value = (True, "HTTP 200: verification_required")
+            res5 = client.get("/api/system/release-readiness?probe=true")
+            assert res5.status_code == 200
+            data5 = res5.json()
+            assert data5["status"] == "DEGRADED"
+            assert data5["live_probe"]["douyin"]["session_state"] == "verification_required"
+            assert data5["live_probe"]["xiaohongshu"]["session_state"] == "verification_required"
+
+            # Case 6: Reachable but Login required -> DEGRADED
+            mock_dy.return_value = (True, "HTTP 200: authenticated")
+            mock_xhs.return_value = (True, "HTTP 200: login_required")
+            res6 = client.get("/api/system/release-readiness?probe=true")
+            assert res6.status_code == 200
+            data6 = res6.json()
+            assert data6["status"] == "DEGRADED"
+            assert data6["live_probe"]["xiaohongshu"]["session_state"] == "login_required"
 
 
 @pytest.mark.anyio

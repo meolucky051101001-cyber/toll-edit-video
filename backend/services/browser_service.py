@@ -533,8 +533,8 @@ class BrowserService:
                 ".side-bar a[href*='/user/profile/'], .side-bar :text('Me'), .side-bar :text('我'), .side-bar :text('Profile'), .side-bar :text('My Profile')"
             )
             user_avatar = page.locator(".side-bar img[src*='avatar'], .side-bar [class*='avatar']:visible, [class*='user-avatar']:visible")
-            has_user_element = ((await user_nav.count()) > 0) or ((await user_avatar.count()) > 0) or has_session_cookie
-            is_authenticated = bool(has_user_element or has_session_cookie)
+            has_user_element = ((await user_nav.count()) > 0) or ((await user_avatar.count()) > 0)
+            is_authenticated = bool(has_session_cookie and has_user_element)
 
             login_modal = page.locator(
                 ".login-container:visible, .login-modal:visible, [class*='login-modal']:visible, .reds-modal.login-modal:visible"
@@ -556,6 +556,9 @@ class BrowserService:
                     login_modal_visible = (await login_modal.count()) > 0
                 except Exception:
                     pass
+
+            # Re-evaluate is_authenticated after modal dismissal attempt
+            is_authenticated = bool(has_session_cookie and has_user_element and not login_modal_visible)
 
             # Check for verification / captcha container or iframes
             captcha_box = page.locator(
@@ -581,15 +584,10 @@ class BrowserService:
             ):
                 # A stale cookie is not evidence that the server accepted the session.
                 self.state = "login_required"
-            elif is_authenticated:
-                self.state = "page_available"
             elif login_modal_visible:
-                # If notes or video elements are present, the page is usable despite the modal
-                note_items = await page.locator("section.note-item, div.note-item, .search-result-item, a[href*='/explore/']").count()
-                if note_items > 0:
-                    self.state = "page_available"
-                else:
-                    self.state = "login_required"
+                self.state = "login_required"
+            elif is_authenticated:
+                self.state = "authenticated"
             else:
                 self.state = "page_available"
 
@@ -625,7 +623,8 @@ class BrowserService:
                 "result_links_count": note_links,
                 "video_elements_count": video_count,
             }
-        except Exception:
+        except Exception as exc:
+            logger.debug("Exception in inspect: %s", exc, exc_info=True)
             self.state = "network_error"
         return self.state
 

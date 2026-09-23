@@ -173,9 +173,33 @@ async def get_release_readiness(
                 else:
                     xhs_ok, xhs_detail = False, f"Unexpected probe result: {xhs_probe_res}"
 
+                def _parse_probe_state(desc: str) -> tuple[int | None, str]:
+                    parts = desc.split(":", 1)
+                    http_code = None
+                    if "HTTP" in parts[0]:
+                        try:
+                            http_code = int(parts[0].replace("HTTP", "").strip())
+                        except ValueError:
+                            pass
+                    st = parts[1].strip() if len(parts) > 1 else desc.strip()
+                    return http_code, st
+
+                dy_http, dy_session_st = _parse_probe_state(dy_detail)
+                xhs_http, xhs_session_st = _parse_probe_state(xhs_detail)
+
                 live_probe_details = {
-                    "douyin": {"reachable": dy_ok, "state": dy_detail},
-                    "xiaohongshu": {"reachable": xhs_ok, "state": xhs_detail},
+                    "douyin": {
+                        "reachable": dy_ok,
+                        "http_status": dy_http,
+                        "session_state": dy_session_st,
+                        "state": dy_detail,
+                    },
+                    "xiaohongshu": {
+                        "reachable": xhs_ok,
+                        "http_status": xhs_http,
+                        "session_state": xhs_session_st,
+                        "state": xhs_detail,
+                    },
                 }
                 if not dy_ok or not xhs_ok:
                     checks["live_providers"] = {
@@ -198,11 +222,14 @@ async def get_release_readiness(
                     }
                     warnings = [w for w in warnings if "standby (not probed)" not in w]
                     has_auth_challenge = (
-                        "login_required" in dy_detail
+                        dy_session_st in ("login_required", "verification_required", "page_available", "unverified")
+                        or xhs_session_st in ("login_required", "verification_required", "page_available", "unverified")
+                        or "login_required" in dy_detail
                         or "verification_required" in dy_detail
                         or "login_required" in xhs_detail
                         or "verification_required" in xhs_detail
                         or "page_available" in xhs_detail
+                        or "page_available" in dy_detail
                     )
                     if has_auth_challenge:
                         warnings.append(f"Provider auth challenge / unverified session: douyin={dy_detail}, xhs={xhs_detail}")

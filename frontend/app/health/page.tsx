@@ -121,15 +121,18 @@ export default function HealthPage() {
         <div>
           <span>Release Readiness</span>
           <strong
+            data-testid="release-readiness-status"
             style={{
               display: "flex",
               alignItems: "center",
               gap: "0.35rem",
-              color: activeReadiness?.is_ready
-                ? "#16a34a"
-                : activeReadiness?.status?.toUpperCase() === "DEGRADED"
-                ? "#ca8a04"
-                : "#dc2626",
+              color: (() => {
+                const s = activeReadiness?.status?.toUpperCase();
+                if (s === "READY") return "#16a34a";
+                if (s === "DEGRADED") return "#ca8a04";
+                if (s === "BLOCKED" || s === "NOT_READY") return "#dc2626";
+                return "#64748b";
+              })(),
             }}
           >
             <ShieldCheck size={18} />
@@ -298,15 +301,33 @@ export default function HealthPage() {
               {activeReadiness.live_probe.douyin && (() => {
                 const dy = activeReadiness.live_probe.douyin;
                 const isReachable = dy.reachable;
-                const isChallenge = dy.state.includes("verification_required") || dy.state.includes("challenge") || dy.state.includes("CAPTCHA");
-                const isLogin = dy.state.includes("login_required");
+                const sessionState = dy.session_state || (
+                  dy.state.includes("verification_required") || dy.state.includes("challenge") || dy.state.includes("CAPTCHA")
+                    ? "verification_required"
+                    : dy.state.includes("login_required")
+                    ? "login_required"
+                    : dy.state.includes("authenticated") || dy.state.includes("ready")
+                    ? "authenticated"
+                    : dy.state.includes("page_available") || dy.state.includes("unverified")
+                    ? "unverified"
+                    : "unknown"
+                );
+                const isChallenge = sessionState === "verification_required";
+                const isLogin = sessionState === "login_required";
+                const isAuthenticated = sessionState === "authenticated";
+                const isUnverified = sessionState === "unverified" || sessionState === "page_available";
+
                 const dyStatusBadge = !isReachable
                   ? { label: "MẤT KẾT NỐI", bg: "#fee2e2", color: "#991b1b" }
+                  : isAuthenticated
+                  ? { label: "ĐÃ ĐĂNG NHẬP (SẴN SÀNG)", bg: "#dcfce7", color: "#166534" }
                   : isChallenge
                   ? { label: "CẦN XÁC MINH BẢO MẬT (CAPTCHA)", bg: "#fef3c7", color: "#92400e" }
                   : isLogin
-                  ? { label: "CẦN ĐĂNG NHẬP", bg: "#fef3c7", color: "#92400e" }
-                  : { label: "ĐÃ KẾT NỐI (READY)", bg: "#dcfce7", color: "#166534" };
+                  ? { label: "CẦN ĐĂNG NHẬP", bg: "#fee2e2", color: "#991b1b" }
+                  : isUnverified
+                  ? { label: "CHƯA XÁC MINH PHIÊN", bg: "#fef3c7", color: "#92400e" }
+                  : { label: "CHƯA XÁC ĐỊNH PHIÊN", bg: "#fef3c7", color: "#92400e" };
 
                 return (
                   <div
@@ -337,18 +358,27 @@ export default function HealthPage() {
                     <div style={{ fontSize: "0.75rem", color: "#475569" }}>
                       {isReachable ? (
                         <span>
-                          <div><strong style={{ color: "#16a34a" }}>Kết nối mạng:</strong> Đã kết nối ({dy.state.split(":")[0]?.trim() || "HTTP 200"})</div>
+                          <div><strong style={{ color: "#16a34a" }}>Kết nối mạng:</strong> Đã kết nối ({dy.http_status ? `HTTP ${dy.http_status}` : dy.state.split(":")[0]?.trim() || "HTTP 200"})</div>
                           <div style={{ marginTop: "0.2rem" }}>
-                            <strong style={{ color: isChallenge || isLogin ? "#b45309" : "#16a34a" }}>Thử thách bảo mật:</strong>{" "}
-                            {isChallenge
+                            <strong style={{ color: isAuthenticated ? "#16a34a" : isChallenge || isLogin || isUnverified ? "#b45309" : "#16a34a" }}>Phiên làm việc:</strong>{" "}
+                            {isAuthenticated
+                              ? "Đã xác thực phiên thành công (Sẵn sàng tìm kiếm)"
+                              : isChallenge
                               ? "Phát hiện thử thách xác minh bảo mật (CAPTCHA)"
                               : isLogin
                               ? "Yêu cầu đăng nhập tài khoản"
-                              : "Không có thử thách bảo mật"}
+                              : isUnverified
+                              ? "Chưa xác minh phiên đăng nhập (Tìm kiếm thật có thể yêu cầu CAPTCHA/đăng nhập)"
+                              : dy.state}
                           </div>
                           {isChallenge && (
                             <div style={{ color: "#b45309", marginTop: "0.2rem", fontStyle: "italic" }}>
                               * Cần mở trình duyệt hoặc giải CAPTCHA trạm làm việc để lấy video trực tiếp.
+                            </div>
+                          )}
+                          {isLogin && (
+                            <div style={{ color: "#b45309", marginTop: "0.2rem", fontStyle: "italic" }}>
+                              * Cần quét mã QR đăng nhập trạm làm việc để duyệt feed tìm kiếm đầy đủ.
                             </div>
                           )}
                         </span>
@@ -364,17 +394,32 @@ export default function HealthPage() {
               {activeReadiness.live_probe.xiaohongshu && (() => {
                 const xhs = activeReadiness.live_probe.xiaohongshu;
                 const isReachable = xhs.reachable;
-                const isLogin = xhs.state.includes("login_required") || xhs.state.includes("Login");
-                const isUnverified = xhs.state.includes("page_available") || xhs.state.includes("unverified");
-                const isAuthenticated = xhs.state.includes("authenticated") || xhs.state.includes("ready");
+                const sessionState = xhs.session_state || (
+                  xhs.state.includes("verification_required") || xhs.state.includes("challenge") || xhs.state.includes("CAPTCHA")
+                    ? "verification_required"
+                    : xhs.state.includes("login_required") || xhs.state.includes("Login")
+                    ? "login_required"
+                    : xhs.state.includes("authenticated") || xhs.state.includes("ready")
+                    ? "authenticated"
+                    : xhs.state.includes("page_available") || xhs.state.includes("unverified")
+                    ? "unverified"
+                    : "unknown"
+                );
+                const isChallenge = sessionState === "verification_required";
+                const isLogin = sessionState === "login_required";
+                const isUnverified = sessionState === "unverified" || sessionState === "page_available";
+                const isAuthenticated = sessionState === "authenticated";
+
                 const xhsStatusBadge = !isReachable
                   ? { label: "MẤT KẾT NỐI", bg: "#fee2e2", color: "#991b1b" }
+                  : isAuthenticated
+                  ? { label: "ĐÃ ĐĂNG NHẬP (SẴN SÀNG)", bg: "#dcfce7", color: "#166534" }
+                  : isChallenge
+                  ? { label: "CẦN XÁC MINH BẢO MẬT (CAPTCHA)", bg: "#fef3c7", color: "#92400e" }
                   : isLogin
                   ? { label: "CẦN ĐĂNG NHẬP PHIÊN", bg: "#fee2e2", color: "#991b1b" }
                   : isUnverified
                   ? { label: "CHƯA XÁC MINH PHIÊN (CẦN ĐĂNG NHẬP ĐỂ TÌM KIẾM)", bg: "#fef3c7", color: "#92400e" }
-                  : isAuthenticated
-                  ? { label: "ĐÃ ĐĂNG NHẬP (SẴN SÀNG)", bg: "#dcfce7", color: "#166534" }
                   : { label: "CHƯA XÁC ĐỊNH PHIÊN", bg: "#fef3c7", color: "#92400e" };
 
                 return (
@@ -406,17 +451,24 @@ export default function HealthPage() {
                     <div style={{ fontSize: "0.75rem", color: "#475569" }}>
                       {isReachable ? (
                         <span>
-                          <div><strong style={{ color: "#16a34a" }}>Kết nối mạng:</strong> Đã kết nối ({xhs.state.split(":")[0]?.trim() || "HTTP 200"})</div>
+                          <div><strong style={{ color: "#16a34a" }}>Kết nối mạng:</strong> Đã kết nối ({xhs.http_status ? `HTTP ${xhs.http_status}` : xhs.state.split(":")[0]?.trim() || "HTTP 200"})</div>
                           <div style={{ marginTop: "0.2rem" }}>
-                            <strong style={{ color: isLogin || isUnverified ? "#b45309" : "#16a34a" }}>Phiên làm việc:</strong>{" "}
-                            {isLogin
+                            <strong style={{ color: isAuthenticated ? "#16a34a" : isChallenge || isLogin || isUnverified ? "#b45309" : "#16a34a" }}>Phiên làm việc:</strong>{" "}
+                            {isAuthenticated
+                              ? "Đã xác thực phiên thành công (Sẵn sàng tìm kiếm)"
+                              : isChallenge
+                              ? "Phát hiện thử thách xác minh bảo mật (CAPTCHA - cần giải trên trạm làm việc)"
+                              : isLogin
                               ? "Cần đăng nhập phiên (Login required)"
                               : isUnverified
                               ? "Chưa xác minh phiên đăng nhập (Tìm kiếm thật có thể bị chặn)"
-                              : isAuthenticated
-                              ? "Đã xác thực phiên thành công"
                               : xhs.state}
                           </div>
+                          {isChallenge && (
+                            <div style={{ color: "#b45309", marginTop: "0.2rem", fontStyle: "italic" }}>
+                              * Cần mở trình duyệt hoặc giải CAPTCHA trạm làm việc để duyệt tìm kiếm.
+                            </div>
+                          )}
                           {(isLogin || isUnverified) && (
                             <div style={{ color: "#b45309", marginTop: "0.2rem", fontStyle: "italic" }}>
                               * Cần quét mã QR đăng nhập trạm làm việc để duyệt feed tìm kiếm đầy đủ.

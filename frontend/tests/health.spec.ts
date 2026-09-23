@@ -28,6 +28,12 @@ test.describe("System Health & Release Readiness UI", () => {
     // 2. Check overview cards
     await expect(page.getByText("Trạng thái Backend", { exact: true })).toBeVisible();
     await expect(page.getByText("Release Readiness", { exact: true })).toBeVisible();
+    const readinessStatus = page.locator("[data-testid='release-readiness-status']");
+    await expect(readinessStatus).toBeVisible();
+    // Default without live probe has warnings for standby sessions -> DEGRADED (amber rgb(202, 138, 4), not green rgb(22, 163, 74))
+    await expect(readinessStatus).toHaveText("DEGRADED");
+    await expect(readinessStatus).toHaveCSS("color", "rgb(202, 138, 4)");
+    await expect(readinessStatus).not.toHaveCSS("color", "rgb(22, 163, 74)");
     await expect(page.getByText("Hàng đợi (Queue Size)", { exact: true })).toBeVisible();
     await expect(page.getByText("Worker Pool", { exact: true })).toBeVisible();
     await expect(page.getByText("Uptime", { exact: true })).toBeVisible();
@@ -125,6 +131,12 @@ test.describe("System Health & Release Readiness UI", () => {
     await expect(page.locator("[data-testid='live-probe-active-badge']")).toBeVisible({ timeout: 10000 });
     await expect(page.locator("[data-testid='live-probe-breakdown']")).toBeVisible();
 
+    // Overview readiness status should be DEGRADED (amber rgb(202, 138, 4), not green rgb(22, 163, 74))
+    const liveReadinessStatus = page.locator("[data-testid='release-readiness-status']");
+    await expect(liveReadinessStatus).toHaveText("DEGRADED");
+    await expect(liveReadinessStatus).toHaveCSS("color", "rgb(202, 138, 4)");
+    await expect(liveReadinessStatus).not.toHaveCSS("color", "rgb(22, 163, 74)");
+
     // Verify distinct Douyin status: Reachable but Auth Challenge Required
     const douyinCard = page.locator("[data-testid='live-probe-douyin']");
     await expect(douyinCard).toBeVisible();
@@ -155,6 +167,142 @@ test.describe("System Health & Release Readiness UI", () => {
     await expect(page.locator("[data-testid='live-probe-breakdown']")).not.toBeVisible();
 
     // Ensure no JavaScript exceptions occurred
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("displays XHS verification_required (CAPTCHA) with amber badge and resolution tips", async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err) => pageErrors.push(err.message));
+
+    await page.goto("/health");
+
+    await page.route("**/api/system/release-readiness?probe=true", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "DEGRADED",
+          is_ready: false,
+          checks: {
+            database: { status: "PASS", detail: "All 5 core tables verified" },
+            worker_pool: { status: "PASS", detail: "Worker pool healthy (2 workers)" },
+            providers: { status: "PASS", detail: "Provider browser services verified live" },
+            live_providers: {
+              status: "PASS",
+              detail: "All providers live verified",
+            },
+          },
+          warnings: ["Provider auth challenge / unverified session: xhs=HTTP 200: verification_required"],
+          live_probe: {
+            douyin: {
+              reachable: true,
+              http_status: 200,
+              session_state: "authenticated",
+              state: "HTTP 200: authenticated",
+            },
+            xiaohongshu: {
+              reachable: true,
+              http_status: 200,
+              session_state: "verification_required",
+              state: "HTTP 200: verification_required",
+            },
+          },
+        }),
+      });
+    });
+
+    const liveProbeBtn = page.locator("[data-testid='run-live-probe-btn']");
+    await expect(liveProbeBtn).toBeVisible();
+    await liveProbeBtn.click();
+
+    await expect(page.locator("[data-testid='live-probe-active-badge']")).toBeVisible({ timeout: 10000 });
+    const xhsBadge = page.locator("[data-testid='live-probe-xiaohongshu-badge']");
+    await expect(xhsBadge).toBeVisible();
+    await expect(xhsBadge).toHaveText("CẦN XÁC MINH BẢO MẬT (CAPTCHA)");
+    await expect(xhsBadge).toHaveCSS("background-color", "rgb(254, 243, 199)"); // #fef3c7
+    await expect(xhsBadge).toHaveCSS("color", "rgb(146, 64, 14)"); // #92400e
+
+    const xhsCard = page.locator("[data-testid='live-probe-xiaohongshu']");
+    await expect(xhsCard).toContainText("Phát hiện thử thách xác minh bảo mật (CAPTCHA - cần giải trên trạm làm việc)");
+    await expect(xhsCard).toContainText("Cần mở trình duyệt hoặc giải CAPTCHA trạm làm việc để duyệt tìm kiếm");
+
+    // Overview readiness status should still be DEGRADED (amber rgb(202, 138, 4), not green)
+    const readinessStatus = page.locator("[data-testid='release-readiness-status']");
+    await expect(readinessStatus).toHaveText("DEGRADED");
+    await expect(readinessStatus).toHaveCSS("color", "rgb(202, 138, 4)");
+    await expect(readinessStatus).not.toHaveCSS("color", "rgb(22, 163, 74)");
+
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("displays APPROVED with green styling when both platforms have authenticated sessions", async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err) => pageErrors.push(err.message));
+
+    await page.goto("/health");
+
+    await page.route("**/api/system/release-readiness?probe=true", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "READY",
+          is_ready: true,
+          checks: {
+            database: { status: "PASS", detail: "All 5 core tables verified" },
+            worker_pool: { status: "PASS", detail: "Worker pool healthy (2 workers)" },
+            providers: { status: "PASS", detail: "Provider browser services verified live" },
+            live_providers: {
+              status: "PASS",
+              detail: "All providers live verified",
+            },
+          },
+          warnings: [],
+          live_probe: {
+            douyin: {
+              reachable: true,
+              http_status: 200,
+              session_state: "authenticated",
+              state: "HTTP 200: authenticated",
+            },
+            xiaohongshu: {
+              reachable: true,
+              http_status: 200,
+              session_state: "authenticated",
+              state: "HTTP 200: authenticated",
+            },
+          },
+        }),
+      });
+    });
+
+    const liveProbeBtn = page.locator("[data-testid='run-live-probe-btn']");
+    await expect(liveProbeBtn).toBeVisible();
+    await liveProbeBtn.click();
+
+    await expect(page.locator("[data-testid='live-probe-active-badge']")).toBeVisible({ timeout: 10000 });
+
+    const readinessStatus = page.locator("[data-testid='release-readiness-status']");
+    await expect(readinessStatus).toHaveText("APPROVED");
+    await expect(readinessStatus).toHaveCSS("color", "rgb(22, 163, 74)"); // #16a34a
+
+    const dyBadge = page.locator("[data-testid='live-probe-douyin-badge']");
+    await expect(dyBadge).toHaveText("ĐÃ ĐĂNG NHẬP (SẴN SÀNG)");
+    await expect(dyBadge).toHaveCSS("background-color", "rgb(220, 252, 231)"); // #dcfce7
+    await expect(dyBadge).toHaveCSS("color", "rgb(22, 101, 52)"); // #166534
+
+    const xhsBadge = page.locator("[data-testid='live-probe-xiaohongshu-badge']");
+    await expect(xhsBadge).toHaveText("ĐÃ ĐĂNG NHẬP (SẴN SÀNG)");
+    await expect(xhsBadge).toHaveCSS("background-color", "rgb(220, 252, 231)"); // #dcfce7
+    await expect(xhsBadge).toHaveCSS("color", "rgb(22, 101, 52)"); // #166534
+
+    const xhsCard = page.locator("[data-testid='live-probe-xiaohongshu']");
+    await expect(xhsCard).toContainText("Đã xác thực phiên thành công (Sẵn sàng tìm kiếm)");
+
     expect(pageErrors).toEqual([]);
   });
 });

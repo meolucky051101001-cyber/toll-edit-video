@@ -429,8 +429,8 @@ class DouyinBrowserService:
             user_avatar = page.locator(
                 "[data-e2e='user-avatar']:visible, .avatar-wrapper:visible, .user-avatar:visible, [data-e2e='user-info']:visible"
             )
-            has_user_element = ((await user_avatar.count()) > 0) or has_session_cookie
-            is_authenticated = bool(has_user_element or has_session_cookie)
+            has_user_element = (await user_avatar.count()) > 0
+            is_authenticated = bool(has_session_cookie and has_user_element)
 
             # Check for verification / captcha container or iframes
             captcha_box = page.locator(
@@ -470,18 +470,17 @@ class DouyinBrowserService:
                 except Exception:
                     pass
 
+            # Re-evaluate is_authenticated after modal dismissal attempt
+            is_authenticated = bool(has_session_cookie and has_user_element and not login_modal_visible)
+
             if self.state in {"verification_required", "restricted"}:
                 pass
-            elif is_authenticated:
-                self.state = "page_available"
             elif "/login" in parts.path:
                 self.state = "login_required"
             elif login_modal_visible:
-                cards = await page.locator("a[href*='/video/'], [class*='search-result-card']").count()
-                if cards > 0:
-                    self.state = "page_available"
-                else:
-                    self.state = "login_required"
+                self.state = "login_required"
+            elif is_authenticated:
+                self.state = "authenticated"
             else:
                 self.state = "page_available"
 

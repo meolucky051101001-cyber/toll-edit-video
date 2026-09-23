@@ -8,7 +8,7 @@ from backend.services.douyin_browser_service import DouyinBrowserService
 
 
 @pytest.mark.anyio
-async def test_xhs_inspect_recognizes_session_cookies_without_dom_avatar(tmp_path: Path):
+async def test_xhs_inspect_requires_dom_avatar_to_authenticate(tmp_path: Path):
     svc = BrowserService(profile=tmp_path)
     mock_context = MagicMock()
     mock_context.cookies = AsyncMock(return_value=[
@@ -34,8 +34,9 @@ async def test_xhs_inspect_recognizes_session_cookies_without_dom_avatar(tmp_pat
 
     state = await svc.inspect(mock_page)
 
+    # Without DOM avatar, cookie alone must NOT be treated as authenticated
     assert state == "page_available"
-    assert svc.diagnostics["is_authenticated"] is True
+    assert svc.diagnostics["is_authenticated"] is False
     # storage_state should be auto-persisted
     mock_context.storage_state.assert_called_once()
 
@@ -106,16 +107,23 @@ async def test_douyin_inspect_recognizes_session_cookies(tmp_path: Path):
     mock_page.url = "https://www.douyin.com/search/test"
     mock_page.title = AsyncMock(return_value="Douyin")
 
-    dummy = MagicMock()
-    dummy.inner_text = AsyncMock(return_value="Search results")
-    dummy.count = AsyncMock(return_value=0)
-    dummy.all = AsyncMock(return_value=[])
-    dummy.first = dummy
-    mock_page.locator.return_value = dummy
+    def locator_router(sel, *args, **kwargs):
+        if "avatar" in sel:
+            m = MagicMock()
+            m.count = AsyncMock(return_value=1)
+            return m
+        dummy = MagicMock()
+        dummy.inner_text = AsyncMock(return_value="Search results")
+        dummy.count = AsyncMock(return_value=0)
+        dummy.all = AsyncMock(return_value=[])
+        dummy.first = dummy
+        return dummy
+
+    mock_page.locator.side_effect = locator_router
 
     state = await svc.inspect(mock_page)
 
-    assert state == "page_available"
+    assert state == "authenticated"
     assert svc.diagnostics["is_authenticated"] is True
     mock_context.storage_state.assert_called_once()
 
@@ -214,7 +222,8 @@ async def test_xhs_stale_cookie_cannot_override_login_redirect(tmp_path: Path):
     state = await svc.inspect(mock_page)
 
     assert state == "login_required"
-    assert svc.diagnostics["is_authenticated"] is True
+    # Stale cookies with login redirect must not be marked as authenticated
+    assert svc.diagnostics["is_authenticated"] is False
     # storage_state should be auto-persisted
     mock_context.storage_state.assert_called_once()
 

@@ -9,16 +9,16 @@ Hệ thống đã trải qua quy trình kiểm chuẩn tự động nghiêm ng�
 | STT | Giai Đoạn Kiểm Tra | Công Cụ / Lệnh Thực Thi | Kết Quả | Chi Tiết Nghiệm Thu |
 | :---: | :--- | :--- | :---: | :--- |
 | **1** | **Runtime Environment** | `check_environment()` | **PASS** | Python 3.12.14 verified (>= 3.11) [0.0s] |
-| **2** | **Database Schema** | `check_database()` | **PASS** | 5 bảng cốt lõi SQLite (`videos`, `search_jobs`, `job_videos`, `dubbing_jobs`, `video_metric_snapshots`) [1.29s] |
-| **3** | **Backend Code Linter** | `ruff check backend/ tests/ scripts/` | **0 errors** | Tuân thủ tuyệt đối chuẩn PEP8 / Ruff [0.23s] |
-| **4** | **Backend Static Types** | `mypy backend` | **0 errors** | 76/76 tập tin nguồn backend kiểm tra kiểu tĩnh hoàn hảo [1.93s] |
-| **5** | **Frontend Code Linter** | `npm run lint` | **0 errors, 0 warnings** | ESLint Next.js 16 / React 19 đạt chuẩn [35.79s] |
-| **6** | **Frontend Typecheck** | `npx tsc --noEmit` | **0 errors** | 0 lỗi TypeScript trên toàn bộ codebase frontend [3.73s] |
-| **7** | **Frontend Production Build** | `npm run build` | **SUCCESS** | Biên dịch tối ưu toàn bộ trang và API routes Next.js [19.95s] |
-| **8** | **Backend Pytest Suite** | `pytest -q` | **416/416 PASS** | Toàn bộ 416 ca kiểm thử hồi quy đạt chuẩn (0 failed) [156.52s] |
-| **9** | **Fixture Benchmark** | `pytest tests/test_evaluation_benchmark.py` | **PASS** | 60 truy vấn chuẩn + 4 bộ dữ liệu crawl thực tế (20 mẫu nguồn) [2.55s] |
-| **10** | **Playwright E2E Tests** | `npx playwright test` | **23/23 PASS** | 23 ca kiểm thử E2E trên 7 tập tin spec (bao gồm `health.spec.ts` kiểm chứng dữ liệu thật) [36.05s] |
-| **11** | **Live Crawl Acceptance** | `python scripts/release_gate.py --live` | **OPERATIONAL** | Network Reachability: **PASS** (Douyin: HTTP 200: page_available, XHS: HTTP 200: page_available). Retrieval: minh bạch trạng thái CAPTCHA/Login [93.14s] |
+| **2** | **Database Schema** | `check_database()` | **PASS** | 5 bảng cốt lõi SQLite (`videos`, `search_jobs`, `job_videos`, `dubbing_jobs`, `video_metric_snapshots`) [0.34s] |
+| **3** | **Backend Code Linter** | `ruff check backend/ tests/ scripts/` | **0 errors** | Tuân thủ tuyệt đối chuẩn PEP8 / Ruff [0.08s] |
+| **4** | **Backend Static Types** | `mypy backend` | **0 errors** | 76/76 tập tin nguồn backend kiểm tra kiểu tĩnh hoàn hảo [0.33s] |
+| **5** | **Frontend Code Linter** | `npm run lint` | **0 errors, 0 warnings** | ESLint Next.js 16 / React 19 đạt chuẩn [5.75s] |
+| **6** | **Frontend Typecheck** | `npx tsc --noEmit` | **0 errors** | 0 lỗi TypeScript trên toàn bộ codebase frontend [2.13s] |
+| **7** | **Frontend Production Build** | `npm run build` | **SUCCESS** | Biên dịch tối ưu toàn bộ trang và API routes Next.js [15.26s] |
+| **8** | **Backend Pytest Suite** | `pytest -q` | **421/421 PASS** | Toàn bộ 421 ca kiểm thử hồi quy đạt chuẩn (0 failed) [138.94s] |
+| **9** | **Fixture Benchmark** | `pytest tests/test_evaluation_benchmark.py` | **PASS** | 60 truy vấn chuẩn + 4 bộ dữ liệu crawl thực tế (20 mẫu nguồn) [2.77s] |
+| **10** | **Playwright E2E Tests** | `npx playwright test` | **25/25 PASS** | 25 ca kiểm thử E2E trên 7 tập tin spec (kiểm chứng màu DEGRADED, badge CAPTCHA XHS, trạng thái authenticated) [38.07s] |
+| **11** | **Live Crawl Acceptance** | `python scripts/release_gate.py --live` | **OPERATIONAL** | Network Reachability: **PASS** (Douyin: HTTP 200: page_available, XHS: HTTP 200: page_available). Retrieval: minh bạch trạng thái CAPTCHA/Login [63.67s] |
 
 **Phán quyết Cổng Phát hành (Verdict)**:  
 `APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH`  
@@ -41,38 +41,36 @@ Hệ thống đã trải qua quy trình kiểm chuẩn tự động nghiêm ng�
 
 ## 3. Các Cải Tiến Kỹ Thuật Đã Thực Hiện
 
-### A. Phân Định Rạch Ròi Trạng Thái Phiên Xiaohongshu Trên Dashboard (`frontend/app/health/page.tsx`)
-- **Vấn đề trước đây:** Khi probe Xiaohongshu trả về `HTTP 200: page_available`, dashboard gán nhãn `ĐÃ KẾT NỐI (READY)`. Tuy nhiên, trang công khai `/explore` tuy tải được HTTP 200 nhưng khi thực hiện tìm kiếm thật lại bị chặn đăng nhập (`BLOCKED (LOGIN_REQUIRED)`), dẫn đến báo cáo trạng thái READY giả.
+### A. Xác Thực Phiên Thật Xiaohongshu & Cấu Trúc Dữ Liệu Live Probe
+- **Vấn đề trước đây:** `inspect()` chỉ kiểm tra sự tồn tại của session cookie và trả về `page_available` cho cả phiên đã đăng nhập lẫn chưa đăng nhập. Probe không truyền trạng thái xác thực lên API khiến API quy tất cả về "chưa xác minh phiên" (DEGRADED). Cookie cũ bị coi nhầm là authenticated dù modal đăng nhập đang chặn.
 - **Giải pháp triệt để:**
-  1. Tách bạch hoàn toàn giữa **kết nối mạng** (`HTTP 200: Đã kết nối`) và **trạng thái phiên làm việc**.
-  2. Phân loại chính xác:
-     - `page_available`: Gán nhãn `CHƯA XÁC MINH PHIÊN (CẦN ĐĂNG NHẬP ĐỂ TÌM KIẾM)` với màu cảnh báo hổ phách (`#fef3c7`), ghi rõ *"Chưa xác minh phiên đăng nhập (Tìm kiếm thật có thể bị chặn)"*.
-     - `login_required`: Gán nhãn `CẦN ĐĂNG NHẬP PHIÊN`.
-     - `verification_required`: Gán nhãn `CẦN XÁC MINH BẢO MẬT (CAPTCHA)`.
-     - Chỉ khi `authenticated` hoặc `ready` mới gán nhãn `ĐÃ ĐĂNG NHẬP (SẴN SÀNG)`.
-  3. Cập nhật bài test E2E Playwright `frontend/tests/health.spec.ts` kiểm chứng thẻ Xiaohongshu hiển thị đúng badge `CHƯA XÁC MINH PHIÊN` và **tuyệt đối không chứa** `ĐÃ KẾT NỐI (READY)`.
+  1. Trong `backend/services/browser_service.py` và `backend/services/douyin_browser_service.py`, áp dụng điều kiện xác thực nghiêm ngặt 3 yếu tố:
+     `is_authenticated = bool(has_session_cookie and has_user_element and not login_modal_visible)`
+  2. `self.state` chuyển sang `"authenticated"` khi xác thực thành công; giữ `"page_available"` khi là khách vãng lai; `"verification_required"` khi gặp CAPTCHA; `"login_required"` khi có modal hoặc trang đăng nhập.
+  3. Bổ sung `_parse_probe_state` trong `backend/api/observability.py` để tách bạch rõ ràng cấu trúc: `reachable: bool`, `http_status: int | None`, `session_state: str`, `state: str`.
+  4. Tạo mới bộ test `tests/test_browser_service.py` gồm 5 kịch bản kiểm thử đơn vị:
+     - `test_xhs_inspect_and_probe_authenticated`
+     - `test_xhs_inspect_and_probe_unauthenticated_guest`
+     - `test_xhs_inspect_and_probe_captcha_challenge`
+     - `test_xhs_inspect_and_probe_stale_cookie_with_login_modal`
+     - `test_xhs_probe_network_error_503_or_timeout`
 
-### B. Loại Bỏ Trạng Thái STANDBY Ảo Sau Khi Live Probe Thành Công (`backend/api/observability.py`)
-- **Vấn đề trước đây:** Khi gọi `/api/system/release-readiness?probe=true` và các provider probe thành công (`HTTP 200: ready`), `checks["providers"]` vẫn bị kẹt ở trạng thái `STANDBY` và `warnings` vẫn chứa `"Provider browser sessions on standby (not probed)"`. Điều này làm trạng thái tổng thể bị suy giảm thành `DEGRADED` thay vì `READY`.
+### B. Bổ Sung Nhãn & Hướng Dẫn CAPTCHA Xiaohongshu Trên Dashboard (`frontend/app/health/page.tsx`)
+- **Vấn đề trước đây:** Nhánh xử lý XHS thiếu trường hợp `verification_required`, dẫn đến khi gặp thử thách bảo mật thì rơi vào trạng thái "CHƯA XÁC ĐỊNH PHIÊN".
 - **Giải pháp triệt để:**
-  1. Khi live probe thành công, cập nhật `checks["providers"]["status"] = "PASS"` với chi tiết `"Provider browser services verified live"`.
-  2. Lọc bỏ hoàn toàn các cảnh báo standby (`"standby (not probed)"`) khỏi danh sách `warnings`.
-  3. Nếu không có thử thách bảo mật hoặc phiên chưa xác minh, endpoint trả về `status: "READY"` và `is_ready: True`.
-  4. Nếu có thử thách bảo mật (`verification_required`, `login_required`, hoặc `page_available` trên XHS), ghi nhận cảnh báo chính xác và hạ cấp có kiểm soát về `status: "DEGRADED"`.
-  5. Bổ sung Case 3 và Case 4 trong `test_release_readiness_probe_fail_closed_on_error` để kiểm chứng cả hai hành vi.
+  1. Thêm badge `CẦN XÁC MINH BẢO MẬT (CAPTCHA)` với màu cảnh báo hổ phách (`#fef3c7`, `#92400e`).
+  2. Hiển thị thông báo chi tiết: *"Phát hiện thử thách xác minh bảo mật (CAPTCHA - cần giải trên trạm làm việc)"*.
+  3. Cung cấp chỉ dẫn vận hành: `* Cần mở trình duyệt hoặc giải CAPTCHA trạm làm việc để duyệt tìm kiếm.`.
+  4. Hỗ trợ badge `ĐÃ ĐĂNG NHẬP (SẴN SÀNG)` màu xanh lá (`#dcfce7`, `#166534`) cho cả Xiaohongshu và Douyin khi phiên đã đăng nhập thành công.
 
-### C. Đặt Lại Dữ Liệu Probe Cũ Khi Làm Mới Dashboard (`frontend/app/health/page.tsx`)
-- **Vấn đề trước đây:** Biến `activeReadiness` ưu tiên hiển thị `liveProbeData` nếu có. Khi người dùng bấm nút "Làm mới", bắt đầu một đợt probe mới, hoặc khi probe gặp lỗi, `liveProbeData` không được reset, dẫn đến giao diện tiếp tục hiển thị kết quả probe cũ.
+### C. Khắc Phục Lỗi Hiển Thị Màu Thẻ Release Readiness (DEGRADED Luôn Là Màu Hổ Phách)
+- **Vấn đề trước đây:** Trong `frontend/app/health/page.tsx`, logic chọn màu của thẻ tổng quan Release Readiness ưu tiên `activeReadiness?.is_ready ? "#16a34a" : ...`, khiến thẻ bị tô màu xanh lá ngay cả khi chữ hiển thị là `DEGRADED`.
 - **Giải pháp triệt để:**
-  1. Trong `handleRunLiveProbe()`, gọi `setLiveProbeData(null)` ngay khi bắt đầu và trong khối `catch`.
-  2. Trong `refreshAll()`, gọi `setLiveProbeData(null)` để xóa bỏ toàn bộ kết quả probe trước đó, đưa dashboard về trạng thái dữ liệu nền tươi mới.
-  3. Bổ sung bài kiểm thử E2E Playwright trong `health.spec.ts` bấm nút "Làm mới" và xác nhận các phần tử `live-probe-active-badge` và `live-probe-breakdown` biến mất hoàn toàn khỏi DOM.
-
-### D. Tinh Chỉnh Chuyển Tiếp Giữa E2E Và Live Probe Trong Release Gate (`scripts/release_gate.py`)
-- **Vấn đề trước đây:** Ngay sau khi Stage 10 (Playwright E2E) kết thúc, Stage 11 (Live Probe) được kích hoạt ngay lập tức. Các tiến trình trình duyệt và cổng mạng chưa kịp giải phóng hoàn toàn trên Windows có thể gây xung đột socket/profile. Đồng thời, regex trích xuất trạng thái probe bắt nhầm dòng code `print` trong traceback khi test thất bại.
-- **Giải pháp triệt để:**
-  1. Bổ sung khoảng trễ `time.sleep(2.0)` giữa Stage 10 và Stage 11 để bảo đảm 100% tài nguyên socket/Chromium được thu hồi sạch sẽ.
-  2. Nâng cấp regex sang định dạng multiline neo đầu dòng: `re.search(r"^\s*PROBE_DOUYIN:\s*(HTTP\s+\d+.*)", p_probe.stdout, re.MULTILINE)` để chỉ khớp với dòng log stdout thực tế.
+  1. Đổi logic màu dựa trực tiếp vào chuỗi trạng thái:
+     - `READY` -> Xanh lá (`#16a34a`)
+     - `DEGRADED` -> Hổ phách/Vàng (`#ca8a04`)
+     - `BLOCKED` / `NOT_READY` -> Đỏ (`#dc2626`)
+  2. Cập nhật Playwright E2E test `frontend/tests/health.spec.ts` kiểm chứng chính xác: khi ở trạng thái `DEGRADED`, thẻ Release Readiness có màu `rgb(202, 138, 4)` và **tuyệt đối không phải** `rgb(22, 163, 74)`.
 
 ---
 

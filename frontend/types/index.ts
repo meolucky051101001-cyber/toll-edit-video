@@ -347,6 +347,8 @@ export interface ReleaseReadinessCheckItem {
 export interface LiveProbePlatformDetail {
   reachable: boolean;
   state: string;
+  http_status?: number | null;
+  session_state?: "authenticated" | "verification_required" | "login_required" | "unverified" | "page_available" | "network_error" | "unknown" | string;
 }
 
 export interface ReleaseReadinessResponse {
