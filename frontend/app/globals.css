@@ -26,19 +26,19 @@
   color-scheme: light;
 }
 .dark {
-  --bg: #0b0f17;
-  --surface: #111722;
-  --surface-card: #141c2b;
-  --surface-raised: #1a2538;
-  --surface-inset: #080c14;
+  --bg: #090d16;
+  --surface: #0f1523;
+  --surface-card: #131b2c;
+  --surface-raised: #182236;
+  --surface-inset: #0c111c;
   --ink: #f1f5f9;
   --muted: #94a3b8;
   --faint: #64748b;
   --line: rgba(255, 255, 255, 0.08);
   --line-strong: rgba(255, 255, 255, 0.16);
-  --accent: #38bdf8;
+  --accent: #3b82f6;
   --accent-hover: #60a5fa;
-  --accent-light: rgba(56, 189, 248, 0.12);
+  --accent-light: rgba(59, 130, 246, 0.12);
   --accent-douyin: #38bdf8;
   --accent-xhs: #f43f5e;
   --success: #10b981;
@@ -368,15 +368,15 @@ footer span {
 .stats-strip {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  margin-bottom: 27px;
+  margin-bottom: 22px;
   background: var(--surface-card);
   border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 16px 0;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.04);
+  border-radius: 10px;
+  padding: 14px 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
 }
 .stats-strip > div {
-  padding: 0 24px;
+  padding: 0 20px;
   border-right: 1px solid var(--line);
 }
 .stats-strip > div:last-child {
@@ -392,7 +392,7 @@ footer span {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 26px;
+  font-size: 24px;
   font-weight: 700;
   letter-spacing: -0.02em;
   margin-top: 4px;
@@ -401,35 +401,30 @@ footer span {
 }
 .stats-strip svg {
   color: var(--muted);
-  opacity: 0.7;
+  opacity: 0.6;
 }
 .search-panel {
   border: 1px solid var(--line);
   background: var(--surface-card);
-  border-radius: 14px;
-  padding: 24px 26px 0;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  padding: 20px 22px 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03), 0 4px 12px rgba(0, 0, 0, 0.02);
 }
 .search-panel-title {
   display: flex;
-  gap: 14px;
+  gap: 12px;
   align-items: center;
-  margin-bottom: 22px;
+  margin-bottom: 18px;
 }
-.spark-icon {
-  display: grid;
-  place-items: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 10px;
-  background: var(--accent-light);
-  color: var(--accent);
-  border: 1px solid rgba(56, 189, 248, 0.2);
+.search-panel-title h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
 }
 .search-panel-title p {
   color: var(--muted);
   font-size: 13px;
-  margin-top: 3px;
+  margin-top: 2px;
 }
 .search-input-row {
   display: flex;
@@ -804,17 +799,18 @@ footer span {
 .video-card {
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--surface-card);
-  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease, border-color 0.2s ease;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
   contain: layout paint;
   display: flex;
   flex-direction: column;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
 }
 .video-card:hover {
   transform: translateY(-2px);
   border-color: var(--line-strong);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.14);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
 }
 .duration,
 .engagement span,
@@ -2119,5 +2115,141 @@ td small {
   font-size: 12px;
   color: var(--muted);
   padding: 16px;
+}
+
+/* Modern Segmented Control */
+.segmented-control {
+  display: inline-flex;
+  align-items: center;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 3px;
+  gap: 3px;
+}
+
+.segmented-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.segmented-button:hover:not(.active) {
+  color: var(--ink);
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.dark .segmented-button:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.segmented-button.active {
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+/* Modern Filter Chip / Toggle Pill */
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 5px 11px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.filter-chip:hover {
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.filter-chip.active {
+  border-color: var(--accent);
+  background: var(--accent-light);
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.filter-chip input[type="checkbox"] {
+  width: 13px;
+  height: 13px;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* Modern Metric Badges */
+.metric-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-pill.highlight {
+  color: var(--accent);
+  background: var(--accent-light);
+  border-color: rgba(37, 99, 235, 0.2);
+}
+
+.dark .metric-pill.highlight {
+  border-color: rgba(59, 130, 246, 0.25);
+}
+
+/* Studio Document Cards (For Script & Dubbing Modals) */
+.studio-card {
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  transition: border-color 0.15s ease;
+}
+
+.studio-card-accent {
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.studio-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  color: var(--muted);
 }
 

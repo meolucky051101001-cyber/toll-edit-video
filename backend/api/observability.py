@@ -1,6 +1,6 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -18,7 +18,11 @@ def get_system_metrics() -> dict[str, Any]:
 
 
 @router.get("/release-readiness")
-def get_release_readiness(db: Session = Depends(get_db)) -> dict[str, Any]:
+async def get_release_readiness(
+    request: Request,
+    probe: bool = False,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     """Evaluates release criteria checklist for automated CI/CD and production deployment."""
     checks = {}
     is_ready = True
@@ -101,6 +105,51 @@ def get_release_readiness(db: Session = Depends(get_db)) -> dict[str, Any]:
             }
     except Exception as exc:
         checks["worker_pool"] = {"status": "WARN", "detail": str(exc)}
+
+    # 5. Real Provider Readiness (Douyin & Xiaohongshu)
+    try:
+        browser = getattr(request.app.state, "browser", None)
+        douyin_browser = getattr(request.app.state, "douyin_browser", None)
+
+        provider_details = {
+            "douyin": douyin_browser.state if douyin_browser else "uninitialized",
+            "xiaohongshu": browser.state if browser else "uninitialized",
+        }
+
+        if probe and douyin_browser and browser:
+            dy_ok, dy_detail = await douyin_browser.probe_live()
+            xhs_ok, xhs_detail = await browser.probe_live()
+            provider_details["douyin_live_probe"] = "PASS" if dy_ok else f"FAIL ({dy_detail})"
+            provider_details["xhs_live_probe"] = "PASS" if xhs_ok else f"FAIL ({xhs_detail})"
+            if not dy_ok or not xhs_ok:
+                checks["providers"] = {
+                    "status": "FAIL",
+                    "detail": f"Live probe failed: {provider_details}",
+                }
+                is_ready = False
+            else:
+                checks["providers"] = {
+                    "status": "PASS",
+                    "detail": f"All providers live verified: {provider_details}",
+                }
+        else:
+            has_error = (
+                (douyin_browser is not None and douyin_browser.state in ("network_error", "restricted"))
+                or (browser is not None and browser.state in ("network_error", "restricted"))
+            )
+            if has_error:
+                checks["providers"] = {
+                    "status": "FAIL",
+                    "detail": f"Provider in error state: {provider_details}",
+                }
+                is_ready = False
+            else:
+                checks["providers"] = {
+                    "status": "PASS",
+                    "detail": f"Provider states operational: {provider_details}",
+                }
+    except Exception as exc:
+        checks["providers"] = {"status": "WARN", "detail": str(exc)}
 
     # Determine overall gate status
     if not is_ready:

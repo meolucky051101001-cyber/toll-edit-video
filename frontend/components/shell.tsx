@@ -9,7 +9,6 @@ import {
   History,
   Settings2,
   Layers3,
-  ArrowUpRight,
   Moon,
   Sun,
   Clapperboard,
@@ -52,13 +51,13 @@ export function Shell({ children }: { children: React.ReactNode }) {
       <aside className="sidebar">
         <Link className="brand" href="/">
           <span className="brand-icon">
-            <Clapperboard size={23} />
+            <Clapperboard size={20} />
           </span>
           <span>
-            Video Research<small>YOUR DISCOVERY WORKSPACE</small>
+            Video Research<small>Local Workspace</small>
           </span>
         </Link>
-        <div className="workspace-label">KHÔNG GIAN CÁ NHÂN</div>
+        <div className="workspace-label">MENU CHÍNH</div>
         <nav aria-label="Điều hướng chính">
           {links.map(([url, name, Icon]) => (
             <Link
@@ -66,7 +65,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
               href={url}
               className={`nav-link ${pathname === url ? "active" : ""}`}
             >
-              <Icon size={19} />
+              <Icon size={18} />
               {name}
               {pathname === url && <span className="nav-dot" />}
             </Link>
@@ -88,7 +87,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
           </a>
           <div className="local-card">
             <span className="status-dot" />
-            Chạy trên máy của bạn<p>Dữ liệu được lưu trong SQLite.</p>
+            Máy trạm nội bộ<p>Dữ liệu lưu an toàn trong SQLite.</p>
           </div>
           <div className="profile">
             <span className="avatar">ME</span>
@@ -130,9 +129,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
         </header>
         <main>{children}</main>
         <footer>
-          AI Video Research Tool{" "}
+          Video Research Workspace{" "}
           <span>
-            Phase 2 · Local workspace <ArrowUpRight size={13} />
+            Bản nội bộ · SQLite Local
           </span>
         </footer>
       </div>

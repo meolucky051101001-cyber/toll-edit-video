@@ -19,13 +19,13 @@ test.describe("Cookie Settings & Anti-Bot Resolution UI", () => {
     ).toBeVisible();
 
     // Check Xiaohongshu platform card
-    await expect(page.getByText("Xiaohongshu / RedNote")).toBeVisible();
+    await expect(page.getByText("Xiaohongshu / RedNote").first()).toBeVisible();
     await expect(page.locator(".token-pill", { hasText: "web_session" })).toBeVisible();
     await expect(page.locator(".token-pill", { hasText: "a1" })).toBeVisible();
     await expect(page.locator(".token-pill", { hasText: "webId" })).toBeVisible();
 
     // Check Douyin platform card
-    await expect(page.getByText("Douyin (抖音)")).toBeVisible();
+    await expect(page.getByText("Douyin (抖音)").first()).toBeVisible();
     await expect(page.locator(".token-pill", { hasText: "ttwid" })).toBeVisible();
     await expect(page.locator(".token-pill", { hasText: "s_v_web_id" })).toBeVisible();
     await expect(page.locator(".token-pill", { hasText: "sessionid" })).toBeVisible();

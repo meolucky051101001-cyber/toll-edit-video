@@ -159,22 +159,22 @@ export function VideoDubbingModal({
             paddingRight: "0.25rem",
           }}
         >
-        <DialogTitle style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-          <Mic size={22} color="#6366f1" />
-          Tự động lồng tiếng AI tiếng Việt (Auto-Dubbing)
+        <DialogTitle style={{ display: "flex", alignItems: "center", gap: "0.5rem", color: "var(--ink)", fontSize: "1.1rem" }}>
+          <Mic size={20} style={{ color: "var(--accent)" }} />
+          Lồng tiếng video tiếng Việt
         </DialogTitle>
-        <DialogDescription>
-          Chuyển kịch bản chuyển thể thành giọng đọc AI tự nhiên (Microsoft Neural TTS) và tự động hòa âm (Audio Ducking) với âm nền gốc.
+        <DialogDescription style={{ color: "var(--muted)", fontSize: "0.82rem" }}>
+          Chuyển kịch bản thành giọng đọc tự nhiên (Microsoft Neural TTS) và tự động hòa âm (Audio Ducking) với âm nền gốc.
         </DialogDescription>
 
         {error && (
           <div
             style={{
               padding: "0.75rem 1rem",
-              background: "#fef2f2",
-              border: "1px solid #fecaca",
+              background: "var(--surface-raised)",
+              border: "1px solid var(--danger)",
               borderRadius: "8px",
-              color: "#dc2626",
+              color: "var(--danger)",
               fontSize: "0.9rem",
               display: "flex",
               alignItems: "center",
@@ -190,8 +190,8 @@ export function VideoDubbingModal({
         <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem", marginTop: "1rem" }}>
           {/* Voice selector */}
           <div>
-            <label style={{ display: "block", fontWeight: 600, fontSize: "0.9rem", marginBottom: "0.4rem" }}>
-              1. Chọn giọng đọc AI:
+            <label style={{ display: "block", fontWeight: 600, fontSize: "0.9rem", marginBottom: "0.4rem", color: "var(--ink)" }}>
+              1. Chọn giọng đọc:
             </label>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "0.5rem" }}>
               {(voices.length > 0
@@ -221,18 +221,19 @@ export function VideoDubbingModal({
                       alignItems: "flex-start",
                       padding: "0.6rem 0.8rem",
                       borderRadius: "8px",
-                      border: isSelected ? "2px solid #6366f1" : "1px solid #e2e8f0",
-                      background: isSelected ? "rgba(99, 102, 241, 0.08)" : "#fff",
+                      border: isSelected ? "1.5px solid var(--accent)" : "1px solid var(--line)",
+                      background: isSelected ? "var(--accent-light)" : "var(--surface)",
                       cursor: "pointer",
                       textAlign: "left",
+                      transition: "all 0.15s ease",
                     }}
                   >
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontWeight: 600, fontSize: "0.85rem", color: isSelected ? "#4f46e5" : "inherit" }}>
-                      <Radio size={14} color={isSelected ? "#4f46e5" : "#94a3b8"} />
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontWeight: 600, fontSize: "0.85rem", color: isSelected ? "var(--accent)" : "var(--ink)" }}>
+                      <Radio size={14} color={isSelected ? "var(--accent)" : "var(--muted)"} />
                       {v.name}
                     </div>
                     {v.description && (
-                      <span style={{ fontSize: "0.75rem", color: "#64748b", marginTop: "0.2rem" }}>
+                      <span style={{ fontSize: "0.75rem", color: "var(--muted)", marginTop: "0.2rem" }}>
                         {v.description}
                       </span>
                     )}
@@ -245,10 +246,10 @@ export function VideoDubbingModal({
           {/* Script input */}
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.4rem" }}>
-              <label style={{ fontWeight: 600, fontSize: "0.9rem" }}>
+              <label style={{ fontWeight: 600, fontSize: "0.9rem", color: "var(--ink)" }}>
                 2. Lời thoại / Kịch bản lồng tiếng:
               </label>
-              <span style={{ fontSize: "0.75rem", color: "#64748b" }}>
+              <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
                 {scriptText.length} ký tự
               </span>
             </div>
@@ -261,7 +262,9 @@ export function VideoDubbingModal({
                 width: "100%",
                 padding: "0.75rem",
                 borderRadius: "8px",
-                border: "1px solid #cbd5e1",
+                border: "1px solid var(--line)",
+                background: "var(--surface-inset)",
+                color: "var(--ink)",
                 fontFamily: "inherit",
                 fontSize: "0.9rem",
                 lineHeight: 1.5,
@@ -276,14 +279,14 @@ export function VideoDubbingModal({
               gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
               gap: "1rem",
               padding: "0.85rem",
-              background: "#f8fafc",
+              background: "var(--surface-raised)",
               borderRadius: "8px",
-              border: "1px solid #f1f5f9",
+              border: "1px solid var(--line)",
             }}
           >
             <div>
-              <label style={{ display: "flex", alignItems: "center", gap: "0.3rem", fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.3rem" }}>
-                <Sliders size={13} />
+              <label style={{ display: "flex", alignItems: "center", gap: "0.3rem", fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.3rem", color: "var(--ink)" }}>
+                <Sliders size={13} style={{ color: "var(--muted)" }} />
                 Tốc độ đọc: {speed.toFixed(1)}x
               </label>
               <input
@@ -293,13 +296,13 @@ export function VideoDubbingModal({
                 step="0.1"
                 value={speed}
                 onChange={(e) => setSpeed(parseFloat(e.target.value))}
-                style={{ width: "100%" }}
+                style={{ width: "100%", accentColor: "var(--accent)" }}
               />
             </div>
 
             <div>
-              <label style={{ display: "flex", alignItems: "center", gap: "0.3rem", fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.3rem" }}>
-                <Music size={13} />
+              <label style={{ display: "flex", alignItems: "center", gap: "0.3rem", fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.3rem", color: "var(--ink)" }}>
+                <Music size={13} style={{ color: "var(--muted)" }} />
                 Âm lượng nhạc nền gốc: {bgmVolume}%
               </label>
               <input
@@ -309,7 +312,7 @@ export function VideoDubbingModal({
                 step="5"
                 value={bgmVolume}
                 onChange={(e) => setBgmVolume(parseInt(e.target.value, 10))}
-                style={{ width: "100%" }}
+                style={{ width: "100%", accentColor: "var(--accent)" }}
               />
             </div>
 
@@ -319,9 +322,9 @@ export function VideoDubbingModal({
                 id="ducking-check"
                 checked={ducking}
                 onChange={(e) => setDucking(e.target.checked)}
-                style={{ cursor: "pointer", width: "16px", height: "16px" }}
+                style={{ cursor: "pointer", width: "16px", height: "16px", accentColor: "var(--accent)" }}
               />
-              <label htmlFor="ducking-check" style={{ fontSize: "0.8rem", cursor: "pointer" }}>
+              <label htmlFor="ducking-check" style={{ fontSize: "0.8rem", cursor: "pointer", color: "var(--ink)" }}>
                 <strong>Audio Ducking</strong> (Tự động hạ nhỏ nhạc nền khi có tiếng đọc)
               </label>
             </div>
@@ -332,28 +335,21 @@ export function VideoDubbingModal({
             <Button
               onClick={handleCreateDubbing}
               disabled={submitting || isJobActive || !scriptText.trim()}
-              style={{
-                background: "linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)",
-                color: "#fff",
-                display: "flex",
-                alignItems: "center",
-                gap: "0.4rem",
-              }}
             >
               {submitting ? (
                 <>
-                  <Loader2 size={16} className="animate-spin" />
+                  <Loader2 size={15} className="animate-spin" style={{ marginRight: "0.35rem" }} />
                   Đang khởi tạo tác vụ…
                 </>
               ) : isJobActive ? (
                 <>
-                  <Loader2 size={16} className="animate-spin" />
+                  <Loader2 size={15} className="animate-spin" style={{ marginRight: "0.35rem" }} />
                   Đang xử lý âm thanh…
                 </>
               ) : (
                 <>
-                  <Mic size={16} />
-                  Bắt đầu tạo lồng tiếng AI
+                  <Mic size={15} style={{ marginRight: "0.35rem" }} />
+                  Bắt đầu tạo lồng tiếng
                 </>
               )}
             </Button>
@@ -361,9 +357,9 @@ export function VideoDubbingModal({
 
           {/* Output / History */}
           {jobs.length > 0 && (
-            <div style={{ marginTop: "0.5rem", borderTop: "1px solid #e2e8f0", paddingTop: "1rem" }}>
+            <div style={{ marginTop: "0.5rem", borderTop: "1px solid var(--line)", paddingTop: "1rem" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.6rem" }}>
-                <h4 style={{ fontSize: "0.9rem", fontWeight: 600, margin: 0 }}>
+                <h4 style={{ fontSize: "0.9rem", fontWeight: 600, margin: 0, color: "var(--ink)" }}>
                   Kết quả lồng tiếng ({jobs.length})
                 </h4>
                 <Button variant="ghost" size="sm" onClick={loadJobs} disabled={loading}>
@@ -376,51 +372,27 @@ export function VideoDubbingModal({
                 {jobs.map((job) => (
                   <div
                     key={job.id}
-                    style={{
-                      padding: "0.85rem",
-                      borderRadius: "8px",
-                      border: "1px solid #e2e8f0",
-                      background: job.status === "completed" ? "#f0fdf4" : "#f8fafc",
-                    }}
+                    className="studio-card"
                   >
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.4rem" }}>
-                      <span style={{ fontSize: "0.8rem", fontWeight: 600, color: "#334155" }}>
+                      <span style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--ink)" }}>
                         Giọng: {job.voice_id} · {new Date(job.created_at).toLocaleTimeString("vi-VN")}
                       </span>
-                      <span
-                        style={{
-                          fontSize: "0.75rem",
-                          fontWeight: 600,
-                          padding: "0.2rem 0.5rem",
-                          borderRadius: "4px",
-                          background:
-                            job.status === "completed"
-                              ? "#dcfce7"
-                              : job.status === "failed"
-                              ? "#fee2e2"
-                              : "#e0e7ff",
-                          color:
-                            job.status === "completed"
-                              ? "#15803d"
-                              : job.status === "failed"
-                              ? "#b91c1c"
-                              : "#4338ca",
-                        }}
-                      >
+                      <span className="metric-pill">
                         {job.status === "completed"
                           ? "✓ Hoàn thành"
                           : job.status === "failed"
                           ? "✗ Lỗi"
                           : job.status === "synthesizing"
-                          ? "Đang tổng hợp giọng nói…"
+                          ? "Đang đọc…"
                           : job.status === "mixing"
-                          ? "Đang hòa âm (Ducking)…"
+                          ? "Đang hòa âm…"
                           : "Đang chờ…"}
                       </span>
                     </div>
 
                     {job.error_message && (
-                      <div style={{ fontSize: "0.8rem", color: "#dc2626", marginTop: "0.3rem" }}>
+                      <div style={{ fontSize: "0.8rem", color: "var(--danger)", marginTop: "0.3rem" }}>
                         Lỗi: {job.error_message}
                       </div>
                     )}
@@ -432,41 +404,31 @@ export function VideoDubbingModal({
                           <a
                             href={job.audio_url}
                             download={`dubbing_${video.id}.mp3`}
-                            className="text-link"
+                            className="button button-outline button-sm"
                             style={{
                               display: "inline-flex",
                               alignItems: "center",
                               gap: "0.3rem",
                               fontSize: "0.8rem",
-                              padding: "0.25rem 0.6rem",
-                              background: "#e0f2fe",
-                              borderRadius: "4px",
-                              color: "#0369a1",
-                              textDecoration: "none",
                             }}
                           >
                             <Download size={13} />
-                            Tải file âm thanh (.mp3)
+                            Tải âm thanh (.mp3)
                           </a>
                           {job.video_url && (
                             <a
                               href={job.video_url}
                               download={`dubbed_${video.id}.mp4`}
-                              className="text-link"
+                              className="button button-primary button-sm"
                               style={{
                                 display: "inline-flex",
                                 alignItems: "center",
                                 gap: "0.3rem",
                                 fontSize: "0.8rem",
-                                padding: "0.25rem 0.6rem",
-                                background: "#dcfce7",
-                                borderRadius: "4px",
-                                color: "#15803d",
-                                textDecoration: "none",
                               }}
                             >
                               <Download size={13} />
-                              Tải video đã lồng tiếng (.mp4)
+                              Tải video (.mp4)
                             </a>
                           )}
                         </div>

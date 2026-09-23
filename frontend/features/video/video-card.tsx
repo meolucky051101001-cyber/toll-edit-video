@@ -11,8 +11,8 @@ import {
   Ban,
   Film,
   Info,
-  Sparkles,
   Mic,
+  FileText,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { VideoDownloadControls } from "./video-download-controls";
@@ -130,10 +130,11 @@ export function VideoCard({
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              background: isSelected ? "#0f766e" : "rgba(255, 255, 255, 0.92)",
+              background: isSelected ? "var(--accent)" : "var(--surface)",
               borderRadius: "5px",
               padding: "3px 4px",
-              boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
+              boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+              border: "1px solid var(--line)",
               cursor: "pointer",
             }}
             onClick={(e) => e.stopPropagation()}
@@ -143,7 +144,7 @@ export function VideoCard({
               type="checkbox"
               checked={isSelected}
               onChange={() => onToggleSelect?.(video.id)}
-              style={{ width: "16px", height: "16px", cursor: "pointer", accentColor: "#0f766e" }}
+              style={{ width: "15px", height: "15px", cursor: "pointer", accentColor: "var(--accent)" }}
               aria-label={`Chọn video ${video.title || video.id}`}
             />
           </label>
@@ -204,7 +205,7 @@ export function VideoCard({
               }}
               title="Nội dung dạng hình ảnh / 图文 (Carousel)"
             >
-              🖼️ 图文
+              图文
             </span>
           ) : video.duration_seconds != null && formatDuration(video.duration_seconds) ? (
             <span className="duration">
@@ -220,19 +221,8 @@ export function VideoCard({
           <div className="card-meta">
             <span>{sourceLabel}</span>
             {video.media_type === "image_text" && (
-              <span
-                style={{
-                  background: "#fef9c3",
-                  color: "#854d0e",
-                  border: "1px solid #fde047",
-                  borderRadius: "9999px",
-                  padding: "1px 7px",
-                  fontSize: "0.72rem",
-                  fontWeight: 600,
-                }}
-                title="Bài đăng dạng ảnh / 图文"
-              >
-                🖼️ 图文 {video.images && video.images.length > 0 ? `(${video.images.length} ảnh)` : ""}
+              <span className="metric-pill" title="Bài đăng dạng ảnh / 图文">
+                图文 {video.images && video.images.length > 0 ? `(${video.images.length})` : ""}
               </span>
             )}
             {video.search_query && (
@@ -240,30 +230,18 @@ export function VideoCard({
                 className="query-pill"
                 title={`Tìm bằng từ khóa: ${video.search_query}`}
               >
-                🔍 {video.search_query}
+                {video.search_query}
               </span>
             )}
-            <span className="relevance">
+            <span className="metric-pill highlight">
               {Math.round(video.relevance_score)}% phù hợp
             </span>
             {video.virality_score != null && video.virality_score > 0 && (
               <span
-                className="virality-pill"
+                className="metric-pill"
                 title={`Điểm lan truyền: ${Math.round(video.virality_score)}/100 (Tốc độ: ${Math.round(video.velocity_score || 0)})`}
-                style={{
-                  background: "linear-gradient(135deg, #ff4d4f18, #ff7a4525)",
-                  color: "#d4380d",
-                  border: "1px solid #ffa39e",
-                  borderRadius: "9999px",
-                  padding: "1px 7px",
-                  fontSize: "0.72rem",
-                  fontWeight: 600,
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "2px",
-                }}
               >
-                🔥 {Math.round(video.virality_score)}
+                Lan truyền: {Math.round(video.virality_score)}
               </span>
             )}
           </div>
@@ -291,10 +269,10 @@ export function VideoCard({
                   style={
                     isMatch
                       ? {
-                          background: "#ccfbf1",
-                          color: "#0f766e",
+                          background: "var(--accent-light)",
+                          color: "var(--accent)",
                           fontWeight: 600,
-                          border: "1px solid #99f6e4",
+                          border: "1px solid rgba(59, 130, 246, 0.25)",
                         }
                       : undefined
                   }
@@ -332,42 +310,20 @@ export function VideoCard({
               variant="outline"
               size="sm"
               onClick={() => setScriptOpen(true)}
-              title="Bóc tách kịch bản & Gợi ý Hook AI"
-              aria-label="Kịch bản AI"
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "0.25rem",
-                background: "linear-gradient(135deg, rgba(99, 102, 241, 0.08) 0%, rgba(168, 85, 247, 0.12) 100%)",
-                borderColor: "#c084fc",
-                color: "#7e22ce",
-                fontWeight: 600,
-                fontSize: "0.8rem",
-                padding: "0 8px",
-              }}
+              title="Bóc tách kịch bản & Gợi ý Hook"
+              aria-label="Kịch bản"
             >
-              <Sparkles size={13} style={{ color: "#9333ea" }} />
-              <span>Kịch bản AI</span>
+              <FileText size={14} />
+              <span>Kịch bản</span>
             </Button>
             <Button
               variant="outline"
               size="sm"
               onClick={() => setDubbingOpen(true)}
-              title="Tự động lồng tiếng AI tiếng Việt (Auto-Dubbing)"
-              aria-label="Lồng tiếng AI"
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "0.25rem",
-                background: "linear-gradient(135deg, rgba(79, 70, 229, 0.08) 0%, rgba(124, 58, 237, 0.12) 100%)",
-                borderColor: "#a5b4fc",
-                color: "#4338ca",
-                fontWeight: 600,
-                fontSize: "0.8rem",
-                padding: "0 8px",
-              }}
+              title="Lồng tiếng AI tiếng Việt"
+              aria-label="Lồng tiếng"
             >
-              <Mic size={13} style={{ color: "#4f46e5" }} />
+              <Mic size={14} />
               <span>Lồng tiếng</span>
             </Button>
             {!video.is_mock && (
@@ -379,7 +335,7 @@ export function VideoCard({
                 onClick={(e) => handleOpenPlatform(e)}
                 title={`Mở trực tiếp trên ${platformName(video.platform)}`}
                 aria-label={`Mở trực tiếp trên ${platformName(video.platform)}`}
-                style={{ padding: "0 7px", display: "inline-flex", alignItems: "center" }}
+                style={{ padding: "0 8px", display: "inline-flex", alignItems: "center" }}
               >
                 <ExternalLink size={14} />
               </a>
@@ -489,17 +445,9 @@ export function VideoCard({
                 setOpen(false);
                 setScriptOpen(true);
               }}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "0.25rem",
-                borderColor: "#c084fc",
-                color: "#7e22ce",
-                fontWeight: 600,
-              }}
             >
-              <Sparkles size={14} style={{ color: "#9333ea" }} />
-              Kịch bản AI
+              <FileText size={14} style={{ marginRight: "0.35rem" }} />
+              Kịch bản
             </Button>
             <Button
               variant="outline"
@@ -507,17 +455,9 @@ export function VideoCard({
                 setOpen(false);
                 setDubbingOpen(true);
               }}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "0.25rem",
-                borderColor: "#a5b4fc",
-                color: "#4338ca",
-                fontWeight: 600,
-              }}
             >
-              <Mic size={14} style={{ color: "#4f46e5" }} />
-              Lồng tiếng AI
+              <Mic size={14} style={{ marginRight: "0.35rem" }} />
+              Lồng tiếng
             </Button>
             <Button variant="outline" onClick={copy}>
               {copied ? "Đã copy" : "Copy URL"}

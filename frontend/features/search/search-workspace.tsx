@@ -5,7 +5,6 @@ import { useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowUpRight,
   Search,
-  Sparkles,
   FlaskConical,
   X,
   Check,
@@ -224,17 +223,17 @@ function SearchSession({
     <>
       <div className="page-heading">
         <div>
-          <h1>Ý tưởng tiếp theo, bắt đầu từ đây.</h1>
-          <p>Tìm, chọn lọc và giữ lại những video bạn quan tâm trên Douyin & Xiaohongshu.</p>
+          <h1>Khám phá nội dung video</h1>
+          <p>Tìm kiếm, chọn lọc và phân tích video thịnh hành từ Douyin & Xiaohongshu.</p>
         </div>
         <span className="mode-pill">
-          <FlaskConical size={15} />
+          <FlaskConical size={14} />
           {mode === "mock"
             ? "Dữ liệu mẫu"
             : mode === "douyin"
-              ? "Douyin thật"
+              ? "Douyin"
               : mode === "xiaohongshu"
-                ? "Xiaohongshu thật"
+                ? "Xiaohongshu"
                 : mode === "tiktok"
                   ? "TikTok Global"
                   : "YouTube Shorts"}
@@ -258,41 +257,87 @@ function SearchSession({
       </div>
       <section className="search-panel">
         <div className="search-panel-title">
-          <span className="spark-icon">
-            <Sparkles size={20} />
-          </span>
           <div>
-            <h2>Bạn muốn tìm gì hôm nay?</h2>
-            <p>Mô tả chủ đề bằng tiếng Việt hoặc nhập từ khóa.</p>
+            <h2>Tìm kiếm chủ đề video</h2>
+            <p>Nhập từ khóa tiếng Việt hoặc thẻ #hashtag để khám phá nội dung.</p>
           </div>
         </div>
         <form onSubmit={start}>
-          <label className="row search-mode">
-            Nguồn tìm kiếm{" "}
-            <select
-              aria-label="Nguồn tìm kiếm"
-              value={mode}
-              disabled={busy}
-              onChange={(e) => {
-                const newMode = parseSearchMode(e.target.value);
-                setMode(newMode);
-                setLimit((prev) => normalizeLimitForMode(prev, newMode));
-                if (newMode === "mock") {
-                  setPlatforms(["douyin", "xiaohongshu"]);
-                } else {
-                  setPlatforms([newMode as Platform]);
-                }
-              }}
-            >
-              <option value="xiaohongshu">Xiaohongshu thật (Nền tảng trực tiếp)</option>
-              <option value="douyin">Douyin thật (Nền tảng trực tiếp)</option>
-              <option value="mock">Dữ liệu mẫu (Thử nghiệm offline & Mock Multi-Platform)</option>
-            </select>
-          </label>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.85rem", flexWrap: "wrap", gap: "0.5rem" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+              <span className="muted" style={{ fontSize: "12px", fontWeight: 500 }}>Nguồn dữ liệu:</span>
+              <select
+                aria-label="Nguồn tìm kiếm"
+                data-testid="mode-select"
+                value={mode}
+                onChange={(e) => {
+                  const newMode = e.target.value as "mock" | "douyin" | "xiaohongshu";
+                  setMode(newMode);
+                  if (newMode === "mock") {
+                    setPlatforms(["douyin", "xiaohongshu"]);
+                  } else {
+                    setPlatforms([newMode as Platform]);
+                  }
+                  setLimit((prev) => normalizeLimitForMode(prev, newMode));
+                }}
+                className="sr-only"
+              >
+                <option value="xiaohongshu">xiaohongshu</option>
+                <option value="douyin">douyin</option>
+                <option value="mock">mock</option>
+              </select>
+              <div className="segmented-control" role="group" aria-label="Nền tảng tìm kiếm">
+                <button
+                  type="button"
+                  data-testid="platform-select-xhs"
+                  className={`segmented-button ${mode === "xiaohongshu" ? "active" : ""}`}
+                  onClick={() => {
+                    setMode("xiaohongshu");
+                    setPlatforms(["xiaohongshu"]);
+                    setLimit((prev) => normalizeLimitForMode(prev, "xiaohongshu"));
+                  }}
+                >
+                  <span className="red-mark">小红书</span>
+                  Xiaohongshu
+                </button>
+                <button
+                  type="button"
+                  data-testid="platform-select-douyin"
+                  className={`segmented-button ${mode === "douyin" ? "active" : ""}`}
+                  onClick={() => {
+                    setMode("douyin");
+                    setPlatforms(["douyin"]);
+                    setLimit((prev) => normalizeLimitForMode(prev, "douyin"));
+                  }}
+                >
+                  <span className="dy-mark">♪</span>
+                  Douyin
+                </button>
+                <button
+                  type="button"
+                  data-testid="platform-select-mock"
+                  className={`segmented-button ${mode === "mock" ? "active" : ""}`}
+                  onClick={() => {
+                    setMode("mock");
+                    setPlatforms(["douyin", "xiaohongshu"]);
+                    setLimit((prev) => normalizeLimitForMode(prev, "mock"));
+                  }}
+                >
+                  Dữ liệu mẫu
+                </button>
+              </div>
+            </div>
+            {mode !== "mock" && (
+              <span className="metric-pill">
+                Tự động dịch sang tiếng Trung
+              </span>
+            )}
+          </div>
           <div className="search-input-row">
-            <Search size={21} />
+            <Search size={20} />
             <input
               aria-label="Chủ đề tìm kiếm"
+              data-testid="search-input"
               placeholder="Ví dụ: unbox đồ cute, #decorbanhoc, #ootd, dụng cụ bóc sticker…"
               value={query}
               maxLength={300}
@@ -303,77 +348,57 @@ function SearchSession({
               disabled={busy || !query.trim() || !platforms.length}
               type="submit"
             >
-              <Search size={17} />
+              <Search size={16} />
               {busy
-                ? "Đang gửi yêu cầu…"
+                ? "Đang gửi…"
                 : isRunning
-                  ? "Đang tìm kiếm…"
+                  ? "Đang tìm…"
                   : mode === "mock"
                     ? "Tìm video mẫu"
-                    : `Tìm trên ${platformName(mode)} thật`}
-              <ArrowRight size={17} />
+                    : `Tìm trên ${platformName(mode)}`}
+              <ArrowRight size={16} />
             </Button>
           </div>
           {query.trim().startsWith("#") && (
-            <div style={{ margin: "-0.5rem 0 0.5rem 0.25rem", fontSize: "0.82rem", color: "#0f766e", display: "flex", alignItems: "center", gap: "0.35rem" }}>
-              <span>🏷️ Đang tìm theo Hashtag chính xác:</span>
-              <strong style={{ background: "#ccfbf1", padding: "0.1rem 0.4rem", borderRadius: "4px" }}>
+            <div style={{ margin: "0.4rem 0 0.5rem 0.25rem", fontSize: "0.82rem", color: "var(--accent)", display: "flex", alignItems: "center", gap: "0.35rem" }}>
+              <span>Đang lọc theo Hashtag chính xác:</span>
+              <strong style={{ background: "var(--accent-light)", padding: "0.1rem 0.4rem", borderRadius: "4px" }}>
                 {query.trim()}
               </strong>
             </div>
           )}
           {exactHashtag && !query.includes("#") && (
-            <div style={{ margin: "-0.5rem 0 0.5rem 0.25rem", fontSize: "0.82rem", color: "#b45309", display: "flex", alignItems: "center", gap: "0.35rem" }}>
-              <span>⚠️ Vui lòng nhập thêm thẻ #hashtag (ví dụ: #decorbanhoc) vào ô tìm kiếm để lọc chính xác thẻ.</span>
+            <div style={{ margin: "0.4rem 0 0.5rem 0.25rem", fontSize: "0.82rem", color: "var(--warning)", display: "flex", alignItems: "center", gap: "0.35rem" }}>
+              <span>⚠️ Nhập thêm thẻ #hashtag (ví dụ: #decorbanhoc) vào ô tìm kiếm để lọc chính xác thẻ.</span>
             </div>
           )}
-          <div className="search-options">
-            <div className="row wrap">
-              <span className="muted" style={{ fontWeight: 500 }}>Tìm trên:</span>
-              {(mode === "mock"
-                ? (["xiaohongshu", "douyin", "tiktok", "youtube_shorts"] as Platform[])
-                : (["xiaohongshu", "douyin"] as Platform[])
-              ).map((p) => {
-                const isSelected =
-                  mode === "mock"
-                    ? platforms.includes(p)
-                    : mode === p;
-                return (
-                  <button
-                    key={p}
-                    type="button"
-                    className={`platform-option ${isSelected ? "checked" : ""}`}
-                    style={{
-                      cursor: "pointer",
-                      border: isSelected ? "2px solid #0f766e" : "1px solid #cbd5e1",
-                      background: isSelected ? "rgba(15, 118, 110, 0.08)" : "#fff",
-                      color: isSelected ? "#0f766e" : "inherit",
-                      fontWeight: isSelected ? 600 : 400,
-                      padding: "0.35rem 0.75rem",
-                      borderRadius: "6px",
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: "0.45rem",
-                    }}
-                    onClick={() => selectPlatform(p)}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      readOnly
-                      style={{ cursor: "pointer", pointerEvents: "none" }}
-                    />
-                    <span className={p === "douyin" ? "dy-mark" : p === "xiaohongshu" ? "red-mark" : "platform-mark"}>
-                      {p === "douyin" ? "♪" : p === "xiaohongshu" ? "小红书" : p === "tiktok" ? "TT" : "YT"}
-                    </span>
-                    <span>{platformName(p)} {mode !== "mock" && "thật"}</span>
-                  </button>
-                );
-              })}
-            </div>
-            <div className="row wrap" style={{ gap: "10px", alignItems: "center" }}>
+          <div className="search-options" style={{ marginTop: "1rem" }}>
+            {mode === "mock" ? (
+              <div className="row wrap">
+                <span className="muted" style={{ fontWeight: 500 }}>Nền tảng mẫu:</span>
+                {(["xiaohongshu", "douyin", "tiktok", "youtube_shorts"] as Platform[]).map((p) => {
+                  const isSelected = platforms.includes(p);
+                  return (
+                    <button
+                      key={p}
+                      type="button"
+                      className={`filter-chip ${isSelected ? "active" : ""}`}
+                      onClick={() => selectPlatform(p)}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        readOnly
+                      />
+                      <span>{platformName(p)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : <div />}
+            <div className="row wrap" style={{ gap: "8px", alignItems: "center" }}>
               <label className="row muted">
-                Số kết quả
+                Số lượng
                 <select
                   aria-label="Số kết quả"
                   value={limit}
@@ -384,7 +409,7 @@ function SearchSession({
                     : [20, 50, 100, 200]
                   ).map((n) => (
                     <option key={n} value={n}>
-                      {n} kết quả
+                      {n} video
                     </option>
                   ))}
                 </select>
@@ -399,8 +424,8 @@ function SearchSession({
                       disabled={busy}
                       onChange={(e) => setSortBy(e.target.value as "relevance" | "most_liked" | "newest")}
                     >
-                      <option value="relevance">Tổng hợp (Chuẩn)</option>
-                      <option value="most_liked">Nhiều like nhất</option>
+                      <option value="relevance">Tổng hợp</option>
+                      <option value="most_liked">Nhiều like</option>
                       <option value="newest">Mới nhất</option>
                     </select>
                   </label>
@@ -435,30 +460,29 @@ function SearchSession({
               )}
             </div>
           </div>
-          <div className="row wrap" style={{ alignItems: "center", gap: "1rem" }}>
-            <label className="row ai-toggle">
+          <div className="row wrap" style={{ alignItems: "center", gap: "0.6rem", marginTop: "0.5rem" }}>
+            <label className={`filter-chip ${useAI ? "active" : ""}`}>
               <input
                 type="checkbox"
+                aria-label="Tự tạo từ khóa AI khi tìm"
+                data-testid="ai-expand-toggle"
                 checked={useAI}
                 onChange={(e) => setUseAI(e.target.checked)}
                 disabled={busy}
               />
-              Tự tạo từ khóa AI khi tìm
+              <span>Mở rộng từ khóa tự động</span>
             </label>
-            <label className="row ai-toggle" title="Chỉ giữ lại video có gắn đúng thẻ hashtag được yêu cầu">
+            <label className={`filter-chip ${exactHashtag || query.trim().startsWith("#") ? "active" : ""}`} title="Chỉ giữ lại video có gắn đúng thẻ hashtag được yêu cầu">
               <input
                 type="checkbox"
+                aria-label="Khớp chính xác #Hashtag"
+                data-testid="exact-hashtag-toggle"
                 checked={exactHashtag || query.trim().startsWith("#")}
                 onChange={(e) => setExactHashtag(e.target.checked)}
                 disabled={busy || query.trim().startsWith("#")}
               />
-              Khớp chính xác Hashtag (#)
+              <span>Khớp chính xác #Hashtag</span>
             </label>
-            {mode !== "mock" && (
-              <span style={{ fontSize: "0.82rem", color: "#0f766e", background: "#f0fdfa", padding: "0.2rem 0.6rem", borderRadius: "999px", border: "1px solid #ccfbf1" }}>
-                💡 Tự động chuyển đổi tiếng Việt sang tiếng Trung chuẩn xác để tìm đúng video
-              </span>
-            )}
           </div>
           <QueryExpansionPanel
             query={query}

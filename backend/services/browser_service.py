@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
@@ -9,6 +10,8 @@ from playwright.async_api import BrowserContext, Error, Page, Playwright, async_
 from backend.core.config import ROOT, settings
 from backend.providers.base import ProviderUnavailableError
 from backend.providers.xiaohongshu.parser import classify_page
+
+logger = logging.getLogger("xiaohongshu.browser")
 
 HOME = "https://www.xiaohongshu.com/explore"
 MESSAGES = {
@@ -329,8 +332,27 @@ class BrowserService:
                 else:
                     await route.continue_()
 
-            await self.context.route("**/*", block_resources)
-            # Restore saved session cookies if present
+            # Sanitize profile cookies: purge dummy/corrupt values that trigger HTTP 500 on Xiaohongshu servers
+            try:
+                from backend.services.cookie_service import DUMMY_SUBSTRINGS
+                loaded_cookies = await self.context.cookies()
+                bad_cookies = [
+                    c for c in loaded_cookies
+                    if any(dummy in str(c.get("value", "")).lower() for dummy in DUMMY_SUBSTRINGS)
+                ]
+                if bad_cookies:
+                    logger.warning("Purging %d dummy/corrupt cookies from Xiaohongshu browser profile...", len(bad_cookies))
+                    clean_cookies = [
+                        c for c in loaded_cookies
+                        if not any(dummy in str(c.get("value", "")).lower() for dummy in DUMMY_SUBSTRINGS)
+                    ]
+                    await self.context.clear_cookies()
+                    if clean_cookies:
+                        await self.context.add_cookies(cast(Any, clean_cookies))
+            except Exception as e:
+                logger.debug("Profile cookie sanitization skipped: %s", e)
+
+            # Restore saved session cookies if present (skipping any dummy values)
             auth_file = self.profile / "auth_state.json"
             if auth_file.exists():
                 try:
@@ -340,8 +362,8 @@ class BrowserService:
                     if cookies:
                         persisted = persist_auth_cookies(cookies)
                         await self.context.add_cookies(cast(Any, persisted))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Could not restore cookies from auth_state.json: %s", e)
 
             # Inject custom cookie from settings if configured (skip dummy/test strings)
             if settings.xhs_cookie:
@@ -363,8 +385,8 @@ class BrowserService:
                             ]
                             persisted_custom = persist_auth_cookies(custom_cookies)
                             await self.context.add_cookies(cast(Any, persisted_custom))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Could not inject custom settings cookie: %s", e)
 
             self.base_url = await self.detect_base_url()
             self.page = (
@@ -372,12 +394,55 @@ class BrowserService:
             )
             self.page.set_default_timeout(10000)
             target_home = initial_url or f"{self.base_url}/explore"
-            # No stealth scripts, proxy changes, cookie import, or private endpoints.
-            await self.page.goto(target_home, wait_until="domcontentloaded", timeout=30000)
+
+            # Domain fallback candidates
+            nav_urls = [target_home]
+            if "rednote.com" in target_home:
+                nav_urls.append(target_home.replace("rednote.com", "xiaohongshu.com"))
+            elif "xiaohongshu.com" in target_home:
+                nav_urls.append(target_home.replace("xiaohongshu.com", "rednote.com"))
+
+            nav_success = False
+            last_nav_err = None
+            for nav_url in nav_urls:
+                try:
+                    logger.info("Xiaohongshu navigating to: %s", nav_url)
+                    await self.page.goto(nav_url, wait_until="domcontentloaded", timeout=30000)
+                    nav_success = True
+                    if "xiaohongshu.com" in nav_url:
+                        self.base_url = "https://www.xiaohongshu.com"
+                    elif "rednote.com" in nav_url:
+                        self.base_url = "https://www.rednote.com"
+                    break
+                except Error as nav_err:
+                    last_nav_err = nav_err
+                    err_text = str(nav_err)
+                    logger.warning("Xiaohongshu navigation failed for %s: %s", nav_url, err_text)
+                    # If server returned HTTP 500 / ERR_HTTP_RESPONSE_CODE_FAILURE, stale/corrupt session cookies
+                    # from past logins often crash Xiaohongshu's backend. Clear cookies and retry clean once.
+                    if "ERR_HTTP_RESPONSE_CODE_FAILURE" in err_text or "500" in err_text:
+                        logger.warning("Received HTTP response code failure on %s; clearing cookies and retrying clean...", nav_url)
+                        try:
+                            await self.context.clear_cookies()
+                            await self.page.goto(nav_url, wait_until="domcontentloaded", timeout=30000)
+                            nav_success = True
+                            if "xiaohongshu.com" in nav_url:
+                                self.base_url = "https://www.xiaohongshu.com"
+                            elif "rednote.com" in nav_url:
+                                self.base_url = "https://www.rednote.com"
+                            break
+                        except Error as retry_err:
+                            logger.error("Retry after cookie clear also failed for %s: %s", nav_url, retry_err)
+                            last_nav_err = retry_err
+
+            if not nav_success:
+                raise last_nav_err or Error("Failed to navigate to Xiaohongshu endpoints")
+
             await self.page.wait_for_timeout(1000)
             await self.inspect(self.page)
             return self.page
-        except Error:
+        except Error as exc:
+            logger.error("Xiaohongshu ensure_open error: %s", exc)
             navigation_failed = self.page is not None
             # A navigation failure can happen after Chrome already launched. Close the
             # partial context so it cannot keep the persistent profile locked.
@@ -387,10 +452,24 @@ class BrowserService:
                 pass
             self.state = "network_error"
             if navigation_failed:
-                raise ProviderUnavailableError("Chrome đã mở nhưng không tải được trang Xiaohongshu/Rednote. Hãy kiểm tra kết nối và mở lại nền tảng trong trình duyệt riêng; lỗi này không đồng nghĩa thiếu Chromium.") from None
+                raise ProviderUnavailableError(
+                    f"Chrome đã mở nhưng không tải được trang Xiaohongshu/Rednote ({exc}). "
+                    "Hãy kiểm tra kết nối và mở lại nền tảng trong trình duyệt riêng; lỗi này không đồng nghĩa thiếu Chromium."
+                ) from None
             raise ProviderUnavailableError(
-                "Không mở được trình duyệt Xiaohongshu. Kiểm tra Chromium đã cài và đóng phiên dùng cùng profile."
+                f"Không mở được trình duyệt Xiaohongshu ({exc}). Kiểm tra Chromium đã cài và đóng phiên dùng cùng profile."
             ) from None
+
+    async def probe_live(self) -> tuple[bool, str]:
+        """Probes live connectivity to Xiaohongshu by opening the page and inspecting state."""
+        try:
+            page = await self.ensure_open()
+            state = await self.inspect(page)
+            is_healthy = state not in ("network_error", "closed", "restricted")
+            return is_healthy, state
+        except Exception as exc:
+            logger.warning("Xiaohongshu live probe failed: %s", exc)
+            return False, str(exc)
 
     async def inspect(self, page: Page) -> str:
         if page.is_closed():

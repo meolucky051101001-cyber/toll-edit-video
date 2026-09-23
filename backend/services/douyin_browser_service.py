@@ -347,15 +347,27 @@ class DouyinBrowserService:
                 await self.page.wait_for_timeout(1500)
             await self.inspect(self.page)
             return self.page
-        except Error:
+        except Error as exc:
+            logger.error("Douyin ensure_open error: %s", exc)
             try:
                 await self._close()
             except Error:
                 pass
             self.state = "network_error"
             raise ProviderUnavailableError(
-                "Không mở được trình duyệt Douyin. Kiểm tra Chromium đã cài và đóng phiên dùng cùng profile."
+                f"Không mở được trình duyệt Douyin ({exc}). Kiểm tra Chromium đã cài và đóng phiên dùng cùng profile."
             ) from None
+
+    async def probe_live(self) -> tuple[bool, str]:
+        """Probes live connectivity to Douyin by opening the page and inspecting state."""
+        try:
+            page = await self.ensure_open()
+            state = await self.inspect(page)
+            is_healthy = state not in ("network_error", "closed", "restricted")
+            return is_healthy, state
+        except Exception as exc:
+            logger.warning("Douyin live probe failed: %s", exc)
+            return False, str(exc)
 
     async def inspect(self, page: Page) -> str:
         if page.is_closed():

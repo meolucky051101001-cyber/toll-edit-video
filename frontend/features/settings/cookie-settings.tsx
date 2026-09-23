@@ -260,6 +260,8 @@ export function CookieSettings() {
             onClick={handleSyncAll}
             disabled={busySyncAll}
             className="sync-all-btn"
+            aria-label="Đồng bộ từ trình duyệt (Cả 2 nền tảng)"
+            data-testid="sync-all-cookies-btn"
           >
             {busySyncAll ? (
               <Loader2 size={14} className="animate-spin mr-1" />
