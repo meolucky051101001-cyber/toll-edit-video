@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlsplit
@@ -421,52 +422,112 @@ def merge_share_url(
     return validated_record_canonical
 
 
-def audit_sample_provenance(sample: dict[str, Any]) -> tuple[bool, str]:
-    """Strictly audits a benchmark sample's provenance.
+@dataclass
+class SampleProvenanceResult:
+    schema_valid: bool
+    source_provenance_verified: bool
+    status: str  # "VERIFIED_STRICT", "UNVERIFIED_LEGACY", "UNVERIFIED_MISSING_METADATA", "UNVERIFIED_INSUFFICIENT_EVIDENCE", "INVALID_SCHEMA"
+    detail: str
+    reasons: list[str] = field(default_factory=list)
 
-    Verifies:
-    1. platform in ('douyin', 'xiaohongshu')
-    2. URL parser validation:
-       - scheme == 'https'
-       - hostname exactly matches platform domain
-       - path is canonical (/video/<digits> or /note/<digits> for douyin, /explore/<hex24> for xhs)
-    3. Extracted ID matches platform_video_id exactly
-    4. collected_at is valid ISO 8601 with timezone (e.g. '2026-09-18T08:30:00Z' or '+00:00')
-    5. media_type in ('video', 'image_text')
-    6. Non-empty title, author, rationale
-    7. ground_truth_relevance is a bool
-    8. metadata: query, submitted_query, collector_version, provenance_source, provenance_level
+    def __iter__(self):
+        """Allows unpacking as (source_provenance_verified, detail) for backward compatibility."""
+        return iter((self.source_provenance_verified, self.detail))
+
+
+def audit_sample_provenance(
+    sample: dict[str, Any],
+    expected_query: str | None = None,
+) -> SampleProvenanceResult:
+    """Strictly audits a benchmark/dataset sample for schema validity and source provenance.
+
+    Separates:
+    - schema_valid: whether the data contract, exact URL structure, canonical regex, ID match,
+      and timezone-aware ISO 8601 timestamp are valid.
+    - source_provenance_verified: whether the sample has verifiable capture provenance,
+      including collector version, session ID, provenance source, and exact query metadata match.
+
+    Legacy unverified samples (provenance_level == 'legacy_unverified') are marked as
+    schema_valid=True, source_provenance_verified=False, status='UNVERIFIED_LEGACY'.
     """
     plat = sample.get("platform")
     if plat not in ("douyin", "xiaohongshu"):
-        return False, f"Invalid platform: {plat}"
+        return SampleProvenanceResult(
+            schema_valid=False,
+            source_provenance_verified=False,
+            status="INVALID_SCHEMA",
+            detail=f"Invalid platform: '{plat}'",
+            reasons=[f"Invalid platform: '{plat}'"],
+        )
 
     url_str = str(sample.get("url") or "")
     if not url_str:
-        return False, "Missing URL"
+        return SampleProvenanceResult(
+            schema_valid=False,
+            source_provenance_verified=False,
+            status="INVALID_SCHEMA",
+            detail="Missing URL",
+            reasons=["Missing URL"],
+        )
 
     try:
         p = urlsplit(url_str)
     except Exception as e:
-        return False, f"Malformed URL: {e}"
+        return SampleProvenanceResult(
+            schema_valid=False,
+            source_provenance_verified=False,
+            status="INVALID_SCHEMA",
+            detail=f"Malformed URL: {e}",
+            reasons=[f"Malformed URL: {e}"],
+        )
 
     if p.scheme != "https":
-        return False, f"Insecure URL scheme '{p.scheme}', expected 'https'"
+        return SampleProvenanceResult(
+            schema_valid=False,
+            source_provenance_verified=False,
+            status="INVALID_SCHEMA",
+            detail=f"Insecure URL scheme '{p.scheme}', expected 'https'",
+            reasons=[f"Insecure URL scheme '{p.scheme}'"],
+        )
 
     host = (p.hostname or "").lower()
     expected_id = str(sample.get("platform_video_id") or "")
     if not expected_id:
-        return False, "Missing platform_video_id"
+        return SampleProvenanceResult(
+            schema_valid=False,
+            source_provenance_verified=False,
+            status="INVALID_SCHEMA",
+            detail="Missing platform_video_id",
+            reasons=["Missing platform_video_id"],
+        )
 
     if plat == "douyin":
         if host not in ("www.douyin.com", "douyin.com"):
-            return False, f"Invalid Douyin host: {host}"
+            return SampleProvenanceResult(
+                schema_valid=False,
+                source_provenance_verified=False,
+                status="INVALID_SCHEMA",
+                detail=f"Invalid or spoofed Douyin host: '{host}'",
+                reasons=[f"Invalid or spoofed Douyin host: '{host}'"],
+            )
         m_dy = DOUYIN_VIDEO_REGEX.search(p.path or "")
         if not m_dy:
-            return False, f"Invalid Douyin canonical path: {p.path}"
+            return SampleProvenanceResult(
+                schema_valid=False,
+                source_provenance_verified=False,
+                status="INVALID_SCHEMA",
+                detail=f"Invalid Douyin canonical path: '{p.path}'",
+                reasons=[f"Invalid Douyin canonical path: '{p.path}'"],
+            )
         url_id = m_dy.group(1)
         if url_id != expected_id:
-            return False, f"URL ID '{url_id}' does not match platform_video_id '{expected_id}'"
+            return SampleProvenanceResult(
+                schema_valid=False,
+                source_provenance_verified=False,
+                status="INVALID_SCHEMA",
+                detail=f"URL ID '{url_id}' does not match platform_video_id '{expected_id}'",
+                reasons=[f"URL ID mismatch: '{url_id}' vs '{expected_id}'"],
+            )
     elif plat == "xiaohongshu":
         if host not in (
             "www.xiaohongshu.com",
@@ -474,44 +535,167 @@ def audit_sample_provenance(sample: dict[str, Any]) -> tuple[bool, str]:
             "www.rednote.com",
             "rednote.com",
         ):
-            return False, f"Invalid Xiaohongshu host: {host}"
+            return SampleProvenanceResult(
+                schema_valid=False,
+                source_provenance_verified=False,
+                status="INVALID_SCHEMA",
+                detail=f"Invalid or spoofed Xiaohongshu host: '{host}'",
+                reasons=[f"Invalid or spoofed Xiaohongshu host: '{host}'"],
+            )
         m_xhs = XHS_NOTE_REGEX.search(p.path or "")
         if not m_xhs:
-            return False, f"Invalid Xiaohongshu canonical path: {p.path}"
+            return SampleProvenanceResult(
+                schema_valid=False,
+                source_provenance_verified=False,
+                status="INVALID_SCHEMA",
+                detail=f"Invalid Xiaohongshu canonical path: '{p.path}'",
+                reasons=[f"Invalid Xiaohongshu canonical path: '{p.path}'"],
+            )
         url_id = m_xhs.group(1).lower()
         if url_id != expected_id.lower():
-            return False, f"URL ID '{url_id}' does not match platform_video_id '{expected_id}'"
+            return SampleProvenanceResult(
+                schema_valid=False,
+                source_provenance_verified=False,
+                status="INVALID_SCHEMA",
+                detail=f"URL ID '{url_id}' does not match platform_video_id '{expected_id}'",
+                reasons=[f"URL ID mismatch: '{url_id}' vs '{expected_id}'"],
+            )
 
     # ISO 8601 parsing with timezone awareness
     collected_at_str = str(sample.get("collected_at") or "")
     if not collected_at_str:
-        return False, "Missing collected_at timestamp"
+        return SampleProvenanceResult(
+            schema_valid=False,
+            source_provenance_verified=False,
+            status="INVALID_SCHEMA",
+            detail="Missing collected_at timestamp",
+            reasons=["Missing collected_at timestamp"],
+        )
     try:
         dt = datetime.fromisoformat(collected_at_str.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            return False, f"collected_at timestamp '{collected_at_str}' lacks timezone"
+        if dt.tzinfo is None or dt.utcoffset() is None:
+            return SampleProvenanceResult(
+                schema_valid=False,
+                source_provenance_verified=False,
+                status="INVALID_SCHEMA",
+                detail=f"collected_at timestamp '{collected_at_str}' lacks timezone offset",
+                reasons=["Timestamp lacks timezone offset"],
+            )
     except Exception as e:
-        return False, f"Invalid ISO 8601 timestamp '{collected_at_str}': {e}"
+        return SampleProvenanceResult(
+            schema_valid=False,
+            source_provenance_verified=False,
+            status="INVALID_SCHEMA",
+            detail=f"Invalid ISO 8601 timestamp '{collected_at_str}': {e}",
+            reasons=[f"Invalid ISO 8601 timestamp: {e}"],
+        )
 
     media_type = sample.get("media_type")
     if media_type not in ("video", "image_text"):
-        return False, f"Invalid media_type '{media_type}'"
+        return SampleProvenanceResult(
+            schema_valid=False,
+            source_provenance_verified=False,
+            status="INVALID_SCHEMA",
+            detail=f"Invalid media_type '{media_type}'",
+            reasons=[f"Invalid media_type '{media_type}'"],
+        )
 
     for field_name in ("title", "author", "rationale"):
         val = sample.get(field_name)
         if not isinstance(val, str) or not val.strip():
-            return False, f"Missing or empty required field '{field_name}'"
+            return SampleProvenanceResult(
+                schema_valid=False,
+                source_provenance_verified=False,
+                status="INVALID_SCHEMA",
+                detail=f"Missing or empty required field '{field_name}'",
+                reasons=[f"Missing or empty required field '{field_name}'"],
+            )
 
     if not isinstance(sample.get("ground_truth_relevance"), bool):
-        return False, "ground_truth_relevance must be a boolean"
+        return SampleProvenanceResult(
+            schema_valid=False,
+            source_provenance_verified=False,
+            status="INVALID_SCHEMA",
+            detail="ground_truth_relevance must be a boolean",
+            reasons=["ground_truth_relevance must be a boolean"],
+        )
 
-    # Provenance metadata level
+    # Check for legacy unverified sample: schema is valid, but provenance is unverified
     prov_level = sample.get("provenance_level")
     if prov_level == "legacy_unverified":
-        return True, "Legacy unverified sample (provenance_level=legacy_unverified)"
+        return SampleProvenanceResult(
+            schema_valid=True,
+            source_provenance_verified=False,
+            status="UNVERIFIED_LEGACY",
+            detail="Legacy sample without verified capture source (provenance_level=legacy_unverified)",
+            reasons=["Legacy sample without verified capture source"],
+        )
 
-    # Strict audit metadata presence
-    if not sample.get("query") and not sample.get("submitted_query"):
-        return False, "Missing query or submitted_query metadata"
+    # Strict provenance verification: metadata requirements
+    missing_meta = []
+    for req_field in (
+        "query",
+        "submitted_query",
+        "session_id",
+        "collector_version",
+        "provenance_source",
+        "provenance_level",
+    ):
+        v = sample.get(req_field)
+        if not v or not str(v).strip():
+            missing_meta.append(req_field)
 
-    return True, "Provenance strictly verified: URL, ID, ISO timestamp, and metadata valid"
+    if missing_meta:
+        return SampleProvenanceResult(
+            schema_valid=True,
+            source_provenance_verified=False,
+            status="UNVERIFIED_MISSING_METADATA",
+            detail=f"Missing required provenance metadata fields: {', '.join(missing_meta)}",
+            reasons=[f"Missing required field '{f}'" for f in missing_meta],
+        )
+
+    if str(sample.get("provenance_level")).strip() != "verified_strict_audit":
+        return SampleProvenanceResult(
+            schema_valid=True,
+            source_provenance_verified=False,
+            status="UNVERIFIED",
+            detail=f"provenance_level is '{sample.get('provenance_level')}', expected 'verified_strict_audit'",
+            reasons=["provenance_level mismatch"],
+        )
+
+    # Query metadata matching outer group query
+    sample_query = str(sample.get("query") or "").strip()
+    if expected_query and sample_query != expected_query.strip():
+        return SampleProvenanceResult(
+            schema_valid=True,
+            source_provenance_verified=False,
+            status="UNVERIFIED",
+            detail=f"Sample query metadata '{sample_query}' does not match expected group query '{expected_query}'",
+            reasons=[f"Query mismatch: '{sample_query}' vs '{expected_query}'"],
+        )
+
+    # Verifiable source evidence check
+    session_id = str(sample.get("session_id") or "").strip()
+    has_valid_session_evidence = bool(
+        re.match(r"^[a-zA-Z0-9_\-\.]{8,}$", session_id)
+        and session_id.lower() not in ("placeholder", "unknown", "none", "session_id")
+    )
+    has_capture_ref = bool(
+        sample.get("source_capture_ref") or sample.get("capture_id") or sample.get("metadata_hash")
+    )
+    if not has_valid_session_evidence and not has_capture_ref:
+        return SampleProvenanceResult(
+            schema_valid=True,
+            source_provenance_verified=False,
+            status="UNVERIFIED_INSUFFICIENT_EVIDENCE",
+            detail=f"Insufficient verifiable source evidence: invalid session_id '{session_id}' and no capture ref/hash",
+            reasons=["Insufficient verifiable source evidence"],
+        )
+
+    return SampleProvenanceResult(
+        schema_valid=True,
+        source_provenance_verified=True,
+        status="VERIFIED_STRICT",
+        detail="Provenance strictly verified: URL, ID, ISO timestamp, and metadata valid",
+        reasons=[],
+    )

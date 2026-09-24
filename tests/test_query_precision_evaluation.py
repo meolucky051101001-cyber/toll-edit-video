@@ -476,50 +476,57 @@ def test_crawled_dataset_retrieval_precision_benchmark():
     safe_print(f"Identified {len(rejection_reasons)} valid distractor rejections with documented rationales.")
 
 
-def test_independent_holdout_multidomain_benchmark():
-    """Independent holdout multi-domain benchmark evaluation.
+def test_regression_fixture_multidomain_benchmark():
+    """Multi-domain regression fixture benchmark evaluation.
 
-    Evaluates a clean, separate holdout dataset (data/benchmarks/independent_holdout_benchmark.json)
+    Evaluates the curated regression fixture dataset (data/benchmarks/independent_holdout_benchmark.json)
     covering 5 distinct domains (craft/tools, decor, tools, tech, skincare).
-    Explicitly checks four distractor types for compound queries:
-    1. sticker_without_tweezer (contains sticker only, lacks tweezer)
-    2. tweezer_not_for_sticker (industrial/repair tweezers, lacks sticker purpose)
-    3. planner_without_sticker (planner/journal '手账' only, lacks sticker and tweezer)
-    4. image_text_not_video (image carousel note violating video requirement)
+    Explicitly separates metrics for different classifiers and evaluation mechanisms:
+    1. Top-k Ranking Precision (Precision@k per query and mean Precision@k)
+    2. Compound-Intent Validator (strictly for 'nhíp gắp sticker' dual-entity query)
+    3. General Threshold Classifier (for domain queries: decor, tools, tech, skincare)
 
-    Ensures high scores cannot override missing mandatory intents and tests generalization
-    on unseen samples without threshold overfitting.
+    Dataset Status:
+    - Labeled as REGRESSION FIXTURE (internal curated fixtures with structured provenance metadata;
+      NOT an externally audited or third-party holdout).
+    - Platform Scope: Douyin only (Xiaohongshu: PENDING DATA - awaiting live authenticated crawl on workstation).
     """
     holdout_path = Path(__file__).resolve().parent.parent / "data/benchmarks/independent_holdout_benchmark.json"
-    assert holdout_path.exists(), f"Holdout benchmark dataset not found at {holdout_path}"
+    assert holdout_path.exists(), f"Regression fixture dataset not found at {holdout_path}"
 
     with open(holdout_path, "r", encoding="utf-8") as f:
         holdout_groups = json.load(f)
 
-    assert len(holdout_groups) >= 5, f"Expected at least 5 holdout query groups, found {len(holdout_groups)}"
+    assert len(holdout_groups) >= 5, f"Expected at least 5 fixture query groups, found {len(holdout_groups)}"
 
     CLASSIFICATION_THRESHOLD = 15.0
-    total_samples = 0
-    holdout_tp = 0
-    holdout_fp = 0
-    holdout_tn = 0
-    holdout_fn = 0
-    rejections_audit = []
+
+    # Separate accumulators for distinct evaluators
+    # 1. Top-k ranking
+    query_rank_precisions: dict[str, float] = {}
+
+    # 2. Compound-intent validator ('nhíp gắp sticker')
+    compound_stats = {"tp": 0, "fp": 0, "tn": 0, "fn": 0, "total": 0, "video": 0, "image_text": 0}
+    compound_distractors: list[dict] = []
+
+    # 3. Threshold classifier (other 4 queries)
+    threshold_stats = {"tp": 0, "fp": 0, "tn": 0, "fn": 0, "total": 0, "video": 0, "image_text": 0}
+    threshold_distractors: list[dict] = []
 
     for group in holdout_groups:
         q = group["query"]
         samples = group.get("samples", [])
-        assert len(samples) > 0, f"Query '{q}' has no holdout samples"
+        assert len(samples) > 0, f"Query '{q}' has no fixture samples"
 
         plan = plan_query(q)
         scored_samples = []
 
         for sample in samples:
-            # Provenance audit
-            prov_ok, prov_msg = audit_sample_provenance(sample)
-            assert prov_ok, f"Holdout sample '{sample.get('title')}' failed provenance: {prov_msg}"
+            # Provenance audit with expected query check
+            prov_res = audit_sample_provenance(sample, expected_query=q)
+            assert prov_res.schema_valid is True, f"Fixture sample '{sample.get('title')}' invalid schema: {prov_res.detail}"
+            assert prov_res.source_provenance_verified is True, f"Fixture sample '{sample.get('title')}' unverified provenance: {prov_res.detail}"
 
-            total_samples += 1
             vr = VideoResult(
                 platform=sample["platform"],
                 platform_video_id=sample["platform_video_id"],
@@ -533,77 +540,116 @@ def test_independent_holdout_multidomain_benchmark():
             breakdown = rank_detailed(vr, q, alternative_queries=plan.tiered_queries)
             is_gt = sample["ground_truth_relevance"]
             dtype = sample.get("distractor_type", "none")
+            scored_samples.append((vr, is_gt, breakdown, sample["rationale"], dtype, sample["media_type"]))
 
-            # Dedicated compound intent test for 'nhíp gắp sticker'
-            if q == "nhíp gắp sticker":
-                is_rel, rel_reason = validate_compound_intent_relevance(vr, breakdown, q)
-                if is_gt:
-                    assert is_rel is True, f"Relevant sample '{vr.title}' was rejected by compound validator: {rel_reason}"
-                else:
-                    assert is_rel is False, f"Distractor ({dtype}) '{vr.title}' was incorrectly accepted: {rel_reason}"
-                    if dtype == "sticker_without_tweezer":
-                        assert "tool" in rel_reason.lower() or "tweezer" in rel_reason.lower() or "nhíp" in rel_reason.lower()
-                    elif dtype == "tweezer_not_for_sticker":
-                        assert "purpose" in rel_reason.lower() or "sticker" in rel_reason.lower() or "guka" in rel_reason.lower()
-                    elif dtype == "planner_without_sticker":
-                        assert "missing" in rel_reason.lower() or "purpose" in rel_reason.lower()
-                    elif dtype == "image_text_not_video":
-                        assert "media_type" in rel_reason.lower()
-
-            scored_samples.append((vr, is_gt, breakdown, sample["rationale"], dtype))
-
-        # Precision@k for holdout query
+        # Metric 1: Precision@k for this query
         gt_positives = [s for s in scored_samples if s[1]]
         k = len(gt_positives)
         scored_samples.sort(key=lambda x: x[2].final_score, reverse=True)
         top_k = scored_samples[:k]
         tp_in_top_k = sum(1 for s in top_k if s[1])
         prec_k = tp_in_top_k / k if k > 0 else 0.0
-        assert prec_k >= 0.80, f"Holdout query '{q}' achieved low Precision@{k}: {prec_k}"
+        query_rank_precisions[q] = prec_k
+        assert prec_k >= 0.80, f"Query '{q}' achieved low Precision@{k}: {prec_k}"
 
-        for vr, is_gt, breakdown, rationale, dtype in scored_samples:
-            score = breakdown.final_score
-            is_pred = (score >= CLASSIFICATION_THRESHOLD)
+        # Metric 2 or 3: Separate by evaluation mechanism
+        if q == "nhíp gắp sticker":
+            for vr, is_gt, breakdown, rationale, dtype, mtype in scored_samples:
+                compound_stats["total"] += 1
+                if mtype == "video":
+                    compound_stats["video"] += 1
+                else:
+                    compound_stats["image_text"] += 1
 
-            # High scores cannot substitute for missing mandatory intents
-            if q == "nhíp gắp sticker":
-                is_rel, _ = validate_compound_intent_relevance(vr, breakdown, q)
-                is_pred = is_rel
-            elif breakdown.missing_mandatory_intents:
-                is_pred = False
-            elif vr.media_type != "video":
-                is_pred = False
+                is_pred, rel_reason = validate_compound_intent_relevance(vr, breakdown, q)
 
-            if is_gt and is_pred:
-                holdout_tp += 1
-            elif (not is_gt) and is_pred:
-                holdout_fp += 1
-            elif (not is_gt) and (not is_pred):
-                holdout_tn += 1
-            else:
-                holdout_fn += 1
+                if is_gt:
+                    assert is_pred is True, f"Relevant sample '{vr.title}' was rejected by compound validator: {rel_reason}"
+                    compound_stats["tp"] += 1
+                else:
+                    assert is_pred is False, f"Distractor ({dtype}) '{vr.title}' was incorrectly accepted: {rel_reason}"
+                    compound_stats["tn"] += 1
+                    compound_distractors.append({
+                        "title": vr.title,
+                        "distractor_type": dtype,
+                        "media_type": mtype,
+                        "reason": rel_reason,
+                    })
+        else:
+            for vr, is_gt, breakdown, rationale, dtype, mtype in scored_samples:
+                threshold_stats["total"] += 1
+                if mtype == "video":
+                    threshold_stats["video"] += 1
+                else:
+                    threshold_stats["image_text"] += 1
 
-            if not is_gt:
-                rejections_audit.append({
-                    "query": q,
-                    "title": vr.title,
-                    "distractor_type": dtype,
-                    "score": score,
-                    "rationale": rationale,
-                })
+                score = breakdown.final_score
+                is_pred = (score >= CLASSIFICATION_THRESHOLD)
+                # Missing mandatory intents cannot be overridden by engagement score
+                if breakdown.missing_mandatory_intents:
+                    is_pred = False
+                elif mtype != "video":
+                    is_pred = False
 
-    assert total_samples >= 13, f"Expected >= 13 holdout samples, got {total_samples}"
-    h_precision = holdout_tp / (holdout_tp + holdout_fp) if (holdout_tp + holdout_fp) > 0 else 0.0
-    h_accuracy = (holdout_tp + holdout_tn) / total_samples if total_samples > 0 else 0.0
+                if is_gt and is_pred:
+                    threshold_stats["tp"] += 1
+                elif (not is_gt) and is_pred:
+                    threshold_stats["fp"] += 1
+                elif (not is_gt) and (not is_pred):
+                    threshold_stats["tn"] += 1
+                else:
+                    threshold_stats["fn"] += 1
 
-    safe_print(f"\n--- INDEPENDENT HOLDOUT MULTI-DOMAIN BENCHMARK (N={total_samples}) ---")
-    safe_print(f"Precision={h_precision:.2f}, Accuracy={h_accuracy:.2f} (TP={holdout_tp}, FP={holdout_fp}, TN={holdout_tn}, FN={holdout_fn})")
-    safe_print(f"Successfully discriminated all {len(rejections_audit)} holdout distractors:")
-    for r in rejections_audit:
-        safe_print(f"  - [{r['distractor_type']}] '{r['title'][:45]}' -> Score={r['score']:.1f}")
+                if not is_gt:
+                    threshold_distractors.append({
+                        "query": q,
+                        "title": vr.title,
+                        "distractor_type": dtype,
+                        "score": score,
+                    })
 
-    assert h_precision >= 0.85, f"Low holdout precision: {h_precision}"
-    assert h_accuracy >= 0.85, f"Low holdout accuracy: {h_accuracy}"
+    total_samples = compound_stats["total"] + threshold_stats["total"]
+    assert total_samples >= 13, f"Expected >= 13 fixture samples, got {total_samples}"
+
+    safe_print(f"\n--- MULTI-DOMAIN REGRESSION FIXTURE BENCHMARK (N={total_samples}) ---")
+    safe_print("Dataset Status: REGRESSION FIXTURE (Internal curated test fixtures with structured provenance metadata)")
+    safe_print("Platform Scope: Douyin only (Xiaohongshu: PENDING DATA - awaiting live crawl on workstation)")
+
+    # 1. Report Top-k Ranking
+    safe_print("\n[EVALUATOR 1: TOP-k RANKING PRECISION]")
+    for q_name, p_val in query_rank_precisions.items():
+        safe_print(f"  - Query '{q_name}': Precision@k = {p_val:.2f}")
+    mean_prec = sum(query_rank_precisions.values()) / len(query_rank_precisions)
+    safe_print(f"  => Mean Precision@k across {len(query_rank_precisions)} queries: {mean_prec:.2f}")
+
+    # 2. Report Compound-Intent Validator
+    c_tp, c_fp, c_tn, c_fn = compound_stats["tp"], compound_stats["fp"], compound_stats["tn"], compound_stats["fn"]
+    c_prec = c_tp / (c_tp + c_fp) if (c_tp + c_fp) > 0 else 0.0
+    c_acc = (c_tp + c_tn) / compound_stats["total"] if compound_stats["total"] > 0 else 0.0
+    safe_print("\n[EVALUATOR 2: COMPOUND-INTENT VALIDATOR ('nhíp gắp sticker')]")
+    safe_print(
+        f"  Sample size: N={compound_stats['total']} ({compound_stats['video']} video, {compound_stats['image_text']} image_text) | Platform: Douyin\n"
+        f"  Precision={c_prec:.2f}, Accuracy={c_acc:.2f} (TP={c_tp}, FP={c_fp}, TN={c_tn}, FN={c_fn})\n"
+        f"  Discriminated all {len(compound_distractors)} compound distractors:"
+    )
+    for cd in compound_distractors:
+        safe_print(f"    * [{cd['distractor_type']}] '{cd['title'][:40]}' -> {cd['reason'][:60]}")
+    assert c_prec >= 0.85 and c_acc >= 0.85
+
+    # 3. Report General Threshold Classifier
+    t_tp, t_fp, t_tn, t_fn = threshold_stats["tp"], threshold_stats["fp"], threshold_stats["tn"], threshold_stats["fn"]
+    t_prec = t_tp / (t_tp + t_fp) if (t_tp + t_fp) > 0 else 0.0
+    t_acc = (t_tp + t_tn) / threshold_stats["total"] if threshold_stats["total"] > 0 else 0.0
+    safe_print(f"\n[EVALUATOR 3: GENERAL THRESHOLD CLASSIFIER (Threshold >= {CLASSIFICATION_THRESHOLD})]")
+    safe_print(
+        f"  Sample size: N={threshold_stats['total']} ({threshold_stats['video']} video, {threshold_stats['image_text']} image_text) | Platform: Douyin\n"
+        f"  Precision={t_prec:.2f}, Accuracy={t_acc:.2f} (TP={t_tp}, FP={t_fp}, TN={t_tn}, FN={t_fn})"
+    )
+    assert t_prec >= 0.85 and t_acc >= 0.85
+
+
+# Backward-compatible alias for existing callers
+test_independent_holdout_multidomain_benchmark = test_regression_fixture_multidomain_benchmark
 
 
 def test_live_retrieval_precision_status_honest_reporting():

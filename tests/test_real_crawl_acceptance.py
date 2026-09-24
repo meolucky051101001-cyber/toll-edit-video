@@ -9,13 +9,16 @@ from backend.services.identity_policy import validate_result_identity
 from backend.services.ranking_service import (
     rank_detailed,
     validate_compound_intent_relevance,
+    validate_live_gate_config,
 )
 from backend.services.translator import plan_query
 
 BENCHMARK_FILE = Path(__file__).resolve().parent.parent / "data" / "benchmarks" / "crawled_benchmark_samples.json"
 
-MIN_LIVE_SAMPLES = int(os.environ.get("MIN_LIVE_SAMPLES", "3"))
-MIN_LIVE_RELEVANCE_RATE = float(os.environ.get("MIN_LIVE_RELEVANCE_RATE", "0.80"))
+MIN_LIVE_SAMPLES, MIN_LIVE_RELEVANCE_RATE = validate_live_gate_config(
+    os.environ.get("MIN_LIVE_SAMPLES", "3"),
+    os.environ.get("MIN_LIVE_RELEVANCE_RATE", "0.80"),
+)
 
 
 @pytest.mark.live_acceptance

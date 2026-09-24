@@ -3,6 +3,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 from backend.schemas.contracts import VideoResult
 from backend.services.translator import (
@@ -468,6 +469,49 @@ def compute_hybrid_score(
     return round(lexical_relevance * (0.8 + 0.2 * quality_score / 100.0), 2)
 
 
+def validate_live_gate_config(
+    min_samples: Any, min_relevance_rate: Any
+) -> tuple[int, float]:
+    """Validates live gate acceptance thresholds.
+
+    Rules:
+    - min_samples must be integer >= 3.
+    - min_relevance_rate must be float with 0.0 < rate <= 1.0 (not NaN, not infinite).
+
+    Raises ValueError with descriptive explanation if any boundary is violated.
+    """
+    try:
+        samples_val = int(min_samples)
+    except (TypeError, ValueError) as err:
+        raise ValueError(
+            f"Invalid MIN_LIVE_SAMPLES={min_samples!r}: must be an integer >= 3"
+        ) from err
+
+    if samples_val < 3:
+        raise ValueError(
+            f"Invalid MIN_LIVE_SAMPLES={samples_val}: minimum allowed sample size for live gate is 3"
+        )
+
+    try:
+        rate_val = float(min_relevance_rate)
+    except (TypeError, ValueError) as err:
+        raise ValueError(
+            f"Invalid MIN_LIVE_RELEVANCE_RATE={min_relevance_rate!r}: must be a float in (0.0, 1.0]"
+        ) from err
+
+    if math.isnan(rate_val) or math.isinf(rate_val):
+        raise ValueError(
+            f"Invalid MIN_LIVE_RELEVANCE_RATE={rate_val}: cannot be NaN or infinite"
+        )
+
+    if rate_val <= 0.0 or rate_val > 1.0:
+        raise ValueError(
+            f"Invalid MIN_LIVE_RELEVANCE_RATE={rate_val}: must be strictly greater than 0.0 and <= 1.0"
+        )
+
+    return samples_val, rate_val
+
+
 STICKER_TWEEZER_TOOL_CJK = ("镊子", "鑷子")
 STICKER_TWEEZER_TOOL_LATIN = (
     "nhíp",
@@ -508,28 +552,55 @@ def check_controlled_phrase_match(
     return False
 
 
-def validate_compound_intent_relevance(
+def validate_sticker_tweezer_compound_intent(
     result: VideoResult,
     breakdown: RankBreakdown,
-    query: str = "nhíp gắp sticker",
 ) -> tuple[bool, str]:
-    """Strictly evaluates whether a video candidate satisfies the compound intent of a dual-entity query.
+    """Strictly evaluates whether a video candidate satisfies the compound intent of 'nhíp gắp sticker'.
 
-    Rules for 'nhíp gắp sticker':
+    Rules:
     1. Media type must be 'video' (photo carousels/notes rejected).
     2. Tool intent (nhíp) must match controlled CJK or whole-word Latin aliases.
     3. Purpose intent (sticker) must match controlled CJK or whole-word Latin aliases.
        NOTE: Standalone '手账' (journal/planner) does NOT count as sticker.
-    4. missing_mandatory_intents from breakdown must be clear of tool or purpose.
-    5. final_score must meet the floor threshold (>= 15.0).
+    4. Reject title-body mismatches: at least one core entity (tool or purpose) must be in the title.
+       A video whose title is completely unrelated (e.g. food/vlog/dance) but spams '#贴纸 #镊子'
+       in caption/hashtags is rejected.
+    5. Reject incompatible domain tweezers: tweezers explicitly for eyelash extension or electronics repair
+       are rejected.
+    6. missing_mandatory_intents from breakdown must be clear of tool or purpose.
+    7. final_score must meet the floor threshold (>= 15.0).
        NOTE: High score cannot substitute for missing mandatory intent.
     """
     if result.media_type != "video":
         return False, f"Rejected: media_type is '{result.media_type}', expected 'video'"
 
-    combined_text = (
-        f"{result.title or ''} {result.caption or ''} {' '.join(result.hashtags or [])}"
+    title_text = result.title or ""
+    caption_text = result.caption or ""
+    tags_text = " ".join(result.hashtags or [])
+    combined_text = f"{title_text} {caption_text} {tags_text}"
+
+    # Check title presence: Title must contain either tool or purpose intent
+    title_has_tool = check_controlled_phrase_match(
+        title_text, STICKER_TWEEZER_TOOL_CJK, STICKER_TWEEZER_TOOL_LATIN
     )
+    title_has_purpose = check_controlled_phrase_match(
+        title_text, STICKER_TWEEZER_PURPOSE_CJK, STICKER_TWEEZER_PURPOSE_LATIN
+    )
+    if not title_has_tool and not title_has_purpose:
+        return (
+            False,
+            "Rejected: Video title has no match for tool or purpose intent (keywords only present in caption/hashtag metadata)",
+        )
+
+    # Check incompatible domains (eyelash extension or electronics/watch repair)
+    incompatible_cjk = ("睫毛", "修手机", "手机维修", "焊点", "电路板", "修表")
+    incompatible_latin = ("eyelash", "noi mi", "sua dien thoai", "sua chua", "soldering")
+    if check_controlled_phrase_match(title_text, incompatible_cjk, incompatible_latin):
+        return (
+            False,
+            "Rejected: Incompatible purpose detected in title (e.g. eyelash extension or electronics repair tweezers)",
+        )
 
     has_tool = check_controlled_phrase_match(
         combined_text, STICKER_TWEEZER_TOOL_CJK, STICKER_TWEEZER_TOOL_LATIN
@@ -574,3 +645,22 @@ def validate_compound_intent_relevance(
         True,
         "Relevant: Satisfies both tool (tweezer) and purpose (sticker) intents with video media evidence",
     )
+
+
+def validate_compound_intent_relevance(
+    result: VideoResult,
+    breakdown: RankBreakdown,
+    query: str = "nhíp gắp sticker",
+) -> tuple[bool, str]:
+    """Validates compound intent for supported dual-entity queries.
+
+    Currently strictly scoped to 'nhíp gắp sticker' (sticker tweezers).
+    Raises ValueError if invoked with an unsupported query.
+    """
+    norm_q = normalize_vietnamese(query).strip().lower()
+    if norm_q not in ("nhip gap sticker", "nhíp gắp sticker"):
+        raise ValueError(
+            f"validate_compound_intent_relevance is strictly scoped to 'nhíp gắp sticker', "
+            f"received unsupported query: '{query}'"
+        )
+    return validate_sticker_tweezer_compound_intent(result, breakdown)

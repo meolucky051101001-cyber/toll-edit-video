@@ -288,28 +288,29 @@ def test_f1_short_link_resolution_and_validation():
     nid_a = "69d3cb2b00000000200399e3"
     nid_b = "69d3cb2b00000000200399f9"
 
-    # Mock resolving short link to note A
-    with patch("httpx.Client.head") as mock_head:
-        mock_head.return_value = SimpleNamespace(
-            url=f"https://www.xiaohongshu.com/explore/{nid_a}?xsec_token=RESOLVED_TOKEN_A"
-        )
-        resolved = resolve_xhs_short_link_sync("https://xhslink.com/targetA", expected_id=nid_a)
-        assert resolved is not None
-        assert nid_a in resolved
-        assert "RESOLVED_TOKEN_A" in resolved
+    with patch("backend.services.identity_policy.resolve_and_validate_host_sync", return_value=["1.1.1.1"]):
+        # Mock resolving short link to note A
+        with patch("httpx.Client.head") as mock_head:
+            mock_head.return_value = SimpleNamespace(
+                url=f"https://www.xiaohongshu.com/explore/{nid_a}?xsec_token=RESOLVED_TOKEN_A"
+            )
+            resolved = resolve_xhs_short_link_sync("https://xhslink.com/targetA", expected_id=nid_a)
+            assert resolved is not None
+            assert nid_a in resolved
+            assert "RESOLVED_TOKEN_A" in resolved
 
-    # Short link resolving to different note B must be rejected
-    with patch("httpx.Client.head") as mock_head:
-        mock_head.return_value = SimpleNamespace(
-            url=f"https://www.xiaohongshu.com/explore/{nid_b}?xsec_token=TOKEN_B"
-        )
-        rejected = resolve_xhs_short_link_sync("https://xhslink.com/targetB", expected_id=nid_a)
-        assert rejected is None
+        # Short link resolving to different note B must be rejected
+        with patch("httpx.Client.head") as mock_head:
+            mock_head.return_value = SimpleNamespace(
+                url=f"https://www.xiaohongshu.com/explore/{nid_b}?xsec_token=TOKEN_B"
+            )
+            rejected = resolve_xhs_short_link_sync("https://xhslink.com/targetB", expected_id=nid_a)
+            assert rejected is None
 
-    # Short link network failure/timeout returns None
-    with patch("httpx.Client.head", side_effect=TimeoutError("Request timed out")):
-        timeout_res = resolve_xhs_short_link_sync("https://xhslink.com/timeout", expected_id=nid_a)
-        assert timeout_res is None
+        # Short link network failure/timeout returns None
+        with patch("httpx.Client.head", side_effect=TimeoutError("Request timed out")):
+            timeout_res = resolve_xhs_short_link_sync("https://xhslink.com/timeout", expected_id=nid_a)
+            assert timeout_res is None
 
 
 def test_f2_schema_rejects_identity_contradiction():

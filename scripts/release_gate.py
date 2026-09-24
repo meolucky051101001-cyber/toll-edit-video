@@ -101,6 +101,18 @@ def parse_pytest_summary(output: str) -> dict[str, int]:
 
 
 def main() -> int:
+    # Preflight Check: Validate Live Gate Configuration
+    from backend.services.ranking_service import validate_live_gate_config
+
+    try:
+        min_live_samples, min_live_relevance_rate = validate_live_gate_config(
+            os.environ.get("MIN_LIVE_SAMPLES", "3"),
+            os.environ.get("MIN_LIVE_RELEVANCE_RATE", "0.80"),
+        )
+    except Exception as exc:
+        print(f"CRITICAL CONFIGURATION ERROR: Live gate configuration invalid: {exc}\n")
+        return 1
+
     total_stages = 11
     print_banner(f"AI Video Research Tool - Comprehensive Release Gate ({total_stages} Stages)")
     start_time = time.time()
@@ -256,9 +268,13 @@ def main() -> int:
     total_crawled_samples = 0
     total_holdout_samples = 0
     total_real_queries = 0
-    provenance_ok = True
     crawled_video_samples = 0
     crawled_image_text_samples = 0
+    schema_valid_samples = 0
+    strict_provenance_verified_samples = 0
+    unverified_legacy_samples = 0
+    unverified_other_samples = 0
+    audit_failures: list[str] = []
     platform_samples_count: dict[str, dict[str, int]] = {
         "douyin": {"video": 0, "image_text": 0, "total": 0},
         "xiaohongshu": {"video": 0, "image_text": 0, "total": 0},
@@ -270,6 +286,7 @@ def main() -> int:
                 crawled_data = json.load(f)
                 total_real_queries = len(crawled_data)
                 for g in crawled_data:
+                    group_q = g.get("query")
                     for s in g.get("samples", []):
                         total_crawled_samples += 1
                         plat = s.get("platform")
@@ -282,25 +299,40 @@ def main() -> int:
                             elif mtype == "image_text":
                                 platform_samples_count[plat]["image_text"] += 1
                                 crawled_image_text_samples += 1
-                        # Strict provenance audit: scheme https, exact host, canonical regex, ID match, ISO timestamp, metadata
-                        audit_ok, _ = audit_sample_provenance(s)
-                        if not audit_ok:
-                            provenance_ok = False
-        except Exception:
-            provenance_ok = False
+
+                        res = audit_sample_provenance(s, expected_query=group_q)
+                        if res.schema_valid:
+                            schema_valid_samples += 1
+                        if res.source_provenance_verified:
+                            strict_provenance_verified_samples += 1
+                        elif res.status == "UNVERIFIED_LEGACY":
+                            unverified_legacy_samples += 1
+                        else:
+                            unverified_other_samples += 1
+                            audit_failures.append(f"Sample '{s.get('title')}' in query '{group_q}': {res.detail}")
+        except Exception as exc:
+            audit_failures.append(f"Benchmark file read error: {exc}")
 
     if holdout_json_path.exists():
         try:
             with open(holdout_json_path, "r", encoding="utf-8") as f:
                 holdout_data = json.load(f)
                 for g in holdout_data:
+                    group_q = g.get("query")
                     for s in g.get("samples", []):
                         total_holdout_samples += 1
-                        audit_ok, _ = audit_sample_provenance(s)
-                        if not audit_ok:
-                            provenance_ok = False
-        except Exception:
-            provenance_ok = False
+                        res = audit_sample_provenance(s, expected_query=group_q)
+                        if res.schema_valid:
+                            schema_valid_samples += 1
+                        if res.source_provenance_verified:
+                            strict_provenance_verified_samples += 1
+                        elif res.status == "UNVERIFIED_LEGACY":
+                            unverified_legacy_samples += 1
+                        else:
+                            unverified_other_samples += 1
+                            audit_failures.append(f"Holdout sample '{s.get('title')}' in query '{group_q}': {res.detail}")
+        except Exception as exc:
+            audit_failures.append(f"Holdout file read error: {exc}")
 
     try:
         from tests.test_evaluation_benchmark import BENCHMARK_DATASET
@@ -308,18 +340,29 @@ def main() -> int:
     except Exception:
         total_benchmark_queries = 60
 
+    total_audited = total_crawled_samples + total_holdout_samples
+    schema_ok = (schema_valid_samples == total_audited) and (total_audited > 0)
+    strict_provenance_ok = (strict_provenance_verified_samples == total_audited) and (unverified_legacy_samples == 0) and (unverified_other_samples == 0)
+    provenance_ok = schema_ok and strict_provenance_ok
+
     total_queries_verified = total_benchmark_queries + total_real_queries
     results["9_fixture_benchmark"] = {
         "passed": bench_ok and provenance_ok,
         "exit_code": code,
+        "dataset_status": "REGRESSION FIXTURE",
         "queries_verified": total_queries_verified,
         "domain_benchmark_queries": total_benchmark_queries,
         "real_crawled_queries": total_real_queries,
+        "total_samples_audited": total_audited,
+        "schema_valid_samples": schema_valid_samples,
+        "strict_provenance_verified_samples": strict_provenance_verified_samples,
+        "unverified_legacy_samples": unverified_legacy_samples,
+        "unverified_other_samples": unverified_other_samples,
         "real_crawled_samples_provenance": total_crawled_samples,
         "independent_holdout_samples": total_holdout_samples,
         "crawled_video_samples": crawled_video_samples,
         "crawled_image_text_samples": crawled_image_text_samples,
-        "provenance_audit_level": "strict_url_id_iso_parsed",
+        "provenance_audit_level": "strict_url_id_iso_parsed_with_evidence",
         "provenance_verified": provenance_ok,
         "crawled_platforms": {
             "douyin": platform_samples_count["douyin"],
@@ -332,9 +375,9 @@ def main() -> int:
         "duration_s": t_bench,
     }
     if bench_ok and provenance_ok:
-        print(f"PASS ({total_benchmark_queries} domain queries + {total_real_queries} offline crawled queries [{total_crawled_samples} crawled + {total_holdout_samples} holdout samples; {crawled_video_samples} video, {crawled_image_text_samples} img/txt, strict provenance verified] verified) [{t_bench}s]")
+        print(f"PASS ({total_benchmark_queries} domain queries + {total_real_queries} offline crawled queries [{total_crawled_samples} crawled + {total_holdout_samples} holdout samples; {crawled_video_samples} video, {crawled_image_text_samples} img/txt; {strict_provenance_verified_samples}/{total_audited} strict provenance verified] verified) [{t_bench}s]")
     else:
-        print(f"FAIL (exit code {code}, provenance_ok={provenance_ok})")
+        print(f"FAIL (exit code {code}, provenance_ok={provenance_ok}, failures={audit_failures[:3]})")
         print(out[:500])
         all_passed = False
 
@@ -469,24 +512,35 @@ def main() -> int:
         dy_tot_cnt = int(m_dy_audit.group(2)) if m_dy_audit else 0
         dy_rel_rate = round(dy_rel_cnt / dy_tot_cnt, 2) if dy_tot_cnt > 0 else 0.0
 
+        dy_network_reachable = probe_ok and ("HTTP" in dy_probe_detail)
+        dy_browser_reachable = probe_ok
         if dy_ok:
             dy_status = "PASS"
             dy_detail = f"Live Douyin video items retrieved: {dy_rel_cnt}/{dy_tot_cnt} relevant (rate={dy_rel_rate})"
             dy_reason = "Compound intent validated on live retrieved videos"
-            dy_operational = True
+            dy_retrieval_available = True
+            dy_retrieval_block_reason = None
             dy_precision_verified = True
-        elif "blocked by authentication" in dy_out or "UserActionRequired" in dy_out or "verification challenge" in dy_out:
+        elif "blocked by authentication" in dy_out or "UserActionRequired" in dy_out or "verification challenge" in dy_out or "CAPTCHA" in dy_out:
             dy_status = "BLOCKED (CHALLENGE_REQUIRED)"
             dy_detail = "Douyin security verification/CAPTCHA challenge required on workstation"
             dy_reason = "CAPTCHA or slider challenge encountered during live search"
-            dy_operational = probe_ok
+            dy_retrieval_available = False
+            dy_retrieval_block_reason = "CAPTCHA_CHALLENGE"
             dy_precision_verified = False
+            dy_tot_cnt = 0
+            dy_rel_cnt = 0
+            dy_rel_rate = 0.0
         else:
             dy_status = "FAIL"
             dy_detail = dy_out[:300]
             dy_reason = dy_out[:300]
-            dy_operational = False
+            dy_retrieval_available = False
+            dy_retrieval_block_reason = "RETRIEVAL_FAILED"
             dy_precision_verified = False
+            dy_tot_cnt = 0
+            dy_rel_cnt = 0
+            dy_rel_rate = 0.0
 
         # 11.C: Xiaohongshu live search retrieval
         p_xhs = subprocess.run(
@@ -512,24 +566,35 @@ def main() -> int:
         xhs_tot_cnt = int(m_xhs_audit.group(2)) if m_xhs_audit else 0
         xhs_rel_rate = round(xhs_rel_cnt / xhs_tot_cnt, 2) if xhs_tot_cnt > 0 else 0.0
 
+        xhs_network_reachable = probe_ok and ("HTTP" in xhs_probe_detail)
+        xhs_browser_reachable = probe_ok
         if xhs_ok:
             xhs_status = "PASS"
             xhs_detail = f"Live Xiaohongshu items retrieved: {xhs_rel_cnt}/{xhs_tot_cnt} relevant (rate={xhs_rel_rate})"
             xhs_reason = "Compound intent validated on live retrieved videos"
-            xhs_operational = True
+            xhs_retrieval_available = True
+            xhs_retrieval_block_reason = None
             xhs_precision_verified = True
         elif "blocked by authentication" in xhs_out or "UserActionRequired" in xhs_out or "login required" in xhs_out:
             xhs_status = "BLOCKED (LOGIN_REQUIRED)"
             xhs_detail = "Xiaohongshu user login session required on workstation"
             xhs_reason = "User login session required to view search results on workstation"
-            xhs_operational = probe_ok
+            xhs_retrieval_available = False
+            xhs_retrieval_block_reason = "LOGIN_REQUIRED"
             xhs_precision_verified = False
+            xhs_tot_cnt = 0
+            xhs_rel_cnt = 0
+            xhs_rel_rate = 0.0
         else:
             xhs_status = "FAIL"
             xhs_detail = xhs_out[:300]
             xhs_reason = xhs_out[:300]
-            xhs_operational = False
+            xhs_retrieval_available = False
+            xhs_retrieval_block_reason = "RETRIEVAL_FAILED"
             xhs_precision_verified = False
+            xhs_tot_cnt = 0
+            xhs_rel_cnt = 0
+            xhs_rel_rate = 0.0
 
         t_live = round(time.time() - t0, 2)
         live_full_green = probe_ok and dy_ok and xhs_ok and dy_precision_verified and xhs_precision_verified
@@ -551,7 +616,10 @@ def main() -> int:
                     "detail": dy_detail,
                     "query": "nhíp gắp sticker",
                     "submitted_query": "贴纸镊子",
-                    "crawl_operational": dy_operational,
+                    "network_reachable": dy_network_reachable,
+                    "browser_reachable": dy_browser_reachable,
+                    "retrieval_available": dy_retrieval_available,
+                    "retrieval_block_reason": dy_retrieval_block_reason,
                     "precision_verified": dy_precision_verified,
                     "results_count": dy_tot_cnt,
                     "relevant_count": dy_rel_cnt,
@@ -563,7 +631,10 @@ def main() -> int:
                     "detail": xhs_detail,
                     "query": "nhíp gắp sticker",
                     "submitted_query": "贴纸镊子",
-                    "crawl_operational": xhs_operational,
+                    "network_reachable": xhs_network_reachable,
+                    "browser_reachable": xhs_browser_reachable,
+                    "retrieval_available": xhs_retrieval_available,
+                    "retrieval_block_reason": xhs_retrieval_block_reason,
                     "precision_verified": xhs_precision_verified,
                     "results_count": xhs_tot_cnt,
                     "relevant_count": xhs_rel_cnt,
@@ -632,14 +703,22 @@ def main() -> int:
             "submitted_query": "贴纸镊子",
             "douyin": {
                 "status": dy_p.get("status", "UNKNOWN"),
-                "crawl_operational": dy_p.get("crawl_operational", False),
+                "network_reachable": dy_p.get("network_reachable", False),
+                "browser_reachable": dy_p.get("browser_reachable", False),
+                "retrieval_available": dy_p.get("retrieval_available", False),
+                "retrieval_block_reason": dy_p.get("retrieval_block_reason"),
                 "precision_verified": dy_p.get("precision_verified", False),
+                "results_count": dy_p.get("results_count", 0),
                 "reason": dy_p.get("reason", "None"),
             },
             "xiaohongshu": {
                 "status": xhs_p.get("status", "UNKNOWN"),
-                "crawl_operational": xhs_p.get("crawl_operational", False),
+                "network_reachable": xhs_p.get("network_reachable", False),
+                "browser_reachable": xhs_p.get("browser_reachable", False),
+                "retrieval_available": xhs_p.get("retrieval_available", False),
+                "retrieval_block_reason": xhs_p.get("retrieval_block_reason"),
                 "precision_verified": xhs_p.get("precision_verified", False),
+                "results_count": xhs_p.get("results_count", 0),
                 "reason": xhs_p.get("reason", "None"),
             },
         }
