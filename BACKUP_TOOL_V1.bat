@@ -1,18 +1,19 @@
 @echo off
-chcp 65001 >nul
 setlocal enabledelayedexpansion
 
 echo ======================================================================
-echo   📦 BACKUP TOAN BO HE THONG TOOL V1 (SAO LUU AN TOAN)
+echo   BACKUP TOAN BO HE THONG TOOL V1 (SAO LUU AN TOAN)
 echo ======================================================================
 echo.
 
 cd /d "C:\tool v1"
 
-REM Tao timestamp YYYYMMDD_HHMMSS
-for /f "tokens=2 delims==" %%I in ('wmic os get localdatetime /value') do set datetime=%%I
-set TIMESTAMP=%datetime:~0,8%_%datetime:~8,6%
-if "%TIMESTAMP%"=="" set TIMESTAMP=%DATE:~10,4%%DATE:~4,2%%DATE:~7,2%_%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%
+for /f "tokens=2 delims==" %%I in ('wmic os get localdatetime /value 2^>nul') do set datetime=%%I
+if defined datetime (
+    set TIMESTAMP=!datetime:~0,8!_!datetime:~8,6!
+) else (
+    set TIMESTAMP=%DATE:~10,4%%DATE:~4,2%%DATE:~7,2%_%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%
+)
 set TIMESTAMP=%TIMESTAMP: =0%
 
 set BRANCH_NAME=backup/v1-auto-%TIMESTAMP%
@@ -20,15 +21,15 @@ set BRANCH_NAME=backup/v1-auto-%TIMESTAMP%
 echo [1/3] Dang tao nhanh Git Backup: %BRANCH_NAME%...
 git branch %BRANCH_NAME%
 if %ERRORLEVEL% EQU 0 (
-    echo       -> Da tao nhanh Git: %BRANCH_NAME% thanh cong!
+    echo       - Da tao nhanh Git: %BRANCH_NAME% thanh cong!
 ) else (
-    echo       -> Nhanh da ton tai hoac Git thong bao, tiep tuc...
+    echo       - Nhanh da ton tai hoac Git thong bao, tiep tuc...
 )
 
 echo [2/3] Dang kiem tra cac file da thay doi...
 git status --short
 
-echo [3/3] Dang tao ban sao du phong vat ly tai thu muc backups\...
+echo [3/3] Dang tao ban sao du phong vat ly tai thu muc backups...
 set BACKUP_DIR=C:\tool v1\backups\backup_%TIMESTAMP%
 mkdir "%BACKUP_DIR%\backend" 2>nul
 mkdir "%BACKUP_DIR%\backend\ai" 2>nul
@@ -43,12 +44,12 @@ if exist "backend\ai\v1_auto_voice.py" copy /y "backend\ai\v1_auto_voice.py" "%B
 
 echo.
 echo ======================================================================
-echo ✅ SAO LUU HOAN TAT!
+echo SAO LUU HOAN TAT!
 echo   - Git Branch : %BRANCH_NAME%
 echo   - Thu muc luu: %BACKUP_DIR%
 echo.
-echo 👉 Khi can khoi phuc, ban chi can chay file: RESTORE_VOICE_LOCK_BACKUP.bat
-echo    hoac dung lenh Git: git checkout %BRANCH_NAME%
+echo Khi can khoi phuc, ban chi can chay file: RESTORE_VOICE_LOCK_BACKUP.bat
+echo hoac dung lenh Git: git checkout %BRANCH_NAME%
 echo ======================================================================
 echo.
 pause
