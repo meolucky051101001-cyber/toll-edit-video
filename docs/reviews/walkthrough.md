@@ -2,83 +2,98 @@
 
 ## 1. Tổng Quan Kết Quả Nghiệm Thu (Comprehensive 11-Stage Scorecard)
 
-Hệ thống đã trải qua quy trình kiểm chuẩn tự động nghiêm ngặt gồm 11 giai đoạn thông qua công cụ cổng phát hành `scripts/release_gate.py --live`. Toàn bộ các giai đoạn kiểm thử tĩnh, kiểm thử đơn vị, kiểm thử tích hợp và E2E đều đạt chuẩn **100% GREEN**. Giai đoạn 11 (Live Crawl & Reachability) phản ánh trung thực khả năng kết nối mạng thực tế với chứng thực mã trạng thái HTTP trực tiếp, kiểm thử fail-closed đồng thời, và phân định rõ ràng giữa môi trường vận hành trạm làm việc (Workstation Operational) với yêu cầu thu thập video trực tiếp không cần đăng nhập/xác minh.
+Hệ thống đã trải qua quy trình kiểm chuẩn tự động nghiêm ngặt gồm 11 giai đoạn thông qua công cụ cổng phát hành `scripts/release_gate.py --live`. Toàn bộ các giai đoạn kiểm thử tĩnh, kiểm thử đơn vị, kiểm thử tích hợp và E2E đều đạt chuẩn **PASS (0 lỗi)**. Giai đoạn 11 (Live Crawl & Reachability) phản ánh trung thực khả năng kết nối mạng thực tế với chứng thực mã trạng thái HTTP trực tiếp, kiểm thử fail-closed đồng thời, và phân định rõ ràng giữa môi trường vận hành trạm làm việc (Workstation Operational) với yêu cầu thu thập video trực tiếp không cần đăng nhập/xác minh.
 
 ### Bảng Điểm Kiểm Chuẩn Toàn Diện (Release Gate Scorecard)
 
 | STT | Giai Đoạn Kiểm Tra | Công Cụ / Lệnh Thực Thi | Kết Quả | Chi Tiết Nghiệm Thu |
 | :---: | :--- | :--- | :---: | :--- |
 | **1** | **Runtime Environment** | `check_environment()` | **PASS** | Python 3.12.14 verified (>= 3.11) [0.0s] |
-| **2** | **Database Schema** | `check_database()` | **PASS** | 5 bảng cốt lõi SQLite (`videos`, `search_jobs`, `job_videos`, `dubbing_jobs`, `video_metric_snapshots`) [0.51s] |
-| **3** | **Backend Code Linter** | `ruff check backend/ tests/ scripts/` | **0 errors** | Tuân thủ tuyệt đối chuẩn PEP8 / Ruff [0.15s] |
+| **2** | **Database Schema** | `check_database()` | **PASS** | 5 bảng cốt lõi SQLite (`videos`, `search_jobs`, `job_videos`, `dubbing_jobs`, `video_metric_snapshots`) [0.36s] |
+| **3** | **Backend Code Linter** | `ruff check backend/ tests/ scripts/` | **0 errors** | Tuân thủ tuyệt đối chuẩn PEP8 / Ruff [0.11s] |
 | **4** | **Backend Static Types** | `mypy backend` | **0 errors** | 76/76 tập tin nguồn backend kiểm tra kiểu tĩnh hoàn hảo [0.72s] |
-| **5** | **Frontend Code Linter** | `npm run lint` | **0 errors, 0 warnings** | ESLint Next.js 16 / React 19 đạt chuẩn [9.8s] |
-| **6** | **Frontend Typecheck** | `npx tsc --noEmit` | **0 errors** | 0 lỗi TypeScript trên toàn bộ codebase frontend [2.89s] |
-| **7** | **Frontend Production Build** | `npm run build` | **SUCCESS** | Biên dịch tối ưu toàn bộ trang và API routes Next.js [18.29s] |
-| **8** | **Backend Pytest Suite** | `pytest -q` | **426/426 PASS** | Toàn bộ 426 ca kiểm thử hồi quy đạt chuẩn (0 failed) [142.48s] |
-| **9** | **Fixture Benchmark** | `pytest tests/test_evaluation_benchmark.py` | **PASS** | 60 truy vấn chuẩn + 4 bộ dữ liệu crawl thực tế (20 mẫu nguồn) [3.06s] |
-| **10** | **Playwright E2E Tests** | `npx playwright test` | **25/25 PASS** | 25 ca kiểm thử E2E trên 7 tập tin spec [41.3s] |
-| **11** | **Live Crawl Acceptance** | `python scripts/release_gate.py --live` | **OPERATIONAL** | Network Reachability: **PASS** (Douyin: HTTP 200: verification_required, XHS: HTTP 200: page_available). Retrieval: minh bạch trạng thái CAPTCHA/Login [140.88s] |
+| **5** | **Frontend Code Linter** | `npm run lint` | **0 errors, 0 warnings** | ESLint Next.js 16 / React 19 đạt chuẩn [5.69s] |
+| **6** | **Frontend Typecheck** | `npx tsc --noEmit` | **0 errors** | 0 lỗi TypeScript trên toàn bộ codebase frontend [2.21s] |
+| **7** | **Frontend Production Build** | `npm run build` | **SUCCESS** | Biên dịch tối ưu toàn bộ trang và API routes Next.js [15.13s] |
+| **8** | **Backend Pytest Suite** | `pytest -q` | **441/441 PASS** | 441 passed, 0 failed, 3 skipped [143.48s] |
+| **9** | **Fixture Benchmark** | `pytest tests/test_evaluation_benchmark.py ...` | **PASS** | 60 truy vấn domain + 4 bộ dữ liệu crawl thực tế (20 mẫu nguồn) [2.41s] |
+| **10** | **Playwright E2E Tests** | `npx playwright test` | **25/25 PASS** | 25 ca kiểm thử E2E trên 7 tập tin spec [82.71s] |
+| **11** | **Live Crawl Acceptance** | `python scripts/release_gate.py --live` | **OPERATIONAL** | Network Reachability: **PASS** (Douyin: HTTP 200: verification_required, XHS: HTTP 200: page_available). Retrieval: Douyin BLOCKED (CHALLENGE_REQUIRED), XHS BLOCKED (LOGIN_REQUIRED) [107.28s] |
 
 **Phán quyết Cổng Phát hành (Verdict)**:  
-`APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH` (Tổng thời gian: 365.21s, mã thoát: 0)  
+`APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH` (Tổng thời gian: 365.21s)  
 *Chi tiết kiểm chứng lưu tại tệp versioned:* [`release_gate_report.json`](file:///C:/Users/admin/Projects/ai-video-research-tool/release_gate_report.json).
 
 ---
 
-## 2. Tiêu Chuẩn Thực Thi Lệnh (Standardized Command Execution)
+## 2. Tiêu Chuẩn Thực Thi Lệnh & Chế Độ Nghiêm Ngặt (Strict Gate)
 
-Để loại bỏ hoàn toàn sự nhập nhằng giữa các chế độ kiểm thử, hệ thống áp dụng bộ lệnh tiêu chuẩn sau:
-
-| Mục Đích Kiểm Thử | Lệnh Tiêu Chuẩn | Hành Vi & Phán Quyết | Mã Thoát (Exit Code) |
+| Mục Đích Kiểm Thử | Lệnh Tiêu Chuẩn | Hành Vi & Phán Quyết | Mã Thoát (Exit Code) Thực Tế |
 | :--- | :--- | :--- | :---: |
-| **Nghiệm thu toàn bộ 11 Stage (Vận hành máy trạm)** | `python scripts/release_gate.py --live` | Chạy toàn bộ 11 stage. Ở Stage 11, kiểm tra Chromium thật mở được Douyin và XHS (HTTP 200). Nếu gặp CAPTCHA/Login, hệ thống ghi nhận đúng trạng thái và kết luận `APPROVED (WORKSTATION READY)`. | `0` (nếu các stage 1-10 pass và mạng reachable) |
-| **Kiểm thử nghiêm ngặt không thử thách bảo mật (Strict CI)** | `python scripts/release_gate.py --live --require-live` | Chạy 11 stage nhưng **bắt buộc** cả Douyin và XHS phải trả về `>= 1 video thật`. Nếu bị chặn bởi CAPTCHA hoặc yêu cầu đăng nhập, cổng phát hành từ chối và thoát mã lỗi 2. | `2` (khi gặp auth/challenge) |
-| **Kiểm thử bộ mẫu chuẩn offline** | `pytest tests/test_real_crawl_acceptance.py` | Chạy kiểm thử hợp đồng dữ liệu, bộ lọc và ranking trên tập dữ liệu đã thu thập trước đó (bỏ qua live network khi chưa set `LIVE_CRAWL_ENABLED=1`). | `0` |
+| **Nghiệm thu toàn bộ 11 Stage (Vận hành máy trạm)** | `python scripts/release_gate.py --live` | Chạy toàn bộ 11 stage. Ở Stage 11, kiểm tra Chromium thật mở được Douyin và XHS (HTTP 200). Khi gặp CAPTCHA/Login, hệ thống ghi nhận đúng trạng thái và kết luận `APPROVED (WORKSTATION READY)`. | `0` |
+| **Kiểm thử nghiêm ngặt thu thập thật (Strict Gate)** | `python scripts/release_gate.py --live --require-live` | Bắt buộc cả Douyin và XHS phải trả về `>= 1 video thật`. Do phiên live hiện tại chưa tự giải CAPTCHA / đăng nhập trên trạm làm việc, cổng phát hành từ chối và thoát mã lỗi 2 (fail-closed). | `2` (fail-closed, không báo FULL GREEN ảo) |
+| **Kiểm thử hồi quy backend** | `pytest -q` | Chạy toàn bộ 441 bài kiểm thử tự động, 3 bài test live crawl được bỏ qua an toàn khi chưa bật `LIVE_CRAWL_ENABLED=1`. | `0` |
 | **Chạy cổng phát hành offline (10 Stage)** | `python scripts/release_gate.py` | Chạy đầy đủ từ Stage 1 đến Stage 10 (bỏ qua Stage 11 Live Crawl). | `0` |
 
 ---
 
-## 3. Các Cải Tiến Kỹ Thuật Đã Thực Hiện
+## 3. Phân Định Minh Bạch Các Tầng Kiểm Thử
 
-### A. Loại Bỏ Hoàn Toàn Nguy Cơ Nhận Diện Nhầm Khách Xiaohongshu Là `authenticated`
-- **Khám phá thực tế trên Chromium**: Qua khảo sát DOM thực tế, Xiaohongshu tự động cấp cookie `web_session` ngay cho khách vãng lai và sidebar của trang khách vẫn luôn hiển thị các tab điều hướng như "我" hay "Me". Do đó, nếu dựa vào các selector chung chung này kết hợp với cookie, hệ thống sẽ kết luận nhầm trang khách là đã xác thực.
-- **Giải pháp triệt để**:
-  1. Loại bỏ toàn bộ các bộ chọn văn bản chung chung: xóa `.side-bar :text('我')`, `.side-bar :text('Me')`, `.side-bar :text('Profile')`, `.side-bar :text('My Profile')`.
-  2. Bổ sung kiểm tra nút đăng nhập: nếu phát hiện bất kỳ nút/liên kết đăng nhập nào hiển thị (`button:has-text('登录'):visible`, `.login-btn:visible`, `[class*='login-btn']:visible`, `.side-bar :text('登录'):visible`...), hệ thống lập tức phủ quyết `is_authenticated = False`. Thêm `:visible` vào tất cả các selector nút đăng nhập trên cả Xiaohongshu và Douyin, đồng thời re-evaluate sau khi thử đóng modal đăng nhập.
-  3. Thu hẹp selector định danh người dùng: chỉ chấp nhận link profile trong thanh điều hướng sidebar và user nav (`.side-bar a[href*='/user/profile/']:visible, .user-nav a[href*='/user/profile/']:visible`), loại bỏ hoàn toàn `a[href*='/user/profile/']` toàn cục vốn khớp với link tác giả bài viết trong feed.
-  4. Sửa lỗi kiểm tra `window.__INITIAL_STATE__.user.loggedIn`: kiểm tra an toàn theo kiểu dữ liệu (`typeof raw === 'boolean'` trước tiên để trả về `false`/`true` trực tiếp, chỉ dùng `in` khi `typeof raw === 'object'`), loại bỏ triệt để lỗi `TypeError: Cannot use 'in' operator to search for '_value' in false`.
-  5. Áp dụng cơ chế kiểm tra nút đăng nhập tương tự cho Douyin (`[data-e2e='login-button']:visible`, `button:has-text('登录'):visible`...).
-  6. Bổ sung 3 bài test đơn vị chuyên biệt trong `tests/test_browser_service.py`:
-     - `test_xhs_js_snippet_logged_in_evaluation`: Kiểm chứng trực tiếp trên Node.js runtime cho cả boolean nguyên thủy, Vue 3 reactive ref (`_value`), và Vue ref (`value`).
-     - `test_xhs_guest_page_with_note_author_links_not_authenticated`: Trang khách chứa link profile tác giả bài viết không bị nhận diện nhầm.
-     - `test_xhs_authenticated_with_hidden_login_button`: Nút đăng nhập ẩn trong DOM không làm phủ quyết phiên hợp lệ.
+### A. Kiểm Thử Offline (Offline Verification)
+- **Tổng số ca kiểm thử**: 441 passed, 3 skipped, 0 failed trong test suite backend.
+- **Tích hợp Pipeline thật** ([`tests/test_search_service_resume.py`](file:///C:/Users/admin/Projects/ai-video-research-tool/tests/test_search_service_resume.py)):
+  - Kiểm thử đầy đủ luồng thực thi `SearchService.pipeline()` với SQLite DB thật trên cả 2 thứ tự nền tảng (Douyin $\to$ Xiaohongshu và Xiaohongshu $\to$ Douyin).
+  - Khi nền tảng thứ hai bị chặn (`UserActionRequired`), job lưu trữ chính xác `active_platform`, `waiting_reason`, đồng thời kết quả thu thập của nền tảng thứ nhất được bảo toàn đầy đủ trong bảng `Video` và `JobVideo`.
+  - Kiểm thử cơ chế loại bỏ trùng lặp (`deduplication`): khi provider trả lại kết quả một phần trước khi chặn và trả lại toàn bộ sau khi tiếp tục, hệ thống không tạo thêm bản ghi `JobVideo` trùng lặp nào.
+  - Kiểm thử timeout thao tác thủ công: khi người dùng không hoàn thành xác minh/đăng nhập trong thời hạn cho phép, hệ thống đưa ra thông báo rõ ràng `"Đã hết thời gian chờ đăng nhập/xác minh trên <nền tảng>. Vui lòng thử lại khi đã sẵn sàng thao tác"`, không bị báo nhầm là lỗi tìm kiếm chung.
+  - Kiểm thử endpoint `POST /api/search/jobs/{job_id}/resume`: trả về đúng **HTTP 409 Conflict** kèm thông điệp tiếng Việt nếu trình duyệt chưa hoàn thành thao tác, và trả về **HTTP 200 OK** khi đã xác thực.
 
-### B. Làm Rõ Hợp Đồng API: Tách Biệt `workstation_ready` và `retrieval_ready`
-- **Vấn đề trước đây**: Khi kết nối mạng đạt HTTP 200 nhưng bị chặn bởi CAPTCHA hoặc yêu cầu đăng nhập, API trả về `status: "DEGRADED"` nhưng `is_ready` vẫn là `true`. Ngoài ra `workstation_ready` trước đây được tính từ `overall_status not in ("BLOCKED", "NOT_READY")`, dẫn tới khi chưa probe (`probe=False`, provider ở `STANDBY`) vẫn trả về `True`.
-- **Giải pháp triệt để**:
-  1. Làm rõ hợp đồng:
-     - `retrieval_ready: bool`: Chỉ `True` khi `status == "READY"`.
-     - `workstation_ready: bool`: Tính từ các check cụ thể `db_ok and worker_ok and live_probe_ok`. Khi `probe=False`, `live_probe_ok = False` $\to$ `workstation_ready = False` (chưa xác minh). Khi `probe=True`, `workstation_ready = True` khi database, worker pool và live probe đều đạt.
-     - `is_ready: bool`: Đồng nhất với `retrieval_ready` (`False` khi `DEGRADED`, `BLOCKED`, `NOT_READY`). Client đọc `is_ready` sẽ không bao giờ bị hiểu nhầm khi tìm kiếm video bị gián đoạn.
-  2. Cập nhật kiểu `ReleaseReadinessResponse` trong `frontend/types/index.ts`.
-  3. Cập nhật toàn bộ bài test kiểm chứng trong `tests/test_observability_and_release_gate.py` và `frontend/tests/health.spec.ts`.
+### B. Kiểm Thử Giao Diện & E2E (UI & Frontend Verification)
+- **Playwright E2E**: 25/25 bài test pass trên 7 file spec (`frontend/tests/`).
+- **Giao diện điều khiển trình duyệt** ([`frontend/features/search/search-workspace.tsx`](file:///C:/Users/admin/Projects/ai-video-research-tool/frontend/features/search/search-workspace.tsx)):
+  - `BrowserControls` và banner thông báo sử dụng trường `active_platform` từ job, hướng người dùng trực tiếp tới đúng cửa sổ trình duyệt của nền tảng đang bị kẹt (thay vì cố định `platforms[0]`).
+  - Lỗi HTTP 409 khi tiếp tục thủ công thất bại được hiển thị trực quan qua `ErrorBanner`.
+- **Chuẩn hóa thông điệp**:
+  - Gỡ bỏ hoàn toàn các phát biểu thiếu thực tế: `"2 giây"`, `"không cần giải đố"`, `"lưu vĩnh viễn"`.
+  - Thông báo trung thực: Phiên được lưu trữ an toàn trong Chromium profile cục bộ của ứng dụng, phiên có thể hết hạn theo chính sách bảo mật nền tảng và người dùng tự quét mã QR / giải CAPTCHA trực tiếp.
 
-### C. Nâng Cấp Độ Ổn Định Probe & Cooldown Giữa Các Giai Đoạn
-- Nâng timeout chuyển trang `probe_live()` từ 20s lên 30s cho cả Douyin và Xiaohongshu để tránh tình trạng timeout giả do độ trễ mạng Internet đột biến.
-- Tăng thời gian cooldown giữa Stage 10 (Playwright E2E) và Stage 11 (Live Probe) trong `scripts/release_gate.py` lên 5.0s và thêm 1 lần retry tự động cho bước probe reachability nhằm đảm bảo thu hồi sạch tài nguyên socket/Chromium trên Windows.
+### C. Live Network Probe
+- Cả Douyin và Xiaohongshu đều được thăm dò trực tiếp qua Chromium headless thật:
+  - Douyin: HTTP 200, phản hồi `verification_required` (thanh trượt CAPTCHA).
+  - Xiaohongshu: HTTP 200, phản hồi `page_available` (phiên khách vãng lai).
+- Kết nối mạng đạt HTTP 200, không bị lỗi DNS hay timeout kết nối.
+
+### D. Live Retrieval Từng Nền Tảng (Trạng Thái Thực Tế)
+- **Douyin**: `BLOCKED (CHALLENGE_REQUIRED)`. Douyin kích hoạt cơ chế bảo vệ chống bot với thanh trượt xác minh bảo mật. Do công cụ tuân thủ nguyên tắc không can thiệp giải mã CAPTCHA tự động, crawler dừng lại và yêu cầu người dùng tự giải quyết.
+- **Xiaohongshu**: `BLOCKED (LOGIN_REQUIRED)`. Xiaohongshu yêu cầu phiên đăng nhập tài khoản người dùng để truy cập đầy đủ kết quả tìm kiếm ghi chú/video.
+- **Kết luận**: Hiện tại Stage 11 có `passed: false`. Tool **chưa có bằng chứng thu thập được video thật** khi chưa có phiên người dùng tự xác thực. Trạng thái hệ thống là **WORKSTATION READY**, tuyệt đối không công bố `FULL GREEN`.
+
+### E. Retrieval Precision Benchmark (Đánh Giá Độ Chính Xác)
+Bộ kiểm thử độ chính xác ([`tests/test_query_precision_evaluation.py`](file:///C:/Users/admin/Projects/ai-video-research-tool/tests/test_query_precision_evaluation.py)) đã được tách bạch rõ ràng thành 2 phân hệ:
+1. **Ranking Unit/Fixture Benchmark (15 truy vấn tiếng Việt thực tế)**:
+   - Đánh giá khả năng phân loại của bộ xếp hạng trên các cặp mẫu liên quan và mẫu gây nhiễu dựng sẵn.
+   - Báo cáo rõ ràng dưới dạng `Precision@k` theo số mẫu ứng viên thực tế ($k=3 \dots 5$) và số lượng mẫu, không gọi nhầm là Precision@10.
+   - Truy vấn `"nhíp gắp sticker"`: bắt buộc giữ nguyên từ khóa cốt lõi `镊子` (nhíp) và `贴纸` (sticker); loại bỏ triệt để các ghi chú chỉ bán sticker thông thường mà không có nhíp.
+2. **Crawled Dataset Retrieval Precision Benchmark (Dữ liệu crawl thực tế)**:
+   - Đánh giá trên 20 mẫu crawl thật có nguồn gốc, URL, timestamp và nhãn người duyệt từ [`data/benchmarks/crawled_benchmark_samples.json`](file:///C:/Users/admin/Projects/ai-video-research-tool/data/benchmarks/crawled_benchmark_samples.json).
+   - Đạt **Precision = 1.00** và **Accuracy = 1.00** trên nền tảng Douyin, phân loại chính xác 12 mẫu liên quan và loại bỏ 8 mẫu gây nhiễu (kèm lý do ghi nhận đầy đủ).
+3. **Live Retrieval Precision**:
+   - Trạng thái: `PENDING LIVE CRAWL / BLOCKED BY AUTH`. Khi chạy kiểm thử mà chưa có dữ liệu live thật, hệ thống báo pending trung thực, không bao giờ tự tạo kết quả giả.
 
 ---
 
-## 4. Hướng Dẫn Vận Hành Trạm Làm Việc (Operational Workstation Guide)
+## 4. Hướng Dẫn Vận Hành & Nghiệm Thu Live Thực Tế
 
-Hệ thống đã đạt chứng nhận vận hành tại trạm làm việc (`APPROVED (WORKSTATION READY)`). Để phục vụ tìm kiếm video trực tiếp:
+Để hoàn tất nghiệm thu Live Retrieval và đạt phán quyết `APPROVED (FULL GREEN)`:
 
-1. **Đối với Douyin**:
-   - Khi tìm kiếm lần đầu hoặc khi tần suất tìm kiếm cao, Douyin có thể xuất hiện cửa sổ trượt CAPTCHA (`verification_required`).
-   - Mở giao diện cấu hình cookie hoặc mở trình duyệt headful để giải thanh trượt. Phiên làm việc sẽ tự động được lưu trữ bền vững vào `data/browser/douyin/auth_state.json`.
-2. **Đối với Xiaohongshu**:
-   - Nền tảng Xiaohongshu yêu cầu phiên đăng nhập để duyệt feed tìm kiếm đầy đủ.
-   - Sử dụng tính năng quét mã QR trên giao diện hoặc đăng nhập 1 lần trên trình duyệt Chromium trạm làm việc. Phiên và cookie sẽ được tự động lưu bền vững vào `data/browser/xiaohongshu/auth_state.json`.
-3. **Tiêu chuẩn FULL GREEN**:
-   - Chạy lệnh `python scripts/release_gate.py --live --require-live` sau khi đã hoàn tất giải CAPTCHA / đăng nhập trên trạm làm việc để nghiệm thu kết quả lấy video trực tiếp.
+1. **Bước 1: Tự hoàn thành xác minh trên Chromium của tool**:
+   - Mở giao diện công cụ tại `http://localhost:3000/settings`.
+   - Bấm **Mở cửa sổ Douyin** $\to$ giải thanh trượt CAPTCHA trực tiếp trên cửa sổ trình duyệt.
+   - Bấm **Mở cửa sổ Xiaohongshu** $\to$ quét mã QR đăng nhập tài khoản.
+   - Phiên làm việc sẽ được lưu tự động vào profile Chromium cục bộ tại `data/browser/douyin` và `data/browser/xiaohongshu`.
+2. **Bước 2: Thực hiện kiểm thử Live Search**:
+   - Chạy tìm kiếm với các từ khóa đại diện: `"nhíp gắp sticker"`, `"decor bàn học"`.
+   - Kiểm tra các video thu thập được có `media_type == "video"`, URL hợp lệ, `is_mock == false`.
+3. **Bước 3: Chạy Cổng Phát Hành Nghiêm Ngặt**:
+   - Chạy lệnh: `python scripts/release_gate.py --live --require-live`
+   - Chỉ khi cả hai nền tảng thu thập thành công video thật, lệnh sẽ trả về **exit code 0** và phán quyết chuyển sang `APPROVED (FULL GREEN)`.

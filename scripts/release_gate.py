@@ -95,7 +95,9 @@ def parse_pytest_summary(output: str) -> dict[str, int]:
     passed = int(match.group(1)) if match else 0
     fail_match = re.search(r"(\d+)\s+failed", output)
     failed = int(fail_match.group(1)) if fail_match else 0
-    return {"passed": passed, "failed": failed}
+    skip_match = re.search(r"(\d+)\s+skipped", output)
+    skipped = int(skip_match.group(1)) if skip_match else 0
+    return {"passed": passed, "failed": failed, "skipped": skipped}
 
 
 def main() -> int:
@@ -220,10 +222,12 @@ def main() -> int:
         "exit_code": code,
         "tests_passed": summary["passed"],
         "tests_failed": summary["failed"],
+        "tests_skipped": summary["skipped"],
         "duration_s": t_pytest,
     }
     if test_ok:
-        print(f"PASS ({summary['passed']} tests passed, 0 failed) [{t_pytest}s]")
+        skip_detail = f", {summary['skipped']} skipped" if summary["skipped"] else ""
+        print(f"PASS ({summary['passed']} tests passed, 0 failed{skip_detail}) [{t_pytest}s]")
     else:
         print(f"FAIL ({summary['failed']} failed out of {summary['passed'] + summary['failed']})")
         print(out[:600])
@@ -496,12 +500,48 @@ def main() -> int:
     print(f"Total verification time: {total_duration}s across {total_stages} automated stages")
 
     report_path = ROOT_DIR / "release_gate_report.json"
+    existing_strict = {}
+    if report_path.exists():
+        try:
+            with open(report_path, "r", encoding="utf-8") as f:
+                old_data = json.load(f)
+                existing_strict = old_data.get("strict_live_run", {})
+        except Exception:
+            pass
+
+    require_live = ("--require-live" in sys.argv) or (os.environ.get("REQUIRE_LIVE") == "1")
+    strict_exit_code = 0
+    if require_live:
+        if not is_live_requested or not results.get("11_live_crawl_acceptance", {}).get("passed"):
+            strict_exit_code = 2
+        strict_info = {
+            "executed": True,
+            "command": "python scripts/release_gate.py --live --require-live",
+            "exit_code": strict_exit_code,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "douyin": results.get("11_live_crawl_acceptance", {}).get("platforms", {}).get("douyin", {}).get("status", "UNKNOWN"),
+            "xiaohongshu": results.get("11_live_crawl_acceptance", {}).get("platforms", {}).get("xiaohongshu", {}).get("status", "UNKNOWN"),
+        }
+    elif existing_strict and existing_strict.get("executed"):
+        strict_info = existing_strict
+    else:
+        strict_info = {
+            "executed": False,
+            "status": "Chưa chạy strict live (--require-live)",
+            "command": "python scripts/release_gate.py --live --require-live",
+            "exit_code": None,
+            "timestamp": None,
+            "douyin": None,
+            "xiaohongshu": None,
+        }
+
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(
             {
                 "verdict": verdict,
                 "duration_seconds": total_duration,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "strict_live_run": strict_info,
                 "stages": results,
             },
             f,
@@ -509,8 +549,7 @@ def main() -> int:
         )
     print(f"Release scorecard saved to: {report_path}\n")
 
-    require_live = ("--require-live" in sys.argv) or (os.environ.get("REQUIRE_LIVE") == "1")
-    if require_live and (not is_live_requested or not results.get("11_live_crawl_acceptance", {}).get("passed")):
+    if require_live and strict_exit_code == 2:
         print("ERROR: --require-live is active but Stage 11 (Live Crawl) did not achieve FULL GREEN live retrieval on both platforms. Release gate rejected with exit code 2.\n")
         return 2
 

@@ -15,7 +15,12 @@ from backend.core.events import EventBus
 from backend.core.events import event_bus as default_event_bus
 from backend.models import JobVideo, SearchJob, SearchPlan, SearchQuery, Video
 from backend.models.video import utcnow
-from backend.providers.base import ProviderError, SearchProvider, UserActionRequired
+from backend.providers.base import (
+    ManualActionTimeoutError,
+    ProviderError,
+    SearchProvider,
+    UserActionRequired,
+)
 from backend.providers.registry import get_provider
 from backend.schemas.contracts import Platform, SearchFilters, VideoResult
 from backend.schemas.expansion import ExpansionOutcome
@@ -159,6 +164,13 @@ class SearchService:
         except asyncio.CancelledError:
             self.update(job_id, status="cancelled", completed_at=utcnow())
             raise
+        except ManualActionTimeoutError as error:
+            self.update(
+                job_id,
+                status="failed",
+                completed_at=utcnow(),
+                error_message=str(error),
+            )
         except TimeoutError:
             self.update(
                 job_id,
@@ -761,6 +773,12 @@ class SearchService:
                 await event.wait()
             self.update(job_id, status="resuming", waiting_reason=None)
             self.update(job_id, status="searching", error_message=None)
+        except TimeoutError:
+            plat_label = "Douyin" if platform == "douyin" else ("Xiaohongshu" if platform == "xiaohongshu" else platform.capitalize())
+            action_desc = "đăng nhập" if (gate.state == "waiting_for_login" or "login" in str(gate).lower()) else "xác minh/CAPTCHA"
+            raise ManualActionTimeoutError(
+                f"Đã hết thời gian chờ {action_desc} trên {plat_label}. Vui lòng thử lại khi đã sẵn sàng thao tác."
+            )
         finally:
             if monitor_task and not monitor_task.done():
                 monitor_task.cancel()

@@ -36,6 +36,10 @@ class ProviderUnavailableError(ProviderError):
     pass
 
 
+class ManualActionTimeoutError(ProviderError):
+    pass
+
+
 class SearchProvider(ABC):
     @abstractmethod
     async def search(

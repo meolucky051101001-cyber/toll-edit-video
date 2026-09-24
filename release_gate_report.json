@@ -1,7 +1,16 @@
 {
   "verdict": "APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH",
-  "duration_seconds": 264.24,
-  "timestamp": "2026-09-23T19:04:44Z",
+  "duration_seconds": 365.21,
+  "timestamp": "2026-09-24T04:38:55Z",
+  "strict_live_run": {
+    "executed": false,
+    "status": "Ch\u01b0a ch\u1ea1y strict live (--require-live)",
+    "command": "python scripts/release_gate.py --live --require-live",
+    "exit_code": null,
+    "timestamp": null,
+    "douyin": null,
+    "xiaohongshu": null
+  },
   "stages": {
     "1_environment": {
       "passed": true,
@@ -11,39 +20,40 @@
     "2_database": {
       "passed": true,
       "detail": "SQLite database schema verified (5 core tables present)",
-      "duration_s": 0.38
+      "duration_s": 0.36
     },
     "3_ruff_linter": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 0.09
+      "duration_s": 0.11
     },
     "4_mypy_types": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 0.36
+      "duration_s": 0.72
     },
     "5_frontend_eslint": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 5.47
+      "duration_s": 5.69
     },
     "6_frontend_typecheck": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 2.69
+      "duration_s": 2.21
     },
     "7_frontend_build": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 13.09
+      "duration_s": 15.13
     },
     "8_backend_pytest": {
       "passed": true,
       "exit_code": 0,
-      "tests_passed": 436,
+      "tests_passed": 441,
       "tests_failed": 0,
-      "duration_s": 144.21
+      "tests_skipped": 3,
+      "duration_s": 143.48
     },
     "9_fixture_benchmark": {
       "passed": true,
@@ -53,14 +63,14 @@
       "real_crawled_queries": 4,
       "real_crawled_samples_provenance": 20,
       "test_suites_passed": 6,
-      "duration_s": 2.61
+      "duration_s": 2.41
     },
     "10_frontend_playwright_e2e": {
       "passed": true,
       "exit_code": 0,
       "tests_passed": 25,
       "specs_count": 7,
-      "duration_s": 31.95
+      "duration_s": 82.71
     },
     "11_live_crawl_acceptance": {
       "executed": true,
@@ -69,7 +79,7 @@
       "probe_reachability": {
         "passed": true,
         "exit_code": 0,
-        "douyin": "HTTP 200: page_available",
+        "douyin": "HTTP 200: verification_required",
         "xiaohongshu": "HTTP 200: page_available"
       },
       "platforms": {
@@ -82,7 +92,7 @@
           "detail": "Xiaohongshu user login session required on workstation"
         }
       },
-      "duration_s": 58.33
+      "duration_s": 107.28
     }
   }
 }
