@@ -8,6 +8,8 @@ from pathlib import Path
 GLOBAL_CACHE_DIR = Path(__file__).parent.parent / "voice_cache"
 GLOBAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+CACHE_KEY_VERSION = 5  # Version 5: Invalidate legacy v4 cache to prevent Edge TTS rescue leakages
+
 def voice_cache_key(segment, voice_source, voice_param):
     model = Path(str(voice_param))
     fingerprint = None
@@ -16,7 +18,7 @@ def voice_cache_key(segment, voice_source, voice_param):
         fingerprint = (stat.st_size, stat.st_mtime_ns)
     # Round duration to 1 decimal place to increase cache hit rate for identical texts
     target_dur = round((segment.end - segment.start).total_seconds(), 1)
-    raw = [4, segment.content.strip(), voice_source, str(voice_param), fingerprint, target_dur]
+    raw = [CACHE_KEY_VERSION, segment.content.strip(), voice_source, str(voice_param), fingerprint, target_dur]
     return hashlib.sha256(json.dumps(raw, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 def read_voice_cache(path, key, text_content=""):

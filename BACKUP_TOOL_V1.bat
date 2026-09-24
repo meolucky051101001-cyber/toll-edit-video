@@ -41,6 +41,7 @@ if exist "backend\main.py" copy /y "backend\main.py" "%BACKUP_DIR%\backend\" >nu
 if exist "backend\tool_control_runtime.py" copy /y "backend\tool_control_runtime.py" "%BACKUP_DIR%\backend\" >nul
 if exist "backend\ai\voice_cloning.py" copy /y "backend\ai\voice_cloning.py" "%BACKUP_DIR%\backend\ai\" >nul
 if exist "backend\ai\v1_auto_voice.py" copy /y "backend\ai\v1_auto_voice.py" "%BACKUP_DIR%\backend\ai\" >nul
+if exist "backend\ai\v1_voice_cache.py" copy /y "backend\ai\v1_voice_cache.py" "%BACKUP_DIR%\backend\ai\" >nul
 
 echo.
 echo ======================================================================

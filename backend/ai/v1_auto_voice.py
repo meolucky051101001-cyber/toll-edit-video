@@ -198,22 +198,11 @@ def detect_first_speaker_gender(
         end_s = _get_end_sec(seg)
         content = _get_content(seg).strip()
         idx = _get_index(seg, 1)
-        duration = end_s - start_s
-        if duration >= MIN_SEGMENT_DURATION and re.search(r'\w', content):
+        duration = max(0.0, end_s - start_s)
+        # Bắt ngay câu thoại đầu tiên có từ ngữ, không nhảy qua câu ngắn sang người thứ 2
+        if re.search(r'\w', content):
             first_candidate = (idx, start_s, end_s, content, duration)
             break
-
-    # Neu cac cau dau deu qua ngan, lay cau dau tien co chua tu ngu >= 0.25s
-    if not first_candidate:
-        for seg in srt_segments:
-            start_s = _get_start_sec(seg)
-            end_s = _get_end_sec(seg)
-            content = _get_content(seg).strip()
-            idx = _get_index(seg, 1)
-            duration = end_s - start_s
-            if duration >= 0.25 and re.search(r'\w', content):
-                first_candidate = (idx, start_s, end_s, content, duration)
-                break
 
     if not first_candidate:
         logger.info("Khong tim thay doan phu de co loi thoai o dau video.")

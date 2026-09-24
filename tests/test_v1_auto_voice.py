@@ -224,6 +224,45 @@ class TestV1AutoVoice(unittest.TestCase):
         self.assertEqual(locked["voice_id"], "capcut-BV075_streaming")
         self.assertEqual(locked["voice_param"], "BV075_streaming")
 
+    def test_08_short_opening_cue_prioritized_over_longer_subsequent_cue(self):
+        """Kiem tra cau mo dau ngan (0.35s) van duoc uu tien cao nhat, khong bi bo qua (Codex Point 4)."""
+        male_wav = os.path.join(self.temp_dir, "short_male.wav")
+        self._create_synthetic_wav(male_wav, f0_hz=125.0, duration_s=0.5)
+
+        # Segment 1 ngan (0.35s) la giong Nam, Segment 2 dai (2.5s) la giong Nu
+        segs = [
+            SimpleNamespace(index=1, start=timedelta(seconds=0.0), end=timedelta(seconds=0.35), content="Này!"),
+            SimpleNamespace(index=2, start=timedelta(seconds=0.5), end=timedelta(seconds=3.0), content="Chào các bạn đã đến kênh...")
+        ]
+        gender, conf, f0, seg_idx = detect_first_speaker_gender(
+            audio_path=male_wav,
+            srt_segments=segs
+        )
+        self.assertEqual(seg_idx, 1, "Phải luôn phân tích câu số 1, không được nhảy sang câu 2 dù câu 1 ngắn!")
+        self.assertEqual(gender, "male")
+
+    def test_09_cache_version_invalidation_prevents_legacy_v4_mix(self):
+        """Kiem tra CACHE_KEY_VERSION = 5 loai bo hoan toan cache v4 co nguy co cuu ho lech giong (Codex Point 1)."""
+        from ai.v1_voice_cache import voice_cache_key, CACHE_KEY_VERSION
+        import hashlib
+
+        self.assertEqual(CACHE_KEY_VERSION, 5)
+
+        test_seg = SimpleNamespace(
+            start=timedelta(seconds=0.0),
+            end=timedelta(seconds=2.0),
+            content="Xin chào các bạn"
+        )
+        key_v5 = voice_cache_key(test_seg, "capcut", "BV075_streaming")
+
+        # Gia lap cach tinh key cua phien ban v4 cu
+        target_dur = round((test_seg.end - test_seg.start).total_seconds(), 1)
+        raw_v4 = [4, test_seg.content.strip(), "capcut", "BV075_streaming", None, target_dur]
+        key_v4 = hashlib.sha256(json.dumps(raw_v4, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+        # Key v5 bat buoc phai khac Key v4 -> cache cu v4 hoan toan bi vo hieu hoa
+        self.assertNotEqual(key_v5, key_v4)
+
 
 if __name__ == "__main__":
     unittest.main()
