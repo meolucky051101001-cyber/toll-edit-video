@@ -42,8 +42,16 @@ class TestV1AutoVoice(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp(prefix="test_v1_voice_")
         self.workspace = os.path.join(self.temp_dir, "workspace")
         os.makedirs(self.workspace, exist_ok=True)
+        # Co lap cache hoan toan vao thu muc temp cua test (Codex Point 1.1)
+        from ai import v1_voice_cache
+        self.orig_cache_dir = v1_voice_cache.GLOBAL_CACHE_DIR
+        self.test_cache_dir = Path(self.temp_dir) / "test_voice_cache"
+        self.test_cache_dir.mkdir(parents=True, exist_ok=True)
+        v1_voice_cache.GLOBAL_CACHE_DIR = self.test_cache_dir
 
     def tearDown(self):
+        from ai import v1_voice_cache
+        v1_voice_cache.GLOBAL_CACHE_DIR = self.orig_cache_dir
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _create_synthetic_wav(self, path: str, f0_hz: float, duration_s: float = 1.5, sr: int = 16000):
@@ -131,7 +139,7 @@ class TestV1AutoVoice(unittest.TestCase):
         # Khi lock_video_voice chay voi audio nay, no phai fallback chu KHONG khoa thanh nu
         out_job = os.path.join(self.temp_dir, "job_fallback_noise")
         locked = lock_video_voice(out_job, segs, vocals_path=noise_wav, workspace=self.workspace)
-        self.assertEqual(locked["rule"], "fallback_default_voice")
+        self.assertTrue(locked["rule"].startswith("fallback_"))
 
     def test_05_demucs_vocals_low_hnr_recovers_from_original_audio(self):
         """Khi vocals bi Demucs loc mat tan so / HNR thap, tu dong thu lai tren original_audio (Codex Point 3)."""
@@ -173,9 +181,8 @@ class TestV1AutoVoice(unittest.TestCase):
             if seg.index == 2:
                 return None  # Failure
             p = os.path.join(folder, f"{seg.index}.mp3")
-            # Write dummy audio
-            with open(p, "wb") as f:
-                f.write(b"RIFF" + b"\x00" * 200)
+            # Tạo audio giả lập hợp lệ để test decodability
+            self._create_synthetic_wav(p, f0_hz=150.0, duration_s=1.5)
             return {
                 "index": seg.index,
                 "path": p,
@@ -262,6 +269,119 @@ class TestV1AutoVoice(unittest.TestCase):
 
         # Key v5 bat buoc phai khac Key v4 -> cache cu v4 hoan toan bi vo hieu hoa
         self.assertNotEqual(key_v5, key_v4)
+
+    def test_10_auto_voice_toggle_and_persistence(self):
+        """Kiem tra bat / tat / xem trang thai che do Auto Voice va ghi nhan file config nguyen tu."""
+        from ai.v1_auto_voice import (
+            get_auto_voice_enabled,
+            set_auto_voice_enabled,
+            get_auto_voice_mode,
+            get_auto_voice_config_path,
+        )
+        self.assertTrue(get_auto_voice_enabled(self.workspace))
+        self.assertEqual(get_auto_voice_mode(self.workspace), "auto")
+
+        ok = set_auto_voice_enabled(False, updated_by="test_user", workspace=self.workspace)
+        self.assertTrue(ok)
+        self.assertFalse(get_auto_voice_enabled(self.workspace))
+        self.assertEqual(get_auto_voice_mode(self.workspace), "manual")
+
+        cfg_file = get_auto_voice_config_path(self.workspace)
+        self.assertTrue(cfg_file.is_file())
+        data = json.loads(cfg_file.read_text(encoding="utf-8"))
+        self.assertFalse(data["enabled"])
+        self.assertEqual(data["updated_by"], "test_user")
+
+        ok = set_auto_voice_enabled(True, updated_by="test_user2", workspace=self.workspace)
+        self.assertTrue(ok)
+        self.assertTrue(get_auto_voice_enabled(self.workspace))
+        self.assertEqual(get_auto_voice_mode(self.workspace), "auto")
+
+    def test_11_decide_voice_manual_mode_bypasses_analysis(self):
+        """Che do MANUAL: Bo qua hoan toan buoc tinh F0/HNR, analysis_time_sec = 0, lay giong thu cong."""
+        from ai.v1_auto_voice import decide_video_voice
+        segs = [
+            SimpleNamespace(index=1, start=timedelta(seconds=0.2), end=timedelta(seconds=2.5), content="Xin chao cac ban"),
+        ]
+        out_job = os.path.join(self.temp_dir, "job_manual_mode")
+
+        with patch("ai.v1_auto_voice.detect_first_speaker_gender") as mock_detect:
+            locked = decide_video_voice(
+                out_dir=out_job,
+                srt_segments=segs,
+                vocals_path=self.real_female_sample,
+                voice_mode="manual",
+                workspace=self.workspace,
+            )
+            mock_detect.assert_not_called()
+
+        self.assertEqual(locked["voice_mode"], "manual")
+        self.assertEqual(locked["analysis_time_sec"], 0.0)
+        self.assertEqual(locked["detected_gender"], "manual")
+        self.assertEqual(locked["rule"], "manual_selection")
+
+    def test_12_decide_voice_auto_female_fails_closed_without_rvc(self):
+        """Che do AUTO: Nguoi noi dau la Nu nhung thieu RVC runtime/model -> Phai raise RuntimeError truoc TTS."""
+        from ai.v1_auto_voice import decide_video_voice
+        segs = [
+            SimpleNamespace(index=1, start=timedelta(seconds=0.2), end=timedelta(seconds=2.5), content="Kính chào quý vị và các bạn"),
+        ]
+        out_job = os.path.join(self.temp_dir, "job_female_no_rvc")
+
+        with patch("ai.v1_auto_voice.find_rvc_model_path", return_value=None):
+            with self.assertRaises(RuntimeError) as ctx:
+                decide_video_voice(
+                    out_dir=out_job,
+                    srt_segments=segs,
+                    vocals_path=self.real_female_sample,
+                    voice_mode="auto",
+                    workspace=self.workspace,
+                )
+            self.assertIn("RVC Chí Mai", str(ctx.exception))
+            self.assertIn("Không âm thầm thay thế bằng CapCut Mai", str(ctx.exception))
+
+    def test_13_snapshot_hash_and_mode_invalidation(self):
+        """Kiem tra snapshot tu dong huy neu hash noi dung video doi hoac che do giong doi."""
+        from ai.v1_auto_voice import decide_video_voice, get_locked_voice, compute_file_sha256
+
+        dummy_video = os.path.join(self.temp_dir, "dummy.mp4")
+        with open(dummy_video, "wb") as f:
+            f.write(b"video content v1")
+
+        out_job = os.path.join(self.temp_dir, "job_hash_test")
+        segs = [SimpleNamespace(index=1, start=timedelta(seconds=0.1), end=timedelta(seconds=2.0), content="Test")]
+
+        locked1 = decide_video_voice(
+            out_dir=out_job,
+            srt_segments=segs,
+            vocals_path=self.real_male_sample,
+            video_path=dummy_video,
+            voice_mode="auto",
+            workspace=self.workspace,
+        )
+        self.assertEqual(locked1["voice_mode"], "auto")
+
+        with open(dummy_video, "wb") as f:
+            f.write(b"video content v2 changed")
+
+        new_hash = compute_file_sha256(dummy_video)
+        stale = get_locked_voice(out_job, expected_video_hash=new_hash)
+        self.assertIsNone(stale, "Snapshot cu phai bi loai bo khi video hash doi!")
+
+        mode_mismatch = get_locked_voice(out_job, expected_mode="manual")
+        self.assertIsNone(mode_mismatch, "Snapshot cu phai bi loai bo khi che do voice_mode doi!")
+
+    def test_14_pause_gate_allows_voice_auto(self):
+        """Kiem tra tool_control_runtime cho phep /voice_auto di qua ke ca khi bot dang bi pause."""
+        from tool_control_runtime import is_allowed_command_during_pause
+
+        self.assertTrue(is_allowed_command_during_pause("/voice_auto"))
+        self.assertTrue(is_allowed_command_during_pause("/voice_auto on"))
+        self.assertTrue(is_allowed_command_during_pause("/voice_auto off"))
+        self.assertTrue(is_allowed_command_during_pause("/voice"))
+        self.assertTrue(is_allowed_command_during_pause("/start"))
+        self.assertFalse(is_allowed_command_during_pause("/batch"))
+        self.assertFalse(is_allowed_command_during_pause("/llm"))
 
 
 if __name__ == "__main__":

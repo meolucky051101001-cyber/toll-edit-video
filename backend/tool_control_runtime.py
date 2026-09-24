@@ -9,10 +9,20 @@ from telegram.ext import TypeHandler, ApplicationHandlerStop
 
 FLAGS=Path(r"C:\tool v1\workspace\control")
 
+def is_allowed_command_during_pause(cmd_text: str) -> bool:
+    """Codex Requirement: Cho phép lệnh xem/đổi chế độ /voice_auto và /start đi qua ngay cả khi V1 đang pause."""
+    if not cmd_text:
+        return False
+    txt = cmd_text.strip().split()[0].lower()
+    return txt.startswith("/voice_auto") or txt.startswith("/voice") or txt == "/start"
+
 def install(application, namespace, key):
     flag=FLAGS/(key+'.pause')
     async def gate(update, context):
         if flag.exists():
+            if isinstance(update, Update) and update.message and update.message.text:
+                if is_allowed_command_during_pause(update.message.text):
+                    return
             raise ApplicationHandlerStop
     application.add_handler(TypeHandler(Update, gate), group=-1000)
     active_callbacks = set()

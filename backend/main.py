@@ -446,14 +446,17 @@ async def api_process_video(
         )
         await asyncio.to_thread(save_srt, translated_segments, srt_translated)
 
-        # 4. Khóa giọng video theo người nói đầu (Codex Plan) & Tạo TTS dubbing
-        from ai.v1_auto_voice import lock_video_voice
+        # 4. Quyết định giọng theo chế độ Auto/Manual (Codex Plan) & Tạo TTS dubbing
+        from ai.v1_auto_voice import decide_video_voice, get_auto_voice_mode
+        api_voice_mode = get_auto_voice_mode(WORKSPACE)
         voice_lock_info = await asyncio.to_thread(
-            lock_video_voice,
+            decide_video_voice,
             out_dir=out_dir,
             srt_segments=srt_segments,
             vocals_path=None,
             original_audio_path=original_audio,
+            video_path=video_path,
+            voice_mode=api_voice_mode,
             workspace=WORKSPACE,
         )
         effective_source = voice_lock_info["voice_source"]
@@ -626,14 +629,17 @@ async def api_process_url(
                 "content": seg.content
             })
 
-        # TTS: Khóa giọng video theo người nói đầu (Codex Plan)
-        from ai.v1_auto_voice import lock_video_voice
+        # TTS: Quyết định giọng theo chế độ Auto/Manual (Codex Plan)
+        from ai.v1_auto_voice import decide_video_voice, get_auto_voice_mode
+        api_voice_mode = get_auto_voice_mode(WORKSPACE)
         voice_lock_info = await asyncio.to_thread(
-            lock_video_voice,
+            decide_video_voice,
             out_dir=out_dir,
             srt_segments=srt_segments,
             vocals_path=None,
             original_audio_path=original_audio,
+            video_path=None,
+            voice_mode=api_voice_mode,
             workspace=WORKSPACE,
         )
         effective_source = voice_lock_info["voice_source"]

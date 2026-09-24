@@ -133,6 +133,14 @@ def _cleanup_job_directory(path: str) -> None:
         shutil.rmtree(candidate)
 
 
+def get_batch_job_dir(video_path: str | Path, workspace: str = WORKSPACE) -> str:
+    """Tinh toan thu muc job dong nhat giua luc chay va luc kiem tra thanh pham (Codex Point 1.3)."""
+    file_name = os.path.basename(str(video_path))
+    base_name = os.path.splitext(file_name)[0]
+    source_id = hashlib.sha256(str(Path(video_path).resolve()).encode()).hexdigest()[:16]
+    return os.path.join(workspace, f"batch_{source_id}_{base_name}")
+
+
 async def process_single_local_video(video_path: str, output_dir: str, progress_callback=None,
                                      queue_index=None, queue_total=None) -> bool:
     """
@@ -143,8 +151,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
     if queue_index is not None or not status.get("active") or status.get("video_name") != file_name:
         job_tracker.start_video(file_name, queue_index or 1, queue_total or 1)
     base_name = os.path.splitext(file_name)[0]
-    source_id = hashlib.sha256(str(Path(video_path).resolve()).encode()).hexdigest()[:16]
-    out_dir = os.path.join(WORKSPACE, f"batch_{source_id}_{base_name}")
+    out_dir = get_batch_job_dir(video_path, WORKSPACE)
     if Path(out_dir).resolve().parent != Path(WORKSPACE).resolve():
         raise RuntimeError("Thư mục batch nằm ngoài workspace.")
     os.makedirs(out_dir, exist_ok=True)
@@ -284,14 +291,17 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         except Exception:
             pass
 
-        # Khóa giọng đọc video duy nhất theo người nói đầu tiên (Codex Plan)
-        from ai.v1_auto_voice import lock_video_voice
+        # Quyết định giọng theo chế độ Auto/Manual (Codex Plan)
+        from ai.v1_auto_voice import decide_video_voice, get_auto_voice_mode
+        batch_voice_mode = get_auto_voice_mode(WORKSPACE)
         voice_lock_info = await asyncio.to_thread(
-            lock_video_voice,
+            decide_video_voice,
             out_dir=out_dir,
             srt_segments=srt_segments,
             vocals_path=vocals_audio,
             original_audio_path=original_audio,
+            video_path=video_path,
+            voice_mode=batch_voice_mode,
             workspace=WORKSPACE,
         )
         v_source = voice_lock_info["voice_source"]
@@ -343,6 +353,9 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_json(receipt_path, {
             "voice_id": v_id,
+            "voice_source": v_source,
+            "voice_mode": voice_lock_info.get("voice_mode", batch_voice_mode),
+            "pipeline_version": "v1_codex_voice_snapshot_2.0",
             "input_sha256": fingerprint(video_path),
             "output_sha256": fingerprint(final_dest),
         })
@@ -494,16 +507,31 @@ async def _process_batch_folder(
         expected_render = os.path.join(output_dir, f"Dubbed_{base_stem}.mp4")
         verified = os.path.isfile(expected_render) and await asyncio.to_thread(_verified_output, vpath, expected_render)
         if verified:
-            receipt = json.loads(_receipt_path(expected_render).read_text(encoding="utf-8"))
-            from ai.v1_auto_voice import get_locked_voice
-            job_out_dir = os.path.join(WORKSPACE, base_stem)
-            locked = get_locked_voice(job_out_dir)
+            receipt_file = _receipt_path(expected_render)
+            receipt = json.loads(receipt_file.read_text(encoding="utf-8")) if receipt_file.is_file() else {}
+            from ai.v1_auto_voice import get_locked_voice, get_auto_voice_mode
+            job_out_dir = get_batch_job_dir(vpath, WORKSPACE)
+            current_mode = get_auto_voice_mode(WORKSPACE)
+            current_input_hash = fingerprint(vpath)
+
+            locked = get_locked_voice(job_out_dir, expected_video_hash=current_input_hash)
             expected_voice_id = locked["voice_id"] if locked else receipt.get("voice_id")
-            if receipt.get("voice_id") != expected_voice_id:
-                # Preserve the old render; never mistake a different voice for completion.
-                backup = Path(expected_render).with_name(Path(expected_render).stem + "_previous_" + uuid.uuid4().hex[:8] + ".mp4")
-                Path(expected_render).rename(backup)
-                logger.info("Giọng đã đổi hoặc bản cũ chưa ghi giọng; giữ bản trước tại %s và render lại", backup)
+
+            mode_changed = receipt.get("voice_mode") and receipt.get("voice_mode") != current_mode
+            voice_changed = receipt.get("voice_id") and receipt["voice_id"] != expected_voice_id
+            hash_changed = receipt.get("input_sha256") and receipt["input_sha256"] != current_input_hash
+
+            if mode_changed or voice_changed or hash_changed:
+                tag = "diff_mode" if mode_changed else ("diff_voice" if voice_changed else "diff_input")
+                backup = Path(expected_render).with_name(Path(expected_render).stem + f"_{tag}_" + uuid.uuid4().hex[:8] + ".mp4")
+                try:
+                    Path(expected_render).rename(backup)
+                    logger.info(
+                        "Thành phẩm cũ không khớp chế độ (%s vs %s) hoặc giọng/nội dung; đã sao lưu tại %s và render lại cho %s",
+                        receipt.get("voice_mode"), current_mode, backup, vname
+                    )
+                except Exception as e:
+                    logger.warning("Không thể đổi tên sao lưu thành phẩm cũ %s: %s", expected_render, e)
                 verified = False
         if verified:
             skip_msg = f"⏩ [{idx}/{total}] Video `{vname}` đã có thành phẩm (`{os.path.basename(expected_render)}`). Bỏ qua..."

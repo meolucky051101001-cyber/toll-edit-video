@@ -21,6 +21,25 @@ def voice_cache_key(segment, voice_source, voice_param):
     raw = [CACHE_KEY_VERSION, segment.content.strip(), voice_source, str(voice_param), fingerprint, target_dur]
     return hashlib.sha256(json.dumps(raw, ensure_ascii=False).encode("utf-8")).hexdigest()
 
+def is_valid_audio(audio_path: str | Path, min_duration: float = 0.15) -> bool:
+    """Kiem tra audio thuc te: co the giai ma va co thoi luong hop le (Codex Requirement)."""
+    p = Path(audio_path)
+    if not p.is_file() or p.stat().st_size < 256:
+        return False
+    try:
+        from pydub import AudioSegment
+        seg = AudioSegment.from_file(str(p))
+        dur_s = len(seg) / 1000.0
+        return dur_s >= min_duration
+    except Exception:
+        pass
+    try:
+        import soundfile as sf
+        info = sf.info(str(p))
+        return info.duration >= min_duration
+    except Exception:
+        return False
+
 def read_voice_cache(path, key, text_content=""):
     # 1. Check job-local cache
     try:
@@ -28,7 +47,8 @@ def read_voice_cache(path, key, text_content=""):
         stat = Path(path).stat()
         if (item["key"]==key and item["size"]==stat.st_size and
                 item["mtime"]==stat.st_mtime_ns and stat.st_size>128):
-            return item["duration"]
+            if is_valid_audio(path):
+                return item["duration"]
     except (OSError, ValueError, KeyError, TypeError):
         pass
         
@@ -39,7 +59,7 @@ def read_voice_cache(path, key, text_content=""):
     try:
         if global_audio.exists() and global_meta.exists():
             item = json.loads(global_meta.read_text(encoding="utf-8"))
-            if global_audio.stat().st_size > 128:
+            if global_audio.stat().st_size > 128 and is_valid_audio(global_audio):
                 # Global Cache HIT
                 shutil.copy2(global_audio, path)
                 write_voice_cache(path, key, item["duration"], text_content, skip_global=True)
@@ -52,6 +72,10 @@ def read_voice_cache(path, key, text_content=""):
     return None
 
 def write_voice_cache(path, key, duration, text_content="", skip_global=False):
+    # Chi ghi cache neu audio hop le va giai ma duoc
+    if not is_valid_audio(path):
+        return
+
     # Job local
     stat = Path(path).stat()
     dest = Path(str(path)+".cache.json")

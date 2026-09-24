@@ -17,10 +17,12 @@ Nguyên tắc:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -264,8 +266,116 @@ def detect_first_speaker_gender(
     return "unknown", conf, f0, idx
 
 
-def find_rvc_model_path(workspace: Optional[str] = None) -> Optional[str]:
-    """Tim model RVC Chi Mai (.pth) trong cac thu muc tieu chuan cua he thong."""
+CONFIG_FILENAME = "v1_auto_voice.json"
+PREFERRED_CHI_MAI_MODELS = [
+    "mi-giong_cua_toi_v2.pth",
+    "chi-mai.pth",
+    "chimai.pth",
+    "chi_mai.pth",
+]
+
+
+def _resolve_control_dir(workspace: Optional[str] = None) -> Path:
+    if workspace:
+        ws_path = Path(workspace)
+        for c in [ws_path / "bot_system" / "control", ws_path / "control"]:
+            if c.is_dir():
+                return c
+    ws_env = os.getenv("AUTODUB_WORKSPACE")
+    if ws_env:
+        for c in [Path(ws_env) / "bot_system" / "control", Path(ws_env) / "control"]:
+            if c.is_dir():
+                return c
+    for c in [Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")]:
+        if c.is_dir():
+            return c
+    return Path(r"C:\tool v1\workspace\control")
+
+
+def get_auto_voice_config_path(workspace: Optional[str] = None) -> Path:
+    cdir = _resolve_control_dir(workspace)
+    cdir.mkdir(parents=True, exist_ok=True)
+    return cdir / CONFIG_FILENAME
+
+
+def get_auto_voice_enabled(workspace: Optional[str] = None) -> bool:
+    cfg_path = get_auto_voice_config_path(workspace)
+    if cfg_path.is_file():
+        try:
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            return bool(data.get("enabled", True))
+        except Exception as e:
+            logger.warning("Không thể đọc cấu hình %s: %s", cfg_path, e)
+    return True  # Mặc định bật theo khuyến nghị Codex
+
+
+def set_auto_voice_enabled(enabled: bool, updated_by: str = "system", workspace: Optional[str] = None) -> bool:
+    cfg_path = get_auto_voice_config_path(workspace)
+    payload = {
+        "enabled": bool(enabled),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_by": str(updated_by)
+    }
+    tmp = cfg_path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, cfg_path)
+        logger.info("Đã cập nhật chế độ Auto Voice: %s (bởi %s) tại %s", "BẬT" if enabled else "TẮT", updated_by, cfg_path)
+        return True
+    except Exception as e:
+        logger.error("Lỗi khi lưu cấu hình auto voice %s: %s", cfg_path, e)
+        return False
+
+
+def get_auto_voice_mode(workspace: Optional[str] = None) -> str:
+    return "auto" if get_auto_voice_enabled(workspace) else "manual"
+
+
+def get_manual_voice_info(workspace: Optional[str] = None) -> Dict[str, Any]:
+    try:
+        import voice_selection
+        return voice_selection.selected()
+    except Exception as e:
+        logger.warning("Không thể lấy giọng thủ công đang chọn: %s", e)
+        return {
+            "id": "chi-mai",
+            "source": "rvc",
+            "param": "chi-mai",
+            "label": "Chí Mai (RVC)"
+        }
+
+
+
+def compute_file_sha256(file_path: Optional[str | Path], max_bytes: int = 16 * 1024 * 1024) -> str:
+    """Tính SHA-256 nội dung file nhanh và chính xác làm fingerprint gắn với snapshot."""
+    if not file_path:
+        return ""
+    p = Path(file_path)
+    if not p.is_file():
+        return ""
+    try:
+        size = p.stat().st_size
+        hasher = hashlib.sha256()
+        hasher.update(str(size).encode("utf-8"))
+        with open(p, "rb") as f:
+            if size <= max_bytes:
+                hasher.update(f.read())
+            else:
+                half = max_bytes // 2
+                hasher.update(f.read(half))
+                f.seek(max(0, size - half))
+                hasher.update(f.read(half))
+        return hasher.hexdigest()
+    except Exception as e:
+        logger.warning("Không thể tính hash file %s: %s", p, e)
+        return ""
+
+
+def find_rvc_model_path(workspace: Optional[str] = None, preferred_name: Optional[str] = None) -> Optional[str]:
+    """
+    Tìm chính xác model RVC Chí Mai trong các thư mục tiêu chuẩn của hệ thống.
+    Ưu tiên các tên file cấu hình Chí Mai trước, không lấy ngẫu nhiên file .pth đầu tiên (Codex Point 1.4).
+    """
     backend_dir = Path(__file__).resolve().parents[1]
     ws = Path(workspace) if workspace else Path(os.getenv("AUTODUB_WORKSPACE", backend_dir.parent / "workspace"))
     search_dirs = [
@@ -275,8 +385,22 @@ def find_rvc_model_path(workspace: Optional[str] = None) -> Optional[str]:
         ws / "models" / "rvc",
         backend_dir.parent / "models" / "rvc",
     ]
+    target_names = [preferred_name] if preferred_name else PREFERRED_CHI_MAI_MODELS
+
+    # 1. Tìm chính xác theo danh sách model Chí Mai cấu hình
     for d in search_dirs:
         if d.is_dir():
+            for name in target_names:
+                candidate = d / name
+                try:
+                    if candidate.is_file() and candidate.stat().st_size > 1024:
+                        return str(candidate.resolve())
+                except OSError:
+                    continue
+
+    # 2. Nếu không tìm thấy tên chính xác, tìm file .pth hợp lệ trong MyVoiceModel_v2
+    for d in search_dirs:
+        if d.is_dir() and "MyVoiceModel" in d.name:
             for f in sorted(os.listdir(d)):
                 if f.endswith(".pth"):
                     candidate = d / f
@@ -296,47 +420,75 @@ def resolve_locked_voice(
     workspace: Optional[str] = None,
     default_voice_id: Optional[str] = None,
     rvc_model_path: Optional[str] = None,
+    voice_mode: str = "auto",
 ) -> Dict[str, Any]:
     """
-    Quy tac anh xa giong theo ke hoach Codex:
-    - Nguoi noi dau la NU -> Khoa Chi Mai (chi-mai, RVC)
-    - Nguoi noi dau la NAM -> Khoa Thanh Nien Tu Tin (capcut-BV075_streaming, param: BV075_streaming)
-    - Khong ro / nhieu / ngan -> Fallback ve giong mac dinh; ghi log ro rang.
+    Quy tắc quyết định giọng (Unified Decision Matrix):
+    - Chế độ MANUAL: Dùng trực tiếp giọng thủ công đang chọn, không nhận diện.
+    - Chế độ AUTO:
+      + Câu thoại đầu là NỮ -> Bắt buộc dùng Chí Mai RVC. Nếu thiếu model/runtime, BÁO LỖI rõ ràng trước TTS.
+      + Câu thoại đầu là NAM -> Thanh Niên Tự Tin BV075_streaming.
+      + Câu đầu không chắc (conf < 0.70) -> Fallback về giọng thủ công đang chọn, ghi log rõ lý do.
     """
     from ai.voice_cloning import rvc_runtime_available
 
-    # 1. NGUOI NOI DAU LA NU
+    # 1. CHẾ ĐỘ THỦ CÔNG (MANUAL MODE)
+    if voice_mode == "manual":
+        import voice_selection
+        cfg_voice = voice_selection.selected()
+        v_id = cfg_voice["id"]
+        v_source = cfg_voice["source"]
+        v_param = cfg_voice["param"]
+        v_label = cfg_voice["label"]
+
+        if v_id == "chi-mai":
+            resolved_rvc = rvc_model_path or find_rvc_model_path(workspace)
+            if not resolved_rvc or not rvc_runtime_available():
+                raise RuntimeError("Giọng thủ công đang chọn là 'chi-mai' nhưng thiếu RVC model/runtime khả dụng trên hệ thống. Dừng trước TTS.")
+            v_param = resolved_rvc
+
+        logger.info("Chế độ Manual: Dùng trực tiếp giọng thủ công đã chọn: %s (%s). Bỏ qua bước nhận diện F0/HNR.", v_label, v_id)
+        return {
+            "voice_id": v_id,
+            "voice_source": v_source,
+            "voice_param": str(v_param),
+            "voice_label": f"{v_label} (Chế độ thủ công)",
+            "detected_gender": "manual",
+            "confidence": 1.0,
+            "median_f0": 0.0,
+            "first_segment_index": 0,
+            "rule": "manual_selection",
+            "voice_mode": "manual",
+        }
+
+    # 2. CHẾ ĐỘ TỰ ĐỘNG (AUTO MODE) - NGUOI NOI DAU LA NU
     if gender == "female" and confidence >= CONFIDENCE_THRESHOLD:
         resolved_rvc = rvc_model_path or find_rvc_model_path(workspace)
-        if resolved_rvc and rvc_runtime_available():
-            return {
-                "voice_id": VOICE_FEMALE_ID,
-                "voice_source": "rvc",
-                "voice_param": resolved_rvc,
-                "voice_label": "Chí Mai · RVC (Khóa theo giọng nữ đầu video)",
-                "detected_gender": "female",
-                "confidence": confidence,
-                "median_f0": median_f0,
-                "first_segment_index": first_seg_index,
-                "rule": "first_speaker_female_rvc",
-            }
-        else:
-            logger.warning(
-                "Phat hien giong nu dau video nhung thieu RVC runtime/model. Dung CapCut Mai lam du phong nu."
+        if not resolved_rvc:
+            raise RuntimeError(
+                "Chế độ Auto Voice: Phát hiện người nói đầu là NỮ nhưng không tìm thấy file model RVC Chí Mai ('mi-giong_cua_toi_v2.pth'). "
+                "Không âm thầm thay thế bằng CapCut Mai để bảo đảm độ thuần giọng. "
+                "Hãy kiểm tra thư mục MyVoiceModel_v2 hoặc tắt auto voice (/voice_auto off)."
             )
-            return {
-                "voice_id": VOICE_FEMALE_ID,
-                "voice_source": "capcut",
-                "voice_param": "BV562_streaming",
-                "voice_label": "CapCut · Mai (Dự phòng cho Chí Mai khi thiếu RVC)",
-                "detected_gender": "female",
-                "confidence": confidence,
-                "median_f0": median_f0,
-                "first_segment_index": first_seg_index,
-                "rule": "first_speaker_female_capcut_fallback",
-            }
+        if not rvc_runtime_available():
+            raise RuntimeError(
+                "Chế độ Auto Voice: Phát hiện người nói đầu là NỮ nhưng RVC runtime hoặc CUDA không khả dụng trên hệ thống. "
+                "Dừng job trước khi tạo TTS."
+            )
+        return {
+            "voice_id": VOICE_FEMALE_ID,
+            "voice_source": "rvc",
+            "voice_param": resolved_rvc,
+            "voice_label": "Chí Mai · RVC (Khóa theo giọng nữ đầu video)",
+            "detected_gender": "female",
+            "confidence": confidence,
+            "median_f0": median_f0,
+            "first_segment_index": first_seg_index,
+            "rule": "first_speaker_female_rvc",
+            "voice_mode": "auto",
+        }
 
-    # 2. NGUOI NOI DAU LA NAM
+    # 3. CHẾ ĐỘ TỰ ĐỘNG - NGUOI NOI DAU LA NAM
     if gender == "male" and confidence >= CONFIDENCE_THRESHOLD:
         return {
             "voice_id": VOICE_MALE_ID,
@@ -348,75 +500,183 @@ def resolve_locked_voice(
             "median_f0": median_f0,
             "first_segment_index": first_seg_index,
             "rule": "first_speaker_male_capcut",
+            "voice_mode": "auto",
         }
 
-    # 3. KHONG XAC DINH RO / NHIEU -> FALLBACK VE GIONG MAC DINH
-    v_id = default_voice_id or "chi-mai"
-    v_source = "rvc"
-    v_param = ""
-    v_label = "Chí Mai · RVC (Mặc định)"
+    # 4. CHẾ ĐỘ TỰ ĐỘNG - CÂU ĐẦU KHÔNG XÁC ĐỊNH CHẮC (UNKNOWN) -> FALLBACK VỀ GIỌNG THỦ CÔNG
+    import voice_selection
+    cfg_voice = voice_selection.selected()
+    v_id = cfg_voice["id"]
+    v_source = cfg_voice["source"]
+    v_param = cfg_voice["param"]
+    v_label = cfg_voice["label"]
 
-    try:
-        import voice_selection
-        cfg_voice = voice_selection.selected()
-        v_id = cfg_voice["id"]
-        v_source = cfg_voice["source"]
-        v_param = cfg_voice["param"]
-        v_label = cfg_voice["label"]
-
-        if v_id == "chi-mai":
-            resolved_rvc = rvc_model_path or find_rvc_model_path(workspace)
-            if resolved_rvc and rvc_runtime_available():
-                v_source = "rvc"
-                v_param = resolved_rvc
-            else:
-                v_source = "capcut"
-                v_param = "BV562_streaming"
-                v_label = "CapCut · Mai (Dự phòng khi thiếu RVC)"
-    except Exception as e:
-        logger.debug("Khong the doc voice_selection.selected(): %s", e)
+    if v_id == "chi-mai":
         resolved_rvc = rvc_model_path or find_rvc_model_path(workspace)
-        if resolved_rvc and rvc_runtime_available():
-            v_id = "chi-mai"
-            v_source = "rvc"
-            v_param = resolved_rvc
-            v_label = "Chí Mai · RVC"
-        else:
-            v_id = "chi-mai"
-            v_source = "capcut"
-            v_param = "BV562_streaming"
-            v_label = "CapCut · Mai"
+        if not resolved_rvc or not rvc_runtime_available():
+            raise RuntimeError("Fallback về giọng thủ công 'chi-mai' nhưng thiếu RVC model/runtime. Dừng trước TTS.")
+        v_param = resolved_rvc
 
     logger.info(
-        "Không xác định rõ giới tính người nói đầu (F0=%.1f Hz, conf=%.2f, giới tính=%s). "
-        "Khóa giọng mặc định: %s (%s)",
-        median_f0, confidence, gender, v_label, v_id
+        "Chế độ Auto Voice: Câu đầu không xác định chắc giới tính (conf=%.2f < %.2f, F0=%.1f Hz, gender=%s). "
+        "Lý do fallback: Âm thanh câu đầu mờ/ồn hoặc không đủ điều kiện phân loại cao độ. "
+        "Chuyển sang giọng thủ công đang chọn: %s (%s).",
+        confidence, CONFIDENCE_THRESHOLD, median_f0, gender, v_label, v_id
     )
 
     return {
         "voice_id": v_id,
         "voice_source": v_source,
-        "voice_param": v_param,
-        "voice_label": f"{v_label} (Mặc định do âm thanh đầu video không rõ)",
+        "voice_param": str(v_param),
+        "voice_label": f"{v_label} (Fallback do câu đầu không xác định chắc giới tính)",
         "detected_gender": gender,
         "confidence": confidence,
         "median_f0": median_f0,
         "first_segment_index": first_seg_index,
-        "rule": "fallback_default_voice",
+        "rule": "fallback_manual_choice_unknown_first_speaker",
+        "voice_mode": "auto",
     }
 
 
-def get_locked_voice(out_dir: str | Path) -> Optional[Dict[str, Any]]:
-    """Kiem tra va doc voice_lock.json neu da ton tai trong thu muc job."""
+def get_locked_voice(
+    out_dir: str | Path,
+    expected_video_hash: Optional[str] = None,
+    expected_mode: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Kiem tra va doc voice_lock.json neu da ton tai trong thu muc job va hop le."""
     lock_file = Path(out_dir) / VOICE_LOCK_FILENAME
     if lock_file.is_file():
         try:
             data = json.loads(lock_file.read_text(encoding="utf-8"))
-            if data.get("voice_id") and data.get("voice_source"):
-                return data
+            required = ["voice_id", "voice_source", "voice_param"]
+            if not all(data.get(k) for k in required):
+                logger.warning("File snapshot khóa giọng %s thiếu trường bắt buộc.", lock_file)
+                return None
+            data.setdefault("rule_version", "v1_codex_voice_snapshot_1.0")
+
+            if expected_video_hash and data.get("video_hash"):
+                if data["video_hash"] != expected_video_hash:
+                    logger.info("Video hash không khớp (cũ=%s, mới=%s); bỏ qua snapshot cũ.", data["video_hash"][:8], expected_video_hash[:8])
+                    return None
+
+            if expected_mode and data.get("voice_mode"):
+                if data["voice_mode"] != expected_mode:
+                    logger.info("Chế độ giọng đổi từ %s sang %s; bỏ qua snapshot cũ.", data["voice_mode"], expected_mode)
+                    return None
+
+            return data
         except Exception as e:
-            logger.warning("Khong the doc file khoa giong %s: %s", lock_file, e)
+            logger.warning("Không thể đọc file khóa giọng %s: %s", lock_file, e)
     return None
+
+
+def decide_video_voice(
+    out_dir: str | Path,
+    srt_segments: Sequence[Any],
+    vocals_path: Optional[str | Path] = None,
+    original_audio_path: Optional[str | Path] = None,
+    video_path: Optional[str | Path] = None,
+    voice_mode: Optional[str] = None,
+    workspace: Optional[str] = None,
+    rvc_model_path: Optional[str] = None,
+    default_voice_id: Optional[str] = None,
+    force_reselect: bool = False,
+    job_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Hàm quyết định giọng chung (Unified Voice Decision Function - Codex Plan):
+    - Chế độ Auto: Phân tích câu thoại đầu -> Chọn và lưu snapshot (Nữ -> Chí Mai RVC; Nam -> BV075; Unknown -> thủ công).
+    - Chế độ Manual: Lấy giọng đã chọn thủ công -> Lưu snapshot (Thời gian phân tích = 0s, không chạy pitch).
+    - Snapshot gắn với hash nội dung video và chế độ.
+    - Nếu ghi snapshot thất bại, dừng trước TTS (fail-closed).
+    """
+    out_dir_path = Path(out_dir)
+    out_dir_path.mkdir(parents=True, exist_ok=True)
+    lock_file = out_dir_path / VOICE_LOCK_FILENAME
+
+    actual_mode = voice_mode or get_auto_voice_mode(workspace)
+    resolved_job_id = job_id or out_dir_path.name
+    content_hash = compute_file_sha256(video_path or original_audio_path)
+
+    # 1. Kiểm tra snapshot đã tồn tại và hợp lệ
+    if not force_reselect:
+        existing = get_locked_voice(
+            out_dir_path,
+            expected_video_hash=content_hash if content_hash else None,
+            expected_mode=actual_mode
+        )
+        if existing:
+            logger.info(
+                "🔒 Giữ nguyên quyết định giọng đã khóa cho video: %s (id=%s, nguồn=%s, mode=%s, rule=%s)",
+                existing.get("voice_label"),
+                existing.get("voice_id"),
+                existing.get("voice_source"),
+                existing.get("voice_mode"),
+                existing.get("rule"),
+            )
+            return existing
+
+    # 2. Xử lý theo từng chế độ
+    pitch_elapsed = 0.0
+    if actual_mode == "manual":
+        # MANUAL: Không nạp librosa, không tính cao độ, thời gian = 0.0s
+        locked = resolve_locked_voice(
+            gender="manual",
+            confidence=1.0,
+            median_f0=0.0,
+            first_seg_index=0,
+            workspace=workspace,
+            default_voice_id=default_voice_id,
+            rvc_model_path=rvc_model_path,
+            voice_mode="manual",
+        )
+    else:
+        # AUTO: Phân tích âm học duy nhất câu thoại đầu tiên
+        t0 = time.perf_counter()
+        gender, confidence, median_f0, seg_idx = detect_first_speaker_gender(
+            audio_path=vocals_path,
+            srt_segments=srt_segments,
+            backup_audio_path=original_audio_path,
+        )
+        pitch_elapsed = time.perf_counter() - t0
+        logger.info(
+            "⏱️ Thời gian phân tích cao độ giọng câu đầu: %.3f giây (gender=%s, conf=%.2f, F0=%.1f)",
+            pitch_elapsed, gender, confidence, median_f0
+        )
+
+        locked = resolve_locked_voice(
+            gender=gender,
+            confidence=confidence,
+            median_f0=median_f0,
+            first_seg_index=seg_idx,
+            workspace=workspace,
+            default_voice_id=default_voice_id,
+            rvc_model_path=rvc_model_path,
+            voice_mode="auto",
+        )
+
+    # 3. Gắn metadata snapshot đầy đủ
+    locked["job_id"] = resolved_job_id
+    locked["video_hash"] = content_hash
+    locked["voice_mode"] = actual_mode
+    locked["analysis_time_sec"] = round(pitch_elapsed, 4)
+    locked["rule_version"] = "v1_codex_voice_snapshot_2.0"
+    locked["locked_at"] = datetime.now(timezone.utc).isoformat()
+
+    # 4. Ghi snapshot nguyên tử (atomic write). Nếu thất bại, DỪNG TRƯỚC TTS (Codex Requirement)
+    tmp_file = out_dir_path / f"{VOICE_LOCK_FILENAME}.tmp"
+    try:
+        tmp_file.write_text(json.dumps(locked, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp_file, lock_file)
+        logger.info(
+            "🔒 Đã ghi snapshot quyết định giọng thành công vào %s: %s (id=%s, mode=%s)",
+            lock_file, locked.get("voice_label"), locked.get("voice_id"), actual_mode
+        )
+    except Exception as e:
+        logger.error("Không thể ghi snapshot vào %s: %s", lock_file, e)
+        raise RuntimeError(f"Lỗi nghiêm trọng: Không thể lưu snapshot quyết định giọng vào {lock_file}: {e}")
+
+    return locked
 
 
 def lock_video_voice(
@@ -428,62 +688,19 @@ def lock_video_voice(
     rvc_model_path: Optional[str] = None,
     default_voice_id: Optional[str] = None,
     force_reselect: bool = False,
+    video_path: Optional[str | Path] = None,
+    voice_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Diem vao duy nhat (Unified Entrypoint):
-    Chon va KHOA giong duy nhat cho toan bo video.
-    Bao dam nguyen tac:
-    - 1 video = 1 giong doc duy nhat tu dau den cuoi.
-    - Cac giong xuat hien sau KHONG lam doi giong video.
-    - Snapshot persisted tai voice_lock.json de resume/retry giu nguyen 100%.
-    """
-    out_dir_path = Path(out_dir)
-    out_dir_path.mkdir(parents=True, exist_ok=True)
-    lock_file = out_dir_path / VOICE_LOCK_FILENAME
-
-    # 1. Neu video da duoc khoa giong tu truoc, tai va dung lai ngay lap tuc!
-    if not force_reselect:
-        existing = get_locked_voice(out_dir_path)
-        if existing:
-            logger.info(
-                "🔒 Giữ nguyên giọng đã khóa cho video: %s (id=%s, nguồn=%s, rule=%s)",
-                existing.get("voice_label"),
-                existing.get("voice_id"),
-                existing.get("voice_source"),
-                existing.get("rule"),
-            )
-            return existing
-
-    # 2. Nhan dien gioi tinh cua nguoi noi dau tien du tin cay
-    gender, confidence, median_f0, seg_idx = detect_first_speaker_gender(
-        audio_path=vocals_path,
+    """Wrapper tương thích ngược gọi decide_video_voice."""
+    return decide_video_voice(
+        out_dir=out_dir,
         srt_segments=srt_segments,
-        backup_audio_path=original_audio_path,
-    )
-
-    # 3. Anh xa sang giong doc theo quy tac
-    locked = resolve_locked_voice(
-        gender=gender,
-        confidence=confidence,
-        median_f0=median_f0,
-        first_seg_index=seg_idx,
+        vocals_path=vocals_path,
+        original_audio_path=original_audio_path,
+        video_path=video_path,
+        voice_mode=voice_mode,
         workspace=workspace,
-        default_voice_id=default_voice_id,
         rvc_model_path=rvc_model_path,
+        default_voice_id=default_voice_id,
+        force_reselect=force_reselect,
     )
-    locked["locked_at"] = datetime.now(timezone.utc).isoformat()
-    locked["version"] = "v1_codex_voice_lock_1.0"
-
-    # 4. Luu voice_lock.json an toan (atomic write)
-    tmp_file = out_dir_path / f"{VOICE_LOCK_FILENAME}.tmp"
-    try:
-        tmp_file.write_text(json.dumps(locked, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp_file, lock_file)
-        logger.info(
-            "🔒 Đã khóa giọng thành công cho video vào %s: %s (id=%s)",
-            lock_file, locked.get("voice_label"), locked.get("voice_id")
-        )
-    except Exception as e:
-        logger.error("Khong the luu voice_lock.json vao %s: %s", lock_file, e)
-
-    return locked

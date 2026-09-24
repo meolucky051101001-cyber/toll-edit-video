@@ -7,7 +7,15 @@ import time
 from pathlib import Path
 from pipeline_v2.atomic_io import atomic_write_json
 
-SNAPSHOT = Path(os.getenv("AUTODUB_WORKSPACE", str(Path(__file__).resolve().parent.parent / "workspace"))) / "telegram_queue.json"
+def _resolve_snapshot_path() -> Path:
+    ws = Path(os.getenv("AUTODUB_WORKSPACE", str(Path(__file__).resolve().parent.parent / "workspace")))
+    bs = ws / "bot_system"
+    target = bs / "telegram_queue.json"
+    if target.exists() or bs.is_dir():
+        return target
+    return ws / "telegram_queue.json"
+
+SNAPSHOT = _resolve_snapshot_path()
 
 class MonitoredQueue(asyncio.Queue):
     def __init__(self):
@@ -37,7 +45,8 @@ class MonitoredQueue(asyncio.Queue):
                         "source": "Telegram",
                         "chat_id": chat_id,
                         "file_id": job.get("file_id", ""),
-                        "filename": job.get("filename", "")
+                        "filename": job.get("filename", ""),
+                        "voice_mode": job.get("voice_mode", "auto"),
                     })
                 else:
                     items.append({

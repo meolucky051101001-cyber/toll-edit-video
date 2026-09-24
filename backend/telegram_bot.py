@@ -194,6 +194,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "5️⃣ Lồng tiếng Tiếng Việt (Microsoft Neural TTS)\n"
         "6️⃣ Xuất video chất lượng cao lưu vào `D:\\banve`\n\n"
         "📌 *Lệnh hỗ trợ:*\n"
+        "• `/voice_auto [on|off]` - Bật/tắt tự nhận diện giọng nói đầu video (Tool V1)\n"
         "• `/llm` - Cấu hình mô hình AI dịch thuật (Google Gemini / OpenAI GPT-4o / DeepSeek V4)\n"
         "• `/batch` - Tự động quét & edit hàng loạt video trong thư mục `D:\\video_input` trên máy\n"
         "• `/batch D:\\thu_muc` - Chỉ định thư mục chứa video cần edit\n"
@@ -201,6 +202,81 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/stop` - Dừng khẩn cấp toàn bộ tác vụ"
     )
     await update.message.reply_text(welcome, parse_mode="Markdown")
+
+
+# ===== LỆNH /voice_auto (Codex Plan - Chế độ nhận diện giọng đầu video) =====
+async def cmd_voice_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Điều khiển chế độ tự động nhận diện giọng nói đầu video (Tool V1).
+    Cú pháp:
+    /voice_auto on   - Bật nhận diện giọng đầu video
+    /voice_auto off  - Tắt nhận diện, dùng giọng đã chọn thủ công
+    /voice_auto      - Xem trạng thái hiện tại
+    """
+    from ai.v1_auto_voice import (
+        get_auto_voice_enabled,
+        set_auto_voice_enabled,
+        get_manual_voice_info,
+    )
+    args = context.args
+    manual_info = get_manual_voice_info(WORKSPACE)
+    manual_label = manual_info.get("label", "Chưa xác định")
+
+    if not args:
+        enabled = get_auto_voice_enabled(WORKSPACE)
+        mode_str = "🟢 BẬT (Tự động nhận diện)" if enabled else "⚪ TẮT (Dùng giọng thủ công)"
+        await update.message.reply_text(
+            f"🎙️ *CẤU HÌNH NHẬN DIỆN GIỌNG NÓI (TOOL V1)*\n\n"
+            f"📍 *Trạng thái hiện tại:* {mode_str}\n"
+            f"🎯 *Giọng thủ công dự phòng:* `{manual_label}`\n\n"
+            f"📋 *Quy tắc hoạt động:*\n"
+            f"• *Bật (`on`):*\n"
+            f"  - Người nói đầu là Nữ ➡️ Chí Mai (RVC)\n"
+            f"  - Người nói đầu là Nam ➡️ Thanh Niên Tự Tin (CapCut)\n"
+            f"  - Không xác định rõ ➡️ Giọng thủ công (`{manual_label}`)\n"
+            f"• *Tắt (`off`):*\n"
+            f"  - Toàn bộ video dùng giọng thủ công (`{manual_label}`)\n"
+            f"  - Bỏ qua phân tích âm học F0 (tiết kiệm thời gian)\n\n"
+            f"📌 *Phạm vi áp dụng:* Lệnh có hiệu lực với các video gửi SAU lệnh. "
+            f"Video đang render hoặc đã trong hàng đợi giữ nguyên chế độ lúc gửi.\n\n"
+            f"👉 *Lệnh điều khiển:*\n"
+            f"• `/voice_auto on` - Bật tự động nhận diện\n"
+            f"• `/voice_auto off` - Tắt nhận diện, dùng giọng thủ công",
+            parse_mode="Markdown"
+        )
+        return
+
+    subcmd = args[0].strip().lower()
+    user_name = update.effective_user.username or update.effective_user.first_name if update.effective_user else "telegram_user"
+
+    if subcmd in ("on", "1", "enable", "bat", "bật"):
+        set_auto_voice_enabled(True, updated_by=user_name, workspace=WORKSPACE)
+        await update.message.reply_text(
+            f"✅ *ĐÃ BẬT CHẾ ĐỘ NHẬN DIỆN GIỌNG NÓI TỰ ĐỘNG!*\n\n"
+            f"• Video mới gửi sẽ tự động chọn giọng theo người nói đầu tiên:\n"
+            f"  👩 Nữ ➡️ Khóa Chí Mai (RVC) xuyên suốt video\n"
+            f"  👨 Nam ➡️ Khóa Thanh Niên Tự Tin (CapCut BV075) xuyên suốt video\n"
+            f"  ❓ Không rõ ➡️ Dùng giọng thủ công (`{manual_label}`)\n\n"
+            f"*(Áp dụng cho các video gửi từ bây giờ. Video đang chạy/trong hàng đợi giữ nguyên chế độ cũ)*",
+            parse_mode="Markdown"
+        )
+    elif subcmd in ("off", "0", "disable", "tat", "tắt"):
+        set_auto_voice_enabled(False, updated_by=user_name, workspace=WORKSPACE)
+        await update.message.reply_text(
+            f"✅ *ĐÃ TẮT CHẾ ĐỘ NHẬN DIỆN GIỌNG NÓI TỰ ĐỘNG!*\n\n"
+            f"• Video mới gửi sẽ dùng cố định giọng thủ công: `{manual_label}`\n"
+            f"• Bỏ qua hoàn toàn bước phân tích âm học F0/HNR (thời gian phân tích = 0s).\n\n"
+            f"*(Áp dụng cho các video gửi từ bây giờ. Video đang chạy/trong hàng đợi giữ nguyên chế độ cũ)*",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Cú pháp không hợp lệ. Vui lòng dùng:\n"
+            "• `/voice_auto on` để bật\n"
+            "• `/voice_auto off` để tắt\n"
+            "• `/voice_auto` để xem trạng thái",
+            parse_mode="Markdown"
+        )
 
 
 # ===== LỆNH /status =====
@@ -464,10 +540,22 @@ async def video_worker():
                                 pass
                         await asyncio.sleep(2)
                 if isinstance(job, dict):
+                    job_voice_mode = job.get('voice_mode')
+                    if not job_voice_mode:
+                        from ai.v1_auto_voice import get_auto_voice_mode
+                        job_voice_mode = get_auto_voice_mode(WORKSPACE)
+
                     if job['type'] == 'url':
-                        await process_single_url(job.get('update'), job.get('context'), job['url'], job.get('pos', 1), chat_id=job.get('chat_id'))
+                        await process_single_url(
+                            job.get('update'), job.get('context'), job['url'], job.get('pos', 1),
+                            chat_id=job.get('chat_id'), voice_mode=job_voice_mode
+                        )
                     elif job['type'] == 'video':
-                        await process_single_video(job.get('update'), job.get('context'), job.get('file_id'), job.get('filename') or 'video.mp4', job.get('pos', 1), chat_id=job.get('chat_id'))
+                        await process_single_video(
+                            job.get('update'), job.get('context'), job.get('file_id'),
+                            job.get('filename') or 'video.mp4', job.get('pos', 1),
+                            chat_id=job.get('chat_id'), voice_mode=job_voice_mode
+                        )
                     elif job['type'] == 'resume_v2':
                         from pipeline_v2.config import PipelineSettings
                         from pipeline_v2.resume import resume_video_job
@@ -487,7 +575,8 @@ async def video_worker():
                         )
                 else:
                     pos, update, context, url = job
-                    await process_single_url(update, context, url, pos)
+                    from ai.v1_auto_voice import get_auto_voice_mode
+                    await process_single_url(update, context, url, pos, voice_mode=get_auto_voice_mode(WORKSPACE))
             except asyncio.CancelledError:
                 if tracker_job:
                     job_tracker.mark_stopped()
@@ -518,7 +607,7 @@ async def video_worker():
             logger.info("Worker queue cancelled.")
             break
 
-async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, pos: int = 1, chat_id: int = None):
+async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, pos: int = 1, chat_id: int = None, voice_mode: str = None):
     import job_tracker
     job_tracker.start_video("Video từ Telegram", pos, pos + global_queue.qsize())
     original_url = url
@@ -740,13 +829,15 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # (Di chuyển BƯỚC 4.5 xuống sau BƯỚC 5 để đồng bộ thời gian biến mất của phụ đề với audio)
 
         # ===== BƯỚC 5: LỒNG TIẾNG (Khóa giọng video theo người nói đầu - Codex Plan) =====
-        from ai.v1_auto_voice import lock_video_voice
+        from ai.v1_auto_voice import decide_video_voice
         voice_lock_info = await asyncio.to_thread(
-            lock_video_voice,
+            decide_video_voice,
             out_dir=out_dir,
             srt_segments=srt_segments,
             vocals_path=vocals_audio,
             original_audio_path=original_audio,
+            video_path=video_path,
+            voice_mode=voice_mode,
             workspace=WORKSPACE,
         )
         v_source = voice_lock_info["voice_source"]
@@ -920,6 +1011,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if worker_task is None or worker_task.done():
         worker_task = asyncio.create_task(video_worker())
 
+    from ai.v1_auto_voice import get_auto_voice_mode
+    captured_mode = get_auto_voice_mode(WORKSPACE)
+
     # Đưa từng URL vào hàng đợi
     for url in urls:
         queue_counter += 1
@@ -928,7 +1022,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'pos': queue_counter,
             'update': update,
             'context': context,
-            'url': url
+            'url': url,
+            'voice_mode': captured_mode,
         })
         
     await update.message.reply_text(
@@ -964,13 +1059,17 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Không nhận dạng được file video.")
         return
         
+    from ai.v1_auto_voice import get_auto_voice_mode
+    captured_mode = get_auto_voice_mode(WORKSPACE)
+
     await global_queue.put({
         'type': 'video',
         'pos': queue_counter,
         'update': update,
         'context': context,
         'file_id': file_obj.file_id,
-        'filename': filename
+        'filename': filename,
+        'voice_mode': captured_mode,
     })
     
     remaining = global_queue.qsize()
@@ -981,7 +1080,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str, filename: str, pos: int, chat_id: int = None):
+async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str, filename: str, pos: int, chat_id: int = None, voice_mode: str = None):
     import job_tracker
     job_tracker.start_video(filename, pos, pos + global_queue.qsize())
     status_msg = None
@@ -1125,13 +1224,15 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
 
         # ===== BƯỚC 5: LỒNG TIẾNG (Khóa giọng video theo người nói đầu - Codex Plan) =====
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-        from ai.v1_auto_voice import lock_video_voice
+        from ai.v1_auto_voice import decide_video_voice
         voice_lock_info = await asyncio.to_thread(
-            lock_video_voice,
+            decide_video_voice,
             out_dir=out_dir,
             srt_segments=srt_segments,
             vocals_path=vocals_audio,
             original_audio_path=original_audio,
+            video_path=video_path,
+            voice_mode=voice_mode,
             workspace=WORKSPACE,
         )
         v_source = voice_lock_info["voice_source"]
@@ -1300,6 +1401,7 @@ async def enqueue_pending_queue_jobs(application=None):
                     "pos": queue_counter,
                     "url": target,
                     "chat_id": item.get("chat_id"),
+                    "voice_mode": item.get("voice_mode", "auto"),
                     "update": None,
                     "context": None
                 })
@@ -1312,6 +1414,7 @@ async def enqueue_pending_queue_jobs(application=None):
                     "file_id": item.get("file_id"),
                     "filename": item.get("filename") or target,
                     "chat_id": item.get("chat_id"),
+                    "voice_mode": item.get("voice_mode", "auto"),
                     "update": None,
                     "context": None
                 })
@@ -1433,6 +1536,8 @@ def main():
             app.add_handler(CommandHandler("batch", cmd_batch))
             app.add_handler(CommandHandler("local", cmd_batch))
             app.add_handler(CommandHandler("llm", cmd_llm))
+            app.add_handler(CommandHandler("voice_auto", cmd_voice_auto))
+            app.add_handler(CommandHandler("voice", cmd_voice_auto))
             app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
             app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
