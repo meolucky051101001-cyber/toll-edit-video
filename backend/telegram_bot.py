@@ -80,6 +80,7 @@ INPUT_DIR = os.path.abspath(os.getenv("AUTODUB_INPUT_DIR", r"D:\video_input"))
 OUTPUT_DIR = os.path.abspath(os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve"))
 os.makedirs(WORKSPACE, exist_ok=True)
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 root_app_log = os.path.abspath(os.path.join(BASE_DIR, "..", "app.log"))
 backend_app_log = os.path.abspath(os.path.join(BASE_DIR, "app.log"))
 log_handlers = [
