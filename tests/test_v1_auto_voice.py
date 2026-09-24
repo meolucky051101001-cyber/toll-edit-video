@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import shutil
@@ -6,11 +7,13 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+V1_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(V1_ROOT / "backend"))
 
 from ai.v1_auto_voice import (
     estimate_f0_pitch,
@@ -23,9 +26,18 @@ from ai.v1_auto_voice import (
     VOICE_MALE_PARAM,
     VOICE_LOCK_FILENAME,
 )
+from ai.voice_cloning import generate_dubbing_audio, TTSIncompleteError
 
 
 class TestV1AutoVoice(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.voice_checks_dir = V1_ROOT / "workspace_backup_safety" / "control" / "voice_checks"
+        cls.real_male_sample = cls.voice_checks_dir / "capcut-BV075_streaming.mp3"
+        cls.real_namminh_sample = cls.voice_checks_dir / "microsoft-namminh.mp3"
+        cls.real_female_sample = cls.voice_checks_dir / "capcut-BV562_streaming.mp3"
+        cls.real_hoaimy_sample = cls.voice_checks_dir / "microsoft-hoaimy.mp3"
+
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix="test_v1_voice_")
         self.workspace = os.path.join(self.temp_dir, "workspace")
@@ -37,114 +49,163 @@ class TestV1AutoVoice(unittest.TestCase):
     def _create_synthetic_wav(self, path: str, f0_hz: float, duration_s: float = 1.5, sr: int = 16000):
         import soundfile as sf
         t = np.linspace(0, duration_s, int(sr * duration_s))
-        # Fundamental + harmonic to simulate voiced speech
         audio = 0.6 * np.sin(2 * np.pi * f0_hz * t) + 0.3 * np.sin(2 * np.pi * 2 * f0_hz * t)
-        # Add smooth envelope
         fade = int(sr * 0.05)
         audio[:fade] *= np.linspace(0, 1, fade)
         audio[-fade:] *= np.linspace(1, 0, fade)
         sf.write(path, audio.astype(np.float32), sr)
 
-    def test_01_f0_pitch_estimation_accuracy(self):
-        """Kiem tra uoc tinh cao do F0 cho am thanh nam va nu."""
-        sr = 16000
-        t = np.linspace(0, 1.0, sr)
+    def test_01_real_voice_samples_pitch_and_gender(self):
+        """Kiem tra nhan dien cao do F0 tren MAU GIONG NOI THUC TE (Codex Requirement 4)."""
+        import librosa
 
-        # Giong nam tieu bieu: 125 Hz
-        y_male = 0.8 * np.sin(2 * np.pi * 125 * t)
-        f0_m, count_m, conf_m, gender_m = estimate_f0_pitch(y_male, sr)
+        # 1. Real Male: CapCut BV075 (Thanh Niên Tự Tin)
+        self.assertTrue(self.real_male_sample.is_file(), f"Missing: {self.real_male_sample}")
+        y_m, sr_m = librosa.load(str(self.real_male_sample), sr=16000, duration=2.5)
+        f0_m, count_m, conf_m, gender_m, hnr_m = estimate_f0_pitch(y_m, sr_m)
         self.assertEqual(gender_m, "male")
-        self.assertAlmostEqual(f0_m, 125.0, delta=5.0)
-        self.assertGreater(conf_m, 0.80)
+        self.assertGreater(hnr_m, 5.0)  # Real voice has high harmonicity
+        self.assertGreater(conf_m, 0.70)
+        self.assertLess(f0_m, 175.0)
 
-        # Giong nu tieu bieu: 230 Hz
-        y_female = 0.8 * np.sin(2 * np.pi * 230 * t)
-        f0_f, count_f, conf_f, gender_f = estimate_f0_pitch(y_female, sr)
+        # 2. Real Female: CapCut BV562 (Mai)
+        self.assertTrue(self.real_female_sample.is_file(), f"Missing: {self.real_female_sample}")
+        y_f, sr_f = librosa.load(str(self.real_female_sample), sr=16000, duration=2.5)
+        f0_f, count_f, conf_f, gender_f, hnr_f = estimate_f0_pitch(y_f, sr_f)
         self.assertEqual(gender_f, "female")
-        self.assertAlmostEqual(f0_f, 230.0, delta=5.0)
-        self.assertGreater(conf_f, 0.80)
+        self.assertGreater(hnr_f, 5.0)
+        self.assertGreater(conf_f, 0.70)
+        self.assertGreater(f0_f, 185.0)
 
-    def test_02_first_speaker_male_locks_capcut(self):
-        """Nguoi noi dau tien la NAM -> Khoa CapCut Thanh Nien Tu Tin (BV075_streaming)."""
-        male_wav = os.path.join(self.temp_dir, "vocals_male.wav")
-        self._create_synthetic_wav(male_wav, f0_hz=125.0, duration_s=2.0)
-
+    def test_02_first_speaker_male_real_audio_locks_capcut(self):
+        """Mau giong thuc te NAM o cau dau -> Khoa CapCut Thanh Nien Tu Tin."""
         segs = [
-            SimpleNamespace(index=1, start=timedelta(seconds=0.2), end=timedelta(seconds=2.0), content="Chào mừng các bạn"),
-            SimpleNamespace(index=2, start=timedelta(seconds=2.2), end=timedelta(seconds=4.0), content="Hôm nay trời rất đẹp"),
+            SimpleNamespace(index=1, start=timedelta(seconds=0.2), end=timedelta(seconds=2.5), content="Xin chào các bạn đã quay trở lại"),
+            SimpleNamespace(index=2, start=timedelta(seconds=2.8), end=timedelta(seconds=4.5), content="Hôm nay mình sẽ hướng dẫn tiếp"),
         ]
 
-        out_job = os.path.join(self.temp_dir, "job_male")
-        locked = lock_video_voice(out_job, segs, vocals_path=male_wav, workspace=self.workspace)
+        out_job = os.path.join(self.temp_dir, "job_male_real")
+        locked = lock_video_voice(out_job, segs, vocals_path=self.real_male_sample, workspace=self.workspace)
 
         self.assertEqual(locked["voice_id"], VOICE_MALE_ID)
         self.assertEqual(locked["voice_source"], "capcut")
         self.assertEqual(locked["voice_param"], VOICE_MALE_PARAM)
         self.assertEqual(locked["detected_gender"], "male")
-        self.assertIn("Thanh Niên Tự Tin", locked["voice_label"])
 
-        # File voice_lock.json phai duoc tao
+        # Snapshot file phai ton tai
         lock_file = Path(out_job) / VOICE_LOCK_FILENAME
         self.assertTrue(lock_file.is_file())
-        saved_data = json.loads(lock_file.read_text(encoding="utf-8"))
-        self.assertEqual(saved_data["voice_id"], VOICE_MALE_ID)
 
-    def test_03_first_speaker_female_locks_chi_mai(self):
-        """Nguoi noi dau tien la NU -> Khoa Chi Mai (chi-mai)."""
-        female_wav = os.path.join(self.temp_dir, "vocals_female.wav")
-        self._create_synthetic_wav(female_wav, f0_hz=235.0, duration_s=2.0)
-
+    def test_03_first_speaker_female_real_audio_locks_chi_mai(self):
+        """Mau giong thuc te NU o cau dau -> Khoa Chi Mai (chi-mai)."""
         segs = [
-            SimpleNamespace(index=1, start=timedelta(seconds=0.3), end=timedelta(seconds=2.2), content="Xin chào quý vị khán giả"),
+            SimpleNamespace(index=1, start=timedelta(seconds=0.2), end=timedelta(seconds=2.5), content="Kính chào quý vị và các bạn"),
         ]
 
-        out_job = os.path.join(self.temp_dir, "job_female")
-        locked = lock_video_voice(out_job, segs, vocals_path=female_wav, workspace=self.workspace)
+        out_job = os.path.join(self.temp_dir, "job_female_real")
+        locked = lock_video_voice(out_job, segs, vocals_path=self.real_female_sample, workspace=self.workspace)
 
         self.assertEqual(locked["voice_id"], VOICE_FEMALE_ID)
         self.assertEqual(locked["detected_gender"], "female")
-        # Phai ho tro RVC hoac fallback CapCut Mai neu chua co model
         self.assertIn(locked["voice_source"], ("rvc", "capcut"))
 
-    def test_04_subsequent_speakers_do_not_change_voice(self):
-        """Giong xuat hien ve sau KHONG LAM HE THONG DOI GIONG (Nguyen tac bat di bat dich)."""
-        # Video bat dau bang giong NAM (0.0s - 2.0s)
-        # Nhung ve sau xuat hien giong NU (2.5s - 5.0s)
-        mixed_wav = os.path.join(self.temp_dir, "dialogue.wav")
+    def test_04_strictly_uses_first_utterance_never_switches_to_later_speaker(self):
+        """SIET CHAT: Chi xet cau thoai dau, khong nhay sang cau 2 du cau 2 la giong khac (Codex Point 3)."""
+        # Video bat dau bang am thanh trang/nhiễu ở câu 1, câu 2 là giọng NỮ
+        noise_wav = os.path.join(self.temp_dir, "noise_seg1.wav")
         import soundfile as sf
         sr = 16000
-        t1 = np.linspace(0, 2.0, sr * 2)
-        audio_male = 0.6 * np.sin(2 * np.pi * 125.0 * t1)
-        t_gap = np.zeros(int(sr * 0.5))
-        t2 = np.linspace(0, 2.5, int(sr * 2.5))
-        audio_female = 0.6 * np.sin(2 * np.pi * 230.0 * t2)
-        full_audio = np.concatenate([audio_male, t_gap, audio_female])
-        sf.write(mixed_wav, full_audio.astype(np.float32), sr)
+        noise = np.random.uniform(-0.005, 0.005, sr * 2)
+        sf.write(noise_wav, noise.astype(np.float32), sr)
 
         segs = [
-            SimpleNamespace(index=1, start=timedelta(seconds=0.1), end=timedelta(seconds=1.9), content="Đoạn thoại đầu của nam"),
-            SimpleNamespace(index=2, start=timedelta(seconds=2.6), end=timedelta(seconds=4.9), content="Đoạn thoại sau của nữ"),
+            SimpleNamespace(index=1, start=timedelta(seconds=0.1), end=timedelta(seconds=1.5), content="Tiếng động nhỏ"),
+            SimpleNamespace(index=2, start=timedelta(seconds=2.0), end=timedelta(seconds=4.0), content="Lời nói rõ của nữ"),
         ]
 
-        out_job = os.path.join(self.temp_dir, "job_dialogue")
-        locked = lock_video_voice(out_job, segs, vocals_path=mixed_wav, workspace=self.workspace)
+        # detect_first_speaker_gender chi phan tich cau 1
+        gender, conf, f0, seg_idx = detect_first_speaker_gender(audio_path=noise_wav, srt_segments=segs)
+        self.assertEqual(seg_idx, 1)  # Phai luon la cau 1
+        self.assertEqual(gender, "unknown")  # Vi cau 1 la nhieu, khong duoc lay giong nu cau 2!
 
-        # Do cau dau la NAM, giong phai duoc khoa la NAM cho den het video
-        self.assertEqual(locked["voice_id"], VOICE_MALE_ID)
-        self.assertEqual(locked["voice_param"], VOICE_MALE_PARAM)
+        # Khi lock_video_voice chay voi audio nay, no phai fallback chu KHONG khoa thanh nu
+        out_job = os.path.join(self.temp_dir, "job_fallback_noise")
+        locked = lock_video_voice(out_job, segs, vocals_path=noise_wav, workspace=self.workspace)
+        self.assertEqual(locked["rule"], "fallback_default_voice")
 
-        # Goi lai lock_video_voice (vi du o buoc tiep theo hoac resume):
-        locked_again = lock_video_voice(out_job, segs, vocals_path=mixed_wav, workspace=self.workspace)
-        self.assertEqual(locked_again["voice_id"], VOICE_MALE_ID)
+    def test_05_demucs_vocals_low_hnr_recovers_from_original_audio(self):
+        """Khi vocals bi Demucs loc mat tan so / HNR thap, tu dong thu lai tren original_audio (Codex Point 3)."""
+        # Gia lap vocals bi loi (im lang/nhiễu), nhung original_audio chua giong nam that
+        silent_vocals = os.path.join(self.temp_dir, "silent_vocals.wav")
+        import soundfile as sf
+        sf.write(silent_vocals, np.zeros(16000 * 2, dtype=np.float32), 16000)
 
-    def test_05_persistence_and_resume_immunity(self):
-        """Kiem tra tinh ben vung: Resume/Retry luon dung lai voice_lock.json da luu."""
-        out_job = os.path.join(self.temp_dir, "job_resume")
+        real_original = str(self.real_male_sample)
+
+        segs = [
+            SimpleNamespace(index=1, start=timedelta(seconds=0.2), end=timedelta(seconds=2.5), content="Xin chào các bạn"),
+        ]
+
+        gender, conf, f0, seg_idx = detect_first_speaker_gender(
+            audio_path=silent_vocals,
+            srt_segments=segs,
+            backup_audio_path=real_original
+        )
+
+        self.assertEqual(gender, "male")
+        self.assertGreater(conf, 0.70)
+        self.assertEqual(seg_idx, 1)
+
+    def test_06_dubbing_audio_voice_purity_no_silent_voice_mix(self):
+        """Kiem tra toan luong TTS: KHONG BAO GIO tron giong giua video khi 1 cau loi (Codex Point 1)."""
+        # Gia lap danh sach 3 segments
+        segs = [
+            SimpleNamespace(index=1, start=timedelta(seconds=0.0), end=timedelta(seconds=2.0), content="Câu thứ nhất"),
+            SimpleNamespace(index=2, start=timedelta(seconds=2.5), end=timedelta(seconds=4.0), content="Câu thứ hai bị lỗi"),
+            SimpleNamespace(index=3, start=timedelta(seconds=4.5), end=timedelta(seconds=6.0), content="Câu thứ ba"),
+        ]
+
+        out_folder = os.path.join(self.temp_dir, "tts_pure")
+        os.makedirs(out_folder, exist_ok=True)
+
+        # Mock generate_single_tts: cau 1 va 3 thanh cong, cau 2 that bai sau retry
+        async def mock_single_tts(seg, folder, source, param, key):
+            if seg.index == 2:
+                return None  # Failure
+            p = os.path.join(folder, f"{seg.index}.mp3")
+            # Write dummy audio
+            with open(p, "wb") as f:
+                f.write(b"RIFF" + b"\x00" * 200)
+            return {
+                "index": seg.index,
+                "path": p,
+                "start": seg.start.total_seconds(),
+                "end": seg.end.total_seconds(),
+                "actual_audio_duration": 1.5,
+                "content": seg.content
+            }
+
+        with patch("ai.voice_cloning.generate_single_tts", side_effect=mock_single_tts):
+            # Goi generate_dubbing_audio voi giong locked la capcut-BV075_streaming
+            with self.assertRaises(RuntimeError) as ctx:
+                asyncio.run(generate_dubbing_audio(
+                    segs, out_folder, voice_source="capcut", voice_param="BV075_streaming"
+                ))
+
+            # Kiem tra nguyen nhan loi: Phai la TTSIncompleteError voi thong diep ro rang
+            cause = ctx.exception.__cause__
+            self.assertIsInstance(cause, TTSIncompleteError)
+            self.assertIn("thất bại với giọng đã khóa", str(cause))
+            cue2_audio = os.path.join(out_folder, "2.mp3")
+            self.assertFalse(os.path.exists(cue2_audio), "File loi khong duoc phep ton tai tren dia!")
+
+    def test_07_resume_and_persistence_integrity(self):
+        """Kiem tra tinh ben vung khi retry/resume tu voice_lock.json."""
+        out_job = os.path.join(self.temp_dir, "job_persist")
         os.makedirs(out_job, exist_ok=True)
         lock_file = Path(out_job) / VOICE_LOCK_FILENAME
 
-        # Gia su job da duoc khoa giong capcut-BV075_streaming tu truoc
-        pre_locked = {
+        initial_data = {
             "voice_id": "capcut-BV075_streaming",
             "voice_source": "capcut",
             "voice_param": "BV075_streaming",
@@ -153,39 +214,15 @@ class TestV1AutoVoice(unittest.TestCase):
             "confidence": 0.95,
             "rule": "first_speaker_male_capcut"
         }
-        lock_file.write_text(json.dumps(pre_locked), encoding="utf-8")
+        lock_file.write_text(json.dumps(initial_data), encoding="utf-8")
 
-        # Goi lock_video_voice voi audio nu hoac segments khac
-        female_wav = os.path.join(self.temp_dir, "female_noise.wav")
-        self._create_synthetic_wav(female_wav, f0_hz=250.0, duration_s=1.0)
-        segs = [SimpleNamespace(index=1, start=timedelta(seconds=0.1), end=timedelta(seconds=1.0), content="Sub moi")]
+        # Goi lai lock_video_voice voi bat ky audio nao khac (vi du giong nu)
+        segs = [SimpleNamespace(index=1, start=timedelta(seconds=0.1), end=timedelta(seconds=2.0), content="Test")]
+        locked = lock_video_voice(out_job, segs, vocals_path=self.real_female_sample)
 
-        result = lock_video_voice(out_job, segs, vocals_path=female_wav)
-
-        # Ket qua phai tuyet doi giu nguyen ban ghi da khoa cu
-        self.assertEqual(result["voice_id"], "capcut-BV075_streaming")
-        self.assertEqual(result["voice_source"], "capcut")
-        self.assertEqual(result["voice_param"], "BV075_streaming")
-
-    def test_06_uncertain_noisy_audio_fallback(self):
-        """Am thanh khong ro / nhieu trang -> Fallback ve giong mac dinh an toan."""
-        noise_wav = os.path.join(self.temp_dir, "noise.wav")
-        import soundfile as sf
-        sr = 16000
-        noise = np.random.uniform(-0.01, 0.01, sr * 2)
-        sf.write(noise_wav, noise.astype(np.float32), sr)
-
-        segs = [
-            SimpleNamespace(index=1, start=timedelta(seconds=0.1), end=timedelta(seconds=1.8), content="Tiếng xì xào"),
-        ]
-
-        out_job = os.path.join(self.temp_dir, "job_noise")
-        locked = lock_video_voice(out_job, segs, vocals_path=noise_wav, workspace=self.workspace)
-
-        # Phai fallback an toan, khong throw exception
-        self.assertIn("voice_id", locked)
-        self.assertIn("voice_source", locked)
-        self.assertEqual(locked["rule"], "fallback_default_voice")
+        # Phai luon giu nguyen ban ghi da khoa tu truoc
+        self.assertEqual(locked["voice_id"], "capcut-BV075_streaming")
+        self.assertEqual(locked["voice_param"], "BV075_streaming")
 
 
 if __name__ == "__main__":

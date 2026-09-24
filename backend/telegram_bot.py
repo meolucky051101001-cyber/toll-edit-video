@@ -80,15 +80,25 @@ INPUT_DIR = os.path.abspath(os.getenv("AUTODUB_INPUT_DIR", r"D:\video_input"))
 OUTPUT_DIR = os.path.abspath(os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve"))
 os.makedirs(WORKSPACE, exist_ok=True)
 
+root_app_log = os.path.abspath(os.path.join(BASE_DIR, "..", "app.log"))
+backend_app_log = os.path.abspath(os.path.join(BASE_DIR, "app.log"))
+log_handlers = [
+    logging.FileHandler(backend_app_log, encoding='utf-8'),
+    logging.StreamHandler()
+]
+try:
+    log_handlers.append(logging.FileHandler(root_app_log, encoding='utf-8'))
+except Exception:
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("app.log", encoding='utf-8'),
-        logging.StreamHandler()
-    ]
+    handlers=log_handlers,
+    force=True
 )
 logger = logging.getLogger(__name__)
+logger.info("=== AUTO VIDEO DUBBING TOOL V1 STARTED === [PID: %d] [CODEX SINGLE VOICE LOCK ACTIVE]", os.getpid())
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 async def safe_edit_status(status_msg, text, parse_mode=None, retries=3):

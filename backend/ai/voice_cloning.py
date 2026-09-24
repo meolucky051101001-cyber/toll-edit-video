@@ -456,31 +456,24 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                             content=seg.content.strip())
             result = await generate_single_tts(seg, output_folder, voice_source, voice_param, api_key)
             if result is None:
-                # Cứu hộ lần 1: Thử đọc bằng Edge TTS cơ bản (giữ đúng giới tính nam/nữ)
-                try:
-                    is_male_target = (
-                        "BV075" in str(voice_param)
-                        or "BV560" in str(voice_param)
-                        or "namminh" in str(voice_param).lower()
-                        or "felipe" in str(voice_param).lower()
-                    )
-                    rescue_voice = "vi-VN-NamMinhNeural" if is_male_target else "vi-VN-HoaiMyNeural"
-                    await generate_tts_edge(seg.content.strip(), path, rescue_voice, pitch="+0Hz", rate="+0%")
-                    if os.path.exists(path) and os.path.getsize(path) > 128:
-                        audio = AudioSegment.from_file(path)
-                        result = dict(index=seg.index, path=path, start=seg.start.total_seconds(),
-                                     end=seg.end.total_seconds(), actual_audio_duration=len(audio) / 1000.0,
-                                     content=seg.content.strip())
-                except Exception:
-                    result = None
+                # Retry chính giọng đã khóa (KHÔNG BAO GIỜ đổi sang giọng khác giữa chừng)
+                for retry_idx in range(2):
+                    await asyncio.sleep(2.0 * (retry_idx + 1))
+                    result = await generate_single_tts(seg, output_folder, voice_source, voice_param, api_key)
+                    if result is not None:
+                        break
+
             if result is None:
-                # TTS fail hoàn toàn sau khi đã thử Edge TTS cứu hộ
+                # TTS thất bại cho câu này với giọng đã khóa -> Dừng job để giữ tính toàn vẹn 1 giọng duy nhất
                 if os.path.exists(path):
                     try:
                         os.remove(path)
                     except OSError:
                         pass
-                raise TTSIncompleteError(f"Failed segment: {seg.index} - {seg.content.strip()[:20]}...")
+                raise TTSIncompleteError(
+                    f"TTS segment {seg.index} thất bại với giọng đã khóa '{voice_source}' ({voice_param}). "
+                    f"Không thay thế bằng giọng khác để đảm bảo 1 video dùng duy nhất 1 giọng."
+                )
             
             # 1.3 KHÔNG CACHE AUDIO LỖI
             # Validation tối thiểu trước khi ghi cache

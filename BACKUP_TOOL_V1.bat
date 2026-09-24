@@ -36,6 +36,8 @@ mkdir "%BACKUP_DIR%\backend\ai" 2>nul
 if exist "backend\batch_processor.py" copy /y "backend\batch_processor.py" "%BACKUP_DIR%\backend\" >nul
 if exist "backend\telegram_bot.py" copy /y "backend\telegram_bot.py" "%BACKUP_DIR%\backend\" >nul
 if exist "backend\voice_selection.py" copy /y "backend\voice_selection.py" "%BACKUP_DIR%\backend\" >nul
+if exist "backend\main.py" copy /y "backend\main.py" "%BACKUP_DIR%\backend\" >nul
+if exist "backend\tool_control_runtime.py" copy /y "backend\tool_control_runtime.py" "%BACKUP_DIR%\backend\" >nul
 if exist "backend\ai\voice_cloning.py" copy /y "backend\ai\voice_cloning.py" "%BACKUP_DIR%\backend\ai\" >nul
 if exist "backend\ai\v1_auto_voice.py" copy /y "backend\ai\v1_auto_voice.py" "%BACKUP_DIR%\backend\ai\" >nul
 

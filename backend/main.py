@@ -126,8 +126,15 @@ OUTPUT_DIR = os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 os.makedirs(WORKSPACE, exist_ok=True)
 
+def _get_system_path(rel_path: str) -> Path:
+    bot_system = Path(WORKSPACE) / "bot_system"
+    target = bot_system / rel_path
+    if target.exists() or bot_system.is_dir():
+        return target
+    return Path(WORKSPACE) / rel_path
+
 # Write runtime token file for tool_control graceful stop
-TOKEN_FILE = Path(WORKSPACE) / ".dashboard_control_token"
+TOKEN_FILE = _get_system_path(".dashboard_control_token")
 try:
     TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp_t = TOKEN_FILE.with_suffix(".tmp")
@@ -137,7 +144,7 @@ except Exception as _te:
     logger.warning("Failed to write runtime control token: %s", _te)
 
 def get_input_dir() -> Path:
-    saved = Path(WORKSPACE) / "dashboard_input.json"
+    saved = _get_system_path("dashboard_input.json")
     if saved.exists():
         return Path(json.loads(saved.read_text(encoding="utf-8"))["path"])
     env_dir = os.getenv("AUTODUB_INPUT_DIR")
@@ -439,11 +446,23 @@ async def api_process_video(
         )
         await asyncio.to_thread(save_srt, translated_segments, srt_translated)
 
-        # 4. Generate TTS dubbing
+        # 4. Khóa giọng video theo người nói đầu (Codex Plan) & Tạo TTS dubbing
+        from ai.v1_auto_voice import lock_video_voice
+        voice_lock_info = await asyncio.to_thread(
+            lock_video_voice,
+            out_dir=out_dir,
+            srt_segments=srt_segments,
+            vocals_path=None,
+            original_audio_path=original_audio,
+            workspace=WORKSPACE,
+        )
+        effective_source = voice_lock_info["voice_source"]
+        effective_param = voice_lock_info["voice_param"]
+
         dubbing_audio_files = await generate_dubbing_audio_isolated(
             translated_segments, dubbing_dir,
-            voice_source=voice_source,
-            voice_param=voice_param,
+            voice_source=effective_source,
+            voice_param=effective_param,
             api_key=api_key
         )
 
@@ -607,11 +626,23 @@ async def api_process_url(
                 "content": seg.content
             })
 
-        # TTS
+        # TTS: Khóa giọng video theo người nói đầu (Codex Plan)
+        from ai.v1_auto_voice import lock_video_voice
+        voice_lock_info = await asyncio.to_thread(
+            lock_video_voice,
+            out_dir=out_dir,
+            srt_segments=srt_segments,
+            vocals_path=None,
+            original_audio_path=original_audio,
+            workspace=WORKSPACE,
+        )
+        effective_source = voice_lock_info["voice_source"]
+        effective_param = voice_lock_info["voice_param"]
+
         dubbing_audio_files = await generate_dubbing_audio_isolated(
             translated_segments, dubbing_dir,
-            voice_source=voice_source,
-            voice_param=voice_param,
+            voice_source=effective_source,
+            voice_param=effective_param,
             api_key=api_key
         )
 
@@ -692,7 +723,7 @@ async def api_get_status():
 @app.get("/api/queue")
 async def api_get_queue():
     import json
-    path = Path(WORKSPACE) / "telegram_queue.json"
+    path = _get_system_path("telegram_queue.json")
     if not path.is_file():
         return {"items": [], "available": False, "message": "Chưa kết nối hàng đợi Telegram. Cần khởi động lại bot để bật tính năng."}
     try:
@@ -706,7 +737,7 @@ async def api_get_queue():
 @app.post("/api/queue/process")
 async def api_process_queue(request: Request):
     """Kích hoạt xử lý lại danh sách video đang đợi trong hàng chờ Telegram."""
-    queue_file = Path(WORKSPACE) / "telegram_queue.json"
+    queue_file = _get_system_path("telegram_queue.json")
     if not queue_file.is_file():
         return {"status": "empty", "message": "Không tìm thấy hàng chờ video."}
 
@@ -718,14 +749,14 @@ async def api_process_queue(request: Request):
             return {"status": "empty", "message": "Hàng chờ hiện đang trống."}
 
         # 1. Gỡ cờ pause nếu Tool V1 đang bị tạm dừng
-        pause_flag = Path(WORKSPACE) / "control" / "v1.pause"
+        pause_flag = _get_system_path("control") / "v1.pause"
         try:
             pause_flag.unlink(missing_ok=True)
         except Exception:
             pass
 
         # 2. Ghi cờ kích hoạt để bot đang chạy nhặt việc ngay lập tức
-        trigger_flag = Path(WORKSPACE) / "telegram_queue_trigger.flag"
+        trigger_flag = _get_system_path("telegram_queue_trigger.flag")
         trigger_flag.write_text(str(time.time()), encoding="utf-8")
 
         # 3. Kiểm tra xem telegram_bot.py có đang chạy không. Nếu chưa chạy thì khởi động
@@ -776,8 +807,8 @@ async def api_process_queue(request: Request):
 @app.post("/api/queue/clear")
 async def api_clear_queue(request: Request):
     """Xóa sạch các video đang đợi trong hàng chờ Telegram."""
-    queue_file = Path(WORKSPACE) / "telegram_queue.json"
-    clear_flag = Path(WORKSPACE) / "telegram_queue_clear.flag"
+    queue_file = _get_system_path("telegram_queue.json")
+    clear_flag = _get_system_path("telegram_queue_clear.flag")
     try:
         import json, time
         # Ghi cờ xóa cho bot đang chạy
@@ -1221,6 +1252,14 @@ except Exception as _se:
 
 
 if __name__ == "__main__":
-    import uvicorn
+    import uvicorn, time
     port = int(os.getenv("AUTODUB_PORT", "8088"))
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    for attempt in range(15):
+        try:
+            uvicorn.run(app, host="127.0.0.1", port=port)
+            break
+        except OSError as oe:
+            if getattr(oe, "winerror", None) == 10048 or oe.errno == 10048:
+                time.sleep(2)
+                continue
+            raise

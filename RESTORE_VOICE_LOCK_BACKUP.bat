@@ -9,7 +9,7 @@ echo.
 cd /d "C:\tool v1"
 
 echo Dang khoi phuc ve branch: backup/before-voice-lock-20260924...
-git checkout backup/before-voice-lock-20260924 -- backend/batch_processor.py backend/telegram_bot.py backend/voice_selection.py backend/ai/voice_cloning.py
+git checkout backup/before-voice-lock-20260924 -- backend/batch_processor.py backend/telegram_bot.py backend/voice_selection.py backend/ai/voice_cloning.py backend/main.py backend/tool_control_runtime.py
 
 if %ERRORLEVEL% EQU 0 (
     echo.
