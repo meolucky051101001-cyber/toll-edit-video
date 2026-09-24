@@ -35,6 +35,108 @@ def test_compound_intent_accepts_valid_sticker_tweezer():
     assert "Satisfies both tool" in reason
 
 
+def test_compound_intent_accepts_title_having_both_intents():
+    """Accepts videos where title genuinely contains both tool (tweezer) and purpose (sticker)."""
+    vr = VideoResult(
+        platform="douyin",
+        platform_video_id="7350000000000000013",
+        url="https://www.douyin.com/video/7350000000000000013",
+        title="Review nhíp gắp sticker chuyên dụng 贴纸专用镊子开箱测评",
+        caption="Gắp sticker và charm cực chuẩn",
+        author_name="StationeryLover",
+        media_type="video",
+    )
+    bd = _make_breakdown(80.0)
+    is_rel, reason = validate_sticker_tweezer_compound_intent(vr, bd)
+    assert is_rel is True
+    assert "Satisfies both tool" in reason
+
+
+def test_compound_intent_rejects_title_sticker_only_with_tweezer_hashtag():
+    """Rejects videos where title only mentions sticker while tweezer is only in hashtag/caption."""
+    vr = VideoResult(
+        platform="douyin",
+        platform_video_id="7350000000000000010",
+        url="https://www.douyin.com/video/7350000000000000010",
+        title="1000 tấm sticker xinh xắn dán sổ tay siêu dễ thương",
+        caption="Review sticker hot trend #镊子 #nhíp #tweezer",
+        hashtags=["镊子", "nhíp", "tweezer"],
+        author_name="StickerShop",
+        media_type="video",
+    )
+    bd = _make_breakdown(50.0)
+    is_rel, reason = validate_sticker_tweezer_compound_intent(vr, bd)
+    assert is_rel is False
+    assert "lacks tool intent" in reason or "tool" in reason.lower()
+
+
+def test_compound_intent_rejects_title_tweezer_only_with_sticker_hashtag():
+    """Rejects videos where title only mentions tweezer while sticker is only in hashtag/caption."""
+    vr = VideoResult(
+        platform="douyin",
+        platform_video_id="7350000000000000011",
+        url="https://www.douyin.com/video/7350000000000000011",
+        title="Top 3 loại nhíp gắp đầu cong siêu bền gắp cực êm",
+        caption="Dụng cụ thủ công tiện ích #贴纸 #sticker #咕卡",
+        hashtags=["贴纸", "sticker", "咕卡"],
+        author_name="ToolReview",
+        media_type="video",
+    )
+    bd = _make_breakdown(50.0)
+    is_rel, reason = validate_sticker_tweezer_compound_intent(vr, bd)
+    assert is_rel is False
+    assert "lacks purpose intent" in reason or "purpose" in reason.lower()
+
+
+def test_compound_intent_rejects_caption_has_both_but_title_off_topic():
+    """Rejects videos where title is completely off-topic even if caption contains both tweezer and sticker."""
+    vr = VideoResult(
+        platform="douyin",
+        platform_video_id="7350000000000000012",
+        url="https://www.douyin.com/video/7350000000000000012",
+        title="Vlog một ngày nấu ăn cuối tuần của mình tại nhà",
+        caption="Cuối ngày dùng nhíp gắp sticker trang trí sổ tay cute 贴纸镊子",
+        hashtags=["vlog", "cooking"],
+        author_name="DailyVlog",
+        media_type="video",
+    )
+    bd = _make_breakdown(55.0)
+    is_rel, reason = validate_sticker_tweezer_compound_intent(vr, bd)
+    assert is_rel is False
+    assert "no match" in reason.lower() or "off-topic" in reason.lower()
+
+
+def test_compound_intent_rejects_eyelash_and_phone_repair_in_title_and_caption():
+    """Rejects incompatible tweezer domains (eyelash extension, phone repair) in title OR caption."""
+    # Eyelash in title
+    vr_eye_title = VideoResult(
+        platform="douyin",
+        platform_video_id="7350000000000000014",
+        url="https://www.douyin.com/video/7350000000000000014",
+        title="Nhíp gắp sticker và nối mi 2 trong 1 睫毛贴纸镊子",
+        author_name="BeautyCraft",
+        media_type="video",
+    )
+    bd = _make_breakdown(50.0)
+    is_rel, reason = validate_sticker_tweezer_compound_intent(vr_eye_title, bd)
+    assert is_rel is False
+    assert "incompatible purpose detected in title" in reason.lower()
+
+    # Phone repair in caption
+    vr_phone_cap = VideoResult(
+        platform="douyin",
+        platform_video_id="7350000000000000015",
+        url="https://www.douyin.com/video/7350000000000000015",
+        title="Review nhíp gắp sticker chuyên dụng 贴纸镊子",
+        caption="Nhíp chuyên dùng để sửa điện thoại và hàn mạch 修手机",
+        author_name="TechFix",
+        media_type="video",
+    )
+    is_rel, reason = validate_sticker_tweezer_compound_intent(vr_phone_cap, bd)
+    assert is_rel is False
+    assert "incompatible purpose detected in caption" in reason.lower()
+
+
 def test_compound_intent_rejects_eyelash_tweezer_distractor():
     """Rejects eyelash tweezers lacking sticker purpose, even if containing tweezer terms."""
     vr = VideoResult(
@@ -48,7 +150,7 @@ def test_compound_intent_rejects_eyelash_tweezer_distractor():
     bd = _make_breakdown(50.0)
     is_rel, reason = validate_sticker_tweezer_compound_intent(vr, bd)
     assert is_rel is False
-    assert "incompatible purpose" in reason.lower() or "missing mandatory purpose" in reason.lower()
+    assert "incompatible purpose" in reason.lower() or "missing mandatory purpose" in reason.lower() or "lacks purpose" in reason.lower()
 
 
 def test_compound_intent_rejects_phone_repair_tweezer_distractor():
@@ -64,7 +166,7 @@ def test_compound_intent_rejects_phone_repair_tweezer_distractor():
     bd = _make_breakdown(45.0)
     is_rel, reason = validate_sticker_tweezer_compound_intent(vr, bd)
     assert is_rel is False
-    assert "incompatible purpose" in reason.lower() or "missing mandatory purpose" in reason.lower()
+    assert "incompatible purpose" in reason.lower() or "missing mandatory purpose" in reason.lower() or "lacks purpose" in reason.lower()
 
 
 def test_compound_intent_rejects_sticker_without_tweezer_distractor():
@@ -97,6 +199,23 @@ def test_compound_intent_rejects_planner_without_sticker_distractor():
     is_rel, reason = validate_sticker_tweezer_compound_intent(vr, bd)
     assert is_rel is False
     assert "no match" in reason.lower() or "missing" in reason.lower()
+
+
+def test_compound_intent_rejects_standalone_shouzhang_planner():
+    """Rejects standalone 手账 without sticker or tweezer keywords."""
+    vr = VideoResult(
+        platform="douyin",
+        platform_video_id="7350000000000000016",
+        url="https://www.douyin.com/video/7350000000000000016",
+        title="Trang trí sổ tay vintage 手账排版分享 极简记录生活",
+        caption="Chia sẻ cách viết sổ tay hàng ngày",
+        author_name="PlannerFan",
+        media_type="video",
+    )
+    bd = _make_breakdown(35.0)
+    is_rel, reason = validate_sticker_tweezer_compound_intent(vr, bd)
+    assert is_rel is False
+    assert "no match" in reason.lower() or "off-topic" in reason.lower()
 
 
 def test_compound_intent_rejects_caption_hashtag_only_spam_distractor():

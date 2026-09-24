@@ -9,10 +9,13 @@ Ensures identity consistency across contracts, providers, dedup, and persistence
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlsplit
 
@@ -426,18 +429,131 @@ def merge_share_url(
 class SampleProvenanceResult:
     schema_valid: bool
     source_provenance_verified: bool
-    status: str  # "VERIFIED_STRICT", "UNVERIFIED_LEGACY", "UNVERIFIED_MISSING_METADATA", "UNVERIFIED_INSUFFICIENT_EVIDENCE", "INVALID_SCHEMA"
+    status: str  # "VERIFIED_STRICT", "UNVERIFIED_LEGACY", "UNVERIFIED_MISSING_METADATA", "UNVERIFIED_PENDING_CAPTURE", "UNVERIFIED_HASH_MISMATCH", "UNVERIFIED_INSUFFICIENT_EVIDENCE", "INVALID_SCHEMA"
     detail: str
     reasons: list[str] = field(default_factory=list)
 
     def __iter__(self):
-        """Allows unpacking as (source_provenance_verified, detail) for backward compatibility."""
-        return iter((self.source_provenance_verified, self.detail))
+        """Allows unpacking as (schema_valid, detail) for backward compatibility."""
+        return iter((self.schema_valid, self.detail))
+
+
+def compute_sample_metadata_hash(sample: dict[str, Any]) -> str:
+    """Computes a deterministic SHA-256 hash for sample metadata.
+
+    Covers platform, platform_video_id, url, title, author, media_type,
+    collected_at, query, submitted_query, session_id, and collector_version.
+    """
+    canonical_payload = {
+        "collected_at": str(sample.get("collected_at") or "").strip(),
+        "collector_version": str(sample.get("collector_version") or "").strip(),
+        "media_type": str(sample.get("media_type") or "video").strip(),
+        "platform": str(sample.get("platform") or "").strip().lower(),
+        "platform_video_id": str(sample.get("platform_video_id") or "").strip(),
+        "query": str(sample.get("query") or "").strip(),
+        "session_id": str(sample.get("session_id") or "").strip(),
+        "submitted_query": str(sample.get("submitted_query") or "").strip(),
+        "title": str(sample.get("title") or "").strip(),
+        "url": str(sample.get("url") or "").strip(),
+    }
+    encoded = json.dumps(
+        canonical_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def create_capture_manifest_record(
+    sample: dict[str, Any], record_id: str | None = None
+) -> dict[str, Any]:
+    """Generates an independent capture manifest record from a captured sample."""
+    plat = str(sample.get("platform") or "").strip().lower()
+    vid = str(sample.get("platform_video_id") or "").strip()
+    r_id = record_id or f"cap-{plat}-{vid}"
+    return {
+        "record_id": r_id,
+        "platform": plat,
+        "platform_video_id": vid,
+        "url": str(sample.get("url") or "").strip(),
+        "query": str(sample.get("query") or "").strip(),
+        "submitted_query": str(sample.get("submitted_query") or "").strip(),
+        "collected_at": str(sample.get("collected_at") or "").strip(),
+        "session_id": str(sample.get("session_id") or "").strip(),
+        "collector_version": str(sample.get("collector_version") or "").strip(),
+        "metadata_hash": compute_sample_metadata_hash(sample),
+    }
+
+
+def lookup_capture_manifest_record(
+    manifest: Any, sample: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Finds a matching capture record in an independent manifest by ID or platform_video_id."""
+    if manifest is None:
+        return None
+
+    if isinstance(manifest, (str, Path)):
+        p = Path(manifest)
+        if not p.exists():
+            return None
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return lookup_capture_manifest_record(data, sample)
+        except Exception:
+            return None
+
+    target_vid = str(sample.get("platform_video_id") or "").strip()
+    target_cid = str(sample.get("capture_id") or sample.get("source_capture_ref") or "").strip()
+    target_plat = str(sample.get("platform") or "").strip().lower()
+
+    if isinstance(manifest, list):
+        for rec in manifest:
+            if not isinstance(rec, dict):
+                continue
+            r_plat = str(rec.get("platform") or "").strip().lower()
+            if r_plat and target_plat and r_plat != target_plat:
+                continue
+            r_cid = str(rec.get("record_id") or rec.get("capture_id") or "").strip()
+            r_vid = str(rec.get("platform_video_id") or rec.get("id") or "").strip()
+            if target_cid and r_cid and target_cid == r_cid:
+                return rec
+            if target_vid and r_vid and target_vid == r_vid:
+                return rec
+        return None
+
+    if isinstance(manifest, dict):
+        if "records" in manifest and isinstance(manifest["records"], list):
+            return lookup_capture_manifest_record(manifest["records"], sample)
+        if "captures" in manifest and isinstance(manifest["captures"], list):
+            return lookup_capture_manifest_record(manifest["captures"], sample)
+
+        if target_cid and target_cid in manifest and isinstance(manifest[target_cid], dict):
+            return manifest[target_cid]
+        if target_vid and target_vid in manifest and isinstance(manifest[target_vid], dict):
+            return manifest[target_vid]
+        compound_key = f"{target_plat}:{target_vid}"
+        if compound_key in manifest and isinstance(manifest[compound_key], dict):
+            return manifest[compound_key]
+
+        for rec in manifest.values():
+            if not isinstance(rec, dict):
+                continue
+            r_plat = str(rec.get("platform") or "").strip().lower()
+            if r_plat and target_plat and r_plat != target_plat:
+                continue
+            r_cid = str(rec.get("record_id") or rec.get("capture_id") or "").strip()
+            r_vid = str(rec.get("platform_video_id") or rec.get("id") or "").strip()
+            if target_cid and r_cid and target_cid == r_cid:
+                return rec
+            if target_vid and r_vid and target_vid == r_vid:
+                return rec
+
+    return None
 
 
 def audit_sample_provenance(
     sample: dict[str, Any],
     expected_query: str | None = None,
+    capture_manifest: Any = None,
 ) -> SampleProvenanceResult:
     """Strictly audits a benchmark/dataset sample for schema validity and source provenance.
 
@@ -674,28 +790,56 @@ def audit_sample_provenance(
             reasons=[f"Query mismatch: '{sample_query}' vs '{expected_query}'"],
         )
 
-    # Verifiable source evidence check
-    session_id = str(sample.get("session_id") or "").strip()
-    has_valid_session_evidence = bool(
-        re.match(r"^[a-zA-Z0-9_\-\.]{8,}$", session_id)
-        and session_id.lower() not in ("placeholder", "unknown", "none", "session_id")
-    )
-    has_capture_ref = bool(
-        sample.get("source_capture_ref") or sample.get("capture_id") or sample.get("metadata_hash")
-    )
-    if not has_valid_session_evidence and not has_capture_ref:
+    # Verifiable source evidence check against independent capture manifest
+    manifest_rec = lookup_capture_manifest_record(capture_manifest, sample)
+    if not manifest_rec:
+        return SampleProvenanceResult(
+            schema_valid=True,
+            source_provenance_verified=False,
+            status="UNVERIFIED_PENDING_CAPTURE",
+            detail="Sample has valid schema and metadata but lacks matching independent capture manifest record",
+            reasons=["No matching independent capture record in manifest"],
+        )
+
+    # Validate manifest platform consistency
+    m_plat = str(manifest_rec.get("platform") or "").strip().lower()
+    s_plat = str(sample.get("platform") or "").strip().lower()
+    if m_plat != s_plat:
+        return SampleProvenanceResult(
+            schema_valid=True,
+            source_provenance_verified=False,
+            status="UNVERIFIED_MANIFEST_MISMATCH",
+            detail=f"Manifest platform '{m_plat}' does not match sample platform '{s_plat}'",
+            reasons=[f"Manifest platform mismatch: '{m_plat}' vs '{s_plat}'"],
+        )
+
+    # Validate metadata hash
+    expected_hash = manifest_rec.get("metadata_hash")
+    if not expected_hash:
         return SampleProvenanceResult(
             schema_valid=True,
             source_provenance_verified=False,
             status="UNVERIFIED_INSUFFICIENT_EVIDENCE",
-            detail=f"Insufficient verifiable source evidence: invalid session_id '{session_id}' and no capture ref/hash",
-            reasons=["Insufficient verifiable source evidence"],
+            detail="Capture manifest record missing metadata_hash",
+            reasons=["Capture manifest record missing metadata_hash"],
+        )
+
+    actual_hash = compute_sample_metadata_hash(sample)
+    clean_exp = str(expected_hash).strip().lower().removeprefix("sha256:")
+    clean_act = str(actual_hash).strip().lower().removeprefix("sha256:")
+    if clean_exp != clean_act:
+        return SampleProvenanceResult(
+            schema_valid=True,
+            source_provenance_verified=False,
+            status="UNVERIFIED_HASH_MISMATCH",
+            detail=f"Metadata hash mismatch with manifest record '{manifest_rec.get('record_id')}': expected {expected_hash}, calculated {actual_hash}",
+            reasons=[f"Metadata hash mismatch: expected {expected_hash}, got {actual_hash}"],
         )
 
     return SampleProvenanceResult(
         schema_valid=True,
         source_provenance_verified=True,
         status="VERIFIED_STRICT",
-        detail="Provenance strictly verified: URL, ID, ISO timestamp, and metadata valid",
+        detail=f"Provenance strictly verified against capture manifest record '{manifest_rec.get('record_id')}'",
         reasons=[],
     )

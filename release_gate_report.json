@@ -1,12 +1,12 @@
 {
   "verdict": "APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH",
-  "duration_seconds": 259.31,
-  "timestamp": "2026-09-24T08:59:54Z",
+  "duration_seconds": 389.39,
+  "timestamp": "2026-09-24T09:27:31Z",
   "strict_live_run": {
     "executed": true,
     "command": "python scripts/release_gate.py --live --require-live",
     "exit_code": 2,
-    "timestamp": "2026-09-24T08:59:54Z",
+    "timestamp": "2026-09-24T09:27:31Z",
     "query": "nh\u00edp g\u1eafp sticker",
     "submitted_query": "\u8d34\u7eb8\u954a\u5b50",
     "douyin": {
@@ -39,40 +39,40 @@
     "2_database": {
       "passed": true,
       "detail": "SQLite database schema verified (5 core tables present)",
-      "duration_s": 0.27
+      "duration_s": 0.29
     },
     "3_ruff_linter": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 0.08
+      "duration_s": 0.12
     },
     "4_mypy_types": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 0.34
+      "duration_s": 0.83
     },
     "5_frontend_eslint": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 5.44
+      "duration_s": 57.58
     },
     "6_frontend_typecheck": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 1.99
+      "duration_s": 5.74
     },
     "7_frontend_build": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 34.39
+      "duration_s": 29.78
     },
     "8_backend_pytest": {
       "passed": true,
       "exit_code": 0,
-      "tests_passed": 462,
+      "tests_passed": 471,
       "tests_failed": 0,
       "tests_skipped": 3,
-      "duration_s": 144.67
+      "duration_s": 155.05
     },
     "9_fixture_benchmark": {
       "passed": true,
@@ -82,16 +82,16 @@
       "domain_benchmark_queries": 60,
       "real_crawled_queries": 4,
       "total_samples_audited": 33,
-      "schema_valid_samples": 33,
-      "strict_provenance_verified_samples": 33,
-      "unverified_legacy_samples": 0,
-      "unverified_other_samples": 0,
+      "metadata_schema_valid": 33,
+      "manifest_verified_samples": 0,
+      "unverified_samples": 33,
+      "rejected_samples": 0,
+      "source_provenance_verified": false,
+      "provenance_audit_level": "manifest_hash_verified",
       "real_crawled_samples_provenance": 20,
       "independent_holdout_samples": 13,
       "crawled_video_samples": 16,
       "crawled_image_text_samples": 4,
-      "provenance_audit_level": "strict_url_id_iso_parsed_with_evidence",
-      "provenance_verified": true,
       "crawled_platforms": {
         "douyin": {
           "video": 16,
@@ -106,14 +106,14 @@
         }
       },
       "test_suites_passed": 12,
-      "duration_s": 2.46
+      "duration_s": 4.63
     },
     "10_frontend_playwright_e2e": {
       "passed": true,
       "exit_code": 0,
       "tests_passed": 26,
       "specs_count": 7,
-      "duration_s": 39.0
+      "duration_s": 54.17
     },
     "11_live_crawl_acceptance": {
       "executed": true,
@@ -122,7 +122,7 @@
       "probe_reachability": {
         "passed": true,
         "exit_code": 0,
-        "douyin": "HTTP 200: page_available",
+        "douyin": "HTTP 200: verification_required",
         "xiaohongshu": "HTTP 200: page_available"
       },
       "platforms": {
@@ -157,7 +157,7 @@
           "reason": "User login session required to view search results on workstation"
         }
       },
-      "duration_s": 25.55
+      "duration_s": 76.04
     }
   }
 }

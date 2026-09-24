@@ -1,9 +1,10 @@
-"""Tests for strict provenance audit and schema validation."""
+"""Tests for strict provenance audit and schema validation with independent capture manifest."""
 
 
 from backend.services.identity_policy import (
     SampleProvenanceResult,
     audit_sample_provenance,
+    create_capture_manifest_record,
 )
 
 
@@ -49,25 +50,85 @@ def _make_valid_xhs_sample() -> dict:
     }
 
 
-def test_provenance_audit_valid_samples():
-    """Valid samples on both platforms must pass both schema validation and strict source provenance."""
+def test_provenance_audit_matching_manifest_verified():
+    """Sample with matching independent capture manifest record and matching hash is verified strictly."""
     dy = _make_valid_douyin_sample()
-    res_dy = audit_sample_provenance(dy, expected_query="nhíp gắp sticker")
+    manifest_record = create_capture_manifest_record(dy)
+    res_dy = audit_sample_provenance(dy, expected_query="nhíp gắp sticker", capture_manifest=[manifest_record])
     assert isinstance(res_dy, SampleProvenanceResult)
     assert res_dy.schema_valid is True
     assert res_dy.source_provenance_verified is True
     assert res_dy.status == "VERIFIED_STRICT"
+    assert manifest_record["record_id"] in res_dy.detail
 
-    # Backward compatibility tuple unpacking
+    # Backward compatibility tuple unpacking (schema_valid, detail)
     ok, msg = res_dy
     assert ok is True
     assert "strictly verified" in msg
 
     xhs = _make_valid_xhs_sample()
-    res_xhs = audit_sample_provenance(xhs, expected_query="nhíp gắp sticker")
+    xhs_manifest = create_capture_manifest_record(xhs)
+    res_xhs = audit_sample_provenance(xhs, expected_query="nhíp gắp sticker", capture_manifest={"records": [xhs_manifest]})
     assert res_xhs.schema_valid is True
     assert res_xhs.source_provenance_verified is True
     assert res_xhs.status == "VERIFIED_STRICT"
+
+
+def test_provenance_audit_rejects_fake_session_id_with_valid_format_when_no_manifest():
+    """Properly formatted session_id is NOT proof of provenance without an independent manifest."""
+    s = _make_valid_douyin_sample()
+    s["session_id"] = "session-fake-valid-format-20260924"
+    res = audit_sample_provenance(s, capture_manifest=None)
+    assert res.schema_valid is True
+    assert res.source_provenance_verified is False
+    assert res.status == "UNVERIFIED_PENDING_CAPTURE"
+    assert "lacks matching independent capture manifest" in res.detail
+
+
+def test_provenance_audit_rejects_arbitrary_metadata_hash_without_manifest():
+    """Arbitrary hash present on the sample itself is NOT proof without an independent manifest."""
+    s = _make_valid_douyin_sample()
+    s["metadata_hash"] = "sha256:112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00"
+    res = audit_sample_provenance(s, capture_manifest=None)
+    assert res.schema_valid is True
+    assert res.source_provenance_verified is False
+    assert res.status == "UNVERIFIED_PENDING_CAPTURE"
+
+
+def test_provenance_audit_rejects_nonexistent_capture_id_in_manifest():
+    """Rejects verification when sample references a capture ID that does not exist in the manifest."""
+    s = _make_valid_douyin_sample()
+    s["capture_id"] = "cap-nonexistent-999"
+    other_sample = _make_valid_xhs_sample()
+    other_manifest = [create_capture_manifest_record(other_sample)]
+    res = audit_sample_provenance(s, capture_manifest=other_manifest)
+    assert res.schema_valid is True
+    assert res.source_provenance_verified is False
+    assert res.status == "UNVERIFIED_PENDING_CAPTURE"
+
+
+def test_provenance_audit_rejects_mismatched_metadata_hash_in_manifest():
+    """Rejects verification when manifest record exists but metadata hash does not match computed hash."""
+    s = _make_valid_douyin_sample()
+    manifest_record = create_capture_manifest_record(s)
+    manifest_record["metadata_hash"] = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    res = audit_sample_provenance(s, capture_manifest=[manifest_record])
+    assert res.schema_valid is True
+    assert res.source_provenance_verified is False
+    assert res.status == "UNVERIFIED_HASH_MISMATCH"
+    assert "Metadata hash mismatch" in res.detail
+
+
+def test_provenance_audit_legacy_unverified_marked_unverified():
+    """Legacy unverified samples must NEVER count as source_provenance_verified even if manifest exists."""
+    s = _make_valid_douyin_sample()
+    s["provenance_level"] = "legacy_unverified"
+    manifest_record = create_capture_manifest_record(s)
+    res = audit_sample_provenance(s, capture_manifest=[manifest_record])
+    assert res.schema_valid is True
+    assert res.source_provenance_verified is False
+    assert res.status == "UNVERIFIED_LEGACY"
+    assert "Legacy sample without verified capture source" in res.detail
 
 
 def test_provenance_audit_rejects_spoofed_and_insecure_hostnames():
@@ -149,24 +210,3 @@ def test_provenance_audit_rejects_query_mismatch():
     assert res.source_provenance_verified is False
     assert res.status == "UNVERIFIED"
     assert "does not match" in res.detail
-
-
-def test_provenance_audit_legacy_unverified_marked_unverified():
-    """Legacy unverified samples must NEVER count as source_provenance_verified."""
-    s = _make_valid_douyin_sample()
-    s["provenance_level"] = "legacy_unverified"
-    res = audit_sample_provenance(s)
-    assert res.schema_valid is True
-    assert res.source_provenance_verified is False
-    assert res.status == "UNVERIFIED_LEGACY"
-    assert "Legacy sample without verified capture source" in res.detail
-
-
-def test_provenance_audit_insufficient_source_evidence():
-    """Rejects samples with placeholder or invalid session_id when capture ref is absent."""
-    s = _make_valid_douyin_sample()
-    s["session_id"] = "placeholder"
-    res = audit_sample_provenance(s)
-    assert res.schema_valid is True
-    assert res.source_provenance_verified is False
-    assert res.status == "UNVERIFIED_INSUFFICIENT_EVIDENCE"

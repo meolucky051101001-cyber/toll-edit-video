@@ -560,72 +560,62 @@ def validate_sticker_tweezer_compound_intent(
 
     Rules:
     1. Media type must be 'video' (photo carousels/notes rejected).
-    2. Tool intent (nhíp) must match controlled CJK or whole-word Latin aliases.
-    3. Purpose intent (sticker) must match controlled CJK or whole-word Latin aliases.
-       NOTE: Standalone '手账' (journal/planner) does NOT count as sticker.
-    4. Reject title-body mismatches: at least one core entity (tool or purpose) must be in the title.
-       A video whose title is completely unrelated (e.g. food/vlog/dance) but spams '#贴纸 #镊子'
-       in caption/hashtags is rejected.
-    5. Reject incompatible domain tweezers: tweezers explicitly for eyelash extension or electronics repair
-       are rejected.
-    6. missing_mandatory_intents from breakdown must be clear of tool or purpose.
-    7. final_score must meet the floor threshold (>= 15.0).
-       NOTE: High score cannot substitute for missing mandatory intent.
+    2. Video title must NOT be off-topic. Both intent groups (Tool: tweezer/nhíp AND Purpose: sticker/咕卡)
+       must be supported by the title. A title having only one intent cannot rely on caption or hashtags
+       to supplement the missing intent. Hashtags are strictly secondary signals and cannot satisfy
+       a mandatory intent.
+    3. Incompatible context check: Any incompatible domain context (e.g. eyelash extension '睫毛'/'nối mi',
+       phone/electronics repair '修手机'/'sửa điện thoại', watch repair '修表', soldering '焊点') in title
+       OR caption causes immediate rejection.
+    4. Standalone '手账' (planner/journal) without explicit sticker/guka keywords does NOT count as sticker.
+    5. Rank breakdown missing_mandatory_intents must be clean of core intents.
+    6. final_score must meet the floor threshold (>= 15.0). High score cannot substitute for missing intent.
     """
     if result.media_type != "video":
         return False, f"Rejected: media_type is '{result.media_type}', expected 'video'"
 
-    title_text = result.title or ""
-    caption_text = result.caption or ""
-    tags_text = " ".join(result.hashtags or [])
-    combined_text = f"{title_text} {caption_text} {tags_text}"
+    title_text = (result.title or "").strip()
+    caption_text = (result.caption or "").strip()
 
-    # Check title presence: Title must contain either tool or purpose intent
+    # 1. Incompatible domain rejection in title OR caption
+    incompatible_cjk = ("睫毛", "修手机", "手机维修", "焊点", "电路板", "修表", "双眼皮", "美甲")
+    incompatible_latin = ("eyelash", "noi mi", "sua dien thoai", "sua chua", "soldering", "nail")
+    if check_controlled_phrase_match(title_text, incompatible_cjk, incompatible_latin):
+        return (
+            False,
+            "Rejected: Incompatible purpose detected in title (e.g. eyelash extension or electronics repair tweezers)",
+        )
+    if check_controlled_phrase_match(caption_text, incompatible_cjk, incompatible_latin):
+        return (
+            False,
+            "Rejected: Incompatible purpose detected in caption (e.g. eyelash extension or electronics repair tweezers)",
+        )
+
+    # 2. Strict Title intent verification: Title must contain BOTH tool and purpose intents
     title_has_tool = check_controlled_phrase_match(
         title_text, STICKER_TWEEZER_TOOL_CJK, STICKER_TWEEZER_TOOL_LATIN
     )
     title_has_purpose = check_controlled_phrase_match(
         title_text, STICKER_TWEEZER_PURPOSE_CJK, STICKER_TWEEZER_PURPOSE_LATIN
     )
+
     if not title_has_tool and not title_has_purpose:
         return (
             False,
-            "Rejected: Video title has no match for tool or purpose intent (keywords only present in caption/hashtag metadata)",
+            "Rejected: Video title has no match for tool or purpose intent (off-topic title; keywords in caption/hashtag cannot substitute for title)",
         )
-
-    # Check incompatible domains (eyelash extension or electronics/watch repair)
-    incompatible_cjk = ("睫毛", "修手机", "手机维修", "焊点", "电路板", "修表")
-    incompatible_latin = ("eyelash", "noi mi", "sua dien thoai", "sua chua", "soldering")
-    if check_controlled_phrase_match(title_text, incompatible_cjk, incompatible_latin):
+    if not title_has_tool:
         return (
             False,
-            "Rejected: Incompatible purpose detected in title (e.g. eyelash extension or electronics repair tweezers)",
+            "Rejected: Video title matches purpose intent but lacks tool intent (tweezer/nhíp); caption/hashtag cannot supply missing tool intent",
         )
-
-    has_tool = check_controlled_phrase_match(
-        combined_text, STICKER_TWEEZER_TOOL_CJK, STICKER_TWEEZER_TOOL_LATIN
-    )
-    has_purpose = check_controlled_phrase_match(
-        combined_text, STICKER_TWEEZER_PURPOSE_CJK, STICKER_TWEEZER_PURPOSE_LATIN
-    )
-
-    if not has_tool and not has_purpose:
+    if not title_has_purpose:
         return (
             False,
-            "Rejected: Missing both tool (tweezer/nhíp) and purpose (sticker) intents",
-        )
-    if not has_tool:
-        return (
-            False,
-            "Rejected: Missing mandatory tool intent (tweezer/nhíp). Contains sticker/stationery only",
-        )
-    if not has_purpose:
-        return (
-            False,
-            "Rejected: Missing mandatory purpose intent (sticker/guka). Contains tweezer for unrelated use (e.g. eyelash/repair/planner only)",
+            "Rejected: Video title matches tool intent but lacks purpose intent (sticker); caption/hashtag cannot supply missing purpose intent",
         )
 
-    # Check breakdown missing mandatory intents: if ranker flagged missing core or mandatory intent
+    # 3. Check breakdown missing mandatory intents
     if any(
         m in ("nhip", "sticker", "镊子", "贴纸")
         for m in breakdown.missing_mandatory_intents
@@ -635,6 +625,7 @@ def validate_sticker_tweezer_compound_intent(
             f"Rejected: Ranker identified missing mandatory intents: {breakdown.missing_mandatory_intents}",
         )
 
+    # 4. Floor score threshold
     if breakdown.final_score < 15.0:
         return (
             False,
@@ -643,7 +634,7 @@ def validate_sticker_tweezer_compound_intent(
 
     return (
         True,
-        "Relevant: Satisfies both tool (tweezer) and purpose (sticker) intents with video media evidence",
+        "Relevant: Satisfies both tool (tweezer) and purpose (sticker) intents in title with video media evidence",
     )
 
 
