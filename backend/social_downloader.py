@@ -139,6 +139,7 @@ def resolve_douyin_so9(url: str, video_id: str = "") -> tuple:
     """
     candidate_urls = []
     if video_id:
+        candidate_urls.append(f"https://www.iesdouyin.com/share/video/{video_id}/")
         candidate_urls.append(f"https://www.douyin.com/video/{video_id}")
     if url and url not in candidate_urls:
         candidate_urls.append(url)
@@ -176,6 +177,8 @@ def resolve_douyin_so9(url: str, video_id: str = "") -> tuple:
                     return True, video_url, title, ""
                 else:
                     last_err = d_data.get("message") or "SO9 không trả về link tải video"
+            else:
+                last_err = f"SO9 trả về dữ liệu không hợp lệ cho {target}"
         except Exception as exc:
             last_err = f"Lỗi kết nối SO9: {exc}"
             logger.warning(f"SO9 resolver gặp lỗi với link {target}: {exc}")
