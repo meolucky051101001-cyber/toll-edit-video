@@ -1,15 +1,14 @@
 {
   "verdict": "APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH",
-  "duration_seconds": 365.21,
-  "timestamp": "2026-09-24T04:38:55Z",
+  "duration_seconds": 316.47,
+  "timestamp": "2026-09-24T07:12:30Z",
   "strict_live_run": {
-    "executed": false,
-    "status": "Ch\u01b0a ch\u1ea1y strict live (--require-live)",
+    "executed": true,
     "command": "python scripts/release_gate.py --live --require-live",
-    "exit_code": null,
-    "timestamp": null,
-    "douyin": null,
-    "xiaohongshu": null
+    "exit_code": 2,
+    "timestamp": "2026-09-24T07:12:30Z",
+    "douyin": "BLOCKED (CHALLENGE_REQUIRED)",
+    "xiaohongshu": "BLOCKED (LOGIN_REQUIRED)"
   },
   "stages": {
     "1_environment": {
@@ -20,32 +19,32 @@
     "2_database": {
       "passed": true,
       "detail": "SQLite database schema verified (5 core tables present)",
-      "duration_s": 0.36
+      "duration_s": 0.57
     },
     "3_ruff_linter": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 0.11
+      "duration_s": 0.17
     },
     "4_mypy_types": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 0.72
+      "duration_s": 1.03
     },
     "5_frontend_eslint": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 5.69
+      "duration_s": 13.65
     },
     "6_frontend_typecheck": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 2.21
+      "duration_s": 4.23
     },
     "7_frontend_build": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 15.13
+      "duration_s": 16.29
     },
     "8_backend_pytest": {
       "passed": true,
@@ -53,7 +52,7 @@
       "tests_passed": 441,
       "tests_failed": 0,
       "tests_skipped": 3,
-      "duration_s": 143.48
+      "duration_s": 169.31
     },
     "9_fixture_benchmark": {
       "passed": true,
@@ -62,15 +61,31 @@
       "domain_benchmark_queries": 60,
       "real_crawled_queries": 4,
       "real_crawled_samples_provenance": 20,
-      "test_suites_passed": 6,
-      "duration_s": 2.41
+      "crawled_video_samples": 16,
+      "crawled_image_text_samples": 4,
+      "crawled_samples_provenance_verified": true,
+      "crawled_platforms": {
+        "douyin": {
+          "video": 16,
+          "image_text": 4,
+          "total": 20
+        },
+        "xiaohongshu": {
+          "video": 0,
+          "image_text": 0,
+          "total": 0,
+          "status": "PENDING DATA (awaiting live crawl on workstation)"
+        }
+      },
+      "test_suites_passed": 10,
+      "duration_s": 2.33
     },
     "10_frontend_playwright_e2e": {
       "passed": true,
       "exit_code": 0,
-      "tests_passed": 25,
+      "tests_passed": 26,
       "specs_count": 7,
-      "duration_s": 82.71
+      "duration_s": 34.63
     },
     "11_live_crawl_acceptance": {
       "executed": true,
@@ -92,7 +107,7 @@
           "detail": "Xiaohongshu user login session required on workstation"
         }
       },
-      "duration_s": 107.28
+      "duration_s": 69.15
     }
   }
 }

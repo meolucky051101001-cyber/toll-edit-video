@@ -124,3 +124,114 @@ test("preview fixture → edit queries → persisted manual search; invalidates 
   await topic.fill("Another topic");
   await expect(page.locator(".ai-translation")).toHaveCount(0);
 });
+
+test("multi-platform search waiting on second platform targets active_platform in banner and opens correct browser", async ({
+  page,
+}) => {
+  let activePlat = "xiaohongshu";
+  let statusState = "waiting_for_login";
+  let waitingReason = "login_required";
+
+  const getJob = () => ({
+    id: "job-multi-target-e2e",
+    original_query: "nhíp gắp sticker",
+    platforms: ["douyin", "xiaohongshu"],
+    active_platform: activePlat,
+    status: statusState,
+    waiting_reason: waitingReason,
+    requested_limit: 10,
+    found_count: 5,
+    processed_count: 5,
+    duplicate_count: 0,
+    rejected_count: 0,
+    provider_counts: { douyin: 5 },
+    is_mock: false,
+    created_at: new Date().toISOString(),
+    error_message: null,
+    queries: ["贴纸镊子"],
+    ai_warning: null,
+  });
+
+  let xhsOpenCalled = false;
+  let dyOpenCalled = false;
+
+  await page.route("**/api/browser/xiaohongshu", (route) =>
+    route.fulfill({
+      json: {
+        state: "login_required",
+        message: "Cần đăng nhập Xiaohongshu",
+        profile_location: "test-profile-xhs",
+        open: false,
+        busy: false,
+      },
+    }),
+  );
+
+  await page.route("**/api/browser/xiaohongshu/open", (route) => {
+    xhsOpenCalled = true;
+    return route.fulfill({ json: { ok: true, open: true } });
+  });
+
+  await page.route("**/api/browser/douyin", (route) =>
+    route.fulfill({
+      json: {
+        state: "verification_required",
+        message: "Cần xác minh Douyin",
+        profile_location: "test-profile-dy",
+        open: false,
+        busy: false,
+      },
+    }),
+  );
+
+  await page.route("**/api/browser/douyin/open", (route) => {
+    dyOpenCalled = true;
+    return route.fulfill({ json: { ok: true, open: true } });
+  });
+
+  await page.route("**/api/search/jobs/job-multi-target-e2e", (route) => {
+    return route.fulfill({ json: getJob() });
+  });
+
+  await page.route("**/api/videos?**", (route) =>
+    route.fulfill({ json: { items: [], total: 0, page: 1 } }),
+  );
+
+  // 1. Visit job where platforms=["douyin", "xiaohongshu"], but active_platform is Xiaohongshu
+  await page.goto("/?job=job-multi-target-e2e");
+
+  // Verify banner explicitly targets Xiaohongshu
+  await expect(
+    page.getByText("🔐 Nền tảng Xiaohongshu yêu cầu đăng nhập tài khoản"),
+  ).toBeVisible();
+
+  // Verify button is "Mở cửa sổ Xiaohongshu"
+  const xhsBtn = page.getByRole("button", { name: "Mở cửa sổ Xiaohongshu", exact: true });
+  await expect(xhsBtn).toBeVisible();
+
+  // Click the button and verify Xiaohongshu open API was called, not Douyin
+  await xhsBtn.click();
+  expect(xhsOpenCalled).toBe(true);
+  expect(dyOpenCalled).toBe(false);
+
+  // 2. Now transition job to active_platform = "douyin" and status = "waiting_for_user"
+  activePlat = "douyin";
+  statusState = "waiting_for_user";
+  waitingReason = "verification_required";
+
+  // Reload page to reflect updated job state
+  await page.reload();
+
+  // Verify banner explicitly targets Douyin
+  await expect(
+    page.getByText("⚠️ Nền tảng Douyin yêu cầu xác minh bảo mật"),
+  ).toBeVisible();
+
+  // Verify button is "Mở cửa sổ Douyin"
+  const dyBtn = page.getByRole("button", { name: "Mở cửa sổ Douyin", exact: true });
+  await expect(dyBtn).toBeVisible();
+
+  // Click the button and verify Douyin open API was called
+  await dyBtn.click();
+  expect(dyOpenCalled).toBe(true);
+});

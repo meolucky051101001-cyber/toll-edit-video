@@ -1,3 +1,12 @@
+"""Pipeline Orchestration Integration Tests.
+
+NOTE: These tests evaluate SearchService.pipeline() coordination, real SQLite persistence,
+active_platform tracking, deduplication across partial retries, and manual action resume
+using controlled mock providers and real SQLite database sessions.
+They verify service-layer orchestration logic, NOT live crawler network acceptance
+(live crawler acceptance tests reside in tests/test_real_crawl_acceptance.py).
+"""
+
 import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch

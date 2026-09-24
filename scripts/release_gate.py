@@ -241,6 +241,7 @@ def main() -> int:
         "-m",
         "pytest",
         "tests/test_evaluation_benchmark.py",
+        "tests/test_query_precision_evaluation.py",
         "tests/test_real_crawl_acceptance.py::test_real_crawl_dataset_schema_and_identity_acceptance",
         "-q",
     ])
@@ -251,14 +252,47 @@ def main() -> int:
     benchmark_json_path = ROOT_DIR / "data/benchmarks/crawled_benchmark_samples.json"
     total_crawled_samples = 0
     total_real_queries = 0
+    provenance_ok = True
+    crawled_video_samples = 0
+    crawled_image_text_samples = 0
+    platform_samples_count: dict[str, dict[str, int]] = {
+        "douyin": {"video": 0, "image_text": 0, "total": 0},
+        "xiaohongshu": {"video": 0, "image_text": 0, "total": 0},
+    }
+
     if benchmark_json_path.exists():
         try:
             with open(benchmark_json_path, "r", encoding="utf-8") as f:
                 crawled_data = json.load(f)
                 total_real_queries = len(crawled_data)
-                total_crawled_samples = sum(len(g.get("samples", [])) for g in crawled_data)
+                for g in crawled_data:
+                    for s in g.get("samples", []):
+                        total_crawled_samples += 1
+                        plat = s.get("platform")
+                        mtype = s.get("media_type", "video")
+                        if plat in platform_samples_count:
+                            platform_samples_count[plat]["total"] += 1
+                            if mtype == "video":
+                                platform_samples_count[plat]["video"] += 1
+                                crawled_video_samples += 1
+                            elif mtype == "image_text":
+                                platform_samples_count[plat]["image_text"] += 1
+                                crawled_image_text_samples += 1
+                        # Provenance validation: URL, ID, ISO timestamp, non-empty title/author/rationale, bool ground truth
+                        has_provenance = (
+                            plat in ("douyin", "xiaohongshu")
+                            and len(str(s.get("platform_video_id") or "")) >= 6
+                            and ("douyin.com" in str(s.get("url") or "") or "xiaohongshu.com" in str(s.get("url") or ""))
+                            and bool(s.get("collected_at") and "T" in s["collected_at"])
+                            and bool(s.get("title"))
+                            and bool(s.get("author"))
+                            and isinstance(s.get("ground_truth_relevance"), bool)
+                            and bool(s.get("rationale"))
+                        )
+                        if not has_provenance:
+                            provenance_ok = False
         except Exception:
-            pass
+            provenance_ok = False
 
     try:
         from tests.test_evaluation_benchmark import BENCHMARK_DATASET
@@ -268,19 +302,29 @@ def main() -> int:
 
     total_queries_verified = total_benchmark_queries + total_real_queries
     results["9_fixture_benchmark"] = {
-        "passed": bench_ok,
+        "passed": bench_ok and provenance_ok,
         "exit_code": code,
         "queries_verified": total_queries_verified,
         "domain_benchmark_queries": total_benchmark_queries,
         "real_crawled_queries": total_real_queries,
         "real_crawled_samples_provenance": total_crawled_samples,
+        "crawled_video_samples": crawled_video_samples,
+        "crawled_image_text_samples": crawled_image_text_samples,
+        "crawled_samples_provenance_verified": provenance_ok,
+        "crawled_platforms": {
+            "douyin": platform_samples_count["douyin"],
+            "xiaohongshu": {
+                **platform_samples_count["xiaohongshu"],
+                "status": "PENDING DATA (awaiting live crawl on workstation)",
+            },
+        },
         "test_suites_passed": bench_summary["passed"],
         "duration_s": t_bench,
     }
-    if bench_ok:
-        print(f"PASS ({total_benchmark_queries} domain queries + {total_real_queries} offline crawled queries [{total_crawled_samples} samples] verified) [{t_bench}s]")
+    if bench_ok and provenance_ok:
+        print(f"PASS ({total_benchmark_queries} domain queries + {total_real_queries} offline crawled queries [{total_crawled_samples} samples: {crawled_video_samples} video, {crawled_image_text_samples} img/txt, provenance verified] verified) [{t_bench}s]")
     else:
-        print(f"FAIL (exit code {code})")
+        print(f"FAIL (exit code {code}, provenance_ok={provenance_ok})")
         print(out[:500])
         all_passed = False
 

@@ -130,7 +130,7 @@ async def test_live_network_probe_reachability():
 @pytest.mark.live_acceptance
 @pytest.mark.anyio
 async def test_live_crawl_douyin_real_results():
-    """Strictly validates that Douyin live search retrieves >= 1 real video item."""
+    """Strictly validates that Douyin live search retrieves real video items matching compound query intent."""
     if os.environ.get("LIVE_CRAWL_ENABLED") != "1":
         pytest.skip("Pass LIVE_CRAWL_ENABLED=1 to execute live Douyin crawl")
 
@@ -138,20 +138,28 @@ async def test_live_crawl_douyin_real_results():
     from backend.providers.douyin.provider import DouyinProvider
     from backend.services.douyin_browser_service import DouyinBrowserService
 
+    raw_query = "nhíp gắp sticker"
+    plan = plan_query(raw_query)
+    target_query = plan.tiered_queries[0] if plan.tiered_queries else "贴纸镊子"
+    print(f"\n[Douyin Live Crawl] Original query: '{raw_query}', Target Chinese query: '{target_query}' (Tiered: {plan.tiered_queries})")
+
     browser = DouyinBrowserService(headless=True)
     provider = DouyinProvider(browser=browser, auto_elevate=False)
-    filters = SearchFilters()
+    filters = SearchFilters(sort_by="most_liked", publish_time="all", content_type="video")
 
     try:
-        results = await provider.search("decor", limit=3, filters=filters)
+        results = await provider.search(target_query, limit=5, filters=filters)
     except UserActionRequired as uar:
         pytest.fail(f"Douyin live crawl blocked by authentication/verification challenge: {uar}")
     finally:
         await provider.close()
         await browser.close()
 
-    assert len(results) > 0, "Douyin live search returned 0 video results"
+    assert len(results) > 0, f"Douyin live search for '{target_query}' returned 0 video results"
     seen_ids = set()
+    relevant_count = 0
+    relevance_audit = []
+
     for r in results:
         assert r.platform == "douyin"
         assert r.platform_video_id and len(r.platform_video_id) >= 6
@@ -160,13 +168,41 @@ async def test_live_crawl_douyin_real_results():
         assert r.is_mock is False
         assert "example.invalid" not in str(r.url)
         assert "douyin.com" in str(r.url)
-        assert r.media_type == "video"
+        assert r.media_type == "video", f"Expected media_type='video', got '{r.media_type}'"
+
+        breakdown = rank_detailed(r, raw_query, alternative_queries=plan.tiered_queries)
+        combined_text = f"{r.title or ''} {r.caption or ''} {' '.join(r.hashtags)}".lower()
+
+        has_tweezer = any(w in combined_text for w in ("镊子", "nhíp", "nhip", "gắp", "gap"))
+        has_sticker = any(w in combined_text for w in ("贴纸", "sticker", "咕卡", "手账"))
+        is_relevant = (has_tweezer and has_sticker) or breakdown.final_score >= 35.0
+
+        if is_relevant:
+            relevant_count += 1
+
+        relevance_audit.append({
+            "id": r.platform_video_id,
+            "title": r.title,
+            "score": breakdown.final_score,
+            "has_tweezer": has_tweezer,
+            "has_sticker": has_sticker,
+            "is_relevant": is_relevant,
+        })
+
+    print(f"\n[Douyin Live Relevance Audit]: {relevant_count}/{len(results)} videos match compound intent 'nhíp gắp sticker':")
+    for item in relevance_audit:
+        print(f"  - [{item['id']}] Score={item['score']:.1f}, Relevant={item['is_relevant']} | {item['title'][:50]}")
+
+    assert relevant_count > 0, (
+        f"Douyin live crawl returned {len(results)} videos, but NONE matched compound intent '{raw_query}' "
+        f"(must match both tweezer/nhíp and sticker/craft intent, rejecting general sticker notes)"
+    )
 
 
 @pytest.mark.live_acceptance
 @pytest.mark.anyio
 async def test_live_crawl_xiaohongshu_real_results():
-    """Strictly validates that Xiaohongshu live search retrieves >= 1 real note/video item."""
+    """Strictly validates that Xiaohongshu live search retrieves real video items matching compound query intent."""
     if os.environ.get("LIVE_CRAWL_ENABLED") != "1":
         pytest.skip("Pass LIVE_CRAWL_ENABLED=1 to execute live Xiaohongshu crawl")
 
@@ -174,20 +210,28 @@ async def test_live_crawl_xiaohongshu_real_results():
     from backend.providers.xiaohongshu.provider import XiaohongshuProvider
     from backend.services.browser_service import BrowserService
 
+    raw_query = "nhíp gắp sticker"
+    plan = plan_query(raw_query)
+    target_query = plan.tiered_queries[0] if plan.tiered_queries else "贴纸镊子"
+    print(f"\n[Xiaohongshu Live Crawl] Original query: '{raw_query}', Target Chinese query: '{target_query}' (Tiered: {plan.tiered_queries})")
+
     browser = BrowserService(headless=True)
     provider = XiaohongshuProvider(browser=browser, auto_elevate=False)
     filters = SearchFilters(sort_by="most_liked", publish_time="all", content_type="video")
 
     try:
-        results = await provider.search("sticker", limit=3, filters=filters)
+        results = await provider.search(target_query, limit=5, filters=filters)
     except UserActionRequired as uar:
         pytest.fail(f"Xiaohongshu live crawl blocked by authentication/login required: {uar}")
     finally:
         await provider.close()
         await browser.close()
 
-    assert len(results) > 0, "Xiaohongshu live search returned 0 results"
+    assert len(results) > 0, f"Xiaohongshu live search for '{target_query}' returned 0 video results"
     seen_ids = set()
+    relevant_count = 0
+    relevance_audit = []
+
     for r in results:
         assert r.platform == "xiaohongshu"
         assert r.platform_video_id and len(r.platform_video_id) >= 8
@@ -196,7 +240,35 @@ async def test_live_crawl_xiaohongshu_real_results():
         assert r.is_mock is False
         assert "example.invalid" not in str(r.url)
         assert "xiaohongshu.com" in str(r.url) or "rednote.com" in str(r.url)
-        assert r.media_type == "video", f"Expected video media evidence for content_type=video, got {r.media_type}"
+        assert r.media_type == "video", f"Expected media_type='video' for content_type=video, got '{r.media_type}'"
+
+        breakdown = rank_detailed(r, raw_query, alternative_queries=plan.tiered_queries)
+        combined_text = f"{r.title or ''} {r.caption or ''} {' '.join(r.hashtags)}".lower()
+
+        has_tweezer = any(w in combined_text for w in ("镊子", "nhíp", "nhip", "gắp", "gap"))
+        has_sticker = any(w in combined_text for w in ("贴纸", "sticker", "咕卡", "手账"))
+        is_relevant = (has_tweezer and has_sticker) or breakdown.final_score >= 35.0
+
+        if is_relevant:
+            relevant_count += 1
+
+        relevance_audit.append({
+            "id": r.platform_video_id,
+            "title": r.title,
+            "score": breakdown.final_score,
+            "has_tweezer": has_tweezer,
+            "has_sticker": has_sticker,
+            "is_relevant": is_relevant,
+        })
+
+    print(f"\n[Xiaohongshu Live Relevance Audit]: {relevant_count}/{len(results)} videos match compound intent 'nhíp gắp sticker':")
+    for item in relevance_audit:
+        print(f"  - [{item['id']}] Score={item['score']:.1f}, Relevant={item['is_relevant']} | {item['title'][:50]}")
+
+    assert relevant_count > 0, (
+        f"Xiaohongshu live crawl returned {len(results)} videos, but NONE matched compound intent '{raw_query}' "
+        f"(must match both tweezer/nhíp and sticker/craft intent, rejecting general sticker notes)"
+    )
 
 
 @pytest.mark.live_acceptance

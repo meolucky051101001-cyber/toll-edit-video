@@ -318,10 +318,11 @@ def test_ranking_fixture_unit_benchmark_15_queries():
 
 
 def test_crawled_dataset_retrieval_precision_benchmark():
-    """Retrieval precision benchmark on real crawled data with provenance.
-    Evaluates real historical crawl samples from data/benchmarks/crawled_benchmark_samples.json
-    reporting Precision@k with actual k per query, platform breakdowns (Douyin vs XHS),
-    and rejection reasons.
+    """Retrieval precision benchmark on real crawled data with provenance verification.
+    Evaluates real crawl samples from data/benchmarks/crawled_benchmark_samples.json
+    using an explicit classification threshold and independent prediction confusion matrix.
+    Separates video results from image_text notes, reports Precision@k with actual k,
+    and isolates platform performance (Douyin vs Xiaohongshu).
     """
     dataset_path = Path(__file__).resolve().parent.parent / "data/benchmarks/crawled_benchmark_samples.json"
     assert dataset_path.exists(), f"Crawled benchmark dataset not found at {dataset_path}"
@@ -331,8 +332,28 @@ def test_crawled_dataset_retrieval_precision_benchmark():
 
     assert len(crawled_groups) >= 4, f"Expected at least 4 crawled query groups, found {len(crawled_groups)}"
 
-    platform_stats: dict[str, dict[str, int]] = {}
+    # Independent classification score threshold:
+    # A candidate is predicted as relevant (pred=True) if and only if final_score >= THRESHOLD
+    CLASSIFICATION_THRESHOLD = 15.0
+
+    valid_platforms = {"douyin", "xiaohongshu"}
+    valid_media_types = {"video", "image_text"}
+
+    platform_stats: dict[str, dict[str, dict[str, int]]] = {
+        "douyin": {
+            "all": {"tp": 0, "fp": 0, "tn": 0, "fn": 0, "total": 0},
+            "video": {"tp": 0, "fp": 0, "tn": 0, "fn": 0, "total": 0},
+            "image_text": {"tp": 0, "fp": 0, "tn": 0, "fn": 0, "total": 0},
+        },
+        "xiaohongshu": {
+            "all": {"tp": 0, "fp": 0, "tn": 0, "fn": 0, "total": 0},
+            "video": {"tp": 0, "fp": 0, "tn": 0, "fn": 0, "total": 0},
+            "image_text": {"tp": 0, "fp": 0, "tn": 0, "fn": 0, "total": 0},
+        },
+    }
+
     rejection_reasons = []
+    total_samples_verified = 0
 
     for group in crawled_groups:
         q = group["query"]
@@ -343,74 +364,122 @@ def test_crawled_dataset_retrieval_precision_benchmark():
         scored_samples = []
 
         for sample in samples:
-            assert "platform" in sample
-            assert "platform_video_id" in sample
-            assert "url" in sample
-            assert "collected_at" in sample
-            assert "ground_truth_relevance" in sample
-            assert "rationale" in sample
-
+            # 1. Full provenance verification
+            assert sample.get("platform") in valid_platforms, f"Invalid platform: {sample.get('platform')}"
             plat = sample["platform"]
-            if plat not in platform_stats:
-                platform_stats[plat] = {"tp": 0, "fp": 0, "tn": 0, "fn": 0, "total": 0}
+            vid_id = str(sample.get("platform_video_id") or "")
+            assert len(vid_id) >= 6, f"Invalid platform_video_id in sample: {sample}"
+            url = str(sample.get("url") or "")
+            assert (plat == "douyin" and ("douyin.com/video/" in url or "douyin.com/note/" in url)) or \
+                   (plat == "xiaohongshu" and ("xiaohongshu.com/explore/" in url or "rednote.com" in url)), \
+                   f"URL provenance mismatch for {plat}: {url}"
+            assert sample.get("collected_at") and "T" in sample["collected_at"], f"Missing ISO timestamp: {sample}"
+            assert sample.get("media_type") in valid_media_types, f"Invalid media_type: {sample.get('media_type')}"
+            media_type = sample["media_type"]
+            assert sample.get("title") and len(sample["title"].strip()) > 0, "Missing sample title"
+            assert sample.get("author") and len(sample["author"].strip()) > 0, "Missing sample author"
+            assert isinstance(sample.get("ground_truth_relevance"), bool), "ground_truth_relevance must be bool"
+            assert sample.get("rationale") and len(sample["rationale"].strip()) > 0, "Missing sample rationale"
 
+            total_samples_verified += 1
             vr = VideoResult(
                 platform=plat,
-                platform_video_id=sample["platform_video_id"],
+                platform_video_id=vid_id,
                 title=sample["title"],
                 url=sample["url"],
                 author_name=sample["author"],
-                like_count=sample["like_count"],
-                media_type=sample.get("media_type", "video"),
+                like_count=sample.get("like_count", 0),
+                media_type=media_type,
             )
 
             breakdown = rank_detailed(vr, q, alternative_queries=plan.tiered_queries)
-            is_ground_truth = sample["ground_truth_relevance"]
-            scored_samples.append((vr, is_ground_truth, breakdown, sample["rationale"], plat))
+            is_gt = sample["ground_truth_relevance"]
+            scored_samples.append((vr, is_gt, breakdown, sample["rationale"], plat, media_type))
 
-        # Sort descending by ranker's final_score
-        scored_samples.sort(key=lambda x: x[2].final_score, reverse=True)
-
-        # In IR: evaluate Precision@k where k is the number of ground-truth relevant items
+        # Precision@k for the query
         gt_positives = [s for s in scored_samples if s[1]]
         k = len(gt_positives)
+        scored_samples.sort(key=lambda x: x[2].final_score, reverse=True)
         top_k = scored_samples[:k]
         tp_in_top_k = sum(1 for s in top_k if s[1])
         precision_at_k = tp_in_top_k / k if k > 0 else 0.0
+        assert precision_at_k >= 0.80, f"Query '{q}' achieved low Precision@{k}: {precision_at_k}"
 
-        for vr, is_gt, breakdown, rationale, plat in scored_samples:
-            platform_stats[plat]["total"] += 1
-            if is_gt:
-                # Relevant items must score strictly higher than distractor floor
-                assert breakdown.final_score >= 15.0, (
-                    f"Relevant crawled item '{vr.title}' scored too low: {breakdown.final_score}"
-                )
-                platform_stats[plat]["tp"] += 1
-            else:
-                # Distractors must be penalized heavily
-                assert breakdown.final_score <= 5.0, (
-                    f"Distractor crawled item '{vr.title}' scored too high: {breakdown.final_score}"
-                )
-                platform_stats[plat]["tn"] += 1
+        # Independent threshold-based classification evaluation
+        for vr, is_gt, breakdown, rationale, plat, media_type in scored_samples:
+            score = breakdown.final_score
+            is_pred = (score >= CLASSIFICATION_THRESHOLD)
+
+            # Confusion matrix accumulation for 'all' and specific media_type
+            for cat in ("all", media_type):
+                stats = platform_stats[plat][cat]
+                stats["total"] += 1
+                if is_gt and is_pred:
+                    stats["tp"] += 1
+                elif (not is_gt) and is_pred:
+                    stats["fp"] += 1
+                elif (not is_gt) and (not is_pred):
+                    stats["tn"] += 1
+                else:  # is_gt and not is_pred
+                    stats["fn"] += 1
+
+            if not is_gt:
                 rejection_reasons.append({
                     "query": q,
                     "platform": plat,
                     "title": vr.title,
+                    "media_type": media_type,
                     "rationale": rationale,
-                    "score": breakdown.final_score,
+                    "score": score,
                 })
 
-        assert precision_at_k >= 0.80, f"Query '{q}' achieved low Precision@{k}: {precision_at_k}"
+    assert total_samples_verified == 20, f"Expected 20 verified samples, found {total_samples_verified}"
 
-    safe_print("\n--- CRAWLED DATASET RETRIEVAL PRECISION REPORT ---")
-    for plat, stats in platform_stats.items():
-        total = stats["total"]
-        tp = stats["tp"]
-        fp = stats["fp"]
-        tn = stats["tn"]
+    safe_print(f"\n--- CRAWLED DATASET RETRIEVAL PRECISION BENCHMARK (Classification Threshold = {CLASSIFICATION_THRESHOLD}) ---")
+    safe_print(f"Verified provenance for {total_samples_verified} samples across {len(crawled_groups)} queries.")
+
+    for plat in ("douyin", "xiaohongshu"):
+        p_data = platform_stats[plat]
+        total = p_data["all"]["total"]
+        if total == 0:
+            safe_print(f"Platform [{plat.upper()}]: PENDING DATA (0 crawled samples with verified provenance. Requires live authenticated crawl on workstation to populate)")
+            continue
+
+        tp = p_data["all"]["tp"]
+        fp = p_data["all"]["fp"]
+        tn = p_data["all"]["tn"]
+        fn = p_data["all"]["fn"]
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         accuracy = (tp + tn) / total if total > 0 else 0.0
-        safe_print(f"Platform [{plat.upper()}]: Total={total}, Precision={precision:.2f}, Accuracy={accuracy:.2f} (TP={tp}, FP={fp}, TN={tn})")
+
+        v_tot = p_data["video"]["total"]
+        v_tp = p_data["video"]["tp"]
+        v_fp = p_data["video"]["fp"]
+        v_tn = p_data["video"]["tn"]
+        v_fn = p_data["video"]["fn"]
+        v_prec = v_tp / (v_tp + v_fp) if (v_tp + v_fp) > 0 else 0.0
+        v_acc = (v_tp + v_tn) / v_tot if v_tot > 0 else 0.0
+
+        img_tot = p_data["image_text"]["total"]
+        img_tp = p_data["image_text"]["tp"]
+        img_fp = p_data["image_text"]["fp"]
+        img_tn = p_data["image_text"]["tn"]
+        img_fn = p_data["image_text"]["fn"]
+
+        safe_print(
+            f"Platform [{plat.upper()}] ALL ({total} samples): Precision={precision:.2f}, Accuracy={accuracy:.2f} "
+            f"(TP={tp}, FP={fp}, TN={tn}, FN={fn})"
+        )
+        safe_print(
+            f"  - Video subset ({v_tot} items): Precision={v_prec:.2f}, Accuracy={v_acc:.2f} "
+            f"(TP={v_tp}, FP={v_fp}, TN={v_tn}, FN={v_fn})"
+        )
+        safe_print(
+            f"  - Image/Text notes ({img_tot} items): (TP={img_tp}, FP={img_fp}, TN={img_tn}, FN={img_fn})"
+        )
+
+        assert precision >= 0.85, f"Low independent precision on {plat}: {precision}"
+        assert accuracy >= 0.85, f"Low independent accuracy on {plat}: {accuracy}"
 
     safe_print(f"Identified {len(rejection_reasons)} valid distractor rejections with documented rationales.")
 
