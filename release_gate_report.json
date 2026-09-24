@@ -1,14 +1,26 @@
 {
   "verdict": "APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH",
-  "duration_seconds": 316.47,
-  "timestamp": "2026-09-24T07:12:30Z",
+  "duration_seconds": 327.42,
+  "timestamp": "2026-09-24T08:09:33Z",
   "strict_live_run": {
     "executed": true,
     "command": "python scripts/release_gate.py --live --require-live",
     "exit_code": 2,
-    "timestamp": "2026-09-24T07:12:30Z",
-    "douyin": "BLOCKED (CHALLENGE_REQUIRED)",
-    "xiaohongshu": "BLOCKED (LOGIN_REQUIRED)"
+    "timestamp": "2026-09-24T08:09:33Z",
+    "query": "nh\u00edp g\u1eafp sticker",
+    "submitted_query": "\u8d34\u7eb8\u954a\u5b50",
+    "douyin": {
+      "status": "BLOCKED (CHALLENGE_REQUIRED)",
+      "crawl_operational": true,
+      "precision_verified": false,
+      "reason": "CAPTCHA or slider challenge encountered during live search"
+    },
+    "xiaohongshu": {
+      "status": "BLOCKED (LOGIN_REQUIRED)",
+      "crawl_operational": true,
+      "precision_verified": false,
+      "reason": "User login session required to view search results on workstation"
+    }
   },
   "stages": {
     "1_environment": {
@@ -19,7 +31,7 @@
     "2_database": {
       "passed": true,
       "detail": "SQLite database schema verified (5 core tables present)",
-      "duration_s": 0.57
+      "duration_s": 0.67
     },
     "3_ruff_linter": {
       "passed": true,
@@ -29,30 +41,30 @@
     "4_mypy_types": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 1.03
+      "duration_s": 0.76
     },
     "5_frontend_eslint": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 13.65
+      "duration_s": 7.3
     },
     "6_frontend_typecheck": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 4.23
+      "duration_s": 2.86
     },
     "7_frontend_build": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 16.29
+      "duration_s": 47.51
     },
     "8_backend_pytest": {
       "passed": true,
       "exit_code": 0,
-      "tests_passed": 441,
+      "tests_passed": 442,
       "tests_failed": 0,
       "tests_skipped": 3,
-      "duration_s": 169.31
+      "duration_s": 163.15
     },
     "9_fixture_benchmark": {
       "passed": true,
@@ -61,9 +73,11 @@
       "domain_benchmark_queries": 60,
       "real_crawled_queries": 4,
       "real_crawled_samples_provenance": 20,
+      "independent_holdout_samples": 13,
       "crawled_video_samples": 16,
       "crawled_image_text_samples": 4,
-      "crawled_samples_provenance_verified": true,
+      "provenance_audit_level": "strict_url_id_iso_parsed",
+      "provenance_verified": true,
       "crawled_platforms": {
         "douyin": {
           "video": 16,
@@ -77,15 +91,15 @@
           "status": "PENDING DATA (awaiting live crawl on workstation)"
         }
       },
-      "test_suites_passed": 10,
-      "duration_s": 2.33
+      "test_suites_passed": 11,
+      "duration_s": 2.77
     },
     "10_frontend_playwright_e2e": {
       "passed": true,
       "exit_code": 0,
       "tests_passed": 26,
       "specs_count": 7,
-      "duration_s": 34.63
+      "duration_s": 42.87
     },
     "11_live_crawl_acceptance": {
       "executed": true,
@@ -100,14 +114,30 @@
       "platforms": {
         "douyin": {
           "status": "BLOCKED (CHALLENGE_REQUIRED)",
-          "detail": "Douyin security verification/CAPTCHA challenge required on workstation"
+          "detail": "Douyin security verification/CAPTCHA challenge required on workstation",
+          "query": "nh\u00edp g\u1eafp sticker",
+          "submitted_query": "\u8d34\u7eb8\u954a\u5b50",
+          "crawl_operational": true,
+          "precision_verified": false,
+          "results_count": 0,
+          "relevant_count": 0,
+          "relevance_rate": 0.0,
+          "reason": "CAPTCHA or slider challenge encountered during live search"
         },
         "xiaohongshu": {
           "status": "BLOCKED (LOGIN_REQUIRED)",
-          "detail": "Xiaohongshu user login session required on workstation"
+          "detail": "Xiaohongshu user login session required on workstation",
+          "query": "nh\u00edp g\u1eafp sticker",
+          "submitted_query": "\u8d34\u7eb8\u954a\u5b50",
+          "crawl_operational": true,
+          "precision_verified": false,
+          "results_count": 0,
+          "relevant_count": 0,
+          "relevance_rate": 0.0,
+          "reason": "User login session required to view search results on workstation"
         }
       },
-      "duration_s": 69.15
+      "duration_s": 54.19
     }
   }
 }

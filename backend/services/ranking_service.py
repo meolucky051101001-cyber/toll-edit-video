@@ -466,3 +466,111 @@ def compute_hybrid_score(
         return round(hybrid, 2)
     # Standard formula fallback
     return round(lexical_relevance * (0.8 + 0.2 * quality_score / 100.0), 2)
+
+
+STICKER_TWEEZER_TOOL_CJK = ("镊子", "鑷子")
+STICKER_TWEEZER_TOOL_LATIN = (
+    "nhíp",
+    "nhip",
+    "nhíp gắp",
+    "nhip gap",
+    "kẹp gắp",
+    "kep gap",
+    "tweezers",
+    "tweezer",
+)
+
+STICKER_TWEEZER_PURPOSE_CJK = ("贴纸", "貼紙", "咕卡")
+STICKER_TWEEZER_PURPOSE_LATIN = (
+    "sticker",
+    "stickers",
+    "hình dán",
+    "hinh dan",
+    "guka",
+)
+
+
+def check_controlled_phrase_match(
+    text: str, cjk_phrases: tuple[str, ...], latin_phrases: tuple[str, ...]
+) -> bool:
+    """Checks for CJK substring presence or bounded whole-word Latin presence in text.
+
+    Rejects loose substring matching (e.g. 'gap' inside 'background' or English words).
+    """
+    for cjk in cjk_phrases:
+        if cjk in text:
+            return True
+    norm_text = normalize_vietnamese(text).lower()
+    for lat in latin_phrases:
+        norm_lat = normalize_vietnamese(lat).lower()
+        if re.search(r"(?<!\w)" + re.escape(norm_lat) + r"(?!\w)", norm_text):
+            return True
+    return False
+
+
+def validate_compound_intent_relevance(
+    result: VideoResult,
+    breakdown: RankBreakdown,
+    query: str = "nhíp gắp sticker",
+) -> tuple[bool, str]:
+    """Strictly evaluates whether a video candidate satisfies the compound intent of a dual-entity query.
+
+    Rules for 'nhíp gắp sticker':
+    1. Media type must be 'video' (photo carousels/notes rejected).
+    2. Tool intent (nhíp) must match controlled CJK or whole-word Latin aliases.
+    3. Purpose intent (sticker) must match controlled CJK or whole-word Latin aliases.
+       NOTE: Standalone '手账' (journal/planner) does NOT count as sticker.
+    4. missing_mandatory_intents from breakdown must be clear of tool or purpose.
+    5. final_score must meet the floor threshold (>= 15.0).
+       NOTE: High score cannot substitute for missing mandatory intent.
+    """
+    if result.media_type != "video":
+        return False, f"Rejected: media_type is '{result.media_type}', expected 'video'"
+
+    combined_text = (
+        f"{result.title or ''} {result.caption or ''} {' '.join(result.hashtags or [])}"
+    )
+
+    has_tool = check_controlled_phrase_match(
+        combined_text, STICKER_TWEEZER_TOOL_CJK, STICKER_TWEEZER_TOOL_LATIN
+    )
+    has_purpose = check_controlled_phrase_match(
+        combined_text, STICKER_TWEEZER_PURPOSE_CJK, STICKER_TWEEZER_PURPOSE_LATIN
+    )
+
+    if not has_tool and not has_purpose:
+        return (
+            False,
+            "Rejected: Missing both tool (tweezer/nhíp) and purpose (sticker) intents",
+        )
+    if not has_tool:
+        return (
+            False,
+            "Rejected: Missing mandatory tool intent (tweezer/nhíp). Contains sticker/stationery only",
+        )
+    if not has_purpose:
+        return (
+            False,
+            "Rejected: Missing mandatory purpose intent (sticker/guka). Contains tweezer for unrelated use (e.g. eyelash/repair/planner only)",
+        )
+
+    # Check breakdown missing mandatory intents: if ranker flagged missing core or mandatory intent
+    if any(
+        m in ("nhip", "sticker", "镊子", "贴纸")
+        for m in breakdown.missing_mandatory_intents
+    ):
+        return (
+            False,
+            f"Rejected: Ranker identified missing mandatory intents: {breakdown.missing_mandatory_intents}",
+        )
+
+    if breakdown.final_score < 15.0:
+        return (
+            False,
+            f"Rejected: final_score {breakdown.final_score:.1f} below minimum floor threshold 15.0",
+        )
+
+    return (
+        True,
+        "Relevant: Satisfies both tool (tweezer) and purpose (sticker) intents with video media evidence",
+    )

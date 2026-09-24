@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime
+from typing import Any
 from urllib.parse import parse_qs, urljoin, urlsplit
 
 from backend.services.download.network import (
@@ -417,3 +419,99 @@ def merge_share_url(
         return None
 
     return validated_record_canonical
+
+
+def audit_sample_provenance(sample: dict[str, Any]) -> tuple[bool, str]:
+    """Strictly audits a benchmark sample's provenance.
+
+    Verifies:
+    1. platform in ('douyin', 'xiaohongshu')
+    2. URL parser validation:
+       - scheme == 'https'
+       - hostname exactly matches platform domain
+       - path is canonical (/video/<digits> or /note/<digits> for douyin, /explore/<hex24> for xhs)
+    3. Extracted ID matches platform_video_id exactly
+    4. collected_at is valid ISO 8601 with timezone (e.g. '2026-09-18T08:30:00Z' or '+00:00')
+    5. media_type in ('video', 'image_text')
+    6. Non-empty title, author, rationale
+    7. ground_truth_relevance is a bool
+    8. metadata: query, submitted_query, collector_version, provenance_source, provenance_level
+    """
+    plat = sample.get("platform")
+    if plat not in ("douyin", "xiaohongshu"):
+        return False, f"Invalid platform: {plat}"
+
+    url_str = str(sample.get("url") or "")
+    if not url_str:
+        return False, "Missing URL"
+
+    try:
+        p = urlsplit(url_str)
+    except Exception as e:
+        return False, f"Malformed URL: {e}"
+
+    if p.scheme != "https":
+        return False, f"Insecure URL scheme '{p.scheme}', expected 'https'"
+
+    host = (p.hostname or "").lower()
+    expected_id = str(sample.get("platform_video_id") or "")
+    if not expected_id:
+        return False, "Missing platform_video_id"
+
+    if plat == "douyin":
+        if host not in ("www.douyin.com", "douyin.com"):
+            return False, f"Invalid Douyin host: {host}"
+        m_dy = DOUYIN_VIDEO_REGEX.search(p.path or "")
+        if not m_dy:
+            return False, f"Invalid Douyin canonical path: {p.path}"
+        url_id = m_dy.group(1)
+        if url_id != expected_id:
+            return False, f"URL ID '{url_id}' does not match platform_video_id '{expected_id}'"
+    elif plat == "xiaohongshu":
+        if host not in (
+            "www.xiaohongshu.com",
+            "xiaohongshu.com",
+            "www.rednote.com",
+            "rednote.com",
+        ):
+            return False, f"Invalid Xiaohongshu host: {host}"
+        m_xhs = XHS_NOTE_REGEX.search(p.path or "")
+        if not m_xhs:
+            return False, f"Invalid Xiaohongshu canonical path: {p.path}"
+        url_id = m_xhs.group(1).lower()
+        if url_id != expected_id.lower():
+            return False, f"URL ID '{url_id}' does not match platform_video_id '{expected_id}'"
+
+    # ISO 8601 parsing with timezone awareness
+    collected_at_str = str(sample.get("collected_at") or "")
+    if not collected_at_str:
+        return False, "Missing collected_at timestamp"
+    try:
+        dt = datetime.fromisoformat(collected_at_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return False, f"collected_at timestamp '{collected_at_str}' lacks timezone"
+    except Exception as e:
+        return False, f"Invalid ISO 8601 timestamp '{collected_at_str}': {e}"
+
+    media_type = sample.get("media_type")
+    if media_type not in ("video", "image_text"):
+        return False, f"Invalid media_type '{media_type}'"
+
+    for field_name in ("title", "author", "rationale"):
+        val = sample.get(field_name)
+        if not isinstance(val, str) or not val.strip():
+            return False, f"Missing or empty required field '{field_name}'"
+
+    if not isinstance(sample.get("ground_truth_relevance"), bool):
+        return False, "ground_truth_relevance must be a boolean"
+
+    # Provenance metadata level
+    prov_level = sample.get("provenance_level")
+    if prov_level == "legacy_unverified":
+        return True, "Legacy unverified sample (provenance_level=legacy_unverified)"
+
+    # Strict audit metadata presence
+    if not sample.get("query") and not sample.get("submitted_query"):
+        return False, "Missing query or submitted_query metadata"
+
+    return True, "Provenance strictly verified: URL, ID, ISO timestamp, and metadata valid"

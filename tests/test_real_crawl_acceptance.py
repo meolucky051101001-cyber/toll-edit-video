@@ -6,10 +6,16 @@ import pytest
 
 from backend.schemas.contracts import SearchFilters, VideoResult
 from backend.services.identity_policy import validate_result_identity
-from backend.services.ranking_service import rank_detailed
+from backend.services.ranking_service import (
+    rank_detailed,
+    validate_compound_intent_relevance,
+)
 from backend.services.translator import plan_query
 
 BENCHMARK_FILE = Path(__file__).resolve().parent.parent / "data" / "benchmarks" / "crawled_benchmark_samples.json"
+
+MIN_LIVE_SAMPLES = int(os.environ.get("MIN_LIVE_SAMPLES", "3"))
+MIN_LIVE_RELEVANCE_RATE = float(os.environ.get("MIN_LIVE_RELEVANCE_RATE", "0.80"))
 
 
 @pytest.mark.live_acceptance
@@ -168,14 +174,20 @@ async def test_live_crawl_douyin_real_results():
         assert r.is_mock is False
         assert "example.invalid" not in str(r.url)
         assert "douyin.com" in str(r.url)
+
+        # Strict identity verification
+        is_valid, resolved_id, err = validate_result_identity(
+            platform=r.platform,
+            platform_video_id=r.platform_video_id,
+            url=str(r.url),
+            share_url=r.share_url,
+            is_mock=False,
+        )
+        assert is_valid, f"Live Douyin result failed identity validation: {err}"
         assert r.media_type == "video", f"Expected media_type='video', got '{r.media_type}'"
 
         breakdown = rank_detailed(r, raw_query, alternative_queries=plan.tiered_queries)
-        combined_text = f"{r.title or ''} {r.caption or ''} {' '.join(r.hashtags)}".lower()
-
-        has_tweezer = any(w in combined_text for w in ("镊子", "nhíp", "nhip", "gắp", "gap"))
-        has_sticker = any(w in combined_text for w in ("贴纸", "sticker", "咕卡", "手账"))
-        is_relevant = (has_tweezer and has_sticker) or breakdown.final_score >= 35.0
+        is_relevant, rel_reason = validate_compound_intent_relevance(r, breakdown, raw_query)
 
         if is_relevant:
             relevant_count += 1
@@ -184,18 +196,25 @@ async def test_live_crawl_douyin_real_results():
             "id": r.platform_video_id,
             "title": r.title,
             "score": breakdown.final_score,
-            "has_tweezer": has_tweezer,
-            "has_sticker": has_sticker,
             "is_relevant": is_relevant,
+            "reason": rel_reason,
         })
 
-    print(f"\n[Douyin Live Relevance Audit]: {relevant_count}/{len(results)} videos match compound intent 'nhíp gắp sticker':")
+    print(f"\n[Douyin Live Relevance Audit]: {relevant_count}/{len(results)} videos match compound intent '{raw_query}':")
     for item in relevance_audit:
-        print(f"  - [{item['id']}] Score={item['score']:.1f}, Relevant={item['is_relevant']} | {item['title'][:50]}")
+        print(f"  - [{item['id']}] Score={item['score']:.1f}, Relevant={item['is_relevant']} | Reason: {item['reason']} | Title: {item['title'][:50]}")
 
-    assert relevant_count > 0, (
-        f"Douyin live crawl returned {len(results)} videos, but NONE matched compound intent '{raw_query}' "
-        f"(must match both tweezer/nhíp and sticker/craft intent, rejecting general sticker notes)"
+    if len(results) < MIN_LIVE_SAMPLES:
+        pytest.fail(
+            f"Douyin live crawl returned insufficient samples ({len(results)}/{MIN_LIVE_SAMPLES}). "
+            f"Cannot certify precision without minimum sample threshold."
+        )
+
+    relevance_rate = relevant_count / len(results)
+    assert relevance_rate >= MIN_LIVE_RELEVANCE_RATE, (
+        f"Douyin live crawl relevance rate {relevance_rate:.2f} ({relevant_count}/{len(results)}) "
+        f"is below required threshold {MIN_LIVE_RELEVANCE_RATE:.2f}. "
+        f"All returned videos must strictly satisfy both tool (tweezer) and purpose (sticker) intents."
     )
 
 
@@ -240,14 +259,20 @@ async def test_live_crawl_xiaohongshu_real_results():
         assert r.is_mock is False
         assert "example.invalid" not in str(r.url)
         assert "xiaohongshu.com" in str(r.url) or "rednote.com" in str(r.url)
+
+        # Strict identity verification
+        is_valid, resolved_id, err = validate_result_identity(
+            platform=r.platform,
+            platform_video_id=r.platform_video_id,
+            url=str(r.url),
+            share_url=r.share_url,
+            is_mock=False,
+        )
+        assert is_valid, f"Live Xiaohongshu result failed identity validation: {err}"
         assert r.media_type == "video", f"Expected media_type='video' for content_type=video, got '{r.media_type}'"
 
         breakdown = rank_detailed(r, raw_query, alternative_queries=plan.tiered_queries)
-        combined_text = f"{r.title or ''} {r.caption or ''} {' '.join(r.hashtags)}".lower()
-
-        has_tweezer = any(w in combined_text for w in ("镊子", "nhíp", "nhip", "gắp", "gap"))
-        has_sticker = any(w in combined_text for w in ("贴纸", "sticker", "咕卡", "手账"))
-        is_relevant = (has_tweezer and has_sticker) or breakdown.final_score >= 35.0
+        is_relevant, rel_reason = validate_compound_intent_relevance(r, breakdown, raw_query)
 
         if is_relevant:
             relevant_count += 1
@@ -256,18 +281,25 @@ async def test_live_crawl_xiaohongshu_real_results():
             "id": r.platform_video_id,
             "title": r.title,
             "score": breakdown.final_score,
-            "has_tweezer": has_tweezer,
-            "has_sticker": has_sticker,
             "is_relevant": is_relevant,
+            "reason": rel_reason,
         })
 
-    print(f"\n[Xiaohongshu Live Relevance Audit]: {relevant_count}/{len(results)} videos match compound intent 'nhíp gắp sticker':")
+    print(f"\n[Xiaohongshu Live Relevance Audit]: {relevant_count}/{len(results)} videos match compound intent '{raw_query}':")
     for item in relevance_audit:
-        print(f"  - [{item['id']}] Score={item['score']:.1f}, Relevant={item['is_relevant']} | {item['title'][:50]}")
+        print(f"  - [{item['id']}] Score={item['score']:.1f}, Relevant={item['is_relevant']} | Reason: {item['reason']} | Title: {item['title'][:50]}")
 
-    assert relevant_count > 0, (
-        f"Xiaohongshu live crawl returned {len(results)} videos, but NONE matched compound intent '{raw_query}' "
-        f"(must match both tweezer/nhíp and sticker/craft intent, rejecting general sticker notes)"
+    if len(results) < MIN_LIVE_SAMPLES:
+        pytest.fail(
+            f"Xiaohongshu live crawl returned insufficient samples ({len(results)}/{MIN_LIVE_SAMPLES}). "
+            f"Cannot certify precision without minimum sample threshold."
+        )
+
+    relevance_rate = relevant_count / len(results)
+    assert relevance_rate >= MIN_LIVE_RELEVANCE_RATE, (
+        f"Xiaohongshu live crawl relevance rate {relevance_rate:.2f} ({relevant_count}/{len(results)}) "
+        f"is below required threshold {MIN_LIVE_RELEVANCE_RATE:.2f}. "
+        f"All returned videos must strictly satisfy both tool (tweezer) and purpose (sticker) intents."
     )
 
 

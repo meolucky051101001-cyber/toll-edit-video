@@ -249,8 +249,12 @@ def main() -> int:
     bench_ok = (code == 0)
     bench_summary = parse_pytest_summary(out)
 
+    from backend.services.identity_policy import audit_sample_provenance
+
     benchmark_json_path = ROOT_DIR / "data/benchmarks/crawled_benchmark_samples.json"
+    holdout_json_path = ROOT_DIR / "data/benchmarks/independent_holdout_benchmark.json"
     total_crawled_samples = 0
+    total_holdout_samples = 0
     total_real_queries = 0
     provenance_ok = True
     crawled_video_samples = 0
@@ -278,18 +282,22 @@ def main() -> int:
                             elif mtype == "image_text":
                                 platform_samples_count[plat]["image_text"] += 1
                                 crawled_image_text_samples += 1
-                        # Provenance validation: URL, ID, ISO timestamp, non-empty title/author/rationale, bool ground truth
-                        has_provenance = (
-                            plat in ("douyin", "xiaohongshu")
-                            and len(str(s.get("platform_video_id") or "")) >= 6
-                            and ("douyin.com" in str(s.get("url") or "") or "xiaohongshu.com" in str(s.get("url") or ""))
-                            and bool(s.get("collected_at") and "T" in s["collected_at"])
-                            and bool(s.get("title"))
-                            and bool(s.get("author"))
-                            and isinstance(s.get("ground_truth_relevance"), bool)
-                            and bool(s.get("rationale"))
-                        )
-                        if not has_provenance:
+                        # Strict provenance audit: scheme https, exact host, canonical regex, ID match, ISO timestamp, metadata
+                        audit_ok, _ = audit_sample_provenance(s)
+                        if not audit_ok:
+                            provenance_ok = False
+        except Exception:
+            provenance_ok = False
+
+    if holdout_json_path.exists():
+        try:
+            with open(holdout_json_path, "r", encoding="utf-8") as f:
+                holdout_data = json.load(f)
+                for g in holdout_data:
+                    for s in g.get("samples", []):
+                        total_holdout_samples += 1
+                        audit_ok, _ = audit_sample_provenance(s)
+                        if not audit_ok:
                             provenance_ok = False
         except Exception:
             provenance_ok = False
@@ -308,9 +316,11 @@ def main() -> int:
         "domain_benchmark_queries": total_benchmark_queries,
         "real_crawled_queries": total_real_queries,
         "real_crawled_samples_provenance": total_crawled_samples,
+        "independent_holdout_samples": total_holdout_samples,
         "crawled_video_samples": crawled_video_samples,
         "crawled_image_text_samples": crawled_image_text_samples,
-        "crawled_samples_provenance_verified": provenance_ok,
+        "provenance_audit_level": "strict_url_id_iso_parsed",
+        "provenance_verified": provenance_ok,
         "crawled_platforms": {
             "douyin": platform_samples_count["douyin"],
             "xiaohongshu": {
@@ -322,7 +332,7 @@ def main() -> int:
         "duration_s": t_bench,
     }
     if bench_ok and provenance_ok:
-        print(f"PASS ({total_benchmark_queries} domain queries + {total_real_queries} offline crawled queries [{total_crawled_samples} samples: {crawled_video_samples} video, {crawled_image_text_samples} img/txt, provenance verified] verified) [{t_bench}s]")
+        print(f"PASS ({total_benchmark_queries} domain queries + {total_real_queries} offline crawled queries [{total_crawled_samples} crawled + {total_holdout_samples} holdout samples; {crawled_video_samples} video, {crawled_image_text_samples} img/txt, strict provenance verified] verified) [{t_bench}s]")
     else:
         print(f"FAIL (exit code {code}, provenance_ok={provenance_ok})")
         print(out[:500])
@@ -443,6 +453,7 @@ def main() -> int:
                 "pytest",
                 "tests/test_real_crawl_acceptance.py::test_live_crawl_douyin_real_results",
                 "-q",
+                "-s",
             ],
             cwd=ROOT_DIR,
             capture_output=True,
@@ -453,15 +464,29 @@ def main() -> int:
         )
         dy_out = (p_dy.stdout + "\n" + p_dy.stderr).strip()
         dy_ok = (p_dy.returncode == 0)
+        m_dy_audit = re.search(r"(\d+)/(\d+)\s+videos match compound intent", dy_out)
+        dy_rel_cnt = int(m_dy_audit.group(1)) if m_dy_audit else 0
+        dy_tot_cnt = int(m_dy_audit.group(2)) if m_dy_audit else 0
+        dy_rel_rate = round(dy_rel_cnt / dy_tot_cnt, 2) if dy_tot_cnt > 0 else 0.0
+
         if dy_ok:
             dy_status = "PASS"
-            dy_detail = "Live Douyin video items successfully retrieved"
+            dy_detail = f"Live Douyin video items retrieved: {dy_rel_cnt}/{dy_tot_cnt} relevant (rate={dy_rel_rate})"
+            dy_reason = "Compound intent validated on live retrieved videos"
+            dy_operational = True
+            dy_precision_verified = True
         elif "blocked by authentication" in dy_out or "UserActionRequired" in dy_out or "verification challenge" in dy_out:
             dy_status = "BLOCKED (CHALLENGE_REQUIRED)"
             dy_detail = "Douyin security verification/CAPTCHA challenge required on workstation"
+            dy_reason = "CAPTCHA or slider challenge encountered during live search"
+            dy_operational = probe_ok
+            dy_precision_verified = False
         else:
             dy_status = "FAIL"
             dy_detail = dy_out[:300]
+            dy_reason = dy_out[:300]
+            dy_operational = False
+            dy_precision_verified = False
 
         # 11.C: Xiaohongshu live search retrieval
         p_xhs = subprocess.run(
@@ -471,6 +496,7 @@ def main() -> int:
                 "pytest",
                 "tests/test_real_crawl_acceptance.py::test_live_crawl_xiaohongshu_real_results",
                 "-q",
+                "-s",
             ],
             cwd=ROOT_DIR,
             capture_output=True,
@@ -481,18 +507,32 @@ def main() -> int:
         )
         xhs_out = (p_xhs.stdout + "\n" + p_xhs.stderr).strip()
         xhs_ok = (p_xhs.returncode == 0)
+        m_xhs_audit = re.search(r"(\d+)/(\d+)\s+videos match compound intent", xhs_out)
+        xhs_rel_cnt = int(m_xhs_audit.group(1)) if m_xhs_audit else 0
+        xhs_tot_cnt = int(m_xhs_audit.group(2)) if m_xhs_audit else 0
+        xhs_rel_rate = round(xhs_rel_cnt / xhs_tot_cnt, 2) if xhs_tot_cnt > 0 else 0.0
+
         if xhs_ok:
             xhs_status = "PASS"
-            xhs_detail = "Live Xiaohongshu items successfully retrieved"
+            xhs_detail = f"Live Xiaohongshu items retrieved: {xhs_rel_cnt}/{xhs_tot_cnt} relevant (rate={xhs_rel_rate})"
+            xhs_reason = "Compound intent validated on live retrieved videos"
+            xhs_operational = True
+            xhs_precision_verified = True
         elif "blocked by authentication" in xhs_out or "UserActionRequired" in xhs_out or "login required" in xhs_out:
             xhs_status = "BLOCKED (LOGIN_REQUIRED)"
             xhs_detail = "Xiaohongshu user login session required on workstation"
+            xhs_reason = "User login session required to view search results on workstation"
+            xhs_operational = probe_ok
+            xhs_precision_verified = False
         else:
             xhs_status = "FAIL"
             xhs_detail = xhs_out[:300]
+            xhs_reason = xhs_out[:300]
+            xhs_operational = False
+            xhs_precision_verified = False
 
         t_live = round(time.time() - t0, 2)
-        live_full_green = probe_ok and dy_ok and xhs_ok
+        live_full_green = probe_ok and dy_ok and xhs_ok and dy_precision_verified and xhs_precision_verified
         live_workstation_ready = probe_ok and (dy_ok or dy_status.startswith("BLOCKED")) and (xhs_ok or xhs_status.startswith("BLOCKED"))
 
         results["11_live_crawl_acceptance"] = {
@@ -506,8 +546,30 @@ def main() -> int:
                 "xiaohongshu": xhs_probe_detail,
             },
             "platforms": {
-                "douyin": {"status": dy_status, "detail": dy_detail},
-                "xiaohongshu": {"status": xhs_status, "detail": xhs_detail},
+                "douyin": {
+                    "status": dy_status,
+                    "detail": dy_detail,
+                    "query": "nhíp gắp sticker",
+                    "submitted_query": "贴纸镊子",
+                    "crawl_operational": dy_operational,
+                    "precision_verified": dy_precision_verified,
+                    "results_count": dy_tot_cnt,
+                    "relevant_count": dy_rel_cnt,
+                    "relevance_rate": dy_rel_rate,
+                    "reason": dy_reason,
+                },
+                "xiaohongshu": {
+                    "status": xhs_status,
+                    "detail": xhs_detail,
+                    "query": "nhíp gắp sticker",
+                    "submitted_query": "贴纸镊子",
+                    "crawl_operational": xhs_operational,
+                    "precision_verified": xhs_precision_verified,
+                    "results_count": xhs_tot_cnt,
+                    "relevant_count": xhs_rel_cnt,
+                    "relevance_rate": xhs_rel_rate,
+                    "reason": xhs_reason,
+                },
             },
             "duration_s": t_live,
         }
@@ -558,13 +620,28 @@ def main() -> int:
     if require_live:
         if not is_live_requested or not results.get("11_live_crawl_acceptance", {}).get("passed"):
             strict_exit_code = 2
+        p_dict = results.get("11_live_crawl_acceptance", {}).get("platforms", {})
+        dy_p = p_dict.get("douyin", {})
+        xhs_p = p_dict.get("xiaohongshu", {})
         strict_info = {
             "executed": True,
             "command": "python scripts/release_gate.py --live --require-live",
             "exit_code": strict_exit_code,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "douyin": results.get("11_live_crawl_acceptance", {}).get("platforms", {}).get("douyin", {}).get("status", "UNKNOWN"),
-            "xiaohongshu": results.get("11_live_crawl_acceptance", {}).get("platforms", {}).get("xiaohongshu", {}).get("status", "UNKNOWN"),
+            "query": "nhíp gắp sticker",
+            "submitted_query": "贴纸镊子",
+            "douyin": {
+                "status": dy_p.get("status", "UNKNOWN"),
+                "crawl_operational": dy_p.get("crawl_operational", False),
+                "precision_verified": dy_p.get("precision_verified", False),
+                "reason": dy_p.get("reason", "None"),
+            },
+            "xiaohongshu": {
+                "status": xhs_p.get("status", "UNKNOWN"),
+                "crawl_operational": xhs_p.get("crawl_operational", False),
+                "precision_verified": xhs_p.get("precision_verified", False),
+                "reason": xhs_p.get("reason", "None"),
+            },
         }
     elif existing_strict and existing_strict.get("executed"):
         strict_info = existing_strict

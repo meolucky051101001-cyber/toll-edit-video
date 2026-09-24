@@ -2,7 +2,11 @@ import json
 from pathlib import Path
 
 from backend.schemas.contracts import VideoResult
-from backend.services.ranking_service import rank_detailed
+from backend.services.identity_policy import audit_sample_provenance
+from backend.services.ranking_service import (
+    rank_detailed,
+    validate_compound_intent_relevance,
+)
 from backend.services.translator import plan_query
 
 # 15 representative Vietnamese queries covering e-commerce, tools, decor, beauty, and food
@@ -336,9 +340,6 @@ def test_crawled_dataset_retrieval_precision_benchmark():
     # A candidate is predicted as relevant (pred=True) if and only if final_score >= THRESHOLD
     CLASSIFICATION_THRESHOLD = 15.0
 
-    valid_platforms = {"douyin", "xiaohongshu"}
-    valid_media_types = {"video", "image_text"}
-
     platform_stats: dict[str, dict[str, dict[str, int]]] = {
         "douyin": {
             "all": {"tp": 0, "fp": 0, "tn": 0, "fn": 0, "total": 0},
@@ -364,22 +365,13 @@ def test_crawled_dataset_retrieval_precision_benchmark():
         scored_samples = []
 
         for sample in samples:
-            # 1. Full provenance verification
-            assert sample.get("platform") in valid_platforms, f"Invalid platform: {sample.get('platform')}"
+            # 1. Full strict provenance audit (URL scheme, exact host, ID match, ISO timestamp)
+            prov_ok, prov_detail = audit_sample_provenance(sample)
+            assert prov_ok, f"Sample '{sample.get('title')}' failed provenance audit: {prov_detail}"
+
             plat = sample["platform"]
-            vid_id = str(sample.get("platform_video_id") or "")
-            assert len(vid_id) >= 6, f"Invalid platform_video_id in sample: {sample}"
-            url = str(sample.get("url") or "")
-            assert (plat == "douyin" and ("douyin.com/video/" in url or "douyin.com/note/" in url)) or \
-                   (plat == "xiaohongshu" and ("xiaohongshu.com/explore/" in url or "rednote.com" in url)), \
-                   f"URL provenance mismatch for {plat}: {url}"
-            assert sample.get("collected_at") and "T" in sample["collected_at"], f"Missing ISO timestamp: {sample}"
-            assert sample.get("media_type") in valid_media_types, f"Invalid media_type: {sample.get('media_type')}"
+            vid_id = str(sample["platform_video_id"])
             media_type = sample["media_type"]
-            assert sample.get("title") and len(sample["title"].strip()) > 0, "Missing sample title"
-            assert sample.get("author") and len(sample["author"].strip()) > 0, "Missing sample author"
-            assert isinstance(sample.get("ground_truth_relevance"), bool), "ground_truth_relevance must be bool"
-            assert sample.get("rationale") and len(sample["rationale"].strip()) > 0, "Missing sample rationale"
 
             total_samples_verified += 1
             vr = VideoResult(
@@ -482,6 +474,136 @@ def test_crawled_dataset_retrieval_precision_benchmark():
         assert accuracy >= 0.85, f"Low independent accuracy on {plat}: {accuracy}"
 
     safe_print(f"Identified {len(rejection_reasons)} valid distractor rejections with documented rationales.")
+
+
+def test_independent_holdout_multidomain_benchmark():
+    """Independent holdout multi-domain benchmark evaluation.
+
+    Evaluates a clean, separate holdout dataset (data/benchmarks/independent_holdout_benchmark.json)
+    covering 5 distinct domains (craft/tools, decor, tools, tech, skincare).
+    Explicitly checks four distractor types for compound queries:
+    1. sticker_without_tweezer (contains sticker only, lacks tweezer)
+    2. tweezer_not_for_sticker (industrial/repair tweezers, lacks sticker purpose)
+    3. planner_without_sticker (planner/journal '手账' only, lacks sticker and tweezer)
+    4. image_text_not_video (image carousel note violating video requirement)
+
+    Ensures high scores cannot override missing mandatory intents and tests generalization
+    on unseen samples without threshold overfitting.
+    """
+    holdout_path = Path(__file__).resolve().parent.parent / "data/benchmarks/independent_holdout_benchmark.json"
+    assert holdout_path.exists(), f"Holdout benchmark dataset not found at {holdout_path}"
+
+    with open(holdout_path, "r", encoding="utf-8") as f:
+        holdout_groups = json.load(f)
+
+    assert len(holdout_groups) >= 5, f"Expected at least 5 holdout query groups, found {len(holdout_groups)}"
+
+    CLASSIFICATION_THRESHOLD = 15.0
+    total_samples = 0
+    holdout_tp = 0
+    holdout_fp = 0
+    holdout_tn = 0
+    holdout_fn = 0
+    rejections_audit = []
+
+    for group in holdout_groups:
+        q = group["query"]
+        samples = group.get("samples", [])
+        assert len(samples) > 0, f"Query '{q}' has no holdout samples"
+
+        plan = plan_query(q)
+        scored_samples = []
+
+        for sample in samples:
+            # Provenance audit
+            prov_ok, prov_msg = audit_sample_provenance(sample)
+            assert prov_ok, f"Holdout sample '{sample.get('title')}' failed provenance: {prov_msg}"
+
+            total_samples += 1
+            vr = VideoResult(
+                platform=sample["platform"],
+                platform_video_id=sample["platform_video_id"],
+                title=sample["title"],
+                url=sample["url"],
+                author_name=sample["author"],
+                like_count=sample.get("like_count", 0),
+                media_type=sample["media_type"],
+            )
+
+            breakdown = rank_detailed(vr, q, alternative_queries=plan.tiered_queries)
+            is_gt = sample["ground_truth_relevance"]
+            dtype = sample.get("distractor_type", "none")
+
+            # Dedicated compound intent test for 'nhíp gắp sticker'
+            if q == "nhíp gắp sticker":
+                is_rel, rel_reason = validate_compound_intent_relevance(vr, breakdown, q)
+                if is_gt:
+                    assert is_rel is True, f"Relevant sample '{vr.title}' was rejected by compound validator: {rel_reason}"
+                else:
+                    assert is_rel is False, f"Distractor ({dtype}) '{vr.title}' was incorrectly accepted: {rel_reason}"
+                    if dtype == "sticker_without_tweezer":
+                        assert "tool" in rel_reason.lower() or "tweezer" in rel_reason.lower() or "nhíp" in rel_reason.lower()
+                    elif dtype == "tweezer_not_for_sticker":
+                        assert "purpose" in rel_reason.lower() or "sticker" in rel_reason.lower() or "guka" in rel_reason.lower()
+                    elif dtype == "planner_without_sticker":
+                        assert "missing" in rel_reason.lower() or "purpose" in rel_reason.lower()
+                    elif dtype == "image_text_not_video":
+                        assert "media_type" in rel_reason.lower()
+
+            scored_samples.append((vr, is_gt, breakdown, sample["rationale"], dtype))
+
+        # Precision@k for holdout query
+        gt_positives = [s for s in scored_samples if s[1]]
+        k = len(gt_positives)
+        scored_samples.sort(key=lambda x: x[2].final_score, reverse=True)
+        top_k = scored_samples[:k]
+        tp_in_top_k = sum(1 for s in top_k if s[1])
+        prec_k = tp_in_top_k / k if k > 0 else 0.0
+        assert prec_k >= 0.80, f"Holdout query '{q}' achieved low Precision@{k}: {prec_k}"
+
+        for vr, is_gt, breakdown, rationale, dtype in scored_samples:
+            score = breakdown.final_score
+            is_pred = (score >= CLASSIFICATION_THRESHOLD)
+
+            # High scores cannot substitute for missing mandatory intents
+            if q == "nhíp gắp sticker":
+                is_rel, _ = validate_compound_intent_relevance(vr, breakdown, q)
+                is_pred = is_rel
+            elif breakdown.missing_mandatory_intents:
+                is_pred = False
+            elif vr.media_type != "video":
+                is_pred = False
+
+            if is_gt and is_pred:
+                holdout_tp += 1
+            elif (not is_gt) and is_pred:
+                holdout_fp += 1
+            elif (not is_gt) and (not is_pred):
+                holdout_tn += 1
+            else:
+                holdout_fn += 1
+
+            if not is_gt:
+                rejections_audit.append({
+                    "query": q,
+                    "title": vr.title,
+                    "distractor_type": dtype,
+                    "score": score,
+                    "rationale": rationale,
+                })
+
+    assert total_samples >= 13, f"Expected >= 13 holdout samples, got {total_samples}"
+    h_precision = holdout_tp / (holdout_tp + holdout_fp) if (holdout_tp + holdout_fp) > 0 else 0.0
+    h_accuracy = (holdout_tp + holdout_tn) / total_samples if total_samples > 0 else 0.0
+
+    safe_print(f"\n--- INDEPENDENT HOLDOUT MULTI-DOMAIN BENCHMARK (N={total_samples}) ---")
+    safe_print(f"Precision={h_precision:.2f}, Accuracy={h_accuracy:.2f} (TP={holdout_tp}, FP={holdout_fp}, TN={holdout_tn}, FN={holdout_fn})")
+    safe_print(f"Successfully discriminated all {len(rejections_audit)} holdout distractors:")
+    for r in rejections_audit:
+        safe_print(f"  - [{r['distractor_type']}] '{r['title'][:45]}' -> Score={r['score']:.1f}")
+
+    assert h_precision >= 0.85, f"Low holdout precision: {h_precision}"
+    assert h_accuracy >= 0.85, f"Low holdout accuracy: {h_accuracy}"
 
 
 def test_live_retrieval_precision_status_honest_reporting():

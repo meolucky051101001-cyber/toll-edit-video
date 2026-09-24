@@ -837,9 +837,12 @@ def fast_online_translate(text: str) -> str | None:
 
 # Tool + purpose must remain together; broad expansion must not erase either.
 COMPOUND_INTENTS = [
-    (["nhip", "tweezers", "镊子", "鑷子"],
-     ["sticker", "stickers", "贴纸", "貼紙"],
-     ["贴纸镊子", "手账贴纸镊子", "贴纸专用镊子"]),
+    (["nhip", "nhip gap", "kep gap", "tweezers", "tweezer", "镊子", "鑷子"],
+     ["sticker", "stickers", "hinh dan", "guka", "咕卡", "贴纸", "貼紙"],
+     ["贴纸镊子", "咕卡贴纸镊子", "贴纸专用镊子"]),
+    (["dung cu", "dung cu boc", "cay boc", "dao boc", "工具", "手账工具", "刮刀"],
+     ["sticker", "stickers", "hinh dan", "guka", "咕卡", "贴纸", "貼紙"],
+     ["贴纸镊子", "咕卡工具", "手账贴纸工具"]),
     (["nhip", "kep", "tweezers", "镊子", "鑷子"],
      ["mi", "eyelash", "睫毛"],
      ["睫毛镊子", "嫁接睫毛镊子", "睫毛专用镊子"]),
