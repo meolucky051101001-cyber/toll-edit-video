@@ -275,56 +275,97 @@ PREFERRED_CHI_MAI_MODELS = [
 ]
 
 
-def _resolve_control_dir(workspace: Optional[str] = None) -> Path:
+def _resolve_control_dirs(workspace: Optional[str] = None) -> List[Path]:
+    """
+    Xác định tất cả các thư mục control trong workspace được yêu cầu để đảm bảo đồng bộ 100% (Codex Point 1).
+    Nếu workspace có cả workspace/bot_system/control và workspace/control, trả về cả hai để đồng bộ.
+    """
     if workspace:
-        ws_path = Path(workspace)
-        for c in [ws_path / "bot_system" / "control", ws_path / "control"]:
-            if c.is_dir():
-                return c
-    ws_env = os.getenv("AUTODUB_WORKSPACE")
-    if ws_env:
-        for c in [Path(ws_env) / "bot_system" / "control", Path(ws_env) / "control"]:
-            if c.is_dir():
-                return c
-    for c in [Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")]:
-        if c.is_dir():
-            return c
-    return Path(r"C:\tool v1\workspace\control")
+        base_ws = Path(workspace)
+    else:
+        ws_env = os.getenv("AUTODUB_WORKSPACE")
+        base_ws = Path(ws_env) if ws_env else Path(r"C:\tool v1\workspace")
+
+    found_dirs: List[Path] = []
+    seen = set()
+    for sub in ["bot_system/control", "control"]:
+        p = base_ws / sub
+        if p.is_dir():
+            resolved_str = str(p.resolve())
+            if resolved_str not in seen:
+                seen.add(resolved_str)
+                found_dirs.append(p)
+
+    if not found_dirs:
+        # Nếu chưa thư mục nào tồn tại trong workspace này, dùng workspace/control chuẩn
+        default_dir = base_ws / "control"
+        found_dirs.append(default_dir)
+
+    return found_dirs
 
 
 def get_auto_voice_config_path(workspace: Optional[str] = None) -> Path:
-    cdir = _resolve_control_dir(workspace)
-    cdir.mkdir(parents=True, exist_ok=True)
-    return cdir / CONFIG_FILENAME
+    """Trả về file config ở thư mục control chính (ưu tiên thư mục đã có file)."""
+    dirs = _resolve_control_dirs(workspace)
+    for d in dirs:
+        p = d / CONFIG_FILENAME
+        if p.is_file():
+            return p
+    return dirs[0] / CONFIG_FILENAME
 
 
 def get_auto_voice_enabled(workspace: Optional[str] = None) -> bool:
-    cfg_path = get_auto_voice_config_path(workspace)
-    if cfg_path.is_file():
-        try:
-            data = json.loads(cfg_path.read_text(encoding="utf-8"))
-            return bool(data.get("enabled", True))
-        except Exception as e:
-            logger.warning("Không thể đọc cấu hình %s: %s", cfg_path, e)
+    """Đọc trạng thái Auto Voice từ các thư mục control khả dụng."""
+    dirs = _resolve_control_dirs(workspace)
+    for d in dirs:
+        cfg_path = d / CONFIG_FILENAME
+        if cfg_path.is_file():
+            try:
+                data = json.loads(cfg_path.read_text(encoding="utf-8"))
+                return bool(data.get("enabled", True))
+            except Exception as e:
+                logger.warning("Không thể đọc cấu hình %s: %s", cfg_path, e)
     return True  # Mặc định bật theo khuyến nghị Codex
 
 
 def set_auto_voice_enabled(enabled: bool, updated_by: str = "system", workspace: Optional[str] = None) -> bool:
-    cfg_path = get_auto_voice_config_path(workspace)
+    """
+    Ghi đồng bộ và nguyên tử trạng thái Auto Voice vào TẤT CẢ các thư mục control hiện hữu (Codex Point 1).
+    Xác nhận đọc lại ngay sau khi ghi để bảo đảm tính toàn vẹn (Codex Point 2).
+    Trả về True nếu ghi thành công và xác thực hợp lệ; ngược lại trả về False.
+    """
+    dirs = _resolve_control_dirs(workspace)
     payload = {
         "enabled": bool(enabled),
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "updated_by": str(updated_by)
     }
-    tmp = cfg_path.with_suffix(".tmp")
-    try:
-        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, cfg_path)
-        logger.info("Đã cập nhật chế độ Auto Voice: %s (bởi %s) tại %s", "BẬT" if enabled else "TẮT", updated_by, cfg_path)
-        return True
-    except Exception as e:
-        logger.error("Lỗi khi lưu cấu hình auto voice %s: %s", cfg_path, e)
-        return False
+    payload_json = json.dumps(payload, indent=2, ensure_ascii=False)
+    success_count = 0
+
+    for d in dirs:
+        cfg_path = d / CONFIG_FILENAME
+        tmp = cfg_path.with_suffix(".tmp")
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(payload_json, encoding="utf-8")
+            os.replace(tmp, cfg_path)
+            # Kiểm tra xác thực đọc lại dữ liệu vừa ghi
+            verify_data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            if bool(verify_data.get("enabled")) != bool(enabled):
+                raise IOError(f"Xác nhận ghi file {cfg_path} thất bại: giá trị không khớp mong muốn")
+            success_count += 1
+            logger.info("Đã đồng bộ cấu hình Auto Voice: %s (bởi %s) tại %s", "BẬT" if enabled else "TẮT", updated_by, cfg_path)
+        except Exception as e:
+            logger.error("Lỗi khi lưu cấu hình auto voice tại %s: %s", cfg_path, e)
+            try:
+                if tmp.exists():
+                    tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return False
+
+    return success_count > 0
 
 
 def get_auto_voice_mode(workspace: Optional[str] = None) -> str:

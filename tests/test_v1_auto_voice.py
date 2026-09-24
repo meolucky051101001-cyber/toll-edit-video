@@ -383,6 +383,48 @@ class TestV1AutoVoice(unittest.TestCase):
         self.assertFalse(is_allowed_command_during_pause("/batch"))
         self.assertFalse(is_allowed_command_during_pause("/llm"))
 
+    def test_15_dual_directory_synchronization_and_verification(self):
+        """Kiem tra dong bo 100% giua workspace/bot_system/control va workspace/control (Codex Point 1 & 2)."""
+        from ai.v1_auto_voice import (
+            set_auto_voice_enabled,
+            get_auto_voice_enabled,
+            CONFIG_FILENAME,
+        )
+
+        ctrl1 = Path(self.workspace) / "bot_system" / "control"
+        ctrl2 = Path(self.workspace) / "control"
+        ctrl1.mkdir(parents=True, exist_ok=True)
+        ctrl2.mkdir(parents=True, exist_ok=True)
+
+        # Ban dau co tinh dat 2 file lech nhau
+        (ctrl1 / CONFIG_FILENAME).write_text(json.dumps({"enabled": False}), encoding="utf-8")
+        (ctrl2 / CONFIG_FILENAME).write_text(json.dumps({"enabled": True}), encoding="utf-8")
+
+        # Goi set_auto_voice_enabled(True)
+        ok = set_auto_voice_enabled(True, updated_by="test_sync", workspace=self.workspace)
+        self.assertTrue(ok)
+
+        # Ca 2 file deu phai la True
+        data1 = json.loads((ctrl1 / CONFIG_FILENAME).read_text(encoding="utf-8"))
+        data2 = json.loads((ctrl2 / CONFIG_FILENAME).read_text(encoding="utf-8"))
+        self.assertTrue(data1["enabled"])
+        self.assertTrue(data2["enabled"])
+        self.assertEqual(data1["updated_by"], "test_sync")
+        self.assertEqual(data2["updated_by"], "test_sync")
+
+        # Goi set_auto_voice_enabled(False)
+        ok = set_auto_voice_enabled(False, updated_by="test_sync2", workspace=self.workspace)
+        self.assertTrue(ok)
+        data1 = json.loads((ctrl1 / CONFIG_FILENAME).read_text(encoding="utf-8"))
+        data2 = json.loads((ctrl2 / CONFIG_FILENAME).read_text(encoding="utf-8"))
+        self.assertFalse(data1["enabled"])
+        self.assertFalse(data2["enabled"])
+
+        # Kiem tra neu write loi hoac verify khong khop thi return False
+        with patch("os.replace", side_effect=OSError("Disk write error")):
+            fail_ok = set_auto_voice_enabled(True, updated_by="test_err", workspace=self.workspace)
+            self.assertFalse(fail_ok)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1210,7 +1210,11 @@ async def api_set_voice_auto(payload: dict = Body(...)):
     else:
         target_enabled = not current_enabled
 
-    set_auto_voice_enabled(target_enabled, updated_by="dashboard", workspace=WORKSPACE)
+    success = set_auto_voice_enabled(target_enabled, updated_by="dashboard", workspace=WORKSPACE)
+    if not success:
+        logger.error("Không thể lưu cấu hình auto voice vào thư mục control")
+        raise HTTPException(status_code=500, detail="Lỗi hệ thống: Không thể lưu file cấu hình Auto Voice.")
+
     manual_info = get_manual_voice_info(WORKSPACE)
     return {
         "status": "ok",

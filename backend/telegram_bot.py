@@ -250,7 +250,10 @@ async def cmd_voice_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.username or update.effective_user.first_name if update.effective_user else "telegram_user"
 
     if subcmd in ("on", "1", "enable", "bat", "bật"):
-        set_auto_voice_enabled(True, updated_by=user_name, workspace=WORKSPACE)
+        ok = set_auto_voice_enabled(True, updated_by=user_name, workspace=WORKSPACE)
+        if not ok:
+            await update.message.reply_text("❌ Lỗi hệ thống: Không thể lưu cấu hình Auto Voice vào ổ đĩa.")
+            return
         await update.message.reply_text(
             f"✅ *ĐÃ BẬT CHẾ ĐỘ NHẬN DIỆN GIỌNG NÓI TỰ ĐỘNG!*\n\n"
             f"• Video mới gửi sẽ tự động chọn giọng theo người nói đầu tiên:\n"
@@ -261,7 +264,10 @@ async def cmd_voice_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     elif subcmd in ("off", "0", "disable", "tat", "tắt"):
-        set_auto_voice_enabled(False, updated_by=user_name, workspace=WORKSPACE)
+        ok = set_auto_voice_enabled(False, updated_by=user_name, workspace=WORKSPACE)
+        if not ok:
+            await update.message.reply_text("❌ Lỗi hệ thống: Không thể lưu cấu hình Auto Voice vào ổ đĩa.")
+            return
         await update.message.reply_text(
             f"✅ *ĐÃ TẮT CHẾ ĐỘ NHẬN DIỆN GIỌNG NÓI TỰ ĐỘNG!*\n\n"
             f"• Video mới gửi sẽ dùng cố định giọng thủ công: `{manual_label}`\n"
