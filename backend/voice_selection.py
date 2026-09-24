@@ -2,7 +2,18 @@
 import json
 import os
 from pathlib import Path
-BASE=Path(r"C:\tool v1\workspace\control")
+def _resolve_control_dir() -> Path:
+    ws_env = os.getenv("AUTODUB_WORKSPACE")
+    if ws_env:
+        for c in [Path(ws_env) / "bot_system" / "control", Path(ws_env) / "control"]:
+            if c.is_dir():
+                return c
+    for c in [Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")]:
+        if c.is_dir():
+            return c
+    return Path(r"C:\tool v1\workspace\control")
+
+BASE = _resolve_control_dir()
 ALIASES = {'capcut-vi-VN-HoaiMyNeural': 'microsoft-hoaimy', 'capcut-vi-VN-NamMinhNeural': 'microsoft-namminh'}
 
 def catalog():

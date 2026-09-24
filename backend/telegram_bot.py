@@ -728,44 +728,26 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
         # (Di chuyển BƯỚC 4.5 xuống sau BƯỚC 5 để đồng bộ thời gian biến mất của phụ đề với audio)
 
-        # ===== BƯỚC 5: LỒNG TIẾNG =====
-        # Khôi phục giọng RVC (Đáng yêu / Chí Mai)
-        rvc_model_path = None
-        search_dirs = [
-            os.path.join(os.path.dirname(__file__), "..", "MyVoiceModel_v2"),
-            os.path.join(WORKSPACE, "..", "MyVoiceModel_v2"),
-            os.path.join(WORKSPACE, "MyVoiceModel_v2"),
-            os.path.join(WORKSPACE, "models", "rvc"),
-            os.path.join(os.path.dirname(__file__), "..", "models", "rvc"),
-        ]
-        for d in search_dirs:
-            if os.path.exists(d):
-                for f in sorted(os.listdir(d)):
-                    if f.endswith(".pth"):
-                        candidate = os.path.join(d, f)
-                        try:
-                            if os.path.getsize(candidate) > 1024:
-                                rvc_model_path = candidate
-                                break
-                        except OSError:
-                            continue
-            if rvc_model_path:
-                break
-                    
-        v_source = "rvc" if rvc_model_path and rvc_runtime_available() else "edge"
-        v_label = "Giọng Chí Mai (RVC)" if v_source == "rvc" else "Giọng Hoài My"
+        # ===== BƯỚC 5: LỒNG TIẾNG (Khóa giọng video theo người nói đầu - Codex Plan) =====
+        from ai.v1_auto_voice import lock_video_voice
+        voice_lock_info = await asyncio.to_thread(
+            lock_video_voice,
+            out_dir=out_dir,
+            srt_segments=srt_segments,
+            vocals_path=vocals_audio,
+            original_audio_path=original_audio,
+            workspace=WORKSPACE,
+        )
+        v_source = voice_lock_info["voice_source"]
+        v_param = voice_lock_info["voice_param"]
+        v_label = voice_lock_info["voice_label"]
+        v_id = voice_lock_info["voice_id"]
+
         await safe_edit_status(
             status_msg,
             f"🗣️ *Bước 5/6:* Đang lồng tiếng AI ({v_label})...",
             parse_mode="Markdown"
         )
-        if v_source == "rvc":
-            v_param = rvc_model_path
-        else:
-            # from audio_analysis import detect_gender
-            # gender = detect_gender(vocals_audio)
-            # v_param = "vi-VN-HoaiMyNeural" if gender == "female" else "vi-VN-NamMinhNeural"
-            v_param = "vi-VN-HoaiMyNeural"  # Tạm thời cố định giọng nữ
         
         dubbing_audio_files = await generate_dubbing_audio_isolated(
             translated_segments, dubbing_dir, voice_source=v_source, voice_param=v_param
@@ -1130,38 +1112,23 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
 
-        # ===== BƯỚC 5: LỒNG TIẾNG =====
+        # ===== BƯỚC 5: LỒNG TIẾNG (Khóa giọng video theo người nói đầu - Codex Plan) =====
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-        # Khôi phục giọng RVC (Đáng yêu / Chí Mai)
-        rvc_model_path = None
-        search_dirs = [
-            os.path.join(os.path.dirname(__file__), "..", "MyVoiceModel_v2"),
-            os.path.join(WORKSPACE, "..", "MyVoiceModel_v2"),
-            os.path.join(WORKSPACE, "MyVoiceModel_v2"),
-            os.path.join(WORKSPACE, "models", "rvc"),
-            os.path.join(os.path.dirname(__file__), "..", "models", "rvc"),
-        ]
-        for d in search_dirs:
-            if os.path.exists(d):
-                for f in sorted(os.listdir(d)):
-                    if f.endswith(".pth"):
-                        candidate = os.path.join(d, f)
-                        try:
-                            if os.path.getsize(candidate) > 1024:
-                                rvc_model_path = candidate
-                                break
-                        except OSError:
-                            continue
-            if rvc_model_path:
-                break
-                    
-        v_source = "rvc" if rvc_model_path and rvc_runtime_available() else "edge"
-        v_label = "Giọng Chí Mai (RVC)" if v_source == "rvc" else "Giọng Hoài My"
+        from ai.v1_auto_voice import lock_video_voice
+        voice_lock_info = await asyncio.to_thread(
+            lock_video_voice,
+            out_dir=out_dir,
+            srt_segments=srt_segments,
+            vocals_path=vocals_audio,
+            original_audio_path=original_audio,
+            workspace=WORKSPACE,
+        )
+        v_source = voice_lock_info["voice_source"]
+        v_param = voice_lock_info["voice_param"]
+        v_label = voice_lock_info["voice_label"]
+        v_id = voice_lock_info["voice_id"]
+
         await safe_edit_status(status_msg, f"🗣️ Đang lồng tiếng AI ({v_label})...")
-        if v_source == "rvc":
-            v_param = rvc_model_path
-        else:
-            v_param = "vi-VN-HoaiMyNeural"  # Tạm thời cố định giọng nữ
         
         dubbing_audio_files = await generate_dubbing_audio_isolated(
             translated_segments, dubbing_dir, voice_source=v_source, voice_param=v_param
@@ -1291,7 +1258,9 @@ async def enqueue_interrupted_v2_jobs(application):
 async def enqueue_pending_queue_jobs(application=None):
     """Tự động khôi phục các link còn tồn đọng trong telegram_queue.json sau khi khởi động hoặc rớt mạng."""
     global queue_counter, worker_task
-    queue_file = Path(WORKSPACE) / "telegram_queue.json"
+    bot_system = Path(WORKSPACE) / "bot_system"
+    bot_system_queue = bot_system / "telegram_queue.json"
+    queue_file = bot_system_queue if (bot_system_queue.is_file() or bot_system.is_dir()) else (Path(WORKSPACE) / "telegram_queue.json")
     if not queue_file.is_file():
         return 0
     try:
@@ -1353,8 +1322,10 @@ async def enqueue_pending_queue_jobs(application=None):
 async def queue_signal_watcher(application=None):
     """Lắng nghe tín hiệu kích hoạt xử lý hàng chờ hoặc xóa hàng chờ từ Dashboard."""
     global worker_task
-    trigger_flag = Path(WORKSPACE) / "telegram_queue_trigger.flag"
-    clear_flag = Path(WORKSPACE) / "telegram_queue_clear.flag"
+    bot_system = Path(WORKSPACE) / "bot_system"
+    flag_dir = bot_system if bot_system.is_dir() else Path(WORKSPACE)
+    trigger_flag = flag_dir / "telegram_queue_trigger.flag"
+    clear_flag = flag_dir / "telegram_queue_clear.flag"
 
     while True:
         try:
@@ -1383,7 +1354,9 @@ def main():
     # Dam bao chi co duy nhat 1 tien trinh Telegram Bot chay tai 1 thoi diem
 
     import msvcrt
-    lock_file_path = os.path.join(WORKSPACE, "bot_instance.lock")
+    bot_system = Path(WORKSPACE) / "bot_system"
+    lock_dir = bot_system if bot_system.is_dir() else Path(WORKSPACE)
+    lock_file_path = os.path.join(str(lock_dir), "bot_instance.lock")
     try:
         global _singleton_lock_file
         _singleton_lock_file = open(lock_file_path, "w")

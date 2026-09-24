@@ -284,32 +284,21 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         except Exception:
             pass
 
-        # Khôi phục giọng RVC (Đáng yêu / Chí Mai)
-        rvc_model_path = None
-        search_dirs = [
-            os.path.join(os.path.dirname(__file__), "..", "MyVoiceModel_v2"),
-            os.path.join(WORKSPACE, "..", "MyVoiceModel_v2"),
-            os.path.join(WORKSPACE, "MyVoiceModel_v2"),
-            os.path.join(WORKSPACE, "models", "rvc"),
-            os.path.join(os.path.dirname(__file__), "..", "models", "rvc"),
-        ]
-        for d in search_dirs:
-            if os.path.exists(d):
-                for f in sorted(os.listdir(d)):
-                    if f.endswith(".pth"):
-                        candidate = os.path.join(d, f)
-                        try:
-                            if os.path.getsize(candidate) > 1024:
-                                rvc_model_path = candidate
-                                break
-                        except OSError:
-                            continue
-            if rvc_model_path:
-                break
-                
-        from voice_selection import resolve_voice
-        v_source, v_param, v_label = resolve_voice(
-            "rvc" if rvc_model_path and rvc_runtime_available() else "edge", rvc_model_path)
+        # Khóa giọng đọc video duy nhất theo người nói đầu tiên (Codex Plan)
+        from ai.v1_auto_voice import lock_video_voice
+        voice_lock_info = await asyncio.to_thread(
+            lock_video_voice,
+            out_dir=out_dir,
+            srt_segments=srt_segments,
+            vocals_path=vocals_audio,
+            original_audio_path=original_audio,
+            workspace=WORKSPACE,
+        )
+        v_source = voice_lock_info["voice_source"]
+        v_param = voice_lock_info["voice_param"]
+        v_label = voice_lock_info["voice_label"]
+        v_id = voice_lock_info["voice_id"]
+
         await pause_checkpoint()
         _raise_if_stopped()
         await notify(f"Đang lồng tiếng: {v_label}")
@@ -353,7 +342,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         receipt_path = _receipt_path(final_dest)
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_json(receipt_path, {
-            "voice_id": __import__("voice_selection").selected()["id"],
+            "voice_id": v_id,
             "input_sha256": fingerprint(video_path),
             "output_sha256": fingerprint(final_dest),
         })
@@ -505,9 +494,12 @@ async def _process_batch_folder(
         expected_render = os.path.join(output_dir, f"Dubbed_{base_stem}.mp4")
         verified = os.path.isfile(expected_render) and await asyncio.to_thread(_verified_output, vpath, expected_render)
         if verified:
-            from voice_selection import selected
             receipt = json.loads(_receipt_path(expected_render).read_text(encoding="utf-8"))
-            if receipt.get("voice_id") != selected()["id"]:
+            from ai.v1_auto_voice import get_locked_voice
+            job_out_dir = os.path.join(WORKSPACE, base_stem)
+            locked = get_locked_voice(job_out_dir)
+            expected_voice_id = locked["voice_id"] if locked else receipt.get("voice_id")
+            if receipt.get("voice_id") != expected_voice_id:
                 # Preserve the old render; never mistake a different voice for completion.
                 backup = Path(expected_render).with_name(Path(expected_render).stem + "_previous_" + uuid.uuid4().hex[:8] + ".mp4")
                 Path(expected_render).rename(backup)

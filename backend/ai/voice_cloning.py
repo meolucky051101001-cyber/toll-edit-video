@@ -456,9 +456,16 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                             content=seg.content.strip())
             result = await generate_single_tts(seg, output_folder, voice_source, voice_param, api_key)
             if result is None:
-                # Cứu hộ lần 1: Thử đọc bằng Edge TTS cơ bản
+                # Cứu hộ lần 1: Thử đọc bằng Edge TTS cơ bản (giữ đúng giới tính nam/nữ)
                 try:
-                    await generate_tts_edge(seg.content.strip(), path, "vi-VN-HoaiMyNeural", pitch="+0Hz", rate="+0%")
+                    is_male_target = (
+                        "BV075" in str(voice_param)
+                        or "BV560" in str(voice_param)
+                        or "namminh" in str(voice_param).lower()
+                        or "felipe" in str(voice_param).lower()
+                    )
+                    rescue_voice = "vi-VN-NamMinhNeural" if is_male_target else "vi-VN-HoaiMyNeural"
+                    await generate_tts_edge(seg.content.strip(), path, rescue_voice, pitch="+0Hz", rate="+0%")
                     if os.path.exists(path) and os.path.getsize(path) > 128:
                         audio = AudioSegment.from_file(path)
                         result = dict(index=seg.index, path=path, start=seg.start.total_seconds(),
