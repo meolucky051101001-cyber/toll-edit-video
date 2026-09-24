@@ -1181,6 +1181,47 @@ async def api_save_audio_settings(payload: dict = Body(...)):
     return save_audio_settings(bgm, dub)
 
 
+# ===== AUTO VOICE MODE (CODEX PLAN - SINGLE VOICE PER VIDEO) =====
+from ai.v1_auto_voice import (
+    get_auto_voice_enabled,
+    set_auto_voice_enabled,
+    get_auto_voice_mode,
+    get_manual_voice_info,
+)
+
+@app.get("/api/voice-auto")
+async def api_get_voice_auto():
+    """Lấy trạng thái chế độ tự động nhận diện giọng nói đầu video (Tool V1)."""
+    enabled = get_auto_voice_enabled(WORKSPACE)
+    manual_info = get_manual_voice_info(WORKSPACE)
+    return {
+        "enabled": enabled,
+        "mode": "auto" if enabled else "manual",
+        "manual_voice": manual_info,
+    }
+
+
+@app.post("/api/voice-auto")
+async def api_set_voice_auto(payload: dict = Body(...)):
+    """Bật / Tắt chế độ tự động nhận diện giọng nói đầu video (Tool V1)."""
+    current_enabled = get_auto_voice_enabled(WORKSPACE)
+    if "enabled" in payload:
+        target_enabled = bool(payload["enabled"])
+    else:
+        target_enabled = not current_enabled
+
+    set_auto_voice_enabled(target_enabled, updated_by="dashboard", workspace=WORKSPACE)
+    manual_info = get_manual_voice_info(WORKSPACE)
+    return {
+        "status": "ok",
+        "enabled": target_enabled,
+        "mode": "auto" if target_enabled else "manual",
+        "manual_voice": manual_info,
+        "message": "Đã BẬT tự động nhận diện giọng đầu video" if target_enabled else "Đã TẮT tự động nhận diện (Dùng giọng thủ công)",
+    }
+
+
+
 # ===== A2UI (AGENT-TO-USER INTERFACE) ISOLATED EXTENSION ENDPOINTS =====
 
 @app.get("/a2ui", response_class=HTMLResponse)
