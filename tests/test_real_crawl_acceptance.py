@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -189,6 +190,17 @@ async def test_live_crawl_douyin_real_results():
         assert is_valid, f"Live Douyin result failed identity validation: {err}"
         assert r.media_type == "video", f"Expected media_type='video', got '{r.media_type}'"
 
+        # Record verifiable capture manifest record in independent storage immediately at time of collection
+        from backend.services.identity_policy import record_live_crawl_capture
+
+        record_live_crawl_capture(
+            r,
+            query=raw_query,
+            submitted_query=target_query,
+            session_id=f"live-douyin-{int(time.time())}",
+            collector_version="v1.2.0-live",
+        )
+
         breakdown = rank_detailed(r, raw_query, alternative_queries=plan.tiered_queries)
         is_relevant, rel_reason = validate_compound_intent_relevance(r, breakdown, raw_query)
 
@@ -273,6 +285,17 @@ async def test_live_crawl_xiaohongshu_real_results():
         )
         assert is_valid, f"Live Xiaohongshu result failed identity validation: {err}"
         assert r.media_type == "video", f"Expected media_type='video' for content_type=video, got '{r.media_type}'"
+
+        # Record verifiable capture manifest record in independent storage immediately at time of collection
+        from backend.services.identity_policy import record_live_crawl_capture
+
+        record_live_crawl_capture(
+            r,
+            query=raw_query,
+            submitted_query=target_query,
+            session_id=f"live-xhs-{int(time.time())}",
+            collector_version="v1.2.0-live",
+        )
 
         breakdown = rank_detailed(r, raw_query, alternative_queries=plan.tiered_queries)
         is_relevant, rel_reason = validate_compound_intent_relevance(r, breakdown, raw_query)

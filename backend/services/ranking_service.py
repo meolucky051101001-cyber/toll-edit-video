@@ -570,6 +570,10 @@ def validate_sticker_tweezer_compound_intent(
     4. Standalone '手账' (planner/journal) without explicit sticker/guka keywords does NOT count as sticker.
     5. Rank breakdown missing_mandatory_intents must be clean of core intents.
     6. final_score must meet the floor threshold (>= 15.0). High score cannot substitute for missing intent.
+
+    SCOPE LIMITATION:
+    This validator evaluates textual title and caption/hashtag metadata only; it does not assert
+    multimodal visual frame understanding or video OCR comprehension.
     """
     if result.media_type != "video":
         return False, f"Rejected: media_type is '{result.media_type}', expected 'video'"

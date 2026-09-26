@@ -210,3 +210,250 @@ def test_provenance_audit_rejects_query_mismatch():
     assert res.source_provenance_verified is False
     assert res.status == "UNVERIFIED"
     assert "does not match" in res.detail
+
+
+def test_provenance_audit_with_static_fixture_and_precomputed_hash():
+    """Manifest record with precomputed static hash created independently verifies strictly."""
+    static_sample = {
+        "platform": "douyin",
+        "platform_video_id": "7350000000000000001",
+        "url": "https://www.douyin.com/video/7350000000000000001",
+        "title": "手账咕卡贴纸专用镊子开箱测评",
+        "author": "手账咕卡研究所",
+        "caption": "手账咕卡贴纸专用镊子开箱测评 弯头直头对比",
+        "hashtags": ["贴纸", "镊子", "咕卡"],
+        "media_type": "video",
+        "like_count": 48200,
+        "collected_at": "2026-09-22T10:00:00Z",
+        "query": "nhíp gắp sticker",
+        "submitted_query": "贴纸镊子",
+        "session_id": "session-fixed-20260926-01",
+        "collector_version": "v1.2.0-live",
+        "provenance_source": "douyin_live_search_capture",
+        "provenance_level": "verified_strict_audit",
+        "ground_truth_relevance": True,
+        "rationale": "Relevant video reviewing dedicated sticker tweezers.",
+    }
+
+    # Manifest record with precomputed hash (calculated independently beforehand without using helper in test)
+    static_manifest = [
+        {
+            "record_id": "cap-douyin-7350000000000000001",
+            "platform": "douyin",
+            "platform_video_id": "7350000000000000001",
+            "url": "https://www.douyin.com/video/7350000000000000001",
+            "query": "nhíp gắp sticker",
+            "submitted_query": "贴纸镊子",
+            "collected_at": "2026-09-22T10:00:00Z",
+            "session_id": "session-fixed-20260926-01",
+            "collector_version": "v1.2.0-live",
+            "author": "手账咕卡研究所",
+            "title": "手账咕卡贴纸专用镊子开箱测评",
+            "caption": "手账咕卡贴纸专用镊子开箱测评 弯头直头对比",
+            "hashtags": ["贴纸", "镊子", "咕卡"],
+            "media_type": "video",
+            "like_count": 48200,
+            "hash_version": "v2",
+            "metadata_hash": "sha256:5531bd8765d43ab66a4c64bfc762fb4bfbe4edebe889ca9d517f4833f9ebc775",
+        }
+    ]
+
+    res = audit_sample_provenance(
+        static_sample,
+        expected_query="nhíp gắp sticker",
+        capture_manifest=static_manifest,
+    )
+    assert res.schema_valid is True
+    assert res.source_provenance_verified is True
+    assert res.status == "VERIFIED_STRICT"
+    assert res.manifest_record_id == "cap-douyin-7350000000000000001"
+
+
+def test_provenance_audit_tampering_each_hashed_field_fails_verification():
+    """Mutating ANY single field included in metadata hash must fail verification."""
+    base_sample = {
+        "platform": "douyin",
+        "platform_video_id": "7350000000000000001",
+        "url": "https://www.douyin.com/video/7350000000000000001",
+        "title": "手账咕卡贴纸专用镊子开箱测评",
+        "author": "手账咕卡研究所",
+        "caption": "手账咕卡贴纸专用镊子开箱测评 弯头直头对比",
+        "hashtags": ["贴纸", "镊子", "咕卡"],
+        "media_type": "video",
+        "like_count": 48200,
+        "collected_at": "2026-09-22T10:00:00Z",
+        "query": "nhíp gắp sticker",
+        "submitted_query": "贴纸镊子",
+        "session_id": "session-fixed-20260926-01",
+        "collector_version": "v1.2.0-live",
+        "provenance_source": "douyin_live_search_capture",
+        "provenance_level": "verified_strict_audit",
+        "ground_truth_relevance": True,
+        "rationale": "Relevant video reviewing dedicated sticker tweezers.",
+    }
+
+    manifest = [
+        {
+            "record_id": "cap-douyin-7350000000000000001",
+            "platform": "douyin",
+            "platform_video_id": "7350000000000000001",
+            "url": "https://www.douyin.com/video/7350000000000000001",
+            "query": "nhíp gắp sticker",
+            "submitted_query": "贴纸镊子",
+            "collected_at": "2026-09-22T10:00:00Z",
+            "session_id": "session-fixed-20260926-01",
+            "collector_version": "v1.2.0-live",
+            "author": "手账咕卡研究所",
+            "title": "手账咕卡贴纸专用镊子开箱测评",
+            "caption": "手账咕卡贴纸专用镊子开箱测评 弯头直头对比",
+            "hashtags": ["贴纸", "镊子", "咕卡"],
+            "media_type": "video",
+            "like_count": 48200,
+            "hash_version": "v2",
+            "metadata_hash": "sha256:5531bd8765d43ab66a4c64bfc762fb4bfbe4edebe889ca9d517f4833f9ebc775",
+        }
+    ]
+
+    field_mutations = {
+        "title": "Tiêu đề bị chỉnh sửa",
+        "author": "Kênh giả mạo",
+        "caption": "Caption quảng cáo mới",
+        "hashtags": ["spam_tag"],
+        "like_count": 999999,
+        "collected_at": "2026-09-22T10:05:00Z",
+        "submitted_query": "truy vấn sai",
+        "session_id": "session-tampered-99",
+        "collector_version": "v9.9.9-modified",
+    }
+
+    for field_name, bad_value in field_mutations.items():
+        tampered_sample = dict(base_sample)
+        tampered_sample[field_name] = bad_value
+        res = audit_sample_provenance(
+            tampered_sample,
+            expected_query="nhíp gắp sticker",
+            capture_manifest=manifest,
+        )
+        assert res.source_provenance_verified is False, f"Expected verification failure when tampering '{field_name}'"
+        assert res.status == "UNVERIFIED_HASH_MISMATCH"
+
+
+def test_annotation_hash_and_tamper_detection():
+    """Separation of crawl data and benchmark annotations with verifiable annotation hash."""
+    from backend.services.identity_policy import (
+        audit_sample_annotation,
+        compute_sample_annotation_hash,
+        create_annotation_record,
+    )
+
+    sample = _make_valid_douyin_sample()
+
+    # Precomputed independently for: annotation_version=v1, ground_truth_relevance=True, platform=douyin,
+    # platform_video_id=7350000000000000001, rationale=Relevant video reviewing dedicated sticker tweezers.,
+    # reviewed_at=2026-09-22T10:00:00Z, reviewer=benchmark_reviewer
+    expected_ann_hash = "sha256:f3ada76cb11cb1f65a93fe236fbc8c170baaa1aa9fd24f59cbf5388bb0f966fd"
+    ann_rec = {
+        "record_id": "ann-douyin-7350000000000000001",
+        "platform": "douyin",
+        "platform_video_id": "7350000000000000001",
+        "ground_truth_relevance": True,
+        "rationale": "Relevant video reviewing dedicated sticker tweezers.",
+        "reviewer": "benchmark_reviewer",
+        "reviewed_at": "2026-09-22T10:00:00Z",
+        "annotation_version": "v1",
+        "annotation_hash": expected_ann_hash,
+    }
+
+    assert compute_sample_annotation_hash(ann_rec) == expected_ann_hash
+
+    # Verify create_annotation_record helper produces matching hash
+    ann_created = create_annotation_record(sample, reviewer="benchmark_reviewer", reviewed_at="2026-09-22T10:00:00Z")
+    assert ann_created["annotation_hash"] == expected_ann_hash
+
+    # Audit passes with valid record
+    ok, msg = audit_sample_annotation(sample, ann_rec)
+    assert ok is True
+    assert "Annotation verified" in msg
+
+    # Mutating ground_truth_relevance in sample or record fails
+    sample_tampered = dict(sample, ground_truth_relevance=False)
+    ok_rel, msg_rel = audit_sample_annotation(sample_tampered, ann_rec)
+    assert ok_rel is False
+    assert "Annotation relevance mismatch" in msg_rel
+
+    # Mutating rationale fails
+    sample_tampered_rat = dict(sample, rationale="Modified rationale that does not match")
+    ok_rat, msg_rat = audit_sample_annotation(sample_tampered_rat, ann_rec)
+    assert ok_rat is False
+    assert "Annotation rationale mismatch" in msg_rat
+
+    # Full audit integration with annotation_manifest
+    manifest = [create_capture_manifest_record(sample)]
+    res = audit_sample_provenance(
+        sample,
+        expected_query="nhíp gắp sticker",
+        capture_manifest=manifest,
+        annotation_manifest=[ann_rec],
+    )
+    assert res.source_provenance_verified is True
+    assert res.annotation_verified is True
+
+    # Audit fails if annotation record is tampered with
+    ann_tampered = dict(ann_rec, ground_truth_relevance=False)
+    res_tampered = audit_sample_provenance(
+        sample,
+        expected_query="nhíp gắp sticker",
+        capture_manifest=manifest,
+        annotation_manifest=[ann_tampered],
+    )
+    assert res_tampered.source_provenance_verified is False
+    assert res_tampered.status == "UNVERIFIED_ANNOTATION_MISMATCH"
+
+
+def test_live_crawl_manifest_append_and_lookup(tmp_path):
+    """Verifies that live crawl captures are appended to an independent JSONL manifest and can be audited."""
+    from backend.services.identity_policy import (
+        load_live_capture_manifest,
+        lookup_capture_manifest_record,
+        record_live_crawl_capture,
+    )
+
+    test_manifest_file = tmp_path / "test_live_manifest.jsonl"
+    sample = _make_valid_douyin_sample()
+
+    # Ingest a real live crawl capture
+    rec = record_live_crawl_capture(
+        sample,
+        query="nhíp gắp sticker",
+        submitted_query="贴纸镊子",
+        session_id="test-live-run-001",
+        collector_version="v1.2.0-live",
+        manifest_path=test_manifest_file,
+    )
+
+    assert test_manifest_file.exists()
+    records = load_live_capture_manifest(test_manifest_file)
+    assert len(records) == 1
+    assert records[0]["platform_video_id"] == sample["platform_video_id"]
+    assert records[0]["metadata_hash"] == rec["metadata_hash"]
+
+    # Lookup matches from JSONL path directly
+    found = lookup_capture_manifest_record(test_manifest_file, sample)
+    assert found is not None
+    assert found["record_id"] == rec["record_id"]
+
+    # Audit sample using JSONL manifest file path
+    sample_to_audit = dict(sample)
+    sample_to_audit["session_id"] = "test-live-run-001"
+    sample_to_audit["collector_version"] = "v1.2.0-live"
+    sample_to_audit["collected_at"] = rec["collected_at"]
+
+    res = audit_sample_provenance(
+        sample_to_audit,
+        expected_query="nhíp gắp sticker",
+        capture_manifest=test_manifest_file,
+    )
+    assert res.schema_valid is True
+    assert res.source_provenance_verified is True
+    assert res.status == "VERIFIED_STRICT"
+

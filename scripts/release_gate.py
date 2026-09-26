@@ -343,6 +343,20 @@ def main() -> int:
     total_audited = total_crawled_samples + total_holdout_samples
     schema_contract_passed = (metadata_schema_valid_samples == total_audited) and (total_audited > 0) and (rejected_samples == 0)
 
+    from backend.services.identity_policy import (
+        DEFAULT_LIVE_MANIFEST_PATH,
+        load_live_capture_manifest,
+    )
+
+    live_records = load_live_capture_manifest(DEFAULT_LIVE_MANIFEST_PATH)
+    rel_manifest_path = str(DEFAULT_LIVE_MANIFEST_PATH.relative_to(ROOT_DIR)).replace("\\", "/")
+
+    audit_level = (
+        "manifest_hash_verified"
+        if manifest_verified_samples > 0
+        else "schema_contract_only_unverified_fixtures"
+    )
+
     total_queries_verified = total_benchmark_queries + total_real_queries
     results["9_fixture_benchmark"] = {
         "passed": bench_ok and schema_contract_passed,
@@ -352,12 +366,24 @@ def main() -> int:
         "domain_benchmark_queries": total_benchmark_queries,
         "real_crawled_queries": total_real_queries,
         "total_samples_audited": total_audited,
+        "schema_valid": schema_contract_passed,
+        "schema_valid_samples": metadata_schema_valid_samples,
         "metadata_schema_valid": metadata_schema_valid_samples,
+        "manifest_verified": manifest_verified_samples > 0,
         "manifest_verified_samples": manifest_verified_samples,
+        "annotation_verified": False,
+        "annotation_verified_samples": 0,
         "unverified_samples": unverified_samples,
         "rejected_samples": rejected_samples,
         "source_provenance_verified": False,
-        "provenance_audit_level": "manifest_hash_verified",
+        "provenance_audit_level": audit_level,
+        "manifest_storage": {
+            "path": rel_manifest_path,
+            "type": "append_only_jsonl",
+            "live_records_count": len(live_records),
+            "status": "PENDING (no live crawl records in current run; retrieval blocked by auth)" if len(live_records) == 0 else f"{len(live_records)} live records recorded",
+            "guarantee_level": "metadata_hash_manifest_consistency (non-tamper-evident without external cryptographic signature)",
+        },
         "real_crawled_samples_provenance": total_crawled_samples,
         "independent_holdout_samples": total_holdout_samples,
         "crawled_video_samples": crawled_video_samples,
@@ -373,7 +399,7 @@ def main() -> int:
         "duration_s": t_bench,
     }
     if bench_ok and schema_contract_passed:
-        print(f"PASS ({total_benchmark_queries} domain queries + {total_real_queries} offline crawled queries [{total_crawled_samples} crawled + {total_holdout_samples} holdout samples; {crawled_video_samples} video, {crawled_image_text_samples} img/txt; {metadata_schema_valid_samples}/{total_audited} metadata_schema_valid, {manifest_verified_samples} manifest-verified, {unverified_samples} unverified fixture samples] verified) [{t_bench}s]")
+        print(f"PASS ({total_benchmark_queries} domain queries + {total_real_queries} offline crawled queries [{total_crawled_samples} crawled + {total_holdout_samples} holdout samples; {crawled_video_samples} video, {crawled_image_text_samples} img/txt; {metadata_schema_valid_samples}/{total_audited} schema_valid, {manifest_verified_samples} manifest_verified, 0 annotation_verified, {unverified_samples} unverified fixture samples] verified) [{t_bench}s]")
     else:
         print(f"FAIL (exit code {code}, schema_contract_passed={schema_contract_passed}, failures={audit_failures[:3]})")
         print(out[:500])

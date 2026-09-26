@@ -519,6 +519,15 @@ class SearchService:
                         )
                         db.add(existing)
                         db.flush()
+                        if not result.is_mock:
+                            from backend.services.identity_policy import record_live_crawl_capture
+                            record_live_crawl_capture(
+                                result,
+                                query=ranking_target,
+                                submitted_query=query,
+                                session_id=job_id,
+                                collector_version="v1.2.0-live",
+                            )
                         self.metric_service.record_snapshot(
                             video_id=existing.id,
                             like_count=existing.like_count,

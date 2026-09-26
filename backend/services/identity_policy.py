@@ -14,10 +14,11 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlsplit
+from uuid import uuid4
 
 from backend.services.download.network import (
     create_safe_async_client,
@@ -26,6 +27,11 @@ from backend.services.download.network import (
 )
 
 logger = logging.getLogger(__name__)
+
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+DEFAULT_LIVE_MANIFEST_PATH = ROOT_DIR / "data" / "manifests" / "live_capture_manifest.jsonl"
+DEFAULT_METADATA_HASH_VERSION = "v2"
+DEFAULT_ANNOTATION_HASH_VERSION = "v1"
 
 XHS_NOTE_REGEX = re.compile(
     r"/(?:explore|search_result|discovery/item)/([0-9a-fA-F]{24})(?:/|\?|$)"
@@ -432,29 +438,109 @@ class SampleProvenanceResult:
     status: str  # "VERIFIED_STRICT", "UNVERIFIED_LEGACY", "UNVERIFIED_MISSING_METADATA", "UNVERIFIED_PENDING_CAPTURE", "UNVERIFIED_HASH_MISMATCH", "UNVERIFIED_INSUFFICIENT_EVIDENCE", "INVALID_SCHEMA"
     detail: str
     reasons: list[str] = field(default_factory=list)
+    annotation_verified: bool = False
+    manifest_record_id: str | None = None
 
     def __iter__(self):
         """Allows unpacking as (schema_valid, detail) for backward compatibility."""
         return iter((self.schema_valid, self.detail))
 
 
-def compute_sample_metadata_hash(sample: dict[str, Any]) -> str:
-    """Computes a deterministic SHA-256 hash for sample metadata.
+def compute_sample_metadata_hash(
+    sample: dict[str, Any], version: str = DEFAULT_METADATA_HASH_VERSION
+) -> str:
+    """Computes a deterministic SHA-256 hash for raw crawl capture metadata.
 
-    Covers platform, platform_video_id, url, title, author, media_type,
-    collected_at, query, submitted_query, session_id, and collector_version.
+    Version v2 (default): Covers author, caption, collected_at, collector_version,
+    hash_version, hashtags, like_count, media_type, platform, platform_video_id,
+    query, session_id, submitted_query, title, and url.
+    Strictly excludes benchmark annotation labels (ground_truth_relevance, rationale),
+    which are hashed independently to guarantee separation of crawl and labeling data.
+
+    Version v1 (legacy compatibility): Covers collected_at, collector_version, media_type,
+    platform, platform_video_id, query, session_id, submitted_query, title, url.
+    """
+    canonical_payload: dict[str, Any]
+    if version == "v1":
+        canonical_payload = {
+            "collected_at": str(sample.get("collected_at") or "").strip(),
+            "collector_version": str(sample.get("collector_version") or "").strip(),
+            "media_type": str(sample.get("media_type") or "video").strip(),
+            "platform": str(sample.get("platform") or "").strip().lower(),
+            "platform_video_id": str(sample.get("platform_video_id") or "").strip(),
+            "query": str(sample.get("query") or "").strip(),
+            "session_id": str(sample.get("session_id") or "").strip(),
+            "submitted_query": str(sample.get("submitted_query") or "").strip(),
+            "title": str(sample.get("title") or "").strip(),
+            "url": str(sample.get("url") or "").strip(),
+        }
+    else:
+        raw_hashtags = sample.get("hashtags") or []
+        if isinstance(raw_hashtags, list):
+            clean_hashtags = sorted([str(h).strip() for h in raw_hashtags if str(h).strip()])
+        else:
+            clean_hashtags = []
+
+        like_val = sample.get("like_count")
+        if like_val is not None:
+            try:
+                like_count = int(like_val)
+            except (ValueError, TypeError):
+                like_count = None
+        else:
+            like_count = None
+
+        canonical_payload = {
+            "author": str(sample.get("author") or sample.get("author_name") or "").strip(),
+            "caption": str(sample.get("caption") or "").strip(),
+            "collected_at": str(sample.get("collected_at") or "").strip(),
+            "collector_version": str(sample.get("collector_version") or "").strip(),
+            "hash_version": "v2",
+            "hashtags": clean_hashtags,
+            "like_count": like_count,
+            "media_type": str(sample.get("media_type") or "video").strip(),
+            "platform": str(sample.get("platform") or "").strip().lower(),
+            "platform_video_id": str(sample.get("platform_video_id") or "").strip(),
+            "query": str(sample.get("query") or "").strip(),
+            "session_id": str(sample.get("session_id") or "").strip(),
+            "submitted_query": str(sample.get("submitted_query") or "").strip(),
+            "title": str(sample.get("title") or "").strip(),
+            "url": str(sample.get("url") or "").strip(),
+        }
+
+    encoded = json.dumps(
+        canonical_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def compute_sample_annotation_hash(
+    annotation: dict[str, Any], version: str = DEFAULT_ANNOTATION_HASH_VERSION
+) -> str:
+    """Computes a deterministic SHA-256 hash for benchmark annotation labels.
+
+    Decoupled from raw crawl capture metadata: covers ground_truth_relevance,
+    rationale, reviewer, reviewed_at timestamp, and target_video_id.
     """
     canonical_payload = {
-        "collected_at": str(sample.get("collected_at") or "").strip(),
-        "collector_version": str(sample.get("collector_version") or "").strip(),
-        "media_type": str(sample.get("media_type") or "video").strip(),
-        "platform": str(sample.get("platform") or "").strip().lower(),
-        "platform_video_id": str(sample.get("platform_video_id") or "").strip(),
-        "query": str(sample.get("query") or "").strip(),
-        "session_id": str(sample.get("session_id") or "").strip(),
-        "submitted_query": str(sample.get("submitted_query") or "").strip(),
-        "title": str(sample.get("title") or "").strip(),
-        "url": str(sample.get("url") or "").strip(),
+        "annotation_version": version,
+        "ground_truth_relevance": bool(annotation.get("ground_truth_relevance")),
+        "platform": str(annotation.get("platform") or "").strip().lower(),
+        "platform_video_id": str(
+            annotation.get("platform_video_id") or annotation.get("id") or ""
+        ).strip(),
+        "rationale": str(annotation.get("rationale") or "").strip(),
+        "reviewed_at": str(
+            annotation.get("reviewed_at")
+            or annotation.get("annotated_at")
+            or annotation.get("collected_at")
+            or ""
+        ).strip(),
+        "reviewer": str(
+            annotation.get("reviewer")
+            or annotation.get("annotator")
+            or "curator"
+        ).strip(),
     }
     encoded = json.dumps(
         canonical_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -462,13 +548,186 @@ def compute_sample_metadata_hash(sample: dict[str, Any]) -> str:
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
-def create_capture_manifest_record(
-    sample: dict[str, Any], record_id: str | None = None
+def create_annotation_record(
+    sample: dict[str, Any],
+    reviewer: str = "benchmark_reviewer",
+    reviewed_at: str | None = None,
+    version: str = DEFAULT_ANNOTATION_HASH_VERSION,
 ) -> dict[str, Any]:
-    """Generates an independent capture manifest record from a captured sample."""
+    """Generates an independent benchmark annotation record with verifiable annotation hash."""
+    plat = str(sample.get("platform") or "").strip().lower()
+    vid = str(sample.get("platform_video_id") or "").strip()
+    r_at = reviewed_at or str(sample.get("collected_at") or "").strip()
+    rec = {
+        "record_id": f"ann-{plat}-{vid}",
+        "platform": plat,
+        "platform_video_id": vid,
+        "ground_truth_relevance": bool(sample.get("ground_truth_relevance")),
+        "rationale": str(sample.get("rationale") or "").strip(),
+        "reviewer": reviewer,
+        "reviewed_at": r_at,
+        "annotation_version": version,
+    }
+    rec["annotation_hash"] = compute_sample_annotation_hash(rec, version=version)
+    return rec
+
+
+def audit_sample_annotation(
+    sample: dict[str, Any],
+    annotation_record: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    """Audits annotation integrity between a sample and its independent annotation record.
+
+    Detects if ground_truth_relevance or rationale was tampered with or modified.
+    """
+    if annotation_record is not None:
+        rec_gt = bool(annotation_record.get("ground_truth_relevance"))
+        sample_gt = bool(sample.get("ground_truth_relevance"))
+        if rec_gt != sample_gt:
+            return False, f"Annotation relevance mismatch: sample has {sample_gt} but record has {rec_gt}"
+        rec_rat = str(annotation_record.get("rationale") or "").strip()
+        sample_rat = str(sample.get("rationale") or "").strip()
+        if rec_rat != sample_rat:
+            return False, f"Annotation rationale mismatch: sample '{sample_rat}' vs record '{rec_rat}'"
+        expected_hash = annotation_record.get("annotation_hash")
+        computed_hash = compute_sample_annotation_hash(annotation_record)
+        if expected_hash and expected_hash != computed_hash:
+            return False, f"Annotation record hash mismatch: expected {expected_hash}, calculated {computed_hash}"
+        return True, f"Annotation verified against record '{annotation_record.get('record_id')}'"
+
+    # If sample itself has annotation_hash
+    sample_hash = sample.get("annotation_hash")
+    if sample_hash:
+        computed = compute_sample_annotation_hash(sample)
+        if sample_hash != computed:
+            return False, f"Sample annotation hash mismatch: expected {sample_hash}, calculated {computed}"
+        return True, "Sample annotation hash verified"
+
+    return False, "Missing annotation record or annotation_hash"
+
+
+def append_live_capture_manifest_record(
+    record: dict[str, Any],
+    manifest_path: Path | str | None = None,
+) -> Path:
+    """Appends a verifiable capture record to an independent append-only JSONL manifest file."""
+    p = Path(manifest_path) if manifest_path else DEFAULT_LIVE_MANIFEST_PATH
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return p
+
+
+def record_live_crawl_capture(
+    item: Any,
+    query: str,
+    submitted_query: str,
+    session_id: str | None = None,
+    collector_version: str = "v1.2.0-live",
+    manifest_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Records a live crawl event into an independent append-only capture manifest.
+
+    NOTE: Must ONLY be called when ingesting real provider/crawl events, NEVER for
+    retroactively fabricating provenance for old unverified fixtures.
+    """
+    if isinstance(item, dict):
+        platform = str(item.get("platform") or "").strip().lower()
+        vid = str(item.get("platform_video_id") or "").strip()
+        url = str(item.get("url") or "").strip()
+        title = str(item.get("title") or "").strip()
+        author = str(item.get("author") or item.get("author_name") or "").strip()
+        caption = str(item.get("caption") or "").strip()
+        hashtags = list(item.get("hashtags") or [])
+        like_count = item.get("like_count")
+        media_type = str(item.get("media_type") or "video").strip()
+    else:
+        platform = str(getattr(item, "platform", "") or "").strip().lower()
+        vid = str(getattr(item, "platform_video_id", "") or "").strip()
+        url = str(getattr(item, "url", "") or "").strip()
+        title = str(getattr(item, "title", "") or "").strip()
+        author = str(getattr(item, "author_name", "") or getattr(item, "author", "") or "").strip()
+        caption = str(getattr(item, "caption", "") or "").strip()
+        hashtags = list(getattr(item, "hashtags", []) or [])
+        like_count = getattr(item, "like_count", None)
+        media_type = str(getattr(item, "media_type", "video") or "video").strip()
+
+    collected_at = datetime.now(timezone.utc).isoformat()
+    sess_id = session_id or f"live-crawl-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    rec_id = f"cap-{platform}-{vid}-{uuid4().hex[:8]}"
+
+    sample_repr = {
+        "author": author,
+        "caption": caption,
+        "collected_at": collected_at,
+        "collector_version": collector_version,
+        "hashtags": hashtags,
+        "like_count": like_count,
+        "media_type": media_type,
+        "platform": platform,
+        "platform_video_id": vid,
+        "query": query,
+        "session_id": sess_id,
+        "submitted_query": submitted_query,
+        "title": title,
+        "url": url,
+    }
+    meta_hash = compute_sample_metadata_hash(sample_repr, version="v2")
+
+    record = {
+        "record_id": rec_id,
+        "platform": platform,
+        "platform_video_id": vid,
+        "url": url,
+        "query": query,
+        "submitted_query": submitted_query,
+        "collected_at": collected_at,
+        "session_id": sess_id,
+        "collector_version": collector_version,
+        "author": author,
+        "title": title,
+        "caption": caption,
+        "hashtags": hashtags,
+        "media_type": media_type,
+        "like_count": like_count,
+        "hash_version": "v2",
+        "metadata_hash": meta_hash,
+    }
+    append_live_capture_manifest_record(record, manifest_path=manifest_path)
+    return record
+
+
+def load_live_capture_manifest(manifest_path: Path | str | None = None) -> list[dict[str, Any]]:
+    """Loads all records from an append-only JSONL capture manifest."""
+    p = Path(manifest_path) if manifest_path else DEFAULT_LIVE_MANIFEST_PATH
+    if not p.exists():
+        return []
+    records = []
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            for line in f:
+                line_str = line.strip()
+                if line_str:
+                    records.append(json.loads(line_str))
+    except Exception as exc:
+        logger.warning("Error reading capture manifest at %s: %s", p, exc)
+    return records
+
+
+def create_capture_manifest_record(
+    sample: dict[str, Any],
+    record_id: str | None = None,
+    version: str = DEFAULT_METADATA_HASH_VERSION,
+) -> dict[str, Any]:
+    """Generates an independent capture manifest record from a captured sample.
+
+    NOTE: This helper is provided for ingestion of real crawl events. It must NOT be used
+    to retroactively fabricate provenance for unverified fixture samples.
+    """
     plat = str(sample.get("platform") or "").strip().lower()
     vid = str(sample.get("platform_video_id") or "").strip()
     r_id = record_id or f"cap-{plat}-{vid}"
+    raw_hashtags = sample.get("hashtags") or []
     return {
         "record_id": r_id,
         "platform": plat,
@@ -479,7 +738,14 @@ def create_capture_manifest_record(
         "collected_at": str(sample.get("collected_at") or "").strip(),
         "session_id": str(sample.get("session_id") or "").strip(),
         "collector_version": str(sample.get("collector_version") or "").strip(),
-        "metadata_hash": compute_sample_metadata_hash(sample),
+        "author": str(sample.get("author") or sample.get("author_name") or "").strip(),
+        "title": str(sample.get("title") or "").strip(),
+        "caption": str(sample.get("caption") or "").strip(),
+        "hashtags": list(raw_hashtags),
+        "media_type": str(sample.get("media_type") or "video").strip(),
+        "like_count": sample.get("like_count"),
+        "hash_version": version,
+        "metadata_hash": compute_sample_metadata_hash(sample, version=version),
     }
 
 
@@ -494,6 +760,8 @@ def lookup_capture_manifest_record(
         p = Path(manifest)
         if not p.exists():
             return None
+        if p.suffix == ".jsonl":
+            return lookup_capture_manifest_record(load_live_capture_manifest(p), sample)
         try:
             with open(p, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -554,6 +822,7 @@ def audit_sample_provenance(
     sample: dict[str, Any],
     expected_query: str | None = None,
     capture_manifest: Any = None,
+    annotation_manifest: Any = None,
 ) -> SampleProvenanceResult:
     """Strictly audits a benchmark/dataset sample for schema validity and source provenance.
 
@@ -811,6 +1080,20 @@ def audit_sample_provenance(
             status="UNVERIFIED_MANIFEST_MISMATCH",
             detail=f"Manifest platform '{m_plat}' does not match sample platform '{s_plat}'",
             reasons=[f"Manifest platform mismatch: '{m_plat}' vs '{s_plat}'"],
+            manifest_record_id=manifest_rec.get("record_id"),
+        )
+
+    # Validate manifest ID and canonical URL consistency
+    m_vid = str(manifest_rec.get("platform_video_id") or manifest_rec.get("id") or "").strip()
+    s_vid = str(sample.get("platform_video_id") or "").strip()
+    if m_vid and s_vid and m_vid != s_vid:
+        return SampleProvenanceResult(
+            schema_valid=True,
+            source_provenance_verified=False,
+            status="UNVERIFIED_MANIFEST_MISMATCH",
+            detail=f"Manifest video ID '{m_vid}' does not match sample video ID '{s_vid}'",
+            reasons=[f"Manifest video ID mismatch: '{m_vid}' vs '{s_vid}'"],
+            manifest_record_id=manifest_rec.get("record_id"),
         )
 
     # Validate metadata hash
@@ -822,19 +1105,53 @@ def audit_sample_provenance(
             status="UNVERIFIED_INSUFFICIENT_EVIDENCE",
             detail="Capture manifest record missing metadata_hash",
             reasons=["Capture manifest record missing metadata_hash"],
+            manifest_record_id=manifest_rec.get("record_id"),
         )
 
-    actual_hash = compute_sample_metadata_hash(sample)
     clean_exp = str(expected_hash).strip().lower().removeprefix("sha256:")
-    clean_act = str(actual_hash).strip().lower().removeprefix("sha256:")
-    if clean_exp != clean_act:
+    actual_hash_v2 = compute_sample_metadata_hash(sample, version="v2")
+    clean_v2 = actual_hash_v2.strip().lower().removeprefix("sha256:")
+    actual_hash_v1 = compute_sample_metadata_hash(sample, version="v1")
+    clean_v1 = actual_hash_v1.strip().lower().removeprefix("sha256:")
+
+    req_version = manifest_rec.get("hash_version", "v2")
+    if req_version == "v1":
+        hash_matched = (clean_exp == clean_v1)
+        actual_hash_str = actual_hash_v1
+    else:
+        hash_matched = (clean_exp == clean_v2) or (clean_exp == clean_v1)
+        actual_hash_str = actual_hash_v2 if clean_exp == clean_v2 else actual_hash_v1
+
+    if not hash_matched:
         return SampleProvenanceResult(
             schema_valid=True,
             source_provenance_verified=False,
             status="UNVERIFIED_HASH_MISMATCH",
-            detail=f"Metadata hash mismatch with manifest record '{manifest_rec.get('record_id')}': expected {expected_hash}, calculated {actual_hash}",
-            reasons=[f"Metadata hash mismatch: expected {expected_hash}, got {actual_hash}"],
+            detail=f"Metadata hash mismatch with manifest record '{manifest_rec.get('record_id')}': expected {expected_hash}, calculated {actual_hash_str}",
+            reasons=[f"Metadata hash mismatch: expected {expected_hash}, got {actual_hash_str}"],
+            manifest_record_id=manifest_rec.get("record_id"),
         )
+
+    # Optional annotation verification
+    ann_verified = False
+    if annotation_manifest is not None:
+        ann_rec = lookup_capture_manifest_record(annotation_manifest, sample)
+        if ann_rec:
+            ann_ok, ann_detail = audit_sample_annotation(sample, ann_rec)
+            if not ann_ok:
+                return SampleProvenanceResult(
+                    schema_valid=True,
+                    source_provenance_verified=False,
+                    status="UNVERIFIED_ANNOTATION_MISMATCH",
+                    detail=f"Annotation label verification failed: {ann_detail}",
+                    reasons=[ann_detail],
+                    annotation_verified=False,
+                    manifest_record_id=manifest_rec.get("record_id"),
+                )
+            ann_verified = True
+    elif sample.get("annotation_hash"):
+        ann_ok, _ = audit_sample_annotation(sample)
+        ann_verified = ann_ok
 
     return SampleProvenanceResult(
         schema_valid=True,
@@ -842,4 +1159,6 @@ def audit_sample_provenance(
         status="VERIFIED_STRICT",
         detail=f"Provenance strictly verified against capture manifest record '{manifest_rec.get('record_id')}'",
         reasons=[],
+        annotation_verified=ann_verified,
+        manifest_record_id=manifest_rec.get("record_id"),
     )

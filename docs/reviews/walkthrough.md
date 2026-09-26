@@ -9,19 +9,19 @@ Hệ thống đã trải qua quy trình kiểm chuẩn tự động nghiêm ng�
 | STT | Giai Đoạn Kiểm Tra | Công Cụ / Lệnh Thực Thi | Kết Quả | Chi Tiết Nghiệm Thu |
 | :---: | :--- | :--- | :--- | :--- |
 | **1** | **Runtime Environment** | `check_environment()` | **PASS** | Python 3.12.14 verified (>= 3.11) [0.0s] |
-| **2** | **Database Schema** | `check_database()` | **PASS** | 5 bảng cốt lõi SQLite (`videos`, `search_jobs`, `job_videos`, `dubbing_jobs`, `video_metric_snapshots`) [0.29s] |
-| **3** | **Backend Code Linter** | `ruff check backend/ tests/ scripts/` | **0 errors** | Tuân thủ tuyệt đối chuẩn PEP8 / Ruff [0.12s] |
-| **4** | **Backend Static Types** | `mypy backend` | **0 errors** | 76/76 tập tin nguồn backend kiểm tra kiểu tĩnh hoàn hảo [0.83s] |
-| **5** | **Frontend Code Linter** | `npm run lint` | **0 errors, 0 warnings** | ESLint Next.js 16 / React 19 đạt chuẩn [57.58s] |
-| **6** | **Frontend Typecheck** | `npx tsc --noEmit` | **0 errors** | 0 lỗi TypeScript trên toàn bộ codebase frontend [5.74s] |
-| **7** | **Frontend Production Build** | `npm run build` | **SUCCESS** | Biên dịch tối ưu toàn bộ trang và API routes Next.js [29.78s] |
-| **8** | **Backend Pytest Suite** | `pytest -q` | **471/471 PASS** | 471 passed, 0 failed, 3 skipped [155.05s] |
-| **9** | **Fixture & Crawled Benchmark** | `pytest tests/test_evaluation_benchmark.py tests/test_query_precision_evaluation.py ...` | **PASS** | 60 domain queries + 4 crawled queries [20 crawled + 13 holdout samples: 16 video, 4 img/txt; 33/33 metadata_schema_valid, 0 manifest-verified, 33 unverified fixture samples] [4.63s] |
-| **10** | **Playwright E2E Tests** | `npx playwright test` | **26/26 PASS** | 26 ca kiểm thử E2E trên 7 tập tin spec (bao gồm ca kiểm thử điều phối `active_platform` đa nền tảng) [54.17s] |
-| **11** | **Live Crawl Acceptance** | `python scripts/release_gate.py --live --require-live` | **OPERATIONAL** | Network Reachability: **PASS** (Douyin: HTTP 200, XHS: HTTP 200). Retrieval: Douyin BLOCKED (CHALLENGE_REQUIRED), XHS BLOCKED (LOGIN_REQUIRED) [76.04s] |
+| **2** | **Database Schema** | `check_database()` | **PASS** | 5 bảng cốt lõi SQLite (`videos`, `search_jobs`, `job_videos`, `dubbing_jobs`, `video_metric_snapshots`) [0.35s] |
+| **3** | **Backend Code Linter** | `ruff check backend/ tests/ scripts/` | **0 errors** | Tuân thủ tuyệt đối chuẩn PEP8 / Ruff [0.15s] |
+| **4** | **Backend Static Types** | `mypy backend` | **0 errors** | 76/76 tập tin nguồn backend kiểm tra kiểu tĩnh hoàn hảo [0.70s] |
+| **5** | **Frontend Code Linter** | `npm run lint` | **0 errors, 0 warnings** | ESLint Next.js 16 / React 19 đạt chuẩn [69.91s] |
+| **6** | **Frontend Typecheck** | `npx tsc --noEmit` | **0 errors** | 0 lỗi TypeScript trên toàn bộ codebase frontend [11.46s] |
+| **7** | **Frontend Production Build** | `npm run build` | **SUCCESS** | Biên dịch tối ưu toàn bộ trang và API routes Next.js [32.41s] |
+| **8** | **Backend Pytest Suite** | `pytest -q` | **475/475 PASS** | 475 passed, 0 failed, 3 skipped [143.60s] |
+| **9** | **Fixture & Crawled Benchmark** | `pytest tests/test_evaluation_benchmark.py tests/test_query_precision_evaluation.py ...` | **PASS** | 60 domain queries + 4 crawled queries [20 crawled + 13 holdout samples: 16 video, 4 img/txt; 33/33 schema_valid, 0 manifest_verified, 0 annotation_verified, 33 unverified fixture samples] [3.69s] |
+| **10** | **Playwright E2E Tests** | `npx playwright test` | **26/26 PASS** | 26 ca kiểm thử E2E trên 7 tập tin spec (bao gồm ca kiểm thử điều phối `active_platform` đa nền tảng) [39.19s] |
+| **11** | **Live Crawl Acceptance** | `python scripts/release_gate.py --live --require-live` | **OPERATIONAL** | Network Reachability: **PASS** (Douyin: HTTP 200, XHS: HTTP 200). Retrieval: Douyin BLOCKED (CHALLENGE_REQUIRED), XHS BLOCKED (LOGIN_REQUIRED) [24.42s] |
 
 **Phán quyết Cổng Phát hành (Verdict)**:  
-`APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH` (Tổng thời gian: 389.39s)  
+`APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH` (Tổng thời gian: 331.00s)  
 *Chi tiết kiểm chứng đồng bộ tuyệt đối lưu tại tệp versioned:* [`release_gate_report.json`](file:///C:/Users/admin/Projects/ai-video-research-tool/release_gate_report.json).
 
 ---
@@ -72,21 +72,32 @@ Bằng chứng thực thi Strict Gate đã được ghi nhận trực tiếp và
 
 ## 3. Phân Định Minh Bạch Các Tầng Kiểm Thử & Tiêu Chí Độ Chính Xác Mới
 
-### A. Xác Minh Nguồn Gốc Độc Lập Bằng Capture Manifest (Verifiable Manifest Provenance Audit)
-- **Hàm kiểm định**: [`audit_sample_provenance(sample, expected_query=None, capture_manifest=None)`](file:///C:/Users/admin/Projects/ai-video-research-tool/backend/services/identity_policy.py).
-- **Cơ chế Capture Manifest độc lập**:
-  - `compute_sample_metadata_hash(sample)`: Tính mã băm SHA-256 xác định trên JSON chuẩn hóa của metadata mẫu.
-  - `lookup_capture_manifest_record(manifest, sample)`: Đối chiếu mẫu với bản ghi lưu độc lập trong manifest.
+### A. Xác Minh Nguồn Gốc Bằng Capture Manifest Độc Lập & Tách Biệt Nhãn Annotation (Verifiable Manifest Provenance Audit)
+- **Hàm kiểm định**: [`audit_sample_provenance(sample, expected_query=None, capture_manifest=None, annotation_manifest=None)`](file:///C:/Users/admin/Projects/ai-video-research-tool/backend/services/identity_policy.py).
+- **Cơ chế Capture Manifest độc lập (`data/manifests/live_capture_manifest.jsonl`)**:
+  - Lưu trữ theo định dạng append-only JSONL hoàn toàn độc lập với thư mục benchmark fixtures.
+  - Tích hợp trực tiếp vào luồng crawler thật (`tests/test_real_crawl_acceptance.py` và `SearchService.persist_results`): mỗi khi crawler thu thập được video thật từ Douyin/Xiaohongshu, record manifest được ghi ngay tại thời điểm thu thập.
+  - Mỗi bản ghi manifest lưu giữ: `record_id`, `platform`, `platform_video_id`, `url`, `query`, `submitted_query`, `collected_at`, `session_id`, `collector_version`, `author`, `title`, `caption`, `hashtags`, `media_type`, `like_count`, `hash_version`, và `metadata_hash`.
   - `source_provenance_verified = True` **chỉ khi** tìm thấy bản ghi tương ứng trong capture manifest độc lập VÀ mã băm SHA-256 metadata khớp 100%.
   - Tuyệt đối không coi `session_id` có định dạng hợp lệ hay giá trị `metadata_hash`/`source_capture_ref` tự khai báo trên mẫu là bằng chứng nguồn gốc.
-  - Khi chưa có capture manifest (dữ liệu fixture hồi quy cũ), giữ `schema_valid = True` (nếu đúng schema) nhưng trả trạng thái `UNVERIFIED_PENDING_CAPTURE`, `source_provenance_verified = False`, và **không tính vào** `strict_provenance_verified_samples`.
+  - Khi chưa có capture manifest (dữ liệu fixture hồi quy cũ), giữ `schema_valid = True` (nếu đúng schema) nhưng trả trạng thái `UNVERIFIED_PENDING_CAPTURE`, `source_provenance_verified = False`, và **không tính vào** `manifest_verified_samples`.
+  - **Mức bảo đảm nguồn gốc**: Mã băm xác nhận tính nhất quán dữ liệu với capture manifest; hệ thống không tuyên bố chống sửa đổi độc lập tuyệt đối (tamper-proof / non-repudiation) khi manifest chưa có chữ ký số mật mã ngoài.
   - Tuyệt đối tuân thủ nguyên tắc Không làm giả dữ liệu cũ (Zero retroactive tampering).
+- **Phân tách Dữ liệu Crawl Thô và Nhãn Benchmark Annotation**:
+  - `compute_sample_metadata_hash(sample, version='v2')`: Bao phủ toàn diện hợp đồng metadata nguồn (`author`, `caption`, `hashtags`, `like_count`, `media_type`, `url`, `platform_video_id`, `platform`, `query`, `submitted_query`, `session_id`, `collector_version`). Tách biệt hoàn toàn nhãn `ground_truth_relevance` và `rationale`.
+  - `compute_sample_annotation_hash(sample, version='v1')` & `create_annotation_record(...)`: Tạo bản ghi annotation độc lập gồm `reviewer`, `reviewed_at`, `ground_truth_relevance`, `rationale` và mã băm `annotation_hash` riêng.
 - **Kết quả trả về**: Đối tượng `SampleProvenanceResult` gồm:
   - `schema_valid`: `True` nếu mẫu thỏa mãn schema cơ bản (ID hợp lệ, URL canonical, ISO 8601 có timezone, media_type video/image_text, title, author, ground_truth_relevance boolean).
   - `source_provenance_verified`: `True` khi và chỉ khi đối chiếu khớp capture manifest độc lập.
-  - `status`: Phân loại rõ ràng: `VERIFIED_STRICT`, `UNVERIFIED_PENDING_CAPTURE`, `UNVERIFIED_LEGACY`, hoặc `INVALID_SCHEMA`.
+  - `annotation_verified`: `True` khi và chỉ khi đối chiếu khớp annotation manifest độc lập.
+  - `status`: Phân loại rõ ràng: `VERIFIED_STRICT`, `UNVERIFIED_PENDING_CAPTURE`, `UNVERIFIED_LEGACY`, `UNVERIFIED_HASH_MISMATCH`, `UNVERIFIED_ANNOTATION_MISMATCH`, hoặc `INVALID_SCHEMA`.
+  - `manifest_record_id`: ID bản ghi manifest đối chiếu.
   - `detail`: Thông điệp giải thích chi tiết.
-- **Bộ test chuyên biệt**: [`tests/test_provenance_audit.py`](file:///C:/Users/admin/Projects/ai-video-research-tool/tests/test_provenance_audit.py) gồm 12 ca kiểm thử bao phủ từ chối session ID giả, hash tự khai báo tùy tiện, capture ID không tồn tại trong manifest, metadata hash bị lệch, và xác nhận manifest hợp lệ.
+- **Bộ test chuyên biệt**: [`tests/test_provenance_audit.py`](file:///C:/Users/admin/Projects/ai-video-research-tool/tests/test_provenance_audit.py) gồm 15 ca kiểm thử bao phủ:
+  - Test với manifest cố định và hash kỳ vọng được tạo độc lập trước (`sha256:5531bd8765d43ab66a4c64bfc762fb4bfbe4edebe889ca9d517f4833f9ebc775`).
+  - Test sửa từng trường đã hash (`title`, `author`, `caption`, `hashtags`, `like_count`, `collected_at`, `submitted_query`, `session_id`, `collector_version`) đều làm xác minh thất bại.
+  - Test sửa nhãn annotation (`ground_truth_relevance`, `rationale`) bị phát hiện tức thì bằng `annotation_hash`.
+  - Test ghi và đối chiếu JSONL manifest độc lập.
 
 ### B. Khóa Chặt Cấu Hình Live Gate (Gate Config Lockdown)
 - **Hàm xác thực**: [`validate_live_gate_config(min_samples, min_relevance_rate)`](file:///C:/Users/admin/Projects/ai-video-research-tool/backend/services/ranking_service.py#L472-L513).
@@ -104,8 +115,9 @@ Bằng chứng thực thi Strict Gate đã được ghi nhận trực tiếp và
   2. **Compound-Intent Validator**: Đo lường riêng cho truy vấn ghép `"nhíp gắp sticker"` ($N=5$ Douyin samples, Precision = 1.00, Accuracy = 1.00, phân loại chính xác tất cả các distractor).
   3. **General Threshold Classifier**: Đo lường ngưỡng phân loại ($Score \ge 15.0$) cho 4 truy vấn lĩnh vực khác ($N=8$, Precision = 1.00, Accuracy = 1.00).
 - **Báo cáo phân tách**: Báo cáo rõ ràng số lượng mẫu ($N$), nền tảng (`Douyin only (Xiaohongshu: PENDING DATA)`), và định dạng (`video` vs `image_text`).
+- **Nhãn kiểm toán Stage 9**: Ghi nhận chính xác `provenance_audit_level: "schema_contract_only_unverified_fixtures"` khi `manifest_verified_samples = 0`, phân biệt rõ việc đạt chuẩn hợp đồng cấu trúc với chứng nhận nguồn gốc thu thập thật.
 
-### D. Khóa Chặt Validator Truy Vấn Ghép & Phòng Thủ Nhiễu (Locked-Down Compound Intent Validator)
+### D. Khóa Chặt Validator Truy Vấn Ghép & Giới Hạn Phạm Vi Đánh Giá (Locked-Down Compound Intent Validator)
 - **Giới hạn phạm vi**: [`validate_compound_intent_relevance()`](file:///C:/Users/admin/Projects/ai-video-research-tool/backend/services/ranking_service.py) và [`validate_sticker_tweezer_compound_intent()`](file:///C:/Users/admin/Projects/ai-video-research-tool/backend/services/ranking_service.py) giới hạn nghiêm ngặt cho truy vấn `"nhíp gắp sticker"`; tự động ném `ValueError` nếu truyền truy vấn không hỗ trợ.
 - **Bắt buộc cả Tool VÀ Purpose xuất hiện trong `title`**:
   - Video hợp lệ bắt buộc phải chứa **cả hai thực thể** (Tool và Purpose) ngay trong `title` (tiêu đề).
@@ -119,6 +131,8 @@ Bằng chứng thực thi Strict Gate đã được ghi nhận trực tiếp và
   - Tự động quét cả tiêu đề và mô tả/hashtag để loại trừ các lĩnh vực không tương thích:
     - Nhíp nối mi / làm đẹp: `睫毛`, `eyelash`, `nối mi`, `双眼皮`.
     - Nhíp sửa điện thoại / điện tử / hàn mạch: `修手机`, `sửa điện thoại`, `焊点`, `soldering`, `主板`.
+- **Giới Hạn Phạm Vi Đánh Giá (Scope Limitation)**:
+  - Validator chỉ đánh giá metadata dạng văn bản (tiêu đề, mô tả, hashtag); chưa được xem là hiểu nội dung hình ảnh/video trực quan nếu chưa thực hiện OCR hoặc xử lý mô hình thị giác máy tính trên từng khung hình video.
 - **Bộ test chuyên biệt**: [`tests/test_compound_intent_distractors.py`](file:///C:/Users/admin/Projects/ai-video-research-tool/tests/test_compound_intent_distractors.py) gồm 8 ca kiểm thử bao phủ toàn bộ các dạng distractor và spam hashtag.
 
 ### E. Minh Bạch Trạng Thái Vận Hành Live (Live Operational Transparency)
@@ -128,6 +142,8 @@ Bằng chứng thực thi Strict Gate đã được ghi nhận trực tiếp và
   - `retrieval_available`: Tìm kiếm live trả về kết quả thật mà không bị chặn bởi cơ chế bảo vệ.
   - `retrieval_block_reason`: Ghi rõ lý do chặn cụ thể (`CAPTCHA_CHALLENGE` hoặc `LOGIN_REQUIRED`).
   - `precision_verified`: Độ chính xác của kết quả live được xác minh bằng validator.
+- Khi bị chặn: `results_count = 0`, `relevant_count = 0`, `precision_verified = false`, `retrieval_available = false`.
+- Lệnh `python scripts/release_gate.py --live --require-live` bắt buộc trả về **exit code 2** (fail-closed trung thực).
 - Khi bị chặn: `results_count = 0`, `relevant_count = 0`, `precision_verified = false`, `retrieval_available = false`.
 - Lệnh `python scripts/release_gate.py --live --require-live` bắt buộc trả về **exit code 2** (fail-closed trung thực).
 
