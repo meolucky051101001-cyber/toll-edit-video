@@ -24,6 +24,7 @@ Tài liệu được nhóm theo thứ tự đọc: chọn phiên bản → cài/
 
 ## 4. Ghi chú kỹ thuật theo chủ đề
 
+- [Kiến trúc backend](backend_architecture.md) — ranh giới module, đường dẫn, profile CPU/GPU, dependencies phát triển và CI.
 - [Pipeline V2 phases 1–2](pipeline_v2_phases_1_2.md)
 - [Pipeline V2 review fixes](pipeline_v2_review_fixes.md)
 - [Pipeline speed V2.3.6](pipeline_speed_v2_3_6.md)

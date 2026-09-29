@@ -49,6 +49,11 @@ class SingleVoiceTests(unittest.IsolatedAsyncioTestCase):
             await generate_tts_audio_v2([segment(1, "male")], directory,
                                         voice_source="rvc", enable_auto_gender=True)
             self.assertEqual(voices, ["BV075_streaming"])
+            voices.clear()
+            await generate_tts_audio_v2([segment(1, "male"), segment(2, "female")], directory,
+                                        voice_source="rvc", enable_auto_gender=False,
+                                        speaker_voice_map={"male": "BV075_streaming", "female": "BV562_streaming"})
+            self.assertEqual(voices, ["BV562_streaming", "BV562_streaming"])
 
     async def test_rvc_fixed_voice_converts_all_segments_and_invalidates_mixed_cache(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -63,7 +68,7 @@ class SingleVoiceTests(unittest.IsolatedAsyncioTestCase):
             infos = []
             for index, gender in ((1, "male"), (2, "female")):
                 key = "tts/{}.mp3".format(index)
-                runner.artifact_store.put_bytes(key, b"tts")
+                runner.artifact_store.put_bytes(key, b"tts" * 200)
                 infos.append({"index": index, "gender": gender, "artifact_key": key})
             runner.artifact_store.put_json("tts/segments.json", {"segments": infos})
             converted = []

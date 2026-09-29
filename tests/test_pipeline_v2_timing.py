@@ -7,6 +7,7 @@ from pathlib import Path
 from backend.pipeline_v2.segments import RuntimeSegment
 from backend.pipeline_v2.timing import (
     TimingPolicy,
+    borrow_gap_silence,
     fit_audio_to_window,
     plan_actual_timing_rewrites,
     plan_segment,
@@ -15,6 +16,27 @@ from backend.pipeline_v2.timing import (
 
 
 class TimingSolverTests(unittest.TestCase):
+    def test_borrow_gap_silence_expands_tight_segment_into_subsequent_gap(self):
+        seg1 = RuntimeSegment(
+            index=1,
+            start=timedelta(seconds=0.5),
+            end=timedelta(seconds=0.97),
+            content="da thú nữa rồi",
+            source_segment_id=66,
+        )
+        seg2 = RuntimeSegment(
+            index=2,
+            start=timedelta(seconds=1.5),
+            end=timedelta(seconds=4.0),
+            content="Chúng ta phải tìm loại vật liệu mát mẻ",
+            source_segment_id=67,
+        )
+        policy = TimingPolicy()
+        self.assertFalse(plan_segment(seg1, policy).fits)
+        expanded = borrow_gap_silence([seg1, seg2], policy)
+        self.assertTrue(plan_segment(expanded[0], policy).fits)
+        self.assertGreater(expanded[0].end.total_seconds(), 0.97)
+        self.assertLessEqual(expanded[0].end.total_seconds(), 1.5 - 0.12)
     def test_default_policy_matches_production_speed_envelope(self):
         policy = TimingPolicy()
         self.assertEqual(policy.atempo_min, 1.00)
@@ -104,6 +126,40 @@ class TimingSolverTests(unittest.TestCase):
         self.assertEqual(len(requests), 1)
         self.assertEqual(requests[0].source_segment_id, 9)
         self.assertLess(requests[0].max_characters, len(segment.content.replace(" ", "")))
+
+    def test_split_merges_short_introductory_clauses(self):
+        segment = RuntimeSegment(
+            index=146,
+            start=timedelta(seconds=585.04),
+            end=timedelta(seconds=587.76),
+            content="Sau này, tôi đã học được cách sử dụng vỏ trái cây để bảo vệ những con rồng non.",
+            source_segment_id=146,
+        )
+        solved = solve_segment_timing([segment])
+        # Short clause "Sau này," (< 4 words) must not be isolated into a 0.3s micro-segment
+        # Instead, it splits into balanced clauses where each clause has at least 4 words
+        for s in solved.segments:
+            self.assertGreaterEqual(len(s.content.split()), 4)
+            dur = (s.end - s.start).total_seconds()
+            self.assertGreaterEqual(dur, 1.0)
+        self.assertEqual(
+            "".join(s.content for s in solved.segments).replace(" ", ""),
+            segment.content.replace(" ", ""),
+        )
+
+    def test_split_merges_short_phrases_in_compound_sentences(self):
+        segment = RuntimeSegment(
+            index=154,
+            start=timedelta(seconds=618.34),
+            end=timedelta(seconds=622.48),
+            content="Assassin, tuy nhiên, đi một mình đến một con mương khác, và một con rồng miệng lạ đi theo anh ta, giữ lại nhiều hơn.",
+            source_segment_id=154,
+        )
+        solved = solve_segment_timing([segment])
+        # Must not create 1-2 word fragments like "Assassin," or "tuy nhiên,"
+        for s in solved.segments:
+            self.assertGreaterEqual(len(s.content.split()), 4)
+
 
 
 class AudioFitIntegrationTests(unittest.TestCase):

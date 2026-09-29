@@ -11,7 +11,7 @@ from backend.telegram_bot import process_v2_telegram_job, TelegramJobPaths
 
 
 class TestTelegramBotV2Delivery(unittest.IsolatedAsyncioTestCase):
-    async def test_process_v2_telegram_job_calls_send_video_safely_when_context_present(self):
+    async def test_process_v2_telegram_job_saves_locally_and_edits_status_by_default(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             video_path = root / "input.mp4"
@@ -20,7 +20,46 @@ class TestTelegramBotV2Delivery(unittest.IsolatedAsyncioTestCase):
             paths = TelegramJobPaths.create(str(root / "workspace"), str(root / "output"), "test_job")
             paths.prepare_directories()
 
-            # Mock pipeline runner so it produces the final video
+            async def fake_run_pipeline(*args, **kwargs):
+                paths.final_video.write_bytes(b"dummy final video")
+                paths.delivery_copy.write_bytes(b"dummy final video copy")
+
+            mock_send_video_safely = AsyncMock()
+            mock_safe_edit = AsyncMock()
+            mock_status = AsyncMock()
+            mock_context = SimpleNamespace(bot=AsyncMock())
+
+            with patch("backend.telegram_bot.run_pipeline_v2_for_telegram", side_effect=fake_run_pipeline), \
+                 patch("backend.telegram_bot.send_video_safely", mock_send_video_safely), \
+                 patch("backend.telegram_bot.safe_edit_status", mock_safe_edit):
+                await process_v2_telegram_job(
+                    str(video_path),
+                    paths,
+                    "test_title",
+                    mock_status,
+                    context=mock_context,
+                    chat_id=123456789,
+                    url_or_filename="https://example.com/video",
+                )
+
+            # By default: video is saved locally, NOT sent to Telegram
+            self.assertEqual(mock_send_video_safely.call_count, 0)
+            self.assertEqual(mock_safe_edit.call_count, 1)
+            call_args = mock_safe_edit.call_args[0]
+            self.assertEqual(call_args[0], mock_status)
+            self.assertIn("test_title", call_args[1])
+            self.assertIn("lưu trực tiếp vào máy", call_args[1])
+            self.assertIn(str(paths.delivery_copy), call_args[1])
+
+    async def test_process_v2_telegram_job_calls_send_video_safely_when_upload_enabled(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            video_path = root / "input.mp4"
+            video_path.write_bytes(b"input video content")
+
+            paths = TelegramJobPaths.create(str(root / "workspace"), str(root / "output"), "test_job_upload")
+            paths.prepare_directories()
+
             async def fake_run_pipeline(*args, **kwargs):
                 paths.final_video.write_bytes(b"dummy final video")
 
@@ -28,7 +67,8 @@ class TestTelegramBotV2Delivery(unittest.IsolatedAsyncioTestCase):
             mock_status = AsyncMock()
             mock_context = SimpleNamespace(bot=AsyncMock())
 
-            with patch("backend.telegram_bot.run_pipeline_v2_for_telegram", side_effect=fake_run_pipeline), \
+            with patch.dict("os.environ", {"AUTODUB_TELEGRAM_UPLOAD_VIDEO": "true"}), \
+                 patch("backend.telegram_bot.run_pipeline_v2_for_telegram", side_effect=fake_run_pipeline), \
                  patch("backend.telegram_bot.send_video_safely", mock_send_video_safely):
                 await process_v2_telegram_job(
                     str(video_path),

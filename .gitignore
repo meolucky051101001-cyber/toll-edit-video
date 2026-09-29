@@ -7,7 +7,11 @@ models/
 venv/
 env/
 *.env
-backend/.env
+*.env*
+.env*
+backend/.env*
+*.key
+*.pem
 
 # Python and test caches
 __pycache__/
@@ -31,8 +35,6 @@ temp_burn*
 *.png
 *.ass
 *.srt
-# User-specific downloader input; keep URLs local and untracked
-urls.txt
 
 # Large optional model assets
 *.pth
@@ -50,3 +52,10 @@ backups/
 benchmarks/
 *.before-*
 *.patch
+
+# Safe-to-commit environment templates (real .env files remain ignored).
+!.env.cpu.example
+!.env.gpu.example
+
+# User-specific downloader input; keep URLs local and untracked
+urls.txt

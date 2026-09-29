@@ -106,7 +106,7 @@ class PipelineSettings:
         env = environment if environment is not None else os.environ
         mode_value = env.get("PIPELINE_MODE", PipelineMode.V2.value).strip().lower()
         qc_value = env.get(
-            "QC_GATE_POLICY", QCGatePolicy.BLOCK.value
+            "QC_GATE_POLICY", env.get("AUTODUB_QC_GATE_POLICY", QCGatePolicy.BLOCK.value)
         ).strip().lower()
         try:
             mode = PipelineMode(mode_value)

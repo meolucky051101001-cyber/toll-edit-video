@@ -47,8 +47,29 @@ class OCRSession:
                 self.close()
                 raise ModelRuntimeError('OCR session timed out')
             time.sleep(.05)
-        data = json.loads(response.read_text(encoding='utf-8'))
-        response.unlink()
+
+        data = None
+        read_error = None
+        for attempt in range(20):
+            try:
+                text_content = response.read_text(encoding='utf-8')
+                if text_content.strip():
+                    data = json.loads(text_content)
+                    break
+            except (PermissionError, OSError, json.JSONDecodeError) as exc:
+                read_error = exc
+                time.sleep(0.05)
+
+        if data is None:
+            raise ModelRuntimeError(f"Failed to read OCR session response ({response.name}) after retries: {read_error}")
+
+        for _ in range(5):
+            try:
+                response.unlink(missing_ok=True)
+                break
+            except (PermissionError, OSError):
+                time.sleep(0.05)
+
         if not data.get('success'):
             raise ModelRuntimeError(data.get('error', 'OCR failed'))
         return data['result']

@@ -603,6 +603,90 @@ class TestPixelCoverQC(unittest.TestCase):
             self.assertTrue(any("cover_hold_0" in k for k in keys))
 
 
+    def test_clean_video_without_subtitles_passes_pixel_cover_qc(self):
+        """When video has no source subtitles (is_subtitle=False), pixel_cover_qc must pass without covers."""
+        import json
+        from unittest import mock
+        from backend.pipeline_v2.qc import run_report_only_qc, QCSettings
+
+        with tempfile.TemporaryDirectory() as td:
+            video_file = Path(td) / "clean_video.mp4"
+            video_file.write_bytes(b"dummy")
+            report_file = Path(td) / "qc_report.json"
+            ass_file = Path(td) / "subs.ass"
+            ass_file.write_text(
+                "[Script Info]\nPlayResX: 1080\nPlayResY: 1920\n\n[Events]\n"
+                "Dialogue: 1,0:00:01.00,0:00:04.00,TextStyle,,0,0,0,,Subtitles on clean video\n",
+                encoding="utf-8-sig",
+            )
+            # All segments have is_subtitle=False (no source subtitles on screen)
+            segments = [
+                {
+                    "id": 1,
+                    "start": 1.0,
+                    "end": 4.0,
+                    "text": "Clean speech",
+                    "orig_content": "No Chinese subtitle on video",
+                    "is_subtitle": False,
+                    "tracking_blocks": [],
+                    "best_block": None,
+                },
+            ]
+            seg_file = Path(td) / "segments.json"
+            seg_file.write_text(json.dumps(segments), encoding="utf-8")
+
+            def fake_run_command(cmd, timeout=30.0):
+                cmd_str = " ".join(str(c) for c in cmd)
+                if "ffprobe" in cmd_str:
+                    mock_res = mock.Mock(returncode=0)
+                    mock_res.stdout = json.dumps({"format": {"duration": "10.0"}, "streams": [{"codec_type": "video", "duration": "10.0"}]})
+                    mock_res.stderr = ""
+                    return mock_res
+                elif "ffmpeg" in cmd_str:
+                    return _handle_mock_ffmpeg(cmd, payload=b"dummy")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with mock.patch("backend.pipeline_v2.qc._run_command", side_effect=fake_run_command):
+                with mock.patch("backend.pipeline_v2.cover_qc.inspect_frame_pixel_coverage") as mock_pix:
+                    mock_pix.return_value = {"checked": False, "reason": "no_active_covers_at_timestamp"}
+                    report = run_report_only_qc(
+                        video_path=video_file,
+                        report_path=report_file,
+                        ass_path=ass_file,
+                        segments_path=seg_file,
+                        settings=QCSettings(sample_frames=True),
+                    )
+
+            pix_check = next((c for c in report.checks if getattr(c, "name", None) == "pixel_cover_qc"), None)
+            self.assertIsNotNone(pix_check)
+            # Must pass because video has no source subtitles to cover!
+            self.assertEqual(pix_check.status, "pass")
+            self.assertTrue(report.metrics.get("pixel_cover_qc", {}).get("all_boxes_filled"))
+
+    def test_check_subtitle_text_collision_detects_overlapping_dialogues(self):
+        from backend.pipeline_v2.cover_qc import check_subtitle_text_collision
+
+        ass_colliding = (
+            "[Script Info]\nPlayResX: 2560\nPlayResY: 1440\n\n[Events]\n"
+            "Dialogue: 1,0:00:17.52,0:00:17.82,TextStyle,,0,0,0,,{\\an8\\pos(640,610)}Đầu tiên đổi sang tỷ lệ điện ảnh\n"
+            "Dialogue: 1,0:00:17.52,0:00:17.82,TextStyle,,0,0,0,,{\\an8\\pos(639,610)}Mắt trần ngắm nhìn\n"
+        )
+        res = check_subtitle_text_collision(ass_colliding)
+        self.assertTrue(res["has_collision"])
+        self.assertEqual(res["collision_count"], 1)
+        self.assertEqual(res["collisions"][0]["start"], 17.52)
+        self.assertEqual(res["collisions"][0]["end"], 17.82)
+
+        ass_clean = (
+            "[Script Info]\nPlayResX: 2560\nPlayResY: 1440\n\n[Events]\n"
+            "Dialogue: 1,0:00:13.08,0:00:17.52,TextStyle,,0,0,0,,{\\an8\\pos(640,610)}Đầu tiên đổi sang tỷ lệ điện ảnh\n"
+            "Dialogue: 1,0:00:17.52,0:00:18.61,TextStyle,,0,0,0,,{\\an8\\pos(639,610)}Mắt trần ngắm nhìn\n"
+        )
+        res_clean = check_subtitle_text_collision(ass_clean)
+        self.assertFalse(res_clean["has_collision"])
+        self.assertEqual(res_clean["collision_count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
 
