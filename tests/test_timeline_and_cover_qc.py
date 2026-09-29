@@ -39,7 +39,7 @@ import numpy as np
 from PIL import Image
 
 from backend.ocr_utils import OCRBlock
-from backend.pipeline_v2.content import merge_ocr_geometry
+from backend.pipeline_v2.content import merge_ocr_geometry, merge_runtime_segments
 from backend.pipeline_v2.cover_qc import (
     build_expected_cover_timeline,
     ExpectedCoverEvent,
@@ -69,6 +69,20 @@ def _create_synthetic_frame(file_path: Path, width: int = 1080, height: int = 19
     img = Image.fromarray(arr)
     file_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(file_path, format="PNG")
+
+
+def _create_synthetic_batch(command, width: int = 1080, height: int = 1920):
+    """Materialize all sequence outputs requested by one FFmpeg invocation."""
+    if "-frames:v" not in command:
+        return []
+    pattern = Path(command[-1])
+    count = int(command[command.index("-frames:v") + 1])
+    paths = []
+    for index in range(count):
+        path = Path(str(pattern).replace("%06d", "{:06d}".format(index)))
+        _create_synthetic_frame(path, width=width, height=height)
+        paths.append(path)
+    return paths
 
 
 class TestExpectedCoverTimeline(unittest.TestCase):
@@ -374,11 +388,11 @@ class TestExpectedCoverTimeline(unittest.TestCase):
                     mock_res.stderr = ""
                     return mock_res
                 elif "ffmpeg" in cmd_str:
-                    if str(cmd[-1]) != "-":
-                        out_path = Path(cmd[-1])
-                        _create_synthetic_frame(out_path, width=1080, height=1920)
-                        ffmpeg_frame_calls.append(out_path.name)
-                    return mock.Mock(returncode=0, stdout="", stderr="")
+                    if "-frames:v" in cmd:
+                        _create_synthetic_batch(cmd, width=1080, height=1920)
+                        ffmpeg_frame_calls.append(tuple(cmd))
+                    from tests.test_pixel_cover_qc import _mock_pts
+                    return mock.Mock(returncode=0, stdout="", stderr=_mock_pts(cmd))
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             with mock.patch("backend.pipeline_v2.qc._run_command", side_effect=fake_run_command):
@@ -390,8 +404,8 @@ class TestExpectedCoverTimeline(unittest.TestCase):
                     settings=QCSettings(sample_frames=True, diagnostic_max_samples=30),
                 )
 
-            self.assertLessEqual(len(ffmpeg_frame_calls), 30, "FFmpeg frame extraction calls must strictly NOT exceed budget of 30")
-            self.assertEqual(len(ffmpeg_frame_calls), 30, "Budget of 30 frames should be fully utilized when 50 candidates exist")
+            self.assertEqual(len(ffmpeg_frame_calls), 1, "All diagnostic frames must be extracted by one FFmpeg decode")
+            self.assertEqual(len(report.diagnostic_artifacts), 30, "Budget of 30 frame artifacts should be fully utilized")
             self.assertLessEqual(len(report.diagnostic_artifacts), 30, "Diagnostic artifacts count must not exceed 30")
 
     def test_segment_serialization_preserves_classification_metadata(self):
@@ -557,10 +571,9 @@ class TestRealQCFailureDetections(unittest.TestCase):
                 mock_res.stderr = ""
                 return mock_res
             elif "ffmpeg" in cmd_str:
-                if str(cmd[-1]) != "-":
-                    out_path = Path(cmd[-1])
-                    _create_synthetic_frame(out_path, width=1080, height=1920)
-                return mock.Mock(returncode=0, stdout="", stderr="")
+                _create_synthetic_batch(cmd, width=1080, height=1920)
+                from tests.test_pixel_cover_qc import _mock_pts
+                return mock.Mock(returncode=0, stdout="", stderr=_mock_pts(cmd))
             return mock.Mock(returncode=0, stdout="", stderr="")
 
         return video_file, report_file, ass_file, seg_file, fake_run_command
@@ -699,6 +712,92 @@ class TestRealQCFailureDetections(unittest.TestCase):
             self.assertIsNotNone(src_check)
             # On 9c4f070, this assertion FAILS (returns 'pass' instead of 'error'):
             self.assertEqual(src_check.status, "error", "Unbridged gap (100ms) between adjacent subtitles must fail QC")
+
+    def test_watermark_collision_detected_and_cleared(self):
+        from backend.pipeline_v2.cover_qc import check_watermark_collision
+        # Canvas 1280x720 (Landscape 16:9). Watermark zone is X >= 1066.24 (0.833), Y >= 612 (0.85).
+        wm_box = (1066.24, 612.0, 1280.0, 720.0)
+        # Case 1: Overlapping cover box reaching X=1200, Y=660
+        overlapping_cover = [(10.0, 15.0, 400.0, 620.0, 1200.0, 680.0)]
+        res_overlap = check_watermark_collision(overlapping_cover, 1280, 720, watermark_box=wm_box)
+        self.assertTrue(res_overlap["has_collision"])
+        self.assertEqual(res_overlap["collision_count"], 1)
+
+        # Case 2: Snug safe cover box clamped to X=1040, Y=660 (well before 1066)
+        safe_cover = [(10.0, 15.0, 400.0, 620.0, 1040.0, 680.0)]
+        res_safe = check_watermark_collision(safe_cover, 1280, 720, watermark_box=wm_box)
+        self.assertFalse(res_safe["has_collision"])
+        self.assertEqual(res_safe["collision_count"], 0)
+
+        # Case 3: When no watermark_box is configured, no false positive collision occurs
+        res_unconfigured = check_watermark_collision(overlapping_cover, 1280, 720, watermark_box=None)
+        self.assertFalse(res_unconfigured["has_collision"])
+        self.assertEqual(res_unconfigured["collision_count"], 0)
+
+    def test_uncovered_cjk_text_fails_qc_gate_even_if_expected_regions_empty(self):
+        """Verify that exposed CJK subtitle text fails pixel cover QC even with empty expected_regions."""
+        from backend.pipeline_v2.cover_qc import inspect_frame_pixel_coverage
+        with tempfile.TemporaryDirectory() as td:
+            frame_p = Path(td) / "test_frame.png"
+            _create_synthetic_frame(frame_p, width=1280, height=720, white_box=(300, 600, 700, 660))
+            active_covers = [(0.0, 5.0, 300, 600, 700, 660)]
+
+            # Case A: Residual exposed CJK text detected by OCR outside the active cover
+            uncovered_cjk = [{
+                "text": "半小时前，挖坑抓鱼",
+                "score": 0.999,
+                "y_pct": [0.78, 0.89],
+                "x_pct": [0.20, 0.78],
+            }]
+            res = inspect_frame_pixel_coverage(
+                frame_p,
+                active_covers,
+                canvas_w=1280,
+                canvas_h=720,
+                timestamp=2.5,
+                expected_regions=[],
+                uncovered_cjk_items=uncovered_cjk,
+            )
+            self.assertFalse(res["all_boxes_filled"], "Frame with exposed CJK text must fail QC")
+            self.assertTrue(res["overflow_detected"])
+            self.assertIn("uncovered_cjk_text_detected", res["reason"])
+
+            # Case B: Clean frame with no exposed CJK text and proper fill passes
+            res_clean = inspect_frame_pixel_coverage(
+                frame_p,
+                active_covers,
+                canvas_w=1280,
+                canvas_h=720,
+                timestamp=2.5,
+                expected_regions=[],
+                uncovered_cjk_items=[],
+            )
+            self.assertTrue(res_clean["all_boxes_filled"], "Clean covered frame must pass QC")
+            self.assertFalse(res_clean["overflow_detected"])
+            self.assertIsNone(res_clean["reason"])
+
+    def test_real_artifact_cover_shift_1103_pre_fails_qc_if_present(self):
+        """Regression test: cover_shift_1103_pre.png with exposed yellow Chinese text MUST fail QC."""
+        from backend.pipeline_v2.cover_qc import inspect_frame_pixel_coverage, parse_ass_covers
+        sample_img = Path(r"D:\workspace_v2\benchmark_runs\e2e_v4_warm_verify\job\pipeline_v2\artifacts\qc\frames\cover_shift_1103_pre.png")
+        sample_ass = Path(r"D:\workspace_v2\benchmark_runs\e2e_v4_warm_verify\job\pipeline_v2\artifacts\subtitles\final.ass")
+        if not sample_img.is_file() or not sample_ass.is_file():
+            self.skipTest("Benchmark artifact not found, skipping disk regression test")
+
+        covers, cw, ch = parse_ass_covers(sample_ass.read_text(encoding="utf-8-sig"))
+        uncovered = [{"text": "半小时前挖坑抓鱼", "score": 0.999, "y_pct": [0.782, 0.892], "x_pct": [0.208, 0.784]}]
+        res = inspect_frame_pixel_coverage(
+            sample_img,
+            covers,
+            canvas_w=cw,
+            canvas_h=ch,
+            timestamp=978.23,
+            expected_regions=[],
+            uncovered_cjk_items=uncovered,
+        )
+        self.assertFalse(res["all_boxes_filled"], "Old defective cover_shift_1103_pre.png MUST FAIL QC")
+        self.assertTrue(res["overflow_detected"])
+        self.assertIn("半小时前挖坑抓鱼", res["reason"])
 
 
 if __name__ == "__main__":

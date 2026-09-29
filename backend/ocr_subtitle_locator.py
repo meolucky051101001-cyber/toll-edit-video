@@ -106,7 +106,7 @@ def _geometry_score(
 
     width = right - left
     height = bottom - top
-    if not (0.0 <= left < right <= 1.0 and 0.03 <= top < bottom <= 0.96):
+    if not (0.0 <= left < right <= 1.0 and 0.01 <= top < bottom <= 0.995):
         return None
     # Burned-in captions can legitimately run almost edge-to-edge (the source
     # may even crop the first/last glyph).  Rejecting boxes wider than 90%
@@ -114,7 +114,7 @@ def _geometry_score(
     # no white cover.  Wide scene/package text is still protected by the
     # transcript-match and static-text checks below, so width alone must not
     # disqualify an otherwise valid ASR-matched subtitle.
-    if width < 0.025 or width > 1.0 + 1e-9 or height < 0.007 or height > 0.14:
+    if width < 0.025 or width > 0.90001 or height < 0.007 or height > 0.14:
         return None
 
     pixel_aspect = (width * max(frame_width, 1)) / (

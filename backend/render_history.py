@@ -1,6 +1,6 @@
 """
 render_history.py - Quản lý và lưu trữ vĩnh viễn thời gian render/edit của từng video thành phẩm.
-Hỗ trợ đọc và ghi đồng bộ giữa Tool V1, Tool V2 và Telegram Bot qua D:\banve\.render_history.json.
+Có thể đọc lịch sử workspace dùng chung nếu được cấu hình qua environment.
 """
 import os
 import json
@@ -9,8 +9,38 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
-SHARED_HISTORY_FILE = Path(r"D:\banve\.render_history.json")
-V2_HISTORY_FILE = Path(os.getenv("TOOL_V2_RENDER_HISTORY", r"D:\banve\.render_history_v2.json"))
+try:
+    from pipeline_v2.atomic_io import atomic_write_json
+except ImportError:
+    try:
+        from backend.pipeline_v2.atomic_io import atomic_write_json
+    except ImportError:
+        atomic_write_json = None
+
+try:
+    from backend.config.paths import AppPaths
+    from backend.environment import read_environment
+except ImportError:
+    from config.paths import AppPaths
+    from environment import read_environment
+
+BACKEND_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BACKEND_DIR.parent
+PATHS = AppPaths.from_environment(PROJECT_ROOT, read_environment(BACKEND_DIR))
+WORKSPACE_DIR = PATHS.workspace
+def _resolve_v2_history():
+    bs = WORKSPACE_DIR / "bot_system"
+    target = bs / ".render_history_v2.json"
+    if target.exists() or bs.is_dir():
+        return target
+    return WORKSPACE_DIR / ".render_history_v2.json"
+
+SHARED_HISTORY_FILE = (
+    PATHS.shared_workspace_dir / "bot_system" / ".render_history.json"
+    if PATHS.shared_workspace_dir
+    else None
+)
+V2_HISTORY_FILE = Path(os.getenv("TOOL_V2_RENDER_HISTORY", str(_resolve_v2_history())))
 HISTORY_FILE = V2_HISTORY_FILE
 
 
@@ -31,17 +61,26 @@ def format_duration(seconds: float) -> str:
 
 
 def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int]:
-    """Đọc toàn bộ lịch sử thời gian render từ các file lịch sử và job manifest V2."""
+    """Đọc toàn bộ lịch sử thời gian render từ các file lịch sử trong workspace và job manifest V2."""
     meta: Dict[str, int] = {}
 
-    # 1. Đọc từ các file history JSON trong D:\banve
-    target_dir = Path(output_dir) if output_dir else Path(r"D:\banve")
+    # 1. Đọc file history JSON trong workspace hiện hành và workspace chia sẻ.
     history_files = [
-        target_dir / ".render_history.json",
-        target_dir / ".render_history_v2.json",
-        SHARED_HISTORY_FILE,
         V2_HISTORY_FILE,
+        WORKSPACE_DIR / "bot_system" / ".render_history_v2.json",
+        WORKSPACE_DIR / "bot_system" / ".render_history.json",
+        WORKSPACE_DIR / ".render_history.json",
     ]
+    if PATHS.shared_workspace_dir:
+        history_files.extend(
+            [
+                SHARED_HISTORY_FILE,
+                PATHS.shared_workspace_dir / "bot_system" / ".render_history_v2.json",
+                PATHS.shared_workspace_dir / ".render_history_v2.json",
+                PATHS.shared_workspace_dir / "bot_system" / ".render_history.json",
+                PATHS.shared_workspace_dir / ".render_history.json",
+            ]
+        )
     for hf in history_files:
         if hf.exists():
             try:
@@ -57,10 +96,16 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
 
     # 2. Đọc bổ sung từ job_status.json (nếu có)
     workspace_candidates = [
-        Path(r"C:\tool v1\workspace\job_status.json"),
-        Path(r"C:\tool v2\workspace\job_status.json"),
-        Path(__file__).resolve().parents[1] / "workspace" / "job_status.json",
+        WORKSPACE_DIR / "bot_system" / "job_status.json",
+        WORKSPACE_DIR / "job_status.json",
     ]
+    if PATHS.shared_workspace_dir:
+        workspace_candidates.extend(
+            [
+                PATHS.shared_workspace_dir / "bot_system" / "job_status.json",
+                PATHS.shared_workspace_dir / "job_status.json",
+            ]
+        )
     for ws in workspace_candidates:
         if ws.exists():
             try:
@@ -81,11 +126,9 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
                 pass
 
     # 3. Đọc bổ sung từ các job manifest V2 trong workspace
-    v2_workspaces = [
-        Path(r"C:\tool v2\workspace"),
-        Path(r"C:\tool v1\workspace"),
-        Path(__file__).resolve().parents[1] / "workspace",
-    ]
+    v2_workspaces = [WORKSPACE_DIR]
+    if PATHS.shared_workspace_dir:
+        v2_workspaces.append(PATHS.shared_workspace_dir)
     for root_ws in v2_workspaces:
         if root_ws.is_dir():
             for mf in root_ws.glob("*/pipeline_v2/job_manifest.json"):
@@ -119,7 +162,7 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
 
 
 def record_render_duration(video_name_or_path: str, duration_seconds: float) -> None:
-    """Ghi nhận thời gian render đồng thời vào cả .render_history.json và .render_history_v2.json."""
+    """Ghi nhận thời gian render đồng thời vào cả .render_history.json và .render_history_v2.json một cách an toàn."""
     if not duration_seconds or duration_seconds <= 0:
         return
     clean_name = os.path.basename(video_name_or_path)
@@ -127,6 +170,23 @@ def record_render_duration(video_name_or_path: str, duration_seconds: float) -> 
 
     target_files = [HISTORY_FILE]
     for history_file in target_files:
+        history_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = history_file.with_name(history_file.name + ".lock")
+        lock_fd = None
+
+        # Khóa file để đồng bộ đa tiến trình trên Windows
+        try:
+            import msvcrt
+            lock_fd = open(lock_file, "a+", encoding="utf-8")
+            for _ in range(30):
+                try:
+                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except (IOError, OSError):
+                    time.sleep(0.05)
+        except Exception:
+            pass
+
         try:
             meta: Dict[str, int] = {}
             if history_file.exists():
@@ -144,9 +204,29 @@ def record_render_duration(video_name_or_path: str, duration_seconds: float) -> 
             else:
                 meta[f"Dubbed_{clean_name}"] = dur_int
 
-            history_file.parent.mkdir(parents=True, exist_ok=True)
-            temporary = history_file.with_suffix(history_file.suffix + f".tmp.{os.getpid()}")
-            temporary.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-            temporary.replace(history_file)
-        except Exception:
-            pass
+            if atomic_write_json is not None:
+                atomic_write_json(history_file, meta)
+            else:
+                temporary = history_file.with_suffix(history_file.suffix + f".tmp.{os.getpid()}")
+                temporary.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+                # Thử lại khi có tranh chấp trên Windows
+                for attempt in range(8):
+                    try:
+                        temporary.replace(history_file)
+                        break
+                    except OSError:
+                        time.sleep(min(0.05 * (2 ** attempt), 0.5))
+        except Exception as e:
+            import logging
+            logging.getLogger("render_history").warning(f"Lỗi ghi nhận lịch sử render vào {history_file}: {e}")
+        finally:
+            if lock_fd:
+                try:
+                    import msvcrt
+                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+                except Exception:
+                    pass
+                try:
+                    lock_fd.close()
+                except Exception:
+                    pass

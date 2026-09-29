@@ -139,6 +139,8 @@ class FastProfileTests(unittest.TestCase):
         import sys
         from backend.ai import voice_cloning as vc
         sys.modules["ai.voice_cloning"] = vc
+        import ai
+        ai.voice_cloning = vc
 
         seg = RuntimeSegment(
             index=1,

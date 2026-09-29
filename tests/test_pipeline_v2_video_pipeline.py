@@ -11,6 +11,7 @@ from backend.pipeline_v2.config import PipelineMode, PipelineSettings, QCGatePol
 from backend.pipeline_v2.qc import evaluate_qc_gate
 from backend.pipeline_v2.segments import RuntimeSegment, segments_to_dicts
 from backend.pipeline_v2.video_pipeline import (
+    PIPELINE_IMPLEMENTATION_VERSION,
     VideoPipelineRequest,
     VideoPipelineRunner,
     compose_srt,
@@ -259,11 +260,11 @@ class VideoPipelineEndToEndTests(unittest.IsolatedAsyncioTestCase):
                 manifest_v27 = VideoPipelineRunner(request)._load_or_create_manifest()
                 self.assertEqual(manifest_v27.metadata["pipeline_implementation_version"], "2.10.0")
 
-            # Now run under the current implementation (2.12.0).
+            # Now run under the current implementation (2.13.2).
             runner_v28 = VideoPipelineRunner(request)
             manifest_v28 = runner_v28._load_or_create_manifest()
 
-            self.assertEqual(manifest_v28.metadata["pipeline_implementation_version"], "2.12.0")
+            self.assertEqual(manifest_v28.metadata["pipeline_implementation_version"], PIPELINE_IMPLEMENTATION_VERSION)
             self.assertNotEqual(
                 manifest_v27.fingerprints.config_sha256,
                 manifest_v28.fingerprints.config_sha256,

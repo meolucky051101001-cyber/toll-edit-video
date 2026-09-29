@@ -106,12 +106,12 @@ class AcceptanceTests(unittest.TestCase):
         from backend.ai import translation as tr
         with patch.object(tr, "_gemini_unhealthy_until", 0), patch.object(tr, "_gemini_transient_failures", 0), patch.object(tr, "current_model_policy", return_value=SimpleNamespace(gemini_candidates=["one", "two", "three"])), patch.object(tr.requests, "post", side_effect=TimeoutError("private-url")) as post:
             self.assertIsNone(tr.translate_with_gemini(["你好"], api_key="dummy_key"))
-            self.assertEqual(post.call_count, 2)
+            self.assertEqual(post.call_count, 3)
             self.assertFalse(tr.is_gemini_available())
             self.assertNotIn("dummy_key", post.call_args.args[0])
             self.assertEqual(post.call_args.kwargs["timeout"], 20)
             tr.translate_with_gemini(["你好"], api_key="dummy_key")
-            self.assertEqual(post.call_count, 2)
+            self.assertEqual(post.call_count, 3)
 
     def test_gemini_bad_json_can_try_second_model(self):
         from backend.ai import translation as tr

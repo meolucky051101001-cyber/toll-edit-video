@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 
-def sample_video_frames(video_path, count=5, start=None, end=None, max_width=960):
+def sample_video_frames(video_path, count=5, start=None, end=None, max_width=960, timestamps=None):
     """Decode once on CUDA and transfer only selected, downscaled frames.
 
     Selection uses presentation timestamps, including on variable-FPS sources.
@@ -14,18 +14,22 @@ def sample_video_frames(video_path, count=5, start=None, end=None, max_width=960
     """
     import cv2
 
-    count = max(1, min(12, int(count)))
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     options = dict(capture_output=True, text=True, encoding="utf-8", errors="replace",
                    creationflags=flags)
-    if end is None:
-        probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
-            "format=duration", "-of", "json", str(video_path)], timeout=15, check=True, **options)
-        end = float(json.loads(probe.stdout)["format"]["duration"])
-    start, end = max(0.0, float(start or 0)), float(end)
-    if end <= start:
-        return []
-    times = [start + (end - start) * i / (count + 1) for i in range(1, count + 1)]
+    if timestamps:
+        times = [max(0.0, float(t)) for t in timestamps[:24]]
+        count = len(times)
+    else:
+        count = max(1, min(24, int(count)))
+        if end is None:
+            probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                "format=duration", "-of", "json", str(video_path)], timeout=15, check=True, **options)
+            end = float(json.loads(probe.stdout)["format"]["duration"])
+        start, end = max(0.0, float(start or 0)), float(end)
+        if end <= start:
+            return []
+        times = [start + (end - start) * i / (count + 1) for i in range(1, count + 1)]
     select = "+".join(
         "gte(t\\,{0:.9f})*(isnan(prev_selected_t)+lt(prev_selected_t\\,{0:.9f}))".format(t)
         for t in times)

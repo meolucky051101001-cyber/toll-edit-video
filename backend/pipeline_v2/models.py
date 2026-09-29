@@ -13,6 +13,14 @@ from .stage_status import StageStatus, require_transition
 
 MANIFEST_SCHEMA_VERSION = 1
 
+from .domain import (
+    DubUtterance,
+    JobTranslationOverride,
+    JobTranslationOverrideStore,
+    SourceTextTrack,
+    VietnameseSubtitle,
+)
+
 DEFAULT_STAGE_ORDER = (
     "input",
     "download",
@@ -21,10 +29,12 @@ DEFAULT_STAGE_ORDER = (
     "transcribe",
     "ocr",
     "translate",
+    "reconcile",
+    "timing",
     "tts",
     "rvc",
-    "subtitles",
     "mix",
+    "subtitles",
     "render",
     "qc",
     "deliver",
@@ -278,8 +288,18 @@ class JobManifest:
         order = list(stage_order or self.stages.keys())
         if name not in order:
             raise KeyError("Unknown pipeline stage in order: {!r}".format(name))
+
+        # Audio and subtitles are independent parallel branches before render.
+        # Subtitle changes must not invalidate the audio mix stages.
+        independent_downstream = {
+            "subtitles": {"subtitles", "render", "qc", "deliver"},
+        }
+        allowed = independent_downstream.get(name)
+
         invalidated = []
         for stage_name in order[order.index(name) :]:
+            if allowed is not None and stage_name not in allowed:
+                continue
             record = self.stage(stage_name)
             record.reset()
             invalidated.append(stage_name)

@@ -99,7 +99,14 @@ def segment_to_dict(segment: Any) -> Dict[str, Any]:
         "gender": str(getattr(segment, "gender", "female") or "female"),
         "speaker_id": getattr(segment, "speaker_id", None),
     }
-    for key in ("is_subtitle", "is_packaging", "is_static", "in_subtitle_band"):
+    for key in (
+        "is_subtitle",
+        "is_packaging",
+        "is_static",
+        "in_subtitle_band",
+        "is_gap_reconciled",
+        "is_unvoiced_scene",
+    ):
         val = getattr(segment, key, None) if not isinstance(segment, dict) else segment.get(key)
         if val is not None:
             res[key] = val
@@ -109,7 +116,7 @@ def segment_to_dict(segment: Any) -> Dict[str, Any]:
 def segment_from_dict(data: Mapping[str, Any]) -> RuntimeSegment:
     best_block_data = data.get("best_block")
     source_segment_id = data.get("source_segment_id", data.get("index"))
-    return RuntimeSegment(
+    seg = RuntimeSegment(
         index=int(data["index"]),
         start=timedelta(seconds=float(data["start"])),
         end=timedelta(seconds=float(data["end"])),
@@ -135,6 +142,10 @@ def segment_from_dict(data: Mapping[str, Any]) -> RuntimeSegment:
         is_static=bool(data["is_static"]) if data.get("is_static") is not None else None,
         in_subtitle_band=bool(data["in_subtitle_band"]) if data.get("in_subtitle_band") is not None else None,
     )
+    for flag_key in ("is_gap_reconciled", "is_unvoiced_scene"):
+        if flag_key in data:
+            setattr(seg, flag_key, bool(data[flag_key]))
+    return seg
 
 
 def segments_to_dicts(segments: Iterable[Any]) -> List[Dict[str, Any]]:

@@ -5,6 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Sequence
 
+try:
+    from backend.config.paths import AppPaths
+except ImportError:
+    from config.paths import AppPaths
+
 from .segments import RuntimeSegment, segment_from_dict, segment_to_dict
 from .stage_validation import is_real_rvc_model
 
@@ -47,10 +52,15 @@ def validate_translated_batch(
             raise RuntimeError(
                 "Translation returned empty text for segment {}".format(original.index)
             )
-        contains_cjk = any("\u4e00" <= character <= "\u9fff" for character in source_text)
-        if contains_cjk and translated_text == source_text:
+        source_contains_cjk = any(
+            "\u3400" <= character <= "\u9fff" for character in source_text
+        )
+        translated_contains_cjk = any(
+            "\u3400" <= character <= "\u9fff" for character in translated_text
+        )
+        if source_contains_cjk and translated_contains_cjk:
             raise RuntimeError(
-                "Translation left CJK source unchanged for segment {}".format(
+                "Translation retained CJK text for segment {}".format(
                     original.index
                 )
             )
@@ -82,11 +92,19 @@ def merge_ocr_geometry(
     return merged
 
 
+merge_runtime_segments = merge_ocr_geometry
+
+
 def discover_rvc_model(workspace: Path) -> Optional[Path]:
     workspace_path = Path(workspace).resolve()
+    repo_root = Path(__file__).resolve().parents[2]
+    paths = AppPaths.from_environment(repo_root)
     search_dirs = [
+        repo_root / "MyVoiceModel_v2",
+        paths.shared_assets_dir / "MyVoiceModel_v2",
         workspace_path.parent / "MyVoiceModel_v2",
         workspace_path / "MyVoiceModel_v2",
+        paths.model_cache / "rvc",
         workspace_path.parent / "models" / "rvc",
         workspace_path / "models" / "rvc",
     ]
