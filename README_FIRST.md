@@ -1,45 +1,41 @@
-# AutoDub Pipeline v2 — Bàn giao production
+# Bắt đầu từ đây
 
-Thư mục này chứa cây mã nguồn đầy đủ của nhánh `tool-v2` cùng toàn
-bộ thay đổi ổn định hóa Pipeline v2 trong vòng review cuối.
+Đây là lối vào nhanh; bản đồ tính năng đầy đủ nằm trong [README.md](README.md).
 
-## Nội dung
+## Chọn phiên bản
 
-- `backend/`: Downloader, BS-RoFormer/Demucs, Qwen3-ASR/Whisper,
-  PP-OCRv6/EasyOCR, Gemini Translation,
-  Timing Solver, TTS, RVC, FFmpeg Mixer, QC Gate, API và Telegram bot.
-- `frontend/`: Electron/React UI, preload bridge, dependencies và production build.
-- `MyVoiceModel_v2/`: model và index RVC hiện có.
-- `tests/`: unit/regression tests Pipeline v2.
-- `docs/`: kiến trúc và hướng dẫn rollout.
-- `.git/`: lịch sử Git của repository.
-- `AutoDub_Pipeline_v2_review.patch`: patch hợp nhất có thể áp dụng lại lên bản
-  gốc của nhánh `refactor/pipeline-v2`.
+- **Tool V1:** checkout nhánh [tool-v1](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v1), xem [handover dashboard V1](https://github.com/meolucky051101001-cyber/toll-edit-video/blob/tool-v1/DASHBOARD_MONITOR_HANDOVER.md).
+- **Tool V2:** checkout nhánh [tool-v2](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v2), xem [hướng dẫn đầy đủ](TOOL_V2_FULL_GUIDE.md) và [rollout guide](docs/pipeline_v2_rollout.md).
+- **AI Video Research Tool:** dùng README và launcher riêng trên nhánh [tool-tim-kiem-video](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-tim-kiem-video).
 
-## Kết quả kiểm định hiện tại
+## Checklist Tool V2
 
-- 115/115 unit và regression tests đạt.
-- Preflight Telegram: 32/32 đạt, `ready=True`.
-- E2E đủ các stage đạt QC 12/12, không cảnh báo.
-- CUDA RTX 4050, FFmpeg/ffprobe và NVENC đã được xác minh.
-- GitHub production branch: `tool-v2`.
+1. Cài Python 3.10, Node.js LTS, FFmpeg/ffprobe; chuẩn bị driver NVIDIA nếu dùng CUDA/NVENC.
+2. Cài đúng CUDA-enabled PyTorch trước các package backend, rồi tạo backend/venv và backend/model_venv theo requirements.
+3. Tạo backend/.env từ backend/.env.example; điền secret và sửa path theo máy. Không commit .env.
+4. Chạy preflight bằng đúng venv:
 
-## Trạng thái máy tại thời điểm bàn giao
-
-Máy production hiện dùng `backend/venv` cho bot/pipeline và
-`backend/model_venv` cho model mạnh. Các thư mục môi trường, cache model,
-workspace, log và `.env` được giữ ngoài Git vì có thể sinh lại hoặc chứa dữ
-liệu riêng tư. Model RVC cần thiết được quản lý bằng Git LFS.
-
-Không chạy production trước khi tạo `backend/venv`, cài dependencies, sao chép
-`backend/.env.example` thành `backend/.env`, điền secrets và nhận kết quả
-`ready=True` từ:
-
-```powershell
+~~~powershell
 cd backend
 .\venv\Scripts\python.exe -m pipeline_v2.preflight --project-root .. --interface all
-```
+cd ..
+~~~
 
-Production dùng `QC_GATE_POLICY=block`. Xem checklist đầy đủ tại
-`docs/pipeline_v2_rollout.md`, sơ đồ module/cấu hình tại
-`docs/backend_architecture.md` và sơ đồ phiên bản tại `VERSIONS.md`.
+5. Chỉ xử lý thật khi preflight sẵn sàng; thử một video ngắn có quyền sử dụng và xem QC/report.
+6. Dùng start_bot.bat cho Telegram + Electron UI. Dashboard Monitor web cần chạy riêng bằng:
+
+~~~powershell
+.\backend\venv\Scripts\python.exe .\backend\dashboard_monitor.py
+~~~
+
+Dashboard Monitor V2: http://127.0.0.1:8089. Chi tiết batch, resume, QC, rollback và cấu hình model nằm trong [rollout guide](docs/pipeline_v2_rollout.md).
+
+## Tài liệu cốt lõi
+
+- [README.md](README.md): tính năng, service, cấu trúc và hướng dẫn tổng quan.
+- [VERSIONS.md](VERSIONS.md): nhánh và cổng service.
+- [docs/README.md](docs/README.md): mục lục tài liệu.
+- [TOOL_V2_FULL_GUIDE.md](TOOL_V2_FULL_GUIDE.md): hướng dẫn kỹ thuật chi tiết.
+- [CODE_HANDOFF_2_12.md](CODE_HANDOFF_2_12.md): ghi chú bàn giao; các test trong đó là kết quả tại thời điểm ghi, không phải CI hiện tại.
+
+Trước khi cập nhật hoặc khởi động lại bot, xác nhận đúng nhánh, queue trống và không có model/FFmpeg đang chạy. Không xóa workspace/model/media để “dọn repo”; chúng là dữ liệu runtime và phải xử lý riêng.
