@@ -46,89 +46,325 @@ def separate_vocals_demucs(
     input_audio_path,
     output_dir,
     segment_seconds=None,
-    timeout_seconds=300,
+    timeout_seconds=900,
+    separation_mode=None,
 ):
     """
-    Sử dụng Demucs để tách vocal ra khỏi nhạc nền siêu tốc.
-    Trả về (vocals_path, no_vocals_path)
+    Tách vocal ra khỏi nhạc nền cho Tool V1.
+    Ưu tiên sử dụng mô hình BS-RoFormer (SDR 12.97dB) để giữ nguyên 90-95% chất lượng nhạc nền,
+    tự động fallback sang Demucs chất lượng cao (overlap 0.25, shifts 1) nếu cần.
+    Hỗ trợ chế độ 'bypass' (giữ 100% âm thanh gốc) theo cấu hình.
     """
     import subprocess
     import sys
     import os
+    import json
+    import threading
     from ai.v1_model_policy import current_v1_model_policy
-    
+
     # Resolve đường dẫn tuyệt đối để tránh lỗi ký tự đặc biệt và ".."
     input_audio_path = os.path.abspath(input_audio_path)
     output_dir = os.path.abspath(output_dir)
-    
+
     if not os.path.exists(input_audio_path):
-        print(f"File audio không tồn tại: {input_audio_path}")
+        raise FileNotFoundError(f"File audio không tồn tại để bóc tách vocal: {input_audio_path}")
+
+    # Ưu tiên separation_mode truyền trực tiếp từ caller
+    if separation_mode:
+        sep_mode = str(separation_mode).strip().lower()
+    else:
+        try:
+            from audio_settings import get_audio_settings
+            audio_cfg = get_audio_settings()
+            sep_mode = audio_cfg.get("separation_mode", "roformer")
+        except Exception:
+            sep_mode = "roformer"
+
+        try:
+            from job_config_service import get_frozen_config
+            frozen = get_frozen_config(input_audio_path) or get_frozen_config(output_dir)
+            if frozen and "separation_mode" in frozen.get("effective_config", {}):
+                sep_mode = frozen["effective_config"]["separation_mode"]
+        except Exception:
+            pass
+
+        env_sep = os.getenv("V1_SEPARATOR_BACKEND", "").strip().lower()
+        if env_sep:
+            sep_mode = env_sep
+
+    if sep_mode == "bypass":
+        print(f"[SEPARATION] Chế độ Bypass: Giữ nguyên toàn bộ âm thanh gốc (bao gồm cả lời nói gốc). Không tách lời bằng AI.")
+        try:
+            from job_tracker import record_separator_info
+            record_separator_info({
+                "engine": "bypass",
+                "model": "none",
+                "status": "bypassed",
+            })
+        except Exception:
+            pass
         return input_audio_path, input_audio_path
-    
-    print(f"Bắt đầu tách âm thanh bằng Demucs (Tối ưu tốc độ) cho {input_audio_path}...")
+
+    import shared_state
+    if getattr(shared_state, "stop_requested", False):
+        raise RuntimeError("Tác vụ tách âm bị hủy: Lệnh dừng được yêu cầu.")
+
+    total_timeout = float(timeout_seconds) if timeout_seconds else 900.0
     try:
-        # Dùng python của venv để đảm bảo demucs được tìm thấy
-        venv_python = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv", "Scripts", "python.exe")
-        if not os.path.exists(venv_python):
-            venv_python = sys.executable  # Fallback
-        
-        cpu_jobs = max(1, (os.cpu_count() or 4) - 1)
-        # V1 deliberately keeps the fast single-model Demucs profile.  The
-        # heavier ensemble/RoFormer models belong to V2 and are not imported.
-        model_name = current_v1_model_policy().demucs_model
-        
-        # Tối ưu hóa siêu tốc:
-        # 1. -n htdemucs: Bản 1 model nhanh gấp 4 lần htdemucs_ft (4 models)
-        # 2. --shifts 0: Tắt shift trick để tăng tốc thêm gấp 2-3 lần
-        # 3. --overlap 0.1: Giảm độ đè lặp phân đoạn
-        # 4. -j cpu_jobs: Tận dụng toàn bộ luồng CPU đa nhân
-        import torch
-        device_args = ["-d", "cuda"] if torch.cuda.is_available() else ["-d", "cpu", "-j", str(cpu_jobs)]
-        
-        cmd = [
-            venv_python, "-m", "demucs",
-            input_audio_path,
-            "-n", model_name,
-            "--two-stems", "vocals",
-            "--shifts", "0",
-            "--overlap", "0.1",
-            "-o", output_dir
-        ]
-        # Pipeline v2 passes 6 seconds to cap peak VRAM on RTX 4050 6 GB.
-        # ``None`` deliberately preserves the legacy command line unchanged.
-        if segment_seconds is not None:
-            segment_seconds = float(segment_seconds)
-            if segment_seconds <= 0:
-                raise ValueError("segment_seconds must be positive")
-            cmd.extend(["--segment", "{:g}".format(segment_seconds)])
-        cmd += device_args
-        run_batch_subprocess(
+        import soundfile as _sf
+        _info = _sf.info(input_audio_path)
+        if _info.duration > 0:
+            total_timeout = max(total_timeout, float(_info.duration) * 2.5 + 120.0)
+    except Exception:
+        pass
+
+    policy = current_v1_model_policy()
+    from v1_separator_lock import separator_gpu_lock
+
+    def _run_cancellable_proc(cmd, t_limit):
+        proc = subprocess.Popen(
             cmd,
-            check=True,
-            timeout=timeout_seconds,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
             creationflags=CREATE_NO_WINDOW,
         )
-        
-        base_name = os.path.splitext(os.path.basename(input_audio_path))[0]
-        demucs_out_dir = os.path.join(output_dir, model_name, base_name)
-        
-        vocals_path = os.path.join(demucs_out_dir, "vocals.wav")
-        no_vocals_path = os.path.join(demucs_out_dir, "no_vocals.wav")
-        
-        if os.path.exists(vocals_path) and os.path.exists(no_vocals_path):
-            print(f"Demucs tách thành công! Vocals: {vocals_path}")
-            return vocals_path, no_vocals_path
+        proc_deadline = time.monotonic() + float(t_limit)
+        stdout_chunks = []
+        stderr_chunks = []
+
+        def _drain(pipe, collector):
+            try:
+                for line in iter(pipe.readline, ''):
+                    collector.append(line)
+                pipe.close()
+            except Exception:
+                pass
+
+        t_out = threading.Thread(target=_drain, args=(proc.stdout, stdout_chunks), daemon=True)
+        t_err = threading.Thread(target=_drain, args=(proc.stderr, stderr_chunks), daemon=True)
+        t_out.start()
+        t_err.start()
+
+        while True:
+            if getattr(shared_state, "stop_requested", False):
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                raise RuntimeError("Tiến trình tách âm đã bị dừng theo yêu cầu (/stop).")
+
+            ret = proc.poll()
+            if ret is not None:
+                t_out.join(timeout=2.0)
+                t_err.join(timeout=2.0)
+                return ret, "".join(stdout_chunks), "".join(stderr_chunks)
+
+            if time.monotonic() > proc_deadline:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                raise TimeoutError(f"Tiến trình tách âm timeout sau {t_limit:.1f}s.")
+
+            time.sleep(0.3)
+
+    # 1. THỬ TÁCH BẰNG BS-ROFORMER (Phương án B - Đỉnh cao chất lượng)
+    if sep_mode in ("auto", "roformer"):
+        roformer_py = policy.separator_python_path()
+        worker_script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "model_workers",
+            "v1_separator_worker.py",
+        )
+        model_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "models",
+            "v1",
+            "source-separation",
+        )
+        model_name = policy.separator_model
+        model_ckpt = os.path.join(model_dir, model_name)
+
+        if not (roformer_py.is_file() and os.path.isfile(worker_script) and os.path.isfile(model_ckpt)):
+            err_msg = (
+                f"BS-RoFormer thiếu thành phần bắt buộc: "
+                f"python={roformer_py.is_file()}, worker={os.path.isfile(worker_script)}, model={os.path.isfile(model_ckpt)}"
+            )
+            if sep_mode == "roformer":
+                raise RuntimeError(err_msg)
+            print(f"{err_msg}. Chuyển sang Demucs...")
         else:
-            # Tìm đệ quy nếu thư mục đặt tên khác
-            for root, dirs, files in os.walk(output_dir):
-                if "vocals.wav" in files and "no_vocals.wav" in files:
-                    return os.path.join(root, "vocals.wav"), os.path.join(root, "no_vocals.wav")
-            print(f"Demucs chạy xong nhưng không tìm thấy file output tại {demucs_out_dir}")
-            return input_audio_path, input_audio_path
-            
-    except Exception as e:
-        print(f"Lỗi khi chạy Demucs: {e}")
-        return input_audio_path, input_audio_path
+            roformer_out_dir = os.path.join(output_dir, "bs_roformer")
+            os.makedirs(roformer_out_dir, exist_ok=True)
+            print(f"Bắt đầu tách âm thanh bằng BS-RoFormer ({model_name}) native FP16...")
+            try:
+                cmd_roformer = [
+                    str(roformer_py),
+                    worker_script,
+                    "--input-audio", input_audio_path,
+                    "--output-dir", roformer_out_dir,
+                    "--model-dir", model_dir,
+                    "--model-name", model_name,
+                    "--use-fp16",
+                ]
+                with separator_gpu_lock(timeout_seconds=total_timeout):
+                    if getattr(shared_state, "stop_requested", False):
+                        raise RuntimeError("Tác vụ tách âm bị hủy: Lệnh dừng được yêu cầu.")
+                    ret_code, stdout_str, stderr_str = _run_cancellable_proc(cmd_roformer, total_timeout)
+                if ret_code == 0:
+                    for line in reversed(stdout_str.strip().splitlines()):
+                        line = line.strip()
+                        if line.startswith("{") and line.endswith("}"):
+                            try:
+                                data = json.loads(line)
+                                if data.get("success"):
+                                    v_path = data.get("vocals_path")
+                                    bg_path = data.get("background_path")
+                                    if v_path and bg_path and os.path.isfile(v_path) and os.path.isfile(bg_path):
+                                        print(f"BS-RoFormer tách thành công! Nhạc nền sạch: {bg_path}")
+                                        try:
+                                            from job_tracker import record_separator_info
+                                            record_separator_info({
+                                                "engine": "bs_roformer",
+                                                "engine_requested": sep_mode,
+                                                "model": model_name,
+                                                "device": data.get("device", "cuda"),
+                                                "device_name": data.get("device_name", ""),
+                                                "fp_mode": data.get("fp_mode", "fp32"),
+                                                "inference_time_s": data.get("inference_time_s"),
+                                                "total_time_s": data.get("total_time_s"),
+                                                "peak_vram_mb": data.get("peak_vram_mb"),
+                                                "vocals_path": v_path,
+                                                "bgm_path": bg_path,
+                                                "cache_hit": False,
+                                            })
+                                        except Exception:
+                                            pass
+                                        return v_path, bg_path
+                            except json.JSONDecodeError:
+                                pass
+                err_detail = stderr_str.strip() or f"exit code {ret_code}"
+                if sep_mode == "roformer":
+                    raise RuntimeError(f"BS-RoFormer worker thất bại: {err_detail}")
+                print(f"BS-RoFormer gặp sự cố ({err_detail}), tự động fallback sang Demucs...")
+            except Exception as r_err:
+                if sep_mode == "roformer":
+                    raise
+                print(f"BS-RoFormer exception ({r_err}), tự động fallback sang Demucs...")
+
+    # 2. FALLBACK SANG DEMUCS CHẤT LƯỢNG CAO (GPU CUDA BẮT BUỘC)
+    print(f"Bắt đầu tách âm thanh bằng Demucs ({policy.demucs_model})...")
+    venv_python = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv", "Scripts", "python.exe")
+    if not os.path.exists(venv_python):
+        venv_python = sys.executable
+
+    # Kiểm tra CUDA trong chính venv chạy Demucs
+    try:
+        check_cuda = subprocess.run(
+            [venv_python, "-c", "import torch; print(torch.cuda.is_available())"],
+            capture_output=True, text=True, timeout=10, creationflags=CREATE_NO_WINDOW
+        )
+        has_cuda = check_cuda.stdout.strip().lower() == "true"
+    except Exception:
+        import torch
+        has_cuda = torch.cuda.is_available()
+
+    if not has_cuda:
+        raise RuntimeError("GPU CUDA không khả dụng trên môi trường Demucs. Tách âm Demucs trên Tool V1 yêu cầu GPU, không chạy trên CPU.")
+
+    model_name = policy.demucs_model
+    device_args = ["-d", "cuda"]
+
+    cmd = [
+        venv_python, "-m", "demucs",
+        input_audio_path,
+        "-n", model_name,
+        "--two-stems", "vocals",
+        "--shifts", "1",
+        "--overlap", "0.25",
+        "-o", output_dir
+    ]
+    if segment_seconds is not None:
+        segment_seconds = float(segment_seconds)
+        if segment_seconds <= 0:
+            raise ValueError("segment_seconds must be positive")
+        cmd.extend(["--segment", "{:g}".format(segment_seconds)])
+    cmd += device_args
+
+    base_name = os.path.splitext(os.path.basename(input_audio_path))[0]
+    demucs_out_dir = os.path.join(output_dir, model_name, base_name)
+    vocals_path = os.path.join(demucs_out_dir, "vocals.wav")
+    no_vocals_path = os.path.join(demucs_out_dir, "no_vocals.wav")
+
+    # Dọn dẹp file cũ nếu có để tránh stale artifacts
+    for old_f in (vocals_path, no_vocals_path):
+        try:
+            if os.path.isfile(old_f):
+                os.remove(old_f)
+        except Exception:
+            pass
+
+    demucs_start_epoch = time.time()
+    with separator_gpu_lock(timeout_seconds=total_timeout):
+        if getattr(shared_state, "stop_requested", False):
+            raise RuntimeError("Tác vụ tách âm bị hủy: Lệnh dừng được yêu cầu.")
+        ret_code, stdout_str, stderr_str = _run_cancellable_proc(cmd, total_timeout)
+        if ret_code != 0:
+            raise RuntimeError(f"Demucs GPU thất bại (mã thoát {ret_code}): {stderr_str.strip()}")
+
+    if os.path.exists(vocals_path) and os.path.exists(no_vocals_path):
+        if os.path.getmtime(vocals_path) >= demucs_start_epoch - 2.0 and os.path.getmtime(no_vocals_path) >= demucs_start_epoch - 2.0:
+            print(f"Demucs tách thành công! Vocals: {vocals_path}")
+            try:
+                from job_tracker import record_separator_info
+                record_separator_info({
+                    "engine": "demucs",
+                    "engine_requested": sep_mode,
+                    "model": model_name,
+                    "device": "cuda",
+                    "total_time_s": round(time.time() - demucs_start_epoch, 2),
+                    "vocals_path": vocals_path,
+                    "bgm_path": no_vocals_path,
+                    "cache_hit": False,
+                })
+            except Exception:
+                pass
+            return vocals_path, no_vocals_path
+
+    # Fallback kiểm tra trong output_dir nhưng bắt buộc file phải tạo sau demucs_start_epoch
+    for root, dirs, files in os.walk(output_dir):
+        if "vocals.wav" in files and "no_vocals.wav" in files:
+            v_p = os.path.join(root, "vocals.wav")
+            nv_p = os.path.join(root, "no_vocals.wav")
+            if os.path.getmtime(v_p) >= demucs_start_epoch - 2.0 and os.path.getmtime(nv_p) >= demucs_start_epoch - 2.0:
+                try:
+                    from job_tracker import record_separator_info
+                    record_separator_info({
+                        "engine": "demucs",
+                        "engine_requested": sep_mode,
+                        "model": model_name,
+                        "device": "cuda",
+                        "total_time_s": round(time.time() - demucs_start_epoch, 2),
+                        "vocals_path": v_p,
+                        "bgm_path": nv_p,
+                        "cache_hit": False,
+                    })
+                except Exception:
+                    pass
+                return v_p, nv_p
+
+    raise RuntimeError(f"Demucs chạy xong nhưng không tìm thấy file output mới tại {demucs_out_dir}")
 
 def merge_audio_files_with_delay(video_path, original_audio_path, dubbing_audio_files, output_video_path, original_volume=0.1, dub_volume=1.0):
     """
@@ -145,23 +381,42 @@ def mix_audio_pydub(
     output_mixed_audio_path,
     original_volume_db=None,
     dubbing_volume_db=None,
+    ducking_mode=None,
     strict=False,
+    explicit=False,
     **kwargs,
 ):
     """
     Trộn âm thanh bằng PyDub. Điều chỉnh âm lượng nhạc nền và giọng đọc AI theo cấu hình mixer.
     """
+    if strict and not dubbing_audio_files:
+        raise ValueError("strict=True: Danh sách file lồng tiếng (dubbing_audio_files) rỗng.")
+
     try:
         from audio_settings import get_audio_settings
         _cfg = get_audio_settings()
-        if original_volume_db is None or original_volume_db in (-2, -5):
+        if not explicit and (original_volume_db is None or original_volume_db in (-2, -5)):
             original_volume_db = _cfg.get("bgm_volume_db", -2.0)
-        if dubbing_volume_db is None or dubbing_volume_db == 1:
+        if not explicit and (dubbing_volume_db is None or dubbing_volume_db == 1):
             dubbing_volume_db = _cfg.get("dubbing_volume_db", 1.0)
+        if not ducking_mode:
+            ducking_mode = _cfg.get("ducking_mode", "soft")
     except Exception:
         if original_volume_db is None: original_volume_db = -2.0
         if dubbing_volume_db is None: dubbing_volume_db = 1.0
-    print(f"Mixing audio tracks using adaptive pydub (BGM={original_volume_db}dB, Dubbing={dubbing_volume_db}dB, Auto-Ducking=Enabled)...")
+        if not ducking_mode: ducking_mode = "soft"
+
+    # Kiểm tra frozen config nếu chưa có ducking_mode cụ thể
+    if not ducking_mode or not explicit:
+        try:
+            from job_config_service import get_frozen_config
+            frozen = get_frozen_config(output_mixed_audio_path) or get_frozen_config(original_audio_path)
+            if frozen and "ducking_mode" in frozen.get("effective_config", {}):
+                ducking_mode = frozen["effective_config"]["ducking_mode"]
+        except Exception:
+            pass
+
+    print(f"Mixing audio tracks using adaptive pydub (BGM={original_volume_db}dB, Dubbing={dubbing_volume_db}dB, Ducking={ducking_mode})...")
     original_popen = None
     try:
         import subprocess
@@ -175,13 +430,24 @@ def mix_audio_pydub(
         subprocess.Popen = PopenNoWindow
         
         from v1_audio_mixer import mix_adaptive_audio
-        return mix_adaptive_audio(
+        result = mix_adaptive_audio(
             bgm_path=original_audio_path,
             dubbing_audio_files=dubbing_audio_files,
             output_path=output_mixed_audio_path,
             base_bgm_gain_db=original_volume_db,
             base_voice_gain_db=dubbing_volume_db,
+            ducking_mode=ducking_mode,
         )
+        try:
+            from job_tracker import record_mixer_info
+            record_mixer_info({
+                "ducking_mode": ducking_mode,
+                "bgm_volume_db": original_volume_db,
+                "dubbing_volume_db": dubbing_volume_db,
+            })
+        except Exception:
+            pass
+        return result
     except Exception as e:
         # A background-only file must never masquerade as a successful dub.
         raise RuntimeError("Adaptive mix failed; dubbed audio was not published") from e

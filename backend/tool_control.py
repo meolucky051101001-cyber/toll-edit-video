@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -135,8 +136,11 @@ def launch(key, service):
     pythonw = root / 'venv' / 'Scripts' / 'pythonw.exe'
     if not pythonw.exists():
         pythonw = root / 'venv' / 'Scripts' / 'python.exe'
+    env = os.environ.copy()
+    for k in ('BOT_TOKEN', 'BOT_EXPECTED_USERNAME', 'AUTODUB_WORKSPACE', 'AUTODUB_OUTPUT_DIR'):
+        env.pop(k, None)
     subprocess.Popen([str(pythonw), str(root / 'background_service.py'), '--service', service],
-                     cwd=str(root), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     cwd=str(root), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      creationflags=subprocess.CREATE_NO_WINDOW)
 
 def _get_dashboard_token(key='v1'):
@@ -205,8 +209,8 @@ def stop_and_release(key):
             cmd = [str(c).lower() for c in (p.cmdline() or [])]
             cmd_str = ' '.join(cmd)
 
-            # Bảo vệ bộ điều khiển trung tâm 8090 và các test runner
-            if any(k in cmd_str for k in ('tool_control.py', 'test_', 'unittest', 'pytest')):
+            # Bảo vệ bộ điều khiển trung tâm 8090, dashboard web servers và các test runner
+            if any(k in cmd_str for k in ('tool_control.py', 'test_', 'unittest', 'pytest', 'dashboard_monitor.py', 'main.py', '--service dashboard')):
                 continue
 
             is_tool_proc = False
@@ -218,7 +222,7 @@ def stop_and_release(key):
                 try:
                     for child in p.children(recursive=True):
                         ch_cmd = ' '.join([str(c).lower() for c in (child.cmdline() or [])])
-                        if not any(k in ch_cmd for k in ('tool_control.py', 'test_', 'unittest', 'pytest')):
+                        if not any(k in ch_cmd for k in ('tool_control.py', 'test_', 'unittest', 'pytest', 'dashboard_monitor.py', 'main.py', '--service dashboard')):
                             targets[child.pid] = child
 
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -357,6 +361,11 @@ def apply_boot_defaults():
         fresh = any(data.get('pid') == p.pid for p in bots) and (time.time() - data.get('at', 0) < 8)
         if 'telegram_bot.py' not in names or not fresh:
             launch('v1', 'telegram')
+        # 4. Đảm bảo Dashboard Tool V2 cũng luôn sẵn sàng phục vụ web (0 MB VRAM)
+        procs_v2 = processes('v2')
+        names_v2 = [name for _, name in procs_v2]
+        if not any(n in names_v2 for n in ('main.py', 'dashboard_monitor.py')):
+            launch('v2', 'dashboard')
     except Exception:
         pass
 
@@ -379,28 +388,29 @@ HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name=
   * { box-sizing: border-box; }
   html, body {
     margin: 0;
-    padding: 10px 14px;
+    padding: 6px 12px;
     background-color: #0b111a;
     color: #e2e8f0;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    font-size: 12px;
-    line-height: 1.4;
+    font-size: 11.5px;
+    line-height: 1.35;
+    overflow-y: hidden;
   }
   .header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 8px;
+    margin-bottom: 5px;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: 4px;
   }
   .title-group {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
   }
   h2 {
-    font-size: 13.5px;
+    font-size: 13px;
     font-weight: 700;
     color: #ffffff;
     margin: 0;
@@ -410,27 +420,27 @@ HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name=
     gap: 6px;
   }
   .badge-rule {
-    font-size: 11px;
+    font-size: 10.5px;
     color: #94a3b8;
     background: #1e293b;
     border: 1px solid #334155;
-    padding: 2px 7px;
+    padding: 1px 6px;
     border-radius: 4px;
   }
   .tools {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-    gap: 10px;
-    margin-bottom: 8px;
+    gap: 8px;
+    margin-bottom: 5px;
   }
   .tool {
     background-color: #141d2b;
     border: 1px solid #233144;
-    border-radius: 8px;
-    padding: 10px 12px;
+    border-radius: 7px;
+    padding: 6px 10px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 4px;
     transition: border-color 0.2s, box-shadow 0.2s;
   }
   .tool.active {
@@ -577,7 +587,7 @@ HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name=
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 6px;
+    margin-bottom: 5px;
     flex-wrap: wrap;
   }
   .btn-stop-all {
@@ -585,9 +595,9 @@ HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name=
     border-color: #7f1d1d;
     color: #fca5a5;
     font-weight: 600;
-    padding: 5px 12px;
+    padding: 4px 10px;
     border-radius: 6px;
-    font-size: 11.5px;
+    font-size: 11px;
   }
   .btn-stop-all:hover:not(:disabled) {
     background-color: #3b141e;
@@ -595,14 +605,14 @@ HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name=
     color: #fee2e2;
   }
   #message {
-    padding: 5px 10px;
+    padding: 4px 8px;
     background: #111827;
     border: 1px solid #1f2937;
     border-radius: 6px;
     color: #93c5fd;
-    font-size: 11.5px;
-    line-height: 1.4;
-    margin-bottom: 8px;
+    font-size: 11px;
+    line-height: 1.35;
+    margin-bottom: 0;
   }
   #message.error {
     color: #fca5a5;
@@ -614,7 +624,12 @@ HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name=
   }
   .voice-section {
     border-top: 1px solid #1e293b;
-    padding-top: 8px;
+    padding-top: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .voice-top-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -622,7 +637,7 @@ HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name=
     flex-wrap: wrap;
   }
   .voice-section label {
-    font-size: 11.5px;
+    font-size: 11px;
     font-weight: 600;
     color: #cbd5e1;
     white-space: nowrap;
@@ -631,8 +646,7 @@ HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name=
     display: flex;
     gap: 6px;
     align-items: center;
-    flex-grow: 1;
-    justify-content: flex-end;
+    flex-wrap: wrap;
   }
   select {
     background-color: #0f172a;
@@ -652,6 +666,234 @@ HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name=
     padding: 4px 10px;
   }
   #save-voice:hover:not(:disabled) { background-color: #1d4ed8; }
+  .btn-preview-toggle {
+    background: linear-gradient(135deg, #1e293b, #0f172a);
+    border: 1px solid #3b82f6;
+    color: #60a5fa;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.2s;
+  }
+  .btn-preview-toggle:hover {
+    background: #1e3a5f;
+    color: #93c5fd;
+    box-shadow: 0 0 8px rgba(59, 130, 246, 0.4);
+  }
+  .voice-preview-card {
+    background: linear-gradient(180deg, #111827 0%, #0c121d 100%);
+    border: 1px solid #23354d;
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 4px 12px rgba(0,0,0,0.3);
+  }
+  .preview-player-col {
+    width: 135px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+  .preview-video-wrap {
+    position: relative;
+    width: 135px;
+    height: 240px;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #000;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+    border: 1px solid #334155;
+    cursor: pointer;
+  }
+  .preview-video-wrap video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .preview-badge-overlay {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    background: rgba(15, 23, 42, 0.88);
+    color: #38bdf8;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 4px;
+    backdrop-filter: blur(4px);
+    border: 1px solid rgba(56, 189, 248, 0.35);
+    pointer-events: none;
+    max-width: 123px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .preview-center-play-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.3);
+    transition: opacity 0.2s;
+    pointer-events: none;
+  }
+  .preview-center-play-overlay.hidden {
+    opacity: 0;
+  }
+  .preview-center-play-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: rgba(59, 130, 246, 0.9);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    box-shadow: 0 0 12px rgba(59, 130, 246, 0.6);
+  }
+  .preview-video-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 135px;
+    gap: 4px;
+  }
+  .btn-play-pause {
+    background: #1e293b;
+    border-color: #3b82f6;
+    color: #93c5fd;
+    font-size: 10.5px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    flex-grow: 1;
+  }
+  .btn-play-pause:hover {
+    background: #2563eb;
+    color: #fff;
+  }
+  .preview-time-display {
+    font-size: 10px;
+    font-family: ui-monospace, monospace;
+    color: #94a3b8;
+    white-space: nowrap;
+  }
+  .preview-details-col {
+    flex: 1;
+    min-width: 250px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .preview-header-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .preview-tag {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    background: rgba(59, 130, 246, 0.15);
+    color: #60a5fa;
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+  .preview-current-name {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: #f8fafc;
+  }
+  .preview-quote-box {
+    background: rgba(15, 23, 42, 0.7);
+    border-left: 3px solid #3b82f6;
+    border-radius: 0 6px 6px 0;
+    padding: 6px 10px;
+    color: #cbd5e1;
+    font-size: 11px;
+    line-height: 1.4;
+  }
+  .preview-action-buttons {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .btn-act-primary {
+    background: #1d4ed8;
+    border-color: #3b82f6;
+    color: #ffffff;
+    font-weight: 600;
+    padding: 4px 10px;
+  }
+  .btn-act-primary:hover { background: #2563eb; }
+  .btn-act-secondary {
+    background: #1e293b;
+    border-color: #475569;
+    color: #cbd5e1;
+    padding: 4px 10px;
+  }
+  .btn-act-secondary:hover { background: #334155; color: #fff; }
+  .btn-act-apply {
+    background: #065f46;
+    border-color: #10b981;
+    color: #a7f3d0;
+    font-weight: 600;
+    padding: 4px 10px;
+  }
+  .btn-act-apply:hover { background: #047857; color: #fff; }
+  .preview-chips-container {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 2px;
+  }
+  .chips-label {
+    font-size: 10.5px;
+    color: #94a3b8;
+    font-weight: 600;
+  }
+  .chips-grid {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+  }
+  .voice-chip {
+    font-size: 10.5px;
+    padding: 3px 8px;
+    border-radius: 12px;
+    background: #1e293b;
+    border: 1px solid #334155;
+    color: #94a3b8;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .voice-chip:hover {
+    background: #273549;
+    border-color: #60a5fa;
+    color: #f1f5f9;
+  }
+  .voice-chip.active {
+    background: #2563eb;
+    border-color: #60a5fa;
+    color: #ffffff;
+    font-weight: 600;
+    box-shadow: 0 0 8px rgba(37, 99, 235, 0.5);
+  }
 </style>
 </head>
 <body>
@@ -672,11 +914,69 @@ HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name=
 </div>
 
 <section class="voice-section">
-  <label for="voice">Giọng lồng tiếng (Dùng chung):</label>
-  <div class="voice-controls">
-    <select id="voice" onchange="saveVoice()" disabled></select>
-    <button id="save-voice" onclick="saveVoice()" disabled>Lưu</button>
-    <small id="voice-status" style="color:#94a3b8; font-size:11px; margin-left:4px;"></small>
+  <div class="voice-top-row">
+    <div style="display:flex; align-items:center; gap:8px;">
+      <label for="voice">Giọng lồng tiếng (Dùng chung):</label>
+      <div class="voice-controls">
+        <select id="voice" onchange="onVoiceDropdownChange()" disabled></select>
+        <button id="save-voice" onclick="saveVoice()" disabled>Lưu</button>
+      </div>
+      <small id="voice-status" style="color:#94a3b8; font-size:11px;"></small>
+    </div>
+    <button id="btn-toggle-preview" class="btn-preview-toggle" onclick="toggleVoicePreview()" title="Bật/tắt video test giọng">
+      🎬 Video test giọng (14s) <span id="preview-caret">▾</span>
+    </button>
+  </div>
+
+  <div id="voice-preview-card" class="voice-preview-card">
+    <div class="preview-player-col">
+      <div class="preview-video-wrap" onclick="toggleVideoPlayback()">
+        <video id="preview-video" playsinline preload="metadata" src="/voice-preview-video/capcut-BV562_streaming.mp4" loop></video>
+        <div class="preview-badge-overlay" id="preview-badge-overlay">CapCut · Mai (Chí Mai)</div>
+        <div class="preview-center-play-overlay" id="preview-center-overlay">
+          <div class="preview-center-play-icon">▶</div>
+        </div>
+      </div>
+      <div class="preview-video-toolbar">
+        <button id="btn-play-pause" class="btn-play-pause" onclick="toggleVideoPlayback()">▶️ Phát thử</button>
+        <span id="preview-time-display" class="preview-time-display">0:00 / 0:14</span>
+      </div>
+    </div>
+
+    <div class="preview-details-col">
+      <div class="preview-header-line">
+        <span class="preview-tag">🎬 Video mẫu 14s</span>
+        <span class="preview-current-name" id="preview-current-name">CapCut · Mai (Chí Mai mặc định)</span>
+      </div>
+      <div class="preview-quote-box">
+        💬 <em>« Xin chào, đây là giọng đọc thử. Hôm nay chúng ta cùng khám phá những món đồ thú vị. »</em>
+      </div>
+
+      <div class="preview-action-buttons">
+        <button class="btn-act-primary" onclick="toggleVideoPlayback()">▶️ Phát / Dừng video</button>
+        <button class="btn-act-secondary" onclick="playVoiceAudioOnly()">🔊 Nghe riêng giọng (Audio)</button>
+        <button class="btn-act-apply" id="btn-apply-voice" onclick="applyAndSavePreviewVoice()">✅ Dùng giọng này để Edit</button>
+      </div>
+
+      <div class="preview-chips-container">
+        <span class="chips-label">Thử nhanh các giọng tiêu biểu:</span>
+        <div class="chips-grid">
+          <button type="button" class="voice-chip active" id="chip-capcut-BV562_streaming" onclick="selectVoiceForPreview('capcut-BV562_streaming')">Chí Mai (CapCut)</button>
+          <button type="button" class="voice-chip" id="chip-capcut-BV075_streaming" onclick="selectVoiceForPreview('capcut-BV075_streaming')">Thanh Niên Tự Tin</button>
+          <button type="button" class="voice-chip" id="chip-chi-mai" onclick="selectVoiceForPreview('chi-mai')">Chí Mai (RVC)</button>
+          <button type="button" class="voice-chip" id="chip-microsoft-hoaimy" onclick="selectVoiceForPreview('microsoft-hoaimy')">Hoài My (Nữ)</button>
+          <button type="button" class="voice-chip" id="chip-microsoft-namminh" onclick="selectVoiceForPreview('microsoft-namminh')">Nam Minh (Nam)</button>
+          <button type="button" class="voice-chip" id="chip-capcut-BV421_vivn_streaming" onclick="selectVoiceForPreview('capcut-BV421_vivn_streaming')">Nhỏ Ngọt Ngào</button>
+          <button type="button" class="voice-chip" id="chip-capcut-multi_female_yangguangnv_uranus_bigtts" onclick="selectVoiceForPreview('capcut-multi_female_yangguangnv_uranus_bigtts')">Ban Mai</button>
+          <button type="button" class="voice-chip" id="chip-capcut-multi_female_richgirl_uranus_bigtts" onclick="selectVoiceForPreview('capcut-multi_female_richgirl_uranus_bigtts')">Review Phim new</button>
+          <button type="button" class="voice-chip" id="chip-capcut-BV074_streaming" onclick="selectVoiceForPreview('capcut-BV074_streaming')">Cô Gái Hoạt Ngôn</button>
+          <button type="button" class="voice-chip" id="chip-capcut-multi_female_felipe_uranus_bigtts" onclick="selectVoiceForPreview('capcut-multi_female_felipe_uranus_bigtts')">Giọng Nam Trầm</button>
+          <button type="button" class="voice-chip" id="chip-capcut-vi_female_huong" onclick="selectVoiceForPreview('capcut-vi_female_huong')">Nữ Phổ Thông</button>
+        </div>
+      </div>
+      <audio id="audio-preview-player" style="display:none;"></audio>
+      <small style="color: #64748b; font-size: 10px; margin-top: 2px;">💡 Mẹo: Chọn bất kỳ giọng nào trong danh sách thả xuống ở trên để test trực tiếp trên video.</small>
+    </div>
   </div>
 </section>
 
@@ -752,6 +1052,7 @@ function renderTools() {
       </div>
     `;
   }).join('');
+  sendHeight();
 }
 
 async function refresh() {
@@ -847,11 +1148,137 @@ async function stopAll() {
   }
 }
 
+let currentPreviewVoiceId = 'chi-mai';
+let cachedVoices = [];
+
+function toggleVoicePreview() {
+  const card = document.getElementById('voice-preview-card');
+  const caret = document.getElementById('preview-caret');
+  if (!card) return;
+  const isHidden = (card.style.display === 'none');
+  card.style.display = isHidden ? 'flex' : 'none';
+  if (caret) caret.textContent = isHidden ? '▾' : '▸';
+  const vid = document.getElementById('preview-video');
+  if (!isHidden && vid) vid.pause();
+  sendHeight();
+}
+
+function selectVoiceForPreview(voiceId, autoPlay = true) {
+  currentPreviewVoiceId = voiceId;
+  const select = document.getElementById('voice');
+  if (select && select.value !== voiceId) {
+    select.value = voiceId;
+  }
+
+  let voiceLabel = voiceId;
+  const found = cachedVoices.find(v => v.id === voiceId);
+  if (found) voiceLabel = found.label;
+
+  const currentNameElem = document.getElementById('preview-current-name');
+  if (currentNameElem) currentNameElem.textContent = voiceLabel;
+
+  const overlayBadge = document.getElementById('preview-badge-overlay');
+  if (overlayBadge) {
+    const shortLabel = voiceLabel.includes('·') ? voiceLabel.split('·')[1].trim() : voiceLabel;
+    overlayBadge.textContent = shortLabel;
+  }
+
+  document.querySelectorAll('.voice-chip').forEach(c => {
+    c.classList.toggle('active', c.id === 'chip-' + voiceId);
+  });
+
+  const vid = document.getElementById('preview-video');
+  if (vid) {
+    const newSrc = '/voice-preview-video/' + voiceId + '.mp4';
+    if (!vid.src.endsWith(newSrc)) {
+      vid.src = newSrc;
+      vid.load();
+    }
+    if (autoPlay) {
+      vid.currentTime = 0;
+      vid.play().catch(() => {});
+    }
+  }
+
+  const aud = document.getElementById('audio-preview-player');
+  if (aud) {
+    aud.src = '/voice-preview-audio/' + voiceId + '.mp3';
+  }
+}
+
+function onVoiceDropdownChange() {
+  const select = document.getElementById('voice');
+  if (select && select.value) {
+    selectVoiceForPreview(select.value, true);
+  }
+}
+
+function toggleVideoPlayback() {
+  const vid = document.getElementById('preview-video');
+  const aud = document.getElementById('audio-preview-player');
+  if (aud) aud.pause();
+  if (!vid) return;
+  if (vid.paused || vid.ended) {
+    vid.play().catch(() => {});
+  } else {
+    vid.pause();
+  }
+}
+
+function playVoiceAudioOnly() {
+  const vid = document.getElementById('preview-video');
+  if (vid) vid.pause();
+  const aud = document.getElementById('audio-preview-player');
+  if (aud) {
+    aud.src = '/voice-preview-audio/' + currentPreviewVoiceId + '.mp3';
+    aud.currentTime = 0;
+    aud.play().catch(() => {});
+  }
+}
+
+async function applyAndSavePreviewVoice() {
+  const select = document.getElementById('voice');
+  if (select) {
+    select.value = currentPreviewVoiceId;
+    await saveVoice();
+  }
+}
+
+function initVideoListeners() {
+  const vid = document.getElementById('preview-video');
+  if (!vid) return;
+  const overlay = document.getElementById('preview-center-overlay');
+  const btn = document.getElementById('btn-play-pause');
+  const timeDisp = document.getElementById('preview-time-display');
+
+  vid.addEventListener('play', () => {
+    if (overlay) overlay.classList.add('hidden');
+    if (btn) btn.textContent = '⏸ Tạm dừng';
+  });
+  vid.addEventListener('pause', () => {
+    if (overlay) overlay.classList.remove('hidden');
+    if (btn) btn.textContent = '▶️ Phát thử';
+  });
+  vid.addEventListener('ended', () => {
+    if (overlay) overlay.classList.remove('hidden');
+    if (btn) btn.textContent = '▶️ Phát lại';
+  });
+  vid.addEventListener('timeupdate', () => {
+    if (timeDisp && vid.duration) {
+      const cur = Math.floor(vid.currentTime);
+      const dur = Math.floor(vid.duration);
+      timeDisp.textContent = `0:${cur < 10 ? '0' : ''}${cur} / 0:${dur < 10 ? '0' : ''}${dur}`;
+    }
+  });
+  vid.addEventListener('loadedmetadata', sendHeight);
+}
+
 async function loadVoices() {
   try {
     const r = await fetch('/voices', { signal: AbortSignal.timeout(5000) });
     if (!r.ok) throw Error();
     const d = await r.json();
+    cachedVoices = d.voices;
     const select = document.getElementById('voice');
     select.replaceChildren();
     for (const source of ['rvc', 'edge', 'capcut']) {
@@ -869,6 +1296,7 @@ async function loadVoices() {
     select.disabled = false;
     document.getElementById('save-voice').disabled = false;
     document.getElementById('voice-status').textContent = 'Đang dùng: ' + d.selected.label;
+    selectVoiceForPreview(d.selected.id, false);
   } catch(e) {
     document.getElementById('voice-status').textContent = 'Không tải được giọng.';
   }
@@ -898,8 +1326,23 @@ async function saveVoice() {
   }
 }
 
-loadVoices();
-refresh();
+function sendHeight() {
+  try {
+    const h = Math.ceil(document.body.scrollHeight || document.documentElement.scrollHeight);
+    window.parent.postMessage({ type: 'control-frame-resize', height: h }, '*');
+  } catch(e) {}
+}
+window.addEventListener('load', () => {
+  initVideoListeners();
+  sendHeight();
+});
+window.addEventListener('resize', sendHeight);
+if (window.ResizeObserver) {
+  new ResizeObserver(sendHeight).observe(document.body);
+}
+
+loadVoices().then(sendHeight);
+refresh().then(sendHeight);
 setInterval(() => { if (!pending) refresh(); }, 3000);
 </script></body></html>"""
 
@@ -914,14 +1357,95 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def send_file(self, file_path, mime_type):
+        p = Path(file_path)
+        if not p.is_file():
+            self.send(404, {'message': 'File not found'})
+            return
+
+        file_size = p.stat().st_size
+        range_header = self.headers.get('Range')
+
+        if range_header and range_header.strip().startswith('bytes='):
+            try:
+                ranges = range_header.strip()[6:].split('-')
+                start = int(ranges[0]) if ranges[0] else 0
+                end = int(ranges[1]) if len(ranges) > 1 and ranges[1] else file_size - 1
+                start = max(0, min(start, file_size - 1))
+                end = max(start, min(end, file_size - 1))
+                length = end - start + 1
+
+                self.send_response(206)
+                self.send_header('Content-Type', mime_type)
+                self.send_header('Content-Range', f'bytes {start}-{end}/{file_size}')
+                self.send_header('Content-Length', str(length))
+                self.send_header('Accept-Ranges', 'bytes')
+                self.send_header('Cache-Control', 'public, max-age=3600')
+                self.send_header('Content-Security-Policy', "frame-ancestors http://127.0.0.1:8088 http://localhost:8088 http://127.0.0.1:8089 http://localhost:8089 http://127.0.0.1:8090")
+                self.end_headers()
+
+                with open(p, 'rb') as f:
+                    f.seek(start)
+                    rem = length
+                    while rem > 0:
+                        chunk = f.read(min(rem, 65536))
+                        if not chunk: break
+                        self.wfile.write(chunk)
+                        rem -= len(chunk)
+                return
+            except Exception:
+                return
+
+        self.send_response(200)
+        self.send_header('Content-Type', mime_type)
+        self.send_header('Content-Length', str(file_size))
+        self.send_header('Accept-Ranges', 'bytes')
+        self.send_header('Cache-Control', 'public, max-age=3600')
+        self.send_header('Content-Security-Policy', "frame-ancestors http://127.0.0.1:8088 http://localhost:8088 http://127.0.0.1:8089 http://localhost:8089 http://127.0.0.1:8090")
+        self.end_headers()
+        try:
+            with open(p, 'rb') as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk: break
+                    self.wfile.write(chunk)
+        except Exception:
+            pass
+
     def trusted(self):
         return self.headers.get('Host') in ('127.0.0.1:8090', 'localhost:8090')
 
     def do_GET(self):
         if not self.trusted(): return self.send(403, {'message': 'Invalid host'})
-        if self.path == '/': return self.send(200, HTML.replace('__TOKEN__', TOKEN), 'text/html')
-        if self.path == '/voices': return self.send(200, {'voices': voice_selection.catalog(), 'selected': voice_selection.selected()})
-        if self.path == '/status': return self.send(200, [status(k) for k in ROOTS])
+        parsed_path = urllib.parse.urlparse(self.path).path
+        if parsed_path == '/': return self.send(200, HTML.replace('__TOKEN__', TOKEN), 'text/html')
+        if parsed_path == '/voices': return self.send(200, {'voices': voice_selection.catalog(), 'selected': voice_selection.selected()})
+        if parsed_path == '/status': return self.send(200, [status(k) for k in ROOTS])
+
+        if parsed_path.startswith('/voice-preview-video/'):
+            filename = Path(parsed_path).name
+            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")]:
+                target = base / 'voice_previews' / filename
+                if target.is_file():
+                    return self.send_file(target, 'video/mp4')
+            return self.send(404, {'message': 'Video preview not found'})
+
+        if parsed_path.startswith('/voice-preview-audio/'):
+            filename = Path(parsed_path).name
+            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")]:
+                target = base / 'voice_checks' / filename
+                if target.is_file():
+                    mime = 'audio/wav' if filename.endswith('.wav') else 'audio/mpeg'
+                    return self.send_file(target, mime)
+            return self.send(404, {'message': 'Audio preview not found'})
+
+        if parsed_path == '/sample-video':
+            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")]:
+                target = base / 'sample_test_video.mp4'
+                if target.is_file():
+                    return self.send_file(target, 'video/mp4')
+            return self.send(404, {'message': 'Sample video not found'})
+
         self.send(404, {})
 
     def do_POST(self):
@@ -988,7 +1512,8 @@ class SingleInstanceServer(ThreadingHTTPServer):
 
 
 if __name__ == '__main__':
-    log_path = Path(r"C:\tool v1\workspace\service_logs\tool_control.log")
+    bs_log = Path(r"C:\tool v1\workspace\bot_system\service_logs\tool_control.log")
+    log_path = bs_log if (bs_log.parent.is_dir() or Path(r"C:\tool v1\workspace\bot_system").is_dir()) else Path(r"C:\tool v1\workspace\service_logs\tool_control.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     status_check = ensure_single_controller()
     if status_check == 'already_running':

@@ -19,8 +19,15 @@ from pipeline_v2.atomic_io import atomic_write_json
 
 BASE_DIR = Path(__file__).resolve().parent
 WORKSPACE = Path(os.getenv("AUTODUB_WORKSPACE", str(BASE_DIR.parent / "workspace")))
-STATUS_FILE = WORKSPACE / "job_status.json"
-BATCH_LOCK_FILE = WORKSPACE / "batch.lock"
+def _resolve_bot_system_file(filename: str) -> Path:
+    bot_system = WORKSPACE / "bot_system"
+    target = bot_system / filename
+    if target.exists() or bot_system.is_dir():
+        return target
+    return WORKSPACE / filename
+
+STATUS_FILE = _resolve_bot_system_file("job_status.json")
+BATCH_LOCK_FILE = _resolve_bot_system_file("batch.lock")
 
 _LOCK = threading.Lock()
 logger = logging.getLogger(__name__)
@@ -65,6 +72,8 @@ _DEFAULT_STATE: Dict[str, Any] = {
     "history": [],
     "step_durations": {},
     "current_step_start": None,
+    "separator_info": None,
+    "mixer_info": None,
     "updated_at": 0,
 }
 
@@ -259,16 +268,19 @@ def get_status() -> Dict[str, Any]:
                 state["eta_seconds"] = max(0, int(total_est - elapsed))
             else:
                 state["eta_seconds"] = None
-        # Đảm bảo translation_models không bị rỗng nếu video vừa hoàn thành có lưu model
-        if not state.get("translation_models"):
+        # Khi đang xử lý video mới, không lấy tên model của video trước làm nhãn (Codex Plan - Đợt 7)
+        if not state.get("active") and not state.get("translation_models"):
             last_models = (state.get("last_completed") or {}).get("translation_models")
             if last_models:
                 state["translation_models"] = list(last_models)
-            elif state.get("history"):
-                for hist in state.get("history", []):
-                    if hist.get("translation_models"):
-                        state["translation_models"] = list(hist["translation_models"])
-                        break
+        if not state.get("active") and not state.get("separator_info"):
+            last_sep = (state.get("last_completed") or {}).get("separator_info")
+            if last_sep:
+                state["separator_info"] = copy.deepcopy(last_sep)
+        if not state.get("active") and not state.get("mixer_info"):
+            last_mix = (state.get("last_completed") or {}).get("mixer_info")
+            if last_mix:
+                state["mixer_info"] = copy.deepcopy(last_mix)
         return state
 
 
@@ -323,6 +335,8 @@ def start_video(video_name: str, index: int = 1, total: int = 1):
             "video_name": video_name,
             "video_status": "running",
             "translation_models": [],
+            "separator_info": None,
+            "mixer_info": None,
             "step": 0,
             "step_name": "Bắt đầu xử lý video...",
             "percent": 5,
@@ -355,6 +369,36 @@ def record_translation_model(model: str, identity: Optional[Any] = None):
         _CURRENT_STATE["translation_models"] = models
         _save_state_to_disk()
         logger.info("Đã ghi nhận model dịch thuật: %s", model)
+
+
+def record_separator_info(info: Dict[str, Any], identity: Optional[Any] = None):
+    """Ghi nhận thông tin mô hình tách âm (BS-RoFormer / Demucs / Bypass)."""
+    if not info:
+        return
+    with _LOCK:
+        _sync_from_disk_unlocked()
+        if identity is not None:
+            current = (_CURRENT_STATE.get("job_id"), _CURRENT_STATE.get("video_name"), _CURRENT_STATE.get("start_time"))
+            if identity != current:
+                return
+        _CURRENT_STATE["separator_info"] = copy.deepcopy(info)
+        _save_state_to_disk()
+        logger.info("Đã ghi nhận thông tin tách âm: %s", info.get("engine") or info.get("model"))
+
+
+def record_mixer_info(info: Dict[str, Any], identity: Optional[Any] = None):
+    """Ghi nhận thông tin hòa âm và adaptive ducking."""
+    if not info:
+        return
+    with _LOCK:
+        _sync_from_disk_unlocked()
+        if identity is not None:
+            current = (_CURRENT_STATE.get("job_id"), _CURRENT_STATE.get("video_name"), _CURRENT_STATE.get("start_time"))
+            if identity != current:
+                return
+        _CURRENT_STATE["mixer_info"] = copy.deepcopy(info)
+        _save_state_to_disk()
+        logger.info("Đã ghi nhận thông tin hòa âm: %s", info.get("ducking_mode"))
 
 
 def update_step(step: float, step_name: str, percent: Optional[int] = None, details: str = ""):
@@ -404,6 +448,8 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
             "duration_seconds": int(duration_seconds),
             "completed_at": now,
             "translation_models": models,
+            "separator_info": copy.deepcopy(_CURRENT_STATE.get("separator_info")),
+            "mixer_info": copy.deepcopy(_CURRENT_STATE.get("mixer_info")),
         }
         history = _CURRENT_STATE.get("history", [])
         history.insert(0, record)

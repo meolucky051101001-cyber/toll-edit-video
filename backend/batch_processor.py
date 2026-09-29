@@ -214,6 +214,21 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
 
     try:
         t0 = time.time()
+        # 0. Đóng băng cấu hình job để không bị ảnh hưởng nếu đổi dashboard giữa chừng
+        from job_config_service import get_frozen_config, freeze_job_config
+        from audio_settings import get_audio_settings
+        cur_audio_settings = get_audio_settings()
+        frozen_job_entry = get_frozen_config(file_name) or freeze_job_config(
+            video_name=file_name,
+            overrides={
+                "bgm_volume_db": cur_audio_settings.get("bgm_volume_db", -2.0),
+                "dubbing_volume_db": cur_audio_settings.get("dubbing_volume_db", 1.0),
+                "separation_mode": cur_audio_settings.get("separation_mode", "roformer"),
+                "ducking_mode": cur_audio_settings.get("ducking_mode", "soft"),
+            }
+        )
+        frozen_eff = frozen_job_entry.get("effective_config", {}) if frozen_job_entry else {}
+
         await pause_checkpoint()
         _raise_if_stopped()
         await notify("🎧 Bước 1/6: Đang trích xuất âm thanh gốc...")
@@ -227,9 +242,13 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
 
         await pause_checkpoint()
         _raise_if_stopped()
-        await notify("🧠 Bước 2/6: Demucs htdemucs Fast đang tách giọng và giữ nhạc nền...")
-        job_tracker.update_step(2, "Bước 2/6: Demucs tách giọng và giữ nhạc nền...", percent=25)
-        vocals_audio, no_vocals_audio = await asyncio.to_thread(separate_vocals_demucs, original_audio, out_dir)
+        await notify("🧠 Bước 2/6: Đang bóc tách giọng nói & giữ nhạc nền (BS-RoFormer GPU / Demucs)...")
+        vocals_audio, no_vocals_audio = await asyncio.to_thread(
+            separate_vocals_demucs,
+            original_audio,
+            out_dir,
+            separation_mode=frozen_eff.get("separation_mode"),
+        )
 
         await pause_checkpoint()
         _raise_if_stopped()
@@ -291,30 +310,83 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         except Exception:
             pass
 
-        # Quyết định giọng theo chế độ Auto/Manual (Codex Plan)
-        from ai.v1_auto_voice import decide_video_voice, get_auto_voice_mode
-        batch_voice_mode = get_auto_voice_mode(WORKSPACE)
-        voice_lock_info = await asyncio.to_thread(
-            decide_video_voice,
-            out_dir=out_dir,
-            srt_segments=srt_segments,
-            vocals_path=vocals_audio,
-            original_audio_path=original_audio,
-            video_path=video_path,
-            voice_mode=batch_voice_mode,
-            workspace=WORKSPACE,
+        if not frozen_job_entry:
+            try:
+                from job_config_service import get_frozen_config
+                frozen_job_entry = get_frozen_config(file_name)
+                if frozen_job_entry:
+                    frozen_eff = frozen_job_entry.get("effective_config", {})
+            except Exception:
+                pass
+
+        sources = frozen_job_entry.get("sources", {}) if frozen_job_entry else {}
+        is_user_chosen = (
+            sources.get("voice_id") in ("preset", "video_override")
+            or (frozen_job_entry and frozen_job_entry.get("preset_id") is not None)
+            or frozen_eff.get("voice_mode") == "manual"
         )
-        v_source = voice_lock_info["voice_source"]
-        v_param = voice_lock_info["voice_param"]
-        v_label = voice_lock_info["voice_label"]
-        v_id = voice_lock_info["voice_id"]
+        if not is_user_chosen and (frozen_eff.get("dual_voice") or frozen_eff.get("voice_mode") == "auto"):
+            frozen_voice_id = None
+        else:
+            frozen_voice_id = frozen_eff.get("voice_id")
+
+        if frozen_voice_id:
+            from voice_selection import catalog
+            cat = catalog()
+            v_match = next((v for v in cat if v["id"] == frozen_voice_id), None)
+            if v_match:
+                v_source = v_match["source"]
+                v_param = v_match["param"]
+                v_label = v_match["label"]
+                v_id = v_match["id"]
+            else:
+                v_source = "edge"
+                v_param = "vi-VN-HoaiMyNeural"
+                v_label = "Hoài My (Fallback)"
+                v_id = "microsoft-hoaimy"
+            batch_voice_mode = frozen_eff.get("voice_mode", "manual")
+            voice_lock_info = {
+                "voice_source": v_source,
+                "voice_param": v_param,
+                "voice_label": v_label,
+                "voice_id": v_id,
+                "voice_mode": batch_voice_mode,
+                "dual_voice": bool(frozen_eff.get("dual_voice", False)),
+                "segment_voices": frozen_eff.get("segment_voices", None),
+            }
+            logger.info("Sử dụng giọng đóng băng theo job cho %s: %s (%s)", file_name, v_label, v_id)
+        else:
+            # Quyết định giọng theo chế độ Auto/Manual (Codex Plan)
+            from ai.v1_auto_voice import decide_video_voice, get_auto_voice_mode
+            batch_voice_mode = get_auto_voice_mode(WORKSPACE)
+            voice_lock_info = await asyncio.to_thread(
+                decide_video_voice,
+                out_dir=out_dir,
+                srt_segments=srt_segments,
+                vocals_path=vocals_audio,
+                original_audio_path=original_audio,
+                video_path=video_path,
+                voice_mode=batch_voice_mode,
+                workspace=WORKSPACE,
+            )
+            v_source = voice_lock_info["voice_source"]
+            v_param = voice_lock_info["voice_param"]
+            v_label = voice_lock_info["voice_label"]
+            v_id = voice_lock_info["voice_id"]
 
         await pause_checkpoint()
         _raise_if_stopped()
         await notify(f"Đang lồng tiếng: {v_label}")
-        job_tracker.update_step(5, f"Lồng tiếng: {v_label}", percent=85)
+        vid_duration = None
+        try:
+            from pydub import AudioSegment
+            vid_duration = len(AudioSegment.from_file(original_audio)) / 1000.0
+        except Exception:
+            pass
+
+        seg_voices = voice_lock_info.get("segment_voices") if 'voice_lock_info' in locals() and voice_lock_info else None
         dubbing_audio_files = await generate_dubbing_audio_isolated(
-            translated_segments, dubbing_dir, voice_source=v_source, voice_param=v_param
+            translated_segments, dubbing_dir, voice_source=v_source, voice_param=v_param, video_duration=vid_duration, segment_voices=seg_voices
         )
 
         # ĐỒNG BỘ THỜI GIAN THEO GIỌNG ĐỌC & CHỐNG ĐÈ SUB CHUYÊN SÂU
@@ -325,8 +397,20 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         ass_path = os.path.join(out_dir, "final.ass")
         await asyncio.to_thread(generate_ass_file, translated_segments, [], ass_path, play_res_x=vid_w, play_res_y=vid_h, main_y_pct=main_y_pct)
 
-        # Trộn nhạc nền sạch với giọng lồng tiếng
-        await asyncio.to_thread(mix_audio_pydub, no_vocals_audio, dubbing_audio_files, mixed_audio, original_volume_db=-2, dubbing_volume_db=1)
+        # Trộn nhạc nền sạch với giọng lồng tiếng (ưu tiên effective_config đóng băng)
+        v1_bgm_vol = frozen_eff.get("bgm_volume_db", -2.0)
+        v1_dub_vol = frozen_eff.get("dubbing_volume_db", 1.0)
+        v1_duck_mode = frozen_eff.get("ducking_mode", "soft")
+        await asyncio.to_thread(
+            mix_audio_pydub,
+            no_vocals_audio,
+            dubbing_audio_files,
+            mixed_audio,
+            original_volume_db=v1_bgm_vol,
+            dubbing_volume_db=v1_dub_vol,
+            ducking_mode=v1_duck_mode,
+            explicit=True,
+        )
 
         await pause_checkpoint()
         _raise_if_stopped()

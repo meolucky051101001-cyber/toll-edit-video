@@ -1,6 +1,7 @@
 import os
 import sys
 import io
+from pathlib import Path
 
 # Fix Windows console UTF-8 encoding
 if hasattr(sys.stdout, "reconfigure"):
@@ -11,6 +12,7 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception: pass
 
 import json
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import requests
 import base64
 import re
@@ -27,8 +29,19 @@ import hashlib
 import threading
 try:
     from ..v1_stage_metrics import stage
+except Exception:
+    try:
+        from v1_stage_metrics import stage
+    except Exception:
+        def stage(*args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+
+try:
+    from .v1_gemini_dispatcher import call_gemini_api, DEFAULT_TRANSLATION_MODELS, DEFAULT_CONDENSATION_MODELS
 except ImportError:
-    from v1_stage_metrics import stage
+    from v1_gemini_dispatcher import call_gemini_api, DEFAULT_TRANSLATION_MODELS, DEFAULT_CONDENSATION_MODELS
 
 logger = logging.getLogger(__name__)
 _gemini_health_lock = threading.Lock()
@@ -62,7 +75,8 @@ Yêu cầu TỐI QUAN TRỌNG:
 """
     if with_vision:
         prompt += "10. TRỰC QUAN: Hãy kết hợp các bức ảnh đính kèm từ video để chọn đại từ nhân xưng và danh từ chính xác tuyệt đối với ngữ cảnh.\n"
-    prompt += "11. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.\n"
+    prompt += "11. THUẬT NGỮ CÔNG NGHỆ & PHẦN CỨNG: Các tên card màn hình, CPU, GPU, đơn vị dung lượng (như RTX 4070, RX 6600 XT, Core i5, Ryzen 7, 2GB, 16GB, VRAM, FPS, CS2): BẮT BUỘC giữ nguyên tên chuẩn quốc tế, định dạng khoảng trắng rõ ràng giữa chữ và số (ví dụ: 'RTX 4070' thay vì 'RTX4070', '8 GB' hoặc '8GB'). Tuyệt đối KHÔNG dịch tên riêng hay mã hiệu kỹ thuật sang tiếng Việt.\n"
+    prompt += "12. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.\n"
     prompt += "Dữ liệu:\n"
     if prior_context:
         prompt += "Ngữ cảnh nối tiếp từ batch trước (không dịch lại):\n"
@@ -115,8 +129,27 @@ def translate_with_gemini(
     **kwargs
 ):
     api_key = api_key or os.getenv("GEMINI_API_KEY", "")
-    if not api_key:
+    if not api_key or not texts:
         return None
+    if len(texts) > 40:
+        chunk_size = 40
+        all_translated = []
+        for i in range(0, len(texts), chunk_size):
+            chunk_texts = texts[i:i + chunk_size]
+            chunk_kwargs = dict(kwargs)
+            chunk_kwargs["job_id"] = f"{kwargs.get('job_id', 'translate')}_p{i // chunk_size + 1}"
+            chunk_res = translate_with_gemini(
+                chunk_texts, target_lang=target_lang, api_key=api_key,
+                video_path=video_path, context_start_seconds=context_start_seconds,
+                context_end_seconds=context_end_seconds, prior_context=prior_context,
+                **chunk_kwargs
+            )
+            if not chunk_res or len(chunk_res) != len(chunk_texts):
+                logger.warning("Gemini chunk %d..%d thất bại, hủy toàn bộ batch để fallback", i, i + len(chunk_texts))
+                return None
+            all_translated.extend(chunk_res)
+        return all_translated
+
     try:
         prompt = build_translation_prompt(texts, target_lang, prior_context, with_vision=True)
         parts = [{"text": prompt}]
@@ -165,75 +198,35 @@ def translate_with_gemini(
             cache_k = None
             write_cache = None
 
-        with _gemini_health_lock:
-            last_good = _gemini_last_good.get(account)
-            if last_good in models_to_try:
-                models_to_try.remove(last_good)
-                models_to_try.insert(0, last_good)
-            models_to_try = [m for m in models_to_try
-                             if _gemini_cooldown.get((account, m), 0) <= time.monotonic()]
-        deadline = time.monotonic() + 90.0
-        for model in models_to_try:
-            remaining = deadline - time.monotonic()
-            if remaining <= 1:
-                break
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-            payload = {"contents": [{"parts": parts}]}
-            headers = {"Content-Type": "application/json"}
-            try:
-                logger.info(f"Đang gọi Google Gemini: {model}...")
-                response = requests.post(url, json=payload, headers=headers,
-                                         timeout=(min(5.0, remaining / 2), min(25.0, remaining / 2)))
-                response.encoding = "utf-8"
-                if response.status_code == 200:
-                    result = response.json()
-                    parts_out = result.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                    raw = "".join(p.get("text", "") for p in parts_out if not p.get("thought")).strip()
-                    match = re.search(r'\[.*\]', raw, re.DOTALL)
-                    translated = json.loads(match.group(0) if match else raw)
-                    if not isinstance(translated, list) or len(translated) != len(texts) or not all(
-                            isinstance(t, str) and t.strip() for t in translated):
-                        raise ValueError("Invalid translation array")
-                    try:
-                        from mojibake_repair import repair_vietnamese_mojibake
-                        translated = [repair_vietnamese_mojibake(t) for t in translated]
-                    except Exception:
-                        pass
-                    if write_cache:
-                        write_cache(cache_k, translated, model)
-                    with _gemini_health_lock:
-                        _gemini_last_good[account] = model
-                        _gemini_cooldown.pop((account, model), None)
-                    logger.info(f"Gọi thành công Gemini {model}!")
-                    try:
-                        import job_tracker
-                        job_tracker.record_translation_model(model)
-                    except Exception:
-                        pass
-                    return translated
-                else:
-                    logger.warning(f"Lỗi gọi {model} (HTTP {response.status_code})")
-                    with _gemini_health_lock:
-                        if response.status_code == 429:
-                            _gemini_cooldown[(account, model)] = time.monotonic() + 15
-                        elif response.status_code in (500, 502, 503, 504):
-                            _gemini_cooldown[(account, model)] = time.monotonic() + 20
-                        elif response.status_code == 404:
-                            _gemini_cooldown[(account, model)] = time.monotonic() + 86400
-                        else:
-                            _gemini_cooldown[(account, model)] = time.monotonic() + 60
-                    if response.status_code in (401, 403):
-                        break
-            except Exception as req_e:
-                # Exception URLs can contain API keys; log only the error type.
-                logger.warning("Lỗi dịch %s: %s", model, type(req_e).__name__)
-                with _gemini_health_lock:
-                    if isinstance(req_e, (requests.ConnectionError, requests.Timeout)):
-                        _gemini_cooldown.pop((account, model), None)
-                    else:
-                        _gemini_cooldown[(account, model)] = time.monotonic() + 30
-                
-        return None
+        from .v1_gemini_dispatcher import call_gemini_api
+        payload = {"contents": [{"parts": parts}]}
+        res_data, used_model = call_gemini_api(
+            payload=payload,
+            purpose="translation",
+            models=candidate_models,
+            api_key=api_key,
+            job_id=str(kwargs.get("job_id", "translate"))
+        )
+        parts_out = res_data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        raw = "".join(p.get("text", "") for p in parts_out if not p.get("thought")).strip()
+        match = re.search(r'\[.*\]', raw, re.DOTALL)
+        translated = json.loads(match.group(0) if match else raw)
+        if not isinstance(translated, list) or len(translated) != len(texts) or not all(
+                isinstance(t, str) and t.strip() for t in translated):
+            raise ValueError("Invalid translation array")
+        try:
+            from mojibake_repair import repair_vietnamese_mojibake
+            translated = [repair_vietnamese_mojibake(t) for t in translated]
+        except Exception:
+            pass
+        if write_cache:
+            write_cache(cache_k, translated, used_model)
+        try:
+            import job_tracker
+            job_tracker.record_translation_model(used_model)
+        except Exception:
+            pass
+        return translated
     except Exception as e:
         logger.warning(f"Lỗi dịch Gemini: {e}")
     return None
@@ -521,55 +514,53 @@ def translate_subtitles(
     
     logger.info("Falling back to Google Translate...")
     failed_segments = []
+    error_keywords = [
+        "error 500", "server error", "invalid source language",
+        "langpair", "almost all languages supported", "mymemory",
+        "query length limit", "daily limit reached", "too many requests"
+    ]
     for segment in srt_segments:
         if not segment.content:
             continue
-            
+
+        segment.orig_content = segment.content
+        # Không chứa ký tự CJK tiếng Trung (như số, tiếng Anh, tên card 2GB, RTX3070, CS2) -> Giữ nguyên gốc!
+        if not _contains_cjk(segment.content):
+            continue
+
         try:
-            segment.orig_content = segment.content
-            src_lang = 'zh-CN' if _contains_cjk(segment.content) else 'auto'
+            src_lang = 'zh-CN'
             try:
                 translator = GoogleTranslator(source=src_lang, target=target_lang)
                 translated_text = translator.translate(segment.content)
             except Exception:
                 translated_text = None
-            
+
             if (
                 not translated_text
-                or "Error 500" in str(translated_text)
-                or "Server Error" in str(translated_text)
+                or any(k in str(translated_text).lower() for k in error_keywords)
                 or str(translated_text).startswith("Error")
                 or (target_lang.lower().startswith("vi") and _contains_cjk(translated_text))
             ):
                 try:
-                    if MyMemoryTranslator is None:
-                        raise RuntimeError("MyMemoryTranslator is unavailable")
-                    mm_target = "vi-VN" if target_lang.lower().startswith("vi") else target_lang
-                    mm_src = "zh-CN" if _contains_cjk(segment.content) else "auto"
-                    translated_text = MyMemoryTranslator(source=mm_src, target=mm_target).translate(segment.content)
+                    if MyMemoryTranslator is not None:
+                        mm_target = "vi-VN" if target_lang.lower().startswith("vi") else target_lang
+                        translated_text = MyMemoryTranslator(source="zh-CN", target=mm_target).translate(segment.content)
                 except Exception:
                     pass
 
             if not isinstance(translated_text, str) or not translated_text.strip():
                 raise RuntimeError("Google Translate returned an empty result")
-            if (
-                "Error 500" in translated_text
-                or "Server Error" in translated_text
-                or translated_text.startswith("Error")
-            ):
-                raise RuntimeError(
-                    "Google Translate returned an error payload: {}".format(
-                        translated_text[:120]
-                    )
-                )
+            if any(k in translated_text.lower() for k in error_keywords) or translated_text.startswith("Error"):
+                raise RuntimeError("Google Translate returned an error payload: {}".format(translated_text[:120]))
             if target_lang.lower().startswith("vi") and _contains_cjk(translated_text):
                 raise RuntimeError("Chinese source text remained untranslated")
-                
+
         except Exception as e:
-            logger.warning(f"Lỗi dịch thuật: {e}")
+            logger.warning(f"Lỗi dịch thuật cho đoạn '{segment.content}': {e}")
             failed_segments.append(int(getattr(segment, "index", 0)))
-            translated_text = segment.content
-            
+            translated_text = segment.orig_content
+
         segment.content = translated_text
         
     if failed_segments and strict:
@@ -589,5 +580,136 @@ def translate_subtitles(
         pass
 
     return srt_segments
+
+
+def validate_condensed_text(orig_text: str, shortened: str, target_words: int) -> bool:
+    """
+    Kiểm tra chặt chẽ câu đã rút gọn theo Codex Plan:
+    1. Không rỗng, không chứa markdown, code fence, hoặc lời giải thích.
+    2. Không chứa ký tự CJK tiếng Trung.
+    3. Không dài hơn câu gốc.
+    4. Bảo toàn các số quan trọng và từ phủ định (không, chưa, chẳng, đừng).
+    """
+    if not isinstance(shortened, str) or not shortened.strip():
+        return False
+    shortened = shortened.strip()
+    if "```" in shortened or "{" in shortened or "}" in shortened or "\n" in shortened:
+        return False
+    if any("\u4e00" <= c <= "\u9fff" for c in shortened):
+        return False
+
+    orig_words = orig_text.strip().split()
+    short_words = shortened.split()
+    if len(short_words) > len(orig_words):
+        return False
+
+    orig_nums = set(re.findall(r'\b\d+\b', orig_text))
+    if orig_nums:
+        short_nums = set(re.findall(r'\b\d+\b', shortened))
+        if not orig_nums.issubset(short_nums):
+            return False
+
+    negations = ["không", "chưa", "chẳng", "đừng"]
+    for neg in negations:
+        if f" {neg} " in f" {orig_text.lower()} " and f" {neg} " not in f" {shortened.lower()} ":
+            return False
+
+    return True
+
+
+def condense_vietnamese_subtitles_batch(
+    items: list,
+    api_key: str = "",
+    deadline: Optional[float] = None,
+    stop_checker: Optional[Callable[[], bool]] = None,
+    job_id: str = "condense"
+) -> dict:
+    """
+    Rút gọn các câu thoại tiếng Việt quá dài theo ngữ nghĩa bằng Gemini theo Kế hoạch Codex:
+    1. Kiểm tra cache trước.
+    2. Gom tất cả câu chưa cache vào đúng MỘT lượt gọi qua v1_gemini_dispatcher.
+    3. Ưu tiên model nhẹ, nhanh: gemini-3.5-flash-lite -> gemini-flash-lite-latest -> gemini-3.5-flash -> gemini-3.7-flash.
+    4. Kiểm tra cấu trúc và ngữ nghĩa chặt chẽ (giữ số, phủ định, không rỗng, không CJK).
+    5. Chỉ chấp nhận các câu hợp lệ, ghi cache.
+    """
+    if not items:
+        return {}
+
+    from .v1_translation_cache import read_condense_cache, write_condense_cache
+    from mojibake_repair import repair_vietnamese_mojibake
+
+    result = {}
+    uncached_items = []
+
+    for it in items:
+        idx = it["index"]
+        text = it["text"].strip()
+        sec = float(it.get("target_seconds", 2.0))
+        tw = int(it.get("target_words") or max(2, int((sec - 0.05) / 0.28)))
+        cached_val = read_condense_cache(text, sec, tw)
+        if cached_val:
+            result[idx] = cached_val
+        else:
+            uncached_items.append({
+                "index": idx,
+                "text": text,
+                "target_seconds": sec,
+                "target_words": tw,
+            })
+
+    if not uncached_items:
+        logger.info(f"[CONDENSE] Tất cả {len(items)} câu đều có sẵn trong cache (100% Cache HIT).")
+        return result
+
+    prompt = (
+        "Bạn là chuyên gia biên tập phụ đề video ngắn chuyên nghiệp.\n"
+        "Các câu thoại tiếng Việt sau đây đang đọc quá dài so với thời lượng video gốc.\n"
+        "Nhiệm vụ: Viết lại/rút gọn từng câu sao cho thật ngắn gọn, súc tích (cô đọng nội dung, bỏ từ đệm thừa, "
+        "giữ trọn vẹn ý chính và tự nhiên, khống chế số lượng từ tối đa theo yêu cầu để người đọc và AI đọc trọn vẹn mà không bị nhanh).\n"
+        "Yêu cầu định dạng: Trả về duy nhất một đối tượng JSON ánh xạ ID dạng chuỗi sang câu đã rút gọn, ví dụ:\n"
+        '{"1": "câu 1 ngắn gọn", "2": "câu 2 ngắn gọn"}\n'
+        "Tuyệt đối không thêm lời dẫn giải hay bất kỳ ký tự nào ngoài JSON.\n\n"
+        "Danh sách câu cần rút gọn:\n"
+    )
+    for it in uncached_items:
+        prompt += f"- ID {it['index']} (mục tiêu: ~{it['target_seconds']:.2f}s, tối đa {it['target_words']} từ): \"{it['text']}\"\n"
+
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
+    try:
+        data, used_model = call_gemini_api(
+            payload=payload,
+            purpose="condensation",
+            models=DEFAULT_CONDENSATION_MODELS,
+            overall_deadline=deadline,
+            stop_checker=stop_checker,
+            job_id=job_id,
+            api_key=api_key,
+            timeout_per_request=20.0
+        )
+        parts_out = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        raw = "".join(p.get("text", "") for p in parts_out if not p.get("thought")).strip()
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            parsed = json.loads(match.group(0))
+            valid_count = 0
+            for it in uncached_items:
+                idx = it["index"]
+                shortened = parsed.get(str(idx)) or parsed.get(idx)
+                if shortened and isinstance(shortened, str):
+                    shortened = repair_vietnamese_mojibake(shortened.strip())
+                    if validate_condensed_text(it["text"], shortened, it["target_words"]):
+                        result[idx] = shortened
+                        write_condense_cache(it["text"], it["target_seconds"], it["target_words"], shortened, used_model)
+                        valid_count += 1
+                    else:
+                        logger.warning(f"[CONDENSE] Câu #{idx} không vượt qua kiểm định (giữ nguyên): '{shortened}'")
+            logger.info(f"[CONDENSE] Gemini {used_model} rút gọn thành công {valid_count}/{len(uncached_items)} câu chưa cache!")
+    except Exception as e:
+        logger.warning(f"[CONDENSE] Rút gọn câu qua Gemini không hoàn tất: {e}")
+
+    return result
+
+
 
 

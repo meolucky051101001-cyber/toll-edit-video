@@ -8,17 +8,26 @@ from pathlib import Path
 GLOBAL_CACHE_DIR = Path(__file__).parent.parent / "voice_cache"
 GLOBAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-CACHE_KEY_VERSION = 5  # Version 5: Invalidate legacy v4 cache to prevent Edge TTS rescue leakages
+CACHE_KEY_VERSION = 9  # Version 9: Tech pronunciation normalization (GPU/CPU/VRAM/vy)
 
-def voice_cache_key(segment, voice_source, voice_param):
+def voice_cache_key(segment, voice_source, voice_param, max_duration=None):
     model = Path(str(voice_param))
     fingerprint = None
     if model.is_file():
         stat = model.stat()
         fingerprint = (stat.st_size, stat.st_mtime_ns)
-    # Round duration to 1 decimal place to increase cache hit rate for identical texts
-    target_dur = round((segment.end - segment.start).total_seconds(), 1)
-    raw = [CACHE_KEY_VERSION, segment.content.strip(), voice_source, str(voice_param), fingerprint, target_dur]
+    # Target duration rounded to 2 decimal places to match exact reading window
+    if max_duration is not None:
+        target_dur = round(float(max_duration), 2)
+    else:
+        target_dur = round((segment.end - segment.start).total_seconds(), 2)
+    content = segment.content.strip()
+    try:
+        from ai.v1_tech_pronunciation import normalize_text_for_tts
+        content = normalize_text_for_tts(content)
+    except Exception:
+        pass
+    raw = [CACHE_KEY_VERSION, content, voice_source, str(voice_param), fingerprint, target_dur]
     return hashlib.sha256(json.dumps(raw, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 def is_valid_audio(audio_path: str | Path, min_duration: float = 0.15) -> bool:
@@ -40,13 +49,15 @@ def is_valid_audio(audio_path: str | Path, min_duration: float = 0.15) -> bool:
     except Exception:
         return False
 
-def read_voice_cache(path, key, text_content=""):
+def read_voice_cache(path, key, text_content="", max_duration=None):
     # 1. Check job-local cache
     try:
         item = json.loads(Path(str(path)+".cache.json").read_text(encoding="utf-8"))
         stat = Path(path).stat()
         if (item["key"]==key and item["size"]==stat.st_size and
                 item["mtime"]==stat.st_mtime_ns and stat.st_size>128):
+            if max_duration is not None and item.get("duration", 0) > max_duration + 0.05:
+                return None  # Cached audio exceeds allowable reading window, re-fit!
             if is_valid_audio(path):
                 return item["duration"]
     except (OSError, ValueError, KeyError, TypeError):
@@ -59,6 +70,8 @@ def read_voice_cache(path, key, text_content=""):
     try:
         if global_audio.exists() and global_meta.exists():
             item = json.loads(global_meta.read_text(encoding="utf-8"))
+            if max_duration is not None and item.get("duration", 0) > max_duration + 0.05:
+                return None  # Cached audio exceeds allowable reading window, re-fit!
             if global_audio.stat().st_size > 128 and is_valid_audio(global_audio):
                 # Global Cache HIT
                 shutil.copy2(global_audio, path)

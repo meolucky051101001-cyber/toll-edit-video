@@ -17,12 +17,12 @@ BASE = _resolve_control_dir()
 ALIASES = {'capcut-vi-VN-HoaiMyNeural': 'microsoft-hoaimy', 'capcut-vi-VN-NamMinhNeural': 'microsoft-namminh'}
 
 def catalog():
-    return json.loads((BASE/'voice_catalog.json').read_text(encoding='utf-8'))
+    return json.loads((BASE/'voice_catalog.json').read_text(encoding='utf-8-sig'))
 def selected():
     try:
-        value=json.loads((BASE/'voice_selection.json').read_text(encoding='utf-8'))['id']
-    except FileNotFoundError:
-        value='chi-mai'
+        value=json.loads((BASE/'voice_selection.json').read_text(encoding='utf-8-sig'))['id']
+    except (FileNotFoundError, KeyError):
+        value='capcut-BV562_streaming'
     value = ALIASES.get(value, value)
     for voice in catalog():
         if voice['id']==value:return voice

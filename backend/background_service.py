@@ -24,7 +24,8 @@ def main():
         raise ctypes.WinError(ctypes.get_last_error())
     if ctypes.get_last_error() == 183:
         return
-    logs = ROOT.parent / "workspace" / "service_logs"
+    bs_logs = ROOT.parent / "workspace" / "bot_system" / "service_logs"
+    logs = bs_logs if (bs_logs.is_dir() or (ROOT.parent / "workspace" / "bot_system").is_dir()) else (ROOT.parent / "workspace" / "service_logs")
     logs.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger(service)
     logger.setLevel(logging.INFO)
@@ -49,10 +50,12 @@ def main():
     except Exception:
         pass
 
-    control_pause = Path(r"C:\tool v1\workspace\control") / "v1.pause"
+    bs_control = ROOT.parent / "workspace" / "bot_system" / "control"
+    control_dir = bs_control if bs_control.is_dir() else (ROOT.parent / "workspace" / "control")
+    control_pause = control_dir / "v1.pause"
     delay = 5
     while True:
-        if control_pause.exists():
+        if service != "dashboard" and control_pause.exists():
             time.sleep(2)
             continue
         started = time.monotonic()

@@ -26,25 +26,25 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg-dark: #0d0f14;
-      --bg-panel: #141722;
-      --bg-card: #171c2a;
-      --bg-card-hover: #1e2436;
-      --bg-input: #0a0d13;
-      --border: #243042;
-      --border-bright: #38bdf8;
-      --border-glow: rgba(56, 189, 248, 0.35);
+      --bg-dark: #09090b;
+      --bg-panel: #121215;
+      --bg-card: #18181b;
+      --bg-card-hover: #202024;
+      --bg-input: #121215;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-bright: rgba(255, 255, 255, 0.16);
+      --border-glow: rgba(139, 92, 246, 0.2);
       
-      --text-main: #f1f5f9;
-      --text-dim: #94a3b8;
-      --text-muted: #64748b;
+      --text-main: #f4f4f5;
+      --text-dim: #a1a1aa;
+      --text-muted: #71717a;
       
       --primary: #8b5cf6;
       --primary-hover: #7c3aed;
       --accent-pink: #ec4899;
       --accent-cyan: #38bdf8;
       --accent-gold: #f59e0b;
-      --accent-red: #ff4757;
+      --accent-red: #ef4444;
       --success: #10b981;
       --warning: #f59e0b;
       --danger: #ef4444;
@@ -52,10 +52,10 @@
       --font-main: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       --font-mono: 'JetBrains Mono', monospace;
       
-      --gradient-brand: linear-gradient(135deg, #8b5cf6, #ec4899);
-      --gradient-auto: linear-gradient(135deg, #f59e0b 0%, #ec4899 50%, #8b5cf6 100%);
-      --gradient-hook: linear-gradient(135deg, #ff4757, #ff6b81);
-      --gradient-body: linear-gradient(135deg, #0284c7, #38bdf8);
+      --gradient-brand: linear-gradient(135deg, #7c3aed, #6366f1);
+      --gradient-auto: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+      --gradient-hook: linear-gradient(135deg, #dc2626, #ef4444);
+      --gradient-body: linear-gradient(135deg, #0284c7, #2563eb);
       --gradient-cta: linear-gradient(135deg, #059669, #10b981);
       --gradient-gold: linear-gradient(135deg, #d97706, #f59e0b);
     }
@@ -81,7 +81,7 @@
 
     /* TOP HEADER */
     header {
-      background: rgba(20, 23, 34, 0.95);
+      background: rgba(14, 14, 17, 0.95);
       backdrop-filter: blur(14px);
       border-bottom: 1px solid var(--border);
       padding: 12px 24px;
@@ -730,6 +730,101 @@
       color: #34d399;
     }
 
+    /* ===== LIVE REAL-TIME PROGRESS BOX ===== */
+    .pipeline-live-progress-box {
+      margin-bottom: 14px;
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.45), inset 0 0 15px rgba(56, 189, 248, 0.08);
+      backdrop-filter: blur(12px);
+      animation: fadeIn 0.3s ease-out;
+    }
+    .progress-box-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .progress-title-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .progress-pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #38bdf8;
+      box-shadow: 0 0 10px #38bdf8;
+      animation: pulseDot 1.2s infinite alternate ease-in-out;
+    }
+    @keyframes pulseDot {
+      0% { opacity: 0.4; transform: scale(0.9); }
+      100% { opacity: 1; transform: scale(1.3); }
+    }
+    .progress-main-title {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      color: #38bdf8;
+      text-transform: uppercase;
+    }
+    .progress-batch-chip {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 99px;
+      background: rgba(16, 185, 129, 0.2);
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      color: #34d399;
+      font-weight: 600;
+    }
+    .progress-time-counter {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: #94a3b8;
+      font-weight: 600;
+    }
+    .progress-track {
+      width: 100%;
+      height: 10px;
+      background: rgba(30, 41, 59, 0.9);
+      border-radius: 99px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      position: relative;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #ec4899 0%, #8b5cf6 50%, #38bdf8 100%);
+      border-radius: 99px;
+      transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.5);
+      position: relative;
+    }
+    .progress-footer-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 8px;
+      font-size: 12px;
+    }
+    .progress-step-text {
+      color: #cbd5e1;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 80%;
+    }
+    .progress-percent-badge {
+      font-family: var(--font-mono);
+      font-weight: 700;
+      color: #38bdf8;
+      font-size: 13px;
+    }
+
     /* DUAL VIDEO PLAYER TABS */
     .dual-player-container {
       background: #0a0d13;
@@ -1146,6 +1241,170 @@
       display: inline-block;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+  
+    /* UI refresh layer */
+/* Shared dark studio visual refresh */
+:root {
+  --bg-dark: #0b1016;
+  --bg-panel: #121a24;
+  --bg-card: #151f2b;
+  --bg-card-hover: #1b2937;
+  --bg-input: #0d141d;
+  --border: rgba(148, 163, 184, .15);
+  --border-bright: rgba(148, 163, 184, .28);
+  --border-glow: rgba(59, 130, 246, .22);
+  --text-main: #f1f5f9;
+  --text-dim: #cbd5e1;
+  --text-muted: #94a3b8;
+  --primary: #3b82f6;
+  --primary-hover: #2563eb;
+  --accent-pink: #ec4899;
+  --accent-cyan: #38bdf8;
+  --accent-gold: #f59e0b;
+  --accent-red: #ef4444;
+  --gradient-brand: linear-gradient(135deg, #2563eb, #0891b2);
+  --gradient-auto: linear-gradient(135deg, #2563eb 0%, #0284c7 100%);
+}
+html { color-scheme: dark; scroll-behavior: smooth; }
+body {
+  background: radial-gradient(ellipse at 50% -22%, rgba(37, 99, 235, .13), transparent 48%), var(--bg-dark);
+  color: var(--text-main);
+}
+:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
+header {
+  padding: 11px clamp(14px, 2vw, 30px);
+  gap: 12px 20px;
+  background: rgba(15, 22, 31, .95);
+  border-color: var(--border);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, .19);
+  backdrop-filter: blur(16px);
+}
+.app-title { letter-spacing: -.02em; }
+.app-subtitle { color: #a7b7c9; line-height: 1.45; }
+.nav-actions { gap: 7px; flex-wrap: wrap; }
+.btn { min-height: 36px; padding: 7px 11px; border-radius: 8px; font-weight: 600; }
+.btn:not(:disabled):hover { transform: translateY(-1px); }
+.btn-outline { background: rgba(148, 163, 184, .055); border-color: var(--border); color: #cbd5e1; }
+.btn-outline:hover { background: rgba(148, 163, 184, .12); border-color: var(--border-bright); color: #fff; }
+.btn-primary { box-shadow: 0 5px 16px rgba(59, 130, 246, .2); }
+.studio-container {
+  max-width: 1660px;
+  grid-template-columns: minmax(340px, .84fr) minmax(0, 1.16fr);
+  gap: 18px;
+  padding: 20px clamp(14px, 2vw, 30px) 76px;
+  align-items: start;
+}
+.panel {
+  min-width: 0;
+  border-color: var(--border);
+  border-radius: 15px;
+  background: linear-gradient(180deg, rgba(19, 27, 37, .98), rgba(16, 23, 32, .98));
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .18);
+}
+.panel-header { min-height: 54px; padding: 13px 17px; background: rgba(255, 255, 255, .025); }
+.panel-title { font-size: 14px; letter-spacing: -.01em; }
+.panel-body { padding: 17px; gap: 15px; }
+.workflow-step-card {
+  padding: 15px;
+  border-color: var(--border);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(24, 35, 48, .84), rgba(19, 28, 39, .8));
+}
+.workflow-step-card:focus-within { border-color: rgba(96, 165, 250, .55); box-shadow: 0 0 0 3px rgba(59, 130, 246, .08); }
+.workflow-step-title { padding-bottom: 9px; border-color: var(--border); line-height: 1.45; }
+.mode-tab-group { background: #0e151e; border-color: var(--border); }
+.mode-tab { min-height: 38px; border-radius: 8px; }
+.mode-tab.active { background: rgba(59, 130, 246, .19); color: #bfdbfe; border-color: rgba(96, 165, 250, .38); }
+.form-label { color: #d7e1ec; line-height: 1.45; }
+.form-input, .form-select, .form-textarea {
+  min-height: 40px;
+  border-color: rgba(148, 163, 184, .22);
+  border-radius: 9px;
+  background: #0d141d;
+  color: #f1f5f9;
+}
+.form-textarea { min-height: 84px; line-height: 1.55; }
+.form-input:focus, .form-select:focus, .form-textarea:focus { border-color: #60a5fa; box-shadow: 0 0 0 3px rgba(59, 130, 246, .14); }
+.video-dropzone { min-height: 132px; border-radius: 12px; border-color: rgba(96, 165, 250, .38); background: rgba(37, 99, 235, .055); }
+.video-dropzone:hover { background: rgba(37, 99, 235, .1); }
+.output-action-bar, .audio-player-box { border-color: var(--border); border-radius: 12px; background: #141e29; box-shadow: 0 8px 22px rgba(0, 0, 0, .14); }
+.output-action-bar { padding: 15px; }
+.output-buttons-row { gap: 10px; }
+.pipeline-live-progress-box { border-color: rgba(96, 165, 250, .26); border-radius: 13px; background: linear-gradient(145deg, rgba(25, 42, 60, .86), rgba(18, 28, 40, .96)); }
+.progress-track { height: 9px; border-radius: 999px; background: rgba(148, 163, 184, .17); }
+.progress-fill { border-radius: inherit; background: linear-gradient(90deg, #3b82f6, #22d3ee); }
+.hook-card-config-box, .hook-card-live-preview-box { border-color: var(--border); border-radius: 12px; }
+footer { background: rgba(15, 22, 31, .96); border-color: var(--border); backdrop-filter: blur(14px); }
+@media (max-width: 1150px) {
+  .studio-container { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
+}
+@media (max-width: 720px) {
+  header { align-items: flex-start; flex-wrap: wrap; padding: 10px 12px; }
+  .logo-area { min-width: 0; align-items: flex-start; }
+  .logo-area > div:last-child { min-width: 0; }
+  .app-subtitle { max-width: 65ch; }
+  .nav-actions { width: 100%; overflow-x: auto; flex-wrap: nowrap; padding-bottom: 3px; }
+  .nav-actions .btn { flex: 0 0 auto; }
+  .studio-container { padding: 14px 12px 24px; gap: 14px; }
+  .panel-header { padding: 12px 14px; gap: 8px; flex-wrap: wrap; }
+  .panel-body { padding: 13px; gap: 13px; }
+  .workflow-step-card { padding: 13px; }
+  .workflow-step-title { align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+  .output-buttons-row { grid-template-columns: minmax(0, 1fr); }
+  footer { position: static; padding: 10px 14px; }
+  .studio-container { padding-bottom: 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+header .nav-actions > a[href="/kich-ban"] { background: rgba(59, 130, 246, .2) !important; border-color: rgba(96, 165, 250, .42) !important; color: #dbeafe !important; }
+header .nav-actions > a[href="http://127.0.0.1:8088/"], header .nav-actions > a[href="http://127.0.0.1:8089/"], header .nav-actions > a[href="/quy-trinh"] { background: rgba(148, 163, 184, .055) !important; border-color: var(--border) !important; color: #cbd5e1 !important; }
+  
+
+    /* Minimal visual pass: calm charcoal surfaces and muted workflow colors */
+:root {
+  --bg-dark: #101114; --bg-panel: #17181c; --bg-card: #1b1c20; --bg-card-hover: #222328; --bg-input: #111215;
+  --border: rgba(255, 255, 255, .085); --border-bright: rgba(255, 255, 255, .15); --border-glow: rgba(255, 255, 255, .12);
+  --text-main: #e7e8ea; --text-dim: #c1c4c9; --text-muted: #92969d;
+  --primary: #748b9c; --primary-hover: #8298a8; --accent-cyan: #82a9bf; --accent-pink: #b18b9d; --accent-gold: #b69a6c;
+  --gradient-brand: linear-gradient(135deg, #303237, #25262b);
+  --gradient-auto: linear-gradient(135deg, #3b4c59, #303c46);
+  --gradient-hook: linear-gradient(135deg, #58363a, #493034);
+  --gradient-body: linear-gradient(135deg, #394a56, #303b45);
+  --gradient-cta: linear-gradient(135deg, #344b40, #2d4037);
+  --gradient-gold: linear-gradient(135deg, #514735, #453d30);
+}
+body { background: #101114; }
+header { background: #141519; box-shadow: none; backdrop-filter: none; }
+.nav-actions { gap: 6px; }
+.btn { border-radius: 6px; transition: background .14s ease, border-color .14s ease, color .14s ease; }
+.btn:not(:disabled):hover { transform: none; }
+.btn-primary { background: #e2e4e7; color: #16171a; box-shadow: none; }
+.btn-primary:hover { background: #f0f1f2; }
+.btn-success { background: #30483d; color: #c1dfcf; border-color: #40594b; }
+.btn-danger { background: #493034; color: #e0b9bc; border-color: #654247; }
+.btn-outline { background: #191a1e; border-color: #303238; color: #c1c4c9; }
+.btn-outline:hover { background: #222328; border-color: #404249; color: #f0f1f2; }
+.studio-container { align-items: start; }
+.panel { background: #17181c; border-color: #2b2d32; box-shadow: none; }
+.panel-header { background: #191a1e; }
+.workflow-step-card { background: #1a1b1f; border-color: #2e3035; }
+.workflow-step-card:focus-within { border-color: #626d77; box-shadow: none; }
+.workflow-step-title { border-color: #2e3035; }
+.mode-tab-group { background: #141519; }
+.mode-tab.active { background: #292b30; color: #e1e3e5; border-color: #41434a; }
+.form-input, .form-select, .form-textarea { background: #111215; border-color: #34363c; }
+.form-input:focus, .form-select:focus, .form-textarea:focus { border-color: #71899a; box-shadow: 0 0 0 2px rgba(113, 137, 154, .12); }
+.video-dropzone { background: #151619; border-color: #45484e; }
+.video-dropzone:hover { background: #1b1c20; border-color: #666a72; }
+.output-action-bar, .audio-player-box { background: #1a1b1f; border-color: #2e3035; box-shadow: none; }
+.pipeline-live-progress-box { background: #191b1f; border-color: #34373d; }
+.progress-track { background: #2a2c31; }
+.progress-fill { background: #6c98b0; }
+.hook-card-config-box, .hook-card-live-preview-box { border-color: #303238; }
+footer { background: #141519; backdrop-filter: none; }
+header .nav-actions > a[href="/kich-ban"] { background: #27292e !important; border-color: #3a3c42 !important; color: #f0f1f2 !important; }
+header .nav-actions > a[href="http://127.0.0.1:8088/"], header .nav-actions > a[href="http://127.0.0.1:8089/"], header .nav-actions > a[href="/quy-trinh"] { background: #191a1e !important; border-color: #303238 !important; color: #c1c4c9 !important; }
   </style>
 </head>
 <body>
@@ -1153,8 +1412,8 @@
   <!-- TOP HEADER -->
   <header>
     <div class="logo-area">
-      <div class="logo-badge">
-        <span>✍️</span>
+      <div class="logo-badge" style="background: #18181b; border: 1px solid var(--border); color: #f4f4f5; box-shadow: none;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>
         <span>STUDIO KỊCH BẢN AI</span>
       </div>
       <div>
@@ -1164,11 +1423,14 @@
     </div>
 
     <div class="nav-actions">
-      <a class="btn btn-outline" href="http://127.0.0.1:8088/" title="Mở dashboard Tool V1">Tool V1</a>
-      <a class="btn btn-outline" href="http://127.0.0.1:8089/" title="Mở dashboard Tool V2">Tool V2</a>
-      <a class="btn btn-outline" href="/quy-trinh" style="border-color: #0284c7; color: #38bdf8;" title="Mở Studio Quy trình biên tập video">🎬 Quy Trình</a>
-      <a class="btn btn-active" href="/kich-ban" title="Đang ở Studio Kịch Bản AI">✍️ Kịch Bản</a>
-      <button class="btn btn-outline" onclick="handleClearDraft()" title="Xóa trắng bản thảo để làm kịch bản mới">🗑️ Làm mới</button>
+      <a class="btn btn-outline" href="http://127.0.0.1:8088/" style="padding: 3px 10px; border-color: transparent;" title="Mở dashboard Tool V1">Tool V1</a>
+      <a class="btn btn-outline" href="http://127.0.0.1:8089/" style="padding: 3px 10px; border-color: transparent;" title="Mở dashboard Tool V2">Tool V2</a>
+      <a class="btn btn-outline" href="/quy-trinh" style="padding: 3px 10px; border-color: transparent;" title="Mở Studio Quy trình biên tập video">Quy Trình</a>
+      <a class="btn btn-primary" href="/kich-ban" style="padding: 3px 10px; background: rgba(139, 92, 246, 0.15); border: 1px solid rgba(139, 92, 246, 0.4); color: #c084fc;" title="Đang ở Studio Kịch Bản AI">Kịch Bản</a>
+      <button class="btn btn-outline" onclick="handleClearDraft()" title="Xóa trắng bản thảo để làm kịch bản mới">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        Làm mới
+      </button>
     </div>
   </header>
 
@@ -1188,7 +1450,7 @@
     <section class="panel">
       <div class="panel-header">
         <div class="panel-title">
-          <span>⚙️</span>
+          
           <span>Đầu Vào Kịch Bản & Cấu Hình</span>
         </div>
         <span class="tag-badge tag-badge-accent" id="aiModelBadge">Gemini Vision 3.7</span>
@@ -1199,17 +1461,17 @@
         <!-- BƯỚC 1: NGUỒN VIDEO / Ý TƯỞNG -->
         <div class="workflow-step-card">
           <div class="workflow-step-title">
-            <span>1️⃣ Nguồn Video & Tình Huống</span>
+            <span>01. Nguồn Video & Tình Huống</span>
             <span class="form-hint">Chọn video hoặc gõ chủ đề</span>
           </div>
 
           <!-- MODE SELECTOR TABS -->
           <div class="mode-tab-group">
             <button class="mode-tab active" id="tabModeVideo" onclick="switchMode('video')">
-              👁️ AI Xem Video (Video-to-Script)
+              AI Xem Video (Video-to-Script)
             </button>
             <button class="mode-tab" id="tabModeText" onclick="switchMode('text')">
-              💡 Nhập Ý Tưởng / Chủ Đề
+              Nhập Ý Tưởng / Chủ Đề
             </button>
           </div>
 
@@ -1281,7 +1543,7 @@
         <!-- BƯỚC 2: THỂ LOẠI, HOOK NÉ BẢN QUYỀN & TÙY CHỈNH THẺ HOOK -->
         <div class="workflow-step-card">
           <div class="workflow-step-title">
-            <span>2️⃣ Thể Loại & Thẻ Text Hook Drama</span>
+            <span>02. Thể Loại & Thẻ Text Hook Drama</span>
             <span class="form-hint">Màu khung tùy ý & Bỏ chữ NEWS</span>
           </div>
 
@@ -1310,18 +1572,18 @@
           <!-- HOOK NÉ BẢN QUYỀN (5s - 7s - 10s) -->
           <div class="hook-duration-box">
             <div class="hook-duration-title">
-              <span>🛡️</span>
+              
               <span>Thời Lượng Hook Né Bản Quyền & Giữ Chân</span>
             </div>
             <div class="hook-duration-btn-group">
               <button class="btn-hook-dur" id="btnHook5s" onclick="selectHookDuration(5)">
-                ⚡ 5s (Nhanh)
+                5s (Nhanh)
               </button>
               <button class="btn-hook-dur active" id="btnHook7s" onclick="selectHookDuration(7)">
-                🎯 7s (Chuẩn né BQ)
+                7s (Chuẩn né BQ)
               </button>
               <button class="btn-hook-dur" id="btnHook10s" onclick="selectHookDuration(10)">
-                📖 10s (Dẫn chuyện)
+                10s (Dẫn chuyện)
               </button>
             </div>
             <div class="hook-guidance-pill" id="hookGuidancePill">
@@ -1332,7 +1594,7 @@
           <!-- TÙY CHỈNH THẺ TEXT HOOK DRAMA & MÀU KHUNG -->
           <div class="hook-card-config-box">
             <div class="hook-duration-title" style="color: #38bdf8;">
-              <span>🎨</span>
+              
               <span>Tùy Chỉnh Thẻ Text Hook Drama (5–7s đầu)</span>
             </div>
             
@@ -1463,7 +1725,7 @@
     <section class="panel">
       <div class="panel-header">
         <div class="panel-title">
-          <span>🎬</span>
+          
           <span>Bảng Phân Cảnh & Video Thành Phẩm</span>
         </div>
         <div style="display: flex; gap: 8px; align-items: center;">
@@ -1501,9 +1763,17 @@
               <span>📑</span>
               <span id="txtQueueHeader">Thứ Tự Video & Hàng Chờ:</span>
             </span>
-            <button class="btn btn-outline" style="font-size: 11px; padding: 3px 8px;" onclick="loadAvailableVideosToQueue()">
-              🔄 Tải Danh Sách Video
-            </button>
+            <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+              <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px;" onclick="loadAvailableVideosToQueue()" title="Làm mới danh sách video từ thư mục">
+                🔄 Tải Danh Sách
+              </button>
+              <button class="btn" id="btnBatchAutoPipeline" style="font-size: 11px; padding: 4px 10px; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: #fff; font-weight: 700; border: none; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 5px; box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);" onclick="handleStartBatchPipeline()">
+                <span>⚡ Xử Lý Toàn Bộ Hàng Chờ</span>
+              </button>
+              <button class="btn" id="btnStopBatch" style="font-size: 11px; padding: 4px 10px; background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; font-weight: 700; border-radius: 6px; cursor: pointer; display: none; align-items: center; gap: 5px;" onclick="handleStopBatchPipeline()">
+                <span>⏹ Dừng Hàng Loạt</span>
+              </button>
+            </div>
           </div>
           <div class="video-queue-list" id="videoQueueList">
             <div class="video-queue-chip active" id="chipVideoCurrent" onclick="selectQueueVideo(0)">
@@ -1511,6 +1781,29 @@
               <span id="chipVideoCurrentName">Chưa chọn video</span>
               <span id="chipVideoCurrentStatus" style="font-size: 10.5px; color: #f59e0b;">⏳ Chưa xử lý</span>
             </div>
+          </div>
+        </div>
+
+        <!-- LIVE REAL-TIME PROGRESS WIDGET -->
+        <div class="pipeline-live-progress-box" id="pipelineLiveProgressBox" style="display: none;">
+          <div class="progress-box-header">
+            <div class="progress-title-row">
+              <span class="progress-pulse-dot"></span>
+              <span class="progress-main-title" id="liveProgressTitle">TIẾN ĐỘ TỰ ĐỘNG HÓA THỜI GIAN THỰC</span>
+              <span class="progress-batch-chip" id="liveProgressBatchChip" style="display: none;">Hàng loạt: Video 1/5</span>
+            </div>
+            <div class="progress-time-counter">
+              <span id="liveProgressTimer">⏱️ 00:00</span>
+            </div>
+          </div>
+
+          <div class="progress-track">
+            <div class="progress-fill" id="liveProgressBarFill" style="width: 0%;"></div>
+          </div>
+
+          <div class="progress-footer-row">
+            <span class="progress-step-text" id="liveProgressStepText">Đang khởi động quy trình...</span>
+            <span class="progress-percent-badge" id="liveProgressPercent">0%</span>
           </div>
         </div>
 
@@ -1787,10 +2080,10 @@
 
         card.innerHTML = `
           <div class="voice-card-name">
-            <span>${genderIcon} ${v.name}</span>
+            <span>${genderIcon} ${escapeHtml(v.name)}</span>
             <span class="voice-card-badge">${providerBadge}</span>
           </div>
-          <div class="voice-card-desc">${v.desc || ''}</div>
+          <div class="voice-card-desc">${escapeHtml(v.desc || '')}</div>
         `;
         box.appendChild(card);
       });
@@ -1852,13 +2145,32 @@
       list.innerHTML = '';
       videoQueue.slice(0, 15).forEach((v, idx) => {
         const chip = document.createElement('div');
-        chip.className = `video-queue-chip ${idx === activeQueueIdx ? 'active' : ''} ${v.isDone ? 'done' : ''}`;
+        const isCurrent = idx === activeQueueIdx;
+        let statusClass = '';
+        let statusText = '⏳ Chờ';
+        let statusColor = '#94a3b8';
+
+        if (v.isDone) {
+          statusClass = 'done';
+          statusText = '✅ Đã xong';
+          statusColor = '#34d399';
+        } else if (v.isRunning) {
+          statusClass = 'active';
+          statusText = `🔄 ${v.progressPercent || 0}%`;
+          statusColor = '#38bdf8';
+        } else if (v.isError) {
+          statusText = '❌ Lỗi';
+          statusColor = '#f87171';
+        }
+
+        chip.className = `video-queue-chip ${isCurrent ? 'active' : ''} ${statusClass}`;
+        chip.id = `videoQueueChip_${idx}`;
         chip.onclick = () => selectQueueVideo(idx);
         
         chip.innerHTML = `
           <span>#${idx + 1}</span>
-          <span>${escapeHtml(v.name || v.path.split('\\').pop())}</span>
-          <span style="font-size: 10px; opacity: 0.8;">${v.isDone ? '✅ Đã xong' : '⏳ Chờ'}</span>
+          <span style="max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(v.name || v.path.split('\\').pop())}</span>
+          <span id="chipVideoStatus_${idx}" style="font-size: 10px; font-weight: 700; color: ${statusColor};">${statusText}</span>
         `;
         list.appendChild(chip);
       });
@@ -1999,13 +2311,114 @@
       }
     }
 
-    // ===== MAIN ACTION 1: 1-CLICK AUTO PIPELINE =====
-    async function handleAutoPipeline() {
-      const videoPath = document.getElementById('txtVideoPath').value.trim();
-      if (!videoPath) {
-        showTopAlert('Vui lòng chọn hoặc kéo thả file video trước khi chạy Tự Động Hóa!');
-        return;
+    // ===== LIVE PROGRESS & BATCH PROCESSING CONTROLLER =====
+    let isBatchRunning = false;
+    let stopBatchRequested = false;
+    let progressPollTimer = null;
+    let progressTimerInterval = null;
+    let pipelineStartTime = null;
+
+    function startLiveProgressUI(title, batchText = '') {
+      const box = document.getElementById('pipelineLiveProgressBox');
+      const titleEl = document.getElementById('liveProgressTitle');
+      const batchChip = document.getElementById('liveProgressBatchChip');
+      const timerEl = document.getElementById('liveProgressTimer');
+      const fillEl = document.getElementById('liveProgressBarFill');
+      const stepEl = document.getElementById('liveProgressStepText');
+      const pctEl = document.getElementById('liveProgressPercent');
+
+      if (box) box.style.display = 'block';
+      if (titleEl) titleEl.innerText = title || 'TIẾN ĐỘ TỰ ĐỘNG HÓA THỜI GIAN THỰC';
+      if (batchChip) {
+        if (batchText) {
+          batchChip.innerText = batchText;
+          batchChip.style.display = 'inline-block';
+        } else {
+          batchChip.style.display = 'none';
+        }
       }
+      if (fillEl) fillEl.style.width = '5%';
+      if (pctEl) pctEl.innerText = '5%';
+      if (stepEl) stepEl.innerText = 'Đang khởi động tiến trình...';
+
+      clearInterval(progressTimerInterval);
+      pipelineStartTime = Date.now();
+      if (timerEl) timerEl.innerText = '⏱️ 00:00';
+      progressTimerInterval = setInterval(() => {
+        if (!pipelineStartTime) return;
+        const elapsedSec = Math.floor((Date.now() - pipelineStartTime) / 1000);
+        const mins = String(Math.floor(elapsedSec / 60)).padStart(2, '0');
+        const secs = String(elapsedSec % 60).padStart(2, '0');
+        if (timerEl) timerEl.innerText = `⏱️ ${mins}:${secs}`;
+      }, 1000);
+    }
+
+    function updateLiveProgressUI(percent, stepName) {
+      const fillEl = document.getElementById('liveProgressBarFill');
+      const stepEl = document.getElementById('liveProgressStepText');
+      const pctEl = document.getElementById('liveProgressPercent');
+
+      const p = Math.max(0, Math.min(100, Math.round(percent)));
+      if (fillEl) fillEl.style.width = `${p}%`;
+      if (pctEl) pctEl.innerText = `${p}%`;
+      if (stepEl && stepName) stepEl.innerText = stepName;
+    }
+
+    function stopLiveProgressUI(isSuccess, finalMsg) {
+      clearInterval(progressTimerInterval);
+      clearInterval(progressPollTimer);
+      progressTimerInterval = null;
+      progressPollTimer = null;
+
+      const fillEl = document.getElementById('liveProgressBarFill');
+      const stepEl = document.getElementById('liveProgressStepText');
+      const pctEl = document.getElementById('liveProgressPercent');
+
+      if (isSuccess) {
+        if (fillEl) fillEl.style.width = '100%';
+        if (pctEl) pctEl.innerText = '100%';
+        if (stepEl) stepEl.innerText = finalMsg || '🎉 Hoàn tất tự động hóa xuất sắc!';
+      } else {
+        if (stepEl) stepEl.innerText = finalMsg || '❌ Quá trình gặp sự cố.';
+      }
+
+      if (!isBatchRunning) {
+        setTimeout(() => {
+          const box = document.getElementById('pipelineLiveProgressBox');
+          if (box && !isBatchRunning) box.style.display = 'none';
+        }, 8000);
+      }
+    }
+
+    function pollTaskProgress(taskId, onFinish) {
+      clearInterval(progressPollTimer);
+      progressPollTimer = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/script/pipeline/progress/${taskId}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.status === 'success' || data.status === 'processing') {
+              updateLiveProgressUI(data.percent, data.step_name);
+              if (activeQueueIdx !== null && videoQueue && videoQueue[activeQueueIdx]) {
+                videoQueue[activeQueueIdx].progressPercent = data.percent;
+                const statusEl = document.getElementById(`chipVideoStatus_${activeQueueIdx}`);
+                if (statusEl) statusEl.innerText = `🔄 ${data.percent}%`;
+              }
+              if (data.percent >= 100 || data.status === 'success') {
+                clearInterval(progressPollTimer);
+                if (onFinish) onFinish(data);
+              }
+            } else if (data.status === 'error') {
+              clearInterval(progressPollTimer);
+              updateLiveProgressUI(100, 'Lỗi: ' + (data.error || 'Thất bại'));
+            }
+          }
+        } catch (e) {}
+      }, 700);
+    }
+
+    async function executeAutoPipelineForVideo(videoPath, batchInfo = null) {
+      if (!videoPath) return { success: false, message: 'Đường dẫn rỗng' };
 
       const genre = document.getElementById('selVideoGenre').value;
       const style = document.getElementById('selVideoStyle').value;
@@ -2014,18 +2427,18 @@
       const chkBadge = document.getElementById('chkShowBadge').checked;
       const isHookCardEnabled = document.getElementById('chkEnableHookCard').checked;
 
-      const btn = document.getElementById('btnAutoPipeline');
-      btn.disabled = true;
-      btn.innerHTML = `
-        <span class="spinner"></span>
-        <div class="auto-pipeline-info">
-          <div class="auto-pipeline-main-title">ĐANG TỰ ĐỘNG HÓA TỪ A-Z...</div>
-          <div class="auto-pipeline-sub-title" id="autoPipelineProgressText">AI Gemini Vision đang xem video & lên kịch bản...</div>
-        </div>
-      `;
+      const videoName = videoPath.split('\\').pop().split('/').pop();
+      const taskId = `task_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
-      showStatus('🚀 [BƯỚC 1/3] AI Gemini Vision đang xem video, bóc tách tình huống và dựng kịch bản chuẩn viral...');
-      showTopAlert('⏳ Đang chạy quy trình tự động hóa khép kín: Kịch bản → Giọng đọc CapCut → Lồng sub → Dập Hook...', false);
+      const titleText = batchInfo 
+        ? `HÀNG LOẠT: VIDEO ${batchInfo.current}/${batchInfo.total} - ${videoName}` 
+        : `TỰ ĐỘNG HÓA: ${videoName}`;
+      const batchChipText = batchInfo ? `Video ${batchInfo.current}/${batchInfo.total}` : '';
+
+      startLiveProgressUI(titleText, batchChipText);
+      showStatus(`🚀 [BẮT ĐẦU] Tự động hóa video: ${videoName}...`);
+
+      pollTaskProgress(taskId);
 
       try {
         const res = await fetch('/api/script/auto-pipeline', {
@@ -2043,7 +2456,8 @@
             hook_card_text: isHookCardEnabled ? (customHookCardText || null) : "",
             hook_card_bg_color: hookCardBgColor,
             hook_card_show_badge: chkBadge,
-            hook_card_badge_text: chkBadge ? "NEWS" : ""
+            hook_card_badge_text: chkBadge ? "NEWS" : "",
+            task_id: taskId
           })
         });
 
@@ -2059,64 +2473,207 @@
             total_duration: data.total_duration
           };
 
-          // Render scenes list
           renderScenes();
 
-          // Cập nhật text hook card
           if (data.hook_text) {
             document.getElementById('txtHookCardText').value = data.hook_text;
             updateHookCardPreview();
           }
 
-          // Cập nhật Audio & Sub download
           const audioBox = document.getElementById('audioPlayerBox');
-          const audioPlayer = document.getElementById('audioPlayer');
-          const srtLink = document.getElementById('linkDownloadSrt');
-          audioPlayer.src = data.audio_stream_url;
-          srtLink.href = data.srt_download_url;
-          audioBox.style.display = 'flex';
+          const fullAudioPlayer = document.getElementById('fullAudioPlayer');
+          const btnDlAudio = document.getElementById('btnDownloadAudio');
+          const btnDlSrt = document.getElementById('btnDownloadSrt');
+          if (audioBox) audioBox.style.display = 'block';
+          if (fullAudioPlayer) fullAudioPlayer.src = data.audio_stream_url;
+          if (btnDlAudio) btnDlAudio.href = data.audio_stream_url;
+          if (btnDlSrt) btnDlSrt.href = data.srt_download_url;
 
-          // Cập nhật Player Video Thành Phẩm và chuyển sang Tab Thành Phẩm
           const burnedPlayer = document.getElementById('burnedVideoPlayer');
           const burnedLabel = document.getElementById('burnedVideoPathLabel');
           const btnDlVideo = document.getElementById('btnDownloadBurnedVideo');
-          const btnDlSrt = document.getElementById('btnDownloadBurnedSrt');
+          const btnDlBurnedSrt = document.getElementById('btnDownloadBurnedSrt');
 
-          burnedPlayer.src = data.video_stream_url;
-          burnedLabel.innerText = `Thành phẩm: ${data.final_video}`;
-          btnDlVideo.href = data.video_stream_url;
-          btnDlSrt.href = data.srt_download_url;
+          if (burnedPlayer) burnedPlayer.src = data.video_stream_url;
+          if (burnedLabel) burnedLabel.innerText = `Thành phẩm: ${data.final_video}`;
+          if (btnDlVideo) btnDlVideo.href = data.video_stream_url;
+          if (btnDlBurnedSrt) btnDlBurnedSrt.href = data.srt_download_url;
 
-          // Chuyển sang Tab Video Sau Khi Làm Xong và tự động phát
           switchVideoPlayerTab('burned');
-          burnedPlayer.play().catch(() => {});
+          if (burnedPlayer) burnedPlayer.play().catch(() => {});
 
-          // Đánh dấu video trong Queue là hoàn thành
-          if (videoQueue && videoQueue[activeQueueIdx]) {
-            videoQueue[activeQueueIdx].isDone = true;
-            renderVideoQueueList();
-          }
-
-          showTopAlert(`🏆 TỰ ĐỘNG HÓA HOÀN TẤT 100%! Video đã được lồng tiếng, dập sub và tạo Hook thành công (${data.total_duration}s).`, true);
+          stopLiveProgressUI(true, `🏆 Xuất video thành công: ${videoName} (${data.total_duration}s)`);
           showStatus(`🏆 Video xuất xưởng thành công: ${data.final_video}`);
           saveDraft();
+          return { success: true, data };
         } else {
-          showTopAlert('Lỗi Tự Động Hóa: ' + (data.message || 'Thất bại'), false, handleAutoPipeline);
+          stopLiveProgressUI(false, 'Lỗi: ' + (data.message || 'Thất bại'));
           showStatus('❌ Lỗi Auto Pipeline: ' + (data.message || 'Thất bại'));
+          return { success: false, message: data.message };
         }
       } catch (err) {
-        showTopAlert('Lỗi kết nối máy chủ khi chạy Auto Pipeline: ' + err.message, false, handleAutoPipeline);
+        stopLiveProgressUI(false, 'Lỗi kết nối: ' + err.message);
         showStatus('❌ Lỗi kết nối: ' + err.message);
-      } finally {
-        btn.disabled = false;
-        btn.innerHTML = `
-          <span class="auto-pipeline-icon">🚀 ⚡</span>
-          <div class="auto-pipeline-info">
-            <div class="auto-pipeline-main-title">TỰ ĐỘNG HÓA TOÀN DIỆN (1-CLICK)</div>
-            <div class="auto-pipeline-sub-title">Lên kịch bản + Lồng tiếng CapCut + Lồng sub + Dập Hook Drama</div>
-          </div>
-        `;
+        return { success: false, message: err.message };
       }
+    }
+
+    // ===== MAIN ACTION 1: 1-CLICK AUTO PIPELINE (SINGLE VIDEO) =====
+    async function handleAutoPipeline() {
+      if (isBatchRunning) {
+        showTopAlert('Đang có tiến trình xử lý hàng loạt chạy ngầm. Vui lòng dừng hàng loạt trước!');
+        return;
+      }
+      const videoPath = document.getElementById('txtVideoPath').value.trim();
+      if (!videoPath) {
+        showTopAlert('Vui lòng chọn hoặc kéo thả file video trước khi chạy Tự Động Hóa!');
+        return;
+      }
+
+      const btn = document.getElementById('btnAutoPipeline');
+      btn.disabled = true;
+      btn.innerHTML = `
+        <span class="spinner"></span>
+        <div class="auto-pipeline-info">
+          <div class="auto-pipeline-main-title">ĐANG TỰ ĐỘNG HÓA TỪ A-Z...</div>
+          <div class="auto-pipeline-sub-title" id="autoPipelineProgressText">Đang chạy theo thời gian thực...</div>
+        </div>
+      `;
+
+      showTopAlert('⏳ Đang chạy quy trình tự động hóa khép kín: Kịch bản → Giọng đọc CapCut → Lồng sub → Dập Hook...', false);
+
+      const res = await executeAutoPipelineForVideo(videoPath);
+      if (res.success) {
+        if (videoQueue && videoQueue[activeQueueIdx]) {
+          videoQueue[activeQueueIdx].isDone = true;
+          renderVideoQueueList();
+        }
+        showTopAlert(`🏆 TỰ ĐỘNG HÓA HOÀN TẤT 100%! Video đã được lồng tiếng, dập sub và tạo Hook thành công.`, true);
+      } else {
+        showTopAlert('Lỗi Tự Động Hóa: ' + (res.message || 'Thất bại'), false, handleAutoPipeline);
+      }
+
+      btn.disabled = false;
+      btn.innerHTML = `
+        <span class="auto-pipeline-icon">🚀 ⚡</span>
+        <div class="auto-pipeline-info">
+          <div class="auto-pipeline-main-title">TỰ ĐỘNG HÓA TOÀN DIỆN (1-CLICK)</div>
+          <div class="auto-pipeline-sub-title">Lên kịch bản + Lồng tiếng CapCut + Lồng sub + Dập Hook Drama</div>
+        </div>
+      `;
+    }
+
+    // ===== BATCH PROCESSING CONTROLLER =====
+    async function handleStartBatchPipeline() {
+      if (isBatchRunning) {
+        showTopAlert('Đang xử lý hàng loạt rồi!');
+        return;
+      }
+
+      if (!videoQueue || videoQueue.length === 0) {
+        showTopAlert('Hàng chờ chưa có video nào. Đang quét tìm video...');
+        await loadAvailableVideos();
+        if (!videoQueue || videoQueue.length === 0) {
+          showTopAlert('Không tìm thấy video nào trong thư mục quét!');
+          return;
+        }
+      }
+
+      const pendingVideos = videoQueue.filter(v => !v.isDone);
+      if (pendingVideos.length === 0) {
+        if (confirm('Tất cả video trong hàng chờ đều đã được xử lý. Bạn có muốn chạy lại toàn bộ từ đầu không?')) {
+          videoQueue.forEach(v => {
+            v.isDone = false;
+            v.isRunning = false;
+            v.isError = false;
+            v.progressPercent = 0;
+          });
+          renderVideoQueueList();
+        } else {
+          return;
+        }
+      }
+
+      isBatchRunning = true;
+      stopBatchRequested = false;
+
+      const btnBatch = document.getElementById('btnBatchAutoPipeline');
+      const btnStop = document.getElementById('btnStopBatch');
+      const btnAuto = document.getElementById('btnAutoPipeline');
+
+      if (btnBatch) {
+        btnBatch.disabled = true;
+        btnBatch.innerHTML = '<span>⏳ Đang Chạy Hàng Loạt...</span>';
+      }
+      if (btnStop) {
+        btnStop.style.display = 'inline-flex';
+        btnStop.innerHTML = '<span>⏹ Dừng Hàng Loạt</span>';
+      }
+      if (btnAuto) btnAuto.disabled = true;
+
+      showTopAlert(`🚀 Bắt đầu xử lý hàng loạt ${videoQueue.length} video trong hàng chờ!`, true);
+
+      let successCount = 0;
+      let errorCount = 0;
+
+      for (let i = 0; i < videoQueue.length; i++) {
+        if (stopBatchRequested) {
+          showTopAlert('⏹ Đã dừng xử lý hàng loạt theo yêu cầu của bạn.');
+          break;
+        }
+
+        const item = videoQueue[i];
+        if (item.isDone) continue;
+
+        selectQueueVideo(i);
+        item.isRunning = true;
+        item.progressPercent = 5;
+        renderVideoQueueList();
+
+        const res = await executeAutoPipelineForVideo(item.path, {
+          current: i + 1,
+          total: videoQueue.length
+        });
+
+        item.isRunning = false;
+        if (res.success) {
+          item.isDone = true;
+          item.isError = false;
+          successCount++;
+        } else {
+          item.isError = true;
+          errorCount++;
+        }
+
+        renderVideoQueueList();
+
+        if (i < videoQueue.length - 1 && !stopBatchRequested) {
+          await new Promise(r => setTimeout(r, 1200));
+        }
+      }
+
+      isBatchRunning = false;
+      stopBatchRequested = false;
+
+      if (btnBatch) {
+        btnBatch.disabled = false;
+        btnBatch.innerHTML = '<span>⚡ Xử Lý Toàn Bộ Hàng Chờ</span>';
+      }
+      if (btnStop) btnStop.style.display = 'none';
+      if (btnAuto) btnAuto.disabled = false;
+
+      showTopAlert(`🎉 Hoàn tất chuỗi hàng loạt: ${successCount} video thành công, ${errorCount} lỗi!`, true);
+      showStatus(`🎉 Hoàn tất chuỗi xử lý hàng loạt: ${successCount} thành công, ${errorCount} lỗi.`);
+    }
+
+    function handleStopBatchPipeline() {
+      if (!isBatchRunning) return;
+      stopBatchRequested = true;
+      const btnStop = document.getElementById('btnStopBatch');
+      if (btnStop) {
+        btnStop.innerHTML = '<span>⏳ Đang dừng sau video này...</span>';
+      }
+      showTopAlert('⚠️ Yêu cầu dừng đã được ghi nhận. Hệ thống sẽ dừng ngay sau khi video hiện tại render xong!');
     }
 
     // ===== MAIN ACTION 2: MANUAL GENERATE SCRIPT =====
@@ -2386,7 +2943,7 @@
               <button class="btn-scene-action" onclick="moveScene(${idx}, -1)" ${idx === 0 ? 'disabled style="opacity:0.3; cursor:not-allowed;"' : ''} title="Di chuyển lên">↑</button>
               <button class="btn-scene-action" onclick="moveScene(${idx}, 1)" ${idx === scenes.length - 1 ? 'disabled style="opacity:0.3; cursor:not-allowed;"' : ''} title="Di chuyển xuống">↓</button>
               <button class="btn-scene-action" id="btnCopyScene_${idx}" onclick="handleCopyScene(${idx})" title="Sao chép lời thoại">📋 Sao chép</button>
-              <button class="btn-scene-action btn-preview-tts ${isPlaying ? 'playing' : ''}" onclick="handlePreviewSceneTTS(${idx})">
+              <button class="btn-scene-action btn-preview-tts ${isPlaying ? 'playing' : ''}" id="btnPreviewTTS_${idx}" onclick="handlePreviewSceneTTS(${idx})">
                 <span>${isPlaying ? '⏹ Đang Đọc...' : '▶ Nghe Thử TTS'}</span>
               </button>
               <button class="btn-scene-action" style="color:#ef4444;" onclick="handleDeleteScene(${idx})" title="Xóa phân cảnh này">🗑️</button>
@@ -2429,19 +2986,25 @@
       return (totalWords / 2.4).toFixed(1);
     }
 
+    let saveDraftTimer = null;
+    function debouncedSaveDraft() {
+      clearTimeout(saveDraftTimer);
+      saveDraftTimer = setTimeout(saveDraft, 800);
+    }
+
     function updateSceneText(idx, val) {
       if (scenes[idx]) {
         scenes[idx].speaker_text = val;
         const words = val.trim().split(/\s+/).filter(Boolean).length;
         scenes[idx].word_count = words;
-        saveDraft();
+        debouncedSaveDraft();
       }
     }
 
     function updateSceneVisual(idx, val) {
       if (scenes[idx]) {
         scenes[idx].visual_cue = val;
-        saveDraft();
+        debouncedSaveDraft();
       }
     }
 
@@ -2454,7 +3017,7 @@
             updateHookCardPreview();
           }
         }
-        saveDraft();
+        debouncedSaveDraft();
       }
     }
 
@@ -2489,14 +3052,8 @@
 
     function handleCopyFullScript() {
       if (!scenes || scenes.length === 0) return;
-      const lines = scenes.map((s, i) => `[Cảnh ${i+1} - ${s.section || 'Phân cảnh'}]
-${s.speaker_text}
-(Chữ nổi: ${s.text_overlay || 'Không'})
-`);
-      const full = `=== KỊCH BẢN: ${scriptData?.title || 'Video ngắn'} ===
-
-` + lines.join('
-');
+      const lines = scenes.map((s, i) => `[Cảnh ${i+1} - ${s.section || 'Phân cảnh'}]\n${s.speaker_text}\n(Chữ nổi: ${s.text_overlay || 'Không'})\n`);
+      const full = `=== KỊCH BẢN: ${scriptData?.title || 'Video ngắn'} ===\n\n` + lines.join('\n');
       navigator.clipboard.writeText(full).then(() => {
         const btn = document.getElementById('btnCopyAllScript');
         const oldText = btn.innerText;
@@ -2535,6 +3092,19 @@ ${s.speaker_text}
     }
 
     // ===== TTS PREVIEW FOR SINGLE SCENE =====
+    function updateTTSPreviewButtonUI(idx, isPlaying) {
+      const btn = document.getElementById(`btnPreviewTTS_${idx}`);
+      if (btn) {
+        if (isPlaying) {
+          btn.classList.add('playing');
+          btn.innerHTML = '<span>⏹ Dừng</span>';
+        } else {
+          btn.classList.remove('playing');
+          btn.innerHTML = '<span>▶ Nghe Thử TTS</span>';
+        }
+      }
+    }
+
     async function handlePreviewSceneTTS(idx) {
       const sc = scenes[idx];
       if (!sc || !sc.speaker_text) return;
@@ -2542,18 +3112,21 @@ ${s.speaker_text}
       if (playingSceneIndex === idx && previewAudio) {
         previewAudio.pause();
         previewAudio = null;
+        updateTTSPreviewButtonUI(idx, false);
         playingSceneIndex = null;
-        renderScenes();
         return;
       }
 
       if (previewAudio) {
         previewAudio.pause();
         previewAudio = null;
+        if (playingSceneIndex !== null) {
+          updateTTSPreviewButtonUI(playingSceneIndex, false);
+        }
       }
 
       playingSceneIndex = idx;
-      renderScenes();
+      updateTTSPreviewButtonUI(idx, true);
       showStatus(`🔊 Đang tạo giọng đọc CapCut cho phân cảnh #${idx + 1}...`);
 
       try {
@@ -2569,24 +3142,24 @@ ${s.speaker_text}
         if (data.status === 'success' && data.stream_url) {
           previewAudio = new Audio(data.stream_url);
           previewAudio.onended = () => {
-            playingSceneIndex = null;
-            renderScenes();
+            updateTTSPreviewButtonUI(idx, false);
+            if (playingSceneIndex === idx) playingSceneIndex = null;
           };
           previewAudio.onerror = () => {
-            playingSceneIndex = null;
-            renderScenes();
+            updateTTSPreviewButtonUI(idx, false);
+            if (playingSceneIndex === idx) playingSceneIndex = null;
           };
           previewAudio.play();
           showStatus(`▶ Đang phát thử giọng đọc (${data.duration}s) phân cảnh #${idx + 1}`);
         } else {
           showTopAlert('Lỗi TTS: ' + (data.message || 'Thất bại'));
+          updateTTSPreviewButtonUI(idx, false);
           playingSceneIndex = null;
-          renderScenes();
         }
       } catch (err) {
         showTopAlert('Lỗi kết nối TTS: ' + err.message);
+        updateTTSPreviewButtonUI(idx, false);
         playingSceneIndex = null;
-        renderScenes();
       }
     }
 
@@ -2709,6 +3282,9 @@ ${s.speaker_text}
         hookCardBgColor,
         scriptData,
         scenes,
+        renderedResult,
+        videoQueue,
+        activeQueueIdx,
         videoPath: document.getElementById('txtVideoPath')?.value || '',
         topic: document.getElementById('txtTopic')?.value || '',
         situationPrompt: document.getElementById('txtSituationPrompt')?.value || '',
@@ -2726,6 +3302,9 @@ ${s.speaker_text}
         const raw = localStorage.getItem('autodub_script_studio_draft_v4') || localStorage.getItem('autodub_script_studio_draft_v3');
         if (!raw) return;
         const draft = JSON.parse(raw);
+        if (draft.currentMode) {
+          switchMode(draft.currentMode);
+        }
         if (draft.selectedVoice) {
           selectedVoice = draft.selectedVoice;
         }
@@ -2757,10 +3336,32 @@ ${s.speaker_text}
         if (draft.chkEnableHookCard !== undefined && document.getElementById('chkEnableHookCard')) {
           document.getElementById('chkEnableHookCard').checked = draft.chkEnableHookCard;
         }
+        if (draft.videoQueue && Array.isArray(draft.videoQueue)) {
+          videoQueue = draft.videoQueue;
+          activeQueueIdx = draft.activeQueueIdx || 0;
+          renderVideoQueueList();
+        }
         if (draft.scenes && draft.scenes.length > 0) {
           scenes = draft.scenes;
           scriptData = draft.scriptData;
           renderScenes();
+        }
+        if (draft.renderedResult) {
+          renderedResult = draft.renderedResult;
+          const audioBox = document.getElementById('audioPlayerBox');
+          if (audioBox) audioBox.style.display = 'block';
+          const fullAudioPlayer = document.getElementById('fullAudioPlayer');
+          if (fullAudioPlayer && renderedResult.audio_stream_url) {
+            fullAudioPlayer.src = renderedResult.audio_stream_url;
+          }
+          const btnAudio = document.getElementById('btnDownloadAudio');
+          if (btnAudio && renderedResult.audio_stream_url) {
+            btnAudio.href = renderedResult.audio_stream_url;
+          }
+          const btnSrt = document.getElementById('btnDownloadSrt');
+          if (btnSrt && renderedResult.srt_download_url) {
+            btnSrt.href = renderedResult.srt_download_url;
+          }
         }
         updateHookCardPreview();
       } catch (e) {}
@@ -2802,7 +3403,14 @@ ${s.speaker_text}
 
     function escapeJsStr(str) {
       if (!str) return '';
-      return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\n/g, ' ');
+      return String(str)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/"/g, '\\"')
+        .replace(/`/g, '\\`')
+        .replace(/\$/g, '\\$')
+        .replace(/\r/g, '')
+        .replace(/\n/g, '\\n');
     }
   </script>
 </body>

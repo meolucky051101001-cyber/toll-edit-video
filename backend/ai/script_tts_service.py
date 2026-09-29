@@ -14,7 +14,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import requests
 from pydub import AudioSegment
 
@@ -184,6 +184,21 @@ def format_srt_time(seconds: float) -> str:
     return f"{hrs:02d}:{mins:02d}:{secs:02d},{millis:03d}"
 
 
+def _run_coroutine_sync(coro):
+    """Chạy một coroutine an toàn, kể cả khi đang ở trong một thread có running event loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    else:
+        return asyncio.run(coro)
+
+
 def generate_single_tts(text: str, output_file: str | Path, voice: str = "BV562_streaming") -> float:
     """
     Sinh audio TTS cho một câu thoại bằng CapCut TTS (hoặc fallback sang Edge TTS).
@@ -204,7 +219,7 @@ def generate_single_tts(text: str, output_file: str | Path, voice: str = "BV562_
         async def _run_edge():
             comm = edge_tts.Communicate(text, voice)
             await comm.save(str(output_path))
-        asyncio.run(_run_edge())
+        _run_coroutine_sync(_run_edge())
         audio = AudioSegment.from_file(str(output_path))
         return audio.duration_seconds
 
@@ -237,7 +252,7 @@ def generate_single_tts(text: str, output_file: str | Path, voice: str = "BV562_
     async def _run_fallback():
         comm = edge_tts.Communicate(text, fallback_voice)
         await comm.save(str(output_path))
-    asyncio.run(_run_fallback())
+    _run_coroutine_sync(_run_fallback())
     audio = AudioSegment.from_file(str(output_path))
     return audio.duration_seconds
 
@@ -346,7 +361,7 @@ def fit_audio_to_scene_window(
         if len(trimmed) > fade_out_ms:
             trimmed = trimmed.fade_out(fade_out_ms)
         trimmed.export(str(dst_path), format=dst_path.suffix.lstrip(".") or "mp3")
-        return dst_path, round(available_window, 2), "fitted"
+        return dst_path, round(available_window, 2), "trimmed"
 
     # Trường hợp 3: Vượt quá 1.08x window -> Trim an toàn với 80ms fade-out
     target_ms = int(round(available_window * 1000))
@@ -364,7 +379,8 @@ def render_full_script_tts(
     workspace_dir: Optional[str | Path] = None,
     pause_between_scenes_ms: int = 350,
     video_duration: Optional[float] = None,
-    api_key: Optional[str] = None
+    api_key: Optional[str] = None,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None
 ) -> Dict[str, Any]:
     """
     Sinh audio hoàn chỉnh cho toàn bộ kịch bản bằng CapCut TTS kết hợp Closed-Loop Rewrite:
@@ -389,6 +405,11 @@ def render_full_script_tts(
     processed_scenes = []
 
     for i, scene in enumerate(scenes):
+        if progress_callback:
+            try:
+                progress_callback(i + 1, len(scenes), f"Đang thu âm phân cảnh #{i+1}/{len(scenes)}")
+            except Exception:
+                pass
         scene_idx = scene.get("index", scene.get("scene_idx", i + 1))
         curr_text = str(scene.get("speaker_text") or scene.get("voiceover") or scene.get("text") or "").strip()
         segment_file = segments_dir / f"scene_{scene_idx:02d}.mp3"
@@ -834,11 +855,11 @@ def burn_script_to_video(
     source_duration = get_media_duration(clean_video)
     logger.info(f"Thời lượng video gốc: {source_duration:.2f}s")
 
-    # Chuẩn hóa đường dẫn srt cho FFmpeg Windows (thay \ bằng / và escape dấu :)
+    # Chuẩn hóa đường dẫn srt cho FFmpeg Windows (thay \ bằng / và escape dấu : và ')
     clean_srt = str(Path(srt_path).resolve()).replace("\\", "/")
-    if ":" in clean_srt:
-        drive, rest = clean_srt.split(":", 1)
-        clean_srt = f"{drive}\\:{rest}"
+    if len(clean_srt) > 1 and clean_srt[1] == ":":
+        clean_srt = clean_srt[0] + "\\:" + clean_srt[2:]
+    clean_srt = clean_srt.replace("'", "\\'")
 
     # Font chữ to, viền đen nổi bật chuẩn TikTok/Reels
     subtitle_filter = (
@@ -878,27 +899,75 @@ def burn_script_to_video(
     else:
         filter_complex = video_clause
 
-    cmd = [
+    # Danh sách các bộ mã hóa theo thứ tự ưu tiên:
+    # 1. NVIDIA GPU Hardware (h264_nvenc) — siêu tốc ~10-20x real-time
+    # 2. Windows MediaFoundation Hardware (h264_mf)
+    # 3. CPU Fallback (libx264 veryfast)
+    encoders_to_try = [
+        ["h264_nvenc", "-preset", "p4", "-tune", "hq", "-b:v", "8000k", "-spatial-aq", "1", "-pix_fmt", "yuv420p"],
+        ["h264_nvenc", "-preset", "fast", "-b:v", "8000k", "-pix_fmt", "yuv420p"],
+        ["h264_mf", "-b:v", "8000k", "-pix_fmt", "yuv420p"],
+        ["libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p"],
+    ]
+
+    base_cmd = [
         "ffmpeg", "-y",
+        "-threads", "4",
+        "-filter_threads", "2",
         "-i", clean_video,
         "-i", clean_audio,
     ] + extra_inputs + [
         "-filter_complex", filter_complex,
         "-map", "[v]",
         "-map", "[a]" if source_duration > 0 else "1:a",
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "20",
+    ]
+
+    end_args = [
         "-c:a", "aac",
         "-b:a", "192k",
+        "-movflags", "+faststart",
     ] + duration_args + [str(out_file)]
 
-    logger.info(f"Đang chạy FFmpeg: {' '.join(cmd)}")
+    ffmpeg_timeout = max(180, int((source_duration or 60) * 3))
+    render_success = False
+    last_error = ""
+
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if proc.returncode != 0:
-            logger.error(f"FFmpeg error: {proc.stderr}")
-            raise RuntimeError(f"Lỗi khi render video: {proc.stderr[-300:]}")
+        for enc_args in encoders_to_try:
+            enc_name = enc_args[0]
+            cmd = base_cmd + ["-c:v", enc_name] + enc_args[1:] + end_args
+            logger.info(f"Đang thử render video bằng encoder '{enc_name}' (timeout={ffmpeg_timeout}s)...")
+            try:
+                t0 = time.monotonic()
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=ffmpeg_timeout
+                )
+                elapsed = time.monotonic() - t0
+                if proc.returncode == 0:
+                    speed_x = (source_duration / max(elapsed, 0.01)) if source_duration > 0 else 0
+                    logger.info(f"🎉 Render video thành công bằng '{enc_name}' trong {elapsed:.1f}s (tốc độ: {speed_x:.1f}x)!")
+                    render_success = True
+                    break
+                else:
+                    err_msg = proc.stderr[-300:] if proc.stderr else "Không rõ lỗi"
+                    last_error = err_msg
+                    logger.warning(f"Encoder '{enc_name}' không thành công (code {proc.returncode}): {err_msg}. Đang thử encoder tiếp theo...")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Encoder '{enc_name}' timeout sau {ffmpeg_timeout}s. Đang chuyển sang encoder khác...")
+                last_error = f"Timeout sau {ffmpeg_timeout}s"
+                continue
+            except Exception as ex:
+                logger.warning(f"Lỗi khởi chạy encoder '{enc_name}': {ex}")
+                last_error = str(ex)
+                continue
+
+        if not render_success:
+            logger.error(f"Tất cả các encoder đều thất bại. Lỗi cuối: {last_error}")
+            raise RuntimeError(f"Lỗi khi render video (đã thử cả GPU NVENC và CPU): {last_error}")
     finally:
         if temp_card_path and temp_card_path.exists():
             try:

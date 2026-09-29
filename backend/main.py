@@ -29,7 +29,7 @@ from ai.v1_asr_isolated import extract_subtitles_isolated
 from ai.translation import translate_subtitles
 from ai.voice_cloning import generate_dubbing_audio
 from ai.v1_voice_isolated import generate_dubbing_audio_isolated
-from video_utils import extract_audio_from_video, mix_audio_pydub, process_video
+from video_utils import extract_audio_from_video, mix_audio_pydub, process_video, separate_vocals_demucs
 from pipeline_v2.config import PipelineMode, PipelineSettings
 import shared_state
 import job_tracker
@@ -86,7 +86,7 @@ async def security_middleware(request: Request, call_next):
     path = request.url.path
     method = request.method.upper()
     if method in ("POST", "PUT", "DELETE", "PATCH") and (path.startswith("/api/") or path.startswith("/a2ui/")):
-        if not path.startswith("/api/script/"):
+        if not path.startswith("/api/script/") and path != "/api/voice-preview" and not path.startswith("/api/jobs/"):
             token = request.headers.get("X-Local-Control-Token")
             if not token or token != LOCAL_TOKEN:
                 return JSONResponse(status_code=403, content={"detail": "Yêu cầu thiếu hoặc sai X-Local-Control-Token"})
@@ -426,22 +426,46 @@ async def api_process_video(
                 "message": f"Xuất video thành công: {published_video}",
             }
 
+        # 0. Snapshot/freeze job configuration
+        from job_config_service import get_frozen_config, freeze_job_config
+        from audio_settings import get_audio_settings
+        cur_audio_settings = get_audio_settings()
+        video_name = os.path.basename(video_path)
+        frozen_job = get_frozen_config(video_name) or freeze_job_config(
+            video_name=video_name,
+            overrides={
+                "bgm_volume_db": cur_audio_settings.get("bgm_volume_db", -2.0),
+                "dubbing_volume_db": cur_audio_settings.get("dubbing_volume_db", 1.0),
+                "separation_mode": cur_audio_settings.get("separation_mode", "roformer"),
+                "ducking_mode": cur_audio_settings.get("ducking_mode", "soft"),
+            }
+        )
+        frozen_eff = frozen_job.get("effective_config", {}) if frozen_job else {}
+        job_bgm_vol = frozen_eff.get("bgm_volume_db", cur_audio_settings.get("bgm_volume_db", -2.0))
+        job_dub_vol = frozen_eff.get("dubbing_volume_db", cur_audio_settings.get("dubbing_volume_db", 1.0))
+        job_sep_mode = frozen_eff.get("separation_mode", cur_audio_settings.get("separation_mode", "roformer"))
+        job_duck_mode = frozen_eff.get("ducking_mode", cur_audio_settings.get("ducking_mode", "soft"))
+
         # 1. Extract audio
         await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
 
+        # 1.5. Separate vocals & background music (BS-RoFormer GPU / Demucs / Bypass)
+        vocals_audio, no_vocals_audio = await asyncio.to_thread(
+            separate_vocals_demucs,
+            original_audio,
+            out_dir,
+            separation_mode=job_sep_mode,
+        )
+
         # 2. Transcribe
-        srt_segments = await asyncio.to_thread(extract_subtitles_isolated, original_audio, srt_original)
+        srt_segments = await asyncio.to_thread(extract_subtitles_isolated, vocals_audio, srt_original)
         vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
 
         # 3. Translate
         translated_segments = await asyncio.to_thread(translate_subtitles, 
             srt_segments,
             target_lang,
-            api_key=(
-                GEMINI_API_KEY
-                if voice_source == "fpt"
-                else (api_key or GEMINI_API_KEY)
-            ),
+            api_key=GEMINI_API_KEY,
             video_path=video_path,
         )
         await asyncio.to_thread(save_srt, translated_segments, srt_translated)
@@ -453,7 +477,7 @@ async def api_process_video(
             decide_video_voice,
             out_dir=out_dir,
             srt_segments=srt_segments,
-            vocals_path=None,
+            vocals_path=vocals_audio,
             original_audio_path=original_audio,
             video_path=video_path,
             voice_mode=api_voice_mode,
@@ -461,20 +485,37 @@ async def api_process_video(
         )
         effective_source = voice_lock_info["voice_source"]
         effective_param = voice_lock_info["voice_param"]
+        vid_duration = None
+        try:
+            from pydub import AudioSegment
+            vid_duration = len(AudioSegment.from_file(original_audio)) / 1000.0
+        except Exception:
+            pass
 
         dubbing_audio_files = await generate_dubbing_audio_isolated(
             translated_segments, dubbing_dir,
             voice_source=effective_source,
             voice_param=effective_param,
-            api_key=api_key
+            api_key=api_key,
+            video_duration=vid_duration,
+            segment_voices=voice_lock_info.get("segment_voices"),
         )
 
         # 4.5. Synchronize subtitle timing to audio duration & anti-overlap
         from ass_utils import sync_and_clamp_subtitles
         translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
 
-        # 5. Mix audio (original + dubbing)
-        await asyncio.to_thread(mix_audio_pydub, original_audio, dubbing_audio_files, mixed_audio)
+        # 5. Mix audio (clean instrumental BGM + dubbing)
+        await asyncio.to_thread(
+            mix_audio_pydub,
+            no_vocals_audio,
+            dubbing_audio_files,
+            mixed_audio,
+            original_volume_db=job_bgm_vol,
+            dubbing_volume_db=job_dub_vol,
+            ducking_mode=job_duck_mode,
+            explicit=True,
+        )
 
         # 6. Final render: Blur + Subtitles + Audio → Output video
         from ass_utils import generate_ass_file
@@ -599,22 +640,46 @@ async def api_process_url(
                 "message": f"Hoàn tất! Video đã xuất tại: {published_video}",
             }
 
+        # 0. Snapshot/freeze job configuration
+        from job_config_service import get_frozen_config, freeze_job_config
+        from audio_settings import get_audio_settings
+        cur_audio_settings = get_audio_settings()
+        video_name = os.path.basename(video_path)
+        frozen_job = get_frozen_config(video_name) or freeze_job_config(
+            video_name=video_name,
+            overrides={
+                "bgm_volume_db": cur_audio_settings.get("bgm_volume_db", -2.0),
+                "dubbing_volume_db": cur_audio_settings.get("dubbing_volume_db", 1.0),
+                "separation_mode": cur_audio_settings.get("separation_mode", "roformer"),
+                "ducking_mode": cur_audio_settings.get("ducking_mode", "soft"),
+            }
+        )
+        frozen_eff = frozen_job.get("effective_config", {}) if frozen_job else {}
+        job_bgm_vol = frozen_eff.get("bgm_volume_db", cur_audio_settings.get("bgm_volume_db", -2.0))
+        job_dub_vol = frozen_eff.get("dubbing_volume_db", cur_audio_settings.get("dubbing_volume_db", 1.0))
+        job_sep_mode = frozen_eff.get("separation_mode", cur_audio_settings.get("separation_mode", "roformer"))
+        job_duck_mode = frozen_eff.get("ducking_mode", cur_audio_settings.get("ducking_mode", "soft"))
+
         # Extract audio
         await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
 
+        # Separate vocals & background music (BS-RoFormer GPU / Demucs / Bypass)
+        vocals_audio, no_vocals_audio = await asyncio.to_thread(
+            separate_vocals_demucs,
+            original_audio,
+            out_dir,
+            separation_mode=job_sep_mode,
+        )
+
         # Transcribe
-        srt_segments = await asyncio.to_thread(extract_subtitles_isolated, original_audio, srt_original)
+        srt_segments = await asyncio.to_thread(extract_subtitles_isolated, vocals_audio, srt_original)
         vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
 
         # Translate
         translated_segments = await asyncio.to_thread(translate_subtitles, 
             srt_segments,
             target_lang,
-            api_key=(
-                GEMINI_API_KEY
-                if voice_source == "fpt"
-                else (api_key or GEMINI_API_KEY)
-            ),
+            api_key=GEMINI_API_KEY,
             video_path=video_path,
         )
         await asyncio.to_thread(save_srt, translated_segments, srt_translated)
@@ -636,7 +701,7 @@ async def api_process_url(
             decide_video_voice,
             out_dir=out_dir,
             srt_segments=srt_segments,
-            vocals_path=None,
+            vocals_path=vocals_audio,
             original_audio_path=original_audio,
             video_path=None,
             voice_mode=api_voice_mode,
@@ -644,20 +709,36 @@ async def api_process_url(
         )
         effective_source = voice_lock_info["voice_source"]
         effective_param = voice_lock_info["voice_param"]
+        vid_duration = None
+        try:
+            from pydub import AudioSegment
+            vid_duration = len(AudioSegment.from_file(original_audio)) / 1000.0
+        except Exception:
+            pass
 
         dubbing_audio_files = await generate_dubbing_audio_isolated(
             translated_segments, dubbing_dir,
             voice_source=effective_source,
             voice_param=effective_param,
-            api_key=api_key
+            api_key=api_key,
+            video_duration=vid_duration
         )
 
         # Synchronize subtitle timing to audio duration & anti-overlap
         from ass_utils import sync_and_clamp_subtitles
         translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
 
-        # Mix audio
-        await asyncio.to_thread(mix_audio_pydub, original_audio, dubbing_audio_files, mixed_audio)
+        # Mix audio (clean instrumental BGM + dubbing)
+        await asyncio.to_thread(
+            mix_audio_pydub,
+            no_vocals_audio,
+            dubbing_audio_files,
+            mixed_audio,
+            original_volume_db=job_bgm_vol,
+            dubbing_volume_db=job_dub_vol,
+            ducking_mode=job_duck_mode,
+            explicit=True,
+        )
 
         # Final render
         from ass_utils import generate_ass_file
@@ -827,6 +908,124 @@ async def api_clear_queue(request: Request):
     except Exception as e:
         logger.exception("Lỗi api_clear_queue")
         raise HTTPException(500, f"Lỗi xóa hàng chờ: {str(e)}")
+
+
+@app.post("/api/queue/move")
+async def api_move_queue_item(request: Request):
+    """Thay đổi thứ tự ưu tiên của video trong hàng chờ Telegram (đẩy lên / xuống / lên đầu)."""
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Dữ liệu JSON không hợp lệ")
+
+    index = payload.get("index")
+    action = payload.get("action", "up")  # 'up', 'down', 'top'
+
+    if index is None or not isinstance(index, int):
+        raise HTTPException(400, "Vị trí index không hợp lệ")
+
+    queue_file = _get_system_path("telegram_queue.json")
+    if not queue_file.is_file():
+        raise HTTPException(404, "Hàng chờ video không tồn tại")
+
+    try:
+        import json, time
+        data = json.loads(await asyncio.to_thread(queue_file.read_text, encoding="utf-8-sig"))
+        items = data.get("items", [])
+        n = len(items)
+        if n <= 1 or index < 0 or index >= n:
+            return {"status": "unchanged", "items": items, "message": "Không thể thay đổi vị trí"}
+
+        moved_name = items[index].get("name", "video")
+        if len(moved_name) > 35:
+            moved_name = moved_name[:35] + "..."
+
+        if action == "up" and index > 0:
+            items[index - 1], items[index] = items[index], items[index - 1]
+            msg = f"Đã đẩy video #{index + 1} lên vị trí #{index}!"
+        elif action == "top" and index > 0:
+            target = items.pop(index)
+            items.insert(0, target)
+            msg = f"Đã đưa video lên đầu hàng chờ (#1)!"
+        elif action == "down" and index < n - 1:
+            items[index], items[index + 1] = items[index + 1], items[index]
+            msg = f"Đã chuyển video #{index + 1} xuống vị trí #{index + 2}!"
+        else:
+            return {"status": "unchanged", "items": items, "message": "Vị trí đã ở giới hạn"}
+
+        # Cập nhật lại chỉ số position cho từng video
+        for i, item in enumerate(items, 1):
+            item["position"] = i
+
+        data["items"] = items
+        data["updated_at"] = time.time()
+
+        # Lưu lại file json snapshot
+        await asyncio.to_thread(queue_file.write_text, json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # Ghi cờ tín hiệu để telegram_bot.py đang chạy đồng bộ lại bộ nhớ ngay lập tức
+        reorder_flag = _get_system_path("telegram_queue_reorder.flag")
+        reorder_flag.write_text(str(time.time()), encoding="utf-8")
+
+        return {"status": "success", "items": items, "message": msg}
+    except Exception as e:
+        logger.exception("Lỗi api_move_queue_item")
+        raise HTTPException(500, f"Lỗi di chuyển video: {str(e)}")
+
+
+@app.post("/api/queue/delete")
+async def api_delete_queue_item(request: Request):
+    """Xóa một video khỏi hàng chờ Telegram theo index."""
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Dữ liệu JSON không hợp lệ")
+
+    index = payload.get("index")
+    if index is None or not isinstance(index, int):
+        raise HTTPException(400, "Vị trí index không hợp lệ")
+
+    queue_file = _get_system_path("telegram_queue.json")
+    if not queue_file.is_file():
+        raise HTTPException(404, "Hàng chờ video không tồn tại")
+
+    try:
+        import json, time
+        data = json.loads(await asyncio.to_thread(queue_file.read_text, encoding="utf-8-sig"))
+        items = data.get("items", [])
+        n = len(items)
+        if index < 0 or index >= n:
+            return {"status": "unchanged", "items": items, "message": "Không tìm thấy video cần xóa"}
+
+        removed = items.pop(index)
+        removed_name = removed.get("name", "video")
+        if len(removed_name) > 35:
+            removed_name = removed_name[:35] + "..."
+
+        # Cập nhật lại chỉ số position cho từng video
+        for i, item in enumerate(items, 1):
+            item["position"] = i
+
+        data["items"] = items
+        data["updated_at"] = time.time()
+
+        # Thêm key của item bị xóa vào danh sách deleted_keys để bot loại bỏ khỏi bộ nhớ
+        del_key = str(removed.get("url") or removed.get("filename") or removed.get("file_id") or removed.get("name") or "").strip()
+        deleted_list = data.get("deleted_keys", [])
+        if del_key and del_key not in deleted_list:
+            deleted_list.append(del_key)
+        data["deleted_keys"] = deleted_list
+
+        await asyncio.to_thread(queue_file.write_text, json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # Ghi cờ tín hiệu để telegram_bot.py đang chạy đồng bộ lại bộ nhớ ngay lập tức
+        reorder_flag = _get_system_path("telegram_queue_reorder.flag")
+        reorder_flag.write_text(str(time.time()), encoding="utf-8")
+
+        return {"status": "success", "items": items, "message": f'Đã xóa video "{removed_name}" khỏi hàng chờ!'}
+    except Exception as e:
+        logger.exception("Lỗi api_delete_queue_item")
+        raise HTTPException(500, f"Lỗi xóa video: {str(e)}")
 
 def _check_input_request(request):
     if request.headers.get("X-Dashboard-Input") != "1" or request.headers.get("origin") not in (None, "http://127.0.0.1:8088", "http://localhost:8088"):
@@ -1136,6 +1335,111 @@ async def api_stop_batch():
     return {"status": "stopping", "message": "Đã gửi lệnh dừng tiến trình xử lý!"}
 
 
+@app.get("/api/preflight")
+async def api_preflight():
+    from preflight_checker import run_full_preflight
+    return await asyncio.to_thread(
+        run_full_preflight,
+        tool="v1",
+        input_dir=get_input_dir(),
+        output_dir=get_output_dir(),
+        workspace_dir=Path(WORKSPACE),
+        backend_dir=BASE_DIR,
+    )
+
+
+@app.get("/api/task-history")
+async def api_task_history():
+    from history_service import get_task_history
+    return await asyncio.to_thread(
+        get_task_history,
+        tool_name="v1",
+        output_dir=get_output_dir(),
+        workspace_dir=Path(WORKSPACE),
+    )
+
+
+async def single_video_runner(video_path: str, output_dir: str, job_id: str):
+    from batch_processor import process_single_local_video
+    async with UNIFIED_PIPELINE_LOCK:
+        try:
+            job_tracker.start_batch(1, str(Path(video_path).parent), output_dir, job_id=job_id)
+            ok = await process_single_local_video(video_path, output_dir)
+            if ok:
+                job_tracker.finish_batch()
+            else:
+                job_tracker.fail_batch("Video processing failed", job_id=job_id)
+        except Exception as e:
+            logger.error(f"Lỗi chạy retry video qua API: {e}", exc_info=True)
+            job_tracker.fail_batch(str(e), job_id=job_id)
+
+
+@app.post("/api/retry-video")
+async def api_retry_video(request: Request):
+    global BATCH_TASK
+    status = job_tracker.get_status()
+    if UNIFIED_PIPELINE_LOCK.locked() or (BATCH_TASK is not None and not BATCH_TASK.done()) or status.get("active"):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": "busy",
+                "job_id": status.get("job_id"),
+                "message": "Hiện đang có tiến trình video đang xử lý, vui lòng đợi!",
+            },
+        )
+    if Path(r"C:\tool v1\workspace\control\v1.pause").exists():
+        raise HTTPException(409, "Tool đang tắt, không nhận xử lý video mới.")
+
+    filename = ""
+    try:
+        data = await request.json()
+        filename = data.get("filename", "").strip()
+    except Exception:
+        pass
+    if not filename:
+        try:
+            form = await request.form()
+            filename = form.get("filename", "").strip()
+        except Exception:
+            pass
+
+    if not filename:
+        raise HTTPException(status_code=400, detail="Thiếu tên video cần chạy lại (filename).")
+
+    input_dir = get_input_dir()
+    video_path = input_dir / filename
+
+    if not video_path.is_file():
+        processed_file = input_dir / "processed" / filename
+        if processed_file.is_file():
+            try:
+                import shutil
+                shutil.copy2(processed_file, video_path)
+            except Exception:
+                video_path = processed_file
+        else:
+            raise HTTPException(status_code=404, detail=f"Không tìm thấy file video {filename} trong thư mục phôi.")
+
+    shared_state.stop_requested = False
+    output_dir = str(get_output_dir())
+    job_id = uuid.uuid4().hex
+
+    BATCH_TASK = asyncio.create_task(
+        single_video_runner(str(video_path), output_dir, job_id),
+        name=f"autodub-retry-{job_id}"
+    )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "started",
+            "job_id": job_id,
+            "video": filename,
+            "message": f"Đã bắt đầu xử lý lại video '{filename}'!",
+        },
+    )
+
+
 @app.post("/api/open-folder")
 async def api_open_folder(folder: str = Form(...)):
     """Mở thư mục Video Phôi hoặc Bản Vẽ trong File Explorer của Windows."""
@@ -1175,54 +1479,178 @@ async def api_get_audio_settings():
 
 @app.post("/api/audio-settings")
 async def api_save_audio_settings(payload: dict = Body(...)):
-    """Lưu cấu hình âm lượng BGM và Dubbing Voice mới."""
+    """Lưu cấu hình âm lượng BGM, Dubbing Voice, Separation Mode và Ducking Mode mới."""
     bgm = payload.get("bgm_volume_db", -2.0)
     dub = payload.get("dubbing_volume_db", 1.0)
-    return save_audio_settings(bgm, dub)
+    sep = payload.get("separation_mode")
+    duck = payload.get("ducking_mode")
+    return save_audio_settings(bgm, dub, separation_mode=sep, ducking_mode=duck)
 
 
 # ===== AUTO VOICE MODE (CODEX PLAN - SINGLE VOICE PER VIDEO) =====
 from ai.v1_auto_voice import (
+    get_auto_voice_config,
+    set_auto_voice_config,
     get_auto_voice_enabled,
     set_auto_voice_enabled,
     get_auto_voice_mode,
     get_manual_voice_info,
 )
+import voice_selection
 
 @app.get("/api/voice-auto")
 async def api_get_voice_auto():
-    """Lấy trạng thái chế độ tự động nhận diện giọng nói đầu video (Tool V1)."""
-    enabled = get_auto_voice_enabled(WORKSPACE)
+    """Lấy trạng thái và cấu hình chế độ tự động nhận diện giọng nói đầu video (Tool V1)."""
+    cfg = get_auto_voice_config(WORKSPACE)
     manual_info = get_manual_voice_info(WORKSPACE)
+    catalog = voice_selection.catalog()
+
+    female_voice = next((v for v in catalog if v.get("id") == cfg["female_voice_id"]), None)
+    male_voice = next((v for v in catalog if v.get("id") == cfg["male_voice_id"]), None)
+
     return {
-        "enabled": enabled,
-        "mode": "auto" if enabled else "manual",
+        "enabled": cfg["enabled"],
+        "mode": "auto" if cfg["enabled"] else "manual",
+        "dual_voice": bool(cfg.get("dual_voice", False)),
+        "female_voice_id": cfg["female_voice_id"],
+        "male_voice_id": cfg["male_voice_id"],
+        "female_voice_label": female_voice["label"] if female_voice else cfg["female_voice_id"],
+        "male_voice_label": male_voice["label"] if male_voice else cfg["male_voice_id"],
         "manual_voice": manual_info,
+        "voices": catalog,
     }
 
 
 @app.post("/api/voice-auto")
 async def api_set_voice_auto(payload: dict = Body(...)):
-    """Bật / Tắt chế độ tự động nhận diện giọng nói đầu video (Tool V1)."""
-    current_enabled = get_auto_voice_enabled(WORKSPACE)
-    if "enabled" in payload:
-        target_enabled = bool(payload["enabled"])
-    else:
-        target_enabled = not current_enabled
+    current_cfg = get_auto_voice_config(WORKSPACE)
+    catalog = voice_selection.catalog()
+    valid_voice_ids = {v["id"] for v in catalog}
 
-    success = set_auto_voice_enabled(target_enabled, updated_by="dashboard", workspace=WORKSPACE)
+    def _parse_bool_val(val, default):
+        if val is None:
+            return default
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, (int, float)):
+            return bool(val)
+        s = str(val).strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off"):
+            return False
+        return default
+
+    target_enabled = _parse_bool_val(payload.get("enabled"), current_cfg["enabled"]) if "enabled" in payload else current_cfg["enabled"]
+    target_dual = _parse_bool_val(payload.get("dual_voice"), current_cfg.get("dual_voice", False)) if "dual_voice" in payload else current_cfg.get("dual_voice", False)
+
+    raw_female = payload.get("female_voice_id") if "female_voice_id" in payload else payload.get("female_voice")
+    raw_male = payload.get("male_voice_id") if "male_voice_id" in payload else payload.get("male_voice")
+
+    target_female_id = current_cfg["female_voice_id"]
+    if raw_female is not None:
+        raw_f_str = str(raw_female).strip()
+        matched_f = next((v for v in catalog if v.get("id") == raw_f_str or v.get("param") == raw_f_str), None)
+        if matched_f:
+            target_female_id = matched_f["id"]
+        elif raw_f_str in valid_voice_ids:
+            target_female_id = raw_f_str
+        else:
+            return {
+                "status": "error",
+                "message": f"Giọng nữ '{raw_female}' không hợp lệ hoặc không tồn tại trong danh mục.",
+                "enabled": current_cfg["enabled"],
+                "dual_voice": bool(current_cfg.get("dual_voice", False)),
+                "female_voice_id": current_cfg["female_voice_id"],
+                "male_voice_id": current_cfg["male_voice_id"],
+            }
+
+    target_male_id = current_cfg["male_voice_id"]
+    if raw_male is not None:
+        raw_m_str = str(raw_male).strip()
+        matched_m = next((v for v in catalog if v.get("id") == raw_m_str or v.get("param") == raw_m_str), None)
+        if matched_m:
+            target_male_id = matched_m["id"]
+        elif raw_m_str in valid_voice_ids:
+            target_male_id = raw_m_str
+        else:
+            return {
+                "status": "error",
+                "message": f"Giọng nam '{raw_male}' không hợp lệ hoặc không tồn tại trong danh mục.",
+                "enabled": current_cfg["enabled"],
+                "dual_voice": bool(current_cfg.get("dual_voice", False)),
+                "female_voice_id": current_cfg["female_voice_id"],
+                "male_voice_id": current_cfg["male_voice_id"],
+            }
+
+    success = set_auto_voice_config(
+        enabled=target_enabled,
+        female_voice_id=target_female_id,
+        male_voice_id=target_male_id,
+        dual_voice=target_dual,
+        updated_by="dashboard",
+        workspace=WORKSPACE
+    )
     if not success:
         logger.error("Không thể lưu cấu hình auto voice vào thư mục control")
         raise HTTPException(status_code=500, detail="Lỗi hệ thống: Không thể lưu file cấu hình Auto Voice.")
 
+    cfg = get_auto_voice_config(WORKSPACE)
     manual_info = get_manual_voice_info(WORKSPACE)
+    catalog = voice_selection.catalog()
+    female_voice = next((v for v in catalog if v.get("id") == cfg["female_voice_id"]), None)
+    male_voice = next((v for v in catalog if v.get("id") == cfg["male_voice_id"]), None)
+
+    msg = "Đã cập nhật cấu hình giọng"
+    if "dual_voice" in payload and len(payload) == 1:
+        msg = "Đã BẬT phân vai Nam & Nữ trong cùng video" if target_dual else "Đã TẮT phân vai Nam/Nữ (Mặc định 1 giọng cả video)"
+    elif "enabled" in payload and len(payload) == 1:
+        msg = "Đã BẬT tự động nhận diện giọng đầu video" if target_enabled else "Đã TẮT tự động nhận diện (Dùng giọng thủ công)"
+
     return {
         "status": "ok",
-        "enabled": target_enabled,
-        "mode": "auto" if target_enabled else "manual",
+        "enabled": cfg["enabled"],
+        "mode": "auto" if cfg["enabled"] else "manual",
+        "dual_voice": bool(cfg.get("dual_voice", False)),
+        "female_voice_id": cfg["female_voice_id"],
+        "male_voice_id": cfg["male_voice_id"],
+        "female_voice_label": female_voice["label"] if female_voice else cfg["female_voice_id"],
+        "male_voice_label": male_voice["label"] if male_voice else cfg["male_voice_id"],
         "manual_voice": manual_info,
-        "message": "Đã BẬT tự động nhận diện giọng đầu video" if target_enabled else "Đã TẮT tự động nhận diện (Dùng giọng thủ công)",
+        "voices": catalog,
+        "message": msg,
     }
+
+
+@app.get("/api/voice-preview-video/{voice_id}")
+async def api_voice_preview_video(voice_id: str):
+    filename = f"{voice_id}.mp4"
+    candidates = [
+        Path(WORKSPACE) / "bot_system" / "control" / "voice_previews" / filename,
+        Path(WORKSPACE) / "control" / "voice_previews" / filename,
+        Path(r"C:\tool v1\workspace\control\voice_previews") / filename,
+        Path(r"C:\tool v1\workspace\bot_system\control\voice_previews") / filename,
+    ]
+    for p in candidates:
+        if p.is_file():
+            return FileResponse(p, media_type="video/mp4")
+    raise HTTPException(status_code=404, detail="Không tìm thấy video mẫu cho giọng này.")
+
+
+@app.get("/api/voice-preview-audio/{voice_id}")
+async def api_voice_preview_audio(voice_id: str):
+    for ext, media in ((".mp3", "audio/mpeg"), (".wav", "audio/wav")):
+        filename = f"{voice_id}{ext}"
+        candidates = [
+            Path(WORKSPACE) / "bot_system" / "control" / "voice_checks" / filename,
+            Path(WORKSPACE) / "control" / "voice_checks" / filename,
+            Path(r"C:\tool v1\workspace\control\voice_checks") / filename,
+            Path(r"C:\tool v1\workspace\bot_system\control\voice_checks") / filename,
+        ]
+        for p in candidates:
+            if p.is_file():
+                return FileResponse(p, media_type=media)
+    raise HTTPException(status_code=404, detail="Không tìm thấy audio mẫu cho giọng này.")
 
 
 
@@ -1300,6 +1728,36 @@ try:
     logger.info("Mounted Studio Kịch Bản script_router successfully.")
 except Exception as _se:
     logger.warning("Failed to mount script_router: %s", _se)
+
+try:
+    from phase_a_routes import router as phase_a_router
+    app.include_router(phase_a_router)
+    logger.info("Mounted Phase A Presets & Job Config router successfully.")
+except Exception as _pe:
+    logger.warning("Failed to mount phase_a_router: %s", _pe)
+
+try:
+    from phase_b_routes import router as phase_b_router
+    app.include_router(phase_b_router)
+    logger.info("Mounted Phase B Voice Preview router successfully.")
+except Exception as _pbe:
+    logger.warning("Failed to mount phase_b_router: %s", _pbe)
+
+try:
+    from phase_c_routes import router as phase_c_router
+    app.include_router(phase_c_router)
+    logger.info("Mounted Phase C Segment Editor router successfully.")
+except Exception as _pce:
+    logger.warning("Failed to mount phase_c_router: %s", _pce)
+
+try:
+    from phase_d_routes import router as phase_d_router
+    app.include_router(phase_d_router)
+    logger.info("Mounted Phase D Crash Recovery router successfully.")
+except Exception as _pde:
+    logger.warning("Failed to mount phase_d_router: %s", _pde)
+
+
 
 
 if __name__ == "__main__":

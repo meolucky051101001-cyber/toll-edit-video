@@ -39,7 +39,9 @@ def _rounded_box(width, height, radius=12):
 def sync_and_clamp_subtitles(translated_segments, dubbing_audio_files=None):
     """
     Đồng bộ thời lượng phụ đề chuẩn xác theo giọng đọc thực tế và chống đè chéo (Anti-Overlap).
-    Đảm bảo thời lượng hiển thị tối thiểu không bị chớp giật (< 0.5s).
+    - Cập nhật seg.end theo độ dài thực tế của file âm thanh TTS
+    - Đảm bảo phụ đề câu trước kết thúc trước câu sau ít nhất 0.05s
+    - TUYỆT ĐỐI KHÔNG dịch chuyển next_seg.start về sau vì âm thanh TTS bắt đầu tại next_seg.start.
     """
     import datetime
     if not translated_segments:
@@ -47,29 +49,32 @@ def sync_and_clamp_subtitles(translated_segments, dubbing_audio_files=None):
 
     # 1. Đồng bộ end time theo độ dài thực tế của file âm thanh TTS
     if dubbing_audio_files:
+        audio_dur_map = {}
         for audio_info in dubbing_audio_files:
             if audio_info:
                 idx = audio_info.get("index")
-                actual_duration = audio_info.get("actual_audio_duration", 0)
-                for seg in translated_segments:
-                    if getattr(seg, "index", None) == idx and actual_duration > 0:
-                        seg.end = seg.start + datetime.timedelta(seconds=actual_duration + 0.15)
-                        break
+                actual_duration = audio_info.get("actual_audio_duration") or audio_info.get("duration", 0)
+                if idx is not None and actual_duration > 0:
+                    audio_dur_map[idx] = float(actual_duration)
 
-    # 2. Chống đè sub (Anti-Overlap) và đảm bảo thời gian đọc tối thiểu
+        for seg in translated_segments:
+            seg_idx = getattr(seg, "index", None)
+            if seg_idx in audio_dur_map:
+                actual_dur = audio_dur_map[seg_idx]
+                seg.end = seg.start + datetime.timedelta(seconds=actual_dur)
+
+    # 2. Chống đè sub (Anti-Overlap): Đảm bảo sub trước phải biến mất trước khi sub sau xuất hiện
+    # TUYỆT ĐỐI KHÔNG dịch chuyển next_seg.start về sau (Codex Plan - Điểm 4)
     for i in range(len(translated_segments) - 1):
         curr_seg = translated_segments[i]
         next_seg = translated_segments[i + 1]
         if curr_seg.end > next_seg.start:
             safe_end = next_seg.start - datetime.timedelta(seconds=0.05)
-            if (safe_end - curr_seg.start).total_seconds() >= 0.5:
+            if safe_end > curr_seg.start:
                 curr_seg.end = safe_end
             else:
-                curr_seg.end = max(curr_seg.start + datetime.timedelta(seconds=0.5), safe_end)
-                if next_seg.start < curr_seg.end:
-                    next_seg.start = curr_seg.end + datetime.timedelta(seconds=0.05)
-                    if next_seg.end <= next_seg.start:
-                        next_seg.end = next_seg.start + datetime.timedelta(seconds=0.6)
+                curr_seg.end = curr_seg.start + datetime.timedelta(seconds=0.1)
+
     return translated_segments
 
 

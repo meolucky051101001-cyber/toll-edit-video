@@ -11,6 +11,7 @@ Features:
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from dataclasses import dataclass, replace
@@ -20,6 +21,8 @@ from typing import Any, Dict, List, Mapping, Sequence, Tuple
 from pydub import AudioSegment
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class AdaptiveDuckingSettings:
@@ -27,37 +30,48 @@ class AdaptiveDuckingSettings:
     base_bgm_gain_db: float = -2.0
     base_voice_gain_db: float = 1.0
     max_peak_dbfs: float = -1.0
-    attack_ms: int = 150
-    release_ms: int = 350
-    gap_merge_ms: int = 400
+    attack_ms: int = 250
+    release_ms: int = 500
+    gap_merge_ms: int = 500
     # Dynamic ducking thresholds based on BGM level
     soft_bgm_threshold_dbfs: float = -25.0
     loud_bgm_threshold_dbfs: float = -15.0
-    soft_duck_db: float = -5.0
-    moderate_duck_db: float = -9.0
-    loud_duck_db: float = -13.0
+    # Gentle ducking range (-1.5 dB to -2.0 dB) prevents audio pumping / giữ 80-90% nhạc nền
+    soft_duck_db: float = -1.5
+    moderate_duck_db: float = -1.8
+    loud_duck_db: float = -2.0
+    ducking_mode: str = "soft"
 
 
 def calculate_adaptive_duck_gain(bgm_dbfs: float, settings: AdaptiveDuckingSettings) -> float:
     """
     Calculate ducking reduction in dB based on actual BGM loudness.
-    Returns negative dB value (e.g. -5.0 to -13.0 dB).
+    Returns negative dB value (e.g. -1.5 to -2.0 dB for soft), or 0.0 if ducking is disabled.
     """
+    mode = getattr(settings, "ducking_mode", "soft")
+    if mode == "off":
+        return 0.0
+
     if not math.isfinite(bgm_dbfs) or bgm_dbfs < -60.0:
         return 0.0  # Silent BGM doesn't need ducking
     
+    if mode == "medium":
+        soft_duck = -3.5
+        loud_duck = -5.0
+    else:
+        soft_duck = settings.soft_duck_db
+        loud_duck = settings.loud_duck_db
+
     if bgm_dbfs < settings.soft_bgm_threshold_dbfs:
-        # Soft music: duck gently (-4 to -6 dB)
-        return settings.soft_duck_db
+        return soft_duck
     elif bgm_dbfs > settings.loud_bgm_threshold_dbfs:
-        # Very loud music: duck deeper (-12 to -14 dB)
-        return settings.loud_duck_db
+        return loud_duck
     else:
         # Linear interpolation between soft and loud
         ratio = (bgm_dbfs - settings.soft_bgm_threshold_dbfs) / (
             settings.loud_bgm_threshold_dbfs - settings.soft_bgm_threshold_dbfs
         )
-        return settings.soft_duck_db + ratio * (settings.loud_duck_db - settings.soft_duck_db)
+        return soft_duck + ratio * (loud_duck - soft_duck)
 
 
 def merge_ducking_intervals(
@@ -195,24 +209,83 @@ def mix_adaptive_audio(
     base_bgm_gain_db: float | None = None,
     base_voice_gain_db: float | None = None,
     settings: AdaptiveDuckingSettings | None = None,
+    ducking_mode: str | None = None,
 ) -> str:
     """
     Mix background music and dubbing audio with adaptive auto-ducking and peak limiting.
     """
+    cfg_duck_mode = ducking_mode
+    if not cfg_duck_mode:
+        try:
+            from job_config_service import get_frozen_config
+            frozen = get_frozen_config(output_path) or get_frozen_config(bgm_path)
+            if frozen and "ducking_mode" in frozen.get("effective_config", {}):
+                cfg_duck_mode = frozen["effective_config"]["ducking_mode"]
+        except Exception:
+            pass
+
+    if not cfg_duck_mode:
+        try:
+            from audio_settings import get_audio_settings
+            _cfg = get_audio_settings()
+            cfg_duck_mode = _cfg.get("ducking_mode", "soft")
+        except Exception:
+            cfg_duck_mode = "soft"
+
     if settings is None:
         settings = AdaptiveDuckingSettings(
             base_bgm_gain_db=base_bgm_gain_db if base_bgm_gain_db is not None else -2.0,
             base_voice_gain_db=base_voice_gain_db if base_voice_gain_db is not None else 1.0,
+            ducking_mode=cfg_duck_mode,
         )
-    elif base_bgm_gain_db is not None or base_voice_gain_db is not None:
+    elif base_bgm_gain_db is not None or base_voice_gain_db is not None or ducking_mode is not None:
         settings = replace(settings,
             base_bgm_gain_db=base_bgm_gain_db if base_bgm_gain_db is not None else settings.base_bgm_gain_db,
             base_voice_gain_db=base_voice_gain_db if base_voice_gain_db is not None else settings.base_voice_gain_db,
+            ducking_mode=ducking_mode if ducking_mode is not None else getattr(settings, "ducking_mode", cfg_duck_mode),
         )
 
+    sorted_dubs = sorted([d for d in dubbing_audio_files if d], key=lambda d: float(d.get("start", 0.0)))
+    for dub in sorted_dubs:
+        path = dub.get("path")
+        if not path or not os.path.isfile(path):
+            raise FileNotFoundError("Missing dubbing audio: {}".format(path))
+
+    # Anti-Overlap Hard Guard (Codex Plan - Điểm 4):
+    # Duyệt danh sách câu thoại (đã sort theo start time).
+    # Nếu start_i + duration_i > start_{i+1} - 0.03s, cắt ngắn audio câu trước (fadeout 30ms)
+    # để không bao giờ có 2 giọng nói đè lên nhau dù có bất kỳ sai lệch nào trước đó.
+    processed_dubs = []
+    for i, dub in enumerate(sorted_dubs):
+        path = dub["path"]
+        start_sec = float(dub.get("start", 0.0))
+        seg_audio = AudioSegment.from_file(path)
+        cur_dur = len(seg_audio) / 1000.0
+
+        if i + 1 < len(sorted_dubs):
+            next_start = float(sorted_dubs[i + 1].get("start", 0.0))
+            max_allowed = max(0.0, next_start - start_sec)
+            # Chỉ can thiệp cắt nhẹ nếu câu trước thực sự tràn vào câu sau quá 80ms
+            if cur_dur > max_allowed + 0.08 and max_allowed > 0.1:
+                logger.warning(
+                    f"[v1_audio_mixer] Anti-overlap clamped dub #{dub.get('index', i)} "
+                    f"from {cur_dur:.3f}s to {max_allowed:.3f}s (next start: {next_start:.3f}s)"
+                )
+                cut_ms = int(max_allowed * 1000)
+                fade_ms = min(50, max(15, cut_ms // 4))
+                seg_audio = seg_audio[:cut_ms].fade_out(fade_ms)
+                cur_dur = len(seg_audio) / 1000.0
+
+        processed_dubs.append({
+            "index": dub.get("index", i),
+            "start": start_sec,
+            "duration": cur_dur,
+            "audio": seg_audio,
+        })
+
     bgm = AudioSegment.from_file(bgm_path)
-    # 1. Apply adaptive ducking on BGM
-    ducked_bgm = apply_adaptive_ducking(bgm, dubbing_audio_files, settings)
+    # 1. Apply adaptive ducking on BGM with accurate clamped durations
+    ducked_bgm = apply_adaptive_ducking(bgm, processed_dubs, settings)
 
     # Sum in float: integer PCM overlay clips before a later limiter can act.
     def samples(audio):
@@ -220,27 +293,29 @@ def mix_adaptive_audio(
         return np.asarray(audio.get_array_of_samples(), dtype=np.float32) / float(1 << (8 * audio.sample_width - 1))
 
     mixed_samples = samples(ducked_bgm)
-    for dub in dubbing_audio_files:
-        path = dub.get("path")
-        if not path or not os.path.isfile(path):
-            raise FileNotFoundError("Missing dubbing audio: {}".format(path))
-        dub_audio = AudioSegment.from_file(path)
+    for dub_item in processed_dubs:
+        dub_audio = dub_item["audio"]
 
         # Voice gain with individual peak guard
         voice_gain = settings.base_voice_gain_db
         if dub_audio.max_dBFS + voice_gain > -0.5:
             voice_gain = max(-5.0, -0.5 - dub_audio.max_dBFS)
         voice = samples(dub_audio) * (10.0 ** (voice_gain / 20.0))
-        position = max(0, int(float(dub.get("start", 0.0)) * bgm.frame_rate)) * bgm.channels
+        position = max(0, int(dub_item["start"] * bgm.frame_rate)) * bgm.channels
         count = min(len(voice), len(mixed_samples) - position)
         if count > 0:
             mixed_samples[position:position + count] += voice[:count]
 
-    # Sample peak, not an oversampled true-peak measurement.
-    peak = float(np.max(np.abs(mixed_samples))) if len(mixed_samples) else 0.0
-    ceiling = 10.0 ** (min(0.0, settings.max_peak_dbfs) / 20.0)
-    if peak > ceiling:
-        mixed_samples *= ceiling / peak
+    # Localized Soft Peak Limiter: Enforce peak ceiling <= max_peak_dbfs without track-wide attenuation
+    ceiling = float(10.0 ** (min(0.0, settings.max_peak_dbfs) / 20.0))
+    knee_threshold = ceiling * 0.90
+    abs_samples = np.abs(mixed_samples)
+    over_mask = abs_samples > knee_threshold
+    if np.any(over_mask):
+        excess = abs_samples[over_mask] - knee_threshold
+        scale_headroom = ceiling - knee_threshold
+        compressed = knee_threshold + scale_headroom * np.tanh(excess / scale_headroom)
+        mixed_samples[over_mask] = np.sign(mixed_samples[over_mask]) * np.minimum(compressed, ceiling)
     pcm = (np.clip(mixed_samples, -1.0, 1.0) * 32767).astype('<i2')
     mixed = AudioSegment(pcm.tobytes(), sample_width=2,
                          frame_rate=bgm.frame_rate, channels=bgm.channels)

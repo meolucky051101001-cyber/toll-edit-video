@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from typing import Optional
 
 
 MOJIBAKE_PATTERNS = re.compile(
@@ -73,3 +74,46 @@ def write_cache(key, texts, model):
                 os.unlink(temporary)
             except OSError:
                 pass
+
+
+def condense_cache_key(cue_text: str, target_seconds: float, target_words: int) -> str:
+    norm_text = re.sub(r'\s+', ' ', str(cue_text or '').strip().lower())
+    data = json.dumps([2, norm_text, round(float(target_seconds), 2), int(target_words)], ensure_ascii=False)
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def read_condense_cache(cue_text: str, target_seconds: float, target_words: int) -> Optional[str]:
+    k = condense_cache_key(cue_text, target_seconds, target_words)
+    cache_file = cache_root() / "condense" / f"{k}.json"
+    try:
+        if cache_file.exists():
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            val = data.get("condensed")
+            if isinstance(val, str) and val.strip() and not is_mojibake(val):
+                return val.strip()
+    except Exception:
+        pass
+    return None
+
+
+def write_condense_cache(cue_text: str, target_seconds: float, target_words: int, condensed: str, model: str):
+    if not isinstance(condensed, str) or not condensed.strip() or is_mojibake(condensed):
+        return
+    k = condense_cache_key(cue_text, target_seconds, target_words)
+    root = cache_root() / "condense"
+    temporary = None
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=root, suffix=".tmp", delete=False) as stream:
+            temporary = stream.name
+            json.dump({"condensed": condensed.strip(), "model": model, "original": cue_text}, stream, ensure_ascii=False)
+        os.replace(temporary, root / f"{k}.json")
+    except Exception:
+        pass
+    finally:
+        if temporary and os.path.exists(temporary):
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+

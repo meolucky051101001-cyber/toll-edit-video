@@ -13,7 +13,8 @@ except ImportError:
 def stop_v1_bot():
     backend = Path(__file__).resolve().parent
     v1_root = backend.parent
-    control_dir = v1_root / "workspace" / "control"
+    bs_control = v1_root / "workspace" / "bot_system" / "control"
+    control_dir = bs_control if bs_control.is_dir() else (v1_root / "workspace" / "control")
     v1_json = control_dir / "v1.json"
 
     target_pid = None

@@ -214,13 +214,22 @@ async def cmd_voice_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /voice_auto      - Xem trạng thái hiện tại
     """
     from ai.v1_auto_voice import (
+        get_auto_voice_config,
         get_auto_voice_enabled,
         set_auto_voice_enabled,
         get_manual_voice_info,
     )
+    import voice_selection
     args = context.args
     manual_info = get_manual_voice_info(WORKSPACE)
     manual_label = manual_info.get("label", "Chưa xác định")
+
+    catalog = voice_selection.catalog()
+    cfg = get_auto_voice_config(WORKSPACE)
+    female_v = next((v for v in catalog if v.get("id") == cfg.get("female_voice_id")), None)
+    male_v = next((v for v in catalog if v.get("id") == cfg.get("male_voice_id")), None)
+    female_label = female_v["label"] if female_v else "Chí Mai · RVC"
+    male_label = male_v["label"] if male_v else "Thanh Niên Tự Tin (CapCut)"
 
     if not args:
         enabled = get_auto_voice_enabled(WORKSPACE)
@@ -228,11 +237,13 @@ async def cmd_voice_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"🎙️ *CẤU HÌNH NHẬN DIỆN GIỌNG NÓI (TOOL V1)*\n\n"
             f"📍 *Trạng thái hiện tại:* {mode_str}\n"
+            f"👩 *Giọng khi nhận diện Nữ:* `{female_label}`\n"
+            f"👨 *Giọng khi nhận diện Nam:* `{male_label}`\n"
             f"🎯 *Giọng thủ công dự phòng:* `{manual_label}`\n\n"
             f"📋 *Quy tắc hoạt động:*\n"
             f"• *Bật (`on`):*\n"
-            f"  - Người nói đầu là Nữ ➡️ Chí Mai (RVC)\n"
-            f"  - Người nói đầu là Nam ➡️ Thanh Niên Tự Tin (CapCut)\n"
+            f"  - Người nói đầu là Nữ ➡️ {female_label}\n"
+            f"  - Người nói đầu là Nam ➡️ {male_label}\n"
             f"  - Không xác định rõ ➡️ Giọng thủ công (`{manual_label}`)\n"
             f"• *Tắt (`off`):*\n"
             f"  - Toàn bộ video dùng giọng thủ công (`{manual_label}`)\n"
@@ -241,7 +252,8 @@ async def cmd_voice_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Video đang render hoặc đã trong hàng đợi giữ nguyên chế độ lúc gửi.\n\n"
             f"👉 *Lệnh điều khiển:*\n"
             f"• `/voice_auto on` - Bật tự động nhận diện\n"
-            f"• `/voice_auto off` - Tắt nhận diện, dùng giọng thủ công",
+            f"• `/voice_auto off` - Tắt nhận diện, dùng giọng thủ công\n"
+            f"*(Để đổi giọng Nữ/Nam cụ thể, bạn có thể chọn trực tiếp trên giao diện Dashboard)*",
             parse_mode="Markdown"
         )
         return
@@ -257,8 +269,8 @@ async def cmd_voice_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ *ĐÃ BẬT CHẾ ĐỘ NHẬN DIỆN GIỌNG NÓI TỰ ĐỘNG!*\n\n"
             f"• Video mới gửi sẽ tự động chọn giọng theo người nói đầu tiên:\n"
-            f"  👩 Nữ ➡️ Khóa Chí Mai (RVC) xuyên suốt video\n"
-            f"  👨 Nam ➡️ Khóa Thanh Niên Tự Tin (CapCut BV075) xuyên suốt video\n"
+            f"  👩 Nữ ➡️ {female_label}\n"
+            f"  👨 Nam ➡️ {male_label}\n"
             f"  ❓ Không rõ ➡️ Dùng giọng thủ công (`{manual_label}`)\n\n"
             f"*(Áp dụng cho các video gửi từ bây giờ. Video đang chạy/trong hàng đợi giữ nguyên chế độ cũ)*",
             parse_mode="Markdown"
@@ -554,13 +566,15 @@ async def video_worker():
                     if job['type'] == 'url':
                         await process_single_url(
                             job.get('update'), job.get('context'), job['url'], job.get('pos', 1),
-                            chat_id=job.get('chat_id'), voice_mode=job_voice_mode
+                            chat_id=job.get('chat_id'), voice_mode=job_voice_mode,
+                            retry_count=job.get('retry_count', 0)
                         )
                     elif job['type'] == 'video':
                         await process_single_video(
                             job.get('update'), job.get('context'), job.get('file_id'),
                             job.get('filename') or 'video.mp4', job.get('pos', 1),
-                            chat_id=job.get('chat_id'), voice_mode=job_voice_mode
+                            chat_id=job.get('chat_id'), voice_mode=job_voice_mode,
+                            retry_count=job.get('retry_count', 0)
                         )
                     elif job['type'] == 'resume_v2':
                         from pipeline_v2.config import PipelineSettings
@@ -613,7 +627,7 @@ async def video_worker():
             logger.info("Worker queue cancelled.")
             break
 
-async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, pos: int = 1, chat_id: int = None, voice_mode: str = None):
+async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, pos: int = 1, chat_id: int = None, voice_mode: str = None, retry_count: int = 0):
     import job_tracker
     job_tracker.start_video("Video từ Telegram", pos, pos + global_queue.qsize())
     original_url = url
@@ -659,6 +673,12 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
 
         # ===== BƯỚC 1: TẢI VIDEO ĐA NỀN TẢNG (DOUYIN / TIKTOK / XHS / FB / YT...) =====
+        import importlib, sys
+        if 'social_downloader' in sys.modules:
+            try:
+                importlib.reload(sys.modules['social_downloader'])
+            except Exception:
+                pass
         from social_downloader import download_social_video
         prefix = f"{timestamp}_{uid}"
         
@@ -678,15 +698,12 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
             )
             if success and os.path.exists(video_path):
                 break
-            is_net_err = any(k in (err_msg or '').lower() for k in [
-                'connection', 'timeout', 'timed out', 'network', 'connecterror', 'socket', 'gián đoạn', 'không thể kết nối'
-            ])
-            if is_net_err and attempt < 2:
+            if attempt < 2:
                 wait_sec = 5 * (attempt + 1)
-                logger.warning(f"⚠️ Mạng gián đoạn khi tải {url}. Tự động thử lại sau {wait_sec}s (Lần {attempt+1}/3)...")
+                logger.warning(f"⚠️ Chưa tải được video từ {url} ({err_msg}). Tự động thử lại sau {wait_sec}s (Lần {attempt+1}/3)...")
                 await safe_edit_status(
                     status_msg,
-                    f"⚠️ *Mạng gián đoạn hoặc chập chờn!*\nĐang tự động thử tải lại sau {wait_sec}s (Lần {attempt+1}/3)...\n`{url}`",
+                    f"⚠️ *Đang tự động thử tải lại sau {wait_sec}s (Lần {attempt+1}/3)...*\n`{url}`",
                     parse_mode="Markdown"
                 )
                 await asyncio.sleep(wait_sec)
@@ -752,6 +769,26 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
         # ===== BƯỚC 2: TÁCH ÂM THANH =====
         start_time = time.time()
+        # Đóng băng cấu hình job để ổn định suốt chu trình
+        from job_config_service import get_frozen_config, freeze_job_config
+        from audio_settings import get_audio_settings
+        cur_audio_settings = get_audio_settings()
+        video_file_name = downloaded_files[0]
+        frozen_job_entry = get_frozen_config(video_file_name) or freeze_job_config(
+            video_name=video_file_name,
+            overrides={
+                "bgm_volume_db": cur_audio_settings.get("bgm_volume_db", -2.0),
+                "dubbing_volume_db": cur_audio_settings.get("dubbing_volume_db", 1.0),
+                "separation_mode": cur_audio_settings.get("separation_mode", "roformer"),
+                "ducking_mode": cur_audio_settings.get("ducking_mode", "soft"),
+            }
+        )
+        frozen_eff = frozen_job_entry.get("effective_config", {}) if frozen_job_entry else {}
+        v1_bgm_vol = frozen_eff.get("bgm_volume_db", cur_audio_settings.get("bgm_volume_db", -2.0))
+        v1_dub_vol = frozen_eff.get("dubbing_volume_db", cur_audio_settings.get("dubbing_volume_db", 1.0))
+        v1_sep_mode = frozen_eff.get("separation_mode", cur_audio_settings.get("separation_mode", "roformer"))
+        v1_duck_mode = frozen_eff.get("ducking_mode", cur_audio_settings.get("ducking_mode", "soft"))
+
         await safe_edit_status(
             status_msg,
             f"✅ *Tải thành công!*\n`{url}`\n\n"
@@ -764,16 +801,21 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await safe_edit_status(status_msg, f"❌ Không thể trích xuất âm thanh từ video.\n`{url}`", parse_mode="Markdown")
             return
 
-        # ===== BƯỚC 2.5: TÁCH VOCAL BẰNG DEMUCS =====
+        # ===== BƯỚC 2.5: TÁCH VOCAL BẰNG BS-ROFORMER GPU / DEMUCS =====
         await safe_edit_status(
             status_msg,
             f"🎧 *Trích xuất xong!*\n`{url}`\n\n"
-            "🧠 *Bước 2.5/6:* AI Demucs đang tách giọng nhân vật khỏi nhạc nền (Sẽ hơi lâu)...",
+            "🧠 *Bước 2.5/6:* Đang bóc tách giọng nói khỏi nhạc nền (BS-RoFormer GPU / Demucs)...",
             parse_mode="Markdown"
         )
         from video_utils import separate_vocals_demucs
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-        vocals_audio, no_vocals_audio = await asyncio.to_thread(separate_vocals_demucs, original_audio, out_dir)
+        vocals_audio, no_vocals_audio = await asyncio.to_thread(
+            separate_vocals_demucs,
+            original_audio,
+            out_dir,
+            separation_mode=v1_sep_mode,
+        )
 
         # ===== BƯỚC 3: NHẬN DẠNG GIỌNG NÓI =====
         await safe_edit_status(
@@ -789,7 +831,7 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # ===== BƯỚC 3.5: KIỂM TRA VỊ TRÍ PHỤ ĐỀ CHÍNH VÀ QUÉT PHỤ ĐỀ CÂM =====
         await safe_edit_status(status_msg, "👀 *Bước 3.5/6:* Đang quét vùng phụ đề cố định (OCR)...", parse_mode="Markdown")
         from ocr_utils import perform_video_ocr, extract_silent_subtitles_from_gaps
-        from ass_utils import generate_ass_file
+        from ass_utils import generate_ass_file, sync_and_clamp_subtitles
         try:
             if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
             _, vid_w, vid_h, main_y_pct = await asyncio.to_thread(perform_video_ocr, video_path, target_lang="vi", sample_rate=1.0, api_key=GEMINI_API_KEY, srt_segments=srt_segments)
@@ -857,40 +899,38 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
             parse_mode="Markdown"
         )
         
+        vid_duration = None
+        try:
+            from pydub import AudioSegment
+            vid_duration = len(AudioSegment.from_file(original_audio)) / 1000.0
+        except Exception:
+            pass
+
+        seg_voices = voice_lock_info.get("segment_voices") if 'voice_lock_info' in locals() and voice_lock_info else None
         dubbing_audio_files = await generate_dubbing_audio_isolated(
-            translated_segments, dubbing_dir, voice_source=v_source, voice_param=v_param
+            translated_segments, dubbing_dir, voice_source=v_source, voice_param=v_param, video_duration=vid_duration, segment_voices=seg_voices
         )
         
-        # ĐỒNG BỘ THỜI GIAN BIẾN MẤT CỦA PHỤ ĐỀ THEO GIỌNG ĐỌC
-        import datetime
-        for i, audio_info in enumerate(dubbing_audio_files):
-            if audio_info:
-                idx = audio_info["index"]
-                actual_duration = audio_info.get("actual_audio_duration", 0)
-                # Cập nhật end time của đoạn sub tương ứng để nó biến mất NGAY khi đọc xong
-                for seg in translated_segments:
-                    if seg.index == idx and actual_duration > 0:
-                        new_end = seg.start + datetime.timedelta(seconds=actual_duration + 0.1) # Thêm 0.1s cho tự nhiên
-                        seg.end = new_end
-                        break
-                        
-        # CHỐNG ĐÈ SUB (Anti-Overlap): Đảm bảo sub trước phải biến mất trước khi sub sau xuất hiện
-        for i in range(len(translated_segments) - 1):
-            if translated_segments[i].end > translated_segments[i+1].start:
-                safe_end = translated_segments[i+1].start - datetime.timedelta(seconds=0.05)
-                if safe_end > translated_segments[i].start:
-                    translated_segments[i].end = safe_end
-                else:
-                    translated_segments[i].end = translated_segments[i].start + datetime.timedelta(seconds=0.1)
+        # ĐỒNG BỘ THỜI GIAN VÀ CHỐNG ĐÈ PHỤ ĐỀ THEO GIỌNG ĐỌC THỰC TẾ (Codex Plan - Điểm 4)
+        translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
         
         # ===== BƯỚC 4.5: TẠO FILE ASS (CÓ SUB DỊCH ĐÃ ĐỒNG BỘ TIMING) =====
         ass_path = os.path.join(out_dir, "final.ass")
         await asyncio.to_thread(generate_ass_file, translated_segments, floating_segments, ass_path, play_res_x=vid_w, play_res_y=vid_h, main_y_pct=main_y_pct)
         sub_file_to_use = ass_path
         
-        # Mix giọng tiếng Việt vào nền nhạc KHÔNG CÓ LỜI (no_vocals_audio)
+        # Mix giọng tiếng Việt vào nền nhạc KHÔNG CÓ LỜI (no_vocals_audio) với cấu hình đóng băng
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-        await asyncio.to_thread(mix_audio_pydub, no_vocals_audio, dubbing_audio_files, mixed_audio, original_volume_db=-2, dubbing_volume_db=1)
+        await asyncio.to_thread(
+            mix_audio_pydub,
+            no_vocals_audio,
+            dubbing_audio_files,
+            mixed_audio,
+            original_volume_db=v1_bgm_vol,
+            dubbing_volume_db=v1_dub_vol,
+            ducking_mode=v1_duck_mode,
+            explicit=True,
+        )
 
         # ===== BƯỚC 6: XUẤT VIDEO =====
         await safe_edit_status(
@@ -989,7 +1029,29 @@ async def process_single_url(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await safe_edit_status(status_msg, "❌ Tải video quá lâu (>5 phút). Thử link khác nhé!")
     except Exception as e:
         logger.error(f"Error processing {url}: {e}", exc_info=True)
-        await safe_edit_status(status_msg, f"❌ Lỗi xử lý:\n{str(e)[:500]}")
+        MAX_AUTO_RETRIES = 2
+        import shared_state
+        if retry_count < MAX_AUTO_RETRIES and not getattr(shared_state, 'stop_requested', False):
+            next_retry = retry_count + 1
+            new_pos = global_queue.qsize() + 1
+            await global_queue.put({
+                "type": "url",
+                "pos": new_pos,
+                "url": original_url,
+                "chat_id": target_chat_id,
+                "voice_mode": voice_mode or "auto",
+                "update": update,
+                "context": context,
+                "retry_count": next_retry
+            })
+            logger.info(f"🔄 Video {original_url} gặp sự cố ({e}). Đã tự động đưa vào cuối hàng chờ (vị trí {new_pos}, lần thử {next_retry}/{MAX_AUTO_RETRIES})")
+            await safe_edit_status(
+                status_msg,
+                f"⚠️ *Video gặp sự cố trong quá trình xử lý:*\n`{str(e)[:200]}`\n\n"
+                f"🔄 *Đã tự động chuyển xuống cuối hàng chờ (Vị trí {new_pos})* để thử lại lần {next_retry}/{MAX_AUTO_RETRIES} sau khi hoàn tất các video khác!"
+            )
+        else:
+            await safe_edit_status(status_msg, f"❌ Lỗi xử lý:\n{str(e)[:500]}")
 
 
 # ===== XỬ LÝ MESSAGE CÓ CHỨA LINK =====
@@ -1086,7 +1148,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str, filename: str, pos: int, chat_id: int = None, voice_mode: str = None):
+async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str, filename: str, pos: int, chat_id: int = None, voice_mode: str = None, retry_count: int = 0):
     import job_tracker
     job_tracker.start_video(filename, pos, pos + global_queue.qsize())
     status_msg = None
@@ -1139,9 +1201,9 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
         mixed_audio = os.path.join(out_dir, "mixed.wav")
         final_video = os.path.join(out_dir, f"final_{base_name}.mp4")
 
-        start_time = time.time()
         from pipeline_v2.config import PipelineMode, PipelineSettings
         if PipelineSettings.from_env().mode is PipelineMode.V2:
+            start_time = time.time()
             downloads_dir = r"D:\banve"
             os.makedirs(downloads_dir, exist_ok=True)
             local_save_path = os.path.join(downloads_dir, f"Dubbed_{base_name}.mp4")
@@ -1172,16 +1234,42 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
+        start_time = time.time()
+        # Đóng băng cấu hình job để ổn định suốt chu trình
+        from job_config_service import get_frozen_config, freeze_job_config
+        from audio_settings import get_audio_settings
+        cur_audio_settings = get_audio_settings()
+        video_file_name = safe_filename
+        frozen_job_entry = get_frozen_config(video_file_name) or freeze_job_config(
+            video_name=video_file_name,
+            overrides={
+                "bgm_volume_db": cur_audio_settings.get("bgm_volume_db", -2.0),
+                "dubbing_volume_db": cur_audio_settings.get("dubbing_volume_db", 1.0),
+                "separation_mode": cur_audio_settings.get("separation_mode", "roformer"),
+                "ducking_mode": cur_audio_settings.get("ducking_mode", "soft"),
+            }
+        )
+        frozen_eff = frozen_job_entry.get("effective_config", {}) if frozen_job_entry else {}
+        v1_bgm_vol = frozen_eff.get("bgm_volume_db", cur_audio_settings.get("bgm_volume_db", -2.0))
+        v1_dub_vol = frozen_eff.get("dubbing_volume_db", cur_audio_settings.get("dubbing_volume_db", 1.0))
+        v1_sep_mode = frozen_eff.get("separation_mode", cur_audio_settings.get("separation_mode", "roformer"))
+        v1_duck_mode = frozen_eff.get("ducking_mode", cur_audio_settings.get("ducking_mode", "soft"))
+
         await safe_edit_status(status_msg, "🎧 Đang tách âm thanh...")
         import shared_state
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
         await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
 
-        # ===== BƯỚC 2.5: TÁCH VOCAL BẰNG DEMUCS =====
-        await safe_edit_status(status_msg, "🎧 Đang tách giọng nhân vật khỏi nhạc nền (Demucs)...")
+        # ===== BƯỚC 2.5: TÁCH VOCAL BẰNG BS-ROFORMER GPU / DEMUCS =====
+        await safe_edit_status(status_msg, "🎧 Đang bóc tách giọng nói khỏi nhạc nền (BS-RoFormer GPU / Demucs)...")
         from video_utils import separate_vocals_demucs
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-        vocals_audio, no_vocals_audio = await asyncio.to_thread(separate_vocals_demucs, original_audio, out_dir)
+        vocals_audio, no_vocals_audio = await asyncio.to_thread(
+            separate_vocals_demucs,
+            original_audio,
+            out_dir,
+            separation_mode=v1_sep_mode,
+        )
 
         # ===== BƯỚC 3: NHẬN DẠNG GIỌNG NÓI =====
         await safe_edit_status(status_msg, "🤖 Whisper AI đang nhận dạng từ Vocal sạch...")
@@ -1191,7 +1279,7 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
         # ===== BƯỚC 3.5: KIỂM TRA VỊ TRÍ PHỤ ĐỀ CHÍNH VÀ QUÉT PHỤ ĐỀ CÂM =====
         await safe_edit_status(status_msg, "👀 Đang quét vùng phụ đề cố định (OCR)...", parse_mode="Markdown")
         from ocr_utils import perform_video_ocr, extract_silent_subtitles_from_gaps
-        from ass_utils import generate_ass_file
+        from ass_utils import generate_ass_file, sync_and_clamp_subtitles
         try:
             if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
             _, vid_w, vid_h, main_y_pct = await asyncio.to_thread(perform_video_ocr, video_path, target_lang="vi", sample_rate=1.0, api_key=GEMINI_API_KEY, srt_segments=srt_segments)
@@ -1248,38 +1336,38 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
 
         await safe_edit_status(status_msg, f"🗣️ Đang lồng tiếng AI ({v_label})...")
         
+        vid_duration = None
+        try:
+            from pydub import AudioSegment
+            vid_duration = len(AudioSegment.from_file(original_audio)) / 1000.0
+        except Exception:
+            pass
+
+        seg_voices = voice_lock_info.get("segment_voices") if 'voice_lock_info' in locals() and voice_lock_info else None
         dubbing_audio_files = await generate_dubbing_audio_isolated(
-            translated_segments, dubbing_dir, voice_source=v_source, voice_param=v_param
+            translated_segments, dubbing_dir, voice_source=v_source, voice_param=v_param, video_duration=vid_duration, segment_voices=seg_voices
         )
         
-        # ĐỒNG BỘ THỜI GIAN BIẾN MẤT CỦA PHỤ ĐỀ THEO GIỌNG ĐỌC
-        import datetime
-        for i, audio_info in enumerate(dubbing_audio_files):
-            if audio_info:
-                idx = audio_info["index"]
-                actual_duration = audio_info.get("actual_audio_duration", 0)
-                for seg in translated_segments:
-                    if seg.index == idx and actual_duration > 0:
-                        new_end = seg.start + datetime.timedelta(seconds=actual_duration + 0.1)
-                        seg.end = new_end
-                        break
-
-        # CHỐNG ĐÈ SUB (Anti-Overlap): Đảm bảo sub trước phải biến mất trước khi sub sau xuất hiện
-        for i in range(len(translated_segments) - 1):
-            if translated_segments[i].end > translated_segments[i+1].start:
-                safe_end = translated_segments[i+1].start - datetime.timedelta(seconds=0.05)
-                if safe_end > translated_segments[i].start:
-                    translated_segments[i].end = safe_end
-                else:
-                    translated_segments[i].end = translated_segments[i].start + datetime.timedelta(seconds=0.1)
+        # ĐỒNG BỘ THỜI GIAN VÀ CHỐNG ĐÈ PHỤ ĐỀ THEO GIỌNG ĐỌC THỰC TẾ (Codex Plan - Điểm 4)
+        translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
 
         # ===== BƯỚC 4.5: TẠO FILE ASS (CÓ SUB DỊCH ĐÃ ĐỒNG BỘ TIMING) =====
         ass_path = os.path.join(out_dir, "final.ass")
         await asyncio.to_thread(generate_ass_file, translated_segments, floating_segments, ass_path, play_res_x=vid_w, play_res_y=vid_h, main_y_pct=main_y_pct)
         sub_file_to_use = ass_path
 
+        # Mix giọng tiếng Việt vào nền nhạc KHÔNG CÓ LỜI (no_vocals_audio) với cấu hình đóng băng
         if shared_state.stop_requested: raise Exception("Bị hủy bởi lệnh /stop")
-        await asyncio.to_thread(mix_audio_pydub, no_vocals_audio, dubbing_audio_files, mixed_audio, original_volume_db=-2, dubbing_volume_db=1)
+        await asyncio.to_thread(
+            mix_audio_pydub,
+            no_vocals_audio,
+            dubbing_audio_files,
+            mixed_audio,
+            original_volume_db=v1_bgm_vol,
+            dubbing_volume_db=v1_dub_vol,
+            ducking_mode=v1_duck_mode,
+            explicit=True,
+        )
 
         # ===== BƯỚC 6: XUẤT VIDEO =====
         await safe_edit_status(status_msg, "🎬 Đang render video (NVENC)...")
@@ -1345,8 +1433,31 @@ async def process_single_video(update: Update, context: ContextTypes.DEFAULT_TYP
         #     logger.error(f"Lỗi dọn dẹp rác: {e}")
 
     except Exception as e:
-        logger.error(f"Error processing video: {e}", exc_info=True)
-        await safe_edit_status(status_msg, f"❌ Lỗi: {str(e)[:500]}")
+        logger.error(f"Error processing video {filename}: {e}", exc_info=True)
+        MAX_AUTO_RETRIES = 2
+        import shared_state
+        if retry_count < MAX_AUTO_RETRIES and not getattr(shared_state, 'stop_requested', False):
+            next_retry = retry_count + 1
+            new_pos = global_queue.qsize() + 1
+            await global_queue.put({
+                "type": "video",
+                "pos": new_pos,
+                "file_id": file_id,
+                "filename": filename,
+                "chat_id": target_chat_id,
+                "voice_mode": voice_mode or "auto",
+                "update": update,
+                "context": context,
+                "retry_count": next_retry
+            })
+            logger.info(f"🔄 Video {filename} gặp sự cố ({e}). Đã tự động đưa vào cuối hàng chờ (vị trí {new_pos}, lần thử {next_retry}/{MAX_AUTO_RETRIES})")
+            await safe_edit_status(
+                status_msg,
+                f"⚠️ *Video gặp sự cố trong quá trình xử lý:*\n`{str(e)[:200]}`\n\n"
+                f"🔄 *Đã tự động chuyển xuống cuối hàng chờ (Vị trí {new_pos})* để thử lại lần {next_retry}/{MAX_AUTO_RETRIES} sau khi hoàn tất các video khác!"
+            )
+        else:
+            await safe_edit_status(status_msg, f"❌ Lỗi: {str(e)[:500]}")
 
 
 # ===== KHỞI CHẠY BOT =====
@@ -1446,6 +1557,7 @@ async def queue_signal_watcher(application=None):
     flag_dir = bot_system if bot_system.is_dir() else Path(WORKSPACE)
     trigger_flag = flag_dir / "telegram_queue_trigger.flag"
     clear_flag = flag_dir / "telegram_queue_clear.flag"
+    reorder_flag = flag_dir / "telegram_queue_reorder.flag"
 
     while True:
         try:
@@ -1454,6 +1566,56 @@ async def queue_signal_watcher(application=None):
                 except Exception: pass
                 global_queue.clear()
                 logger.info("🗑️ Đã nhận lệnh xóa sạch hàng đợi từ Dashboard.")
+
+            if reorder_flag.exists():
+                try:
+                    reorder_flag.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                try:
+                    queue_file = flag_dir / "telegram_queue.json"
+                    if queue_file.is_file():
+                        import json
+                        qdata = json.loads(queue_file.read_text(encoding="utf-8-sig"))
+                        desired_items = qdata.get("items", [])
+                        if desired_items and not global_queue.empty():
+                            current_jobs = list(global_queue._queue)
+
+                            def _job_key(j):
+                                if isinstance(j, dict):
+                                    return str(j.get("url") or j.get("filename") or j.get("file_id") or j.get("name") or "").strip()
+                                return str(j).strip()
+
+                            job_map = {}
+                            for j in current_jobs:
+                                k = _job_key(j)
+                                if k:
+                                    if k not in job_map:
+                                        job_map[k] = []
+                                    job_map[k].append(j)
+
+                            new_jobs = []
+                            for it in desired_items:
+                                k = str(it.get("url") or it.get("filename") or it.get("file_id") or it.get("name") or "").strip()
+                                if k in job_map and job_map[k]:
+                                    new_jobs.append(job_map[k].pop(0))
+
+                            deleted_keys = set(qdata.get("deleted_keys", []))
+                            for remaining in job_map.values():
+                                for j in remaining:
+                                    k = _job_key(j)
+                                    if k not in deleted_keys:
+                                        new_jobs.append(j)
+
+                            global_queue._queue.clear()
+                            for pos, j in enumerate(new_jobs, 1):
+                                if isinstance(j, dict):
+                                    j["pos"] = pos
+                                global_queue._queue.append(j)
+                            global_queue.publish()
+                            logger.info("🔀 Đã cập nhật lại thứ tự ưu tiên hàng đợi từ Dashboard (%s video).", len(new_jobs))
+                except Exception as e:
+                    logger.warning("Lỗi cập nhật thứ tự hàng đợi: %s", e)
 
             if trigger_flag.exists():
                 try: trigger_flag.unlink(missing_ok=True)

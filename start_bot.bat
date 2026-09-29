@@ -14,7 +14,8 @@ if not exist "%PYTHON_EXE%" (
 
 :: Kiểm tra riêng cho Tool V1; không yêu cầu hoặc kích hoạt Pipeline V2.
 cd /d "%PROJECT_DIR%backend"
-"%PYTHON_EXE%" v1_preflight.py --project-root "%PROJECT_DIR%" --interface all
+set "ROOT_DIR=%PROJECT_DIR:~0,-1%"
+"%PYTHON_EXE%" v1_preflight.py --project-root "%ROOT_DIR%" --interface all
 if errorlevel 1 (
   echo [ERROR] Preflight that bai. Sua cac muc error o tren roi chay lai.
   pause

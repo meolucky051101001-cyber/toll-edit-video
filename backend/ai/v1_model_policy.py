@@ -47,6 +47,9 @@ class V1ModelPolicy:
     paddle_detection_model: str = "PP-OCRv6_tiny_det"
     paddle_recognition_model: str = "PP-OCRv6_tiny_rec"
     paddle_engine: str = "onnxruntime"
+    separator_backend: str = "auto"
+    separator_model: str = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
+    separator_runtime_python: str = ""
     runtime_python: str = ""
     model_cache_directory: str = ""
 
@@ -62,6 +65,28 @@ class V1ModelPolicy:
         configured_runtime = _clean(env.get("V1_MODEL_RUNTIME_PYTHON"), "")
         if not configured_runtime and default_runtime.is_file():
             configured_runtime = str(default_runtime)
+
+        configured_separator_runtime = _clean(env.get("V1_SEPARATOR_PYTHON"), "")
+        if not configured_separator_runtime:
+            candidates = [
+                root / "backend" / "model_venv" / "Scripts" / "python.exe",
+                Path(r"C:\tool v2\backend\model_venv\Scripts\python.exe"),
+            ]
+            for cand in candidates:
+                if cand.is_file():
+                    try:
+                        import subprocess
+                        chk = subprocess.run(
+                            [str(cand), "-c", "import audio_separator"],
+                            capture_output=True,
+                            timeout=5,
+                        )
+                        if chk.returncode == 0:
+                            configured_separator_runtime = str(cand)
+                            break
+                    except Exception:
+                        pass
+
         return cls(
             whisper_model=_clean(
                 env.get("V1_WHISPER_MODEL"), "large-v3-turbo"
@@ -70,6 +95,16 @@ class V1ModelPolicy:
                 env.get("V1_WHISPER_FALLBACK_MODEL"), "large-v3"
             ),
             demucs_model=_clean(env.get("V1_DEMUCS_MODEL"), "htdemucs"),
+            separator_backend=_choice(
+                env.get("V1_SEPARATOR_BACKEND"),
+                "auto",
+                ("auto", "roformer", "demucs", "bypass"),
+            ),
+            separator_model=_clean(
+                env.get("V1_SEPARATOR_MODEL"),
+                "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+            ),
+            separator_runtime_python=configured_separator_runtime,
             ocr_backend=_choice(
                 env.get("V1_OCR_BACKEND"),
                 "auto",
@@ -103,6 +138,11 @@ class V1ModelPolicy:
 
     def runtime_python_path(self) -> Path:
         return Path(self.runtime_python or sys.executable)
+
+    def separator_python_path(self) -> Path:
+        if self.separator_runtime_python and Path(self.separator_runtime_python).is_file():
+            return Path(self.separator_runtime_python)
+        return self.runtime_python_path()
 
 
 def current_v1_model_policy(

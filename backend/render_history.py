@@ -10,8 +10,14 @@ from pathlib import Path
 from typing import Dict, Optional
 
 WORKSPACE_DIR = Path(__file__).resolve().parent.parent / "workspace"
-HISTORY_FILE = WORKSPACE_DIR / ".render_history.json"
-LOCK_FILE = WORKSPACE_DIR / ".render_history.lock"
+def _resolve_history_files():
+    bot_system = WORKSPACE_DIR / "bot_system"
+    target = bot_system / ".render_history.json"
+    if target.exists() or bot_system.is_dir():
+        return target, bot_system / ".render_history.lock"
+    return WORKSPACE_DIR / ".render_history.json", WORKSPACE_DIR / ".render_history.lock"
+
+HISTORY_FILE, LOCK_FILE = _resolve_history_files()
 
 def format_duration(seconds: float) -> str:
     """Định dạng giây sang dạng Xp Ys hoặc Xs."""
@@ -32,6 +38,9 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
     """Đọc toàn bộ lịch sử thời gian render từ workspace và cache runtime (tuyệt đối không tạo file trong output_dir)."""
     history_files = [
         HISTORY_FILE,
+        Path(r"C:\tool v1\workspace\bot_system\.render_history.json"),
+        Path(r"C:\tool v2\workspace\bot_system\.render_history_v2.json"),
+        Path(r"C:\tool v2\workspace\bot_system\.render_history.json"),
         Path(r"C:\tool v2\workspace\.render_history_v2.json"),
         Path(r"C:\tool v2\workspace\.render_history.json"),
     ]
@@ -51,7 +60,9 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
 
     # Đọc bổ sung từ job_status.json nếu chưa có
     workspace_candidates = [
+        Path(r"C:\tool v1\workspace\bot_system\job_status.json"),
         Path(r"C:\tool v1\workspace\job_status.json"),
+        Path(r"C:\tool v2\workspace\bot_system\job_status.json"),
         Path(r"C:\tool v2\workspace\job_status.json"),
     ]
     for ws in workspace_candidates:
