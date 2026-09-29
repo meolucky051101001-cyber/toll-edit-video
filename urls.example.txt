@@ -1,0 +1,4 @@
+# Sao chép file này thành urls.txt rồi thêm URL video của bạn, mỗi dòng một URL.
+# urls.txt được .gitignore bỏ qua để không đẩy danh sách cá nhân lên GitHub.
+# Ví dụ (thay bằng URL của bạn):
+# https://www.facebook.com/reel/...

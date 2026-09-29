@@ -38,3 +38,6 @@ workspace/.dashboard_control_token
 voice_cache/
 backend/voice_cache/
 *.tmp
+
+# User-specific downloader input; keep URLs local and untracked
+urls.txt
