@@ -31,6 +31,8 @@ temp_burn*
 *.png
 *.ass
 *.srt
+# User-specific downloader input; keep URLs local and untracked
+urls.txt
 
 # Large optional model assets
 *.pth
