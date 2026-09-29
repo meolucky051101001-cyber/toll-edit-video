@@ -1,16 +1,30 @@
-# React + Vite
+# V2 Desktop Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Giao diện desktop cục bộ được xây bằng React, Vite và Electron. Đây không phải frontend Next.js.
 
-Currently, two official plugins are available:
+## Chức năng
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- Chọn thư mục hoặc video qua Electron preload bridge.
+- Xem video, điều khiển phát/tua và biên tập phụ đề trên giao diện.
+- Chọn nguồn/giọng đọc ở các luồng giao diện hiện có.
+- Xem log từ API cục bộ.
+- Electron bật context isolation, sandbox và Node integration tắt; quyền chọn file được giới hạn qua preload.
 
-## React Compiler
+## Phát triển
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Yêu cầu Node.js LTS tương thích với phiên bản Vite trong package lock.
 
-## Expanding the Oxlint configuration
+~~~powershell
+cd frontend
+npm ci
+npm run dev
+~~~
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+Lệnh dev mở Vite và Electron. Trong chế độ dev, Electron kết nối backend cục bộ theo cấu hình trong electron-main.cjs; API desktop mặc định dùng 127.0.0.1:8000. Dashboard Monitor V2 ở cổng 8089 là service riêng.
+
+~~~powershell
+npm run lint
+npm run build
+~~~
+
+Chạy các lệnh tại đúng thư mục frontend. Không commit node_modules, dist, log, video hoặc file cấu hình chứa secret.
