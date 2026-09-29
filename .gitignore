@@ -52,3 +52,6 @@ backups/
 benchmarks/
 *.before-*
 *.patch
+
+# User-specific downloader input; keep URLs local and untracked
+urls.txt
