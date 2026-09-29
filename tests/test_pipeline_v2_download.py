@@ -211,6 +211,39 @@ class DouyinDirectTests(unittest.TestCase):
             cookies = load_douyin_cookies({"DOUYIN_COOKIE_FILE": str(cookie_file)})
         self.assertEqual(cookies, {"msToken": "secret-token", "ttwid": "web-token"})
 
+    def test_social_downloader_uses_viesnap_first_for_douyin(self):
+        from backend import social_downloader
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            social_downloader,
+            "resolve_douyin_viesnap",
+            return_value=(True, "https://cdn.example/viesnap.mp4", "viesnap_title", {"Referer": "https://montague.ie/"}, ""),
+        ) as viesnap_resolver, patch.object(
+            social_downloader, "download_parallel_range", return_value=True
+        ) as mock_range, patch.object(
+            social_downloader, "download_file_stream"
+        ) as mock_stream, patch.object(
+            social_downloader, "resolve_douyin_video"
+        ) as direct_resolver:
+            ok, path, title, error = social_downloader.download_douyin_tiktok(
+                "https://v.douyin.com/JrSZrceQ-kU/",
+                directory,
+                "job",
+            )
+        self.assertTrue(ok)
+        self.assertTrue(path.endswith("job_viesnap_title.mp4"))
+        self.assertEqual(title, "viesnap_title")
+        self.assertEqual(error, "")
+        viesnap_resolver.assert_called_once_with("https://v.douyin.com/JrSZrceQ-kU/")
+        mock_range.assert_called_once_with(
+            "https://cdn.example/viesnap.mp4",
+            path,
+            workers=6,
+            headers={"Referer": "https://montague.ie/"},
+        )
+        mock_stream.assert_not_called()
+        direct_resolver.assert_not_called()
+
     def test_social_downloader_uses_direct_resolver_before_tikwm(self):
         from backend import social_downloader
         from backend.douyin_direct import DouyinVideoInfo
@@ -221,10 +254,12 @@ class DouyinDirectTests(unittest.TestCase):
             download_headers={"User-Agent": "test"},
         )
         with tempfile.TemporaryDirectory() as directory, patch.object(
+            social_downloader, "resolve_douyin_viesnap", return_value=(False, "", "", {}, "viesnap_offline")
+        ), patch.object(
             social_downloader, "resolve_douyin_video", return_value=info
         ) as resolver, patch.object(
-            social_downloader, "download_file_stream", return_value=True
-        ), patch.object(
+            social_downloader, "download_parallel_range", return_value=True
+        ) as mock_range, patch.object(
             social_downloader.requests, "post"
         ) as tikwm:
             ok, path, title, error = social_downloader.download_douyin_tiktok(
@@ -237,6 +272,7 @@ class DouyinDirectTests(unittest.TestCase):
         self.assertEqual(title, "direct")
         self.assertEqual(error, "")
         resolver.assert_called_once_with("7676769981752790308")
+        mock_range.assert_called_once()
         tikwm.assert_not_called()
 
     def test_social_downloader_falls_back_to_so9_when_direct_fails(self):
@@ -244,6 +280,8 @@ class DouyinDirectTests(unittest.TestCase):
         from backend.douyin_direct import DouyinDirectError
 
         with tempfile.TemporaryDirectory() as directory, patch.object(
+            social_downloader, "resolve_douyin_viesnap", return_value=(False, "", "", {}, "viesnap_offline")
+        ), patch.object(
             social_downloader,
             "resolve_douyin_video",
             side_effect=DouyinDirectError("Blocked 403"),
@@ -252,6 +290,8 @@ class DouyinDirectTests(unittest.TestCase):
             "resolve_douyin_so9",
             return_value=(True, "https://cdn.example/so9.mp4", "so9_title", ""),
         ) as so9_resolver, patch.object(
+            social_downloader, "download_parallel_range", return_value=False
+        ), patch.object(
             social_downloader, "download_file_stream", return_value=True
         ), patch.object(
             social_downloader.requests, "post"
@@ -291,6 +331,54 @@ class DouyinDirectTests(unittest.TestCase):
         self.assertEqual(title, "douyin_test")
         self.assertEqual(err, "")
         self.assertEqual(mock_get.call_count, 2)
+
+    def test_social_downloader_viesnap_falls_back_to_stream_when_range_fails(self):
+        from backend import social_downloader
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            social_downloader,
+            "resolve_douyin_viesnap",
+            return_value=(True, "https://cdn.example/viesnap.mp4", "viesnap_title", {"Referer": "https://montague.ie/"}, ""),
+        ), patch.object(
+            social_downloader, "download_parallel_range", return_value=False
+        ) as mock_range, patch.object(
+            social_downloader, "download_file_stream", return_value=True
+        ) as mock_stream:
+            ok, path, title, error = social_downloader.download_douyin_tiktok(
+                "https://v.douyin.com/JrSZrceQ-kU/",
+                directory,
+                "job",
+            )
+        self.assertTrue(ok)
+        self.assertTrue(path.endswith("job_viesnap_title.mp4"))
+        self.assertEqual(title, "viesnap_title")
+        self.assertEqual(error, "")
+        mock_range.assert_called_once()
+        mock_stream.assert_called_once()
+
+    def test_social_downloader_reports_detailed_diagnostics_when_all_resolvers_fail(self):
+        from backend import social_downloader
+        from backend.douyin_direct import DouyinDirectError
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            social_downloader, "resolve_douyin_viesnap", return_value=(False, "", "", {}, "Viesnap HTTP 500")
+        ), patch.object(
+            social_downloader, "resolve_douyin_video", side_effect=DouyinDirectError("Direct Blocked 403")
+        ), patch.object(
+            social_downloader, "resolve_douyin_so9", return_value=(False, "", "", "SO9 Read Timeout")
+        ):
+            ok, path, title, error = social_downloader.download_douyin_tiktok(
+                "https://www.douyin.com/video/7676769981752790308",
+                directory,
+                "job",
+            )
+        self.assertFalse(ok)
+        self.assertEqual(path, "")
+        self.assertEqual(title, "")
+        self.assertIn("Bóc tách Douyin thất bại:", error)
+        self.assertIn("Viesnap: Viesnap HTTP 500", error)
+        self.assertIn("Direct: Direct Blocked 403", error)
+        self.assertIn("SO9: SO9 Read Timeout", error)
 
 
 if __name__ == "__main__":

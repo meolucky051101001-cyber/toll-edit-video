@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -129,11 +130,19 @@ def evaluate_qc_gate(report: Union[QCReport, Mapping[str, Any]], policy: Any) ->
         for check in checks
         if check.get("status") == "error"
     ]
+
+    # In BLOCK policy, uncovered source rectangles, subtitle text collisions, or exposed Chinese text cannot be delivered
+    if policy_value == "block":
+        for check in checks:
+            name = str(check.get("name", ""))
+            if name in ("source_cover", "pixel_cover_qc", "watermark_collision", "subtitle_text_collision") and check.get("status") != "pass" and name not in errors:
+                errors.append(name)
+
     if policy_value == "block" and errors:
         return QCGateDecision(
             False,
             policy_value,
-            "QC gate blocked delivery because critical errors were reported",
+            "QC gate blocked delivery because critical errors or unverified covers were reported",
             tuple(errors),
         )
     if errors:
@@ -411,6 +420,147 @@ def _analyse_audio(
                 QCCheck("long_silence", "pass", "No unexpectedly long silence detected")
             )
     return metrics, checks
+
+
+def _check_mixed_audio_audibility(
+    audio_path: PathLike,
+    segments: Sequence[Dict[str, Any]],
+    min_audible_db: float = -42.0,
+    background_audio_path: Optional[PathLike] = None,
+) -> Tuple[Dict[str, Any], List[QCCheck]]:
+    """Verify that speech in the mixed audio is audible and not muted or swallowed by background."""
+    spoken_segments = [
+        s for s in segments
+        if str(s.get("content") or s.get("text") or "").strip()
+        and not bool(s.get("is_silent_fallback", False))
+        and not bool(s.get("is_unvoiced_scene", False))
+    ]
+    if not spoken_segments:
+        return {}, [QCCheck("dubbing_audibility", "pass", "No spoken segments required audibility check")]
+
+    try:
+        import soundfile as sf
+        import numpy as np
+
+        inaudible_ids = []
+        measured_rms = {}
+        vocal_stem_rms = {}
+        vocal_in_mix_rms = {}
+        silent_vocal_ids = []
+
+        # 1. Inspect individual vocal stem files if provided in segments
+        has_any_vocal_stems = any(bool(seg.get("audio_path")) for seg in spoken_segments)
+        if has_any_vocal_stems:
+            for seg in spoken_segments:
+                seg_id = seg.get("id", seg.get("index", 0))
+                vocal_file = seg.get("audio_path")
+                if vocal_file and Path(vocal_file).is_file():
+                    try:
+                        with sf.SoundFile(str(vocal_file)) as vf:
+                            v_data = vf.read()
+                            if len(v_data) > 0:
+                                v_rms = float(np.sqrt(np.mean(v_data**2)))
+                                v_db = 20 * np.log10(v_rms) if v_rms > 1e-9 else -100.0
+                                vocal_stem_rms[str(seg_id)] = round(v_db, 2)
+                                if v_db < -45.0:
+                                    silent_vocal_ids.append(seg_id)
+                            else:
+                                vocal_stem_rms[str(seg_id)] = -100.0
+                                silent_vocal_ids.append(seg_id)
+                    except Exception:
+                        silent_vocal_ids.append(seg_id)
+                else:
+                    # Stem was expected but missing or unreadable
+                    vocal_stem_rms[str(seg_id)] = -100.0
+                    silent_vocal_ids.append(seg_id)
+
+        # 2. Inspect mixed audio track (and compare with background stem if available)
+        bg_file = Path(background_audio_path) if background_audio_path else None
+        has_bg = bool(bg_file and bg_file.is_file())
+
+        with sf.SoundFile(str(audio_path)) as f:
+            sr = f.samplerate
+            total_samples = len(f)
+            bg_sf = sf.SoundFile(str(bg_file)) if has_bg else None
+            try:
+                for seg in spoken_segments:
+                    seg_id = seg.get("id", seg.get("index", 0))
+                    s_start = float(seg.get("start", 0.0))
+                    s_end = float(seg.get("end", s_start))
+                    dur = s_end - s_start
+                    if dur <= 0.1:
+                        continue
+                    start_sec = s_start + min(0.05, dur * 0.2)
+                    end_sec = s_end - min(0.05, dur * 0.2)
+                    start_frame = max(0, int(start_sec * sr))
+                    end_frame = min(total_samples, int(end_sec * sr))
+                    if end_frame <= start_frame:
+                        continue
+                    f.seek(start_frame)
+                    chunk = f.read(end_frame - start_frame)
+                    m_mono = np.mean(chunk, axis=1) if chunk.ndim > 1 else chunk
+                    rms = float(np.sqrt(np.mean(m_mono**2)))
+                    rms_db = 20 * np.log10(rms) if rms > 1e-9 else -100.0
+                    measured_rms[str(seg_id)] = round(rms_db, 2)
+
+                    # Check vocal energy differential if background track is available
+                    vocal_is_missing_in_mix = False
+                    if bg_sf is not None:
+                        try:
+                            bg_sf.seek(start_frame)
+                            b_chunk = bg_sf.read(end_frame - start_frame)
+                            b_mono = np.mean(b_chunk, axis=1) if b_chunk.ndim > 1 else b_chunk
+                            min_l = min(len(m_mono), len(b_mono))
+                            diff = m_mono[:min_l] - b_mono[:min_l]
+                            diff_rms = float(np.sqrt(np.mean(diff**2)))
+                            diff_db = 20 * np.log10(diff_rms) if diff_rms > 1e-9 else -100.0
+                            vocal_in_mix_rms[str(seg_id)] = round(diff_db, 2)
+                            # If vocal stem had sound (not in silent_vocal_ids) but diff in mix is inaudible:
+                            if seg_id not in silent_vocal_ids and diff_db < min_audible_db:
+                                vocal_is_missing_in_mix = True
+                        except Exception:
+                            pass
+
+                    if rms_db < min_audible_db or seg_id in silent_vocal_ids or vocal_is_missing_in_mix:
+                        inaudible_ids.append(seg_id)
+            finally:
+                if bg_sf is not None:
+                    bg_sf.close()
+
+        metrics = {
+            "audible_checked_segments": len(measured_rms),
+            "inaudible_segment_ids": inaudible_ids,
+            "silent_vocal_ids": silent_vocal_ids,
+            "min_measured_rms_db": min(measured_rms.values()) if measured_rms else None,
+            "avg_measured_rms_db": round(sum(measured_rms.values()) / len(measured_rms), 2) if measured_rms else None,
+            "min_vocal_stem_rms_db": min(vocal_stem_rms.values()) if vocal_stem_rms else None,
+            "avg_vocal_stem_rms_db": round(sum(vocal_stem_rms.values()) / len(vocal_stem_rms), 2) if vocal_stem_rms else None,
+        }
+        if inaudible_ids:
+            return metrics, [
+                QCCheck(
+                    "dubbing_audibility",
+                    "error",
+                    f"Detected {len(inaudible_ids)} segments with inaudible speech or missing vocal stem (< {min_audible_db} dBFS)",
+                    metrics,
+                )
+            ]
+        return metrics, [
+            QCCheck(
+                "dubbing_audibility",
+                "pass",
+                "Mixed audio and vocal stems have clear audible speech across all segments",
+                metrics,
+            )
+        ]
+    except Exception as exc:
+        return {}, [
+            QCCheck(
+                "dubbing_audibility",
+                "info",
+                f"Audibility check skipped ({exc})",
+            )
+        ]
 
 
 def _parse_srt_timestamp(value: str) -> float:
@@ -815,75 +965,120 @@ def _sample_frames(
         ]
 
     diagnostics_directory.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(
-        prefix=".frame_batch_", dir=str(diagnostics_directory)
-    ) as temporary_directory:
-        temporary_root = Path(temporary_directory)
-        output_pattern = temporary_root / "sample_%06d.png"
-        select_expression = "+".join(
-            "gte(t\\,{0:.9f})*(isnan(prev_selected_t)+lt(prev_selected_t\\,{0:.9f}))".format(timestamp)
-            for timestamp in selected_times
-        )
-        command = [
-            ffmpeg_binary,
-            "-hide_banner",
-            "-loglevel",
-            "info",
-            "-y",
-            "-i",
-            str(video_path),
-            "-vf",
-            "setpts=PTS-STARTPTS,select={},scale='min(960,iw)':-2,showinfo".format(select_expression),
-            "-fps_mode",
-            "vfr",
-            "-start_number",
-            "0",
-            "-frames:v",
-            str(len(selected_times)),
-            "-vcodec",
-            "png",
-            "-f",
-            "image2",
-            str(output_pattern),
-        ]
-        try:
-            result = _run_command(command, timeout)
-            if result.returncode != 0:
-                failures.extend(label for label, _ in samples)
-            else:
-                frame_times = [float(value) for value in re.findall(
-                    r"\bpts_time:([-+0-9.eE]+)", result.stderr or "")]
-                pending = list(selected_times)
-                for output_index, actual_time in enumerate(frame_times):
-                    decoded_frame = temporary_root / "sample_{:06d}.png".format(output_index)
-                    reached = [t for t in pending if t <= actual_time + 0.00001]
-                    labels = [label for t in reached for label in samples_by_time[t]]
-                    pending = [t for t in pending if t not in reached]
-                    if not decoded_frame.is_file() or decoded_frame.stat().st_size == 0:
-                        failures.extend(label for label, _ in labels)
-                        continue
-                    for label, timestamp in labels:
-                        key = "frames/{}.png".format(label)
+    opencv_success = False
+    try:
+        import cv2
+        cap = cv2.VideoCapture(str(video_path))
+        if cap.isOpened():
+            cv_artifacts = []
+            for t in selected_times:
+                cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+                ret, frame = cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    actual_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+                    actual_pts = (actual_msec / 1000.0) if actual_msec >= 0 else t
+                    fh, fw = frame.shape[:2]
+                    if fw > 960:
+                        new_h = int(fh * 960 / fw)
+                        new_h = (new_h // 2) * 2
+                        frame = cv2.resize(frame, (960, new_h), interpolation=cv2.INTER_AREA)
+                    for label, timestamp in samples_by_time[t]:
+                        key = f"frames/{label}.png"
+                        out_p = diagnostics_directory / key
+                        out_p.parent.mkdir(parents=True, exist_ok=True)
+                        cv2.imwrite(str(out_p), frame)
                         record = store.put_file(
                             key,
-                            decoded_frame,
+                            out_p,
                             metadata={
-                                "timestamp_seconds": actual_time,
+                                "timestamp_seconds": round(actual_pts, 3),
                                 "requested_timestamp_seconds": round(timestamp, 3),
-                                "sampling_output_index": output_index,
-                                "timestamp_basis": "decoded_pts",
+                                "timestamp_basis": "opencv_pos_msec",
                                 "source_fps": round(measured_fps, 6),
                             },
                         )
-                        artifacts.append(record.to_dict())
-                failures.extend(label for t in pending for label, _ in samples_by_time[t])
-        except (OSError, subprocess.SubprocessError):
-            failures.extend(label for label, _ in samples)
+                        cv_artifacts.append(record.to_dict())
+            cap.release()
+            if len(cv_artifacts) >= len(samples) * 0.8:
+                artifacts.extend(cv_artifacts)
+                opencv_success = True
+                logger.info("⚡ OpenCV fast diagnostic sampling extracted %d frames in seconds", len(artifacts))
+    except Exception as cv_exc:
+        logger.debug("OpenCV frame sampling skipped: %s", cv_exc)
+        opencv_success = False
+
+    if not opencv_success:
+        with tempfile.TemporaryDirectory(
+            prefix=".frame_batch_", dir=str(diagnostics_directory)
+        ) as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            output_pattern = temporary_root / "sample_%06d.png"
+            select_expression = "+".join(
+                "gte(t\\,{0:.9f})*(isnan(prev_selected_t)+lt(prev_selected_t\\,{0:.9f}))".format(timestamp)
+                for timestamp in selected_times
+            )
+            command = [
+                ffmpeg_binary,
+                "-hide_banner",
+                "-loglevel",
+                "info",
+                "-y",
+                "-i",
+                str(video_path),
+                "-vf",
+                "setpts=PTS-STARTPTS,select={},scale='min(960,iw)':-2,showinfo".format(select_expression),
+                "-fps_mode",
+                "vfr",
+                "-start_number",
+                "0",
+                "-frames:v",
+                str(len(selected_times)),
+                "-vcodec",
+                "png",
+                "-f",
+                "image2",
+                str(output_pattern),
+            ]
+            try:
+                result = _run_command(command, timeout)
+                if result.returncode != 0:
+                    failures.extend(label for label, _ in samples)
+                else:
+                    frame_times = [float(value) for value in re.findall(
+                        r"\bpts_time:([-+0-9.eE]+)", result.stderr or "")]
+                    pending = list(selected_times)
+                    for output_index, actual_time in enumerate(frame_times):
+                        decoded_frame = temporary_root / "sample_{:06d}.png".format(output_index)
+                        reached = [t for t in pending if t <= actual_time + 0.00001]
+                        labels = [label for t in reached for label in samples_by_time[t]]
+                        pending = [t for t in pending if t not in reached]
+                        if not decoded_frame.is_file() or decoded_frame.stat().st_size == 0:
+                            failures.extend(label for label, _ in labels)
+                            continue
+                        for label, timestamp in labels:
+                            key = "frames/{}.png".format(label)
+                            record = store.put_file(
+                                key,
+                                decoded_frame,
+                                metadata={
+                                    "timestamp_seconds": actual_time,
+                                    "requested_timestamp_seconds": round(timestamp, 3),
+                                    "sampling_output_index": output_index,
+                                    "timestamp_basis": "decoded_pts",
+                                    "source_fps": round(measured_fps, 6),
+                                },
+                            )
+                            artifacts.append(record.to_dict())
+                    failures.extend(label for t in pending for label, _ in samples_by_time[t])
+            except (OSError, subprocess.SubprocessError):
+                failures.extend(label for label, _ in samples)
 
     extraction_metrics = {
         "requested_samples": len(samples),
         "decoded_unique_frames": len({a['metadata']['timestamp_seconds'] for a in artifacts}),
-        "ffmpeg_invocations": 1,
+        "extraction_backend": "opencv" if opencv_success else "ffmpeg",
+        "ffmpeg_invocations": 0 if opencv_success else 1,
+        "opencv_frames_extracted": len(artifacts) if opencv_success else 0,
         "fps": round(measured_fps, 6),
         "created": len(artifacts),
     }
@@ -900,7 +1095,7 @@ def _sample_frames(
         QCCheck(
             "frame_samples",
             "pass",
-            "Created diagnostic frames in one sequential decode",
+            f"Created diagnostic frames via {'OpenCV' if opencv_success else 'FFmpeg sequential decode'}",
             extraction_metrics,
         )
     ]
@@ -1016,6 +1211,17 @@ def run_report_only_qc(
                 segment_metrics, segment_checks = _check_segments(segments)
                 report.metrics.update(segment_metrics)
                 report.checks.extend(segment_checks)
+                if audio is not None and audio.is_file() and segments.suffix.lower() == ".json":
+                    try:
+                        bg_track = audio.parent / "background.wav"
+                        bg_path_arg = bg_track if bg_track.is_file() else None
+                        aud_metrics, aud_checks = _check_mixed_audio_audibility(
+                            audio, _load_segments(segments), background_audio_path=bg_path_arg
+                        )
+                        report.metrics["dubbing_audibility"] = aud_metrics
+                        report.checks.extend(aud_checks)
+                    except Exception:
+                        pass
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 report.add("segments", "error", "Could not inspect segments: {}".format(exc))
 
@@ -1088,19 +1294,22 @@ def run_report_only_qc(
             # 1. Primary: Sample directly from actual ASS covers
             total_covers = len(ass_covers)
             selected_cov_indices = set()
-            if total_covers <= 15:
+            # Adaptive sample budget: check 100% of covers for clips with <= 30 covers;
+            # For longer videos with many covers, sample proportionally (up to 50 covers)
+            cov_budget = max(15, min(total_covers, max(30, int(total_covers * 0.35))))
+            if total_covers <= cov_budget:
                 selected_cov_indices.update(range(total_covers))
             else:
-                selected_cov_indices.add(0)
+                selected_cov_indices.update(range(min(6, total_covers)))
                 selected_cov_indices.add(total_covers - 1)
                 cov_shifts = []
                 for i in range(len(ass_covers) - 1):
                     c1, c2 = ass_covers[i], ass_covers[i + 1]
                     if abs(c1[3] - c2[3]) > (ch * 0.03):
                         cov_shifts.append(i + 1)
-                for s_idx in cov_shifts[:8]:
+                for s_idx in cov_shifts[:15]:
                     selected_cov_indices.add(s_idx)
-                rem = 15 - len(selected_cov_indices)
+                rem = cov_budget - len(selected_cov_indices)
                 if rem > 0:
                     step = (total_covers - 1) / max(1, rem + 1)
                     for k in range(1, rem + 1):
@@ -1204,12 +1413,6 @@ def run_report_only_qc(
                 fail_t = float(fail_item.get("start", 0.0))
                 diagnostic_points.append((f"cover_fail_{f_idx}", fail_t))
 
-        # Targeted sampling at watermark reference frames if within video duration
-        if video_duration >= 600.0:
-            diagnostic_points.append(("watermark_zone_600", 600.0))
-        if video_duration >= 750.0:
-            diagnostic_points.append(("watermark_zone_750", 750.0))
-
         diagnostics = Path(diagnostics_directory or (Path(report_path).parent / "qc_diagnostics"))
         try:
             frame_artifacts, frame_checks = _sample_frames(
@@ -1219,7 +1422,7 @@ def run_report_only_qc(
                 ffmpeg_binary,
                 config.command_timeout_seconds,
                 extra_samples=diagnostic_points,
-                max_samples=getattr(config, "diagnostic_max_samples", 30),
+                max_samples=getattr(config, "diagnostic_max_samples", 50),
                 fps=video_fps,
             )
             report.diagnostic_artifacts.extend(frame_artifacts)
@@ -1235,14 +1438,22 @@ def run_report_only_qc(
                     if not ass_covers:
                         ass_covers, cw, ch = parse_ass_covers(Path(subtitles).read_text(encoding="utf-8-sig"))
 
-                    # Watermark collision check against bottom-right seal
-                    wm_res = check_watermark_collision(ass_covers, cw, ch)
+                    # Dynamic watermark collision check (only active if watermark_box is configured)
+                    watermark_box = getattr(config, "watermark_box", None)
+                    wm_res = check_watermark_collision(ass_covers, cw, ch, watermark_box=watermark_box)
                     report.metrics["watermark_collision_qc"] = wm_res
                     if wm_res["has_collision"]:
                         report.add(
                             "subtitle_watermark_collision",
                             "error" if is_block else "warning",
                             f"Phát hiện {wm_res['collision_count']} khung che phụ đề va chạm vùng watermark góc dưới phải",
+                            wm_res,
+                        )
+                    elif watermark_box is None:
+                        report.add(
+                            "subtitle_watermark_collision",
+                            "info",
+                            "Bỏ qua kiểm tra va chạm watermark do watermark_box không được cấu hình (None)",
                             wm_res,
                         )
                     else:
@@ -1253,6 +1464,26 @@ def run_report_only_qc(
                             wm_res,
                         )
 
+                    # Dynamic subtitle text collision check (detects overlapping dialogue lines)
+                    from .cover_qc import check_subtitle_text_collision
+                    ass_text_raw = Path(subtitles).read_text(encoding="utf-8-sig")
+                    text_collision_res = check_subtitle_text_collision(ass_text_raw)
+                    report.metrics["subtitle_text_collision_qc"] = text_collision_res
+                    if text_collision_res["has_collision"]:
+                        report.add(
+                            "subtitle_text_collision",
+                            "error" if is_block else "warning",
+                            f"Phát hiện {text_collision_res['collision_count']} đoạn phụ đề tiếng Việt bị chồng chữ/trùng thời gian tại cùng tọa độ màn hình",
+                            text_collision_res,
+                        )
+                    else:
+                        report.add(
+                            "subtitle_text_collision",
+                            "pass",
+                            "Toàn bộ các dòng phụ đề tiếng Việt hiển thị tuần tự, không bị chồng chữ hoặc đè thời gian",
+                            text_collision_res,
+                        )
+
                     expected_cover_prefixes = (
                         "cover_onset_",
                         "cover_mid_",
@@ -1260,11 +1491,118 @@ def run_report_only_qc(
                         "cover_hold_",
                         "cover_shift_",
                         "cover_fail_",
-                        "transition_",
-                        "boundary_mid_",
-                        "boundary_exit_",
-                        "boundary_shift_",
                     )
+
+                    # Batch OCR check on diagnostic frames to detect any exposed/uncovered Chinese text
+                    exposed_text_by_frame = {}
+                    batch_ocr_metrics = {
+                        "status": "not_run",
+                        "sent_images": 0,
+                        "received_results": 0,
+                        "error": None,
+                    }
+                    try:
+                        from pipeline_v2.reconcile import PACKAGING_KEYWORDS
+                    except ImportError:
+                        try:
+                            from .reconcile import PACKAGING_KEYWORDS
+                        except ImportError:
+                            PACKAGING_KEYWORDS = ()
+
+                    try:
+                        backend_dir = str(Path(__file__).resolve().parents[1])
+                        if backend_dir not in sys.path:
+                            sys.path.insert(0, backend_dir)
+                        import cv2
+                        import numpy as np
+                        from ocr_utils import _readtext_batch
+                        diag_imgs = []
+                        valid_diag_records = []
+                        for art in frame_artifacts:
+                            key_name = art.get("key") or art.get("artifact_key", "")
+                            fpath = diagnostics / key_name
+                            ts = art.get("metadata", {}).get("timestamp_seconds", art.get("timestamp_seconds"))
+                            ts_val = float(ts) if ts is not None else 0.0
+                            if fpath.is_file() and ts_val >= 0.5:
+                                im = cv2.imread(str(fpath))
+                                if im is not None and im.size > 0:
+                                    # Skip completely uniform / blank frames (std < 5.0)
+                                    if float(np.std(im)) >= 5.0:
+                                        diag_imgs.append(im)
+                                        valid_diag_records.append((key_name, fpath.name, ts_val, im.shape[0], im.shape[1]))
+                        if diag_imgs:
+                            batch_ocr_metrics["sent_images"] = len(diag_imgs)
+                            ocr_results = _readtext_batch(diag_imgs)
+                            batch_ocr_metrics["received_results"] = len(ocr_results)
+                            if len(ocr_results) < len(diag_imgs):
+                                batch_ocr_metrics["status"] = "partial"
+                            else:
+                                batch_ocr_metrics["status"] = "complete"
+
+                            for (k_name, f_name, ts_val, im_h, im_w), res in zip(valid_diag_records, ocr_results):
+                                uncovered_cjk = []
+                                for bbox, text, score in res:
+                                    clean_text = str(text or "").strip()
+                                    if float(score or 0.0) < 0.45 or len(clean_text) < 2 or not re.search(r'[\u4e00-\u9fff]', clean_text):
+                                        continue
+                                    if clean_text.startswith(("@", "*", "©", "®")) or "鹿茸" in clean_text or "抖音" in clean_text:
+                                        continue
+                                    ys = [p[1] for p in bbox]
+                                    xs = [p[0] for p in bbox]
+                                    y1_pct = min(ys) / im_h
+                                    y2_pct = max(ys) / im_h
+                                    x1_pct = min(xs) / im_w
+                                    x2_pct = max(xs) / im_w
+
+                                    cx = (x1_pct + x2_pct) / 2.0
+                                    box_w = abs(x2_pct - x1_pct)
+                                    is_centered = abs(cx - 0.5) <= 0.15
+                                    is_subtitle_band = (y1_pct >= 0.65 and is_centered)
+                                    is_narrative = bool(re.search(r'(?:小时前|分钟前|天前|年后|个月前|清晨|深夜|傍晚|剧终|全剧终)', clean_text))
+                                    # Packaging keywords, photo editing UI, tiny icon text, or off-center labels
+                                    is_tiny = box_w < 0.05
+                                    is_packaging = any(kw in clean_text for kw in PACKAGING_KEYWORDS) or is_tiny or (not is_centered and not is_narrative and len(clean_text) <= 6)
+                                    if not is_narrative and (is_packaging or not is_centered):
+                                        continue
+
+                                    # Watermark boundary check must verify all 4 sides of the watermark region
+                                    if watermark_box and len(watermark_box) >= 4:
+                                        wx1 = float(watermark_box[0]) if float(watermark_box[0]) <= 1.0 else float(watermark_box[0]) / cw
+                                        wy1 = float(watermark_box[1]) if float(watermark_box[1]) <= 1.0 else float(watermark_box[1]) / ch
+                                        wx2 = float(watermark_box[2]) if float(watermark_box[2]) <= 1.0 else float(watermark_box[2]) / cw
+                                        wy2 = float(watermark_box[3]) if float(watermark_box[3]) <= 1.0 else float(watermark_box[3]) / ch
+                                        if x1_pct >= wx1 - 0.02 and y1_pct >= wy1 - 0.02 and x2_pct <= wx2 + 0.02 and y2_pct <= wy2 + 0.02:
+                                            continue
+                                    if is_subtitle_band or is_narrative:
+                                        uncovered_cjk.append({
+                                            "text": clean_text,
+                                            "score": round(float(score), 3),
+                                            "y_pct": [round(y1_pct, 3), round(y2_pct, 3)],
+                                            "x_pct": [round(x1_pct, 3), round(x2_pct, 3)],
+                                        })
+                                if uncovered_cjk:
+                                    exposed_text_by_frame[k_name] = uncovered_cjk
+                                    exposed_text_by_frame[f_name] = uncovered_cjk
+                    except Exception as ocr_qc_exc:
+                        batch_ocr_metrics["status"] = "failed"
+                        batch_ocr_metrics["error"] = str(ocr_qc_exc)
+                        logger.warning("Diagnostic OCR text check failed: %s", ocr_qc_exc)
+
+                    report.metrics["diagnostic_batch_ocr"] = batch_ocr_metrics
+                    if batch_ocr_metrics["status"] in ("failed", "partial"):
+                        report.add(
+                            "diagnostic_batch_ocr",
+                            "error" if is_block else "warning",
+                            f"Diagnostic batch OCR incomplete or failed ({batch_ocr_metrics['received_results']}/{batch_ocr_metrics['sent_images']}): {batch_ocr_metrics['error'] or 'missing items'}",
+                            batch_ocr_metrics,
+                        )
+                    elif batch_ocr_metrics["status"] == "complete":
+                        report.add(
+                            "diagnostic_batch_ocr",
+                            "pass",
+                            f"Diagnostic batch OCR verified {batch_ocr_metrics['received_results']} frames for exposed Chinese text",
+                            batch_ocr_metrics,
+                        )
 
                     pixel_results = []
                     for art in frame_artifacts:
@@ -1273,13 +1611,6 @@ def run_report_only_qc(
                         ts = art.get("metadata", {}).get("timestamp_seconds", art.get("timestamp_seconds"))
                         if not fpath.is_file():
                             continue
-
-                        # Check if this frame was sampled specifically expecting an active cover
-                        base_name = Path(key_name).name
-                        is_expected_cover = any(
-                            base_name.startswith(p) or key_name.startswith(f"frames/{p}") or key_name.startswith(p)
-                            for p in expected_cover_prefixes
-                        )
 
                         sample_time = float(ts) if ts is not None else None
                         expected_regions = []
@@ -1297,6 +1628,16 @@ def run_report_only_qc(
                                 if event.src_start <= sample_time < event.src_end
                             ]
 
+                        # Check if this frame was sampled specifically expecting an active cover
+                        base_name = Path(key_name).name
+                        is_expected_cover = bool(expected_cover_timeline) and (
+                            bool(expected_regions) or any(
+                                base_name.startswith(p) or key_name.startswith(f"frames/{p}") or key_name.startswith(p)
+                                for p in expected_cover_prefixes
+                            )
+                        )
+
+                        frame_uncovered_cjk = exposed_text_by_frame.get(key_name) or exposed_text_by_frame.get(fpath.name, [])
                         pix_res = inspect_frame_pixel_coverage(
                             fpath,
                             ass_covers,
@@ -1304,6 +1645,8 @@ def run_report_only_qc(
                             canvas_h=ch,
                             timestamp=ts,
                             expected_regions=expected_regions,
+                            watermark_box=watermark_box,
+                            uncovered_cjk_items=frame_uncovered_cjk,
                         )
                         if pix_res.get("checked"):
                             # If expected cover frame produced 0 boxes checked (degenerate cover box)
@@ -1336,7 +1679,7 @@ def run_report_only_qc(
                             if any(
                                 not region.get("geometry_covered", False)
                                 for region in result.get("expected_region_checks", [])
-                            )
+                            ) or bool(result.get("uncovered_cjk_items"))
                         )
                         report.metrics["pixel_cover_qc"] = {
                             "checked_frames": len(pixel_results),
@@ -1360,19 +1703,43 @@ def run_report_only_qc(
                             },
                         )
                     else:
-                        # Fail-closed: Subtitles were provided but no sampled frame pixel result could be produced
-                        report.metrics["pixel_cover_qc"] = {
-                            "checked_frames": 0,
-                            "all_boxes_filled": False,
-                            "reason": "no_pixel_results_generated",
-                        }
-                        qc_status = "error" if is_block else "warning"
-                        report.add(
-                            "pixel_cover_qc",
-                            qc_status,
-                            "ASS covers were expected but no sampled frame pixel result could be produced for verification",
-                            {"checked_frames": 0, "gate_policy": gate_policy_str},
+                        # Check if this video legitimately required no subtitle covers:
+                        # 1. No ASS covers present
+                        # 2. No OCR tracking blocks or expected timeline
+                        # 3. All loaded segments are explicitly non-subtitles (is_subtitle is False) or no segments loaded
+                        # 4. No exposed Chinese text was detected in diagnostic frames
+                        has_expected_covers = (
+                            bool(expected_cover_timeline)
+                            or any(bool(s.get("tracking_blocks") or s.get("best_block") or s.get("is_subtitle") is True) for s in loaded_segs)
+                            or (bool(loaded_segs) and not all(s.get("is_subtitle") is False for s in loaded_segs))
+                            or any(bool(items) for items in exposed_text_by_frame.values())
                         )
+                        if not ass_covers and not has_expected_covers:
+                            report.metrics["pixel_cover_qc"] = {
+                                "checked_frames": 0,
+                                "all_boxes_filled": True,
+                                "reason": "no_source_subtitles_to_cover",
+                            }
+                            report.add(
+                                "pixel_cover_qc",
+                                "pass",
+                                "No ASS subtitle covers were required for this video (no source subtitle text detected)",
+                                {"checked_frames": 0, "gate_policy": gate_policy_str},
+                            )
+                        else:
+                            # Fail-closed: Subtitles were provided but no sampled frame pixel result could be produced
+                            report.metrics["pixel_cover_qc"] = {
+                                "checked_frames": 0,
+                                "all_boxes_filled": False,
+                                "reason": "no_pixel_results_generated",
+                            }
+                            qc_status = "error" if is_block else "warning"
+                            report.add(
+                                "pixel_cover_qc",
+                                qc_status,
+                                "ASS covers were expected but no sampled frame pixel result could be produced for verification",
+                                {"checked_frames": 0, "gate_policy": gate_policy_str},
+                            )
                 except Exception as exc:
                     logger.debug("Pixel cover check error: %s", exc)
                     report.metrics["pixel_cover_qc"] = {

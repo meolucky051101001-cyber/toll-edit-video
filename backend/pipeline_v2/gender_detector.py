@@ -162,9 +162,11 @@ def enrich_segments_with_speaker_and_gender(
 
     # 3. First Pass: Hysteresis classification based on global baseline
     raw_genders = []
+    is_strong = []
     for pitch in pitches:
         if pitch is None:
             raw_genders.append(global_gender)
+            is_strong.append(False)
         else:
             if global_gender == "female":
                 # In predominantly female video, pitch must be distinctly male (< 145 Hz) to switch
@@ -172,21 +174,24 @@ def enrich_segments_with_speaker_and_gender(
             else:
                 # In predominantly male video, pitch must be distinctly female (> 185 Hz) to switch
                 raw_genders.append("female" if pitch > 185.0 else "male")
+            strong_cue = pitch < 145.0 or pitch > 180.0
+            is_strong.append(bool(strong_cue))
 
     # 4. Second Pass: Temporal Smoothing (Hangover filter)
-    # Remove isolated 1-segment flips (e.g. Female -> Male (1 seg) -> Female)
+    # Remove isolated 1-segment flips only if the segment lacks strong acoustic evidence
     smoothed_genders = list(raw_genders)
     n = len(smoothed_genders)
     for i in range(1, n - 1):
-        prev_g = smoothed_genders[i - 1]
-        curr_g = smoothed_genders[i]
+        prev_g = raw_genders[i - 1]
+        curr_g = raw_genders[i]
         next_g = raw_genders[i + 1]
         if curr_g != prev_g and prev_g == next_g:
-            smoothed_genders[i] = prev_g
+            if not is_strong[i]:
+                smoothed_genders[i] = prev_g
 
     # 5. Third Pass: Monologue consensus
-    # If one gender dominates >= 80% and there is no sustained multi-segment dialogue
-    # (i.e. fewer than 3 consecutive segments of the opposite gender), lock all segments to dominant gender.
+    # If one gender dominates >= 80% and there is no sustained multi-segment dialogue,
+    # normalize only minority segments that lack strong acoustic evidence.
     f_count = sum(1 for g in smoothed_genders if g == "female")
     m_count = sum(1 for g in smoothed_genders if g == "male")
     dom_gender = "female" if f_count >= m_count else "male"
@@ -204,12 +209,14 @@ def enrich_segments_with_speaker_and_gender(
 
     if dom_ratio >= 0.80 and max_consecutive_minor < 3:
         logger.info(
-            "Single-speaker monologue detected (dominance %.1f%%, max consecutive minor %d). Locking all segments to %s.",
+            "Single-speaker monologue detected (dominance %.1f%%, max consecutive minor %d). Normalizing weak segments to %s.",
             dom_ratio * 100,
             max_consecutive_minor,
             dom_gender,
         )
-        smoothed_genders = [dom_gender] * n
+        for i in range(n):
+            if smoothed_genders[i] == minor_gender and not is_strong[i]:
+                smoothed_genders[i] = dom_gender
 
     # 6. Assign final gender and speaker_id to segments
     for seg, pitch, g in zip(segments, pitches, smoothed_genders):

@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import uuid
@@ -63,6 +64,7 @@ V2_STAGE_ORDER = (
     "transcribe",
     "ocr",
     "translate",
+    "reconcile",
     "timing",
     "tts",
     "rvc",
@@ -77,7 +79,7 @@ V2_STAGE_ORDER = (
 # Bump this value whenever artifact semantics change.  It participates in the
 # manifest fingerprint so an upgraded runner cannot silently reuse output from
 # an older implementation that happened to have the same environment flags.
-PIPELINE_IMPLEMENTATION_VERSION = "2.13.2"
+PIPELINE_IMPLEMENTATION_VERSION = "2.15.0"
 TRANSLATION_CHECKPOINT_VERSION = 3
 TRANSLATION_CONTEXT_WINDOW = 12
 
@@ -157,9 +159,14 @@ class VideoPipelineRunner:
         self.manifest_store = ManifestStore(self.v2_directory)
         self.work_directory = self.v2_directory / "work"
         self.work_directory.mkdir(parents=True, exist_ok=True)
+        gpu_lock_file = (
+            self.job_directory.parent / "bot_system" / "pipeline_v2_gpu.lock"
+            if (self.job_directory.parent / "bot_system").is_dir()
+            else (self.job_directory.parent / "pipeline_v2_gpu.lock")
+        )
         self.gpu_executor = GPUStageExecutor(
             self.v2_directory / "control",
-            (self.job_directory.parent / "bot_system" / "pipeline_v2_gpu.lock") if (self.job_directory.parent / "bot_system").is_dir() else (self.job_directory.parent / "pipeline_v2_gpu.lock"),
+            gpu_lock_file,
             lock_timeout_seconds=request.settings.gpu_lock_timeout_seconds,
             stage_timeout_seconds=request.settings.stage_timeout_seconds,
         )
@@ -168,6 +175,13 @@ class VideoPipelineRunner:
     async def run(self) -> VideoPipelineResult:
         if not self.video_path.is_file():
             raise FileNotFoundError("Input video is missing: {}".format(self.video_path))
+        from .interprocess_lock import get_global_pipeline_lock, get_job_lock
+        job_lock = get_job_lock(self.job_directory, self.job_directory.name)
+        global_lock = get_global_pipeline_lock(self.job_directory.parent)
+        async with global_lock, job_lock:
+            return await self._run_pipeline()
+
+    async def _run_pipeline(self) -> VideoPipelineResult:
         self.manifest = self._load_or_create_manifest()
         recovered = self.manifest.recover_interrupted()
         if recovered:
@@ -198,7 +212,9 @@ class VideoPipelineRunner:
         transcript = self._load_segments("transcript/segments.json")
 
         ocr_should_run = True
-        if self.request.settings.enable_adaptive_ocr:
+        if self._completed_valid("ocr"):
+            ocr_should_run = True
+        elif self.request.settings.enable_adaptive_ocr:
             ocr_decision = await asyncio.to_thread(
                 decide_ocr, self.video_path, 24, transcript=transcript
             )
@@ -225,6 +241,13 @@ class VideoPipelineRunner:
             await self._execute("translate", lambda: self._translate_stage(transcript))
 
         merged = self._merged_translated_segments(transcript)
+        rec_fp = self._compute_reconcile_fingerprint()
+        await self._execute(
+            "reconcile",
+            lambda: self._reconcile_stage(transcript, merged),
+            input_fingerprint=rec_fp,
+        )
+        merged = self._load_reconciled_segments(merged)
         if self.request.settings.enable_timing_solver:
             await self._execute("timing", lambda: self._timing_stage(merged))
             timed_segments = self._load_segments("translation/timed_segments.json")
@@ -249,6 +272,7 @@ class VideoPipelineRunner:
             self._skip("rvc", "RVC model unavailable or disabled")
 
         await self._execute("subtitles", lambda: self._subtitles_stage(final_segments))
+
         if self.request.settings.enable_ffmpeg_mix_v2:
             if self.request.settings.enable_legacy_mix_ab:
                 await self._execute("mix_legacy", self._mix_legacy_stage)
@@ -258,6 +282,7 @@ class VideoPipelineRunner:
         else:
             await self._execute("mix_legacy", self._mix_legacy_stage)
             self._skip("mix_v2", "ENABLE_FFMPEG_MIX_V2 is false")
+
         await self._execute("render", self._render_stage)
         await self._execute("qc", lambda: self._qc_stage(final_segments))
 
@@ -348,6 +373,7 @@ class VideoPipelineRunner:
                     "font_name": self.request.font_name,
                     "font_color": self.request.font_color,
                     "font_weight": self.request.font_weight,
+                    "speaker_voice_map": dict(self.request.speaker_voice_map or {}),
                 }
             ),
             model_sha256=model_fingerprints,
@@ -431,19 +457,20 @@ class VideoPipelineRunner:
         name: str,
         callback: Callable[[], Any],
         allow_empty: bool = False,
+        input_fingerprint: Optional[str] = None,
     ) -> List[ArtifactRecord]:
         assert self.manifest is not None
         record = self.manifest.stage(name)
         if record.status is StageStatus.SKIPPED:
             return []
-        if self._completed_valid(name, allow_empty=allow_empty):
+        if self._completed_valid(name, allow_empty=allow_empty, input_fingerprint=input_fingerprint):
             await self._notify(name, "cache_hit")
             return [self.manifest.artifacts[key] for key in record.artifact_keys]
         if record.status is StageStatus.COMPLETED:
             self.manifest.invalidate_from(name, V2_STAGE_ORDER)
             self.manifest_store.save(self.manifest)
         self._check_stopped()
-        self.manifest.start_stage(name)
+        self.manifest.start_stage(name, input_fingerprint=input_fingerprint)
         self.manifest_store.save(self.manifest)
         await self._notify(name, "running")
         try:
@@ -504,24 +531,37 @@ class VideoPipelineRunner:
         ]
         try:
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-            # If any task raised, cancel the remaining siblings immediately.
             for t in pending:
                 t.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
-            # Propagate the first exception.
+
+            # Consume exceptions on all completed tasks to prevent unretrieved task exception warnings
+            first_exc = None
             for t in done:
-                if t.exception() is not None:
-                    raise t.exception()
-        except asyncio.CancelledError:
+                exc = t.exception()
+                if exc is not None and first_exc is None:
+                    first_exc = exc
+            if first_exc is not None:
+                raise first_exc
+        except BaseException:
             for t in tasks:
-                t.cancel()
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
-    def _completed_valid(self, name: str, allow_empty: bool = False) -> bool:
+    def _completed_valid(
+        self,
+        name: str,
+        allow_empty: bool = False,
+        input_fingerprint: Optional[str] = None,
+    ) -> bool:
         assert self.manifest is not None
         record = self.manifest.stage(name)
         if record.status is not StageStatus.COMPLETED:
+            return False
+        if input_fingerprint and record.input_fingerprint != input_fingerprint:
             return False
         if name == "deliver":
             outputs = record.metadata.get("published_outputs") or [
@@ -780,14 +820,24 @@ class VideoPipelineRunner:
                 if main_positions
                 else 0.85
             )
+            gap_dets = sampling_metrics.get("gap_detections", [])
             result = {
                 "segments": segments_to_dicts(segments),
                 "width": width,
                 "height": height,
                 "main_y_pct": main_y_pct,
                 "sampling_metrics": sampling_metrics,
+                "gap_detections": gap_dets,
             }
-        return [self.artifact_store.put_json("ocr/result.json", result)]
+        gap_dets = result.get("gap_detections") or result.get("sampling_metrics", {}).get("gap_detections", [])
+        result["gap_detections"] = gap_dets
+        metrics_count = result.get("sampling_metrics", {}).get("gap_detections_count", len(gap_dets))
+        if metrics_count > 0 and len(gap_dets) == 0:
+            raise RuntimeError(f"OCR stage data drop: worker reported {metrics_count} gap detections but received 0")
+        return [
+            self.artifact_store.put_json("ocr/result.json", result),
+            self.artifact_store.put_json("ocr/gap_detections.json", {"gap_detections": gap_dets, "count": len(gap_dets)}),
+        ]
 
     async def _translate_stage(
         self, transcript: Sequence[RuntimeSegment]
@@ -854,7 +904,7 @@ class VideoPipelineRunner:
                     translated_batch = None
             if translated_batch is None:
                 batch_quality: Dict[str, Any] = {}
-                max_translate_retries = 3
+                max_translate_retries = 8
                 last_translate_err = None
                 for attempt in range(max_translate_retries):
                     try:
@@ -901,11 +951,12 @@ class VideoPipelineRunner:
                     except Exception as err:
                         last_translate_err = err
                         if attempt < max_translate_retries - 1:
+                            backoff = min(4.0 * (attempt + 1), 30.0)
                             logger.warning(
-                                "Translation batch attempt %d/%d failed (%s: %s). Retrying in 3s...",
-                                attempt + 1, max_translate_retries, type(err).__name__, err
+                                "Translation batch attempt %d/%d failed (%s: %s). Retrying in %gs...",
+                                attempt + 1, max_translate_retries, type(err).__name__, err, backoff
                             )
-                            await asyncio.sleep(3.0)
+                            await asyncio.sleep(backoff)
                 if last_translate_err is not None:
                     raise last_translate_err
                 artifacts.append(
@@ -938,6 +989,22 @@ class VideoPipelineRunner:
                 for segment in translated_batch[-TRANSLATION_CONTEXT_WINDOW:]
             )
 
+        source_hash = self.manifest.fingerprints.source_sha256 if self.manifest else ""
+        if source_hash:
+            try:
+                from .reconcile import JobTranslationOverrideStore
+                default_override_file = Path(__file__).resolve().parent.parent / "data" / "job_overrides.json"
+                if default_override_file.is_file():
+                    override_store = JobTranslationOverrideStore.from_file(default_override_file)
+                    for seg in translated_all:
+                        src = str(getattr(seg, "orig_content", None) or seg.content).strip()
+                        ov = override_store.get_override(source_hash, source_text=src)
+                        if ov and ov.override_translation:
+                            logger.info("Applied verified job translation override for %s: %s", src, ov.override_translation)
+                            seg.content = ov.override_translation
+            except Exception as ov_exc:
+                logger.warning("Could not apply job translation overrides: %s", ov_exc)
+
         artifacts.extend([
             self.artifact_store.put_json(
                 "translation/segments.json", {"segments": segments_to_dicts(translated_all)}
@@ -966,6 +1033,177 @@ class VideoPipelineRunner:
             ocr = self._load_json("ocr/result.json")
             return merge_ocr_geometry(translated, segments_from_dicts(ocr["segments"]))
         return merge_ocr_geometry(translated, transcript)
+ 
+    def _compute_reconcile_fingerprint(self) -> str:
+        """Compute strict input fingerprint for reconcile stage cache validity."""
+        ocr_sha = ""
+        if "ocr/gap_detections.json" in self.manifest.artifacts:
+            ocr_sha = self.manifest.artifacts["ocr/gap_detections.json"].sha256
+        elif "ocr/result.json" in self.manifest.artifacts:
+            ocr_sha = self.manifest.artifacts["ocr/result.json"].sha256
+
+        transcript_sha = ""
+        if "transcript/segments.json" in self.manifest.artifacts:
+            transcript_sha = self.manifest.artifacts["transcript/segments.json"].sha256
+
+        vocal_sha = ""
+        if "audio/vocals.wav" in self.manifest.artifacts:
+            vocal_sha = self.manifest.artifacts["audio/vocals.wav"].sha256
+
+        video_hash = str(self.manifest.metadata.get("source_video_sha256", ""))
+        components = {
+            "ocr_sha256": ocr_sha,
+            "transcript_sha256": transcript_sha,
+            "vocal_sha256": vocal_sha,
+            "glossary": dict(self.request.glossary or {}),
+            "translation_overrides": dict(getattr(self.request, "translation_overrides", {}) or {}),
+            "video_hash": video_hash,
+            "target_lang": self.request.target_lang,
+            "algorithm_version": "2.16.0_reconcile_handoff_v1",
+        }
+        return fingerprint_json(components)
+
+    async def _reconcile_stage(
+        self,
+        transcript: Sequence[RuntimeSegment],
+        merged: List[RuntimeSegment],
+    ) -> Sequence[ArtifactRecord]:
+        from .reconcile import (
+            build_domain_tracks,
+            build_segments_from_spans,
+            reconcile_asr_gaps,
+            translate_spans,
+        )
+
+        reconcile_key = "ocr/gap_reconciliation.json"
+        gap_dets = []
+        if self.manifest.stage("ocr").status is StageStatus.COMPLETED:
+            if self.artifact_store.exists("ocr/gap_detections.json"):
+                payload = self._load_json("ocr/gap_detections.json")
+                gap_dets = payload.get("gap_detections", [])
+            elif self.artifact_store.exists("ocr/result.json"):
+                payload = self._load_json("ocr/result.json")
+                gap_dets = payload.get("gap_detections") or payload.get("sampling_metrics", {}).get("gap_detections", [])
+
+        video_hash = str(self.manifest.metadata.get("source_video_sha256", ""))
+        vocal_audio = self._speech_audio()
+        duration = float(self.manifest.metadata.get("source_duration_seconds", 0.0))
+
+        if not gap_dets:
+            logger.info("No gap detections found; creating empty reconciliation artifacts")
+            source_tracks, subtitles, dub_utterances = build_domain_tracks([], merged)
+            artifacts = [
+                self.artifact_store.put_json(
+                    reconcile_key,
+                    {
+                        "total_raw_detections": 0,
+                        "reconciled_spans": [],
+                        "spoken_dialogue_count": 0,
+                        "unvoiced_scene_text_count": 0,
+                        "scene_packaging_count": 0,
+                        "uncertain_count": 0,
+                        "added_segments_count": 0,
+                        "reconciled_segments": [],
+                    },
+                ),
+                self.artifact_store.put_json(
+                    "ocr/source_tracks.json",
+                    {"tracks": [t.to_dict() for t in source_tracks], "count": len(source_tracks)},
+                ),
+                self.artifact_store.put_json(
+                    "ocr/vietnamese_subtitles.json",
+                    {"subtitles": [s.to_dict() for s in subtitles], "count": len(subtitles)},
+                ),
+                self.artifact_store.put_json(
+                    "ocr/dub_utterances.json",
+                    {"utterances": [u.to_dict() for u in dub_utterances], "count": len(dub_utterances)},
+                ),
+            ]
+            return artifacts
+
+        spans, spans_dict_list = await asyncio.to_thread(
+            reconcile_asr_gaps,
+            gap_dets,
+            merged,
+            vocal_audio,
+            duration,
+        )
+
+        await translate_spans(
+            spans,
+            target_lang=self.request.target_lang,
+            api_key=self.request.api_key,
+            glossary=self.request.glossary,
+            entity_map=self.request.entity_map,
+            translation_overrides=getattr(self.request, "translation_overrides", None),
+            video_hash=video_hash,
+        )
+
+        for sp_obj, sp_dict in zip(spans, spans_dict_list):
+            sp_dict["translated_vietnamese"] = sp_obj.translated_vietnamese
+
+        new_segments = build_segments_from_spans(spans)
+        source_tracks, subtitles, dub_utterances = build_domain_tracks(spans, merged)
+
+        logger.info(
+            "Reconciliation produced %d new segments (%d spoken dialogue, %d unvoiced scene text, %d uncertain)",
+            len(new_segments),
+            sum(1 for s in spans if s.classification == "spoken_dialogue"),
+            sum(1 for s in spans if s.classification == "unvoiced_scene_text"),
+            sum(1 for s in spans if s.classification == "uncertain"),
+        )
+
+        artifacts = [
+            self.artifact_store.put_json(
+                reconcile_key,
+                {
+                    "total_raw_detections": len(gap_dets),
+                    "reconciled_spans": spans_dict_list,
+                    "spoken_dialogue_count": sum(1 for s in spans if s.classification == "spoken_dialogue"),
+                    "unvoiced_scene_text_count": sum(1 for s in spans if s.classification == "unvoiced_scene_text"),
+                    "scene_packaging_count": sum(1 for s in spans if s.classification in ("packaging_or_watermark", "scene_packaging_or_logo")),
+                    "uncertain_count": sum(1 for s in spans if s.classification == "uncertain"),
+                    "added_segments_count": len(new_segments),
+                    "reconciled_segments": segments_to_dicts(new_segments),
+                    "total_segments_before": len(merged),
+                    "total_segments_after": len(merged) + len(new_segments),
+                },
+            ),
+            self.artifact_store.put_json(
+                "ocr/source_tracks.json",
+                {"tracks": [t.to_dict() for t in source_tracks], "count": len(source_tracks)},
+            ),
+            self.artifact_store.put_json(
+                "ocr/vietnamese_subtitles.json",
+                {"subtitles": [s.to_dict() for s in subtitles], "count": len(subtitles)},
+            ),
+            self.artifact_store.put_json(
+                "ocr/dub_utterances.json",
+                {"utterances": [u.to_dict() for u in dub_utterances], "count": len(dub_utterances)},
+            ),
+        ]
+        return artifacts
+
+    def _load_reconciled_segments(
+        self, merged: List[RuntimeSegment]
+    ) -> List[RuntimeSegment]:
+        reconcile_key = "ocr/gap_reconciliation.json"
+        if not self.artifact_store.exists(reconcile_key):
+            return merged
+        try:
+            cached_data = self._load_json(reconcile_key)
+            cached_segs = cached_data.get("reconciled_segments", [])
+            if cached_segs:
+                new_segments = segments_from_dicts(cached_segs)
+                combined = list(merged) + list(new_segments)
+                combined.sort(key=lambda s: s.start.total_seconds())
+                for idx, s in enumerate(combined, 1):
+                    s.index = idx
+                    s.source_segment_id = idx
+                return combined
+        except Exception as exc:
+            logger.warning("Could not read %s: %s", reconcile_key, exc)
+        return merged
 
     async def _timing_stage(
         self, segments: Sequence[RuntimeSegment]
@@ -1074,6 +1312,36 @@ class VideoPipelineRunner:
             if restored:
                 continue
 
+            # Per-sentence audio caching: check previously synthesized audio for unchanged sentences in this batch
+            cached_sentence_infos = {}
+            if checkpoint_path.is_file():
+                try:
+                    old_ckpt = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                    config_matches = (
+                        old_ckpt.get("voice_source", self.request.voice_source) == self.request.voice_source
+                        and old_ckpt.get("voice_param") == self.request.voice_param
+                        and dict(old_ckpt.get("speaker_voice_map") or {}) == dict(self.request.speaker_voice_map or {})
+                        and bool(old_ckpt.get("enable_auto_gender", False)) == bool(self.request.settings.enable_auto_gender)
+                    )
+                    if config_matches:
+                        for old_info in old_ckpt.get("segments", []):
+                            old_idx = int(old_info.get("index", -1))
+                            old_key = f"tts/{old_idx}.mp3"
+                            if old_idx >= 0 and self.artifact_store.exists(old_key):
+                                matching_seg = next((s for s in batch if int(s.index) == old_idx), None)
+                                if (
+                                    matching_seg is not None
+                                    and str(matching_seg.content).strip() == str(old_info.get("content", "")).strip()
+                                    and abs(matching_seg.start.total_seconds() - float(old_info.get("start", 0.0))) < 0.05
+                                    and abs(matching_seg.end.total_seconds() - float(old_info.get("end", 0.0))) < 0.05
+                                ):
+                                    cached_sentence_infos[old_idx] = {
+                                        **old_info,
+                                        "path": str(self._artifact_path(old_key)),
+                                    }
+                except Exception:
+                    cached_sentence_infos = {}
+
             with tempfile.TemporaryDirectory(
                 prefix="tts-batch-", dir=self.work_directory
             ) as work:
@@ -1090,7 +1358,19 @@ class VideoPipelineRunner:
                         speaker_voice_map=self.request.speaker_voice_map,
                     )
 
-                infos = await generate_round(0, batch)
+                to_generate = [s for s in batch if int(s.index) not in cached_sentence_infos]
+                if to_generate:
+                    new_infos = await generate_round(0, to_generate)
+                    new_by_idx = {int(info["index"]): info for info in new_infos}
+                    infos = []
+                    for seg in batch:
+                        idx = int(seg.index)
+                        if idx in cached_sentence_infos:
+                            infos.append(cached_sentence_infos[idx])
+                        elif idx in new_by_idx:
+                            infos.append(new_by_idx[idx])
+                else:
+                    infos = [cached_sentence_infos[int(seg.index)] for seg in batch]
                 if actual_rewriter is not None:
                     for rewrite_round in range(1, policy.max_rewrite_rounds + 1):
                         requests = plan_actual_timing_rewrites(batch, infos)
@@ -1120,6 +1400,7 @@ class VideoPipelineRunner:
                             raise RuntimeError("TTS rewrite returned mismatched audio segments")
                         # Keep unchanged audio and the original batch order.
                         infos = [revised_by_index.get(int(info["index"]), info) for info in infos]
+
                 batch_records = []
                 batch_infos = []
                 for info in infos:
@@ -1131,6 +1412,10 @@ class VideoPipelineRunner:
                     checkpoint_key,
                     {
                         "input_fingerprint": input_fingerprint,
+                        "voice_source": self.request.voice_source,
+                        "voice_param": self.request.voice_param,
+                        "speaker_voice_map": dict(self.request.speaker_voice_map or {}),
+                        "enable_auto_gender": bool(self.request.settings.enable_auto_gender),
                         "audio_artifacts": [record.to_dict() for record in batch_records],
                         "segments": batch_infos,
                         "runtime_segments": segments_to_dicts(batch),
@@ -1146,7 +1431,10 @@ class VideoPipelineRunner:
                     "segments": portable_infos,
                     "runtime_segments": segments_to_dicts(segments),
                     "silent_fallback_count": sum(
-                        1 for info in portable_infos if bool(info.get("is_silent_fallback", False))
+                        1
+                        for info in portable_infos
+                        if bool(info.get("is_silent_fallback", False))
+                        and not bool(info.get("is_unvoiced_scene", False))
                     ),
                     "unresolved_source_ids": sorted(
                         {
@@ -1251,16 +1539,89 @@ class VideoPipelineRunner:
                 if restored:
                     continue
 
+                cached_rvc_records: Dict[int, ArtifactRecord] = {}
+                cached_rvc_infos: Dict[int, Dict[str, Any]] = {}
+                if checkpoint_path.is_file():
+                    try:
+                        old_ckpt = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                        cached_auto_gender = old_ckpt.get("enable_auto_gender")
+                        cached_model_sha = old_ckpt.get("rvc_model_sha256")
+                        current_model_sha = getattr(getattr(self.manifest, "fingerprints", None), "model_sha256", {}).get("rvc")
+                        cached_model_path = old_ckpt.get("rvc_model_path")
+                        current_model_path = str(self.request.rvc_model_path or "")
+
+                        model_matches = True
+                        if cached_model_sha is not None and current_model_sha is not None:
+                            if cached_model_sha != current_model_sha:
+                                model_matches = False
+                        elif cached_model_path is not None and current_model_path:
+                            if cached_model_path != current_model_path:
+                                model_matches = False
+
+                        if (
+                            (cached_auto_gender is None or cached_auto_gender == self.request.settings.enable_auto_gender)
+                            and model_matches
+                        ):
+                            old_segments = {
+                                int(s["index"]): s
+                                for s in old_ckpt.get("segments", [])
+                                if isinstance(s, dict) and "index" in s
+                            }
+                            for info in batch:
+                                idx = int(info["index"])
+                                rvc_key = "rvc/{}.wav".format(idx)
+                                if idx in old_segments and self.artifact_store.exists(rvc_key):
+                                    old_info = old_segments[idx]
+                                    tts_path = self._artifact_path(info["artifact_key"])
+                                    if tts_path.is_file():
+                                        cur_tts_sha, _ = hash_file(tts_path)
+                                        saved_tts_sha = old_info.get("tts_sha256")
+                                        sha_matches = (saved_tts_sha is not None and saved_tts_sha == cur_tts_sha)
+                                        content_matches = (
+                                            str(old_info.get("content", "")).strip() == str(info.get("content", "")).strip()
+                                            and abs(float(old_info.get("start", 0.0)) - float(info.get("start", 0.0))) < 0.05
+                                            and abs(float(old_info.get("end", 0.0)) - float(info.get("end", 0.0))) < 0.05
+                                            and str(old_info.get("gender", "")) == str(info.get("gender", ""))
+                                        )
+                                        if sha_matches or (saved_tts_sha is None and content_matches):
+                                            rec = self.artifact_store.record_existing(rvc_key)
+                                            cached_rvc_records[idx] = rec
+                                            cached_rvc_infos[idx] = {
+                                                **old_info,
+                                                "tts_sha256": cur_tts_sha,
+                                            }
+                    except Exception as exc:
+                        logger.debug("Failed checking RVC cached segments: %s", exc)
+                        cached_rvc_records = {}
+                        cached_rvc_infos = {}
+
                 with tempfile.TemporaryDirectory(
                     prefix="rvc-batch-", dir=self.work_directory
                 ) as work:
                     work_path = Path(work)
                     items_to_rvc = []
                     male_items = []
+                    new_processed_records: Dict[int, ArtifactRecord] = {}
+                    new_processed_infos: Dict[int, Dict[str, Any]] = {}
+
                     for info in batch:
+                        idx = int(info["index"])
+                        if idx in cached_rvc_records:
+                            continue
                         gender = str(info.get("gender", "female") or "female").lower()
                         inp_path = str(self._artifact_path(info["artifact_key"]))
-                        if self.request.settings.enable_auto_gender and gender == "male":
+                        inp_file = Path(inp_path)
+                        inp_is_silent = (
+                            bool(info.get("is_unvoiced_scene", False))
+                            or not inp_file.is_file()
+                            or inp_file.stat().st_size <= 256
+                        )
+                        if inp_is_silent:
+                            male_items.append({
+                                "index": info["index"],
+                                "output_path": inp_path,
+                            })
+                        elif self.request.settings.enable_auto_gender and gender == "male":
                             male_items.append({
                                 "index": info["index"],
                                 "output_path": inp_path,
@@ -1317,8 +1678,6 @@ class VideoPipelineRunner:
                         rvc_items_result = result.get("items", [])
 
                     all_items_result = male_items + rvc_items_result
-                    batch_records = []
-                    batch_infos = []
                     for item in all_items_result:
                         index = int(item["index"])
                         segment = segment_map[index]
@@ -1332,24 +1691,42 @@ class VideoPipelineRunner:
                         )
                         key = "rvc/{}.wav".format(index)
                         record = self.artifact_store.put_file(key, fitted)
-                        batch_records.append(record)
+                        new_processed_records[index] = record
                         original_info = tts_by_index[index]
-                        batch_infos.append(
-                            {
-                                **original_info,
-                                "artifact_key": key,
-                                "path": None,
-                                "rvc_source_audio_duration": fit.source_duration_seconds,
-                                "target_audio_duration": fit.target_duration_seconds,
-                                "actual_audio_duration": fit.output_duration_seconds,
-                                "rvc_applied_atempo": fit.applied_atempo,
-                                "timing_fits": fit.fits,
-                            }
-                        )
+                        tts_path = self._artifact_path(original_info["artifact_key"])
+                        cur_tts_sha = hash_file(tts_path)[0] if tts_path.is_file() else ""
+                        new_processed_infos[index] = {
+                            **original_info,
+                            "artifact_key": key,
+                            "path": None,
+                            "rvc_source_audio_duration": fit.source_duration_seconds,
+                            "target_audio_duration": fit.target_duration_seconds,
+                            "actual_audio_duration": fit.output_duration_seconds,
+                            "rvc_applied_atempo": fit.applied_atempo,
+                            "timing_fits": fit.fits,
+                            "tts_sha256": cur_tts_sha,
+                        }
+
+                    batch_records = []
+                    batch_infos = []
+                    for info in batch:
+                        idx = int(info["index"])
+                        if idx in cached_rvc_records:
+                            batch_records.append(cached_rvc_records[idx])
+                            batch_infos.append(cached_rvc_infos[idx])
+                        elif idx in new_processed_records:
+                            batch_records.append(new_processed_records[idx])
+                            batch_infos.append(new_processed_infos[idx])
+                        else:
+                            raise RuntimeError(f"Missing RVC audio record for segment {idx}")
+
                     checkpoint_record = self.artifact_store.put_json(
                         checkpoint_key,
                         {
                             "input_fingerprint": input_fingerprint,
+                            "enable_auto_gender": self.request.settings.enable_auto_gender,
+                            "rvc_model_path": str(self.request.rvc_model_path or ""),
+                            "rvc_model_sha256": getattr(getattr(self.manifest, "fingerprints", None), "model_sha256", {}).get("rvc"),
                             "audio_artifacts": [record.to_dict() for record in batch_records],
                             "segments": batch_infos,
                         },
@@ -1367,7 +1744,10 @@ class VideoPipelineRunner:
                 {
                     "segments": portable,
                     "silent_fallback_count": sum(
-                        1 for info in portable if bool(info.get("is_silent_fallback", False))
+                        1
+                        for info in portable
+                        if bool(info.get("is_silent_fallback", False))
+                        and not bool(info.get("is_unvoiced_scene", False))
                     ),
                     "unresolved_source_ids": sorted(
                         {
@@ -1406,6 +1786,7 @@ class VideoPipelineRunner:
                 font_name=self.request.font_name,
                 font_color=self.request.font_color,
                 font_weight=self.request.font_weight,
+                watermark_box=getattr(self.request, "watermark_box", None),
             )
             return [self.artifact_store.put_file("subtitles/final.ass", output)]
 
@@ -1437,7 +1818,12 @@ class VideoPipelineRunner:
                 except ImportError:
                     from ai.audio_enhancer import preserve_pristine_background
                 enhanced_bg = work / "enhanced_bg.wav"
-                raw_segs = self._load_segments("transcript/segments.json")
+                if self.manifest.stage("reconcile").status is StageStatus.COMPLETED and self._artifact_path("reconcile/segments.json").is_file():
+                    raw_segs = self._load_segments("reconcile/segments.json")
+                elif self.manifest.stage("timing").status is StageStatus.COMPLETED and self._artifact_path("timing/segments.json").is_file():
+                    raw_segs = self._load_segments("timing/segments.json")
+                else:
+                    raw_segs = self._load_segments("transcript/segments.json")
                 segments = []
                 for seg in raw_segs:
                     s_val = getattr(seg, "start", 0.0)
@@ -1564,7 +1950,7 @@ class VideoPipelineRunner:
                 run_report_only_qc,
                 self._artifact_path("output/final.mp4"),
                 report_path,
-                self._artifact_path("output/final.mp4"),
+                self._selected_mix() if self._selected_mix().is_file() else self._artifact_path("output/final.mp4"),
                 self._artifact_path("qc/segments.json"),
                 self._artifact_path("subtitles/final.ass"),
                 diagnostics,
@@ -1583,6 +1969,48 @@ class VideoPipelineRunner:
                 artifacts.append(
                     self.artifact_store.put_file("qc/frames/{}".format(frame.name), frame)
                 )
+
+            # Evaluate gap coverage and export artifact
+            if self.artifact_store.exists("ocr/gap_detections.json") and self._artifact_path("subtitles/final.ass").is_file():
+                try:
+                    from .cover_qc import parse_ass_covers
+                    ass_text = self._artifact_path("subtitles/final.ass").read_text(encoding="utf-8-sig")
+                    ass_covers, cw, ch = parse_ass_covers(ass_text)
+                    gap_data = self._load_json("ocr/gap_detections.json")
+                    gap_dets = gap_data.get("gap_detections", [])
+
+                    in_band_gaps = [d for d in gap_dets if d.get("in_subtitle_band")]
+                    covered_gaps = 0
+                    uncovered_gaps = []
+                    uncovered_dialogue = []
+                    for gd in in_band_gaps:
+                        t = max(0.0, float(gd.get("time", 0.0)))
+                        text = str(gd.get("text", "")).strip()
+                        is_covered = any(c[0] - 0.20 <= t <= c[1] + 0.20 for c in ass_covers)
+                        if is_covered:
+                            covered_gaps += 1
+                        else:
+                            uncovered_gaps.append(gd)
+                            has_cjk = bool(re.search(r'[\u4e00-\u9fff]', text))
+                            is_logo = text.startswith(("@", "*", "©", "®")) or "鹿茸" in text or "抖音" in text
+                            if has_cjk and not is_logo:
+                                uncovered_dialogue.append(gd)
+
+                    gap_cov_payload = {
+                        "total_gap_detections": len(gap_dets),
+                        "subtitle_band_detections": len(in_band_gaps),
+                        "covered_gaps": covered_gaps,
+                        "uncovered_gaps_count": len(uncovered_gaps),
+                        "uncovered_dialogue_count": len(uncovered_dialogue),
+                        "uncovered_gaps": uncovered_gaps[:20],
+                        "coverage_ratio": round(covered_gaps / max(1, len(in_band_gaps)), 4),
+                        "dialogue_coverage_ratio": round((len(in_band_gaps) - len(uncovered_dialogue)) / max(1, len(in_band_gaps)), 4),
+                    }
+                    gap_cov_record = self.artifact_store.put_json("qc/gap_coverage.json", gap_cov_payload)
+                    artifacts.append(gap_cov_record)
+                except Exception as exc:
+                    logger.warning("Failed to evaluate gap coverage in QC: %s", exc)
+
             return artifacts
 
     def _deliver_stage(self) -> Sequence[ArtifactRecord]:

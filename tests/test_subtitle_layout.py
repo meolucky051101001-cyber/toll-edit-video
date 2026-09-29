@@ -286,7 +286,7 @@ class SubtitleLayoutTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "watermark_clearance.ass"
-            generate_ass_file([seg], [], path, play_res_x=1920, play_res_y=1080)
+            generate_ass_file([seg], [], path, play_res_x=1920, play_res_y=1080, watermark_box=(1626.0, 980.0, 1920.0, 1080.0))
             content = path.read_text(encoding="utf-8-sig")
             bg_line = next(l for l in content.splitlines() if ",BgStyle," in l)
             match = re.search(r"\\pos\((\d+),(\d+)\).*?m (\d+) [\d.]+ l [\d.]+ [\d.]+ b [\d.]+ [\d.]+ [\d.]+ (\d+)", bg_line)

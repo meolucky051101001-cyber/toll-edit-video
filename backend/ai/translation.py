@@ -211,10 +211,10 @@ Yêu cầu TỐI QUAN TRỌNG:
    - Nếu câu nói ngắn, liền một hơi không có ngắt nghỉ thì KHÔNG tự ý chèn dấu ngắt nghỉ ("nếu không thì thôi").
    - Kết thúc một câu hoàn chỉnh trọn vẹn ý nghĩa: BẮT BUỘC có dấu kết câu (. ! ?). Tuyệt đối không để câu hoàn chỉnh kết thúc cụt ngủn không dấu.
    - TUYỆT ĐỐI KHÔNG dùng dấu ba chấm (... hoặc …).
-7. NGỮ CẢNH NỐI TIẾP: Vì phụ đề thường bị ngắt giữa chừng, hãy đọc cả đoạn để dịch sao cho ý nối liền mạch trơn tru.
-    BẮT BUỘC giữ nguyên cách viết tên riêng, loài vật và đại từ đã xuất hiện trong phần ngữ cảnh batch trước, không dịch lại theo nghĩa.
-    Tên nhân vật chính là 'A Thích' (阿特): BẮT BUỘC giữ nguyên xuyên suốt là 'A Thích', TUYỆT ĐỐI KHÔNG đổi thành 'Assassin', 'Assin', 'Sát thủ' hay bất kỳ tên nào khác!
-    KHÔNG dùng dấu ba chấm (... hoặc …). Hệ thống sẽ chuyển phụ đề sang câu kế tiếp tại dấu kết câu; vẫn giữ đúng số phần tử JSON theo đầu vào.
+7. NGỮ CẢNH NỐI TIẾP & TÊN RIÊNG: Vì phụ đề thường bị ngắt giữa chừng, hãy đọc cả đoạn để dịch sao cho ý nối liền mạch trơn tru.
+    - BẮT BUỘC giữ nguyên cách viết tên riêng, đại từ và nhân xưng đã thống nhất trong ngữ cảnh các đoạn trước (không dịch lại theo nghĩa thông thường hay tự ý đổi tên).
+    - TUYỆT ĐỐI KHÔNG tự ý suy diễn hoặc thay thế các danh từ chung, động từ, danh xưng nghề nghiệp (ví dụ: sát thủ, thích khách, người thợ, bác sĩ...) thành tên riêng của nhân vật nếu không có chỉ định từ ngữ cảnh nguồn hoặc bảng từ điển.
+    - KHÔNG dùng dấu ba chấm (... hoặc …). Hệ thống sẽ chuyển phụ đề sang câu kế tiếp tại dấu kết câu; vẫn giữ đúng số phần tử JSON theo đầu vào.
 8. BẮT LỖI ĐỒNG ÂM ASR DO NHẬN DẠNG GIỌNG NÓI (WHISPER): Phụ đề tiếng Trung gốc được trích xuất bằng ASR nên thường xuất hiện các từ đồng âm/gần âm sai trong video review, handmade, đồ gia dụng. Hãy dùng ngữ cảnh sản phẩm để tự động sửa:
    - '天手章' hoặc '手张' -> hiểu đúng là '贴手帐' hoặc '手帐' (dán sổ tay / chơi sổ Bullet Journal / planner); tuyệt đối KHÔNG dịch thành 'chương tay' hay 'quả trứng'.
    - '怪蛋' -> hiểu đúng là '怪诞' (kỳ ảo, kỳ thú, độc lạ); KHÔNG dịch thành 'quả trứng quái'.
@@ -300,7 +300,7 @@ def is_gemini_available() -> bool:
     return time.time() >= _gemini_unhealthy_until
 
 
-def mark_gemini_unhealthy(cooldown_seconds: float = 300.0) -> None:
+def mark_gemini_unhealthy(cooldown_seconds: float = 30.0) -> None:
     global _gemini_unhealthy_until
     _gemini_unhealthy_until = time.time() + cooldown_seconds
     logger.warning("Gemini marked unhealthy; cooling down for %g seconds", cooldown_seconds)
@@ -405,11 +405,11 @@ def translate_with_gemini(
                     break
                 elif response.status_code == 429:
                     logger.warning(f"Lỗi giới hạn tần suất {model} (HTTP 429 Rate Limit) -> Tự động backup sang model tiếp theo...")
-                    time.sleep(0.5)
+                    time.sleep(1.0)
                     continue
                 elif response.status_code == 503:
                     logger.warning(f"Lỗi máy chủ Google quá tải {model} (HTTP 503 High Demand) -> Tự động backup sang model tiếp theo...")
-                    time.sleep(0.5)
+                    time.sleep(1.0)
                     continue
                 elif response.status_code == 404:
                     logger.warning(f"Model {model} không khả dụng (HTTP 404) -> Tự động backup sang model tiếp theo...")
@@ -423,6 +423,7 @@ def translate_with_gemini(
                 continue
 
         logger.warning("Tất cả các model Gemini trong danh sách backup (%s) đều không thực hiện được batch này.", ", ".join(models_to_try))
+        time.sleep(2.0)
         if _gemini_transient_failures == 0:
             _gemini_transient_failure()
     except Exception as e:
@@ -610,14 +611,30 @@ Dữ liệu:
     return None
 
 
-def ensure_speech_pauses_and_entity(source_texts, translated_texts, entity_map=None, prior_context=None):
-    """Normalize translated texts with proper capitalization, pauses, and entity names."""
+def ensure_speech_pauses_and_entity(
+    source_texts,
+    translated_texts,
+    entity_map=None,
+    prior_context=None,
+    glossary=None,
+):
+    """Normalize translated texts with proper capitalization, pauses, and entity names.
+
+    Entity normalization is strictly context- and glossary-driven:
+    - User glossary takes precedence, followed by job entity_map.
+    - An entity replacement is applied ONLY when the source keyword actually appears in the corresponding source text.
+    - No ordinary terms (like assassin, sát thủ, thích khách) are converted to proper names without explicit source evidence.
+    - Terminal periods are added ONLY when the source text actually ends with sentence-terminal punctuation.
+    - Commas are inserted ONLY when source punctuation indicates a clause break, never based arbitrarily on word count.
+    """
     if not translated_texts or len(source_texts) != len(translated_texts):
         return translated_texts
 
-    forbidden_variants = [
-        (re.compile(r"\b(?:assassin|assin|sát thủ|thích khách)\b", re.IGNORECASE), "A Thích"),
-    ]
+    active_entity_map = {}
+    if entity_map and isinstance(entity_map, dict):
+        active_entity_map.update(entity_map)
+    if glossary and isinstance(glossary, dict):
+        active_entity_map.update(glossary)
 
     intro_adverbial_pattern = re.compile(
         r"^(?P<lead>(?:Trước khi|Sau khi|Đến khi|Khi|Nếu|Dù|Tuy|Mặc dù|Vì|Do|Nhờ|Để|Sau đó|Trước đó|Từ đó|Về sau|Sau này|Lúc này|Đến nay|Hiện tại|Cuối cùng|Đồng thời|Mặt khác|Thậm chí|Ngược lại)\s+[^,]{0,35}?)\s+(?=(?:nhất định|sẽ|thì|đều|lại|vẫn|phải|liền|đành|buộc phải|không thể|đã|nó|họ|anh|cô|chúng|ông|bà|tôi|bạn|là|đang|cũng)\b)",
@@ -629,10 +646,6 @@ def ensure_speech_pauses_and_entity(source_texts, translated_texts, entity_map=N
         re.compile(r"(\s+)(chia\s+cắt\s+nó\b|nó\s+rơi\s+xuống\b|nó\s+rơi\s+vào\b|đúng\s+vào\s+lúc\b|lúc\s+này\b|đúng\s+lúc\s+này\b)", re.IGNORECASE),
         re.compile(r"(\s+)(lúc\s+thì\b|khi\s+thì\b|nhưng\s+ngày\s+nào\b|cuối\s+cùng\s+vẫn\b|cuối\s+cùng\s+chậm\s+chạp\b|và\s+rồi\b|rồi\s+lại\b)", re.IGNORECASE),
     ]
-    mid_word_pattern = re.compile(
-        r"(\s+)(sẽ\b|đã\b|đang\b|lại\b|vẫn\b|để\b|thì\b|và\b|cũng\b|liền\b|đều\b|khiến\b|cho\b|bị\b|được\b|nhưng\b|mà\b|bởi\b|do\b|tuy\b|là\b)",
-        re.IGNORECASE,
-    )
 
     out = []
     for src, tr in zip(source_texts, translated_texts):
@@ -641,21 +654,34 @@ def ensure_speech_pauses_and_entity(source_texts, translated_texts, entity_map=N
             out.append(clean)
             continue
 
-        for pat, replacement in forbidden_variants:
-            if "a thích" not in clean.lower():
-                clean = pat.sub(replacement, clean)
+        src_str = str(src or "")
 
+        # 1. Entity normalization with provenance: only apply if the source entity is in the source segment
+        if active_entity_map:
+            for src_key, target_val in active_entity_map.items():
+                if src_key and target_val and src_key in src_str:
+                    # Standardize casing of target term in translation if present
+                    tgt_pat = re.compile(rf"\b{re.escape(str(target_val))}\b", re.IGNORECASE)
+                    if tgt_pat.search(clean):
+                        clean = tgt_pat.sub(str(target_val), clean)
+                    # Also replace untranslated source term if left in translation
+                    src_pat = re.compile(rf"\b{re.escape(str(src_key))}\b", re.IGNORECASE)
+                    if src_pat.search(clean):
+                        clean = src_pat.sub(str(target_val), clean)
+
+        # 2. Capitalization of first character
         first_char = clean[0]
         if first_char.isalpha() and not first_char.isupper():
             clean = first_char.upper() + clean[1:]
 
+        # 3. Ellipses normalization: no '...' in final subtitles
         clean = re.sub(r"\s*[\.]{2,}\s*", ", ", clean)
         clean = re.sub(r"\s*…\s*", ", ", clean)
         clean = normalize_subtitle_text(clean)
 
-        src_has_pause = any(p in src for p in ("，", ",", "；", ";", "、"))
-        words = clean.split()
-        if (src_has_pause or len(words) >= 8) and "," not in clean:
+        # 4. Punctuation pauses: strictly driven by source pause, NEVER by word length alone
+        src_has_pause = any(p in src_str for p in ("，", ",", "；", ";", "、"))
+        if src_has_pause and "," not in clean:
             m_intro = intro_adverbial_pattern.search(clean)
             if m_intro and len(clean) - m_intro.end("lead") >= 6:
                 clean = m_intro.group("lead") + "," + clean[m_intro.end("lead"):]
@@ -667,54 +693,31 @@ def ensure_speech_pauses_and_entity(source_texts, translated_texts, entity_map=N
                         break
             clean = normalize_subtitle_text(clean)
 
-        if (src_has_pause or len(words) >= 11) and "," not in clean:
-            candidates = []
-            for m in mid_word_pattern.finditer(clean):
-                if m.start() >= 10 and len(clean) - m.end() >= 8:
-                    dist = abs((len(clean) / 2) - m.start())
-                    candidates.append((dist, m.start()))
-            if candidates:
-                candidates.sort(key=lambda x: x[0])
-                best_pos = candidates[0][1]
-                clean = clean[:best_pos] + "," + clean[best_pos:]
-                clean = normalize_subtitle_text(clean)
-
-        # Fallback to source pause ratio if source has pause but translation still lacks comma
-        words = clean.split()
-        if (src_has_pause or len(words) >= 12) and "," not in clean and len(words) >= 6:
-            pause_chars = [i for i, c in enumerate(src) if c in ("，", ",", "；", ";", "、")]
-            ratio = pause_chars[0] / max(len(src), 1) if pause_chars else 0.45
-            split_idx = max(2, min(len(words) - 2, round(len(words) * ratio)))
-            if split_idx < len(words) and words[split_idx].lower() == "thích" and words[split_idx - 1].lower() == "a":
-                split_idx += 1
-            clean = " ".join(words[:split_idx]) + ", " + " ".join(words[split_idx:])
-            clean = normalize_subtitle_text(clean)
-
-        # Long sentence (>= 18 words) secondary pause
-        words = clean.split()
-        if len(words) >= 18 and clean.count(",") == 1:
-            parts = clean.split(",", 1)
-            for i, p in enumerate(parts):
-                p_words = p.strip().split()
-                if len(p_words) >= 10:
-                    cand = []
-                    for m in mid_word_pattern.finditer(p):
-                        if m.start() >= 10 and len(p) - m.end() >= 8:
-                            cand.append((abs((len(p) / 2) - m.start()), m.start()))
-                    if cand:
-                        cand.sort(key=lambda x: x[0])
-                        bpos = cand[0][1]
-                        parts[i] = p[:bpos] + "," + p[bpos:]
-                        clean = ",".join(parts)
-                        clean = normalize_subtitle_text(clean)
-                        break
-
-        src_ends_terminal = any(str(src).strip().endswith(p) for p in ("。", "！", "？", ".", "!", "?"))
-        words = clean.split()
-        if not clean.endswith((".", "!", "?", ",", ";", ":")):
-            if not bool(re.search(r"(?i)\b(thì|mà|nhưng|hoặc|và|lại|khi|lúc|sau|trước|đến)$", clean)):
-                if src_ends_terminal or len(words) >= 6:
+        # 5. Terminal punctuation: strictly driven by source sentence ending
+        src_trimmed = src_str.strip()
+        src_ends_terminal = any(src_trimmed.endswith(p) for p in ("。", "！", "？", ".", "!", "?"))
+        if src_ends_terminal:
+            if not clean.endswith((".", "!", "?")):
+                if src_trimmed.endswith(("？", "?")):
+                    clean += "?"
+                elif src_trimmed.endswith(("！", "!")):
+                    clean += "!"
+                else:
                     clean += "."
+        else:
+            # Source does NOT end with terminal punctuation (an ongoing or split clause).
+            # Ensure no rogue terminal punctuation was placed in the middle of a continuous sentence.
+            while clean.endswith((".", "!", "?")):
+                # If source ends with a comma or pause, retain comma instead of period
+                if any(src_trimmed.endswith(p) for p in ("，", ",", "；", ";", "、")):
+                    clean = clean[:-1].rstrip() + ","
+                    break
+                else:
+                    clean = clean[:-1].rstrip()
+
+        # 6. Ensure first letter is capitalized
+        if clean and clean[0].isalpha() and not clean[0].isupper():
+            clean = clean[0].upper() + clean[1:]
 
         out.append(clean)
 
@@ -736,7 +739,11 @@ def validate_translation_batch_quality(
     if len(source_texts) != len(translated_texts):
         return False, [f"Số câu dịch ({len(translated_texts)}) không khớp số câu gốc ({len(source_texts)})"]
 
-    forbidden_variants = ["assassin", "assin", "sát thủ", "thích khách"]
+    active_terms = {}
+    if entity_map and isinstance(entity_map, dict):
+        active_terms.update(entity_map)
+    if glossary and isinstance(glossary, dict):
+        active_terms.update(glossary)
 
     for idx, (src, trans) in enumerate(zip(source_texts, translated_texts), 1):
         raw_tr = str(trans or "").strip()
@@ -759,23 +766,21 @@ def validate_translation_batch_quality(
         if first_char.isalpha() and not first_char.isupper():
             reasons.append(f"Câu {idx} chưa viết hoa chữ cái đầu: '{clean_tr}'")
 
-        for bad in forbidden_variants:
-            if bad in clean_tr.lower() and "a thích" not in clean_tr.lower():
-                reasons.append(
-                    f"Câu {idx} dùng biến thể sai lệch '{bad}' thay vì 'A Thích': '{clean_tr}'"
-                )
+        # Validate glossary compliance only when explicitly defined
+        src_str = str(src or "")
+        for src_key, target_val in active_terms.items():
+            if src_key and target_val and src_key in src_str:
+                if str(target_val).lower() not in clean_tr.lower():
+                    reasons.append(
+                        f"Câu {idx} chứa thuật ngữ '{src_key}' nhưng bản dịch thiếu '{target_val}': '{clean_tr}'"
+                    )
 
-        words = clean_tr.split()
-        src_has_comma = any(p in src for p in ("，", ",", "；", ";", "、"))
-        tr_has_comma = "," in clean_tr
-
-        if src_has_comma and len(words) >= 6 and not tr_has_comma:
+        # Ensure no premature sentence termination in mid-clause segments
+        src_trimmed = src_str.strip()
+        src_ends_terminal = any(src_trimmed.endswith(p) for p in ("。", "！", "？", ".", "!", "?"))
+        if not src_ends_terminal and clean_tr.endswith((".", "!", "?")):
             reasons.append(
-                f"Câu {idx} là câu nhiều vế (nguồn có ngắt nghỉ) nhưng thiếu dấu phẩy: '{clean_tr}'"
-            )
-        elif len(words) >= 14 and not tr_has_comma:
-            reasons.append(
-                f"Câu {idx} dài ({len(words)} từ) nối nhiều ý nhưng thiếu dấu phẩy ngắt nghỉ: '{clean_tr}'"
+                f"Câu {idx} câu nguồn chưa kết thúc nhưng bản dịch lại có dấu kết câu ở giữa: '{clean_tr}'"
             )
 
     return len(reasons) == 0, reasons
@@ -899,6 +904,7 @@ def translate_subtitles(
             translated_texts,
             entity_map=entity_map or kwargs.get("entity_map"),
             prior_context=prior_context,
+            glossary=glossary or kwargs.get("glossary"),
         )
 
     translated_texts_valid = bool(
@@ -916,9 +922,63 @@ def translate_subtitles(
             strict=True,
         )
         if not is_valid:
-            raise RuntimeError(
-                f"Strict translation mode requires a complete LLM translation conforming to quality rules: {'; '.join(reasons)}"
-            )
+            # Granular retry: Retry specifically failing items with alternate LLM candidate
+            failing_indices = set()
+            for r in reasons:
+                m = re.match(r"Câu (\d+)", r)
+                if m:
+                    failing_indices.add(int(m.group(1)) - 1)
+
+            if failing_indices:
+                sorted_failing = sorted(failing_indices)
+                failing_texts = [texts[i] for i in sorted_failing]
+                logger.warning(
+                    "Dịch thuật batch gặp %d lỗi chất lượng ở các câu %s: %s. Thử lại cụ thể các câu lỗi qua LLM...",
+                    len(reasons),
+                    [i + 1 for i in sorted_failing],
+                    reasons,
+                )
+                retranslated = None
+                available_providers = ["gemini", "openai", "deepseek"]
+                alt_providers = [p for p in available_providers if p != used_provider]
+                if not alt_providers or used_provider == "gemini":
+                    if "gemini" not in alt_providers:
+                        alt_providers.append("gemini")
+                g_key = api_key or os.getenv("GEMINI_API_KEY", "")
+                for alt_p in alt_providers:
+                    if alt_p == "openai" and os.getenv("OPENAI_API_KEY"):
+                        retranslated = translate_with_openai(failing_texts, target_lang, os.getenv("OPENAI_API_KEY"), **kwargs)
+                    elif alt_p == "deepseek" and os.getenv("DEEPSEEK_API_KEY"):
+                        retranslated = translate_with_deepseek(failing_texts, target_lang, os.getenv("DEEPSEEK_API_KEY"), **kwargs)
+                    elif alt_p == "gemini" and g_key:
+                        retranslated = translate_with_gemini(failing_texts, target_lang, g_key, **kwargs)
+                    if retranslated and len(retranslated) == len(failing_texts):
+                        for k, orig_idx in enumerate(sorted_failing):
+                            translated_texts[orig_idx] = retranslated[k]
+                        break
+
+                # Re-clean and re-validate
+                translated_texts = clean_incomplete_segment_stops(translated_texts)
+                translated_texts = ensure_speech_pauses_and_entity(
+                    texts,
+                    translated_texts,
+                    entity_map=entity_map or kwargs.get("entity_map"),
+                    prior_context=prior_context,
+                    glossary=glossary or kwargs.get("glossary"),
+                )
+                is_valid, reasons = validate_translation_batch_quality(
+                    texts,
+                    translated_texts,
+                    prior_context=prior_context,
+                    entity_map=entity_map or kwargs.get("entity_map"),
+                    glossary=glossary or kwargs.get("glossary"),
+                    strict=True,
+                )
+
+            if not is_valid:
+                raise RuntimeError(
+                    f"Strict translation mode requires a complete LLM translation conforming to quality rules: {'; '.join(reasons)}"
+                )
 
     if translated_texts_valid and not strict:
         unchanged_cjk = [

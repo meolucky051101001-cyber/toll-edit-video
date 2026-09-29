@@ -249,5 +249,34 @@ class ReportOnlyGuaranteeTests(unittest.TestCase):
             self.assertEqual(checks[0].metrics["ffmpeg_invocations"], 1)
 
 
+class AudibilityQcTests(unittest.TestCase):
+    def test_audible_speech_passes_and_silent_speech_errors(self):
+        import numpy as np
+        import soundfile as sf
+        from backend.pipeline_v2.qc import _check_mixed_audio_audibility
+
+        with tempfile.TemporaryDirectory() as td:
+            sr = 16000
+            # 2.0s audio: 0.0 - 1.0 has tone (-17 dB), 1.0 - 2.0 has zero silence
+            t = np.linspace(0, 1.0, sr, endpoint=False)
+            tone = (0.2 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+            silence = np.zeros(sr, dtype=np.float32)
+            audio = np.concatenate([tone, silence])
+            wav_path = Path(td) / "mixed.wav"
+            sf.write(str(wav_path), audio, sr)
+
+            # Segment 1 in tone region
+            seg1 = {"id": 1, "start": 0.1, "end": 0.9, "content": "Xin chào"}
+            metrics, checks = _check_mixed_audio_audibility(wav_path, [seg1])
+            self.assertEqual(checks[0].status, "pass")
+            self.assertEqual(metrics["inaudible_segment_ids"], [])
+
+            # Segment 2 in silence region
+            seg2 = {"id": 2, "start": 1.1, "end": 1.9, "content": "Tôi đang nói"}
+            metrics2, checks2 = _check_mixed_audio_audibility(wav_path, [seg2])
+            self.assertEqual(checks2[0].status, "error")
+            self.assertEqual(metrics2["inaudible_segment_ids"], [2])
+
+
 if __name__ == "__main__":
     unittest.main()

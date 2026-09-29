@@ -92,9 +92,14 @@ merge_runtime_segments = merge_ocr_geometry
 
 def discover_rvc_model(workspace: Path) -> Optional[Path]:
     workspace_path = Path(workspace).resolve()
+    repo_root = Path(__file__).resolve().parents[2]
     search_dirs = [
+        repo_root / "MyVoiceModel_v2",
+        Path(r"C:\tool v2\MyVoiceModel_v2"),
         workspace_path.parent / "MyVoiceModel_v2",
         workspace_path / "MyVoiceModel_v2",
+        repo_root / "models" / "rvc",
+        Path(r"C:\tool v2\models\rvc"),
         workspace_path.parent / "models" / "rvc",
         workspace_path / "models" / "rvc",
     ]

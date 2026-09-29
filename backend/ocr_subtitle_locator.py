@@ -106,7 +106,7 @@ def _geometry_score(
 
     width = right - left
     height = bottom - top
-    if not (0.0 <= left < right <= 1.0 and 0.03 <= top < bottom <= 0.96):
+    if not (0.0 <= left < right <= 1.0 and 0.01 <= top < bottom <= 0.995):
         return None
     # Burned-in captions can legitimately run almost edge-to-edge (the source
     # may even crop the first/last glyph).  Rejecting boxes wider than 90%

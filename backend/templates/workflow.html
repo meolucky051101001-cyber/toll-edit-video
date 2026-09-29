@@ -6,29 +6,32 @@
   <title>Studio Quy Trình - Giám Sát Biên Tập & Chống Re-up Video</title>
   <style>
     :root {
-      --bg-darkest: #090d14;
-      --bg-dark: #0f1520;
-      --bg-panel: #151d2a;
-      --bg-card: #1a2434;
-      --bg-card-hover: #222f44;
-      --border: #263449;
-      --border-light: #374761;
+      --bg-darkest: #09090b;
+      --bg-dark: #0e0e11;
+      --bg-panel: #121215;
+      --bg-card: #18181b;
+      --bg-card-hover: #202024;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-light: rgba(255, 255, 255, 0.16);
       --primary: #3b82f6;
       --primary-hover: #2563eb;
-      --accent: #06b6d4;
+      --accent: #38bdf8;
       --success: #10b981;
       --warning: #f59e0b;
       --danger: #ef4444;
-      --text: #f1f5f9;
-      --text-muted: #94a3b8;
-      --text-dim: #64748b;
+      --text: #f4f4f5;
+      --text-muted: #a1a1aa;
+      --text-dim: #71717a;
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 14px;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
     body { background-color: var(--bg-darkest); color: var(--text); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 
     /* TOPBAR */
     header {
-      background: #111824;
+      background: #0e0e11;
       border-bottom: 1px solid var(--border);
       height: 56px;
       padding: 0 16px;
@@ -68,7 +71,7 @@
     .version-toggle-group {
       display: inline-flex;
       align-items: center;
-      background: #0b111a;
+      background: #121215;
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 2px;
@@ -112,7 +115,7 @@
     .ratio-selector-group {
       display: flex;
       align-items: center;
-      background: #0d131d;
+      background: #121215;
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 2px;
@@ -307,7 +310,7 @@
       width: 44px;
       height: 44px;
       border-radius: 6px;
-      background: #111824;
+      background: #0e0e11;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -1022,7 +1025,7 @@
     }
     .folder-chip:hover { background: #223249; color: #fff; border-color: #38bdf8; }
     .batch-summary-box {
-      background: #111824;
+      background: #0e0e11;
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 10px 12px;
@@ -1334,6 +1337,50 @@
       border: 1.5px solid #38bdf8 !important;
       box-shadow: 0 0 14px rgba(56, 189, 248, 0.5) !important;
     }
+    .capcut-transform-box.editing {
+      border: 2px dashed #38bdf8 !important;
+      box-shadow: 0 0 16px rgba(56, 189, 248, 0.7) !important;
+    }
+    .sub-vietnamese-text.editing-active {
+      cursor: text !important;
+      user-select: text !important;
+      outline: 2px solid #38bdf8 !important;
+      outline-offset: 3px;
+      background: rgba(15, 23, 42, 0.95) !important;
+      border-radius: 4px;
+    }
+    .sub-vietnamese-text:empty:before {
+      content: 'Nhấp đúp hoặc bấm Sửa chữ...';
+      color: rgba(255, 255, 255, 0.45);
+      font-style: italic;
+    }
+    .btn-restore-sub {
+      position: absolute;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(15, 23, 42, 0.92);
+      border: 1.5px solid #38bdf8;
+      color: #38bdf8;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      z-index: 40;
+      pointer-events: auto;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s ease;
+    }
+    .btn-restore-sub:hover {
+      background: #0284c7;
+      color: #ffffff;
+      border-color: #7dd3fc;
+      transform: translateX(-50%) scale(1.05);
+    }
     .capcut-transform-box.dragging {
       cursor: grabbing !important;
       opacity: 0.95;
@@ -1415,7 +1462,7 @@
     .sidebar-sticky-footer {
       flex-shrink: 0;
       padding: 10px 14px;
-      background: #0d131d;
+      background: #121215;
       border-top: 1px solid var(--border);
       display: flex;
       gap: 8px;
@@ -1469,6 +1516,188 @@
       box-shadow: 0 4px 10px rgba(16, 185, 129, 0.45);
     }
 
+  
+    /* UI refresh layer */
+/* Shared dark studio visual refresh */
+:root {
+  --bg-darkest: #0b1016;
+  --bg-dark: #0e151d;
+  --bg-panel: #121a24;
+  --bg-card: #151f2b;
+  --bg-card-hover: #1b2937;
+  --border: rgba(148, 163, 184, .15);
+  --border-light: rgba(148, 163, 184, .27);
+  --primary: #3b82f6;
+  --primary-hover: #2563eb;
+  --accent: #38bdf8;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --text: #f1f5f9;
+  --text-muted: #cbd5e1;
+  --text-dim: #94a3b8;
+  --radius-sm: 8px;
+  --radius-md: 11px;
+  --radius-lg: 15px;
+}
+html { color-scheme: dark; }
+body { background: radial-gradient(ellipse at 50% -25%, rgba(37, 99, 235, .13), transparent 48%), var(--bg-darkest); color: var(--text); }
+:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
+header {
+  min-height: 62px;
+  height: auto;
+  padding: 9px clamp(12px, 1.4vw, 24px);
+  gap: 10px;
+  background: rgba(15, 22, 31, .96);
+  border-color: var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .2);
+  backdrop-filter: blur(16px);
+}
+.logo-badge { border-radius: 9px; }
+.video-title-bar { color: #dce7f3; }
+.top-left, .top-right { gap: 8px; }
+.btn, .version-btn, .ratio-btn, .filter-btn, .panel-tab {
+  min-height: 34px;
+  border-radius: 8px;
+  transition: background .16s ease, border-color .16s ease, color .16s ease, transform .16s ease;
+}
+.btn { padding: 7px 11px; font-weight: 600; }
+.btn:not(:disabled):hover { transform: translateY(-1px); }
+.btn-outline { background: rgba(148, 163, 184, .06); border-color: var(--border); color: #cbd5e1; }
+.btn-outline:hover { background: rgba(148, 163, 184, .13); border-color: var(--border-light); color: #fff; }
+.btn-primary { box-shadow: 0 5px 16px rgba(59, 130, 246, .2); }
+.version-toggle-group, .ratio-selector-group { background: #121a24; border-color: var(--border); border-radius: 9px; }
+.version-btn, .ratio-btn { padding: 7px 10px; }
+.version-btn.active-final { background: #0f766e; box-shadow: none; }
+.version-btn.active-raw { background: #2563eb; box-shadow: none; }
+.ratio-btn.active { background: rgba(56, 189, 248, .16); color: #bae6fd; border-color: rgba(56, 189, 248, .4); }
+.header-anti-reup-pill { min-height: 34px; border-radius: 9px; border-color: var(--border); }
+.studio-workspace {
+  grid-template-columns: minmax(250px, 295px) minmax(0, 1fr) minmax(320px, 370px);
+  background: var(--bg-darkest);
+}
+.media-sidebar, .settings-sidebar { background: #101720; border-color: var(--border); }
+.sidebar-header, .panel-tabs { background: #141d28; border-color: var(--border); }
+.sidebar-title { color: #e5edf6; }
+.search-box, .filter-tabs { background: #111923; border-color: var(--border); }
+.search-input, input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]), select, textarea {
+  color: #f1f5f9;
+  background-color: #0d141d;
+  border-color: rgba(148, 163, 184, .22);
+  border-radius: 8px;
+}
+.search-input { min-height: 38px; }
+.search-input:focus, input:focus, select:focus, textarea:focus { border-color: #60a5fa; box-shadow: 0 0 0 3px rgba(59, 130, 246, .14); }
+.filter-btn { min-height: 34px; }
+.filter-btn.active { background: rgba(56, 189, 248, .12); color: #bae6fd; border-color: rgba(56, 189, 248, .3); box-shadow: none; }
+.media-list { padding: 11px; gap: 9px; }
+.media-card { border-radius: 10px; background: #151f2b; padding: 11px; }
+.media-card.active { background: rgba(37, 99, 235, .14); box-shadow: inset 0 0 0 1px rgba(96, 165, 250, .14); }
+.center-stage { background: #0d141c; }
+.canvas-viewport-container { background: radial-gradient(ellipse at center, #182432 0%, #0b1118 75%); }
+.timeline-container { background: #111923; border-color: var(--border); }
+.timeline-ruler { background: #182330; border-color: var(--border); }
+.track-row { border-radius: 8px; background: #17212c; }
+.panel-tab { padding: 7px 10px; }
+.panel-tab.active { background: #121a24; color: #7dd3fc; border-color: var(--border); border-bottom-color: #121a24; }
+.panel-content { padding: 16px; gap: 15px; }
+.form-section-title { color: #7dd3fc; letter-spacing: .07em; }
+.form-section, .step-card { border-color: var(--border); border-radius: 10px; }
+.step-card { background: #151f2b; }
+.step-badge-num { background: rgba(59, 130, 246, .16); color: #bfdbfe; border-radius: 6px; }
+.form-label, .switch-label { color: #d4deea; }
+.form-slider, input[type="range"] { accent-color: #38bdf8; }
+.sidebar-sticky-footer { background: rgba(18, 26, 36, .97); border-color: var(--border); backdrop-filter: blur(12px); }
+.btn-reset-sidebar, .btn-save-sidebar { min-height: 40px; border-radius: 8px; }
+@media (max-width: 1370px) {
+  .studio-workspace { grid-template-columns: minmax(230px, 260px) minmax(0, 1fr) minmax(300px, 330px); }
+  .top-right { gap: 6px; }
+  .top-right .btn { padding-inline: 9px; }
+}
+@media (max-width: 1050px) {
+  body { height: auto; min-height: 100vh; overflow: auto; }
+  header { flex-wrap: wrap; align-items: flex-start; }
+  .top-left { flex-wrap: wrap; min-width: 0; }
+  .top-right { max-width: 100%; overflow-x: auto; padding: 2px 0 5px; }
+  .studio-workspace { grid-template-columns: minmax(230px, .72fr) minmax(0, 1.4fr); grid-template-rows: minmax(520px, 1fr) auto; overflow: visible; }
+  .media-sidebar { grid-row: 1 / span 2; }
+  .center-stage { min-height: 600px; }
+  .settings-sidebar { grid-column: 2; min-height: 470px; max-height: 650px; }
+  .timeline-container { height: 185px; }
+}
+@media (max-width: 780px) {
+  header { padding: 10px 12px; }
+  .studio-workspace { display: flex; flex-direction: column; overflow: visible; }
+  .media-sidebar { min-height: 180px; max-height: 320px; border-right: 0; border-bottom: 1px solid var(--border); }
+  .center-stage { min-height: 560px; height: min(72vh, 760px); }
+  .settings-sidebar { min-height: 520px; max-height: none; border-left: 0; border-top: 1px solid var(--border); }
+  .panel-tabs { overflow-x: auto; padding-inline: 7px; }
+  .panel-tab { flex: 0 0 auto; }
+  .panel-content { padding: 14px; }
+  .timeline-container { height: 180px; }
+  .top-right { width: 100%; }
+}
+@media (max-width: 520px) {
+  .top-left { align-items: flex-start; }
+  .video-title-bar { max-width: calc(100vw - 40px); }
+  .version-toggle-group, .ratio-selector-group { max-width: 100%; overflow-x: auto; }
+  .header-anti-reup-pill { flex: 0 0 auto; }
+  .canvas-viewport-container { padding: 8px; }
+  .timeline-container { height: 160px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+header .top-right > a[href="/quy-trinh"] { background: rgba(59, 130, 246, .2) !important; border-color: rgba(96, 165, 250, .42) !important; color: #dbeafe !important; }
+header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href="http://127.0.0.1:8089/"], header .top-right > a[href="/kich-ban"] { background: rgba(148, 163, 184, .055) !important; border-color: var(--border) !important; color: #cbd5e1 !important; }
+  
+
+    /* Minimal visual pass: neutral editing workspace with quiet selection states */
+:root {
+  --bg-darkest: #101114; --bg-dark: #141519; --bg-panel: #17181c; --bg-card: #1b1c20; --bg-card-hover: #222328;
+  --border: rgba(255, 255, 255, .085); --border-light: rgba(255, 255, 255, .15);
+  --primary: #748b9c; --primary-hover: #8298a8; --accent: #82a9bf;
+  --text: #e7e8ea; --text-muted: #c1c4c9; --text-dim: #92969d;
+}
+body { background: #101114; }
+header { background: #141519; box-shadow: none; backdrop-filter: none; }
+.btn, .version-btn, .ratio-btn, .filter-btn, .panel-tab { border-radius: 6px; }
+.btn:not(:disabled):hover { transform: none; }
+.btn-primary { background: #e2e4e7; color: #16171a; box-shadow: none; }
+.btn-primary:hover { background: #f0f1f2; }
+.btn-success { background: rgba(31, 112, 76, .18); color: #9bd4b5; }
+.btn-danger { background: rgba(140, 54, 60, .16); color: #e4a5a8; }
+.btn-outline { background: #191a1e; border-color: #303238; color: #c1c4c9; }
+.btn-outline:hover { background: #222328; border-color: #404249; color: #f0f1f2; }
+.version-toggle-group, .ratio-selector-group { background: #191a1e; border-color: #303238; border-radius: 7px; }
+.version-btn.active-final { background: #30483d; color: #c1dfcf; box-shadow: none; }
+.version-btn.active-raw { background: #303a43; color: #d3dce3; box-shadow: none; }
+.ratio-btn.active { background: #292b30; color: #e2e4e7; border-color: #45474d; }
+.header-anti-reup-pill { border-color: #303238; }
+.studio-workspace { background: #101114; }
+.media-sidebar, .settings-sidebar { background: #141519; }
+.sidebar-header, .panel-tabs { background: #191a1e; }
+.search-box, .filter-tabs { background: #151619; }
+.search-input, input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]), select, textarea { background-color: #111215; border-color: #34363c; }
+.search-input:focus, input:focus, select:focus, textarea:focus { border-color: #71899a; box-shadow: 0 0 0 2px rgba(113, 137, 154, .12); }
+.filter-btn.active { background: #25272c; color: #e0e2e4; border-color: #41434a; }
+.media-card { background: #1a1b1f; }
+.media-card:hover { background: #202126; }
+.media-card.active { background: #24272b; border-color: #647988; box-shadow: none; }
+.center-stage { background: #111215; }
+.canvas-viewport-container { background: #111316; }
+.timeline-container, .timeline-ruler { background: #151619; }
+.track-row { background: #1a1b1f; }
+.panel-tab.active { background: #17181c; color: #dce2e6; border-color: #34363c; border-bottom-color: #17181c; }
+.step-card { background: #1a1b1f; }
+.step-badge-num { background: #292b30; color: #c0c3c8; }
+.form-section-title { color: #aebbc5; }
+.sidebar-sticky-footer { background: #17181c; box-shadow: none; backdrop-filter: none; }
+.btn-reset-sidebar { background: rgba(140, 54, 60, .12); color: #dba9ac; border-color: rgba(177, 82, 88, .25); }
+.btn-save-sidebar { background: #30483d; color: #c1dfcf; box-shadow: none; }
+.btn-save-sidebar:hover { background: #395746; box-shadow: none; transform: none; }
+header .top-right > a[href="/quy-trinh"] { background: #27292e !important; border-color: #3a3c42 !important; color: #f0f1f2 !important; }
+header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href="http://127.0.0.1:8089/"], header .top-right > a[href="/kich-ban"] { background: #191a1e !important; border-color: #303238 !important; color: #c1c4c9 !important; }
   </style>
 </head>
 <body>
@@ -1476,49 +1705,59 @@
   <!-- TOP HEADER -->
   <header>
     <div class="top-left">
-      <div class="logo-badge">
-        <span>🎬</span>
+      <div class="logo-badge" style="background: #18181b; border: 1px solid var(--border); color: #f4f4f5;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/></svg>
         <span>STUDIO QUY TRÌNH</span>
       </div>
 
       <div class="video-title-bar" id="topVideoTitle">Chưa chọn video...</div>
       
-      <!-- FEATURE 1: VERSION SWITCHER (BẢN HOÀN TẤT vs VIDEO GỐC) -->
+      <!-- FEATURE 1: VERSION SWITCHER -->
       <div class="version-toggle-group" id="versionToggleGroup" title="Chuyển đổi giữa Bản Hoàn Tất (đã lồng tiếng & che sub) và Video Phôi Gốc">
         <button class="version-btn active-final" id="btnVersionFinal" onclick="switchVideoVersion('final')">
-          ✨ Bản Hoàn Tất (Lồng Tiếng & Che Sub)
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+          Bản Hoàn Tất
         </button>
         <button class="version-btn" id="btnVersionRaw" onclick="switchVideoVersion('raw')">
-          📹 Video Gốc (Phôi)
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+          Video Phôi Gốc
         </button>
       </div>
 
       <!-- RATIO QUICK SWITCHER -->
       <div class="ratio-selector-group">
-        <button class="ratio-btn" data-ratio="9:16" onclick="setRatio('9:16')">📱 9:16 (Dọc)</button>
-        <button class="ratio-btn" data-ratio="16:9" onclick="setRatio('16:9')">📺 16:9 (Ngang)</button>
-        <button class="ratio-btn" data-ratio="1:1" onclick="setRatio('1:1')">⏹ 1:1</button>
-        <button class="ratio-btn active" data-ratio="original" onclick="setRatio('original')">🎯 Gốc</button>
+        <button class="ratio-btn" data-ratio="9:16" onclick="setRatio('9:16')">9:16</button>
+        <button class="ratio-btn" data-ratio="16:9" onclick="setRatio('16:9')">16:9</button>
+        <button class="ratio-btn" data-ratio="1:1" onclick="setRatio('1:1')">1:1</button>
+        <button class="ratio-btn active" data-ratio="original" onclick="setRatio('original')">Gốc</button>
       </div>
     </div>
 
     <div class="top-right">
-      <!-- FEATURE 3: MASTER ANTI-REUP HEADER PILL -->
+      <!-- MASTER ANTI-REUP HEADER PILL -->
       <div class="header-anti-reup-pill disabled" id="headerAntiReupPill" onclick="toggleMasterAntiReupFromHeader()" title="Bấm để Bật hoặc Tắt nhanh chế độ chèn khung chống re-up">
         <span class="anti-reup-dot" id="headerAntiReupDot"></span>
-        <span id="headerAntiReupText">⚪ Chống Re-up: TẮT</span>
+        <span id="headerAntiReupText">Chống Re-up: TẮT</span>
       </div>
 
-      <button class="btn btn-primary" onclick="openExportModal()" style="background: linear-gradient(135deg, #0284c7, #2563eb); font-weight: 700; display: inline-flex; align-items: center; gap: 6px; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);" title="Xuất video tùy chọn độ phân giải, bitrate kbps, và xuất file SRT giống CapCut">
-        🚀 Xuất Video (CapCut)
+      <button class="btn btn-primary" onclick="openExportModal()" title="Xuất video tùy chọn độ phân giải, bitrate kbps, và xuất file SRT">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Xuất Video
       </button>
       <button class="btn btn-success" onclick="saveSettingsForBatch()" title="Lưu cấu hình cho tiến trình render video hàng loạt">
-        💾 Lưu Khung Hàng Loạt
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+        Lưu Khung Hàng Loạt
       </button>
-      <a class="btn btn-outline" href="http://127.0.0.1:8088/" title="Về Dashboard Tool V1">Tool V1</a>
-      <a class="btn btn-outline" href="http://127.0.0.1:8089/" title="Về Dashboard Tool V2">Tool V2</a>
-      <a class="btn btn-primary" href="/kich-ban" style="background: linear-gradient(135deg, #8b5cf6, #ec4899); border:none; font-weight:700;" title="Mở Studio Kịch Bản AI & Lồng Sub (CapCut TTS)">✍️ Kịch Bản</a>
-      <button class="btn btn-outline" onclick="loadWorkflowData()">🔄</button>
+
+      <!-- UNIFIED NAVIGATION LINKS -->
+      <a class="btn btn-outline" href="http://127.0.0.1:8088/" style="padding: 3px 10px; border-color: transparent;" title="Về Dashboard Tool V1">Tool V1</a>
+      <a class="btn btn-outline" href="http://127.0.0.1:8089/" style="padding: 3px 10px; border-color: transparent;" title="Về Dashboard Tool V2">Tool V2</a>
+      <a class="btn btn-primary" href="/quy-trinh" style="padding: 3px 10px; background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.4); color: #60a5fa;" title="Đang ở Studio Quy Trình">Quy Trình</a>
+      <a class="btn btn-outline" href="/kich-ban" style="padding: 3px 10px; border-color: transparent;" title="Mở Studio Kịch Bản AI & Lồng Sub">Kịch Bản</a>
+
+      <button class="btn btn-outline" onclick="loadWorkflowData()" title="Làm mới">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+      </button>
     </div>
   </header>
 
@@ -1529,13 +1768,13 @@
     <div class="media-sidebar">
       <div class="sidebar-header">
         <div class="sidebar-title">
-          <span>📁 Thư Viện Video</span>
+          <span>Thư Viện Video</span>
           <span id="videoCountBadge" style="font-size: 11px; color: var(--text-dim); font-weight: normal;">(0 video)</span>
         </div>
         <!-- FEATURE 2: LOCAL FILE PICKER BUTTON -->
         <input type="file" id="localVideoPicker" accept="video/mp4,video/mkv,video/mov,video/webm,video/avi" style="display:none;" onchange="handleLocalVideoSelect(event)">
         <button class="btn btn-outline" style="font-size:11px; padding:4px 8px;" onclick="document.getElementById('localVideoPicker').click()" title="Chọn tệp video bất kỳ từ máy tính để xem thử">
-          📂 Mở Từ Máy
+          Mở Từ Máy
         </button>
       </div>
       
@@ -1616,12 +1855,14 @@
                 </label>
                 <button type="button" class="capcut-mini-btn" onclick="quickStepFontSize(-2)" title="Thu nhỏ chữ">A-</button>
                 <button type="button" class="capcut-mini-btn" onclick="quickStepFontSize(2)" title="Phóng to chữ">A+</button>
+                <button type="button" class="capcut-mini-btn" id="btnEditSubText" onclick="startEditingSubText(event)" title="Nhấp để gõ sửa chữ trực tiếp trên video (hoặc nhấp đúp vào chữ)">✏️ Sửa chữ</button>
+                <button type="button" class="capcut-mini-btn" id="btnClearSubText" onclick="clearOrHideSubtitle(event)" title="Xóa chữ hoặc ẩn khung phụ đề khỏi video" style="color: #f87171;">🗑️ Xóa / Ẩn</button>
                 <button type="button" class="capcut-mini-btn" onclick="resetSubtitleStyleToDefault()" title="Khôi phục tiêu chuẩn mặc định">↺ Mặc định</button>
               </div>
 
               <!-- Main Subtitle Text and Background Box -->
-              <div class="sub-vietnamese-text" id="subVietnameseText" style="cursor: grab;">
-                hôm nay khui sáu mươi cuộn băng dính washi
+              <div class="sub-vietnamese-text" id="subVietnameseText" style="cursor: grab;" contenteditable="false" spellcheck="false" title="Nhấp đúp hoặc bấm nút '✏️ Sửa chữ' để chỉnh sửa chữ trực tiếp">
+                Phụ đề mẫu (Nhấp đúp để sửa chữ)
               </div>
               <div class="sub-original-text" id="subOriginalText" style="display: none;">Phụ đề gốc</div>
 
@@ -1635,6 +1876,11 @@
               <div class="capcut-handle handle-n" data-handle="n" title="Kéo để co giãn chiều cao khung"></div>
               <div class="capcut-handle handle-s" data-handle="s" title="Kéo để co giãn chiều cao khung"></div>
             </div>
+
+            <!-- Floating button to restore sample sub if hidden -->
+            <button type="button" class="btn-restore-sub" id="btnRestoreSubFloating" onclick="restoreSampleSubtitle(event)" style="display: none;" title="Bấm để hiện lại khung căn chỉnh phụ đề mẫu">
+              👁️ Hiện Lại Khung Phụ Đề Mẫu
+            </button>
           </div>
 
         </div>
@@ -1747,7 +1993,29 @@
         <div style="background: rgba(14, 165, 233, 0.1); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px; padding: 8px 10px; display: flex; align-items: center; gap: 8px;">
           <span style="font-size: 18px;">✨</span>
           <div style="font-size: 11px; color: #cbd5e1; line-height: 1.4;">
-            <strong style="color: #38bdf8;">Chuẩn CapCut:</strong> Bấm giữ chuột vào khung chữ trên video để <strong>kéo di chuyển vị trí</strong>, hoặc kéo các <strong>nút tròn ở 4 góc</strong> để phóng to / thu nhỏ trực tiếp!
+            <strong style="color: #38bdf8;">Chuẩn CapCut:</strong> Bấm giữ chuột vào khung chữ trên video để <strong>kéo di chuyển vị trí</strong>, kéo các <strong>nút tròn ở 4 góc</strong> để phóng to / thu nhỏ, hoặc <strong>nhấp đúp vào chữ</strong> để gõ sửa nội dung!
+          </div>
+        </div>
+
+        <!-- Section: Chỉnh sửa nội dung chữ trực tiếp & Xóa/Ẩn -->
+        <div class="form-section">
+          <div class="form-section-title" style="display: flex; justify-content: space-between; align-items: center;">
+            <span>✏️ Chỉnh Sửa Chữ Trực Tiếp</span>
+            <span id="subContentModeBadge" style="font-size: 10px; color: #38bdf8; font-weight: 600;">Xem mẫu</span>
+          </div>
+
+          <div style="margin-bottom: 8px;">
+            <label class="form-label" style="font-size: 11px; margin-bottom: 4px;">Nội dung phụ đề (sửa trực tiếp trên video hoặc tại đây):</label>
+            <textarea id="subTextInputPanel" class="form-control" rows="2" style="width: 100%; background: #162032; border: 1px solid #28374d; color: #f1f5f9; padding: 6px 10px; border-radius: 6px; font-size: 12px; resize: vertical; line-height: 1.4; box-sizing: border-box;" placeholder="Nhập chữ phụ đề hoặc nhấp đúp trực tiếp lên video..." oninput="onSubTextInputPanelChange(this.value)"></textarea>
+          </div>
+
+          <div style="display: flex; gap: 8px;">
+            <button type="button" class="btn btn-outline" style="flex: 1; font-size: 11px; padding: 6px 10px; justify-content: center; color: #f87171; border-color: rgba(239, 68, 68, 0.4);" onclick="clearOrHideSubtitle(event)" title="Xóa chữ câu này hoặc ẩn khung phụ đề mẫu">
+              🗑️ Xóa / Ẩn Sub
+            </button>
+            <button type="button" class="btn btn-outline" id="btnToggleSampleSubPanel" style="flex: 1; font-size: 11px; padding: 6px 10px; justify-content: center; color: #38bdf8; border-color: rgba(56, 189, 248, 0.4);" onclick="toggleSampleSubVisibility(event)" title="Bật/Tắt hiển thị khung phụ đề trên video">
+              👁️ Hiện Khung Sub
+            </button>
           </div>
         </div>
 
@@ -2354,6 +2622,9 @@
     let currentVideoData = null;
     let currentVideoVersion = 'final'; // 'final' or 'raw'
     let currentSubtitles = [];
+    let isEditingSubText = false;
+    let customSampleSubText = '';
+    let isSampleSubHidden = false;
     let currentPlaybackSpeed = 1.0;
     let isScrubbing = false;
     let wasPlayingBeforeScrub = false;
@@ -2649,6 +2920,8 @@
 
     // REALTIME SUBTITLE SYNCHRONIZATION
     function updateSubtitlesOverlay() {
+      if (isEditingSubText) return; // Không ghi đè khi người dùng đang trực tiếp gõ sửa chữ!
+
       const isSubtitleEditTab = document.getElementById('tabSubtitleStyle') && document.getElementById('tabSubtitleStyle').style.display !== 'none';
       
       // If watching final video version and NOT in subtitle edit tab, hide overlay
@@ -2660,7 +2933,12 @@
       subtitleOverlay.style.display = 'flex';
       applySubtitlePosition();
 
+      const box = document.getElementById('subtitleInteractiveBox');
+      const restoreBtn = document.getElementById('btnRestoreSubFloating');
+      const modeBadge = document.getElementById('subContentModeBadge');
+      const togglePanelBtn = document.getElementById('btnToggleSampleSubPanel');
       const t = mainPlayer.currentTime || 0;
+
       let activeSub = currentSubtitles ? currentSubtitles.find(s => t >= s.start && t <= s.end) : null;
       
       // If no subtitle at exact second but in edit mode, pick first or closest subtitle so box is always interactive
@@ -2669,7 +2947,11 @@
       }
 
       if (activeSub) {
-        subVietnameseText.innerText = activeSub.text;
+        if (box) box.style.display = 'inline-flex';
+        if (restoreBtn) restoreBtn.style.display = 'none';
+        if (modeBadge) modeBadge.innerText = `Phụ đề AI (#${activeSub.index || '1'})`;
+        if (togglePanelBtn) togglePanelBtn.innerText = '👁️ Hiện Khung Sub';
+        subVietnameseText.innerText = activeSub.text || '';
         if (activeSub.original_text && activeSub.original_text !== activeSub.text) {
           subOriginalText.style.display = 'inline-block';
           subOriginalText.innerText = activeSub.original_text;
@@ -2677,8 +2959,38 @@
           subOriginalText.style.display = 'none';
         }
       } else if (!currentSubtitles || !currentSubtitles.length) {
-        subVietnameseText.innerText = 'hôm nay khui sáu mươi cuộn băng dính washi';
-        subOriginalText.style.display = 'none';
+        if (modeBadge) modeBadge.innerText = 'Xem mẫu';
+        if (isSampleSubHidden) {
+          if (box) box.style.display = 'none';
+          if (restoreBtn) restoreBtn.style.display = isSubtitleEditTab ? 'inline-flex' : 'none';
+          if (togglePanelBtn) togglePanelBtn.innerText = '👁️ Hiện Khung Sub';
+        } else {
+          if (box) box.style.display = 'inline-flex';
+          if (restoreBtn) restoreBtn.style.display = 'none';
+          if (togglePanelBtn) togglePanelBtn.innerText = '🗑️ Ẩn Khung Sub';
+          const defaultSample = 'Phụ đề mẫu (Nhấp đúp để sửa chữ)';
+          subVietnameseText.innerText = (customSampleSubText !== undefined && customSampleSubText !== '') ? customSampleSubText : defaultSample;
+          subOriginalText.style.display = 'none';
+        }
+      } else {
+        // Có danh sách phụ đề nhưng tại giây này không có tiếng nói
+        if (modeBadge) modeBadge.innerText = 'Khoảng lặng';
+        if (isSubtitleEditTab) {
+          if (box) box.style.display = 'inline-flex';
+          if (restoreBtn) restoreBtn.style.display = 'none';
+          subVietnameseText.innerText = customSampleSubText || 'Phụ đề mẫu (Nhấp đúp để sửa chữ)';
+          subOriginalText.style.display = 'none';
+        } else {
+          if (box) box.style.display = 'none';
+          subVietnameseText.innerText = '';
+          subOriginalText.style.display = 'none';
+        }
+      }
+
+      // Cập nhật textarea trong panel cài đặt phụ đề nếu đang mở
+      const panelInput = document.getElementById('subTextInputPanel');
+      if (panelInput && document.activeElement !== panelInput) {
+        panelInput.value = (box && box.style.display !== 'none') ? subVietnameseText.innerText : '';
       }
     }
 
@@ -4559,26 +4871,62 @@
     // ==========================================
     let isSubDragging = false;
     let isSubResizing = false;
+    let isPotentialSubDrag = false;
     let activeSubHandle = null;
     let dragStartX = 0, dragStartY = 0;
     let startSubPosX = 0.50, startSubPosY = 0.80;
     let startSubFontSize = 18;
     let startSubPadX = 16, startSubPadY = 8;
+    let saveSubTimeout = null;
 
     function initCapcutInteractiveEngine() {
       const box = document.getElementById('subtitleInteractiveBox');
       const overlay = document.getElementById('subtitleOverlay');
-      if (!box || !overlay) return;
+      const textEl = document.getElementById('subVietnameseText');
+      if (!box || !overlay || !textEl) return;
+
+      // Double-click directly on text to enter inline edit mode
+      textEl.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        startEditingSubText();
+      });
+
+      // Stop video player hotkeys (like Space) while user is typing in subtitle box
+      textEl.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          textEl.blur();
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          stopEditingSubText(false);
+        }
+      });
+
+      textEl.addEventListener('input', (e) => {
+        syncSubTextFromEditor(textEl.innerText);
+      });
+
+      textEl.addEventListener('blur', () => {
+        stopEditingSubText(true);
+      });
 
       box.addEventListener('mousedown', (e) => {
         // If clicking inside quick picker buttons or color inputs, don't drag
         if (e.target.closest('.capcut-mini-toolbar')) return;
+
+        // If user is currently editing text inline and clicked inside text, let cursor position naturally
+        if (isEditingSubText && (e.target === textEl || textEl.contains(e.target))) {
+          return;
+        }
 
         const handle = e.target.closest('.capcut-handle');
         if (handle) {
           // START RESIZING
           isSubResizing = true;
           isSubDragging = false;
+          isPotentialSubDrag = false;
           activeSubHandle = handle.dataset.handle;
           dragStartX = e.clientX;
           dragStartY = e.clientY;
@@ -4588,24 +4936,36 @@
           e.preventDefault();
           e.stopPropagation();
         } else {
-          // START DRAGGING (MOVE POSITION)
-          isSubDragging = true;
+          // PREPARE POTENTIAL DRAGGING (differentiate between click to select vs dragging)
+          isPotentialSubDrag = true;
+          isSubDragging = false;
           isSubResizing = false;
-          box.classList.add('dragging');
           dragStartX = e.clientX;
           dragStartY = e.clientY;
           startSubPosX = (canvasSettings.sub_pos_x_pct !== undefined) ? canvasSettings.sub_pos_x_pct : 0.50;
           startSubPosY = (canvasSettings.sub_pos_y_pct !== undefined) ? canvasSettings.sub_pos_y_pct : 0.80;
-          e.preventDefault();
+          
+          box.classList.add('active');
+          if (!isEditingSubText) {
+            e.preventDefault();
+          }
           e.stopPropagation();
         }
       });
 
       window.addEventListener('mousemove', (e) => {
-        if (!isSubDragging && !isSubResizing) return;
+        if (!isSubDragging && !isSubResizing && !isPotentialSubDrag) return;
 
         const overlayRect = overlay.getBoundingClientRect();
         if (!overlayRect.width || !overlayRect.height) return;
+
+        if (isPotentialSubDrag && !isSubDragging) {
+          const dist = Math.hypot(e.clientX - dragStartX, e.clientY - dragStartY);
+          if (dist > 4) {
+            isSubDragging = true;
+            box.classList.add('dragging');
+          }
+        }
 
         if (isSubDragging) {
           const dx = (e.clientX - dragStartX) / overlayRect.width;
@@ -4652,6 +5012,7 @@
 
       window.addEventListener('mouseup', () => {
         let changed = false;
+        isPotentialSubDrag = false;
         if (isSubDragging) {
           isSubDragging = false;
           box.classList.remove('dragging');
@@ -4666,6 +5027,220 @@
           triggerAutoSaveSettings();
         }
       });
+    }
+
+    // ==========================================
+    // INLINE SUBTITLE EDITING & REMOVAL ENGINE
+    // ==========================================
+    function startEditingSubText(e) {
+      if (e) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+      const box = document.getElementById('subtitleInteractiveBox');
+      const textEl = document.getElementById('subVietnameseText');
+      if (!box || !textEl) return;
+
+      box.style.display = 'inline-flex';
+      box.classList.add('active');
+      box.classList.add('editing');
+      isEditingSubText = true;
+
+      textEl.setAttribute('contenteditable', 'true');
+      textEl.classList.add('editing-active');
+      textEl.focus();
+
+      const cur = textEl.innerText.trim();
+      const isPlaceholder = cur === 'Phụ đề mẫu (Nhấp đúp để sửa chữ)' || cur === 'hôm nay khui sáu mươi cuộn băng dính washi';
+      
+      const range = document.createRange();
+      range.selectNodeContents(textEl);
+      if (!isPlaceholder) {
+        range.collapse(false);
+      }
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+
+    function stopEditingSubText(save = true) {
+      if (!isEditingSubText) return;
+      const box = document.getElementById('subtitleInteractiveBox');
+      const textEl = document.getElementById('subVietnameseText');
+      if (!textEl) return;
+
+      isEditingSubText = false;
+      textEl.setAttribute('contenteditable', 'false');
+      textEl.classList.remove('editing-active');
+      if (box) box.classList.remove('editing');
+
+      if (save) {
+        const newText = textEl.innerText.trim();
+        applySavedSubText(newText);
+      } else {
+        updateSubtitlesOverlay();
+      }
+    }
+
+    function syncSubTextFromEditor(val) {
+      const panelInput = document.getElementById('subTextInputPanel');
+      if (panelInput && document.activeElement !== panelInput) {
+        panelInput.value = val;
+      }
+      
+      const t = mainPlayer.currentTime || 0;
+      let activeSub = currentSubtitles ? currentSubtitles.find(s => t >= s.start && t <= s.end) : null;
+      if (!activeSub && currentSubtitles && currentSubtitles.length) {
+        activeSub = currentSubtitles[0];
+      }
+
+      if (activeSub) {
+        activeSub.text = val;
+        if (currentVideoData && currentVideoData.vietnamese_subtitles) {
+          const vs = currentVideoData.vietnamese_subtitles.find(s => Math.abs(s.start - activeSub.start) < 0.05 || s.index === activeSub.index);
+          if (vs) vs.text = val;
+        }
+        renderSubtitlesTimeline();
+        debounceSaveSubtitles();
+      } else {
+        customSampleSubText = val;
+      }
+    }
+
+    function applySavedSubText(newText) {
+      const t = mainPlayer.currentTime || 0;
+      let activeSub = currentSubtitles ? currentSubtitles.find(s => t >= s.start && t <= s.end) : null;
+      if (!activeSub && currentSubtitles && currentSubtitles.length) {
+        activeSub = currentSubtitles[0];
+      }
+
+      if (activeSub) {
+        activeSub.text = newText;
+        if (currentVideoData && currentVideoData.vietnamese_subtitles) {
+          const vs = currentVideoData.vietnamese_subtitles.find(s => Math.abs(s.start - activeSub.start) < 0.05 || s.index === activeSub.index);
+          if (vs) vs.text = newText;
+        }
+        renderSubtitlesTimeline();
+        saveUpdatedSubtitlesToServer();
+      } else {
+        customSampleSubText = newText;
+        if (!newText) {
+          isSampleSubHidden = true;
+          const box = document.getElementById('subtitleInteractiveBox');
+          if (box) box.style.display = 'none';
+          const restoreBtn = document.getElementById('btnRestoreSubFloating');
+          if (restoreBtn) restoreBtn.style.display = 'inline-flex';
+        } else {
+          isSampleSubHidden = false;
+        }
+      }
+      updateSubtitlesOverlay();
+    }
+
+    function clearOrHideSubtitle(e) {
+      if (e) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+      const box = document.getElementById('subtitleInteractiveBox');
+      const textEl = document.getElementById('subVietnameseText');
+      const panelInput = document.getElementById('subTextInputPanel');
+      const t = mainPlayer.currentTime || 0;
+
+      let activeSub = currentSubtitles ? currentSubtitles.find(s => t >= s.start && t <= s.end) : null;
+      if (!activeSub && currentSubtitles && currentSubtitles.length) {
+        activeSub = currentSubtitles[0];
+      }
+
+      if (activeSub) {
+        activeSub.text = '';
+        if (currentVideoData && currentVideoData.vietnamese_subtitles) {
+          const vs = currentVideoData.vietnamese_subtitles.find(s => Math.abs(s.start - activeSub.start) < 0.05 || s.index === activeSub.index);
+          if (vs) vs.text = '';
+        }
+        if (textEl) textEl.innerText = '';
+        if (panelInput) panelInput.value = '';
+        renderSubtitlesTimeline();
+        saveUpdatedSubtitlesToServer();
+        showToast('🗑️ Đã xóa nội dung phụ đề câu này');
+      } else {
+        customSampleSubText = '';
+        isSampleSubHidden = true;
+        if (textEl) textEl.innerText = '';
+        if (panelInput) panelInput.value = '';
+        if (box) box.style.display = 'none';
+        const restoreBtn = document.getElementById('btnRestoreSubFloating');
+        if (restoreBtn) restoreBtn.style.display = 'inline-flex';
+        const toggleBtn = document.getElementById('btnToggleSampleSubPanel');
+        if (toggleBtn) toggleBtn.innerText = '👁️ Hiện Khung Sub';
+        showToast('🗑️ Đã xóa chữ & ẩn khung phụ đề mẫu khỏi video');
+      }
+      updateSubtitlesOverlay();
+    }
+
+    function restoreSampleSubtitle(e) {
+      if (e) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+      isSampleSubHidden = false;
+      if (!customSampleSubText) {
+        customSampleSubText = 'Phụ đề mẫu (Nhấp đúp để sửa chữ)';
+      }
+      const box = document.getElementById('subtitleInteractiveBox');
+      if (box) box.style.display = 'inline-flex';
+      const restoreBtn = document.getElementById('btnRestoreSubFloating');
+      if (restoreBtn) restoreBtn.style.display = 'none';
+      const toggleBtn = document.getElementById('btnToggleSampleSubPanel');
+      if (toggleBtn) toggleBtn.innerText = '🗑️ Ẩn Khung Sub';
+      updateSubtitlesOverlay();
+      showToast('👁️ Đã hiện lại khung phụ đề trên video');
+    }
+
+    function toggleSampleSubVisibility(e) {
+      if (e) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+      if (isSampleSubHidden) {
+        restoreSampleSubtitle(e);
+      } else {
+        clearOrHideSubtitle(e);
+      }
+    }
+
+    function onSubTextInputPanelChange(val) {
+      const textEl = document.getElementById('subVietnameseText');
+      if (textEl) textEl.innerText = val;
+      syncSubTextFromEditor(val);
+      if (isSampleSubHidden && val) {
+        isSampleSubHidden = false;
+        const box = document.getElementById('subtitleInteractiveBox');
+        if (box) box.style.display = 'inline-flex';
+        const restoreBtn = document.getElementById('btnRestoreSubFloating');
+        if (restoreBtn) restoreBtn.style.display = 'none';
+      }
+    }
+
+    function debounceSaveSubtitles() {
+      clearTimeout(saveSubTimeout);
+      saveSubTimeout = setTimeout(saveUpdatedSubtitlesToServer, 800);
+    }
+
+    async function saveUpdatedSubtitlesToServer() {
+      if (!currentVideoData || !currentVideoData.stem || !currentSubtitles || !currentSubtitles.length) return;
+      try {
+        await fetch('/api/workflow/save-subtitles', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            stem: currentVideoData.stem,
+            subtitles: currentSubtitles
+          })
+        });
+      } catch (err) {
+        console.warn('Lưu phụ đề thất bại:', err);
+      }
     }
 
     function applySubtitlePosition() {

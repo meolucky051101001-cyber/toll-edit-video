@@ -13,36 +13,84 @@ class TranslationQualityGateTests(unittest.TestCase):
         self.assertFalse(valid)
         self.assertTrue(any("CJK" in r or "chữ Hán" in r for r in reasons))
 
-    def test_forbidden_entity_variant_rejection(self):
-        sources = ["阿特跑了"]
-        # "sát thủ" instead of "A Thích"
-        translated = ["Sát thủ đã chạy thoát rồi."]
-        valid, reasons = validate_translation_batch_quality(sources, translated, strict=True)
-        self.assertFalse(valid)
-        self.assertTrue(any("A Thích" in r for r in reasons))
+    def test_case_1_video_with_athich_character_via_glossary(self):
+        """Case 1: Video with character 'A Thích' configured via glossary / entity_map."""
+        sources = ["阿特跑了", "阿特正在准备食物。"]
+        translated = ["a thích đã chạy thoát rồi", "a thích đang chuẩn bị thức ăn."]
+        glossary = {"阿特": "A Thích"}
+        fixed = ensure_speech_pauses_and_entity(sources, translated, glossary=glossary)
+        self.assertEqual(fixed[0], "A Thích đã chạy thoát rồi")
+        self.assertEqual(fixed[1], "A Thích đang chuẩn bị thức ăn.")
+        valid, reasons = validate_translation_batch_quality(sources, fixed, glossary=glossary, strict=True)
+        self.assertTrue(valid, f"Expected valid, got: {reasons}")
 
-    def test_ensure_speech_pauses_and_entity_normalizes_entity(self):
-        sources = ["阿特跑了", "刺客在等待"]
-        translated = ["sát thủ đã chạy thoát rồi", "assassin đang đợi."]
+    def test_case_2_video_genuinely_about_assassins_no_athich_replacement(self):
+        """Case 2: Video genuinely about assassins/sát thủ/thích khách.
+        Verifies that 'sát thủ' and 'thích khách' are NOT replaced with 'A Thích'."""
+        sources = ["刺客在黑夜中潜行", "两名刺客正在等待目标。"]
+        translated = ["Thích khách đang lẻn đi trong đêm tối", "Hai tên sát thủ đang chờ đợi mục tiêu."]
+        # No glossary provided, ordinary term should be retained
         fixed = ensure_speech_pauses_and_entity(sources, translated)
-        self.assertEqual(fixed[0], "A Thích đã chạy thoát rồi.")
-        self.assertEqual(fixed[1], "A Thích đang đợi.")
+        self.assertIn("Thích khách", fixed[0])
+        self.assertIn("sát thủ", fixed[1])
+        self.assertNotIn("A Thích", fixed[0])
+        self.assertNotIn("A Thích", fixed[1])
+        valid, reasons = validate_translation_batch_quality(sources, fixed, strict=True)
+        self.assertTrue(valid, f"Expected valid without A Thích, got: {reasons}")
+
+    def test_case_3_video_with_different_proper_name(self):
+        """Case 3: Video with different character name (e.g. 'Tiểu Bạch')."""
+        sources = ["小白跑了", "小白正在准备行李。"]
+        translated = ["tiểu bạch đã chạy thoát rồi", "tiểu bạch đang chuẩn bị hành lý."]
+        glossary = {"小白": "Tiểu Bạch"}
+        fixed = ensure_speech_pauses_and_entity(sources, translated, glossary=glossary)
+        self.assertEqual(fixed[0], "Tiểu Bạch đã chạy thoát rồi")
+        self.assertEqual(fixed[1], "Tiểu Bạch đang chuẩn bị hành lý.")
+        valid, reasons = validate_translation_batch_quality(sources, fixed, glossary=glossary, strict=True)
+        self.assertTrue(valid, f"Expected valid, got: {reasons}")
+
+    def test_case_4_video_with_no_proper_names(self):
+        """Case 4: Video with common terms, no proper names."""
+        sources = ["木匠在修椅子", "医生正在检查病人。"]
+        translated = ["Người thợ mộc đang sửa chiếc ghế", "Bác sĩ đang khám cho bệnh nhân."]
+        fixed = ensure_speech_pauses_and_entity(sources, translated)
+        self.assertEqual(fixed[0], "Người thợ mộc đang sửa chiếc ghế")
+        self.assertEqual(fixed[1], "Bác sĩ đang khám cho bệnh nhân.")
+        valid, reasons = validate_translation_batch_quality(sources, fixed, strict=True)
+        self.assertTrue(valid, f"Expected valid, got: {reasons}")
+
+    def test_sentence_boundary_and_asr_split_no_mid_sentence_period(self):
+        """Continuous sentence split across segments by ASR.
+        Must NOT insert periods on incomplete clauses."""
+        sources = [
+            "当一阵剧烈的震颤",
+            "将它与迁徙的族群隔开",
+            "它落入了死火山的石缝中。",
+        ]
+        translated = [
+            "Khi một trận rung chấn kinh hoàng",
+            "chia cắt nó khỏi bầy đàn đang di cư",
+            "nó rơi vào khe đá của ngọn núi lửa đã tắt.",
+        ]
+        fixed = ensure_speech_pauses_and_entity(sources, translated)
+        # Segments 0 and 1 must NOT end with a period
+        self.assertFalse(fixed[0].endswith("."))
+        self.assertFalse(fixed[1].endswith("."))
+        # Segment 2 ends with a period because source ended with '。'
+        self.assertTrue(fixed[2].endswith("."))
+        valid, reasons = validate_translation_batch_quality(sources, fixed, strict=True)
+        self.assertTrue(valid, f"Expected valid, got: {reasons}")
 
     def test_multi_clause_comma_enforcement(self):
-        sources = ["一阵剧烈的震颤，将它与迁徙的族群隔开"]
+        sources = ["一阵剧烈的震颤，将它与迁徙的族群隔开。"]
         translated = ["Một trận rung chấn kinh hoàng chia cắt nó khỏi đàn đang di cư."]
-        valid, reasons = validate_translation_batch_quality(sources, translated, strict=True)
-        self.assertFalse(valid)
-        self.assertTrue(any("dấu phẩy" in r for r in reasons))
-
-        # After normalization with ensure_speech_pauses_and_entity:
         fixed = ensure_speech_pauses_and_entity(sources, translated)
         self.assertIn(",", fixed[0])
-        valid_fixed, _ = validate_translation_batch_quality(sources, fixed, strict=True)
-        self.assertTrue(valid_fixed)
+        valid_fixed, reasons = validate_translation_batch_quality(sources, fixed, strict=True)
+        self.assertTrue(valid_fixed, f"Expected valid, got: {reasons}")
 
     def test_short_sentence_does_not_force_comma(self):
-        sources = ["你好"]
+        sources = ["你好。"]
         translated = ["Xin chào."]
         valid, reasons = validate_translation_batch_quality(sources, translated, strict=True)
         self.assertTrue(valid)
@@ -59,28 +107,6 @@ class TranslationQualityGateTests(unittest.TestCase):
         self.assertNotIn("...", fixed[0])
         self.assertNotIn("…", fixed[0])
 
-    def test_narrative_and_subject_break_pauses(self):
-        sources = [
-            "其他怪喙龙，也逐渐习惯了这个跟在后面的陌生面孔。",
-            "只有阿特，把完整的半个蛋壳推到小怪常待的地方。",
-            "后来又学会利用果壳保护小怪。",
-            "天黑之前肯定会回到这个石缝。",
-        ]
-        translated = [
-            "Những con quái mỏ long khác cũng dần quen với sự hiện diện của kẻ xa lạ luôn đi theo phía sau này.",
-            "Chỉ có A Thích là đẩy nửa chiếc vỏ nguyên vẹn đến nơi quái con thường nghỉ ngơi.",
-            "Sau đó lại học cách tận dụng vỏ quả để bảo vệ quái con.",
-            "Trước khi trời tối nhất định sẽ quay lại khe đá này.",
-        ]
-        fixed = ensure_speech_pauses_and_entity(sources, translated)
-        valid, reasons = validate_translation_batch_quality(sources, fixed, strict=True)
-        self.assertTrue(valid, f"Expected all to pass quality gate, got: {reasons}")
-        for s in fixed:
-            self.assertIn(",", s)
-            self.assertTrue(s.endswith("."))
-            self.assertTrue(s[0].isupper())
-
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -33,12 +33,19 @@ def _block_value(block, key, default=None):
 
 
 def _excluded_source(block):
-    return (_block_value(block, "is_subtitle") is False
-            or _block_value(block, "is_packaging") is True
-            or _block_value(block, "is_static") is True
-            or _block_value(block, "in_subtitle_band") is False
-            or str(_block_value(block, "type", "")).lower() in
-            ("packaging", "background", "logo", "watermark"))
+    if block is None:
+        return True
+    if _block_value(block, "is_subtitle") is False:
+        return True
+    if _block_value(block, "is_packaging") is True or _block_value(block, "is_static") is True:
+        return True
+    if str(_block_value(block, "type", "")).lower() in ("packaging", "background", "logo", "watermark"):
+        return True
+    if _block_value(block, "is_subtitle") is True:
+        return False
+    if _block_value(block, "in_subtitle_band") is False:
+        return True
+    return False
 
 
 def _transition_cover_blocks(blocks):
@@ -96,8 +103,8 @@ def _held_tracking_blocks(segments, video_duration=None):
                 band = bands[-1]
                 low = min(b['y_pct'] for b in band)
                 high = max(b['max_y_pct'] for b in band)
-                nearby = (abs((low + high) - (values['y_pct'] + values['max_y_pct'])) <= .04
-                          and max(high, values['max_y_pct']) - min(low, values['y_pct']) <= .10
+                nearby = (abs((low + high) - (values['y_pct'] + values['max_y_pct'])) / 2.0 <= .04
+                          and max(high, values['max_y_pct']) - min(low, values['y_pct']) <= .12
                           and values['start'] - max(b['end'] for b in band) <= 1.0)
             else:
                 nearby = False
@@ -116,7 +123,7 @@ def _held_tracking_blocks(segments, video_duration=None):
     blocks = sorted(unique.values(), key=lambda b: (b['start'], b['end']))
     held = []
     for block in blocks:
-        following = [b['start'] for b in blocks if b['start'] > block['start'] + .0001]
+        following = [b['start'] for b in blocks if b['start'] > block['start'] + .0001 and b['end'] > block['end']]
         end = block['end'] + 1.0
         if following:
             end = max(block['end'], min(end, min(following)))
@@ -138,6 +145,7 @@ def generate_ass_file(
     font_color="&H00000000",
     font_weight=2,
     video_duration=None,
+    watermark_box=None,
 ):
     """Generate an ASS subtitle file.
     
@@ -163,16 +171,18 @@ def generate_ass_file(
     line_h = 36 if source_x > source_y else 42
     outline = 0
 
+    is_landscape = canvas_x > canvas_y
     sticker_padding_x = 8
-    sticker_padding_y = 6
+    sticker_padding_y = 8 if is_landscape else 6
     min_margin = math.ceil(canvas_x * 0.05)
     max_allowed_w = canvas_x - 2 * min_margin
     text_max_w = max_allowed_w - (outline * 2) - (sticker_padding_x * 2)
 
     # Watermark protection zone (bottom-right red seal at X >= 0.8468, Y >= 0.9074 on landscape videos)
-    is_landscape = canvas_x > canvas_y
-    if is_landscape:
-        watermark_x_limit = int(canvas_x * (1574.0 / 1920.0))  # <= 1049px on 720p canvas, <= 1574px in 1080p
+    if is_landscape and watermark_box is not None:
+        wm_x1 = watermark_box[0]
+        wm_ratio = (wm_x1 / source_x) if wm_x1 > 1.0 else wm_x1
+        watermark_x_limit = int(canvas_x * min(wm_ratio - 0.02, 1574.0 / 1920.0))
         safe_bottom_text_max_w = int(canvas_x * 0.65)
     else:
         watermark_x_limit = canvas_x - min_margin
@@ -222,7 +232,8 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: BgStyle,Arial,{font_size},&H00F0F0F0,&H00F0F0F0,&H00F0F0F0,&H00F0F0F0,0,0,0,0,100,100,0,0,1,{outline},0,5,0,0,0,1
+Style: CoverStyle,Arial,{font_size},&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,0,0,0,0,100,100,0,0,1,{outline},0,5,0,0,0,1
+Style: BgStyle,Arial,{font_size},&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,0,0,0,0,100,100,0,0,1,{outline},0,5,0,0,0,1
 Style: TextStyle,{font_name},{font_size},{font_color},&H000000FF,&H00FFFFFF,&H00000000,{bold},0,0,0,100,100,0,0,1,{text_outline},0,5,10,10,10,1
 
 [Events]
@@ -253,6 +264,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     original_tracks and not seg.tracking_blocks
                 ):
                     seg.best_block = None
+                if seg.tracking_blocks:
+                    first_b = seg.tracking_blocks[0]
+                    b_start = float(_block_value(first_b, "start", seg.start.total_seconds()))
+                    s_start = seg.start.total_seconds()
+                    if 0.0 < (b_start - s_start) <= 1.0:
+                        if isinstance(first_b, dict):
+                            first_b["start"] = s_start
+                        else:
+                            setattr(first_b, "start", s_start)
         groups = []
         held_tracks = _held_tracking_blocks(dialogue_segments, video_duration)
         for seg in dialogue_segments:
@@ -274,18 +294,59 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 if pages[0].start.total_seconds() - 0.30001 <= first:
                     pages[0].start = timedelta(seconds=max(0, min(
                         pages[0].start.total_seconds(), first)))
-                held_end = max((b['end'] for b in held_tracks
-                    if any(abs(b['start'] - float(_block_value(t, 'start', 0))) < .0001
-                           for t in tracks)), default=last + 1.0)
+                def _track_matches_held(b, t):
+                    t_start = float(_block_value(t, 'start', 0))
+                    t_end = float(_block_value(t, 'end', 0))
+                    if abs(b['start'] - t_start) < 0.05:
+                        return True
+                    if (b['start'] - 0.05 <= t_start <= b['end'] + 0.05) or (b['start'] - 0.05 <= t_end <= b['end'] + 0.05):
+                        b_cy = (b['y_pct'] + b['max_y_pct']) / 2.0
+                        t_cy = (float(_block_value(t, 'y_pct', 0)) + float(_block_value(t, 'max_y_pct', 0))) / 2.0
+                        if abs(b_cy - t_cy) <= 0.06:
+                            return True
+                    return False
+
+                matching_ends = [b['end'] for b in held_tracks if any(_track_matches_held(b, t) for t in tracks)]
+                held_end = max(matching_ends, default=last + 1.0)
                 pages[-1].end = timedelta(seconds=held_end)
         for i in range(len(groups) - 1):
             boundary = groups[i + 1][1][0].start
-            for page in groups[i][1]:
-                gap = (boundary - page.end).total_seconds()
-                if 0.0 < gap <= 0.5:
-                    page.end = boundary
+            # Check if next group has valid tracking blocks
+            next_tracks = [b for page in groups[i + 1][1] for b in (getattr(page, "tracking_blocks", None) or []) if not _excluded_source(b)]
+            if not next_tracks:
+                for page in groups[i + 1][1]:
+                    best = getattr(page, "best_block", None)
+                    if best and not _excluded_source(best):
+                        next_tracks.append(best)
+
+            curr_tracks = [b for page in groups[i][1] for b in (getattr(page, "tracking_blocks", None) or []) if not _excluded_source(b)]
+            if not curr_tracks:
+                for page in groups[i][1]:
+                    best = getattr(page, "best_block", None)
+                    if best and not _excluded_source(best):
+                        curr_tracks.append(best)
+
+            # Determine whether next group shares the same visual position
+            transition_target = boundary
+            if curr_tracks and next_tracks:
+                curr_y = (min(float(_block_value(b, "y_pct", 0)) for b in curr_tracks) + max(float(_block_value(b, "max_y_pct", 0)) for b in curr_tracks)) / 2.0
+                next_y = (min(float(_block_value(b, "y_pct", 0)) for b in next_tracks) + max(float(_block_value(b, "max_y_pct", 0)) for b in next_tracks)) / 2.0
+                if abs(curr_y - next_y) <= 0.05:
+                    # Same position: bridge to next visual onset, but never exceed next sentence start
+                    next_visual_start = min(float(_block_value(b, "start", 0)) for b in next_tracks)
+                    transition_target = min(timedelta(seconds=next_visual_start), boundary)
                 else:
-                    page.end = min(page.end, boundary)
+                    # Position changed: end when next group starts to prevent dialogue text collision
+                    transition_target = boundary
+            else:
+                transition_target = boundary
+
+            for page in groups[i][1]:
+                gap = (transition_target - page.end).total_seconds()
+                if 0.0 < gap <= 0.5:
+                    page.end = transition_target
+                else:
+                    page.end = min(page.end, transition_target)
         dialogue_segments = [s for s in dialogue_segments if s.end > s.start]
         if clean_incomplete_segment_stops is not None:
             dialogue_segments = clean_incomplete_segment_stops(dialogue_segments)
@@ -389,6 +450,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                             y_pct=min(b['y_pct'] for b in active),
                             max_y_pct=max(b['max_y_pct'] for b in active)))
             blocks = _transition_cover_blocks(blocks)
+            if blocks and seg_s < float(_block_value(blocks[0], "start", seg_s)):
+                first_gap = float(_block_value(blocks[0], "start", seg_s)) - seg_s
+                if first_gap <= 1.0:
+                    blocks[0]["start"] = seg_s
             cursor = seg_s
             for b in blocks:
                 left = max(seg_s, float(_block_value(b, "start", seg_s)))
@@ -453,7 +518,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 required_text_h = num_lines * line_h
 
                 if has_source:
-                    chinese_center_x = canvas_x // 2
+                    chinese_center_x = canvas_x / 2.0
                     raw_cy_pct = (raw_y_pct + raw_max_y_pct) * 0.5
                     raw_h = int((raw_max_y_pct - raw_y_pct) * canvas_y)
                     if abs(raw_cy_pct - med_center_pct) <= 0.04:
@@ -483,21 +548,22 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         box_x1 = max(min_margin, box_x1)
 
                         # In landscape bottom area, protect watermark seal (X <= watermark_x_limit)
+                        # BUT NEVER clip below need_x2 if that would leave Chinese characters exposed!
                         if box_x2 > watermark_x_limit:
                             excess = box_x2 - watermark_x_limit
                             if box_x1 - excess >= min_margin and (box_x1 - excess) <= need_x1:
                                 box_x1 -= excess
-                                box_x2 = watermark_x_limit
+                                box_x2 = max(need_x2, watermark_x_limit)
                             else:
-                                box_x2 = watermark_x_limit
+                                box_x2 = max(need_x2, watermark_x_limit)
 
                         draw_x = round(box_x1)
                         draw_w = max(4, round(box_x2 - box_x1))
                         draw_w = 2 * math.ceil(draw_w / 2)
-                        if draw_x + draw_w > watermark_x_limit:
-                            draw_x = max(min_margin, watermark_x_limit - draw_w)
-                            if draw_x + draw_w > watermark_x_limit:
-                                draw_w = 2 * ((watermark_x_limit - draw_x) // 2)
+                        if draw_x + draw_w > watermark_x_limit and (draw_x + draw_w) > need_x2:
+                            shift_w = max(min_margin, watermark_x_limit - draw_w)
+                            if shift_w <= need_x1:
+                                draw_x = shift_w
                     else:
                         min_cover_w = math.ceil(2 * max(
                             chinese_center_x - source_left_pct * canvas_x,
@@ -509,7 +575,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         )
                         draw_w = max(4, target_visible_w - (outline * 2))
                         draw_w = min(max_allowed_w, 2 * math.ceil(draw_w / 2))
-                        draw_x = chinese_center_x - draw_w // 2
+                        draw_x = chinese_center_x - (draw_w / 2.0)
                         min_margin = math.ceil(canvas_x * 0.05)
                         if draw_x < min_margin:
                             draw_x = min_margin
@@ -522,6 +588,25 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
                     draw_h = max(4, target_visible_h - (outline * 2))
                     draw_y = chinese_center_y - (draw_h // 2)
+
+                    need_x1 = int(source_left_pct * canvas_x) - sticker_padding_x
+                    need_x2 = math.ceil(source_right_pct * canvas_x) + sticker_padding_x
+                    need_y1 = int(raw_y_pct * canvas_y) - sticker_padding_y
+                    need_y2 = math.ceil(raw_max_y_pct * canvas_y) + sticker_padding_y
+
+                    if draw_x > need_x1:
+                        draw_w += (draw_x - need_x1)
+                        draw_x = need_x1
+                    if draw_x + draw_w < need_x2:
+                        draw_w = need_x2 - draw_x
+
+                    if draw_y > need_y1:
+                        draw_h += (draw_y - need_y1)
+                        draw_y = need_y1
+                    if draw_y + draw_h < need_y2:
+                        draw_h = need_y2 - draw_y
+
+                    draw_x = max(0, draw_x)
                     draw_y = max(0, min(draw_y, canvas_y - draw_h - (outline * 2)))
 
                     draw_cmd = "{\\p1}" + _rounded_box(draw_w, draw_h) + "{\\p0}"

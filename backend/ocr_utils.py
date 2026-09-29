@@ -45,6 +45,19 @@ def release_ocr_reader():
             torch.cuda.empty_cache()
 
 
+def _has_chinese_overlap(candidate_text: str, segment_text: str) -> bool:
+    """Verify if candidate OCR text shares meaningful Chinese characters with segment text."""
+    c_zh = "".join(c for c in str(candidate_text or "") if "\u3400" <= c <= "\u9fff")
+    s_zh = "".join(c for c in str(segment_text or "") if "\u3400" <= c <= "\u9fff")
+    if not c_zh or not s_zh:
+        return False
+    shared = set(c_zh) & set(s_zh)
+    if len(shared) >= 2 or (len(c_zh) >= 2 and len(shared) / len(c_zh) >= 0.3):
+        return True
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, c_zh, s_zh).ratio() >= 0.3
+
+
 def _readtext_batch(frames):
     """Recognize all sampled frames in one PP-OCRv6 process, then fallback safely."""
 
@@ -291,9 +304,28 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                 refinement_points.append((t_enter, seg, seg_idx, "boundary_enter"))
                 refinement_points.append((t_exit, seg, seg_idx, "boundary_exit"))
 
+            # Pha 3: Quét thích ứng các khoảng trống (ASR gaps >= 0.8s và mở đầu video)
+            gap_points = []
+            first_s = srt_segments[0].start.total_seconds() if srt_segments else (duration or 0.0)
+            if first_s >= 0.8:
+                cur = 0.3
+                while cur < first_s - 0.2:
+                    gap_points.append((round(cur, 3), None, -1, "gap_intro"))
+                    cur += 0.5
+
+            for seg_idx, seg in enumerate(srt_segments):
+                e = seg.end.total_seconds()
+                next_start = (srt_segments[seg_idx + 1].start.total_seconds()
+                              if seg_idx + 1 < len(srt_segments) else (duration or e))
+                if next_start - e >= 0.8:
+                    cur = e + 0.3
+                    while cur < next_start - 0.2:
+                        gap_points.append((round(cur, 3), None, -1, "gap_between"))
+                        cur += 0.5
+
             # Hợp nhất và loại trừ trùng lặp các mốc thời gian (sai số <= 50ms)
             all_pts = {}
-            for t, seg, idx, reason in coarse_points + refinement_points:
+            for t, seg, idx, reason in coarse_points + refinement_points + gap_points:
                 k = round(t, 2)
                 if k not in all_pts:
                     all_pts[k] = (t, seg, idx)
@@ -318,12 +350,18 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
 
         target_timestamps.sort(key=lambda item: item[0])
     else:
-        # Without a transcript there is no reliable way to distinguish scene text.
-        cap.release()
-        return [], width, height, 0.85
+        # Video without transcript: perform video-wide sampling to detect scene text and subtitles
+        eff_dur = duration if duration > 0 else 30.0
+        sample_step = max(0.8, min(1.5, float(os.getenv("OCR_NO_TRANSCRIPT_STEP", "1.2"))))
+        coarse_pts = []
+        cur_t = 0.5
+        while cur_t < eff_dur - 0.2:
+            coarse_pts.append((round(cur_t, 3), None, -1))
+            cur_t += sample_step
+        target_timestamps = coarse_pts
 
-    crop_y_start = int(height * 0.05) # Quét từ 5% (bỏ thanh trạng thái)
-    crop_y_end = int(height * 0.95)   # đến 95%
+    crop_y_start = 0
+    crop_y_end = height
     captured_frames = []
     recognized_samples = []
     frame_cache = None
@@ -345,10 +383,13 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
     # The cheap image comparison still checks every tracking timestamp.
     if kwargs.get("adaptive", True) and hasattr(cv2, "Canny") and target_timestamps:
         from ocr_frame_cache import SubtitleFrameCache
-        seed_indices = sorted({round(i*(len(target_timestamps)-2)/5) for i in range(6)})
+        valid_seed_points = [p for p in target_timestamps if p[1] is not None]
+        if not valid_seed_points:
+            valid_seed_points = target_timestamps
+        seed_indices = sorted({round(i*(len(valid_seed_points)-1)/5) for i in range(min(6, len(valid_seed_points)))})
         seeds = []
         for index in seed_indices:
-            t, seg, idx = target_timestamps[index]
+            t, seg, idx = valid_seed_points[index]
             captured = capture(t)
             if captured is not None:
                 frame, ratio = captured
@@ -364,8 +405,8 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
         ocr_frame_count += len(seeds)
         probe_blocks, texts = [], {}
         for (t, seg, idx, frame, ratio), rows in zip(seeds, seed_rows):
-            sid = getattr(seg, "index", idx)
-            texts[sid] = seg.content
+            sid = getattr(seg, "index", idx) if seg is not None else idx
+            texts[sid] = getattr(seg, "content", "") if seg is not None else ""
             for bbox, text, prob in rows:
                 if len(bbox) < 4:
                     continue
@@ -495,7 +536,7 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
 
             prev_sample = (current_time, signature, seg_idx)
 
-            full_probe = current_time-last_full_probe >= 1.0
+            full_probe = (current_time - last_full_probe >= 4.0) or (target_seg is None)
             reused = frame_cache.lookup(signature, current_time) if frame_cache and not full_probe else None
             if reused is not None:
                 # Reuse only rows inside the visually checked region. Product
@@ -558,7 +599,7 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
         for mb in merged_frame_blocks:
             all_blocks.append(OCRBlock(
                 text=mb['text'],
-                start=current_time - 1.2,
+                start=max(0.0, current_time - 1.2),
                 end=current_time + 1.2,
                 x_pct=mb['x_pct'],
                 max_x_pct=mb['max_x_pct'],
@@ -677,15 +718,93 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                     seg.max_y_pct = b["max_y_pct"]
                     logger.info(f"Sync (Subtitle Band): '{str(getattr(seg, 'content', ''))[:15]}' -> Y: {seg.y_pct:.3f} - {seg.max_y_pct:.3f}")
                 else:
-                    # No subtitle found for this segment: do NOT assign random Chinese block!
-                    seg.best_block = None
-                    seg.tracking_blocks = []
-                    seg.is_subtitle = False
-                    seg.in_subtitle_band = False
-                    seg.is_packaging = False
-                    seg.is_static = False
-                    seg.y_pct = global_med_top
-                    seg.max_y_pct = global_med_bottom
+                    # Query all_blocks for matching text detected inside the global subtitle band during this segment's window
+                    seg_content = str(getattr(seg, "content", "") or "")
+                    cand = [
+                        blk for blk in all_blocks
+                        if (global_med_top - 0.02 <= blk.y_pct and blk.max_y_pct <= global_med_bottom + 0.02)
+                        and (seg.start.total_seconds() - 0.25 <= blk.sample_time <= seg.end.total_seconds() + 0.25)
+                        and len(str(blk.text or "").strip()) >= 2
+                        and _has_chinese_overlap(blk.text, seg_content)
+                    ]
+                    if cand:
+                        cand.sort(key=lambda x: (x.sample_time, x.start))
+                        tracking = []
+                        for c_idx, row in enumerate(cand):
+                            left = seg_s if c_idx == 0 else (cand[c_idx - 1].sample_time + row.sample_time) / 2.0
+                            right = seg_e if c_idx == len(cand) - 1 else (row.sample_time + cand[c_idx + 1].sample_time) / 2.0
+                            if right > left:
+                                tracking.append(OCRBlock(
+                                    text=row.text,
+                                    x_pct=row.x_pct,
+                                    max_x_pct=row.max_x_pct,
+                                    y_pct=row.y_pct,
+                                    max_y_pct=row.max_y_pct,
+                                    start=max(seg_s, left),
+                                    end=min(seg_e, right),
+                                    prob=row.prob,
+                                    sample_segment_id=s_key,
+                                    sample_time=row.sample_time,
+                                    is_subtitle=True,
+                                    is_packaging=False,
+                                    is_static=False,
+                                    in_subtitle_band=True,
+                                    type="subtitle",
+                                ))
+                        seg.tracking_blocks = tracking
+                        best_blk = max(cand, key=lambda c: len(str(c.text or "")))
+                        seg.best_block = OCRBlock(
+                            text=best_blk.text,
+                            start=seg_s,
+                            end=tracking[-1].end if tracking else seg_e,
+                            x_pct=min(c.x_pct for c in cand),
+                            max_x_pct=max(c.max_x_pct for c in cand),
+                            y_pct=min(c.y_pct for c in cand),
+                            max_y_pct=max(c.max_y_pct for c in cand),
+                            prob=best_blk.prob,
+                            is_subtitle=True,
+                            is_packaging=False,
+                            is_static=False,
+                            in_subtitle_band=True,
+                            type="subtitle",
+                        )
+                        seg.is_subtitle = True
+                        seg.in_subtitle_band = True
+                        seg.is_packaging = False
+                        seg.is_static = False
+                        seg.y_pct = seg.best_block.y_pct
+                        seg.max_y_pct = seg.best_block.max_y_pct
+                        logger.info(f"Fallback Sync (Subtitle Band Candidate): '{str(getattr(seg, 'content', ''))[:15]}' -> Y: {seg.y_pct:.3f} - {seg.max_y_pct:.3f}, {len(tracking)} blocks")
+                    else:
+                        seg_text = str(getattr(seg, "content", "") or "")
+                        center_x = 0.5
+                        est_w = min(0.65, max(0.20, len(seg_text) * 0.045))
+                        x1 = max(0.10, center_x - est_w / 2.0)
+                        x2 = min(0.90, center_x + est_w / 2.0)
+                        fallback_blk = OCRBlock(
+                            text=seg_text,
+                            start=seg_s,
+                            end=seg_e,
+                            x_pct=x1,
+                            max_x_pct=x2,
+                            y_pct=global_med_top,
+                            max_y_pct=global_med_bottom,
+                            prob=0.8,
+                            is_subtitle=True,
+                            is_packaging=False,
+                            is_static=False,
+                            in_subtitle_band=True,
+                            type="subtitle",
+                        )
+                        seg.best_block = fallback_blk
+                        seg.tracking_blocks = [fallback_blk]
+                        seg.is_subtitle = True
+                        seg.in_subtitle_band = True
+                        seg.is_packaging = False
+                        seg.is_static = False
+                        seg.y_pct = global_med_top
+                        seg.max_y_pct = global_med_bottom
+                        logger.info(f"Synthesized Fallback Geometry for segment {s_key}: '{seg_text[:15]}' -> Y: {seg.y_pct:.3f} - {seg.max_y_pct:.3f}")
     else:
         logger.info("No reliable Chinese subtitle band detected (video without subtitles or only static packaging/logos).")
         main_y_pct = 0.85
@@ -705,6 +824,38 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                 seg.y_pct = 0.85
                 seg.max_y_pct = 0.90
 
+    gap_detections = []
+    assigned_times = []
+    if srt_segments:
+        for s in srt_segments:
+            assigned_times.append((s.start.total_seconds(), s.end.total_seconds()))
+
+    for blk in all_blocks:
+        st_val = getattr(blk, "sample_time", None)
+        t = max(0.0, float(st_val if st_val is not None else getattr(blk, "start", 0.0)))
+        in_speech = any(s_st - 0.25 <= t <= s_et + 0.25 for s_st, s_et in assigned_times)
+        if not in_speech and len(str(blk.text or "").strip()) >= 2:
+            clean_blk_text = str(blk.text or "").strip()
+            import re
+            has_cjk = bool(re.search(r'[\u4e00-\u9fff]', clean_blk_text))
+            is_narrative = bool(re.search(r'(?:小时前|分钟前|天前|年后|个月前|清晨|深夜|傍晚|剧终|全剧终)', clean_blk_text))
+            blk_cx = (blk.x_pct + blk.max_x_pct) / 2.0
+            is_centered = abs(blk_cx - 0.5) <= 0.18
+            in_band = False
+            if 'global_med_top' in locals():
+                in_band = bool(global_med_top - 0.08 <= blk.y_pct and blk.max_y_pct <= global_med_bottom + 0.08 and is_centered)
+            if not in_band and is_centered and blk.y_pct >= 0.65:
+                in_band = True
+            classification = "unvoiced_scene_text" if (in_band or is_narrative) else "scene_packaging_or_logo"
+            gap_detections.append({
+                "time": round(t, 3),
+                "text": clean_blk_text,
+                "bbox": [round(blk.x_pct, 4), round(blk.y_pct, 4), round(blk.max_x_pct, 4), round(blk.max_y_pct, 4)],
+                "in_subtitle_band": in_band,
+                "classification": classification,
+                "prob": round(float(getattr(blk, "prob", 1.0) or 1.0), 3),
+            })
+
     if kwargs.get("metrics") is not None:
         kwargs["metrics"].update({
             "mode": "adaptive" if is_adaptive else "uniform",
@@ -716,6 +867,8 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
             "band_support": band.support if 'band' in locals() else 0,
             "band_mode": band.mode if 'band' in locals() else "none",
             "main_y_pct": round(main_y_pct, 4),
+            "gap_detections": gap_detections,
+            "gap_detections_count": len(gap_detections),
         })
 
     return [], width, height, main_y_pct

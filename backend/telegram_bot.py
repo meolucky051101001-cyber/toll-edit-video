@@ -217,8 +217,10 @@ async def run_pipeline_v2_for_telegram(
             parse_mode="Markdown",
         )
 
-    from voice_selection import resolve_voice, get_speaker_voice_map, get_speaker_map
+    from voice_selection import resolve_voice, get_speaker_voice_map, get_speaker_map, is_dual_voice_enabled
     from dataclasses import replace
+    dual_voice_on = is_dual_voice_enabled()
+    settings = replace(settings, enable_auto_gender=dual_voice_on)
     selected_source, selected_param, selected_label = resolve_voice("rvc" if rvc_model else "edge", rvc_model)
     request = VideoPipelineRequest(
         video_path=Path(video_path),
@@ -231,9 +233,9 @@ async def run_pipeline_v2_for_telegram(
         api_key=GEMINI_API_KEY,
         voice_source=selected_source,
         voice_param=selected_param,
-        rvc_model_path=rvc_model,
-        speaker_map=get_speaker_map() if settings.enable_auto_gender else None,
-        speaker_voice_map=get_speaker_voice_map() if settings.enable_auto_gender else None,
+        rvc_model_path=Path(selected_param) if selected_source == "rvc" else rvc_model,
+        speaker_map=get_speaker_map() if dual_voice_on else None,
+        speaker_voice_map=get_speaker_voice_map() if dual_voice_on else None,
         progress=progress,
     )
     return await VideoPipelineRunner(request).run()
@@ -264,17 +266,23 @@ async def process_v2_telegram_job(
         record_render_duration(str(paths.delivery_copy), elapsed_seconds)
     except Exception as exc:
         logger.warning("Không thể ghi nhận render_history: %s", exc)
+    final_video = paths.final_video
+    if not Path(final_video).is_file() and paths.delivery_copy and Path(paths.delivery_copy).is_file():
+        final_video = paths.delivery_copy
+
+    saved_file = paths.delivery_copy if paths.delivery_copy and Path(paths.delivery_copy).is_file() else final_video
     caption = build_v2_completion_caption(
         title=title,
         output_directory=OUTPUT_DIR,
         elapsed_seconds=elapsed_seconds,
         remaining_jobs=global_queue.qsize(),
+        saved_file_path=str(saved_file) if saved_file and Path(saved_file).is_file() else "",
     )
-    final_video = paths.final_video
-    if not Path(final_video).is_file() and paths.delivery_copy and Path(paths.delivery_copy).is_file():
-        final_video = paths.delivery_copy
 
-    if context and chat_id and Path(final_video).is_file():
+    # Theo yêu cầu: không gửi file video lên Telegram mà lưu trực tiếp về máy vào thư mục định sẵn
+    upload_to_telegram = os.getenv("AUTODUB_TELEGRAM_UPLOAD_VIDEO", "false").lower() in ("true", "1", "yes")
+
+    if upload_to_telegram and context and chat_id and Path(final_video).is_file():
         await send_video_safely(
             context,
             chat_id,
@@ -284,7 +292,13 @@ async def process_v2_telegram_job(
             url_or_filename or title,
         )
     else:
-        await safe_edit_status(status_msg, caption, parse_mode="Markdown")
+        if status_msg:
+            await safe_edit_status(status_msg, caption, parse_mode="Markdown")
+        elif context and chat_id:
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=caption, parse_mode="Markdown")
+            except Exception as exc:
+                logger.warning("Không thể gửi thông báo hoàn tất qua Telegram: %s", exc)
 
 
 def snapshot_legacy_telegram_run(
@@ -529,16 +543,25 @@ async def run_durable_video(job):
                 job['url'], str(downloads), prefix)
             if not ok or not video or not Path(video).is_file():
                 download_err = error or 'Không thể tải video từ link'
-                if "HTTP Error 403" in download_err or "Fresh cookies" in download_err:
+                if "Bóc tách Douyin thất bại:" in download_err:
+                    friendly_err = download_err
+                elif "HTTP Error 403" in download_err or "Fresh cookies" in download_err:
                     friendly_err = "Douyin chặn tải trực tiếp (yêu cầu cookie hoặc bị hạn chế truy cập)"
                 elif "timeout" in download_err.lower() or "quá lâu" in download_err.lower():
                     friendly_err = "Hết thời gian chờ máy chủ video (Timeout)"
                 else:
-                    friendly_err = download_err[:200]
+                    friendly_err = download_err[:250]
                 if status:
+                    clean_err_md = (
+                        friendly_err.replace("\\", "\\\\")
+                        .replace("_", "\\_")
+                        .replace("*", "\\*")
+                        .replace("`", "\\`")
+                        .replace("[", "\\[")
+                    )
                     await safe_edit_status(
                         status,
-                        f"❌ *Không thể tải video từ link:*\n_{friendly_err}_\n\n"
+                        f"❌ *Không thể tải video từ link:*\n_{clean_err_md}_\n\n"
                         f"💡 *Gợi ý:*\n"
                         f"• Nền tảng (Douyin/TikTok) đôi khi giới hạn tải link từ xa.\n"
                         f"• Bạn hãy gửi lại link sau vài giây để Bot thử lại từ bộ nhớ cache.\n"

@@ -1282,6 +1282,41 @@ async def api_download_srt(stem: str = Query(...), type: str = Query("translated
     )
 
 
+def format_srt_timestamp(seconds: float) -> str:
+    millis = int(round((seconds - int(seconds)) * 1000))
+    if millis >= 1000:
+        seconds += 1
+        millis = 0
+    s = int(seconds)
+    hours = s // 3600
+    minutes = (s % 3600) // 60
+    secs = s % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+@router.post("/api/workflow/save-subtitles")
+async def api_save_workflow_subtitles(payload: Dict[str, Any] = Body(...)):
+    """Lưu phụ đề đã chỉnh sửa từ giao diện trực tiếp vào tệp translated.srt."""
+    stem = payload.get("stem")
+    subs = payload.get("subtitles", [])
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu stem video")
+    job_dir = WORKSPACE / stem
+    if not job_dir.is_dir():
+        job_dir.mkdir(parents=True, exist_ok=True)
+
+    srt_blocks = []
+    for idx, s in enumerate(subs, 1):
+        text = (s.get("text") or "").strip()
+        start = float(s.get("start", 0))
+        end = float(s.get("end", start + 2.0))
+        srt_blocks.append(f"{idx}\n{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}\n{text}\n")
+
+    trans_srt = job_dir / "translated.srt"
+    trans_srt.write_text("\n".join(srt_blocks), encoding="utf-8")
+    return {"status": "ok", "saved_count": len(subs)}
+
+
 @router.post("/api/workflow/export-custom")
 async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
     """

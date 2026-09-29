@@ -431,6 +431,13 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
         async with semaphore:
             return await generate_single_tts(seg, output_folder, voice_source, voice_param, api_key)
 
-    tasks = [_bounded_single_tts(seg) for seg in translated_segments]
-    results = await asyncio.gather(*tasks)
+    tasks = [asyncio.create_task(_bounded_single_tts(seg)) for seg in translated_segments]
+    try:
+        results = await asyncio.gather(*tasks)
+    except BaseException:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
     return [res for res in results if res is not None]

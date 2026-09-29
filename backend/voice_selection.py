@@ -64,10 +64,105 @@ def save(voice_id):
 def resolve_voice(default_source, default_param):
     voice = selected()
     if voice["id"] == "chi-mai":
-        if default_source != "rvc" or not default_param:
+        param = default_param
+        if not param or default_source != "rvc":
+            try:
+                from pipeline_v2.content import discover_rvc_model
+                param = discover_rvc_model(BASE)
+            except Exception:
+                param = None
+        if not param:
             return "edge", "vi-VN-HoaiMyNeural", "Microsoft · Hoài My (nữ)"
-        return default_source, str(default_param), voice["label"]
+        return "rvc", str(param), voice["label"]
     return voice["source"], voice["param"], voice["label"]
+
+
+AUTO_VOICE_CONFIG_FILE = BASE / "v2_auto_voice.json"
+
+
+def get_auto_voice_config() -> dict:
+    """Đọc cấu hình Auto Voice & Dual Voice cho Tool V2. Mặc định dual_voice luôn TẮT (False)."""
+    if AUTO_VOICE_CONFIG_FILE.is_file():
+        try:
+            data = json.loads(AUTO_VOICE_CONFIG_FILE.read_text(encoding="utf-8"))
+            return {
+                "enabled": bool(data.get("enabled", True)),
+                "dual_voice": bool(data.get("dual_voice", False)),  # LUÔN TẮT MẶC ĐỊNH
+                "female_voice_id": str(data.get("female_voice_id") or "chi-mai"),
+                "male_voice_id": str(data.get("male_voice_id") or "capcut-BV075_streaming"),
+                "updated_at": str(data.get("updated_at", "")),
+                "updated_by": str(data.get("updated_by", "default")),
+            }
+        except Exception:
+            pass
+    return {
+        "enabled": True,
+        "dual_voice": False,
+        "female_voice_id": "chi-mai",
+        "male_voice_id": "capcut-BV075_streaming",
+        "updated_at": "",
+        "updated_by": "default",
+    }
+
+
+def is_dual_voice_enabled() -> bool:
+    """Kiểm tra chế độ dùng cả 2 giọng Nam & Nữ trong cùng video (Mặc định: False)."""
+    return bool(get_auto_voice_config().get("dual_voice", False))
+
+
+def resolve_voice_param(voice_id: str) -> str:
+    """Lấy param tương ứng với voice_id cho speaker_voice_map."""
+    for v in catalog():
+        if v.get("id") == voice_id:
+            if v.get("source") == "rvc" or v.get("id") == "chi-mai":
+                return "BV562_streaming"
+            return v.get("param") or "BV562_streaming"
+    return "BV075_streaming" if "male" in voice_id.lower() or "075" in voice_id else "BV562_streaming"
+
+
+def set_auto_voice_config(
+    enabled: bool = None,
+    female_voice_id: str = None,
+    male_voice_id: str = None,
+    dual_voice: bool = None,
+    updated_by: str = "system"
+) -> dict:
+    """Ghi cấu hình Auto Voice & Dual Voice cho Tool V2."""
+    from datetime import datetime, timezone
+    current = get_auto_voice_config()
+    if enabled is not None:
+        current["enabled"] = bool(enabled)
+    if female_voice_id is not None:
+        current["female_voice_id"] = str(female_voice_id)
+    if male_voice_id is not None:
+        current["male_voice_id"] = str(male_voice_id)
+    if dual_voice is not None:
+        current["dual_voice"] = bool(dual_voice)
+    current.setdefault("dual_voice", False)
+    current["updated_at"] = datetime.now(timezone.utc).isoformat()
+    current["updated_by"] = str(updated_by)
+
+    tmp = AUTO_VOICE_CONFIG_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, AUTO_VOICE_CONFIG_FILE)
+
+    # Cập nhật đồng thời speaker_voice_map.json
+    f_prm = resolve_voice_param(current["female_voice_id"])
+    m_prm = resolve_voice_param(current["male_voice_id"])
+    svm = {
+        "male": m_prm,
+        "female": f_prm,
+        "SPEAKER_MALE_0": m_prm,
+        "SPEAKER_MALE_1": m_prm,
+        "SPEAKER_FEMALE_0": f_prm,
+        "SPEAKER_FEMALE_1": f_prm,
+    }
+    try:
+        (BASE / "speaker_voice_map.json").write_text(json.dumps(svm, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+    return current
 
 
 DEFAULT_SPEAKER_VOICE_MAP = {
@@ -94,7 +189,17 @@ def get_speaker_voice_map() -> dict:
             return json.loads(svm_file.read_text(encoding="utf-8"))
         except Exception:
             pass
-    return dict(DEFAULT_SPEAKER_VOICE_MAP)
+    cfg = get_auto_voice_config()
+    f_prm = resolve_voice_param(cfg.get("female_voice_id", "chi-mai"))
+    m_prm = resolve_voice_param(cfg.get("male_voice_id", "capcut-BV075_streaming"))
+    return {
+        "male": m_prm,
+        "female": f_prm,
+        "SPEAKER_MALE_0": m_prm,
+        "SPEAKER_MALE_1": m_prm,
+        "SPEAKER_FEMALE_0": f_prm,
+        "SPEAKER_FEMALE_1": f_prm,
+    }
 
 
 def get_speaker_map() -> dict:

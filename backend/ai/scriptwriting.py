@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 TIMELINE_REPAIR_TOLERANCE = 0.5  # Ngưỡng cho phép auto-repair chênh lệch float (<= 0.5s); vượt quá sẽ reject
+DEFAULT_SPEECH_RATE_WPS = 2.4  # Tốc độ đọc chuẩn tự nhiên tiếng Việt (từ/giây)
 
 
 class ScriptScene(BaseModel):
@@ -81,7 +82,7 @@ def clean_fs_path(p: str | Path) -> Path:
     return Path(s)
 
 
-DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
+DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
 GEMINI_SCRIPT_MODEL = os.getenv("GEMINI_SCRIPT_MODEL", DEFAULT_GEMINI_MODEL).strip()
 GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", DEFAULT_GEMINI_MODEL).strip()
 GEMINI_REWRITE_MODEL = os.getenv("GEMINI_REWRITE_MODEL", DEFAULT_GEMINI_MODEL).strip()
@@ -91,14 +92,15 @@ GEMINI_FALLBACK_MODELS = [
     DEFAULT_GEMINI_MODEL,
     GEMINI_SCRIPT_MODEL,
     GEMINI_VISION_MODEL,
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
     "gemini-3.5-flash",
+    "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
-    "gemini-3.1-flash-lite-preview",
     "gemini-flash-lite-latest",
+    "gemini-flash-latest",
+    "gemini-3.1-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-3.7-flash",
+    "gemini-3.8-flash",
 ]
 
 
@@ -266,7 +268,7 @@ def build_scene_timeline(
 
 
 def parse_gemini_json(raw_text: str) -> Dict[str, Any]:
-    """Parse JSON từ Gemini an toàn: thử json.loads trực tiếp trước, fallback regex sau."""
+    """Parse JSON từ Gemini an toàn: thử json.loads trực tiếp, bóc tách code block, và cân bằng ngoặc nhọn."""
     if not raw_text:
         raise ValueError("Phản hồi từ Gemini rỗng.")
     text = raw_text.strip()
@@ -275,12 +277,34 @@ def parse_gemini_json(raw_text: str) -> Dict[str, Any]:
     except json.JSONDecodeError:
         pass
 
-    match = re.search(r'\{.*\}', text, re.DOTALL)
-    if match:
+    # Thử bóc tách khối ```json ... ```
+    if "```" in text:
+        code_blocks = re.findall(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
+        for block in code_blocks:
+            try:
+                return json.loads(block.strip())
+            except Exception:
+                continue
+
+    # Tìm object JSON qua vị trí dấu ngoặc { } ngoài cùng
+    start_idx = text.find('{')
+    if start_idx != -1:
+        end_idx = text.rfind('}')
+        if end_idx > start_idx:
+            candidate = text[start_idx:end_idx + 1]
+            try:
+                return json.loads(candidate)
+            except Exception:
+                pass
+
+    # Thử regex từng object đơn
+    matches = re.findall(r'\{[\s\S]*?\}', text)
+    for m in matches:
         try:
-            return json.loads(match.group(0))
-        except Exception as e:
-            raise ValueError(f"Không thể giải mã JSON từ phản hồi: {e}")
+            return json.loads(m)
+        except Exception:
+            continue
+
     raise ValueError("Không tìm thấy cấu trúc JSON hợp lệ trong phản hồi Gemini.")
 
 
@@ -1066,7 +1090,7 @@ def generate_video_script(
     # Lấy thông tin profile tương ứng
     prof_key = (profile or "review").lower().strip()
     if prof_key not in SCRIPT_PROFILES:
-        prof_key = "affiliate" if prof_key == "review" else "affiliate"
+        prof_key = "review" if "review" in SCRIPT_PROFILES else "affiliate"
     prof_data = SCRIPT_PROFILES.get(prof_key, SCRIPT_PROFILES.get("affiliate", {}))
 
     # Xử lý quy tắc đại từ nhân xưng (Pronoun Persona)
@@ -1122,7 +1146,7 @@ def generate_video_script(
         s_sec = sc["start_seconds"]
         e_sec = sc["end_seconds"]
         t_range = sc["time_range"]
-        target_words = int(round((e_sec - s_sec) * 2.4))
+        target_words = int(round((e_sec - s_sec) * DEFAULT_SPEECH_RATE_WPS))
 
         if sec == "hook":
             h_dur = round(e_sec - s_sec, 1)
@@ -1154,14 +1178,12 @@ def generate_video_script(
     prompt = f"""Hãy viết một kịch bản video ngắn hoàn chỉnh cho chủ đề sau:
 - Chủ đề: "{topic}"
 - Nền tảng đích: {platform} (TikTok / Instagram Reels / Shorts)
-- Thời lượng mục tiêu: khoảng {duration_target} giây (tổng số từ khoảng {int(duration_target * 2.4)} từ)
+- Thời lượng mục tiêu: khoảng {duration_target} giây (tổng số từ khoảng {int(duration_target * DEFAULT_SPEECH_RATE_WPS)} từ)
 - Phong cách: {style}
 - {hook_prompt}
 {f"- Ghi chú bổ sung: {custom_instruction}" if custom_instruction else ""}
 
 {profile_guide}
-
-{HUMAN_VOICE_GUIDELINES}
 
 BẮT BUỘC trả về đúng định dạng JSON tuân thủ timeline {len(timeline)} phân cảnh sau:
 {{
@@ -1302,12 +1324,12 @@ def analyze_video_and_generate_script(
     frames_data, duration_seconds, metadata = extract_smart_video_frames(video_path, max_frames=8)
     
     target_duration = int(round(duration_seconds))
-    target_words = int(round(duration_seconds * 2.4))
+    target_words = int(round(duration_seconds * DEFAULT_SPEECH_RATE_WPS))
     
     prof_key = (profile or genre or "review").lower().strip()
     if prof_key not in SCRIPT_PROFILES:
-        prof_key = "affiliate" if prof_key in ("review", "auto") else "explainer" if prof_key == "documentary" else "storytime" if prof_key == "story" else "affiliate"
-    prof_data = SCRIPT_PROFILES.get(prof_key, SCRIPT_PROFILES.get("affiliate", {}))
+        prof_key = "review" if prof_key in ("review", "auto") else "explainer" if prof_key == "documentary" else "storytime" if prof_key == "story" else "affiliate"
+    prof_data = SCRIPT_PROFILES.get(prof_key, SCRIPT_PROFILES.get("review", SCRIPT_PROFILES.get("affiliate", {})))
 
     # Xử lý quy tắc đại từ nhân xưng (Pronoun Persona)
     persona_key = (persona or "auto").lower().strip()

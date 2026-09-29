@@ -36,7 +36,7 @@ class SubtitleFrameCache:
 
     def remember(self, signature, timestamp, result):
         self.entries.append((timestamp, *signature, result))
-        self.entries = self.entries[-12:]
+        self.entries = self.entries[-32:]
 
     def visual_diff(self, sig1, sig2):
         if not sig1 or not sig2:

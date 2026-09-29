@@ -14,7 +14,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import requests
 from pydub import AudioSegment
 
@@ -184,6 +184,21 @@ def format_srt_time(seconds: float) -> str:
     return f"{hrs:02d}:{mins:02d}:{secs:02d},{millis:03d}"
 
 
+def _run_coroutine_sync(coro):
+    """Chạy một coroutine an toàn, kể cả khi đang ở trong một thread có running event loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    else:
+        return asyncio.run(coro)
+
+
 def generate_single_tts(text: str, output_file: str | Path, voice: str = "BV562_streaming") -> float:
     """
     Sinh audio TTS cho một câu thoại bằng CapCut TTS (hoặc fallback sang Edge TTS).
@@ -204,7 +219,7 @@ def generate_single_tts(text: str, output_file: str | Path, voice: str = "BV562_
         async def _run_edge():
             comm = edge_tts.Communicate(text, voice)
             await comm.save(str(output_path))
-        asyncio.run(_run_edge())
+        _run_coroutine_sync(_run_edge())
         audio = AudioSegment.from_file(str(output_path))
         return audio.duration_seconds
 
@@ -237,7 +252,7 @@ def generate_single_tts(text: str, output_file: str | Path, voice: str = "BV562_
     async def _run_fallback():
         comm = edge_tts.Communicate(text, fallback_voice)
         await comm.save(str(output_path))
-    asyncio.run(_run_fallback())
+    _run_coroutine_sync(_run_fallback())
     audio = AudioSegment.from_file(str(output_path))
     return audio.duration_seconds
 
@@ -346,7 +361,7 @@ def fit_audio_to_scene_window(
         if len(trimmed) > fade_out_ms:
             trimmed = trimmed.fade_out(fade_out_ms)
         trimmed.export(str(dst_path), format=dst_path.suffix.lstrip(".") or "mp3")
-        return dst_path, round(available_window, 2), "fitted"
+        return dst_path, round(available_window, 2), "trimmed"
 
     # Trường hợp 3: Vượt quá 1.08x window -> Trim an toàn với 80ms fade-out
     target_ms = int(round(available_window * 1000))
@@ -364,7 +379,8 @@ def render_full_script_tts(
     workspace_dir: Optional[str | Path] = None,
     pause_between_scenes_ms: int = 350,
     video_duration: Optional[float] = None,
-    api_key: Optional[str] = None
+    api_key: Optional[str] = None,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None
 ) -> Dict[str, Any]:
     """
     Sinh audio hoàn chỉnh cho toàn bộ kịch bản bằng CapCut TTS kết hợp Closed-Loop Rewrite:
@@ -389,6 +405,11 @@ def render_full_script_tts(
     processed_scenes = []
 
     for i, scene in enumerate(scenes):
+        if progress_callback:
+            try:
+                progress_callback(i + 1, len(scenes), f"Đang thu âm phân cảnh #{i+1}/{len(scenes)}")
+            except Exception:
+                pass
         scene_idx = scene.get("index", scene.get("scene_idx", i + 1))
         curr_text = str(scene.get("speaker_text") or scene.get("voiceover") or scene.get("text") or "").strip()
         segment_file = segments_dir / f"scene_{scene_idx:02d}.mp3"
@@ -653,16 +674,176 @@ def get_media_duration(file_path: str | Path) -> float:
     return 0.0
 
 
+def hex_to_rgba(hex_code: str, alpha: int = 235) -> tuple:
+    """Chuyển mã màu HEX sang tuple RGBA."""
+    hex_code = str(hex_code or "#A52A3A").lstrip("#")
+    if len(hex_code) == 3:
+        hex_code = "".join([c * 2 for c in hex_code])
+    if len(hex_code) == 6:
+        r = int(hex_code[0:2], 16)
+        g = int(hex_code[2:4], 16)
+        b = int(hex_code[4:6], 16)
+        return (r, g, b, alpha)
+    elif len(hex_code) == 8:
+        r = int(hex_code[0:2], 16)
+        g = int(hex_code[2:4], 16)
+        b = int(hex_code[4:6], 16)
+        a = int(hex_code[6:8], 16)
+        return (r, g, b, a)
+    return (175, 45, 75, alpha)
+
+
+def create_news_hook_card(
+    text: str,
+    badge_text: str = "",
+    show_badge: bool = False,
+    card_width: int = 960,
+    output_png: str = "news_card.png",
+    bg_color: str | tuple = "#A52A3A",
+    border_color: tuple = (255, 255, 255, 255),
+    border_width: int = 4,
+    corner_radius: int = 28,
+    font_size: int = 42,
+    badge_font_size: int = 28,
+    alpha: int = 235
+) -> str:
+    """Tạo file PNG card text hook drama bo góc viền trắng tinh tế, màu nền tùy chỉnh."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        logger.warning("Pillow (PIL) chưa được cài đặt, bỏ qua tạo card PNG.")
+        return ""
+
+    if isinstance(bg_color, str):
+        card_rgba = hex_to_rgba(bg_color, alpha=alpha)
+    else:
+        card_rgba = bg_color
+
+    render_badge = show_badge and bool(badge_text and badge_text.strip())
+
+    # Windows font candidates
+    def _get_font(sz: int, bold: bool = True):
+        for fp in [
+            r"C:\Windows\Fonts\arialbd.ttf" if bold else r"C:\Windows\Fonts\arial.ttf",
+            r"C:\Windows\Fonts\seguiui.ttf",
+            r"C:\Windows\Fonts\tahoma.ttf",
+            r"C:\Windows\Fonts\calibrib.ttf" if bold else r"C:\Windows\Fonts\calibri.ttf",
+        ]:
+            if os.path.exists(fp):
+                try:
+                    return ImageFont.truetype(fp, sz)
+                except Exception:
+                    continue
+        return ImageFont.load_default()
+
+    main_font = _get_font(font_size, bold=True)
+    badge_font = _get_font(badge_font_size, bold=True) if render_badge else None
+
+    # Text wrapping
+    dummy_img = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+    dummy_draw = ImageDraw.Draw(dummy_img)
+
+    words = text.split()
+    lines = []
+    current_line = []
+    text_max_w = card_width - 80
+
+    for word in words:
+        test_line = " ".join(current_line + [word])
+        bbox = dummy_draw.textbbox((0, 0), test_line, font=main_font)
+        line_w = bbox[2] - bbox[0]
+        if line_w <= text_max_w:
+            current_line.append(word)
+        else:
+            if current_line:
+                lines.append(" ".join(current_line))
+                current_line = [word]
+            else:
+                lines.append(word)
+                current_line = []
+    if current_line:
+        lines.append(" ".join(current_line))
+
+    line_spacing = int(font_size * 0.35)
+    line_height = font_size + line_spacing
+    total_text_h = len(lines) * line_height - line_spacing
+
+    top_padding = 65 if render_badge else 45
+    bottom_padding = 45
+    card_height = top_padding + total_text_h + bottom_padding
+
+    badge_offset_y = 20 if render_badge else 0
+    canvas_w = card_width + 40
+    canvas_h = card_height + badge_offset_y + 40
+
+    img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    card_x0 = 20
+    card_y0 = (badge_offset_y + 10) if render_badge else 20
+    card_x1 = card_x0 + card_width
+    card_y1 = card_y0 + card_height
+
+    # Vẽ card nền màu tùy chọn + viền trắng
+    draw.rounded_rectangle(
+        [card_x0, card_y0, card_x1, card_y1],
+        radius=corner_radius,
+        fill=card_rgba,
+        outline=border_color,
+        width=border_width
+    )
+
+    # Vẽ badge nếu bật
+    if render_badge:
+        b_text = badge_text.strip().upper()
+        badge_bbox = draw.textbbox((0, 0), b_text, font=badge_font)
+        badge_w = (badge_bbox[2] - badge_bbox[0]) + 36
+        badge_h = (badge_bbox[3] - badge_bbox[1]) + 20
+        badge_x0 = card_x0 + 40
+        badge_y0 = card_y0 - (badge_h // 2)
+        badge_x1 = badge_x0 + badge_w
+        badge_y1 = badge_y0 + badge_h
+
+        draw.rounded_rectangle(
+            [badge_x0, badge_y0, badge_x1, badge_y1],
+            radius=badge_h // 2,
+            fill=(220, 35, 55, 255),
+            outline=border_color,
+            width=border_width
+        )
+        text_x = badge_x0 + (badge_w - (badge_bbox[2] - badge_bbox[0])) // 2
+        text_y = badge_y0 + (badge_h - (badge_bbox[3] - badge_bbox[1])) // 2 - 2
+        draw.text((text_x, text_y), b_text, font=badge_font, fill=(255, 255, 255, 255))
+
+    # Vẽ các dòng text chính
+    cur_y = card_y0 + top_padding
+    for line in lines:
+        l_bbox = draw.textbbox((0, 0), line, font=main_font)
+        l_w = l_bbox[2] - l_bbox[0]
+        l_x = card_x0 + (card_width - l_w) // 2
+        draw.text((l_x, cur_y), line, font=main_font, fill=(255, 255, 255, 255))
+        cur_y += line_height
+
+    img.save(output_png)
+    return output_png
+
+
 def burn_script_to_video(
     video_path: str | Path,
     audio_path: str | Path,
     srt_path: str | Path,
-    output_path: str | Path
+    output_path: str | Path,
+    hook_card_text: Optional[str] = None,
+    hook_card_bg_color: str = "#A52A3A",
+    hook_card_show_badge: bool = False,
+    hook_card_badge_text: str = "",
+    hook_card_duration: float = 4.5
 ) -> str:
     """
-    Lồng tiếng CapCut và dập phụ đề SRT vào video nền bằng FFmpeg.
-    ĐẢM BẢO thời lượng video xuất ra khớp chuẩn xác với thời lượng video gốc
-    (Audio ngắn hơn sẽ được pad im lặng, audio dài hơn sẽ được trim, không dùng -shortest làm mất video).
+    Lồng tiếng CapCut, dập phụ đề SRT và (tùy chọn) dập Text Hook Drama Card vào video nền bằng FFmpeg.
+    - hook_card_text: Chuỗi text hook hiển thị ở 4-5 giây đầu (nếu có).
+    - hook_card_bg_color: Mã màu HEX cho nền thẻ (mặc định #A52A3A).
+    - hook_card_show_badge: Bật/tắt huy hiệu (mặc định False: không có chữ NEWS).
     """
     out_file = Path(output_path)
     out_file.parent.mkdir(parents=True, exist_ok=True)
@@ -674,11 +855,11 @@ def burn_script_to_video(
     source_duration = get_media_duration(clean_video)
     logger.info(f"Thời lượng video gốc: {source_duration:.2f}s")
 
-    # Chuẩn hóa đường dẫn srt cho FFmpeg Windows (thay \ bằng / và escape dấu :)
+    # Chuẩn hóa đường dẫn srt cho FFmpeg Windows (thay \ bằng / và escape dấu : và ')
     clean_srt = str(Path(srt_path).resolve()).replace("\\", "/")
-    if ":" in clean_srt:
-        drive, rest = clean_srt.split(":", 1)
-        clean_srt = f"{drive}\\:{rest}"
+    if len(clean_srt) > 1 and clean_srt[1] == ":":
+        clean_srt = clean_srt[0] + "\\:" + clean_srt[2:]
+    clean_srt = clean_srt.replace("'", "\\'")
 
     # Font chữ to, viền đen nổi bật chuẩn TikTok/Reels
     subtitle_filter = (
@@ -686,35 +867,112 @@ def burn_script_to_video(
         f"OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=35'"
     )
 
-    # 2. Xử lý audio filter: pad silence nếu audio ngắn hơn, trim nếu audio dài hơn
-    if source_duration > 0:
-        filter_complex = (
-            f"[0:v]{subtitle_filter}[v];"
-            f"[1:a]apad=whole_dur={source_duration},atrim=0:{source_duration}[a]"
+    # 2. Xử lý hook card nếu có
+    temp_card_path = None
+    if hook_card_text and hook_card_text.strip():
+        temp_card_path = out_file.parent / f"temp_hook_{out_file.stem}_{uuid.uuid4().hex[:6]}.png"
+        create_news_hook_card(
+            text=hook_card_text.strip(),
+            badge_text=hook_card_badge_text,
+            show_badge=hook_card_show_badge,
+            output_png=str(temp_card_path),
+            bg_color=hook_card_bg_color
         )
-        duration_args = ["-t", str(round(source_duration, 3))]
-    else:
-        filter_complex = f"[0:v]{subtitle_filter}[v]"
-        duration_args = []
 
-    cmd = [
+    # 3. Xử lý filter complex
+    audio_clause = f"[1:a]apad=whole_dur={source_duration},atrim=0:{source_duration}[a]" if source_duration > 0 else ""
+    duration_args = ["-t", str(round(source_duration, 3))] if source_duration > 0 else []
+
+    extra_inputs = []
+    if temp_card_path and temp_card_path.exists():
+        extra_inputs = ["-i", str(temp_card_path)]
+        overlay_dur = min(hook_card_duration or 4.5, source_duration if source_duration > 0 else 999.0)
+        video_clause = (
+            f"[0:v]{subtitle_filter}[subbed];"
+            f"[subbed][2:v]overlay=x=(W-w)/2:y=(H*0.52)-(h/2):enable='between(t,0,{overlay_dur})'[v]"
+        )
+    else:
+        video_clause = f"[0:v]{subtitle_filter}[v]"
+
+    if audio_clause:
+        filter_complex = f"{video_clause};{audio_clause}"
+    else:
+        filter_complex = video_clause
+
+    # Danh sách các bộ mã hóa theo thứ tự ưu tiên:
+    # 1. NVIDIA GPU Hardware (h264_nvenc) — siêu tốc ~10-20x real-time
+    # 2. Windows MediaFoundation Hardware (h264_mf)
+    # 3. CPU Fallback (libx264 veryfast)
+    encoders_to_try = [
+        ["h264_nvenc", "-preset", "p4", "-tune", "hq", "-b:v", "8000k", "-spatial-aq", "1", "-pix_fmt", "yuv420p"],
+        ["h264_nvenc", "-preset", "fast", "-b:v", "8000k", "-pix_fmt", "yuv420p"],
+        ["h264_mf", "-b:v", "8000k", "-pix_fmt", "yuv420p"],
+        ["libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p"],
+    ]
+
+    base_cmd = [
         "ffmpeg", "-y",
+        "-threads", "4",
+        "-filter_threads", "2",
         "-i", clean_video,
         "-i", clean_audio,
+    ] + extra_inputs + [
         "-filter_complex", filter_complex,
         "-map", "[v]",
         "-map", "[a]" if source_duration > 0 else "1:a",
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "22",
+    ]
+
+    end_args = [
         "-c:a", "aac",
         "-b:a", "192k",
+        "-movflags", "+faststart",
     ] + duration_args + [str(out_file)]
 
-    logger.info(f"Đang chạy FFmpeg: {' '.join(cmd)}")
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if proc.returncode != 0:
-        logger.error(f"FFmpeg error: {proc.stderr}")
-        raise RuntimeError(f"Lỗi khi render video: {proc.stderr[-300:]}")
+    ffmpeg_timeout = max(180, int((source_duration or 60) * 3))
+    render_success = False
+    last_error = ""
+
+    try:
+        for enc_args in encoders_to_try:
+            enc_name = enc_args[0]
+            cmd = base_cmd + ["-c:v", enc_name] + enc_args[1:] + end_args
+            logger.info(f"Đang thử render video bằng encoder '{enc_name}' (timeout={ffmpeg_timeout}s)...")
+            try:
+                t0 = time.monotonic()
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=ffmpeg_timeout
+                )
+                elapsed = time.monotonic() - t0
+                if proc.returncode == 0:
+                    speed_x = (source_duration / max(elapsed, 0.01)) if source_duration > 0 else 0
+                    logger.info(f"🎉 Render video thành công bằng '{enc_name}' trong {elapsed:.1f}s (tốc độ: {speed_x:.1f}x)!")
+                    render_success = True
+                    break
+                else:
+                    err_msg = proc.stderr[-300:] if proc.stderr else "Không rõ lỗi"
+                    last_error = err_msg
+                    logger.warning(f"Encoder '{enc_name}' không thành công (code {proc.returncode}): {err_msg}. Đang thử encoder tiếp theo...")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Encoder '{enc_name}' timeout sau {ffmpeg_timeout}s. Đang chuyển sang encoder khác...")
+                last_error = f"Timeout sau {ffmpeg_timeout}s"
+                continue
+            except Exception as ex:
+                logger.warning(f"Lỗi khởi chạy encoder '{enc_name}': {ex}")
+                last_error = str(ex)
+                continue
+
+        if not render_success:
+            logger.error(f"Tất cả các encoder đều thất bại. Lỗi cuối: {last_error}")
+            raise RuntimeError(f"Lỗi khi render video (đã thử cả GPU NVENC và CPU): {last_error}")
+    finally:
+        if temp_card_path and temp_card_path.exists():
+            try:
+                temp_card_path.unlink()
+            except Exception:
+                pass
 
     return str(out_file)

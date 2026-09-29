@@ -9,6 +9,7 @@ if isinstance(sys.stderr, io.TextIOWrapper):
     try: sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     except Exception: pass
 
+import re
 import srt
 from datetime import timedelta
 import threading
@@ -309,15 +310,29 @@ def get_or_load_whisper_model(model_name: str, num_workers: int = 1):
         return model
 
 
+KNOWN_ASR_HALLUCINATIONS = (
+    "请不吝点赞",
+    "订阅 转发",
+    "打赏支持",
+    "明镜与点点",
+    "欢迎订阅",
+    "感谢观看",
+    "点赞关注",
+    "频道会员",
+)
+
+
+def _is_asr_hallucination(text: str) -> bool:
+    clean = re.sub(r"\s+", "", text)
+    return any(re.sub(r"\s+", "", phrase) in clean for phrase in KNOWN_ASR_HALLUCINATIONS)
+
+
 def _extract_subtitles_faster_whisper(
     audio_path, output_srt_path, num_workers=2, model_name="large-v3", group_speech_windows=False,
     initial_prompt=None, keep_loaded=None
 ):
     print("Transcribing {} with Faster-Whisper {}...".format(audio_path, model_name))
     model = get_or_load_whisper_model(model_name=model_name, num_workers=num_workers)
-
-    if initial_prompt is None:
-        initial_prompt = "这是一段带有标点符号的中文视频，包含逗号，句号！"
 
     try:
         segments, info = model.transcribe(
@@ -337,6 +352,12 @@ def _extract_subtitles_faster_whisper(
         for segment in segments:
             text = segment.text.strip()
             if not text:
+                continue
+            # Drop pure punctuation / non-speech noise hallucinated by Whisper
+            if not any(c.isalnum() or '\u4e00' <= c <= '\u9fff' for c in text):
+                continue
+            if _is_asr_hallucination(text):
+                logger.warning("ASR dropped known hallucination segment: %s", text)
                 continue
             start, end = _word_aligned_bounds(segment)
             transcribed_segments.append({"start": start, "end": end, "text": text})

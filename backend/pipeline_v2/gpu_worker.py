@@ -99,6 +99,7 @@ def _run_ocr(payload: Mapping[str, Any]) -> Dict[str, Any]:
             "main_y_pct": main_y_pct,
             "block_count": block_count,
             "sampling_metrics": sampling_metrics,
+            "gap_detections": sampling_metrics.get("gap_detections", []),
         }
     finally:
         release_ocr_reader()

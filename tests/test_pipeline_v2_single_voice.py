@@ -68,7 +68,7 @@ class SingleVoiceTests(unittest.IsolatedAsyncioTestCase):
             infos = []
             for index, gender in ((1, "male"), (2, "female")):
                 key = "tts/{}.mp3".format(index)
-                runner.artifact_store.put_bytes(key, b"tts")
+                runner.artifact_store.put_bytes(key, b"tts" * 200)
                 infos.append({"index": index, "gender": gender, "artifact_key": key})
             runner.artifact_store.put_json("tts/segments.json", {"segments": infos})
             converted = []

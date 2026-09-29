@@ -56,6 +56,12 @@ class ArtifactStore:
             raise ValueError("Artifact key must identify a file")
         return candidate
 
+    def exists(self, key: str) -> bool:
+        try:
+            return self.path_for(key).is_file()
+        except ValueError:
+            return False
+
     def staging_path(self, key: str) -> Path:
         destination = self.path_for(key)
         destination.parent.mkdir(parents=True, exist_ok=True)

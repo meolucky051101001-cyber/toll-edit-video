@@ -56,20 +56,26 @@ def build_v2_completion_caption(
     output_directory: str,
     elapsed_seconds: float,
     remaining_jobs: int,
+    saved_file_path: str = "",
 ) -> str:
     queue_status = (
         "\n⏳ Phía sau còn {} video đang chờ xử lý...".format(remaining_jobs)
         if remaining_jobs > 0
         else "\n🎉 Đã hoàn tất toàn bộ hàng đợi!"
     )
+    dest_str = (
+        str(Path(saved_file_path).resolve())
+        if saved_file_path
+        else str(Path(output_directory).resolve())
+    )
     return (
         "✅ *Video đã lồng tiếng Tiếng Việt (Pipeline v2 - Âm thanh Studio)!*\n\n"
         "🎬 Video: `{}`\n"
-        "💾 Đã tự động lưu vào máy: `{}`\n"
+        "💾 Đã tự động lưu trực tiếp vào máy: `{}`\n"
         "⏱️ Thời gian xử lý: {}{}"
     ).format(
         title,
-        str(Path(output_directory).resolve()),
+        dest_str,
         format_elapsed_time(elapsed_seconds),
         queue_status,
     )

@@ -10,7 +10,8 @@ import re
 import subprocess
 import sys
 import time
-from fastapi import FastAPI, Form, HTTPException, Body
+from typing import Optional, Dict, Any, List
+from fastapi import FastAPI, Form, HTTPException, Body, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from environment import read_environment
 
@@ -26,6 +27,19 @@ def _resolve_queue_db() -> Path:
     return WORKSPACE / "queue_v2.sqlite3"
 
 INPUT = Path(ENV.get("AUTODUB_INPUT_DIR", r"D:\video phôi"))
+
+def get_input_dir() -> Path:
+    cfg = WORKSPACE / "dashboard_input.json"
+    if cfg.is_file():
+        try:
+            d = json.loads(cfg.read_text(encoding="utf-8"))
+            p = Path(d.get("path", "")).resolve()
+            if p.is_dir():
+                return p
+        except Exception:
+            pass
+    return INPUT
+
 _env_output = Path(ENV.get("AUTODUB_OUTPUT_DIR", r"D:\video tool v2")).resolve()
 if not _env_output.is_dir():
     _env_output.mkdir(parents=True, exist_ok=True)
@@ -280,7 +294,9 @@ def read_status():
         for item in UI_STEPS
     ]
 
-    result = {"stages": stage_list, "ui_steps": ui_step_list, "percent": 0, "video_name": "", "elapsed_seconds": 0,
+    result = {"stages": stage_list, "ui_steps": ui_step_list, "step_durations": {},
+              "translation_models": ["gemini-3.8-flash", "gemini-3.5-flash-lite"],
+              "percent": 0, "video_name": "", "elapsed_seconds": 0,
               "eta_seconds": None,
               "message": "Chưa có tác vụ nào đang chạy.",
               "status": "stopped" if paused else ("running" if batch_alive else "idle"),
@@ -288,6 +304,11 @@ def read_status():
               "batch_running": batch_alive,
               "active": batch_alive,
               "queue_count": q_count,
+              "queue_index": 0,
+              "queue_total": 0,
+              "pause_state": "paused" if (WORKSPACE / "control" / "video.pause").is_file() else "running",
+              "video_status": "idle",
+              "last_completed": None,
               "step": 0,
               "step_name": "Sẵn sàng xử lý video"}
     if paused:
@@ -314,32 +335,33 @@ def read_status():
                     if "Bước 1/4" in line:
                         result["step"] = 1
                         result["percent"] = 25
-                        result["step_name"] = "Bước 1/4: Đang trích xuất & tách âm thanh (BS-RoFormer GPU)..."
+                        result["step_name"] = "Bước 1: Đang trích xuất & tách âm thanh (BS-RoFormer GPU)..."
                         result["message"] = result["step_name"]
                         break
                     elif "Bước 2/4" in line:
-                        result["step"] = 2
-                        result["percent"] = 50
-                        result["step_name"] = "Bước 2/4: Nhận diện giọng nói & Dịch thuật AI (Whisper + Gemini)..."
+                        result["step"] = 4
+                        result["percent"] = 55
+                        result["step_name"] = "Bước 4: Nhận diện giọng nói & Dịch thuật AI (Whisper + Gemini)..."
                         result["message"] = result["step_name"]
                         break
                     elif "Bước 3/4" in line:
-                        result["step"] = 3
+                        result["step"] = 5
                         result["percent"] = 75
-                        result["step_name"] = "Bước 3/4: Lồng tiếng AI & Hòa âm trong trẻo..."
+                        result["step_name"] = "Bước 5: Lồng tiếng AI & Hòa âm trong trẻo..."
                         result["message"] = result["step_name"]
                         break
                     elif "Bước 4/4" in line:
-                        result["step"] = 4
+                        result["step"] = 6
                         result["percent"] = 90
-                        result["step_name"] = "Bước 4/4: Đang Render video thành phẩm (NVENC GPU)..."
+                        result["step_name"] = "Bước 6: Đang Render video thành phẩm (NVENC GPU)..."
                         result["message"] = result["step_name"]
                         break
                     elif "Hoàn thành video" in line:
-                        result["step"] = 4
+                        result["step"] = 6
                         result["percent"] = 100
                         result["step_name"] = "Đã hoàn thành video"
                         result["message"] = line.strip()
+                        result["video_status"] = "completed"
                         break
             except Exception:
                 pass
@@ -422,13 +444,18 @@ def read_status():
     result["video_name"] = Path(data.get("metadata", {}).get("source_path", path.parent.parent.name)).name
     result["updated_at"] = data.get("updated_at", "")
     finished = sum(s["status"] in ("completed", "skipped") for s in result["stages"])
-    delivered = records.get("deliver", {}).get("status") == "completed"
     vname = result["video_name"]
-    has_output = (OUTPUT / f"Dubbed_{vname}").is_file() or (OUTPUT / f"Dubbed_{Path(vname).stem}.mp4").is_file()
-    if not delivered and has_output and records.get("render", {}).get("status") == "completed":
-        delivered = True
+    delivered = False
+    try:
+        from pipeline_v2.delivery_verification import verify_delivered_product
+        ver = verify_delivered_product(path, check_sha256=False, verify_media_streams=False)
+        delivered = ver.is_valid
+    except Exception:
+        delivered = False
     failed = [s["label"] for s in result["stages"] if s["status"] == "failed"]
     running = [s["label"] for s in result["stages"] if s["status"] == "running"]
+    if not delivered and records.get("deliver", {}).get("status") == "completed" and records.get("qc", {}).get("status") == "completed" and not failed:
+        delivered = True
     
     # Active if worker/batch/bot is alive and task not completed/failed/paused
     active = not paused and not delivered and not failed and (
@@ -493,6 +520,87 @@ def read_status():
     else:
         result["eta_seconds"] = None
 
+    # Tính toán thời gian thực tế từng bước (step_durations) cho quy trình 7 bước
+    step_durations = {}
+    stage_to_step = {
+        "1": ["extract_audio"],
+        "2": ["demucs"],
+        "3": ["transcribe"],
+        "3.5": ["ocr"],
+        "4": ["translate"],
+        "5": ["tts", "rvc"],
+        "6": ["render", "qc", "deliver"],
+    }
+    for sk_step, sub_keys in stage_to_step.items():
+        sub_durs = []
+        for sk in sub_keys:
+            st_data = records.get(sk, {})
+            st_s = st_data.get("started_at")
+            st_f = st_data.get("finished_at")
+            if st_s and st_f:
+                try:
+                    t0 = datetime.fromisoformat(st_s.replace("Z", "+00:00"))
+                    t1 = datetime.fromisoformat(st_f.replace("Z", "+00:00"))
+                    sub_durs.append(max(0.0, (t1 - t0).total_seconds()))
+                except Exception:
+                    pass
+            elif st_s and st_data.get("status") == "running":
+                try:
+                    t0 = datetime.fromisoformat(st_s.replace("Z", "+00:00"))
+                    sub_durs.append(max(0.0, (now - t0).total_seconds()))
+                except Exception:
+                    pass
+        if sub_durs:
+            step_durations[sk_step] = round(sum(sub_durs), 1)
+    result["step_durations"] = step_durations
+
+    if records.get("deliver", {}).get("status") in ("running", "completed") or records.get("render", {}).get("status") in ("running", "completed") or records.get("qc", {}).get("status") in ("running", "completed"):
+        result["step"] = 6
+    elif records.get("tts", {}).get("status") in ("running", "completed") or records.get("rvc", {}).get("status") in ("running", "completed") or records.get("subtitles", {}).get("status") in ("running", "completed"):
+        result["step"] = 5
+    elif records.get("translate", {}).get("status") in ("running", "completed") or records.get("timing", {}).get("status") in ("running", "completed"):
+        result["step"] = 4
+    elif records.get("ocr", {}).get("status") in ("running", "completed"):
+        result["step"] = 3.5
+    elif records.get("transcribe", {}).get("status") in ("running", "completed"):
+        result["step"] = 3
+    elif records.get("demucs", {}).get("status") in ("running", "completed"):
+        result["step"] = 2
+    elif records.get("extract_audio", {}).get("status") in ("running", "completed"):
+        result["step"] = 1
+
+    if delivered:
+        result["video_status"] = "completed"
+    elif failed:
+        result["video_status"] = "error"
+    elif active:
+        result["video_status"] = "running"
+    else:
+        result["video_status"] = "idle"
+
+    # Video hoàn thành gần nhất
+    try:
+        if OUTPUT.is_dir():
+            recent_outputs = sorted(
+                [f for f in OUTPUT.iterdir() if f.is_file() and f.suffix.lower() in MEDIA],
+                key=lambda f: f.stat().st_mtime,
+                reverse=True
+            )
+            if recent_outputs:
+                result["last_completed"] = {"video_name": recent_outputs[0].name}
+    except Exception:
+        pass
+
+    # Tổng hàng đợi và vị trí xử lý
+    try:
+        inp = get_input_dir()
+        phoi_count = len([f for f in inp.iterdir() if f.is_file() and f.suffix.lower() in MEDIA and not f.name.startswith("Dubbed_")]) if inp.is_dir() else 0
+        banve_count = len([f for f in OUTPUT.iterdir() if f.is_file() and f.suffix.lower() in MEDIA]) if OUTPUT.is_dir() else 0
+        result["queue_total"] = phoi_count + banve_count
+        result["queue_index"] = banve_count + (1 if active else 0)
+    except Exception:
+        pass
+
     return result
 
 @app.get("/api/status")
@@ -535,19 +643,30 @@ def listing(root):
 
             if is_input_folder:
                 stem = p.stem
-                has_dubbed = (
-                    f"Dubbed_{stem}.mp4" in output_files
-                    or f"Dubbed_{p.name}" in output_files
-                )
                 if p.name == active_video and is_active:
                     status_val = "running"
                     label = f"Đang chạy ({pct}%)"
-                elif has_dubbed:
-                    status_val = "completed"
-                    label = "Thành công"
                 else:
-                    status_val = "waiting"
-                    label = "Chờ xử lý"
+                    # Check if there is a verified job manifest for this input video
+                    is_verified = False
+                    try:
+                        from pipeline_v2.delivery_verification import verify_delivered_product
+                        possible_dirs = [WORKSPACE / f"batch_{stem}"]
+                        possible_dirs.extend(list(WORKSPACE.glob(f"batch_*_{stem}")))
+                        for j_dir in possible_dirs:
+                            if j_dir.is_dir() and (j_dir / "job_manifest.json").is_file():
+                                if verify_delivered_product(j_dir, expected_source_path=p, check_sha256=False, verify_media_streams=False).is_valid:
+                                    is_verified = True
+                                    break
+                    except Exception:
+                        is_verified = False
+
+                    if is_verified:
+                        status_val = "completed"
+                        label = "Thành công"
+                    else:
+                        status_val = "waiting"
+                        label = "Chờ xử lý"
             else:
                 status_val = "completed"
                 label = "Thành công"
@@ -563,11 +682,12 @@ def listing(root):
             })
     files.sort(key=lambda item: item["created"], reverse=True)
     return {"files": files, "total_count": len(files),
-            "total_size_mb": round(sum(f["size_mb"] for f in files), 2)}
+            "total_size_mb": round(sum(f["size_mb"] for f in files), 2),
+            "path": str(root)}
 
 @app.get("/api/phoi")
 async def inputs():
-    return await asyncio.to_thread(listing, INPUT)
+    return await asyncio.to_thread(listing, get_input_dir())
 
 @app.get("/api/banve")
 async def outputs():
@@ -593,7 +713,7 @@ async def logs():
 def folder(key):
     if key not in {"phoi", "banve"}:
         raise HTTPException(400, "Thư mục không hợp lệ")
-    return INPUT if key == "phoi" else OUTPUT
+    return get_input_dir() if key == "phoi" else OUTPUT
 
 @app.post("/api/open-folder")
 async def open_folder(folder: str = Form(...)):
@@ -621,32 +741,17 @@ async def api_run_batch():
             content={"status": "busy", "message": "Tiến trình xử lý video đang chạy, vui lòng đợi!"}
         )
 
-    # Tự động di chuyển các video đã có thành phẩm sang thư mục processed để không xử lý lại
-    processed_dir = INPUT / "processed"
-    processed_dir.mkdir(parents=True, exist_ok=True)
-    output_files = set(f.name for f in OUTPUT.iterdir() if f.is_file()) if OUTPUT.is_dir() else set()
-    for vf in [f for f in INPUT.glob("*") if f.is_file() and f.suffix.lower() in MEDIA and not f.name.startswith("Dubbed_")]:
-        stem = vf.stem
-        if f"Dubbed_{stem}.mp4" in output_files or f"Dubbed_{vf.name}" in output_files:
-            try:
-                dest = processed_dir / vf.name
-                if dest.exists():
-                    dest = processed_dir / f"{stem}_{int(time.time())}{vf.suffix}"
-                import shutil
-                shutil.move(str(vf), str(dest))
-            except Exception:
-                pass
-
+    current_input = get_input_dir()
     # Kiểm tra thư mục đầu vào có file video cần xử lý không
     video_files = [
-        f for f in INPUT.glob("*")
+        f for f in current_input.glob("*")
         if f.suffix.lower() in MEDIA and not f.name.startswith("Dubbed_") and f.is_file()
-    ] if INPUT.is_dir() else []
+    ] if current_input.is_dir() else []
 
     if not video_files:
         return JSONResponse(
             status_code=200,
-            content={"status": "completed", "message": f"Toàn bộ video trong thư mục {INPUT} đều đã được hoàn thành và chuyển sang processed!"}
+            content={"status": "completed", "message": f"Toàn bộ video trong thư mục {current_input} đều đã được hoàn thành và chuyển sang processed!"}
         )
 
     python_exe = ROOT / "venv" / "Scripts" / "python.exe"
@@ -656,9 +761,12 @@ async def api_run_batch():
     script = ROOT / "batch_processor.py"
     logs_dir = WORKSPACE / "service_logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
-    log_file = logs_dir / "batch_processor.log"
-
+    from voice_selection import is_dual_voice_enabled
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
+    if is_dual_voice_enabled():
+        env["ENABLE_AUTO_GENDER"] = "true"
+    else:
+        env["ENABLE_AUTO_GENDER"] = "false"
     try:
         log_fp = open(log_file, "ab")
         BATCH_PROCESS = subprocess.Popen(
@@ -666,7 +774,7 @@ async def api_run_batch():
                 str(python_exe),
                 "-u",
                 str(script),
-                "--input", str(INPUT),
+                "--input", str(current_input),
                 "--output", str(OUTPUT),
             ],
             cwd=str(ROOT),
@@ -769,6 +877,129 @@ async def api_stop_batch():
             content={"status": "idle", "message": "Không có tiến trình xử lý nào đang chạy."}
         )
 
+@app.get("/api/preflight")
+async def api_preflight():
+    from preflight_checker import run_full_preflight
+    return await asyncio.to_thread(
+        run_full_preflight,
+        tool="v2",
+        input_dir=get_input_dir(),
+        output_dir=OUTPUT,
+        workspace_dir=WORKSPACE,
+        backend_dir=ROOT,
+    )
+
+@app.get("/api/task-history")
+async def api_task_history():
+    from history_service import get_task_history
+    return await asyncio.to_thread(
+        get_task_history,
+        tool_name="v2",
+        output_dir=OUTPUT,
+        workspace_dir=WORKSPACE,
+    )
+
+@app.get("/api/qc-report")
+async def api_qc_report(target: Optional[str] = None):
+    from qc_service import get_qc_report
+    report = await asyncio.to_thread(get_qc_report, WORKSPACE, target)
+    if not report:
+        raise HTTPException(status_code=404, detail="Không tìm thấy báo cáo QC Gate nào.")
+    return report
+
+@app.get("/api/qc-reports")
+async def api_qc_reports():
+    from qc_service import list_qc_reports
+    return await asyncio.to_thread(list_qc_reports, WORKSPACE)
+
+@app.post("/api/retry-video")
+async def api_retry_video(request: Request):
+    global BATCH_PROCESS
+    if is_v2_paused():
+        return JSONResponse(
+            status_code=409,
+            content={"status": "paused", "message": "Tool V2 đang TẮT. Vui lòng bật lại ở Bảng Điều Khiển (Port 8090) trước khi chạy."}
+        )
+    if is_v2_batch_running():
+        return JSONResponse(
+            status_code=409,
+            content={"status": "busy", "message": "Tiến trình xử lý video đang chạy, vui lòng đợi!"}
+        )
+
+    filename = ""
+    try:
+        data = await request.json()
+        filename = data.get("filename", "").strip()
+    except Exception:
+        pass
+    if not filename:
+        try:
+            form = await request.form()
+            filename = form.get("filename", "").strip()
+        except Exception:
+            pass
+
+    if not filename:
+        raise HTTPException(status_code=400, detail="Thiếu tên video cần chạy lại (filename).")
+
+    current_input = get_input_dir()
+    video_path = current_input / filename
+    
+    if not video_path.is_file():
+        processed_file = current_input / "processed" / filename
+        if processed_file.is_file():
+            try:
+                import shutil
+                shutil.copy2(processed_file, video_path)
+            except Exception:
+                video_path = processed_file
+        else:
+            raise HTTPException(status_code=404, detail=f"Không tìm thấy file video {filename} trong thư mục phôi.")
+
+    python_exe = ROOT / "venv" / "Scripts" / "python.exe"
+    if not python_exe.exists():
+        python_exe = Path(sys.executable)
+
+    script = ROOT / "batch_processor.py"
+    logs_dir = WORKSPACE / "service_logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    log_file = logs_dir / "batch_processor.log"
+
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
+    try:
+        log_fp = open(log_file, "ab")
+        BATCH_PROCESS = subprocess.Popen(
+            [
+                str(python_exe),
+                "-u",
+                str(script),
+                "--video", str(video_path),
+                "--output", str(OUTPUT),
+            ],
+            cwd=str(ROOT),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fp,
+            stderr=subprocess.STDOUT,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        log_fp.close()
+        try:
+            batch_ctrl = WORKSPACE / "control" / "batch.json"
+            batch_ctrl.parent.mkdir(parents=True, exist_ok=True)
+            batch_ctrl.write_text(json.dumps({"pid": BATCH_PROCESS.pid, "video": filename, "at": time.time()}), encoding="utf-8")
+        except Exception:
+            pass
+        return JSONResponse(
+            status_code=200,
+            content={"status": "started", "video": filename, "message": f"Đã bắt đầu xử lý lại video '{filename}'!"}
+        )
+    except Exception as e:
+        logger_name = globals().get("logger")
+        if logger_name:
+            logger_name.error(f"Lỗi khởi động retry video: {e}")
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
 @app.get("/api/stream/{key}/{filename}")
 async def stream(key: str, filename: str):
     root = folder(key).resolve()
@@ -776,6 +1007,109 @@ async def stream(key: str, filename: str):
     if target.parent != root or target.suffix.lower() not in MEDIA or not target.is_file():
         raise HTTPException(404, "Video không tồn tại")
     return FileResponse(target)
+
+FOLDER_PICKER_LOCK = asyncio.Lock()
+BATCH_INPUT_LOCK = asyncio.Lock()
+
+def _check_input_request(request: Request):
+    if request.headers.get("X-Dashboard-Input") != "1" or request.headers.get("origin") not in (None, "http://127.0.0.1:8089", "http://localhost:8089", "http://127.0.0.1:8088", "http://localhost:8088"):
+        raise HTTPException(403, "Yêu cầu không hợp lệ")
+    if is_v2_batch_running():
+        raise HTTPException(409, "Chờ video đang xử lý hoàn tất trước khi đổi nguồn hoặc thêm video.")
+
+@app.post("/api/choose-input-folder")
+async def api_choose_input_folder(request: Request):
+    _check_input_request(request)
+    if FOLDER_PICKER_LOCK.locked():
+        raise HTTPException(409, "Hộp chọn thư mục đang mở. Hãy chọn hoặc bấm Hủy trong cửa sổ đó.")
+    async with FOLDER_PICKER_LOCK:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, str(ROOT / "choose_video_folder.py"), str(get_input_dir()),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
+            if process.returncode:
+                raise HTTPException(503, "Không mở được hộp chọn thư mục Windows. Hãy kiểm tra phiên desktop đang đăng nhập.")
+            return json.loads(stdout.decode("utf-8"))
+        except asyncio.TimeoutError:
+            raise HTTPException(408, "Hết thời gian chọn thư mục. Bấm Chọn thư mục để thử lại.")
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.communicate()
+
+@app.post("/api/input-folder")
+async def api_input_folder(request: Request):
+    async with BATCH_INPUT_LOCK:
+        _check_input_request(request)
+        data = await request.json()
+        value = data.get("path", "") if isinstance(data, dict) else ""
+        if not isinstance(value, str) or not value.strip():
+            raise HTTPException(400, "Nhập đường dẫn thư mục video.")
+        path = Path(value.strip().strip('"'))
+        if not path.is_absolute() or not path.is_dir():
+            raise HTTPException(400, "Thư mục không tồn tại. Hãy nhập đường dẫn đầy đủ.")
+        path = path.resolve()
+        if path == OUTPUT.resolve():
+            raise HTTPException(400, "Hãy chọn thư mục nguồn khác thư mục video hoàn thành.")
+        dest = WORKSPACE / "dashboard_input.json"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"path": str(path)}), encoding="utf-8")
+        os.replace(tmp, dest)
+        return {"path": str(path)}
+
+@app.post("/api/input-video")
+async def api_input_video(request: Request):
+    from urllib.parse import unquote
+    import uuid
+    async with BATCH_INPUT_LOCK:
+        _check_input_request(request)
+        name = unquote(request.headers.get("X-Video-Name", ""))
+        if not name or Path(name).name != name or any(c in name for c in '/\\:') or Path(name).suffix.lower() not in MEDIA:
+            raise HTTPException(400, "Chỉ nhận file video MP4, MKV, MOV, AVI, WEBM, FLV, M4V.")
+        if name.startswith("Dubbed_"):
+            name = "Source_" + name
+        root = get_input_dir().resolve()
+        if not root.is_dir():
+            raise HTTPException(400, "Thư mục nguồn không còn tồn tại. Hãy chọn lại.")
+        tmp = root / (".upload-" + uuid.uuid4().hex + ".part")
+        target = root / name
+        total = 0
+        try:
+            with tmp.open("xb") as out:
+                async for chunk in request.stream():
+                    total += len(chunk)
+                    if total > 4 * 1024**3:
+                        raise HTTPException(413, "Mỗi video tối đa 4 GB.")
+                    await asyncio.to_thread(out.write, chunk)
+            if not total:
+                raise HTTPException(400, "File video rỗng.")
+            if target.exists():
+                target = root / (Path(name).stem + "_" + uuid.uuid4().hex[:8] + Path(name).suffix)
+            tmp.rename(target)
+            return {"name": target.name, "size": total}
+        finally:
+            tmp.unlink(missing_ok=True)
+
+@app.post("/api/pause-video")
+async def api_pause_video(request: Request):
+    ctrl = WORKSPACE / "control"
+    ctrl.mkdir(parents=True, exist_ok=True)
+    flag = ctrl / "video.pause"
+    import uuid
+    if not flag.exists():
+        flag.write_text(uuid.uuid4().hex, encoding="utf-8")
+    return {"message": "Sẽ tạm dừng sau bước đang chạy."}
+
+@app.post("/api/resume-video")
+async def api_resume_video(request: Request):
+    ctrl = WORKSPACE / "control"
+    (ctrl / "video.pause").unlink(missing_ok=True)
+    (ctrl / "video.pause.ack").unlink(missing_ok=True)
+    return {"message": "Đã tiếp tục xử lý video."}
+
 
 from audio_settings import get_audio_settings, save_audio_settings
 
@@ -787,7 +1121,131 @@ async def api_get_audio_settings():
 async def api_save_audio_settings(payload: dict = Body(...)):
     bgm = payload.get("bgm_volume_db", -2.0)
     dub = payload.get("dubbing_volume_db", 1.0)
-    return save_audio_settings(bgm, dub)
+    sep = payload.get("separation_mode")
+    duck = payload.get("ducking_mode")
+    return save_audio_settings(bgm, dub, separation_mode=sep, ducking_mode=duck)
+
+
+import voice_selection
+
+@app.get("/api/voice-auto")
+async def api_get_voice_auto():
+    """Lấy trạng thái và cấu hình chế độ tự động nhận diện giọng nói & Dual Voice (Tool V2)."""
+    cfg = voice_selection.get_auto_voice_config()
+    catalog = voice_selection.catalog()
+    manual_voice = voice_selection.selected()
+
+    female_voice = next((v for v in catalog if v.get("id") == cfg["female_voice_id"]), None)
+    male_voice = next((v for v in catalog if v.get("id") == cfg["male_voice_id"]), None)
+
+    return {
+        "enabled": cfg["enabled"],
+        "mode": "auto" if cfg["enabled"] else "manual",
+        "dual_voice": bool(cfg.get("dual_voice", False)),  # LUÔN TẮT MẶC ĐỊNH
+        "female_voice_id": cfg["female_voice_id"],
+        "male_voice_id": cfg["male_voice_id"],
+        "female_voice_label": female_voice["label"] if female_voice else cfg["female_voice_id"],
+        "male_voice_label": male_voice["label"] if male_voice else cfg["male_voice_id"],
+        "manual_voice": manual_voice,
+        "voices": catalog,
+    }
+
+
+@app.post("/api/voice-auto")
+async def api_set_voice_auto(payload: dict = Body(...)):
+    """Bật / Tắt và cấu hình giọng tự động nhận diện giọng nói & Dual Voice (Tool V2)."""
+    current_cfg = voice_selection.get_auto_voice_config()
+    catalog = voice_selection.catalog()
+    valid_voice_ids = {v["id"] for v in catalog}
+
+    def _parse_bool_val(val, default):
+        if val is None:
+            return default
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, (int, float)):
+            return bool(val)
+        s = str(val).strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off"):
+            return False
+        return default
+
+    target_enabled = _parse_bool_val(payload.get("enabled"), current_cfg["enabled"]) if "enabled" in payload else current_cfg["enabled"]
+    target_dual = _parse_bool_val(payload.get("dual_voice"), current_cfg.get("dual_voice", False)) if "dual_voice" in payload else current_cfg.get("dual_voice", False)
+
+    raw_female = payload.get("female_voice_id") if "female_voice_id" in payload else payload.get("female_voice")
+    raw_male = payload.get("male_voice_id") if "male_voice_id" in payload else payload.get("male_voice")
+
+    target_female_id = current_cfg["female_voice_id"]
+    if raw_female is not None:
+        raw_f_str = str(raw_female).strip()
+        matched_f = next((v for v in catalog if v.get("id") == raw_f_str or v.get("param") == raw_f_str), None)
+        if matched_f:
+            target_female_id = matched_f["id"]
+        elif raw_f_str in valid_voice_ids:
+            target_female_id = raw_f_str
+        else:
+            return {
+                "status": "error",
+                "message": f"Giọng nữ '{raw_female}' không hợp lệ hoặc không tồn tại trong danh mục.",
+                "enabled": current_cfg["enabled"],
+                "dual_voice": bool(current_cfg.get("dual_voice", False)),
+                "female_voice_id": current_cfg["female_voice_id"],
+                "male_voice_id": current_cfg["male_voice_id"],
+            }
+
+    target_male_id = current_cfg["male_voice_id"]
+    if raw_male is not None:
+        raw_m_str = str(raw_male).strip()
+        matched_m = next((v for v in catalog if v.get("id") == raw_m_str or v.get("param") == raw_m_str), None)
+        if matched_m:
+            target_male_id = matched_m["id"]
+        elif raw_m_str in valid_voice_ids:
+            target_male_id = raw_m_str
+        else:
+            return {
+                "status": "error",
+                "message": f"Giọng nam '{raw_male}' không hợp lệ hoặc không tồn tại trong danh mục.",
+                "enabled": current_cfg["enabled"],
+                "dual_voice": bool(current_cfg.get("dual_voice", False)),
+                "female_voice_id": current_cfg["female_voice_id"],
+                "male_voice_id": current_cfg["male_voice_id"],
+            }
+
+    cfg = voice_selection.set_auto_voice_config(
+        enabled=target_enabled,
+        female_voice_id=target_female_id,
+        male_voice_id=target_male_id,
+        dual_voice=target_dual,
+        updated_by="dashboard"
+    )
+
+    manual_voice = voice_selection.selected()
+    female_voice = next((v for v in catalog if v.get("id") == cfg["female_voice_id"]), None)
+    male_voice = next((v for v in catalog if v.get("id") == cfg["male_voice_id"]), None)
+
+    msg = "Đã cập nhật cấu hình giọng"
+    if "dual_voice" in payload and len(payload) == 1:
+        msg = "Đã BẬT phân vai Nam & Nữ trong cùng video" if target_dual else "Đã TẮT phân vai Nam/Nữ (Mặc định 1 giọng cả video)"
+    elif "enabled" in payload and len(payload) == 1:
+        msg = "Đã BẬT tự động nhận diện giọng đầu video" if target_enabled else "Đã TẮT tự động nhận diện (Dùng giọng thủ công)"
+
+    return {
+        "status": "ok",
+        "enabled": cfg["enabled"],
+        "mode": "auto" if cfg["enabled"] else "manual",
+        "dual_voice": bool(cfg.get("dual_voice", False)),
+        "female_voice_id": cfg["female_voice_id"],
+        "male_voice_id": cfg["male_voice_id"],
+        "female_voice_label": female_voice["label"] if female_voice else cfg["female_voice_id"],
+        "male_voice_label": male_voice["label"] if male_voice else cfg["male_voice_id"],
+        "manual_voice": manual_voice,
+        "voices": catalog,
+        "message": msg,
+    }
+
 
 def read_queue():
     paused = is_v2_paused()
@@ -817,8 +1275,10 @@ def read_queue():
                         name = f"Video #{r['id']}"
                     source = "Batch" if payload.get("type") == "local" else "Telegram"
                     items.append({
+                        "id": r["id"],
                         "position": idx,
                         "name": name,
+                        "url": payload.get("url") or "",
                         "source": source
                     })
             finally:
@@ -856,13 +1316,324 @@ async def api_get_queue():
     except Exception:
         raise HTTPException(503, "Không đọc được hàng đợi V2")
 
+
+@app.post("/api/queue/process")
+async def api_process_queue():
+    """Kích hoạt xử lý lại danh sách video đang đợi trong hàng chờ V2."""
+    queue_candidates = [
+        WORKSPACE / "telegram_queue.json",
+        Path(r"C:\tool v2\workspace\telegram_queue.json"),
+        Path(r"C:\tool v1\workspace\telegram_queue.json"),
+    ]
+    queue_file = None
+    for qc in queue_candidates:
+        if qc.is_file():
+            queue_file = qc
+            break
+
+    db_path = _resolve_queue_db()
+    has_db_items = False
+    if db_path.is_file():
+        try:
+            import sqlite3
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+            try:
+                count = conn.execute("SELECT COUNT(*) FROM jobs WHERE state = 'queued'").fetchone()[0]
+                if count > 0:
+                    has_db_items = True
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+    if not queue_file and not has_db_items:
+        return {"status": "empty", "message": "Không tìm thấy hàng chờ video hoặc hàng chờ đang trống."}
+
+    # 1. Gỡ cờ pause nếu Tool V2 đang bị tạm dừng
+    for pause_candidate in [WORKSPACE / "control" / "v2.pause", Path(r"C:\tool v2\workspace\control\v2.pause"), Path(r"C:\tool v1\workspace\control\v2.pause")]:
+        try:
+            pause_candidate.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    # 2. Ghi cờ kích hoạt telegram_queue_trigger.flag
+    for trigger_candidate in [WORKSPACE / "telegram_queue_trigger.flag", Path(r"C:\tool v2\workspace\telegram_queue_trigger.flag")]:
+        try:
+            trigger_candidate.parent.mkdir(parents=True, exist_ok=True)
+            trigger_candidate.write_text(str(time.time()), encoding="utf-8")
+        except Exception:
+            pass
+
+    # 3. Kiểm tra xem telegram_bot.py của v2 có đang chạy không
+    alive = False
+    import psutil
+    for p in psutil.process_iter(['pid', 'cmdline']):
+        try:
+            cmdline = p.info.get('cmdline') or []
+            if any('telegram_bot.py' in str(arg) for arg in cmdline) and any(('tool v2' in str(arg) or 'v2' in str(arg).lower()) for arg in cmdline):
+                alive = True
+                break
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    if not alive:
+        python = ROOT / "venv" / "Scripts" / "python.exe"
+        if not python.exists():
+            python = Path(sys.executable)
+        import subprocess
+        bg_service = ROOT / "background_service.py"
+        if bg_service.exists():
+            subprocess.Popen(
+                [str(python), str(bg_service), "--service", "telegram"],
+                cwd=str(ROOT),
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            return {
+                "status": "started",
+                "message": "Đã khởi động Bot V2 và kích hoạt xử lý hàng chờ!"
+            }
+
+    return {
+        "status": "processing",
+        "message": "Đã gửi lệnh xử lý video trong hàng chờ V2!"
+    }
+
+
+@app.post("/api/queue/clear")
+async def api_clear_queue():
+    """Xóa sạch hàng chờ V2."""
+    for clear_flag in [WORKSPACE / "telegram_queue_clear.flag", Path(r"C:\tool v2\workspace\telegram_queue_clear.flag")]:
+        try:
+            clear_flag.parent.mkdir(parents=True, exist_ok=True)
+            clear_flag.write_text(str(time.time()), encoding="utf-8")
+        except Exception:
+            pass
+    for q_file in [WORKSPACE / "telegram_queue.json", Path(r"C:\tool v2\workspace\telegram_queue.json")]:
+        try:
+            if q_file.is_file():
+                q_file.write_text(json.dumps({"items": [], "updated_at": time.time()}), encoding="utf-8")
+        except Exception:
+            pass
+    return {"status": "cleared", "message": "Đã xóa toàn bộ hàng chờ V2."}
+
+
+@app.post("/api/queue/move")
+async def api_move_queue_item(request: Request):
+    """Thay đổi thứ tự ưu tiên của video trong hàng chờ V2 (đẩy lên / xuống / lên đầu)."""
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Dữ liệu JSON không hợp lệ")
+
+    index = payload.get("index")
+    action = payload.get("action", "up")  # 'up', 'down', 'top'
+
+    if index is None or not isinstance(index, int):
+        raise HTTPException(400, "Vị trí index không hợp lệ")
+
+    db_path = _resolve_queue_db()
+    if db_path.is_file():
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path, timeout=10)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT id, dedupe, payload, updated, error, source_fingerprint, checkpoint_stage, retry_count "
+                    "FROM jobs WHERE state = 'queued' ORDER BY id ASC"
+                ).fetchall()
+                n = len(rows)
+                if n <= 1 or index < 0 or index >= n:
+                    q_data = read_queue()
+                    return {"status": "unchanged", "items": q_data.get("items", []), "message": "Không thể thay đổi vị trí"}
+
+                row_list = [dict(r) for r in rows]
+                target_ids = [r["id"] for r in row_list]
+
+                moved_name = ""
+                try:
+                    p = json.loads(row_list[index]["payload"])
+                    moved_name = str(p.get("filename") or p.get("url") or "")
+                except Exception:
+                    pass
+                if not moved_name:
+                    moved_name = f"Video #{row_list[index]['id']}"
+                if len(moved_name) > 35:
+                    moved_name = moved_name[:35] + "..."
+
+                if action == "up" and index > 0:
+                    row_list[index - 1], row_list[index] = row_list[index], row_list[index - 1]
+                    msg = f"Đã đẩy video #{index + 1} lên vị trí #{index}!"
+                elif action == "top" and index > 0:
+                    target = row_list.pop(index)
+                    row_list.insert(0, target)
+                    msg = "Đã đưa video lên đầu hàng chờ (#1)!"
+                elif action == "down" and index < n - 1:
+                    row_list[index], row_list[index + 1] = row_list[index + 1], row_list[index]
+                    msg = f"Đã chuyển video #{index + 1} xuống vị trí #{index + 2}!"
+                else:
+                    q_data = read_queue()
+                    return {"status": "unchanged", "items": q_data.get("items", []), "message": "Vị trí đã ở giới hạn"}
+
+                with conn:
+                    now = time.time()
+                    for tid in target_ids:
+                        conn.execute(
+                            "UPDATE jobs SET dedupe = ? WHERE id = ?",
+                            (f"__reorder_tmp_{tid}_{now}", tid)
+                        )
+                    for new_data, tid in zip(row_list, target_ids):
+                        conn.execute(
+                            "UPDATE jobs SET dedupe = ?, payload = ?, source_fingerprint = ?, "
+                            "checkpoint_stage = ?, retry_count = ?, updated = ? WHERE id = ?",
+                            (
+                                new_data["dedupe"],
+                                new_data["payload"],
+                                new_data.get("source_fingerprint"),
+                                new_data.get("checkpoint_stage"),
+                                new_data.get("retry_count", 0),
+                                now,
+                                tid
+                            )
+                        )
+                q_data = read_queue()
+                return {"status": "success", "items": q_data.get("items", []), "message": msg}
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"Lỗi api_move_queue_item (SQLite): {e}", flush=True)
+            raise HTTPException(500, f"Lỗi di chuyển video V2: {str(e)}")
+
+    for q_candidate in [WORKSPACE / "telegram_queue.json", Path(r"C:\tool v2\workspace\telegram_queue.json")]:
+        if q_candidate.is_file():
+            try:
+                data = json.loads(q_candidate.read_text(encoding="utf-8"))
+                items = data.get("items", [])
+                n = len(items)
+                if n <= 1 or index < 0 or index >= n:
+                    return {"status": "unchanged", "items": items, "message": "Không thể thay đổi vị trí"}
+
+                if action == "up" and index > 0:
+                    items[index - 1], items[index] = items[index], items[index - 1]
+                    msg = f"Đã đẩy video #{index + 1} lên vị trí #{index}!"
+                elif action == "top" and index > 0:
+                    target = items.pop(index)
+                    items.insert(0, target)
+                    msg = "Đã đưa video lên đầu hàng chờ (#1)!"
+                elif action == "down" and index < n - 1:
+                    items[index], items[index + 1] = items[index + 1], items[index]
+                    msg = f"Đã chuyển video #{index + 1} xuống vị trí #{index + 2}!"
+                else:
+                    return {"status": "unchanged", "items": items, "message": "Vị trí đã ở giới hạn"}
+
+                for i, it in enumerate(items, 1):
+                    it["position"] = i
+                data["items"] = items
+                data["updated_at"] = time.time()
+                q_candidate.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                return {"status": "success", "items": items, "message": msg}
+            except Exception as e:
+                raise HTTPException(500, f"Lỗi di chuyển video JSON: {str(e)}")
+
+    return {"status": "unchanged", "items": [], "message": "Hàng chờ trống"}
+
+
+@app.post("/api/queue/delete")
+async def api_delete_queue_item(request: Request):
+    """Xóa một video khỏi hàng chờ V2 theo index."""
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Dữ liệu JSON không hợp lệ")
+
+    index = payload.get("index")
+    if index is None or not isinstance(index, int):
+        raise HTTPException(400, "Vị trí index không hợp lệ")
+
+    db_path = _resolve_queue_db()
+    if db_path.is_file():
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path, timeout=10)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT id, payload FROM jobs WHERE state = 'queued' ORDER BY id ASC"
+                ).fetchall()
+                n = len(rows)
+                if index < 0 or index >= n:
+                    q_data = read_queue()
+                    return {"status": "unchanged", "items": q_data.get("items", []), "message": "Không tìm thấy video cần xóa"}
+
+                target_row = rows[index]
+                target_id = target_row["id"]
+                removed_name = ""
+                try:
+                    p = json.loads(target_row["payload"])
+                    removed_name = str(p.get("filename") or p.get("url") or "")
+                except Exception:
+                    pass
+                if not removed_name:
+                    removed_name = f"Video #{target_id}"
+                if len(removed_name) > 35:
+                    removed_name = removed_name[:35] + "..."
+
+                with conn:
+                    conn.execute(
+                        "UPDATE jobs SET state = 'cancelled', error = 'deleted_by_user', updated = ? WHERE id = ?",
+                        (time.time(), target_id)
+                    )
+
+                q_data = read_queue()
+                return {
+                    "status": "success",
+                    "items": q_data.get("items", []),
+                    "message": f'Đã xóa video "{removed_name}" khỏi hàng chờ!'
+                }
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"Lỗi api_delete_queue_item (SQLite): {e}", flush=True)
+            raise HTTPException(500, f"Lỗi xóa video V2: {str(e)}")
+
+    for q_candidate in [WORKSPACE / "telegram_queue.json", Path(r"C:\tool v2\workspace\telegram_queue.json")]:
+        if q_candidate.is_file():
+            try:
+                data = json.loads(q_candidate.read_text(encoding="utf-8"))
+                items = data.get("items", [])
+                n = len(items)
+                if index < 0 or index >= n:
+                    return {"status": "unchanged", "items": items, "message": "Không tìm thấy video cần xóa"}
+                removed = items.pop(index)
+                removed_name = removed.get("name", "video")
+                if len(removed_name) > 35:
+                    removed_name = removed_name[:35] + "..."
+                for i, it in enumerate(items, 1):
+                    it["position"] = i
+                data["items"] = items
+                data["updated_at"] = time.time()
+                q_candidate.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                return {
+                    "status": "success",
+                    "items": items,
+                    "message": f'Đã xóa video "{removed_name}" khỏi hàng chờ!'
+                }
+            except Exception as e:
+                raise HTTPException(500, f"Lỗi xóa video JSON: {str(e)}")
+
+    return {"status": "unchanged", "items": [], "message": "Hàng chờ trống"}
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     page = TEMPLATE.read_text(encoding="utf-8")
+    input_dir = get_input_dir()
     # Replace paths separately in HTML and JavaScript so backslashes remain valid.
     head, script = page.split("<script>", 1)
-    head = head.replace(r"D:\video phôi", html.escape(str(INPUT))).replace(r"D:\video tool v2", html.escape(str(OUTPUT)))
-    script = script.replace(r"D:\\video phôi", str(INPUT).replace("\\", "\\\\")).replace(r"D:\\video tool v2", str(OUTPUT).replace("\\", "\\\\"))
+    head = head.replace(r"D:\video phôi", html.escape(str(input_dir))).replace(r"D:\video tool v2", html.escape(str(OUTPUT)))
+    script = script.replace(r"D:\\video phôi", str(input_dir).replace("\\", "\\\\")).replace(r"D:\\video tool v2", str(OUTPUT).replace("\\", "\\\\"))
     return head + "<script>" + script
 
 from workflow_api import router as workflow_router
@@ -874,6 +1645,36 @@ try:
     print("[Studio Kich Ban] script_router mounted successfully on V2.")
 except Exception as _se:
     print(f"[Studio Kich Ban] Failed to mount script_router on V2: {_se}")
+
+try:
+    from phase_a_routes import router as phase_a_router
+    app.include_router(phase_a_router)
+    print("[Phase A] phase_a_router mounted successfully on V2.")
+except Exception as _pe:
+    print(f"[Phase A] Failed to mount phase_a_router on V2: {_pe}")
+
+try:
+    from phase_b_routes import router as phase_b_router
+    app.include_router(phase_b_router)
+    print("[Phase B] phase_b_router mounted successfully on V2.")
+except Exception as _pbe:
+    print(f"[Phase B] Failed to mount phase_b_router on V2: {_pbe}")
+
+try:
+    from phase_c_routes import router as phase_c_router
+    app.include_router(phase_c_router)
+    print("[Phase C] phase_c_router mounted successfully on V2.")
+except Exception as _pce:
+    print(f"[Phase C] Failed to mount phase_c_router on V2: {_pce}")
+
+try:
+    from phase_d_routes import router as phase_d_router
+    app.include_router(phase_d_router)
+    print("[Phase D] phase_d_router mounted successfully on V2.")
+except Exception as _pde:
+    print(f"[Phase D] Failed to mount phase_d_router on V2: {_pde}")
+
+
 
 if __name__ == "__main__":
     import uvicorn

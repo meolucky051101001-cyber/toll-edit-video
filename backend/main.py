@@ -444,6 +444,14 @@ async def api_process_url(
         API_PROCESS_LOCK.release()
 
 
+try:
+    from script_api import router as script_router
+    app.include_router(script_router)
+except Exception as _se:
+    import logging
+    logging.getLogger(__name__).warning("Failed to mount script_router: %s", _se)
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)

@@ -716,17 +716,88 @@ class TestRealQCFailureDetections(unittest.TestCase):
     def test_watermark_collision_detected_and_cleared(self):
         from backend.pipeline_v2.cover_qc import check_watermark_collision
         # Canvas 1280x720 (Landscape 16:9). Watermark zone is X >= 1066.24 (0.833), Y >= 612 (0.85).
+        wm_box = (1066.24, 612.0, 1280.0, 720.0)
         # Case 1: Overlapping cover box reaching X=1200, Y=660
         overlapping_cover = [(10.0, 15.0, 400.0, 620.0, 1200.0, 680.0)]
-        res_overlap = check_watermark_collision(overlapping_cover, 1280, 720)
+        res_overlap = check_watermark_collision(overlapping_cover, 1280, 720, watermark_box=wm_box)
         self.assertTrue(res_overlap["has_collision"])
         self.assertEqual(res_overlap["collision_count"], 1)
 
         # Case 2: Snug safe cover box clamped to X=1040, Y=660 (well before 1066)
         safe_cover = [(10.0, 15.0, 400.0, 620.0, 1040.0, 680.0)]
-        res_safe = check_watermark_collision(safe_cover, 1280, 720)
+        res_safe = check_watermark_collision(safe_cover, 1280, 720, watermark_box=wm_box)
         self.assertFalse(res_safe["has_collision"])
         self.assertEqual(res_safe["collision_count"], 0)
+
+        # Case 3: When no watermark_box is configured, no false positive collision occurs
+        res_unconfigured = check_watermark_collision(overlapping_cover, 1280, 720, watermark_box=None)
+        self.assertFalse(res_unconfigured["has_collision"])
+        self.assertEqual(res_unconfigured["collision_count"], 0)
+
+    def test_uncovered_cjk_text_fails_qc_gate_even_if_expected_regions_empty(self):
+        """Verify that exposed CJK subtitle text fails pixel cover QC even with empty expected_regions."""
+        from backend.pipeline_v2.cover_qc import inspect_frame_pixel_coverage
+        with tempfile.TemporaryDirectory() as td:
+            frame_p = Path(td) / "test_frame.png"
+            _create_synthetic_frame(frame_p, width=1280, height=720, white_box=(300, 600, 700, 660))
+            active_covers = [(0.0, 5.0, 300, 600, 700, 660)]
+
+            # Case A: Residual exposed CJK text detected by OCR outside the active cover
+            uncovered_cjk = [{
+                "text": "半小时前，挖坑抓鱼",
+                "score": 0.999,
+                "y_pct": [0.78, 0.89],
+                "x_pct": [0.20, 0.78],
+            }]
+            res = inspect_frame_pixel_coverage(
+                frame_p,
+                active_covers,
+                canvas_w=1280,
+                canvas_h=720,
+                timestamp=2.5,
+                expected_regions=[],
+                uncovered_cjk_items=uncovered_cjk,
+            )
+            self.assertFalse(res["all_boxes_filled"], "Frame with exposed CJK text must fail QC")
+            self.assertTrue(res["overflow_detected"])
+            self.assertIn("uncovered_cjk_text_detected", res["reason"])
+
+            # Case B: Clean frame with no exposed CJK text and proper fill passes
+            res_clean = inspect_frame_pixel_coverage(
+                frame_p,
+                active_covers,
+                canvas_w=1280,
+                canvas_h=720,
+                timestamp=2.5,
+                expected_regions=[],
+                uncovered_cjk_items=[],
+            )
+            self.assertTrue(res_clean["all_boxes_filled"], "Clean covered frame must pass QC")
+            self.assertFalse(res_clean["overflow_detected"])
+            self.assertIsNone(res_clean["reason"])
+
+    def test_real_artifact_cover_shift_1103_pre_fails_qc_if_present(self):
+        """Regression test: cover_shift_1103_pre.png with exposed yellow Chinese text MUST fail QC."""
+        from backend.pipeline_v2.cover_qc import inspect_frame_pixel_coverage, parse_ass_covers
+        sample_img = Path(r"D:\workspace_v2\benchmark_runs\e2e_v4_warm_verify\job\pipeline_v2\artifacts\qc\frames\cover_shift_1103_pre.png")
+        sample_ass = Path(r"D:\workspace_v2\benchmark_runs\e2e_v4_warm_verify\job\pipeline_v2\artifacts\subtitles\final.ass")
+        if not sample_img.is_file() or not sample_ass.is_file():
+            self.skipTest("Benchmark artifact not found, skipping disk regression test")
+
+        covers, cw, ch = parse_ass_covers(sample_ass.read_text(encoding="utf-8-sig"))
+        uncovered = [{"text": "半小时前挖坑抓鱼", "score": 0.999, "y_pct": [0.782, 0.892], "x_pct": [0.208, 0.784]}]
+        res = inspect_frame_pixel_coverage(
+            sample_img,
+            covers,
+            canvas_w=cw,
+            canvas_h=ch,
+            timestamp=978.23,
+            expected_regions=[],
+            uncovered_cjk_items=uncovered,
+        )
+        self.assertFalse(res["all_boxes_filled"], "Old defective cover_shift_1103_pre.png MUST FAIL QC")
+        self.assertTrue(res["overflow_detected"])
+        self.assertIn("半小时前挖坑抓鱼", res["reason"])
 
 
 if __name__ == "__main__":

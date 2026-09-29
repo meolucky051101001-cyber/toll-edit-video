@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import json
 import math
+import logging
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+
+logger = logging.getLogger(__name__)
 
 from .segments import RuntimeSegment, segment_from_dict, segment_to_dict
 
@@ -40,7 +44,7 @@ def _creation_flags() -> int:
 class TimingPolicy:
     atempo_min: float = 1.00
     atempo_max: float = 1.50
-    estimated_chars_per_second: float = 14.5
+    estimated_chars_per_second: float = 11.5
     min_segment_seconds: float = 0.45
     max_rewrite_rounds: int = 2
 
@@ -139,13 +143,34 @@ def normalized_character_count(text: str) -> int:
 def estimate_tts_duration(text: str, policy: Optional[TimingPolicy] = None) -> float:
     config = policy or TimingPolicy()
     characters = normalized_character_count(text)
+    if characters <= 0:
+        return 0.0
     punctuation_pauses = len(re.findall(r"[,.!?;:…，。！？；：]", text)) * 0.10
-    return characters / config.estimated_chars_per_second + punctuation_pauses
+    raw = characters / config.estimated_chars_per_second + punctuation_pauses
+    # Acoustic floor for speech synthesis (onset, vowels, release, tail):
+    # Standard TTS audio clip is at least 1.10s.
+    return max(1.10, raw)
 
 
 def plan_segment(
     segment: RuntimeSegment, policy: Optional[TimingPolicy] = None
 ) -> TimingPlan:
+    clean_chars = [c for c in str(segment.content or "") if c.isalnum() or '\u4e00' <= c <= '\u9fff']
+    if getattr(segment, "is_unvoiced_scene", False) or getattr(segment, "is_silent_fallback", False) or not clean_chars:
+        target = max(
+            0.1,
+            (segment.end - segment.start).total_seconds(),
+        )
+        return TimingPlan(
+            segment_index=segment.index,
+            source_segment_id=int(getattr(segment, "source_segment_id", None) or segment.index),
+            target_seconds=target,
+            estimated_seconds=target,
+            character_budget=9999,
+            required_atempo=1.0,
+            fits=True,
+            action="keep",
+        )
     config = policy or TimingPolicy()
     target = max(
         config.min_segment_seconds,
@@ -211,7 +236,7 @@ def _split_clauses(text: str, min_words: int = 4, min_chars: int = 15) -> List[s
 
     if len(parts) <= 1:
         words = text.split()
-        if len(words) < 8:
+        if len(words) < 10:
             return [text.strip()]
         midpoint = len(words) // 2
         return [" ".join(words[:midpoint]), " ".join(words[midpoint:])]
@@ -239,7 +264,7 @@ def _split_clauses(text: str, min_words: int = 4, min_chars: int = 15) -> List[s
         return merged
 
     words = text.split()
-    if len(words) < 8:
+    if len(words) < 10:
         return [text.strip()]
     midpoint = len(words) // 2
     return [" ".join(words[:midpoint]), " ".join(words[midpoint:])]
@@ -252,7 +277,7 @@ def _split_segment(segment: RuntimeSegment) -> List[RuntimeSegment]:
     parts = _split_clauses(segment.content)
     if len(parts) <= 1:
         return [segment]
-    if (total_duration / len(parts)) < 0.30:
+    if (total_duration / len(parts)) < 0.32:
         return [segment]
     weights = [max(normalized_character_count(part), 1) for part in parts]
     total_weight = sum(weights)
@@ -274,6 +299,51 @@ def _split_segment(segment: RuntimeSegment) -> List[RuntimeSegment]:
 
 
 RewriteCallback = Callable[[Sequence[RewriteRequest]], Mapping[int, str]]
+
+
+def borrow_gap_silence(
+    segments: Sequence[RuntimeSegment],
+    policy: Optional[TimingPolicy] = None,
+    max_borrow: float = 0.45,
+    min_buffer: float = 0.12,
+) -> List[RuntimeSegment]:
+    """Borrow silence from neighboring gaps so tight or overflowing segments fit naturally."""
+    from datetime import timedelta
+    config = policy or TimingPolicy()
+    seg_list = list(segments)
+    for i, seg in enumerate(seg_list):
+        clean_chars = [c for c in str(seg.content or "") if c.isalnum() or '\u4e00' <= c <= '\u9fff']
+        if not clean_chars or getattr(seg, "is_unvoiced_scene", False) or getattr(seg, "is_silent_fallback", False):
+            continue
+        target = (seg.end - seg.start).total_seconds()
+        est = estimate_tts_duration(seg.content, config)
+        desired = est / 1.18
+        if desired <= target:
+            continue
+        needed = desired - target
+
+        # 1. Borrow from gap after
+        if i + 1 < len(seg_list):
+            next_s = seg_list[i + 1].start.total_seconds()
+            gap_after = max(0.0, next_s - seg.end.total_seconds())
+            avail_after = max(0.0, gap_after - min_buffer)
+            borrow_after = min(needed, avail_after, max_borrow)
+            if borrow_after > 0.01:
+                seg.end = seg.end + timedelta(seconds=borrow_after)
+                needed -= borrow_after
+                target += borrow_after
+
+        # 2. Borrow from gap before if still needed
+        if needed > 0.01 and i > 0:
+            prev_e = seg_list[i - 1].end.total_seconds()
+            gap_before = max(0.0, seg.start.total_seconds() - prev_e)
+            avail_before = max(0.0, gap_before - min_buffer)
+            borrow_before = min(needed, avail_before, max_borrow)
+            if borrow_before > 0.01:
+                seg.start = max(timedelta(0), seg.start - timedelta(seconds=borrow_before))
+                needed -= borrow_before
+                target += borrow_before
+    return seg_list
 
 
 def solve_segment_timing(
@@ -318,6 +388,7 @@ def solve_segment_timing(
                 break
             clean_incomplete_segment_stops(working)
 
+    working = borrow_gap_silence(working, config)
     expanded = []
     for segment in working:
         # Sentence changes are display cues in the ASS renderer. Keeping a
@@ -327,6 +398,7 @@ def solve_segment_timing(
             expanded.append(segment)
         else:
             expanded.extend(_split_segment(segment))
+    expanded = borrow_gap_silence(expanded, config)
     for index, segment in enumerate(expanded, 1):
         segment.index = index
     plans = [plan_segment(segment, config) for segment in expanded]
@@ -340,28 +412,53 @@ def solve_segment_timing(
     return TimingSolveResult(expanded, plans, unresolved, rewrite_rounds)
 
 
+_timing_rewriter_unhealthy_until = 0.0
+
+
 def _check_gemini_available() -> bool:
-    try:
-        from ai.translation import is_gemini_available
-        return is_gemini_available()
-    except ImportError:
-        try:
-            from backend.ai.translation import is_gemini_available
-            return is_gemini_available()
-        except ImportError:
-            return True
+    return time.time() >= _timing_rewriter_unhealthy_until
 
 
-def _mark_gemini_cooldown(cooldown_seconds: float = 180.0) -> None:
-    try:
-        from ai.translation import mark_gemini_unhealthy
-        mark_gemini_unhealthy(cooldown_seconds)
-    except ImportError:
-        try:
-            from backend.ai.translation import mark_gemini_unhealthy
-            mark_gemini_unhealthy(cooldown_seconds)
-        except ImportError:
-            pass
+def _mark_gemini_cooldown(cooldown_seconds: float = 30.0) -> None:
+    global _timing_rewriter_unhealthy_until
+    _timing_rewriter_unhealthy_until = time.time() + cooldown_seconds
+    logger.info("Timing rewriter cooling down for %g seconds", cooldown_seconds)
+
+
+def _local_shorten_vietnamese(text: str, max_chars: int) -> str:
+    """Rule-based local shortening for Vietnamese dubbing when LLM is unavailable."""
+    if not text:
+        return ""
+    cand = normalize_subtitle_text(text)
+    if normalized_character_count(cand) <= max_chars:
+        return cand
+
+    # 1. Remove conversational filler phrases/particles
+    fillers = [
+        r",?\s*được không\??", r",?\s*được chưa\??", r",?\s*nhé\b", r",?\s*nhá\b", r",?\s*nha\b",
+        r",?\s*ạ\b", r",?\s*nhỉ\b", r",?\s*nào\b", r",?\s*vậy\b", r",?\s*chứ\b",
+        r"\bthực ra\s*", r"\bthực sự\s*", r"\brõ ràng\s*", r"\bnhưng mà\s*",
+        r"\bcho tôi hỏi\s*", r"\btôi nghĩ rằng\s*",
+    ]
+    for f in fillers:
+        cand = re.sub(f, "", cand, flags=re.IGNORECASE).strip()
+        if normalized_character_count(cand) <= max_chars:
+            return cand
+
+    # 2. Keep whole words up to max_chars
+    words = cand.split()
+    trimmed = []
+    curr_len = 0
+    for w in words:
+        w_len = len(w) + (1 if trimmed else 0)
+        if curr_len + w_len <= max_chars:
+            trimmed.append(w)
+            curr_len += w_len
+        else:
+            break
+    if trimmed:
+        return " ".join(trimmed).strip(",.!? ")
+    return cand[:max_chars].strip(",.!? ")
 
 
 class GeminiTimingRewriter:
@@ -387,86 +484,96 @@ class GeminiTimingRewriter:
         self.max_batch_requests = max(1, int(max_batch_requests))
 
     def __call__(self, requests: Sequence[RewriteRequest]) -> Mapping[int, str]:
-        if not self.api_key or not requests:
+        if not requests:
             return {}
-        if not _check_gemini_available():
-            return {}
-        import requests as http_requests
-
         rewritten = {}
-        for offset in range(0, len(requests), self.max_batch_requests):
-            batch = list(requests[offset : offset + self.max_batch_requests])
-            items = [
-                {
-                    "id": item.segment_index,
-                    "text": item.text,
-                    "max_characters": item.max_characters,
-                    "target_seconds": round(item.target_seconds, 2),
-                }
-                for item in batch
-            ]
-            prompt = (
-                "Rút gọn các câu tiếng Việt để lồng tiếng đúng thời lượng. Giữ nguyên ý, "
-                "đại từ, tên riêng, giọng điệu và dấu phẩy ngắt nghỉ (,); không cắt cụt ý. Mỗi câu không vượt quá "
-                "max_characters. Không dùng dấu ba chấm (... hoặc …); chỉ đặt dấu chấm (. ! ?) "
-                "khi hết câu hoàn chỉnh, tuyệt đối không chèn dấu chấm ở câu lửng. "
-                "Chỉ trả về JSON dạng [{\"id\":1,\"text\":\"Câu đã rút gọn\"}].\n"
-                + json.dumps(items, ensure_ascii=False)
-            )
-            allowed = {item.segment_index: item.max_characters for item in batch}
-            for model in self.models:
-                if not _check_gemini_available():
-                    break
-                url = (
-                    "https://generativelanguage.googleapis.com/v1beta/models/"
-                    "{}:generateContent".format(model)
+        if self.api_key and _check_gemini_available():
+            import requests as http_requests
+
+            for offset in range(0, len(requests), self.max_batch_requests):
+                batch = list(requests[offset : offset + self.max_batch_requests])
+                items = [
+                    {
+                        "id": item.segment_index,
+                        "text": item.text,
+                        "max_characters": item.max_characters,
+                        "target_seconds": round(item.target_seconds, 2),
+                    }
+                    for item in batch
+                ]
+                prompt = (
+                    "Rút gọn các câu tiếng Việt để lồng tiếng đúng thời lượng. Giữ nguyên ý, "
+                    "đại từ, tên riêng, giọng điệu và dấu phẩy ngắt nghỉ (,); không cắt cụt ý. Mỗi câu không vượt quá "
+                    "max_characters. Không dùng dấu ba chấm (... hoặc …); chỉ đặt dấu chấm (. ! ?) "
+                    "khi hết câu hoàn chỉnh, tuyệt đối không chèn dấu chấm ở câu lửng. "
+                    "Chỉ trả về JSON dạng [{\"id\":1,\"text\":\"Câu đã rút gọn\"}].\n"
+                    + json.dumps(items, ensure_ascii=False)
                 )
-                headers = {
-                    "Content-Type": "application/json",
-                    "x-goog-api-key": self.api_key,
-                }
-                try:
-                    response = http_requests.post(
-                        url,
-                        headers=headers,
-                        json={"contents": [{"parts": [{"text": prompt}]}]},
-                        timeout=self.timeout_seconds,
+                allowed = {item.segment_index: item.max_characters for item in batch}
+                for model in self.models:
+                    if not _check_gemini_available():
+                        break
+                    url = (
+                        "https://generativelanguage.googleapis.com/v1beta/models/"
+                        "{}:generateContent".format(model)
                     )
-                    if response.status_code == 429 or response.status_code >= 500:
+                    headers = {
+                        "Content-Type": "application/json",
+                        "x-goog-api-key": self.api_key,
+                    }
+                    try:
+                        response = http_requests.post(
+                            url,
+                            headers=headers,
+                            json={"contents": [{"parts": [{"text": prompt}]}]},
+                            timeout=self.timeout_seconds,
+                        )
+                        if response.status_code == 429:
+                            _mark_gemini_cooldown(180.0)
+                            break
+                        if response.status_code in (500, 502, 503, 504):
+                            logger.info("Timing rewriter: model %s returned HTTP %s, trying backup model...", model, response.status_code)
+                            continue
+                        if response.status_code != 200:
+                            continue
+                        text = response.json()["candidates"][0]["content"]["parts"][0][
+                            "text"
+                        ]
+                        match = re.search(r"\[[\s\S]*\]", text)
+                        if not match:
+                            continue
+                        payload = json.loads(match.group(0))
+                        for item in payload:
+                            segment_id = int(item["id"])
+                            candidate = normalize_subtitle_text(item["text"])
+                            if (
+                                segment_id in allowed
+                                and candidate
+                                and normalized_character_count(candidate) <= allowed[segment_id]
+                            ):
+                                rewritten[segment_id] = candidate
+                        break
+                    except (
+                        http_requests.Timeout,
+                        http_requests.ConnectionError,
+                    ):
                         _mark_gemini_cooldown(180.0)
                         break
-                    if response.status_code != 200:
+                    except (
+                        KeyError,
+                        TypeError,
+                        ValueError,
+                        http_requests.RequestException,
+                    ):
                         continue
-                    text = response.json()["candidates"][0]["content"]["parts"][0][
-                        "text"
-                    ]
-                    match = re.search(r"\[[\s\S]*\]", text)
-                    if not match:
-                        continue
-                    payload = json.loads(match.group(0))
-                    for item in payload:
-                        segment_id = int(item["id"])
-                        candidate = normalize_subtitle_text(item["text"])
-                        if (
-                            segment_id in allowed
-                            and candidate
-                            and normalized_character_count(candidate) <= allowed[segment_id]
-                        ):
-                            rewritten[segment_id] = candidate
-                    break
-                except (
-                    http_requests.Timeout,
-                    http_requests.ConnectionError,
-                ):
-                    _mark_gemini_cooldown(180.0)
-                    break
-                except (
-                    KeyError,
-                    TypeError,
-                    ValueError,
-                    http_requests.RequestException,
-                ):
-                    continue
+
+        # Fallback to local rule-based shortening for any requests not resolved by Gemini
+        for item in requests:
+            if item.segment_index not in rewritten:
+                cand = _local_shorten_vietnamese(item.text, item.max_characters)
+                if cand and cand != item.text:
+                    rewritten[item.segment_index] = cand
+
         return rewritten
 
 
@@ -521,6 +628,45 @@ def fit_audio_to_window(
     if target_seconds <= 0:
         raise ValueError("target_seconds must be positive")
     source_duration = probe_audio_duration(input_path, ffprobe_binary)
+    working_input = input_path
+    temp_trimmed: Optional[Path] = None
+
+    # If the source audio exceeds the target window, check if stripping leading/trailing
+    # padding silence allows it to fit or reduces required speedup.
+    if source_duration > target_seconds + 0.08:
+        try:
+            trimmed_candidate = Path(output_path).parent / f"trim_{Path(input_path).name}"
+            trim_cmd = [
+                ffmpeg_binary,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(input_path),
+                "-af",
+                "silenceremove=start_periods=1:start_duration=0.02:start_threshold=-50dB,areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-50dB,areverse",
+                str(trimmed_candidate),
+            ]
+            t_res = subprocess.run(
+                trim_cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                creationflags=_creation_flags(),
+            )
+            if t_res.returncode == 0 and trimmed_candidate.is_file():
+                trimmed_dur = probe_audio_duration(trimmed_candidate, ffprobe_binary)
+                # Only use trimmed if it contains audible speech (not pure silence collapsed to 0)
+                if trimmed_dur >= 0.10:
+                    working_input = trimmed_candidate
+                    temp_trimmed = trimmed_candidate
+                    source_duration = trimmed_dur
+                else:
+                    trimmed_candidate.unlink(missing_ok=True)
+        except Exception:
+            pass
+
     required = source_duration / target_seconds
     if required > 1.0:
         applied = min(required, config.atempo_max)
@@ -528,7 +674,7 @@ def fit_audio_to_window(
         applied = max(required, config.atempo_min)
     else:
         applied = 1.0
-    command = [ffmpeg_binary, "-hide_banner", "-loglevel", "error", "-y", "-i", str(input_path)]
+    command = [ffmpeg_binary, "-hide_banner", "-loglevel", "error", "-y", "-i", str(working_input)]
     if abs(applied - 1.0) > 0.001:
         command.extend(["-filter:a", "atempo={:.6f}".format(applied)])
     command.extend(["-vn", str(output_path)])
@@ -544,6 +690,12 @@ def fit_audio_to_window(
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"FFmpeg audio fitting timed out after 120s for: {input_path}")
+    finally:
+        if temp_trimmed is not None:
+            try:
+                temp_trimmed.unlink(missing_ok=True)
+            except Exception:
+                pass
     if result.returncode != 0 or not Path(output_path).is_file():
         raise RuntimeError(result.stderr.strip() or "FFmpeg audio fitting failed")
     output_duration = probe_audio_duration(output_path, ffprobe_binary)
@@ -556,3 +708,4 @@ def fit_audio_to_window(
         output_duration_seconds=output_duration,
         fits=fits,
     )
+
