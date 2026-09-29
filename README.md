@@ -47,7 +47,7 @@ Toàn bộ hệ thống được phân tách thành các nhánh chuyên biệt t
 | :--- | :--- | :--- | :--- | :--- |
 | **Portal Điều Phối** | [`main`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/main) | - | Thư mục gốc | Mục lục hệ sinh thái, tài liệu tổng hợp, quy chuẩn vận hành |
 | **Tool V1 (Production)** | [`tool-v1`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v1) | `http://127.0.0.1:8088` | `C:\tool v1` | Bản render ổn định cao, tối ưu hóa RAM/VRAM, chạy hàng loạt siêu tốc |
-| **Tool V2 (Next-Gen)** | [`tool-v2`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v2) | `http://127.0.0.1:8089` | `C:\tool v2` | Pipeline V2 v2.12.0, Multi-zone Cover QC, Dynamic Sampling |
+| **Tool V2 (Next-Gen)** | [`tool-v2`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v2) | `http://127.0.0.1:8089` | Thư mục checkout tùy chọn; đường dẫn dữ liệu cấu hình qua ENV | Pipeline V2 v2.12.0, Multi-zone Cover QC, Dynamic Sampling |
 | **Hệ Thống Giám Sát & A2UI** | Có trên cả `tool-v1` & `tool-v2` | `8088` (V1) / `8089` (V2) | Tích hợp sẵn | Giám sát thời gian thực, Studio Quy Trình (`/quy-trinh`), Studio Kịch Bản (`/kich-ban`) |
 | **Tool Tìm Kiếm Video AI** | [`tool-tim-kiem-video`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-tim-kiem-video)<br>*(alias: `ai-video-research-tool`)* | Web: `http://localhost:3000`<br>API: `http://localhost:8000` | `C:\Users\admin\Projects\ai-video-research-tool` | Cào video Douyin & Xiaohongshu không watermark, Gemini AI mở rộng từ khóa |
 
@@ -94,11 +94,12 @@ Phiên bản nâng cấp chuyên sâu giải quyết triệt để các bài to�
 - **Quản lý Canvas & Tỷ lệ khung hình**: Hỗ trợ chuẩn hóa canvas tự động (`canvas_settings.py`), giữ nguyên tỷ lệ khung hình gốc khi chèn dải che mờ thẩm mỹ.
 - **Giới hạn tài nguyên theo batch**: Dịch/OCR/TTS/RVC có batch checkpoint, mixer tạo voice bus phân tầng để không vượt giới hạn dòng lệnh Windows, streaming segment an toàn.
 - **Tài liệu bàn giao & Rollout**: Xem phạm vi bàn giao tại [`VERSIONS.md`](VERSIONS.md), feature flags và rollback tại [`docs/pipeline_v2_rollout.md`](docs/pipeline_v2_rollout.md).
+- **Cấu trúc backend & cấu hình**: Sơ đồ module hiện tại/lộ trình tách dần, đường dẫn portable, profile CPU/GPU và lệnh kiểm thử tại [`docs/backend_architecture.md`](docs/backend_architecture.md).
+- **Phụ thuộc phát triển/model**: Dùng `requirements-dev.txt` cho lint và unit test nhẹ; `requirements-models.txt` trỏ tới bộ cài model nặng được cô lập.
 
 #### 💡 Hướng dẫn chạy nhanh Tool V2:
 ```powershell
-# Di chuyển vào thư mục Tool V2
-cd "C:\tool v2"
+# Mở PowerShell tại thư mục gốc của repository
 git checkout tool-v2
 
 # Khởi chạy Telegram Bot & Dashboard V2

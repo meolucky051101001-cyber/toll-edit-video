@@ -1,4 +1,5 @@
 import asyncio
+import argparse
 import os
 import sys
 import time
@@ -13,37 +14,45 @@ if hasattr(sys.stderr, "reconfigure"):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-env_file = os.path.join(BASE_DIR, ".env")
-if os.path.exists(env_file):
-    with open(env_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if "=" in line and not line.strip().startswith("#"):
-                k, v = line.strip().split("=", 1)
-                os.environ[k.strip()] = v.strip().strip('"').strip("'")
+from environment import load_environment
+
+load_environment(Path(BASE_DIR))
+
+try:
+    from config.paths import AppPaths
+except ImportError:
+    from backend.config.paths import AppPaths
+
+PATHS = AppPaths.from_environment(Path(BASE_DIR).parent)
 
 from pipeline_v2.config import PipelineSettings
 from pipeline_v2.video_pipeline import VideoPipelineRequest, VideoPipelineRunner, discover_rvc_model
 
-async def main():
-    video_path = Path(r"C:\tool v2\workspace\downloads\1789932323_c26d2025_douyin_7682719002690374963.mp4")
+async def main(video_path: Path):
     if not video_path.exists():
         print(f"ERROR: Video file {video_path} not found!", flush=True)
         sys.exit(1)
 
-    workspace_dir = Path(r"C:\tool v2\workspace")
-    job_dir = workspace_dir / "job_douyin_7682719002690374963"
+    workspace_dir = PATHS.workspace
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    job_dir = workspace_dir / f"job_{video_path.stem}"
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    output_dir = Path(r"D:\video tool v2")
+    output_dir = PATHS.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
-    final_dest = output_dir / "Dubbed_1789932323_c26d2025_douyin_7682719002690374963.mp4"
+    final_dest = output_dir / f"Dubbed_{video_path.stem}.mp4"
 
-    delivery_dir = Path(r"D:\banve")
-    delivery_dir.mkdir(parents=True, exist_ok=True)
-    delivery_dest = delivery_dir / "Dubbed_1789932323_c26d2025_douyin_7682719002690374963.mp4"
+    delivery_path = os.getenv("AUTODUB_DELIVERY_DIR", "").strip()
+    delivery_dest = None
+    if delivery_path:
+        delivery_dir = Path(delivery_path).expanduser()
+        if not delivery_dir.is_absolute():
+            delivery_dir = PATHS.project_root / delivery_dir
+        delivery_dir.mkdir(parents=True, exist_ok=True)
+        delivery_dest = delivery_dir / final_dest.name
 
     settings = PipelineSettings.from_env()
-    rvc_model = discover_rvc_model(Path(r"C:\tool v2\MyVoiceModel_v2"))
+    rvc_model = discover_rvc_model(Path(BASE_DIR) / "MyVoiceModel_v2")
     if not rvc_model:
         rvc_model = discover_rvc_model(workspace_dir)
 
@@ -56,7 +65,8 @@ async def main():
     print(f"🎬 Video nguồn: {video_path} ({video_path.stat().st_size / (1024*1024):.1f} MB)", flush=True)
     print(f"🎤 Model Giọng RVC: {rvc_model}", flush=True)
     print(f"📁 Thư mục xuất chính: {final_dest}", flush=True)
-    print(f"📁 Thư mục giao nhận: {delivery_dest}", flush=True)
+    if delivery_dest:
+        print(f"📁 Thư mục giao nhận: {delivery_dest}", flush=True)
     print("=" * 70, flush=True)
 
     log_file = workspace_dir / "render_v2_status.log"
@@ -96,9 +106,13 @@ async def main():
     print("=" * 70, flush=True)
     print(f"🎉 HOÀN THÀNH XUẤT SẮC TOÀN BỘ PIPELINE V2 TRONG {m} PHÚT {s} GIÂY!", flush=True)
     print(f"💾 File thành phẩm Tool V2: {final_dest} (Tồn tại: {final_dest.exists()})", flush=True)
-    print(f"💾 File sao lưu tại D:\\banve: {delivery_dest} (Tồn tại: {delivery_dest.exists()})", flush=True)
+    if delivery_dest:
+        print(f"💾 File sao lưu: {delivery_dest} (Tồn tại: {delivery_dest.exists()})", flush=True)
     print(f"📊 QC Report: {result.qc_report_path} (Allowed: {result.qc_allowed})", flush=True)
     print("=" * 70, flush=True)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description="Chạy thử một video bằng Pipeline V2.")
+    parser.add_argument("video", type=Path, help="Đường dẫn video nguồn cần chạy thử")
+    args = parser.parse_args()
+    asyncio.run(main(args.video.expanduser().resolve()))

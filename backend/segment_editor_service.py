@@ -22,6 +22,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+try:
+    from backend.config.paths import AppPaths
+except ImportError:
+    from config.paths import AppPaths
+
+PATHS = AppPaths.from_environment(Path(__file__).resolve().parents[1])
+
 # Concurrency lock for regeneration and publishing
 _segment_lock = asyncio.Lock()
 
@@ -30,29 +37,20 @@ _IDEMPOTENCY_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
 
 def resolve_workspace_dir() -> Path:
-    ws_env = os.getenv("AUTODUB_WORKSPACE")
-    if ws_env and Path(ws_env).is_dir():
-        return Path(ws_env)
-    for c in [
-        Path(r"C:\tool v1\workspace"),
-        Path(r"C:\tool v2\workspace"),
-        Path(__file__).resolve().parent.parent / "workspace",
-    ]:
-        if c.is_dir():
-            return c
-    fallback = Path(__file__).resolve().parent.parent / "workspace"
-    fallback.mkdir(parents=True, exist_ok=True)
-    return fallback
+    PATHS.workspace.mkdir(parents=True, exist_ok=True)
+    return PATHS.workspace
 
 
 def resolve_output_dir() -> Path:
-    out_env = os.getenv("AUTODUB_OUTPUT_DIR")
-    if out_env and Path(out_env).is_dir():
-        return Path(out_env)
-    for c in [Path(r"D:\banve"), Path(r"D:\video tool v2")]:
-        if c.is_dir():
-            return c
-    return Path(r"D:\banve")
+    return PATHS.output_dir
+
+
+def _workspace_roots() -> List[Path]:
+    roots = [resolve_workspace_dir()]
+    shared = PATHS.shared_workspace_dir
+    if shared and shared not in roots:
+        roots.append(shared)
+    return roots
 
 
 def get_segment_drafts_dir() -> Path:
@@ -155,11 +153,7 @@ def sanitize_job_id(job_id_or_name: str) -> str:
 def find_job_workspace(job_id_or_name: str) -> Optional[Path]:
     """Tìm thư mục workspace của job trên cả V1 và V2."""
     clean_id = sanitize_job_id(job_id_or_name)
-    roots = [
-        resolve_workspace_dir(),
-        Path(r"C:\tool v1\workspace"),
-        Path(r"C:\tool v2\workspace"),
-    ]
+    roots = _workspace_roots()
 
     for root in roots:
         if not root.is_dir():
@@ -245,13 +239,7 @@ def resolve_job_voice(job_id_or_name: str, job_folder: Optional[Path] = None) ->
                     pass
 
     # 2. Tìm kiếm trong các thư mục workspace theo clean_id hoặc prefix
-    roots = [
-        resolve_workspace_dir(),
-        Path(r"D:\workspace"),
-        Path(r"D:\workspace_v2"),
-        Path(r"C:\tool v1\workspace"),
-        Path(r"C:\tool v2\workspace"),
-    ]
+    roots = _workspace_roots()
     for root in roots:
         if not root.is_dir():
             continue
@@ -815,9 +803,8 @@ async def publish_revised_video(
         job_folder / "pipeline_v2" / "artifacts" / "output" / "final.mp4",
         job_folder / "input.mp4",
         job_folder / f"{clean_id}.mp4",
-        Path(r"D:\video phôi") / f"{clean_id}.mp4",
-        Path(r"D:\banve") / f"Dubbed_{clean_id}.mp4",
-        Path(r"D:\video tool v2") / f"Dubbed_{clean_id}.mp4",
+        PATHS.input_dir / f"{clean_id}.mp4",
+        PATHS.output_dir / f"Dubbed_{clean_id}.mp4",
     ]
     source_video = next((p for p in source_video_candidates if p.is_file()), None)
 
@@ -833,7 +820,10 @@ async def publish_revised_video(
 
     if not source_video:
         # Check any matching in banve or video tool v2
-        for cand_dir in [resolve_output_dir(), Path(r"D:\banve"), Path(r"D:\video tool v2")]:
+        candidate_output_dirs = [resolve_output_dir()]
+        if PATHS.shared_workspace_dir:
+            candidate_output_dirs.append(PATHS.shared_workspace_dir / "output")
+        for cand_dir in candidate_output_dirs:
             if cand_dir.is_dir():
                 matches = list(cand_dir.glob(f"*{clean_id}*.mp4"))
                 if matches:

@@ -53,5 +53,9 @@ benchmarks/
 *.before-*
 *.patch
 
+# Safe-to-commit environment templates (real .env files remain ignored).
+!.env.cpu.example
+!.env.gpu.example
+
 # User-specific downloader input; keep URLs local and untracked
 urls.txt

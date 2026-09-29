@@ -148,7 +148,12 @@ def get_global_pipeline_lock(workspace_dir: Optional[PathLike] = None) -> CrossP
     if workspace_dir:
         base = Path(workspace_dir)
     else:
-        base = Path(os.getenv("AUTODUB_WORKSPACE", r"C:\tool v2\workspace"))
+        try:
+            from backend.config.paths import AppPaths
+        except ImportError:
+            from config.paths import AppPaths
+        project_root = Path(__file__).resolve().parents[2]
+        base = AppPaths.from_environment(project_root).workspace
     lock_file = base / ".pipeline_v2_global.lock"
     return CrossProcessLock(lock_file, name="GlobalPipelineLock", timeout_seconds=7200.0)
 
