@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import re
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 
 @dataclass
@@ -98,6 +98,22 @@ def build_expected_cover_timeline(
             valid_blocks,
             key=lambda x: (float(_prop(x, "start", 0.0)), float(_prop(x, "end", 0.0))),
         )
+        seg_start_sec = _prop(seg, "start")
+        if seg_start_sec is not None and sorted_blocks:
+            try:
+                if hasattr(seg_start_sec, "total_seconds"):
+                    s_start = float(seg_start_sec.total_seconds())
+                else:
+                    s_start = float(seg_start_sec)
+                first_b = sorted_blocks[0]
+                b_start = float(_prop(first_b, "start", s_start))
+                if 0.0 < (b_start - s_start) <= 1.0:
+                    if isinstance(first_b, dict):
+                        first_b["start"] = s_start
+                    elif hasattr(first_b, "start"):
+                        setattr(first_b, "start", s_start)
+            except (TypeError, ValueError):
+                pass
 
         # Split into clusters if the subtitle disappears for > 1.0s *or* the
         # tracked rectangle jumps to a different screen position.  The latter
@@ -273,7 +289,7 @@ def parse_ass_covers(ass):
         if not line.startswith('Dialogue:'):
             continue
         fields = line.split(',', 9)
-        if len(fields) != 10 or fields[3] != 'BgStyle':
+        if len(fields) != 10 or fields[3] not in ('BgStyle', 'CoverStyle'):
             continue
         if r'\an7' not in fields[9]:
             continue
@@ -333,7 +349,10 @@ def inspect_covers(
             if cover_end > left
             and cover_start < right
             and x1 <= event.x_pct * w + 2
-            and x2 >= event.max_x_pct * w - 2
+            and (
+                x2 >= event.max_x_pct * w - 2
+                or (w > h and event.y_pct >= 0.80 and x2 >= min(event.max_x_pct * w - 2, int(w * (1574.0 / 1920.0))))
+            )
             and y1 <= event.y_pct * h + 2
             and y2 >= event.max_y_pct * h - 2
         )
@@ -386,6 +405,8 @@ def inspect_frame_pixel_coverage(
     canvas_h=1920,
     timestamp=None,
     expected_regions: Optional[Sequence[Mapping[str, Any]]] = None,
+    watermark_box: Optional[Sequence[float]] = None,
+    uncovered_cjk_items: Optional[Sequence[Mapping[str, Any]]] = None,
 ):
     """Verify sticker fill and whether known source subtitle pixels escape it.
 
@@ -486,6 +507,13 @@ def inspect_frame_pixel_coverage(
                 ry1 = int(float(region["y_pct"]) * fh)
                 rx2 = int(float(region["max_x_pct"]) * fw)
                 ry2 = int(float(region["max_y_pct"]) * fh)
+                if watermark_box and len(watermark_box) >= 4:
+                    wx1 = int(float(watermark_box[0]) * fw if float(watermark_box[0]) <= 1.0 else float(watermark_box[0]))
+                    wy1 = int(float(watermark_box[1]) * fh if float(watermark_box[1]) <= 1.0 else float(watermark_box[1]))
+                    wx2 = int(float(watermark_box[2]) * fw if float(watermark_box[2]) <= 1.0 else float(watermark_box[2]))
+                    wy2 = int(float(watermark_box[3]) * fh if float(watermark_box[3]) <= 1.0 else float(watermark_box[3]))
+                    if rx2 > wx1 and not (ry2 < wy1 or ry1 > wy2):
+                        rx2 = min(rx2, max(rx1 + 1, wx1))
             except (KeyError, TypeError, ValueError):
                 expected_region_checks.append({
                     "segment_id": region.get("segment_id") if isinstance(region, dict) else None,
@@ -558,31 +586,101 @@ def inspect_frame_pixel_coverage(
                         uncovered_ratio > 0.005 and high_contrast_text_signal
                     )
 
+            # Rim / Edge Margin Inspection: check if high-contrast character strokes peek out directly below or above the cover box
+            bottom_rim_leak = False
+            top_rim_leak = False
+            relevant_covers = [
+                c for c in active_pixel_boxes
+                if not (c[2] <= rx1 or c[0] >= rx2 or c[3] <= ry1 or c[1] >= ry2)
+            ]
+            if relevant_covers:
+                max_cy2 = max(c[3] for c in relevant_covers)
+                min_cy1 = min(c[1] for c in relevant_covers)
+                cov_x1 = max(0, min(c[0] for c in relevant_covers))
+                cov_x2 = min(fw, max(c[2] for c in relevant_covers))
+
+                # Check bottom rim only if expected text box reaches past the bottom cover
+                if ry2 > max_cy2:
+                    b_rim_y2 = min(fh, max(ry2, max_cy2 + 4))
+                    rim_x1 = max(0, rx1)
+                    rim_x2 = min(fw, rx2)
+                    if b_rim_y2 > max_cy2 + 2 and rim_x2 > rim_x1 + 10:
+                        b_patch = arr[max_cy2:b_rim_y2, rim_x1:rim_x2]
+                        b_gray = (
+                            b_patch[:, :, 0] * 0.299
+                            + b_patch[:, :, 1] * 0.587
+                            + b_patch[:, :, 2] * 0.114
+                        )
+                        b_sobel = np.zeros_like(b_gray, dtype=bool)
+                        b_sobel[:-1, :] |= np.abs(np.diff(b_gray, axis=0)) > 35
+                        b_sobel[:, :-1] |= np.abs(np.diff(b_gray, axis=1)) > 35
+                        b_edge_density = float(np.mean(b_sobel))
+                        b_contrast = float(np.percentile(b_gray, 95) - np.percentile(b_gray, 5))
+                        b_dark = float(np.mean(b_gray < 85))
+                        b_bright = float(np.mean(b_gray > 200))
+                        if b_contrast >= 45 and b_edge_density >= 0.035 and (b_dark >= 0.02 or b_bright >= 0.02):
+                            bottom_rim_leak = True
+
+                # Check top rim only if expected text box reaches above the top cover
+                if ry1 < min_cy1:
+                    t_rim_y1 = max(0, min(ry1, min_cy1 - 4))
+                    rim_x1 = max(0, rx1)
+                    rim_x2 = min(fw, rx2)
+                    if min_cy1 > t_rim_y1 + 2 and rim_x2 > rim_x1 + 10:
+                        t_patch = arr[t_rim_y1:min_cy1, rim_x1:rim_x2]
+                        t_gray = (
+                            t_patch[:, :, 0] * 0.299
+                            + t_patch[:, :, 1] * 0.587
+                            + t_patch[:, :, 2] * 0.114
+                        )
+                        t_sobel = np.zeros_like(t_gray, dtype=bool)
+                        t_sobel[:-1, :] |= np.abs(np.diff(t_gray, axis=0)) > 35
+                        t_sobel[:, :-1] |= np.abs(np.diff(t_gray, axis=1)) > 35
+                        t_edge_density = float(np.mean(t_sobel))
+                        t_contrast = float(np.percentile(t_gray, 95) - np.percentile(t_gray, 5))
+                        t_dark = float(np.mean(t_gray < 85))
+                        t_bright = float(np.mean(t_gray > 200))
+                        if t_contrast >= 45 and t_edge_density >= 0.035 and (t_dark >= 0.02 or t_bright >= 0.02):
+                            top_rim_leak = True
+
+            rim_leak_detected = bottom_rim_leak or top_rim_leak
+            overflow_detected = overflow_detected or rim_leak_detected
+
             expected_region_checks.append({
                 "segment_id": region.get("segment_id"),
                 "bbox": [rx1, ry1, rx2, ry2],
-                "geometry_covered": geometry_covered,
+                "geometry_covered": geometry_covered and not rim_leak_detected,
                 "uncovered_ratio": round(uncovered_ratio, 4),
                 "overflow_detected": overflow_detected,
+                "rim_leak_detected": rim_leak_detected,
+                "bottom_rim_leak": bottom_rim_leak,
+                "top_rim_leak": top_rim_leak,
                 "contrast_range": round(contrast_range, 2),
                 "edge_density": round(edge_density, 4),
                 "dark_ratio": round(dark_ratio, 4),
                 "bright_ratio": round(bright_ratio, 4),
             })
 
-        source_regions_covered = all(
-            check.get("geometry_covered", False) for check in expected_region_checks
+        has_exposed_cjk = bool(uncovered_cjk_items)
+        source_regions_covered = (
+            all(check.get("geometry_covered", False) for check in expected_region_checks)
+            if expected_region_checks
+            else (not has_exposed_cjk)
         )
         overflow_detected = any(
             check.get("overflow_detected", False) for check in expected_region_checks
-        )
+        ) or has_exposed_cjk
+
         all_ok = (
             all(b["has_cover_fill"] for b in checked_boxes)
             and source_regions_covered
             and not overflow_detected
         )
         reason = None
-        if not source_regions_covered or overflow_detected:
+        if has_exposed_cjk:
+            cjk_texts = [str(it.get("text", "")) for it in (uncovered_cjk_items or []) if isinstance(it, dict)]
+            reason = f"uncovered_cjk_text_detected: {', '.join(cjk_texts)}"
+        elif not source_regions_covered or overflow_detected:
             reason = "source_text_outside_cover"
         elif not all_ok:
             reason = "invalid_cover_fill"
@@ -593,9 +691,124 @@ def inspect_frame_pixel_coverage(
             "boxes_checked": len(checked_boxes),
             "all_boxes_filled": all_ok,
             "overflow_detected": overflow_detected,
+            "uncovered_cjk_items": list(uncovered_cjk_items or []),
             "expected_region_checks": expected_region_checks,
             "reason": reason,
             "details": checked_boxes,
         }
     except Exception as exc:
         return {"checked": False, "error": str(exc)}
+
+
+def check_watermark_collision(
+    covers: Sequence[Tuple[float, float, float, float, float, float]],
+    canvas_w: int,
+    canvas_h: int,
+    watermark_box: Optional[Tuple[float, float, float, float]] = None,
+) -> Dict[str, Any]:
+    """Check if any ASS subtitle cover box collides with the watermark zone.
+    
+    Default watermark zone is the bottom-right corner for landscape videos:
+    x_pct >= 0.833, y_pct >= 0.85 (e.g. Douyin red seal '静默沸腾').
+    """
+    if watermark_box is None:
+        return {
+            "has_collision": False,
+            "collisions": [],
+            "collision_count": 0,
+            "checked_covers": len(covers),
+        }
+
+    wm_x1, wm_y1, wm_x2, wm_y2 = watermark_box
+    if 0.0 <= wm_x1 <= 1.0 and 0.0 <= wm_x2 <= 1.0:
+        wm_x1 = wm_x1 * canvas_w
+        wm_y1 = wm_y1 * canvas_h
+        wm_x2 = wm_x2 * canvas_w
+        wm_y2 = wm_y2 * canvas_h
+
+    collisions = []
+    for c in covers:
+        c_start, c_end, x1, y1, x2, y2 = c
+        ix1 = max(x1, wm_x1)
+        iy1 = max(y1, wm_y1)
+        ix2 = min(x2, wm_x2)
+        iy2 = min(y2, wm_y2)
+        if ix2 > ix1 and iy2 > iy1:
+            overlap_w = ix2 - ix1
+            overlap_h = iy2 - iy1
+            collisions.append({
+                "start": round(c_start, 2),
+                "end": round(c_end, 2),
+                "cover_bbox": [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)],
+                "watermark_bbox": [round(wm_x1, 1), round(wm_y1, 1), round(wm_x2, 1), round(wm_y2, 1)],
+                "overlap_px": [round(overlap_w, 1), round(overlap_h, 1)],
+            })
+
+    return {
+        "has_collision": len(collisions) > 0,
+        "collisions": collisions,
+        "collision_count": len(collisions),
+        "checked_covers": len(covers),
+    }
+
+
+def check_subtitle_text_collision(ass_text: str) -> Dict[str, Any]:
+    """Check if any two rendered Vietnamese dialogue text lines collide in time and position.
+    
+    Detects when multiple TextStyle events are displayed concurrently with overlapping
+    vertical positions, causing unreadable text-on-text visual collisions.
+    """
+    dialogues = []
+    for line in ass_text.splitlines():
+        if not line.startswith('Dialogue:'):
+            continue
+        fields = line.split(',', 9)
+        if len(fields) != 10:
+            continue
+        style = fields[3].strip()
+        if style in ('BgStyle', 'CoverStyle'):
+            continue
+        try:
+            start, end = seconds(fields[1]), seconds(fields[2])
+        except (ValueError, IndexError):
+            continue
+        if end <= start:
+            continue
+        raw = fields[9]
+        pos = re.search(r'\\pos\(([-\d.]+),([-\d.]+)\)', raw)
+        cx = float(pos[1]) if pos else 0.0
+        cy = float(pos[2]) if pos else 0.0
+        clean = re.sub(r'\{.*?\}', '', raw).strip()
+        if clean:
+            dialogues.append({
+                'start': start,
+                'end': end,
+                'cx': cx,
+                'cy': cy,
+                'text': clean,
+            })
+
+    collisions = []
+    for i in range(len(dialogues)):
+        for j in range(i + 1, len(dialogues)):
+            d1, d2 = dialogues[i], dialogues[j]
+            overlap = min(d1['end'], d2['end']) - max(d1['start'], d2['start'])
+            if overlap > 0.05:  # Overlap more than 50ms
+                # Check spatial collision: vertical distance within 50px
+                if abs(d1['cy'] - d2['cy']) <= 50.0:
+                    collisions.append({
+                        'start': round(max(d1['start'], d2['start']), 2),
+                        'end': round(min(d1['end'], d2['end']), 2),
+                        'overlap_seconds': round(overlap, 3),
+                        'text1': d1['text'][:60],
+                        'text2': d2['text'][:60],
+                        'cy1': round(d1['cy'], 1),
+                        'cy2': round(d2['cy'], 1),
+                    })
+
+    return {
+        "has_collision": len(collisions) > 0,
+        "collision_count": len(collisions),
+        "collisions": collisions,
+        "checked_dialogues": len(dialogues),
+    }

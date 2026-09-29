@@ -58,6 +58,31 @@ class SegmentSerializationTests(unittest.TestCase):
         self.assertEqual(restored.y_pct, 0.8)
 
 
+class RVCSessionTests(unittest.TestCase):
+    def test_rvc_session_runs_multiple_batches_in_single_process(self):
+        from backend.pipeline_v2.rvc_session import RVCSession
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = RVCSession(root / "control", root / "gpu.lock")
+            try:
+                pid = session.process.pid
+                self.assertIsNotNone(pid)
+                # First run batch with empty items
+                result1 = session.run({"model_path": "dummy.pth", "items": []}, timeout_seconds=30)
+                self.assertEqual(result1.get("items"), [])
+                # Second run batch with empty items in the same process
+                result2 = session.run({"model_path": "dummy.pth", "items": []}, timeout_seconds=30)
+                self.assertEqual(result2.get("items"), [])
+                # The process must be identical across both batches
+                self.assertEqual(session.process.pid, pid)
+            finally:
+                session.close()
+
+            # Ensure process terminated cleanly
+            self.assertIsNotNone(session.process.poll())
+
+
 if __name__ == "__main__":
     unittest.main()
 

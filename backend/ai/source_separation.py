@@ -33,11 +33,19 @@ def separate_vocals(
     policy = current_model_policy()
     failures = []
 
+    # Dynamic timeout calculation for long videos (30 - 60 minutes)
+    try:
+        import soundfile as sf
+        audio_duration = float(sf.info(input_audio_path).duration)
+    except Exception:
+        audio_duration = 300.0
+    effective_timeout = max(float(timeout_seconds), audio_duration * 1.5 + 300.0)
+
     if policy.separator_backend in {"auto", "roformer"}:
         if runtime_module_available("audio_separator", policy):
             print(
-                "Bắt đầu tách giọng bằng BS-RoFormer {}...".format(
-                    policy.separator_model
+                "Bắt đầu tách giọng bằng BS-RoFormer {} (timeout: {:.0f}s)...".format(
+                    policy.separator_model, effective_timeout
                 )
             )
             try:
@@ -52,7 +60,7 @@ def separate_vocals(
                         "model_filename": policy.separator_model,
                         "use_native_fp16": True,
                     },
-                    timeout_seconds=float(timeout_seconds),
+                    timeout_seconds=float(effective_timeout),
                     policy=policy,
                 )
                 vocals_path = str(result["vocals_path"])
@@ -116,7 +124,7 @@ def separate_vocals(
             subprocess.run(
                 command,
                 check=True,
-                timeout=float(timeout_seconds),
+                timeout=float(effective_timeout),
                 creationflags=CREATE_NO_WINDOW,
             )
             model_output = os.path.join(output_dir, model_name, base_name)

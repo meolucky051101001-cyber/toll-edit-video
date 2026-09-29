@@ -41,4 +41,5 @@ cd backend
 ```
 
 Production dùng `QC_GATE_POLICY=block`. Xem checklist đầy đủ tại
-`docs/pipeline_v2_rollout.md` và sơ đồ phiên bản tại `VERSIONS.md`.
+`docs/pipeline_v2_rollout.md`, sơ đồ module/cấu hình tại
+`docs/backend_architecture.md` và sơ đồ phiên bản tại `VERSIONS.md`.
