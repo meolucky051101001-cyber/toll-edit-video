@@ -16,12 +16,15 @@ Repository này chứa mã nguồn và tài liệu cho ba nhóm công cụ độ
 
 ## 1. Chọn đúng công cụ và nhánh
 
-| Công cụ | Nhánh nên dùng | Mục đích | Cổng / điểm vào |
+| Tên công cụ | Nhánh GitHub | Cổng truy cập | Vai trò chính |
 | --- | --- | --- | --- |
-| Tool V1 | [tool-v1](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v1) | Pipeline V1 và dashboard giám sát độc lập | Dashboard mặc định 8088 |
-| Tool V2 | [tool-v2](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v2) | Pipeline mới hơn, bot Telegram, dashboard, xử lý cục bộ và QC | Dashboard 8089; API desktop 8000 |
-| Tool tìm kiếm video | [tool-tim-kiem-video](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-tim-kiem-video) | Ứng dụng riêng để nghiên cứu/tìm kiếm và quản lý kết quả | Xem README của nhánh |
-| Trang tổng hợp | [main](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/main) | Mục lục và nhánh đích cho các thay đổi chung; có thể chậm hơn nhánh tính năng | Không phải cam kết phiên bản đang chạy |
+| **Portal điều phối** | [`main`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/main) | — | Mục lục hệ sinh thái, tài liệu tổng hợp và quy chuẩn vận hành |
+| **Tool V1 (Production)** | [`tool-v1`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v1) | Dashboard `127.0.0.1:8088` | Pipeline V1 xử lý video theo hàng đợi và dashboard giám sát |
+| **Tool V2 (Next-Gen)** | [`tool-v2`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v2) | Dashboard `127.0.0.1:8089`; API desktop `127.0.0.1:8000` | Pipeline theo job/stage, phục hồi và QC; Multi-zone Cover QC, Dynamic Sampling; bot Telegram và xử lý cục bộ |
+| **Giám sát & A2UI Studio** | Tích hợp trên `tool-v1` và `tool-v2` | V1 `8088` / V2 `8089` | Dashboard giám sát; Studio Quy Trình (`/quy-trinh`) và Studio Kịch Bản (`/kich-ban`) khi service tương ứng được mount |
+| **Tool tìm kiếm video AI** | [`tool-tim-kiem-video`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-tim-kiem-video) (alias: `ai-video-research-tool`) | Web `localhost:3000`; API `localhost:8000` | Ứng dụng riêng để nghiên cứu/tìm kiếm video; xem README của nhánh để biết tính năng và cấu hình hiện hành |
+
+Đường dẫn checkout và dữ liệu cục bộ phụ thuộc máy; Tool V2 hỗ trợ cấu hình thư mục qua ENV. Bảng này không cố định các đường dẫn Windows cá nhân hay khẳng định service đang chạy.
 
 Nhánh **refactor/pipeline-v2** hiện trùng nội dung với **tool-v2**; dùng **tool-v2** làm tên chuẩn. **ai-video-research-tool** là tên nhánh tương thích của ứng dụng tìm kiếm; ưu tiên **tool-tim-kiem-video**. Luôn kiểm tra commit/PR hiện hành trước khi cập nhật máy chạy.
 
