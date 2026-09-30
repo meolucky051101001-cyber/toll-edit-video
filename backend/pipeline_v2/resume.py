@@ -39,6 +39,12 @@ class ResumableVideoJob:
     clean_audio_hint: Optional[bool]
     delogo: bool
     next_stage: str
+    font_name: str = "Arial"
+    font_color: str = "&H00000000"
+    font_weight: int = 2
+    speaker_map: Optional[Dict[str, str]] = None
+    speaker_voice_map: Optional[Dict[str, str]] = None
+    enable_auto_gender: bool = False
 
 
 def _published_outputs_present(manifest: Any) -> bool:
@@ -108,6 +114,16 @@ def find_resumable_jobs(workspace: Path) -> List[ResumableVideoJob]:
                     clean_audio_hint=request.get("clean_audio_hint"),
                     delogo=bool(request.get("delogo", False)),
                     next_stage=next_stage,
+                    font_name=str(request.get("font_name", "Arial")),
+                    font_color=str(request.get("font_color", "&H00000000")),
+                    font_weight=int(request.get("font_weight", 2)),
+                    speaker_map=request.get("speaker_map"),
+                    speaker_voice_map=request.get("speaker_voice_map"),
+                    enable_auto_gender=bool(
+                        metadata.get("settings", {}).get("enable_auto_gender")
+                        or request.get("settings", {}).get("enable_auto_gender")
+                        or bool(request.get("speaker_voice_map"))
+                    ),
                 )
             )
         except (OSError, KeyError, TypeError, ValueError):
@@ -140,6 +156,16 @@ async def resume_video_job(
             )
         voice_param = str(rvc_model)
 
+    enable_auto_gender = getattr(job, "enable_auto_gender", None)
+    if enable_auto_gender is None:
+        if bool(getattr(job, "speaker_voice_map", None)):
+            enable_auto_gender = True
+        else:
+            enable_auto_gender = settings.enable_auto_gender
+    if settings.enable_auto_gender != enable_auto_gender:
+        from dataclasses import replace
+        settings = replace(settings, enable_auto_gender=enable_auto_gender)
+
     async def report(stage: str, state: str) -> None:
         if progress is None:
             return
@@ -162,5 +188,10 @@ async def resume_video_job(
         clean_audio_hint=job.clean_audio_hint,
         delogo=job.delogo,
         progress=report,
+        font_name=job.font_name,
+        font_color=job.font_color,
+        font_weight=job.font_weight,
+        speaker_map=job.speaker_map,
+        speaker_voice_map=job.speaker_voice_map,
     )
     return await VideoPipelineRunner(request).run()

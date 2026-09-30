@@ -1,19 +1,21 @@
 # Pipeline v2 rollout guide
 
 Pipeline v2 is integrated into Telegram URL uploads, Telegram file uploads and
-the local batch processor. The default remains the unchanged legacy pipeline.
+the local batch processor. Branch `tool-v2` now defaults to the production v2
+pipeline; branch `tool-v1` preserves the independent V1 implementation.
 
 ## Modes
 
 ```env
-PIPELINE_MODE=legacy
+PIPELINE_MODE=v2
 ```
 
-- `legacy`: current production flow; no v2 processing or manifest writes.
+- `legacy`: temporary in-checkout rollback; no v2 processing or manifest writes.
 - `shadow`: legacy remains authoritative and a post-run shadow manifest records
   artifact hashes plus observed stage/total timing for comparison. It never
   loads a second GPU model alongside the live legacy render.
-- `v2`: use the checkpointed v2 pipeline and publish its final result.
+- `v2`: current production flow; use the checkpointed v2 pipeline and publish
+  only output allowed by the QC gate.
 
 Restart the bot only when its queue is empty. Never change modes while Demucs,
 Whisper, EasyOCR, RVC or FFmpeg is active.
@@ -33,9 +35,10 @@ và không còn mục `error`. Warning về RVC có thể chấp nhận nếu ch
 warning CUDA nghĩa là pipeline có thể chạy CPU nhưng không phù hợp video dài.
 Wildcard CORS bị preflight chặn vì API nhận đường dẫn file cục bộ.
 
-## Recommended rollout
+## Validation on a new machine
 
-Start with shadow mode:
+For a new machine or driver change, shadow mode can be used briefly before the
+first v2 E2E run:
 
 ```env
 PIPELINE_MODE=shadow
@@ -82,15 +85,14 @@ Adaptive decisions are conservative. An uncertain audio probe runs Demucs; an
 unavailable lightweight video probe runs EasyOCR. Source resolution is kept,
 and a requested target must never upscale a smaller source.
 
-Keep QC non-blocking during initial real-video testing:
+Use report-only only for an explicit diagnostic run on a new machine:
 
 ```env
 QC_GATE_POLICY=report_only
 ```
 
-After multiple successful videos, `warn` still delivers while surfacing QC
-errors. `block` prevents delivery when the QC report contains an error, but it
-does not delete the render or its artifacts:
+Production uses `block`. It prevents delivery when the QC report contains an
+error, but it does not delete the render or its artifacts:
 
 ```env
 QC_GATE_POLICY=block
@@ -114,9 +116,9 @@ configuration and model fingerprints remain valid. `ENABLE_STAGE_CACHE=true`
 also reuses a fully delivered job; when false, a new run archives the completed
 manifest and starts fresh.
 
-The GPU lock is shared by Demucs, Whisper, EasyOCR and RVC. Each heavyweight
-stage runs in its own Python process, and operating-system lock release protects
-against worker crashes.
+The GPU lock is shared by BS-RoFormer/Demucs, Qwen3-ASR/Whisper,
+PP-OCRv6/EasyOCR and RVC. Each heavyweight stage runs in its own Python process,
+and operating-system lock release protects against worker crashes.
 
 Pipeline v2 dùng fail-closed cho các artifact tạo nội dung: Demucs/RVC giả hoặc
 Git LFS pointer, bản dịch CJK không đổi, batch OCR/Translation rỗng và FPT hết
@@ -160,7 +162,7 @@ the machine without changing stage order or output behavior.
 ## Checklist trước khi chuyển sang hoạt động
 
 1. Preflight `ready=True` bằng chính venv sẽ chạy bot/API.
-2. Chạy một video 30–90 giây ở `QC_GATE_POLICY=report_only`; mở và nghe file cuối,
+2. Chạy một video 30–90 giây ở `QC_GATE_POLICY=block`; mở và nghe file cuối,
    kiểm tra `qc/qc_report.json` và `job_manifest.json`.
 3. Dừng giữa TTS hoặc RVC rồi khởi động lại để xác nhận resume không đổi giọng và
    không chạy lại các stage đã có SHA-256 hợp lệ.
@@ -168,14 +170,16 @@ the machine without changing stage order or output behavior.
    đã qua là bằng chứng cho provider khác.
 5. Chạy một video dài đại diện với cấu hình batch thật và theo dõi VRAM, dung
    lượng workspace, thời gian mixer/render.
-6. Sau khi ma trận video thật sạch, chuyển `QC_GATE_POLICY=warn`, rồi `block`.
+6. Giữ `QC_GATE_POLICY=block` cho hoạt động production; chỉ hạ xuống
+   `report_only` trong một lượt chẩn đoán có giám sát.
 
 Không đánh dấu production-ready chỉ từ unit test: Demucs, dịch/TTS cloud, RVC và
 NVENC cần ít nhất một lượt end-to-end với model, API key và driver của máy chạy.
 
 ## Rollback
 
-Set the following and restart after the queue becomes empty:
+Ưu tiên checkout branch `tool-v1` nếu cần quay lại V1 độc lập. Để rollback tạm
+ngay trong checkout V2, đặt cấu hình sau và restart khi hàng đợi đã trống:
 
 ```env
 PIPELINE_MODE=legacy

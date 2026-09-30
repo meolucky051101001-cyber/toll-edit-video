@@ -565,19 +565,18 @@ def process_video(
                 print(f"Lưu ý: Không thể cấu hình delogo ({d_err})")
                 
         if srt_to_use.endswith('.ass'):
-            filter_parts.append(f"subtitles='{srt_escaped}'")
+            srt_filter_str = f"subtitles='{srt_escaped}'"
         else:
-            filter_parts.append(f"subtitles='{srt_escaped}':force_style='{style_str}'")
-            
-        filter_complex = ",".join(filter_parts)
+            srt_filter_str = f"subtitles='{srt_escaped}':force_style='{style_str}'"
+
+        filter_args, extra_inputs, video_map = build_canvas_render_graph(
+            video_path, w, h, filter_parts, srt_filter_str
+        )
         
         video_bitrate_kbps = 8000
         b_v = f"{video_bitrate_kbps}k"
         
-        # Danh sách các bộ mã hóa video theo thứ tự ưu tiên tốc độ cao nhất:
-        # 1. h264_nvenc (NVIDIA GPU Hardware)
-        # 2. h264_mf (Windows MediaFoundation Hardware)
-        # 3. libx264 (CPU Đa nhân tối ưu veryfast)
+        # GPU-first NVENC with CPU libx264 fallback for long video resilience (e.g. NVENC session limit on RTX 4050)
         encoders_to_try = [
             ['h264_nvenc', '-preset', 'p4', '-tune', 'hq', '-b:v', b_v, '-spatial-aq', '1'],
             ['h264_nvenc', '-preset', 'fast', '-b:v', b_v],
@@ -598,8 +597,8 @@ def process_video(
                 '-filter_threads', '2',
                 '-i', video_path,
                 '-i', mixed_audio_path,
-                '-vf', filter_complex,
-                '-map', '0:v',
+            ] + extra_inputs + filter_args + [
+                '-map', video_map,
                 '-map', '1:a',
                 '-c:v', encoder_name
             ] + enc_args[1:] + [

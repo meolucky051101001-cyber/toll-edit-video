@@ -12,6 +12,7 @@ import time
 import threading
 import subprocess
 import hashlib
+import html
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 import cv2
@@ -31,6 +32,18 @@ from canvas_settings import (
 )
 
 logger = logging.getLogger("workflow_api")
+
+try:
+    from backend.config.paths import AppPaths
+    from backend.environment import read_environment
+except ImportError:
+    from config.paths import AppPaths
+    from environment import read_environment
+
+_BACKEND_ROOT = Path(__file__).resolve().parent
+PATHS = AppPaths.from_environment(
+    _BACKEND_ROOT.parent, read_environment(_BACKEND_ROOT)
+)
 
 router = APIRouter()
 
@@ -332,10 +345,10 @@ def build_ass_force_style(cfg: Dict[str, Any], default_font_size: int = 18) -> s
     )
 
 
-ROOT = Path(__file__).resolve().parent
-WORKSPACE = Path(os.getenv("AUTODUB_WORKSPACE", str(ROOT.parent / "workspace")))
-INPUT_DIR = Path(os.getenv("AUTODUB_INPUT_DIR", r"D:\video phôi"))
-OUTPUT_DIR = Path(os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve"))
+ROOT = _BACKEND_ROOT
+WORKSPACE = PATHS.workspace
+INPUT_DIR = PATHS.input_dir
+OUTPUT_DIR = PATHS.output_dir
 DOWNLOADS_DIR = WORKSPACE / "downloads"
 
 # ===== BATCH FOLDER FRAMING STATE & WORKER =====
@@ -462,6 +475,28 @@ async def serve_workflow_page():
         token = get_current_control_token()
         content = content.replace("__REPLACE_TOKEN__", token)
         content = content.replace("CONTROL_PLANE_TOKEN_PLACEHOLDER", token)
+        configured_paths = {
+            "input": str(PATHS.input_dir),
+            "output": str(PATHS.output_dir),
+            "framed_output": str(PATHS.output_dir / "chong_reup"),
+        }
+        content = content.replace(
+            "__CONFIGURED_INPUT_DIR__", html.escape(configured_paths["input"], quote=True)
+        )
+        content = content.replace(
+            "__CONFIGURED_OUTPUT_DIR__",
+            html.escape(configured_paths["output"], quote=True),
+        )
+        content = content.replace(
+            "__CONFIGURED_FRAMED_OUTPUT_DIR__",
+            html.escape(configured_paths["framed_output"], quote=True),
+        )
+        path_script = (
+            "<script>window.AUTO_DUB_PATHS = "
+            + json.dumps(configured_paths, ensure_ascii=True)
+            + ";</script>"
+        )
+        content = content.replace("</head>", f"{path_script}</head>", 1)
         return HTMLResponse(content)
     return HTMLResponse("<h2>Chưa tìm thấy file template workflow.html</h2>", status_code=404)
 
@@ -1338,7 +1373,7 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
     cfg = payload.get("canvas_settings") or get_canvas_settings()
 
     if not output_folder:
-        output_folder = r"D:\banve"
+        output_folder = str(OUTPUT_DIR)
     out_dir = Path(output_folder)
     out_dir.mkdir(parents=True, exist_ok=True)
 

@@ -24,6 +24,14 @@ if env_file.exists():
 # The API in this worktree is Tool V1 only, regardless of inherited variables.
 os.environ["PIPELINE_MODE"] = "legacy"
 
+from environment import load_environment
+
+BASE_DIR = Path(__file__).resolve().parent
+load_environment(BASE_DIR)
+from config.paths import AppPaths
+
+PATHS = AppPaths.from_environment(BASE_DIR.parent)
+
 from ai.transcription import extract_subtitles_whisper, save_srt
 from ai.v1_asr_isolated import extract_subtitles_isolated
 from ai.translation import translate_subtitles
@@ -259,6 +267,9 @@ async def run_api_pipeline_v2(
     voice_source,
     voice_param,
     api_key,
+    font_name="Arial",
+    font_color="&H00FFFFFF",
+    font_weight=1,
 ):
     """Run the shared v2 runner for API routes when rollout mode is v2."""
 
@@ -299,6 +310,9 @@ async def run_api_pipeline_v2(
         voice_source=voice_source,
         voice_param=selected_voice_param,
         rvc_model_path=rvc_model,
+        font_name=font_name,
+        font_color=font_color,
+        font_weight=font_weight,
     )
     return await VideoPipelineRunner(request).run()
 
@@ -414,6 +428,9 @@ async def api_process_video(
             voice_source,
             voice_param,
             api_key,
+            font_name,
+            font_color,
+            font_weight,
         )
         if v2_result is not None:
             return {
@@ -627,6 +644,9 @@ async def api_process_url(
             voice_source,
             voice_param,
             api_key,
+            font_name,
+            font_color,
+            font_weight,
         )
         if v2_result is not None:
             return {

@@ -1,43 +1,61 @@
-backend/.env
-.env
-
-__pycache__/
-*.pyc
-*.pyo
-
-node_modules/
-
-cache/
-temp/
-tmp/
-downloads/
-outputs/
-logs/
-runtime_logs/
-*.log
-backend/*.log
-
-*.part
-*.downloading
-
-.venv/
-venv/
-model_venv/
-workspace/
-
+# Local environments and secrets
+backend/venv/
+backend/venv_old/
+backend/model_venv/
+backend/venv-invalid-distributions-*/
 models/
-weights/
-*.pt
-*.pth
-*.bin
-*.safetensors
+venv/
+env/
+*.env
+*.env*
+.env*
+backend/.env*
+*.key
+*.pem
 
-master_plan.txt
-*.control_token
-workspace/.dashboard_control_token
-voice_cache/
-backend/voice_cache/
-*.tmp
+# Python and test caches
+__pycache__/
+*.py[cod]
+
+# Frontend build/install output
+frontend/node_modules/
+frontend/dist/
+
+# Runtime artifacts
+workspace/
+backend/workspace/
+backend/downloads/
+*.lock
+*.log
+temp_burn*
+*.mp4
+*.mp3
+*.wav
+*.jpg
+*.png
+*.ass
+*.srt
+
+# Large optional model assets
+*.pth
+*.index
+*.onnx
+
+# Editor/OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Backups and temporary files
+backups/
+benchmarks/
+*.before-*
+*.patch
+
+# Safe-to-commit environment templates (real .env files remain ignored).
+!.env.cpu.example
+!.env.gpu.example
 
 # User-specific downloader input; keep URLs local and untracked
 urls.txt

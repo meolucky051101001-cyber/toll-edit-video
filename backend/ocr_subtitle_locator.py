@@ -106,9 +106,15 @@ def _geometry_score(
 
     width = right - left
     height = bottom - top
-    if not (0.0 <= left < right <= 1.0 and 0.03 <= top < bottom <= 0.96):
+    if not (0.0 <= left < right <= 1.0 and 0.01 <= top < bottom <= 0.995):
         return None
-    if width < 0.025 or height < 0.007 or height > 0.14:
+    # Burned-in captions can legitimately run almost edge-to-edge (the source
+    # may even crop the first/last glyph).  Rejecting boxes wider than 90%
+    # drops their geometry and makes ASS fall back to text-only rendering with
+    # no white cover.  Wide scene/package text is still protected by the
+    # transcript-match and static-text checks below, so width alone must not
+    # disqualify an otherwise valid ASR-matched subtitle.
+    if width < 0.025 or width > 0.90001 or height < 0.007 or height > 0.14:
         return None
 
     pixel_aspect = (width * max(frame_width, 1)) / (
@@ -218,6 +224,11 @@ def _is_static_packaging_or_logo(cluster: Sequence[_Candidate]) -> bool:
     if best_text_score >= 0.45:
         return False
 
+    center = median(item.center_y for item in chosen)
+    # Mid-screen zone (0.25 - 0.68) is product packaging/scene text zone unless strongly matched to ASR
+    if 0.25 <= center <= 0.68 and best_text_score < 0.40:
+        return True
+
     texts = Counter(item.normalized_text for item in chosen if item.normalized_text)
     unique_texts = len(texts)
     sample_count = len(chosen)
@@ -262,11 +273,36 @@ def select_chinese_subtitle_band(
 
     grouped: Dict[Any, List[_Candidate]] = {}
     candidates: List[_Candidate] = []
+    speech_ids = list(segment_texts)
+    context_texts = {
+        sid: ''.join(segment_texts[key] for key in speech_ids[max(0, i-1):i+2])
+        for i, sid in enumerate(speech_ids)
+    }
+
+    def speech_match(text, sid):
+        score, strong = _text_match(text, segment_texts.get(sid, ''))
+        if not strong:
+            # A burnt-in caption often spans two ASR cues. Require a real
+            # phrase in this cue before consulting its immediate neighbours.
+            own = SequenceMatcher(None, _chinese_text(text),
+                                  _chinese_text(segment_texts.get(sid, '')), autojunk=False)
+            matches = own.get_matching_blocks()
+            if max((m.size for m in matches), default=0) >= 3 and sum(m.size for m in matches) >= 4:
+                context_score, context_strong = _text_match(text, context_texts.get(sid, ''))
+                if context_strong and context_score >= .65:
+                    return max(score, context_score*.9), True
+        return score, strong
+
     for ordinal, source in enumerate(blocks):
-        block = _as_mapping(source)
-        # Social handles below captions must never enlarge a subtitle union.
-        if str(block["text"]).lstrip().startswith(("@", "＠")):
+        # Respect explicit classification before mapping drops optional fields.
+        if (_value(source, "is_subtitle") is False
+                or _value(source, "is_packaging") is True
+                or _value(source, "is_static") is True
+                or _value(source, "in_subtitle_band") is False
+                or str(_value(source, "type", "")).lower() in
+                ("packaging", "background", "logo", "watermark")):
             continue
+        block = _as_mapping(source)
         if len(_chinese_text(block["text"])) < 2:
             continue
         geometry_score = _geometry_score(block, frame_width, frame_height)
@@ -279,9 +315,7 @@ def select_chinese_subtitle_band(
             if segment_id is not None
             else ("time", round(float(block.get("sample_time", ordinal)), 3))
         )
-        text_score, strong = _text_match(
-            block["text"], segment_texts.get(segment_id, "")
-        )
+        text_score, strong = speech_match(block["text"], segment_id)
         candidate = _Candidate(
             block=block,
             sample_key=sample_key,
@@ -369,8 +403,37 @@ def select_chinese_subtitle_band(
         ]
         seen_segments = {other.segment_id for other in related}
         matching_segments = {other.segment_id for other in related if other.strong_text_match}
-        return not (len(seen_segments) >= 3 and
-                    len(matching_segments) / len(seen_segments) < 0.6)
+        # Repeated unmatched scene text must not enter through bracket recovery.
+        # Position alone is not evidence: genuine fixed-position dialogue with
+        # changing text or matching ASR remains eligible.
+        if len(seen_segments - {None}) >= 2 and not matching_segments:
+            return False
+        if len(seen_segments) >= 3 and len(matching_segments) / len(seen_segments) < 0.6:
+            # Overlapping acquisition windows can observe ONE genuine caption
+            # under the preceding/current/following ASR IDs. These are not
+            # three independent proofs of a persistent product label.
+            # Recover only a strongly matched phrase, temporally bracketed by
+            # different validated captions at the same position. A coincident
+            # second line or a long-lived label remains ineligible.
+            if not item.strong_text_match or len(_chinese_text(item.block['text'])) < 6:
+                return False
+            first = min(other.block['sample_time'] for other in related)
+            last = max(other.block['sample_time'] for other in related)
+            if last - first > 4.0:
+                return False
+            neighbours = [other for other in candidates if other.strong_text_match
+                and not other.composite
+                and SequenceMatcher(None, other.normalized_text, item.normalized_text,
+                                    autojunk=False).ratio() < .5
+                and abs(other.center_y - item.center_y) <= .018
+                and abs((other.block['max_y_pct'] - other.block['y_pct']) -
+                        (item.block['max_y_pct'] - item.block['y_pct'])) <= .022]
+            if any(abs(other.block['sample_time'] - seen.block['sample_time']) < .02
+                   for other in neighbours for seen in related):
+                return False
+            return (any(0 < first - other.block['sample_time'] <= 2.0 for other in neighbours)
+                    and any(0 < other.block['sample_time'] - last <= 2.0 for other in neighbours))
+        return True
 
     strong_candidates = [item for item in candidates if item.strong_text_match and reliable(item)]
     chosen_cluster: Optional[List[_Candidate]] = None
@@ -415,9 +478,30 @@ def select_chinese_subtitle_band(
 
     selected_by_segment: Dict[int, Mapping[str, Any]] = {}
     selected_by_sample: Dict[int, List[Mapping[str, Any]]] = {}
+    # Outlined fonts can produce near-zero OCR confidence and corrupt words.
+    # Recover only an observed centered line bracketed by ASR-validated lines
+    # at the same position. Never invent a box for an empty frame.
+    def bracketed_line(item):
+        b = item.block
+        if (item.composite or not reliable(item)
+                or len(_chinese_text(b["text"])) < 4
+                or b["max_x_pct"] - b["x_pct"] < 0.30
+                or abs((b["x_pct"] + b["max_x_pct"]) / 2 - 0.5) > 0.10):
+            return False
+        anchors = [other for other in strong_candidates
+                   if other.segment_id != item.segment_id
+                   and abs(other.center_y - item.center_y) <= 0.018
+                   and abs((other.block["max_y_pct"] - other.block["y_pct"])
+                           - (b["max_y_pct"] - b["y_pct"])) <= 0.022]
+        t = b["sample_time"]
+        return (any(0 < t - a.block["sample_time"] <= 6 for a in anchors)
+                and any(0 < a.block["sample_time"] - t <= 6 for a in anchors))
+
+    recovered = [item for item in candidates
+                 if not item.strong_text_match and bracketed_line(item)]
     for segment_id in segment_texts:
         # Use only validated matches, including genuine vertical motion.
-        local = [item for item in strong_candidates if item.segment_id == segment_id]
+        local = [item for item in strong_candidates + recovered if item.segment_id == segment_id]
         selected = sorted(_best_per_sample(local), key=lambda item: item.block["sample_time"])
         if not selected:
             continue

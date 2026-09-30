@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import os
 import sys
 import time
@@ -15,13 +15,15 @@ if hasattr(sys.stderr, "reconfigure"):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-env_file = os.path.join(BASE_DIR, ".env")
-if os.path.exists(env_file):
-    with open(env_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if "=" in line and not line.strip().startswith("#"):
-                k, v = line.strip().split("=", 1)
-                os.environ[k.strip()] = v.strip().strip('"').strip("'")
+from environment import load_environment
+
+load_environment(Path(BASE_DIR))
+try:
+    from config.paths import AppPaths
+except ImportError:
+    from backend.config.paths import AppPaths
+
+PATHS = AppPaths.from_environment(Path(BASE_DIR).parent)
 
 from pipeline_v2.config import PipelineSettings
 from pipeline_v2.video_pipeline import VideoPipelineRequest, VideoPipelineRunner, discover_rvc_model
@@ -30,13 +32,11 @@ async def process_video(video_path: Path):
     file_name = video_path.name
     base_name = video_path.stem
     
-    workspace_dir = Path(
-        os.getenv("AUTODUB_WORKSPACE", str(Path(BASE_DIR).parent / "workspace"))
-    ).resolve()
+    workspace_dir = PATHS.workspace
     job_dir = workspace_dir / f"batch_{base_name}"
     job_dir.mkdir(parents=True, exist_ok=True)
     
-    output_dir = Path(os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve")).resolve()
+    output_dir = PATHS.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     final_dest = output_dir / f"Dubbed_{base_name}.mp4"
     
@@ -72,7 +72,7 @@ async def process_video(video_path: Path):
     print(f"💾 Đã lưu thành phẩm vào: {final_dest}\n", flush=True)
 
 async def main():
-    input_folder = Path(os.getenv("AUTODUB_INPUT_DIR", r"D:\video phôi")).resolve()
+    input_folder = PATHS.input_dir
     if not input_folder.exists():
         print(f"ERROR: Thư mục {input_folder} không tồn tại!", flush=True)
         return

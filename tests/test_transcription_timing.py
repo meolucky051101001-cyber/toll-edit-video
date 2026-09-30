@@ -4,12 +4,27 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from backend.ai.transcription import _merge_short_fragments, _word_aligned_bounds
+from backend.ai.transcription import _merge_short_fragments, _word_aligned_bounds, _group_fast_speech_windows
 from backend.ass_utils import generate_ass_file
 from backend.pipeline_v2.segments import RuntimeSegment
 
 
 class WhisperTimingRegressionTests(unittest.TestCase):
+    def test_fast_windows_preserve_text_bounds_pauses_and_overlap(self):
+        raw = [
+            {"start": 0, "end": 1.5, "text": "第一句。"},
+            {"start": 1.5, "end": 3.5, "text": "第二句。"},
+            {"start": 3.5, "end": 5.0, "text": "第三句。"},
+            {"start": 8, "end": 9, "text": "第四句。"},
+            {"start": 8.8, "end": 10, "text": "第五句。"},
+        ]
+        grouped = _group_fast_speech_windows(raw)
+        self.assertEqual(len(grouped), 4)
+        self.assertEqual(grouped[0], {"start": 0, "end": 3.5, "text": "第一句。第二句。"})
+        self.assertEqual(grouped[1:], raw[2:])
+        self.assertEqual("".join(item["text"] for item in grouped), "".join(item["text"] for item in raw))
+        self.assertEqual(raw[0]["end"], 1.5)
+
     def test_word_bounds_replace_coarse_silence_spanning_bounds(self):
         segment = SimpleNamespace(
             start=0.18,

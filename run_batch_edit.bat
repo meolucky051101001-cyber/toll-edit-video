@@ -15,8 +15,7 @@ echo ========================================================
 echo   AUTO BATCH VIDEO DUBBING PROCESSOR (OFFLINE / LOCAL)
 echo ========================================================
 echo.
-echo [1] Thư mục chứa video gốc : %AUTODUB_INPUT_DIR%
-echo [2] Thư mục lưu thành phẩm : %AUTODUB_OUTPUT_DIR%
+echo [1] Thư mục đầu vào/đầu ra đọc từ backend\.env hoặc cấu hình mặc định theo hệ điều hành.
 echo.
 echo Đang quét và bắt đầu xử lý tuần tự từng video...
 echo.
@@ -33,10 +32,10 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-call ".\venv\Scripts\python.exe" "batch_processor.py" --input "%AUTODUB_INPUT_DIR%" --output "%AUTODUB_OUTPUT_DIR%"
+call ".\venv\Scripts\python.exe" "batch_processor.py"
 
 echo.
 echo ========================================================
-echo   HOÀN TẤT! Video thành phẩm đã được lưu tại %AUTODUB_OUTPUT_DIR%
+echo   Batch đã kết thúc. Đường dẫn xuất thực tế được in trong log phía trên.
 echo ========================================================
 pause
