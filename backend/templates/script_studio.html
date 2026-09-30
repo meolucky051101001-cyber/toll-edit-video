@@ -1492,13 +1492,13 @@ header .nav-actions > a[href="http://127.0.0.1:8088/"], header .nav-actions > a[
                 <button class="btn btn-outline" style="font-size:10.5px; padding:2px 7px;" onclick="loadAvailableVideos()" title="Quét lại thư mục video">🔄 Quét lại</button>
               </label>
               <select class="form-select" id="selAvailableVideos" onchange="handleSelectAvailableVideo(this.value)">
-                <option value="">-- Chọn video trong D:\video phôi hoặc D:\banve --</option>
+                <option value="">-- Chọn video trong thư mục nguồn hoặc thành phẩm đã cấu hình --</option>
               </select>
             </div>
 
             <div class="form-group">
               <label class="form-label">Đường dẫn file video (.mp4)</label>
-              <input type="text" class="form-input" id="txtVideoPath" placeholder="Ví dụ: D:\video phôi\review_san_pham.mp4" oninput="handleVideoPathChanged(this.value)">
+              <input type="text" class="form-input" id="txtVideoPath" placeholder="Nhập đường dẫn video trên máy này" oninput="handleVideoPathChanged(this.value)">
             </div>
 
             <!-- PROMPT BỔ SUNG TÌNH HUỐNG VIDEO -->

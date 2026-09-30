@@ -45,9 +45,26 @@ class LegacyPatchPreservationTests(unittest.TestCase):
         source = (ROOT / "backend" / "ai" / "translation.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn("cv2.VideoCapture(video_path)", source)
+        self.assertIn("sample_video_frames(video_path, num_frames", source)
         self.assertIn('"inline_data"', source)
         self.assertIn('"mime_type": "image/jpeg"', source)
+        import base64
+        import numpy as np
+        import tempfile
+        from unittest.mock import patch
+        from backend.ai.translation import extract_video_frames_base64
+        import cv2
+        frames = [np.full((32, 48, 3), i * 40, dtype=np.uint8) for i in range(5)]
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / 'fixture.mp4'
+            video.write_bytes(b'fixture')
+            with patch('backend.video_sampling.sample_video_frames', return_value=frames) as sample:
+                encoded = extract_video_frames_base64(str(video), 2, 8, 5)
+            sample.assert_called_once_with(str(video), 5, 2, 8)
+        self.assertEqual(len(encoded), 5)
+        for jpeg in encoded:
+            decoded = cv2.imdecode(np.frombuffer(base64.b64decode(jpeg), np.uint8), cv2.IMREAD_COLOR)
+            self.assertEqual(decoded.shape, (32, 48, 3))
 
     def test_v2_gpu_limits_are_explicit(self):
         pipeline = (ROOT / "backend" / "pipeline_v2" / "video_pipeline.py").read_text(

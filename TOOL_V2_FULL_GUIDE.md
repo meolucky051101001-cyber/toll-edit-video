@@ -13,7 +13,8 @@ Pipeline v2 là hệ thống xử lý video đa phương tiện hướng trạng
 ## 🌟 2. CÁC TÍNH NĂNG ĐỘT PHÁ CỦA V2
 
 ### 1. Cách ly tiến trình GPU (GPU Process Isolation & Lock)
-- Mỗi model AI nặng (Demucs, Faster-Whisper, EasyOCR, RVC) được thực thi trong một tiến trình con (subprocess) độc lập.
+- Mỗi model AI nặng (BS-RoFormer/Demucs, Qwen3-ASR/Whisper,
+  PP-OCRv6/EasyOCR, RVC) được thực thi trong một tiến trình con (subprocess) độc lập.
 - Sau khi hoàn thành stage, tiến trình con tự hủy -> **Hệ điều hành Windows thu hồi 100% VRAM về 0MB**.
 - GPULock sử dụng file-lock nguyên tử đảm bảo chỉ 1 tác vụ AI chiếm dụng GPU tại một thời điểm.
 
@@ -55,7 +56,7 @@ Pipeline v2 là hệ thống xử lý video đa phương tiện hướng trạng
 | ATEMPO_MAX | 1.40 | Tốc độ đọc nhanh nhất |
 | TARGET_LUFS | -15.0 | Chuẩn âm lượng tổng thể EBU R128 |
 | TRUE_PEAK_MAX_DBTP | -1.0 | Ngưỡng chặn rè âm True Peak |
-| QC_GATE_POLICY | report_only | Chính sách kiểm định (report_only, warn, block) |
+| QC_GATE_POLICY | block | Chặn giao video khi QC phát hiện lỗi nghiêm trọng |
 | ENABLE_RVC | true | Bật tính năng lồng tiếng RVC AI |
 
 ---
@@ -64,10 +65,10 @@ Pipeline v2 là hệ thống xử lý video đa phương tiện hướng trạng
 
 ### 1. Kiểm tra Sức khỏe Hệ thống (Preflight Check)
 Mở PowerShell tại thư mục backend/ và chạy:
-`powershell
+```powershell
 .\venv\Scripts\python.exe -m pipeline_v2.preflight --project-root .. --interface all
-`
-Yêu cầu kết quả: ready=True pass=29 warning=0 error=0.
+```
+Yêu cầu production hiện tại: `ready=True pass=32 warning=0 error=0` cho giao diện Telegram.
 
 ### 2. Khởi động Bot Telegram
 - **Cách 1 (Giao diện chuẩn):** Chạy file start_bot.bat ở thư mục gốc.
@@ -77,16 +78,27 @@ Yêu cầu kết quả: ready=True pass=29 warning=0 error=0.
 Chạy file run_batch_edit.bat để render toàn bộ video có trong thư mục đầu vào.
 
 ### 4. Khởi chạy Bộ Kiểm thử (Run All Tests)
-`powershell
-.\venv\Scripts\python.exe -m pytest tests/ -v
-`
-Kết quả: 72/72 tests đạt chuẩn.
+```powershell
+.\backend\venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+```
+Kết quả hiện tại: 115/115 tests đạt chuẩn.
 
 ---
 
 ## 🔄 5. HƯỚNG DẪN QUAY VỀ BẢN V1 (ROLLBACK) KHI CẦN
 
 Nếu cần chuyển nhanh về bản V1 (Legacy):
-1. Mở file backend/.env, sửa dòng:
-   PIPELINE_MODE=legacy
-2. Khởi động lại Bot bằng start_bot.bat.
+1. Dùng nhánh GitHub `tool-v1` cho mã nguồn V1 độc lập.
+2. Dùng nhánh `tool-v2` cho Pipeline V2 production.
+3. Chỉ dùng `PIPELINE_MODE=legacy` để rollback tạm thời trong checkout V2.
+
+---
+
+## 📦 6. PHẠM VI DỮ LIỆU TRÊN GITHUB
+
+- Source backend/frontend, tests, tài liệu và script vận hành được track đầy đủ.
+- Model RVC `.pth`/`.index` được lưu bằng Git LFS.
+- Qwen3-ASR, ForcedAligner, PP-OCRv6 và BS-RoFormer được tải vào `models/`
+  khi cài/chạy model runtime; cache này không commit vì có kích thước khoảng 4.2 GB.
+- `backend/venv`, `backend/model_venv`, `workspace`, video render, log và `.env`
+  không được đẩy lên GitHub. Chúng có tổng dung lượng hơn 21 GB và `.env` chứa token/API key.

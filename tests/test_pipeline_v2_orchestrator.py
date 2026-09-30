@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from backend.pipeline_v2 import ArtifactStore, FingerprintSet, ManifestStore
-from backend.pipeline_v2.config import PipelineMode, PipelineSettings
+from backend.pipeline_v2.config import PipelineMode, PipelineSettings, QCGatePolicy
 from backend.pipeline_v2.orchestrator import (
     PipelineContext,
     PipelineOrchestrator,
@@ -19,7 +19,17 @@ class PipelineSettingsTests(unittest.TestCase):
         self.assertEqual(settings.mode, PipelineMode.V2)
         self.assertFalse(settings.enable_stage_cache)
         self.assertTrue(settings.preserve_source_resolution)
+        self.assertFalse(settings.enable_auto_gender)
         self.assertTrue(settings.enable_timing_solver)
+        self.assertEqual(settings.qc_gate_policy, QCGatePolicy.BLOCK)
+
+    def test_auto_gender_can_be_disabled_explicitly(self):
+        settings = PipelineSettings.from_env({"ENABLE_AUTO_GENDER": "false"})
+        self.assertFalse(settings.enable_auto_gender)
+
+    def test_auto_gender_requires_explicit_opt_in(self):
+        self.assertFalse(PipelineSettings().enable_auto_gender)
+        self.assertTrue(PipelineSettings.from_env({"ENABLE_AUTO_GENDER": "true"}).enable_auto_gender)
 
     def test_rejects_unsafe_atempo_bounds(self):
         with self.assertRaises(ValueError):

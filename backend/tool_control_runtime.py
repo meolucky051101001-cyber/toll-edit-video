@@ -7,7 +7,13 @@ from pathlib import Path
 from telegram import Update
 from telegram.ext import TypeHandler, ApplicationHandlerStop
 
-FLAGS=Path(r"C:\tool v1\workspace\control")
+FLAGS = Path(os.getenv(
+    "TOOL_V1_CONTROL_DIR",
+    os.getenv(
+        "AUTODUB_CONTROL_DIR",
+        str(Path(__file__).resolve().parent.parent / "workspace" / "control"),
+    ),
+))
 
 def is_allowed_command_during_pause(cmd_text: str) -> bool:
     """Codex Requirement: Cho phép lệnh xem/đổi chế độ /voice_auto và /start đi qua ngay cả khi V1 đang pause."""

@@ -114,7 +114,9 @@ def decide_ocr_from_scores(
     )
     peak = max(text_like_frame_scores)
     likelihood = min(1.0, positive_ratio * 0.75 + peak * 0.25)
-    should_run = likelihood >= threshold
+    # Fail-safe: never skip OCR if any sampled frame shows text-like structures (peak >= 0.35)
+    # or if any frame has positive text detection, preventing missed late-appearing subtitles.
+    should_run = (likelihood >= threshold) or (peak >= 0.35) or (positive_ratio > 0)
     return AdaptiveDecision(
         should_run,
         "burned_subtitle_likely" if should_run else "no_persistent_text_band",
@@ -128,27 +130,50 @@ def decide_ocr_from_scores(
     )
 
 
-def decide_ocr(video_path: PathLike, sample_count: int = 8) -> AdaptiveDecision:
-    """Use lightweight CPU vision to find persistent subtitle-like text bands."""
+def decide_ocr(
+    video_path: PathLike,
+    sample_count: int = 24,
+    transcript: Optional[Sequence[Any]] = None,
+) -> AdaptiveDecision:
+    """GPU-decode sparse previews, then run a lightweight text-band heuristic."""
 
     try:
         import cv2
     except ImportError:
         return AdaptiveDecision(True, "opencv_unavailable", 0.0)
-    capture = cv2.VideoCapture(str(video_path))
-    if not capture.isOpened():
-        return AdaptiveDecision(True, "video_probe_failed", 0.0)
     try:
-        total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total_frames <= 0:
-            return AdaptiveDecision(True, "frame_count_unavailable", 0.0)
+        try:
+            from ..video_sampling import sample_video_frames
+        except ImportError:
+            from video_sampling import sample_video_frames
+
+        timestamps = None
+        has_dialogue = False
+        if transcript:
+            speech_times = []
+            for s in transcript:
+                start_s = getattr(s, "start", None)
+                end_s = getattr(s, "end", None)
+                if hasattr(start_s, "total_seconds") and hasattr(end_s, "total_seconds"):
+                    st = start_s.total_seconds()
+                    et = end_s.total_seconds()
+                elif isinstance(s, dict) and "start" in s and "end" in s:
+                    st = float(s["start"])
+                    et = float(s["end"])
+                else:
+                    continue
+                if et - st >= 0.3:
+                    speech_times.append((st + et) / 2.0)
+            if speech_times:
+                has_dialogue = True
+                step = max(1, len(speech_times) // sample_count)
+                timestamps = [round(t, 3) for t in speech_times[::step][:sample_count]]
+
+        frames = sample_video_frames(
+            video_path, sample_count, max_width=720, timestamps=timestamps
+        )
         scores = []
-        for index in range(1, sample_count + 1):
-            frame_index = int(total_frames * index / (sample_count + 1))
-            capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-            ok, frame = capture.read()
-            if not ok:
-                continue
+        for frame in frames:
             height, width = frame.shape[:2]
             region = frame[
                 int(height * 0.40) : int(height * 0.94),
@@ -170,11 +195,17 @@ def decide_ocr(video_path: PathLike, sample_count: int = 8) -> AdaptiveDecision:
                 ):
                     text_like += 1
             scores.append(min(1.0, text_like / 12.0))
-        return decide_ocr_from_scores(scores)
+        decision = decide_ocr_from_scores(scores)
+        if has_dialogue and not decision.should_run:
+            return AdaptiveDecision(
+                True,
+                "speech_dialogue_present_failsafe",
+                0.5,
+                {**decision.metrics, "speech_dialogue_sampled": len(timestamps or [])},
+            )
+        return decision
     except Exception:
         return AdaptiveDecision(True, "lightweight_text_probe_failed", 0.0)
-    finally:
-        capture.release()
 
 
 def probe_video_dimensions(
@@ -245,3 +276,4 @@ def choose_output_dimensions(
     width = max(2, int(source_width * scale) // 2 * 2)
     height = max(2, int(source_height * scale) // 2 * 2)
     return width, height
+
