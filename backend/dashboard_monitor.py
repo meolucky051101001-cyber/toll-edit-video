@@ -13,6 +13,7 @@ import time
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, Form, HTTPException, Body, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from dashboard_media import media_status, paginate_listing, paginate_output, verify_dashboard_delivery
 from environment import read_environment
 try:
     from config.paths import AppPaths
@@ -259,6 +260,42 @@ def is_v2_worker_running(workspace=None, job_id=None):
         pass
     return False
 
+
+def _translation_models_for_job(manifest_path, manifest_data):
+    """Read exact successful translation models saved in per-batch checkpoints."""
+    models = []
+    batch_dir = manifest_path.parent / "artifacts" / "translation" / "batches"
+    if batch_dir.is_dir():
+        for checkpoint in sorted(batch_dir.glob("*.json"))[-512:]:
+            try:
+                quality = json.loads(checkpoint.read_text(encoding="utf-8")).get("quality", {})
+                found = quality.get("models") or ([quality.get("model")] if quality.get("model") else [])
+                if not found and quality.get("provider"):
+                    found = ["{} · chưa ghi nhận model".format(quality["provider"].upper())]
+                for model in found:
+                    if model and model not in models:
+                        models.append(str(model))
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+    if models:
+        return models
+
+    # Older jobs keep aggregate translation provenance in this artifact.
+    context_path = manifest_path.parent / "artifacts" / "translation" / "context.json"
+    try:
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        for batch in context.get("batches", []):
+            found = batch.get("models") or ([batch.get("model")] if batch.get("model") else [])
+            if not found and batch.get("provider"):
+                found = ["{} · chưa ghi nhận model".format(batch["provider"].upper())]
+            for model in found:
+                if model and model not in models:
+                    models.append(str(model))
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return models
+
+
 def read_status():
     candidates = sorted(WORKSPACE.glob("*/pipeline_v2/job_manifest.json"),
                         key=lambda p: p.stat().st_mtime, reverse=True)
@@ -299,8 +336,11 @@ def read_status():
         for item in UI_STEPS
     ]
 
+    cfg_model = str(ENV.get("GEMINI_MODEL", "gemini-3.8-flash")).strip() or "gemini-3.8-flash"
     result = {"stages": stage_list, "ui_steps": ui_step_list, "step_durations": {},
-              "translation_models": ["gemini-3.8-flash", "gemini-3.5-flash-lite"],
+              "configured_gemini_model": cfg_model,
+              "active_translation_model": cfg_model,
+              "translation_models": [],
               "percent": 0, "video_name": "", "elapsed_seconds": 0,
               "eta_seconds": None,
               "message": "Chưa có tác vụ nào đang chạy.",
@@ -317,11 +357,11 @@ def read_status():
               "step": 0,
               "step_name": "Sẵn sàng xử lý video"}
     if paused:
-        result["message"] = "⏸ Tool V2 đang TẮT. Toàn bộ tiến trình bot và bộ nhớ VRAM đã được giải phóng."
-        return result
+        result["active"] = False
+        result["message"] = "Tool V2 đang tắt; đang hiển thị trạng thái đã lưu."
 
     # Kiểm tra log tiến độ xử lý batch nếu batch_processor đang chạy và chưa có manifest
-    if batch_alive and not candidates:
+    if batch_alive and not paused and not candidates:
         log_paths = [
             WORKSPACE / "service_logs" / "batch_processor.log",
             ROOT / "app.log",
@@ -362,11 +402,11 @@ def read_status():
                         result["message"] = result["step_name"]
                         break
                     elif "Hoàn thành video" in line:
-                        result["step"] = 6
-                        result["percent"] = 100
-                        result["step_name"] = "Đã hoàn thành video"
-                        result["message"] = line.strip()
-                        result["video_status"] = "completed"
+                        result["step"] = 8
+                        result["percent"] = 99
+                        result["step_name"] = "Log ghi nhận hoàn thành; chưa có manifest để xác minh thành phẩm."
+                        result["message"] = result["step_name"]
+                        result["video_status"] = "unverified"
                         break
             except Exception:
                 pass
@@ -450,17 +490,20 @@ def read_status():
     result["updated_at"] = data.get("updated_at", "")
     finished = sum(s["status"] in ("completed", "skipped") for s in result["stages"])
     vname = result["video_name"]
-    delivered = False
+    verification = {"valid": False, "pending": False, "reason": "Chưa xác minh thành phẩm."}
     try:
-        from pipeline_v2.delivery_verification import verify_delivered_product
-        ver = verify_delivered_product(path, check_sha256=False, verify_media_streams=False)
-        delivered = ver.is_valid
-    except Exception:
-        delivered = False
+        verification = verify_dashboard_delivery(path)
+    except Exception as exc:
+        verification["reason"] = "Không xác minh được thành phẩm: " + str(exc)
+    delivered = verification["valid"]
     failed = [s["label"] for s in result["stages"] if s["status"] == "failed"]
     running = [s["label"] for s in result["stages"] if s["status"] == "running"]
-    if not delivered and records.get("deliver", {}).get("status") == "completed" and records.get("qc", {}).get("status") == "completed" and not failed:
-        delivered = True
+    delivery_invalid = records.get("deliver", {}).get("status") == "completed" and not delivered and not verification["pending"]
+    if delivery_invalid:
+        failed.append("Xác minh thành phẩm")
+    if failed:
+        delivered = False
+        result["last_error"] = verification["reason"] if delivery_invalid else "Lỗi tại: " + ", ".join(failed)
     
     # Active if worker/batch/bot is alive and task not completed/failed/paused
     active = not paused and not delivered and not failed and (
@@ -469,7 +512,12 @@ def read_status():
     result["active"] = active
     result["batch_running"] = batch_alive
 
-    if paused:
+    if failed:
+        result["status"] = "error"
+        result["percent"] = min(99, int(finished / len(STAGES) * 100))
+        result["message"] = result["last_error"]
+        result["step"] = current_step or 1
+    elif paused:
         result["status"] = "stopped"
         result["percent"] = 100 if delivered else min(99, int(finished / len(STAGES) * 100))
         result["message"] = ("Đã xuất thành phẩm trước đó. Tool V2 hiện đang TẮT (VRAM đã giải phóng)." if delivered else
@@ -525,16 +573,18 @@ def read_status():
     else:
         result["eta_seconds"] = None
 
-    # Tính toán thời gian thực tế từng bước (step_durations) cho quy trình 7 bước
+    # Tính toán thời gian thực tế từng bước (step_durations) cho quy trình 8 bước
     step_durations = {}
     stage_to_step = {
         "1": ["extract_audio"],
         "2": ["demucs"],
         "3": ["transcribe"],
+        "4": ["ocr"],
         "3.5": ["ocr"],
-        "4": ["translate"],
-        "5": ["tts", "rvc"],
-        "6": ["render", "qc", "deliver"],
+        "5": ["translate"],
+        "6": ["tts", "rvc"],
+        "7": ["subtitles", "mix_legacy", "mix_v2"],
+        "8": ["render", "qc", "deliver"],
     }
     for sk_step, sub_keys in stage_to_step.items():
         sub_durs = []
@@ -558,15 +608,18 @@ def read_status():
         if sub_durs:
             step_durations[sk_step] = round(sum(sub_durs), 1)
     result["step_durations"] = step_durations
+    result["total_steps"] = 8
 
     if records.get("deliver", {}).get("status") in ("running", "completed") or records.get("render", {}).get("status") in ("running", "completed") or records.get("qc", {}).get("status") in ("running", "completed"):
-        result["step"] = 6
+        result["step"] = 8
+    elif records.get("mix_v2", {}).get("status") in ("running", "completed") or records.get("mix_legacy", {}).get("status") in ("running", "completed"):
+        result["step"] = 7
     elif records.get("tts", {}).get("status") in ("running", "completed") or records.get("rvc", {}).get("status") in ("running", "completed") or records.get("subtitles", {}).get("status") in ("running", "completed"):
-        result["step"] = 5
+        result["step"] = 6
     elif records.get("translate", {}).get("status") in ("running", "completed") or records.get("timing", {}).get("status") in ("running", "completed"):
-        result["step"] = 4
+        result["step"] = 5
     elif records.get("ocr", {}).get("status") in ("running", "completed"):
-        result["step"] = 3.5
+        result["step"] = 4
     elif records.get("transcribe", {}).get("status") in ("running", "completed"):
         result["step"] = 3
     elif records.get("demucs", {}).get("status") in ("running", "completed"):
@@ -574,10 +627,20 @@ def read_status():
     elif records.get("extract_audio", {}).get("status") in ("running", "completed"):
         result["step"] = 1
 
-    if delivered:
-        result["video_status"] = "completed"
-    elif failed:
+    step_stage_keys = {1:["input","extract_audio"], 2:["demucs"], 3:["transcribe"], 4:["ocr"],
+                       5:["translate","timing"], 6:["tts","rvc"], 7:["subtitles","mix_legacy","mix_v2"],
+                       8:["render","qc","deliver"]}
+    for step_id, keys in step_stage_keys.items():
+        if any(records.get(key, {}).get("status") == "failed" for key in keys):
+            result["step"] = step_id
+            break
+    result["step_name"] = result["message"]
+    result["job_id"] = job_id
+    result["start_time"] = data.get("created_at")
+    if failed:
         result["video_status"] = "error"
+    elif delivered:
+        result["video_status"] = "completed"
     elif active:
         result["video_status"] = "running"
     else:
@@ -602,20 +665,33 @@ def read_status():
         phoi_count = len([f for f in inp.iterdir() if f.is_file() and f.suffix.lower() in MEDIA and not f.name.startswith("Dubbed_")]) if inp.is_dir() else 0
         banve_count = len([f for f in OUTPUT.iterdir() if f.is_file() and f.suffix.lower() in MEDIA]) if OUTPUT.is_dir() else 0
         result["queue_total"] = phoi_count + banve_count
-        result["queue_index"] = banve_count + (1 if active else 0)
     except Exception:
         pass
+
+    # Cấu hình model chính và model đã thực sự trả kết quả theo từng batch.
+    model_policy = (data.get("metadata", {}) or {}).get("model_policy", {})
+    cfg_model = str(
+        model_policy.get("gemini_model")
+        or ENV.get("GEMINI_MODEL", "gemini-3.8-flash")
+    ).strip() or "gemini-3.8-flash"
+    result["configured_gemini_model"] = cfg_model
+    actual_models = _translation_models_for_job(path, data)
+    result["translation_models"] = actual_models
+    result["active_translation_model"] = actual_models[-1] if actual_models else cfg_model
 
     return result
 
 @app.get("/api/status")
 async def status():
     try:
-        return await asyncio.to_thread(read_status)
+        result = await asyncio.to_thread(read_status)
+        result["output_dir"] = str(OUTPUT)
+        result["tool"] = "v2"
+        return result
     except (OSError, ValueError, TypeError):
         raise HTTPException(503, "Không đọc được manifest V2; sẽ thử lại.")
 
-def listing(root):
+def listing(root, kind="input", limit=None, offset=0, search="", status="all"):
     files = []
     try:
         from render_history import get_all_render_durations, format_duration
@@ -624,7 +700,7 @@ def listing(root):
         durations = {}
         format_duration = lambda s: "--"
 
-    is_input_folder = (str(root.resolve()).lower() == str(INPUT.resolve()).lower())
+    is_input_folder = kind == "input"
     output_files = set()
     if is_input_folder and OUTPUT.is_dir():
         output_files = set(f.name for f in OUTPUT.iterdir() if f.is_file())
@@ -651,6 +727,9 @@ def listing(root):
                 if p.name == active_video and is_active:
                     status_val = "running"
                     label = f"Đang chạy ({pct}%)"
+                elif p.name == active_video and cur_status.get("status") == "error":
+                    status_val = "error"
+                    label = "Xử lý lỗi"
                 else:
                     # Check if there is a verified job manifest for this input video
                     is_verified = False
@@ -660,7 +739,7 @@ def listing(root):
                         possible_dirs.extend(list(WORKSPACE.glob(f"batch_*_{stem}")))
                         for j_dir in possible_dirs:
                             if j_dir.is_dir() and (j_dir / "job_manifest.json").is_file():
-                                if verify_delivered_product(j_dir, expected_source_path=p, check_sha256=False, verify_media_streams=False).is_valid:
+                                if verify_dashboard_delivery(j_dir, expected_source_path=p)["valid"]:
                                     is_verified = True
                                     break
                     except Exception:
@@ -686,17 +765,21 @@ def listing(root):
                 "status_label": label
             })
     files.sort(key=lambda item: item["created"], reverse=True)
-    return {"files": files, "total_count": len(files),
+    result = paginate_listing({"files": files, "total_count": len(files),
+            "exists": root.is_dir(),
             "total_size_mb": round(sum(f["size_mb"] for f in files), 2),
-            "path": str(root)}
+            "path": str(root)}, limit if is_input_folder else None, offset if is_input_folder else 0, search if is_input_folder else "", status if is_input_folder else "all")
+    if not is_input_folder:
+        return paginate_output(result, root, limit, offset, search, status)
+    return result
 
 @app.get("/api/phoi")
-async def inputs():
-    return await asyncio.to_thread(listing, get_input_dir())
+async def inputs(limit: Optional[int] = None, offset: int = 0, search: str = "", status: str = "all"):
+    return await asyncio.to_thread(listing, get_input_dir(), "input", limit, offset, search, status)
 
 @app.get("/api/banve")
-async def outputs():
-    return await asyncio.to_thread(listing, OUTPUT)
+async def outputs(limit: Optional[int] = None, offset: int = 0, search: str = "", status: str = "all"):
+    return await asyncio.to_thread(listing, OUTPUT, "output", limit, offset, search, status)
 
 def log_tail():
     paths = [ROOT / "app.log", ROOT.parent / "app.log"]
@@ -1143,9 +1226,11 @@ async def api_get_voice_auto():
     female_voice = next((v for v in catalog if v.get("id") == cfg["female_voice_id"]), None)
     male_voice = next((v for v in catalog if v.get("id") == cfg["male_voice_id"]), None)
 
+    effective_mode = "dual" if (cfg["enabled"] and cfg.get("dual_voice", False)) else ("auto_single" if cfg["enabled"] else "manual")
     return {
         "enabled": cfg["enabled"],
         "mode": "auto" if cfg["enabled"] else "manual",
+        "effective_mode": effective_mode,
         "dual_voice": bool(cfg.get("dual_voice", False)),  # LUÔN TẮT MẶC ĐỊNH
         "female_voice_id": cfg["female_voice_id"],
         "male_voice_id": cfg["male_voice_id"],
@@ -1179,6 +1264,18 @@ async def api_set_voice_auto(payload: dict = Body(...)):
 
     target_enabled = _parse_bool_val(payload.get("enabled"), current_cfg["enabled"]) if "enabled" in payload else current_cfg["enabled"]
     target_dual = _parse_bool_val(payload.get("dual_voice"), current_cfg.get("dual_voice", False)) if "dual_voice" in payload else current_cfg.get("dual_voice", False)
+
+    if "mode" in payload:
+        mode_val = str(payload["mode"]).strip().lower()
+        if mode_val in ("manual", "single_manual"):
+            target_enabled = False
+            target_dual = False
+        elif mode_val in ("auto", "auto_single", "single_auto"):
+            target_enabled = True
+            target_dual = False
+        elif mode_val in ("dual", "dual_voice"):
+            target_enabled = True
+            target_dual = True
 
     raw_female = payload.get("female_voice_id") if "female_voice_id" in payload else payload.get("female_voice")
     raw_male = payload.get("male_voice_id") if "male_voice_id" in payload else payload.get("male_voice")
@@ -1232,15 +1329,24 @@ async def api_set_voice_auto(payload: dict = Body(...)):
     male_voice = next((v for v in catalog if v.get("id") == cfg["male_voice_id"]), None)
 
     msg = "Đã cập nhật cấu hình giọng"
-    if "dual_voice" in payload and len(payload) == 1:
+    if "mode" in payload:
+        if mode_val == "manual":
+            msg = "Đã chuyển sang chế độ 1 giọng thủ công"
+        elif mode_val in ("auto", "auto_single", "single_auto"):
+            msg = "Đã chuyển sang chế độ Tự chọn 1 giọng (Auto Single)"
+        elif mode_val in ("dual", "dual_voice"):
+            msg = "Đã chuyển sang chế độ Phân vai Nam & Nữ (Dual Voice)"
+    elif "dual_voice" in payload and len(payload) == 1:
         msg = "Đã BẬT phân vai Nam & Nữ trong cùng video" if target_dual else "Đã TẮT phân vai Nam/Nữ (Mặc định 1 giọng cả video)"
     elif "enabled" in payload and len(payload) == 1:
         msg = "Đã BẬT tự động nhận diện giọng đầu video" if target_enabled else "Đã TẮT tự động nhận diện (Dùng giọng thủ công)"
 
+    effective_mode = "dual" if (cfg["enabled"] and cfg.get("dual_voice", False)) else ("auto_single" if cfg["enabled"] else "manual")
     return {
         "status": "ok",
         "enabled": cfg["enabled"],
         "mode": "auto" if cfg["enabled"] else "manual",
+        "effective_mode": effective_mode,
         "dual_voice": bool(cfg.get("dual_voice", False)),
         "female_voice_id": cfg["female_voice_id"],
         "male_voice_id": cfg["male_voice_id"],
