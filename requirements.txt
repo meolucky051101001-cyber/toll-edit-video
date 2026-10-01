@@ -19,15 +19,12 @@ srt>=3.5,<4
 deep-translator>=1.11,<2
 uvicorn[standard]>=0.29,<1
 yt-dlp>=2024.4
-# Optional browser-profile bridge used to export only Douyin cookies through
-# Chrome's own decryption context. It uses the installed browser binary.
-playwright>=1.40,<2
-gmssl>=3.2.2,<4
+g4f>=0.3.1,<1
+librosa>=0.10,<1
+paddleocr>=2.7,<3
+praat-parselmouth>=0.4.3,<1
+psutil>=5.9,<6
 
-# Keep the main bot environment compatible with the pinned CUDA Torch and
-# current Hugging Face client. Strong-model dependencies belong in model_venv.
-sympy==1.13.1
-click>=8.1.7,<8.2
 
 # Optional voice-clone providers used only when selected/configured:
 # capcut-tts-api

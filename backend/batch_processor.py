@@ -1,3 +1,4 @@
+from video_pause import checkpoint as pause_checkpoint
 """
 Batch Video Processor - Tự động xử lý hàng loạt video từ thư mục máy tính (Offline / Local Folder)
 - Quét toàn bộ video trong thư mục đầu vào đã cấu hình.
@@ -12,6 +13,8 @@ import asyncio
 import logging
 import gc
 import shutil
+import uuid
+import hashlib
 from pathlib import Path
 
 # Cấu hình UTF-8 cho console Windows
@@ -35,10 +38,26 @@ except ImportError:
 
 PATHS = AppPaths.from_environment(Path(BASE_DIR).parent)
 
+# The Tool V1 batch entrypoint is permanently isolated from Pipeline V2.
+os.environ["PIPELINE_MODE"] = "legacy"
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-WORKSPACE = str(PATHS.workspace)
-DEFAULT_INPUT_DIR = str(PATHS.input_dir)
-DEFAULT_OUTPUT_DIR = str(PATHS.output_dir)
+WORKSPACE = os.path.abspath(
+    os.getenv("AUTODUB_WORKSPACE", os.path.join(BASE_DIR, "..", "workspace"))
+)
+def get_default_input_dir():
+    env_dir = os.getenv("AUTODUB_INPUT_DIR")
+    if env_dir:
+        return os.path.abspath(env_dir)
+    for candidate in [r"D:\video phôi", r"D:\video phoi", r"D:\video_input"]:
+        if os.path.exists(candidate):
+            return os.path.abspath(candidate)
+    return os.path.abspath(r"D:\video phôi")
+
+DEFAULT_INPUT_DIR = get_default_input_dir()
+DEFAULT_OUTPUT_DIR = os.path.abspath(
+    os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve")
+)
 os.makedirs(WORKSPACE, exist_ok=True)
 
 logger = logging.getLogger("batch_processor")
@@ -52,33 +71,100 @@ except Exception:
 # Import các module AI
 from ai.transcription import extract_subtitles_whisper, save_srt
 from ai.translation import translate_subtitles
-from ai.voice_cloning import generate_dubbing_audio
+from ai.v1_voice_isolated import generate_dubbing_audio_isolated
+from ai.voice_cloning import rvc_runtime_available
 from video_utils import extract_audio_from_video, mix_audio_pydub, process_video, separate_vocals_demucs
 from ass_utils import generate_ass_file
 from ocr_utils import perform_video_ocr, release_ocr_reader
 import shared_state
+import job_tracker
+from pipeline_v2.atomic_io import atomic_copy_file, atomic_write_json
+from batch_checkpoint import fingerprint
+from pipeline_v2.download_validation import probe_downloaded_video
+import json
 
 SUPPORTED_EXTENSIONS = ('.mp4', '.mkv', '.mov', '.avi', '.webm', '.flv', '.m4v')
 
-async def process_single_local_video(video_path: str, output_dir: str, progress_callback=None) -> bool:
+
+class BatchStopRequested(RuntimeError):
+    """Raised at safe checkpoints when the user asks the batch to stop."""
+
+
+def _stop_requested() -> bool:
+    return bool(
+        getattr(shared_state, "stop_requested", False)
+        or job_tracker.is_stop_requested()
+    )
+
+
+def _raise_if_stopped() -> None:
+    if _stop_requested():
+        raise BatchStopRequested("Batch đã được dừng theo yêu cầu")
+
+
+def _receipt_path(output):
+    import hashlib
+    key = os.path.normcase(os.path.abspath(str(output)))
+    name = hashlib.sha256(key.encode("utf-8")).hexdigest() + ".json"
+    return Path(WORKSPACE) / "output_receipts" / name
+
+
+def _verified_output(source, output):
+    try:
+        receipt = json.loads(_receipt_path(output).read_text(encoding="utf-8"))
+        return (receipt["input_sha256"] == fingerprint(source)
+                and receipt["output_sha256"] == fingerprint(output))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def _archive_source(source, archive):
+    """Never overwrite an existing original in the archive."""
+    destination = Path(archive) / Path(source).name
+    if destination.exists():
+        destination = destination.with_name(destination.stem + "_" + uuid.uuid4().hex + destination.suffix)
+    shutil.move(source, destination)
+
+
+def _cleanup_job_directory(path: str) -> None:
+    """Remove only a direct, Tool-owned batch directory inside WORKSPACE."""
+    workspace = Path(WORKSPACE).resolve()
+    candidate = Path(path).resolve()
+    if candidate.parent != workspace or not candidate.name.startswith("batch_"):
+        raise RuntimeError(f"Từ chối xóa thư mục tạm không an toàn: {candidate}")
+    marker = candidate / ".autodub-owned"
+    if not marker.is_file() or marker.read_text(encoding="utf-8") != str(candidate):
+        raise RuntimeError("Thư mục thiếu xác nhận sở hữu của batch.")
+    if candidate.exists():
+        shutil.rmtree(candidate)
+
+
+def get_batch_job_dir(video_path: str | Path, workspace: str = WORKSPACE) -> str:
+    """Tinh toan thu muc job dong nhat giua luc chay va luc kiem tra thanh pham (Codex Point 1.3)."""
+    file_name = os.path.basename(str(video_path))
+    base_name = os.path.splitext(file_name)[0]
+    source_id = hashlib.sha256(str(Path(video_path).resolve()).encode()).hexdigest()[:16]
+    return os.path.join(workspace, f"batch_{source_id}_{base_name}")
+
+
+async def process_single_local_video(video_path: str, output_dir: str, progress_callback=None,
+                                     queue_index=None, queue_total=None, video_mode: str = "auto") -> bool:
     """
     Quy trình 6 bước AI Dubbing cho 1 file video cục bộ
     """
     file_name = os.path.basename(video_path)
+    status = job_tracker.get_status()
+    if queue_index is not None or not status.get("active") or status.get("video_name") != file_name:
+        job_tracker.start_video(file_name, queue_index or 1, queue_total or 1)
     base_name = os.path.splitext(file_name)[0]
-
-    # Hash source video to assign unique job_id and prevent collision
-    try:
-        from pipeline_v2.artifact_store import hash_file
-        source_sha256, _ = hash_file(video_path)
-        source_hash_short = source_sha256[:10]
-    except Exception:
-        source_sha256 = ""
-        source_hash_short = "local"
-
-    job_id = f"batch_{source_hash_short}_{base_name}"
-    out_dir = os.path.join(WORKSPACE, job_id)
+    out_dir = get_batch_job_dir(video_path, WORKSPACE)
+    if Path(out_dir).resolve().parent != Path(WORKSPACE).resolve():
+        raise RuntimeError("Thư mục batch nằm ngoài workspace.")
     os.makedirs(out_dir, exist_ok=True)
+    from pipeline_v2.atomic_io import atomic_write_text
+    atomic_write_text(Path(out_dir) / ".autodub-owned", str(Path(out_dir).resolve()))
+    from batch_checkpoint import Checkpoints
+    checkpoints = await asyncio.to_thread(Checkpoints, out_dir, video_path)
 
     original_audio = os.path.join(out_dir, "original.wav")
     srt_original = os.path.join(out_dir, "original.srt")
@@ -124,11 +210,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                     final_dest = os.path.join(output_dir, f"Dubbed_{base_name}_{source_hash_short[:6]}.mp4")
 
             rvc_model = discover_rvc_model(Path(WORKSPACE))
-            from voice_selection import resolve_voice, get_speaker_voice_map, get_speaker_map, is_dual_voice_enabled
+            from voice_selection import resolve_voice
             from dataclasses import replace
-            from pipeline_v2.config import QCGatePolicy
-            dual_voice_on = is_dual_voice_enabled()
-            pipeline_settings = replace(pipeline_settings, enable_adaptive_ocr=True, enable_auto_gender=dual_voice_on)
             selected_source, selected_param, selected_label = resolve_voice("rvc" if rvc_model else "edge", rvc_model)
             request = VideoPipelineRequest(
                 video_path=Path(video_path),
@@ -138,9 +221,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 api_key=GEMINI_API_KEY,
                 voice_source=selected_source,
                 voice_param=selected_param,
-                rvc_model_path=Path(selected_param) if selected_source == "rvc" else rvc_model,
-                speaker_map=get_speaker_map() if dual_voice_on else None,
-                speaker_voice_map=get_speaker_voice_map() if dual_voice_on else None,
+                rvc_model_path=rvc_model,
                 progress=v2_progress,
             )
             await VideoPipelineRunner(request).run()
@@ -171,24 +252,126 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             await notify("❌ Pipeline v2 lỗi: {}".format(error))
             return False
 
+    # Kiểm tra cờ V1_USE_ORCHESTRATOR để kích hoạt luồng điều phối V1 nâng cấp
+    try:
+        from v1_feature_flags import get_feature_flags
+        flags = get_feature_flags(WORKSPACE)
+    except Exception:
+        flags = {}
+
+    if flags.get("V1_USE_ORCHESTRATOR", True):
+        try:
+            from job_config_service import get_frozen_config
+            from v1_orchestrator import V1Orchestrator
+            orch = V1Orchestrator(WORKSPACE)
+            job_id = f"batch_{base_name}_{int(time.time())}"
+            final_dest = os.path.join(output_dir, f"Dubbed_{base_name}.mp4")
+            frozen_plan = get_frozen_config(file_name, workspace_path=WORKSPACE) or {}
+            frozen_effective = frozen_plan.get("effective_config", {})
+            planned_mode = frozen_effective.get("video_mode") or video_mode or "auto"
+
+            async def _batch_orch_progress(st, step, tot, pct, msg, d):
+                job_tracker.update_step(step, msg, percent=int(pct))
+                await notify(msg)
+
+            orch_started = time.monotonic()
+            res = await orch.execute_job(
+                video_path=video_path,
+                job_id=job_id,
+                output_dir=out_dir,
+                delivery_path=final_dest,
+                user_mode=planned_mode,
+                overrides=frozen_effective,
+                progress_callback=_batch_orch_progress,
+                stop_checker=lambda: getattr(shared_state, 'stop_requested', False),
+            )
+            if not res.get('tracker_finalized'):
+                job_tracker.finish_video(file_name, res["final_video"], time.monotonic() - orch_started)
+            # Ghi receipt xác thực
+            receipt_path = _receipt_path(final_dest)
+            receipt_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(receipt_path, {
+                "job_id": job_id,
+                "video_mode": res.get("video_mode"),
+                "pipeline_version": "v1_orchestrator_complete",
+                "qc_status": res.get("qc_status"),
+                "input_sha256": fingerprint(video_path),
+                "output_sha256": fingerprint(final_dest),
+            })
+            await notify(f"✅ Hoàn tất video ({res.get('video_mode')}, QC: {res.get('qc_status')}) -> {final_dest}")
+            return True
+        except asyncio.CancelledError:
+            raise
+        except BatchStopRequested as exc:
+            job_tracker.mark_stopped(str(exc))
+            return False
+        except Exception as orch_err:
+            logger.exception("V1 job failed; checkpoint retained, no legacy restart")
+            job_tracker.set_error(file_name, str(orch_err), fatal=False)
+            await notify(f"❌ Lỗi: {orch_err}; đã giữ checkpoint để thử lại.")
+            return False
+
     try:
         t0 = time.time()
-        # ===== BƯỚC 1/4: TÁCH ÂM THANH & NHẠC NỀN GỐC =====
-        await notify("🎧 Bước 1/4: Đang trích xuất & tách âm thanh (BS-RoFormer GPU)...")
-        if not extract_audio_from_video(video_path, original_audio):
+        # 0. Đóng băng cấu hình job để không bị ảnh hưởng nếu đổi dashboard giữa chừng
+        from job_config_service import get_frozen_config, freeze_job_config
+        from audio_settings import get_audio_settings
+        cur_audio_settings = get_audio_settings()
+        frozen_job_entry = get_frozen_config(file_name, workspace_path=WORKSPACE) or freeze_job_config(
+            video_name=file_name,
+            workspace_path=WORKSPACE,
+            overrides={
+                "video_mode": video_mode or "auto",
+                "bgm_volume_db": cur_audio_settings.get("bgm_volume_db", -2.0),
+                "dubbing_volume_db": cur_audio_settings.get("dubbing_volume_db", 1.0),
+                "separation_mode": cur_audio_settings.get("separation_mode", "roformer"),
+                "ducking_mode": cur_audio_settings.get("ducking_mode", "soft"),
+            }
+        )
+        frozen_eff = frozen_job_entry.get("effective_config", {}) if frozen_job_entry else {}
+
+        await pause_checkpoint()
+        _raise_if_stopped()
+        await notify("🎧 Bước 1/6: Đang trích xuất âm thanh gốc...")
+        job_tracker.update_step(1, "Bước 1/6: Đang trích xuất âm thanh gốc...", percent=10)
+        if not await asyncio.to_thread(extract_audio_from_video, video_path, original_audio):
             await notify("❌ Không thể trích xuất âm thanh!")
+            job_tracker.set_error(
+                file_name, "Không thể trích xuất âm thanh", fatal=False
+            )
             return False
 
-        vocals_audio, no_vocals_audio = await asyncio.to_thread(separate_vocals_demucs, original_audio, out_dir)
+        await pause_checkpoint()
+        _raise_if_stopped()
+        await notify("🧠 Bước 2/6: Đang bóc tách giọng nói & giữ nhạc nền (BS-RoFormer GPU / Demucs)...")
+        vocals_audio, no_vocals_audio = await asyncio.to_thread(
+            separate_vocals_demucs,
+            original_audio,
+            out_dir,
+            separation_mode=frozen_eff.get("separation_mode"),
+        )
 
-        # ===== BƯỚC 2/4: NHẬN DIỆN GIỌNG NÓI & DỊCH THUẬT AI =====
-        await notify("🤖 Bước 2/4: Nhận diện giọng nói & Dịch thuật AI (Whisper + Gemini)...")
-        srt_segments = await asyncio.to_thread(extract_subtitles_whisper, vocals_audio, srt_original)
+        await pause_checkpoint()
+        _raise_if_stopped()
+        batch_asr_model = frozen_eff.get("asr_model", "whisper_turbo")
+        batch_asr_display = "Qwen3-ASR 0.6B (GPU CUDA)" if "qwen" in batch_asr_model.lower() else "Faster-Whisper Large-v3 Turbo"
+        await notify(f"🤖 Bước 3/6: {batch_asr_display} đang nhận dạng giọng nói...")
+        job_tracker.update_step(3, f"Bước 3/6: {batch_asr_display} nhận dạng giọng nói...", percent=40)
+        srt_segments = await checkpoints.subtitles(
+            "transcribe", vocals_audio,
+            lambda: asyncio.to_thread(extract_subtitles_whisper, vocals_audio, srt_original, original_audio_path=original_audio, asr_model=batch_asr_model),
+            srt_original)
         if not srt_segments:
             await notify("⚠️ Video không có giọng nói để dịch!")
+            job_tracker.set_error(
+                file_name, "Video không có giọng nói để dịch", fatal=False
+            )
             return False
 
-        # Xác định kích thước video & vị trí phụ đề chuẩn trong 0.01s (bỏ qua quét OCR rườm rà)
+        await pause_checkpoint()
+        _raise_if_stopped()
+        await notify("👀 Bước 3.5/6: Đang quét vị trí phụ đề gốc...")
+        job_tracker.update_step(3.5, "Bước 3.5/6: Quét vị trí phụ đề gốc (PP-OCRv6)...", percent=55)
         try:
             import cv2
             _cap = cv2.VideoCapture(video_path)
@@ -199,91 +382,173 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             vid_w, vid_h = 1080, 1920
         main_y_pct = 0.88 if vid_h > vid_w else 0.85
 
-        translated_segments = await asyncio.to_thread(translate_subtitles, srt_segments, "vi", api_key=GEMINI_API_KEY, video_path=video_path)
-        await asyncio.to_thread(save_srt, translated_segments, srt_translated)
+        # XỬ LÝ THỜI GIAN CHUẨN KHI LÀM SUB & LỒNG TIẾNG (Chống lệch giọng)
+        import datetime
+        for i in range(len(srt_segments) - 1):
+            if srt_segments[i].end > srt_segments[i+1].start:
+                new_end = srt_segments[i+1].start - datetime.timedelta(seconds=0.05)
+                if new_end > srt_segments[i].start:
+                    srt_segments[i].end = new_end
+                else:
+                    srt_segments[i].end = srt_segments[i].start + datetime.timedelta(seconds=0.1)
 
-        # ===== BƯỚC 3/4: LỒNG TIẾNG AI & HÒA ÂM STUDIO =====
-        frozen_job_entry = None
+        for i, seg in enumerate(srt_segments, 1):
+            seg.index = i
+
+        await pause_checkpoint()
+        _raise_if_stopped()
+        configured_m = os.getenv("GEMINI_MODEL", "gemini-3.7-flash").strip() or "gemini-3.7-flash"
+        job_tracker.record_active_translation_model(configured_m)
+        await notify(f"🌐 Bước 5/8: {configured_m} đang dịch ({len(srt_segments)} câu)...")
+        job_tracker.update_step(5, f"Bước 5/8: {configured_m} đang dịch ({len(srt_segments)} câu)...", percent=65)
+        translated_segments = await checkpoints.subtitles(
+            "translate", srt_original,
+            lambda: asyncio.to_thread(translate_subtitles, srt_segments, "vi",
+                                      api_key=GEMINI_API_KEY, video_path=video_path),
+            srt_translated)
+        await asyncio.to_thread(save_srt, translated_segments, srt_translated)
         try:
-            from job_config_service import get_frozen_config
-            frozen_job_entry = get_frozen_config(file_name)
+            t_models = job_tracker.get_status().get("translation_models", [])
+            used_model = ", ".join(t_models) if t_models else configured_m
+            job_tracker.record_active_translation_model(used_model)
+            logger.info(f"Hoàn tất Bước 5/8 dịch phụ đề ({len(translated_segments)} câu) bằng model: {used_model}")
+            await notify(f"🌐 Bước 5/8: Đã dịch xong {len(translated_segments)} câu bằng model {used_model}")
         except Exception:
             pass
 
-        frozen_eff = frozen_job_entry.get("effective_config", {}) if frozen_job_entry else {}
-        frozen_voice_id = frozen_eff.get("voice_id")
+        if not frozen_job_entry:
+            try:
+                from job_config_service import get_frozen_config
+                frozen_job_entry = get_frozen_config(file_name, workspace_path=WORKSPACE)
+                if frozen_job_entry:
+                    frozen_eff = frozen_job_entry.get("effective_config", {})
+            except Exception:
+                pass
 
-        v2_source = "edge"
-        v2_param = "vi-VN-HoaiMyNeural"
-        v2_label = "Hoài My"
+        sources = frozen_job_entry.get("sources", {}) if frozen_job_entry else {}
+        is_user_chosen = (
+            sources.get("voice_id") in ("preset", "video_override")
+            or (frozen_job_entry and frozen_job_entry.get("preset_id") is not None)
+            or frozen_eff.get("voice_mode") == "manual"
+        )
+        if not is_user_chosen and (frozen_eff.get("dual_voice") or frozen_eff.get("voice_mode") == "auto"):
+            frozen_voice_id = None
+        else:
+            frozen_voice_id = frozen_eff.get("voice_id")
+
         if frozen_voice_id:
             from voice_selection import catalog
             cat = catalog()
             v_match = next((v for v in cat if v["id"] == frozen_voice_id), None)
             if v_match:
-                v2_source = v_match["source"]
-                v2_param = v_match["param"]
-                v2_label = v_match["label"]
-            logger.info("V2 sử dụng giọng đóng băng theo job cho %s: %s (%s)", file_name, v2_label, frozen_voice_id)
+                v_source = v_match["source"]
+                v_param = v_match["param"]
+                v_label = v_match["label"]
+                v_id = v_match["id"]
+            else:
+                v_source = "edge"
+                v_param = "vi-VN-HoaiMyNeural"
+                v_label = "Hoài My (Fallback)"
+                v_id = "microsoft-hoaimy"
+            batch_voice_mode = frozen_eff.get("voice_mode", "manual")
+            voice_lock_info = {
+                "voice_source": v_source,
+                "voice_param": v_param,
+                "voice_label": v_label,
+                "voice_id": v_id,
+                "voice_mode": batch_voice_mode,
+                "dual_voice": bool(frozen_eff.get("dual_voice", False)),
+                "segment_voices": frozen_eff.get("segment_voices", None),
+            }
+            logger.info("Sử dụng giọng đóng băng theo job cho %s: %s (%s)", file_name, v_label, v_id)
         else:
-            try:
-                from voice_selection import selected
-                curr_v = selected()
-                v2_source = curr_v.get("source", "edge")
-                v2_param = curr_v.get("param", "vi-VN-HoaiMyNeural")
-                v2_label = curr_v.get("label", "Hoài My")
-            except Exception:
-                pass
+            # Quyết định giọng theo chế độ Auto/Manual (Codex Plan)
+            from ai.v1_auto_voice import decide_video_voice, get_auto_voice_mode
+            batch_voice_mode = get_auto_voice_mode(WORKSPACE)
+            voice_lock_info = await asyncio.to_thread(
+                decide_video_voice,
+                out_dir=out_dir,
+                srt_segments=srt_segments,
+                vocals_path=vocals_audio,
+                original_audio_path=original_audio,
+                video_path=video_path,
+                voice_mode=batch_voice_mode,
+                workspace=WORKSPACE,
+            )
+            v_source = voice_lock_info["voice_source"]
+            v_param = voice_lock_info["voice_param"]
+            v_label = voice_lock_info["voice_label"]
+            v_id = voice_lock_info["voice_id"]
 
-        await notify(f"🗣️ Bước 3/4: Lồng tiếng AI ({v2_label}, {len(translated_segments)} câu) & Hòa âm trong trẻo...")
-        dubbing_audio_files = await generate_dubbing_audio(
-            translated_segments, dubbing_dir, voice_source=v2_source, voice_param=v2_param
+        await pause_checkpoint()
+        _raise_if_stopped()
+        await notify(f"Đang lồng tiếng: {v_label}")
+        vid_duration = None
+        try:
+            from pydub import AudioSegment
+            vid_duration = len(AudioSegment.from_file(original_audio)) / 1000.0
+        except Exception:
+            pass
+
+        seg_voices = voice_lock_info.get("segment_voices") if 'voice_lock_info' in locals() and voice_lock_info else None
+        dubbing_audio_files = await generate_dubbing_audio_isolated(
+            translated_segments, dubbing_dir, voice_source=v_source, voice_param=v_param, video_duration=vid_duration, segment_voices=seg_voices
         )
+
+        # ĐỒNG BỘ THỜI GIAN THEO GIỌNG ĐỌC & CHỐNG ĐÈ SUB CHUYÊN SÂU
+        from ass_utils import sync_and_clamp_subtitles
+        translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
 
         # Căn chỉnh phụ đề ASS
         ass_path = os.path.join(out_dir, "final.ass")
         await asyncio.to_thread(generate_ass_file, translated_segments, [], ass_path, play_res_x=vid_w, play_res_y=vid_h, main_y_pct=main_y_pct)
 
-        # Bảo tồn âm nền trong trẻo nguyên bản ở khoảng không thoại & phục hồi treble >14kHz
-        try:
-            from ai.audio_enhancer import preserve_pristine_background
-            pristine_bgm = os.path.join(out_dir, "pristine_background.wav")
-            enhanced_bgm = await asyncio.to_thread(
-                preserve_pristine_background,
-                original_audio,
-                no_vocals_audio,
-                srt_segments,
-                pristine_bgm,
-            )
-            if os.path.isfile(enhanced_bgm):
-                no_vocals_audio = enhanced_bgm
-        except Exception as enh_err:
-            logger.warning(f"Selective background preservation notice: {enh_err}")
-
-        # Trộn nhạc nền sạch với giọng lồng tiếng (Dynamic Sidechain Ducking & EBU R128)
-        v2_bgm_vol = frozen_eff.get("bgm_volume_db", -2.0)
-        v2_dub_vol = frozen_eff.get("dubbing_volume_db", 1.0)
+        # Trộn nhạc nền sạch với giọng lồng tiếng (ưu tiên effective_config đóng băng)
+        v1_bgm_vol = frozen_eff.get("bgm_volume_db", -2.0)
+        v1_dub_vol = frozen_eff.get("dubbing_volume_db", 1.0)
+        v1_duck_mode = frozen_eff.get("ducking_mode", "soft")
         await asyncio.to_thread(
             mix_audio_pydub,
             no_vocals_audio,
             dubbing_audio_files,
             mixed_audio,
-            original_volume_db=v2_bgm_vol,
-            dubbing_volume_db=v2_dub_vol,
+            original_volume_db=v1_bgm_vol,
+            dubbing_volume_db=v1_dub_vol,
+            ducking_mode=v1_duck_mode,
             explicit=True,
         )
 
-        # ===== BƯỚC 4/4: RENDER VIDEO THÀNH PHẨM =====
-        await notify("🎬 Bước 4/4: Đang Render video thành phẩm (NVENC GPU)...")
-        res = await asyncio.to_thread(process_video, video_path, ass_path, mixed_audio, final_video, main_y_pct=main_y_pct)
+        await pause_checkpoint()
+        _raise_if_stopped()
+        await notify("🎬 Bước 6/6: Đang Render video thành phẩm (Multi-threading)...")
+        job_tracker.update_step(6, "Bước 6/6: Render video thành phẩm bằng NVENC GPU...", percent=95)
+        res = await asyncio.to_thread(process_video, video_path, ass_path, mixed_audio, final_video, main_y_pct=main_y_pct, delogo=False)
         if not res or not os.path.exists(final_video):
             await notify("❌ Lỗi trong quá trình render video!")
+            job_tracker.set_error(
+                file_name, "Render video NVENC thất bại", fatal=False
+            )
             return False
 
+        await pause_checkpoint()
+        _raise_if_stopped()
         # Lưu thành phẩm vào thư mục đầu ra
+        probe = await asyncio.to_thread(probe_downloaded_video, final_video)
+        if not probe.audio_stream_count:
+            raise RuntimeError("Thành phẩm không có luồng âm thanh.")
         os.makedirs(output_dir, exist_ok=True)
         final_dest = os.path.join(output_dir, f"Dubbed_{base_name}.mp4")
-        shutil.copy2(final_video, final_dest)
+        atomic_copy_file(final_video, final_dest)
+        receipt_path = _receipt_path(final_dest)
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(receipt_path, {
+            "voice_id": v_id,
+            "voice_source": v_source,
+            "voice_mode": voice_lock_info.get("voice_mode", batch_voice_mode),
+            "pipeline_version": "v1_codex_voice_snapshot_2.0",
+            "input_sha256": fingerprint(video_path),
+            "output_sha256": fingerprint(final_dest),
+        })
 
         if pipeline_settings.mode is PipelineMode.SHADOW:
             try:
@@ -311,11 +576,23 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 logger.warning("Shadow manifest warning: %s", shadow_error)
 
         dt = int(time.time() - t0)
+        job_tracker.finish_video(file_name, final_dest, dt)
         await notify(f"✅ Hoàn thành video ({dt}s) -> Đã lưu vào {final_dest}")
+        # Dọn dẹp thư mục tạm trong workspace để giải phóng dung lượng ổ C
+        try:
+            _cleanup_job_directory(out_dir)
+        except Exception as cleanup_error:
+            logger.warning("Không thể dọn thư mục tạm %s: %s", out_dir, cleanup_error)
         return True
 
+    except (BatchStopRequested, asyncio.CancelledError) as stop_error:
+        logger.info("[%s] %s", file_name, stop_error)
+        job_tracker.mark_stopped("Đã dừng batch theo yêu cầu!")
+        await notify(f"⏹️ {stop_error}")
+        return False
     except Exception as e:
         logger.error(f"Lỗi xử lý file {file_name}: {e}", exc_info=True)
+        job_tracker.set_error(file_name, str(e), fatal=False)
         await notify(f"❌ Lỗi: {str(e)}")
         return False
     finally:
@@ -325,6 +602,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
         except:
             pass
 
@@ -332,10 +611,49 @@ async def process_batch_folder(
     input_dir: str = DEFAULT_INPUT_DIR,
     output_dir: str = DEFAULT_OUTPUT_DIR,
     progress_callback=None,
+    job_id: str = None,
+    video_mode: str = "auto",
+):
+    """Own the complete lifecycle, including failures from callbacks and cancellation."""
+    job_id = job_id or uuid.uuid4().hex
+    worker = asyncio.create_task(_process_batch_folder(
+        input_dir, output_dir, progress_callback, job_id, video_mode=video_mode))
+    try:
+        result = await asyncio.shield(worker)
+        status = job_tracker.get_status()
+        if status.get("job_id") == job_id and status.get("active"):
+            job_tracker.finish_batch()
+        return result
+    except asyncio.CancelledError:
+        # to_thread cannot be killed safely: keep ownership until it actually exits.
+        shared_state.stop_requested = True
+        if job_tracker.get_status().get("job_id") == job_id:
+            job_tracker.request_stop()
+        try:
+            await worker
+        finally:
+            raise
+    except job_tracker.JobAlreadyRunningError:
+        raise
+    except Exception as exc:
+        job_tracker.fail_batch(str(exc), job_id=job_id)
+        raise
+    finally:
+        job_tracker.release_batch(job_id)
+
+
+async def _process_batch_folder(
+    input_dir: str = DEFAULT_INPUT_DIR,
+    output_dir: str = DEFAULT_OUTPUT_DIR,
+    progress_callback=None,
+    job_id: str = None,
+    video_mode: str = "auto",
 ):
     """
     Quét và xử lý toàn bộ video trong thư mục đầu vào
     """
+    from batch_control import stop_check
+    stop_check.set(_stop_requested)
     if not os.path.exists(input_dir):
         os.makedirs(input_dir, exist_ok=True)
         msg = f"📁 Đã tạo thư mục đầu vào: `{input_dir}`. Bạn hãy thả các video cần edit vào đây nhé!"
@@ -345,10 +663,11 @@ async def process_batch_folder(
         return
 
     os.makedirs(output_dir, exist_ok=True)
-    video_files = [
+    video_files = sorted([
         os.path.join(input_dir, f) for f in os.listdir(input_dir)
         if f.lower().endswith(SUPPORTED_EXTENSIONS) and not f.startswith("Dubbed_")
-    ]
+        and os.path.isfile(os.path.join(input_dir, f))
+    ])
 
     if not video_files:
         msg = f"⚠️ Không tìm thấy video nào trong `{input_dir}`. Hãy thả file video (.mp4, .mkv, .mov...) vào đây!"
@@ -358,6 +677,8 @@ async def process_batch_folder(
         return
 
     total = len(video_files)
+    job_id = job_tracker.start_batch(total, input_dir, output_dir, job_id=job_id)
+    shared_state.stop_requested = False
     start_msg = f"🚀 Bắt đầu xử lý hàng loạt **{total} video** từ thư mục:\n📂 `{input_dir}`\n💾 Đầu ra: `{output_dir}`"
     logger.info(start_msg)
     if progress_callback:
@@ -433,50 +754,98 @@ async def process_batch_folder(
         return
 
     success_count = 0
+    failure_count = 0
     for idx, vpath in enumerate(video_files, 1):
+        if _stop_requested():
+            break
         vname = os.path.basename(vpath)
         base_stem = os.path.splitext(vname)[0]
 
-        # Kiểm tra nếu video này đã có job V2 hoàn thành và xác minh thành phẩm hợp lệ
-        try:
-            source_sha, _ = hash_file(vpath)
-            source_hash_short = source_sha[:10]
-        except Exception:
-            source_sha = ""
-            source_hash_short = ""
+        # Kiểm tra nếu video này đã được render thành phẩm trong output_dir thì bỏ qua
+        expected_render = os.path.join(output_dir, f"Dubbed_{base_stem}.mp4")
+        verified = os.path.isfile(expected_render) and await asyncio.to_thread(_verified_output, vpath, expected_render)
+        if verified:
+            receipt_file = _receipt_path(expected_render)
+            receipt = json.loads(receipt_file.read_text(encoding="utf-8")) if receipt_file.is_file() else {}
+            from ai.v1_auto_voice import get_locked_voice, get_auto_voice_mode
+            job_out_dir = get_batch_job_dir(vpath, WORKSPACE)
+            current_mode = get_auto_voice_mode(WORKSPACE)
+            current_input_hash = fingerprint(vpath)
 
-        job_dir = os.path.join(WORKSPACE, f"batch_{source_hash_short}_{base_stem}") if source_hash_short else os.path.join(WORKSPACE, f"batch_{base_stem}")
-        existing_ver = verify_delivered_product(
-            job_dir,
-            expected_source_sha256=source_sha or None,
-            check_sha256=True,
-            verify_media_streams=True,
-        ) if os.path.isdir(job_dir) else None
+            locked = get_locked_voice(job_out_dir, expected_video_hash=current_input_hash)
+            expected_voice_id = locked["voice_id"] if locked else receipt.get("voice_id")
 
-        if existing_ver and existing_ver.is_valid:
-            delivered_file = existing_ver.published_outputs[0]["path"] if existing_ver.published_outputs else f"Dubbed_{base_stem}.mp4"
-            skip_msg = f"⏩ [{idx}/{total}] Video `{vname}` đã có thành phẩm xác minh hợp lệ (`{os.path.basename(delivered_file)}`). Di chuyển vào thư mục processed..."
+            mode_changed = receipt.get("voice_mode") and receipt.get("voice_mode") != current_mode
+            voice_changed = receipt.get("voice_id") and receipt["voice_id"] != expected_voice_id
+            hash_changed = receipt.get("input_sha256") and receipt["input_sha256"] != current_input_hash
+
+            if mode_changed or voice_changed or hash_changed:
+                tag = "diff_mode" if mode_changed else ("diff_voice" if voice_changed else "diff_input")
+                backup = Path(expected_render).with_name(Path(expected_render).stem + f"_{tag}_" + uuid.uuid4().hex[:8] + ".mp4")
+                try:
+                    Path(expected_render).rename(backup)
+                    logger.info(
+                        "Thành phẩm cũ không khớp chế độ (%s vs %s) hoặc giọng/nội dung; đã sao lưu tại %s và render lại cho %s",
+                        receipt.get("voice_mode"), current_mode, backup, vname
+                    )
+                except Exception as e:
+                    logger.warning("Không thể đổi tên sao lưu thành phẩm cũ %s: %s", expected_render, e)
+                verified = False
+        if verified:
+            skip_msg = f"⏩ [{idx}/{total}] Video `{vname}` đã có thành phẩm (`{os.path.basename(expected_render)}`). Bỏ qua..."
             logger.info(skip_msg)
             if progress_callback:
                 await progress_callback(skip_msg)
-            if _safe_archive_source(vpath, base_stem, vname, job_dir):
-                success_count += 1
+            try:
+                _archive_source(vpath, processed_archive)
+            except Exception:
+                pass
             continue
+
+        if os.path.exists(expected_render):
+            # Tự động sao lưu thành phẩm cũ chưa khớp để không làm kẹt batch và render bản mới
+            mtime_tag = int(os.path.getmtime(expected_render))
+            backup_render = Path(expected_render).with_name(f"{Path(expected_render).stem}_old_{mtime_tag}_{uuid.uuid4().hex[:4]}.mp4")
+            try:
+                Path(expected_render).rename(backup_render)
+                logger.info(f"Thành phẩm cũ chưa xác minh; đã sao lưu tại {backup_render} và tiến hành render lại cho {vname}")
+            except Exception as rename_err:
+                logger.warning(f"Không thể sao lưu thành phẩm cũ {expected_render}: {rename_err}")
+                failure_count += 1
+                job_tracker.set_error(vname, f"Không thể sao lưu thành phẩm cũ: {rename_err}", fatal=False)
+                continue
 
         step_msg = f"🎬 **[{idx}/{total}] Đang xử lý:** `{vname}`..."
         logger.info(step_msg)
         if progress_callback:
             await progress_callback(step_msg)
 
-        ok = await process_single_local_video(vpath, output_dir, progress_callback)
+        job_tracker.start_video(vname, idx, total)
+        ok = await process_single_local_video(vpath, output_dir, progress_callback, queue_index=idx, queue_total=total, video_mode=video_mode)
+        if _stop_requested():
+            break
+        if not ok:
+            failure_count += 1
         if ok:
             success_count += 1
-            _safe_archive_source(vpath, base_stem, vname, job_dir)
-        else:
-            logger.warning("Video %s thất bại hoặc bị chặn QC. Giữ nguyên video nguồn trong thư mục chờ.", vname)
-            if progress_callback:
-                await progress_callback(f"⚠️ Video `{vname}` thất bại hoặc bị chặn QC. Giữ nguyên trong thư mục chờ để retry.")
+            # Di chuyển file gốc đã làm xong sang thư mục processed để không bị trùng lặp
+            try:
+                _archive_source(vpath, processed_archive)
+            except Exception as mv_err:
+                logger.warning(f"Không thể di chuyển file gốc: {mv_err}")
 
+    if _stop_requested():
+        job_tracker.mark_stopped()
+        stop_msg = f"⏹️ Đã dừng batch. Hoàn thành {success_count}/{total} video."
+        logger.info(stop_msg)
+        if progress_callback:
+            await progress_callback(stop_msg)
+        return
+
+    if failure_count:
+        job_tracker.fail_batch(f"{failure_count}/{total} video xử lý lỗi.", job_id=job_id)
+    else:
+        job_tracker.finish_batch()
     summary_msg = f"🎉 **ĐÃ HOÀN TẤT XỬ LÝ HÀNG LOẠT!**\n✅ Thành công: {success_count}/{total} video\n💾 Thư mục lưu thành phẩm: `{output_dir}`"
     logger.info(summary_msg)
     if progress_callback:

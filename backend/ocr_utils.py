@@ -1,39 +1,57 @@
 import cv2
-import json
 import logging
 import os
-import subprocess
 import tempfile
+import hashlib
+import copy
+from collections import OrderedDict
 from pathlib import Path
+try:
+    from .v1_ocr_proxy import ocr_proxy
+except ImportError:
+    from v1_ocr_proxy import ocr_proxy
+try:
+    from .v1_stage_metrics import stage
+except ImportError:
+    from v1_stage_metrics import stage
 
-from ai.model_policy import current_model_policy
-from ai.model_runtime import ModelRuntimeError, run_model_stage, runtime_module_available
+try:
+    from .ai.v1_model_policy import current_v1_model_policy
+    from .ai.v1_model_runtime import V1ModelRuntimeError, run_v1_ocr, runtime_module_available
+except ImportError:
+    from ai.v1_model_policy import current_v1_model_policy
+    from ai.v1_model_runtime import V1ModelRuntimeError, run_v1_ocr, runtime_module_available
 
 try:
     from .ocr_subtitle_locator import select_chinese_subtitle_band
-except ImportError:  # Running ocr_utils.py from backend/ on Windows.
+except ImportError:
     from ocr_subtitle_locator import select_chinese_subtitle_band
+
 
 logger = logging.getLogger(__name__)
 reader = None
-ocr_session = None
+_paddle_failed = False
+_frame_cache = OrderedDict()
 
 def get_ocr_reader():
     global reader
     if reader is None:
+        logger.info("Initializing EasyOCR reader (CPU mode for safe stability)...")
+        # Dùng CPU cho EasyOCR để tránh lỗi xung đột cudnnGetLibConfig Error code 127
         import easyocr
 
-        logger.info("Initializing EasyOCR reader (GPU=True)...")
-        # Gỡ bỏ 'en' để tránh EasyOCR bị ảo giác (nhận diện nhầm nhiễu thành chữ tiếng Anh)
-        reader = easyocr.Reader(['ch_sim'], gpu=os.getenv('OCR_GPU', '1') != '0')
+        reader = easyocr.Reader(['ch_sim'], gpu=False)
     return reader
 
 def release_ocr_reader():
-    global ocr_session
-    if ocr_session is not None:
-        ocr_session.close()
-        ocr_session = None
-    global reader
+    global reader, _paddle_failed
+    _paddle_failed = False
+    _frame_cache.clear()
+    try:
+        from .ai.v1_model_runtime import close_session
+    except ImportError:
+        from ai.v1_model_runtime import close_session
+    close_session()
     if reader is not None:
         logger.info("🧹 Đang giải phóng bộ nhớ RAM/VRAM của EasyOCR...")
         del reader
@@ -46,51 +64,79 @@ def release_ocr_reader():
 
 
 def _has_chinese_overlap(candidate_text: str, segment_text: str) -> bool:
-    """Verify if candidate OCR text shares meaningful Chinese characters with segment text."""
-    c_zh = "".join(c for c in str(candidate_text or "") if "\u3400" <= c <= "\u9fff")
-    s_zh = "".join(c for c in str(segment_text or "") if "\u3400" <= c <= "\u9fff")
-    if not c_zh or not s_zh:
+    """Check whether OCR and ASR share meaningful Chinese characters."""
+    candidate = "".join(char for char in str(candidate_text or "") if "\u3400" <= char <= "\u9fff")
+    segment = "".join(char for char in str(segment_text or "") if "\u3400" <= char <= "\u9fff")
+    if not candidate or not segment:
         return False
-    shared = set(c_zh) & set(s_zh)
-    if len(shared) >= 2 or (len(c_zh) >= 2 and len(shared) / len(c_zh) >= 0.3):
+    shared = set(candidate) & set(segment)
+    if len(shared) >= 2 or (len(candidate) >= 2 and len(shared) / len(candidate) >= 0.3):
         return True
     from difflib import SequenceMatcher
-    return SequenceMatcher(None, c_zh, s_zh).ratio() >= 0.3
+    return SequenceMatcher(None, candidate, segment).ratio() >= 0.3
 
 
 def _readtext_batch(frames):
-    """Recognize all sampled frames in one PP-OCRv6 process, then fallback safely."""
+    # Reuse only pixel-identical frames, never merely similar subtitle regions:
+    # no risk of missing a changed Chinese glyph or motion.
+    if not all(hasattr(frame, "tobytes") for frame in frames):
+        return _recognize_batch(frames)
+    keys = [hashlib.sha256(str(frame.shape).encode() + frame.tobytes()).digest()
+            for frame in frames]
+    pending = {}
+    for key, frame in zip(keys, frames):
+        if key not in _frame_cache:
+            pending.setdefault(key, frame)
+    if pending:
+        rows = _recognize_batch(list(pending.values()))
+        if len(rows) != len(pending):
+            raise RuntimeError("OCR returned incomplete unique frames")
+        for key, row in zip(pending, rows):
+            _frame_cache[key] = copy.deepcopy(row)
+    result = [copy.deepcopy(_frame_cache[key]) for key in keys]
+    while len(_frame_cache) > 64:
+        _frame_cache.popitem(last=False)
+    logger.info("V1 OCR frames=%d unique_work=%d reused=%d",
+                len(frames), len(pending), len(frames)-len(pending))
+    return result
 
-    global ocr_session
-    policy = current_model_policy()
-    if policy.ocr_backend in {"auto", "paddle"} and runtime_module_available(
+
+@stage("ocr_recognize_batch")
+def _recognize_batch(frames):
+    """Recognize sampled frames with PP-OCRv6 Tiny, then fall back safely."""
+
+    global _paddle_failed
+    policy = current_v1_model_policy()
+    if not _paddle_failed and policy.ocr_backend in {"auto", "paddle"} and runtime_module_available(
         "paddleocr", policy
     ):
         try:
-            with tempfile.TemporaryDirectory(prefix="autodub-ocr-") as temporary:
+            with tempfile.TemporaryDirectory(prefix="autodub-v1-ocr-frames-") as temporary:
                 paths = []
                 for index, frame in enumerate(frames):
                     path = Path(temporary) / "frame_{:04d}.png".format(index)
                     if not cv2.imwrite(str(path), frame):
                         raise OSError("Could not write OCR frame {}".format(path))
                     paths.append(str(path))
-                if ocr_session is None:
-                    from ai.ocr_session import OCRSession
-                    ocr_session = OCRSession(policy)
-                result = ocr_session.run(
+
+                result = run_v1_ocr(
                     {
                         "images": paths,
-                        "ocr_version": policy.paddle_ocr_version,
-                        "engine": policy.paddle_ocr_engine,
+                        "detection_model": policy.paddle_detection_model,
+                        "recognition_model": policy.paddle_recognition_model,
+                        "engine": policy.paddle_engine,
                     },
-                    timeout=float(os.getenv("OCR_MODEL_TIMEOUT_SECONDS", "1800")),
+                    timeout_seconds=float(
+                        os.getenv("V1_OCR_TIMEOUT_SECONDS", "900")
+                    ),
+                    policy=policy,
                 )
                 by_path = {
                     str(item.get("path")): item.get("rows", [])
                     for item in result.get("images", [])
                 }
                 if any(path not in by_path for path in paths):
-                    raise RuntimeError("OCR response omitted a frame")
+                    raise RuntimeError("OCR response omitted a sampled frame")
                 output = []
                 for path in paths:
                     rows = []
@@ -104,17 +150,23 @@ def _readtext_batch(frames):
                 if len(output) != len(frames):
                     raise RuntimeError("PP-OCRv6 returned an incomplete frame batch")
                 logger.info(
-                    "PP-OCRv6 completed %d sampled frames via %s",
+                    "PP-OCRv6 Tiny completed %d sampled frames via %s",
                     len(frames),
-                    policy.paddle_ocr_engine,
+                    policy.paddle_engine,
                 )
                 return output
-        except (ModelRuntimeError, OSError, RuntimeError, TypeError, ValueError) as exc:
-            if ocr_session is not None:
-                ocr_session.close()
-                ocr_session = None
-            logger.warning("PP-OCRv6 failed; falling back to EasyOCR: %s", exc)
+        except (V1ModelRuntimeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            # Close the failed model BEFORE opening the CPU fallback. Stay on
+            # fallback until this video ends instead of loading both repeatedly.
+            try:
+                from .ai.v1_model_runtime import close_session
+            except ImportError:
+                from ai.v1_model_runtime import close_session
+            close_session()
+            _paddle_failed = True
+            logger.error("PP-OCRv6 GPU failed; CPU fallback disabled: %s", exc)
 
+    raise RuntimeError("V1 GPU OCR unavailable; CPU EasyOCR fallback disabled")
     easy_reader = get_ocr_reader()
     return [
         easy_reader.readtext(
@@ -126,6 +178,7 @@ def _readtext_batch(frames):
         )
         for frame in frames
     ]
+
 
 def extract_silent_subtitles_from_gaps(gap_segments, target_lang="vi", api_key=None):
     return []
@@ -158,6 +211,8 @@ def stabilize_samples(samples):
 
 
 class OCRBlock:
+    """OCR text with temporal and screen geometry used by subtitle/QC stages."""
+
     def __init__(
         self,
         text,
@@ -193,6 +248,8 @@ class OCRBlock:
         self.type = type
 
 
+@stage("ocr", cleanup=release_ocr_reader)
+@ocr_proxy
 def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=None, srt_segments=None, **kwargs):
     logger.info(f"Bắt đầu OCR toàn diện trên video {video_path}")
 
@@ -206,272 +263,182 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     frame_count_key = getattr(cv2, "CAP_PROP_FRAME_COUNT", None)
     duration = cap.get(frame_count_key) / fps if frame_count_key is not None else 0
-    if kwargs.get('end_time') is not None:
-        duration = min(duration, float(kwargs['end_time'])) if duration > 0 else float(kwargs['end_time'])
     if width <= 0 or height <= 0:
         cap.release()
         raise ValueError("Video has invalid dimensions")
 
-    # OpenCV's time seek can land seconds late on irregular VFR streams.
-    # Normalize only the OCR analysis copy, never the source/render output.
-    if kwargs.get("adaptive", False) and not kwargs.get("_ocr_proxy", False):
-        try:
-            probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=r_frame_rate,avg_frame_rate", "-of", "json", str(video_path)],
-                capture_output=True, text=True, timeout=15,
-                creationflags=0x08000000 if os.name == "nt" else 0)
-            from fractions import Fraction
-            stream = json.loads(probe.stdout)["streams"][0]
-            nominal = float(Fraction(stream["r_frame_rate"]))
-            average = float(Fraction(stream["avg_frame_rate"]))
-            irregular = average > 0 and abs(nominal-average) / average > .02
-        except (OSError, ValueError, KeyError, IndexError, ZeroDivisionError, subprocess.SubprocessError):
-            irregular = False
-        if irregular:
-            cap.release()
-            import time
-            proxy_started = time.monotonic()
-            with tempfile.TemporaryDirectory(prefix="v2-ocr-proxy-") as folder:
-                proxy = Path(folder) / "analysis.mp4"
-                subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                    "-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-i", str(video_path),
-                    "-vf", "fps=10,scale_cuda=720:-2:format=nv12",
-                    "-an", "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "lossless", str(proxy)],
-                    check=True, capture_output=True, timeout=240,
-                    creationflags=0x08000000 if os.name == "nt" else 0)
-                proxy_seconds = time.monotonic() - proxy_started
-                proxy_kwargs = dict(kwargs, _ocr_proxy=True, end_time=duration)
-                result = perform_video_ocr(str(proxy), target_lang, sample_rate, api_key,
-                                           srt_segments, **proxy_kwargs)
-                if kwargs.get("metrics") is not None:
-                    kwargs["metrics"].update(ocr_proxy=True, proxy_fps=10,
-                        proxy_encoder="h264_nvenc", proxy_seconds=round(proxy_seconds, 3),
-                        source_width=width, source_height=height)
-                return result[0], width, height, result[3]
-
+    class OCRBlock:
+        def __init__(self, text, start, end, x_pct, max_x_pct, y_pct, max_y_pct, prob=1.0, sample_segment_id=None, sample_time=0.0):
+            self.text = text
+            self.start = start
+            self.end = end
+            self.x_pct = x_pct
+            self.max_x_pct = max_x_pct
+            self.y_pct = y_pct
+            self.max_y_pct = max_y_pct
+            self.prob = prob
+            self.sample_segment_id = sample_segment_id
+            self.sample_time = sample_time
 
     all_blocks = []
 
-    # === TỐI ƯU HÓA 2-PHA OCR THEO TỪNG ĐOẠN THOẠI ===
+    # === TỐI ƯU HÓA SIÊU TỐC OCR THEO TỪNG ĐOẠN THOẠI (SMART SKIP OCR) ===
+    short_thresh = float(os.getenv("V1_SHORT_MAX_SECONDS", "420.0"))
+    effective_duration = duration
+    if effective_duration <= 0 and srt_segments:
+        try:
+            effective_duration = max(s.end.total_seconds() for s in srt_segments)
+        except Exception:
+            pass
+
+    # Quy tắc: Tắt hoàn toàn smart skip OCR cho video ngắn (dưới 7 phút / 420s). Luôn dùng "full" OCR.
+    if effective_duration > 0 and effective_duration <= short_thresh:
+        ocr_strategy = "full"
+        logger.info("Chế độ OCR cho video ngắn (%.1fs <= %.0fs): 'full' (đã tắt smart_skip)", effective_duration, short_thresh)
+    else:
+        ocr_strategy = kwargs.get("ocr_strategy")
+        if not ocr_strategy or ocr_strategy == "auto":
+            try:
+                try:
+                    from backend.job_config_service import resolve_job_frozen_config
+                except ImportError:
+                    from job_config_service import resolve_job_frozen_config
+                frozen = resolve_job_frozen_config(video_path)
+                if frozen and "effective_config" in frozen and "planned_pipeline" in frozen["effective_config"]:
+                    ocr_strategy = frozen["effective_config"]["planned_pipeline"].get("ocr_strategy")
+                elif frozen and "routing" in frozen and frozen["routing"]:
+                    ocr_strategy = frozen["routing"].get("planned_pipeline", {}).get("ocr_strategy")
+            except Exception:
+                pass
+
+        if not ocr_strategy or ocr_strategy == "auto":
+            try:
+                from .v1_feature_flags import get_feature_flags
+            except ImportError:
+                try:
+                    from v1_feature_flags import get_feature_flags
+                except ImportError:
+                    get_feature_flags = lambda: {}
+            flags = get_feature_flags()
+            enable_smart = flags.get("V1_SMART_SKIP_OCR")
+            if enable_smart is None:
+                enable_smart = os.getenv("V1_SMART_SKIP_OCR", os.getenv("ENABLE_SMART_SKIP_OCR", "true")).strip().lower() in ("1", "true", "yes", "on")
+            else:
+                enable_smart = bool(enable_smart)
+
+            if effective_duration > short_thresh and enable_smart:
+                ocr_strategy = "smart_skip"
+            else:
+                ocr_strategy = "full"
+
+    def _check_visual_subtitle_activity(cap_obj, timestamp_sec, vid_w, vid_h):
+        """Kiểm tra hoạt độ biên cạnh quang học tại vùng phụ đề tiềm năng (68%-92% chiều cao)."""
+        try:
+            cap_obj.set(cv2.CAP_PROP_POS_MSEC, max(0.0, timestamp_sec) * 1000)
+            ok, frm = cap_obj.read()
+            if not ok or frm is None:
+                return True, 1.0  # Fail-safe nếu không đọc được frame
+            y1 = int(vid_h * 0.68)
+            y2 = int(vid_h * 0.92)
+            x1 = int(vid_w * 0.10)
+            x2 = int(vid_w * 0.90)
+            sub_roi = frm[y1:y2, x1:x2]
+            if sub_roi.size == 0:
+                return True, 1.0
+            gray = cv2.cvtColor(sub_roi, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(gray, 60, 180)
+            edge_pixels = cv2.countNonZero(edges)
+            total_pixels = edges.shape[0] * edges.shape[1]
+            edge_dens = float(edge_pixels) / float(total_pixels) if total_pixels > 0 else 0.0
+            # Phụ đề cứng tiếng Trung thường có mật độ cạnh rõ nét >= 0.018
+            return (edge_dens >= 0.018), edge_dens
+        except Exception as _edge_err:
+            logger.debug("Visual band check error at t=%.2f: %s", timestamp_sec, _edge_err)
+            return True, 1.0
+
     target_timestamps = []
     is_adaptive = bool(kwargs.get("adaptive", False))
     interval = max(0.08, min(0.5, float(os.getenv("OCR_TRACK_INTERVAL", "0.2"))))
 
     if srt_segments:
-        if is_adaptive:
-            # Pha 1: Quét thưa toàn bộ chiều dài video (Sparse Anchors)
-            coarse_points = []
-            for seg_idx, seg in enumerate(srt_segments):
-                s = seg.start.total_seconds()
-                e = seg.end.total_seconds()
-                if e <= s:
-                    continue
-                # Điểm neo trung tâm câu
-                t_mid = round((s + e) / 2.0, 3)
-                coarse_points.append((t_mid, seg, seg_idx, "mid"))
+        # Cover every speech segment; process recognition in bounded batches.
+        interval = max(0.1, min(5.0, float(os.getenv("V1_OCR_TRACK_INTERVAL", "1.2"))))
+        max_samples_per_cue = max(1, int(os.getenv("V1_OCR_MAX_SAMPLES_PER_SEGMENT", "2")))
+        total_segs = len(srt_segments)
+        skipped_count = 0
+        for seg_idx, seg in enumerate(srt_segments):
+            s = seg.start.total_seconds()
+            e = seg.end.total_seconds()
+            if e <= s:
+                continue
 
-                dur_seg = e - s
-                # Câu đủ dài: thêm mốc khởi đầu và kết thúc
-                if dur_seg >= 0.8:
-                    t_on = round(s + 0.15, 3)
-                    t_off = round(max(s + 0.3, e - 0.15), 3)
-                    coarse_points.append((t_on, seg, seg_idx, "onset"))
-                    coarse_points.append((t_off, seg, seg_idx, "offset"))
-                # Câu rất dài (trên 2.5s): thêm các điểm 1/4 và 3/4
-                if dur_seg >= 2.5:
-                    coarse_points.append((round(s + dur_seg * 0.25, 3), seg, seg_idx, "quarter1"))
-                    coarse_points.append((round(s + dur_seg * 0.75, 3), seg, seg_idx, "quarter3"))
+            if ocr_strategy == "smart_skip":
+                is_boundary = (seg_idx < 2 or seg_idx >= total_segs - 2)
+                is_periodic = (seg_idx % 8 == 0)
+                txt = getattr(seg, "content", "") or ""
+                is_short = (len(txt.strip()) <= 3)
+                is_suspicious = any(c in txt for c in "?!…:0123456789")
+                conf = getattr(seg, "confidence", None)
+                logprob = getattr(seg, "avg_logprob", None)
+                low_conf = (conf is not None and conf < 0.88) or (logprob is not None and logprob < -0.25)
 
-                # Ranh giới nối tiếp giữa 2 câu liền kề
-                next_start = (srt_segments[seg_idx + 1].start.total_seconds()
-                              if seg_idx + 1 < len(srt_segments) else duration)
-                if 0.05 <= next_start - e <= 0.8:
-                    coarse_points.append((round((e + next_start) / 2.0, 3), seg, seg_idx, "transition"))
+                if is_boundary:
+                    reason = "boundary_segment"
+                elif is_periodic:
+                    reason = "periodic_checkpoint"
+                elif is_short:
+                    reason = "short_cue"
+                elif is_suspicious:
+                    reason = "suspicious_punctuation_digits"
+                elif low_conf:
+                    reason = f"low_asr_conf({conf})"
+                else:
+                    # Đạt tiêu chí ASR tốt, xác minh trực quan dải phụ đề đáy video
+                    mid_t = (s + e) / 2.0
+                    has_sub, edge_d = _check_visual_subtitle_activity(cap, mid_t, width, height)
+                    if not has_sub:
+                        skipped_count += 1
+                        logger.info("Smart Skip OCR [SKIP]: Seg %d (t=%.2fs) - lý do=high_conf_no_visual_sub (conf=%.2f, edge=%.4f)",
+                                    seg_idx, s, conf if conf is not None else 1.0, edge_d)
+                        continue
+                    else:
+                        reason = f"visual_band_active(edge={edge_d:.4f})"
+                logger.debug("Smart Skip OCR [RUN]: Seg %d (t=%.2fs) - lý do=%s", seg_idx, s, reason)
 
-            # Pha 2: Tinh chỉnh dày quanh điểm xuất hiện (onset) và biến mất (offset)
-            refinement_points = []
-            for seg_idx, seg in enumerate(srt_segments):
-                s = seg.start.total_seconds()
-                e = seg.end.total_seconds()
-                if e <= s:
-                    continue
-                next_start = (srt_segments[seg_idx + 1].start.total_seconds()
-                              if seg_idx + 1 < len(srt_segments) else duration)
-                # Điểm xuất hiện phụ đề: ngay trước khi câu bắt đầu (để hộp che không bị bật trễ)
-                t_enter = round(max(0.0, s - 0.15), 3)
-                # Điểm biến mất phụ đề: ngay sau khi câu kết thúc (đảm bảo không tắt sớm)
-                t_exit = round(min(duration if duration > 0 else e + 0.25, min(e + 0.25, next_start)), 3)
-                refinement_points.append((t_enter, seg, seg_idx, "boundary_enter"))
-                refinement_points.append((t_exit, seg, seg_idx, "boundary_exit"))
-
-            # Pha 3: Quét thích ứng các khoảng trống (ASR gaps >= 0.8s và mở đầu video)
-            gap_points = []
-            first_s = srt_segments[0].start.total_seconds() if srt_segments else (duration or 0.0)
-            if first_s >= 0.8:
-                cur = 0.3
-                while cur < first_s - 0.2:
-                    gap_points.append((round(cur, 3), None, -1, "gap_intro"))
-                    cur += 0.5
-
-            for seg_idx, seg in enumerate(srt_segments):
-                e = seg.end.total_seconds()
-                next_start = (srt_segments[seg_idx + 1].start.total_seconds()
-                              if seg_idx + 1 < len(srt_segments) else (duration or e))
-                if next_start - e >= 0.8:
-                    cur = e + 0.3
-                    while cur < next_start - 0.2:
-                        gap_points.append((round(cur, 3), None, -1, "gap_between"))
-                        cur += 0.5
-
-            # Hợp nhất và loại trừ trùng lặp các mốc thời gian (sai số <= 50ms)
-            all_pts = {}
-            for t, seg, idx, reason in coarse_points + refinement_points + gap_points:
-                k = round(t, 2)
-                if k not in all_pts:
-                    all_pts[k] = (t, seg, idx)
-
-            target_timestamps = [all_pts[k] for k in sorted(all_pts.keys())]
-        else:
-            # Dense temporal cadence (legacy / uniform sampling compatibility)
-            for seg_idx, seg in enumerate(srt_segments):
-                s = seg.start.total_seconds()
-                e = seg.end.total_seconds()
-                if e <= s:
-                    continue
-                s = max(0.0, s - 0.3)
-                next_start = (srt_segments[seg_idx + 1].start.total_seconds()
-                              if seg_idx + 1 < len(srt_segments) else duration)
-                e = max(e, next_start) + 0.3
-                if duration > 0:
-                    e = min(e, duration)
-                count = max(1, __import__("math").ceil((e - s) / interval))
-                for n in range(count):
-                    target_timestamps.append((s + (n + 0.5) * (e - s) / count, seg, seg_idx))
-
-        target_timestamps.sort(key=lambda item: item[0])
+            s = max(0.0, s - 0.3)
+            next_start = (srt_segments[seg_idx + 1].start.total_seconds()
+                          if seg_idx + 1 < len(srt_segments) else duration)
+            e = min(e + 0.4, next_start) if next_start > e else (e + 0.3)
+            if duration > 0:
+                e = min(e, duration)
+            cue_dur = max(0.1, e - s)
+            count = min(max_samples_per_cue, max(1, __import__("math").ceil(cue_dur / interval)))
+            for n in range(count):
+                target_timestamps.append((s + (n + 0.5) * cue_dur / count, seg, seg_idx))
+        if skipped_count > 0:
+            logger.info("Smart Skip OCR đã tối ưu bỏ qua %d / %d câu thoại (Whisper conf cao + xác minh không có phụ đề cứng)", skipped_count, total_segs)
     else:
-        # Video without transcript: perform video-wide sampling to detect scene text and subtitles
-        eff_dur = duration if duration > 0 else 30.0
-        sample_step = max(0.8, min(1.5, float(os.getenv("OCR_NO_TRANSCRIPT_STEP", "1.2"))))
-        coarse_pts = []
-        cur_t = 0.5
-        while cur_t < eff_dur - 0.2:
-            coarse_pts.append((round(cur_t, 3), None, -1))
-            cur_t += sample_step
-        target_timestamps = coarse_pts
+        # Without a transcript there is no reliable way to distinguish scene text.
+        cap.release()
+        return [], width, height, 0.85
 
-    crop_y_start = 0
-    crop_y_end = height
+    crop_y_start = int(height * 0.05) # Quét từ 5% (bỏ thanh trạng thái)
+    crop_y_end = int(height * 0.95)   # đến 95%
     captured_frames = []
     recognized_samples = []
-    frame_cache = None
-    ocr_frame_count = 0
-    last_full_probe = -10.0
-
-    def capture(current_time):
-        cap.set(cv2.CAP_PROP_POS_MSEC, current_time * 1000)
-        ret, frame = cap.read()
-        if not ret:
-            return None
-        crop = frame[crop_y_start:crop_y_end, :]
-        ratio = min(1.0, 720.0 / crop.shape[1])
-        if ratio < 1:
-            crop = cv2.resize(crop, (720, int(crop.shape[0]*ratio)), interpolation=cv2.INTER_AREA)
-        return crop, ratio
-
-    # Six distributed probes establish a band before any dense recognition.
-    # The cheap image comparison still checks every tracking timestamp.
-    if kwargs.get("adaptive", True) and hasattr(cv2, "Canny") and target_timestamps:
-        from ocr_frame_cache import SubtitleFrameCache
-        valid_seed_points = [p for p in target_timestamps if p[1] is not None]
-        if not valid_seed_points:
-            valid_seed_points = target_timestamps
-        seed_indices = sorted({round(i*(len(valid_seed_points)-1)/5) for i in range(min(6, len(valid_seed_points)))})
-        seeds = []
-        for index in seed_indices:
-            t, seg, idx = valid_seed_points[index]
-            captured = capture(t)
-            if captured is not None:
-                frame, ratio = captured
-                seeds.append((t, seg, idx, frame, ratio))
-        try:
-            seed_rows = _readtext_batch([s[3] for s in seeds]) if seeds else []
-        except BaseException:
-            cap.release()
-            raise
-        if len(seed_rows) != len(seeds):
-            cap.release()
-            raise RuntimeError("OCR returned incomplete probe results")
-        ocr_frame_count += len(seeds)
-        probe_blocks, texts = [], {}
-        for (t, seg, idx, frame, ratio), rows in zip(seeds, seed_rows):
-            sid = getattr(seg, "index", idx) if seg is not None else idx
-            texts[sid] = getattr(seg, "content", "") if seg is not None else ""
-            for bbox, text, prob in rows:
-                if len(bbox) < 4:
-                    continue
-                probe_blocks.append(dict(text=text, prob=prob, sample_time=t,
-                    sample_segment_id=sid,
-                    x_pct=min(p[0] for p in bbox)/ratio/width,
-                    max_x_pct=max(p[0] for p in bbox)/ratio/width,
-                    y_pct=(min(p[1] for p in bbox)/ratio+crop_y_start)/height,
-                    max_y_pct=(max(p[1] for p in bbox)/ratio+crop_y_start)/height))
-        probe_band = select_chinese_subtitle_band(probe_blocks, texts, width, height)
-        cache_top, cache_bottom = probe_band.top, probe_band.bottom
-        cache_region_found = probe_band.support >= 1
-        if not cache_region_found:
-            # Spatial agreement only chooses a region to compare/cache. It does
-            # not authorize any mask; final selection still requires ASR anchors.
-            lines = [b for b in probe_blocks
-                     if len(b['text']) >= 4 and b['max_x_pct']-b['x_pct'] >= .25
-                     and .012 <= b['max_y_pct']-b['y_pct'] <= .10
-                     and abs((b['x_pct']+b['max_x_pct'])/2-.5) <= .10]
-            clusters = [[b for b in lines if abs(b['y_pct']-a['y_pct']) <= .025
-                         and abs(b['max_y_pct']-a['max_y_pct']) <= .025] for a in lines]
-            cluster = max(clusters, key=len, default=[])
-            if len({b['sample_time'] for b in cluster}) >= 3:
-                cache_top = min(b['y_pct'] for b in cluster)
-                cache_bottom = max(b['max_y_pct'] for b in cluster)
-                cache_region_found = True
-        if cache_region_found:
-            # Padding notices nearby second lines or small vertical movement.
-            top = max(0, (cache_top*height-crop_y_start)/ (crop_y_end-crop_y_start)-.02)
-            bottom = min(1, (cache_bottom*height-crop_y_start)/(crop_y_end-crop_y_start)+.02)
-            frame_cache = SubtitleFrameCache(top, bottom, max_age=2.5)
-        logger.info("OCR probes=%d, band_support=%d, visual reuse=%s", len(seeds), probe_band.support, frame_cache is not None)
-        if kwargs.get("band_only", False) and cache_region_found:
-            cap.release()
-            fast_y = (cache_top + cache_bottom) / 2.0
-            logger.info("⚡ Fast OCR band detected: main_y_pct=%.4f (Skipping dense frame tracking)", fast_y)
-            return [], width, height, fast_y
 
     def flush_frames():
-        nonlocal ocr_frame_count
         if not captured_frames:
             return
-        images, offsets = [], []
-        for item in captured_frames:
-            frame, holder = item[2], item[5]
-            if frame_cache and not holder['full_probe']:
-                offset = max(0, int(frame.shape[0]*frame_cache.top))
-                image = frame[offset:min(frame.shape[0], int(frame.shape[0]*frame_cache.bottom))]
-            else:
-                image, offset = frame, 0
-            images.append(image)
-            offsets.append(offset)
-        results = _readtext_batch(images)
-        ocr_frame_count += len(captured_frames)
+        results = _readtext_batch([item[2] for item in captured_frames])
         if len(results) != len(captured_frames):
             raise RuntimeError("OCR returned incomplete frame results")
-        for item, rows, offset in zip(captured_frames, results, offsets):
-            current_time, scale_ratio, frame, target_seg, seg_idx, holder = item
-            holder["rows"] = [([[p[0], p[1]+offset] for p in box], text, prob)
-                              for box, text, prob in rows]
-            recognized_samples.append((current_time, scale_ratio, target_seg, seg_idx, holder))
+        for item, rows in zip(captured_frames, results):
+            current_time, scale_ratio, _, target_seg, seg_idx = item
+            recognized_samples.append((current_time, scale_ratio, target_seg, seg_idx, rows))
         captured_frames.clear()
 
     try:
-        prev_sample = None
         for current_time, target_seg, seg_idx in target_timestamps:
             try:
                 from . import shared_state
@@ -481,16 +448,8 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                 cap.release()
                 return [], width, height, 0.85
 
-            target_msec = current_time * 1000
-            try:
-                current_pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
-            except Exception:
-                current_pos_msec = None
-            if current_pos_msec is not None and 0 <= (target_msec - current_pos_msec) <= 80:
-                ret, frame = cap.read()
-            else:
-                cap.set(cv2.CAP_PROP_POS_MSEC, target_msec)
-                ret, frame = cap.read()
+            cap.set(cv2.CAP_PROP_POS_MSEC, current_time * 1000)
+            ret, frame = cap.read()
             if not ret: continue
 
             # 1. Cắt vùng chứa phụ đề tiềm năng (từ 5% đến 95% chiều cao màn hình)
@@ -507,63 +466,14 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
             else:
                 proc_frame = cropped_frame
 
-            signature = frame_cache.signature(proc_frame) if frame_cache else None
-
-            # Dynamic Densification: If a significant visual transition occurred between consecutive
-            # probes in the same segment and interval > 0.20s, sample the midpoint to pinpoint onset/offset
-            if (
-                frame_cache
-                and prev_sample is not None
-                and prev_sample[2] == seg_idx
-                and (current_time - prev_sample[0]) > 0.20
-                and frame_cache.is_visual_transition(prev_sample[1], signature)
-            ):
-                mid_time = round((prev_sample[0] + current_time) / 2.0, 3)
-                mid_cap = capture(mid_time)
-                if mid_cap is not None:
-                    m_frame, m_ratio = mid_cap
-                    m_sig = frame_cache.signature(m_frame)
-                    m_reused = frame_cache.lookup(m_sig, mid_time)
-                    if m_reused is not None:
-                        recognized_samples.append((
-                            mid_time, m_ratio, target_seg, seg_idx,
-                            {"reuse": m_reused, "shape_h": m_frame.shape[0]}
-                        ))
-                    else:
-                        m_holder = {"full_probe": False}
-                        captured_frames.append((mid_time, m_ratio, m_frame, target_seg, seg_idx, m_holder))
-                        frame_cache.remember(m_sig, mid_time, m_holder)
-
-            prev_sample = (current_time, signature, seg_idx)
-
-            full_probe = (current_time - last_full_probe >= 4.0) or (target_seg is None)
-            reused = frame_cache.lookup(signature, current_time) if frame_cache and not full_probe else None
-            if reused is not None:
-                # Reuse only rows inside the visually checked region. Product
-                # text elsewhere in a seed frame may have moved since then.
-                recognized_samples.append((current_time, scale_ratio, target_seg, seg_idx,
-                                           {"reuse": reused, "shape_h": proc_frame.shape[0]}))
-                continue
-            holder = {'full_probe': full_probe}
-            if full_probe:
-                last_full_probe = current_time
-            captured_frames.append((current_time, scale_ratio, proc_frame, target_seg, seg_idx, holder))
-            if frame_cache:
-                frame_cache.remember(signature, current_time, holder)
-            if len(captured_frames) >= (32 if frame_cache else 12):
+            captured_frames.append((current_time, scale_ratio, proc_frame, target_seg, seg_idx))
+            if len(captured_frames) >= 12:
                 flush_frames()
 
     finally:
         cap.release()
     flush_frames()
-    logger.info("OCR recognized=%d, reused=%d, tracking_samples=%d", ocr_frame_count,
-                frame_cache.hits if frame_cache else 0, len(recognized_samples))
-    for current_time, scale_ratio, target_seg, seg_idx, holder in recognized_samples:
-        results = holder.get("rows", [])
-        if "reuse" in holder:
-            results = [row for row in holder["reuse"]["rows"]
-                       if min(p[1] for p in row[0]) >= frame_cache.top*holder["shape_h"]
-                       and max(p[1] for p in row[0]) <= frame_cache.bottom*holder["shape_h"]]
+    for current_time, scale_ratio, target_seg, seg_idx, results in recognized_samples:
         frame_blocks = []
         for (bbox, text, prob) in results:
             clean_t = str(text or "").strip()
@@ -599,7 +509,7 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
         for mb in merged_frame_blocks:
             all_blocks.append(OCRBlock(
                 text=mb['text'],
-                start=max(0.0, current_time - 1.2),
+                start=current_time - 1.2,
                 end=current_time + 1.2,
                 x_pct=mb['x_pct'],
                 max_x_pct=mb['max_x_pct'],
@@ -617,6 +527,20 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
             s_key = s_id if s_id is not None else idx
             segment_texts[s_key] = str(getattr(seg, 'content', '') or '').strip()
 
+    # A short ASR interjection may be printed with the next full sentence.
+    # Only borrow immediate contiguous speech; never seed from arbitrary scene text.
+    for idx, seg in enumerate(srt_segments):
+        key = getattr(seg, "index", None)
+        key = key if key is not None else idx
+        own = segment_texts[key]
+        if len("".join(c for c in own if "\u3400" <= c <= "\u9fff")) <= 4:
+            context = [own]
+            if idx and (seg.start - srt_segments[idx - 1].end).total_seconds() <= .3:
+                context.insert(0, str(srt_segments[idx - 1].content))
+            if idx + 1 < len(srt_segments) and (srt_segments[idx + 1].start - seg.end).total_seconds() <= .3:
+                context.append(str(srt_segments[idx + 1].content))
+            segment_texts[key] = " ".join(context)
+
     band = select_chinese_subtitle_band(
         blocks=all_blocks,
         segment_texts=segment_texts,
@@ -632,14 +556,6 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
         main_y_pct = global_med_top
         logger.info(f"🎯 Global Subtitle Band detected ({band.mode}, support={band.support}): Top={global_med_top:.3f}, Bottom={global_med_bottom:.3f}")
 
-        # Enforce strict packaging text exclusion on blocks outside the subtitle band
-        for blk in all_blocks:
-            if not (global_med_top - 0.02 <= blk.y_pct and blk.max_y_pct <= global_med_bottom + 0.02):
-                blk.is_packaging = True
-                blk.is_subtitle = False
-                blk.in_subtitle_band = False
-                blk.type = "packaging"
-
         if srt_segments:
             for idx, seg in enumerate(srt_segments):
                 s_id = getattr(seg, 'index', None)
@@ -649,37 +565,16 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                 seg_s = max(0.0, seg.start.total_seconds() - 0.3)
                 next_start = (srt_segments[idx + 1].start.total_seconds()
                               if idx + 1 < len(srt_segments) else duration)
-                seg_e = max(seg.end.total_seconds(), next_start) + 0.3
+                seg_e = min(seg.end.total_seconds() + 0.4, next_start) if next_start > seg.end.total_seconds() else (seg.end.total_seconds() + 0.3)
                 if duration > 0:
                     seg_e = min(seg_e, duration)
-
-                if b and not (global_med_top - 0.02 <= b["y_pct"] and b["max_y_pct"] <= global_med_bottom + 0.02):
-                    b = None
 
                 if b:
                     selected = stabilize_samples(band.selected_by_sample.get(s_key, []))
                     tracking = []
                     for position, row in enumerate(selected):
-                        if not (global_med_top - 0.02 <= row["y_pct"] and row["max_y_pct"] <= global_med_bottom + 0.02):
-                            continue
-                        if position == 0:
-                            if row["sample_time"] - 0.45 > seg.start.total_seconds():
-                                left = row["sample_time"] - 0.4
-                            else:
-                                left = seg_s
-                        else:
-                            left = (selected[position - 1]["sample_time"] + row["sample_time"]) / 2.0
-
-                        if position == len(selected) - 1:
-                            if row["sample_time"] + 0.45 < seg.end.total_seconds():
-                                right = row["sample_time"] + 0.4
-                            else:
-                                right = seg.end.total_seconds() + 0.3
-                                if duration > 0:
-                                    right = min(right, duration)
-                        else:
-                            right = (row["sample_time"] + selected[position + 1]["sample_time"]) / 2.0
-
+                        left = seg_s if position == 0 else (selected[position - 1]["sample_time"] + row["sample_time"]) / 2.0
+                        right = seg_e if position == len(selected) - 1 else (row["sample_time"] + selected[position + 1]["sample_time"]) / 2.0
                         if right > left:
                             tracking.append(OCRBlock(
                                 **{key: row[key] for key in
@@ -687,188 +582,177 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                                 start=max(seg_s, left), end=min(seg_e, right),
                                 prob=row.get("prob", 0.0),
                                 sample_segment_id=s_key, sample_time=row["sample_time"],
-                                is_subtitle=True, is_packaging=False, is_static=False,
-                                in_subtitle_band=True, type="subtitle",
                             ))
                     seg.tracking_blocks = tracking
 
-                    best_end = seg_e
-                    if tracking:
-                        best_end = tracking[-1].end
                     seg.best_block = OCRBlock(
                         text=b["text"],
                         start=seg_s,
-                        end=best_end,
+                        end=seg_e,
                         x_pct=b["x_pct"],
                         max_x_pct=b["max_x_pct"],
                         y_pct=b["y_pct"],
                         max_y_pct=b["max_y_pct"],
                         prob=b.get("prob", 1.0),
-                        is_subtitle=True,
-                        is_packaging=False,
-                        is_static=False,
-                        in_subtitle_band=True,
-                        type="subtitle",
                     )
-                    seg.is_subtitle = True
-                    seg.in_subtitle_band = True
-                    seg.is_packaging = False
-                    seg.is_static = False
                     seg.y_pct = b["y_pct"]
                     seg.max_y_pct = b["max_y_pct"]
                     logger.info(f"Sync (Subtitle Band): '{str(getattr(seg, 'content', ''))[:15]}' -> Y: {seg.y_pct:.3f} - {seg.max_y_pct:.3f}")
                 else:
-                    # Query all_blocks for matching text detected inside the global subtitle band during this segment's window
-                    seg_content = str(getattr(seg, "content", "") or "")
-                    cand = [
-                        blk for blk in all_blocks
-                        if (global_med_top - 0.02 <= blk.y_pct and blk.max_y_pct <= global_med_bottom + 0.02)
-                        and (seg.start.total_seconds() - 0.25 <= blk.sample_time <= seg.end.total_seconds() + 0.25)
-                        and len(str(blk.text or "").strip()) >= 2
-                        and _has_chinese_overlap(blk.text, seg_content)
-                    ]
-                    if cand:
-                        cand.sort(key=lambda x: (x.sample_time, x.start))
-                        tracking = []
-                        for c_idx, row in enumerate(cand):
-                            left = seg_s if c_idx == 0 else (cand[c_idx - 1].sample_time + row.sample_time) / 2.0
-                            right = seg_e if c_idx == len(cand) - 1 else (row.sample_time + cand[c_idx + 1].sample_time) / 2.0
-                            if right > left:
-                                tracking.append(OCRBlock(
-                                    text=row.text,
-                                    x_pct=row.x_pct,
-                                    max_x_pct=row.max_x_pct,
-                                    y_pct=row.y_pct,
-                                    max_y_pct=row.max_y_pct,
-                                    start=max(seg_s, left),
-                                    end=min(seg_e, right),
-                                    prob=row.prob,
-                                    sample_segment_id=s_key,
-                                    sample_time=row.sample_time,
-                                    is_subtitle=True,
-                                    is_packaging=False,
-                                    is_static=False,
-                                    in_subtitle_band=True,
-                                    type="subtitle",
-                                ))
-                        seg.tracking_blocks = tracking
-                        best_blk = max(cand, key=lambda c: len(str(c.text or "")))
-                        seg.best_block = OCRBlock(
-                            text=best_blk.text,
-                            start=seg_s,
-                            end=tracking[-1].end if tracking else seg_e,
-                            x_pct=min(c.x_pct for c in cand),
-                            max_x_pct=max(c.max_x_pct for c in cand),
-                            y_pct=min(c.y_pct for c in cand),
-                            max_y_pct=max(c.max_y_pct for c in cand),
-                            prob=best_blk.prob,
-                            is_subtitle=True,
-                            is_packaging=False,
-                            is_static=False,
-                            in_subtitle_band=True,
-                            type="subtitle",
-                        )
-                        seg.is_subtitle = True
-                        seg.in_subtitle_band = True
-                        seg.is_packaging = False
-                        seg.is_static = False
-                        seg.y_pct = seg.best_block.y_pct
-                        seg.max_y_pct = seg.best_block.max_y_pct
-                        logger.info(f"Fallback Sync (Subtitle Band Candidate): '{str(getattr(seg, 'content', ''))[:15]}' -> Y: {seg.y_pct:.3f} - {seg.max_y_pct:.3f}, {len(tracking)} blocks")
-                    else:
-                        seg_text = str(getattr(seg, "content", "") or "")
-                        center_x = 0.5
-                        est_w = min(0.65, max(0.20, len(seg_text) * 0.045))
-                        x1 = max(0.10, center_x - est_w / 2.0)
-                        x2 = min(0.90, center_x + est_w / 2.0)
-                        fallback_blk = OCRBlock(
-                            text=seg_text,
-                            start=seg_s,
-                            end=seg_e,
-                            x_pct=x1,
-                            max_x_pct=x2,
-                            y_pct=global_med_top,
-                            max_y_pct=global_med_bottom,
-                            prob=0.8,
-                            is_subtitle=True,
-                            is_packaging=False,
-                            is_static=False,
-                            in_subtitle_band=True,
-                            type="subtitle",
-                        )
-                        seg.best_block = fallback_blk
-                        seg.tracking_blocks = [fallback_blk]
-                        seg.is_subtitle = True
-                        seg.in_subtitle_band = True
-                        seg.is_packaging = False
-                        seg.is_static = False
-                        seg.y_pct = global_med_top
-                        seg.max_y_pct = global_med_bottom
-                        logger.info(f"Synthesized Fallback Geometry for segment {s_key}: '{seg_text[:15]}' -> Y: {seg.y_pct:.3f} - {seg.max_y_pct:.3f}")
+                    # No subtitle found for this segment: do NOT assign random Chinese block!
+                    seg.best_block = None
+                    seg.tracking_blocks = []
+                    seg.y_pct = global_med_top
+                    seg.max_y_pct = global_med_bottom
+
+        # BỔ SUNG CÂU THOẠI TỪ OCR (Nếu ASR bị nhạc to át mất câu)
+        try:
+            recovered_subs = recover_missing_subtitles_from_ocr(
+                all_blocks=all_blocks,
+                srt_segments=srt_segments,
+                band=band,
+                duration=duration,
+            )
+            if recovered_subs:
+                logger.info(f"🎯 OCR Fallback phát hiện {len(recovered_subs)} câu phụ đề bị ASR bỏ sót: {[r['text'] for r in recovered_subs]}")
+                import srt
+                from datetime import timedelta
+                for rec in recovered_subs:
+                    new_seg = srt.Subtitle(
+                        index=len(srt_segments) + 1,
+                        start=timedelta(seconds=rec["start"]),
+                        end=timedelta(seconds=rec["end"]),
+                        content=rec["text"],
+                    )
+                    b = rec["best_block"]
+                    new_seg.best_block = OCRBlock(
+                        text=getattr(b, "text", "") if hasattr(b, "text") else b.get("text", ""),
+                        start=rec["start"],
+                        end=rec["end"],
+                        x_pct=getattr(b, "x_pct", 0.0) if hasattr(b, "x_pct") else b.get("x_pct", 0.0),
+                        max_x_pct=getattr(b, "max_x_pct", 1.0) if hasattr(b, "max_x_pct") else b.get("max_x_pct", 1.0),
+                        y_pct=getattr(b, "y_pct", global_med_top) if hasattr(b, "y_pct") else b.get("y_pct", global_med_top),
+                        max_y_pct=getattr(b, "max_y_pct", global_med_bottom) if hasattr(b, "max_y_pct") else b.get("max_y_pct", global_med_bottom),
+                        prob=getattr(b, "prob", 1.0) if hasattr(b, "prob") else b.get("prob", 1.0),
+                    )
+                    new_seg.y_pct = new_seg.best_block.y_pct
+                    new_seg.max_y_pct = new_seg.best_block.max_y_pct
+                    new_seg.tracking_blocks = []
+                    srt_segments.append(new_seg)
+
+                # Sort by start time and re-index
+                srt_segments.sort(key=lambda s: s.start)
+                for idx, s in enumerate(srt_segments, start=1):
+                    s.index = idx
+        except Exception as ocr_rec_err:
+            logger.warning(f"OCR subtitle recovery error: {ocr_rec_err}")
     else:
         logger.info("No reliable Chinese subtitle band detected (video without subtitles or only static packaging/logos).")
         main_y_pct = 0.85
-        for blk in all_blocks:
-            blk.is_packaging = True
-            blk.is_subtitle = False
-            blk.in_subtitle_band = False
-            blk.type = "packaging"
         if srt_segments:
             for seg in srt_segments:
                 seg.best_block = None
                 seg.tracking_blocks = []
-                seg.is_subtitle = False
-                seg.in_subtitle_band = False
-                seg.is_packaging = False
-                seg.is_static = False
                 seg.y_pct = 0.85
                 seg.max_y_pct = 0.90
 
-    gap_detections = []
-    assigned_times = []
+    return [], width, height, main_y_pct
+
+
+def recover_missing_subtitles_from_ocr(all_blocks, srt_segments, band, duration=None):
+    """
+    Recover missing speech segments from reliable OCR blocks in the Chinese Subtitle Band
+    that were missed by Whisper ASR (e.g. drowned out by loud music).
+    """
+    if not all_blocks or getattr(band, "support", 0) <= 0 or getattr(band, "mode", "") == "default":
+        return []
+
+    # 1. Collect existing segment intervals
+    existing_intervals = []
     if srt_segments:
-        for s in srt_segments:
-            assigned_times.append((s.start.total_seconds(), s.end.total_seconds()))
+        for seg in srt_segments:
+            existing_intervals.append((seg.start.total_seconds() - 0.5, seg.end.total_seconds() + 0.5))
 
-    for blk in all_blocks:
-        st_val = getattr(blk, "sample_time", None)
-        t = max(0.0, float(st_val if st_val is not None else getattr(blk, "start", 0.0)))
-        in_speech = any(s_st - 0.25 <= t <= s_et + 0.25 for s_st, s_et in assigned_times)
-        if not in_speech and len(str(blk.text or "").strip()) >= 2:
-            clean_blk_text = str(blk.text or "").strip()
-            import re
-            has_cjk = bool(re.search(r'[\u4e00-\u9fff]', clean_blk_text))
-            is_narrative = bool(re.search(r'(?:小时前|分钟前|天前|年后|个月前|清晨|深夜|傍晚|剧终|全剧终)', clean_blk_text))
-            blk_cx = (blk.x_pct + blk.max_x_pct) / 2.0
-            is_centered = abs(blk_cx - 0.5) <= 0.18
-            in_band = False
-            if 'global_med_top' in locals():
-                in_band = bool(global_med_top - 0.08 <= blk.y_pct and blk.max_y_pct <= global_med_bottom + 0.08 and is_centered)
-            if not in_band and is_centered and blk.y_pct >= 0.65:
-                in_band = True
-            classification = "unvoiced_scene_text" if (in_band or is_narrative) else "scene_packaging_or_logo"
-            gap_detections.append({
-                "time": round(t, 3),
-                "text": clean_blk_text,
-                "bbox": [round(blk.x_pct, 4), round(blk.y_pct, 4), round(blk.max_x_pct, 4), round(blk.max_y_pct, 4)],
-                "in_subtitle_band": in_band,
-                "classification": classification,
-                "prob": round(float(getattr(blk, "prob", 1.0) or 1.0), 3),
-            })
+    # 2. Filter candidate blocks in subtitle band
+    candidates = []
+    for b in all_blocks:
+        def value(name, default=None):
+            return b.get(name, default) if isinstance(b, dict) else getattr(b, name, default)
+        if (value('is_packaging') is True or value('is_static') is True
+                or value('is_subtitle') is False or value('in_subtitle_band') is False
+                or str(value('type', '')).lower() in ('packaging', 'logo', 'watermark', 'background')):
+            continue
+        prob = float(getattr(b, "prob", 1.0) if hasattr(b, "prob") else b.get("prob", 1.0))
+        text = str(getattr(b, "text", "") if hasattr(b, "text") else b.get("text", "")).strip()
+        y_pct = float(getattr(b, "y_pct", 0.0) if hasattr(b, "y_pct") else b.get("y_pct", 0.0))
+        sample_time = float(getattr(b, "sample_time", 0.0) if hasattr(b, "sample_time") else b.get("sample_time", 0.0))
 
-    if kwargs.get("metrics") is not None:
-        kwargs["metrics"].update({
-            "mode": "adaptive" if is_adaptive else "uniform",
-            "adaptive_sampling": "2phase" if is_adaptive else "uniform",
-            "expected_timestamps": len(target_timestamps),
-            "ocr_inferences": ocr_frame_count,
-            "visual_reused": frame_cache.hits if frame_cache else 0,
-            "tracking_samples": len(recognized_samples),
-            "band_support": band.support if 'band' in locals() else 0,
-            "band_mode": band.mode if 'band' in locals() else "none",
-            "main_y_pct": round(main_y_pct, 4),
-            "gap_detections": gap_detections,
-            "gap_detections_count": len(gap_detections),
+        # Check band alignment
+        if not (band.top - 0.035 <= y_pct <= band.bottom + 0.035):
+            continue
+        # Check text quality: at least 2 Chinese characters
+        ch_chars = [c for c in text if "\u3400" <= c <= "\u9fff"]
+        if prob < 0.60 or len(ch_chars) < 2:
+            continue
+        # Check if already covered by ASR
+        covered = any(st <= sample_time <= et for st, et in existing_intervals)
+        if covered:
+            continue
+        candidates.append(b)
+
+    if not candidates:
+        return []
+
+    # 3. Group consecutive frames of the same subtitle
+    def get_st(blk):
+        return float(getattr(blk, "sample_time", 0.0) if hasattr(blk, "sample_time") else blk.get("sample_time", 0.0))
+
+    candidates.sort(key=get_st)
+    clusters = []
+    current_cluster = [candidates[0]]
+    for b in candidates[1:]:
+        prev_time = get_st(current_cluster[-1])
+        from difflib import SequenceMatcher
+        def caption_text(item):
+            return str(item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', '')).strip()
+        same_caption = SequenceMatcher(None, caption_text(current_cluster[0]), caption_text(b), autojunk=False).ratio() >= 0.8
+        if get_st(b) - prev_time <= 1.5 and same_caption:
+            current_cluster.append(b)
+        else:
+            clusters.append(current_cluster)
+            current_cluster = [b]
+    if current_cluster:
+        clusters.append(current_cluster)
+
+    # 4. Convert clusters to recovered Subtitle segments
+    recovered = []
+    for cluster in clusters:
+        times = [get_st(b) for b in cluster]
+        if len(set(times)) < 2:
+            continue
+        start_t = max(0.0, min(times) - 0.3)
+        end_t = max(times) + 0.5
+        if duration and duration > 0:
+            end_t = min(end_t, duration)
+        if end_t - start_t < 0.8 and len(cluster) < 2:
+            continue
+
+        def get_prob_len(blk):
+            p = float(getattr(blk, "prob", 0.0) if hasattr(blk, "prob") else blk.get("prob", 0.0))
+            t = str(getattr(blk, "text", "") if hasattr(blk, "text") else blk.get("text", ""))
+            return (p, len(t))
+
+        best_block = max(cluster, key=get_prob_len)
+        text = str(getattr(best_block, "text", "") if hasattr(best_block, "text") else best_block.get("text", "")).strip()
+        if not text:
+            continue
+
+        recovered.append({
+            "start": start_t,
+            "end": end_t,
+            "text": text,
+            "best_block": best_block,
+            "samples": cluster,
         })
 
-    return [], width, height, main_y_pct
+    return recovered

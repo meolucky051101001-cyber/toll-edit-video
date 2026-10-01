@@ -1,6 +1,7 @@
 import os
 import sys
 import io
+from pathlib import Path
 
 # Fix Windows console UTF-8 encoding
 if hasattr(sys.stdout, "reconfigure"):
@@ -11,12 +12,41 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception: pass
 
 import json
-import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import requests
 import base64
 import re
-from deep_translator import GoogleTranslator, MyMemoryTranslator
+from deep_translator import GoogleTranslator
+try:
+    from deep_translator import MyMemoryTranslator
+except ImportError:
+    # Keep provider discovery deterministic. A late import could escape test or
+    # runtime dependency isolation and unexpectedly make a network request.
+    MyMemoryTranslator = None
+
+try:
+    from .transcription import save_srt
+except Exception:
+    save_srt = None
 import logging
+import time
+import hashlib
+import threading
+try:
+    from ..v1_stage_metrics import stage
+except Exception:
+    try:
+        from v1_stage_metrics import stage
+    except Exception:
+        def stage(*args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+
+try:
+    from .v1_gemini_dispatcher import call_gemini_api, DEFAULT_TRANSLATION_MODELS, DEFAULT_CONDENSATION_MODELS
+except ImportError:
+    from v1_gemini_dispatcher import call_gemini_api, DEFAULT_TRANSLATION_MODELS, DEFAULT_CONDENSATION_MODELS
 
 from .model_policy import current_model_policy, ordered_unique
 
@@ -26,6 +56,9 @@ except ImportError:
     from subtitle_text import clean_incomplete_segment_stops, normalize_subtitle_text
 
 logger = logging.getLogger(__name__)
+_gemini_health_lock = threading.Lock()
+_gemini_cooldown = {}
+_gemini_last_good = {}
 
 
 def _contains_cjk(text):
@@ -202,19 +235,9 @@ Yêu cầu TỐI QUAN TRỌNG:
 2. DỊCH CHUẨN XÁC, TỰ NHIÊN, HẤP DẪN: Ưu tiên dịch đúng nghĩa đen và bóng của câu chữ. Giữ văn phong tự nhiên, cuốn hút, có chút thiên hướng mạng xã hội để đăng video. Viết hoa chữ cái đầu câu hoặc sau dấu kết câu theo đúng ngữ pháp tiếng Việt.
 3. XỬ LÝ TỪ NGỮ VĂN HOA/THƠ CA: Các video Douyin thường dùng câu chữ hoa mỹ. Ví dụ '懒春秋' mang ý nghĩa 'thư thái, nhàn hạ' chứ KHÔNG PHẢI là 'lười biếng'. Hãy dịch thoát ý, sang trọng.
 4. TUYỆT ĐỐI KHÔNG lạm dụng từ tiếng Anh. Ưu tiên tiếng Việt thuần túy.
-5. KHỚP KHẨU HÌNH & THỜI LƯỢNG (LIP-SYNC): Văn bản dịch dùng để lồng tiếng (TTS), độ dài âm tiết của câu tiếng Việt PHẢI TƯƠNG ĐƯƠNG VỚI CÂU GỐC để khớp hoàn hảo khẩu hình miệng của nhân vật (không được dịch quá dài khiến AI phải đọc quá nhanh, và không được dịch quá cụt khiến AI đọc xong trước khi nhân vật khép miệng).
-6. ĐẶT DẤU NGẮT NGHỈ (DẤU PHẨY, DẤU CHẤM) CHUẨN XÁC THEO LỜI NÓI GỐC:
-   Văn bản dịch dùng để lồng tiếng (TTS) và hiển thị phụ đề. Giọng đọc TTS chỉ ngắt nghỉ, lấy hơi khi gặp dấu phẩy (,) hoặc dấu chấm kết câu (. ! ?).
-   - BẮT BUỘC viết hoa chữ cái đầu tiên của mỗi câu.
-   - BẮT BUỘC đặt dấu phẩy (,) phân tách các vế trong câu ghép, câu có trạng ngữ, liên từ (như 'khi...', 'nếu...', 'nhưng...', 'lúc thì...'):
-     * CÂU DÀI NỐI NHIỀU Ý BẮT BUỘC PHẢI CÓ DẤU PHẨY ĐỂ AI THỞ TỰ NHIÊN (ví dụ: 'Một trận rung chấn kinh hoàng, chia cắt nó khỏi đàn đang di cư, nó rơi xuống khe đá núi lửa.', 'Lúc thì cào lại đống đất bị dẫm loạn, hơn mười ngày sau, mảng bùn ẩm nứt ra một đường nhỏ.').
-   - Nếu câu nói ngắn, liền một hơi không có ngắt nghỉ thì KHÔNG tự ý chèn dấu ngắt nghỉ ("nếu không thì thôi").
-   - Kết thúc một câu hoàn chỉnh trọn vẹn ý nghĩa: BẮT BUỘC có dấu kết câu (. ! ?). Tuyệt đối không để câu hoàn chỉnh kết thúc cụt ngủn không dấu.
-   - TUYỆT ĐỐI KHÔNG dùng dấu ba chấm (... hoặc …).
-7. NGỮ CẢNH NỐI TIẾP & TÊN RIÊNG: Vì phụ đề thường bị ngắt giữa chừng, hãy đọc cả đoạn để dịch sao cho ý nối liền mạch trơn tru.
-    - BẮT BUỘC giữ nguyên cách viết tên riêng, đại từ và nhân xưng đã thống nhất trong ngữ cảnh các đoạn trước (không dịch lại theo nghĩa thông thường hay tự ý đổi tên).
-    - TUYỆT ĐỐI KHÔNG tự ý suy diễn hoặc thay thế các danh từ chung, động từ, danh xưng nghề nghiệp (ví dụ: sát thủ, thích khách, người thợ, bác sĩ...) thành tên riêng của nhân vật nếu không có chỉ định từ ngữ cảnh nguồn hoặc bảng từ điển.
-    - KHÔNG dùng dấu ba chấm (... hoặc …). Hệ thống sẽ chuyển phụ đề sang câu kế tiếp tại dấu kết câu; vẫn giữ đúng số phần tử JSON theo đầu vào.
+5. KHỚP KHẨU HÌNH & THỜI LƯỢNG (LIP-SYNC): Văn bản dịch dùng để lồng tiếng (TTS), độ dài âm tiết của câu tiếng Việt PHẢI TƯƠNG ĐƯƠNG VỚI CÂU GỐC để khớp hoàn hảo khẩu hình miệng của nhân vật.
+6. THUẬT NGỮ KIẾN TRÚC & ĐỜI SỐNG: '三合院' dịch là 'nhà tam hợp viện / nhà ba gian', '占地' dịch là 'diện tích đất', '大气' dịch là 'bề thế, sang trọng / đẳng cấp' (tuyệt đối không dịch thành 'dấu chân', 'khí quyển').
+7. LỌC HOẶC VIỆT HÓA CÂU KÊU GỌI (CTA): Các câu kêu gọi Douyin/TikTok như '回复888', '关注我', '点赞' hãy dịch khéo thành lời kêu gọi tự nhiên ngắn gọn (ví dụ: 'để lại bình luận bên dưới nhé' hoặc 'liên hệ ngay nhé'), không dịch máy số hiệu thô thiển.
 8. BẮT LỖI ĐỒNG ÂM ASR DO NHẬN DẠNG GIỌNG NÓI (WHISPER): Phụ đề tiếng Trung gốc được trích xuất bằng ASR nên thường xuất hiện các từ đồng âm/gần âm sai trong video review, handmade, đồ gia dụng. Hãy dùng ngữ cảnh sản phẩm để tự động sửa:
    - '天手章' hoặc '手张' -> hiểu đúng là '贴手帐' hoặc '手帐' (dán sổ tay / chơi sổ Bullet Journal / planner); tuyệt đối KHÔNG dịch thành 'chương tay' hay 'quả trứng'.
    - '怪蛋' -> hiểu đúng là '怪诞' (kỳ ảo, kỳ thú, độc lạ); KHÔNG dịch thành 'quả trứng quái'.
@@ -222,43 +245,12 @@ Yêu cầu TỐI QUAN TRỌNG:
    - '苏打' khi nói về keo dán/băng keo -> hiểu đúng là '胶带' / '调色板贴纸' (băng dính Washi Tape / sticker bảng màu); KHÔNG dịch thành nước sô-đa.
    - '叶芝麦' -> hiểu đúng là '叶之脉' (gân của chiếc lá); dịch thoát ý tự nhiên.
    - '可思线' -> hiểu đúng là '可撕线' (đường răng cưa dễ xé).
-   - '比耶' -> tạo dáng chữ V / giơ tay chữ V (tạo dáng khi chụp ảnh, tuyệt đối KHÔNG dịch thành bia hay 'Bière').
-   - '出片' -> chụp ảnh đẹp / lên hình đẹp / có ảnh ưng ý (tuyệt đối KHÔNG dịch thành 'ra khỏi bộ phim').
-   - '修图' / '修好' -> chỉnh sửa ảnh / sửa ảnh xong (tuyệt đối KHÔNG dịch thành 'khắc phục' hay 'sửa chữa đồ đạc').
-   - '去路人' -> xóa người qua đường / xóa người lạ khỏi ảnh (tính năng xóa người trong app ảnh, KHÔNG dịch thành 'đặt hàng người qua đường').
-   - '小腿' -> bắp chân / cẳng chân (KHÔNG dịch thành 'bê').
-   - '顶前面' / '往后面推' -> đẩy về phía trước / lùi về phía sau một chút.
+9. NGỮ CẢNH NỐI TIẾP: Vì phụ đề thường bị ngắt giữa chừng, hãy đọc cả đoạn để dịch sao cho ý nối liền mạch trơn tru.
 """
     if with_vision:
-        prompt += "9. TRỰC QUAN: Hãy kết hợp các bức ảnh đính kèm từ video để chọn đại từ nhân xưng và danh từ chính xác tuyệt đối với ngữ cảnh.\n"
-    prompt += "10. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.\n"
-    if duration_budgets and len(duration_budgets) == len(texts):
-        prompt += (
-            "10. NGÂN SÁCH THỜI LƯỢNG cho từng phần tử, cùng thứ tự với mảng gốc:\n"
-            + json.dumps(duration_budgets, ensure_ascii=False)
-            + "\nseconds là số giây đọc; max_characters là giới hạn ký tự mong muốn (kể cả khoảng trắng). "
-            "Hãy chọn câu dịch ngắn gọn, dễ đọc ngay từ lần đầu để vừa thời gian, "
-            "nhưng giữ đủ ý chính, tên riêng, số lượng và phủ định. Không cắt cụt từ, "
-            "không bỏ ý chỉ để đạt giới hạn; không trả về bảng ngân sách.\n"
-        )
-    if glossary:
-        prompt += (
-            "10. BẢNG THUẬT NGỮ CỐ ĐỊNH (GLOSSARY) - BẮT BUỘC tuân thủ chính xác các từ khóa sau:\n"
-            + json.dumps(dict(glossary), ensure_ascii=False)
-            + "\n"
-        )
-    if entity_map:
-        prompt += (
-            "11. BẢNG THỰC THỂ / TÊN RIÊNG (ENTITY MAP) - BẮT BUỘC dùng đúng tên thực thể/nhân vật/địa danh sau:\n"
-            + json.dumps(dict(entity_map), ensure_ascii=False)
-            + "\n"
-        )
-    if speaker_map:
-        prompt += (
-            "12. BẢNG NHÂN VẬT / NGƯỜI NÓI (SPEAKER MAP) - Dùng đúng vai vế và đại từ nhân xưng phù hợp cho từng nhân vật:\n"
-            + json.dumps(dict(speaker_map), ensure_ascii=False)
-            + "\n"
-        )
+        prompt += "10. TRỰC QUAN: Hãy kết hợp các bức ảnh đính kèm từ video để chọn đại từ nhân xưng và danh từ chính xác tuyệt đối với ngữ cảnh.\n"
+    prompt += "11. THUẬT NGỮ CÔNG NGHỆ & PHẦN CỨNG: Các tên card màn hình, CPU, GPU, đơn vị dung lượng (như RTX 4070, RX 6600 XT, Core i5, Ryzen 7, 2GB, 16GB, VRAM, FPS, CS2): BẮT BUỘC giữ nguyên tên chuẩn quốc tế, định dạng khoảng trắng rõ ràng giữa chữ và số (ví dụ: 'RTX 4070' thay vì 'RTX4070', '8 GB' hoặc '8GB'). Tuyệt đối KHÔNG dịch tên riêng hay mã hiệu kỹ thuật sang tiếng Việt.\n"
+    prompt += "12. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.\n"
     prompt += "Dữ liệu:\n"
     if prior_context:
         prompt += "Ngữ cảnh nối tiếp từ batch trước (để duy trì xưng hô và mạch truyện, KHÔNG dịch lại):\n"
@@ -327,11 +319,27 @@ def translate_with_gemini(
 ):
     global _gemini_transient_failures
     api_key = api_key or os.getenv("GEMINI_API_KEY", "")
-    if not api_key:
+    if not api_key or not texts:
         return None
-    if not is_gemini_available():
-        logger.debug("Gemini currently in cooldown health cache, skipping.")
-        return None
+    if len(texts) > 40:
+        chunk_size = 40
+        all_translated = []
+        for i in range(0, len(texts), chunk_size):
+            chunk_texts = texts[i:i + chunk_size]
+            chunk_kwargs = dict(kwargs)
+            chunk_kwargs["job_id"] = f"{kwargs.get('job_id', 'translate')}_p{i // chunk_size + 1}"
+            chunk_res = translate_with_gemini(
+                chunk_texts, target_lang=target_lang, api_key=api_key,
+                video_path=video_path, context_start_seconds=context_start_seconds,
+                context_end_seconds=context_end_seconds, prior_context=prior_context,
+                **chunk_kwargs
+            )
+            if not chunk_res or len(chunk_res) != len(chunk_texts):
+                logger.warning("Gemini chunk %d..%d không thành công, tạm dùng nguyên văn để fallback cục bộ", i, i + len(chunk_texts))
+                chunk_res = list(chunk_texts)
+            all_translated.extend(chunk_res)
+        return all_translated
+
     try:
         prompt = build_translation_prompt(
             texts,
@@ -353,79 +361,94 @@ def translate_with_gemini(
                     "data": b64
                 }
             })
-        if frames:
-            logger.info(f"Đã đính kèm {len(frames)} ảnh từ video vào Gemini Vision.")
-        
-        models_to_try = current_model_policy().gemini_candidates
+        preferred_gemini = os.getenv("GEMINI_MODEL", "gemini-3.7-flash").strip()
+        candidate_models = [
+            preferred_gemini,
+            "gemini-3.7-flash",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.6-flash",
+            "gemini-3.1-flash-lite",
+            "gemini-flash-lite-latest",
+            "gemini-3.8-flash",
+        ]
+        models_to_try = []
+        for m in candidate_models:
+            if m and m not in models_to_try:
+                models_to_try.append(m)
         response = None
-        for model in models_to_try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-            payload = {"contents": [{"parts": parts}]}
-            headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
-            try:
-                logger.info(f"Đang gọi Google Gemini ({model})...")
-                request_timeout = timeout if timeout is not None else int(os.getenv("GEMINI_TRANSLATION_TIMEOUT", "20"))
-                response = requests.post(url, json=payload, headers=headers, timeout=request_timeout)
-                response.encoding = "utf-8"
-                if response.status_code == 200:
-                    result = response.json()
-                    candidates = result.get("candidates", [])
-                    if candidates:
-                        parts_out = candidates[0].get("content", {}).get("parts", [])
-                        raw_text = "".join(p.get("text", "") for p in parts_out if not p.get("thought")).strip()
-                        translated = _parse_json_array(raw_text)
-                        if (isinstance(translated, list) and len(translated) == len(texts)
-                                and all(isinstance(item, str) and item.strip() for item in translated)):
-                            try:
-                                from mojibake_repair import repair_vietnamese_mojibake
-                                translated = [repair_vietnamese_mojibake(t) for t in translated]
-                            except Exception:
-                                pass
-                            _gemini_transient_failures = 0
-                            logger.info(f"Dịch thành công bằng Google Gemini ({model})!")
-                            return translated
-                        elif isinstance(translated, list) and len(texts) >= 4 and len(translated) != len(texts):
-                            logger.warning(
-                                "Gemini %s trả về %d câu cho %d câu gốc. Đang kích hoạt chia nhỏ thích ứng (divide-and-conquer)...",
-                                model, len(translated), len(texts)
-                            )
-                            split_res = _subdivide_and_retry(
-                                translate_with_gemini, texts, target_lang=target_lang, api_key=api_key,
-                                prior_context=prior_context, model=model, provider_label="Gemini",
-                                video_path=video_path, context_start_seconds=context_start_seconds,
-                                context_end_seconds=context_end_seconds, timeout=timeout, **kwargs
-                            )
-                            if split_res:
-                                return split_res
-                    logger.warning("Gemini %s không trả về định dạng JSON hợp lệ, chuyển sang model backup kế tiếp...", model)
-                    continue
-                elif response.status_code in (401, 403):
-                    logger.warning(f"Lỗi xác thực API Key cho {model} (HTTP {response.status_code}) - cooldown activated")
-                    mark_gemini_unhealthy(300.0)
-                    break
-                elif response.status_code == 429:
-                    logger.warning(f"Lỗi giới hạn tần suất {model} (HTTP 429 Rate Limit) -> Tự động backup sang model tiếp theo...")
-                    time.sleep(1.0)
-                    continue
-                elif response.status_code == 503:
-                    logger.warning(f"Lỗi máy chủ Google quá tải {model} (HTTP 503 High Demand) -> Tự động backup sang model tiếp theo...")
-                    time.sleep(1.0)
-                    continue
-                elif response.status_code == 404:
-                    logger.warning(f"Model {model} không khả dụng (HTTP 404) -> Tự động backup sang model tiếp theo...")
-                    continue
-                else:
-                    logger.warning(f"Lỗi gọi {model} (HTTP {response.status_code}) -> Tự động backup sang model tiếp theo...")
-                    continue
-            except Exception as req_e:
-                logger.warning("Gemini %s gặp lỗi (%s: %s) -> Tự động backup sang model tiếp theo...", model, type(req_e).__name__, req_e)
-                _gemini_transient_failure()
-                continue
+        account = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+        try:
+            from .v1_translation_cache import cache_key, read_cache, write_cache
+            cache_k = cache_key(parts, candidate_models, account)
+            cached = read_cache(cache_k, len(texts), target_lang)
+            if cached:
+                m_cache = cached.get("model", "gemini-cached")
+                logger.info("Sử dụng bản dịch từ cache (model=%s)", m_cache)
+                with _gemini_health_lock:
+                    _gemini_last_good[account] = cached["model"]
+                try:
+                    import job_tracker
+                    job_tracker.record_translation_model(m_cache)
+                except Exception:
+                    pass
+                return cached["texts"]
+        except ImportError:
+            cache_k = None
+            write_cache = None
 
-        logger.warning("Tất cả các model Gemini trong danh sách backup (%s) đều không thực hiện được batch này.", ", ".join(models_to_try))
-        time.sleep(2.0)
-        if _gemini_transient_failures == 0:
-            _gemini_transient_failure()
+        from .v1_gemini_dispatcher import call_gemini_api
+        payload = {"contents": [{"parts": parts}]}
+        res_data, used_model = call_gemini_api(
+            payload=payload,
+            purpose="translation",
+            models=candidate_models,
+            api_key=api_key,
+            job_id=str(kwargs.get("job_id", "translate"))
+        )
+        parts_out = res_data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        raw = "".join(p.get("text", "") for p in parts_out if not p.get("thought")).strip()
+        match = re.search(r'\[\s*(?:"|\{).*\]', raw, re.DOTALL)
+        try:
+            translated = json.loads(match.group(0) if match else raw)
+        except Exception:
+            m2 = re.search(r'\[.*\]', raw, re.DOTALL)
+            translated = json.loads(m2.group(0)) if m2 else None
+
+        if not isinstance(translated, list) or len(translated) == 0:
+            raise ValueError("Invalid translation array (not a list or empty)")
+
+        clean_translated = []
+        for idx, t in enumerate(translated):
+            if isinstance(t, str) and t.strip():
+                clean_translated.append(t.strip())
+            elif isinstance(t, dict) and "text" in t:
+                clean_translated.append(str(t["text"]).strip())
+            elif idx < len(texts):
+                clean_translated.append(texts[idx])
+            else:
+                clean_translated.append("")
+
+        if len(clean_translated) < len(texts):
+            for idx in range(len(clean_translated), len(texts)):
+                clean_translated.append(texts[idx])
+        elif len(clean_translated) > len(texts):
+            clean_translated = clean_translated[:len(texts)]
+
+        translated = clean_translated
+        try:
+            from mojibake_repair import repair_vietnamese_mojibake
+            translated = [repair_vietnamese_mojibake(t) for t in translated]
+        except Exception:
+            pass
+        if write_cache:
+            write_cache(cache_k, translated, used_model)
+        try:
+            import job_tracker
+            job_tracker.record_translation_model(used_model)
+        except Exception:
+            pass
+        return translated
     except Exception as e:
         logger.warning("Lỗi ngoài dự kiến trong translate_with_gemini: %s", type(e).__name__)
     return None
@@ -490,6 +513,11 @@ def translate_with_openai(
                     translated = _parse_json_array(text)
                     if isinstance(translated, list) and len(translated) == len(texts):
                         logger.info(f"Dịch thành công bằng OpenAI ChatGPT ({om})!")
+                        try:
+                            import job_tracker
+                            job_tracker.record_translation_model(f"OpenAI {om}")
+                        except Exception:
+                            pass
                         return translated
                     elif isinstance(translated, list) and len(texts) >= 4 and len(translated) != len(texts):
                         logger.warning("OpenAI %s trả về lệch số lượng câu (%d thay vì %d). Chia nhỏ batch...", om, len(translated), len(texts))
@@ -557,6 +585,11 @@ def translate_with_deepseek(
                     translated = _parse_json_array(text)
                     if isinstance(translated, list) and len(translated) == len(texts):
                         logger.info(f"Dịch thành công bằng DeepSeek ({dm})!")
+                        try:
+                            import job_tracker
+                            job_tracker.record_translation_model(f"DeepSeek {dm}")
+                        except Exception:
+                            pass
                         return translated
                     elif isinstance(translated, list) and len(texts) >= 4 and len(translated) != len(texts):
                         logger.warning("DeepSeek %s trả về lệch số lượng câu (%d thay vì %d). Chia nhỏ batch...", dm, len(translated), len(texts))
@@ -610,7 +643,6 @@ Dữ liệu:
         logger.debug(f"Lỗi dịch G4F: {e}")
     return None
 
-
 def ensure_speech_pauses_and_entity(
     source_texts,
     translated_texts,
@@ -618,174 +650,62 @@ def ensure_speech_pauses_and_entity(
     prior_context=None,
     glossary=None,
 ):
-    """Normalize translated texts with proper capitalization, pauses, and entity names.
-
-    Entity normalization is strictly context- and glossary-driven:
-    - User glossary takes precedence, followed by job entity_map.
-    - An entity replacement is applied ONLY when the source keyword actually appears in the corresponding source text.
-    - No ordinary terms (like assassin, sát thủ, thích khách) are converted to proper names without explicit source evidence.
-    - Terminal periods are added ONLY when the source text actually ends with sentence-terminal punctuation.
-    - Commas are inserted ONLY when source punctuation indicates a clause break, never based arbitrarily on word count.
-    """
+    """Normalize mapped names and punctuation using the source sentence boundaries."""
     if not translated_texts or len(source_texts) != len(translated_texts):
         return translated_texts
 
-    active_entity_map = {}
-    if entity_map and isinstance(entity_map, dict):
-        active_entity_map.update(entity_map)
-    if glossary and isinstance(glossary, dict):
-        active_entity_map.update(glossary)
+    entities = {}
+    if isinstance(entity_map, dict):
+        entities.update(entity_map)
+    if isinstance(glossary, dict):
+        entities.update(glossary)
 
-    intro_adverbial_pattern = re.compile(
-        r"^(?P<lead>(?:Trước khi|Sau khi|Đến khi|Khi|Nếu|Dù|Tuy|Mặc dù|Vì|Do|Nhờ|Để|Sau đó|Trước đó|Từ đó|Về sau|Sau này|Lúc này|Đến nay|Hiện tại|Cuối cùng|Đồng thời|Mặt khác|Thậm chí|Ngược lại)\s+[^,]{0,35}?)\s+(?=(?:nhất định|sẽ|thì|đều|lại|vẫn|phải|liền|đành|buộc phải|không thể|đã|nó|họ|anh|cô|chúng|ông|bà|tôi|bạn|là|đang|cũng)\b)",
-        re.IGNORECASE,
+    clause_markers = (
+        " chia cắt ", " nhưng ", " tuy nhiên ", " đồng thời ", " vì vậy ",
+        " sau đó ", " khi ", " và rồi ", " rồi lại ",
     )
-    clause_split_patterns = [
-        re.compile(r"(\s+)(nhưng\b|mà\b|cho nên\b|thế nhưng\b|tuy nhiên\b|thậm chí\b|ngược lại\b|do đó\b|vì vậy\b|vì thế\b|đồng thời\b|bởi vậy\b|mặt khác\b)", re.IGNORECASE),
-        re.compile(r"(\s+)(khi\s+bạn\b|khi\s+mùa\b|khi\s+nó\b|đến\s+khi\b|đến\s+chập\s+tối\b|ngày\s+hôm\s+sau\b|ngày\s+hôm\s+trước\b|hơn\s+mười\s+ngày\s+sau\b|mấy\s+ngày\s+sau\b|vài\s+ngày\s+sau\b|ngay\s+sau\s+đó\b|ít\s+lâu\s+sau\b)", re.IGNORECASE),
-        re.compile(r"(\s+)(chia\s+cắt\s+nó\b|nó\s+rơi\s+xuống\b|nó\s+rơi\s+vào\b|đúng\s+vào\s+lúc\b|lúc\s+này\b|đúng\s+lúc\s+này\b)", re.IGNORECASE),
-        re.compile(r"(\s+)(lúc\s+thì\b|khi\s+thì\b|nhưng\s+ngày\s+nào\b|cuối\s+cùng\s+vẫn\b|cuối\s+cùng\s+chậm\s+chạp\b|và\s+rồi\b|rồi\s+lại\b)", re.IGNORECASE),
-    ]
+    results = []
+    for source, translated in zip(source_texts, translated_texts):
+        source = str(source or "")
+        clean = normalize_subtitle_text(str(translated or "")).strip()
+        clean = re.sub(r"\s*(?:\.{2,}|…+)\s*", ", ", clean).strip(" ,")
 
-    out = []
-    for src, tr in zip(source_texts, translated_texts):
-        clean = normalize_subtitle_text(str(tr or "")).strip()
-        if not clean:
-            out.append(clean)
-            continue
+        for source_name, target_name in entities.items():
+            if source_name and target_name and str(source_name) in source:
+                pattern = re.compile(rf"\b{re.escape(str(target_name))}\b", re.IGNORECASE)
+                clean = pattern.sub(str(target_name), clean)
 
-        src_str = str(src or "")
-
-        # 1. Entity normalization with provenance: only apply if the source entity is in the source segment
-        if active_entity_map:
-            for src_key, target_val in active_entity_map.items():
-                if src_key and target_val and src_key in src_str:
-                    # Standardize casing of target term in translation if present
-                    tgt_pat = re.compile(rf"\b{re.escape(str(target_val))}\b", re.IGNORECASE)
-                    if tgt_pat.search(clean):
-                        clean = tgt_pat.sub(str(target_val), clean)
-                    # Also replace untranslated source term if left in translation
-                    src_pat = re.compile(rf"\b{re.escape(str(src_key))}\b", re.IGNORECASE)
-                    if src_pat.search(clean):
-                        clean = src_pat.sub(str(target_val), clean)
-
-        # 2. Capitalization of first character
-        first_char = clean[0]
-        if first_char.isalpha() and not first_char.isupper():
-            clean = first_char.upper() + clean[1:]
-
-        # 3. Ellipses normalization: no '...' in final subtitles
-        clean = re.sub(r"\s*[\.]{2,}\s*", ", ", clean)
-        clean = re.sub(r"\s*…\s*", ", ", clean)
-        clean = normalize_subtitle_text(clean)
-
-        # 4. Punctuation pauses: strictly driven by source pause, NEVER by word length alone
-        src_has_pause = any(p in src_str for p in ("，", ",", "；", ";", "、"))
-        if src_has_pause and "," not in clean:
-            m_intro = intro_adverbial_pattern.search(clean)
-            if m_intro and len(clean) - m_intro.end("lead") >= 6:
-                clean = m_intro.group("lead") + "," + clean[m_intro.end("lead"):]
-            else:
-                for pat in clause_split_patterns:
-                    m = pat.search(clean)
-                    if m and m.start() >= 10 and len(clean) - m.end() >= 6:
-                        clean = clean[:m.start()] + "," + clean[m.start():]
-                        break
-            clean = normalize_subtitle_text(clean)
-
-        # 5. Terminal punctuation: strictly driven by source sentence ending
-        src_trimmed = src_str.strip()
-        src_ends_terminal = any(src_trimmed.endswith(p) for p in ("。", "！", "？", ".", "!", "?"))
-        if src_ends_terminal:
-            if not clean.endswith((".", "!", "?")):
-                if src_trimmed.endswith(("？", "?")):
-                    clean += "?"
-                elif src_trimmed.endswith(("！", "!")):
-                    clean += "!"
-                else:
-                    clean += "."
-        else:
-            # Source does NOT end with terminal punctuation (an ongoing or split clause).
-            # Ensure no rogue terminal punctuation was placed in the middle of a continuous sentence.
-            while clean.endswith((".", "!", "?")):
-                # If source ends with a comma or pause, retain comma instead of period
-                if any(src_trimmed.endswith(p) for p in ("，", ",", "；", ";", "、")):
-                    clean = clean[:-1].rstrip() + ","
-                    break
-                else:
-                    clean = clean[:-1].rstrip()
-
-        # 6. Ensure first letter is capitalized
-        if clean and clean[0].isalpha() and not clean[0].isupper():
+        if clean and clean[0].isalpha():
             clean = clean[0].upper() + clean[1:]
 
-        out.append(clean)
-
-    return out
-
-
-def validate_translation_batch_quality(
-    source_texts,
-    translated_texts,
-    prior_context=None,
-    entity_map=None,
-    glossary=None,
-    strict=True,
-):
-    """Quality gate validating a batch of translated subtitles before TTS / persistence."""
-    reasons = []
-    if not isinstance(translated_texts, (list, tuple)):
-        return False, ["Bản dịch không phải là danh sách hợp lệ"]
-    if len(source_texts) != len(translated_texts):
-        return False, [f"Số câu dịch ({len(translated_texts)}) không khớp số câu gốc ({len(source_texts)})"]
-
-    active_terms = {}
-    if entity_map and isinstance(entity_map, dict):
-        active_terms.update(entity_map)
-    if glossary and isinstance(glossary, dict):
-        active_terms.update(glossary)
-
-    for idx, (src, trans) in enumerate(zip(source_texts, translated_texts), 1):
-        raw_tr = str(trans or "").strip()
-        if not raw_tr:
-            reasons.append(f"Câu {idx} rỗng nội dung")
-            continue
-
-        if "..." in raw_tr or "…" in raw_tr:
-            reasons.append(f"Câu {idx} chứa dấu ba chấm ('...'): '{raw_tr}'")
-
-        if _contains_cjk(raw_tr):
-            reasons.append(f"Câu {idx} còn sót chữ Hán (CJK): '{raw_tr}'")
-
-        clean_tr = normalize_subtitle_text(raw_tr).strip()
-        if not clean_tr:
-            reasons.append(f"Câu {idx} rỗng nội dung sau chuẩn hóa")
-            continue
-
-        first_char = clean_tr[0]
-        if first_char.isalpha() and not first_char.isupper():
-            reasons.append(f"Câu {idx} chưa viết hoa chữ cái đầu: '{clean_tr}'")
-
-        # Validate glossary compliance only when explicitly defined
-        src_str = str(src or "")
-        for src_key, target_val in active_terms.items():
-            if src_key and target_val and src_key in src_str:
-                if str(target_val).lower() not in clean_tr.lower():
-                    reasons.append(
-                        f"Câu {idx} chứa thuật ngữ '{src_key}' nhưng bản dịch thiếu '{target_val}': '{clean_tr}'"
-                    )
-
-        # Ensure no premature sentence termination in mid-clause segments
-        src_trimmed = src_str.strip()
-        src_ends_terminal = any(src_trimmed.endswith(p) for p in ("。", "！", "？", ".", "!", "?"))
-        if not src_ends_terminal and clean_tr.endswith((".", "!", "?")):
-            reasons.append(
-                f"Câu {idx} câu nguồn chưa kết thúc nhưng bản dịch lại có dấu kết câu ở giữa: '{clean_tr}'"
+        source_has_pause = any(mark in source for mark in ("，", ",", "；", ";", "、"))
+        if source_has_pause and "," not in clean:
+            lowered = clean.lower()
+            split_at = next(
+                (lowered.find(marker) for marker in clause_markers if lowered.find(marker) >= 10),
+                -1,
             )
+            if split_at < 0:
+                words = clean.split()
+                if len(words) >= 5:
+                    split_at = len(" ".join(words[: len(words) // 2]))
+            if split_at > 0 and len(clean) - split_at > 6:
+                clean = clean[:split_at].rstrip() + "," + clean[split_at:]
 
-    return len(reasons) == 0, reasons
+        source_ends_sentence = source.strip().endswith(("。", "！", "？", ".", "!", "?"))
+        if source_ends_sentence:
+            if clean and not clean.endswith((".", "!", "?")):
+                ending = source.strip()[-1]
+                clean += "?" if ending in ("？", "?") else "!" if ending in ("！", "!") else "."
+        else:
+            clean = clean.rstrip(".!? ")
+            if source.strip().endswith(("，", ",", "；", ";", "、")) and clean:
+                clean += ","
+        results.append(clean)
+    return results
 
 
+@stage("translation")
 def translate_subtitles(
     srt_segments,
     target_lang="vi",
@@ -870,43 +790,18 @@ def translate_subtitles(
                     provider_kind = "llm"
                 
     # Fallback Tier: G4F Free
-    if not translated_texts and enable_g4f and not strict:
-        logger.info("Trying ChatGPT (G4F) API...")
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(translate_with_g4f, texts, target_lang)
-            try:
-                translated_texts = future.result(timeout=40)
-                if translated_texts:
-                    used_provider = "g4f"
-                    provider_kind = "free_llm"
-            except concurrent.futures.TimeoutError:
-                logger.warning("G4F phản hồi quá lâu (quá 40s), hủy để tránh treo bot.")
-                translated_texts = None
-            except Exception as e:
-                logger.warning(f"Lỗi G4F: {e}")
-                translated_texts = None
-
-    if strict:
-        if not translated_texts or len(translated_texts) != len(texts):
-            raise RuntimeError("Strict translation mode requires a complete LLM translation without machine fallback")
-        if any(_contains_cjk(str(t or "")) for t in translated_texts):
-            raise RuntimeError("Strict translation mode requires a complete LLM translation without CJK text")
-
-    if isinstance(translated_texts, list):
-        translated_texts = [
-            normalize_subtitle_text(item) if isinstance(item, str) else item
-            for item in translated_texts
-        ]
-        translated_texts = clean_incomplete_segment_stops(translated_texts)
-        translated_texts = ensure_speech_pauses_and_entity(
-            texts,
-            translated_texts,
-            entity_map=entity_map or kwargs.get("entity_map"),
-            prior_context=prior_context,
-            glossary=glossary or kwargs.get("glossary"),
-        )
-
+    if not translated_texts and enable_g4f:
+        logger.info("Trying ChatGPT (G4F) API via bounded fallback...")
+        try:
+            from ai.v1_bounded_fallback import run_fallback
+            translated_texts = run_fallback(translate_with_g4f, texts, target_lang, timeout=40)
+        except TimeoutError:
+            logger.warning("G4F phản hồi quá lâu (quá 40s), hủy để tránh treo bot.")
+            translated_texts = None
+        except Exception as e:
+            logger.warning(f"Lỗi G4F: {e}")
+            translated_texts = None
+        
     translated_texts_valid = bool(
         translated_texts
         and len(translated_texts) == len(texts)
@@ -986,14 +881,19 @@ def translate_subtitles(
             for position, (source, translated) in enumerate(
                 zip(texts, translated_texts), 1
             )
-            if _contains_cjk(source)
-            and normalize_subtitle_text(source) == str(translated).strip()
+            if target_lang.lower().startswith("vi") and _contains_cjk(translated)
         ]
         if unchanged_cjk:
             logger.warning(
-                "AI translation left CJK source unchanged at positions: %s",
-                ", ".join(str(position) for position in unchanged_cjk),
+                "AI translation left CJK source unchanged at %d positions; applying partial translation before fallback",
+                len(unchanged_cjk),
             )
+            try:
+                from mojibake_repair import repair_vietnamese_mojibake
+                translated_texts = [repair_vietnamese_mojibake(text) for text in translated_texts]
+            except Exception:
+                pass
+
             # Dịch bù chọn lọc cho từng câu bị sót chữ Hán bằng fallback để không làm mất các câu đã dịch tốt
             for position in unchanged_cjk:
                 idx = position - 1
@@ -1019,9 +919,11 @@ def translate_subtitles(
                 translated_texts_valid = False
 
     if translated_texts_valid:
-        if isinstance(quality_metadata, dict):
-            quality_metadata["provider"] = used_provider
-            quality_metadata["provider_kind"] = provider_kind
+        try:
+            from mojibake_repair import repair_vietnamese_mojibake
+            translated_texts = [repair_vietnamese_mojibake(t) for t in translated_texts]
+        except Exception:
+            pass
         idx = 0
         for segment in srt_segments:
             if not segment.content:
@@ -1030,6 +932,13 @@ def translate_subtitles(
             segment.content = translated_texts[idx]
             idx += 1
         logger.info("LLM translation successful.")
+        try:
+            import job_tracker
+            t_models = job_tracker.get_status().get("translation_models", [])
+            m_name = ", ".join(t_models) if t_models else "AI"
+            logger.info(f"Hoàn thành dịch {len(texts)} đoạn phụ đề bằng model: {m_name}")
+        except Exception:
+            pass
         return srt_segments
 
     if strict:
@@ -1037,29 +946,202 @@ def translate_subtitles(
 
     logger.info("Falling back to Google Translate...")
     failed_segments = []
+    error_keywords = [
+        "error 500", "server error", "invalid source language",
+        "langpair", "almost all languages supported", "mymemory",
+        "query length limit", "daily limit reached", "too many requests"
+    ]
     for segment in srt_segments:
         if not segment.content:
             continue
-            
+
+        segment.orig_content = segment.content
+        # Không chứa ký tự CJK tiếng Trung (như số, tiếng Anh, tên card 2GB, RTX3070, CS2) -> Giữ nguyên gốc!
+        if not _contains_cjk(segment.content):
+            continue
+
         try:
-            segment.orig_content = segment.content
-            translated_text = _translate_with_resilient_fallback(
-                segment.content, target_lang
-            )
-                
+            src_lang = 'zh-CN'
+            try:
+                translator = GoogleTranslator(source=src_lang, target=target_lang)
+                translated_text = translator.translate(segment.content)
+            except Exception:
+                translated_text = None
+
+            if (
+                not translated_text
+                or any(k in str(translated_text).lower() for k in error_keywords)
+                or str(translated_text).startswith("Error")
+                or (target_lang.lower().startswith("vi") and _contains_cjk(translated_text))
+            ):
+                try:
+                    if MyMemoryTranslator is not None:
+                        mm_target = "vi-VN" if target_lang.lower().startswith("vi") else target_lang
+                        translated_text = MyMemoryTranslator(source="zh-CN", target=mm_target).translate(segment.content)
+                except Exception:
+                    pass
+
+            if not isinstance(translated_text, str) or not translated_text.strip():
+                raise RuntimeError("Google Translate returned an empty result")
+            if any(k in translated_text.lower() for k in error_keywords) or translated_text.startswith("Error"):
+                raise RuntimeError("Google Translate returned an error payload: {}".format(translated_text[:120]))
+            if target_lang.lower().startswith("vi") and _contains_cjk(translated_text):
+                raise RuntimeError("Chinese source text remained untranslated")
+
         except Exception as e:
-            logger.warning(f"Lỗi dịch thuật: {e}")
+            logger.warning(f"Lỗi dịch thuật cho đoạn '{segment.content}': {e}")
             failed_segments.append(int(getattr(segment, "index", 0)))
-            translated_text = segment.content
-            
+            translated_text = segment.orig_content
+
         segment.content = translated_text
         
-    if strict and failed_segments:
+    if failed_segments and strict:
         raise RuntimeError(
             "Translation failed for segment indexes: {}".format(
                 ", ".join(str(index) for index in failed_segments)
             )
         )
 
-    clean_incomplete_segment_stops(srt_segments)
+    try:
+        import job_tracker
+        t_models = job_tracker.get_status().get("translation_models", [])
+        if not t_models:
+            job_tracker.record_translation_model("Google Translate (fallback)")
+            logger.info("Hoàn tất dịch phụ đề bằng model: Google Translate (fallback)")
+    except Exception:
+        pass
+
     return srt_segments
+
+
+def validate_condensed_text(orig_text: str, shortened: str, target_words: int) -> bool:
+    """
+    Kiểm tra chặt chẽ câu đã rút gọn theo Codex Plan:
+    1. Không rỗng, không chứa markdown, code fence, hoặc lời giải thích.
+    2. Không chứa ký tự CJK tiếng Trung.
+    3. Không dài hơn câu gốc.
+    4. Bảo toàn các số quan trọng và từ phủ định (không, chưa, chẳng, đừng).
+    """
+    if not isinstance(shortened, str) or not shortened.strip():
+        return False
+    shortened = shortened.strip()
+    if "```" in shortened or "{" in shortened or "}" in shortened or "\n" in shortened:
+        return False
+    if any("\u4e00" <= c <= "\u9fff" for c in shortened):
+        return False
+
+    orig_words = orig_text.strip().split()
+    short_words = shortened.split()
+    if len(short_words) > len(orig_words):
+        return False
+
+    orig_nums = set(re.findall(r'\b\d+\b', orig_text))
+    if orig_nums:
+        short_nums = set(re.findall(r'\b\d+\b', shortened))
+        if not orig_nums.issubset(short_nums):
+            return False
+
+    negations = ["không", "chưa", "chẳng", "đừng"]
+    for neg in negations:
+        if f" {neg} " in f" {orig_text.lower()} " and f" {neg} " not in f" {shortened.lower()} ":
+            return False
+
+    return True
+
+
+def condense_vietnamese_subtitles_batch(
+    items: list,
+    api_key: str = "",
+    deadline: Optional[float] = None,
+    stop_checker: Optional[Callable[[], bool]] = None,
+    job_id: str = "condense"
+) -> dict:
+    """
+    Rút gọn các câu thoại tiếng Việt quá dài theo ngữ nghĩa bằng Gemini theo Kế hoạch Codex:
+    1. Kiểm tra cache trước.
+    2. Gom tất cả câu chưa cache vào đúng MỘT lượt gọi qua v1_gemini_dispatcher.
+    3. Ưu tiên model nhẹ, nhanh: gemini-3.5-flash-lite -> gemini-flash-lite-latest -> gemini-3.5-flash -> gemini-3.7-flash.
+    4. Kiểm tra cấu trúc và ngữ nghĩa chặt chẽ (giữ số, phủ định, không rỗng, không CJK).
+    5. Chỉ chấp nhận các câu hợp lệ, ghi cache.
+    """
+    if not items:
+        return {}
+
+    from .v1_translation_cache import read_condense_cache, write_condense_cache
+    from mojibake_repair import repair_vietnamese_mojibake
+
+    result = {}
+    uncached_items = []
+
+    for it in items:
+        idx = it["index"]
+        text = it["text"].strip()
+        sec = float(it.get("target_seconds", 2.0))
+        tw = int(it.get("target_words") or max(2, int((sec - 0.05) / 0.28)))
+        cached_val = read_condense_cache(text, sec, tw)
+        if cached_val:
+            result[idx] = cached_val
+        else:
+            uncached_items.append({
+                "index": idx,
+                "text": text,
+                "target_seconds": sec,
+                "target_words": tw,
+            })
+
+    if not uncached_items:
+        logger.info(f"[CONDENSE] Tất cả {len(items)} câu đều có sẵn trong cache (100% Cache HIT).")
+        return result
+
+    prompt = (
+        "Bạn là chuyên gia biên tập phụ đề video ngắn chuyên nghiệp.\n"
+        "Các câu thoại tiếng Việt sau đây đang đọc quá dài so với thời lượng video gốc.\n"
+        "Nhiệm vụ: Viết lại/rút gọn từng câu sao cho thật ngắn gọn, súc tích (cô đọng nội dung, bỏ từ đệm thừa, "
+        "giữ trọn vẹn ý chính và tự nhiên, khống chế số lượng từ tối đa theo yêu cầu để người đọc và AI đọc trọn vẹn mà không bị nhanh).\n"
+        "Yêu cầu định dạng: Trả về duy nhất một đối tượng JSON ánh xạ ID dạng chuỗi sang câu đã rút gọn, ví dụ:\n"
+        '{"1": "câu 1 ngắn gọn", "2": "câu 2 ngắn gọn"}\n'
+        "Tuyệt đối không thêm lời dẫn giải hay bất kỳ ký tự nào ngoài JSON.\n\n"
+        "Danh sách câu cần rút gọn:\n"
+    )
+    for it in uncached_items:
+        prompt += f"- ID {it['index']} (mục tiêu: ~{it['target_seconds']:.2f}s, tối đa {it['target_words']} từ): \"{it['text']}\"\n"
+
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
+    try:
+        data, used_model = call_gemini_api(
+            payload=payload,
+            purpose="condensation",
+            models=DEFAULT_CONDENSATION_MODELS,
+            overall_deadline=deadline,
+            stop_checker=stop_checker,
+            job_id=job_id,
+            api_key=api_key,
+            timeout_per_request=20.0
+        )
+        parts_out = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        raw = "".join(p.get("text", "") for p in parts_out if not p.get("thought")).strip()
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            parsed = json.loads(match.group(0))
+            valid_count = 0
+            for it in uncached_items:
+                idx = it["index"]
+                shortened = parsed.get(str(idx)) or parsed.get(idx)
+                if shortened and isinstance(shortened, str):
+                    shortened = repair_vietnamese_mojibake(shortened.strip())
+                    if validate_condensed_text(it["text"], shortened, it["target_words"]):
+                        result[idx] = shortened
+                        write_condense_cache(it["text"], it["target_seconds"], it["target_words"], shortened, used_model)
+                        valid_count += 1
+                    else:
+                        logger.warning(f"[CONDENSE] Câu #{idx} không vượt qua kiểm định (giữ nguyên): '{shortened}'")
+            logger.info(f"[CONDENSE] Gemini {used_model} rút gọn thành công {valid_count}/{len(uncached_items)} câu chưa cache!")
+    except Exception as e:
+        logger.warning(f"[CONDENSE] Rút gọn câu qua Gemini không hoàn tất: {e}")
+
+    return result
+
+
+
+
