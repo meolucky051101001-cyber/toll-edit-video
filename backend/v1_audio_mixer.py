@@ -24,6 +24,19 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def _check_cancel():
+    from batch_control import stop_check
+    predicate = stop_check.get()
+    if predicate and predicate():
+        raise RuntimeError("Audio mixing stop requested")
+
+
+def _read_audio(path):
+    _check_cancel()
+    with open(path, "rb") as stream:
+        return AudioSegment.from_file(stream)
+
+
 @dataclass(frozen=True)
 class AdaptiveDuckingSettings:
     """Settings for adaptive auto-ducking."""
@@ -91,7 +104,7 @@ def merge_ducking_intervals(
         duration_sec = float(dub.get("actual_audio_duration", 0.0) or dub.get("duration", 0.0))
         if duration_sec <= 0 and "path" in dub and os.path.exists(dub["path"]):
             try:
-                seg = AudioSegment.from_file(dub["path"])
+                seg = _read_audio(dub["path"])
                 duration_sec = len(seg) / 1000.0
             except Exception:
                 duration_sec = 1.0
@@ -210,9 +223,11 @@ def mix_adaptive_audio(
     base_voice_gain_db: float | None = None,
     settings: AdaptiveDuckingSettings | None = None,
     ducking_mode: str | None = None,
+    cluster_dispatch: bool = True,
 ) -> str:
     """
     Mix background music and dubbing audio with adaptive auto-ducking and peak limiting.
+    Tự động phân cụm (Hierarchical Mix) cho video dài (>100 câu thoại).
     """
     cfg_duck_mode = ducking_mode
     if not cfg_duck_mode:
@@ -251,6 +266,24 @@ def mix_adaptive_audio(
         if not path or not os.path.isfile(path):
             raise FileNotFoundError("Missing dubbing audio: {}".format(path))
 
+    # Tự động chuyển giao sang Hierarchical Audio Mixer nếu số lượng câu thoại lớn (>100)
+    if cluster_dispatch and len(sorted_dubs) > 100:
+        try:
+            try:
+                from v1_hierarchical_mixer import mix_hierarchical_audio
+            except ImportError:
+                from .v1_hierarchical_mixer import mix_hierarchical_audio
+            return mix_hierarchical_audio(
+                bgm_path=bgm_path,
+                dubbing_audio_files=sorted_dubs,
+                output_path=output_path,
+                base_bgm_gain_db=settings.base_bgm_gain_db,
+                base_voice_gain_db=settings.base_voice_gain_db,
+                ducking_mode=cfg_duck_mode,
+            )
+        except Exception as hier_err:
+            logger.warning("Hierarchical mixer fallback to direct: %s", hier_err)
+
     # Anti-Overlap Hard Guard (Codex Plan - Điểm 4):
     # Duyệt danh sách câu thoại (đã sort theo start time).
     # Nếu start_i + duration_i > start_{i+1} - 0.03s, cắt ngắn audio câu trước (fadeout 30ms)
@@ -259,7 +292,7 @@ def mix_adaptive_audio(
     for i, dub in enumerate(sorted_dubs):
         path = dub["path"]
         start_sec = float(dub.get("start", 0.0))
-        seg_audio = AudioSegment.from_file(path)
+        seg_audio = _read_audio(path)
         cur_dur = len(seg_audio) / 1000.0
 
         if i + 1 < len(sorted_dubs):
@@ -283,7 +316,7 @@ def mix_adaptive_audio(
             "audio": seg_audio,
         })
 
-    bgm = AudioSegment.from_file(bgm_path)
+    bgm = _read_audio(bgm_path)
     # 1. Apply adaptive ducking on BGM with accurate clamped durations
     ducked_bgm = apply_adaptive_ducking(bgm, processed_dubs, settings)
 

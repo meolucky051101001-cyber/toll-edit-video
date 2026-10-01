@@ -23,6 +23,11 @@ except ImportError:
     # Keep provider discovery deterministic. A late import could escape test or
     # runtime dependency isolation and unexpectedly make a network request.
     MyMemoryTranslator = None
+
+try:
+    from .transcription import save_srt
+except Exception:
+    save_srt = None
 import logging
 import time
 import hashlib
@@ -330,8 +335,8 @@ def translate_with_gemini(
                 **chunk_kwargs
             )
             if not chunk_res or len(chunk_res) != len(chunk_texts):
-                logger.warning("Gemini chunk %d..%d thất bại, hủy toàn bộ batch để fallback", i, i + len(chunk_texts))
-                return None
+                logger.warning("Gemini chunk %d..%d không thành công, tạm dùng nguyên văn để fallback cục bộ", i, i + len(chunk_texts))
+                chunk_res = list(chunk_texts)
             all_translated.extend(chunk_res)
         return all_translated
 
@@ -403,11 +408,34 @@ def translate_with_gemini(
         )
         parts_out = res_data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
         raw = "".join(p.get("text", "") for p in parts_out if not p.get("thought")).strip()
-        match = re.search(r'\[.*\]', raw, re.DOTALL)
-        translated = json.loads(match.group(0) if match else raw)
-        if not isinstance(translated, list) or len(translated) != len(texts) or not all(
-                isinstance(t, str) and t.strip() for t in translated):
-            raise ValueError("Invalid translation array")
+        match = re.search(r'\[\s*(?:"|\{).*\]', raw, re.DOTALL)
+        try:
+            translated = json.loads(match.group(0) if match else raw)
+        except Exception:
+            m2 = re.search(r'\[.*\]', raw, re.DOTALL)
+            translated = json.loads(m2.group(0)) if m2 else None
+
+        if not isinstance(translated, list) or len(translated) == 0:
+            raise ValueError("Invalid translation array (not a list or empty)")
+
+        clean_translated = []
+        for idx, t in enumerate(translated):
+            if isinstance(t, str) and t.strip():
+                clean_translated.append(t.strip())
+            elif isinstance(t, dict) and "text" in t:
+                clean_translated.append(str(t["text"]).strip())
+            elif idx < len(texts):
+                clean_translated.append(texts[idx])
+            else:
+                clean_translated.append("")
+
+        if len(clean_translated) < len(texts):
+            for idx in range(len(clean_translated), len(texts)):
+                clean_translated.append(texts[idx])
+        elif len(clean_translated) > len(texts):
+            clean_translated = clean_translated[:len(texts)]
+
+        translated = clean_translated
         try:
             from mojibake_repair import repair_vietnamese_mojibake
             translated = [repair_vietnamese_mojibake(t) for t in translated]
@@ -615,6 +643,68 @@ Dữ liệu:
         logger.debug(f"Lỗi dịch G4F: {e}")
     return None
 
+def ensure_speech_pauses_and_entity(
+    source_texts,
+    translated_texts,
+    entity_map=None,
+    prior_context=None,
+    glossary=None,
+):
+    """Normalize mapped names and punctuation using the source sentence boundaries."""
+    if not translated_texts or len(source_texts) != len(translated_texts):
+        return translated_texts
+
+    entities = {}
+    if isinstance(entity_map, dict):
+        entities.update(entity_map)
+    if isinstance(glossary, dict):
+        entities.update(glossary)
+
+    clause_markers = (
+        " chia cắt ", " nhưng ", " tuy nhiên ", " đồng thời ", " vì vậy ",
+        " sau đó ", " khi ", " và rồi ", " rồi lại ",
+    )
+    results = []
+    for source, translated in zip(source_texts, translated_texts):
+        source = str(source or "")
+        clean = normalize_subtitle_text(str(translated or "")).strip()
+        clean = re.sub(r"\s*(?:\.{2,}|…+)\s*", ", ", clean).strip(" ,")
+
+        for source_name, target_name in entities.items():
+            if source_name and target_name and str(source_name) in source:
+                pattern = re.compile(rf"\b{re.escape(str(target_name))}\b", re.IGNORECASE)
+                clean = pattern.sub(str(target_name), clean)
+
+        if clean and clean[0].isalpha():
+            clean = clean[0].upper() + clean[1:]
+
+        source_has_pause = any(mark in source for mark in ("，", ",", "；", ";", "、"))
+        if source_has_pause and "," not in clean:
+            lowered = clean.lower()
+            split_at = next(
+                (lowered.find(marker) for marker in clause_markers if lowered.find(marker) >= 10),
+                -1,
+            )
+            if split_at < 0:
+                words = clean.split()
+                if len(words) >= 5:
+                    split_at = len(" ".join(words[: len(words) // 2]))
+            if split_at > 0 and len(clean) - split_at > 6:
+                clean = clean[:split_at].rstrip() + "," + clean[split_at:]
+
+        source_ends_sentence = source.strip().endswith(("。", "！", "？", ".", "!", "?"))
+        if source_ends_sentence:
+            if clean and not clean.endswith((".", "!", "?")):
+                ending = source.strip()[-1]
+                clean += "?" if ending in ("？", "?") else "!" if ending in ("！", "!") else "."
+        else:
+            clean = clean.rstrip(".!? ")
+            if source.strip().endswith(("，", ",", "；", ";", "、")) and clean:
+                clean += ","
+        results.append(clean)
+    return results
+
+
 @stage("translation")
 def translate_subtitles(
     srt_segments,
@@ -795,9 +885,15 @@ def translate_subtitles(
         ]
         if unchanged_cjk:
             logger.warning(
-                "AI translation left CJK source unchanged at positions: %s",
-                ", ".join(str(position) for position in unchanged_cjk),
+                "AI translation left CJK source unchanged at %d positions; applying partial translation before fallback",
+                len(unchanged_cjk),
             )
+            try:
+                from mojibake_repair import repair_vietnamese_mojibake
+                translated_texts = [repair_vietnamese_mojibake(text) for text in translated_texts]
+            except Exception:
+                pass
+
             # Dịch bù chọn lọc cho từng câu bị sót chữ Hán bằng fallback để không làm mất các câu đã dịch tốt
             for position in unchanged_cjk:
                 idx = position - 1

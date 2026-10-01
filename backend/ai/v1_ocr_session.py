@@ -27,6 +27,10 @@ def close_session():
 
 def run_request(args, *, timeout, env, creationflags=0, **kwargs):
     global _process, _key
+    from batch_control import stop_check
+    predicate = stop_check.get()
+    if predicate and predicate():
+        raise RuntimeError("OCR stop requested")
     request = Path(args[args.index("--request") + 1])
     response = Path(args[args.index("--response") + 1])
     key = (args[0], args[1], env.get("HF_HOME"), env.get("PADDLE_PDX_CACHE_HOME"))
@@ -43,6 +47,8 @@ def run_request(args, *, timeout, env, creationflags=0, **kwargs):
             _process.stdin.flush()
             deadline = time.monotonic() + timeout
             while not response.is_file():
+                if predicate and predicate():
+                    raise RuntimeError("OCR stop requested")
                 if _process.poll() is not None:
                     raise RuntimeError("V1 OCR worker exited before returning results")
                 if time.monotonic() >= deadline:

@@ -11,6 +11,7 @@ if isinstance(sys.stderr, io.TextIOWrapper):
 
 import re
 import srt
+import logging
 from datetime import timedelta
 import threading
 
@@ -21,7 +22,6 @@ from .model_runtime import ModelRuntimeError, run_model_stage, runtime_module_av
 logger = logging.getLogger(__name__)
 
 from .v1_model_policy import current_v1_model_policy
-import logging
 import time
 
 
@@ -124,7 +124,53 @@ def _merge_short_fragments(segments):
         merged.append(current)
     return merged
 
-def _transcribe_once(audio_path, model_name, num_workers, download_root=None, original_audio_path=None):
+def _transcribe_raw_segments(model, target_audio, initial_prompt=None):
+    options = {"word_timestamps": True}
+    if initial_prompt:
+        options["initial_prompt"] = initial_prompt
+    segments, _info = model.transcribe(
+        target_audio,
+        beam_size=5,
+        vad_filter=True,
+        vad_parameters=dict(min_silence_duration_ms=600, threshold=0.4),
+        condition_on_previous_text=False,
+        temperature=[0.0, 0.2, 0.4],
+        **options,
+    )
+    transcribed_segments = []
+    for segment in segments:
+        text = segment.text.strip()
+        if not text:
+            continue
+        words = getattr(segment, "words", None)
+        duration = float(segment.end) - float(segment.start)
+        if words and duration > 6.0:
+            sub_chunks = []
+            cur = []
+            for w in words:
+                cur.append(w)
+                cur_dur = float(cur[-1].end) - float(cur[0].start)
+                w_text = str(getattr(w, "word", "") or "")
+                is_end = any(p in w_text for p in "。！？!?")
+                is_comma = any(p in w_text for p in "，,；;") and cur_dur >= 3.0
+                if is_end or is_comma:
+                    txt = "".join(str(getattr(x, "word", "") or "") for x in cur).strip()
+                    if txt:
+                        sub_chunks.append({"start": float(cur[0].start), "end": float(cur[-1].end), "text": txt})
+                    cur = []
+            if cur:
+                txt = "".join(str(getattr(x, "word", "") or "") for x in cur).strip()
+                if txt:
+                    sub_chunks.append({"start": float(cur[0].start), "end": float(cur[-1].end), "text": txt})
+            if len(sub_chunks) > 1:
+                transcribed_segments.extend(sub_chunks)
+                continue
+        start, end = _word_aligned_bounds(segment)
+        transcribed_segments.append({"start": start, "end": end, "text": text})
+    return transcribed_segments
+
+
+def _transcribe_once(audio_path, model_name, num_workers, download_root=None, original_audio_path=None, chunking=None, chunk_size_s=240.0, overlap_s=0.75):
     """Run one ASR model and always release its CPU/GPU memory."""
 
     import torch, gc
@@ -148,64 +194,49 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None, or
             download_root=download_root,
         )
     else:
-        print(
-            "⚡ Loading Faster-Whisper {} on CPU ({} threads)...".format(
-                model_name, num_threads
-            )
-        )
-        model = WhisperModel(
-            model_name,
-            device="cpu",
-            compute_type="int8",
-            cpu_threads=num_threads,
-            download_root=download_root,
-        )
+        raise RuntimeError("V1 ASR requires CUDA; CPU fallback is disabled.")
 
     logging.getLogger(__name__).info("V1 ASR model loaded seconds=%.2f", time.monotonic()-load_started)
     try:
-        segments, _info = model.transcribe(
-            audio_path,
-            beam_size=5,
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=600, threshold=0.4),
-            condition_on_previous_text=False,
-            temperature=[0.0, 0.2, 0.4],
-            # Coarse segment timestamps can span the entire silence before the
-            # next speaker. Word timestamps provide the actual audible window.
-            word_timestamps=True,
-            initial_prompt=initial_prompt,
-        )
-        
-        transcribed_segments = []
-        for segment in segments:
-            text = segment.text.strip()
-            if not text:
-                continue
-            words = getattr(segment, "words", None)
-            duration = float(segment.end) - float(segment.start)
-            if words and duration > 6.0:
-                sub_chunks = []
-                cur = []
-                for w in words:
-                    cur.append(w)
-                    cur_dur = float(cur[-1].end) - float(cur[0].start)
-                    w_text = str(getattr(w, "word", "") or "")
-                    is_end = any(p in w_text for p in "。！？!?")
-                    is_comma = any(p in w_text for p in "，,；;") and cur_dur >= 3.0
-                    if is_end or is_comma:
-                        txt = "".join(str(getattr(x, "word", "") or "") for x in cur).strip()
-                        if txt:
-                            sub_chunks.append({"start": float(cur[0].start), "end": float(cur[-1].end), "text": txt})
-                        cur = []
-                if cur:
-                    txt = "".join(str(getattr(x, "word", "") or "") for x in cur).strip()
-                    if txt:
-                        sub_chunks.append({"start": float(cur[0].start), "end": float(cur[-1].end), "text": txt})
-                if len(sub_chunks) > 1:
-                    transcribed_segments.extend(sub_chunks)
-                    continue
-            start, end = _word_aligned_bounds(segment)
-            transcribed_segments.append({"start": start, "end": end, "text": text})
+        try:
+            from .v1_asr_chunking import (
+                get_audio_duration_seconds,
+                chunk_audio_intervals,
+                deduplicate_boundary_segments,
+                slice_audio_chunk,
+            )
+        except ImportError:
+            from ai.v1_asr_chunking import (
+                get_audio_duration_seconds,
+                chunk_audio_intervals,
+                deduplicate_boundary_segments,
+                slice_audio_chunk,
+            )
+
+        total_dur = get_audio_duration_seconds(audio_path)
+        enable_chunking = chunking if chunking is not None else os.getenv("V1_ASR_CHUNKING", "true").lower() in ("true", "1", "yes")
+
+        short_thresh = float(os.getenv("V1_SHORT_MAX_SECONDS", "420.0"))
+        chunk_threshold = chunk_size_s if chunking is not None else short_thresh
+        if enable_chunking and total_dur > chunk_threshold:
+            import tempfile
+            logging.getLogger(__name__).info(
+                f"[ASR_CHUNKING] Audio dài {total_dur:.1f}s (>{short_thresh:.0f}s ~ 7 phút) -> Áp dụng Safe Chunking (240s, 0.75s overlap)..."
+            )
+            intervals = chunk_audio_intervals(total_dur, chunk_size=chunk_size_s, overlap=overlap_s)
+            transcribed_segments = []
+            with tempfile.TemporaryDirectory() as tmpdir:
+                for idx, (c_start, c_end) in enumerate(intervals):
+                    chunk_wav = os.path.join(tmpdir, f"chunk_{idx:03d}.wav")
+                    slice_audio_chunk(audio_path, c_start, c_end - c_start, chunk_wav)
+                    chunk_segs = _transcribe_raw_segments(model, chunk_wav, initial_prompt)
+                    for s in chunk_segs:
+                        s["start"] = round(s["start"] + c_start, 3)
+                        s["end"] = round(s["end"] + c_start, 3)
+                    chunk_segs = deduplicate_boundary_segments(transcribed_segments, chunk_segs, c_start)
+                    transcribed_segments.extend(chunk_segs)
+        else:
+            transcribed_segments = _transcribe_raw_segments(model, audio_path, initial_prompt)
 
         merged_fast = _merge_short_fragments(transcribed_segments)
         
@@ -258,8 +289,54 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None, or
         print("🧹 Đã giải phóng bộ nhớ RAM/VRAM của Whisper AI.")
 
 
-def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, original_audio_path=None):
-    """Transcribe with V1's fast model, falling back to the proven model."""
+def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, original_audio_path=None, asr_model=None, *, model_id=None, chunking=None, chunk_size_s=240.0, overlap_s=0.75):
+    """Transcribe with V1's fast model (or Qwen3-ASR if selected), falling back to the proven model."""
+
+    try:
+        from .v1_qwen_asr_adapter import is_qwen_asr_enabled, transcribe_audio_qwen, check_qwen_readiness
+    except ImportError:
+        from ai.v1_qwen_asr_adapter import is_qwen_asr_enabled, transcribe_audio_qwen, check_qwen_readiness
+
+    aliases = {"whisper": "whisper_turbo", "whisper_large_v3_turbo": "whisper_turbo", "qwen": "qwen3_asr", "qwen3": "qwen3_asr", "qwen3_asr_preview": "qwen3_asr"}
+    selected = model_id if model_id is not None else asr_model
+    model_id = aliases.get(str(selected).lower(), selected) if selected is not None else None
+    if model_id not in (None, "whisper_turbo", "qwen3_asr"):
+        raise ValueError(f"Unsupported ASR model: {model_id}")
+    use_qwen = model_id == "qwen3_asr" if model_id is not None else is_qwen_asr_enabled()
+    if use_qwen:
+        ready, reason = check_qwen_readiness(ignore_flag=True)
+        if ready:
+            print("🚀 [ASR] Người dùng đã chọn Qwen3-ASR 0.6B GPU. Đang thực thi nhận dạng...")
+            try:
+                if chunking:
+                    from .v1_asr_chunking import get_audio_duration_seconds, chunk_audio_intervals, slice_audio_chunk, deduplicate_boundary_segments
+                    import tempfile
+                    merged = []
+                    intervals = chunk_audio_intervals(get_audio_duration_seconds(audio_path), chunk_size_s, overlap_s)
+                    with tempfile.TemporaryDirectory(prefix="v1-qwen-chunks-") as folder:
+                        for number, (start, end) in enumerate(intervals):
+                            chunk_path = str(Path(folder) / f"{number}.wav")
+                            slice_audio_chunk(audio_path, start, end - start, chunk_path)
+                            chunk_subs = transcribe_audio_qwen(chunk_path, None)
+                            rows = [{"start": s.start.total_seconds() + start,
+                                     "end": s.end.total_seconds() + start, "text": s.content}
+                                    for s in chunk_subs]
+                            merged.extend(deduplicate_boundary_segments(merged, rows, start))
+                    qwen_subs = [srt.Subtitle(i, timedelta(seconds=row["start"]),
+                                 timedelta(seconds=row["end"]), row["text"])
+                                 for i, row in enumerate(merged, 1)]
+                    save_srt(qwen_subs, output_srt_path)
+                else:
+                    qwen_subs = transcribe_audio_qwen(audio_path, output_srt_path)
+                if qwen_subs:
+                    print(f"✅ Qwen3-ASR hoàn tất nhận dạng thành công ({len(qwen_subs)} câu thoại).")
+                    # Do not set custom attributes on srt.Subtitle to avoid TypeError in Subtitle.__init__
+                    pass
+                    return qwen_subs
+            except Exception as qwen_err:
+                print(f"⚠️ Qwen3-ASR gặp lỗi: {qwen_err}. Tự động fallback sang Faster-Whisper Large-v3 Turbo...")
+        else:
+            print(f"⚠️ Qwen3-ASR chưa sẵn sàng ({reason}). Sử dụng Faster-Whisper mặc định.")
 
     policy = current_v1_model_policy()
     failures = []
@@ -280,6 +357,7 @@ def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, origin
                 num_workers,
                 download_root=whisper_cache,
                 original_audio_path=original_audio_path,
+                chunking=chunking, chunk_size_s=chunk_size_s, overlap_s=overlap_s,
             )
             selected_model = model_name
             break
@@ -308,7 +386,7 @@ def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, origin
         srt_segments.append(sub)
 
     with open(output_srt_path, "w", encoding="utf-8") as output_file:
-        output_file.write(srt.compose(srt_segments))
+        output_file.write(srt.compose(srt_segments, reindex=False))
 
     return srt_segments
 

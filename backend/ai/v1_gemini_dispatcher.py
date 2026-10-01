@@ -298,6 +298,34 @@ def parse_retry_after(header_val: Optional[str]) -> Optional[float]:
         return None
 
 
+def _record_dispatcher_active_model(model: str, purpose: str):
+    if purpose != "translation":
+        return
+    try:
+        import job_tracker
+        job_tracker.record_active_translation_model(model)
+    except Exception:
+        try:
+            from backend import job_tracker
+            job_tracker.record_active_translation_model(model)
+        except Exception:
+            pass
+
+
+def _record_dispatcher_success_model(model: str, purpose: str):
+    if purpose != "translation":
+        return
+    try:
+        import job_tracker
+        job_tracker.record_translation_model(model)
+    except Exception:
+        try:
+            from backend import job_tracker
+            job_tracker.record_translation_model(model)
+        except Exception:
+            pass
+
+
 def call_gemini_api(
     payload: dict,
     purpose: str = "translation",
@@ -383,6 +411,8 @@ def call_gemini_api(
             f"timeout=({connect_timeout:.1f}s, {read_timeout:.1f}s) remaining={remaining:.1f}s"
         )
 
+        _record_dispatcher_active_model(model, purpose)
+
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=(connect_timeout, read_timeout))
             resp.encoding = "utf-8"
@@ -391,6 +421,7 @@ def call_gemini_api(
             if resp.status_code == 200:
                 data = resp.json()
                 circuit_breaker.record_success(account_hash, model, purpose)
+                _record_dispatcher_success_model(model, purpose)
                 logger.info(
                     f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} "
                     f"SUCCESS status=200 elapsed={elapsed_ms}ms"

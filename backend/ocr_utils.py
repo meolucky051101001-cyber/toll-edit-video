@@ -63,6 +63,19 @@ def release_ocr_reader():
             torch.cuda.empty_cache()
 
 
+def _has_chinese_overlap(candidate_text: str, segment_text: str) -> bool:
+    """Check whether OCR and ASR share meaningful Chinese characters."""
+    candidate = "".join(char for char in str(candidate_text or "") if "\u3400" <= char <= "\u9fff")
+    segment = "".join(char for char in str(segment_text or "") if "\u3400" <= char <= "\u9fff")
+    if not candidate or not segment:
+        return False
+    shared = set(candidate) & set(segment)
+    if len(shared) >= 2 or (len(candidate) >= 2 and len(shared) / len(candidate) >= 0.3):
+        return True
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, candidate, segment).ratio() >= 0.3
+
+
 def _readtext_batch(frames):
     # Reuse only pixel-identical frames, never merely similar subtitle regions:
     # no risk of missing a changed Chinese glyph or motion.
@@ -197,6 +210,44 @@ def stabilize_samples(samples):
     return result
 
 
+class OCRBlock:
+    """OCR text with temporal and screen geometry used by subtitle/QC stages."""
+
+    def __init__(
+        self,
+        text,
+        start,
+        end,
+        x_pct,
+        max_x_pct,
+        y_pct,
+        max_y_pct,
+        prob=1.0,
+        sample_segment_id=None,
+        sample_time=0.0,
+        is_subtitle=None,
+        is_packaging=None,
+        is_static=None,
+        in_subtitle_band=None,
+        type=None,
+    ):
+        self.text = text
+        self.start = start
+        self.end = end
+        self.x_pct = x_pct
+        self.max_x_pct = max_x_pct
+        self.y_pct = y_pct
+        self.max_y_pct = max_y_pct
+        self.prob = prob
+        self.sample_segment_id = sample_segment_id
+        self.sample_time = sample_time
+        self.is_subtitle = is_subtitle
+        self.is_packaging = is_packaging
+        self.is_static = is_static
+        self.in_subtitle_band = in_subtitle_band
+        self.type = type
+
+
 @stage("ocr", cleanup=release_ocr_reader)
 @ocr_proxy
 def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=None, srt_segments=None, **kwargs):
@@ -231,7 +282,80 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
 
     all_blocks = []
 
-    # === TỐI ƯU HÓA SIÊU TỐC OCR THEO TỪNG ĐOẠN THOẠI ===
+    # === TỐI ƯU HÓA SIÊU TỐC OCR THEO TỪNG ĐOẠN THOẠI (SMART SKIP OCR) ===
+    short_thresh = float(os.getenv("V1_SHORT_MAX_SECONDS", "420.0"))
+    effective_duration = duration
+    if effective_duration <= 0 and srt_segments:
+        try:
+            effective_duration = max(s.end.total_seconds() for s in srt_segments)
+        except Exception:
+            pass
+
+    # Quy tắc: Tắt hoàn toàn smart skip OCR cho video ngắn (dưới 7 phút / 420s). Luôn dùng "full" OCR.
+    if effective_duration > 0 and effective_duration <= short_thresh:
+        ocr_strategy = "full"
+        logger.info("Chế độ OCR cho video ngắn (%.1fs <= %.0fs): 'full' (đã tắt smart_skip)", effective_duration, short_thresh)
+    else:
+        ocr_strategy = kwargs.get("ocr_strategy")
+        if not ocr_strategy or ocr_strategy == "auto":
+            try:
+                try:
+                    from backend.job_config_service import resolve_job_frozen_config
+                except ImportError:
+                    from job_config_service import resolve_job_frozen_config
+                frozen = resolve_job_frozen_config(video_path)
+                if frozen and "effective_config" in frozen and "planned_pipeline" in frozen["effective_config"]:
+                    ocr_strategy = frozen["effective_config"]["planned_pipeline"].get("ocr_strategy")
+                elif frozen and "routing" in frozen and frozen["routing"]:
+                    ocr_strategy = frozen["routing"].get("planned_pipeline", {}).get("ocr_strategy")
+            except Exception:
+                pass
+
+        if not ocr_strategy or ocr_strategy == "auto":
+            try:
+                from .v1_feature_flags import get_feature_flags
+            except ImportError:
+                try:
+                    from v1_feature_flags import get_feature_flags
+                except ImportError:
+                    get_feature_flags = lambda: {}
+            flags = get_feature_flags()
+            enable_smart = flags.get("V1_SMART_SKIP_OCR")
+            if enable_smart is None:
+                enable_smart = os.getenv("V1_SMART_SKIP_OCR", os.getenv("ENABLE_SMART_SKIP_OCR", "true")).strip().lower() in ("1", "true", "yes", "on")
+            else:
+                enable_smart = bool(enable_smart)
+
+            if effective_duration > short_thresh and enable_smart:
+                ocr_strategy = "smart_skip"
+            else:
+                ocr_strategy = "full"
+
+    def _check_visual_subtitle_activity(cap_obj, timestamp_sec, vid_w, vid_h):
+        """Kiểm tra hoạt độ biên cạnh quang học tại vùng phụ đề tiềm năng (68%-92% chiều cao)."""
+        try:
+            cap_obj.set(cv2.CAP_PROP_POS_MSEC, max(0.0, timestamp_sec) * 1000)
+            ok, frm = cap_obj.read()
+            if not ok or frm is None:
+                return True, 1.0  # Fail-safe nếu không đọc được frame
+            y1 = int(vid_h * 0.68)
+            y2 = int(vid_h * 0.92)
+            x1 = int(vid_w * 0.10)
+            x2 = int(vid_w * 0.90)
+            sub_roi = frm[y1:y2, x1:x2]
+            if sub_roi.size == 0:
+                return True, 1.0
+            gray = cv2.cvtColor(sub_roi, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(gray, 60, 180)
+            edge_pixels = cv2.countNonZero(edges)
+            total_pixels = edges.shape[0] * edges.shape[1]
+            edge_dens = float(edge_pixels) / float(total_pixels) if total_pixels > 0 else 0.0
+            # Phụ đề cứng tiếng Trung thường có mật độ cạnh rõ nét >= 0.018
+            return (edge_dens >= 0.018), edge_dens
+        except Exception as _edge_err:
+            logger.debug("Visual band check error at t=%.2f: %s", timestamp_sec, _edge_err)
+            return True, 1.0
+
     target_timestamps = []
     is_adaptive = bool(kwargs.get("adaptive", False))
     interval = max(0.08, min(0.5, float(os.getenv("OCR_TRACK_INTERVAL", "0.2"))))
@@ -240,11 +364,47 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
         # Cover every speech segment; process recognition in bounded batches.
         interval = max(0.1, min(5.0, float(os.getenv("V1_OCR_TRACK_INTERVAL", "1.2"))))
         max_samples_per_cue = max(1, int(os.getenv("V1_OCR_MAX_SAMPLES_PER_SEGMENT", "2")))
+        total_segs = len(srt_segments)
+        skipped_count = 0
         for seg_idx, seg in enumerate(srt_segments):
             s = seg.start.total_seconds()
             e = seg.end.total_seconds()
             if e <= s:
                 continue
+
+            if ocr_strategy == "smart_skip":
+                is_boundary = (seg_idx < 2 or seg_idx >= total_segs - 2)
+                is_periodic = (seg_idx % 8 == 0)
+                txt = getattr(seg, "content", "") or ""
+                is_short = (len(txt.strip()) <= 3)
+                is_suspicious = any(c in txt for c in "?!…:0123456789")
+                conf = getattr(seg, "confidence", None)
+                logprob = getattr(seg, "avg_logprob", None)
+                low_conf = (conf is not None and conf < 0.88) or (logprob is not None and logprob < -0.25)
+
+                if is_boundary:
+                    reason = "boundary_segment"
+                elif is_periodic:
+                    reason = "periodic_checkpoint"
+                elif is_short:
+                    reason = "short_cue"
+                elif is_suspicious:
+                    reason = "suspicious_punctuation_digits"
+                elif low_conf:
+                    reason = f"low_asr_conf({conf})"
+                else:
+                    # Đạt tiêu chí ASR tốt, xác minh trực quan dải phụ đề đáy video
+                    mid_t = (s + e) / 2.0
+                    has_sub, edge_d = _check_visual_subtitle_activity(cap, mid_t, width, height)
+                    if not has_sub:
+                        skipped_count += 1
+                        logger.info("Smart Skip OCR [SKIP]: Seg %d (t=%.2fs) - lý do=high_conf_no_visual_sub (conf=%.2f, edge=%.4f)",
+                                    seg_idx, s, conf if conf is not None else 1.0, edge_d)
+                        continue
+                    else:
+                        reason = f"visual_band_active(edge={edge_d:.4f})"
+                logger.debug("Smart Skip OCR [RUN]: Seg %d (t=%.2fs) - lý do=%s", seg_idx, s, reason)
+
             s = max(0.0, s - 0.3)
             next_start = (srt_segments[seg_idx + 1].start.total_seconds()
                           if seg_idx + 1 < len(srt_segments) else duration)
@@ -255,6 +415,8 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
             count = min(max_samples_per_cue, max(1, __import__("math").ceil(cue_dur / interval)))
             for n in range(count):
                 target_timestamps.append((s + (n + 0.5) * cue_dur / count, seg, seg_idx))
+        if skipped_count > 0:
+            logger.info("Smart Skip OCR đã tối ưu bỏ qua %d / %d câu thoại (Whisper conf cao + xác minh không có phụ đề cứng)", skipped_count, total_segs)
     else:
         # Without a transcript there is no reliable way to distinguish scene text.
         cap.release()

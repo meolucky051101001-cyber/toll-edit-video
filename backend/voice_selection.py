@@ -1,12 +1,25 @@
 """Shared dashboard/bot voice choice, read at the start of voice generation."""
 import json
 import os
+import uuid
 from pathlib import Path
+def _resolve_control_dir() -> Path:
+    explicit_dir = os.getenv("AUTODUB_CONTROL_DIR")
+    if explicit_dir:
+        return Path(explicit_dir).expanduser()
+    ws_env = os.getenv("AUTODUB_WORKSPACE")
+    candidates = []
+    if ws_env:
+        candidates.extend([Path(ws_env) / "bot_system" / "control", Path(ws_env) / "control"])
+    project_workspace = Path(__file__).resolve().parent.parent / "workspace"
+    candidates.extend([project_workspace / "bot_system" / "control", project_workspace / "control"])
+    for c in candidates:
+        if (c / "voice_catalog.json").is_file():
+            return c
+    return candidates[0]
 
-ROOT = Path(__file__).resolve().parent
-BASE = Path(os.getenv("TOOL_V2_CONTROL_DIR", str(ROOT.parent / "workspace" / "control")))
+BASE = _resolve_control_dir()
 BASE.mkdir(parents=True, exist_ok=True)
-
 ALIASES = {'capcut-vi-VN-HoaiMyNeural': 'microsoft-hoaimy', 'capcut-vi-VN-NamMinhNeural': 'microsoft-namminh'}
 
 DEFAULT_CATALOG = [
@@ -56,11 +69,9 @@ def save(voice_id):
     voice_id = ALIASES.get(voice_id, voice_id)
     if not any(v["id"] == voice_id for v in catalog()):
         raise ValueError("Mã giọng không hợp lệ.")
-    tmp = BASE / "voice_selection.tmp"
-    tmp.write_text(json.dumps({"id": voice_id}), encoding="utf-8")
-    os.replace(tmp, BASE / "voice_selection.json")
-
-
+    tmp=BASE/f'voice_selection.json.tmp.{uuid.uuid4().hex}'
+    tmp.write_text(json.dumps({'id':voice_id}),encoding='utf-8')
+    os.replace(tmp,BASE/'voice_selection.json')
 def resolve_voice(default_source, default_param):
     voice = selected()
     if voice["id"] == "chi-mai":

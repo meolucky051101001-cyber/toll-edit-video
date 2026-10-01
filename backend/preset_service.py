@@ -312,7 +312,10 @@ def resolve_effective_config(
                 sources[k] = "video_override"
 
     # Kiểm tra tính tương thích của giọng
-    from voice_selection import catalog
+    try:
+        from voice_selection import catalog
+    except ImportError:
+        from .voice_selection import catalog
     try:
         cat = catalog()
         valid_voice_ids = {item["id"] for item in cat}

@@ -15,8 +15,8 @@ from pydub import AudioSegment
 
 logger = logging.getLogger(__name__)
 
-edge_semaphore = asyncio.Semaphore(1)
-capcut_semaphore = threading.Semaphore(int(os.getenv("CAPCUT_CONCURRENCY", "3")))
+edge_semaphore = asyncio.Semaphore(int(os.getenv("V1_EDGE_WORKERS", "4")))
+capcut_semaphore = threading.Semaphore(int(os.getenv("V1_CAPCUT_WORKERS", "6")))
 rvc_semaphore = asyncio.Semaphore(1)
 global_rvc_instance = None
 global_rvc_model_path = None
@@ -147,14 +147,22 @@ _shared_capcut_client = None
 
 def _get_capcut_client():
     global _shared_capcut_client
-    if _shared_capcut_client is None:
-        from capcut_tts_api import CapCutClient
+    from capcut_tts_api import CapCutClient
+    if _shared_capcut_client is None or not isinstance(_shared_capcut_client, CapCutClient):
         _shared_capcut_client = CapCutClient()
+        if hasattr(_shared_capcut_client, "session") and _shared_capcut_client.session is not None:
+            try:
+                from requests.adapters import HTTPAdapter
+                adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20)
+                _shared_capcut_client.session.mount("https://", adapter)
+                _shared_capcut_client.session.mount("http://", adapter)
+            except Exception:
+                pass
     return _shared_capcut_client
 
 @stage("tts_capcut_attempt")
 def _run_capcut_tts_once(
-    text, output_path, voice="BV562_streaming", poll_interval=1.0
+    text, output_path, voice="BV562_streaming", poll_interval=3.0
 ):
     import json, time
     client = _get_capcut_client()
@@ -163,7 +171,7 @@ def _run_capcut_tts_once(
     task_id = res["data"]["tasks"][0]["id"]
     token = res["data"]["tasks"][0]["token"]
     
-    deadline = time.monotonic() + 45.0
+    deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline:
         time.sleep(min(max(0.0, float(poll_interval)),
                        max(0.0, deadline - time.monotonic())))
@@ -184,7 +192,7 @@ def _run_capcut_tts_once(
         elif status == "failed":
             raise Exception("CapCut TTS task failed")
             
-    raise TimeoutError("CapCut TTS polling exceeded 45s (network calls may add time)")
+    raise TimeoutError("CapCut TTS polling exceeded 60s (network calls may add time)")
 
 
 def _run_capcut_tts(
@@ -193,7 +201,7 @@ def _run_capcut_tts(
     voice="BV562_streaming",
     attempts=3,
     retry_delays=(1.5, 3.0),
-    poll_interval=1.0,
+    poll_interval=0.5,
 ):
     import time
 
@@ -568,10 +576,10 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
     return None
 
 
-MAX_NATURAL_SPEED = 1.45
+MAX_NATURAL_SPEED = float(os.getenv("V1_MAX_NATURAL_SPEED", "1.35"))
 
 @stage("voice")
-async def generate_dubbing_audio(translated_segments, output_folder, voice_source="edge", voice_param="vi-VN-HoaiMyNeural", api_key="", video_duration=None):
+async def generate_dubbing_audio(translated_segments, output_folder, voice_source="edge", voice_param="vi-VN-HoaiMyNeural", api_key="", video_duration=None, segment_voices=None):
     print(f"Generating TTS for dubbing using {voice_source} (Anti-Overlap Enabled)...")
     os.makedirs(output_folder, exist_ok=True)
     
@@ -625,7 +633,7 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                 seg.content = condensed_map[seg.index]
                 print(f"[VOICE_GUARD] Đã rút gọn câu #{seg.index}: '{old_text[:35]}...' -> '{seg.content}'")
 
-    limiter = asyncio.Semaphore(4)
+    limiter = asyncio.Semaphore(int(os.getenv("V1_TTS_WORKERS", "6")))
     async def run_one(seg):
         async with limiter:
             if not seg.content.strip() or not re.search(r'\w', seg.content):

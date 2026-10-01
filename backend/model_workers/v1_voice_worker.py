@@ -42,4 +42,7 @@ if __name__ == '__main__':
                 logging.warning(f"Error applying segment_voices_map: {e}")
 
     result = asyncio.run(generate_dubbing_audio(segments, output_folder, voice_source, voice_param, api_key=api_key, video_duration=video_duration))
+    for r in result:
+        if isinstance(r, dict) and "duration" not in r:
+            r["duration"] = r.get("actual_audio_duration", 0.0)
     output_json.write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')

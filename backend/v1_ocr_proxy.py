@@ -25,11 +25,11 @@ def ocr_proxy(fn):
         with tempfile.TemporaryDirectory(prefix="v1-ocr-proxy-") as directory:
             proxy=Path(directory)/"ocr.mp4"
             cmd_nvenc=["ffmpeg","-v","error","-y","-i",str(video_path),"-an",
-                       "-vf","scale=720:-2","-c:v","h264_nvenc","-preset","p1",
-                       "-g","12","-fps_mode","passthrough",str(proxy)]
+                       "-vf","scale=720:-2,fps=30","-c:v","h264_nvenc","-preset","p1",
+                       "-g","12",str(proxy)]
             cmd_cpu=["ffmpeg","-v","error","-y","-i",str(video_path),"-an",
-                     "-vf","scale=720:-2","-c:v","libx264","-preset","ultrafast",
-                     "-crf","18","-g","12","-fps_mode","passthrough",str(proxy)]
+                     "-vf","scale=720:-2,fps=30","-c:v","libx264","-preset","ultrafast",
+                     "-crf","18","-g","12",str(proxy)]
             proxy_ok = False
             for cmd in [cmd_nvenc, cmd_cpu]:
                 try:
