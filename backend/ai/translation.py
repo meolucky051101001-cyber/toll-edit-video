@@ -314,6 +314,19 @@ def _gemini_transient_failure():
         _gemini_transient_failures = 0
 
 
+def _record_translation_model(kwargs, provider, model):
+    """Persist the model that actually returned a translation, when requested."""
+    quality_metadata = kwargs.get("quality_metadata")
+    if not isinstance(quality_metadata, dict) or not model:
+        return
+    quality_metadata["provider"] = provider
+    quality_metadata["provider_kind"] = "llm"
+    models = quality_metadata.setdefault("models", [])
+    if model not in models:
+        models.append(model)
+    quality_metadata["model"] = model
+
+
 def translate_with_gemini(
     texts,
     target_lang="vi",
@@ -383,6 +396,7 @@ def translate_with_gemini(
                                 pass
                             _gemini_transient_failures = 0
                             logger.info(f"Dịch thành công bằng Google Gemini ({model})!")
+                            _record_translation_model(kwargs, "gemini", model)
                             return translated
                         elif isinstance(translated, list) and len(texts) >= 4 and len(translated) != len(texts):
                             logger.warning(
@@ -490,6 +504,7 @@ def translate_with_openai(
                     translated = _parse_json_array(text)
                     if isinstance(translated, list) and len(translated) == len(texts):
                         logger.info(f"Dịch thành công bằng OpenAI ChatGPT ({om})!")
+                        _record_translation_model(kwargs, "openai", om)
                         return translated
                     elif isinstance(translated, list) and len(texts) >= 4 and len(translated) != len(texts):
                         logger.warning("OpenAI %s trả về lệch số lượng câu (%d thay vì %d). Chia nhỏ batch...", om, len(translated), len(texts))
@@ -557,6 +572,7 @@ def translate_with_deepseek(
                     translated = _parse_json_array(text)
                     if isinstance(translated, list) and len(translated) == len(texts):
                         logger.info(f"Dịch thành công bằng DeepSeek ({dm})!")
+                        _record_translation_model(kwargs, "deepseek", dm)
                         return translated
                     elif isinstance(translated, list) and len(texts) >= 4 and len(translated) != len(texts):
                         logger.warning("DeepSeek %s trả về lệch số lượng câu (%d thay vì %d). Chia nhỏ batch...", dm, len(translated), len(texts))
@@ -953,6 +969,8 @@ def translate_subtitles(
                     elif alt_p == "gemini" and g_key:
                         retranslated = translate_with_gemini(failing_texts, target_lang, g_key, **kwargs)
                     if retranslated and len(retranslated) == len(failing_texts):
+                        used_provider = alt_p
+                        provider_kind = "llm"
                         for k, orig_idx in enumerate(sorted_failing):
                             translated_texts[orig_idx] = retranslated[k]
                         break
