@@ -148,7 +148,7 @@ def get_batch_job_dir(video_path: str | Path, workspace: str = WORKSPACE) -> str
 
 
 async def process_single_local_video(video_path: str, output_dir: str, progress_callback=None,
-                                     queue_index=None, queue_total=None) -> bool:
+                                     queue_index=None, queue_total=None, video_mode: str = "auto") -> bool:
     """
     Quy trình 6 bước AI Dubbing cho 1 file video cục bộ
     """
@@ -252,15 +252,76 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             await notify("❌ Pipeline v2 lỗi: {}".format(error))
             return False
 
+    # Kiểm tra cờ V1_USE_ORCHESTRATOR để kích hoạt luồng điều phối V1 nâng cấp
+    try:
+        from v1_feature_flags import get_feature_flags
+        flags = get_feature_flags(WORKSPACE)
+    except Exception:
+        flags = {}
+
+    if flags.get("V1_USE_ORCHESTRATOR", True):
+        try:
+            from job_config_service import get_frozen_config
+            from v1_orchestrator import V1Orchestrator
+            orch = V1Orchestrator(WORKSPACE)
+            job_id = f"batch_{base_name}_{int(time.time())}"
+            final_dest = os.path.join(output_dir, f"Dubbed_{base_name}.mp4")
+            frozen_plan = get_frozen_config(file_name, workspace_path=WORKSPACE) or {}
+            frozen_effective = frozen_plan.get("effective_config", {})
+            planned_mode = frozen_effective.get("video_mode") or video_mode or "auto"
+
+            async def _batch_orch_progress(st, step, tot, pct, msg, d):
+                job_tracker.update_step(step, msg, percent=int(pct))
+                await notify(msg)
+
+            orch_started = time.monotonic()
+            res = await orch.execute_job(
+                video_path=video_path,
+                job_id=job_id,
+                output_dir=out_dir,
+                delivery_path=final_dest,
+                user_mode=planned_mode,
+                overrides=frozen_effective,
+                progress_callback=_batch_orch_progress,
+                stop_checker=lambda: getattr(shared_state, 'stop_requested', False),
+            )
+            if not res.get('tracker_finalized'):
+                job_tracker.finish_video(file_name, res["final_video"], time.monotonic() - orch_started)
+            # Ghi receipt xác thực
+            receipt_path = _receipt_path(final_dest)
+            receipt_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(receipt_path, {
+                "job_id": job_id,
+                "video_mode": res.get("video_mode"),
+                "pipeline_version": "v1_orchestrator_complete",
+                "qc_status": res.get("qc_status"),
+                "input_sha256": fingerprint(video_path),
+                "output_sha256": fingerprint(final_dest),
+            })
+            await notify(f"✅ Hoàn tất video ({res.get('video_mode')}, QC: {res.get('qc_status')}) -> {final_dest}")
+            return True
+        except asyncio.CancelledError:
+            raise
+        except BatchStopRequested as exc:
+            job_tracker.mark_stopped(str(exc))
+            return False
+        except Exception as orch_err:
+            logger.exception("V1 job failed; checkpoint retained, no legacy restart")
+            job_tracker.set_error(file_name, str(orch_err), fatal=False)
+            await notify(f"❌ Lỗi: {orch_err}; đã giữ checkpoint để thử lại.")
+            return False
+
     try:
         t0 = time.time()
         # 0. Đóng băng cấu hình job để không bị ảnh hưởng nếu đổi dashboard giữa chừng
         from job_config_service import get_frozen_config, freeze_job_config
         from audio_settings import get_audio_settings
         cur_audio_settings = get_audio_settings()
-        frozen_job_entry = get_frozen_config(file_name) or freeze_job_config(
+        frozen_job_entry = get_frozen_config(file_name, workspace_path=WORKSPACE) or freeze_job_config(
             video_name=file_name,
+            workspace_path=WORKSPACE,
             overrides={
+                "video_mode": video_mode or "auto",
                 "bgm_volume_db": cur_audio_settings.get("bgm_volume_db", -2.0),
                 "dubbing_volume_db": cur_audio_settings.get("dubbing_volume_db", 1.0),
                 "separation_mode": cur_audio_settings.get("separation_mode", "roformer"),
@@ -292,11 +353,13 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
 
         await pause_checkpoint()
         _raise_if_stopped()
-        await notify("🤖 Bước 3/6: Faster-Whisper Large-v3 Turbo đang nhận dạng giọng nói...")
-        job_tracker.update_step(3, "Bước 3/6: Faster-Whisper Large-v3 Turbo nhận dạng giọng nói...", percent=40)
+        batch_asr_model = frozen_eff.get("asr_model", "whisper_turbo")
+        batch_asr_display = "Qwen3-ASR 0.6B (GPU CUDA)" if "qwen" in batch_asr_model.lower() else "Faster-Whisper Large-v3 Turbo"
+        await notify(f"🤖 Bước 3/6: {batch_asr_display} đang nhận dạng giọng nói...")
+        job_tracker.update_step(3, f"Bước 3/6: {batch_asr_display} nhận dạng giọng nói...", percent=40)
         srt_segments = await checkpoints.subtitles(
             "transcribe", vocals_audio,
-            lambda: asyncio.to_thread(extract_subtitles_whisper, vocals_audio, srt_original, original_audio_path=original_audio),
+            lambda: asyncio.to_thread(extract_subtitles_whisper, vocals_audio, srt_original, original_audio_path=original_audio, asr_model=batch_asr_model),
             srt_original)
         if not srt_segments:
             await notify("⚠️ Video không có giọng nói để dịch!")
@@ -334,8 +397,10 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
 
         await pause_checkpoint()
         _raise_if_stopped()
-        await notify(f"🌐 Bước 4/6: Gemini 3.8 Flash đang dịch ({len(srt_segments)} câu)...")
-        job_tracker.update_step(4, f"Bước 4/6: Gemini 3.8 Flash đang dịch ({len(srt_segments)} câu)...", percent=70)
+        configured_m = os.getenv("GEMINI_MODEL", "gemini-3.7-flash").strip() or "gemini-3.7-flash"
+        job_tracker.record_active_translation_model(configured_m)
+        await notify(f"🌐 Bước 5/8: {configured_m} đang dịch ({len(srt_segments)} câu)...")
+        job_tracker.update_step(5, f"Bước 5/8: {configured_m} đang dịch ({len(srt_segments)} câu)...", percent=65)
         translated_segments = await checkpoints.subtitles(
             "translate", srt_original,
             lambda: asyncio.to_thread(translate_subtitles, srt_segments, "vi",
@@ -344,16 +409,17 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         await asyncio.to_thread(save_srt, translated_segments, srt_translated)
         try:
             t_models = job_tracker.get_status().get("translation_models", [])
-            used_model = ", ".join(t_models) if t_models else "Gemini"
-            logger.info(f"Hoàn tất Bước 4/6 dịch phụ đề ({len(translated_segments)} câu) bằng model: {used_model}")
-            await notify(f"🌐 Bước 4/6: Đã dịch xong {len(translated_segments)} câu bằng model {used_model}")
+            used_model = ", ".join(t_models) if t_models else configured_m
+            job_tracker.record_active_translation_model(used_model)
+            logger.info(f"Hoàn tất Bước 5/8 dịch phụ đề ({len(translated_segments)} câu) bằng model: {used_model}")
+            await notify(f"🌐 Bước 5/8: Đã dịch xong {len(translated_segments)} câu bằng model {used_model}")
         except Exception:
             pass
 
         if not frozen_job_entry:
             try:
                 from job_config_service import get_frozen_config
-                frozen_job_entry = get_frozen_config(file_name)
+                frozen_job_entry = get_frozen_config(file_name, workspace_path=WORKSPACE)
                 if frozen_job_entry:
                     frozen_eff = frozen_job_entry.get("effective_config", {})
             except Exception:
@@ -519,8 +585,9 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             logger.warning("Không thể dọn thư mục tạm %s: %s", out_dir, cleanup_error)
         return True
 
-    except BatchStopRequested as stop_error:
+    except (BatchStopRequested, asyncio.CancelledError) as stop_error:
         logger.info("[%s] %s", file_name, stop_error)
+        job_tracker.mark_stopped("Đã dừng batch theo yêu cầu!")
         await notify(f"⏹️ {stop_error}")
         return False
     except Exception as e:
@@ -545,11 +612,12 @@ async def process_batch_folder(
     output_dir: str = DEFAULT_OUTPUT_DIR,
     progress_callback=None,
     job_id: str = None,
+    video_mode: str = "auto",
 ):
     """Own the complete lifecycle, including failures from callbacks and cancellation."""
     job_id = job_id or uuid.uuid4().hex
     worker = asyncio.create_task(_process_batch_folder(
-        input_dir, output_dir, progress_callback, job_id))
+        input_dir, output_dir, progress_callback, job_id, video_mode=video_mode))
     try:
         result = await asyncio.shield(worker)
         status = job_tracker.get_status()
@@ -579,6 +647,7 @@ async def _process_batch_folder(
     output_dir: str = DEFAULT_OUTPUT_DIR,
     progress_callback=None,
     job_id: str = None,
+    video_mode: str = "auto",
 ):
     """
     Quét và xử lý toàn bộ video trong thư mục đầu vào
@@ -752,7 +821,7 @@ async def _process_batch_folder(
             await progress_callback(step_msg)
 
         job_tracker.start_video(vname, idx, total)
-        ok = await process_single_local_video(vpath, output_dir, progress_callback)
+        ok = await process_single_local_video(vpath, output_dir, progress_callback, queue_index=idx, queue_total=total, video_mode=video_mode)
         if _stop_requested():
             break
         if not ok:

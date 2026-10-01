@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -492,7 +493,7 @@ def set_auto_voice_config(
 
     for d in dirs:
         cfg_path = d / CONFIG_FILENAME
-        tmp = cfg_path.with_suffix(".tmp")
+        tmp = cfg_path.with_name(f"{cfg_path.name}.tmp.{uuid.uuid4().hex}")
         try:
             d.mkdir(parents=True, exist_ok=True)
             tmp.write_text(payload_json, encoding="utf-8")
@@ -632,6 +633,7 @@ def resolve_locked_voice(
     default_voice_id: Optional[str] = None,
     rvc_model_path: Optional[str] = None,
     voice_mode: str = "auto",
+    voice_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Quy tắc quyết định giọng (Unified Decision Matrix):
@@ -647,7 +649,7 @@ def resolve_locked_voice(
     # 1. CHẾ ĐỘ THỦ CÔNG (MANUAL MODE)
     if voice_mode == "manual":
         import voice_selection
-        cfg_voice = voice_selection.selected()
+        cfg_voice = (voice_config or {}).get("manual_voice") or voice_selection.selected()
         v_id = cfg_voice["id"]
         v_source = cfg_voice["source"]
         v_param = cfg_voice["param"]
@@ -674,7 +676,7 @@ def resolve_locked_voice(
         }
 
     # 2. CHẾ ĐỘ TỰ ĐỘNG (AUTO MODE)
-    auto_cfg = get_auto_voice_config(workspace)
+    auto_cfg = voice_config if voice_config is not None else get_auto_voice_config(workspace)
     cfg_female_id = auto_cfg.get("female_voice_id") or VOICE_FEMALE_ID
     cfg_male_id = auto_cfg.get("male_voice_id") or VOICE_MALE_ID
     catalog = _get_catalog(workspace)
@@ -752,7 +754,7 @@ def resolve_locked_voice(
 
     # 4. CHẾ ĐỘ TỰ ĐỘNG - CÂU ĐẦU KHÔNG XÁC ĐỊNH CHẮC (UNKNOWN) -> FALLBACK VỀ GIỌNG THỦ CÔNG
     import voice_selection
-    cfg_voice = voice_selection.selected()
+    cfg_voice = (voice_config or {}).get("manual_voice") or voice_selection.selected()
     v_id = cfg_voice["id"]
     v_source = cfg_voice["source"]
     v_param = cfg_voice["param"]
@@ -834,6 +836,7 @@ def decide_video_voice(
     default_voice_id: Optional[str] = None,
     force_reselect: bool = False,
     job_id: Optional[str] = None,
+    voice_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Hàm quyết định giọng chung (Unified Voice Decision Function - Codex Plan):
@@ -848,7 +851,7 @@ def decide_video_voice(
     lock_file = out_dir_path / VOICE_LOCK_FILENAME
 
     actual_mode = voice_mode or get_auto_voice_mode(workspace)
-    auto_cfg = get_auto_voice_config(workspace)
+    auto_cfg = voice_config if voice_config is not None else get_auto_voice_config(workspace)
     is_dual = bool(auto_cfg.get("dual_voice", False))
     resolved_job_id = job_id or out_dir_path.name
     content_hash = compute_file_sha256(video_path or original_audio_path)
@@ -885,6 +888,7 @@ def decide_video_voice(
             workspace=workspace,
             default_voice_id=default_voice_id,
             rvc_model_path=rvc_model_path,
+            voice_config=voice_config,
             voice_mode="manual",
         )
         locked["dual_voice"] = False
@@ -907,6 +911,7 @@ def decide_video_voice(
             workspace=workspace,
             default_voice_id=default_voice_id,
             rvc_model_path=rvc_model_path,
+            voice_config=voice_config,
             voice_mode="auto",
         )
         male_voice_info = resolve_locked_voice(
@@ -917,6 +922,7 @@ def decide_video_voice(
             workspace=workspace,
             default_voice_id=default_voice_id,
             rvc_model_path=rvc_model_path,
+            voice_config=voice_config,
             voice_mode="auto",
         )
 
@@ -992,6 +998,7 @@ def decide_video_voice(
             workspace=workspace,
             default_voice_id=default_voice_id,
             rvc_model_path=rvc_model_path,
+            voice_config=voice_config,
             voice_mode="auto",
         )
         locked["dual_voice"] = False
@@ -1005,7 +1012,7 @@ def decide_video_voice(
     locked["locked_at"] = datetime.now(timezone.utc).isoformat()
 
     # 4. Ghi snapshot nguyên tử (atomic write). Nếu thất bại, DỪNG TRƯỚC TTS (Codex Requirement)
-    tmp_file = out_dir_path / f"{VOICE_LOCK_FILENAME}.tmp"
+    tmp_file = out_dir_path / f"{VOICE_LOCK_FILENAME}.tmp.{uuid.uuid4().hex}"
     try:
         tmp_file.write_text(json.dumps(locked, indent=2, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp_file, lock_file)

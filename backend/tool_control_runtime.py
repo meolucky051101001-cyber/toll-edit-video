@@ -60,7 +60,7 @@ def install(application, namespace, key):
                     busy = busy or bool(active_callbacks) or (getattr(queue, '_unfinished_tasks', 0) > count if queue else False)
                     payload={'pid':os.getpid(),'at':time.time(),'busy':busy,'queue':count,
                              'paused':flag.exists(),'polling':bool(app.updater and app.updater.running),
-                             'version':'v1_codex_voice_lock_1.0'}
+                             'version':('v1_independent_repair_20260930' if key == 'v1' else 'v1_codex_voice_lock_1.0')}
                     FLAGS.mkdir(parents=True,exist_ok=True)
                     tmp=FLAGS/(key+'.'+str(os.getpid())+'.tmp')
                     tmp.write_text(json.dumps(payload),encoding='utf-8')

@@ -184,6 +184,7 @@ async def api_jobs_batch(request: Request, payload: Dict[str, Any] = Body(...)):
 
     batch_id = payload.get("batch_id") or f"batch_{uuid.uuid4().hex[:8]}"
     trigger_now = bool(payload.get("trigger", True))
+    batch_video_mode = str(payload.get("video_mode") or "auto").strip() or "auto"
     
     frozen_items = []
     for it in items:
@@ -191,7 +192,10 @@ async def api_jobs_batch(request: Request, payload: Dict[str, Any] = Body(...)):
         if not filename:
             continue
         p_id = it.get("preset_id")
-        ovr = it.get("overrides")
+        ovr = dict(it.get("overrides") or {})
+        # Freeze the dashboard's S/M/L choice with the item. A later global
+        # mode change must not alter a job that is already queued.
+        ovr.setdefault("video_mode", str(it.get("video_mode") or batch_video_mode))
         job_id = it.get("job_id") or f"{batch_id}_{filename}"
 
         # Đóng băng cấu hình cho video này
@@ -224,7 +228,7 @@ async def api_jobs_batch(request: Request, payload: Dict[str, Any] = Body(...)):
                 from dashboard_monitor import is_v2_batch_running, is_v2_paused, api_run_batch
                 if not is_v2_paused() and not is_v2_batch_running():
                     import asyncio
-                    asyncio.create_task(api_run_batch())
+                    asyncio.create_task(api_run_batch(None, video_mode=batch_video_mode))
                     execution_triggered = True
                     message += " Đang khởi chạy tiến trình xử lý V2..."
             except Exception as e:
@@ -234,7 +238,7 @@ async def api_jobs_batch(request: Request, payload: Dict[str, Any] = Body(...)):
             try:
                 from main import UNIFIED_PIPELINE_LOCK, BATCH_TASK, api_run_batch
                 import asyncio
-                asyncio.create_task(api_run_batch())
+                asyncio.create_task(api_run_batch(None, video_mode=batch_video_mode))
                 execution_triggered = True
                 message += " Đang khởi chạy tiến trình xử lý V1..."
             except Exception as e:

@@ -47,6 +47,10 @@ class MonitoredQueue(asyncio.Queue):
                         "file_id": job.get("file_id", ""),
                         "filename": job.get("filename", ""),
                         "voice_mode": job.get("voice_mode", "auto"),
+                        "video_mode": job.get("video_mode"),
+                        "job_overrides": job.get("job_overrides"),
+                        "resume_state": job.get("resume_state"),
+                        "retry_count": job.get("retry_count", 0),
                     })
                 else:
                     items.append({

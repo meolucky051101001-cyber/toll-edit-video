@@ -290,7 +290,7 @@ def build_custom_ass_file(job_dir: Path, cfg: Dict[str, Any], tw: int = 1080, th
         bg_color_ass = hex_to_ass_color(bg_color_hex, default_hex="ffffff", alpha=bg_opacity)
 
         new_bg_style = f"Style: BgStyle,Arial,{font_size},{bg_color_ass},{bg_color_ass},{bg_color_ass},{bg_color_ass},0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1"
-        new_txt_style = f"Style: TextStyle,{font_name},{font_size},{font_color_ass},&H000000FF,&H00FFFFFF,&H00000000,{bold_val},0,0,0,100,100,0,0,1,2,0,5,10,10,10,1"
+        new_txt_style = f"Style: TextStyle,{font_name},{font_size},{font_color_ass},&H000000FF,&H00000000,&H00000000,{bold_val},0,0,0,100,100,0,0,1,0,0,5,10,10,10,1"
 
         ass_text = re.sub(r"Style:\s*BgStyle,[^\r\n]+", new_bg_style, ass_text)
         ass_text = re.sub(r"Style:\s*TextStyle,[^\r\n]+", new_txt_style, ass_text)
