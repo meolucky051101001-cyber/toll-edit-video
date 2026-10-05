@@ -123,7 +123,26 @@ def intent_constraints(query: str) -> list[tuple[str, list[str], float]]:
         ) and is_valid_action_match(query, norm, name):
             # Include equivalent Vietnamese action names (unbox / dap hop).
             equivalents = [key for key, values in ACTION_MAP.items() if set(values) & set(aliases)]
-            groups.append((name, [*equivalents, *aliases], 45.0))
+            action_aliases = [*equivalents, *aliases]
+            if name == "decor" and re.search(r"\bnha\b", norm):
+                # Vietnamese home-decor intent is searched in Chinese. Keep the
+                # aliases specific to house/interior design so furniture-sale
+                # posts do not pass merely because they mention 家具.
+                action_aliases.extend(
+                    [
+                        "家居装饰",
+                        "家居布置",
+                        "家装",
+                        "房间布置",
+                        "房间装饰",
+                        "室内装饰",
+                        "室内设计",
+                        "装修",
+                        "装修设计",
+                        "软装",
+                    ]
+                )
+            groups.append((name, action_aliases, 45.0))
             break
     names, attributes = extract_mandatory_attributes(norm)
     for name, aliases in zip(names, attributes, strict=True):
@@ -337,6 +356,13 @@ def rank_detailed(
         relevance = min(20.0, relevance * 0.3)
         missing_mandatory.append(f"#{active_target_tag}")
         best_missing_core.append(f"#{active_target_tag}")
+
+    # The strict sticker-tweezer intent is a video request. Keep the ranker
+    # consistent with the production validator so photo notes cannot outrank
+    # verified videos just because their title has both words.
+    if normalize_vietnamese(query).strip() == "nhip gap sticker" and result.media_type != "video":
+        relevance = 0.0
+        missing_mandatory.append("video")
 
     metrics = [
         (result.like_count, 100000),

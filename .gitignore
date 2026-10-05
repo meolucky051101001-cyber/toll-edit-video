@@ -25,3 +25,4 @@ scratch/
 *.zip
 data_schema.sql
 database_metrics.json
+.pytest-tmp*

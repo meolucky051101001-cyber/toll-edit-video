@@ -208,6 +208,64 @@ def test_provider_browser_dom_and_restriction_without_network(tmp_path):
     asyncio.run(scenario())
 
 
+def test_titled_video_card_gets_verified_detail_and_redirect_is_rejected(tmp_path):
+    async def scenario():
+        note_a, note_b, unrelated = "a" * 24, "b" * 24, "c" * 24
+        async with async_playwright() as p:
+            context = await p.chromium.launch_persistent_context(
+                str(tmp_path / "profile"),
+                headless=True,
+                channel=settings.xhs_browser_channel,
+            )
+            detail_visits: list[str] = []
+
+            async def route_handler(route):
+                url = route.request.url
+                if f"/explore/{note_a}" in url:
+                    detail_visits.append(note_a)
+                    html = """<div id='noteContainer'><div id='detail-title'>我的人生镊子！</div>
+                    <div id='detail-desc'>用镊子夹取贴纸做手账。</div>
+                    <video style='width:400px;height:250px'></video></div>"""
+                    await route.fulfill(status=200, body=html, content_type="text/html; charset=utf-8")
+                elif f"/explore/{note_b}" in url:
+                    detail_visits.append(note_b)
+                    await route.fulfill(
+                        status=302,
+                        headers={"location": f"https://www.xiaohongshu.com/explore/{unrelated}"},
+                        body="",
+                    )
+                elif f"/explore/{unrelated}" in url:
+                    html = """<div id='noteContainer'><div id='detail-title'>其他视频</div>
+                    <div id='detail-desc'>镊子 贴纸</div>
+                    <video style='width:400px;height:250px'></video></div>"""
+                    await route.fulfill(status=200, body=html, content_type="text/html; charset=utf-8")
+                elif "keyword=" in url:
+                    html = f"""<section class='note-item'><a class='cover' href='/explore/{note_a}'>A</a>
+                    <div class='title'>我的人生镊子！</div><span>00:12</span></section>
+                    <section class='note-item'><a class='cover' href='/explore/{note_b}'>B</a>
+                    <div class='title'>贴纸书</div><span>00:14</span></section>"""
+                    await route.fulfill(status=200, body=html, content_type="text/html; charset=utf-8")
+                else:
+                    await route.fulfill(status=200, body="<body>Home</body>", content_type="text/html; charset=utf-8")
+
+            await context.route("**/*", route_handler)
+            page = await context.new_page()
+            await page.goto(HOME)
+            browser = BrowserService(tmp_path / "unused", headless=True)
+            browser.context = context
+            browser.page = page
+            provider = XiaohongshuProvider(browser)
+            results = await provider.search("贴纸镊子", 5, SearchFilters())
+            assert len(results) == 1
+            assert results[0].platform_video_id == note_a
+            assert results[0].caption == "用镊子夹取贴纸做手账。"
+            assert detail_visits == [note_a, note_b]
+            assert len(provider.detail_cache) == 1
+            await context.close()
+
+    asyncio.run(scenario())
+
+
 def test_browser_status_does_not_report_its_own_lock_as_busy(tmp_path):
     async def scenario():
         browser = BrowserService(tmp_path / "profile", headless=True)

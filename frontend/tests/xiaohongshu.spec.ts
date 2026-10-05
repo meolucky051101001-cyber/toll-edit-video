@@ -325,6 +325,49 @@ test("platform button switches between real platforms and normalizes limit if ne
   await expect(limitSelect).toHaveValue("5");
 });
 
+test("dual-platform real search submits both providers and keeps the combined limit", async ({ page }) => {
+  const searchReqPromise = page.waitForRequest(
+    (req) => req.url().endsWith("/api/search") && req.method() === "POST",
+  );
+  await page.route("**/api/search", (route) =>
+    route.fulfill({
+      status: 202,
+      json: {
+        id: "dual-platform-fixture",
+        original_query: "decor bàn học",
+        platforms: ["douyin", "xiaohongshu"],
+        status: "completed",
+        requested_limit: 5,
+        found_count: 0,
+        processed_count: 0,
+        duplicate_count: 0,
+        provider_counts: { douyin: 0, xiaohongshu: 0 },
+        created_at: new Date().toISOString(),
+        error_message: null,
+        is_mock: false,
+        queries: [],
+      },
+    }),
+  );
+  await page.route("**/api/search/jobs/dual-platform-fixture", (route) =>
+    route.fulfill({ json: { id: "dual-platform-fixture", status: "completed", platforms: ["douyin", "xiaohongshu"], requested_limit: 5, processed_count: 0, found_count: 0, provider_counts: {} } }),
+  );
+  await page.route("**/api/videos?**", (route) =>
+    route.fulfill({ json: { items: [], total: 0, page: 1 } }),
+  );
+
+  await page.goto("/?mode=both");
+  await expect(page.getByRole("combobox", { name: "Nguồn tìm kiếm" })).toHaveValue("both");
+  await page.getByRole("combobox", { name: "Số kết quả", exact: true }).selectOption("5");
+  await page.getByRole("textbox", { name: "Chủ đề tìm kiếm" }).fill("decor bàn học");
+  await page.getByRole("button", { name: "Tìm trên cả hai" }).click();
+
+  const payload = (await searchReqPromise).postDataJSON() as SearchPayload;
+  expect(payload.mode).toBe("both");
+  expect(payload.platforms).toEqual(["douyin", "xiaohongshu"]);
+  expect(payload.limit).toBe(5);
+});
+
 test("unvalidated mode query param defaults to mock in UI and search payload", async ({ page }) => {
   const searchReqPromise = page.waitForRequest(
     (req) => req.url().includes("/api/search") && req.method() === "POST",

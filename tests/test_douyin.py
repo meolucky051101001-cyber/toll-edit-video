@@ -1,5 +1,8 @@
 
 
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
 from backend.providers.douyin.parser import (
     classify_page,
     parse_count_text,
@@ -7,6 +10,21 @@ from backend.providers.douyin.parser import (
     validate_image_url,
     video_url,
 )
+from backend.services.douyin_browser_service import has_usable_douyin_document
+
+
+def test_navigation_timeout_recovery_requires_real_douyin_document():
+    page = MagicMock()
+    page.url = "https://www.douyin.com/"
+    page.evaluate = AsyncMock(return_value=True)
+    assert asyncio.run(has_usable_douyin_document(page)) is True
+
+    page.url = "https://www.douyin.com.evil.invalid/"
+    assert asyncio.run(has_usable_douyin_document(page)) is False
+
+    page.url = "https://www.douyin.com/"
+    page.evaluate = AsyncMock(return_value=False)
+    assert asyncio.run(has_usable_douyin_document(page)) is False
 
 
 def test_douyin_video_url():
@@ -53,6 +71,15 @@ def test_douyin_classify_page():
 
     # Page available
     assert classify_page("发现精彩视频 搜索结果", title="文具开箱 - 抖音") == "page_available"
+    assert (
+        classify_page(
+            "抖音精选 首页推荐 verify SDK loaded",
+            title="抖音精选电脑版 - 抖音旗下优质视频平台",
+            url="https://www.douyin.com/jingxuan",
+        )
+        == "page_available"
+    )
+    assert classify_page("拼图手工视频分享", title="精选视频") == "page_available"
 
 
 def test_douyin_parse_count_text():
@@ -156,3 +183,23 @@ def test_douyin_browser_api(client):
     data = resp.json()
     assert "state" in data
     assert data["base_url"] == "https://www.douyin.com"
+
+
+def test_douyin_qr_screenshot_refuses_to_return_an_arbitrary_page_crop(client):
+    from unittest.mock import AsyncMock, MagicMock
+
+    browser = client.app.state.douyin_browser
+    page = MagicMock()
+    page.locator = MagicMock()
+    qr_locator = MagicMock()
+    qr_locator.first = qr_locator
+    qr_locator.count = AsyncMock(return_value=0)
+    page.locator.return_value = qr_locator
+    page.screenshot = AsyncMock()
+    browser.get_active_page = MagicMock(return_value=page)
+
+    response = client.get("/api/browser/douyin/screenshot?crop=qr")
+
+    assert response.status_code == 404
+    assert "chưa hiển thị mã QR" in response.json()["detail"]
+    page.screenshot.assert_not_awaited()

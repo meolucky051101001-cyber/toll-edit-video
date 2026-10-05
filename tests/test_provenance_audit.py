@@ -457,3 +457,49 @@ def test_live_crawl_manifest_append_and_lookup(tmp_path):
     assert res.source_provenance_verified is True
     assert res.status == "VERIFIED_STRICT"
 
+
+
+
+def test_metadata_hash_version_is_explicit_and_strict():
+    from backend.services.identity_policy import compute_sample_metadata_hash
+
+    sample = _make_valid_douyin_sample()
+    record = create_capture_manifest_record(sample)
+    legacy = dict(record, hash_version="v1")
+    legacy["metadata_hash"] = compute_sample_metadata_hash(sample, version="v1")
+    assert audit_sample_provenance(sample, capture_manifest=[legacy]).source_provenance_verified is True
+
+    v2_with_v1_hash = dict(record, metadata_hash=compute_sample_metadata_hash(sample, version="v1"))
+    result = audit_sample_provenance(sample, capture_manifest=[v2_with_v1_hash])
+    assert result.source_provenance_verified is False
+    assert result.status == "UNVERIFIED_HASH_MISMATCH"
+
+    for invalid in (dict(record, hash_version="v3"), {k: v for k, v in record.items() if k != "hash_version"}):
+        result = audit_sample_provenance(sample, capture_manifest=[invalid])
+        assert result.source_provenance_verified is False
+        assert result.status == "UNVERIFIED_UNSUPPORTED_HASH_VERSION"
+
+
+def test_annotation_audit_fails_closed_for_missing_hash_or_invalid_schema():
+    from backend.services.identity_policy import audit_sample_annotation, create_annotation_record
+
+    sample = _make_valid_douyin_sample()
+    valid = create_annotation_record(sample, reviewer="benchmark_reviewer", reviewed_at="2026-09-22T10:00:00Z")
+    missing_hash = dict(valid)
+    missing_hash.pop("annotation_hash")
+    assert audit_sample_annotation(sample, missing_hash)[0] is False
+
+    invalid_records = [
+        dict(valid, ground_truth_relevance="true"),
+        dict(valid, annotation_version="v2"),
+        dict(valid, reviewer=""),
+        dict(valid, reviewed_at="2026-09-22"),
+        dict(valid, record_id=""),
+        dict(valid, platform="xiaohongshu"),
+        dict(valid, platform_video_id="different-id"),
+    ]
+    for invalid in invalid_records:
+        assert audit_sample_annotation(sample, invalid)[0] is False
+
+    tampered = dict(valid, rationale="tampered")
+    assert audit_sample_annotation(sample, tampered)[0] is False

@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from backend.models import SearchJob
 from backend.providers.base import SearchFilters, SearchProvider
@@ -124,3 +124,19 @@ def test_adaptive_harvest_cascades_to_fill_deficit(sessions):
     assert len(provider.calls) == 2
     assert provider.calls[0] == ("机械键盘", 10)
     assert provider.calls[1] == ("客制化键盘", 6)
+
+
+def test_non_mock_untrusted_provider_never_writes_live_manifest(tmp_path, sessions):
+    provider = ControllableProvider("xiaohongshu", yield_counts=[1])
+    writer = Mock()
+    service = SearchService(sessions, factory=lambda _platform, _is_mock: provider, capture_writer=writer)
+    with sessions() as db:
+        job = SearchJob(original_query="bàn phím cơ", platforms=["xiaohongshu"], requested_limit=1, is_mock=False)
+        db.add(job)
+        db.commit()
+        job_id = job.id
+    with patch.object(service, "prepare_queries", return_value=["机械键盘"]):
+        asyncio.run(service.run(job_id))
+    assert provider.capture_origin == "untrusted"
+    writer.assert_not_called()
+    assert not (tmp_path / "isolated_live_capture_manifest.jsonl").exists()

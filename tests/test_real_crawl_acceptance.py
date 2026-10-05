@@ -16,6 +16,13 @@ from backend.services.translator import plan_query
 
 BENCHMARK_FILE = Path(__file__).resolve().parent.parent / "data" / "benchmarks" / "crawled_benchmark_samples.json"
 
+
+
+def _live_test_manifest_path(tmp_path: Path) -> Path:
+    configured = os.environ.get("LIVE_CAPTURE_MANIFEST_PATH")
+    return Path(configured) if configured else tmp_path / "live_capture_test.jsonl"
+
+
 MIN_LIVE_SAMPLES, MIN_LIVE_RELEVANCE_RATE = validate_live_gate_config(
     os.environ.get("MIN_LIVE_SAMPLES", "3"),
     os.environ.get("MIN_LIVE_RELEVANCE_RATE", "0.80"),
@@ -139,7 +146,7 @@ async def test_live_network_probe_reachability():
 
 @pytest.mark.live_acceptance
 @pytest.mark.anyio
-async def test_live_crawl_douyin_real_results():
+async def test_live_crawl_douyin_real_results(tmp_path: Path):
     """Strictly validates that Douyin live search retrieves real video items matching compound query intent."""
     if os.environ.get("LIVE_CRAWL_ENABLED") != "1":
         pytest.skip("Pass LIVE_CRAWL_ENABLED=1 to execute live Douyin crawl")
@@ -199,6 +206,7 @@ async def test_live_crawl_douyin_real_results():
             submitted_query=target_query,
             session_id=f"live-douyin-{int(time.time())}",
             collector_version="v1.2.0-live",
+            manifest_path=_live_test_manifest_path(tmp_path),
         )
 
         breakdown = rank_detailed(r, raw_query, alternative_queries=plan.tiered_queries)
@@ -235,7 +243,7 @@ async def test_live_crawl_douyin_real_results():
 
 @pytest.mark.live_acceptance
 @pytest.mark.anyio
-async def test_live_crawl_xiaohongshu_real_results():
+async def test_live_crawl_xiaohongshu_real_results(tmp_path: Path):
     """Strictly validates that Xiaohongshu live search retrieves real video items matching compound query intent."""
     if os.environ.get("LIVE_CRAWL_ENABLED") != "1":
         pytest.skip("Pass LIVE_CRAWL_ENABLED=1 to execute live Xiaohongshu crawl")
@@ -295,6 +303,7 @@ async def test_live_crawl_xiaohongshu_real_results():
             submitted_query=target_query,
             session_id=f"live-xhs-{int(time.time())}",
             collector_version="v1.2.0-live",
+            manifest_path=_live_test_manifest_path(tmp_path),
         )
 
         breakdown = rank_detailed(r, raw_query, alternative_queries=plan.tiered_queries)

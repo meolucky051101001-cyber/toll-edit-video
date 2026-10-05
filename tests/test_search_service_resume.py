@@ -17,6 +17,7 @@ from backend.api.search import serialize_job
 from backend.models import JobVideo, SearchJob, SearchPlan, Video
 from backend.providers.base import (
     ManualActionTimeoutError,
+    ProviderUnavailableError,
     SearchProvider,
     UserActionRequired,
 )
@@ -223,6 +224,115 @@ async def test_cancel_waiting_job_releases_cleanly():
     await service.cancel(job_id)
     assert event.is_set()
     assert mock_job.status == "cancelled"
+
+
+@pytest.mark.anyio
+async def test_dual_platform_keeps_other_results_when_first_provider_unavailable(sessions):
+    job_id = "test-first-provider-unavailable"
+    with sessions() as db:
+        db.add(SearchJob(
+            id=job_id,
+            original_query="decor bàn học",
+            platforms=["douyin", "xiaohongshu"],
+            requested_limit=2,
+            is_mock=False,
+        ))
+        db.add(SearchPlan(job_id=job_id, queries=["书桌布置"], use_ai=False))
+        db.commit()
+
+    douyin = FakeMultiPlatformProvider("douyin", ProviderUnavailableError("Douyin timeout"))
+    xhs = FakeMultiPlatformProvider("xiaohongshu", [VideoResult(
+        platform="xiaohongshu", platform_video_id="xhs_available_001",
+        title="书桌布置视频", url="https://www.xiaohongshu.com/explore/xhs_available_001",
+    )])
+    service = SearchService(
+        sessions=sessions,
+        factory=lambda platform, _mock: douyin if platform == "douyin" else xhs,
+    )
+    await service.pipeline(job_id)
+    with sessions() as db:
+        current = db.get(SearchJob, job_id)
+        assert current is not None
+        assert current.status == "failed"
+        assert current.processed_count == 1
+        assert current.provider_counts == {"xiaohongshu": 1}
+        assert current.diagnostics["provider_errors"] == {"douyin": "Douyin timeout"}
+        assert "Douyin timeout" in current.error_message
+    assert douyin.call_count == 1
+    assert xhs.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_dual_platform_collects_second_before_waiting_on_first(sessions):
+    job_id = "test-deferred-first-platform"
+    with sessions() as db:
+        db.add(SearchJob(
+            id=job_id,
+            original_query="decor bàn học",
+            platforms=["douyin", "xiaohongshu"],
+            requested_limit=2,
+            is_mock=False,
+        ))
+        db.add(SearchPlan(job_id=job_id, queries=["书桌布置"], use_ai=False))
+        db.commit()
+
+    douyin_browser = MagicMock()
+    douyin_page = AsyncMock()
+    douyin_page.is_closed = MagicMock(return_value=False)
+    douyin_page.url = "https://www.douyin.com"
+    douyin_browser.get_active_page = MagicMock(return_value=douyin_page)
+    douyin_browser.page = douyin_page
+    douyin_browser.inspect = AsyncMock(return_value="verification_required")
+    gate = UserActionRequired(state="waiting_for_user", message="Douyin CAPTCHA", partial=[])
+    douyin_result = VideoResult(
+        platform="douyin", platform_video_id="dy_deferred_001",
+        title="书桌布置视频", url="https://www.douyin.com/video/dy_deferred_001",
+    )
+    xhs_result = VideoResult(
+        platform="xiaohongshu", platform_video_id="xhs_deferred_001",
+        title="书桌布置视频", url="https://www.xiaohongshu.com/explore/xhs_deferred_001",
+    )
+    douyin = FakeMultiPlatformProvider(
+        "douyin", lambda calls: gate if calls == 1 else [douyin_result], browser=douyin_browser,
+    )
+    xhs = FakeMultiPlatformProvider("xiaohongshu", [xhs_result])
+    service = SearchService(
+        sessions=sessions,
+        factory=lambda platform, _mock: douyin if platform == "douyin" else xhs,
+    )
+    task = asyncio.create_task(service.pipeline(job_id))
+    try:
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            with sessions() as db:
+                current = db.get(SearchJob, job_id)
+                if current and current.status == "waiting_for_user":
+                    break
+        with sessions() as db:
+            current = db.get(SearchJob, job_id)
+            assert current is not None
+            assert current.status == "waiting_for_user"
+            assert current.active_platform == "douyin"
+            assert current.provider_counts == {"xiaohongshu": 1}
+            assert current.processed_count == 1
+        assert douyin.call_count == 1
+        assert xhs.call_count == 1
+
+        douyin_browser.inspect = AsyncMock(return_value="page_available")
+        accepted, _ = await service.verify_and_resume(job_id)
+        assert accepted is True
+        await asyncio.wait_for(task, timeout=5)
+        with sessions() as db:
+            current = db.get(SearchJob, job_id)
+            assert current is not None
+            assert current.status == "completed"
+            assert current.provider_counts == {"xiaohongshu": 1, "douyin": 1}
+            assert current.processed_count == 2
+        assert douyin.call_count == 2
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.anyio

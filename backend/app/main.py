@@ -36,6 +36,7 @@ from backend.services.browser_service import BrowserService
 from backend.services.douyin_browser_service import DouyinBrowserService
 from backend.services.download.browser_resolver import BrowserMediaResolver
 from backend.services.download.service import DownloadService
+from backend.services.identity_policy import record_live_crawl_capture
 from backend.services.metric_service import MetricService
 from backend.services.observability import telemetry_service
 from backend.services.search_service import SearchService
@@ -126,6 +127,7 @@ async def lifespan(app: FastAPI):
         ai=app.state.ai,
         event_bus=app.state.event_bus,
         metric_service=app.state.metrics,
+        capture_writer=record_live_crawl_capture,
     )
     app.state.search.recover_interrupted()
     app.state.download = DownloadService(

@@ -2,7 +2,6 @@
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
-from backend.core.database import SessionLocal
 from backend.models.download_job import DownloadJob
 from backend.schemas.downloads import BatchDownloadRequest, DownloadJobOut
 
@@ -89,7 +88,7 @@ def download_file(download_id: str, request: Request):
     if not service:
         raise HTTPException(503, "Dịch vụ tải chưa được khởi tạo.")
 
-    with SessionLocal() as db:
+    with service.sessions() as db:
         job = db.get(DownloadJob, download_id)
         if not job:
             raise HTTPException(404, "Không tìm thấy tiến trình tải này.")

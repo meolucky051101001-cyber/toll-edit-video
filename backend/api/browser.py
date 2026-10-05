@@ -56,7 +56,7 @@ async def get_screenshot(request: Request, crop: str | None = None):
     try:
         if crop == "qr":
             qr_elem = page.locator(
-                ".qrcode-img:visible, [class*='qrcode'] img:visible, [class*='qrcode']:visible, canvas:visible"
+                ".qrcode-img:visible, [class*='qrcode'] img:visible, [class*='qrcode']:visible"
             ).first
             if await qr_elem.count() > 0:
                 box = await qr_elem.bounding_box()
@@ -73,12 +73,9 @@ async def get_screenshot(request: Request, crop: str | None = None):
                         media_type="image/png",
                         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
                     )
-            clip = {"x": 300, "y": 220, "width": 320, "height": 340}
-            img_bytes = await page.screenshot(clip=clip)
-            return Response(
-                content=img_bytes,
-                media_type="image/png",
-                headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+            raise HTTPException(
+                404,
+                "Xiaohongshu chưa hiển thị mã QR đăng nhập. Hãy mở cửa sổ trình duyệt để kiểm tra trực tiếp.",
             )
 
         img_bytes = await page.screenshot()
@@ -87,6 +84,8 @@ async def get_screenshot(request: Request, crop: str | None = None):
             media_type="image/png",
             headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
         )
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(503, "Không chụp được màn hình trình duyệt.")
 
@@ -143,6 +142,32 @@ async def douyin_status(request: Request):
     return await request.app.state.douyin_browser.refresh_status()
 
 
+@router.post("/refresh_verification")
+@douyin_router.post("/refresh_verification")
+async def refresh_verification(request: Request):
+    """Reload the actual blocked tab, without clearing the saved login."""
+    browser = (
+        request.app.state.douyin_browser
+        if "/douyin/" in request.url.path
+        else request.app.state.browser
+    )
+    if browser.lock.locked():
+        raise HTTPException(409, "Trình duyệt đang tìm kiếm. Hãy chờ trạng thái yêu cầu xác minh.")
+    async with browser.lock:
+        try:
+            page = browser.get_active_page()
+        except ProviderUnavailableError:
+            raise HTTPException(404, "Trình duyệt chưa mở.") from None
+        if browser.state != "verification_required":
+            raise HTTPException(409, "Trang hiện tại không yêu cầu CAPTCHA. Hãy kiểm tra trạng thái hoặc tiếp tục lượt tìm.")
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=30000)
+            await browser.inspect(page)
+            return browser.snapshot()
+        except Exception:
+            raise HTTPException(503, "Trang xác minh chưa tải được. Kiểm tra kết nối rồi thử lại; phiên đăng nhập được giữ nguyên.") from None
+
+
 @douyin_router.post("/open")
 async def open_douyin_browser(request: Request):
     browser = request.app.state.douyin_browser
@@ -190,12 +215,9 @@ async def get_douyin_screenshot(request: Request, crop: str | None = None):
                         media_type="image/png",
                         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
                     )
-            clip = {"x": 420, "y": 180, "width": 440, "height": 480}
-            img_bytes = await page.screenshot(clip=clip)
-            return Response(
-                content=img_bytes,
-                media_type="image/png",
-                headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+            raise HTTPException(
+                404,
+                "Douyin chưa hiển thị mã QR đăng nhập. Hãy mở cửa sổ trình duyệt để kiểm tra trực tiếp.",
             )
 
         img_bytes = await page.screenshot()
@@ -204,6 +226,8 @@ async def get_douyin_screenshot(request: Request, crop: str | None = None):
             media_type="image/png",
             headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
         )
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(503, "Không chụp được màn hình trình duyệt.")
 
@@ -224,7 +248,11 @@ async def inspect_cards(request: Request):
                 rawHref: a.href,
             }));
             const title = c.querySelector('.title, [class*="title"], .desc, [class*="desc"]')?.innerText?.trim();
-            return { index: idx, title, anchors };
+            const mediaClasses = Array.from(c.querySelectorAll('svg, span, div, video'))
+                .map(el => ({ tag: el.tagName, className: typeof el.className === 'string' ? el.className : el.className?.baseVal || '' }))
+                .filter(el => /play|video|duration|cover|badge|type|mask|note/i.test(el.className))
+                .slice(0, 20);
+            return { index: idx, title, anchors, mediaClasses };
         });
     }""")
 

@@ -44,17 +44,19 @@ def classify_page(body: str, title: str = "", url: str = "") -> str:
             term in content
             for term in [
                 "验证码中间页",
-                "完成验证",
-                "安全验证",
+                "完成验证后继续",
                 "请完成下列验证",
                 "拖动滑块",
                 "按住左边按钮拖动",
-                "拼图",
-                "verify",
-                "security verification",
+                "请完成安全验证",
+                "请通过安全验证",
+                "please complete the following verification",
+                "complete the verification to continue",
+                "drag the slider",
+                "hold the left button and drag",
             ]
         )
-        or "verify" in split_url.path.lower()
+        or re.search(r"/(?:verify|verification|captcha)(?:/|$)", split_url.path.lower())
     ):
         return "verification_required"
 

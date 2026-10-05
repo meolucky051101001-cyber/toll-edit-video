@@ -5,7 +5,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import timedelta
-from typing import cast
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -33,8 +33,8 @@ from backend.services.identity_policy import (
     validate_result_identity,
 )
 from backend.services.metric_service import MetricService
-from backend.services.ranking_service import rank_detailed
-from backend.services.translator import is_cjk, plan_query_async
+from backend.services.ranking_service import rank_detailed, validate_compound_intent_relevance
+from backend.services.translator import is_cjk, normalize_vietnamese, plan_query_async
 
 TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
 logger = logging.getLogger("research")
@@ -48,9 +48,11 @@ class SearchService:
         ai: AIService | None = None,
         event_bus: EventBus | None = None,
         metric_service: MetricService | None = None,
+        capture_writer: Callable[..., dict[str, Any]] | None = None,
     ):
         self.sessions = sessions
         self.factory = factory
+        self.capture_writer = capture_writer
         self.ai = ai
         self.event_bus = event_bus if event_bus is not None else default_event_bus
         self.metric_service = (
@@ -68,6 +70,7 @@ class SearchService:
         self.waiters: dict[str, asyncio.Event] = {}
         self.deadlines: dict[str, asyncio.Timeout] = {}
         self.waiting_contexts: dict[str, tuple[SearchProvider, UserActionRequired, str]] = {}
+        self.deferred_providers: dict[str, dict[str, SearchProvider]] = {}
 
     def get_platform_lock(self, platform: str) -> asyncio.Lock:
         if platform not in self.platform_locks:
@@ -85,7 +88,9 @@ class SearchService:
             if job:
                 diag = dict(job.diagnostics or {})
                 for key, value in values.items():
-                    if hasattr(job, key):
+                    if key == "diagnostics" and isinstance(value, dict):
+                        diag.update(value)
+                    elif hasattr(job, key):
                         setattr(job, key, value)
                     if key in ("active_platform", "waiting_reason"):
                         diag[key] = value
@@ -105,6 +110,12 @@ class SearchService:
 
     async def cancel(self, job_id: str) -> None:
         self.waiting_contexts.pop(job_id, None)
+        deferred = self.deferred_providers.pop(job_id, {})
+        for provider in deferred.values():
+            try:
+                await provider.close()
+            except Exception:
+                pass
         event = self.waiters.get(job_id)
         if event:
             event.set()
@@ -186,6 +197,12 @@ class SearchService:
             )
             logger.error("job=%s provider=- query=- error_type=%s", job_id, type(error).__name__)
             self.update(job_id, status="failed", completed_at=utcnow(), error_message=message)
+        finally:
+            for provider in self.deferred_providers.pop(job_id, {}).values():
+                try:
+                    await provider.close()
+                except Exception:
+                    logger.warning("job=%s deferred_provider_cleanup_failed", job_id)
 
     async def pipeline(self, job_id: str) -> None:
         self.update(job_id, status="searching", started_at=utcnow())
@@ -201,8 +218,21 @@ class SearchService:
         queries = await self.prepare_queries(job_id, query)
         if not use_mock:
             queries = queries[:3]
-        for platform_index, platform in enumerate(platforms):
-            provider_limit = limit // len(platforms) + (platform_index < limit % len(platforms))
+        # If the first provider needs manual verification, let the other provider
+        # collect its quota before waiting. Keep the blocked provider and its page
+        # alive so the user can solve the challenge when we return to it.
+        platform_queue = list(platforms)
+        platform_limits = {
+            name: limit // len(platforms) + (index < limit % len(platforms))
+            for index, name in enumerate(platforms)
+        }
+        deferred_providers: dict[str, SearchProvider] = {}
+        self.deferred_providers[job_id] = deferred_providers
+        deferred_gates: dict[str, UserActionRequired] = {}
+        resume_query_at: dict[str, int] = {}
+        provider_failures: dict[str, str] = {}
+        for platform_index, platform in enumerate(platform_queue):
+            provider_limit = platform_limits[platform]
             if provider_limit == 0:
                 continue
             self.update(job_id, active_platform=platform)
@@ -210,13 +240,32 @@ class SearchService:
             async with self.get_platform_lock(lock_key):
                 async with asyncio.timeout(settings.search_timeout) as deadline:
                     self.deadlines[job_id] = deadline
-                    provider = self.factory(cast(Platform, platform), use_mock)
+                    provider = deferred_providers.pop(platform, None) or self.factory(cast(Platform, platform), use_mock)
+                    capture_writer = (self.capture_writer if not use_mock and getattr(provider, "capture_origin", "untrusted") == "live_provider" else None)
+                    deferred = False
+                    provider_failed = False
                     try:
+                        deferred_gate = deferred_gates.pop(platform, None)
+                        if deferred_gate is not None:
+                            self.update(
+                                job_id,
+                                waiting_reason=(
+                                    "login_required"
+                                    if deferred_gate.state == "waiting_for_login"
+                                    else "verification_required"
+                                ),
+                            )
+                            await self.wait_for_user(
+                                job_id, deferred_gate, provider=provider, platform=platform,
+                            )
                         for index, term in enumerate(queries):
+                            if index < resume_query_at.get(platform, 0):
+                                continue
                             with self.sessions() as db:
                                 current = db.get(SearchJob, job_id)
                                 assert current is not None
                                 remaining = provider_limit - current.provider_counts.get(platform, 0)
+                                has_precision_filter = current.min_relevance is not None
                                 if remaining <= 0 or current.processed_count >= current.requested_limit:
                                     break
                                 db.add(SearchQuery(job_id=job_id, platform=platform, query=term))
@@ -226,7 +275,9 @@ class SearchService:
                                     1, (remaining + len(queries) - index - 1) // (len(queries) - index)
                                 )
                             else:
-                                query_limit = remaining
+                                # The requested quota counts accepted videos, not raw cards.
+                                # Bound extra work per query when relevance filtering is active.
+                                query_limit = min(remaining * 3, 150) if has_precision_filter else remaining
                             self.update(job_id, status="searching", active_platform=platform)
 
                             streamed = False
@@ -242,6 +293,7 @@ class SearchService:
                                     provider_limit,
                                     alternative_queries=queries,
                                     original_query=query,
+                                    capture_writer=capture_writer,
                                 )
 
                             while True:
@@ -277,8 +329,42 @@ class SearchService:
                                             provider_limit,
                                             alternative_queries=queries,
                                             original_query=query,
+                                            capture_writer=capture_writer,
                                         )
+                                    if platform_index < len(platforms) - 1 and platform not in resume_query_at:
+                                        resume_query_at[platform] = index
+                                        deferred_providers[platform] = provider
+                                        deferred_gates[platform] = gate
+                                        platform_queue.append(platform)
+                                        deferred = True
+                                        next_plat = (
+                                            platforms[platform_index + 1]
+                                            if platform_index + 1 < len(platforms)
+                                            else platform
+                                        )
+                                        self.update(
+                                            job_id,
+                                            status="searching",
+                                            active_platform=next_plat,
+                                            waiting_reason=None,
+                                            error_message=None,
+                                        )
+                                        break
                                     await self.wait_for_user(job_id, gate, provider=provider, platform=platform)
+                                except ProviderError as error:
+                                    provider_failures[platform] = str(error)
+                                    self.update(
+                                        job_id,
+                                        diagnostics={"provider_errors": dict(provider_failures)},
+                                    )
+                                    logger.warning(
+                                        "job=%s provider=%s query=%r error_type=%s detail=%s",
+                                        job_id, platform, term, type(error).__name__, str(error)[:400],
+                                    )
+                                    provider_failed = True
+                                    break
+                            if deferred or provider_failed:
+                                break
                             logger.info(
                                 "job=%s provider=%s query=%r results=%d",
                                 job_id,
@@ -296,6 +382,7 @@ class SearchService:
                                     provider_limit,
                                     alternative_queries=queries,
                                     original_query=query,
+                                    capture_writer=capture_writer,
                                 )
                             with self.sessions() as db:
                                 current = db.get(SearchJob, job_id)
@@ -306,15 +393,27 @@ class SearchService:
                                     break
                     finally:
                         self.deadlines.pop(job_id, None)
-                        await provider.close()
+                        if not deferred:
+                            await provider.close()
         with self.sessions() as db:
             job = db.get(SearchJob, job_id)
             if job and job.status not in TERMINAL:
-                job.status = "completed"
+                job.status = "failed" if provider_failures else "completed"
                 job.completed_at = utcnow()
-                if job.processed_count == 0 and job.found_count == 0:
+                if provider_failures:
+                    summary = (
+                        f"Lượt tìm bị gián đoạn; {job.processed_count} video đã lưu vẫn được giữ. "
+                        if job.processed_count
+                        else "Không thể hoàn tất lượt tìm. "
+                    )
+                    job.error_message = summary + "; ".join(
+                        f"{name}: {message}" for name, message in provider_failures.items()
+                    )
+                    job.diagnostics = {**(job.diagnostics or {}), "provider_errors": provider_failures}
+                elif job.processed_count == 0 and job.found_count == 0:
                     job.error_message = "Không tìm thấy video nào phù hợp với từ khóa và bộ lọc."
                 db.commit()
+        self.deferred_providers.pop(job_id, None)
 
     async def prepare_queries(self, job_id: str, original: str) -> list[str]:
         with self.sessions() as db:
@@ -384,6 +483,7 @@ class SearchService:
         provider_limit: int,
         alternative_queries: list[str] | None = None,
         original_query: str | None = None,
+        capture_writer: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         ranking_target = original_query or query
         for start in range(0, len(results), 8):
@@ -469,6 +569,17 @@ class SearchService:
                             is_rejected = True
                             reject_reason = f"Trùng từ khóa tiêu cực: {', '.join(detail.matched_negative_tokens)}"
 
+                    # The strict compound validator used by the offline benchmark
+                    # must also govern the real search path for this exact intent.
+                    if not is_rejected and normalize_vietnamese(ranking_target).strip() == "nhip gap sticker":
+                        matches_compound, compound_reason = validate_compound_intent_relevance(
+                            result, detail, ranking_target
+                        )
+                        if not matches_compound:
+                            logger.debug("Reject sticker-tweezer candidate %s: %s", result.platform_video_id, compound_reason)
+                            is_rejected = True
+                            reject_reason = "Tiêu đề chưa xác minh được cả nhíp và sticker, hoặc video thuộc lĩnh vực khác"
+
                     if is_rejected:
                         job.rejected_count += 1
                         diag = dict(job.diagnostics or {})
@@ -519,9 +630,8 @@ class SearchService:
                         )
                         db.add(existing)
                         db.flush()
-                        if not result.is_mock:
-                            from backend.services.identity_policy import record_live_crawl_capture
-                            record_live_crawl_capture(
+                        if capture_writer is not None and not result.is_mock:
+                            capture_writer(
                                 result,
                                 query=ranking_target,
                                 submitted_query=query,

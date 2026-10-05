@@ -21,9 +21,16 @@ async def create_search(payload: SearchRequest, request: Request, db: Session = 
     use_mock = payload.mode == "mock" if payload.mode else settings.use_mock_provider
     if not use_mock:
         valid_platforms = {"xiaohongshu", "douyin"}
-        if len(payload.platforms) != 1 or payload.platforms[0] not in valid_platforms or payload.limit > 100:
+        if (
+            len(payload.platforms) > 2
+            or len(set(payload.platforms)) != len(payload.platforms)
+            or not set(payload.platforms).issubset(valid_platforms)
+            or payload.limit > 100
+            or (payload.mode == "both" and set(payload.platforms) != valid_platforms)
+            or (payload.mode in valid_platforms and payload.platforms != [payload.mode])
+        ):
             raise HTTPException(
-                422, "Tìm thật hỗ trợ Xiaohongshu hoặc Douyin, tối đa 100 video/lượt. Các nền tảng khác vui lòng thử ở chế độ Dữ liệu mẫu (Mock)."
+                422, "Tìm thật hỗ trợ Douyin, Xiaohongshu hoặc cả hai, tối đa 100 video/lượt. Các nền tảng khác chỉ có trong Dữ liệu mẫu."
             )
         if payload.selected_queries and len(payload.selected_queries) > 3:
             raise HTTPException(

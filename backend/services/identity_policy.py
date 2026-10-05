@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -30,7 +31,16 @@ logger = logging.getLogger(__name__)
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 DEFAULT_LIVE_MANIFEST_PATH = ROOT_DIR / "data" / "manifests" / "live_capture_manifest.jsonl"
+LIVE_CAPTURE_MANIFEST_ENV = "LIVE_CAPTURE_MANIFEST_PATH"
 DEFAULT_METADATA_HASH_VERSION = "v2"
+
+
+def resolve_live_capture_manifest_path(manifest_path: Path | str | None = None) -> Path:
+    """Resolve an explicit path, an isolated-run override, or the production manifest."""
+    if manifest_path is not None:
+        return Path(manifest_path)
+    configured_path = os.environ.get(LIVE_CAPTURE_MANIFEST_ENV)
+    return Path(configured_path) if configured_path else DEFAULT_LIVE_MANIFEST_PATH
 DEFAULT_ANNOTATION_HASH_VERSION = "v1"
 
 XHS_NOTE_REGEX = re.compile(
@@ -460,6 +470,8 @@ def compute_sample_metadata_hash(
     Version v1 (legacy compatibility): Covers collected_at, collector_version, media_type,
     platform, platform_video_id, query, session_id, submitted_query, title, url.
     """
+    if version not in {"v1", "v2"}:
+        raise ValueError(f"Unsupported metadata hash version: {version}")
     canonical_payload: dict[str, Any]
     if version == "v1":
         canonical_payload = {
@@ -517,34 +529,22 @@ def compute_sample_metadata_hash(
 def compute_sample_annotation_hash(
     annotation: dict[str, Any], version: str = DEFAULT_ANNOTATION_HASH_VERSION
 ) -> str:
-    """Computes a deterministic SHA-256 hash for benchmark annotation labels.
-
-    Decoupled from raw crawl capture metadata: covers ground_truth_relevance,
-    rationale, reviewer, reviewed_at timestamp, and target_video_id.
-    """
+    """Computes a deterministic SHA-256 hash for a supported annotation record."""
+    if version != "v1":
+        raise ValueError(f"Unsupported annotation hash version: {version}")
+    relevance = annotation.get("ground_truth_relevance")
+    if type(relevance) is not bool:
+        raise ValueError("ground_truth_relevance must be a boolean")
     canonical_payload = {
         "annotation_version": version,
-        "ground_truth_relevance": bool(annotation.get("ground_truth_relevance")),
+        "ground_truth_relevance": relevance,
         "platform": str(annotation.get("platform") or "").strip().lower(),
-        "platform_video_id": str(
-            annotation.get("platform_video_id") or annotation.get("id") or ""
-        ).strip(),
+        "platform_video_id": str(annotation.get("platform_video_id") or annotation.get("id") or "").strip(),
         "rationale": str(annotation.get("rationale") or "").strip(),
-        "reviewed_at": str(
-            annotation.get("reviewed_at")
-            or annotation.get("annotated_at")
-            or annotation.get("collected_at")
-            or ""
-        ).strip(),
-        "reviewer": str(
-            annotation.get("reviewer")
-            or annotation.get("annotator")
-            or "curator"
-        ).strip(),
+        "reviewed_at": str(annotation.get("reviewed_at") or annotation.get("annotated_at") or annotation.get("collected_at") or "").strip(),
+        "reviewer": str(annotation.get("reviewer") or annotation.get("annotator") or "").strip(),
     }
-    encoded = json.dumps(
-        canonical_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
+    encoded = json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
@@ -576,42 +576,54 @@ def audit_sample_annotation(
     sample: dict[str, Any],
     annotation_record: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
-    """Audits annotation integrity between a sample and its independent annotation record.
-
-    Detects if ground_truth_relevance or rationale was tampered with or modified.
-    """
-    if annotation_record is not None:
-        rec_gt = bool(annotation_record.get("ground_truth_relevance"))
-        sample_gt = bool(sample.get("ground_truth_relevance"))
-        if rec_gt != sample_gt:
-            return False, f"Annotation relevance mismatch: sample has {sample_gt} but record has {rec_gt}"
-        rec_rat = str(annotation_record.get("rationale") or "").strip()
-        sample_rat = str(sample.get("rationale") or "").strip()
-        if rec_rat != sample_rat:
-            return False, f"Annotation rationale mismatch: sample '{sample_rat}' vs record '{rec_rat}'"
-        expected_hash = annotation_record.get("annotation_hash")
-        computed_hash = compute_sample_annotation_hash(annotation_record)
-        if expected_hash and expected_hash != computed_hash:
-            return False, f"Annotation record hash mismatch: expected {expected_hash}, calculated {computed_hash}"
-        return True, f"Annotation verified against record '{annotation_record.get('record_id')}'"
-
-    # If sample itself has annotation_hash
-    sample_hash = sample.get("annotation_hash")
-    if sample_hash:
-        computed = compute_sample_annotation_hash(sample)
-        if sample_hash != computed:
-            return False, f"Sample annotation hash mismatch: expected {sample_hash}, calculated {computed}"
-        return True, "Sample annotation hash verified"
-
-    return False, "Missing annotation record or annotation_hash"
+    """Fail-closed audit against a separate, fully identified annotation record."""
+    if annotation_record is None:
+        return False, "Missing independent annotation record"
+    required_text = ("record_id", "platform", "platform_video_id", "rationale", "reviewer", "reviewed_at")
+    for field_name in required_text:
+        value = annotation_record.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            return False, f"Annotation record missing required field '{field_name}'"
+    if annotation_record.get("annotation_version") != "v1":
+        return False, "Unsupported or missing annotation_version"
+    if type(annotation_record.get("ground_truth_relevance")) is not bool:
+        return False, "Annotation ground_truth_relevance must be a boolean"
+    if type(sample.get("ground_truth_relevance")) is not bool:
+        return False, "Sample ground_truth_relevance must be a boolean"
+    try:
+        reviewed_at = datetime.fromisoformat(annotation_record["reviewed_at"].replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False, "Annotation reviewed_at must be an ISO 8601 timestamp"
+    if reviewed_at.tzinfo is None or reviewed_at.utcoffset() is None:
+        return False, "Annotation reviewed_at must include a timezone"
+    if annotation_record["platform"].strip().lower() != str(sample.get("platform") or "").strip().lower():
+        return False, "Annotation platform does not match sample platform"
+    sample_video_id = str(sample.get("platform_video_id") or "").strip()
+    if not sample_video_id or annotation_record["platform_video_id"].strip() != sample_video_id:
+        return False, "Annotation video ID does not match sample video ID"
+    if annotation_record["ground_truth_relevance"] != sample["ground_truth_relevance"]:
+        return False, "Annotation relevance mismatch: sample label differs from annotation record"
+    sample_rationale = sample.get("rationale")
+    if not isinstance(sample_rationale, str) or annotation_record["rationale"].strip() != sample_rationale.strip():
+        return False, "Annotation rationale mismatch: sample rationale differs from annotation record"
+    expected_hash = annotation_record.get("annotation_hash")
+    if not isinstance(expected_hash, str) or not expected_hash.strip():
+        return False, "Missing annotation_hash"
+    try:
+        computed_hash = compute_sample_annotation_hash(annotation_record, version=annotation_record["annotation_version"])
+    except ValueError as exc:
+        return False, str(exc)
+    if expected_hash != computed_hash:
+        return False, f"Annotation record hash mismatch: expected {expected_hash}, calculated {computed_hash}"
+    return True, f"Annotation verified against record '{annotation_record['record_id']}'"
 
 
 def append_live_capture_manifest_record(
     record: dict[str, Any],
     manifest_path: Path | str | None = None,
 ) -> Path:
-    """Appends a verifiable capture record to an independent append-only JSONL manifest file."""
-    p = Path(manifest_path) if manifest_path else DEFAULT_LIVE_MANIFEST_PATH
+    """Append one row; append-only is an application convention, not tamper-proof storage."""
+    p = resolve_live_capture_manifest_path(manifest_path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -699,7 +711,7 @@ def record_live_crawl_capture(
 
 def load_live_capture_manifest(manifest_path: Path | str | None = None) -> list[dict[str, Any]]:
     """Loads all records from an append-only JSONL capture manifest."""
-    p = Path(manifest_path) if manifest_path else DEFAULT_LIVE_MANIFEST_PATH
+    p = resolve_live_capture_manifest_path(manifest_path)
     if not p.exists():
         return []
     records = []
@@ -1114,13 +1126,19 @@ def audit_sample_provenance(
     actual_hash_v1 = compute_sample_metadata_hash(sample, version="v1")
     clean_v1 = actual_hash_v1.strip().lower().removeprefix("sha256:")
 
-    req_version = manifest_rec.get("hash_version", "v2")
+    req_version = manifest_rec.get("hash_version")
+    if req_version not in {"v1", "v2"}:
+        return SampleProvenanceResult(schema_valid=True, source_provenance_verified=False,
+            status="UNVERIFIED_UNSUPPORTED_HASH_VERSION",
+            detail=f"Missing or unsupported metadata hash version: {req_version!r}",
+            reasons=["Manifest must declare a supported hash_version (v1 or v2)"],
+            manifest_record_id=manifest_rec.get("record_id"))
     if req_version == "v1":
-        hash_matched = (clean_exp == clean_v1)
+        hash_matched = clean_exp == clean_v1
         actual_hash_str = actual_hash_v1
     else:
-        hash_matched = (clean_exp == clean_v2) or (clean_exp == clean_v1)
-        actual_hash_str = actual_hash_v2 if clean_exp == clean_v2 else actual_hash_v1
+        hash_matched = clean_exp == clean_v2
+        actual_hash_str = actual_hash_v2
 
     if not hash_matched:
         return SampleProvenanceResult(

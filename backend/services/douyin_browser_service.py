@@ -1,20 +1,30 @@
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
-from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
 from playwright.async_api import BrowserContext, Error, Page, Playwright, async_playwright
+from playwright.async_api import TimeoutError as BrowserTimeout
 
 from backend.core.config import ROOT, settings
 from backend.providers.base import ProviderUnavailableError
 from backend.providers.douyin.parser import classify_page
+from backend.services.browser_session import (
+    load_headful_preference,
+    platform_navigation_url,
+    restore_missing_cookies,
+    save_headful_preference,
+    save_session_checkpoint,
+    visible_challenge_evidence,
+)
 
 logger = logging.getLogger("douyin.browser")
 
 DOUYIN_HOME = "https://www.douyin.com"
 MESSAGES = {
+    "authenticated": "Đã đăng nhập Douyin. Có thể bắt đầu tìm kiếm.",
     "closed": "Trình duyệt Douyin chưa mở.",
     "page_available": "Trang Douyin đã mở. Sẵn sàng tìm kiếm.",
     "login_required": "Douyin yêu cầu đăng nhập tài khoản. Hãy bấm vào đường link bên cạnh để đăng nhập trên trình duyệt, rồi bấm Tiếp tục lượt tìm.",
@@ -37,6 +47,17 @@ HEAVY_EXTENSIONS = (
 )
 
 
+async def has_usable_douyin_document(page: Page) -> bool:
+    """A navigation timeout is recoverable only after real Douyin DOM is visible."""
+    try:
+        host = (urlsplit(page.url).hostname or "").lower()
+        if host != "douyin.com" and not host.endswith(".douyin.com"):
+            return False
+        return bool(await page.evaluate("Boolean(document.body && document.body.childElementCount > 0)"))
+    except (Error, AttributeError, TypeError, ValueError):
+        return False
+
+
 class DouyinBrowserService:
     def __init__(self, profile: Path | None = None, headless: bool = True, hybrid_headless: bool = True):
         self.profile = profile or ROOT / "data/browser/douyin"
@@ -44,6 +65,7 @@ class DouyinBrowserService:
         self.hybrid_headless = hybrid_headless
         self.default_hybrid_headless = hybrid_headless
         self.force_headful_session = False
+        self.sticky_headful = load_headful_preference(self.profile)
         self.is_currently_headless = headless
         self.driver: Playwright | None = None
         self.context: BrowserContext | None = None
@@ -59,6 +81,21 @@ class DouyinBrowserService:
 
     def set_allow_media(self, allow: bool) -> None:
         self.allow_media = allow
+
+    def should_block_resource(self, url: str, resource_type: str) -> bool:
+        # A visible verification window must load every challenge resource.
+        if not self.is_currently_headless or self.state == "verification_required":
+            return False
+        lowered = url.lower()
+        host = (urlsplit(lowered).hostname or "").lower()
+        trackers = ("sensorsdata.cn", "growingio.com", "hm.baidu.com", "google-analytics.com")
+        if any(host == domain or host.endswith("." + domain) for domain in trackers):
+            return True
+        if self.allow_media:
+            return resource_type == "font"
+        return resource_type in {"media", "font"} or any(
+            lowered.endswith(ext) or ext + "?" in lowered for ext in HEAVY_EXTENSIONS
+        )
 
     def should_run_headless(self) -> bool:
         if getattr(self, "force_headful_session", False):
@@ -100,16 +137,20 @@ class DouyinBrowserService:
         self.force_headful_session = True
         self.sticky_headful = True
         self.hybrid_headless = False
+        save_headful_preference(self.profile)
         if not getattr(self, "is_currently_headless", False):
-            return self.page or await self.ensure_open(headless_override=False)
-        current_url = self.page.url if self.page and not self.page.is_closed() else None
-        await self._close()
-        page = await self.ensure_open(headless_override=False)
-        if current_url and not current_url.startswith("about:"):
             try:
-                await page.goto(current_url, wait_until="domcontentloaded", timeout=15000)
-            except Exception:
-                pass
+                return self.get_active_page()
+            except ProviderUnavailableError:
+                return await self.ensure_open(headless_override=False)
+        try:
+            active = self.get_active_page()
+            current_url = platform_navigation_url(active.url, ("douyin.com",))
+        except ProviderUnavailableError:
+            current_url = None
+        await self._close()
+        # Navigate directly to the blocked route, never via the home feed.
+        page = await self.ensure_open(headless_override=False, initial_url=current_url)
         await self.inspect(page)
         return page
 
@@ -137,16 +178,17 @@ class DouyinBrowserService:
             active = self.get_active_page()
         except Exception:
             pass
-        if self.page and self.page.is_closed():
+        if active is None and (self.page is None or self.page.is_closed()):
             self.state = "closed"
+            self.diagnostics = {}
         login_url = self.base_url or "https://www.douyin.com"
         return {
             "state": self.state,
-            "message": MESSAGES[self.state],
+            "message": MESSAGES.get(self.state, "Trạng thái trình duyệt Douyin không xác định."),
             "profile_location": str(self.profile),
             "base_url": self.base_url,
             "login_url": login_url,
-            "open": bool(self.page and not self.page.is_closed()),
+            "open": active is not None,
             "busy": self.lock.locked(),
             "diagnostics": self.diagnostics,
             "active_url": active.url if active else None,
@@ -160,7 +202,9 @@ class DouyinBrowserService:
         self.profile.mkdir(parents=True, exist_ok=True)
         try:
             self.driver = await async_playwright().start()
-            if headless_override is not None:
+            if self.sticky_headful:
+                effective_headless = False
+            elif headless_override is not None:
                 effective_headless = headless_override
             else:
                 effective_headless = self.should_run_headless()
@@ -169,7 +213,6 @@ class DouyinBrowserService:
                 str(self.profile),
                 headless=effective_headless,
                 channel=settings.xhs_browser_channel,
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 900},
                 accept_downloads=False,
                 locale="zh-CN",
@@ -179,7 +222,6 @@ class DouyinBrowserService:
                     "--no-sandbox",
                     "--disable-infobars",
                     "--disable-blink-features=AutomationControlled",
-                    "--disable-features=IsolateOrigins,site-per-process",
                     "--disable-dev-shm-usage",
                     "--no-first-run",
                     "--no-default-browser-check",
@@ -187,134 +229,25 @@ class DouyinBrowserService:
                 ],
             )
 
-            # Enterprise stealth injection to mask automated Playwright fingerprints
-            STEALTH_INIT_SCRIPT = """
-            // Overwrite webdriver on Navigator.prototype so navigator.hasOwnProperty('webdriver') === false
-            try {
-                delete Object.getPrototypeOf(navigator).webdriver;
-            } catch (e) {}
-            try {
-                Object.defineProperty(Navigator.prototype, 'webdriver', {
-                    get: () => undefined,
-                    configurable: true,
-                    enumerable: false,
-                });
-            } catch (e) {}
+            # Use the installed browser's native UA, plugins and security isolation.
 
-            // Realistic window.chrome object
-            if (!window.chrome) {
-                window.chrome = {};
-            }
-            if (!window.chrome.runtime) {
-                window.chrome.runtime = {
-                    connect: () => {},
-                    sendMessage: () => {},
-                    id: undefined,
-                };
-            }
-            if (!window.chrome.loadTimes) {
-                window.chrome.loadTimes = () => ({
-                    requestTime: performance.now() / 1000,
-                    startLoadTime: performance.now() / 1000,
-                    commitLoadTime: performance.now() / 1000,
-                    finishDocumentLoadTime: performance.now() / 1000,
-                    firstPaintTime: performance.now() / 1000,
-                    firstPaintAfterLoadTime: 0,
-                    navigationType: 'Other',
-                    wasFetchedViaSpdy: false,
-                    wasNpnNegotiated: false,
-                    npnNegotiatedProtocol: 'unknown',
-                    wasAlternateProtocolAvailable: false,
-                    connectionInfo: 'http/1.1',
-                });
-            }
-            if (!window.chrome.csi) {
-                window.chrome.csi = () => ({
-                    startE: performance.now(),
-                    onloadT: performance.now(),
-                    pageT: performance.now(),
-                    tran: 15,
-                });
-            }
-            if (!window.chrome.app) {
-                window.chrome.app = {
-                    isInstalled: false,
-                    InstallState: { DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed" },
-                    RunningState: { CANNOT_RUN: "cannot_run", READY_TO_RUN: "ready_to_run", RUNNING: "running" },
-                    getIsInstalled: () => false,
-                    getDetails: () => null,
-                };
-            }
-
-            // Realistic languages
-            try {
-                Object.defineProperty(Navigator.prototype, 'languages', {
-                    get: () => ['zh-CN', 'zh', 'en-US', 'en'],
-                    configurable: true,
-                });
-            } catch (e) {}
-
-            // Standard plugins
-            try {
-                const makePlugin = (name, filename, description) => ({
-                    name,
-                    filename,
-                    description,
-                    length: 1,
-                    item: () => null,
-                    namedItem: () => null,
-                });
-                const pluginsList = [
-                    makePlugin('PDF Viewer', 'pdf-viewer.plugin', 'Portable Document Format'),
-                    makePlugin('Chrome PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
-                    makePlugin('Chromium PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
-                ];
-                Object.defineProperty(Navigator.prototype, 'plugins', {
-                    get: () => pluginsList,
-                    configurable: true,
-                });
-            } catch (e) {}
-            """
-            await self.context.add_init_script(STEALTH_INIT_SCRIPT)
-
-            # Unblock bds.snssdk.com / mon.snssdk.com / log.douyin.com so ByteDance Security SDK and CAPTCHA verify correctly
-            TRACKER_DOMAINS = (
-                "sensorsdata.cn",
-                "growingio.com",
-                "hm.baidu.com",
-                "google-analytics.com",
-            )
 
             async def block_resources(route):
                 req = route.request
-                url = req.url.lower()
-                if any(domain in url for domain in TRACKER_DOMAINS):
+                if self.should_block_resource(req.url, req.resource_type):
                     await route.abort()
-                    return
-                # Only block media when allow_media is False (e.g. during search card scraping)
-                if not getattr(self, "allow_media", False):
-                    if (
-                        req.resource_type in {"media", "font"}
-                        or any(url.endswith(ext) or ext + "?" in url for ext in HEAVY_EXTENSIONS)
-                    ):
-                        await route.abort()
-                        return
-                elif req.resource_type == "font":
-                    await route.abort()
-                    return
-                await route.continue_()
+                else:
+                    await route.continue_()
 
             await self.context.route("**/*", block_resources)
             # Restore saved session cookies if present
             auth_file = self.profile / "auth_state.json"
             if auth_file.exists():
                 try:
-                    from backend.services.cookie_service import persist_auth_cookies
                     auth_data = json.loads(auth_file.read_text("utf-8"))
                     cookies = auth_data.get("cookies", [])
                     if cookies:
-                        persisted = persist_auth_cookies(cookies)
-                        await self.context.add_cookies(cast(Any, persisted))
+                        await restore_missing_cookies(self.context, cookies)
                 except Exception:
                     pass
 
@@ -324,7 +257,6 @@ class DouyinBrowserService:
                     from backend.services.cookie_service import (
                         is_dummy_cookie,
                         parse_cookie_str,
-                        persist_auth_cookies,
                     )
                     if not is_dummy_cookie(settings.douyin_cookie):
                         tokens = parse_cookie_str(settings.douyin_cookie)
@@ -333,8 +265,7 @@ class DouyinBrowserService:
                                 {"name": k, "value": v, "domain": ".douyin.com", "path": "/"}
                                 for k, v in tokens.items()
                             ]
-                            persisted_custom = persist_auth_cookies(custom_cookies)
-                            await self.context.add_cookies(cast(Any, persisted_custom))
+                            await restore_missing_cookies(self.context, custom_cookies)
                 except Exception:
                     pass
 
@@ -343,7 +274,13 @@ class DouyinBrowserService:
             )
             self.page.set_default_timeout(10000)
             nav_target = initial_url or self.base_url
-            resp = await self.page.goto(nav_target, wait_until="domcontentloaded", timeout=30000)
+            try:
+                resp = await self.page.goto(nav_target, wait_until="domcontentloaded", timeout=30000)
+            except BrowserTimeout:
+                if not await has_usable_douyin_document(self.page):
+                    raise
+                logger.warning("Douyin DOM is usable after navigation timeout; inspecting the loaded page")
+                resp = None
             if resp is not None:
                 self.last_http_status = resp.status
             if not initial_url:
@@ -357,15 +294,32 @@ class DouyinBrowserService:
             except Error:
                 pass
             self.state = "network_error"
+            if isinstance(exc, BrowserTimeout):
+                raise ProviderUnavailableError(
+                    "Douyin chưa tải được trang trong 30 giây. Kiểm tra kết nối, mở cửa sổ Douyin để xác minh trạng thái rồi thử lại."
+                ) from None
             raise ProviderUnavailableError(
                 f"Không mở được trình duyệt Douyin ({exc}). Kiểm tra Chromium đã cài và đóng phiên dùng cùng profile."
             ) from None
 
+    async def _visible_captcha_evidence(self, page: Page) -> str | None:
+        return await visible_challenge_evidence(page)
+
     async def probe_live(self) -> tuple[bool, str]:
+        if self.lock.locked():
+            return False, "browser_busy"
+        async with self.lock:
+            return await self._probe_live_unlocked()
+
+    async def _probe_live_unlocked(self) -> tuple[bool, str]:
         """Probes live connectivity to Douyin using a dedicated page to avoid interrupting active searches."""
         probe_page: Page | None = None
+        active_state: str | None = None
+        active_diagnostics: dict = {}
         try:
             await self.ensure_open()
+            active_state = self.state
+            active_diagnostics = dict(self.diagnostics)
             if not self.context:
                 return False, "Browser context unavailable"
             probe_page = await self.context.new_page()
@@ -374,6 +328,8 @@ class DouyinBrowserService:
             http_status = resp.status if resp is not None else None
             self.last_http_status = http_status
             state = await self.inspect(probe_page)
+            if active_state in {"login_required", "verification_required", "restricted"}:
+                state = active_state
 
             is_http_ok = http_status is not None and 200 <= http_status < 400
             is_healthy = is_http_ok and state not in ("network_error", "closed", "restricted")
@@ -390,6 +346,9 @@ class DouyinBrowserService:
                         await probe_page.close()
                 except Exception:
                     pass
+            if active_state is not None:
+                self.state = active_state
+                self.diagnostics = active_diagnostics
 
     async def inspect(self, page: Page) -> str:
         if page.is_closed():
@@ -400,7 +359,8 @@ class DouyinBrowserService:
             url = page.url
             title = await page.title()
             body = await page.locator("body").inner_text(timeout=5000)
-            self.state = classify_page(body, title, url)
+            page_state = classify_page(body, title, url)
+            self.state = page_state
 
             parts = urlsplit(url)
             query_param_names = list(parse_qs(parts.query).keys())
@@ -438,21 +398,15 @@ class DouyinBrowserService:
             )
             has_login_button = (await login_buttons.count()) > 0
 
-            # Check for verification / captcha container or iframes
-            captcha_box = page.locator(
-                "#captcha-verify-image:visible, .captcha-verify-container:visible, .verify-bar-close:visible, [class*='captcha']:visible"
-            )
-            captcha_visible = (await captcha_box.count()) > 0
-            if not captcha_visible and hasattr(page, "frames"):
-                for f in page.frames:
-                    if f != page.main_frame:
-                        f_url = (f.url or "").lower()
-                        if "verifycenter" in f_url or "nocaptcha" in f_url or "verify" in f_url or "captcha" in f_url:
-                            captcha_visible = True
-                            break
+            captcha_evidence = await self._visible_captcha_evidence(page)
+            captcha_visible = bool(captcha_evidence) or page_state == "verification_required"
 
-            if captcha_visible:
+            if page_state == "restricted":
+                self.state = "restricted"
+            elif captcha_visible:
                 self.state = "verification_required"
+            else:
+                self.state = page_state
 
             # Check for dismissible login modal / mask
             login_modal = page.locator(
@@ -506,15 +460,7 @@ class DouyinBrowserService:
                 try:
                     c_list = await self.context.cookies()
                     if c_list:
-                        auth_file = self.profile / "auth_state.json"
-                        await self.context.storage_state(path=str(auth_file))
-                        try:
-                            from backend.services.cookie_service import persist_auth_cookies
-                            raw_auth = json.loads(auth_file.read_text("utf-8"))
-                            raw_auth["cookies"] = persist_auth_cookies(raw_auth.get("cookies", []))
-                            auth_file.write_text(json.dumps(raw_auth, indent=2), encoding="utf-8")
-                        except Exception:
-                            pass
+                        await save_session_checkpoint(self.context, self.profile)
                 except Exception:
                     pass
 
@@ -530,6 +476,10 @@ class DouyinBrowserService:
                 "search_input_value": search_val,
                 "login_modal_visible": login_modal_visible,
                 "captcha_visible": captcha_visible,
+                "captcha_detection_reason": captcha_evidence
+                or ("visible_challenge_text" if page_state == "verification_required" else None),
+                "has_session_cookie": has_session_cookie,
+                "has_user_element": has_user_element,
                 "has_login_button": has_login_button,
                 "is_authenticated": is_authenticated,
                 "result_links_count": note_links,
@@ -543,10 +493,13 @@ class DouyinBrowserService:
         if self.lock.locked():
             return self.snapshot()
         async with self.lock:
-            if headful and getattr(self, "is_currently_headless", False):
-                await self.elevate_to_headful()
+            if headful:
+                page = await self.elevate_to_headful()
+                await page.bring_to_front()
+                await self.inspect(page)
             else:
                 page = await self.ensure_open()
+                page = self.get_active_page()
                 await page.bring_to_front()
                 await self.inspect(page)
         return self.snapshot()
@@ -555,8 +508,21 @@ class DouyinBrowserService:
         if not self.page or self.page.is_closed():
             return self.snapshot()
         try:
+            login_surface = self.page.locator(
+                "#login-panel:visible, .login-mask:visible, [class*='login-panel']:visible, "
+                "[class*='login-modal']:visible, [class*='login-dialog']:visible"
+            )
+            is_login_route = "/login" in urlsplit(self.page.url).path.lower()
+            if await login_surface.count() == 0 and not is_login_route:
+                await self.inspect(self.page)
+                self.diagnostics["qr_available"] = False
+                self.diagnostics["qr_message"] = "Douyin chưa hiển thị mã QR trên trang hiện tại."
+                return self.snapshot()
+
             refresh_btn = self.page.locator(
-                ".qrcode-mask:visible, .refresh-btn:visible, :text('点击刷新'):visible, :text('刷新'):visible, [class*='refresh']:visible"
+                "#login-panel .qrcode-mask:visible, #login-panel .refresh-btn:visible, "
+                "#login-panel :text('点击刷新'):visible, #login-panel :text('刷新'):visible, "
+                "[class*='login-panel'] [class*='refresh']:visible"
             ).first
             if await refresh_btn.count() > 0:
                 await refresh_btn.click(timeout=2000)
@@ -564,6 +530,7 @@ class DouyinBrowserService:
                 await self.page.reload(wait_until="domcontentloaded", timeout=20000)
             await asyncio.sleep(1)
             await self.inspect(self.page)
+            self.diagnostics["qr_available"] = True
         except Exception:
             pass
         return self.snapshot()
@@ -593,15 +560,7 @@ class DouyinBrowserService:
         try:
             if self.context:
                 try:
-                    auth_file = self.profile / "auth_state.json"
-                    await self.context.storage_state(path=str(auth_file))
-                    try:
-                        from backend.services.cookie_service import persist_auth_cookies
-                        raw_auth = json.loads(auth_file.read_text("utf-8"))
-                        raw_auth["cookies"] = persist_auth_cookies(raw_auth.get("cookies", []))
-                        auth_file.write_text(json.dumps(raw_auth, indent=2), encoding="utf-8")
-                    except Exception:
-                        pass
+                    await save_session_checkpoint(self.context, self.profile)
                 except Exception:
                     pass
                 await self.context.close()
@@ -610,6 +569,7 @@ class DouyinBrowserService:
             self.page = None
             self.search_page = None
             self.blocked_page = None
+            self.diagnostics = {}
             if self.driver:
                 await self.driver.stop()
                 self.driver = None
@@ -663,8 +623,7 @@ class DouyinBrowserService:
                     indicator_text = await page.locator(
                         "[class*='indicator'], [class*='slider-tag'], [class*='pagination'], [class*='count']"
                     ).evaluate_all("els => els.map(e => e.innerText).join(' ')")
-                    import re
-
+                    
                     m_ind = re.search(r"\d+\s*/\s*(\d+)", str(indicator_text))
                     if m_ind:
                         total_from_ind = int(m_ind.group(1))

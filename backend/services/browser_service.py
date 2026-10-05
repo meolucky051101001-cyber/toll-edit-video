@@ -10,11 +10,20 @@ from playwright.async_api import BrowserContext, Error, Page, Playwright, async_
 from backend.core.config import ROOT, settings
 from backend.providers.base import ProviderUnavailableError
 from backend.providers.xiaohongshu.parser import classify_page
+from backend.services.browser_session import (
+    load_headful_preference,
+    platform_navigation_url,
+    restore_missing_cookies,
+    save_headful_preference,
+    save_session_checkpoint,
+    visible_challenge_evidence,
+)
 
 logger = logging.getLogger("xiaohongshu.browser")
 
 HOME = "https://www.xiaohongshu.com/explore"
 MESSAGES = {
+    "authenticated": "Đã đăng nhập Xiaohongshu. Có thể bắt đầu tìm kiếm.",
     "closed": "Trình duyệt riêng chưa mở.",
     "page_available": "Trang đã mở. Chưa xác minh đăng nhập; nền tảng có thể yêu cầu khi tìm.",
     "login_required": "Nền tảng yêu cầu đăng nhập. Hãy bấm vào đường link bên cạnh để đăng nhập trên trình duyệt, rồi bấm Tiếp tục lượt tìm.",
@@ -44,6 +53,7 @@ class BrowserService:
         self.hybrid_headless = hybrid_headless
         self.default_hybrid_headless = hybrid_headless
         self.force_headful_session = False
+        self.sticky_headful = load_headful_preference(self.profile)
         self.is_currently_headless = headless
         self.driver: Playwright | None = None
         self.context: BrowserContext | None = None
@@ -96,16 +106,20 @@ class BrowserService:
         self.force_headful_session = True
         self.sticky_headful = True
         self.hybrid_headless = False
+        save_headful_preference(self.profile)
         if not getattr(self, "is_currently_headless", False):
-            return self.page or await self.ensure_open(headless_override=False)
-        current_url = self.page.url if self.page and not self.page.is_closed() else None
-        await self._close()
-        page = await self.ensure_open(headless_override=False)
-        if current_url and not current_url.startswith("about:"):
             try:
-                await page.goto(current_url, wait_until="domcontentloaded", timeout=15000)
-            except Exception:
-                pass
+                return self.get_active_page()
+            except ProviderUnavailableError:
+                return await self.ensure_open(headless_override=False)
+        try:
+            active = self.get_active_page()
+            current_url = platform_navigation_url(active.url, ("xiaohongshu.com", "rednote.com"))
+        except ProviderUnavailableError:
+            current_url = None
+        await self._close()
+        # Navigate directly to the blocked route, never via the home feed.
+        page = await self.ensure_open(headless_override=False, initial_url=current_url)
         await self.inspect(page)
         return page
 
@@ -138,7 +152,7 @@ class BrowserService:
         login_url = self.base_url or "https://www.xiaohongshu.com/explore"
         return {
             "state": self.state,
-            "message": MESSAGES[self.state],
+            "message": MESSAGES.get(self.state, "Trạng thái trình duyệt Xiaohongshu không xác định."),
             "profile_location": str(self.profile),
             "base_url": self.base_url,
             "login_url": login_url,
@@ -186,6 +200,49 @@ class BrowserService:
             pass
         return "https://www.rednote.com"
 
+    def session_navigation_url(self, initial_url: str | None) -> str:
+        if initial_url:
+            parsed = urlsplit(initial_url)
+            if parsed.hostname in {"rednote.com", "www.rednote.com", "xiaohongshu.com", "www.xiaohongshu.com"}:
+                return f"{self.base_url}{parsed.path}" + (f"?{parsed.query}" if parsed.query else "")
+        return f"{self.base_url}/explore"
+
+    async def navigate_preserving_session(self, target_url: str) -> None:
+        assert self.page is not None
+        urls = [target_url]
+        if "rednote.com" in urlsplit(target_url).netloc:
+            urls.append(target_url.replace("rednote.com", "xiaohongshu.com", 1))
+        else:
+            urls.append(target_url.replace("xiaohongshu.com", "rednote.com", 1))
+        last_error = None
+        for attempt, url in enumerate(urls):
+            if attempt and self.context:
+                # A failed navigation can still be redirecting in the background.
+                # Use a fresh tab for the alternate domain, within the same session.
+                failed_page = self.page
+                self.page = await self.context.new_page()
+                self.page.set_default_timeout(10000)
+                try:
+                    await failed_page.close()
+                except Error:
+                    pass
+            try:
+                response = await self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                self.last_http_status = response.status if response else None
+                if response and response.status >= 400:
+                    raise Error(f"Xiaohongshu returned HTTP {response.status}")
+                parsed = urlsplit(self.page.url)
+                if parsed.scheme != "https" or parsed.hostname not in {"rednote.com", "www.rednote.com", "xiaohongshu.com", "www.xiaohongshu.com"}:
+                    raise Error("Xiaohongshu navigation did not reach a trusted platform page")
+                self.base_url = f"{parsed.scheme}://{parsed.netloc}"
+                return
+            except Error as error:
+                # HTTP failures are not evidence that authentication cookies are invalid.
+                # Keep the user's session and try the alternate public domain once.
+                last_error = error
+                logger.warning("Xiaohongshu navigation failed: %s", type(error).__name__)
+        raise last_error or Error("Failed to navigate to Xiaohongshu endpoints")
+
     async def ensure_open(
         self,
         headless_override: bool | None = None,
@@ -197,7 +254,9 @@ class BrowserService:
         self.profile.mkdir(parents=True, exist_ok=True)
         try:
             self.driver = await async_playwright().start()
-            if headless_override is not None:
+            if self.sticky_headful:
+                effective_headless = False
+            elif headless_override is not None:
                 effective_headless = headless_override
             else:
                 effective_headless = self.should_run_headless()
@@ -206,7 +265,6 @@ class BrowserService:
                 str(self.profile),
                 headless=effective_headless,
                 channel=settings.xhs_browser_channel,
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 900},
                 accept_downloads=False,
                 locale="zh-CN",
@@ -216,7 +274,6 @@ class BrowserService:
                     "--no-sandbox",
                     "--disable-infobars",
                     "--disable-blink-features=AutomationControlled",
-                    "--disable-features=IsolateOrigins,site-per-process",
                     "--disable-dev-shm-usage",
                     "--no-first-run",
                     "--no-default-browser-check",
@@ -224,95 +281,8 @@ class BrowserService:
                 ],
             )
 
-            # Enterprise stealth injection to mask automated Playwright fingerprints
-            STEALTH_INIT_SCRIPT = """
-            // Overwrite webdriver on Navigator.prototype so navigator.hasOwnProperty('webdriver') === false
-            try {
-                delete Object.getPrototypeOf(navigator).webdriver;
-            } catch (e) {}
-            try {
-                Object.defineProperty(Navigator.prototype, 'webdriver', {
-                    get: () => undefined,
-                    configurable: true,
-                    enumerable: false,
-                });
-            } catch (e) {}
+            # Use the installed browser's native UA, plugins and security isolation.
 
-            // Realistic window.chrome object
-            if (!window.chrome) {
-                window.chrome = {};
-            }
-            if (!window.chrome.runtime) {
-                window.chrome.runtime = {
-                    connect: () => {},
-                    sendMessage: () => {},
-                    id: undefined,
-                };
-            }
-            if (!window.chrome.loadTimes) {
-                window.chrome.loadTimes = () => ({
-                    requestTime: performance.now() / 1000,
-                    startLoadTime: performance.now() / 1000,
-                    commitLoadTime: performance.now() / 1000,
-                    finishDocumentLoadTime: performance.now() / 1000,
-                    firstPaintTime: performance.now() / 1000,
-                    firstPaintAfterLoadTime: 0,
-                    navigationType: 'Other',
-                    wasFetchedViaSpdy: false,
-                    wasNpnNegotiated: false,
-                    npnNegotiatedProtocol: 'unknown',
-                    wasAlternateProtocolAvailable: false,
-                    connectionInfo: 'http/1.1',
-                });
-            }
-            if (!window.chrome.csi) {
-                window.chrome.csi = () => ({
-                    startE: performance.now(),
-                    onloadT: performance.now(),
-                    pageT: performance.now(),
-                    tran: 15,
-                });
-            }
-            if (!window.chrome.app) {
-                window.chrome.app = {
-                    isInstalled: false,
-                    InstallState: { DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed" },
-                    RunningState: { CANNOT_RUN: "cannot_run", READY_TO_RUN: "ready_to_run", RUNNING: "running" },
-                    getIsInstalled: () => false,
-                    getDetails: () => null,
-                };
-            }
-
-            // Realistic languages
-            try {
-                Object.defineProperty(Navigator.prototype, 'languages', {
-                    get: () => ['zh-CN', 'zh', 'en-US', 'en'],
-                    configurable: true,
-                });
-            } catch (e) {}
-
-            // Standard plugins
-            try {
-                const makePlugin = (name, filename, description) => ({
-                    name,
-                    filename,
-                    description,
-                    length: 1,
-                    item: () => null,
-                    namedItem: () => null,
-                });
-                const pluginsList = [
-                    makePlugin('PDF Viewer', 'pdf-viewer.plugin', 'Portable Document Format'),
-                    makePlugin('Chrome PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
-                    makePlugin('Chromium PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
-                ];
-                Object.defineProperty(Navigator.prototype, 'plugins', {
-                    get: () => pluginsList,
-                    configurable: true,
-                });
-            } catch (e) {}
-            """
-            await self.context.add_init_script(STEALTH_INIT_SCRIPT)
 
             TRACKER_DOMAINS = (
                 "sensorsdata.cn",
@@ -357,12 +327,10 @@ class BrowserService:
             auth_file = self.profile / "auth_state.json"
             if auth_file.exists():
                 try:
-                    from backend.services.cookie_service import persist_auth_cookies
                     auth_data = json.loads(auth_file.read_text("utf-8"))
                     cookies = auth_data.get("cookies", [])
                     if cookies:
-                        persisted = persist_auth_cookies(cookies)
-                        await self.context.add_cookies(cast(Any, persisted))
+                        await restore_missing_cookies(self.context, cookies)
                 except Exception as e:
                     logger.debug("Could not restore cookies from auth_state.json: %s", e)
 
@@ -372,7 +340,6 @@ class BrowserService:
                     from backend.services.cookie_service import (
                         is_dummy_cookie,
                         parse_cookie_str,
-                        persist_auth_cookies,
                     )
                     if not is_dummy_cookie(settings.xhs_cookie):
                         tokens = parse_cookie_str(settings.xhs_cookie)
@@ -384,8 +351,7 @@ class BrowserService:
                                 {"name": k, "value": v, "domain": ".xiaohongshu.com", "path": "/"}
                                 for k, v in tokens.items()
                             ]
-                            persisted_custom = persist_auth_cookies(custom_cookies)
-                            await self.context.add_cookies(cast(Any, persisted_custom))
+                            await restore_missing_cookies(self.context, custom_cookies)
                 except Exception as e:
                     logger.debug("Could not inject custom settings cookie: %s", e)
 
@@ -394,54 +360,9 @@ class BrowserService:
                 self.context.pages[0] if self.context.pages else await self.context.new_page()
             )
             self.page.set_default_timeout(10000)
-            target_home = initial_url or f"{self.base_url}/explore"
-
-            # Domain fallback candidates
-            nav_urls = [target_home]
-            if "rednote.com" in target_home:
-                nav_urls.append(target_home.replace("rednote.com", "xiaohongshu.com"))
-            elif "xiaohongshu.com" in target_home:
-                nav_urls.append(target_home.replace("xiaohongshu.com", "rednote.com"))
-
-            nav_success = False
-            last_nav_err = None
-            for nav_url in nav_urls:
-                try:
-                    logger.info("Xiaohongshu navigating to: %s", nav_url)
-                    resp = await self.page.goto(nav_url, wait_until="domcontentloaded", timeout=30000)
-                    if resp is not None:
-                        self.last_http_status = resp.status
-                    nav_success = True
-                    if "xiaohongshu.com" in nav_url:
-                        self.base_url = "https://www.xiaohongshu.com"
-                    elif "rednote.com" in nav_url:
-                        self.base_url = "https://www.rednote.com"
-                    break
-                except Error as nav_err:
-                    last_nav_err = nav_err
-                    err_text = str(nav_err)
-                    logger.warning("Xiaohongshu navigation failed for %s: %s", nav_url, err_text)
-                    # If server returned HTTP 500 / ERR_HTTP_RESPONSE_CODE_FAILURE, stale/corrupt session cookies
-                    # from past logins often crash Xiaohongshu's backend. Clear cookies and retry clean once.
-                    if "ERR_HTTP_RESPONSE_CODE_FAILURE" in err_text or "500" in err_text:
-                        logger.warning("Received HTTP response code failure on %s; clearing cookies and retrying clean...", nav_url)
-                        try:
-                            await self.context.clear_cookies()
-                            retry_resp = await self.page.goto(nav_url, wait_until="domcontentloaded", timeout=30000)
-                            if retry_resp is not None:
-                                self.last_http_status = retry_resp.status
-                            nav_success = True
-                            if "xiaohongshu.com" in nav_url:
-                                self.base_url = "https://www.xiaohongshu.com"
-                            elif "rednote.com" in nav_url:
-                                self.base_url = "https://www.rednote.com"
-                            break
-                        except Error as retry_err:
-                            logger.error("Retry after cookie clear also failed for %s: %s", nav_url, retry_err)
-                            last_nav_err = retry_err
-
-            if not nav_success:
-                raise last_nav_err or Error("Failed to navigate to Xiaohongshu endpoints")
+            # Preserve the path/query while choosing the domain with the saved session.
+            target_home = self.session_navigation_url(initial_url)
+            await self.navigate_preserving_session(target_home)
 
             await self.page.wait_for_timeout(1000)
             await self.inspect(self.page)
@@ -466,10 +387,20 @@ class BrowserService:
             ) from None
 
     async def probe_live(self) -> tuple[bool, str]:
+        if self.lock.locked():
+            return False, "browser_busy"
+        async with self.lock:
+            return await self._probe_live_unlocked()
+
+    async def _probe_live_unlocked(self) -> tuple[bool, str]:
         """Probes live connectivity to Xiaohongshu using a dedicated page to avoid interrupting active searches."""
         probe_page: Page | None = None
+        active_state: str | None = None
+        active_diagnostics: dict = {}
         try:
             await self.ensure_open()
+            active_state = self.state
+            active_diagnostics = dict(self.diagnostics)
             if not self.context:
                 return False, "Browser context unavailable"
             probe_page = await self.context.new_page()
@@ -478,6 +409,8 @@ class BrowserService:
             http_status = resp.status if resp is not None else None
             self.last_http_status = http_status
             state = await self.inspect(probe_page)
+            if active_state in {"login_required", "verification_required", "restricted"}:
+                state = active_state
 
             is_http_ok = http_status is not None and 200 <= http_status < 400
             is_healthy = is_http_ok and state not in ("network_error", "closed", "restricted")
@@ -494,6 +427,9 @@ class BrowserService:
                         await probe_page.close()
                 except Exception:
                     pass
+            if active_state is not None:
+                self.state = active_state
+                self.diagnostics = active_diagnostics
 
     async def inspect(self, page: Page) -> str:
         if page.is_closed():
@@ -605,18 +541,8 @@ class BrowserService:
                 and js_logged_in is not False
             )
 
-            # Check for verification / captcha container or iframes
-            captcha_box = page.locator(
-                "#captcha-verify-image, .captcha-verify-container:visible, .verify-bar-close:visible, [class*='captcha']:visible"
-            )
-            captcha_visible = (await captcha_box.count()) > 0
-            if not captcha_visible and hasattr(page, "frames"):
-                for f in page.frames:
-                    if f != page.main_frame:
-                        f_url = (f.url or "").lower()
-                        if "verifycenter" in f_url or "nocaptcha" in f_url or "verify" in f_url or "captcha" in f_url:
-                            captcha_visible = True
-                            break
+            captcha_evidence = await visible_challenge_evidence(page)
+            captcha_visible = bool(captcha_evidence) or self.state == "verification_required"
 
             if captcha_visible:
                 self.state = "verification_required"
@@ -638,19 +564,13 @@ class BrowserService:
                 try:
                     c_list = await self.context.cookies()
                     if c_list:
-                        auth_file = self.profile / "auth_state.json"
-                        await self.context.storage_state(path=str(auth_file))
-                        try:
-                            from backend.services.cookie_service import persist_auth_cookies
-                            raw_auth = json.loads(auth_file.read_text("utf-8"))
-                            raw_auth["cookies"] = persist_auth_cookies(raw_auth.get("cookies", []))
-                            auth_file.write_text(json.dumps(raw_auth, indent=2), encoding="utf-8")
-                        except Exception:
-                            pass
+                        await save_session_checkpoint(self.context, self.profile)
                 except Exception:
                     pass
 
-            note_links = await page.locator('a[href*="/explore/"]').count()
+            note_links = await page.locator(
+                'a[href*="/explore/"], a[href*="/search_result/"], a[href*="/discovery/item/"]'
+            ).count()
             video_count = await page.locator("video").count()
 
             self.diagnostics = {
@@ -662,6 +582,7 @@ class BrowserService:
                 "search_input_value": search_val,
                 "login_modal_visible": login_modal_visible,
                 "captcha_visible": captcha_visible,
+                "captcha_detection_reason": captcha_evidence or ("visible_challenge_text" if captcha_visible else None),
                 "has_login_button": has_login_button,
                 "is_authenticated": is_authenticated,
                 "result_links_count": note_links,
@@ -676,12 +597,13 @@ class BrowserService:
         if self.lock.locked():
             return self.snapshot()
         async with self.lock:
-            if headful and getattr(self, "is_currently_headless", False):
-                await self.elevate_to_headful()
+            if headful:
+                page = await self.elevate_to_headful()
             else:
                 page = await self.ensure_open()
-                await page.bring_to_front()
-                await self.inspect(page)
+                page = self.get_active_page()
+            await page.bring_to_front()
+            await self.inspect(page)
         return self.snapshot()
 
     async def refresh_qr(self) -> dict:
@@ -727,15 +649,7 @@ class BrowserService:
         try:
             if self.context:
                 try:
-                    auth_file = self.profile / "auth_state.json"
-                    await self.context.storage_state(path=str(auth_file))
-                    try:
-                        from backend.services.cookie_service import persist_auth_cookies
-                        raw_auth = json.loads(auth_file.read_text("utf-8"))
-                        raw_auth["cookies"] = persist_auth_cookies(raw_auth.get("cookies", []))
-                        auth_file.write_text(json.dumps(raw_auth, indent=2), encoding="utf-8")
-                    except Exception:
-                        pass
+                    await save_session_checkpoint(self.context, self.profile)
                 except Exception:
                     pass
                 await self.context.close()

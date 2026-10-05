@@ -18,10 +18,12 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -100,6 +102,116 @@ def parse_pytest_summary(output: str) -> dict[str, int]:
     return {"passed": passed, "failed": failed, "skipped": skipped}
 
 
+
+def audit_current_run_capture_records(
+    records: list[dict[str, Any]],
+    platform_results: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Count only run-scoped capture rows for successful platforms after strict checks."""
+    from backend.services.identity_policy import (
+        compute_sample_metadata_hash,
+        validate_result_identity,
+    )
+
+    platform_audit: dict[str, dict[str, Any]] = {}
+    eligible_platforms: set[str] = set()
+    verified_total = 0
+    for platform in ("douyin", "xiaohongshu"):
+        result = platform_results.get(platform, {})
+        expected = int(result.get("results_count") or 0)
+        eligible = (
+            result.get("status") == "PASS"
+            and result.get("retrieval_available") is True
+            and expected > 0
+        )
+        rows = [row for row in records if str(row.get("platform") or "").lower() == platform]
+        verified = 0
+        if eligible:
+            eligible_platforms.add(platform)
+            for row in rows:
+                required = (
+                    "record_id", "platform_video_id", "url", "query", "submitted_query",
+                    "session_id", "collector_version", "collected_at", "media_type",
+                )
+                if any(not str(row.get(field) or "").strip() for field in required):
+                    continue
+                if row.get("hash_version") != "v2" or row.get("media_type") != "video":
+                    continue
+                expected_hash = str(row.get("metadata_hash") or "").strip().lower()
+                actual_hash = compute_sample_metadata_hash(row, version="v2").lower()
+                if expected_hash != actual_hash:
+                    continue
+                is_valid, resolved_id, _ = validate_result_identity(
+                    platform=platform,
+                    platform_video_id=str(row["platform_video_id"]),
+                    url=str(row["url"]),
+                    share_url=None,
+                    is_mock=False,
+                )
+                if not is_valid or resolved_id != row["platform_video_id"]:
+                    continue
+                verified += 1
+        complete = eligible and len(rows) == expected and verified == expected
+        if complete:
+            verified_total += verified
+        platform_audit[platform] = {
+            "retrieval_status": result.get("status", "NOT_RUN"),
+            "expected_results": expected,
+            "manifest_records": len(rows),
+            "verified_records": verified,
+            "complete": complete,
+        }
+
+    eligible_rows = [
+        row for row in records
+        if str(row.get("platform") or "").lower() in eligible_platforms
+    ]
+    all_verified = bool(eligible_platforms) and all(
+        platform_audit[platform]["complete"] for platform in eligible_platforms
+    ) and len(eligible_rows) == len(records)
+    return {
+        "current_run_live_captures": verified_total,
+        "current_run_unverified_capture_records": len(records) - verified_total,
+        "manifest_records_in_run_scope": len(records),
+        "all_retrieved_results_verified": all_verified,
+        "platforms": platform_audit,
+    }
+
+
+def is_suspected_synthetic_capture_record(record: dict[str, Any]) -> bool:
+    video_id = str(record.get("platform_video_id") or "").strip().lower()
+    url = str(record.get("url") or "").strip().lower()
+    return video_id.startswith("pvid_") or "example.invalid" in url
+
+
+
+
+def build_manifest_storage_report(
+    manifest_path: str,
+    historical_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Report historical rows as unverified until their acquisition run can be attested."""
+    suspected = sum(is_suspected_synthetic_capture_record(row) for row in historical_records)
+    return {
+        "path": manifest_path,
+        "type": "append_only_jsonl",
+        "historical_records_count": len(historical_records),
+        "historical_unverified_records_count": len(historical_records),
+        "historical_suspected_synthetic_records_count": suspected,
+        "historical_quarantined_records_count": suspected,
+        "historical_quarantine_mode": "logical_only_read_only",
+        "historical_status": "UNVERIFIED_HISTORY_REQUIRES_REVIEW" if historical_records else "NO_HISTORICAL_RECORDS",
+        "current_run_live_captures": 0,
+        "current_run_status": "NOT_RUN",
+        "current_run_unverified_capture_records": 0,
+        "current_run_manifest_isolated": True,
+        "append_only_enforcement": "application_append_mode_only",
+        "tamper_evident": False,
+        "guarantee_level": "metadata_hash_consistency_only; edits/deletion require external signature or immutable storage to detect",
+    }
+
+
+
 def main() -> int:
     # Preflight Check: Validate Live Gate Configuration
     from backend.services.ranking_service import validate_live_gate_config
@@ -118,6 +230,8 @@ def main() -> int:
     start_time = time.time()
     results = {}
     all_passed = True
+    run_capture_tempdir: tempfile.TemporaryDirectory[str] | None = None
+    run_capture_manifest_path: Path | None = None
     npm_cmd = "npm.cmd" if os.name == "nt" else "npm"
     npx_cmd = "npx.cmd" if os.name == "nt" else "npx"
     python_bin = sys.executable
@@ -348,7 +462,7 @@ def main() -> int:
         load_live_capture_manifest,
     )
 
-    live_records = load_live_capture_manifest(DEFAULT_LIVE_MANIFEST_PATH)
+    historical_manifest_records = load_live_capture_manifest(DEFAULT_LIVE_MANIFEST_PATH)
     rel_manifest_path = str(DEFAULT_LIVE_MANIFEST_PATH.relative_to(ROOT_DIR)).replace("\\", "/")
 
     audit_level = (
@@ -377,13 +491,9 @@ def main() -> int:
         "rejected_samples": rejected_samples,
         "source_provenance_verified": False,
         "provenance_audit_level": audit_level,
-        "manifest_storage": {
-            "path": rel_manifest_path,
-            "type": "append_only_jsonl",
-            "live_records_count": len(live_records),
-            "status": "PENDING (no live crawl records in current run; retrieval blocked by auth)" if len(live_records) == 0 else f"{len(live_records)} live records recorded",
-            "guarantee_level": "metadata_hash_manifest_consistency (non-tamper-evident without external cryptographic signature)",
-        },
+        "manifest_storage": build_manifest_storage_report(
+            rel_manifest_path, historical_manifest_records
+        ),
         "real_crawled_samples_provenance": total_crawled_samples,
         "independent_holdout_samples": total_holdout_samples,
         "crawled_video_samples": crawled_video_samples,
@@ -469,6 +579,9 @@ def main() -> int:
         time.sleep(5.0)
         t0 = time.time()
         live_env = os.environ.copy()
+        run_capture_tempdir = tempfile.TemporaryDirectory(prefix="ai-video-release-gate-")
+        run_capture_manifest_path = Path(run_capture_tempdir.name) / "current_run_capture_manifest.jsonl"
+        live_env["RELEASE_GATE_CAPTURE_MANIFEST_PATH"] = str(run_capture_manifest_path)
         live_env["LIVE_CRAWL_ENABLED"] = "1"
 
         # 11.A: Platform reachability probe (with 1 retry for transient post-E2E network/socket contention)
@@ -621,8 +734,30 @@ def main() -> int:
             xhs_rel_rate = 0.0
 
         t_live = round(time.time() - t0, 2)
-        live_full_green = probe_ok and dy_ok and xhs_ok and dy_precision_verified and xhs_precision_verified
+        from backend.services.identity_policy import load_live_capture_manifest
+        run_capture_records = load_live_capture_manifest(run_capture_manifest_path)
+        capture_audit = audit_current_run_capture_records(
+            run_capture_records,
+            {
+                "douyin": {"status": dy_status, "retrieval_available": dy_retrieval_available, "results_count": dy_tot_cnt},
+                "xiaohongshu": {"status": xhs_status, "retrieval_available": xhs_retrieval_available, "results_count": xhs_tot_cnt},
+            },
+        )
+        capture_provenance_full = all(
+            capture_audit["platforms"][platform]["complete"]
+            for platform in ("douyin", "xiaohongshu")
+        )
+        live_full_green = (
+            probe_ok and dy_ok and xhs_ok and dy_precision_verified and xhs_precision_verified
+            and capture_provenance_full
+        )
         live_workstation_ready = probe_ok and (dy_ok or dy_status.startswith("BLOCKED")) and (xhs_ok or xhs_status.startswith("BLOCKED"))
+        storage_report = results["9_fixture_benchmark"]["manifest_storage"]
+        storage_report["current_run_live_captures"] = capture_audit["current_run_live_captures"]
+        storage_report["current_run_unverified_capture_records"] = capture_audit["current_run_unverified_capture_records"]
+        storage_report["current_run_status"] = (
+            "VERIFIED" if capture_audit["all_retrieved_results_verified"] else "NO_VERIFIED_CURRENT_RUN_CAPTURE"
+        )
 
         results["11_live_crawl_acceptance"] = {
             "executed": True,
@@ -634,6 +769,9 @@ def main() -> int:
                 "douyin": dy_probe_detail,
                 "xiaohongshu": xhs_probe_detail,
             },
+            "current_run_live_captures": capture_audit["current_run_live_captures"],
+            "current_run_unverified_capture_records": capture_audit["current_run_unverified_capture_records"],
+            "capture_provenance_audit": capture_audit,
             "platforms": {
                 "douyin": {
                     "status": dy_status,
@@ -692,8 +830,14 @@ def main() -> int:
         verdict = "APPROVED (OFFLINE FIXTURES) - PENDING LIVE CRAWL"
     elif results["11_live_crawl_acceptance"]["passed"]:
         verdict = "APPROVED (FULL GREEN)"
-    elif results["11_live_crawl_acceptance"]["workstation_operational"]:
+    elif results["11_live_crawl_acceptance"]["workstation_operational"] and any(
+        str(item.get("status", "")).startswith("BLOCKED")
+        for item in results["11_live_crawl_acceptance"].get("platforms", {}).values()
+    ):
         verdict = "APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH"
+    elif results["11_live_crawl_acceptance"]["workstation_operational"]:
+        verdict = "REJECTED (LIVE CAPTURE PROVENANCE INCOMPLETE)"
+        all_passed = False
     else:
         verdict = "REJECTED (LIVE NETWORK FAILURE)"
 
@@ -723,6 +867,8 @@ def main() -> int:
             "command": "python scripts/release_gate.py --live --require-live",
             "exit_code": strict_exit_code,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "current_run_live_captures": results.get("11_live_crawl_acceptance", {}).get("current_run_live_captures", 0),
+            "capture_provenance_audit": results.get("11_live_crawl_acceptance", {}).get("capture_provenance_audit"),
             "query": "nhíp gắp sticker",
             "submitted_query": "贴纸镊子",
             "douyin": {
@@ -772,6 +918,8 @@ def main() -> int:
             indent=2,
         )
     print(f"Release scorecard saved to: {report_path}\n")
+    if run_capture_tempdir is not None:
+        run_capture_tempdir.cleanup()
 
     if require_live and strict_exit_code == 2:
         print("ERROR: --require-live is active but Stage 11 (Live Crawl) did not achieve FULL GREEN live retrieval on both platforms. Release gate rejected with exit code 2.\n")

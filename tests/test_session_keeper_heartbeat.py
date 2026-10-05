@@ -11,12 +11,13 @@ class MockBrowser:
     def __init__(self, page_eval_result: dict | None = None, is_logged_in_val: bool = True):
         self.lock = asyncio.Lock()
         self.page = MagicMock()
+        self.page.url = "https://www.douyin.com/search/test"
         self.page.is_closed = MagicMock(return_value=False)
         self.page.evaluate = AsyncMock(return_value=page_eval_result or {"ok": True, "status": 200})
         self._logged_in = is_logged_in_val
 
-    async def is_logged_in(self) -> bool:
-        return self._logged_in
+    async def inspect(self, page) -> str:
+        return "authenticated" if self._logged_in else "page_available"
 
 
 @pytest.mark.anyio

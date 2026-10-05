@@ -2,6 +2,7 @@ import asyncio
 import logging
 import random
 import re
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from typing import cast
 from urllib.parse import parse_qs, quote, unquote, urlsplit
@@ -30,6 +31,44 @@ from backend.services.browser_service import MESSAGES, BrowserService
 from backend.services.media_parser import extract_hashtags, parse_duration_seconds
 
 logger = logging.getLogger(__name__)
+
+
+def query_card_terms(query: str) -> set[str]:
+    """Extract semantic search terms from query without creating cross-boundary junk bigrams."""
+    cjk_seqs = re.findall(r"[\u4e00-\u9fff]+", query)
+    latin_words = [w.lower() for w in re.findall(r"[a-zA-Z0-9]+", query) if len(w) >= 2]
+    terms: set[str] = set(latin_words)
+
+    KNOWN_VOCAB = (
+        "造景", "贴纸", "镊子", "咕卡", "手账", "手帐", "剥离器", "起边器", "揭贴器",
+        "夹取", "工具", "开箱", "盲盒", "书桌", "改造", "布置", "文具", "桌面", "收纳",
+        "穿搭", "测评", "试色", "打包", "电钻", "录音", "日常", "沉浸式", "治愈",
+        "卧室", "房间", "室内", "家居", "家装", "装饰", "软装",
+    )
+    for seq in cjk_seqs:
+        matched_any = False
+        for vocab in KNOWN_VOCAB:
+            if vocab in seq:
+                terms.add(vocab)
+                matched_any = True
+        if not matched_any:
+            if len(seq) == 2:
+                terms.add(seq)
+            elif len(seq) > 2 and len(seq) % 2 == 0:
+                for i in range(0, len(seq), 2):
+                    terms.add(seq[i : i + 2])
+            else:
+                for i in range(len(seq) - 1):
+                    terms.add(seq[i : i + 2])
+    return terms
+
+
+def detail_card_priority(
+    candidate: dict[str, object], terms: set[str], frequencies: Counter[str]
+) -> tuple[int, int, int]:
+    title = str(candidate.get("title") or "")
+    matches = {term for term in terms if term in title}
+    return (0 if matches else 1, min((frequencies[term] for term in matches), default=9999), -len(matches))
 
 
 def require_search_results(url: str, query: str) -> None:
@@ -83,10 +122,13 @@ DETAIL_SCRIPT = """() => {
 
 
 class XiaohongshuProvider(SearchProvider):
+    capture_origin = "live_provider"
+
     def __init__(self, browser: BrowserService, auto_elevate: bool = False):
         self.browser = browser
         self.auto_elevate = auto_elevate
         self.attempted_queries: set[str] = set()
+        self.detail_cache: dict[str, VideoResult] = {}
 
     async def gate(self, page: Page, partial: list[VideoResult]) -> None:
         state = await self.browser.inspect(page)
@@ -146,6 +188,7 @@ class XiaohongshuProvider(SearchProvider):
                 if initial_state in {"verification_required", "restricted"}:
                     await self.gate(page, results)
                 base = f"{urlsplit(page.url).scheme}://{urlsplit(page.url).netloc}" if page.url and urlsplit(page.url).netloc else getattr(self.browser, "base_url", "https://www.rednote.com")
+                direct_url = f"{base}/search_result?keyword={quote(query)}&source=web_explore_feed&type=51"
                 current = urlsplit(page.url)
                 on_current_results = False
                 if current.path.rstrip("/") == "/search_result":
@@ -236,8 +279,8 @@ class XiaohongshuProvider(SearchProvider):
                         pass
 
                 candidates: dict[str, dict[str, object]] = {}
-                max_scrolls = min(max(5, int(limit * 0.8)), 12)
-                target_candidates = min(max(limit * 2, 15), 35)
+                max_scrolls = min(max(5, int(limit * 0.8)), 30)
+                target_candidates = min(max(limit * 2, 15), 250)
                 prev_count = 0
                 stale_scrolls = 0
 
@@ -436,7 +479,7 @@ class XiaohongshuProvider(SearchProvider):
 
                     scroll_px = random.randint(800, 1150)
                     await page.mouse.wheel(0, scroll_px)
-                    await page.wait_for_timeout(random.randint(150, 250))
+                    await page.wait_for_timeout(random.randint(700, 1100))
 
                     if len(candidates) == prev_count:
                         stale_scrolls += 1
@@ -465,8 +508,16 @@ class XiaohongshuProvider(SearchProvider):
                     ),
                 )
                 needs_detail: list[dict[str, object]] = []
+                query_terms = query_card_terms(query)
+                term_frequencies = Counter(
+                    term
+                    for cand in ordered
+                    if cand.get("is_video")
+                    for term in query_terms
+                    if term in str(cand.get("title") or "")
+                )
 
-                # Instantly populate results from search cards only if verified as video
+                # Cards with partial query evidence need their actual note description.
                 for cand in ordered:
                     note_id = str(cand["note_id"])
                     canonical = str(cand.get("canonical") or f"{base}/explore/{note_id}")
@@ -474,6 +525,20 @@ class XiaohongshuProvider(SearchProvider):
                     candidate_cover = cand.get("cover")
                     title = cand.get("title")
                     is_card_video = bool(cand.get("is_video"))
+                    matched_terms = {term for term in query_terms if term in str(title or "")}
+                    if title and is_card_video and len(query_terms) >= 2:
+                        if not matched_terms:
+                            continue
+                        has_full_intent = (
+                            len(matched_terms) >= len(query_terms)
+                            or (
+                                any(t in str(title) for t in ("镊子", "夹取", "剥离器", "起边器", "揭贴器"))
+                                and any(t in str(title) for t in ("贴纸", "咕卡", "手账", "手帐"))
+                            )
+                        )
+                        if not has_full_intent:
+                            needs_detail.append(cand)
+                            continue
                     if title and is_card_video:
                         card_likes = parse_count_text(str(cand.get("like_text"))) if cand.get("like_text") else None
                         if card_likes is None or card_likes >= filters.minimum_likes:
@@ -510,17 +575,30 @@ class XiaohongshuProvider(SearchProvider):
                         needs_detail.append(cand)
                     # Photo cards with title but is_card_video=False are photo notes, not videos
 
-                # Only visit detail tabs if needed (e.g. synthetic test DOM cards without titles)
+                # Inspect a bounded number of promising cards; a long search must not
+                # turn into hundreds of detail navigations or exhaust the job timeout.
+                needs_detail.sort(key=lambda cand: detail_card_priority(cand, query_terms, term_frequencies))
+                remaining_needed = max(0, limit - len(results))
+                detail_budget = min(15, max(5, remaining_needed))
                 if len(results) < limit and needs_detail:
                     assert self.browser.context is not None
                     detail = await self.browser.context.new_page()
                     should_close_detail = True
                     try:
-                        for cand in needs_detail[: max(limit - len(results), 2)]:
+                        for cand in needs_detail[:detail_budget]:
                             link = str(cand["link"])
                             canonical = str(cand.get("canonical") or link)
                             note_id = str(cand.get("note_id") or canonical.rsplit("/", 1)[1])
                             candidate_cover = cand.get("cover")
+                            cached = self.detail_cache.get(note_id)
+                            if cached is not None:
+                                if (cached.like_count or 0) >= filters.minimum_likes:
+                                    results.append(cached)
+                                    if on_batch:
+                                        await on_batch([cached])
+                                    if len(results) >= limit:
+                                        break
+                                continue
                             try:
                                 await detail.goto(link, wait_until="domcontentloaded", timeout=6000)
                                 await self.gate(detail, results)
@@ -545,6 +623,10 @@ class XiaohongshuProvider(SearchProvider):
                                     )
                                 except ValueError:
                                     continue
+                                # Redirects to another note or back to recommendations
+                                # cannot supply metadata for this search card.
+                                if effective_id != note_id or note_url(detail.url) is None:
+                                    continue
 
                                 raw_data = await detail.evaluate(DETAIL_SCRIPT)
                                 cover_str = str(candidate_cover) if candidate_cover else None
@@ -557,6 +639,7 @@ class XiaohongshuProvider(SearchProvider):
                                         platform_video_id=effective_id,
                                     )
                                     if result:
+                                        self.detail_cache[note_id] = result
                                         if (result.like_count or 0) >= filters.minimum_likes:
                                             results.append(result)
                                             if on_batch:

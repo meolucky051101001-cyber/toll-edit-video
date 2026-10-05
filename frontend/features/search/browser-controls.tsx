@@ -22,6 +22,11 @@ interface BrowserDiagnostics {
   input_count?: number;
   search_input_value?: string;
   login_modal_visible?: boolean;
+  captcha_visible?: boolean;
+  captcha_detection_reason?: string | null;
+  has_session_cookie?: boolean;
+  has_user_element?: boolean;
+  has_login_button?: boolean;
   is_authenticated?: boolean;
   result_links_count?: number;
   video_elements_count?: number;
@@ -54,14 +59,17 @@ export function BrowserControls({
   const status = useResource<BrowserStatus>(endpoint, 4000);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [showVerificationPreview, setShowVerificationPreview] = useState(false);
   const [showQrModal, setShowQrModal] = useState(false);
   const [qrTimestamp, setQrTimestamp] = useState(0);
+  const [qrUnavailable, setQrUnavailable] = useState(false);
 
   async function action(actionPath: string) {
     setBusy(true);
     setError("");
     try {
       await api(actionPath, { method: "POST", signal: AbortSignal.timeout(45000) });
+      setQrTimestamp(Date.now());
       status.refresh();
       refresh?.();
     } catch (e) {
@@ -96,14 +104,16 @@ export function BrowserControls({
   }, [showQrModal, status, refresh]);
 
   const handleOpenQr = async () => {
-    setShowQrModal(true);
-    setQrTimestamp(Date.now());
-    // Ensure browser is running headful so QR code is actively loaded
+    setQrUnavailable(false);
+    // Wait for Chromium to open/refresh before mounting the image request.
+    // Otherwise the screenshot can race the browser startup and leave a false error state.
     if (!status.data?.open) {
       await action(`${endpoint}/open`);
     } else {
       await action(`${endpoint}/refresh_qr`);
     }
+    setQrTimestamp(Date.now());
+    setShowQrModal(true);
   };
 
   return (
@@ -133,7 +143,7 @@ export function BrowserControls({
             <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
               <Smartphone size={18} style={{ color: "#0f766e" }} />
               <strong style={{ fontSize: "0.95rem", color: "#0f766e" }}>
-                Đăng nhập bằng mã QR {platformLabel}
+                {qrUnavailable ? `Chưa có mã QR đăng nhập ${platformLabel}` : `Đăng nhập bằng mã QR ${platformLabel}`}
               </strong>
             </div>
             <button
@@ -173,24 +183,38 @@ export function BrowserControls({
                 justifyContent: "center",
               }}
             >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={`/api${endpoint}/screenshot?crop=qr&t=${qrTimestamp}`}
-                alt={`Mã QR ${platformLabel}`}
-                style={{ width: "100%", height: "100%", objectFit: "contain" }}
-                onError={(e) => {
-                  (e.target as HTMLImageElement).style.display = "none";
-                }}
-              />
+              {qrUnavailable ? (
+                <div
+                  role="status"
+                  style={{ padding: "0.8rem", color: "#475569", fontSize: "0.78rem", textAlign: "center" }}
+                >
+                  Chưa thấy mã QR trên trang Douyin. Hãy mở cửa sổ trình duyệt và đăng nhập trực tiếp.
+                </div>
+              ) : (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={`/api${endpoint}/screenshot?crop=qr&t=${qrTimestamp}`}
+                  alt={`Mã QR ${platformLabel}`}
+                  style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                  onLoad={() => setQrUnavailable(false)}
+                  onError={() => setQrUnavailable(true)}
+                />
+              )}
             </div>
 
             <div style={{ flex: 1, minWidth: "240px", fontSize: "0.85rem", lineHeight: 1.6 }}>
-              <ol style={{ paddingLeft: "1.2rem", margin: "0 0 0.75rem 0", color: "#334155" }}>
-                <li>Mở app <strong>{platformLabel}</strong> trên điện thoại.</li>
-                <li>Vào phần <strong>Quét mã QR</strong> (ở góc trên cùng hoặc trang cá nhân).</li>
-                <li>Hướng camera vào mã bên cạnh để xác nhận đăng nhập.</li>
-                <li>Hệ thống sẽ <strong>tự động nhận diện khi đăng nhập thành công</strong>.</li>
-              </ol>
+              {qrUnavailable ? (
+                <p role="status" style={{ margin: "0 0 0.75rem 0", color: "#475569" }}>
+                  Trang hiện tại không có QR để quét. Hãy mở cửa sổ Douyin, tự bấm Đăng nhập hoặc xử lý CAPTCHA trên trang đó.
+                </p>
+              ) : (
+                <ol style={{ paddingLeft: "1.2rem", margin: "0 0 0.75rem 0", color: "#334155" }}>
+                  <li>Mở app <strong>{platformLabel}</strong> trên điện thoại.</li>
+                  <li>Vào phần <strong>Quét mã QR</strong> (ở góc trên cùng hoặc trang cá nhân).</li>
+                  <li>Hướng camera vào mã bên cạnh để xác nhận đăng nhập.</li>
+                  <li>Hệ thống sẽ <strong>tự động nhận diện khi đăng nhập thành công</strong>.</li>
+                </ol>
+              )}
 
               <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
                 <Button
@@ -199,6 +223,7 @@ export function BrowserControls({
                   variant="outline"
                   disabled={busy}
                   onClick={() => {
+                    setQrUnavailable(false);
                     action(`${endpoint}/refresh_qr`);
                     setQrTimestamp(Date.now());
                   }}
@@ -263,7 +288,7 @@ export function BrowserControls({
             </Button>
 
             {/* Primary Action 2: Quick QR Login */}
-            <Button
+            {status.data?.state !== "verification_required" && <Button
               type="button"
               variant="outline"
               disabled={busy}
@@ -279,7 +304,18 @@ export function BrowserControls({
             >
               <QrCode size={16} className="mr-1" />
               Đăng nhập bằng mã QR
-            </Button>
+            </Button>}
+
+            {status.data?.state === "verification_required" && <>
+              <Button type="button" variant="outline" disabled={busy}
+                onClick={() => { setQrTimestamp(Date.now()); setShowVerificationPreview((shown) => !shown); }}>
+                {showVerificationPreview ? "Ẩn trang xác minh" : "Xem trang xác minh"}
+              </Button>
+              <Button type="button" variant="outline" disabled={busy}
+                onClick={() => action(`${endpoint}/refresh_verification`)}>
+                <RotateCcw size={16} className="mr-1" /> Tải lại CAPTCHA không hiển thị
+              </Button>
+            </>}
 
             {jobId && waiting && (
               <Button
@@ -299,6 +335,16 @@ export function BrowserControls({
               </Button>
             )}
           </div>
+          {showVerificationPreview && status.data?.state === "verification_required" && (
+            <div style={{ margin: "0.75rem 0" }}>
+              <p style={{ fontSize: "0.82rem", color: "#475569" }}>
+                Ảnh trang hiện tại để kiểm tra. Thao tác xác minh trong cửa sổ trình duyệt của tool.
+              </p>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={`/api${endpoint}/screenshot?t=${qrTimestamp}`} alt={`Trang xác minh ${platformLabel}`}
+                style={{ maxWidth: "100%", maxHeight: 420, objectFit: "contain", border: "1px solid #cbd5e1", borderRadius: 8 }} />
+            </div>
+          )}
           <p
             style={{
               fontSize: "0.82rem",
@@ -343,6 +389,14 @@ export function BrowserControls({
             ) : status.data.state === "verification_required" ? (
               <span style={{ color: "#b45309", fontWeight: 600 }}>
                 Cần giải mã CAPTCHA
+              </span>
+            ) : diag.has_login_button ? (
+              <span style={{ color: "#dc2626", fontWeight: 600 }}>
+                Chưa đăng nhập trong trình duyệt của công cụ
+              </span>
+            ) : diag.has_session_cookie && !diag.has_user_element ? (
+              <span style={{ color: "#b45309", fontWeight: 600 }}>
+                Có cookie phiên nhưng chưa xác minh được tài khoản
               </span>
             ) : (
               "Chưa xác minh"
@@ -407,7 +461,7 @@ export function BrowserControls({
         >
           {busy ? "Đang xử lý…" : `Mở cửa sổ ${platformLabel}`}
         </Button>
-        <Button
+        {status.data?.state !== "verification_required" && <Button
           type="button"
           variant="outline"
           disabled={busy || status.data?.busy}
@@ -415,7 +469,7 @@ export function BrowserControls({
         >
           <QrCode size={14} className="mr-1" />
           Mã QR
-        </Button>
+        </Button>}
         {!jobId && status.data?.open && (
           <Button
             type="button"

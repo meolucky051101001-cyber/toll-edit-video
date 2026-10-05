@@ -84,10 +84,10 @@ async def test_production_service_headless_elevation(tmp_path: Path):
         assert svc.hybrid_headless is False
         assert svc.should_run_headless() is False
         mock_close.assert_called_once()
-        mock_ensure.assert_called_once_with(headless_override=False)
+        mock_ensure.assert_called_once_with(headless_override=False, initial_url=mock_page.url)
 
     # Repeat check for Douyin
-    dy_svc = DouyinBrowserService(profile=tmp_path, headless=True, hybrid_headless=True)
+    dy_svc = DouyinBrowserService(profile=tmp_path / "douyin", headless=True, hybrid_headless=True)
     assert dy_svc.should_run_headless() is True
     dy_svc.is_currently_headless = True
     dy_svc.page = mock_page
@@ -100,7 +100,7 @@ async def test_production_service_headless_elevation(tmp_path: Path):
         await dy_svc.elevate_to_headful()
         assert dy_svc.force_headful_session is True
         assert dy_svc.should_run_headless() is False
-        mock_ensure.assert_called_once_with(headless_override=False)
+        mock_ensure.assert_called_once_with(headless_override=False, initial_url=None)
 
 
 # 4. Provider auto_elevate=False

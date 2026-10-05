@@ -88,6 +88,8 @@ DETAIL_SCRIPT = """() => {
 
 
 class DouyinProvider(SearchProvider):
+    capture_origin = "live_provider"
+
     def __init__(self, browser: DouyinBrowserService, auto_elevate: bool = False):
         self.browser = browser
         self.auto_elevate = auto_elevate

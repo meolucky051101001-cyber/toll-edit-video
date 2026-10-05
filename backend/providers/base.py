@@ -41,6 +41,9 @@ class ManualActionTimeoutError(ProviderError):
 
 
 class SearchProvider(ABC):
+    # Concrete live crawlers opt in; mocks/adapters are untrusted by default.
+    capture_origin = "untrusted"
+
     @abstractmethod
     async def search(
         self,

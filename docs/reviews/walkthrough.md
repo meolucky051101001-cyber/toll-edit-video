@@ -161,3 +161,33 @@ Bằng chứng thực thi Strict Gate đã được ghi nhận trực tiếp và
 2. **Bước 2: Chạy Cổng Phát Hành Nghiêm Ngặt**:
    - Chạy lệnh: `python scripts/release_gate.py --live --require-live`
    - Hệ thống sẽ tìm kiếm từ khóa `"nhíp gắp sticker"` (với từ khóa mục tiêu `"贴纸镊子"`), kiểm tra video trả về đúng loại `content_type=video`, xác thực độ liên quan phức hợp của top kết quả theo quy chuẩn $\ge 3$ video và $\ge 80\%$ relevance rate, và chỉ trả về **exit code 0** khi cả hai nền tảng thu thập thành công video thật.
+
+
+## 5. Khóa an toàn Capture Manifest & nghiệm thu strict (2026-09-26)
+
+### Cách ly đường ghi và dữ liệu lịch sử
+- SearchService chỉ chuyển capture writer xuống luồng lưu khi job là tìm thật, service được cấu hình writer, và provider khai báo capture_origin = "live_provider". SearchProvider mặc định là untrusted; provider kiểm thử dù trả VideoResult(is_mock=False) không đủ điều kiện ghi manifest.
+- Ứng dụng production inject record_live_crawl_capture. Test suite mặc định dùng LIVE_CAPTURE_MANIFEST_PATH trỏ vào thư mục tạm; release gate cấp RELEASE_GATE_CAPTURE_MANIFEST_PATH riêng cho Stage 11. Hai bài live acceptance ghi vào manifest tạm đó, không ghi manifest vận hành.
+- Pytest có session guard so sánh SHA-256 của manifest vận hành trước và sau cả lượt test.
+- Dữ liệu cũ được giữ nguyên, không di chuyển hay xóa. Báo cáo phân loại cả 138 bản ghi lịch sử là UNVERIFIED_HISTORY_REQUIRES_REVIEW; 60 bản ghi có ID dạng pvid_* được đánh dấu nghi ngờ dữ liệu test và cách ly logic để không tính là capture live. Đây là nhãn báo cáo, không phải chỉnh sửa tệp.
+- Manifest hiện có 138 dòng và SHA-256 16774E2829D0630253BA501ABD52318530911B51426965A7268518265E670B93; giá trị trước và sau release gate giống nhau.
+
+### Hash metadata và annotation fail-closed
+- Audit metadata chỉ chấp nhận hash_version tường minh là v1 hoặc v2. Manifest v2 chỉ kiểm tra hash v2; v1 chỉ dùng khi record khai báo chính xác v1. Thiếu phiên bản hoặc phiên bản không hỗ trợ bị từ chối.
+- Annotation audit yêu cầu record ID, platform, video ID, nhãn boolean đúng kiểu, rationale, reviewer, timestamp ISO 8601 có timezone, version được hỗ trợ và annotation_hash khớp. Không còn xác nhận khi thiếu hash hoặc chỉ tự hash nhãn nằm trong sample.
+- JSONL vẫn chỉ được ghi bằng chế độ append ở mức ứng dụng. Điều này không ngăn sửa hoặc xóa tệp; báo cáo không tuyên bố chống giả mạo nếu chưa có chữ ký số ngoài hoặc kho bất biến.
+
+### Nghiệm thu sau sửa
+Lệnh thực tế: .\.venv\Scripts\python.exe scripts\release_gate.py --live --require-live
+
+- Ruff, Mypy, ESLint, TypeScript và production build: PASS.
+- Backend: 481 passed, 0 failed, 3 skipped.
+- Stage 9: 33/33 sample hợp lệ schema; 0 manifest verified, 0 annotation verified, 33 fixture chưa xác minh.
+- Playwright: 26/26 tests qua 7 specs.
+- Stage 11: probe HTTP thành công trên Douyin và Xiaohongshu; Douyin BLOCKED (CHALLENGE_REQUIRED), Xiaohongshu BLOCKED (LOGIN_REQUIRED). Cả hai trả 0 kết quả.
+- current_run_live_captures=0; manifest capture tạm của lần chạy có 0 dòng. release_gate_report.json ghi strict exit code 2 và verdict APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH; hệ thống không báo Full Green.
+
+
+## Kiểm tra bổ sung 27/09/2026
+
+Đã sửa lỗi phiên XHS, QR, lượng ứng viên và endpoint tải file; regression cuối: 508 pass, 3 skip, 0 fail. Live smoke: Douyin 20/20, XHS 2/20 cho dụng cụ bóc sticker. **Chưa FULL GREEN / chưa nghiệm thu tìm hàng loạt trên cả hai nền tảng.** Báo cáo gate phía trên thuộc lần chạy cũ, không chứng nhận bản sửa hiện tại. Chi tiết tại [REPAIR_VERIFICATION_2026-09-27.md](REPAIR_VERIFICATION_2026-09-27.md).

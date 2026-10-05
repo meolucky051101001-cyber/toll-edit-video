@@ -1,12 +1,35 @@
 {
   "verdict": "APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH",
-  "duration_seconds": 331.0,
-  "timestamp": "2026-09-26T06:16:54Z",
+  "duration_seconds": 231.32,
+  "timestamp": "2026-10-05T17:01:08Z",
   "strict_live_run": {
     "executed": true,
     "command": "python scripts/release_gate.py --live --require-live",
     "exit_code": 2,
-    "timestamp": "2026-09-26T06:16:54Z",
+    "timestamp": "2026-10-05T17:01:08Z",
+    "current_run_live_captures": 0,
+    "capture_provenance_audit": {
+      "current_run_live_captures": 0,
+      "current_run_unverified_capture_records": 0,
+      "manifest_records_in_run_scope": 0,
+      "all_retrieved_results_verified": false,
+      "platforms": {
+        "douyin": {
+          "retrieval_status": "BLOCKED (CHALLENGE_REQUIRED)",
+          "expected_results": 0,
+          "manifest_records": 0,
+          "verified_records": 0,
+          "complete": false
+        },
+        "xiaohongshu": {
+          "retrieval_status": "BLOCKED (LOGIN_REQUIRED)",
+          "expected_results": 0,
+          "manifest_records": 0,
+          "verified_records": 0,
+          "complete": false
+        }
+      }
+    },
     "query": "nh\u00edp g\u1eafp sticker",
     "submitted_query": "\u8d34\u7eb8\u954a\u5b50",
     "douyin": {
@@ -39,40 +62,40 @@
     "2_database": {
       "passed": true,
       "detail": "SQLite database schema verified (5 core tables present)",
-      "duration_s": 0.35
+      "duration_s": 0.28
     },
     "3_ruff_linter": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 0.15
+      "duration_s": 0.09
     },
     "4_mypy_types": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 0.7
+      "duration_s": 0.34
     },
     "5_frontend_eslint": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 69.91
+      "duration_s": 4.78
     },
     "6_frontend_typecheck": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 11.46
+      "duration_s": 2.15
     },
     "7_frontend_build": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 32.41
+      "duration_s": 11.5
     },
     "8_backend_pytest": {
       "passed": true,
       "exit_code": 0,
-      "tests_passed": 475,
+      "tests_passed": 544,
       "tests_failed": 0,
       "tests_skipped": 3,
-      "duration_s": 143.6
+      "duration_s": 140.03
     },
     "9_fixture_benchmark": {
       "passed": true,
@@ -96,9 +119,19 @@
       "manifest_storage": {
         "path": "data/manifests/live_capture_manifest.jsonl",
         "type": "append_only_jsonl",
-        "live_records_count": 45,
-        "status": "45 live records recorded",
-        "guarantee_level": "metadata_hash_manifest_consistency (non-tamper-evident without external cryptographic signature)"
+        "historical_records_count": 212,
+        "historical_unverified_records_count": 212,
+        "historical_suspected_synthetic_records_count": 60,
+        "historical_quarantined_records_count": 60,
+        "historical_quarantine_mode": "logical_only_read_only",
+        "historical_status": "UNVERIFIED_HISTORY_REQUIRES_REVIEW",
+        "current_run_live_captures": 0,
+        "current_run_status": "NO_VERIFIED_CURRENT_RUN_CAPTURE",
+        "current_run_unverified_capture_records": 0,
+        "current_run_manifest_isolated": true,
+        "append_only_enforcement": "application_append_mode_only",
+        "tamper_evident": false,
+        "guarantee_level": "metadata_hash_consistency_only; edits/deletion require external signature or immutable storage to detect"
       },
       "real_crawled_samples_provenance": 20,
       "independent_holdout_samples": 13,
@@ -118,14 +151,14 @@
         }
       },
       "test_suites_passed": 12,
-      "duration_s": 3.69
+      "duration_s": 2.59
     },
     "10_frontend_playwright_e2e": {
       "passed": true,
       "exit_code": 0,
-      "tests_passed": 26,
-      "specs_count": 7,
-      "duration_s": 39.19
+      "tests_passed": 29,
+      "specs_count": 8,
+      "duration_s": 34.59
     },
     "11_live_crawl_acceptance": {
       "executed": true,
@@ -135,7 +168,31 @@
         "passed": true,
         "exit_code": 0,
         "douyin": "HTTP 200: page_available",
-        "xiaohongshu": "HTTP 200: page_available"
+        "xiaohongshu": "HTTP 200: authenticated"
+      },
+      "current_run_live_captures": 0,
+      "current_run_unverified_capture_records": 0,
+      "capture_provenance_audit": {
+        "current_run_live_captures": 0,
+        "current_run_unverified_capture_records": 0,
+        "manifest_records_in_run_scope": 0,
+        "all_retrieved_results_verified": false,
+        "platforms": {
+          "douyin": {
+            "retrieval_status": "BLOCKED (CHALLENGE_REQUIRED)",
+            "expected_results": 0,
+            "manifest_records": 0,
+            "verified_records": 0,
+            "complete": false
+          },
+          "xiaohongshu": {
+            "retrieval_status": "BLOCKED (LOGIN_REQUIRED)",
+            "expected_results": 0,
+            "manifest_records": 0,
+            "verified_records": 0,
+            "complete": false
+          }
+        }
       },
       "platforms": {
         "douyin": {
@@ -169,7 +226,7 @@
           "reason": "User login session required to view search results on workstation"
         }
       },
-      "duration_s": 24.42
+      "duration_s": 29.91
     }
   }
 }

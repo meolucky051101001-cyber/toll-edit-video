@@ -97,6 +97,7 @@ export interface RejectedCandidate {
 }
 export interface JobDiagnostics {
   rejected_candidates?: RejectedCandidate[];
+  provider_errors?: Record<string, string>;
   [key: string]: unknown;
 }
 export interface Job {

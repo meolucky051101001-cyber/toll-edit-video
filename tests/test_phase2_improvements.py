@@ -90,8 +90,9 @@ def test_session_keep_alive_service(tmp_path):
     service = SessionKeepAliveService(douyin_profile=douyin_dir, xhs_profile=tmp_path / "xhs")
     status = service.get_status()
     assert status["douyin"]["saved_cookies"] == 2
-    assert status["douyin"]["has_auth_session"] is True
-    assert status["douyin"]["status"] == "healthy"
+    assert status["douyin"]["has_saved_session_tokens"] is True
+    assert status["douyin"]["has_auth_session"] is False
+    assert status["douyin"]["status"] == "saved_unverified"
     assert status["xiaohongshu"]["has_auth_session"] is False
 
     # Test ping with mocked browser
@@ -99,9 +100,13 @@ def test_session_keep_alive_service(tmp_path):
         mock_browser = MagicMock()
         mock_browser.lock = asyncio.Lock()
         mock_page = MagicMock()
+        mock_page.url = "https://www.douyin.com/search/test"
         mock_page.is_closed = MagicMock(return_value=False)
         mock_page.evaluate = AsyncMock(return_value={"ok": True, "status": 200})
         mock_browser.page = mock_page
+        mock_browser.get_active_page.return_value = mock_page
+        mock_browser.inspect = AsyncMock(return_value="authenticated")
+        mock_browser.context = None
 
         ok = await service.ping_platform("douyin", mock_browser)
         assert ok is True

@@ -1,4 +1,4 @@
-import os
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
@@ -44,12 +44,18 @@ def get_dubbing_job(job_id: str, db: Session = Depends(get_db)):
 @router.get("/files/{filename}")
 def stream_dubbing_file(filename: str):
     """Streams generated dubbing audio or video files."""
-    # Prevent path traversal attacks
-    clean_filename = os.path.basename(filename)
-    file_path = os.path.join("data", "dubbing", clean_filename)
+    base_dir = Path("data/dubbing").resolve()
+    target_path = (base_dir / filename).resolve()
 
-    if not os.path.isfile(file_path):
+    # Path traversal guard matching download service
+    try:
+        target_path.relative_to(base_dir)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Đường dẫn tập tin không an toàn.")
+
+    if not target_path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tệp âm thanh/video không tồn tại.")
 
+    clean_filename = target_path.name
     media_type = "audio/mpeg" if clean_filename.endswith(".mp3") else "audio/wav" if clean_filename.endswith(".wav") else "video/mp4"
-    return FileResponse(file_path, media_type=media_type, filename=clean_filename)
+    return FileResponse(str(target_path), media_type=media_type, filename=clean_filename)

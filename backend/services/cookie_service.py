@@ -20,10 +20,14 @@ def is_dummy_cookie(cookie_str: str | None) -> bool:
     return any(dummy in lower for dummy in DUMMY_SUBSTRINGS)
 
 
-def persist_auth_cookies(cookies: list[dict], duration_days: int = 365) -> list[dict]:
-    """Ensure essential session tokens have long-lived expiry so Chromium persists them."""
+def persist_auth_cookies(cookies: list[dict]) -> list[dict]:
+    """Keep native cookie lifetimes; disk snapshots preserve session cookies.
+
+    Extending an expiry locally cannot extend a session on the platform server.
+    Expired cookies must not be resurrected during a browser restart.
+    """
     import time
-    future_exp = int(time.time() + duration_days * 86400)
+    now = time.time()
     updated = []
     for c in cookies:
         if not isinstance(c, dict):
@@ -32,9 +36,11 @@ def persist_auth_cookies(cookies: list[dict], duration_days: int = 365) -> list[
         val = str(item.get("value", "")).lower()
         if any(dummy in val for dummy in DUMMY_SUBSTRINGS):
             continue
-        # If session cookie (expires <= 0 or missing), give it 1-year persistent life
-        if not item.get("expires") or item.get("expires", 0) <= 0:
-            item["expires"] = future_exp
+        expires = item.get("expires", -1)
+        if not isinstance(expires, (int, float)):
+            continue
+        if 0 < expires <= now:
+            continue
         updated.append(item)
     return updated
 
@@ -96,7 +102,7 @@ def inspect_cookie_tokens(cookie_str: str, platform: str) -> dict[str, Any]:
         status_text = "Chưa có Cookie. Video có thể bị giới hạn độ phân giải hoặc gặp chặn bot."
     elif len(detected_essential) >= 2 or (has_session and has_device):
         grade = "high_quality"
-        status_text = "Cookie hợp lệ. Đã mở khóa chất lượng video cao nhất (1080p / gốc) & chống quét bot."
+        status_text = "Có đủ token cookie cơ bản. Cần kiểm tra phiên trên trình duyệt; cookie không đảm bảo đăng nhập, chất lượng video hoặc miễn CAPTCHA."
     else:
         grade = "basic"
         status_text = "Cookie cơ bản (thiếu token phiên đăng nhập đầy đủ). Khuyên dùng tài khoản đã đăng nhập."

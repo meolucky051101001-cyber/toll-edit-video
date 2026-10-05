@@ -16,6 +16,34 @@ def test_health_validation_and_origin(client):
     assert client.get("/api/videos/no-such-id").status_code == 404
 
 
+def test_real_search_accepts_both_platforms_and_rejects_mismatched_modes(client, monkeypatch):
+    # Validate the public API without launching a browser or writing a live manifest.
+    submitted = []
+    monkeypatch.setattr(app.state.search, "submit", submitted.append)
+    response = client.post(
+        "/api/search",
+        json={
+            "query": "dụng cụ bóc sticker",
+            "mode": "both",
+            "platforms": ["douyin", "xiaohongshu"],
+            "limit": 5,
+        },
+    )
+    assert response.status_code == 202
+    assert response.json()["platforms"] == ["douyin", "xiaohongshu"]
+    assert response.json()["is_mock"] is False
+    assert submitted == [response.json()["id"]]
+
+    invalid = [
+        {"mode": "both", "platforms": ["douyin"]},
+        {"mode": "douyin", "platforms": ["douyin", "xiaohongshu"]},
+        {"mode": "both", "platforms": ["douyin", "douyin"]},
+        {"mode": "both", "platforms": ["douyin", "tiktok"]},
+    ]
+    for values in invalid:
+        assert client.post("/api/search", json={"query": "sticker", "limit": 5, **values}).status_code == 422
+
+
 def test_filters_pagination_and_save(client, sessions):
     from tests.test_pipeline import make_job
 

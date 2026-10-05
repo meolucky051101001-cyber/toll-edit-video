@@ -29,13 +29,14 @@ import { BrowserControls } from "./browser-controls";
 
 const terminal = ["completed", "failed", "cancelled", "interrupted"];
 
-export type SearchMode = "mock" | "xiaohongshu" | "douyin" | "tiktok" | "youtube_shorts";
+export type SearchMode = "mock" | "xiaohongshu" | "douyin" | "both" | "tiktok" | "youtube_shorts";
 
 export function parseSearchMode(raw: string | null | undefined): SearchMode {
   if (!raw) return "xiaohongshu";
   const normalized = raw.trim().toLowerCase();
   if (normalized === "xiaohongshu") return "xiaohongshu";
   if (normalized === "douyin") return "douyin";
+  if (normalized === "both") return "both";
   if (normalized === "tiktok") return "tiktok";
   if (normalized === "youtube_shorts" || normalized === "youtube") return "youtube_shorts";
   return "mock";
@@ -86,7 +87,7 @@ function SearchSession({
   const settings = useResource<Settings>("/settings");
   const [query, setQuery] = useState(initialQuery);
   const [platforms, setPlatforms] = useState<Platform[]>(
-    initialMode === "mock"
+    initialMode === "mock" || initialMode === "both"
       ? ["douyin", "xiaohongshu"]
       : [initialMode as Platform],
   );
@@ -173,7 +174,9 @@ function SearchSession({
           platforms:
             mode === "mock"
               ? platforms
-              : [mode as Platform],
+              : mode === "both"
+                ? ["douyin", "xiaohongshu"]
+                : [mode as Platform],
           limit: normalizeLimitForMode(limit, mode),
           use_ai: useAI,
           selected_queries: terms.length ? terms : undefined,
@@ -230,13 +233,15 @@ function SearchSession({
           <FlaskConical size={14} />
           {mode === "mock"
             ? "Dữ liệu mẫu"
-            : mode === "douyin"
-              ? "Douyin"
-              : mode === "xiaohongshu"
-                ? "Xiaohongshu"
-                : mode === "tiktok"
-                  ? "TikTok Global"
-                  : "YouTube Shorts"}
+            : mode === "both"
+              ? "Douyin + Xiaohongshu"
+              : mode === "douyin"
+                ? "Douyin"
+                : mode === "xiaohongshu"
+                  ? "Xiaohongshu"
+                  : mode === "tiktok"
+                    ? "TikTok Global"
+                    : "YouTube Shorts"}
         </span>
       </div>
       <div className="stats-strip">
@@ -271,9 +276,9 @@ function SearchSession({
                 data-testid="mode-select"
                 value={mode}
                 onChange={(e) => {
-                  const newMode = e.target.value as "mock" | "douyin" | "xiaohongshu";
+                  const newMode = e.target.value as "mock" | "douyin" | "xiaohongshu" | "both";
                   setMode(newMode);
-                  if (newMode === "mock") {
+                  if (newMode === "mock" || newMode === "both") {
                     setPlatforms(["douyin", "xiaohongshu"]);
                   } else {
                     setPlatforms([newMode as Platform]);
@@ -284,6 +289,7 @@ function SearchSession({
               >
                 <option value="xiaohongshu">xiaohongshu</option>
                 <option value="douyin">douyin</option>
+                <option value="both">both</option>
                 <option value="mock">mock</option>
               </select>
               <div className="segmented-control" role="group" aria-label="Nền tảng tìm kiếm">
@@ -315,6 +321,18 @@ function SearchSession({
                 </button>
                 <button
                   type="button"
+                  data-testid="platform-select-both"
+                  className={`segmented-button ${mode === "both" ? "active" : ""}`}
+                  onClick={() => {
+                    setMode("both");
+                    setPlatforms(["douyin", "xiaohongshu"]);
+                    setLimit((prev) => normalizeLimitForMode(prev, "both"));
+                  }}
+                >
+                  Cả hai nền tảng
+                </button>
+                <button
+                  type="button"
                   data-testid="platform-select-mock"
                   className={`segmented-button ${mode === "mock" ? "active" : ""}`}
                   onClick={() => {
@@ -333,6 +351,11 @@ function SearchSession({
               </span>
             )}
           </div>
+          {mode === "both" && (
+            <p className="muted" style={{ fontSize: "0.82rem", margin: "0.25rem 0 0.75rem" }}>
+              Hạn mức tổng được chia gần đều cho Douyin và Xiaohongshu. Nếu một nền tảng yêu cầu đăng nhập hoặc xác minh, lượt tìm sẽ chờ bạn hoàn tất trước khi tiếp tục.
+            </p>
+          )}
           <div className="search-input-row">
             <Search size={20} />
             <input
@@ -355,6 +378,8 @@ function SearchSession({
                   ? "Đang tìm…"
                   : mode === "mock"
                     ? "Tìm video mẫu"
+                    : mode === "both"
+                      ? "Tìm trên cả hai"
                     : `Tìm trên ${platformName(mode)}`}
               <ArrowRight size={16} />
             </Button>
@@ -507,7 +532,7 @@ function SearchSession({
           ))}
         </div>
       </section>
-      {mode === "xiaohongshu" && !active && (!job.data || terminal.includes(job.data.status)) && (
+      {(mode === "xiaohongshu" || mode === "both") && !active && (!job.data || terminal.includes(job.data.status)) && (
         <section className="job-progress">
           <p>
             Tìm thật trên Xiaohongshu: tối đa 3 truy vấn và 100 video. Các số
@@ -516,7 +541,7 @@ function SearchSession({
           <BrowserControls platform="xiaohongshu" />
         </section>
       )}
-      {mode === "douyin" && !active && (!job.data || terminal.includes(job.data.status)) && (
+      {(mode === "douyin" || mode === "both") && !active && (!job.data || terminal.includes(job.data.status)) && (
         <section className="job-progress">
           <p>
             Tìm thật trên Douyin: tối đa 3 truy vấn và 100 video. Các số liệu
@@ -531,9 +556,11 @@ function SearchSession({
           <strong>
             {mode === "mock"
               ? "Đang thử quy trình với dữ liệu mẫu."
-              : mode === "douyin"
-                ? "Đang dùng trình duyệt Douyin riêng."
-                : "Đang dùng trình duyệt Xiaohongshu riêng."}
+              : mode === "both"
+                ? "Đang dùng trình duyệt riêng cho Douyin và Xiaohongshu."
+                : mode === "douyin"
+                  ? "Đang dùng trình duyệt Douyin riêng."
+                  : "Đang dùng trình duyệt Xiaohongshu riêng."}
           </strong>{" "}
           {mode === "mock"
             ? "Dữ liệu mẫu để thử nghiệm quy trình tìm kiếm offline."
@@ -591,7 +618,7 @@ function SearchSession({
           )}
           {job.data && job.data.status === "completed" && job.data.processed_count < job.data.requested_limit && (
             <p className="muted" style={{ fontSize: "0.83rem", marginTop: "0.4rem" }}>
-              ℹ️ Đã quét hết kết quả phù hợp trên trang ({job.data.processed_count} video). Số lượng {job.data.requested_limit} là trần mục tiêu tối đa.
+              ℹ️ Đã lưu {job.data.processed_count}/{job.data.requested_limit} video trong phạm vi lượt quét này. Các ứng viên không đủ độ phù hợp đã bị loại; chưa khẳng định đã quét hết kết quả của nền tảng.
             </p>
           )}
           {job.data && (job.data.ai_source || job.data.actual_ai_model) && (
@@ -637,7 +664,7 @@ function SearchSession({
           {job.data?.diagnostics?.rejected_candidates && job.data.diagnostics.rejected_candidates.length > 0 && (
             <details style={{ marginTop: "0.6rem", border: "1px solid #fed7aa", borderRadius: "8px", background: "#fff7ed", padding: "0.5rem 0.75rem" }}>
               <summary style={{ cursor: "pointer", fontWeight: 600, color: "#c2410c", fontSize: "0.85rem" }}>
-                🛡️ Video bị loại trừ bởi Precision Gate ({job.data.diagnostics.rejected_candidates.length})
+                🛡️ Ứng viên bị lọc: {job.data.rejected_count ?? 0} · Hiển thị {job.data.diagnostics.rejected_candidates.length} lý do đầu tiên
               </summary>
               <div style={{ marginTop: "0.5rem", maxHeight: "200px", overflowY: "auto", fontSize: "0.8rem" }}>
                 {job.data.diagnostics.rejected_candidates.map((cand, idx) => (
@@ -654,6 +681,15 @@ function SearchSession({
             </details>
           )}
           <ErrorBanner message={job.data?.ai_warning ?? ""} />
+          {job.data?.diagnostics?.provider_errors && !terminal.includes(job.data.status) && (
+            <div className="error-banner" role="status">
+              {Object.entries(job.data.diagnostics.provider_errors).map(([platform, message]) => (
+                <p key={platform}>
+                  {platformName(platform)} chưa tìm được trong lượt này: {message}. Kết quả từ nền tảng còn lại vẫn được giữ.
+                </p>
+              ))}
+            </div>
+          )}
           <ErrorBanner message={job.data?.error_message ?? ""} />
           {job.data &&
             ["waiting_for_login", "waiting_for_user"].includes(
@@ -760,7 +796,7 @@ function SearchSession({
                     }
                     const itemPlatform =
                       (item.platforms && item.platforms[0]) || "xiaohongshu";
-                    setMode(item.is_mock ? "mock" : itemPlatform);
+                    setMode(item.is_mock ? "mock" : item.platforms?.length === 2 ? "both" : parseSearchMode(itemPlatform));
                     setJobId(item.id);
                     setQuery(item.original_query);
                   }}

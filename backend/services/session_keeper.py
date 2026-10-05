@@ -1,7 +1,7 @@
 """Session Keep-Alive Service.
 
-Periodically verifies and refreshes saved browser session cookies
-to prevent session expiry and minimize CAPTCHA challenges.
+Periodically checks active sessions without navigating away from searches.
+Only the platform server controls expiry and security challenges.
 """
 
 from __future__ import annotations
@@ -64,16 +64,23 @@ class SessionKeepAliveService:
         res: dict[str, Any] = {}
         for p in ("douyin", "xiaohongshu"):
             cookies = self.inspect_saved_cookies(p)
-            has_auth = any(
+            has_tokens = any(
                 c.get("name") in ("sessionid", "passport_csrf_token", "web_session", "id_token")
                 for c in cookies
             )
             last_p = self.last_heartbeat.get(p)
+            browser = self.browsers.get(p)
+            page = getattr(browser, "page", None)
+            has_auth = bool(
+                page and not page.is_closed()
+                and getattr(browser, "state", None) == "authenticated"
+            )
             res[p] = {
                 "saved_cookies": len(cookies),
+                "has_saved_session_tokens": has_tokens,
                 "has_auth_session": has_auth,
                 "last_heartbeat_s_ago": round(now - last_p, 1) if last_p else None,
-                "status": "healthy" if has_auth else "unauthenticated",
+                "status": "healthy" if has_auth else ("saved_unverified" if has_tokens else "unauthenticated"),
             }
         return res
 
@@ -87,46 +94,68 @@ class SessionKeepAliveService:
             logger.debug("Skipping session ping for %s: browser is currently busy", platform)
             return False
 
-        target_url = "https://www.douyin.com/" if platform == "douyin" else "https://www.xiaohongshu.com/explore"
+        from urllib.parse import urlsplit
+
+        from backend.services.browser_session import (
+            platform_navigation_url,
+            save_session_checkpoint,
+        )
         max_retries = 2
         for attempt in range(max_retries):
             try:
                 async with browser_service.lock:
-                    page = getattr(browser_service, "page", None)
+                    if getattr(browser_service, "page", None) is None:
+                        return False
+                    page = (
+                        browser_service.get_active_page()
+                        if hasattr(browser_service, "get_active_page")
+                        else getattr(browser_service, "page", None)
+                    )
                     if not page or page.is_closed():
                         return False
+                    # Do not touch the platform while a user is verifying a challenge.
+                    if getattr(browser_service, "state", None) in {
+                        "login_required", "verification_required", "restricted", "network_error",
+                    }:
+                        return False
+                    domains = ("douyin.com",) if platform == "douyin" else ("xiaohongshu.com", "rednote.com")
+                    verified_url = platform_navigation_url(page.url, domains)
+                    if not verified_url:
+                        return False
+                    target = urlsplit(verified_url)
+                    target_url = f"{target.scheme}://{target.netloc}/"
 
                     ping_res = await page.evaluate(
-                        f"""async () => {{
+                        """async (targetUrl) => {
                             const controller = new AbortController();
                             const timeoutId = setTimeout(() => controller.abort(), 8000);
-                            try {{
-                                const res = await fetch('{target_url}', {{
+                            try {
+                                const res = await fetch(targetUrl, {
                                     method: 'HEAD',
                                     signal: controller.signal,
                                     credentials: 'include'
-                                }});
+                                });
                                 clearTimeout(timeoutId);
-                                return {{
+                                return {
                                     ok: res.ok || (res.status >= 200 && res.status < 400),
                                     status: res.status
-                                }};
-                            }} catch (e) {{
+                                };
+                            } catch (e) {
                                 clearTimeout(timeoutId);
-                                return {{ ok: false, error: String(e), status: 0 }};
-                            }}
-                        }}"""
+                                return { ok: false, error: String(e), status: 0 };
+                            }
+                        }""",
+                        target_url,
                     )
 
                     if isinstance(ping_res, dict) and ping_res.get("ok"):
-                        login_ok = True
-                        if hasattr(browser_service, "is_logged_in"):
-                            try:
-                                login_ok = await browser_service.is_logged_in()
-                            except Exception:
-                                pass
+                        login_ok = False
+                        if hasattr(browser_service, "inspect"):
+                            login_ok = await browser_service.inspect(page) == "authenticated"
 
                         if login_ok:
+                            if getattr(browser_service, "context", None) and getattr(browser_service, "profile", None):
+                                await save_session_checkpoint(browser_service.context, browser_service.profile)
                             self.last_heartbeat[platform] = time.time()
                             logger.info(
                                 "Session heartbeat succeeded for %s (status=%s)",

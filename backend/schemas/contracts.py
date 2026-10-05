@@ -58,7 +58,7 @@ VALID_JOB_STATUSES: set[str] = {
 
 
 class SearchRequest(BaseModel):
-    mode: Literal["mock", "xiaohongshu", "douyin", "tiktok", "youtube_shorts"] | None = None
+    mode: Literal["mock", "xiaohongshu", "douyin", "both", "tiktok", "youtube_shorts"] | None = None
     use_ai: bool = False
     selected_queries: list[str] | None = Field(default=None, min_length=1, max_length=10)
     query: str = Field(min_length=1, max_length=300)
