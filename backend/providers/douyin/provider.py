@@ -233,6 +233,13 @@ class DouyinProvider(SearchProvider):
                         await on_batch(results)
                     return results
 
+                # Detach response listener once initial network interception window concludes
+                if hasattr(page, "remove_listener"):
+                    try:
+                        page.remove_listener("response", handle_response)
+                    except Exception:
+                        pass
+
                 current_url = urlsplit(page.url)
                 unquoted_path = unquote(current_url.path)
                 on_search_page = unquoted_path.startswith("/search")
@@ -497,7 +504,11 @@ class DouyinProvider(SearchProvider):
                     detail = await self.browser.context.new_page()
                     should_close_detail = True
                     try:
-                        for vid_id, cand in needs_detail[: max(limit - len(results), 2)]:
+                        remaining_needed = max(0, limit - len(results))
+                        detail_budget = min(len(needs_detail), max(6, remaining_needed * 3), 20)
+                        for vid_id, cand in needs_detail[:detail_budget]:
+                            if len(results) >= limit:
+                                break
                             link = str(cand["link"])
                             candidate_cover = cand.get("cover")
                             try:

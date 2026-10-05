@@ -228,7 +228,7 @@ def main() -> int:
     total_stages = 11
     print_banner(f"AI Video Research Tool - Comprehensive Release Gate ({total_stages} Stages)")
     start_time = time.time()
-    results = {}
+    results: dict[str, Any] = {}
     all_passed = True
     run_capture_tempdir: tempfile.TemporaryDirectory[str] | None = None
     run_capture_manifest_path: Path | None = None

@@ -1,12 +1,12 @@
 {
-  "verdict": "APPROVED (WORKSTATION READY) - LIVE RETRIEVAL BLOCKED BY AUTH",
-  "duration_seconds": 231.32,
-  "timestamp": "2026-10-05T17:01:08Z",
+  "verdict": "APPROVED (OFFLINE FIXTURES) - PENDING LIVE CRAWL",
+  "duration_seconds": 206.86,
+  "timestamp": "2026-10-05T17:35:54Z",
   "strict_live_run": {
     "executed": true,
     "command": "python scripts/release_gate.py --live --require-live",
     "exit_code": 2,
-    "timestamp": "2026-10-05T17:01:08Z",
+    "timestamp": "2026-10-05T17:31:56Z",
     "current_run_live_captures": 0,
     "capture_provenance_audit": {
       "current_run_live_captures": 0,
@@ -34,8 +34,8 @@
     "submitted_query": "\u8d34\u7eb8\u954a\u5b50",
     "douyin": {
       "status": "BLOCKED (CHALLENGE_REQUIRED)",
-      "network_reachable": true,
-      "browser_reachable": true,
+      "network_reachable": false,
+      "browser_reachable": false,
       "retrieval_available": false,
       "retrieval_block_reason": "CAPTCHA_CHALLENGE",
       "precision_verified": false,
@@ -44,8 +44,8 @@
     },
     "xiaohongshu": {
       "status": "BLOCKED (LOGIN_REQUIRED)",
-      "network_reachable": true,
-      "browser_reachable": true,
+      "network_reachable": false,
+      "browser_reachable": false,
       "retrieval_available": false,
       "retrieval_block_reason": "LOGIN_REQUIRED",
       "precision_verified": false,
@@ -62,40 +62,40 @@
     "2_database": {
       "passed": true,
       "detail": "SQLite database schema verified (5 core tables present)",
-      "duration_s": 0.28
+      "duration_s": 0.25
     },
     "3_ruff_linter": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 0.09
+      "duration_s": 0.08
     },
     "4_mypy_types": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 0.34
+      "duration_s": 0.3
     },
     "5_frontend_eslint": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 4.78
+      "duration_s": 5.14
     },
     "6_frontend_typecheck": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 2.15
+      "duration_s": 1.93
     },
     "7_frontend_build": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 11.5
+      "duration_s": 13.58
     },
     "8_backend_pytest": {
       "passed": true,
       "exit_code": 0,
-      "tests_passed": 544,
+      "tests_passed": 545,
       "tests_failed": 0,
       "tests_skipped": 3,
-      "duration_s": 140.03
+      "duration_s": 147.77
     },
     "9_fixture_benchmark": {
       "passed": true,
@@ -126,7 +126,7 @@
         "historical_quarantine_mode": "logical_only_read_only",
         "historical_status": "UNVERIFIED_HISTORY_REQUIRES_REVIEW",
         "current_run_live_captures": 0,
-        "current_run_status": "NO_VERIFIED_CURRENT_RUN_CAPTURE",
+        "current_run_status": "NOT_RUN",
         "current_run_unverified_capture_records": 0,
         "current_run_manifest_isolated": true,
         "append_only_enforcement": "application_append_mode_only",
@@ -151,82 +151,20 @@
         }
       },
       "test_suites_passed": 12,
-      "duration_s": 2.59
+      "duration_s": 2.39
     },
     "10_frontend_playwright_e2e": {
       "passed": true,
       "exit_code": 0,
       "tests_passed": 29,
       "specs_count": 8,
-      "duration_s": 34.59
+      "duration_s": 35.35
     },
     "11_live_crawl_acceptance": {
-      "executed": true,
-      "passed": false,
-      "workstation_operational": true,
-      "probe_reachability": {
-        "passed": true,
-        "exit_code": 0,
-        "douyin": "HTTP 200: page_available",
-        "xiaohongshu": "HTTP 200: authenticated"
-      },
-      "current_run_live_captures": 0,
-      "current_run_unverified_capture_records": 0,
-      "capture_provenance_audit": {
-        "current_run_live_captures": 0,
-        "current_run_unverified_capture_records": 0,
-        "manifest_records_in_run_scope": 0,
-        "all_retrieved_results_verified": false,
-        "platforms": {
-          "douyin": {
-            "retrieval_status": "BLOCKED (CHALLENGE_REQUIRED)",
-            "expected_results": 0,
-            "manifest_records": 0,
-            "verified_records": 0,
-            "complete": false
-          },
-          "xiaohongshu": {
-            "retrieval_status": "BLOCKED (LOGIN_REQUIRED)",
-            "expected_results": 0,
-            "manifest_records": 0,
-            "verified_records": 0,
-            "complete": false
-          }
-        }
-      },
-      "platforms": {
-        "douyin": {
-          "status": "BLOCKED (CHALLENGE_REQUIRED)",
-          "detail": "Douyin security verification/CAPTCHA challenge required on workstation",
-          "query": "nh\u00edp g\u1eafp sticker",
-          "submitted_query": "\u8d34\u7eb8\u954a\u5b50",
-          "network_reachable": true,
-          "browser_reachable": true,
-          "retrieval_available": false,
-          "retrieval_block_reason": "CAPTCHA_CHALLENGE",
-          "precision_verified": false,
-          "results_count": 0,
-          "relevant_count": 0,
-          "relevance_rate": 0.0,
-          "reason": "CAPTCHA or slider challenge encountered during live search"
-        },
-        "xiaohongshu": {
-          "status": "BLOCKED (LOGIN_REQUIRED)",
-          "detail": "Xiaohongshu user login session required on workstation",
-          "query": "nh\u00edp g\u1eafp sticker",
-          "submitted_query": "\u8d34\u7eb8\u954a\u5b50",
-          "network_reachable": true,
-          "browser_reachable": true,
-          "retrieval_available": false,
-          "retrieval_block_reason": "LOGIN_REQUIRED",
-          "precision_verified": false,
-          "results_count": 0,
-          "relevant_count": 0,
-          "relevance_rate": 0.0,
-          "reason": "User login session required to view search results on workstation"
-        }
-      },
-      "duration_s": 29.91
+      "executed": false,
+      "passed": null,
+      "workstation_operational": null,
+      "detail": "Skipped (Pass --live or set LIVE_CRAWL_ENABLED=1 to execute live network verification)"
     }
   }
 }

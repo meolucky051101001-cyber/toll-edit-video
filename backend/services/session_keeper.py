@@ -84,6 +84,10 @@ class SessionKeepAliveService:
             }
         return res
 
+    def record_activity(self, platform: str) -> None:
+        """Record activity timestamp for an active authenticated session."""
+        self.last_heartbeat[platform] = time.time()
+
     async def ping_platform(self, platform: str, browser_service: Any = None) -> bool:
         """Sends a lightweight ping to keep cookies fresh if browser service is available and not busy."""
         if not browser_service:
@@ -92,6 +96,9 @@ class SessionKeepAliveService:
 
         if hasattr(browser_service, "lock") and browser_service.lock.locked():
             logger.debug("Skipping session ping for %s: browser is currently busy", platform)
+            if getattr(browser_service, "state", None) == "authenticated":
+                self.last_heartbeat[platform] = time.time()
+                return True
             return False
 
         from urllib.parse import urlsplit

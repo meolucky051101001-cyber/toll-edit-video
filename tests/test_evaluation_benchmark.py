@@ -1,6 +1,7 @@
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 from backend.schemas.contracts import VideoResult
 from backend.services.ranking_service import rank_detailed
@@ -9,7 +10,7 @@ from backend.services.translator import (
     plan_query,
 )
 
-BENCHMARK_DATASET = [
+BENCHMARK_DATASET: list[dict[str, Any]] = [
     # Category 1: Làm đẹp & Chăm sóc da (12 queries)
     {"cat": "beauty", "query": "trị mụn ẩn cho da dầu", "must": ["去闭口", "油皮"], "forbid": ["键盘", "开箱"]},
     {"cat": "beauty", "query": "kem chống nắng nâng tone kiềm dầu", "must": ["防晒"], "forbid": ["做饭"]},
@@ -96,7 +97,7 @@ def test_translation_intent_coverage_and_zero_failure():
     cjk_missing = []
 
     for item in BENCHMARK_DATASET:
-        query = item["query"]
+        query = str(item["query"])
         plan = plan_query(query)
 
         # 1. Zero crash / zero empty
@@ -120,7 +121,7 @@ def test_precision_benchmark_across_categories():
     precision_10_hits = 0
 
     for item in BENCHMARK_DATASET:
-        query = item["query"]
+        query = str(item["query"])
         must_tokens = item["must"]
         forbid_tokens = item["forbid"]
 

@@ -188,7 +188,7 @@ export function BrowserControls({
                   role="status"
                   style={{ padding: "0.8rem", color: "#475569", fontSize: "0.78rem", textAlign: "center" }}
                 >
-                  Chưa thấy mã QR trên trang Douyin. Hãy mở cửa sổ trình duyệt và đăng nhập trực tiếp.
+                  Chưa thấy mã QR trên trang {platformLabel}. Hãy mở cửa sổ trình duyệt và đăng nhập trực tiếp.
                 </div>
               ) : (
                 // eslint-disable-next-line @next/next/no-img-element
@@ -205,7 +205,7 @@ export function BrowserControls({
             <div style={{ flex: 1, minWidth: "240px", fontSize: "0.85rem", lineHeight: 1.6 }}>
               {qrUnavailable ? (
                 <p role="status" style={{ margin: "0 0 0.75rem 0", color: "#475569" }}>
-                  Trang hiện tại không có QR để quét. Hãy mở cửa sổ Douyin, tự bấm Đăng nhập hoặc xử lý CAPTCHA trên trang đó.
+                  Trang hiện tại không có QR để quét. Hãy mở cửa sổ {platformLabel}, tự bấm Đăng nhập hoặc xử lý CAPTCHA trên trang đó.
                 </p>
               ) : (
                 <ol style={{ paddingLeft: "1.2rem", margin: "0 0 0.75rem 0", color: "#334155" }}>
