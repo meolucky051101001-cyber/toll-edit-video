@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -271,114 +272,20 @@ def classify_all_segments_gender(
     srt_segments: Sequence[Any],
     vocals_path: Optional[str | Path] = None,
     original_audio_path: Optional[str | Path] = None,
-) -> Dict[int, str]:
-    """
-    Phan loai gioi tinh tung cau thoai cho che do Dual Voice (Nam & Nu trong 1 video):
-    - Trich xuat audio slice cho tung cau thoai co chu.
-    - Uoc luong F0 (Parselmouth / Praat voi librosa fallback).
-    - Ap dung hysteresis va temporal smoothing (hangover filter).
-    - Tra ve dict {seg_index: "female" | "male"}.
-    """
-    if not srt_segments:
-        return {}
-
-    audio_file = vocals_path if vocals_path and Path(vocals_path).is_file() else original_audio_path
-    if not audio_file or not Path(audio_file).is_file():
-        return {_get_index(s, idx + 1): "female" for idx, s in enumerate(srt_segments)}
-
-    pitches: List[Tuple[int, Optional[float], str]] = []
-    # 1. Thu thap F0 cho tung cau thoai
-    for idx, seg in enumerate(srt_segments):
-        seg_idx = _get_index(seg, idx + 1)
-        text = _get_content(seg).strip()
-        if not text or not re.search(r'\w', text):
-            pitches.append((seg_idx, None, "empty"))
-            continue
-
-        start_s = _get_start_sec(seg)
-        end_s = _get_end_sec(seg)
-        slice_res = extract_segment_audio_slice(audio_file, start_s, end_s)
-        if slice_res is None and original_audio_path and str(original_audio_path) != str(audio_file):
-            slice_res = extract_segment_audio_slice(original_audio_path, start_s, end_s)
-
-        if slice_res is not None:
-            y, sr = slice_res
-            f0, voiced_cnt, conf, gender, hnr = estimate_f0_pitch(y, sr)
-            if voiced_cnt >= MIN_VOICED_FRAMES and f0 > 0:
-                pitches.append((seg_idx, f0, conf, gender))
-            else:
-                pitches.append((seg_idx, None, 0.0, "unvoiced"))
-        else:
-            pitches.append((seg_idx, None, 0.0, "missing"))
-
-    # 2. Tinh F0 median toan video de xac dinh dominant baseline
-    valid_f0s = [p[1] for p in pitches if p[1] is not None]
-    if valid_f0s:
-        global_med = float(np.median(valid_f0s))
-        global_gender = "female" if global_med >= 165.0 else "male"
-    else:
-        global_med = 200.0
-        global_gender = "female"
-
-    # 3. Phan loai theo Hysteresis dua tren baseline
-    raw_genders = []
-    is_strong = []
-    for item in pitches:
-        seg_idx, f0 = item[0], item[1]
-        conf = item[2] if len(item) > 2 and isinstance(item[2], (int, float)) else 1.0
-        if f0 is None:
-            raw_genders.append(global_gender)
-            is_strong.append(False)
-        else:
-            if global_gender == "female":
-                # Video chu dao Nu: can < 145 Hz de nhan dien Nam
-                raw_genders.append("male" if f0 < 145.0 else "female")
-            else:
-                # Video chu dao Nam: can > 185 Hz de nhan dien Nu
-                raw_genders.append("female" if f0 > 185.0 else "male")
-            strong_cue = (f0 < 145.0 or f0 > 180.0) and (conf is None or conf >= 0.70)
-            is_strong.append(bool(strong_cue))
-
-    # 4. Temporal smoothing (hangover filter khong lan truyen, bao ve cau co bang chung F0 ro)
-    n = len(raw_genders)
-    smoothed = list(raw_genders)
-    for i in range(1, n - 1):
-        prev_g = raw_genders[i - 1]
-        curr_g = raw_genders[i]
-        next_g = raw_genders[i + 1]
-        if curr_g != prev_g and prev_g == next_g:
-            if not is_strong[i]:
-                smoothed[i] = prev_g
-
-    # 5. Monologue Consensus: chi chuan hoa cac cau thieu bang chung F0 manh
-    f_cnt = sum(1 for g in smoothed if g == "female")
-    m_cnt = sum(1 for g in smoothed if g == "male")
-    dom_gender = "female" if f_cnt >= m_cnt else "male"
-    dom_ratio = max(f_cnt, m_cnt) / n if n > 0 else 1.0
-    minor_gender = "male" if dom_gender == "female" else "female"
-
-    max_consecutive_minor = 0
-    curr_consecutive = 0
-    for g in smoothed:
-        if g == minor_gender:
-            curr_consecutive += 1
-            max_consecutive_minor = max(max_consecutive_minor, curr_consecutive)
-        else:
-            curr_consecutive = 0
-
-    if dom_ratio >= 0.80 and max_consecutive_minor < 3:
-        logger.info(
-            "Phat hien doc thoai (dominance %.1f%%, chuoi toi da %d cau). Chuan hoa cac cau thieu bang chung sang %s.",
-            dom_ratio * 100, max_consecutive_minor, dom_gender
-        )
-        for i in range(n):
-            if smoothed[i] == minor_gender and not is_strong[i]:
-                smoothed[i] = dom_gender
-
-    result_map = {}
-    for item, g in zip(pitches, smoothed):
-        result_map[item[0]] = g
-    return result_map
+    *,
+    return_details: bool = False,
+) -> Dict:
+    """Classify each cue independently; uncertain cues remain explicitly unknown."""
+    from .v1_dual_voice_analysis import classify_dialogue
+    details = classify_dialogue(
+        srt_segments, vocals_path, original_audio_path,
+        read_slice=extract_segment_audio_slice, estimate=estimate_f0_pitch,
+        get_start=_get_start_sec, get_end=_get_end_sec,
+        get_index=_get_index, get_content=_get_content,
+    )
+    return details if return_details else {
+        index: evidence["gender"] for index, evidence in details.items()
+    }
 
 
 CONFIG_FILENAME = "v1_auto_voice.json"
@@ -492,7 +399,7 @@ def set_auto_voice_config(
 
     for d in dirs:
         cfg_path = d / CONFIG_FILENAME
-        tmp = cfg_path.with_suffix(".tmp")
+        tmp = cfg_path.with_name(f"{cfg_path.name}.tmp.{uuid.uuid4().hex}")
         try:
             d.mkdir(parents=True, exist_ok=True)
             tmp.write_text(payload_json, encoding="utf-8")
@@ -632,6 +539,7 @@ def resolve_locked_voice(
     default_voice_id: Optional[str] = None,
     rvc_model_path: Optional[str] = None,
     voice_mode: str = "auto",
+    voice_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Quy tắc quyết định giọng (Unified Decision Matrix):
@@ -647,7 +555,7 @@ def resolve_locked_voice(
     # 1. CHẾ ĐỘ THỦ CÔNG (MANUAL MODE)
     if voice_mode == "manual":
         import voice_selection
-        cfg_voice = voice_selection.selected()
+        cfg_voice = (voice_config or {}).get("manual_voice") or voice_selection.selected()
         v_id = cfg_voice["id"]
         v_source = cfg_voice["source"]
         v_param = cfg_voice["param"]
@@ -674,7 +582,7 @@ def resolve_locked_voice(
         }
 
     # 2. CHẾ ĐỘ TỰ ĐỘNG (AUTO MODE)
-    auto_cfg = get_auto_voice_config(workspace)
+    auto_cfg = voice_config if voice_config is not None else get_auto_voice_config(workspace)
     cfg_female_id = auto_cfg.get("female_voice_id") or VOICE_FEMALE_ID
     cfg_male_id = auto_cfg.get("male_voice_id") or VOICE_MALE_ID
     catalog = _get_catalog(workspace)
@@ -752,11 +660,24 @@ def resolve_locked_voice(
 
     # 4. CHẾ ĐỘ TỰ ĐỘNG - CÂU ĐẦU KHÔNG XÁC ĐỊNH CHẮC (UNKNOWN) -> FALLBACK VỀ GIỌNG THỦ CÔNG
     import voice_selection
-    cfg_voice = voice_selection.selected()
+    cfg_voice = (voice_config or {}).get("manual_voice") or voice_selection.selected()
     v_id = cfg_voice["id"]
     v_source = cfg_voice["source"]
     v_param = cfg_voice["param"]
     v_label = cfg_voice["label"]
+
+    if v_source == "vieneu":
+        vp_lower = str(v_param).lower()
+        if any(f in vp_lower for f in ["mai anh", "trúc ly", "thùy dung", "ngọc huyền", "ngọc trân", "mỹ duyên", "quỳnh anh", "nữ", "female"]):
+            v_id = VOICE_FEMALE_ID
+            v_source = "capcut"
+            v_param = "BV562_streaming"
+            v_label = "CapCut · Mai"
+        else:
+            v_id = VOICE_MALE_ID
+            v_source = "capcut"
+            v_param = "BV075_streaming"
+            v_label = "CapCut · Thanh Niên Tự Tin"
 
     if v_id == "chi-mai":
         resolved_rvc = rvc_model_path or find_rvc_model_path(workspace)
@@ -816,6 +737,10 @@ def get_locked_voice(
                 logger.info("Chế độ Dual Voice đổi từ %s sang %s; bỏ qua snapshot cũ.", data.get("dual_voice", False), expected_dual_voice)
                 return None
 
+            if data.get("voice_source") == "vieneu":
+                logger.info("Voice source 'vieneu' không khả dụng trong Tool V1; bỏ qua snapshot cũ để chọn lại giọng hợp lệ.")
+                return None
+
             return data
         except Exception as e:
             logger.warning("Không thể đọc file khóa giọng %s: %s", lock_file, e)
@@ -834,6 +759,7 @@ def decide_video_voice(
     default_voice_id: Optional[str] = None,
     force_reselect: bool = False,
     job_id: Optional[str] = None,
+    voice_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Hàm quyết định giọng chung (Unified Voice Decision Function - Codex Plan):
@@ -848,7 +774,7 @@ def decide_video_voice(
     lock_file = out_dir_path / VOICE_LOCK_FILENAME
 
     actual_mode = voice_mode or get_auto_voice_mode(workspace)
-    auto_cfg = get_auto_voice_config(workspace)
+    auto_cfg = voice_config if voice_config is not None else get_auto_voice_config(workspace)
     is_dual = bool(auto_cfg.get("dual_voice", False))
     resolved_job_id = job_id or out_dir_path.name
     content_hash = compute_file_sha256(video_path or original_audio_path)
@@ -885,6 +811,7 @@ def decide_video_voice(
             workspace=workspace,
             default_voice_id=default_voice_id,
             rvc_model_path=rvc_model_path,
+            voice_config=voice_config,
             voice_mode="manual",
         )
         locked["dual_voice"] = False
@@ -892,11 +819,13 @@ def decide_video_voice(
         # DUAL VOICE: Phân vai Nam & Nữ trong cùng 1 video
         t0 = time.perf_counter()
         logger.info("👥 Chế độ Dual Voice đang BẬT: Đang phân loại giọng Nam/Nữ theo từng câu thoại...")
-        gender_map = classify_all_segments_gender(
+        gender_evidence = classify_all_segments_gender(
             srt_segments=srt_segments,
             vocals_path=vocals_path,
             original_audio_path=original_audio_path,
+            return_details=True,
         )
+        gender_map = {i: evidence["gender"] for i, evidence in gender_evidence.items()}
         pitch_elapsed = time.perf_counter() - t0
 
         female_voice_info = resolve_locked_voice(
@@ -907,6 +836,7 @@ def decide_video_voice(
             workspace=workspace,
             default_voice_id=default_voice_id,
             rvc_model_path=rvc_model_path,
+            voice_config=voice_config,
             voice_mode="auto",
         )
         male_voice_info = resolve_locked_voice(
@@ -917,14 +847,85 @@ def decide_video_voice(
             workspace=workspace,
             default_voice_id=default_voice_id,
             rvc_model_path=rvc_model_path,
+            voice_config=voice_config,
             voice_mode="auto",
         )
 
+        same_voice_for_both_roles = female_voice_info["voice_id"] == male_voice_info["voice_id"]
+        if same_voice_for_both_roles:
+            logger.warning(
+                "Dual Voice: male/female roles use the same configured voice %s; auto-correcting to ensure distinct voices",
+                female_voice_info["voice_id"]
+            )
+            shared_id = str(female_voice_info.get("voice_id", "")).lower()
+            if shared_id == VOICE_FEMALE_ID.lower() or "female" in shared_id or "mai" in shared_id or "nu" in shared_id:
+                cfg_override = dict(voice_config or {})
+                cfg_override["male_voice_id"] = VOICE_MALE_ID
+                male_voice_info = resolve_locked_voice(
+                    gender="male",
+                    confidence=1.0,
+                    median_f0=120.0,
+                    first_seg_index=0,
+                    workspace=workspace,
+                    default_voice_id=VOICE_MALE_ID,
+                    rvc_model_path=rvc_model_path,
+                    voice_config=cfg_override,
+                    voice_mode="auto",
+                )
+            else:
+                cfg_override = dict(voice_config or {})
+                cfg_override["female_voice_id"] = VOICE_FEMALE_ID
+                female_voice_info = resolve_locked_voice(
+                    gender="female",
+                    confidence=1.0,
+                    median_f0=220.0,
+                    first_seg_index=0,
+                    workspace=workspace,
+                    default_voice_id=VOICE_FEMALE_ID,
+                    rvc_model_path=rvc_model_path,
+                    voice_config=cfg_override,
+                    voice_mode="auto",
+                )
+            same_voice_for_both_roles = female_voice_info["voice_id"] == male_voice_info["voice_id"]
+            if same_voice_for_both_roles:
+                male_voice_info = {
+                    "voice_id": VOICE_MALE_ID,
+                    "voice_source": "capcut",
+                    "voice_param": VOICE_MALE_PARAM,
+                    "voice_label": "CapCut · Thanh Niên Tự Tin (Khóa theo giọng nam đầu video)",
+                    "detected_gender": "male",
+                    "confidence": 1.0,
+                    "median_f0": 120.0,
+                    "first_segment_index": 0,
+                    "rule": "first_speaker_male_capcut",
+                    "voice_mode": "auto",
+                }
+                same_voice_for_both_roles = False
+            logger.info(
+                "Dual Voice: Phân vai rõ rệt -> Nữ: %s (%s), Nam: %s (%s)",
+                female_voice_info.get("voice_id"), female_voice_info.get("voice_label"),
+                male_voice_info.get("voice_id"), male_voice_info.get("voice_label")
+            )
+        fallback_voice_info = None
         segment_voices = {}
         for seg in srt_segments:
             seg_idx = _get_index(seg, 1)
-            g = gender_map.get(seg_idx, "female")
-            chosen_v = female_voice_info if g == "female" else male_voice_info
+            g = gender_map.get(seg_idx, "unknown")
+            if g == "female":
+                chosen_v = female_voice_info
+            elif g == "male":
+                chosen_v = male_voice_info
+            else:
+                if fallback_voice_info is None:
+                    fallback_voice_info = resolve_locked_voice(
+                        gender="manual", confidence=1.0, median_f0=0.0,
+                        first_seg_index=0, workspace=workspace,
+                        default_voice_id=default_voice_id, rvc_model_path=rvc_model_path,
+                        voice_config=voice_config, voice_mode="manual",
+                    )
+                chosen_v = fallback_voice_info
+                logger.warning("Dual Voice cue #%s unresolved (%s); configured fallback %s, not a gender guess",
+                               seg_idx, gender_evidence.get(seg_idx, {}).get("reason"), chosen_v["voice_id"])
 
             try:
                 setattr(seg, "voice_source", chosen_v["voice_source"])
@@ -945,6 +946,8 @@ def decide_video_voice(
                 "id": chosen_v["voice_id"],
                 "gender": g,
                 "label": chosen_v.get("voice_label", ""),
+                "confidence": gender_evidence.get(seg_idx, {}).get("confidence", 0.0),
+                "reason": gender_evidence.get(seg_idx, {}).get("reason", "missing_cue"),
             }
 
         female_cnt = sum(1 for g in gender_map.values() if g == "female")
@@ -962,13 +965,17 @@ def decide_video_voice(
             "voice_param": str(female_voice_info["voice_param"]),
             "voice_label": f"Phân vai ({f_lbl} 👩 & {m_lbl} 👨)",
             "detected_gender": "dual",
-            "confidence": 1.0,
+            "confidence": min((e["confidence"] for e in gender_evidence.values()), default=0.0),
             "median_f0": 0.0,
             "first_segment_index": 0,
             "rule": "dual_voice_dialogue",
             "voice_mode": "auto",
             "dual_voice": True,
             "segment_voices": segment_voices,
+            "gender_evidence": {str(i): evidence for i, evidence in gender_evidence.items()},
+            "unresolved_segment_indices": [i for i, gender in gender_map.items() if gender == "unknown"],
+            "analysis_version": "dual_voice_evidence_1",
+            "same_voice_for_both_roles": same_voice_for_both_roles,
         }
     else:
         # AUTO SINGLE VOICE: Phân tích âm học duy nhất câu thoại đầu tiên
@@ -992,6 +999,7 @@ def decide_video_voice(
             workspace=workspace,
             default_voice_id=default_voice_id,
             rvc_model_path=rvc_model_path,
+            voice_config=voice_config,
             voice_mode="auto",
         )
         locked["dual_voice"] = False
@@ -1005,7 +1013,7 @@ def decide_video_voice(
     locked["locked_at"] = datetime.now(timezone.utc).isoformat()
 
     # 4. Ghi snapshot nguyên tử (atomic write). Nếu thất bại, DỪNG TRƯỚC TTS (Codex Requirement)
-    tmp_file = out_dir_path / f"{VOICE_LOCK_FILENAME}.tmp"
+    tmp_file = out_dir_path / f"{VOICE_LOCK_FILENAME}.tmp.{uuid.uuid4().hex}"
     try:
         tmp_file.write_text(json.dumps(locked, indent=2, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp_file, lock_file)

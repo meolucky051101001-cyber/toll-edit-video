@@ -132,6 +132,11 @@ class RenderScriptRequest(BaseModel):
     scenes: List[Dict[str, Any]] = Field(..., min_items=1)
     voice: str = Field(default="BV562_streaming", max_length=100)
 
+class ExportScriptTextRequest(BaseModel):
+    title: Optional[str] = Field(default="Kịch bản Video", max_length=500)
+    topic: Optional[str] = Field(default="", max_length=500)
+    scenes: List[Dict[str, Any]] = Field(..., min_items=1)
+
 class BurnVideoRequest(BaseModel):
     video_path: str = Field(..., min_length=1)
     audio_filename: str = Field(..., min_length=1, max_length=255)
@@ -169,6 +174,10 @@ class VideoAnalyzeRequest(BaseModel):
     persona_gender: str = Field(default="neutral", max_length=50)
     persona: Optional[str] = Field(default=None, max_length=50)
 
+class VideoDownloadRequest(BaseModel):
+    url: str = Field(..., min_length=1, max_length=1000)
+    target_folder: Optional[str] = Field(default=None, max_length=500)
+
 
 
 # =========================================================================
@@ -205,9 +214,10 @@ def api_get_script_voices():
 
 @router.get("/api/script/available-videos")
 def api_get_available_videos():
-    """Quét và trả về danh sách video có sẵn trong D:\\video phôi và D:\\banve để người dùng chọn nhanh."""
+    """Quét và trả về danh sách video có sẵn trong D:\\video phôi, workspace downloads và D:\\banve để người dùng chọn nhanh."""
     video_dirs = [
         Path(r"D:\video phôi"),
+        SCRIPT_WORKSPACE / "downloads",
         Path(r"D:\banve"),
     ]
     extensions = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
@@ -239,6 +249,94 @@ def api_get_available_videos():
 
     results.sort(key=lambda x: x["mtime"], reverse=True)
     return {"status": "success", "videos": results[:50]}
+
+
+@router.post("/api/script/download-video")
+def api_download_video_from_url(req: VideoDownloadRequest):
+    """
+    Tải video phôi từ YouTube Shorts, TikTok, Facebook Reels, Douyin,... bằng yt-dlp.
+    Lưu trực tiếp vào D:\\video phôi hoặc SCRIPT_WORKSPACE / downloads và trả về đường dẫn video.
+    """
+    url = req.url.strip()
+    if not url.startswith("http://") and not url.startswith("https://"):
+        return {"status": "error", "message": "URL không hợp lệ. Vui lòng bắt đầu bằng http:// hoặc https://"}
+
+    save_dir = None
+    if req.target_folder:
+        p = Path(req.target_folder)
+        if p.exists() and p.is_dir():
+            save_dir = p
+
+    if save_dir is None:
+        d_candidates = [
+            Path(r"D:\video phôi"),
+            SCRIPT_WORKSPACE / "downloads",
+            Path(r"D:\banve"),
+        ]
+        for c in d_candidates:
+            try:
+                c.mkdir(parents=True, exist_ok=True)
+                save_dir = c
+                break
+            except Exception:
+                continue
+
+    if save_dir is None:
+        save_dir = SCRIPT_WORKSPACE
+
+    try:
+        import yt_dlp
+    except ImportError:
+        return {"status": "error", "message": "Thư viện yt-dlp chưa được cài đặt trong môi trường!"}
+
+    try:
+        out_template = str(save_dir / "%(title).40s_%(id)s.%(ext)s")
+        ydl_opts = {
+            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "outtmpl": out_template,
+            "quiet": True,
+            "no_warnings": True,
+            "merge_output_format": "mp4",
+            "socket_timeout": 35,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if not info:
+                return {"status": "error", "message": "Không thể trích xuất video từ URL này"}
+            
+            filepath = ydl.prepare_filename(info)
+            p_file = Path(filepath)
+            if not p_file.exists():
+                mp4_candidate = p_file.with_suffix(".mp4")
+                if mp4_candidate.exists():
+                    p_file = mp4_candidate
+
+            if not p_file.exists():
+                files = list(save_dir.glob("*.mp4"))
+                if files:
+                    files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                    p_file = files[0]
+
+            if not p_file.exists():
+                return {"status": "error", "message": "Không tìm thấy file video sau khi tải về"}
+
+            title = info.get("title", p_file.stem)
+            duration = info.get("duration", 0)
+
+            logger.info(f"Đã tải thành công video: {url} -> {p_file}")
+            return {
+                "status": "success",
+                "message": f"Tải thành công: {p_file.name}",
+                "video_path": str(p_file),
+                "filename": p_file.name,
+                "title": title,
+                "duration": duration,
+                "size_mb": round(p_file.stat().st_size / (1024 * 1024), 2)
+            }
+    except Exception as e:
+        logger.error(f"Lỗi khi tải video từ {url}: {e}", exc_info=True)
+        return {"status": "error", "message": f"Lỗi tải video: {str(e)}"}
 
 
 @router.post("/api/script/analyze-video")
@@ -425,6 +523,10 @@ def api_auto_pipeline(req: AutoPipelineRequest):
         clean_video_path = _validate_safe_video_path(req.video_path)
         logger.info(f"[AUTO-PIPELINE] Bắt đầu tự động hóa từ A-Z cho video: {clean_video_path}")
 
+        import shared_state
+        if getattr(shared_state, "stop_requested", False):
+            raise RuntimeError("Tiến trình đã bị dừng theo yêu cầu (/stop)")
+
         persona_val = req.persona or req.persona_gender or "auto"
 
         # BƯỚC 1: Phân tích video & lên kịch bản + hook
@@ -440,6 +542,8 @@ def api_auto_pipeline(req: AutoPipelineRequest):
             voice=req.voice,
             anti_copyright=req.anti_copyright
         )
+        if getattr(shared_state, "stop_requested", False):
+            raise RuntimeError("Tiến trình đã bị dừng theo yêu cầu (/stop)")
         scenes = script.get("scenes", [])
         if not scenes:
             raise RuntimeError("Không tạo được phân cảnh kịch bản từ video.")
@@ -455,6 +559,8 @@ def api_auto_pipeline(req: AutoPipelineRequest):
         # BƯỚC 2: CapCut TTS thu âm & tạo phụ đề SRT
         logger.info(f"[AUTO-PIPELINE] Bước 2: CapCut TTS thu âm ({len(scenes)} cảnh) giọng {req.voice} & tạo file SRT...")
         def on_tts_progress(curr, total, msg):
+            if getattr(shared_state, "stop_requested", False):
+                raise RuntimeError("Tiến trình đã bị dừng theo yêu cầu (/stop)")
             pct = 35 + int((curr / max(1, total)) * 35) # 35% -> 70%
             _update_task_progress(task_id, pct, f"CapCut TTS: Cảnh #{curr}/{total}")
 
@@ -465,6 +571,8 @@ def api_auto_pipeline(req: AutoPipelineRequest):
             video_duration=script.get("video_duration"),
             progress_callback=on_tts_progress
         )
+        if getattr(shared_state, "stop_requested", False):
+            raise RuntimeError("Tiến trình đã bị dừng theo yêu cầu (/stop)")
         audio_filename = render_res["audio_filename"]
         srt_filename = render_res["srt_filename"]
 
@@ -542,3 +650,56 @@ def api_stream_script_file(file_path: str):
     }
     media_type = media_types.get(suffix, "application/octet-stream")
     return FileResponse(path=str(target), media_type=media_type, filename=target.name)
+
+
+@router.post("/api/script/stop")
+def api_stop_script():
+    """Dừng tiến trình Script Studio tức thì và dọn dẹp các tiến trình ngầm."""
+    import shared_state
+    shared_state.stop_requested = True
+    killed_count = 0
+    try:
+        from process_killer import terminate_worker_processes
+        killed = terminate_worker_processes()
+        killed_count = len(killed)
+    except Exception as e:
+        logger.warning(f"Lỗi dọn worker: {e}")
+    return {
+        "status": "stopped",
+        "message": "Đã yêu cầu dừng tiến trình Script Studio!",
+        "killed_processes": killed_count
+    }
+
+
+@router.post("/api/script/export-text")
+def api_export_script_text(req: ExportScriptTextRequest):
+    """Xuất kịch bản ra định dạng Plain Text để lưu trữ hoặc chia sẻ."""
+    title = (req.title or "Kịch bản Video").strip()
+    scenes = req.scenes
+    lines = [
+        f"TIÊU ĐỀ: {title}",
+    ]
+    if req.topic:
+        lines.append(f"CHỦ ĐỀ: {req.topic.strip()}")
+    lines.append(f"TỔNG SỐ PHÂN CẢNH: {len(scenes)}")
+    lines.append("=" * 40)
+    lines.append("")
+
+    for idx, sc in enumerate(scenes, 1):
+        tr = sc.get("time_range") or f"{sc.get('start_seconds', 0)}s - {sc.get('end_seconds', 0)}s"
+        sec = f"[{sc.get('section', '').upper()}] " if sc.get('section') else ""
+        lines.append(f"Phân cảnh #{idx} {sec}({tr}):")
+        lines.append(f"Lời thoại: {sc.get('speaker_text', '')}")
+        if sc.get("visual_cue"):
+            lines.append(f"Gợi ý hình ảnh: {sc.get('visual_cue')}")
+        if sc.get("text_overlay"):
+            lines.append(f"Chữ hiển thị: {sc.get('text_overlay')}")
+        lines.append("")
+
+    content = "\n".join(lines)
+    return {
+        "status": "success",
+        "title": title,
+        "content": content,
+        "scene_count": len(scenes)
+    }

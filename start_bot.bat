@@ -26,8 +26,13 @@ if errorlevel 1 (
 netstat -ano | findstr ":8088" >nul
 if errorlevel 1 (
   echo [Tool V1] Dang khoi dong Dashboard tren cong 8088...
-  start /b "" "%PYTHON_EXE%" main.py
-  timeout /t 2 /nobreak >nul
+  set "PYTHONW_EXE=%PROJECT_DIR%backend\venv\Scripts\pythonw.exe"
+  if exist "%PYTHONW_EXE%" (
+    start "" "%PYTHONW_EXE%" main.py
+  ) else (
+    start "" "%PYTHON_EXE%" main.py
+  )
+  timeout /t 3 /nobreak >nul
 )
 
 :: Khởi động Telegram Bot Tool V1

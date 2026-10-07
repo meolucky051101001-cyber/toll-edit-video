@@ -65,38 +65,87 @@ def clean_filename(title: str, max_len: int = 40) -> str:
     """Lọc bỏ ký tự đặc biệt để đặt tên file an toàn trên Windows"""
     if not title:
         return "social_video"
+    try:
+        if any(ord(c) > 127 for c in title):
+            # Tự động khắc phục nếu chuỗi là UTF-8 bị giải mã nhầm qua Latin-1 (Mojibake)
+            fixed = title.encode('latin-1').decode('utf-8')
+            if fixed and len(fixed) > 0:
+                title = fixed
+    except Exception:
+        pass
     cleaned = re.sub(r'[\\/*?:"<>|]', '', title).strip()
     cleaned = re.sub(r'[^\w\s\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\-_.]', '', cleaned)
     cleaned = re.sub(r'\s+', '_', cleaned)
     return cleaned[:max_len] or "social_video"
 
-def download_file_stream(url: str, dest_path: str, headers: dict = None, timeout: tuple = (15, 90)) -> bool:
-    """Stream to a sibling temp file, ffprobe it, then publish atomically."""
+def download_file_stream(url: str, dest_path: str, headers: dict = None, timeout: tuple = (15, 90), max_retries: int = 4) -> bool:
+    """Stream to a sibling temp file with automatic HTTP Range resuming, ffprobe it, then publish atomically."""
     temporary_path = f"{dest_path}.{uuid.uuid4().hex}.downloading"
+    base_headers = dict(headers or {"User-Agent": USER_AGENTS["desktop"]})
+    header_keys = [k.lower() for k in base_headers]
+    if "referer" not in header_keys:
+        if "douyin" in url or "zjcdn" in url:
+            base_headers["Referer"] = "https://www.douyin.com/"
+        elif "tiktok" in url or "byteoversea" in url:
+            base_headers["Referer"] = "https://www.tiktok.com/"
+
     try:
         os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
-        req_headers = headers or {"User-Agent": USER_AGENTS["desktop"]}
-        with requests.get(url, headers=req_headers, stream=True, timeout=timeout) as response:
-            require_complete_response(response.status_code, response.headers)
-            with open(temporary_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=512 * 1024):  # 512KB per chunk
-                    if chunk:
-                        f.write(chunk)
-                f.flush()
-                os.fsync(f.fileno())
-        actual_size = os.path.getsize(temporary_path)
-        expected_size = response.headers.get("Content-Length")
-        if expected_size is not None and actual_size != int(expected_size):
-            raise DownloadValidationError(
-                "Downloaded byte size {} differs from Content-Length {}".format(
-                    actual_size, expected_size
-                )
-            )
-        if actual_size <= 10000:
-            raise DownloadValidationError("Downloaded video is unexpectedly small")
-        probe_downloaded_video(temporary_path)
-        atomic_replace_file(temporary_path, dest_path)
-        return True
+        downloaded = 0
+        expected_size = None
+
+        for attempt in range(max_retries):
+            req_headers = dict(base_headers)
+            mode = "wb"
+            if downloaded > 0:
+                req_headers["Range"] = f"bytes={downloaded}-"
+                mode = "ab"
+
+            try:
+                with requests.get(url, headers=req_headers, stream=True, timeout=timeout) as response:
+                    if downloaded > 0:
+                        require_partial_content(response.status_code, response.headers)
+                    else:
+                        require_complete_response(response.status_code, response.headers)
+                        content_len = response.headers.get("Content-Length")
+                        if content_len:
+                            expected_size = int(content_len)
+
+                    with open(temporary_path, mode) as f:
+                        for chunk in response.iter_content(chunk_size=512 * 1024):  # 512KB per chunk
+                            if chunk:
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                        f.flush()
+                        os.fsync(f.fileno())
+
+                actual_size = os.path.getsize(temporary_path)
+                if expected_size is not None and actual_size < expected_size:
+                    if attempt < max_retries - 1:
+                        downloaded = actual_size
+                        logger.warning(f"Stream bị ngắt ({actual_size}/{expected_size} bytes), tự động resume lần {attempt+1}...")
+                        time.sleep(1.0)
+                        continue
+                    else:
+                        raise DownloadValidationError(f"Downloaded byte size {actual_size} differs from Content-Length {expected_size}")
+
+                if actual_size <= 10000:
+                    raise DownloadValidationError("Downloaded video is unexpectedly small")
+
+                probe_downloaded_video(temporary_path)
+                atomic_replace_file(temporary_path, dest_path)
+                return True
+
+            except Exception as exc:
+                if os.path.exists(temporary_path):
+                    actual_size = os.path.getsize(temporary_path)
+                    if actual_size > 0 and attempt < max_retries - 1:
+                        downloaded = actual_size
+                        logger.warning(f"Lỗi tải stream: {exc}. Tự động resume từ byte {downloaded} (lần {attempt+1}/{max_retries})...")
+                        time.sleep(1.5)
+                        continue
+                if attempt == max_retries - 1:
+                    raise
     except Exception as e:
         logger.error(f"Lỗi tải stream từ {url[:60]}: {e}")
         if os.path.exists(temporary_path):
@@ -162,6 +211,7 @@ def resolve_douyin_so9(url: str, video_id: str = "") -> tuple:
             if res.status_code != 200:
                 last_err = f"SO9 trả về HTTP {res.status_code}"
                 continue
+            res.encoding = 'utf-8'
 
             match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>', res.text)
             if not match:
@@ -206,6 +256,7 @@ def resolve_douyin_viesnap(url: str, timeout: int = 15) -> tuple:
             timeout=timeout
         )
         if r.status_code == 200:
+            r.encoding = 'utf-8'
             data = r.json()
             title = data.get("title") or data.get("description") or "douyin_video"
             qualities = data.get("qualities", {})
@@ -250,8 +301,11 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
             if ok_vn and v_url_vn:
                 safe_title = clean_filename(v_title_vn or (f"douyin_{video_id}" if video_id else "douyin_video"))
                 target_path = os.path.join(output_dir, f"{prefix}_{safe_title}.mp4")
+                if download_parallel_range(v_url_vn, target_path, workers=4):
+                    logger.info(f"Tải thành công Douyin không logo qua Montague/Viesnap (Range): {target_path}")
+                    return True, target_path, v_title_vn, ""
                 if download_file_stream(v_url_vn, target_path, headers=v_headers_vn):
-                    logger.info(f"Tải thành công Douyin không logo qua Montague/Viesnap: {target_path}")
+                    logger.info(f"Tải thành công Douyin không logo qua Montague/Viesnap (Stream): {target_path}")
                     return True, target_path, v_title_vn, ""
                 logger.warning("Tải luồng video từ Montague/Viesnap thất bại.")
         except Exception as e_vn:
@@ -502,6 +556,7 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
                           "https://www.xiaohongshu.com/discovery", "http://www.xiaohongshu.com/discovery"]:
             return False, "", "", "Bài viết trên Tiểu Hồng Thư (XHS) này đã bị tác giả xóa, hết hạn hoặc không tồn tại"
 
+        res.encoding = 'utf-8'
         html = res.text
         if any(msg in html for msg in ["你访问的页面不见了", "页面不存在", "该笔记已被删除", "笔记不存在", "Note not found"]):
             return False, "", "", "Bài viết trên Tiểu Hồng Thư này đã bị tác giả xóa (Trang không tồn tại)"

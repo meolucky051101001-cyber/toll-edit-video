@@ -34,16 +34,20 @@ DB_PATH = DB_DIR / "gemini_circuit_breaker.db"
 
 # Model presets as specified in Codex Plan
 DEFAULT_TRANSLATION_MODELS = [
-    "gemini-3.7-flash",
-    "gemini-3.5-flash",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
     "gemini-3.5-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemini-3.5-flash",
     "gemini-3.6-flash",
     "gemini-3.1-flash-lite",
-    "gemini-flash-lite-latest",
     "gemini-3.8-flash",
+    "gemini-3.7-flash",
 ]
 
 DEFAULT_CONDENSATION_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
     "gemini-3.5-flash-lite",
     "gemini-flash-lite-latest",
     "gemini-3.5-flash",
@@ -79,12 +83,15 @@ class GeminiAllModelsFailedError(GeminiError):
     """Raised when all candidate models fail within budget."""
     pass
 
+class GeminiRequestError(GeminiError):
+    """Invalid shared request; changing models cannot repair it."""
+
 
 def mask_secret(text: str) -> str:
     """Mask any API keys in URLs or strings for secure logging."""
     if not text:
         return ""
-    text = re.sub(r'key=([a-zA-Z0-9_\-\.]+)', r'key=\1'[:8] + '...', str(text))
+    text = re.sub(r'(?i)(key|api_key|token)=([^\s&#]+)', r'\1=[REDACTED]', str(text))
     text = re.sub(r'AIza[a-zA-Z0-9_\-]{10,}', 'AIza...', text)
     return text
 
@@ -174,7 +181,8 @@ class GeminiCircuitBreaker:
         self,
         account_hash: str,
         purpose: str,
-        candidates: Sequence[str]
+        candidates: Sequence[str],
+        reserve_probe: bool = True,
     ) -> List[Tuple[str, str]]:
         """
         Check circuit status for each candidate model.
@@ -202,13 +210,16 @@ class GeminiCircuitBreaker:
                         # In cooldown: skip without network request
                         continue
 
-                    if state == "COOLDOWN" and cooldown_until <= now:
+                    if state in ("COOLDOWN", "HALF_OPEN") and cooldown_until <= now:
+                        if not reserve_probe:
+                            allowed.append((model, "HALF_OPEN"))
+                            continue
                         # Try to transition to HALF_OPEN (probe request)
                         # Atomic update ensures only ONE worker probes at a time
                         cur.execute(
                             "UPDATE model_circuit SET state = 'HALF_OPEN', cooldown_until = ? "
-                            "WHERE account_hash = ? AND model = ? AND purpose = ? AND state != 'HALF_OPEN'",
-                            (now + 40.0, account_hash, model, purpose)
+                            "WHERE account_hash = ? AND model = ? AND purpose = ? AND cooldown_until <= ?",
+                            (now + 40.0, account_hash, model, purpose, now)
                         )
                         conn.commit()
                         if cur.rowcount > 0:
@@ -298,6 +309,34 @@ def parse_retry_after(header_val: Optional[str]) -> Optional[float]:
         return None
 
 
+def _record_dispatcher_active_model(model: str, purpose: str):
+    if purpose != "translation":
+        return
+    try:
+        import job_tracker
+        job_tracker.record_active_translation_model(model)
+    except Exception:
+        try:
+            from backend import job_tracker
+            job_tracker.record_active_translation_model(model)
+        except Exception:
+            pass
+
+
+def _record_dispatcher_success_model(model: str, purpose: str):
+    if purpose != "translation":
+        return
+    try:
+        import job_tracker
+        job_tracker.record_translation_model(model)
+    except Exception:
+        try:
+            from backend import job_tracker
+            job_tracker.record_translation_model(model)
+        except Exception:
+            pass
+
+
 def call_gemini_api(
     payload: dict,
     purpose: str = "translation",
@@ -307,6 +346,7 @@ def call_gemini_api(
     job_id: str = "default",
     api_key: Optional[str] = None,
     timeout_per_request: float = 20.0,
+    response_validator: Optional[Callable[[dict], Any]] = None,
 ) -> Tuple[dict, str]:
     """
     Centralized, resilient dispatcher for all Gemini API calls in Tool V1.
@@ -345,7 +385,7 @@ def call_gemini_api(
         logger.info(f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose}: Hủy theo yêu cầu /stop.")
         raise GeminiCancelledError("Operation cancelled by user stop request.")
 
-    candidate_statuses = circuit_breaker.get_candidate_models(account_hash, purpose, ordered_models)
+    candidate_statuses = circuit_breaker.get_candidate_models(account_hash, purpose, ordered_models, reserve_probe=False)
     if not candidate_statuses:
         # All models in circuit cooldown
         logger.warning(
@@ -353,7 +393,10 @@ def call_gemini_api(
         )
         raise GeminiQuotaExhaustedError("All Gemini models are currently in cooldown due to previous rate limits.")
 
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": real_key,
+    }
     last_exception = None
 
     for attempt, (model, state) in enumerate(candidate_statuses):
@@ -370,11 +413,17 @@ def call_gemini_api(
             )
             raise GeminiDeadlineError("Gemini call exceeded overall deadline budget.")
 
-        connect_timeout = min(5.0, max(1.0, remaining / 2.0))
-        read_timeout = min(timeout_per_request, max(2.0, remaining - connect_timeout))
+        connect_timeout = min(5.0, max(0.1, remaining / 2.0))
+        read_timeout = min(timeout_per_request, max(0.1, remaining - connect_timeout))
+        # Reserve only the model actually about to be tried. Other candidates
+        # remain available to subsequent jobs if this request succeeds early.
+        admitted = circuit_breaker.get_candidate_models(account_hash, purpose, [model])
+        if not admitted:
+            continue
+        state = admitted[0][1]
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={real_key}"
-        masked_url = mask_secret(url)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        masked_url = url
         t_start = time.monotonic()
 
         state_tag = f"[{state}]" if state != "ACTIVE" else ""
@@ -383,6 +432,8 @@ def call_gemini_api(
             f"timeout=({connect_timeout:.1f}s, {read_timeout:.1f}s) remaining={remaining:.1f}s"
         )
 
+        _record_dispatcher_active_model(model, purpose)
+
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=(connect_timeout, read_timeout))
             resp.encoding = "utf-8"
@@ -390,7 +441,12 @@ def call_gemini_api(
 
             if resp.status_code == 200:
                 data = resp.json()
+                if stop_checker and stop_checker():
+                    raise GeminiCancelledError("Operation cancelled by user stop request.")
+                if response_validator is not None:
+                    response_validator(data)
                 circuit_breaker.record_success(account_hash, model, purpose)
+                _record_dispatcher_success_model(model, purpose)
                 logger.info(
                     f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} "
                     f"SUCCESS status=200 elapsed={elapsed_ms}ms"
@@ -422,10 +478,13 @@ def call_gemini_api(
                     err_msg = err_json.get("error", {}).get("message", "Bad request")
                 except Exception:
                     err_msg = resp.text[:200]
+                err_msg = mask_secret(err_msg)
                 logger.error(f"[GEMINI_DISPATCHER] HTTP 400 Bad Request: {err_msg}")
                 # Don't keep hammering if payload itself is fundamentally broken
-                last_exception = GeminiError(f"HTTP 400: {err_msg}")
-                continue
+                if any(token in err_msg.lower() for token in ("model", "not supported", "not found")):
+                    last_exception = GeminiError(f"HTTP 400: {err_msg}")
+                    continue
+                raise GeminiRequestError(f"HTTP 400: {err_msg}")
 
             last_exception = GeminiError(f"HTTP {status} from {model}")
 
@@ -435,7 +494,7 @@ def call_gemini_api(
                 f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} TIMEOUT after {elapsed_ms}ms"
             )
             circuit_breaker.record_failure(account_hash, model, purpose, None, "Timeout")
-            last_exception = e
+            last_exception = TimeoutError(mask_secret(str(e)))
 
         except requests.ConnectionError as e:
             elapsed_ms = int((time.monotonic() - t_start) * 1000)
@@ -443,10 +502,10 @@ def call_gemini_api(
                 f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} CONNECTION_ERROR after {elapsed_ms}ms"
             )
             circuit_breaker.record_failure(account_hash, model, purpose, None, "ConnectionError")
-            last_exception = e
+            last_exception = ConnectionError(mask_secret(str(e)))
 
         except Exception as e:
-            if isinstance(e, (GeminiAuthError, GeminiDeadlineError, GeminiCancelledError)):
+            if isinstance(e, (GeminiAuthError, GeminiRequestError, GeminiDeadlineError, GeminiCancelledError)):
                 raise
             elapsed_ms = int((time.monotonic() - t_start) * 1000)
             logger.warning(
@@ -455,4 +514,4 @@ def call_gemini_api(
             circuit_breaker.record_failure(account_hash, model, purpose, None, type(e).__name__)
             last_exception = e
 
-    raise GeminiAllModelsFailedError(f"All candidate Gemini models failed for {purpose}: {last_exception}")
+    raise GeminiAllModelsFailedError(f"All candidate Gemini models failed for {purpose}: {mask_secret(str(last_exception))}") from last_exception

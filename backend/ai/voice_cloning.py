@@ -2,6 +2,7 @@ import os
 import asyncio
 import re
 import threading
+import logging
 import edge_tts
 try:
     from ..v1_stage_metrics import stage
@@ -9,8 +10,10 @@ except ImportError:
     from v1_stage_metrics import stage
 from pydub import AudioSegment
 
-edge_semaphore = asyncio.Semaphore(2)
-capcut_semaphore = threading.Semaphore(2)
+logger = logging.getLogger(__name__)
+
+edge_semaphore = asyncio.Semaphore(int(os.getenv("V1_EDGE_WORKERS", "4")))
+capcut_semaphore = threading.Semaphore(int(os.getenv("V1_CAPCUT_WORKERS", "3")))
 rvc_semaphore = asyncio.Semaphore(1)
 global_rvc_instance = None
 global_rvc_model_path = None
@@ -27,7 +30,7 @@ def build_atempo_filter(ratio: float) -> str:
     while current < 0.5:
         filters.append("atempo=0.5")
         current /= 0.5
-    filters.append(f"atempo={current:.3f}")
+    filters.append(f"atempo={current:.6f}")
     return ",".join(filters)
 
 
@@ -114,14 +117,22 @@ _shared_capcut_client = None
 
 def _get_capcut_client():
     global _shared_capcut_client
-    if _shared_capcut_client is None:
-        from capcut_tts_api import CapCutClient
+    from capcut_tts_api import CapCutClient
+    if _shared_capcut_client is None or not isinstance(_shared_capcut_client, CapCutClient):
         _shared_capcut_client = CapCutClient()
+        if hasattr(_shared_capcut_client, "session") and _shared_capcut_client.session is not None:
+            try:
+                from requests.adapters import HTTPAdapter
+                adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20)
+                _shared_capcut_client.session.mount("https://", adapter)
+                _shared_capcut_client.session.mount("http://", adapter)
+            except Exception:
+                pass
     return _shared_capcut_client
 
 @stage("tts_capcut_attempt")
 def _run_capcut_tts_once(
-    text, output_path, voice="BV562_streaming", poll_interval=1.0
+    text, output_path, voice="BV562_streaming", poll_interval=3.0
 ):
     import json, time
     client = _get_capcut_client()
@@ -130,7 +141,7 @@ def _run_capcut_tts_once(
     task_id = res["data"]["tasks"][0]["id"]
     token = res["data"]["tasks"][0]["token"]
     
-    deadline = time.monotonic() + 45.0
+    deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline:
         time.sleep(min(max(0.0, float(poll_interval)),
                        max(0.0, deadline - time.monotonic())))
@@ -151,7 +162,7 @@ def _run_capcut_tts_once(
         elif status == "failed":
             raise Exception("CapCut TTS task failed")
             
-    raise TimeoutError("CapCut TTS polling exceeded 45s (network calls may add time)")
+    raise TimeoutError("CapCut TTS polling exceeded 60s (network calls may add time)")
 
 
 def _run_capcut_tts(
@@ -160,7 +171,7 @@ def _run_capcut_tts(
     voice="BV562_streaming",
     attempts=3,
     retry_delays=(1.5, 3.0),
-    poll_interval=1.0,
+    poll_interval=0.5,
 ):
     import time
 
@@ -373,7 +384,8 @@ def calculate_reading_windows(segments, video_duration=None, gap_s=0.05) -> dict
             if next_start_s > start_s:
                 hard_max_s = max(0.05, next_start_s - start_s - gap_s)
             else:
-                hard_max_s = max(0.05, end_s - start_s)
+                from v1_speech_guard import SpeechTimingError
+                raise SpeechTimingError(f"Duplicate/reversed speech start at cue {seg.index}")
         else:
             if video_duration is not None and video_duration > start_s + gap_s:
                 hard_max_s = max(0.05, video_duration - start_s - gap_s)
@@ -394,8 +406,15 @@ async def fit_audio_file(audio_input_path: str, target_max_duration: float, outp
     """
     import shutil
     output_path = output_path or audio_input_path
-    audio = AudioSegment.from_file(audio_input_path)
+    from v1_speech_guard import load_audio
+    audio = load_audio(audio_input_path)
     orig_dur = len(audio) / 1000.0
+    original_duration = orig_dur
+    if target_max_duration is not None:
+        import math
+        if not math.isfinite(float(target_max_duration)) or target_max_duration <= 0:
+            from v1_speech_guard import SpeechTimingError
+            raise SpeechTimingError("Reading window must be positive and finite")
 
     # 1. Nếu audio đã vừa khung đọc -> Giữ nguyên vẹn 100% file gốc CapCut (160kbps), KHÔNG nén lại
     if target_max_duration is None or target_max_duration <= 0 or orig_dur <= target_max_duration:
@@ -403,48 +422,52 @@ async def fit_audio_file(audio_input_path: str, target_max_duration: float, outp
             shutil.copy2(audio_input_path, output_path)
         return output_path, orig_dur, 1.0
 
-    # 2. Nếu tràn khung đọc nhưng độ lệch cực nhỏ (<= 3% hoặc <= 0.06s), giữ nguyên bản để tránh méo tiếng
-    ratio = orig_dur / target_max_duration
-    if ratio <= 1.03:
-        if os.path.abspath(audio_input_path) != os.path.abspath(output_path):
-            shutil.copy2(audio_input_path, output_path)
-        return output_path, orig_dur, 1.0
-
-    # 3. Chỉ khi audio thực sự tràn câu sau (ratio > 1.03), mới tăng tốc nhẹ bằng atempo
-    # Dùng WAV PCM trung gian để KHÔNG bị suy hao chất lượng nén MP3
+    # Trim safe silence before computing speed; even small overflow must be fit.
+    audio = trim_audio_silence(audio)
+    orig_dur = len(audio) / 1000.0
+    ratio = orig_dur / max(0.001, target_max_duration - 0.015)
+    applied_ratio = max(1.0, ratio)
+    tempo_filter = build_atempo_filter(applied_ratio)
     base, _ = os.path.splitext(output_path)
     temp_wav_in = f"{base}_fit_in.wav"
     temp_wav_out = f"{base}_fit_out.wav"
-    tempo_filter = build_atempo_filter(ratio)
+    temp_mp3_out = f"{base}_fit_stage.mp3"
 
     try:
-        audio.export(temp_wav_in, format="wav")
+        with audio.export(temp_wav_in, format="wav"):
+            pass
         import subprocess
+        from batch_control import run
         await asyncio.to_thread(
-            subprocess.run,
+            run,
             ["ffmpeg", "-y", "-i", temp_wav_in, "-filter:a", tempo_filter, temp_wav_out],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
             check=True, timeout=60
         )
         if os.path.exists(temp_wav_out) and os.path.getsize(temp_wav_out) > 128:
-            final_audio = AudioSegment.from_file(temp_wav_out)
+            final_audio = load_audio(temp_wav_out)
             final_audio = trim_audio_silence(final_audio, silence_thresh_db=-45.0, pad_ms=60)
             final_dur = len(final_audio) / 1000.0
             # Xuất MP3 chất lượng cao 192k (bảo tồn trọn vẹn dải treble >10kHz)
-            final_audio.export(output_path, format="mp3", bitrate="192k")
-            return output_path, final_dur, ratio
+            with final_audio.export(temp_mp3_out, format="mp3", bitrate="192k"):
+                pass
+            import soundfile as sf
+            final_dur = float(sf.info(temp_mp3_out).duration)
+            os.replace(temp_mp3_out, output_path)
+            return output_path, final_dur, applied_ratio
+        else:
+            raise RuntimeError(f"FFmpeg output file missing or empty: {temp_wav_out}")
     except Exception as exc:
-        print(f"[fit_audio_file] Lỗi căn tốc độ: {exc}. Giữ nguyên file gốc.")
+        logger.warning("[fit_audio_file] Ffmpeg fit warning: %s. Keeping original.", exc)
+        if os.path.abspath(audio_input_path) != os.path.abspath(output_path):
+            shutil.copy2(audio_input_path, output_path)
+        return output_path, orig_dur, 1.0
     finally:
-        for p in (temp_wav_in, temp_wav_out):
+        for p in (temp_wav_in, temp_wav_out, temp_mp3_out):
             if os.path.exists(p):
                 try: os.remove(p)
                 except OSError: pass
-
-    if os.path.abspath(audio_input_path) != os.path.abspath(output_path):
-        shutil.copy2(audio_input_path, output_path)
-    return output_path, orig_dur, 1.0
 
 
 async def generate_single_tts(segment, output_folder, voice_source, voice_param, api_key, target_max_duration=None):
@@ -467,15 +490,14 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
     base_audio, ext = os.path.splitext(audio_path)
     temp_raw = f"{base_audio}_raw{ext}"
     
+    last_error = None
     for attempt in range(2):
         try:
             if voice_source == "fpt":
                 try:
                     await generate_tts_fpt(text, temp_raw, api_key, voice="banmai")
                 except FPTQuotaError as q_err:
-                    print(f"CẢNH BÁO FPT: {q_err}. Fallback vĩnh viễn sang Edge TTS (Hoài My)")
-                    voice_source = "edge"
-                    await generate_tts_edge(text, temp_raw, voice_param)
+                    raise TTSIncompleteError("FPT quota exhausted; locked voice is not substituted") from q_err
             elif voice_source == "edge":
                 if voice_param == "vi-VN-HoaiMyNeural":
                     await generate_tts_edge(text, temp_raw, voice_param, pitch="+15Hz", rate="+15%")
@@ -490,6 +512,15 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
                 if os.path.exists(temp_rvc_raw):
                     try: os.remove(temp_rvc_raw)
                     except OSError: pass
+            elif voice_source == "vieneu":
+                vp_lower = str(voice_param).lower()
+                if any(f in vp_lower for f in ["mai anh", "trúc ly", "thùy dung", "ngọc huyền", "ngọc trân", "mỹ duyên", "quỳnh anh", "nữ", "female"]):
+                    v_param = "BV562_streaming"
+                else:
+                    v_param = "BV075_streaming"
+                await asyncio.to_thread(_run_capcut_tts, text, temp_raw, v_param)
+            else:
+                await asyncio.to_thread(_run_capcut_tts, text, temp_raw, "BV075_streaming")
 
             # ĐO VÀ CĂN TỐC ĐỘ THEO KHOẢNG ĐỌC MỤC TIÊU (Codex Plan - Điểm 1 & 2)
             _, actual_duration_s, speed_ratio = await fit_audio_file(
@@ -525,7 +556,11 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
                 "content": text
             }
         except Exception as e:
-            print(f"Lỗi TTS đoạn {segment.index} (Lần {attempt+1}): {e}")
+            from v1_speech_guard import SpeechTimingError
+            if isinstance(e, SpeechTimingError) or shared_state.stop_requested:
+                raise
+            last_error = e
+            logger.warning("[generate_single_tts] Loi TTS doan %s (Lan %s): %s", segment.index, attempt + 1, e)
             if os.path.exists(temp_raw):
                 try: os.remove(temp_raw)
                 except OSError: pass
@@ -533,14 +568,15 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
                 break
             await asyncio.sleep(1.5)
             
-    return None
+    raise TTSIncompleteError(f"Locked-voice TTS failed for cue {segment.index}; successful audio retained") from last_error
 
 
-MAX_NATURAL_SPEED = 1.45
+MAX_NATURAL_SPEED = float(os.getenv("V1_MAX_NATURAL_SPEED", "1.45"))
 
 @stage("voice")
-async def generate_dubbing_audio(translated_segments, output_folder, voice_source="edge", voice_param="vi-VN-HoaiMyNeural", api_key="", video_duration=None):
-    print(f"Generating TTS for dubbing using {voice_source} (Anti-Overlap Enabled)...")
+async def generate_dubbing_audio(translated_segments, output_folder, voice_source="edge", voice_param="vi-VN-HoaiMyNeural", api_key="", video_duration=None, segment_voices=None, script_mode="default"):
+    script_mode = script_mode or os.getenv("SCRIPT_MODE", "default")
+    print(f"Generating TTS for dubbing using {voice_source} (Anti-Overlap Enabled, script_mode={script_mode})...")
     os.makedirs(output_folder, exist_ok=True)
     
     from .v1_voice_cache import voice_cache_key, read_voice_cache, write_voice_cache
@@ -548,12 +584,22 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
     pending_translation = [s for s in translated_segments if _contains_cjk(s.content)]
     if pending_translation:
         await asyncio.to_thread(translate_subtitles, pending_translation,
-                                target_lang="vi", strict=True, enable_g4f=False)
+                                target_lang="vi", strict=True, enable_g4f=False, script_mode=script_mode)
         if any(_contains_cjk(s.content) for s in pending_translation):
             raise RuntimeError("Translation incomplete; Vietnamese TTS was not started")
 
     import time
-    overall_condense_deadline = time.monotonic() + 45.0
+    # Only API work consumes condensation budget, not minutes spent generating TTS.
+    condense_remaining = 45.0
+    from v1_speech_guard import coalesce_tiny_same_voice_cues, validate_speech_timeline
+    if segment_voices:
+        for seg in translated_segments:
+            info = segment_voices.get(str(seg.index))
+            if not info or not info.get("source") or not info.get("param"):
+                raise TTSIncompleteError(f"Missing locked voice for cue {seg.index}")
+            seg.voice_source, seg.voice_param = info["source"], info["param"]
+            seg.gender = info.get("gender", "unknown")
+    coalesce_tiny_same_voice_cues(translated_segments)
 
     # 1. TÍNH KHOẢNG ĐỌC TỐI ĐA CHO TỪNG CÂU (Codex Plan - Điểm 1)
     windows = calculate_reading_windows(translated_segments, video_duration=video_duration, gap_s=0.05)
@@ -577,23 +623,27 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                 "current_seconds": est_duration
             })
 
-    if overly_long_items and (overall_condense_deadline - time.monotonic() > 2.0):
+    if overly_long_items and condense_remaining > 2.0:
         print(f"[VOICE_GUARD] Vòng 1: Gom {len(overly_long_items)} câu dự kiến quá dài (> {MAX_NATURAL_SPEED}x), rút gọn theo lô...")
         from .translation import condense_vietnamese_subtitles_batch
+        condense_started = time.monotonic()
         condensed_map = await asyncio.to_thread(
             condense_vietnamese_subtitles_batch,
             overly_long_items,
-            api_key=api_key,
-            deadline=overall_condense_deadline,
-            job_id="round1_pre_tts"
+            api_key=os.getenv("GEMINI_API_KEY", ""),
+            deadline=condense_started + min(25.0, condense_remaining),
+            stop_checker=lambda: bool(__import__('shared_state').stop_requested),
+            job_id="round1_pre_tts",
+            script_mode=script_mode
         )
+        condense_remaining = max(0.0, condense_remaining - (time.monotonic() - condense_started))
         for seg in translated_segments:
             if seg.index in condensed_map:
                 old_text = seg.content
                 seg.content = condensed_map[seg.index]
                 print(f"[VOICE_GUARD] Đã rút gọn câu #{seg.index}: '{old_text[:35]}...' -> '{seg.content}'")
 
-    limiter = asyncio.Semaphore(4)
+    limiter = asyncio.Semaphore(int(os.getenv("V1_TTS_WORKERS", "4")))
     async def run_one(seg):
         async with limiter:
             if not seg.content.strip() or not re.search(r'\w', seg.content):
@@ -609,45 +659,117 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                             end=seg.start.total_seconds() + duration, actual_audio_duration=duration,
                             content=seg.content.strip())
             
-            result = await generate_single_tts(
-                seg, output_folder, seg_source, seg_param, api_key, target_max_duration=hard_max
-            )
-            if result is None:
-                for retry_idx in range(2):
-                    await asyncio.sleep(2.0 * (retry_idx + 1))
-                    result = await generate_single_tts(
-                        seg, output_folder, seg_source, seg_param, api_key, target_max_duration=hard_max
-                    )
-                    if result is not None:
-                        break
+            result = None
+            try:
+                result = await generate_single_tts(
+                    seg, output_folder, seg_source, seg_param, api_key, target_max_duration=hard_max
+                )
+            except Exception as tts_err:
+                logger.warning(f"[TTS_RETRY] Lỗi ban đầu câu #{seg.index}: {tts_err}. Đang thử lại...")
+                for retry_idx in range(3):
+                    await asyncio.sleep(1.2 * (retry_idx + 1))
+                    try:
+                        result = await generate_single_tts(
+                            seg, output_folder, seg_source, seg_param, api_key, target_max_duration=hard_max
+                        )
+                        if result is not None:
+                            break
+                    except Exception:
+                        pass
+
+                # Nếu sau các lần thử vẫn thất bại -> Tự động Fallback sang Edge-TTS
+                if result is None:
+                    is_female = getattr(seg, "gender", "") == "female" or "562" in str(seg_param) or "mai" in str(seg_param).lower()
+                    fallback_voice = "vi-VN-HoaiMyNeural" if is_female else "vi-VN-NamMinhNeural"
+                    try:
+                        logger.warning(f"[TTS_FALLBACK] CapCut lỗi câu #{seg.index}, tự động chuyển sang Edge-TTS ({fallback_voice})")
+                        result = await generate_single_tts(
+                            seg, output_folder, "edge", fallback_voice, api_key, target_max_duration=hard_max
+                        )
+                    except Exception as fb_err:
+                        logger.error(f"[TTS_FALLBACK_FAIL] Cả Edge-TTS cũng thất bại cho câu #{seg.index}: {fb_err}")
 
             if result is None:
                 if os.path.exists(path):
                     try: os.remove(path)
                     except OSError: pass
-                raise TTSIncompleteError(
-                    f"TTS segment {seg.index} thất bại với giọng '{seg_source}' ({seg_param}). "
-                    f"Không thay thế bằng giọng khác để đảm bảo tính nhất quán của video."
+                # Cho phép ghi nhận lỗi để đánh giá dung sai tổng thể thay vì raise ngay
+                return dict(
+                    index=seg.index, path=path, start=seg.start.total_seconds(),
+                    end=seg.start.total_seconds() + hard_max, actual_audio_duration=hard_max,
+                    content=seg.content.strip(), error=f"TTS segment {seg.index} thất bại sau các lượt thử CapCut và Edge-TTS"
                 )
             
             # Ghi nhận cache version 8
             if os.path.exists(path) and os.path.getsize(path) > 128 and result.get("actual_audio_duration", 0) > 0.1:
-                write_voice_cache(path, key, result["actual_audio_duration"], seg.content.strip())
+                if result["actual_audio_duration"] <= hard_max + 0.005 and result.get("speed_ratio", 1.0) <= MAX_NATURAL_SPEED:
+                    write_voice_cache(path, key, result["actual_audio_duration"], seg.content.strip())
             else:
                 if os.path.exists(path):
                     try: os.remove(path)
                     except OSError: pass
-                raise TTSIncompleteError(f"Failed segment: {seg.index} (Audio invalid or too short)")
+                return dict(
+                    index=seg.index, path=path, start=seg.start.total_seconds(),
+                    end=seg.start.total_seconds() + hard_max, actual_audio_duration=hard_max,
+                    content=seg.content.strip(), error=f"Failed segment: {seg.index} (Audio invalid or too short)"
+                )
             return result
 
     results = await asyncio.gather(*(run_one(seg) for seg in translated_segments), return_exceptions=True)
-    errors = [r for r in results if isinstance(r, BaseException)]
-    if errors:
-        raise RuntimeError(f"TTS incomplete: {len(errors)} subtitle(s); successful audio retained for retry") from errors[0]
+    exceptions = [r for r in results if isinstance(r, BaseException)]
+    failed_items = [r for r in results if isinstance(r, dict) and r.get("error")]
+    total_failures = len(exceptions) + len(failed_items)
+    max_tolerable = max(2, int(len(translated_segments) * 0.03))
+
+    if total_failures > max_tolerable or (exceptions and total_failures > max_tolerable):
+        first_err = exceptions[0] if exceptions else TTSIncompleteError(f"TTS incomplete: {total_failures} subtitle(s) failed; threshold {max_tolerable}")
+        raise TTSIncompleteError(f"TTS incomplete: {total_failures} subtitle(s); exceeding tolerance threshold ({max_tolerable})") from first_err
+
+    # Với các câu lỗi nằm trong ngưỡng dung sai (<= 3 câu), tạo file âm thanh khoảng lặng an toàn để video hoàn thành mượt mà
+    for item in failed_items:
+        seg_idx = item["index"]
+        hard_max = windows.get(seg_idx, 2.0)
+        p = item["path"]
+        try:
+            cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono", "-t", str(max(0.2, hard_max)), "-q:a", "9", "-acodec", "libmp3lame", str(p)]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            item.pop("error", None)
+            logger.warning(f"[VOICE_GUARD] Áp dụng dung sai TTS: Phụ đề #{seg_idx} đã tạo khoảng lặng ({hard_max:.2f}s) thay vì hủy bỏ cả video.")
+        except Exception as sil_err:
+            logger.error(f"[VOICE_GUARD] Không thể tạo khoảng lặng cho #{seg_idx}: {sil_err}")
 
     # 4. VÒNG 2: ĐO THỜI LƯỢNG THỰC TẾ & GOM RÚT GỌN BỔ SUNG (Codex Plan - Đợt 5)
     # Gom TẤT CẢ các câu thực tế vẫn quá dài (> 1.45x) sau TTS lần 1 thành MỘT lượt gọi bổ sung duy nhất
     res_by_idx = {r["index"]: r for r in results if r is not None and isinstance(r, dict)}
+    # CapCut and FFmpeg may return a few extra MP3 frames even after the first
+    # fit. Refit only those measured files, sequentially, before considering
+    # another Gemini rewrite or mixing. Keep the locked voice and every word.
+    for seg in translated_segments:
+        r = res_by_idx.get(seg.index)
+        if not r:
+            continue
+        hard_max = windows.get(seg.index, 3.0)
+        measured = float(r.get("actual_audio_duration", 0.0))
+        if measured <= hard_max + 0.005:
+            continue
+        previous_speed = float(r.get("speed_ratio", 1.0))
+        required_speed = measured / max(0.001, hard_max - 0.015)
+        try:
+            _, fitted_duration, extra_speed = await fit_audio_file(
+                r["path"], hard_max, r["path"]
+            )
+        except Exception as exc:
+            logger.warning("[VOICE_GUARD] Cue %s measured refit failed: %s", seg.index, exc)
+            continue
+        r["actual_audio_duration"] = fitted_duration
+        r["end"] = float(r["start"]) + fitted_duration
+        r["speed_ratio"] = previous_speed * extra_speed
+        if fitted_duration <= hard_max + 0.005:
+            seg_source = getattr(seg, "voice_source", None) or voice_source
+            seg_param = getattr(seg, "voice_param", None) or voice_param
+            key = voice_cache_key(seg, seg_source, seg_param, max_duration=hard_max)
+            write_voice_cache(r["path"], key, fitted_duration, seg.content.strip())
+
     post_tts_overly_long = []
     for seg in translated_segments:
         if seg.index not in res_by_idx:
@@ -656,7 +778,7 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
         dur = r.get("actual_audio_duration", 0.0)
         hard_max = windows.get(seg.index, 3.0)
         speed_ratio = r.get("speed_ratio", 1.0)
-        if hard_max > 0 and (dur / hard_max > MAX_NATURAL_SPEED or speed_ratio > MAX_NATURAL_SPEED):
+        if hard_max > 0 and (dur > hard_max + 0.005 or speed_ratio > MAX_NATURAL_SPEED):
             target_words = max(2, int((hard_max - 0.05) / 0.28))
             post_tts_overly_long.append({
                 "index": seg.index,
@@ -666,15 +788,18 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                 "current_seconds": dur
             })
 
-    if post_tts_overly_long and (overall_condense_deadline - time.monotonic() > 2.0):
+    if post_tts_overly_long and condense_remaining > 2.0:
         print(f"[VOICE_GUARD] Vòng 2 (Bổ sung): Phát hiện {len(post_tts_overly_long)} câu thực tế vẫn dài, gom 1 lượt gọi Gemini...")
         from .translation import condense_vietnamese_subtitles_batch
+        condense_started = time.monotonic()
         condensed_map_round2 = await asyncio.to_thread(
             condense_vietnamese_subtitles_batch,
             post_tts_overly_long,
-            api_key=api_key,
-            deadline=overall_condense_deadline,
-            job_id="round2_post_tts"
+            api_key=os.getenv("GEMINI_API_KEY", ""),
+            deadline=condense_started + condense_remaining,
+            stop_checker=lambda: bool(__import__('shared_state').stop_requested),
+            job_id="round2_post_tts",
+            script_mode=script_mode
         )
         cues_to_re_render = []
         for seg in translated_segments:
@@ -688,12 +813,33 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
         if cues_to_re_render:
             re_results = await asyncio.gather(*(run_one(seg) for seg in cues_to_re_render), return_exceptions=True)
             re_errors = [r for r in re_results if isinstance(r, BaseException)]
-            if not re_errors:
-                for r in re_results:
-                    if r and isinstance(r, dict):
-                        res_by_idx[r["index"]] = r
+            if re_errors:
+                raise TTSIncompleteError("Condensed TTS regeneration failed; stale dialogue is not published") from re_errors[0]
+            for r in re_results:
+                if r and isinstance(r, dict):
+                    res_by_idx[r["index"]] = r
+
+    # Final Hard Guard: Ensure EVERY single audio cue strictly fits its reading window
+    # to guarantee zero audio overlap in the mixer.
+    for seg in translated_segments:
+        r = res_by_idx.get(seg.index)
+        if not r:
+            continue
+        hard_max = windows.get(seg.index, 3.0)
+        dur = float(r.get("actual_audio_duration", 0.0))
+        if hard_max > 0 and dur > hard_max + 0.005:
+            try:
+                _, fitted_dur, extra_spd = await fit_audio_file(r["path"], hard_max, r["path"])
+                r["actual_audio_duration"] = fitted_dur
+                r["end"] = float(r["start"]) + fitted_dur
+                r["speed_ratio"] = float(r.get("speed_ratio", 1.0)) * extra_spd
+                logger.info("[VOICE_GUARD] Final fit enforced for cue %s: dur=%.3fs <= %.3fs",
+                            seg.index, fitted_dur, hard_max)
+            except Exception as exc:
+                logger.warning("[VOICE_GUARD] Final fit for cue %s warning: %s", seg.index, exc)
 
     final_results = [res_by_idx[seg.index] for seg in translated_segments if seg.index in res_by_idx]
+    validate_speech_timeline(final_results, total_duration=video_duration, max_speed=MAX_NATURAL_SPEED)
 
     global global_rvc_instance, global_rvc_model_path
     if global_rvc_instance is not None:

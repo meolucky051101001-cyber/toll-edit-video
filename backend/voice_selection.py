@@ -1,14 +1,18 @@
 """Shared dashboard/bot voice choice, read at the start of voice generation."""
 import json
 import os
+import uuid
 from pathlib import Path
 def _resolve_control_dir() -> Path:
     ws_env = os.getenv("AUTODUB_WORKSPACE")
+    candidates = []
     if ws_env:
-        for c in [Path(ws_env) / "bot_system" / "control", Path(ws_env) / "control"]:
-            if c.is_dir():
-                return c
-    for c in [Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")]:
+        candidates.extend([Path(ws_env) / "bot_system" / "control", Path(ws_env) / "control"])
+    candidates.extend([Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")])
+    for c in candidates:
+        if (c / "voice_catalog.json").is_file():
+            return c
+    for c in candidates:
         if c.is_dir():
             return c
     return Path(r"C:\tool v1\workspace\control")
@@ -30,7 +34,7 @@ def selected():
 def save(voice_id):
     voice_id = ALIASES.get(voice_id, voice_id)
     if not any(v['id']==voice_id for v in catalog()):raise ValueError('Mã giọng không hợp lệ.')
-    tmp=BASE/'voice_selection.tmp'
+    tmp=BASE/f'voice_selection.json.tmp.{uuid.uuid4().hex}'
     tmp.write_text(json.dumps({'id':voice_id}),encoding='utf-8')
     os.replace(tmp,BASE/'voice_selection.json')
 def resolve_voice(default_source, default_param):

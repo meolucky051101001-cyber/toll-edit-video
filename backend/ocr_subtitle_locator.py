@@ -106,7 +106,8 @@ def _geometry_score(
 
     width = right - left
     height = bottom - top
-    if not (0.0 <= left < right <= 1.0 and 0.03 <= top < bottom <= 0.96):
+    # Captions may touch either edge; do not silently reject the bottom 4%.
+    if not (0.0 <= left < right <= 1.0 and 0.0 <= top < bottom <= 1.0):
         return None
     if width < 0.025 or height < 0.007 or height > 0.14:
         return None
@@ -358,7 +359,11 @@ def select_chinese_subtitle_band(
             default_top, default_bottom, "default", 0, {}, 0
         )
 
+    reliability_cache = {}
     def reliable(item):
+        cached = reliability_cache.get(id(item))
+        if cached is not None:
+            return cached
         related = [
             other for other in candidates if not other.composite
             and abs(other.center_y - item.center_y) <= 0.035
@@ -369,8 +374,10 @@ def select_chinese_subtitle_band(
         ]
         seen_segments = {other.segment_id for other in related}
         matching_segments = {other.segment_id for other in related if other.strong_text_match}
-        return not (len(seen_segments) >= 3 and
-                    len(matching_segments) / len(seen_segments) < 0.6)
+        result = not (len(seen_segments) >= 3 and
+                      len(matching_segments) / len(seen_segments) < 0.6)
+        reliability_cache[id(item)] = result
+        return result
 
     strong_candidates = [item for item in candidates if item.strong_text_match and reliable(item)]
     chosen_cluster: Optional[List[_Candidate]] = None
@@ -410,19 +417,59 @@ def select_chinese_subtitle_band(
         top, bottom = center - 0.0125, center + 0.0125
     elif height > 0.14:
         top, bottom = center - 0.07, center + 0.07
-    top = max(0.03, top)
-    bottom = min(0.96, bottom)
+    top = max(0.0, top)
+    bottom = min(1.0, bottom)
 
     selected_by_segment: Dict[int, Mapping[str, Any]] = {}
     selected_by_sample: Dict[int, List[Mapping[str, Any]]] = {}
+    strong_by_segment = {}
+    for item in strong_candidates:
+        strong_by_segment.setdefault(item.segment_id, []).append(item)
     for segment_id in segment_texts:
         # Use only validated matches, including genuine vertical motion.
-        local = [item for item in strong_candidates if item.segment_id == segment_id]
+        local = strong_by_segment.get(segment_id, [])
         selected = sorted(_best_per_sample(local), key=lambda item: item.block["sample_time"])
         if not selected:
             continue
-        selected_by_sample[int(segment_id)] = [dict(item.block) for item in selected]
-        selected_by_segment[int(segment_id)] = dict(max(selected, key=lambda item: item.rank_score).block)
+        # An ASR cue may describe only part of one long on-screen sentence.
+        # Match text to establish the anchor, then cover the complete co-linear
+        # row at THAT sample (never union different timestamps or nearby rows).
+        expanded = []
+        for anchor in selected:
+            merged = dict(anchor.block)
+            members = [anchor]
+            pool = [item for item in grouped.get(anchor.sample_key, [])
+                    if reliable(item)]
+            changed = True
+            while changed:
+                changed = False
+                for item in pool:
+                    if item in members:
+                        continue
+                    a, b = merged, item.block
+                    height_a = float(anchor.block['max_y_pct']) - float(anchor.block['y_pct'])
+                    height_b = float(b['max_y_pct']) - float(b['y_pct'])
+                    same_baseline = abs(anchor.center_y - item.center_y) <= min(.012, max(height_a, height_b) * .3)
+                    gap = max(0.0, float(b['x_pct']) - float(a['max_x_pct']),
+                              float(a['x_pct']) - float(b['max_x_pct']))
+                    overlap = min(float(a['max_x_pct']), float(b['max_x_pct'])) - max(float(a['x_pct']), float(b['x_pct']))
+                    if not same_baseline or gap > .045 or max(height_a, height_b) > min(height_a, height_b) * 1.8:
+                        continue
+                    # OCR glyph margins intentionally overlap at word seams.
+                    # Reject deep containment, not a few padded pixels.
+                    if overlap > .06 and not item.strong_text_match:
+                        continue
+                    members.append(item)
+                    merged.update(x_pct=min(a['x_pct'], b['x_pct']),
+                                  max_x_pct=max(a['max_x_pct'], b['max_x_pct']),
+                                  y_pct=min(a['y_pct'], b['y_pct']),
+                                  max_y_pct=max(a['max_y_pct'], b['max_y_pct']))
+                    changed = True
+            merged['text'] = ' '.join(item.block['text'] for item in sorted(members, key=lambda c:c.block['x_pct']))
+            expanded.append(merged)
+        selected_by_sample[int(segment_id)] = expanded
+        best = max(selected, key=lambda item: item.rank_score)
+        selected_by_segment[int(segment_id)] = expanded[selected.index(best)]
 
     return SubtitleBandSelection(
         top=top,

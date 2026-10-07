@@ -38,7 +38,15 @@ def atomic_replace_file(staged_path: PathLike, destination_path: PathLike) -> Pa
     destination.parent.mkdir(parents=True, exist_ok=True)
     with staged.open("ab") as handle:
         os.fsync(handle.fileno())
-    os.replace(str(staged), str(destination))
+    for attempt in range(5):
+        try:
+            os.replace(str(staged), str(destination))
+            break
+        except OSError:
+            if attempt == 4:
+                raise
+            import time
+            time.sleep(0.05 * (attempt + 1))
     _sync_parent_directory(destination.parent)
     return destination
 

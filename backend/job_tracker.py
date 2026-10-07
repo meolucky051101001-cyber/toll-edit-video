@@ -36,16 +36,70 @@ logger = logging.getLogger(__name__)
 class JobAlreadyRunningError(RuntimeError):
     pass
 
-# Bảng quy đổi bước xử lý sang % tiến độ mặc định
+# Bảng quy đổi bước xử lý sang % tiến độ mặc định (Chuẩn 8 bước V1 Orchestrator)
 STEP_PERCENT_MAP = {
     1.0: 10,   # Trích xuất âm thanh gốc
-    2.0: 25,   # Demucs tách nhạc nền & giọng nói
-    3.0: 40,   # Faster-Whisper nhận dạng giọng nói
-    3.5: 55,   # PP-OCRv6 dò tìm phụ đề gốc
-    4.0: 70,   # Gemini 3.8 Flash dịch phụ đề
-    5.0: 85,   # RVC / Hoài My lồng tiếng AI
-    6.0: 95,   # NVENC Hardware Render video
+    2.0: 25,   # Bóc tách giọng nói khỏi nhạc nền
+    3.0: 40,   # Nhận dạng giọng nói (ASR)
+    3.5: 55,   # Tương thích ngược OCR
+    4.0: 55,   # Quét phụ đề chữ cứng (OCR)
+    5.0: 65,   # Dịch phụ đề chuẩn ngữ cảnh (Gemini AI)
+    6.0: 75,   # Lồng tiếng AI (TTS → RVC Voice)
+    7.0: 85,   # Trộn nhạc nền & giọng đọc (Adaptive Mixer)
+    8.0: 95,   # Render video thành phẩm bằng NVENC GPU
 }
+ 
+def _default_worker_state(worker_id: int) -> Dict[str, Any]:
+    return {
+        "worker_id": int(worker_id),
+        "active": False,
+        "status": "idle",
+        "video_name": "",
+        "video_status": "idle",
+        "step": 0,
+        "total_steps": 8,
+        "step_name": "Hệ thống sẵn sàng" if worker_id == 1 else "Đang chờ video từ hàng đợi...",
+        "percent": 0,
+        "start_time": None,
+        "elapsed_seconds": 0,
+        "eta_seconds": None,
+        "queue_total": 0,
+        "queue_index": 0,
+        "step_durations": {},
+        "current_step_start": None,
+        "router_info": None,
+        "video_mode": None,
+        "last_error": None,
+        "updated_at": 0,
+    }
+
+
+def _get_worker_id(explicit_id: Optional[int] = None) -> int:
+    if explicit_id is not None:
+        try:
+            val = int(explicit_id)
+            if val in (1, 2):
+                return val
+        except (ValueError, TypeError):
+            pass
+    try:
+        from telegram_progress import current_worker_id
+        val = current_worker_id.get()
+        if val in (1, 2):
+            return int(val)
+    except Exception:
+        pass
+    try:
+        from v1_gpu_gatekeeper import get_gpu_context_id
+        cid = str(get_gpu_context_id() or "")
+        if "worker_2" in cid:
+            return 2
+        elif "worker_1" in cid:
+            return 1
+    except Exception:
+        pass
+    return 1
+
 
 _DEFAULT_STATE: Dict[str, Any] = {
     "schema_version": 2,
@@ -55,7 +109,7 @@ _DEFAULT_STATE: Dict[str, Any] = {
     "video_name": "",
     "video_status": "idle",
     "step": 0,
-    "total_steps": 7,
+    "total_steps": 8,
     "step_name": "Hệ thống sẵn sàng",
     "percent": 0,
     "start_time": None,
@@ -74,6 +128,15 @@ _DEFAULT_STATE: Dict[str, Any] = {
     "current_step_start": None,
     "separator_info": None,
     "mixer_info": None,
+    "active_translation_model": None,
+    "translation_models": [],
+    "configured_gemini_model": os.getenv("GEMINI_MODEL", "gemini-3.7-flash").strip() or "gemini-3.7-flash",
+    "router_info": None,
+    "video_mode": None,
+    "workers": {
+        "1": _default_worker_state(1),
+        "2": _default_worker_state(2),
+    },
     "updated_at": 0,
 }
 
@@ -174,9 +237,17 @@ def _claim_batch_lock_guarded(job_id: str) -> None:
                 raise JobAlreadyRunningError("Batch lock is being written or is unreadable.")
             owner_pid = int(owner.get("pid") or 0)
             if owner_pid and _pid_is_running(owner_pid):
+                if owner_pid == os.getpid():
+                    try:
+                        from worker_settings import get_worker_settings
+                        if get_worker_settings().get("concurrency", 1) > 1:
+                            return
+                    except Exception:
+                        pass
                 raise JobAlreadyRunningError(
                     "Một batch khác đang chạy (PID {}).".format(owner_pid)
                 )
+
             try:
                 BATCH_LOCK_FILE.unlink()
             except FileNotFoundError:
@@ -238,6 +309,31 @@ def _save_state_to_disk():
         logger.warning("Không thể ghi trạng thái job: %s", exc)
 
 
+def _freeze_progress_unlocked(now=None):
+    """Persist terminal timings before active becomes false. Caller holds _LOCK."""
+    now = time.time() if now is None else now
+    if _CURRENT_STATE.get("active") and _CURRENT_STATE.get("start_time"):
+        _CURRENT_STATE["elapsed_seconds"] = max(0, int(now - _CURRENT_STATE["start_time"]))
+        step = _CURRENT_STATE.get("step")
+        started = _CURRENT_STATE.get("current_step_start")
+        if step and started and _CURRENT_STATE.get("video_status") != "completed":
+            durations = dict(_CURRENT_STATE.get("step_durations") or {})
+            durations[str(step)] = round(max(0, now - started), 1)
+            _CURRENT_STATE["step_durations"] = durations
+    _CURRENT_STATE["eta_seconds"] = None
+    if "workers" in _CURRENT_STATE and isinstance(_CURRENT_STATE["workers"], dict):
+        for wid_k, w in _CURRENT_STATE["workers"].items():
+            if w.get("active") and w.get("start_time"):
+                w["elapsed_seconds"] = max(0, int(now - w["start_time"]))
+                w_step = w.get("step")
+                w_started = w.get("current_step_start")
+                if w_step and w_started and w.get("video_status") != "completed":
+                    w_durs = dict(w.get("step_durations") or {})
+                    w_durs[str(w_step)] = round(max(0, now - w_started), 1)
+                    w["step_durations"] = w_durs
+            w["eta_seconds"] = None
+
+
 def get_status() -> Dict[str, Any]:
     """Lấy trạng thái hiện tại (kèm cập nhật elapsed_seconds nếu đang chạy)."""
     with _LOCK:
@@ -248,7 +344,8 @@ def get_status() -> Dict[str, Any]:
         state = copy.deepcopy(_CURRENT_STATE)
         owner = _read_batch_lock_unlocked()
         if state.get("active") and owner and not _pid_is_running(int(owner.get("pid") or 0)):
-            state.update(active=False, status="interrupted",
+            state.update(active=False, status="interrupted", video_status="interrupted",
+                         elapsed_seconds=max(0, int((state.get("updated_at") or time.time()) - (state.get("start_time") or time.time()))),
                          step_name="Tiến trình đã thoát. Có thể chạy lại để tiếp tục.",
                          eta_seconds=None)
         if state.get("active") and state.get("start_time"):
@@ -268,6 +365,22 @@ def get_status() -> Dict[str, Any]:
                 state["eta_seconds"] = max(0, int(total_est - elapsed))
             else:
                 state["eta_seconds"] = None
+        # Normalize historical snapshots without changing a running worker's disk state.
+        if state.get("status") in ("error", "stopped", "interrupted"):
+            state["video_status"] = state["status"]
+            state["percent"] = min(99, max(0, state.get("percent", 0)))
+            state["eta_seconds"] = None
+            if not state.get("elapsed_seconds") and state.get("start_time"):
+                state["elapsed_seconds"] = max(0, int((state.get("updated_at") or state["start_time"]) - state["start_time"]))
+        if state.get("video_status") == "completed":
+            from dashboard_media import media_status
+            output_path = (state.get("last_completed") or {}).get("output_path")
+            check = media_status(output_path, defer=True) if output_path else {"status": "unverified", "reason": "Chưa có đường dẫn thành phẩm để xác minh."}
+            if check["status"] != "valid":
+                state.update(active=False, status="error" if check["status"] == "invalid" else "recorded",
+                             video_status="error" if check["status"] == "invalid" else "unverified",
+                             percent=min(99, max(0, state.get("percent", 0))), eta_seconds=None,
+                             step_name=check["reason"], last_error=check["reason"])
         # Khi đang xử lý video mới, không lấy tên model của video trước làm nhãn (Codex Plan - Đợt 7)
         if not state.get("active") and not state.get("translation_models"):
             last_models = (state.get("last_completed") or {}).get("translation_models")
@@ -281,6 +394,47 @@ def get_status() -> Dict[str, Any]:
             last_mix = (state.get("last_completed") or {}).get("mixer_info")
             if last_mix:
                 state["mixer_info"] = copy.deepcopy(last_mix)
+
+        # Cập nhật thông tin model dịch thuật cấu hình và model thực tế đang chạy
+        configured_m = os.getenv("GEMINI_MODEL", "gemini-3.7-flash").strip() or "gemini-3.7-flash"
+        state["configured_gemini_model"] = configured_m
+        if not state.get("active_translation_model"):
+            if state.get("active") and (state.get("step") == 5 or state.get("step") == 5.0):
+                state["active_translation_model"] = configured_m
+            elif state.get("translation_models"):
+                state["active_translation_model"] = state["translation_models"][-1]
+            elif not state.get("active"):
+                last_models = (state.get("last_completed") or {}).get("translation_models")
+                if last_models:
+                    state["active_translation_model"] = last_models[-1]
+                else:
+                    state["active_translation_model"] = configured_m
+
+        # Cập nhật thông tin chi tiết từng luồng xử lý (Workers 1 & 2)
+        if "workers" in state and isinstance(state["workers"], dict):
+            for wid_k, w_info in state["workers"].items():
+                if w_info.get("active") and w_info.get("start_time"):
+                    w_elapsed = max(0, int(time.time() - w_info["start_time"]))
+                    w_info["elapsed_seconds"] = w_elapsed
+                    c_step = w_info.get("step")
+                    c_start = w_info.get("current_step_start")
+                    if c_step and c_step > 0 and c_start:
+                        durs = dict(w_info.get("step_durations") or {})
+                        durs[str(c_step)] = round(max(0, time.time() - c_start), 1)
+                        w_info["step_durations"] = durs
+                    w_pct = w_info.get("percent", 0)
+                    if w_pct > 10 and w_pct < 100:
+                        total_est = (w_elapsed / w_pct) * 100
+                        w_info["eta_seconds"] = max(0, int(total_est - w_elapsed))
+                    else:
+                        w_info["eta_seconds"] = None
+        else:
+            w1_copy = copy.deepcopy(state)
+            w1_copy["worker_id"] = 1
+            state["workers"] = {
+                "1": w1_copy,
+                "2": _default_worker_state(2),
+            }
         return state
 
 
@@ -298,6 +452,14 @@ def start_batch(
         reserved = owner.get("job_id") == job_id and owner.get("pid") == os.getpid()
         if not reserved:
             _claim_batch_lock_unlocked(job_id)
+            try:
+                (WORKSPACE / "control" / "video.stop").unlink(missing_ok=True)
+            except Exception:
+                pass
+            try:
+                STATUS_FILE.with_name("stop_request.json").unlink(missing_ok=True)
+            except Exception:
+                pass
         now = time.time()
         _CURRENT_STATE.update({
             "schema_version": 2,
@@ -325,32 +487,105 @@ def start_batch(
         return job_id
 
 
-def start_video(video_name: str, index: int = 1, total: int = 1):
-    """Bắt đầu xử lý một video cụ thể."""
+def start_video(video_name: str, index: int = 1, total: int = 1, worker_id: Optional[int] = None):
+    """Bắt đầu xử lý một video cụ thể (hỗ trợ phân biệt worker_id 1 hoặc 2)."""
     with _LOCK:
         _sync_from_disk_unlocked()
-        _CURRENT_STATE.update({
+        wid = _get_worker_id(worker_id)
+        wid_str = str(wid)
+        now = time.time()
+
+        if "workers" not in _CURRENT_STATE or not isinstance(_CURRENT_STATE["workers"], dict):
+            _CURRENT_STATE["workers"] = {
+                "1": _default_worker_state(1),
+                "2": _default_worker_state(2),
+            }
+        if wid_str not in _CURRENT_STATE["workers"]:
+            _CURRENT_STATE["workers"][wid_str] = _default_worker_state(wid)
+
+        _CURRENT_STATE["workers"][wid_str].update({
             "active": True,
             "status": "running",
             "video_name": video_name,
             "video_status": "running",
-            "translation_models": [],
-            "separator_info": None,
-            "mixer_info": None,
             "step": 0,
             "step_name": "Bắt đầu xử lý video...",
             "percent": 5,
-            "start_time": time.time(),
+            "start_time": now,
             "elapsed_seconds": 0,
             "eta_seconds": None,
             "queue_total": total,
             "queue_index": index,
             "last_error": None,
             "step_durations": {},
-            "current_step_start": time.time(),
-            "updated_at": time.time(),
+            "current_step_start": now,
+            "router_info": None,
+            "video_mode": None,
+            "updated_at": now,
+        })
+
+        _CURRENT_STATE.update({
+            "active": True,
+            "status": "running",
+            "video_name": video_name,
+            "video_status": "running",
+            "active_translation_model": None,
+            "translation_models": [],
+            "separator_info": None,
+            "mixer_info": None,
+            "router_info": None,
+            "video_mode": None,
+            "step": 0,
+            "step_name": "Bắt đầu xử lý video...",
+            "percent": 5,
+            "start_time": now,
+            "elapsed_seconds": 0,
+            "eta_seconds": None,
+            "queue_total": total,
+            "queue_index": index,
+            "last_error": None,
+            "step_durations": {},
+            "current_step_start": now,
+            "updated_at": now,
         })
         _save_state_to_disk()
+
+
+def record_router_info(info: Dict[str, Any], identity: Optional[Any] = None, worker_id: Optional[int] = None):
+    """Ghi nhận thông tin bộ điều phối video (SML Router: SHORT, MEDIUM, LONG, AUTO)."""
+    if not info:
+        return
+    with _LOCK:
+        _sync_from_disk_unlocked()
+        wid = _get_worker_id(worker_id)
+        wid_str = str(wid)
+        if "workers" in _CURRENT_STATE and wid_str in _CURRENT_STATE["workers"]:
+            _CURRENT_STATE["workers"][wid_str]["router_info"] = copy.deepcopy(info)
+            _CURRENT_STATE["workers"][wid_str]["video_mode"] = info.get("resolved_mode") or info.get("mode")
+
+        if identity is not None:
+            current = (_CURRENT_STATE.get("job_id"), _CURRENT_STATE.get("video_name"), _CURRENT_STATE.get("start_time"))
+            if identity != current:
+                return
+        _CURRENT_STATE["router_info"] = copy.deepcopy(info)
+        _CURRENT_STATE["video_mode"] = info.get("resolved_mode") or info.get("mode")
+        _save_state_to_disk()
+        logger.info("Đã ghi nhận bộ điều phối video [Worker %s]: %s (mode=%s)", wid, info.get("router_label") or info.get("resolved_mode"), info.get("resolved_mode"))
+
+
+def record_active_translation_model(model: str, identity: Optional[Any] = None):
+    """Ghi nhận model Gemini đang chạy inference dịch thuật theo thời gian thực."""
+    if not model:
+        return
+    with _LOCK:
+        _sync_from_disk_unlocked()
+        if identity is not None:
+            current = (_CURRENT_STATE.get("job_id"), _CURRENT_STATE.get("video_name"), _CURRENT_STATE.get("start_time"))
+            if identity != current:
+                return
+        _CURRENT_STATE["active_translation_model"] = model
+        _save_state_to_disk()
+        logger.info("Đang dịch thuật với model Gemini: %s", model)
 
 
 def record_translation_model(model: str, identity: Optional[Any] = None):
@@ -367,6 +602,7 @@ def record_translation_model(model: str, identity: Optional[Any] = None):
         if model not in models:
             models.append(model)
         _CURRENT_STATE["translation_models"] = models
+        _CURRENT_STATE["active_translation_model"] = model
         _save_state_to_disk()
         logger.info("Đã ghi nhận model dịch thuật: %s", model)
 
@@ -401,8 +637,8 @@ def record_mixer_info(info: Dict[str, Any], identity: Optional[Any] = None):
         logger.info("Đã ghi nhận thông tin hòa âm: %s", info.get("ducking_mode"))
 
 
-def update_step(step: float, step_name: str, percent: Optional[int] = None, details: str = ""):
-    """Cập nhật bước xử lý và tiến độ %."""
+def update_step(step: float, step_name: str, percent: Optional[int] = None, details: str = "", worker_id: Optional[int] = None):
+    """Cập nhật bước xử lý và tiến độ % (hỗ trợ phân biệt worker_id)."""
     with _LOCK:
         _sync_from_disk_unlocked()
         if percent is None:
@@ -410,17 +646,42 @@ def update_step(step: float, step_name: str, percent: Optional[int] = None, deta
         percent = min(99, max(0, percent))
 
         now = time.time()
+        wid = _get_worker_id(worker_id)
+        wid_str = str(wid)
+
+        if "workers" in _CURRENT_STATE and wid_str in _CURRENT_STATE["workers"]:
+            w = _CURRENT_STATE["workers"][wid_str]
+            w_prev_step = w.get("step")
+            w_step_durations = dict(w.get("step_durations") or {})
+            w_current_step_start = w.get("current_step_start") or now
+            if w_prev_step and w_prev_step != step and w_prev_step > 0:
+                w_step_durations[str(w_prev_step)] = round(now - w_current_step_start, 1)
+
+            w_status = "rendering" if step >= 8.0 else "running"
+            w.update({
+                "active": True,
+                "status": w_status,
+                "video_status": w_status,
+                "step": step,
+                "step_name": step_name,
+                "percent": percent,
+                "details": details,
+                "step_durations": w_step_durations,
+                "current_step_start": now,
+                "updated_at": now,
+            })
+
         prev_step = _CURRENT_STATE.get("step")
         step_durations = dict(_CURRENT_STATE.get("step_durations") or {})
         current_step_start = _CURRENT_STATE.get("current_step_start") or now
         if prev_step and prev_step != step and prev_step > 0:
             step_durations[str(prev_step)] = round(now - current_step_start, 1)
 
-        status = "rendering" if step >= 6.0 else "running"
+        status = "rendering" if step >= 8.0 else "running"
         if (_CURRENT_STATE.get("step"), _CURRENT_STATE.get("step_name")) != (step, step_name):
             logging.getLogger("pipeline.progress").info(
-                "Video %s | Bước %s: %s",
-                _CURRENT_STATE.get("video_name", ""), step, step_name)
+                "Worker %s | Video %s | Bước %s: %s",
+                wid, _CURRENT_STATE.get("video_name", ""), step, step_name)
 
         _CURRENT_STATE.update({
             "active": True,
@@ -436,11 +697,37 @@ def update_step(step: float, step_name: str, percent: Optional[int] = None, deta
         _save_state_to_disk()
 
 
-def finish_video(video_name: str, output_path: str = "", duration_seconds: float = 0):
-    """Ghi nhận hoàn thành video."""
+def finish_video(video_name: str, output_path: str = "", duration_seconds: float = 0, worker_id: Optional[int] = None):
+    """Record completion only after the output can be read as video with audio."""
+    from dashboard_media import media_status
+    check = media_status(output_path) if output_path else {"status": "unverified", "reason": "Không có đường dẫn thành phẩm."}
+    if check["status"] != "valid":
+        message = "Chưa xác nhận thành phẩm: " + check["reason"]
+        set_error(video_name, message, fatal=True, worker_id=worker_id)
+        raise RuntimeError(message)
     with _LOCK:
         _sync_from_disk_unlocked()
         now = time.time()
+        wid = _get_worker_id(worker_id)
+        wid_str = str(wid)
+
+        if "workers" in _CURRENT_STATE and wid_str in _CURRENT_STATE["workers"]:
+            w = _CURRENT_STATE["workers"][wid_str]
+            w_step_durations = dict(w.get("step_durations") or {})
+            w_last_step = w.get("step")
+            w_current_step_start = w.get("current_step_start") or now
+            if w_last_step and w_last_step > 0:
+                w_step_durations[str(w_last_step)] = round(now - w_current_step_start, 1)
+            w.update({
+                "active": False,
+                "percent": 100,
+                "step": 8,
+                "step_name": f"Hoàn thành: {video_name}",
+                "video_status": "completed",
+                "step_durations": w_step_durations,
+                "updated_at": now,
+            })
+
         models = list(_CURRENT_STATE.get("translation_models", []))
         record = {
             "video_name": video_name,
@@ -448,6 +735,7 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
             "duration_seconds": int(duration_seconds),
             "completed_at": now,
             "translation_models": models,
+            "active_translation_model": models[-1] if models else _CURRENT_STATE.get("active_translation_model"),
             "separator_info": copy.deepcopy(_CURRENT_STATE.get("separator_info")),
             "mixer_info": copy.deepcopy(_CURRENT_STATE.get("mixer_info")),
         }
@@ -464,11 +752,12 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
 
         _CURRENT_STATE.update({
             "percent": 100,
-            "step": 6,
+            "step": 8,
             "step_name": f"Hoàn thành xuất sắc: {video_name}",
             "last_completed": record,
             "video_status": "completed",
             "translation_models": models,
+            "active_translation_model": models[-1] if models else _CURRENT_STATE.get("active_translation_model"),
             "step_durations": step_durations,
             "updated_at": now,
         })
@@ -485,18 +774,30 @@ def finish_batch():
     """Ghi nhận hoàn thành toàn bộ hàng đợi."""
     with _LOCK:
         _sync_from_disk_unlocked()
+        _freeze_progress_unlocked()
         _CURRENT_STATE.update({
             "active": False,
-            "status": "idle",
+            "status": "error" if _CURRENT_STATE.get("video_status") == "error" else "idle",
             "queue_index": _CURRENT_STATE.get("queue_total", 0),
-            "step_name": "Đã hoàn thành toàn bộ hàng đợi!",
-            "percent": 100,
+            "step_name": "Đã hoàn thành toàn bộ hàng đợi!" if _CURRENT_STATE.get("video_status") == "completed" else (_CURRENT_STATE.get("step_name") or "Hàng đợi đã kết thúc; chưa xác minh thành phẩm."),
+            "percent": 100 if _CURRENT_STATE.get("video_status") == "completed" else min(99, _CURRENT_STATE.get("percent", 0)),
             "start_time": None,
-            "elapsed_seconds": 0,
             "eta_seconds": None,
             "stop_requested": False,
             "updated_at": time.time(),
         })
+        if "workers" in _CURRENT_STATE and isinstance(_CURRENT_STATE["workers"], dict):
+            for wid_k, w in _CURRENT_STATE["workers"].items():
+                w.update({
+                    "active": False,
+                    "status": "idle" if _CURRENT_STATE.get("video_status") != "error" else "error",
+                    "video_status": "completed" if w.get("percent", 0) >= 100 else "idle",
+                    "step_name": "Hệ thống sẵn sàng" if wid_k == "1" else "Đang chờ video từ hàng đợi...",
+                    "start_time": None,
+                    "eta_seconds": None,
+                    "stop_requested": False,
+                    "updated_at": time.time(),
+                })
         _save_state_to_disk()
         _release_batch_lock_unlocked(_CURRENT_STATE.get("job_id"))
 
@@ -506,10 +807,29 @@ def release_batch(job_id: str) -> None:
         _release_batch_lock_unlocked(job_id)
 
 
-def set_error(video_name: str, error_msg: str, fatal: bool = True):
+def set_error(video_name: str, error_msg: str, fatal: bool = True, worker_id: Optional[int] = None):
     """Ghi nhận lỗi khi xử lý."""
     with _LOCK:
         _sync_from_disk_unlocked()
+        now = time.time()
+        wid = _get_worker_id(worker_id)
+        wid_str = str(wid)
+
+        if "workers" in _CURRENT_STATE and wid_str in _CURRENT_STATE["workers"]:
+            w = _CURRENT_STATE["workers"][wid_str]
+            w.update({
+                "active": not fatal,
+                "status": "error" if fatal else "running",
+                "video_name": video_name,
+                "video_status": "error",
+                "step_name": f"Lỗi: {error_msg}",
+                "last_error": error_msg,
+                "percent": min(99, max(0, w.get("percent", 0))),
+                "updated_at": now,
+            })
+
+        if fatal:
+            _freeze_progress_unlocked()
         _CURRENT_STATE.update({
             "active": not fatal,
             "status": "error" if fatal else "running",
@@ -517,50 +837,105 @@ def set_error(video_name: str, error_msg: str, fatal: bool = True):
             "step_name": f"Lỗi: {error_msg}",
             "last_error": error_msg,
             "video_status": "error",
-            "updated_at": time.time(),
+            "percent": min(99, max(0, _CURRENT_STATE.get("percent", 0))),
+            "updated_at": now,
         })
         _save_state_to_disk()
 
 
 def request_stop():
-    """Gửi yêu cầu dừng batch."""
+    """Gửi yêu cầu dừng batch (hỗ trợ đa tiến trình: main.py, telegram_bot.py, v1/v2)."""
     with _LOCK:
         _sync_from_disk_unlocked()
+        control_dir = WORKSPACE / "control"
+        control_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            (control_dir / "video.stop").write_text(str(time.time()), encoding="utf-8")
+        except Exception:
+            pass
+
         atomic_write_json(STATUS_FILE.with_name("stop_request.json"),
-                          {"job_id": _CURRENT_STATE.get("job_id")})
+                          {"job_id": _CURRENT_STATE.get("job_id"), "requested_at": time.time()})
+        _freeze_progress_unlocked()
+        now = time.time()
+        if "workers" in _CURRENT_STATE and isinstance(_CURRENT_STATE["workers"], dict):
+            for wid_k, w in _CURRENT_STATE["workers"].items():
+                w.update({
+                    "active": False,
+                    "status": "stopped",
+                    "video_status": "stopped",
+                    "step_name": "Đã dừng theo yêu cầu",
+                    "percent": min(99, max(0, w.get("percent", 0))),
+                    "updated_at": now,
+                })
         _CURRENT_STATE.update({
-            "active": True,
-            "status": "stopping",
+            "active": False,
+            "status": "stopped",
+            "video_status": "stopped",
+            "percent": min(99, max(0, _CURRENT_STATE.get("percent", 0))),
             "stop_requested": True,
             "step_name": "Đang dừng tiến trình theo yêu cầu...",
-            "updated_at": time.time(),
+            "updated_at": now,
         })
         _save_state_to_disk()
 
 
+def clear_stop_request():
+    """Xóa các cờ dừng khi bắt đầu một batch hoặc video mới."""
+    with _LOCK:
+        control_stop = WORKSPACE / "control" / "video.stop"
+        try:
+            control_stop.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            STATUS_FILE.with_name("stop_request.json").unlink(missing_ok=True)
+        except Exception:
+            pass
+        _CURRENT_STATE["stop_requested"] = False
+        _save_state_to_disk()
+
+
 def is_stop_requested() -> bool:
+    """Kiểm tra cờ dừng xuyên tiến trình."""
+    control_stop = WORKSPACE / "control" / "video.stop"
+    if control_stop.exists():
+        return True
+
+    stop_req_file = STATUS_FILE.with_name("stop_request.json")
+    if stop_req_file.exists():
+        return True
+
     with _LOCK:
         _sync_from_disk_unlocked()
-        try:
-            command = json.loads(STATUS_FILE.with_name("stop_request.json").read_text(encoding="utf-8"))
-            if command.get("job_id") and command["job_id"] == _CURRENT_STATE.get("job_id"):
-                return True
-        except (OSError, ValueError, TypeError):
-            pass
         return bool(_CURRENT_STATE.get("stop_requested"))
 
 
 def mark_stopped(message: str = "Đã dừng theo yêu cầu") -> None:
     with _LOCK:
         _sync_from_disk_unlocked()
+        _freeze_progress_unlocked()
         _CURRENT_STATE.update({
             "active": False,
             "status": "stopped",
+            "video_status": "stopped",
+            "percent": min(99, max(0, _CURRENT_STATE.get("percent", 0))),
             "step_name": message,
             "eta_seconds": None,
             "stop_requested": True,
             "updated_at": time.time(),
         })
+        if "workers" in _CURRENT_STATE and isinstance(_CURRENT_STATE["workers"], dict):
+            for wid_k, w in _CURRENT_STATE["workers"].items():
+                w.update({
+                    "active": False,
+                    "status": "stopped",
+                    "video_status": "stopped",
+                    "step_name": message,
+                    "eta_seconds": None,
+                    "stop_requested": True,
+                    "updated_at": time.time(),
+                })
         _save_state_to_disk()
         _release_batch_lock_unlocked(_CURRENT_STATE.get("job_id"))
 
@@ -581,11 +956,14 @@ def fail_batch(
                 current_job_id,
             )
             return
+        _freeze_progress_unlocked()
         _CURRENT_STATE.update({
             "job_id": job_id or current_job_id,
             "active": False,
             "status": "error",
-            "video_name": video_name,
+            "video_status": "error",
+            "percent": min(99, max(0, _CURRENT_STATE.get("percent", 0))),
+            "video_name": (_CURRENT_STATE.get("video_name") or video_name) if video_name == "batch" else video_name,
             "step_name": f"Lỗi: {error_msg}",
             "last_error": error_msg,
             "eta_seconds": None,

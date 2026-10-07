@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 ROOT_DIR = Path(__file__).resolve().parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 WORKSPACE_DIR = Path(os.getenv("AUTODUB_WORKSPACE", str(ROOT_DIR.parent / "workspace")))
 CONTROL_DIR = WORKSPACE_DIR / "control"
 CONTROL_DIR.mkdir(parents=True, exist_ok=True)
@@ -35,6 +37,7 @@ SYSTEM_DEFAULTS = {
     "ducking_mode": "soft",
     "language": "vi",
     "subtitle_style": "default",
+    "script_mode": "default",
 }
 
 DEFAULT_PRESETS = [
@@ -212,7 +215,7 @@ def update_preset(preset_id: str, data: Dict[str, Any], expected_revision: Optio
 
     if "config" in data and isinstance(data["config"], dict):
         cfg = current.setdefault("config", {})
-        for k in ("voice_id", "language", "subtitle_style"):
+        for k in ("voice_id", "language", "subtitle_style", "script_mode"):
             if k in data["config"]:
                 cfg[k] = str(data["config"][k])
         if "speed" in data["config"]:
@@ -327,7 +330,13 @@ def resolve_effective_config(
                 sources[k] = "video_override"
 
     # Kiểm tra tính tương thích của giọng
-    from voice_selection import catalog
+    try:
+        try:
+            from voice_selection import catalog
+        except ImportError:
+            from backend.voice_selection import catalog
+    except Exception:
+        catalog = lambda: []
     try:
         cat = catalog()
         valid_voice_ids = {item["id"] for item in cat}

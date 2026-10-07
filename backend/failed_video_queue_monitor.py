@@ -153,12 +153,15 @@ def monitor_loop():
     logger.info("Bắt đầu tiến trình giám sát video thất bại của Tool V1...")
     state = load_monitor_state()
 
-    # Bắt đầu đọc từ vị trí hiện tại của file log nếu file tồn tại
+    # Bắt đầu đọc từ vị trí hiện tại của file log để không đọc lặp lỗi cũ
     last_pos = 0
     if TELEGRAM_LOG.is_file():
         file_size = TELEGRAM_LOG.stat().st_size
-        # Nếu mới khởi động, quét ngược 50KB gần nhất để không bỏ sót lỗi vừa xảy ra
-        last_pos = max(0, file_size - 50000)
+        saved_pos = state.get("handled_offsets", 0)
+        if 0 < saved_pos <= file_size:
+            last_pos = saved_pos
+        else:
+            last_pos = file_size
 
     url_error_pattern = re.compile(r"ERROR - Error processing (https?://\S+):\s*(.+)")
     vid_error_pattern = re.compile(r"ERROR - Error processing video:\s*(.+)")
@@ -179,6 +182,8 @@ def monitor_loop():
                     f.seek(last_pos)
                     lines = f.readlines()
                     last_pos = f.tell()
+                    state["handled_offsets"] = last_pos
+                    save_monitor_state(state)
 
                 for line in lines:
                     m_url = url_error_pattern.search(line)

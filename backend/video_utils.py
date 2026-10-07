@@ -455,6 +455,58 @@ def mix_audio_pydub(
         if original_popen is not None:
             subprocess.Popen = original_popen
 
+def clean_stale_temp_files(max_age_hours: float = 24.0) -> int:
+    """
+    Dọn dẹp các tệp tạm thời tồn đọng quá max_age_hours trong temp_subs và các thư mục cache.
+    Trả về số lượng file đã dọn dẹp.
+    """
+    cleaned = 0
+    now = time.time()
+    max_age_sec = max_age_hours * 3600.0
+
+    # 1. Quét dọn temp_subs
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    temp_subs_dir = os.path.join(base_dir, "temp_subs")
+    if os.path.isdir(temp_subs_dir):
+        try:
+            for item in os.listdir(temp_subs_dir):
+                item_path = os.path.join(temp_subs_dir, item)
+                if os.path.isfile(item_path):
+                    try:
+                        if (now - os.path.getmtime(item_path)) > max_age_sec:
+                            os.remove(item_path)
+                            cleaned += 1
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+
+    # 2. Quét dọn .v1_ocr_cache trong các ổ đĩa và workspace phổ biến
+    candidate_cache_dirs = [
+        r"D:\workspace\downloads\.v1_ocr_cache",
+        r"D:\video phôi\.v1_ocr_cache",
+        os.path.join(base_dir, "workspace", ".v1_ocr_cache"),
+    ]
+    for c_dir in candidate_cache_dirs:
+        if os.path.isdir(c_dir):
+            try:
+                for item in os.listdir(c_dir):
+                    item_path = os.path.join(c_dir, item)
+                    if os.path.isfile(item_path):
+                        try:
+                            if (now - os.path.getmtime(item_path)) > max_age_sec:
+                                os.remove(item_path)
+                                cleaned += 1
+                        except OSError:
+                            pass
+            except Exception:
+                pass
+
+    if cleaned > 0:
+        logger.info(f"[CLEANUP] Đã dọn dẹp {cleaned} tệp tạm cũ (> {max_age_hours}h).")
+    return cleaned
+
+
 @stage("render")
 def process_video(
     video_path,
@@ -462,8 +514,8 @@ def process_video(
     mixed_audio_path,
     output_video_path,
     font_name="Arial",
-    font_color="&H00FFFFFF",
-    font_weight=1,
+    font_color="&H00000000",
+    font_weight=2,
     main_y_pct=0.75,
     delogo=True,
     timeout_seconds=None,
@@ -491,6 +543,12 @@ def process_video(
 
     print("Processing final video with styled subtitles, auto-delogo and hardware encoder...")
     
+    # Tự động dọn dẹp các tệp tạm cũ trước khi xử lý
+    try:
+        clean_stale_temp_files(max_age_hours=24.0)
+    except Exception:
+        pass
+
     # Tạo bản copy an toàn ASCII ở thư mục temp_subs để FFmpeg filter subtitles không bị dính ký tự Unicode
     import shutil
     import uuid
@@ -516,18 +574,30 @@ def process_video(
         
     try:
         filter_parts = []
-        import cv2
-        cap = cv2.VideoCapture(video_path)
         try:
-            original_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            original_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        finally:
-            cap.release()
+            from .v1_media_streams import probe_main_video, validate_video_output
+        except ImportError:
+            from v1_media_streams import probe_main_video, validate_video_output
+        source_video = probe_main_video(video_path)
+        original_w, original_h = source_video.width, source_video.height
         w, h = original_w, original_h
         if w <= 0 or h <= 0:
             raise ValueError("Invalid video dimensions")
-        logger.info("V1 render size source=%dx%d output=%dx%d", original_w, original_h, w, h)
+        logger.info("V1 render size source=%dx%d output=%dx%d stream=%s cover_excluded=%s fps=%.6f",
+                    original_w, original_h, w, h, source_video.index, source_video.has_cover, source_video.fps)
         
+        # NVENC H.264 hardware limit is 4096px per dimension. Downscale oversized/8K/4.3K to standard 1080p bounds.
+        orig_w, orig_h = w, h
+        target_w, target_h = w, h
+        max_dim = max(w, h)
+        if max_dim > 3840 or min(w, h) > 2160 or max_dim > 4096:
+            ratio = min(1080.0 / min(w, h), 1920.0 / max_dim)
+            target_w = int(w * ratio) // 2 * 2
+            target_h = int(h * ratio) // 2 * 2
+            filter_parts.append(f"scale={target_w}:{target_h}")
+            w, h = target_w, target_h
+            logger.info("NVENC H.264 bounds enforced: scaled %dx%d -> %dx%d", orig_w, orig_h, w, h)
+
         # Xóa sạch toàn bộ watermark ở cả 4 góc video (Logo Tiểu Hồng Thư và ID tác giả nhảy trên/dưới)
         if delogo:
             try:
@@ -563,35 +633,37 @@ def process_video(
                     filter_parts.append(f"delogo=x={tr_x}:y={tr_y}:w={tr_w}:h={tr_h}")
             except Exception as d_err:
                 print(f"Lưu ý: Không thể cấu hình delogo ({d_err})")
-                
+
         if srt_to_use.endswith('.ass'):
             filter_parts.append(f"subtitles='{srt_escaped}'")
         else:
             filter_parts.append(f"subtitles='{srt_escaped}':force_style='{style_str}'")
             
+        # Convert to 8-bit YUV420P so 10-bit HEVC/HDR source does not cause NVENC "10 bit encode not supported"
+        filter_parts.append("format=yuv420p")
         filter_complex = ",".join(filter_parts)
         
         video_bitrate_kbps = 8000
         b_v = f"{video_bitrate_kbps}k"
         
-        # Danh sách các bộ mã hóa video theo thứ tự ưu tiên tốc độ cao nhất:
-        # 1. h264_nvenc (NVIDIA GPU Hardware)
-        # 2. h264_mf (Windows MediaFoundation Hardware)
-        # 3. libx264 (CPU Đa nhân tối ưu veryfast)
+        # NVIDIA encoding only. No MediaFoundation/software CPU fallback.
         encoders_to_try = [
             ['h264_nvenc', '-preset', 'p4', '-tune', 'hq', '-b:v', b_v, '-spatial-aq', '1'],
             ['h264_nvenc', '-preset', 'fast', '-b:v', b_v],
-            ['h264_mf', '-b:v', b_v],
-            ['libx264', '-preset', 'veryfast', '-crf', '22']
         ]
         
-        for enc_args in encoders_to_try:
+        for enc_idx, enc_args in enumerate(encoders_to_try):
             encoder_name = enc_args[0]
             encoder_started = time.monotonic()
             logger.info("V1 render start encoder=%s", encoder_name)
+            # Su dung GPU NVDEC phan cung de decode truc tiep tren VRAM GPU, giam tai CPU va tang toc gap 3-4x
+            hw_args = ['-hwaccel', 'cuda'] if enc_idx == 0 else []
             cmd = [
                 'ffmpeg',
+                '-loglevel', 'warning',
+                '-nostats',
                 '-y',
+            ] + hw_args + [
                 # Bound 4K decoder/filter frame pools: auto threading can
                 # allocate >10 GB and push a 16 GB machine into paging.
                 '-threads', '4',
@@ -599,11 +671,13 @@ def process_video(
                 '-i', video_path,
                 '-i', mixed_audio_path,
                 '-vf', filter_complex,
-                '-map', '0:v',
-                '-map', '1:a',
+                '-map', source_video.input_map,
+                '-map', '1:a:0',
+                '-sn', '-dn',
                 '-c:v', encoder_name
             ] + enc_args[1:] + [
                 '-pix_fmt', 'yuv420p',
+                '-fps_mode', 'passthrough',
                 '-c:a', 'aac',
                 '-b:a', '192k',
                 '-movflags', '+faststart',
@@ -633,22 +707,39 @@ def process_video(
                     timeout=command_timeout,
                 )
                 if proc.returncode == 0 and os.path.exists(output_video_path) and os.path.getsize(output_video_path) > 10000:
+                    validate_video_output(output_video_path, source_video, require_audio=True, expected_size=(w, h))
                     logger.info("V1 render complete encoder=%s seconds=%.2f bytes=%d",
                                 encoder_name, time.monotonic()-encoder_started,
                                 os.path.getsize(output_video_path))
                     print(f"Render video thành công bằng encoder: {encoder_name}")
                     return True
                 else:
-                    err_snippet = proc.stderr[-400:] if proc.stderr else ""
+                    error_text = proc.stderr or "FFmpeg did not produce a valid output file."
+                    error_file = output_video_path + f".render-{enc_args[2]}-error.log"
+                    try:
+                        from pathlib import Path
+                        Path(error_file).write_text(error_text, encoding='utf-8')
+                    except OSError:
+                        logger.exception("Unable to save full FFmpeg diagnostic")
                     logger.warning("V1 render fallback encoder=%s seconds=%.2f exit=%s reason=%s",
                                    encoder_name, time.monotonic()-encoder_started,
-                                   proc.returncode, err_snippet)
-                    print(f"Encoder {encoder_name} không thành công ({proc.returncode}): {err_snippet}")
+                                   proc.returncode, error_text[:6000])
+                    print(f"Encoder {encoder_name} không thành công ({proc.returncode}). Chi tiết: {error_file}")
+                    lower_error = error_text.lower()
+                    can_retry = (any(token in lower_error for token in ('spatial-aq', 'unsupported', 'invalid param', 'hwaccel', 'cuda', 'cuvid'))
+                                 and not any(token in lower_error for token in (
+                                     'error reinitializing filters', 'failed to inject frame',
+                                     'error initializing filter', 'no capable devices',
+                                     'cannot load nvcuda', 'out of memory')))
+                    if not can_retry:
+                        break
             except subprocess.TimeoutExpired as enc_err:
                 print(f"Encoder {encoder_name} vượt quá deadline render ({enc_err}).")
                 break
             except Exception as enc_err:
-                print(f"Encoder {encoder_name} gặp ngoại lệ ({enc_err}), chuyển sang encoder dự phòng...")
+                logger.exception("V1 render failed; retain job checkpoint, GPU-only policy remains active")
+                print(f"Encoder {encoder_name} gặp ngoại lệ ({enc_err}); không chuyển sang CPU.")
+                break
                 
         return False
     except Exception as e:

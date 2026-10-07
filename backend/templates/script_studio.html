@@ -1501,6 +1501,21 @@ header .nav-actions > a[href="http://127.0.0.1:8088/"], header .nav-actions > a[
               <input type="text" class="form-input" id="txtVideoPath" placeholder="Ví dụ: D:\video phôi\review_san_pham.mp4" oninput="handleVideoPathChanged(this.value)">
             </div>
 
+            <!-- TẢI VIDEO TỪ LINK (YOUTUBE SHORTS / TIKTOK / DOUYIN) -->
+            <div class="form-group" style="background: rgba(139, 92, 246, 0.08); border: 1px dashed rgba(139, 92, 246, 0.35); border-radius: 8px; padding: 10px;">
+              <label class="form-label" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <span style="font-weight: 600; color: #a78bfa;">⚡ Tải Video từ Link (YouTube Shorts / TikTok / Reels)</span>
+                <span class="form-hint" style="color: #cbd5e1; font-size: 11px;">Dán link Shorts triệu view để tự động tải phôi</span>
+              </label>
+              <div style="display: flex; gap: 8px;">
+                <input type="text" class="form-input" id="txtVideoDownloadUrl" placeholder="Dán link Shorts/TikTok (vd: https://youtube.com/shorts/...)" style="flex: 1; font-size: 12.5px;">
+                <button type="button" class="btn btn-primary" id="btnDownloadUrl" onclick="handleDownloadFromUrl()" style="white-space: nowrap; font-size: 12px; padding: 0 14px; background: #8b5cf6; border-color: #8b5cf6;">
+                  <span>⬇️ Tải Phôi</span>
+                </button>
+              </div>
+              <div id="urlDownloadStatus" style="font-size: 11.5px; margin-top: 4px; display: none;"></div>
+            </div>
+
             <!-- PROMPT BỔ SUNG TÌNH HUỐNG VIDEO -->
             <div class="form-group">
               <label class="form-label">
@@ -1530,7 +1545,7 @@ header .nav-actions > a[href="http://127.0.0.1:8088/"], header .nav-actions > a[
               <div class="form-group">
                 <label class="form-label">Thời Lượng Dự Kiến</label>
                 <select class="form-select" id="selDurationTarget">
-                  <option value="15">15 giây (Siêu ngắn)</option>
+                  <option value="15">15 giây (Siêu ngắn - Moonlit)</option>
                   <option value="30">30 giây (Chuẩn viral)</option>
                   <option value="45" selected>45 giây (Vừa vặn)</option>
                   <option value="60">60 giây (Review sâu)</option>
@@ -1550,7 +1565,8 @@ header .nav-actions > a[href="http://127.0.0.1:8088/"], header .nav-actions > a[
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
             <div class="form-group">
               <label class="form-label">Thể Loại Video</label>
-              <select class="form-select" id="selVideoGenre">
+              <select class="form-select" id="selVideoGenre" onchange="handleGenreChanged(this.value)">
+                <option value="moonlit_emotional" selected>🌟 Cảm Động & Kịch Tính (Moonlit Shorts)</option>
                 <option value="review">Review Sản Phẩm / Hướng Dẫn</option>
                 <option value="story">Tâm Sự / Kể Chuyện Đời Sống</option>
                 <option value="tech">Công Nghệ / Mẹo Thủ Thuật</option>
@@ -1561,9 +1577,9 @@ header .nav-actions > a[href="http://127.0.0.1:8088/"], header .nav-actions > a[
             <div class="form-group">
               <label class="form-label">Phong Cách Nói</label>
               <select class="form-select" id="selVideoStyle">
+                <option value="Kịch tính, tò mò, giật gân" selected>Kịch tính, tò mò (Moonlit Style)</option>
                 <option value="Chuyên gia cuốn hút & thực chiến">Chuyên gia cuốn hút</option>
                 <option value="Hài hước, dí dỏm, chọc cười">Hài hước, dí dỏm</option>
-                <option value="Kịch tính, tò mò, giật gân">Kịch tính, tò mò</option>
                 <option value="Chân thành, mộc mạc đời thường">Chân thành, mộc mạc</option>
               </select>
             </div>
@@ -1729,6 +1745,9 @@ header .nav-actions > a[href="http://127.0.0.1:8088/"], header .nav-actions > a[
           <span>Bảng Phân Cảnh & Video Thành Phẩm</span>
         </div>
         <div style="display: flex; gap: 8px; align-items: center;">
+          <button class="btn btn-outline" id="btnExportScript" onclick="handleExportScriptText()" style="font-size: 12px; padding: 5px 12px; border-color: #8b5cf6; color: #a78bfa;" title="Tải toàn bộ kịch bản về máy dưới dạng tệp văn bản .txt">
+            📝 Tải Kịch Bản (.TXT)
+          </button>
           <button class="btn btn-outline" id="btnCopyAllScript" onclick="handleCopyFullScript()" style="font-size: 12px; padding: 5px 12px;" title="Sao chép toàn bộ kịch bản ra clipboard">
             📋 Sao chép kịch bản
           </button>
@@ -1839,6 +1858,9 @@ header .nav-actions > a[href="http://127.0.0.1:8088/"], header .nav-actions > a[
                   <a class="btn btn-outline" id="btnDownloadBurnedSrt" href="#" download style="font-size: 11.5px; padding: 4px 10px; border-color: #38bdf8; color: #38bdf8; text-decoration: none;">
                     📥 Tải File Sub SRT
                   </a>
+                  <button class="btn btn-outline" id="btnDownloadBurnedScript" onclick="handleExportScriptText()" style="font-size: 11.5px; padding: 4px 10px; border-color: #a855f7; color: #c084fc; background: transparent; cursor: pointer;" title="Tải toàn bộ kịch bản và lời thoại về máy dưới dạng tệp văn bản .txt">
+                    📝 Tải Kịch Bản (.TXT)
+                  </button>
                 </div>
               </div>
             </div>
@@ -1882,6 +1904,9 @@ header .nav-actions > a[href="http://127.0.0.1:8088/"], header .nav-actions > a[
             </button>
             <button class="btn btn-primary" id="btnBurnVideo" onclick="handleBurnVideo()" style="font-size: 13.5px; padding: 12px 18px; font-weight: 700;">
               <span>🎬 Xuất Lại Video (FFmpeg Burn)</span>
+            </button>
+            <button class="btn btn-outline" id="btnExportScriptBottom" onclick="handleExportScriptText()" style="font-size: 13.5px; padding: 12px 18px; font-weight: 700; border-color: #8b5cf6; color: #a78bfa;" title="Tải toàn bộ kịch bản và lời thoại về máy dưới dạng tệp văn bản .txt">
+              <span>📝 Tải Kịch Bản (.TXT)</span>
             </button>
           </div>
 
@@ -2051,6 +2076,113 @@ header .nav-actions > a[href="http://127.0.0.1:8088/"], header .nav-actions > a[
         }
       }
       saveDraft();
+    }
+
+    // ===== PRESET THỂ LOẠI MOONLIT & TỰ ĐỘNG CẤU HÌNH =====
+    function handleGenreChanged(genre) {
+      if (genre === 'moonlit_emotional') {
+        const selStyle = document.getElementById('selVideoStyle');
+        if (selStyle) selStyle.value = 'Kịch tính, tò mò, giật gân';
+
+        if (typeof availableVoices !== 'undefined' && availableVoices.length > 0) {
+          const maleVoice = availableVoices.find(v => v.id.includes('075') || v.id.toLowerCase().includes('felipe') || v.name.toLowerCase().includes('trầm'));
+          if (maleVoice) {
+            selectVoice(maleVoice.id);
+          }
+        }
+
+        if (typeof selectHookDuration === 'function') {
+          selectHookDuration(5);
+        }
+
+        hookCardBgColor = '#111827';
+        const colorInput = document.getElementById('inputHookColor');
+        if (colorInput) colorInput.value = '#111827';
+        if (typeof updateHookCardPreview === 'function') {
+          updateHookCardPreview();
+        }
+
+        const promptInput = document.getElementById('txtSituationPrompt');
+        if (promptInput && !promptInput.value.trim()) {
+          promptInput.placeholder = 'Gợi ý: Tình huống nguy hiểm / người cha lao ra cứu con / fan hâm mộ hy sinh món đồ... AI sẽ dựng câu chuyện 3 hồi kịch tính chuẩn Moonlit!';
+        }
+
+        showTopAlert('🌟 Đã kích hoạt cấu hình Moonlit Shorts: Giọng Nam Trầm, Hook 3 hồi kịch tính!', true);
+      }
+      saveDraft();
+    }
+
+    // ===== TẢI VIDEO TỪ LINK (YOUTUBE SHORTS / TIKTOK) =====
+    async function handleDownloadFromUrl() {
+      const urlInput = document.getElementById('txtVideoDownloadUrl');
+      const btn = document.getElementById('btnDownloadUrl');
+      const statusEl = document.getElementById('urlDownloadStatus');
+      const url = (urlInput.value || '').trim();
+
+      if (!url) {
+        alert('Vui lòng dán link video (YouTube Shorts, TikTok, Facebook Reels...)!');
+        urlInput.focus();
+        return;
+      }
+
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        alert('Đường dẫn không hợp lệ. Vui lòng dán link bắt đầu bằng https://');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerHTML = '<span>⏳ Đang tải...</span>';
+      statusEl.style.display = 'block';
+      statusEl.style.color = '#38bdf8';
+      statusEl.innerText = '⚡ Đang phân tích và tải video phôi chất lượng cao bằng yt-dlp...';
+      showStatus('⚡ Đang tải video phôi từ link trực tuyến...');
+
+      try {
+        const res = await fetch('/api/script/download-video', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: url })
+        });
+        const data = await res.json();
+
+        if (data.status === 'success') {
+          statusEl.style.color = '#4ade80';
+          statusEl.innerText = `✅ ${data.message} (${data.size_mb} MB)`;
+          
+          const inputPath = document.getElementById('txtVideoPath');
+          inputPath.value = data.video_path;
+          handleVideoPathChanged(data.video_path);
+
+          const fileDisplay = document.getElementById('dropzoneSelectedFile');
+          fileDisplay.style.display = 'block';
+          fileDisplay.innerText = `📹 Đã tải: ${data.filename} (${data.size_mb} MB)`;
+
+          const genreSel = document.getElementById('selVideoGenre');
+          if (genreSel) {
+            genreSel.value = 'moonlit_emotional';
+            handleGenreChanged('moonlit_emotional');
+          }
+
+          if (typeof loadAvailableVideos === 'function') {
+            loadAvailableVideos();
+          }
+
+          showTopAlert(`🎬 Đã tải thành công: ${data.filename}!`, true);
+          showStatus(`✅ Đã tải phôi thành công: ${data.filename}. Sẵn sàng phân tích AI!`);
+          urlInput.value = '';
+        } else {
+          statusEl.style.color = '#f87171';
+          statusEl.innerText = `❌ Lỗi: ${data.message || 'Không thể tải video'}`;
+          alert(`Lỗi tải video: ${data.message}`);
+        }
+      } catch (err) {
+        statusEl.style.color = '#f87171';
+        statusEl.innerText = `❌ Lỗi kết nối: ${err.message}`;
+        alert(`Lỗi kết nối khi tải video: ${err.message}`);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<span>⬇️ Tải Phôi</span>';
+      }
     }
 
     // ===== LOAD VOICES =====
@@ -2666,14 +2798,18 @@ header .nav-actions > a[href="http://127.0.0.1:8088/"], header .nav-actions > a[
       showStatus(`🎉 Hoàn tất chuỗi xử lý hàng loạt: ${successCount} thành công, ${errorCount} lỗi.`);
     }
 
-    function handleStopBatchPipeline() {
-      if (!isBatchRunning) return;
+    async function handleStopBatchPipeline() {
       stopBatchRequested = true;
       const btnStop = document.getElementById('btnStopBatch');
       if (btnStop) {
-        btnStop.innerHTML = '<span>⏳ Đang dừng sau video này...</span>';
+        btnStop.innerHTML = '<span>⏳ Đang dừng tức thì...</span>';
       }
-      showTopAlert('⚠️ Yêu cầu dừng đã được ghi nhận. Hệ thống sẽ dừng ngay sau khi video hiện tại render xong!');
+      try {
+        await fetch('/api/script/stop', { method: 'POST' });
+        showTopAlert('⏹️ Đã gửi lệnh dừng tức thì tới hệ thống!', true);
+      } catch (err) {
+        showTopAlert('⚠️ Lỗi gửi lệnh dừng: ' + err.message);
+      }
     }
 
     // ===== MAIN ACTION 2: MANUAL GENERATE SCRIPT =====
@@ -3065,6 +3201,35 @@ header .nav-actions > a[href="http://127.0.0.1:8088/"], header .nav-actions > a[
           btn.style.color = '';
         }, 2000);
       });
+    }
+
+    function handleExportScriptText() {
+      if (!scenes || scenes.length === 0) {
+        showTopAlert('⚠️ Chưa có kịch bản nào để tải về!');
+        return;
+      }
+      const title = scriptData?.title || 'Kịch bản Video';
+      const lines = scenes.map((s, i) => {
+        const timeRange = s.time_range || `${s.start_seconds || 0}s - ${s.end_seconds || 0}s`;
+        const sectionName = s.section ? `[${s.section.toUpperCase()}] ` : '';
+        let sceneText = `Phân cảnh #${i + 1} ${sectionName}(${timeRange}):\n`;
+        sceneText += `Lời thoại: ${s.speaker_text || ''}\n`;
+        if (s.visual_cue) sceneText += `Gợi ý hình ảnh: ${s.visual_cue}\n`;
+        if (s.text_overlay) sceneText += `Chữ hiển thị: ${s.text_overlay}\n`;
+        return sceneText;
+      });
+
+      const full = `=== KỊCH BẢN: ${title} ===\nChủ đề: ${scriptData?.detected_subject || 'Video'}\nTổng số phân cảnh: ${scenes.length}\n${'='.repeat(40)}\n\n` + lines.join('\n');
+      const safeTitle = title.replace(/[\/\\?%*:|"<>]/g, '_');
+      const blob = new Blob([full], { type: 'text/plain;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `${safeTitle}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+      showTopAlert('✅ Đã tải tệp kịch bản (.TXT) thành công!', true);
     }
 
     function handleDeleteScene(idx) {

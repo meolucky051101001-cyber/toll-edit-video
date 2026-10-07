@@ -21,9 +21,10 @@ def is_mojibake(text: str) -> bool:
     return bool(MOJIBAKE_PATTERNS.search(text))
 
 
-def cache_key(parts, models, account):
-    data = json.dumps([1, parts, models, account], ensure_ascii=False, sort_keys=True)
+def cache_key(parts, models, account, script_mode="default"):
+    data = json.dumps([2, str(script_mode or "default").lower(), parts, models, account], ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
 
 
 def cache_root():
@@ -76,14 +77,14 @@ def write_cache(key, texts, model):
                 pass
 
 
-def condense_cache_key(cue_text: str, target_seconds: float, target_words: int) -> str:
+def condense_cache_key(cue_text: str, target_seconds: float, target_words: int, script_mode: str = "default") -> str:
     norm_text = re.sub(r'\s+', ' ', str(cue_text or '').strip().lower())
-    data = json.dumps([2, norm_text, round(float(target_seconds), 2), int(target_words)], ensure_ascii=False)
+    data = json.dumps([3, str(script_mode or "default").lower(), norm_text, round(float(target_seconds), 2), int(target_words)], ensure_ascii=False)
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
-def read_condense_cache(cue_text: str, target_seconds: float, target_words: int) -> Optional[str]:
-    k = condense_cache_key(cue_text, target_seconds, target_words)
+def read_condense_cache(cue_text: str, target_seconds: float, target_words: int, script_mode: str = "default") -> Optional[str]:
+    k = condense_cache_key(cue_text, target_seconds, target_words, script_mode=script_mode)
     cache_file = cache_root() / "condense" / f"{k}.json"
     try:
         if cache_file.exists():
@@ -96,10 +97,10 @@ def read_condense_cache(cue_text: str, target_seconds: float, target_words: int)
     return None
 
 
-def write_condense_cache(cue_text: str, target_seconds: float, target_words: int, condensed: str, model: str):
+def write_condense_cache(cue_text: str, target_seconds: float, target_words: int, condensed: str, model: str, script_mode: str = "default"):
     if not isinstance(condensed, str) or not condensed.strip() or is_mojibake(condensed):
         return
-    k = condense_cache_key(cue_text, target_seconds, target_words)
+    k = condense_cache_key(cue_text, target_seconds, target_words, script_mode=script_mode)
     root = cache_root() / "condense"
     temporary = None
     try:

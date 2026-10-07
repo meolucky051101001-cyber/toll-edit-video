@@ -4,6 +4,7 @@ import os
 import tempfile
 import hashlib
 import copy
+import math
 from collections import OrderedDict
 from pathlib import Path
 try:
@@ -26,6 +27,13 @@ try:
     from .ocr_subtitle_locator import select_chinese_subtitle_band
 except ImportError:
     from ocr_subtitle_locator import select_chinese_subtitle_band
+
+try:
+    from .v1_ocr_geometry import (sample_times, rescue_times, has_caption_evidence,
+                                  geometry_summary, validate_mask_geometry, normalized_rows)
+except ImportError:
+    from v1_ocr_geometry import (sample_times, rescue_times, has_caption_evidence,
+                                geometry_summary, validate_mask_geometry, normalized_rows)
 
 
 logger = logging.getLogger(__name__)
@@ -204,7 +212,8 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        return [], 1080, 1920, 0.85
+        cap.release()
+        raise RuntimeError('OCR cannot open video; mask coordinates not verified')
 
     fps = cap.get(cv2.CAP_PROP_FPS)
     if not fps or fps < 1: fps = 30
@@ -231,34 +240,82 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
 
     all_blocks = []
 
-    # === TỐI ƯU HÓA SIÊU TỐC OCR THEO TỪNG ĐOẠN THOẠI ===
+    # === TỐI ƯU HÓA SIÊU TỐC OCR THEO TỪNG ĐOẠN THOẠI (SMART SKIP OCR) ===
+    short_thresh = float(os.getenv("V1_SHORT_MAX_SECONDS", "420.0"))
+    effective_duration = duration
+    if effective_duration <= 0 and srt_segments:
+        try:
+            effective_duration = max(s.end.total_seconds() for s in srt_segments)
+        except Exception:
+            pass
+
+    # Quy tắc: Tắt hoàn toàn smart skip OCR cho video ngắn (dưới 7 phút / 420s). Luôn dùng "full" OCR.
+    if effective_duration > 0 and effective_duration <= short_thresh:
+        ocr_strategy = "full"
+        logger.info("Chế độ OCR cho video ngắn (%.1fs <= %.0fs): 'full' (đã tắt smart_skip)", effective_duration, short_thresh)
+    else:
+        ocr_strategy = kwargs.get("ocr_strategy")
+        if not ocr_strategy or ocr_strategy == "auto":
+            try:
+                try:
+                    from backend.job_config_service import resolve_job_frozen_config
+                except ImportError:
+                    from job_config_service import resolve_job_frozen_config
+                frozen = resolve_job_frozen_config(video_path)
+                if frozen and "effective_config" in frozen and "planned_pipeline" in frozen["effective_config"]:
+                    ocr_strategy = frozen["effective_config"]["planned_pipeline"].get("ocr_strategy")
+                elif frozen and "routing" in frozen and frozen["routing"]:
+                    ocr_strategy = frozen["routing"].get("planned_pipeline", {}).get("ocr_strategy")
+            except Exception:
+                pass
+
+        if not ocr_strategy or ocr_strategy == "auto":
+            try:
+                from .v1_feature_flags import get_feature_flags
+            except ImportError:
+                try:
+                    from v1_feature_flags import get_feature_flags
+                except ImportError:
+                    get_feature_flags = lambda: {}
+            flags = get_feature_flags()
+            enable_smart = flags.get("V1_SMART_SKIP_OCR")
+            if enable_smart is None:
+                enable_smart = os.getenv("V1_SMART_SKIP_OCR", os.getenv("ENABLE_SMART_SKIP_OCR", "true")).strip().lower() in ("1", "true", "yes", "on")
+            else:
+                enable_smart = bool(enable_smart)
+
+            if effective_duration > short_thresh and enable_smart:
+                ocr_strategy = "smart_skip"
+            else:
+                ocr_strategy = "full"
+
     target_timestamps = []
     if srt_segments:
         # Cover every speech segment; process recognition in bounded batches.
         interval = max(0.1, min(5.0, float(os.getenv("V1_OCR_TRACK_INTERVAL", "1.2"))))
         max_samples_per_cue = max(1, int(os.getenv("V1_OCR_MAX_SAMPLES_PER_SEGMENT", "2")))
+        total_segs = len(srt_segments)
         for seg_idx, seg in enumerate(srt_segments):
             s = seg.start.total_seconds()
             e = seg.end.total_seconds()
             if e <= s:
                 continue
-            s = max(0.0, s - 0.3)
-            next_start = (srt_segments[seg_idx + 1].start.total_seconds()
-                          if seg_idx + 1 < len(srt_segments) else duration)
-            e = min(e + 0.4, next_start) if next_start > e else (e + 0.3)
+
             if duration > 0:
                 e = min(e, duration)
             cue_dur = max(0.1, e - s)
-            count = min(max_samples_per_cue, max(1, __import__("math").ceil(cue_dur / interval)))
-            for n in range(count):
-                target_timestamps.append((s + (n + 0.5) * cue_dur / count, seg, seg_idx))
+            # Smart mode saves extra samples, NEVER the only geometry sample.
+            count = 1 if ocr_strategy == 'smart_skip' else min(max_samples_per_cue, max(1, math.ceil(cue_dur / interval)))
+            for t in sample_times(s, e, count):
+                target_timestamps.append((t, seg, seg_idx))
+        if ocr_strategy == 'smart_skip':
+            logger.info('Smart OCR: one mandatory full-frame geometry sample per cue (%d cues)', total_segs)
     else:
         # Without a transcript there is no reliable way to distinguish scene text.
         cap.release()
         return [], width, height, 0.85
 
-    crop_y_start = int(height * 0.05) # Quét từ 5% (bỏ thanh trạng thái)
-    crop_y_end = int(height * 0.95)   # đến 95%
+    crop_y_start, crop_y_end = 0, height
     captured_frames = []
     recognized_samples = []
 
@@ -269,8 +326,8 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
         if len(results) != len(captured_frames):
             raise RuntimeError("OCR returned incomplete frame results")
         for item, rows in zip(captured_frames, results):
-            current_time, scale_ratio, _, target_seg, seg_idx = item
-            recognized_samples.append((current_time, scale_ratio, target_seg, seg_idx, rows))
+            current_time, scale_ratio, _, target_seg, seg_idx, crop_offset = item
+            recognized_samples.append((current_time, scale_ratio, target_seg, seg_idx, rows, crop_offset))
         captured_frames.clear()
 
     try:
@@ -281,79 +338,46 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                 import shared_state
             if getattr(shared_state, 'stop_requested', False):
                 cap.release()
-                return [], width, height, 0.85
+                raise RuntimeError('OCR stop requested')
 
             cap.set(cv2.CAP_PROP_POS_MSEC, current_time * 1000)
             ret, frame = cap.read()
             if not ret: continue
 
-            # 1. Cắt vùng chứa phụ đề tiềm năng (từ 5% đến 95% chiều cao màn hình)
+            # Include both edges; bottom captions used to be clipped before OCR.
             cropped_frame = frame[crop_y_start:crop_y_end, :]
 
-            # 2. Resize nhanh về độ phân giải chuẩn 720p để EasyOCR tăng tốc gấp 3 lần nhưng vẫn siêu nét
+            # Bounded GPU input; higher-resolution rescue only for missing cues.
             orig_crop_h, orig_crop_w = cropped_frame.shape[:2]
             scale_ratio = 1.0
-            if orig_crop_w > 720:
-                scale_ratio = 720.0 / orig_crop_w
-                target_w = 720
+            if orig_crop_w > 960:
+                scale_ratio = 960.0 / orig_crop_w
+                target_w = 960
                 target_h = int(orig_crop_h * scale_ratio)
                 proc_frame = cv2.resize(cropped_frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
             else:
                 proc_frame = cropped_frame
 
-            captured_frames.append((current_time, scale_ratio, proc_frame, target_seg, seg_idx))
+            captured_frames.append((current_time, scale_ratio, proc_frame, target_seg, seg_idx, crop_y_start))
             if len(captured_frames) >= 12:
                 flush_frames()
 
     finally:
         cap.release()
     flush_frames()
-    for current_time, scale_ratio, target_seg, seg_idx, results in recognized_samples:
-        frame_blocks = []
-        for (bbox, text, prob) in results:
-            clean_t = str(text or "").strip()
-            # Khong bo qua chu Han ke ca khi prob thap vi font chu nghe thuat co vien thuong co prob = 0.00
-            if len(clean_t) == 0 or len(bbox) < 4:
-                continue
+    def append_recognized(samples):
+        for current_time, scale_ratio, target_seg, seg_idx, results, crop_offset in samples:
+            s_id = getattr(target_seg, 'index', None)
+            sample_id = s_id if s_id is not None else seg_idx
+            for mb in normalized_rows(results, scale_ratio, crop_offset, width, height):
+                all_blocks.append(OCRBlock(**mb, start=current_time - 1.2,
+                                           end=current_time + 1.2,
+                                           sample_segment_id=sample_id,
+                                           sample_time=current_time))
 
-            xs = [pt[0] / scale_ratio for pt in bbox]
-            ys = [(pt[1] / scale_ratio) + crop_y_start for pt in bbox] # Bù lại vị trí cắt dọc
-
-            x1, x2 = min(xs), max(xs)
-            y1, y2 = min(ys), max(ys)
-
-            x1 = max(0, x1 - int(width * 0.01))
-            x2 = min(width, x2 + int(width * 0.01))
-            y1 = max(0, y1 - int(height * 0.005))
-            y2 = min(height, y2 + int(height * 0.005))
-
-            x_pct = x1 / width
-            max_x_pct = x2 / width
-            y_pct = y1 / height
-            max_y_pct = y2 / height
-
-            frame_blocks.append({
-                'text': clean_t, 'x_pct': x_pct, 'max_x_pct': max_x_pct,
-                'y_pct': y_pct, 'max_y_pct': max_y_pct, 'prob': prob
-            })
-
-        merged_frame_blocks = frame_blocks
-
-        s_id = getattr(target_seg, 'index', None) if target_seg is not None else seg_idx
-        sample_id = s_id if s_id is not None else seg_idx
-        for mb in merged_frame_blocks:
-            all_blocks.append(OCRBlock(
-                text=mb['text'],
-                start=current_time - 1.2,
-                end=current_time + 1.2,
-                x_pct=mb['x_pct'],
-                max_x_pct=mb['max_x_pct'],
-                y_pct=mb['y_pct'],
-                max_y_pct=mb['max_y_pct'],
-                prob=mb.get('prob', 1.0),
-                sample_segment_id=sample_id,
-                sample_time=current_time,
-            ))
+    append_recognized(recognized_samples)
+    sampled_ids = {getattr(item[2], 'index', None) for item in recognized_samples}
+    recognized_samples.clear()
 
     segment_texts = {}
     if srt_segments:
@@ -384,6 +408,53 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
         default_top=0.75,
         default_bottom=0.82,
     )
+
+    # Rescue only missing coordinates: two in-cue samples, higher resolution,
+    # established subtitle ROI (or full frame if no reliable track exists).
+    missing = [(i, seg) for i, seg in enumerate(srt_segments)
+               if getattr(seg, 'index', i) not in band.selected_by_segment]
+    if missing:
+        logger.info('OCR geometry rescue: %d/%d cues, GPU only', len(missing), len(srt_segments))
+        rescue_cap = cv2.VideoCapture(video_path)
+        if not rescue_cap.isOpened():
+            rescue_cap.release()
+            raise RuntimeError('OCR rescue cannot open video')
+        roi_start = max(0, int((band.top - .08) * height)) if band.support else 0
+        roi_end = min(height, math.ceil((band.bottom + .08) * height)) if band.support else height
+        try:
+            for seg_idx, target_seg in missing:
+                try:
+                    from . import shared_state
+                except ImportError:
+                    import shared_state
+                if getattr(shared_state, 'stop_requested', False):
+                    raise RuntimeError('OCR stop requested')
+                end = target_seg.end.total_seconds()
+                if duration > 0:
+                    end = min(end, duration)
+                for current_time in rescue_times(target_seg.start.total_seconds(), end):
+                    rescue_cap.set(cv2.CAP_PROP_POS_MSEC, current_time * 1000)
+                    ok, frame = rescue_cap.read()
+                    if not ok:
+                        continue
+                    crop = frame[roi_start:roi_end, :]
+                    scale_ratio = min(1., 1280. / width)
+                    proc = cv2.resize(crop, (round(width * scale_ratio), max(1, round((roi_end-roi_start) * scale_ratio))), interpolation=cv2.INTER_AREA) if scale_ratio < 1 else crop
+                    captured_frames.append((current_time, scale_ratio, proc, target_seg, seg_idx, roi_start))
+                    if len(captured_frames) >= 12:
+                        flush_frames()
+            flush_frames()
+        finally:
+            rescue_cap.release()
+        sampled_ids.update(getattr(item[2], 'index', None) for item in recognized_samples)
+        append_recognized(recognized_samples)
+        band = select_chinese_subtitle_band(all_blocks, segment_texts, width, height)
+
+    for idx, seg in enumerate(srt_segments):
+        sid = getattr(seg, 'index', idx)
+        seg.ocr_mask_status = ('located' if sid in band.selected_by_segment else
+                               'unresolved' if sid not in sampled_ids or has_caption_evidence(all_blocks, sid, band)
+                               else 'no_caption_evidence')
 
     if band.support > 0 and band.mode != "default":
         global_med_top = band.top
@@ -434,11 +505,22 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                     seg.max_y_pct = b["max_y_pct"]
                     logger.info(f"Sync (Subtitle Band): '{str(getattr(seg, 'content', ''))[:15]}' -> Y: {seg.y_pct:.3f} - {seg.max_y_pct:.3f}")
                 else:
-                    # No subtitle found for this segment: do NOT assign random Chinese block!
-                    seg.best_block = None
+                    # Fallback to the detected Global Subtitle Band for this segment
+                    seg.best_block = OCRBlock(
+                        text="",
+                        start=seg_s,
+                        end=seg_e,
+                        x_pct=0.05,
+                        max_x_pct=0.95,
+                        y_pct=global_med_top,
+                        max_y_pct=global_med_bottom,
+                        prob=1.0,
+                    )
                     seg.tracking_blocks = []
                     seg.y_pct = global_med_top
                     seg.max_y_pct = global_med_bottom
+                    seg.ocr_mask_status = 'located'
+                    logger.info(f"Sync fallback (Subtitle Band): '#{s_key}' -> Y: {seg.y_pct:.3f} - {seg.max_y_pct:.3f}")
 
         # BỔ SUNG CÂU THOẠI TỪ OCR (Nếu ASR bị nhạc to át mất câu)
         try:
@@ -473,6 +555,7 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                     new_seg.y_pct = new_seg.best_block.y_pct
                     new_seg.max_y_pct = new_seg.best_block.max_y_pct
                     new_seg.tracking_blocks = []
+                    new_seg.ocr_mask_status = 'located'
                     srt_segments.append(new_seg)
 
                 # Sort by start time and re-index
@@ -490,7 +573,17 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                 seg.tracking_blocks = []
                 seg.y_pct = 0.85
                 seg.max_y_pct = 0.90
+                seg.ocr_mask_status = 'no_caption_evidence'
 
+    report = geometry_summary(srt_segments)
+    logger.info('OCR geometry audit: %s', report)
+    if kwargs.get('geometry_report_path'):
+        try:
+            from .v1_stage_runtime import save_payload
+        except ImportError:
+            from v1_stage_runtime import save_payload
+        save_payload(kwargs['geometry_report_path'], geometry=report)
+    validate_mask_geometry(srt_segments)
     return [], width, height, main_y_pct
 
 

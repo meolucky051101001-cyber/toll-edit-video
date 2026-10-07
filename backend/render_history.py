@@ -6,6 +6,7 @@ import os
 import json
 import time
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -35,55 +36,130 @@ def format_duration(seconds: float) -> str:
     return f"{s}s"
 
 def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int]:
-    """Đọc toàn bộ lịch sử thời gian render từ workspace và cache runtime (tuyệt đối không tạo file trong output_dir)."""
+    """Đọc toàn bộ lịch sử thời gian render từ workspace, manifests và cache runtime."""
     history_files = [
         HISTORY_FILE,
+        Path(r"D:\workspace\bot_system\.render_history.json"),
+        Path(r"D:\workspace\.render_history.json"),
         Path(r"C:\tool v1\workspace\bot_system\.render_history.json"),
+        Path(r"C:\tool v1\workspace\.render_history.json"),
+        Path(r"D:\workspace_v2\bot_system\.render_history_v2.json"),
+        Path(r"D:\workspace_v2\.render_history_v2.json"),
         Path(r"C:\tool v2\workspace\bot_system\.render_history_v2.json"),
-        Path(r"C:\tool v2\workspace\bot_system\.render_history.json"),
         Path(r"C:\tool v2\workspace\.render_history_v2.json"),
+        Path(r"C:\tool v2\workspace\bot_system\.render_history.json"),
         Path(r"C:\tool v2\workspace\.render_history.json"),
     ]
     meta: Dict[str, int] = {}
+
+    def _register(key: str, dur: int):
+        if not key or not dur or dur <= 0:
+            return
+        meta.setdefault(key, dur)
+        clean = key.replace("Dubbed_", "")
+        meta.setdefault(clean, dur)
+        meta.setdefault(f"Dubbed_{clean}", dur)
+        if not clean.lower().endswith(".mp4"):
+            meta.setdefault(f"{clean}.mp4", dur)
+            meta.setdefault(f"Dubbed_{clean}.mp4", dur)
+
+    # 1. Đọc từ các file json history
     for hf in history_files:
-        if hf.exists():
+        if hf.is_file():
             try:
                 raw = json.loads(hf.read_text(encoding="utf-8"))
                 if isinstance(raw, dict):
                     for k, v in raw.items():
-                        if isinstance(v, (int, float)) and v > 0:
-                            meta.setdefault(k, int(v))
-                        elif isinstance(v, dict) and "duration_seconds" in v:
-                            meta.setdefault(k, int(v["duration_seconds"]))
+                        dur_val = int(v if isinstance(v, (int, float)) else v.get("duration_seconds", 0))
+                        _register(k, dur_val)
             except Exception:
                 pass
 
-    # Đọc bổ sung từ job_status.json nếu chưa có
+    # 2. Đọc bổ sung từ job_status.json
     workspace_candidates = [
+        Path(r"D:\workspace\bot_system\job_status.json"),
+        Path(r"D:\workspace\job_status.json"),
+        Path(r"D:\workspace_v2\bot_system\job_status.json"),
+        Path(r"D:\workspace_v2\job_status.json"),
         Path(r"C:\tool v1\workspace\bot_system\job_status.json"),
         Path(r"C:\tool v1\workspace\job_status.json"),
         Path(r"C:\tool v2\workspace\bot_system\job_status.json"),
         Path(r"C:\tool v2\workspace\job_status.json"),
     ]
     for ws in workspace_candidates:
-        if ws.exists():
+        if ws.is_file():
             try:
                 data = json.loads(ws.read_text(encoding="utf-8"))
                 for item in data.get("history", []):
                     dur = item.get("duration_seconds")
-                    if not dur or dur <= 0:
-                        continue
-                    out_p = item.get("output_path", "")
-                    if out_p:
-                        bname = os.path.basename(out_p)
-                        if bname not in meta:
-                            meta[bname] = int(dur)
-                    vname = item.get("video_name", "")
-                    if vname:
-                        if vname not in meta:
-                            meta[vname] = int(dur)
-                        if f"Dubbed_{vname}" not in meta:
-                            meta[f"Dubbed_{vname}"] = int(dur)
+                    if dur and dur > 0:
+                        out_p = item.get("output_path", "")
+                        if out_p:
+                            _register(os.path.basename(out_p), int(dur))
+                        vname = item.get("video_name", "")
+                        if vname:
+                            _register(vname, int(dur))
+            except Exception:
+                pass
+
+    # 3. Đọc từ toàn bộ V1 Manifests (*.manifest.json)
+    manifest_dirs = [
+        Path(r"D:\workspace\bot_system\manifests"),
+        Path(r"C:\tool v1\workspace\bot_system\manifests"),
+    ]
+    for md in manifest_dirs:
+        if md.is_dir():
+            try:
+                for mf in md.glob("*.manifest.json"):
+                    try:
+                        d = json.loads(mf.read_text(encoding="utf-8"))
+                        vname = d.get("video_name")
+                        out_p = d.get("output_video_path")
+                        c_at = d.get("created_at")
+                        u_at = d.get("updated_at")
+                        dur = 0
+                        if c_at and u_at:
+                            dur = int(round(u_at - c_at))
+                        if not dur:
+                            stages = d.get("stages", {})
+                            dur = int(round(sum(st.get("duration_s", 0) for st in stages.values())))
+                        if dur > 0:
+                            if vname:
+                                _register(vname, dur)
+                            if out_p:
+                                _register(os.path.basename(out_p), dur)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    # 4. Đọc từ toàn bộ V2 Manifests (job_manifest.json)
+    v2_ws_dirs = [
+        Path(r"D:\workspace_v2"),
+        Path(r"C:\tool v2\workspace"),
+        Path(r"D:\workspace"),
+        Path(r"C:\tool v1\workspace"),
+    ]
+    for v2_dir in v2_ws_dirs:
+        if v2_dir.is_dir():
+            try:
+                for mf in v2_dir.glob("*/pipeline_v2/job_manifest.json"):
+                    try:
+                        d = json.loads(mf.read_text(encoding="utf-8"))
+                        c_at = d.get("created_at")
+                        u_at = d.get("updated_at")
+                        if c_at and u_at:
+                            t0 = datetime.fromisoformat(c_at.replace("Z", "+00:00"))
+                            t1 = datetime.fromisoformat(u_at.replace("Z", "+00:00"))
+                            dur = int(round(max(0, (t1 - t0).total_seconds())))
+                            if dur > 0:
+                                jname = mf.parent.parent.name
+                                _register(jname, dur)
+                                sp = d.get("metadata", {}).get("source_path")
+                                if sp:
+                                    _register(Path(sp).name, dur)
+                    except Exception:
+                        pass
             except Exception:
                 pass
 

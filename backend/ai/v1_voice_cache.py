@@ -8,7 +8,7 @@ from pathlib import Path
 GLOBAL_CACHE_DIR = Path(__file__).parent.parent / "voice_cache"
 GLOBAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-CACHE_KEY_VERSION = 9  # Version 9: Tech pronunciation normalization (GPU/CPU/VRAM/vy)
+CACHE_KEY_VERSION = 10  # Strict fit/no clipping; never reuse formerly overspeed audio.
 
 def voice_cache_key(segment, voice_source, voice_param, max_duration=None):
     model = Path(str(voice_param))
@@ -18,7 +18,7 @@ def voice_cache_key(segment, voice_source, voice_param, max_duration=None):
         fingerprint = (stat.st_size, stat.st_mtime_ns)
     # Target duration rounded to 2 decimal places to match exact reading window
     if max_duration is not None:
-        target_dur = round(float(max_duration), 2)
+        target_dur = round(float(max_duration), 4)
     else:
         target_dur = round((segment.end - segment.start).total_seconds(), 2)
     content = segment.content.strip()
@@ -27,7 +27,8 @@ def voice_cache_key(segment, voice_source, voice_param, max_duration=None):
         content = normalize_text_for_tts(content)
     except Exception:
         pass
-    raw = [CACHE_KEY_VERSION, content, voice_source, str(voice_param), fingerprint, target_dur]
+    raw = [CACHE_KEY_VERSION, content, voice_source, str(voice_param), fingerprint, target_dur,
+           os.getenv("V1_MAX_NATURAL_SPEED", "1.35")]
     return hashlib.sha256(json.dumps(raw, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 def is_valid_audio(audio_path: str | Path, min_duration: float = 0.15) -> bool:
@@ -36,8 +37,8 @@ def is_valid_audio(audio_path: str | Path, min_duration: float = 0.15) -> bool:
     if not p.is_file() or p.stat().st_size < 256:
         return False
     try:
-        from pydub import AudioSegment
-        seg = AudioSegment.from_file(str(p))
+        from v1_speech_guard import load_audio
+        seg = load_audio(p)
         dur_s = len(seg) / 1000.0
         return dur_s >= min_duration
     except Exception:
@@ -56,10 +57,12 @@ def read_voice_cache(path, key, text_content="", max_duration=None):
         stat = Path(path).stat()
         if (item["key"]==key and item["size"]==stat.st_size and
                 item["mtime"]==stat.st_mtime_ns and stat.st_size>128):
-            if max_duration is not None and item.get("duration", 0) > max_duration + 0.05:
+            if max_duration is not None and item.get("duration", 0) > max_duration + 0.005:
                 return None  # Cached audio exceeds allowable reading window, re-fit!
             if is_valid_audio(path):
-                return item["duration"]
+                import soundfile as sf
+                measured = float(sf.info(str(path)).duration)
+                return measured if max_duration is None or measured <= max_duration + 0.005 else None
     except (OSError, ValueError, KeyError, TypeError):
         pass
         
@@ -70,15 +73,19 @@ def read_voice_cache(path, key, text_content="", max_duration=None):
     try:
         if global_audio.exists() and global_meta.exists():
             item = json.loads(global_meta.read_text(encoding="utf-8"))
-            if max_duration is not None and item.get("duration", 0) > max_duration + 0.05:
+            if max_duration is not None and item.get("duration", 0) > max_duration + 0.005:
                 return None  # Cached audio exceeds allowable reading window, re-fit!
             if global_audio.stat().st_size > 128 and is_valid_audio(global_audio):
+                import soundfile as sf
+                measured = float(sf.info(str(global_audio)).duration)
+                if max_duration is not None and measured > max_duration + 0.005:
+                    return None
                 # Global Cache HIT
                 shutil.copy2(global_audio, path)
-                write_voice_cache(path, key, item["duration"], text_content, skip_global=True)
+                write_voice_cache(path, key, measured, text_content, skip_global=True)
                 short_txt = text_content[:40].replace('\n', ' ')
                 print(f"✅ [CACHE HIT] Tái sử dụng audio: '{short_txt}...'")
-                return item["duration"]
+                return measured
     except Exception:
         pass
         

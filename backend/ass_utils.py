@@ -96,6 +96,11 @@ def generate_ass_file(
     Missing OCR retains a text-sized Vietnamese card.
     Supports both landscape (horizontal) and portrait (vertical) videos.
     """
+    try:
+        from .v1_ocr_geometry import validate_mask_geometry
+    except ImportError:
+        from v1_ocr_geometry import validate_mask_geometry
+    validate_mask_geometry(dialogue_segments)
     if not font_name.strip() or any(char in font_name for char in ",\r\n"):
         font_name = "Arial"
     if not re.fullmatch(r"&H[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?&?", font_color):
@@ -177,7 +182,7 @@ def generate_ass_file(
                 
         return textwrap.wrap(text, width=chars) or [text]
 
-    text_outline = 2
+    text_outline = 0
 
     ass_content = f"""[Script Info]
 ScriptType: v4.00+
@@ -188,8 +193,8 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: BgStyle,Arial,{font_size},&H00F0F0F0,&H00F0F0F0,&H00F0F0F0,&H00F0F0F0,0,0,0,0,100,100,0,0,1,{outline},0,5,0,0,0,1
-Style: TextStyle,{font_name},{font_size},{font_color},&H000000FF,&H00FFFFFF,&H00000000,{bold},0,0,0,100,100,0,0,1,{text_outline},0,5,10,10,10,1
+Style: BgStyle,Arial,{font_size},&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,0,0,0,0,100,100,0,0,1,{outline},0,5,0,0,0,1
+Style: TextStyle,{font_name},{font_size},{font_color},&H000000FF,&H00000000,&H00000000,{bold},0,0,0,100,100,0,0,1,{text_outline},0,5,10,10,10,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

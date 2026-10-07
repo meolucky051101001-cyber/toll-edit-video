@@ -225,7 +225,7 @@ class TestV1AutoVoice(unittest.TestCase):
 
         # Goi lai lock_video_voice voi bat ky audio nao khac (vi du giong nu)
         segs = [SimpleNamespace(index=1, start=timedelta(seconds=0.1), end=timedelta(seconds=2.0), content="Test")]
-        locked = lock_video_voice(out_job, segs, vocals_path=self.real_female_sample)
+        locked = lock_video_voice(out_job, segs, vocals_path=self.real_female_sample, workspace=self.workspace)
 
         # Phai luon giu nguyen ban ghi da khoa tu truoc
         self.assertEqual(locked["voice_id"], "capcut-BV075_streaming")
@@ -425,6 +425,48 @@ class TestV1AutoVoice(unittest.TestCase):
         with patch("os.replace", side_effect=OSError("Disk write error")):
             fail_ok = set_auto_voice_enabled(True, updated_by="test_err", workspace=self.workspace)
             self.assertFalse(fail_ok)
+
+    def test_16_dual_voice_identical_role_prevention(self):
+        """Kiem tra chế độ Dual Voice tự động tách vai nam/nữ khi cấu hình bị trùng cùng một giọng."""
+        from ai.v1_auto_voice import decide_video_voice
+
+        # Cấu hình cố tình đặt cả vai nam và nữ là cùng một giọng Mai (BV562)
+        misconfigured_voice = {
+            "enabled": True,
+            "female_voice_id": "capcut-BV562_streaming",
+            "male_voice_id": "capcut-BV562_streaming",
+            "dual_voice": True,
+        }
+
+        segs = [
+            SimpleNamespace(index=1, start=timedelta(seconds=0.0), end=timedelta(seconds=2.0), content="Chào em"),
+            SimpleNamespace(index=2, start=timedelta(seconds=2.2), end=timedelta(seconds=4.0), content="Dạ chào anh"),
+        ]
+
+        # Mock classify_dialogue để cue 1 là male, cue 2 là female
+        mock_evidence = {
+            1: {"gender": "male", "confidence": 0.95, "median_f0": 130.0, "reason": "test"},
+            2: {"gender": "female", "confidence": 0.95, "median_f0": 260.0, "reason": "test"},
+        }
+
+        out_job = os.path.join(self.temp_dir, "job_dual_identical_prevention")
+        with patch("ai.v1_auto_voice.classify_all_segments_gender", return_value=mock_evidence):
+            result = decide_video_voice(
+                out_job,
+                segs,
+                voice_mode="auto",
+                voice_config=misconfigured_voice,
+                workspace=self.workspace,
+            )
+
+        self.assertTrue(result["dual_voice"])
+        # Phải tự động tách thành 2 giọng khác nhau
+        cue1_voice = result["segment_voices"]["1"]["id"]
+        cue2_voice = result["segment_voices"]["2"]["id"]
+        self.assertNotEqual(cue1_voice, cue2_voice)
+        self.assertEqual(cue1_voice, VOICE_MALE_ID)
+        self.assertEqual(cue2_voice, "capcut-BV562_streaming")
+        self.assertFalse(result.get("same_voice_for_both_roles", False))
 
 
 if __name__ == "__main__":

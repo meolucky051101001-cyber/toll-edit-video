@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 import srt
 
-async def generate_dubbing_audio_isolated(segments, output_folder, voice_source='edge', voice_param='vi-VN-HoaiMyNeural', api_key='', video_duration=None, segment_voices=None):
+async def generate_dubbing_audio_isolated(segments, output_folder, voice_source='edge', voice_param='vi-VN-HoaiMyNeural', api_key='', video_duration=None, segment_voices=None, *, tts_workers=None, max_natural_speed=None, timeout_s=1800, script_mode="default"):
     from .translation import _contains_cjk
     if any(_contains_cjk(s.content) for s in segments):
         raise RuntimeError("Phụ đề chứa ký tự CJK tiếng Trung chưa được dịch (Fail-Closed).")
@@ -18,6 +18,13 @@ async def generate_dubbing_audio_isolated(segments, output_folder, voice_source=
         from batch_control import run, stop_check
         import shared_state
     backend = Path(__file__).resolve().parents[1]
+    from v1_speech_guard import coalesce_tiny_same_voice_cues, SpeechTimingError
+    for s in segments:
+        info = (segment_voices or {}).get(str(s.index))
+        if info:
+            s.voice_source, s.voice_param = info['source'], info['param']
+            s.gender = info.get('gender', 'unknown')
+    coalesce_tiny_same_voice_cues(segments)
     def work():
         with tempfile.TemporaryDirectory(prefix='v1-voice-') as folder:
             request = Path(folder)/'input.srt'
@@ -44,9 +51,15 @@ async def generate_dubbing_audio_isolated(segments, output_folder, voice_source=
                 seg_voices_file.write_text(json.dumps(final_segment_voices, ensure_ascii=False), encoding='utf-8')
 
             worker_env = dict(os.environ, PYTHONIOENCODING='utf-8')
+            if tts_workers is not None:
+                worker_env['V1_TTS_WORKERS'] = str(tts_workers)
+            if max_natural_speed is not None:
+                worker_env['V1_MAX_NATURAL_SPEED'] = str(max_natural_speed)
             if api_key:
                 worker_env['VOICE_API_KEY'] = str(api_key)
                 worker_env['FPT_API_KEY'] = str(api_key)
+            if script_mode:
+                worker_env['V1_SCRIPT_MODE'] = str(script_mode)
             cmd = [
                 str(backend/'venv/Scripts/python.exe'), str(backend/'model_workers/v1_voice_worker.py'),
                 str(request), str(result), str(Path(output_folder).resolve()), voice_source, voice_param
@@ -59,11 +72,17 @@ async def generate_dubbing_audio_isolated(segments, output_folder, voice_source=
                 cmd.append(str(seg_voices_file))
             try:
                 run(cmd,
-                    timeout=1800, check=True, cwd=str(backend),
+                    timeout=timeout_s, check=True, cwd=str(backend),
                     env=worker_env,
                     creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)|getattr(subprocess,'NORMAL_PRIORITY_CLASS',0),
                     stdout=subprocess.DEVNULL)
             except subprocess.CalledProcessError as e:
+                if result.is_file():
+                    error = json.loads(result.read_text(encoding='utf-8'))
+                    if isinstance(error, dict) and error.get('error'):
+                        if error.get('retryable'):
+                            raise ConnectionError(error['error']) from e
+                        raise SpeechTimingError(error['error']) from e
                 raise RuntimeError(f"Voice worker subprocess failed with exit code {e.returncode}") from e
             except subprocess.TimeoutExpired as e:
                 raise RuntimeError(f"Voice worker subprocess timed out after {e.timeout}s") from e
@@ -77,24 +96,40 @@ async def generate_dubbing_audio_isolated(segments, output_folder, voice_source=
             if not isinstance(data, list):
                 raise RuntimeError(f"Voice worker returned invalid data type: {type(data)}")
 
-            # Đồng bộ lại nội dung phụ đề đã rút gọn (nếu có câu dài được rút gọn bởi Gemini)
+            # Đồng bộ lại nội dung phụ đề đã rút gọn và chuẩn hóa key duration
             for dub in data:
-                d_idx = dub.get("index")
-                d_content = dub.get("content")
-                if d_idx is not None and d_content:
-                    for s in segments:
-                        if getattr(s, "index", None) == d_idx:
-                            s.content = d_content
-                            break
+                if isinstance(dub, dict):
+                    if "duration" not in dub:
+                        dub["duration"] = dub.get("actual_audio_duration", 0.0)
+                    d_idx = dub.get("index")
+                    d_content = dub.get("content")
+                    if d_idx is not None and d_content:
+                        for s in segments:
+                            if getattr(s, "index", None) == d_idx:
+                                s.content = d_content
+                                break
 
             return data
     cancelled = __import__('threading').Event()
     inherited = stop_check.get()
     token = stop_check.set(lambda: cancelled.is_set() or bool(shared_state.stop_requested) or bool(inherited and inherited()))
+    task = asyncio.create_task(asyncio.to_thread(work))
     try:
-        return await asyncio.to_thread(work)
+        return await asyncio.shield(task)
     except asyncio.CancelledError:
         cancelled.set()
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+        if task.done() and not task.cancelled():
+            try:
+                task.result()
+            except BaseException:
+                pass
         raise
     finally:
         stop_check.reset(token)

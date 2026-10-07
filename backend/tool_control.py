@@ -1,4 +1,16 @@
 """Local control plane for the two fixed AutoDub installations."""
+import sys
+from pathlib import Path
+
+_backend_dir = Path(__file__).resolve().parent
+_site_packages = _backend_dir / "venv" / "Lib" / "site-packages"
+if _site_packages.is_dir() and str(_site_packages) not in sys.path:
+    sys.path.insert(0, str(_site_packages))
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
+if str(Path(r"C:\tool v1\backend")) not in sys.path:
+    sys.path.insert(0, r"C:\tool v1\backend")
+
 import json
 import os
 import secrets
@@ -9,7 +21,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 import psutil
 import voice_selection
 
@@ -381,6 +392,12 @@ def change_voice(voice_id):
     except (OSError, TimeoutError):
         raise ValueError('Không xác minh được batch V1; chưa đổi giọng.')
     voice_selection.save(voice_id)
+    try:
+        v2_ctrl = Path(r"C:\tool v2\workspace\control")
+        v2_ctrl.mkdir(parents=True, exist_ok=True)
+        (v2_ctrl / "voice_selection.json").write_text(json.dumps({"id": voice_id}, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
     return 'Đã lưu: ' + voice_selection.selected()['label'] + '. Video tiếp theo sẽ dùng giọng này.'
 
 HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Điều khiển Tool V1 / V2</title>
@@ -961,6 +978,10 @@ HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name=
       <div class="preview-chips-container">
         <span class="chips-label">Thử nhanh các giọng tiêu biểu:</span>
         <div class="chips-grid">
+          <button type="button" class="voice-chip" id="chip-vieneu-haidang" onclick="selectVoiceForPreview('vieneu-haidang')">🔥 Hải Đăng (VieNeu)</button>
+          <button type="button" class="voice-chip" id="chip-vieneu-maianh" onclick="selectVoiceForPreview('vieneu-maianh')">🔥 Mai Anh (VieNeu)</button>
+          <button type="button" class="voice-chip" id="chip-vieneu-trucly" onclick="selectVoiceForPreview('vieneu-trucly')">🔥 Trúc Ly (VieNeu)</button>
+          <button type="button" class="voice-chip" id="chip-vieneu-thienminh" onclick="selectVoiceForPreview('vieneu-thienminh')">🔥 Thiện Minh (VieNeu)</button>
           <button type="button" class="voice-chip active" id="chip-capcut-BV562_streaming" onclick="selectVoiceForPreview('capcut-BV562_streaming')">Chí Mai (CapCut)</button>
           <button type="button" class="voice-chip" id="chip-capcut-BV075_streaming" onclick="selectVoiceForPreview('capcut-BV075_streaming')">Thanh Niên Tự Tin</button>
           <button type="button" class="voice-chip" id="chip-chi-mai" onclick="selectVoiceForPreview('chi-mai')">Chí Mai (RVC)</button>
@@ -1281,16 +1302,23 @@ async function loadVoices() {
     cachedVoices = d.voices;
     const select = document.getElementById('voice');
     select.replaceChildren();
-    for (const source of ['rvc', 'edge', 'capcut']) {
+    for (const source of ['vieneu', 'rvc', 'edge', 'capcut']) {
       const group = document.createElement('optgroup');
-      group.label = { rvc: 'Giọng mặc định · RVC', edge: 'Microsoft TTS', capcut: 'CapCut TTS' }[source];
+      group.label = {
+        vieneu: '🔥 VieNeu-TTS (48kHz Tự Nhiên Cao Cấp)',
+        rvc: 'Giọng mặc định · RVC',
+        edge: 'Microsoft TTS',
+        capcut: 'CapCut TTS'
+      }[source] || source;
       for (const v of d.voices.filter(v => v.source === source)) {
         const option = document.createElement('option');
         option.value = v.id;
-        option.textContent = v.label + (v.verified_at ? ' ✓' : '');
+        option.textContent = v.label + (v.verified_at || v.source === 'vieneu' ? ' ✓' : '');
         group.append(option);
       }
-      select.append(group);
+      if (group.children.length > 0) {
+        select.append(group);
+      }
     }
     select.value = d.selected.id;
     select.disabled = false;
@@ -1424,7 +1452,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed_path.startswith('/voice-preview-video/'):
             filename = Path(parsed_path).name
-            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")]:
+            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control"), Path(r"C:\tool v2\workspace\control")]:
                 target = base / 'voice_previews' / filename
                 if target.is_file():
                     return self.send_file(target, 'video/mp4')
@@ -1432,7 +1460,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed_path.startswith('/voice-preview-audio/'):
             filename = Path(parsed_path).name
-            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")]:
+            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control"), Path(r"C:\tool v2\workspace\control")]:
                 target = base / 'voice_checks' / filename
                 if target.is_file():
                     mime = 'audio/wav' if filename.endswith('.wav') else 'audio/mpeg'
@@ -1440,7 +1468,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(404, {'message': 'Audio preview not found'})
 
         if parsed_path == '/sample-video':
-            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")]:
+            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control"), Path(r"C:\tool v2\workspace\control")]:
                 target = base / 'sample_test_video.mp4'
                 if target.is_file():
                     return self.send_file(target, 'video/mp4')
@@ -1508,7 +1536,7 @@ def ensure_single_controller():
     return 'proceed'
 
 class SingleInstanceServer(ThreadingHTTPServer):
-    allow_reuse_address = False
+    allow_reuse_address = True
 
 
 if __name__ == '__main__':
@@ -1537,7 +1565,15 @@ if __name__ == '__main__':
                 raise SystemExit(0)
 
     # Áp dụng mặc định khi khởi động máy: Tool V1 BẬT, Tool V2 TẮT
-    threading.Thread(target=apply_boot_defaults, daemon=True).start()
-    server.serve_forever()
+    try:
+        threading.Thread(target=apply_boot_defaults, daemon=True).start()
+        server.serve_forever()
+    except Exception as e:
+        with open(log_path, "a", encoding="utf-8") as lf:
+            import traceback
+            lf.write(f"Server exception PID {os.getpid()}: {e}\n{traceback.format_exc()}\n")
+    finally:
+        with open(log_path, "a", encoding="utf-8") as lf:
+            lf.write(f"Server PID {os.getpid()} exiting.\n")
 
 
