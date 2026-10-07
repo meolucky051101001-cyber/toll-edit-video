@@ -173,6 +173,27 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
 
     try:
         t0 = time.time()
+        # ===== TỰ ĐỘNG GỠ WATERMARK NẾU ĐƯỢC KÍCH HOẠT =====
+        try:
+            from watermark_api import get_watermark_config
+            wm_cfg = get_watermark_config()
+            if wm_cfg.get("auto_remove"):
+                await notify("🪄 Đang tự động gỡ Watermark AI khỏi video gốc...")
+                from ai.watermark_removal_service import get_watermark_service
+                clean_source_path = os.path.join(out_dir, "clean_source.mp4")
+                wm_res = await asyncio.to_thread(
+                    get_watermark_service().process_video,
+                    input_path=video_path,
+                    output_path=clean_source_path,
+                    mode=wm_cfg.get("mode", "both"),
+                    gain=float(wm_cfg.get("gain", 0.6)),
+                )
+                if wm_res.get("success") and os.path.isfile(clean_source_path):
+                    video_path = clean_source_path
+                    await notify("✅ Đã gỡ sạch Watermark AI thành công!")
+        except Exception as _wme:
+            logger.warning("Bỏ qua lỗi tự động gỡ watermark: %s", _wme)
+
         # ===== BƯỚC 1/4: TÁCH ÂM THANH & NHẠC NỀN GỐC =====
         await notify("🎧 Bước 1/4: Đang trích xuất & tách âm thanh (BS-RoFormer GPU)...")
         if not extract_audio_from_video(video_path, original_audio):

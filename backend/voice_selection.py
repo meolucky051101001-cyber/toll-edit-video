@@ -11,6 +11,20 @@ ALIASES = {'capcut-vi-VN-HoaiMyNeural': 'microsoft-hoaimy', 'capcut-vi-VN-NamMin
 
 DEFAULT_CATALOG = [
     {"id": "chi-mai", "label": "Chí Mai · RVC (mặc định)", "source": "rvc", "param": ""},
+    {"id": "vieneu-haidang", "label": "VieNeu · Hải Đăng (Nam Bắc 48k)", "source": "vieneu", "param": "Hải Đăng"},
+    {"id": "vieneu-maianh", "label": "VieNeu · Mai Anh (Nữ Bắc 48k)", "source": "vieneu", "param": "Mai Anh"},
+    {"id": "vieneu-trucly", "label": "VieNeu · Trúc Ly (Nữ Bắc 48k)", "source": "vieneu", "param": "Trúc Ly"},
+    {"id": "vieneu-thienminh", "label": "VieNeu · Thiện Minh (Nam Kể chuyện 48k)", "source": "vieneu", "param": "Thiện Minh"},
+    {"id": "vieneu-thuydung", "label": "VieNeu · Thùy Dung (Nữ Nam 48k)", "source": "vieneu", "param": "Thùy Dung"},
+    {"id": "vieneu-adambua", "label": "VieNeu · Adam Bựa (Nam Hài hước 48k)", "source": "vieneu", "param": "Adam bựa"},
+    {"id": "vieneu-thaison", "label": "VieNeu · Thái Sơn (Nam Nam 48k)", "source": "vieneu", "param": "Thái Sơn"},
+    {"id": "vieneu-phamtuyen", "label": "VieNeu · Phạm Tuyên (Nam Trầm ấm 48k)", "source": "vieneu", "param": "Phạm Tuyên"},
+    {"id": "vieneu-ngochuyen", "label": "VieNeu · Ngọc Huyền (Nữ Tự nhiên 48k)", "source": "vieneu", "param": "Ngọc Huyền"},
+    {"id": "vieneu-ngoctran", "label": "VieNeu · Ngọc Trân (Nữ Miền Trung 48k)", "source": "vieneu", "param": "Ngọc Trân"},
+    {"id": "vieneu-quangson", "label": "VieNeu · Quang Sơn (Nam Miền Trung 48k)", "source": "vieneu", "param": "Quang Sơn"},
+    {"id": "vieneu-myduyen", "label": "VieNeu · Mỹ Duyên (Nữ Nam Đọc truyện 48k)", "source": "vieneu", "param": "Mỹ Duyên"},
+    {"id": "vieneu-quynhanh", "label": "VieNeu · Quỳnh Anh (Nữ Bắc Đọc truyện 48k)", "source": "vieneu", "param": "Quỳnh Anh"},
+    {"id": "vieneu-thanhbinh", "label": "VieNeu · Thanh Bình (Nam Kể chuyện 48k)", "source": "vieneu", "param": "Thanh Bình"},
     {"id": "microsoft-hoaimy", "label": "Microsoft · Hoài My (nữ)", "source": "edge", "param": "vi-VN-HoaiMyNeural"},
     {"id": "microsoft-namminh", "label": "Microsoft · Nam Minh (nam)", "source": "edge", "param": "vi-VN-NamMinhNeural"},
     {"id": "capcut-BV421_vivn_streaming", "label": "CapCut · Nhỏ Ngọt Ngào", "source": "capcut", "param": "BV421_vivn_streaming"},
@@ -29,7 +43,16 @@ def catalog():
     cat_file = BASE / "voice_catalog.json"
     if cat_file.is_file():
         try:
-            return json.loads(cat_file.read_text(encoding="utf-8"))
+            existing = json.loads(cat_file.read_text(encoding="utf-8"))
+            existing_ids = {v.get("id") for v in existing if isinstance(v, dict)}
+            missing = [item for item in DEFAULT_CATALOG if item.get("id") not in existing_ids]
+            if missing:
+                existing.extend(missing)
+                try:
+                    cat_file.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+                except Exception:
+                    pass
+            return existing
         except Exception:
             pass
     try:

@@ -141,8 +141,8 @@ class VideoPipelineRunner:
             and Path(request.delivery_copy_path).resolve() == self.video_path
         ):
             raise ValueError("Pipeline delivery_copy_path must not overwrite the input video")
-        if request.voice_source not in {"edge", "fpt", "rvc", "capcut"}:
-            raise ValueError("voice_source must be edge, fpt, rvc or capcut")
+        if request.voice_source not in {"edge", "fpt", "rvc", "capcut", "vieneu"}:
+            raise ValueError("voice_source must be edge, fpt, rvc, capcut or vieneu")
         if request.voice_source == "fpt" and not (
             request.tts_api_key or request.api_key
         ):
