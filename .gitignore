@@ -1,54 +1,80 @@
-# Local environments and secrets
-backend/venv/
-backend/venv_old/
-backend/model_venv/
-backend/venv-invalid-distributions-*/
-models/
-venv/
-env/
-*.env
-*.env*
-.env*
-backend/.env*
-*.key
-*.pem
+backend/.env
+.env
 
-# Python and test caches
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
 
-# Frontend build/install output
-frontend/node_modules/
-frontend/dist/
+node_modules/
 
-# Runtime artifacts
-workspace/
-backend/workspace/
-backend/downloads/
-*.lock
+cache/
+temp/
+tmp/
+downloads/
+outputs/
+logs/
+runtime_logs/
 *.log
-temp_burn*
+backend/*.log
+
+*.part
+*.downloading
+
+.venv/
+venv/
+model_venv/
+workspace/
+
+models/
+weights/
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+master_plan.txt
+*.control_token
+workspace/.dashboard_control_token
+voice_cache/
+backend/voice_cache/
+*.tmp
+
+# Scratch & test media files
 *.mp4
 *.mp3
 *.wav
+*.m4a
+*.flac
+*.aac
+*.ogg
 *.jpg
+*.jpeg
 *.png
-*.ass
-*.srt
+*.gif
+!assets/**
+!frontend/**
+!backend/static/**
 
-# Large optional model assets
-*.pth
-*.index
-*.onnx
-
-# Editor/OS files
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/
-
-# Backups and temporary files
+# Backup files
+*.bak
+*.bak*
+*.backup*
 backups/
-benchmarks/
-*.before-*
+
+# Local databases & test artifacts
+*.sqlite3
+douyin_script_data.json
+backend/douyin_script_data.json
+test_out_dir/
+out.srt
+scratch_*.txt
+pre_implementation_snapshot.json
+yt1_12_ocr.json
+
 *.patch
+*.before-*
+*venv-invalid-*
+MyVoiceModel_v2/backup_other_voices/
+test_*.ass
+
+backend/data/*.png

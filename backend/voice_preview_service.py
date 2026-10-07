@@ -70,9 +70,9 @@ def resolve_workspace_dir() -> Path:
     if ws_env and Path(ws_env).is_dir():
         return Path(ws_env)
     for c in [
-        Path(r"C:\tool v1\workspace"),
         Path(r"C:\tool v2\workspace"),
         Path(__file__).resolve().parent.parent / "workspace",
+        Path(r"C:\tool v1\workspace"),
     ]:
         if c.is_dir():
             return c
@@ -382,6 +382,15 @@ async def synthesize_voice_preview(
                         await asyncio.wait_for(communicate.save(str(temp_raw)), timeout=15.0)
                         synthesized = temp_raw.is_file() and temp_raw.stat().st_size > 128
                         warning = "Chưa có file mẫu Chí Mai RVC, đang phát mẫu tham chiếu Hoài My."
+
+                elif source == "vieneu":
+                    try:
+                        from ai.vieneu_tts_service import generate_tts_vieneu
+                        await generate_tts_vieneu(text, str(temp_raw), voice=param or "Hải Đăng")
+                        synthesized = temp_raw.is_file() and temp_raw.stat().st_size > 128
+                    except Exception as ve:
+                        logger.error("Lỗi tạo preview VieNeu TTS (%s): %s", voice_id, ve)
+                        raise
 
                 if not synthesized or not temp_raw.is_file() or temp_raw.stat().st_size < 128:
                     raise RuntimeError("Không thể tạo âm thanh xem trước từ provider.")

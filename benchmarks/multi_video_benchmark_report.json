@@ -1,0 +1,317 @@
+{
+  "timestamp": "2026-09-14T14:25:04.009408+00:00",
+  "summary": "Multi-video production benchmark with dynamic bottleneck ranking and RVC",
+  "results": [
+    {
+      "label": "4K_Video_A_RVC",
+      "video_file": "queue_9b27caac49724208a7dddf53872cb7e9_20s速通展示牌谷美文件夹变身美萌门挂.mp4",
+      "resolution": "2160x3840",
+      "video_duration_seconds": 19.47,
+      "with_rvc": true,
+      "total_elapsed_seconds": 430.76,
+      "realtime_ratio": 22.12,
+      "stage_timings": {
+        "deliver": 0.67,
+        "demucs": 49.66,
+        "extract_audio": 0.18,
+        "input": 0.13,
+        "mix_legacy": 0.0,
+        "mix_v2": 1.86,
+        "ocr": 66.03,
+        "qc": 10.42,
+        "render": 25.34,
+        "rvc": 32.18,
+        "subtitles": 0.47,
+        "timing": 93.31,
+        "transcribe": 122.91,
+        "translate": 66.03,
+        "tts": 9.78
+      },
+      "bottlenecks": {
+        "top_bottlenecks": [
+          {
+            "stage": "transcribe",
+            "duration_seconds": 122.91,
+            "percentage": 28.5
+          },
+          {
+            "stage": "timing",
+            "duration_seconds": 93.31,
+            "percentage": 21.7
+          },
+          {
+            "stage": "ocr",
+            "duration_seconds": 66.03,
+            "percentage": 15.3
+          },
+          {
+            "stage": "translate",
+            "duration_seconds": 66.03,
+            "percentage": 15.3
+          },
+          {
+            "stage": "demucs",
+            "duration_seconds": 49.66,
+            "percentage": 11.5
+          },
+          {
+            "stage": "rvc",
+            "duration_seconds": 32.18,
+            "percentage": 7.5
+          },
+          {
+            "stage": "render",
+            "duration_seconds": 25.34,
+            "percentage": 5.9
+          },
+          {
+            "stage": "qc",
+            "duration_seconds": 10.42,
+            "percentage": 2.4
+          },
+          {
+            "stage": "tts",
+            "duration_seconds": 9.78,
+            "percentage": 2.3
+          },
+          {
+            "stage": "mix_v2",
+            "duration_seconds": 1.86,
+            "percentage": 0.4
+          },
+          {
+            "stage": "deliver",
+            "duration_seconds": 0.67,
+            "percentage": 0.2
+          },
+          {
+            "stage": "subtitles",
+            "duration_seconds": 0.47,
+            "percentage": 0.1
+          },
+          {
+            "stage": "extract_audio",
+            "duration_seconds": 0.18,
+            "percentage": 0.0
+          },
+          {
+            "stage": "input",
+            "duration_seconds": 0.13,
+            "percentage": 0.0
+          }
+        ],
+        "whisper_seconds": 122.91,
+        "demucs_seconds": 49.66,
+        "timing_seconds": 93.31,
+        "combined_ai_heavy_seconds": 172.57,
+        "ai_heavy_percentage": 40.1
+      },
+      "qc": {
+        "boundary_frames_checked": 6,
+        "pixel_cover_pass": true,
+        "true_peak_dbtp": -1.1,
+        "qc_allowed": true,
+        "qc_blocked_reason": null
+      }
+    },
+    {
+      "label": "4K_Video_B_New",
+      "video_file": "queue_28e175ed90584956ad5d985c9909c1f9_0.1都不要的物料炸了我都夸它响.mp4",
+      "resolution": "2160x3840",
+      "video_duration_seconds": 19.23,
+      "with_rvc": false,
+      "total_elapsed_seconds": 281.04,
+      "realtime_ratio": 14.61,
+      "stage_timings": {
+        "deliver": 0.22,
+        "demucs": 43.6,
+        "extract_audio": 0.26,
+        "input": 0.18,
+        "mix_legacy": 0.0,
+        "mix_v2": 1.08,
+        "ocr": 32.94,
+        "qc": 13.44,
+        "render": 13.47,
+        "rvc": 0.0,
+        "subtitles": 0.03,
+        "timing": 101.49,
+        "transcribe": 55.86,
+        "translate": 32.94,
+        "tts": 16.08
+      },
+      "bottlenecks": {
+        "top_bottlenecks": [
+          {
+            "stage": "timing",
+            "duration_seconds": 101.49,
+            "percentage": 36.1
+          },
+          {
+            "stage": "transcribe",
+            "duration_seconds": 55.86,
+            "percentage": 19.9
+          },
+          {
+            "stage": "demucs",
+            "duration_seconds": 43.6,
+            "percentage": 15.5
+          },
+          {
+            "stage": "ocr",
+            "duration_seconds": 32.94,
+            "percentage": 11.7
+          },
+          {
+            "stage": "translate",
+            "duration_seconds": 32.94,
+            "percentage": 11.7
+          },
+          {
+            "stage": "tts",
+            "duration_seconds": 16.08,
+            "percentage": 5.7
+          },
+          {
+            "stage": "render",
+            "duration_seconds": 13.47,
+            "percentage": 4.8
+          },
+          {
+            "stage": "qc",
+            "duration_seconds": 13.44,
+            "percentage": 4.8
+          },
+          {
+            "stage": "mix_v2",
+            "duration_seconds": 1.08,
+            "percentage": 0.4
+          },
+          {
+            "stage": "extract_audio",
+            "duration_seconds": 0.26,
+            "percentage": 0.1
+          },
+          {
+            "stage": "deliver",
+            "duration_seconds": 0.22,
+            "percentage": 0.1
+          },
+          {
+            "stage": "input",
+            "duration_seconds": 0.18,
+            "percentage": 0.1
+          }
+        ],
+        "whisper_seconds": 55.86,
+        "demucs_seconds": 43.6,
+        "timing_seconds": 101.49,
+        "combined_ai_heavy_seconds": 99.46000000000001,
+        "ai_heavy_percentage": 35.4
+      },
+      "qc": {
+        "boundary_frames_checked": 11,
+        "pixel_cover_pass": true,
+        "true_peak_dbtp": -3.3,
+        "qc_allowed": true,
+        "qc_blocked_reason": null
+      }
+    },
+    {
+      "label": "1080p_Video_New",
+      "video_file": "queue_d0ac9434459549f0a993f80cb0f21f87_贴纸书开箱这一本真的好实用啊啊啊.mp4",
+      "resolution": "1080x1920",
+      "video_duration_seconds": 24.22,
+      "with_rvc": false,
+      "total_elapsed_seconds": 182.08,
+      "realtime_ratio": 7.52,
+      "stage_timings": {
+        "deliver": 0.0,
+        "demucs": 33.98,
+        "extract_audio": 0.15,
+        "input": 0.12,
+        "mix_legacy": 0.0,
+        "mix_v2": 1.32,
+        "ocr": 25.54,
+        "qc": 10.36,
+        "render": 3.09,
+        "rvc": 0.0,
+        "subtitles": 0.03,
+        "timing": 41.79,
+        "transcribe": 44.83,
+        "translate": 25.54,
+        "tts": 20.03
+      },
+      "bottlenecks": {
+        "top_bottlenecks": [
+          {
+            "stage": "transcribe",
+            "duration_seconds": 44.83,
+            "percentage": 24.6
+          },
+          {
+            "stage": "timing",
+            "duration_seconds": 41.79,
+            "percentage": 23.0
+          },
+          {
+            "stage": "demucs",
+            "duration_seconds": 33.98,
+            "percentage": 18.7
+          },
+          {
+            "stage": "ocr",
+            "duration_seconds": 25.54,
+            "percentage": 14.0
+          },
+          {
+            "stage": "translate",
+            "duration_seconds": 25.54,
+            "percentage": 14.0
+          },
+          {
+            "stage": "tts",
+            "duration_seconds": 20.03,
+            "percentage": 11.0
+          },
+          {
+            "stage": "qc",
+            "duration_seconds": 10.36,
+            "percentage": 5.7
+          },
+          {
+            "stage": "render",
+            "duration_seconds": 3.09,
+            "percentage": 1.7
+          },
+          {
+            "stage": "mix_v2",
+            "duration_seconds": 1.32,
+            "percentage": 0.7
+          },
+          {
+            "stage": "extract_audio",
+            "duration_seconds": 0.15,
+            "percentage": 0.1
+          },
+          {
+            "stage": "input",
+            "duration_seconds": 0.12,
+            "percentage": 0.1
+          }
+        ],
+        "whisper_seconds": 44.83,
+        "demucs_seconds": 33.98,
+        "timing_seconds": 41.79,
+        "combined_ai_heavy_seconds": 78.81,
+        "ai_heavy_percentage": 43.3
+      },
+      "qc": {
+        "boundary_frames_checked": 13,
+        "pixel_cover_pass": false,
+        "true_peak_dbtp": -1.2,
+        "qc_allowed": false,
+        "qc_blocked_reason": "QC gate blocked delivery because critical errors were reported: source_cover, pixel_cover_qc"
+      }
+    }
+  ]
+}

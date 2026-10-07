@@ -370,6 +370,24 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
                     await generate_tts_edge(text, audio_path, voice_param, pitch="+0Hz", rate="+5%")
             elif voice_source == "capcut":
                 await asyncio.to_thread(_run_capcut_tts, text, audio_path, voice_param)
+            elif voice_source == "vieneu":
+                from ai.vieneu_tts_service import generate_tts_vieneu
+                await generate_tts_vieneu(text, audio_path, voice=voice_param or "Hải Đăng")
+                audio = AudioSegment.from_file(audio_path)
+                duration_s = len(audio) / 1000.0
+                expected_s = (segment.end - segment.start).total_seconds()
+                if expected_s > 0 and duration_s > expected_s:
+                    ratio = duration_s / expected_s
+                    ratio = min(ratio, 1.8)
+                    temp_speed = audio_path.replace(".mp3", "_speed.mp3")
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-v", "error", "-i", audio_path, "-filter:a", f"atempo={ratio:.2f}", temp_speed],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
+                        check=True,
+                    )
+                    if os.path.exists(temp_speed):
+                        shutil.move(temp_speed, audio_path)
             elif voice_source == "rvc":
                 temp_edge_raw = audio_path.replace(".mp3", "_temp_raw.mp3")
                 temp_edge_rvc = audio_path.replace(".mp3", "_temp_rvc.mp3")
@@ -422,10 +440,11 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
     return None
 
 async def generate_dubbing_audio(translated_segments, output_folder, voice_source="edge", voice_param="vi-VN-HoaiMyNeural", api_key=""):
-    print(f"Generating TTS for dubbing using {voice_source} (Parallel with concurrency pool=15)...")
+    pool_concurrency = 4 if voice_source == "vieneu" else 15
+    print(f"Generating TTS for dubbing using {voice_source} (Parallel with concurrency pool={pool_concurrency})...")
     os.makedirs(output_folder, exist_ok=True)
     
-    semaphore = asyncio.Semaphore(15)
+    semaphore = asyncio.Semaphore(pool_concurrency)
 
     async def _bounded_single_tts(seg):
         async with semaphore:

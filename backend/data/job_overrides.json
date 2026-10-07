@@ -1,0 +1,342 @@
+[
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_000937",
+    "source_text": "两个小时前",
+    "override_translation": "Hai tiếng trước.",
+    "override_classification": "unvoiced_scene_text",
+    "reviewer": "qa_team",
+    "reason": "Narrative time card at start of video",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_011725",
+    "source_text": "敌袭全员醒来",
+    "override_translation": "Địch tấn công, tất cả dậy ngay.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Exclamatory dialogue during bug attack",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_014417",
+    "source_text": "大毛二毛三毛去储藏屋搬硝石粉",
+    "override_translation": "Đại Mao, Nhị Mao, Tam Mao đi kho lấy bột diêm tiêu.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Instruction shouted to panda kids",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_014817",
+    "source_text": "老妈带他们把硝石全倒进冰水里搅匀",
+    "override_translation": "Mẹ dẫn bọn trẻ đổ hết diêm tiêu vào nước đá khuấy đều.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Instruction for chemical ice cooling",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_015240",
+    "source_text": "我要温度最低的液态冰浆",
+    "override_translation": "Ta cần hỗn hợp nước đá lạnh tới mức thấp nhất.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Dialogue line in cooling sequence",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_017417",
+    "source_text": "甲碎了",
+    "override_translation": "Giáp vỡ rồi.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Battle reaction",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_027563",
+    "source_text": "千得漂亮",
+    "override_translation": "Làm tốt lắm.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Common praise phrase 干得漂亮 with typo in OCR",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_027732",
+    "source_text": "大毛把硝石全搬下去",
+    "override_translation": "Đại Mao, chuyển hết diêm tiêu xuống đây.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Dialogue line",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_032102",
+    "source_text": "一群恐怖虫子来了",
+    "override_translation": "Một lũ côn trùng kinh tởm đang kéo tới.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Urgent alert line",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_032325",
+    "source_text": "它们吃肉啃草",
+    "override_translation": "Chúng ăn thịt và gặm cỏ.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Creature description",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_032425",
+    "source_text": "我们必须要防御反击",
+    "override_translation": "Phải phòng thủ phản công!",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Exclamatory battle line",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_032525",
+    "source_text": "大毛二毛三毛",
+    "override_translation": "Đại Mao, Nhị Mao, Tam Mao.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Character names",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_037171",
+    "source_text": "就给我用尽吃奶的力气吹",
+    "override_translation": "Dùng hết sức bình sinh cho ta thổi mạnh vào.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Action instruction",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_042593",
+    "source_text": "呼呼",
+    "override_translation": "Phù phù.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Blowing sound effect",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_043708",
+    "source_text": "成功啦",
+    "override_translation": "Thành công rồi.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Celebration line",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_051771",
+    "source_text": "哎哎",
+    "override_translation": "Ê ê.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Interjection",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_056587",
+    "source_text": "彪子先别动手",
+    "override_translation": "Bưu Tử, đừng manh động.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Dialogue line with character name Biao Zi",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_063683",
+    "source_text": "来尝尝咱们自酿的大山特供糯米酿",
+    "override_translation": "Nếm thử đặc sản rượu nếp tự ủ của núi rừng chúng ta nào.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Dialogue line",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_087872",
+    "source_text": "嗯嗯哈哈哈",
+    "override_translation": "Ưm ưm, ha ha ha.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Laughter",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_089072",
+    "source_text": "大毛二毛",
+    "override_translation": "Đại Mao, Nhị Mao.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Character names",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_089195",
+    "source_text": "别出声往后退",
+    "override_translation": "Đừng lên tiếng, lùi lại phía sau.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Dialogue warning",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_092550",
+    "source_text": "嘿嘿嘿",
+    "override_translation": "Hê hê hê.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Chuckle",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_095493",
+    "source_text": "嘿嘿嘿",
+    "override_translation": "Hê hê hê.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Chuckle",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_096293",
+    "source_text": "哈哈哈",
+    "override_translation": "Ha ha ha.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Laughter",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_097780",
+    "source_text": "半小时前，挖坑抓鱼",
+    "override_translation": "Nửa giờ trước, đào hố bắt cá.",
+    "override_classification": "unvoiced_scene_text",
+    "reviewer": "qa_team",
+    "reason": "Artistic narrative title card on quiet digging scene",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_097780_b",
+    "source_text": "半小时前挖坑抓鱼",
+    "override_translation": "Nửa giờ trước, đào hố bắt cá.",
+    "override_classification": "unvoiced_scene_text",
+    "reviewer": "qa_team",
+    "reason": "No punctuation variant of title card",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_100931",
+    "source_text": "关门抓鱼",
+    "override_translation": "Đóng cửa bắt rùa.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Idiomatic action dialogue",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_103828",
+    "source_text": "哈哈哈你个憨逼",
+    "override_translation": "Ha ha ha, đồ ngốc nhà ngươi.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Character taunt",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_104051",
+    "source_text": "哈哈哈",
+    "override_translation": "Ha ha ha.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Laughter",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_108351",
+    "source_text": "开饭",
+    "override_translation": "Dọn cơm thôi.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Meal announcement",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_108751",
+    "source_text": "好烫好辣",
+    "override_translation": "Nóng quá, cay quá.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Taste reaction",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "5d627bc04cfe7912fdfa2a284ad222b2748c0c5ef62249d79050e937a491841c",
+    "track_id": "trk_108973",
+    "source_text": "但是好安逸哦",
+    "override_translation": "Nhưng mà dễ chịu thật đấy.",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Dialect reaction phrase",
+    "created_at": "2026-09-24T12:00:00Z"
+  },
+  {
+    "video_hash": "ad98fc73cf71c363f538ce027da6ae0a13349bfd5d7a049449f1ca9dc39b8bc7",
+    "track_id": "trk_000001",
+    "source_text": "这玩意儿咋比肥皂还滑",
+    "override_translation": "Thứ này sao trơn hơn xà phòng thế",
+    "override_classification": "spoken_dialogue",
+    "reviewer": "qa_team",
+    "reason": "Natural concise translation to fit speech duration without overrun",
+    "created_at": "2026-09-26T00:00:00Z"
+  },
+  {
+    "video_hash": "ad98fc73cf71c363f538ce027da6ae0a13349bfd5d7a049449f1ca9dc39b8bc7",
+    "track_id": "trk_gap_0001",
+    "source_text": "半小时前，挖坑抓鱼",
+    "override_translation": "Nửa tiếng trước, đào hố bắt cá.",
+    "override_classification": "unvoiced_scene_text",
+    "reviewer": "qa_team",
+    "reason": "Quiet narrative title card",
+    "created_at": "2026-09-26T00:00:00Z"
+  }
+]
