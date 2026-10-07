@@ -71,6 +71,19 @@ def release_ocr_reader():
             torch.cuda.empty_cache()
 
 
+def _has_chinese_overlap(candidate_text: str, segment_text: str) -> bool:
+    """Check whether OCR and ASR share meaningful Chinese characters."""
+    candidate = "".join(char for char in str(candidate_text or "") if "\u3400" <= char <= "\u9fff")
+    segment = "".join(char for char in str(segment_text or "") if "\u3400" <= char <= "\u9fff")
+    if not candidate or not segment:
+        return False
+    shared = set(candidate) & set(segment)
+    if len(shared) >= 2 or (len(candidate) >= 2 and len(shared) / len(candidate) >= 0.3):
+        return True
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, candidate, segment).ratio() >= 0.3
+
+
 def _readtext_batch(frames):
     # Reuse only pixel-identical frames, never merely similar subtitle regions:
     # no risk of missing a changed Chinese glyph or motion.
@@ -203,6 +216,44 @@ def stabilize_samples(samples):
         for row in group:
             row.update(bounds)
     return result
+
+
+class OCRBlock:
+    """OCR text with temporal and screen geometry used by subtitle/QC stages."""
+
+    def __init__(
+        self,
+        text,
+        start,
+        end,
+        x_pct,
+        max_x_pct,
+        y_pct,
+        max_y_pct,
+        prob=1.0,
+        sample_segment_id=None,
+        sample_time=0.0,
+        is_subtitle=None,
+        is_packaging=None,
+        is_static=None,
+        in_subtitle_band=None,
+        type=None,
+    ):
+        self.text = text
+        self.start = start
+        self.end = end
+        self.x_pct = x_pct
+        self.max_x_pct = max_x_pct
+        self.y_pct = y_pct
+        self.max_y_pct = max_y_pct
+        self.prob = prob
+        self.sample_segment_id = sample_segment_id
+        self.sample_time = sample_time
+        self.is_subtitle = is_subtitle
+        self.is_packaging = is_packaging
+        self.is_static = is_static
+        self.in_subtitle_band = in_subtitle_band
+        self.type = type
 
 
 @stage("ocr", cleanup=release_ocr_reader)

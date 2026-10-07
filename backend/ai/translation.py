@@ -520,6 +520,68 @@ def translate_with_g4f(texts, target_lang="vi", script_mode="default"):
         logger.debug(f"Lỗi dịch G4F: {e}")
     return None
 
+def ensure_speech_pauses_and_entity(
+    source_texts,
+    translated_texts,
+    entity_map=None,
+    prior_context=None,
+    glossary=None,
+):
+    """Normalize mapped names and punctuation using the source sentence boundaries."""
+    if not translated_texts or len(source_texts) != len(translated_texts):
+        return translated_texts
+
+    entities = {}
+    if isinstance(entity_map, dict):
+        entities.update(entity_map)
+    if isinstance(glossary, dict):
+        entities.update(glossary)
+
+    clause_markers = (
+        " chia cắt ", " nhưng ", " tuy nhiên ", " đồng thời ", " vì vậy ",
+        " sau đó ", " khi ", " và rồi ", " rồi lại ",
+    )
+    results = []
+    for source, translated in zip(source_texts, translated_texts):
+        source = str(source or "")
+        clean = normalize_subtitle_text(str(translated or "")).strip()
+        clean = re.sub(r"\s*(?:\.{2,}|…+)\s*", ", ", clean).strip(" ,")
+
+        for source_name, target_name in entities.items():
+            if source_name and target_name and str(source_name) in source:
+                pattern = re.compile(rf"\b{re.escape(str(target_name))}\b", re.IGNORECASE)
+                clean = pattern.sub(str(target_name), clean)
+
+        if clean and clean[0].isalpha():
+            clean = clean[0].upper() + clean[1:]
+
+        source_has_pause = any(mark in source for mark in ("，", ",", "；", ";", "、"))
+        if source_has_pause and "," not in clean:
+            lowered = clean.lower()
+            split_at = next(
+                (lowered.find(marker) for marker in clause_markers if lowered.find(marker) >= 10),
+                -1,
+            )
+            if split_at < 0:
+                words = clean.split()
+                if len(words) >= 5:
+                    split_at = len(" ".join(words[: len(words) // 2]))
+            if split_at > 0 and len(clean) - split_at > 6:
+                clean = clean[:split_at].rstrip() + "," + clean[split_at:]
+
+        source_ends_sentence = source.strip().endswith(("。", "！", "？", ".", "!", "?"))
+        if source_ends_sentence:
+            if clean and not clean.endswith((".", "!", "?")):
+                ending = source.strip()[-1]
+                clean += "?" if ending in ("？", "?") else "!" if ending in ("！", "!") else "."
+        else:
+            clean = clean.rstrip(".!? ")
+            if source.strip().endswith(("，", ",", "；", ";", "、")) and clean:
+                clean += ","
+        results.append(clean)
+    return results
+
+
 @stage("translation")
 def translate_subtitles(
     srt_segments,

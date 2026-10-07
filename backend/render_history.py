@@ -43,6 +43,7 @@ SHARED_HISTORY_FILE = (
 )
 V2_HISTORY_FILE = Path(os.getenv("TOOL_V2_RENDER_HISTORY", str(_resolve_v2_history())))
 HISTORY_FILE = V2_HISTORY_FILE
+LOCK_FILE = HISTORY_FILE.with_name(HISTORY_FILE.name + ".lock")
 
 
 def format_duration(seconds: float) -> str:
@@ -114,10 +115,7 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
     ]
     if PATHS.shared_workspace_dir:
         workspace_candidates.extend(
-            [
-                PATHS.shared_workspace_dir / "bot_system" / "job_status.json",
-                PATHS.shared_workspace_dir / "job_status.json",
-            ]
+            [workspace / "bot_system" / "job_status.json", workspace / "job_status.json"]
         )
     for ws in workspace_candidates:
         if ws.is_file():
@@ -196,38 +194,65 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
             except Exception:
                 pass
 
-    # 3. Đọc bổ sung từ các job manifest V2 trong workspace
-    v2_workspaces = [WORKSPACE_DIR]
-    if PATHS.shared_workspace_dir:
-        v2_workspaces.append(PATHS.shared_workspace_dir)
-    for root_ws in v2_workspaces:
-        if root_ws.is_dir():
-            for mf in root_ws.glob("*/pipeline_v2/job_manifest.json"):
+    def manifest_duration(data: dict) -> int:
+        created = data.get("created_at")
+        updated = data.get("updated_at")
+        try:
+            if isinstance(created, (int, float)) and isinstance(updated, (int, float)):
+                return max(0, int(round(updated - created)))
+            if created and updated:
+                start = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+                end = datetime.fromisoformat(str(updated).replace("Z", "+00:00"))
+                return max(0, int(round((end - start).total_seconds())))
+        except (TypeError, ValueError):
+            pass
+        stages = data.get("stages", {})
+        if isinstance(stages, dict):
+            return max(
+                0,
+                int(
+                    round(
+                        sum(
+                            float(stage.get("duration_s", 0) or 0)
+                            for stage in stages.values()
+                            if isinstance(stage, dict)
+                        )
+                    )
+                ),
+            )
+        return 0
+
+    # V1 manifests are distinct from the dashboard's summarized job history.
+    for workspace in workspaces:
+        md = workspace / "bot_system" / "manifests"
+        if md.is_dir():
+            for mf in md.glob("*.manifest.json"):
+                try:
+                    data = json.loads(mf.read_text(encoding="utf-8"))
+                    duration = manifest_duration(data)
+                    if duration > 0:
+                        register(data.get("video_name", ""), duration)
+                        output_path = data.get("output_video_path")
+                        if output_path:
+                            register(Path(output_path).name, duration)
+                except Exception:
+                    continue
+
+    # V2 manifests may live in either the local or shared workspace.
+    for workspace in workspaces:
+        if workspace.is_dir():
+            for mf in workspace.glob("*/pipeline_v2/job_manifest.json"):
                 try:
                     d = json.loads(mf.read_text(encoding="utf-8"))
-                    c_at = d.get("created_at")
-                    u_at = d.get("updated_at")
-                    if c_at and u_at:
-                        t0 = datetime.fromisoformat(c_at.replace("Z", "+00:00"))
-                        t1 = datetime.fromisoformat(u_at.replace("Z", "+00:00"))
-                        dur = int(round(max(0, (t1 - t0).total_seconds())))
-                        if dur > 0:
-                            jname = mf.parent.parent.name
-                            meta.setdefault(jname, dur)
-                            meta.setdefault(f"{jname}.mp4", dur)
-                            meta.setdefault(f"Dubbed_{jname}", dur)
-                            meta.setdefault(f"Dubbed_{jname}.mp4", dur)
-                            meta.setdefault(f"final_{jname}.mp4", dur)
-                            sp = d.get("metadata", {}).get("source_path")
-                            if sp:
-                                sname = Path(sp).name
-                                meta.setdefault(sname, dur)
-                                meta.setdefault(f"Dubbed_{sname}", dur)
-                                if not sname.lower().endswith(".mp4"):
-                                    meta.setdefault(f"{sname}.mp4", dur)
-                                    meta.setdefault(f"Dubbed_{sname}.mp4", dur)
+                    duration = manifest_duration(d)
+                    if duration > 0:
+                        job_name = mf.parent.parent.name
+                        register(job_name, duration)
+                        source_path = d.get("metadata", {}).get("source_path")
+                        if source_path:
+                            register(Path(source_path).name, duration)
                 except Exception:
-                    pass
+                    continue
 
     return meta
 

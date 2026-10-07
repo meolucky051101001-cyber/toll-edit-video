@@ -17,10 +17,8 @@ def _resolve_control_dir() -> Path:
             return c
     return Path(r"C:\tool v1\workspace\control")
 
-ROOT = Path(__file__).resolve().parent
-BASE = Path(os.getenv("TOOL_V2_CONTROL_DIR", str(ROOT.parent / "workspace" / "control")))
+BASE = _resolve_control_dir()
 BASE.mkdir(parents=True, exist_ok=True)
-
 ALIASES = {'capcut-vi-VN-HoaiMyNeural': 'microsoft-hoaimy', 'capcut-vi-VN-NamMinhNeural': 'microsoft-namminh'}
 
 DEFAULT_CATALOG = [

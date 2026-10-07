@@ -11,6 +11,7 @@ if isinstance(sys.stderr, io.TextIOWrapper):
 
 import re
 import srt
+import logging
 from datetime import timedelta
 import threading
 
@@ -21,7 +22,6 @@ from .model_runtime import ModelRuntimeError, run_model_stage, runtime_module_av
 logger = logging.getLogger(__name__)
 
 from .v1_model_policy import current_v1_model_policy
-import logging
 import time
 
 
