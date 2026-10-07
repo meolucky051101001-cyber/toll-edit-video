@@ -8,10 +8,16 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, List
 
+try:
+    from backend.config.paths import AppPaths
+except ImportError:
+    from config.paths import AppPaths
+
 logger = logging.getLogger("canvas_settings")
 
 ROOT = Path(__file__).resolve().parent
-WORKSPACE = Path(os.getenv("AUTODUB_WORKSPACE", str(ROOT.parent / "workspace")))
+PATHS = AppPaths.from_environment(ROOT.parent)
+WORKSPACE = PATHS.workspace
 def _resolve_settings_file() -> Path:
     bot_system = WORKSPACE / "bot_system"
     target = bot_system / "canvas_settings.json"
@@ -84,8 +90,7 @@ def get_available_motion_backgrounds() -> List[Dict[str, Any]]:
 
     dirs_to_check = [
         MOTION_BG_DIR,
-        Path("C:/tool v1/workspace/motion_backgrounds"),
-        Path("C:/tool v2/workspace/motion_backgrounds")
+        PATHS.shared_assets_dir / "motion_backgrounds",
     ]
 
     found_files = {}
@@ -138,7 +143,7 @@ def resolve_motion_bg_path(filename_or_path: str) -> str:
     if p.is_file() and p.exists():
         return str(p).replace("\\", "/")
     # Kiểm tra trong các thư mục motion_backgrounds
-    for d in [MOTION_BG_DIR, Path("C:/tool v1/workspace/motion_backgrounds"), Path("C:/tool v2/workspace/motion_backgrounds")]:
+    for d in [MOTION_BG_DIR, PATHS.shared_assets_dir / "motion_backgrounds"]:
         candidate = d / p.name
         if candidate.is_file() and candidate.exists():
             return str(candidate).replace("\\", "/")
@@ -215,8 +220,7 @@ def get_available_image_backgrounds() -> List[Dict[str, Any]]:
 
     dirs_to_check = [
         IMAGE_BG_DIR,
-        Path("C:/tool v1/workspace/background_images"),
-        Path("C:/tool v2/workspace/background_images")
+        PATHS.shared_assets_dir / "background_images",
     ]
 
     valid_exts = {".jpg", ".jpeg", ".png", ".webp"}
@@ -269,7 +273,7 @@ def resolve_image_bg_path(filename_or_path: str) -> str:
     p = Path(filename_or_path)
     if p.is_file() and p.exists():
         return str(p).replace("\\", "/")
-    for d in [IMAGE_BG_DIR, Path("C:/tool v1/workspace/background_images"), Path("C:/tool v2/workspace/background_images")]:
+    for d in [IMAGE_BG_DIR, PATHS.shared_assets_dir / "background_images"]:
         candidate = d / p.name
         if candidate.is_file() and candidate.exists():
             return str(candidate).replace("\\", "/")

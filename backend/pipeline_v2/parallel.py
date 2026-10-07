@@ -30,10 +30,19 @@ async def run_ocr_and_translation(
     enabled: bool,
 ) -> ParallelContextResult:
     if enabled:
-        ocr_result, translation_result = await asyncio.gather(
-            _invoke(ocr_callback), _invoke(translation_callback)
-        )
-        return ParallelContextResult(ocr_result, translation_result, True)
+        t_ocr = asyncio.create_task(_invoke(ocr_callback))
+        t_trans = asyncio.create_task(_invoke(translation_callback))
+        try:
+            ocr_result, translation_result = await asyncio.gather(t_ocr, t_trans)
+            return ParallelContextResult(ocr_result, translation_result, True)
+        except BaseException:
+            for task in (t_ocr, t_trans):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(t_ocr, t_trans, return_exceptions=True)
+            raise
     ocr_result = await _invoke(ocr_callback)
     translation_result = await _invoke(translation_callback)
     return ParallelContextResult(ocr_result, translation_result, False)
+
+

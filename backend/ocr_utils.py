@@ -290,6 +290,9 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                 ocr_strategy = "full"
 
     target_timestamps = []
+    is_adaptive = bool(kwargs.get("adaptive", False))
+    interval = max(0.08, min(0.5, float(os.getenv("OCR_TRACK_INTERVAL", "0.2"))))
+
     if srt_segments:
         # Cover every speech segment; process recognition in bounded batches.
         interval = max(0.1, min(5.0, float(os.getenv("V1_OCR_TRACK_INTERVAL", "1.2"))))

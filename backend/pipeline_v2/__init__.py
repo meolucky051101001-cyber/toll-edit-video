@@ -1,7 +1,7 @@
-"""Durable, opt-in pipeline v2 building blocks.
+"""Durable Pipeline V2 building blocks.
 
-Legacy remains the default; heavyweight modules are loaded only after mode
-selection or inside a short-lived worker process.
+Heavyweight modules are loaded only after mode selection or inside a
+short-lived worker process. Legacy remains available as a rollback mode.
 """
 
 from .artifact_store import ArtifactStore, ArtifactValidation
@@ -29,3 +29,4 @@ __all__ = [
     "StageStatus",
     "fingerprint_json",
 ]
+

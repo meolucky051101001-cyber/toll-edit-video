@@ -16,6 +16,11 @@ import copy
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
+try:
+    from backend.config.paths import AppPaths
+except ImportError:
+    from config.paths import AppPaths
+
 ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
@@ -33,8 +38,6 @@ SYSTEM_DEFAULTS = {
     "speed": 1.0,
     "bgm_volume_db": -2.0,
     "dubbing_volume_db": 1.0,
-    "separation_mode": "roformer",
-    "ducking_mode": "soft",
     "language": "vi",
     "subtitle_style": "default",
     "script_mode": "default",
@@ -270,16 +273,6 @@ def resolve_effective_config(
     }
     """
     base_defaults = copy.deepcopy(SYSTEM_DEFAULTS)
-    try:
-        from audio_settings import get_audio_settings
-        _cur_audio = get_audio_settings()
-        base_defaults["bgm_volume_db"] = _cur_audio.get("bgm_volume_db", -2.0)
-        base_defaults["dubbing_volume_db"] = _cur_audio.get("dubbing_volume_db", 1.0)
-        base_defaults["separation_mode"] = _cur_audio.get("separation_mode", "roformer")
-        base_defaults["ducking_mode"] = _cur_audio.get("ducking_mode", "soft")
-    except Exception:
-        pass
-
     if system_defaults:
         base_defaults.update(system_defaults)
 
@@ -318,14 +311,6 @@ def resolve_effective_config(
                     except (ValueError, TypeError):
                         warnings.append(f"Giá trị '{v}' cho '{k}' không hợp lệ; bỏ qua ghi đè.")
                         continue
-                elif k == "separation_mode":
-                    v = str(v).strip().lower()
-                    if v not in ("roformer", "demucs", "bypass"):
-                        v = "roformer"
-                elif k == "ducking_mode":
-                    v = str(v).strip().lower()
-                    if v not in ("soft", "medium", "off"):
-                        v = "soft"
                 effective[k] = v
                 sources[k] = "video_override"
 

@@ -3,10 +3,15 @@ import os
 import logging
 from pathlib import Path
 
+try:
+    from backend.config.paths import AppPaths
+except ImportError:
+    from config.paths import AppPaths
+
 logger = logging.getLogger("audio_settings")
 
 ROOT = Path(__file__).resolve().parent
-WORKSPACE = Path(os.getenv("AUTODUB_WORKSPACE", str(ROOT.parent / "workspace")))
+WORKSPACE = AppPaths.from_environment(ROOT.parent).workspace
 def _resolve_settings_file() -> Path:
     bot_system = WORKSPACE / "bot_system"
     target = bot_system / "audio_settings.json"

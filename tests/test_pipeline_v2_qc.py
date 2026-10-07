@@ -9,11 +9,30 @@ from backend.pipeline_v2.qc import (
     _check_ass_safe_area,
     _check_segments,
     _parse_srt_timestamp,
+    _video_frame_rate,
     run_report_only_qc,
 )
 
 
 class SegmentQcTests(unittest.TestCase):
+    def test_video_frame_rate_uses_ffprobe_fraction_and_safe_fallback(self):
+        probe = {
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "avg_frame_rate": "30000/1001",
+                    "r_frame_rate": "30/1",
+                }
+            ]
+        }
+        self.assertAlmostEqual(_video_frame_rate(probe), 29.97002997, places=6)
+        self.assertEqual(
+            _video_frame_rate(
+                {"streams": [{"codec_type": "video", "avg_frame_rate": "0/0"}]}
+            ),
+            30.0,
+        )
+
     def test_srt_timestamp_parser(self):
         self.assertEqual(_parse_srt_timestamp("01:02:03,500"), 3723.5)
 
@@ -71,6 +90,60 @@ class SegmentQcTests(unittest.TestCase):
             self.assertEqual(metrics["timing_failure_ids"], [1])
             self.assertEqual(by_name["segment_timing"].status, "error")
             self.assertEqual(by_name["translation_fallback"].status, "error")
+            self.assertEqual(by_name["tts_integrity"].status, "skipped")
+
+    def test_tts_integrity_pass_and_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "voice.wav"
+            audio.write_bytes(b"voice")
+            path = Path(directory) / "segments.json"
+
+            # Case 1: Pass without silent fallback
+            path.write_text(
+                json.dumps(
+                    {
+                        "segments": [
+                            {
+                                "index": 1,
+                                "start": 0.0,
+                                "end": 1.0,
+                                "content": "Xin chào",
+                                "audio_path": str(audio),
+                                "is_silent_fallback": False,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            metrics, checks = _check_segments(path)
+            by_name = {check.name: check for check in checks}
+            self.assertEqual(by_name["tts_integrity"].status, "pass")
+            self.assertEqual(metrics["tts_degraded_segments"], 0)
+
+            # Case 2: Degraded with silent fallback
+            path.write_text(
+                json.dumps(
+                    {
+                        "segments": [
+                            {
+                                "index": 1,
+                                "start": 0.0,
+                                "end": 1.0,
+                                "content": "Xin chào",
+                                "audio_path": str(audio),
+                                "is_silent_fallback": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            metrics, checks = _check_segments(path)
+            by_name = {check.name: check for check in checks}
+            self.assertEqual(by_name["tts_integrity"].status, "error")
+            self.assertEqual(metrics["tts_degraded_segments"], 1)
+            self.assertEqual(metrics["tts_degraded_segment_ids"], [1])
 
 
 class SubtitleQcTests(unittest.TestCase):
@@ -131,6 +204,78 @@ class ReportOnlyGuaranteeTests(unittest.TestCase):
             self.assertEqual(report.overall, "issues_found")
             self.assertFalse(report.blocking)
             self.assertTrue(report.delivery_allowed)
+
+    @mock.patch("backend.pipeline_v2.qc._run_command")
+    def test_sample_frames_includes_transitions_edges_weak_ocr_and_tail(self, run_command):
+        from backend.pipeline_v2.qc import _sample_frames
+        run_command.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / "video.mp4"
+            video.write_bytes(b"dummy")
+            diag_dir = Path(directory) / "diagnostics"
+
+            # Create dummy image output for committed stages
+            def fake_command(cmd, timeout):
+                output_pattern = Path(cmd[-1])
+                output_pattern.parent.mkdir(parents=True, exist_ok=True)
+                count = int(cmd[cmd.index("-frames:v") + 1])
+                for index in range(count):
+                    out_path = Path(
+                        str(output_pattern).replace("%06d", "{:06d}".format(index))
+                    )
+                    out_path.write_bytes(b"fake png")
+                from tests.test_pixel_cover_qc import _mock_pts
+                return mock.Mock(returncode=0, stdout="", stderr=_mock_pts(cmd))
+
+            run_command.side_effect = fake_command
+
+            extra = [("transition_0", 2.5), ("weak_ocr_0", 4.0), ("near_edge_0", 1.2)]
+            artifacts, checks = _sample_frames(
+                video,
+                duration=10.0,
+                diagnostics_directory=diag_dir,
+                ffmpeg_binary="ffmpeg",
+                timeout=30.0,
+                extra_samples=extra,
+            )
+            labels = [a["key"] for a in artifacts]
+            self.assertTrue(any("transition_0" in l for l in labels))
+            self.assertTrue(any("weak_ocr_0" in l for l in labels))
+            self.assertTrue(any("near_edge_0" in l for l in labels))
+            self.assertTrue(any("tail" in l for l in labels))
+            self.assertEqual(checks[0].status, "pass")
+            self.assertEqual(run_command.call_count, 1)
+            self.assertEqual(checks[0].metrics["ffmpeg_invocations"], 1)
+
+
+class AudibilityQcTests(unittest.TestCase):
+    def test_audible_speech_passes_and_silent_speech_errors(self):
+        import numpy as np
+        import soundfile as sf
+        from backend.pipeline_v2.qc import _check_mixed_audio_audibility
+
+        with tempfile.TemporaryDirectory() as td:
+            sr = 16000
+            # 2.0s audio: 0.0 - 1.0 has tone (-17 dB), 1.0 - 2.0 has zero silence
+            t = np.linspace(0, 1.0, sr, endpoint=False)
+            tone = (0.2 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+            silence = np.zeros(sr, dtype=np.float32)
+            audio = np.concatenate([tone, silence])
+            wav_path = Path(td) / "mixed.wav"
+            sf.write(str(wav_path), audio, sr)
+
+            # Segment 1 in tone region
+            seg1 = {"id": 1, "start": 0.1, "end": 0.9, "content": "Xin chào"}
+            metrics, checks = _check_mixed_audio_audibility(wav_path, [seg1])
+            self.assertEqual(checks[0].status, "pass")
+            self.assertEqual(metrics["inaudible_segment_ids"], [])
+
+            # Segment 2 in silence region
+            seg2 = {"id": 2, "start": 1.1, "end": 1.9, "content": "Tôi đang nói"}
+            metrics2, checks2 = _check_mixed_audio_audibility(wav_path, [seg2])
+            self.assertEqual(checks2[0].status, "error")
+            self.assertEqual(metrics2["inaudible_segment_ids"], [2])
 
 
 if __name__ == "__main__":

@@ -2469,15 +2469,14 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             </button>
           </div>
           <div style="display: flex; gap: 6px;">
-            <input type="text" id="batchInputFolder" class="search-input" style="flex: 1;" value="D:\banve" placeholder="Ví dụ: D:\banve hoặc D:\video phôi">
+            <input type="text" id="batchInputFolder" class="search-input" style="flex: 1;" value="__CONFIGURED_INPUT_DIR__" placeholder="Chọn hoặc nhập đường dẫn video nguồn">
             <button type="button" class="btn btn-outline" style="padding: 0 12px; font-size: 12px; font-weight: 600; white-space: nowrap; display: flex; align-items: center; gap: 4px;" onclick="chooseBatchInputFolder()" title="Duyệt thư mục trên máy tính">
               <span>📂 Duyệt</span>
             </button>
           </div>
           <div class="folder-chips">
-            <span class="folder-chip" onclick="setBatchInputFolder('D:\\banve')">D:\banve</span>
-            <span class="folder-chip" onclick="setBatchInputFolder('D:\\video phôi')">D:\video phôi</span>
-            <span class="folder-chip" onclick="setBatchInputFolder('C:\\tool v1\\workspace\\downloads')">Downloads</span>
+            <span class="folder-chip" onclick="setBatchInputFolder(window.AUTO_DUB_PATHS.input)">Thư mục video nguồn</span>
+            <span class="folder-chip" onclick="setBatchInputFolder(window.AUTO_DUB_PATHS.output)">Thư mục thành phẩm</span>
           </div>
         </div>
 
@@ -2490,14 +2489,13 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             </button>
           </div>
           <div style="display: flex; gap: 6px;">
-            <input type="text" id="batchOutputFolder" class="search-input" style="flex: 1;" value="D:\banve\chong_reup" placeholder="Ví dụ: D:\banve\chong_reup">
+            <input type="text" id="batchOutputFolder" class="search-input" style="flex: 1;" value="__CONFIGURED_FRAMED_OUTPUT_DIR__" placeholder="Mặc định: thư mục thành phẩm đã cấu hình">
             <button type="button" class="btn btn-outline" style="padding: 0 12px; font-size: 12px; font-weight: 600; white-space: nowrap; display: flex; align-items: center; gap: 4px;" onclick="chooseBatchOutputFolder()" title="Duyệt thư mục trên máy tính">
               <span>📂 Duyệt</span>
             </button>
           </div>
           <div class="folder-chips">
-            <span class="folder-chip" onclick="setBatchOutputFolder('D:\\banve\\chong_reup')">D:\banve\chong_reup</span>
-            <span class="folder-chip" onclick="setBatchOutputFolder('D:\\video phôi\\da_dong_khung')">Phôi Đóng Khung</span>
+            <span class="folder-chip" onclick="setBatchOutputFolder(window.AUTO_DUB_PATHS.framed_output)">Thư mục xuất mặc định</span>
           </div>
         </div>
 
@@ -3208,7 +3206,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
     }
 
     async function chooseBatchInputFolder() {
-      const current = document.getElementById('batchInputFolder').value.trim() || 'D:\\banve';
+      const current = document.getElementById('batchInputFolder').value.trim() || window.AUTO_DUB_PATHS.input;
       showToast('📂 Đang mở cửa sổ chọn thư mục Windows...');
       try {
         const res = await fetch('/api/workflow/choose-folder', {
@@ -3236,7 +3234,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
     }
 
     async function chooseBatchOutputFolder() {
-      const current = document.getElementById('batchOutputFolder').value.trim() || 'D:\\banve\\chong_reup';
+      const current = document.getElementById('batchOutputFolder').value.trim() || window.AUTO_DUB_PATHS.framed_output;
       showToast('📂 Đang mở cửa sổ chọn thư mục Windows...');
       try {
         const res = await fetch('/api/workflow/choose-folder', {
@@ -3264,7 +3262,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
     async function chooseExportOutputFolder() {
       const inputEl = document.getElementById('exportOutputFolder');
-      const current = (inputEl ? inputEl.value.trim() : '') || 'D:\\banve';
+      const current = (inputEl ? inputEl.value.trim() : '') || window.AUTO_DUB_PATHS.output;
       showToast('📂 Đang mở cửa sổ chọn thư mục Windows...');
       try {
         const res = await fetch('/api/workflow/choose-folder', {
@@ -4573,7 +4571,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       const selectedSrtRadio = document.querySelector('input[name="exportSrtType"]:checked');
       const srtType = selectedSrtRadio ? selectedSrtRadio.value : 'translated';
       const exportSrt = document.getElementById('chkExportSrt').checked;
-      const outFolder = document.getElementById('exportOutputFolder').value.trim() || 'D:\\banve';
+      const outFolder = document.getElementById('exportOutputFolder').value.trim() || window.AUTO_DUB_PATHS.output;
       const useAntiReup = document.getElementById('chkExportAntiReup').checked;
 
       const payload = {
@@ -5327,7 +5325,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           <div style="font-size: 13px; font-weight: 700; color: #f1f5f9; margin-bottom: 6px;" id="exportModalVideoName">🎬 Video: --</div>
           <div style="display: flex; gap: 8px; align-items: center;">
             <span style="font-size: 11px; color: #94a3b8; white-space: nowrap;">Thư mục xuất:</span>
-            <input type="text" id="exportOutputFolder" class="form-input" style="flex: 1; padding: 4px 8px; font-size: 12px; height: 28px;" value="D:\banve">
+            <input type="text" id="exportOutputFolder" class="form-input" style="flex: 1; padding: 4px 8px; font-size: 12px; height: 28px;" value="__CONFIGURED_OUTPUT_DIR__">
             <button type="button" class="btn btn-outline" style="padding: 0 10px; font-size: 11px; height: 28px; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: #38bdf8; border-color: rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.08); cursor: pointer;" onclick="chooseExportOutputFolder()" title="Duyệt chọn thư mục xuất video hoàn tất">
               <span>📂 Duyệt...</span>
             </button>

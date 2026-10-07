@@ -36,3 +36,5 @@ def require_transition(current: StageStatus, target: StageStatus) -> None:
                 current.value, target.value
             )
         )
+
+

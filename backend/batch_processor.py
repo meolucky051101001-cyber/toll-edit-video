@@ -1,9 +1,9 @@
 from video_pause import checkpoint as pause_checkpoint
 """
 Batch Video Processor - Tự động xử lý hàng loạt video từ thư mục máy tính (Offline / Local Folder)
-- Quét toàn bộ video trong thư mục đầu vào (mặc định: D:\\video_input)
+- Quét toàn bộ video trong thư mục đầu vào đã cấu hình.
 - Xử lý tuần tự từng video một để tối ưu RAM/CPU, không gây giật lag
-- Xuất thành phẩm trực tiếp vào thư mục đầu ra (mặc định: D:\\banve)
+- Xuất thành phẩm trực tiếp vào thư mục đầu ra đã cấu hình.
 """
 
 import os
@@ -28,14 +28,15 @@ if isinstance(sys.stderr, io.TextIOWrapper):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-# Load biến môi trường từ .env
-env_file = os.path.join(BASE_DIR, ".env")
-if os.path.exists(env_file):
-    with open(env_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if "=" in line and not line.strip().startswith("#"):
-                k, v = line.strip().split("=", 1)
-                os.environ[k.strip()] = v.strip().strip('"').strip("'")
+from environment import load_environment
+
+load_environment(Path(__file__).resolve().parent)
+try:
+    from config.paths import AppPaths
+except ImportError:
+    from backend.config.paths import AppPaths
+
+PATHS = AppPaths.from_environment(Path(BASE_DIR).parent)
 
 # The Tool V1 batch entrypoint is permanently isolated from Pipeline V2.
 os.environ["PIPELINE_MODE"] = "legacy"
@@ -61,6 +62,11 @@ os.makedirs(WORKSPACE, exist_ok=True)
 
 logger = logging.getLogger("batch_processor")
 logger.setLevel(logging.INFO)
+try:
+    from social_downloader import SensitiveUrlFilter
+    logger.addFilter(SensitiveUrlFilter())
+except Exception:
+    pass
 
 # Import các module AI
 from ai.transcription import extract_subtitles_whisper, save_srt
@@ -176,6 +182,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 pass
 
     from pipeline_v2.config import PipelineMode, PipelineSettings
+    from pipeline_v2.delivery_verification import verify_delivered_product
     pipeline_settings = PipelineSettings.from_env()
     if pipeline_settings.mode is PipelineMode.V2:
         try:
@@ -188,7 +195,20 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             async def v2_progress(stage: str, state: str):
                 await notify("[pipeline v2] {}: {}".format(stage, state))
 
-            final_dest = os.path.join(output_dir, f"Dubbed_{base_name}.mp4")
+            # Prevent overwriting an existing output that belongs to a different video
+            default_dest_name = f"Dubbed_{base_name}.mp4"
+            final_dest = os.path.join(output_dir, default_dest_name)
+            if os.path.isfile(final_dest) and source_sha256:
+                existing_ver = verify_delivered_product(
+                    Path(out_dir),
+                    expected_output_path=final_dest,
+                    expected_source_sha256=source_sha256,
+                    check_sha256=False,
+                    verify_media_streams=False,
+                )
+                if not existing_ver.is_valid:
+                    final_dest = os.path.join(output_dir, f"Dubbed_{base_name}_{source_hash_short[:6]}.mp4")
+
             rvc_model = discover_rvc_model(Path(WORKSPACE))
             from voice_selection import resolve_voice
             from dataclasses import replace
@@ -205,9 +225,29 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 progress=v2_progress,
             )
             await VideoPipelineRunner(request).run()
-            await notify("✅ Pipeline v2 hoàn thành -> {}".format(final_dest))
-            return True
+
+            # Strictly verify delivered product before claiming success
+            ver_result = verify_delivered_product(
+                Path(out_dir),
+                expected_output_path=final_dest,
+                expected_source_sha256=source_sha256 or None,
+                qc_policy=pipeline_settings.qc_gate_policy,
+                check_sha256=True,
+                verify_media_streams=True,
+            )
+            if ver_result.is_valid:
+                await notify("✅ Pipeline v2 hoàn thành và xác minh thành công -> {}".format(final_dest))
+                return True
+            else:
+                logger.error("Pipeline v2 giao hàng thất bại do không đạt xác minh: %s", ver_result.reason)
+                await notify("❌ Pipeline v2 thất bại: {}".format(ver_result.reason))
+                return False
         except Exception as error:
+            is_qc_block = "QC gate" in str(error) or error.__class__.__name__ == "QCGateBlocked"
+            if is_qc_block and getattr(pipeline_settings, "qc_gate_policy", None) == QCGatePolicy.BLOCK:
+                logger.error("Pipeline v2 bị chặn do vi phạm tiêu chuẩn QC nghiêm ngặt: %s", error)
+                await notify("❌ Pipeline v2 thất bại: Vi phạm tiêu chuẩn QC ({})".format(error))
+                return False
             logger.error("Pipeline v2 failed: %s", error, exc_info=True)
             await notify("❌ Pipeline v2 lỗi: {}".format(error))
             return False
@@ -658,6 +698,71 @@ async def _process_batch_folder(
     processed_archive = os.path.join(input_dir, "processed")
     os.makedirs(processed_archive, exist_ok=True)
 
+    def _safe_archive_source(vpath: str, base_stem: str, vname: str, job_dir: Optional[str] = None) -> bool:
+        dest_archive = os.path.join(processed_archive, vname)
+        if os.path.exists(dest_archive):
+            dest_archive = os.path.join(processed_archive, f"{base_stem}_{int(time.time())}{os.path.splitext(vname)[1]}")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                shutil.move(vpath, dest_archive)
+                logger.info("Đã lưu trữ video nguồn hoàn thành: %s -> %s", vpath, dest_archive)
+                return True
+            except (OSError, PermissionError) as err:
+                logger.warning("Thử di chuyển video nguồn lần %d/%d thất bại (%s): %s", attempt + 1, max_retries, err, vpath)
+                time.sleep(0.5)
+
+        logger.warning("Không thể di chuyển file nguồn do lock Windows. Đánh dấu delivered_archive_pending: %s", vpath)
+        if job_dir and os.path.isdir(job_dir):
+            try:
+                marker = os.path.join(job_dir, "archive_status.json")
+                with open(marker, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "status": "delivered_archive_pending",
+                        "source_path": vpath,
+                        "target_archive": dest_archive,
+                        "marked_at": time.time(),
+                    }, f, indent=2)
+            except Exception:
+                pass
+        return False
+
+    from pipeline_v2.artifact_store import hash_file
+    from pipeline_v2.delivery_verification import verify_delivered_product
+
+    # Kiểm tra và xử lý các video có trạng thái delivered_archive_pending trước
+    for pending_file in list(video_files):
+        if not os.path.isfile(pending_file):
+            continue
+        try:
+            p_sha, _ = hash_file(pending_file)
+            p_stem = os.path.splitext(os.path.basename(pending_file))[0]
+            p_job_dir = os.path.join(WORKSPACE, f"batch_{p_sha[:10]}_{p_stem}")
+            marker = os.path.join(p_job_dir, "archive_status.json")
+            if os.path.isfile(marker):
+                ver = verify_delivered_product(p_job_dir, expected_source_sha256=p_sha, check_sha256=False, verify_media_streams=False)
+                if ver.is_valid:
+                    if _safe_archive_source(pending_file, p_stem, os.path.basename(pending_file), p_job_dir):
+                        try:
+                            os.remove(marker)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+    # Làm mới danh sách video cần xử lý sau khi hoàn tất các pending archive
+    video_files = [
+        os.path.join(input_dir, f) for f in os.listdir(input_dir)
+        if f.lower().endswith(SUPPORTED_EXTENSIONS) and not f.startswith("Dubbed_") and os.path.isfile(os.path.join(input_dir, f))
+    ]
+    total = len(video_files)
+    if total == 0:
+        summary_msg = f"🎉 **ĐÃ HOÀN TẤT!**\nToàn bộ video đã được xác minh thành phẩm và lưu trữ."
+        logger.info(summary_msg)
+        if progress_callback:
+            await progress_callback(summary_msg)
+        return
+
     success_count = 0
     failure_count = 0
     for idx, vpath in enumerate(video_files, 1):
@@ -761,6 +866,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Batch Video Dubbing Processor")
     parser.add_argument("--input", default=DEFAULT_INPUT_DIR, help="Thư mục chứa video gốc")
     parser.add_argument("--output", default=DEFAULT_OUTPUT_DIR, help="Thư mục lưu video thành phẩm")
+    parser.add_argument("--video", default="", help="File video cụ thể cần xử lý lại")
     args = parser.parse_args()
 
-    asyncio.run(process_batch_folder(args.input, args.output))
+    if args.video and os.path.isfile(args.video):
+        asyncio.run(process_single_local_video(args.video, args.output))
+    else:
+        asyncio.run(process_batch_folder(args.input, args.output))
