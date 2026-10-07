@@ -1,4 +1,4 @@
-"""Run one Tool V2 service independently under Windows Task Scheduler."""
+"""Run one Tool V1 service independently under Windows Task Scheduler."""
 import argparse
 import ctypes
 import logging
@@ -19,12 +19,13 @@ def main():
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
     kernel.CreateMutexW.restype = ctypes.c_void_p
-    mutex = kernel.CreateMutexW(None, False, "Local\\AutoDubV2_" + service)
+    mutex = kernel.CreateMutexW(None, False, "Local\\AutoDubV1_" + service)
     if not mutex:
         raise ctypes.WinError(ctypes.get_last_error())
     if ctypes.get_last_error() == 183:
         return
-    logs = ROOT.parent / "workspace" / "service_logs"
+    bs_logs = ROOT.parent / "workspace" / "bot_system" / "service_logs"
+    logs = bs_logs if (bs_logs.is_dir() or (ROOT.parent / "workspace" / "bot_system").is_dir()) else (ROOT.parent / "workspace" / "service_logs")
     logs.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger(service)
     logger.setLevel(logging.INFO)
@@ -33,9 +34,25 @@ def main():
     handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     logger.addHandler(handler)
     python = ROOT / "venv" / "Scripts" / "python.exe"
-    script = ROOT / ("dashboard_monitor.py" if service == "dashboard" else "telegram_bot.py")
+    script = ROOT / ("main.py" if service == "dashboard" else "telegram_bot.py")
     environment = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
-    control_pause = (ROOT.parent / "workspace" / "control" / "v2.pause")
+    # Keep the control plane available independently of either dashboard.
+    try:
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _sock:
+            _sock.settimeout(0.3)
+            if _sock.connect_ex(('127.0.0.1', 8090)) != 0:
+                control_python = Path(r"C:\tool v1\backend\venv\Scripts\pythonw.exe")
+                control_script = Path(r"C:\tool v1\backend\tool_control.py")
+                subprocess.Popen([str(control_python), str(control_script)],
+                                 cwd=str(control_script.parent), creationflags=subprocess.CREATE_NO_WINDOW,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+    bs_control = ROOT.parent / "workspace" / "bot_system" / "control"
+    control_dir = bs_control if bs_control.is_dir() else (ROOT.parent / "workspace" / "control")
+    control_pause = control_dir / "v1.pause"
     delay = 5
     while True:
         if service != "dashboard" and control_pause.exists():
@@ -50,7 +67,7 @@ def main():
                 process = subprocess.Popen(
                     [str(python), "-u", str(script)], cwd=str(ROOT), env=environment,
                     stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
-                    creationflags=subprocess.CREATE_NO_WINDOW)
+                    creationflags=(subprocess.CREATE_NO_WINDOW | subprocess.NORMAL_PRIORITY_CLASS))
                 logger.info("Started PID %s", process.pid)
                 code = process.wait()
                 logger.warning("Exited code %s; restarting", code)
@@ -62,4 +79,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

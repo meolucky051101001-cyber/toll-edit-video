@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>A2UI Studio & Playground - Giao Diện Động AI Agent</title>
+  <style>
+    :root {
+      --bg-dark: #0a0e17;
+      --bg-card: #131b28;
+      --bg-card-hover: #1c2738;
+      --border: #243247;
+      --primary: #3b82f6;
+      --accent: #06b6d4;
+      --accent-purple: #a855f7;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    body { background-color: var(--bg-dark); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; }
+    
+    header { background: #0f172a; border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; }
+    .logo-area { display: flex; align-items: center; gap: 12px; }
+    .a2ui-badge { background: linear-gradient(135deg, #a855f7, #3b82f6); color: white; padding: 6px 12px; border-radius: 8px; font-weight: bold; font-size: 13px; letter-spacing: 0.5px; }
+    .app-title { font-size: 17px; font-weight: 700; color: #fff; }
+    .app-subtitle { font-size: 11.5px; color: var(--text-muted); }
+    
+    .btn { padding: 7px 14px; border-radius: 8px; border: 1px solid transparent; font-size: 12.5px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: all 0.2s; }
+    .btn-primary { background: #2563eb; color: white; }
+    .btn-primary:hover { background: #1d4ed8; }
+    .btn-success { background: #059669; color: white; }
+    .btn-success:hover { background: #047857; }
+    .btn-purple { background: #9333ea; color: white; }
+    .btn-purple:hover { background: #7e22ce; }
+    .btn-outline { background: transparent; border-color: var(--border); color: var(--text); }
+    .btn-outline:hover { background: var(--bg-card-hover); border-color: var(--text-muted); }
+    
+    .container { max-width: 1540px; margin: 0 auto; padding: 20px; width: 100%; flex: 1; display: flex; flex-direction: column; gap: 18px; }
+    
+    /* Scenario Selector Bar */
+    .scenario-bar { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 12px 18px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+    .scenario-group { display: flex; gap: 8px; align-items: center; }
+    .scenario-label { font-size: 12px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin-right: 6px; }
+    
+    /* Main Layout */
+    .main-grid { display: grid; grid-template-columns: 1.15fr 1fr; gap: 20px; flex: 1; }
+    @media (max-width: 1100px) { .main-grid { grid-template-columns: 1fr; } }
+    
+    .panel { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; }
+    .panel-header { padding: 14px 18px; background: #0f172a; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+    .panel-title { font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+    .panel-body { padding: 18px; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+    
+    /* A2UI Component Rendered Styles */
+    .a2ui-card { background: #182233; border: 1px solid var(--border); border-radius: 12px; padding: 18px; display: flex; flex-direction: column; gap: 14px; position: relative; }
+    .a2ui-card.highlight { border-color: rgba(59, 130, 246, 0.4); box-shadow: 0 0 20px rgba(59, 130, 246, 0.08); }
+    .a2ui-card.highlight::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, #3b82f6, #a855f7); border-radius: 12px 12px 0 0; }
+    .a2ui-card.warning { border-color: rgba(245, 158, 11, 0.4); }
+    .a2ui-card.warning::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: #f59e0b; border-radius: 12px 12px 0 0; }
+    
+    .a2ui-card-title { font-size: 16px; font-weight: 800; color: #fff; }
+    .a2ui-card-subtitle { font-size: 12px; color: var(--text-muted); }
+    
+    /* Voice Selector Widget */
+    .voice-option-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 6px; }
+    .voice-card { background: #0e1624; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; cursor: pointer; transition: all 0.2s; display: flex; justify-content: space-between; align-items: center; }
+    .voice-card.selected { border-color: #3b82f6; background: rgba(59, 130, 246, 0.12); }
+    .voice-name { font-size: 12.5px; font-weight: 600; color: #fff; }
+    .voice-badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: bold; background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    
+    /* Subtitle Review Table */
+    .sub-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+    .sub-table th { text-align: left; padding: 8px; color: var(--text-muted); border-bottom: 1px solid var(--border); }
+    .sub-table td { padding: 10px 8px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+    .confidence-badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
+    .confidence-high { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    .confidence-med { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+    
+    /* Mixer Slider Widget */
+    .mixer-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; background: #0f172a; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); }
+    .mixer-label { font-size: 12px; font-weight: 600; width: 150px; }
+    .mixer-slider { flex: 1; accent-color: var(--primary); cursor: pointer; }
+    .mixer-val { font-size: 12px; font-weight: bold; color: #38bdf8; width: 45px; text-align: right; }
+    
+    /* Inspector Widget */
+    .inspector-box { background: #0f172a; border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+    .inspector-item { display: flex; justify-content: space-between; }
+    .inspector-label { color: var(--text-muted); }
+    .inspector-val { font-weight: 600; color: #fff; }
+    
+    /* JSON & RPC Inspector */
+    .json-box { background: #05080f; border: 1px solid #1e293b; border-radius: 8px; padding: 12px; font-family: "Consolas", "Courier New", monospace; font-size: 11px; line-height: 1.5; color: #a5f3fc; overflow-y: auto; max-height: 520px; white-space: pre-wrap; word-break: break-all; }
+    
+    /* Toast Notification */
+    .toast { position: fixed; bottom: 20px; right: 20px; background: #1e293b; border: 1px solid #3b82f6; color: #fff; padding: 12px 18px; border-radius: 10px; font-size: 13px; display: none; align-items: center; gap: 8px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); z-index: 1000; animation: slideUp 0.3s ease; }
+    @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="logo-area">
+      <div class="a2ui-badge">A2UI v1.0</div>
+      <div>
+        <div class="app-title">A2UI Studio & Playground (Agent-to-User Interface)</div>
+        <div class="app-subtitle">Chuẩn giao diện động tương tác 2 chiều cho AI Agent (Google & CopilotKit Standard)</div>
+      </div>
+    </div>
+    
+    <div style="display: flex; gap: 10px;">
+      <a href="/" class="btn btn-outline">⬅ Quay lại Bảng Điều Khiển Tool V1</a>
+    </div>
+  </header>
+
+  <div class="container">
+
+    <!-- SCENARIOS SELECTOR -->
+    <div class="scenario-bar">
+      <div class="scenario-group">
+        <span class="scenario-label">Chọn Kịch Bản Thử Nghiệm:</span>
+        <button class="btn btn-primary" onclick="loadScenario('multivoice')">🎭 1. Lồng Tiếng 2 Nhân Vật</button>
+        <button class="btn btn-purple" onclick="loadScenario('subtitles')">📝 2. Duyệt Phụ Đề 1-Chạm</button>
+        <button class="btn btn-success" onclick="loadScenario('rater')">🔍 3. Mixer & Đánh Giá Video</button>
+      </div>
+      <div>
+        <button class="btn btn-outline" onclick="loadCatalog()">📦 Xem Component Catalog</button>
+      </div>
+    </div>
+
+    <!-- MAIN TWO-PANEL GRID -->
+    <div class="main-grid">
+
+      <!-- LEFT PANEL: LIVE CLIENT RENDERER -->
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">
+            <span>🖥️ Khung Hiển Thị A2UI Native Renderer</span>
+            <span style="font-size: 11px; padding: 2px 6px; background: rgba(16, 185, 129, 0.2); color: #34d399; border-radius: 4px; font-weight: bold;">Interactive 2-Way</span>
+          </div>
+          <span id="activeSurfaceText" style="font-size: 11px; color: var(--text-muted);">Surface: multivoice-surface</span>
+        </div>
+        <div class="panel-body" id="rendererCanvas">
+          <!-- Dynamic A2UI components rendered here -->
+          <div style="text-align: center; padding: 40px; color: var(--text-muted);">Đang nạp dữ liệu A2UI...</div>
+        </div>
+      </div>
+
+      <!-- RIGHT PANEL: JSON STREAM & RPC INSPECTOR -->
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">
+            <span>📡 Thanh Soi Giao Thức (A2UI Stream & RPC Inspector)</span>
+          </div>
+          <button class="btn btn-outline" style="font-size: 11px; padding: 3px 8px;" onclick="copyJson()">📋 Sao chép</button>
+        </div>
+        <div class="panel-body">
+          <div class="json-box" id="jsonStreamView">Đang chờ luồng dữ liệu...</div>
+        </div>
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- TOAST NOTIFICATION -->
+  <div class="toast" id="toastBox">
+    <span>🤖</span>
+    <span id="toastMsg">Agent đã phản hồi!</span>
+  </div>
+
+  <script>
+    let currentMessages = [];
+    let currentDataModel = {};
+
+    async function loadScenario(name) {
+      try {
+        const res = await fetch(`/api/a2ui/scenario/${name}`);
+        const data = await res.json();
+        currentMessages = data.messages || [];
+        renderA2UIStream(currentMessages);
+      } catch (err) {
+        alert('Lỗi nạp kịch bản A2UI: ' + err.message);
+      }
+    }
+
+    async function loadCatalog() {
+      try {
+        const res = await fetch('/api/a2ui/catalog');
+        const catalog = await res.json();
+        document.getElementById('jsonStreamView').textContent = JSON.stringify(catalog, null, 2);
+        document.getElementById('rendererCanvas').innerHTML = `
+          <div class="a2ui-card highlight">
+            <div class="a2ui-card-title">📦 Component Catalog Đã Đăng Ký</div>
+            <div class="a2ui-card-subtitle">Đây là danh mục các linh kiện tin cậy được client cấp phép cho Agent sử dụng.</div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px;">
+              ${Object.keys(catalog.components).map(c => `
+                <div style="background: #0f172a; padding: 10px; border-radius: 6px; border: 1px solid var(--border);">
+                  <div style="font-weight: bold; color: #38bdf8;">🧩 ${c}</div>
+                  <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">${catalog.components[c].description}</div>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        `;
+      } catch (err) {
+        alert('Lỗi nạp Catalog: ' + err.message);
+      }
+    }
+
+    function renderA2UIStream(messages) {
+      document.getElementById('jsonStreamView').textContent = JSON.stringify(messages, null, 2);
+
+      let surfaceId = "";
+      let components = [];
+      currentDataModel = {};
+
+      messages.forEach(msg => {
+        if (msg.createSurface) {
+          surfaceId = msg.createSurface.surfaceId;
+        }
+        if (msg.updateComponents) {
+          components = msg.updateComponents.components;
+        }
+        if (msg.updateDataModel) {
+          Object.assign(currentDataModel, msg.updateDataModel.value || {});
+        }
+      });
+
+      document.getElementById('activeSurfaceText').textContent = `Surface: ${surfaceId}`;
+      const canvas = document.getElementById('rendererCanvas');
+      canvas.innerHTML = "";
+
+      const compMap = new Map();
+      components.forEach(c => compMap.set(c.id, c));
+
+      // Root cards
+      const rootComps = components.filter(c => c.component === 'Card');
+      if (rootComps.length === 0) {
+        canvas.innerHTML = `<div style="color: var(--text-muted);">Không tìm thấy Component Card gốc.</div>`;
+        return;
+      }
+
+      rootComps.forEach(card => {
+        const cardEl = renderComponent(card, compMap);
+        canvas.appendChild(cardEl);
+      });
+    }
+
+    function renderComponent(comp, compMap) {
+      const type = comp.component;
+
+      if (type === 'Card') {
+        const div = document.createElement('div');
+        div.className = `a2ui-card ${comp.variant || ''}`;
+        div.innerHTML = `
+          <div>
+            <div class="a2ui-card-title">${comp.title || ''}</div>
+            ${comp.subtitle ? `<div class="a2ui-card-subtitle">${comp.subtitle}</div>` : ''}
+          </div>
+        `;
+        const childrenContainer = document.createElement('div');
+        childrenContainer.style.display = 'flex';
+        childrenContainer.style.flexDirection = 'column';
+        childrenContainer.style.gap = '12px';
+
+        (comp.children || []).forEach(childId => {
+          const childComp = compMap.get(childId);
+          if (childComp) {
+            childrenContainer.appendChild(renderComponent(childComp, compMap));
+          }
+        });
+
+        div.appendChild(childrenContainer);
+        return div;
+      }
+
+      if (type === 'Text') {
+        const p = document.createElement('p');
+        p.style.fontSize = comp.variant === 'h1' ? '18px' : comp.variant === 'subheading' ? '14px' : '12.5px';
+        p.style.lineHeight = '1.5';
+        p.style.color = comp.color || (comp.variant === 'subheading' ? '#38bdf8' : 'var(--text)');
+        p.textContent = resolveBinding(comp.text);
+        return p;
+      }
+
+      if (type === 'VoiceSelectorCard') {
+        const wrap = document.createElement('div');
+        wrap.innerHTML = `<div style="font-size: 11.5px; font-weight: bold; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Lựa chọn giọng đọc</div>`;
+        const grid = document.createElement('div');
+        grid.className = 'voice-option-grid';
+
+        const selectedVal = resolveBinding(comp.selectedVoice);
+        (comp.options || []).forEach(opt => {
+          const vcard = document.createElement('div');
+          vcard.className = `voice-card ${selectedVal === opt.id ? 'selected' : ''}`;
+          vcard.innerHTML = `
+            <div>
+              <div class="voice-name">🎙️ ${opt.name}</div>
+            </div>
+            ${opt.recommended ? `<span class="voice-badge">Khuyên dùng</span>` : ''}
+          `;
+          vcard.onclick = () => {
+            grid.querySelectorAll('.voice-card').forEach(el => el.classList.remove('selected'));
+            vcard.classList.add('selected');
+            currentDataModel.voice = opt.id;
+            showToast(`Đã chọn: ${opt.name}`);
+          };
+          grid.appendChild(vcard);
+        });
+        wrap.appendChild(grid);
+        return wrap;
+      }
+
+      if (type === 'SubtitleReviewCard') {
+        const wrap = document.createElement('div');
+        wrap.innerHTML = `
+          <table class="sub-table">
+            <thead>
+              <tr>
+                <th style="width: 70px;">Thời gian</th>
+                <th>Phụ đề gốc (Trung Quốc)</th>
+                <th>Bản dịch tiếng Việt (Gemini AI)</th>
+                <th style="width: 75px;">Độ tin cậy</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${(comp.segments || []).map(s => `
+                <tr>
+                  <td style="color: var(--text-muted); font-size: 11px;">${s.start}</td>
+                  <td style="color: #cbd5e1;">${s.original}</td>
+                  <td style="color: #38bdf8; font-weight: 600;">${s.translated}</td>
+                  <td><span class="confidence-badge ${s.confidence > 0.9 ? 'confidence-high' : 'confidence-med'}">${Math.round(s.confidence * 100)}%</span></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+        return wrap;
+      }
+
+      if (type === 'AudioMixerCard') {
+        const wrap = document.createElement('div');
+        wrap.style.display = 'flex';
+        wrap.style.flexDirection = 'column';
+        wrap.style.gap = '8px';
+
+        wrap.innerHTML = `
+          <div class="mixer-row">
+            <span class="mixer-label">🎵 Nhạc nền gốc (BGM):</span>
+            <input type="range" min="-12" max="6" value="${resolveBinding(comp.bgmVolumeDb) || -2}" class="mixer-slider" oninput="this.nextElementSibling.textContent = this.value + ' dB'">
+            <span class="mixer-val">${resolveBinding(comp.bgmVolumeDb) || -2} dB</span>
+          </div>
+          <div class="mixer-row">
+            <span class="mixer-label">🗣️ Giọng đọc AI (Dubbing):</span>
+            <input type="range" min="-6" max="10" value="${resolveBinding(comp.dubbingVolumeDb) || 2}" class="mixer-slider" oninput="this.nextElementSibling.textContent = '+' + this.value + ' dB'">
+            <span class="mixer-val">+${resolveBinding(comp.dubbingVolumeDb) || 2} dB</span>
+          </div>
+        `;
+        return wrap;
+      }
+
+      if (type === 'VideoInspectorCard') {
+        const wrap = document.createElement('div');
+        wrap.className = 'inspector-box';
+        wrap.innerHTML = `
+          <div class="inspector-item"><span class="inspector-label">Tên video:</span><span class="inspector-val">🎬 ${comp.videoName}</span></div>
+          <div class="inspector-item"><span class="inspector-label">Dung lượng & Thời lượng:</span><span class="inspector-val">${comp.fileSize} • ${comp.duration}</span></div>
+          <div class="inspector-item"><span class="inspector-label">Độ phức tạp phụ đề:</span><span class="inspector-val" style="color: #34d399;">Dễ (Đã dò dải phụ đề đáy)</span></div>
+          <div style="margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.06); color: #93c5fd; font-style: italic;">
+            💡 Đề xuất AI: ${comp.aiNotes}
+          </div>
+        `;
+        return wrap;
+      }
+
+      if (type === 'ButtonGroup') {
+        const div = document.createElement('div');
+        div.style.display = 'flex';
+        div.style.gap = '10px';
+        div.style.justifyContent = comp.align === 'right' ? 'flex-end' : comp.align === 'center' ? 'center' : 'flex-start';
+        div.style.marginTop = '8px';
+
+        (comp.children || []).forEach(childId => {
+          const childComp = compMap.get(childId);
+          if (childComp) div.appendChild(renderComponent(childComp, compMap));
+        });
+        return div;
+      }
+
+      if (type === 'Button') {
+        const btn = document.createElement('button');
+        btn.className = `btn btn-${comp.variant || 'primary'}`;
+        btn.innerHTML = comp.label || 'Bấm';
+
+        if (comp.action && comp.action.callAgentFunction) {
+          btn.onclick = async () => {
+            await triggerAgentFunction(comp.action.callAgentFunction);
+          };
+        }
+        return btn;
+      }
+
+      const fallback = document.createElement('div');
+      fallback.textContent = `[Component: ${type}]`;
+      return fallback;
+    }
+
+    function resolveBinding(val) {
+      if (val && typeof val === 'object' && val.$bind) {
+        const key = val.$bind.split('/').pop();
+        return currentDataModel[key] || val.$bind;
+      }
+      return val;
+    }
+
+    async function triggerAgentFunction(funcSpec) {
+      try {
+        const payload = {
+          name: funcSpec.name,
+          parameters: funcSpec.parameters || {},
+          functionCallId: 'call-' + Date.now()
+        };
+
+        // Ghi nhận RPC vào Inspector
+        const currentText = document.getElementById('jsonStreamView').textContent;
+        document.getElementById('jsonStreamView').textContent = `// [RPC Out] callAgentFunction:\n${JSON.stringify(payload, null, 2)}\n\n${currentText}`;
+
+        const res = await fetch('/api/a2ui/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json();
+        const resp = data.agentFunctionResponse;
+
+        // Ghi nhận phản hồi vào Inspector
+        document.getElementById('jsonStreamView').textContent = `// [RPC In] agentFunctionResponse:\n${JSON.stringify(resp, null, 2)}\n\n` + document.getElementById('jsonStreamView').textContent;
+
+        showToast(resp.result.message || 'Thực thi thành công!');
+      } catch (err) {
+        alert('Lỗi gọi hàm Agent: ' + err.message);
+      }
+    }
+
+    function showToast(msg) {
+      const toast = document.getElementById('toastBox');
+      document.getElementById('toastMsg').textContent = msg;
+      toast.style.display = 'flex';
+      setTimeout(() => { toast.style.display = 'none'; }, 3500);
+    }
+
+    function copyJson() {
+      const text = document.getElementById('jsonStreamView').textContent;
+      navigator.clipboard.writeText(text);
+      showToast('Đã sao chép nội dung JSON A2UI!');
+    }
+
+    // Load default scenario 1
+    loadScenario('multivoice');
+  </script>
+</body>
+</html>

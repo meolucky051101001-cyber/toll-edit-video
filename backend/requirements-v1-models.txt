@@ -1,0 +1,6 @@
+# Optional isolated OCR runtime for Tool V1.
+# Install into backend/model_venv, never into backend/venv.
+paddleocr==3.7.0
+# CUDA 12 / cuDNN 9 DLLs supplied by the V1 torch installation.
+# Do not co-install the CPU onnxruntime package (same Python namespace).
+onnxruntime-gpu==1.26.0

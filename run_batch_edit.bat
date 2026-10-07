@@ -1,6 +1,16 @@
 @echo off
 chcp 65001 >nul
-title Auto Batch Video Dubbing Processor
+title Auto Batch Video Dubbing Processor (Tool V1)
+if not defined AUTODUB_INPUT_DIR (
+    if exist "D:\video phôi" (
+        set "AUTODUB_INPUT_DIR=D:\video phôi"
+    ) else if exist "D:\video phoi" (
+        set "AUTODUB_INPUT_DIR=D:\video phoi"
+    ) else (
+        set "AUTODUB_INPUT_DIR=D:\video_input"
+    )
+)
+if not defined AUTODUB_OUTPUT_DIR set "AUTODUB_OUTPUT_DIR=D:\banve"
 echo ========================================================
 echo   AUTO BATCH VIDEO DUBBING PROCESSOR (OFFLINE / LOCAL)
 echo ========================================================
@@ -16,7 +26,7 @@ if not exist ".\venv\Scripts\python.exe" (
   pause
   exit /b 1
 )
-call ".\venv\Scripts\python.exe" -m pipeline_v2.preflight --project-root "%~dp0" --interface batch
+call ".\venv\Scripts\python.exe" "v1_preflight.py" --project-root "%~dp0" --interface batch
 if errorlevel 1 (
   echo [ERROR] Preflight that bai.
   pause

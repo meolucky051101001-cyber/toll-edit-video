@@ -674,6 +674,39 @@ def get_media_duration(file_path: str | Path) -> float:
     return 0.0
 
 
+def get_media_dimensions(file_path: str | Path) -> Tuple[int, int]:
+    """Lấy kích thước chiều rộng và chiều cao (width, height) của video bằng ffprobe (fallback OpenCV)."""
+    p = clean_fs_path(file_path)
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=p=0:s=x",
+        str(p)
+    ]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        out = proc.stdout.strip()
+        if "x" in out:
+            parts = out.split("x")
+            return int(parts[0]), int(parts[1])
+    except Exception as ex:
+        logger.warning(f"ffprobe không đo được kích thước cho {p}: {ex}")
+
+    try:
+        import cv2
+        cap = cv2.VideoCapture(str(p))
+        if cap.isOpened():
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+            if w > 0 and h > 0:
+                return w, h
+    except Exception:
+        pass
+    return 0, 0
+
+
 def hex_to_rgba(hex_code: str, alpha: int = 235) -> tuple:
     """Chuyển mã màu HEX sang tuple RGBA."""
     hex_code = str(hex_code or "#A52A3A").lstrip("#")
@@ -721,11 +754,11 @@ def create_news_hook_card(
 
     render_badge = show_badge and bool(badge_text and badge_text.strip())
 
-    # Windows font candidates
+    # Windows font candidates (chuẩn hỗ trợ tiếng Việt có dấu đầy đủ)
     def _get_font(sz: int, bold: bool = True):
         for fp in [
             r"C:\Windows\Fonts\arialbd.ttf" if bold else r"C:\Windows\Fonts\arial.ttf",
-            r"C:\Windows\Fonts\seguiui.ttf",
+            r"C:\Windows\Fonts\segoeuib.ttf" if bold else r"C:\Windows\Fonts\segoeui.ttf",
             r"C:\Windows\Fonts\tahoma.ttf",
             r"C:\Windows\Fonts\calibrib.ttf" if bold else r"C:\Windows\Fonts\calibri.ttf",
         ]:
@@ -861,11 +894,23 @@ def burn_script_to_video(
         clean_srt = clean_srt[0] + "\\:" + clean_srt[2:]
     clean_srt = clean_srt.replace("'", "\\'")
 
-    # Font chữ to, viền đen nổi bật chuẩn TikTok/Reels
+    # Font chữ to, viền đen nổi bật chuẩn TikTok/Reels/Shorts, hỗ trợ Unicode tiếng Việt Segoe UI
     subtitle_filter = (
-        f"subtitles='{clean_srt}':force_style='FontSize=18,PrimaryColour=&H00FFFFFF,"
-        f"OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=35'"
+        f"subtitles='{clean_srt}':force_style='FontName=Segoe UI,FontSize=20,Bold=1,PrimaryColour=&H00FFFFFF,"
+        f"OutlineColour=&H00000000,BorderStyle=1,Outline=2.5,Shadow=1,Alignment=2,MarginV=40'"
     )
+
+    # Kiểm tra kích thước và tự động downscale nếu vượt quá giới hạn phần cứng NVENC (4096px)
+    orig_w, orig_h = get_media_dimensions(clean_video)
+    scale_filter = ""
+    if orig_w > 0 and orig_h > 0:
+        max_dim = max(orig_w, orig_h)
+        if max_dim > 3840 or min(orig_w, orig_h) > 2160 or max_dim > 4096:
+            ratio = min(1080.0 / min(orig_w, orig_h), 1920.0 / max_dim)
+            target_w = int(orig_w * ratio) // 2 * 2
+            target_h = int(orig_h * ratio) // 2 * 2
+            scale_filter = f"scale={target_w}:{target_h},"
+            logger.info(f"NVENC bounds enforced: scaled {orig_w}x{orig_h} -> {target_w}x{target_h}")
 
     # 2. Xử lý hook card nếu có
     temp_card_path = None
@@ -888,11 +933,11 @@ def burn_script_to_video(
         extra_inputs = ["-i", str(temp_card_path)]
         overlay_dur = min(hook_card_duration or 4.5, source_duration if source_duration > 0 else 999.0)
         video_clause = (
-            f"[0:v]{subtitle_filter}[subbed];"
+            f"[0:v]{scale_filter}{subtitle_filter}[subbed];"
             f"[subbed][2:v]overlay=x=(W-w)/2:y=(H*0.52)-(h/2):enable='between(t,0,{overlay_dur})'[v]"
         )
     else:
-        video_clause = f"[0:v]{subtitle_filter}[v]"
+        video_clause = f"[0:v]{scale_filter}{subtitle_filter}[v]"
 
     if audio_clause:
         filter_complex = f"{video_clause};{audio_clause}"

@@ -40,15 +40,16 @@ async def get_job_resume_plan(job_id: str, request: Request):
     - Mã token xác thực plan_token cho bước thực thi tiếp theo
     """
     try:
+        # Determine input and output dirs from app if available
         input_dir = None
         output_dir = None
         try:
-            from dashboard_monitor import get_input_dir, get_output_dir
+            from main import get_input_dir, get_output_dir
             input_dir = get_input_dir()
             output_dir = get_output_dir()
         except ImportError:
             try:
-                from main import get_input_dir, get_output_dir
+                from dashboard_monitor import get_input_dir, get_output_dir
                 input_dir = get_input_dir()
                 output_dir = get_output_dir()
             except ImportError:
@@ -78,12 +79,12 @@ async def execute_job_resume(job_id: str, payload: ResumeRequest, request: Reque
         input_dir = None
         output_dir = None
         try:
-            from dashboard_monitor import get_input_dir, get_output_dir
+            from main import get_input_dir, get_output_dir
             input_dir = get_input_dir()
             output_dir = get_output_dir()
         except ImportError:
             try:
-                from main import get_input_dir, get_output_dir
+                from dashboard_monitor import get_input_dir, get_output_dir
                 input_dir = get_input_dir()
                 output_dir = get_output_dir()
             except ImportError:
@@ -98,10 +99,30 @@ async def execute_job_resume(job_id: str, payload: ResumeRequest, request: Reque
             output_dir=output_dir,
         )
 
+        # Trigger background execution if mode is recover or restart
         if payload.mode in ["recover", "restart"]:
             clean_name = job_id.replace("Dubbed_", "").replace(".mp4", "").strip()
             source_file = result.get("source_video")
             if source_file:
+                # Dispatch for Tool V1
+                try:
+                    import main as v1_main
+                    import asyncio, uuid, shared_state
+                    if hasattr(v1_main, "single_video_runner"):
+                        status = v1_main.job_tracker.get_status()
+                        if not status.get("active"):
+                            shared_state.stop_requested = False
+                            out_dir_str = str(output_dir) if output_dir else str(Path(r"D:\banve"))
+                            jid = uuid.uuid4().hex
+                            v1_main.BATCH_TASK = asyncio.create_task(
+                                v1_main.single_video_runner(str(source_file), out_dir_str, jid),
+                                name=f"autodub-recovery-{jid}"
+                            )
+                            result["dispatched"] = True
+                            result["task_id"] = jid
+                except Exception as ex:
+                    logger.info(f"V1 direct dispatch check: {ex}")
+
                 # Dispatch for Tool V2
                 try:
                     import dashboard_monitor as v2_main

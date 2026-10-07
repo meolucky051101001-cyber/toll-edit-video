@@ -92,6 +92,16 @@ GEMINI_FALLBACK_MODELS = [
     DEFAULT_GEMINI_MODEL,
     GEMINI_SCRIPT_MODEL,
     GEMINI_VISION_MODEL,
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemini-flash-latest",
+    "gemini-3.1-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-3.7-flash",
     "gemini-3.8-flash",
     "gemini-3.7-flash",
     "gemini-3.6-flash",
@@ -714,6 +724,17 @@ EVIDENCE_AWARE_GUIDELINES = """
 """
 
 SCRIPT_PROFILES: Dict[str, Dict[str, Any]] = {
+    "moonlit_emotional": {
+        "name": "Moonlit Emotional & Heroic Short (Cảm động & Kịch tính)",
+        "hook_strategy": "Tạo khoảng trống tò mò (Curiosity Gap) cực mạnh, bẻ lái tình huống nguy cấp hoặc sự hy sinh ngay trong 2.5s đầu",
+        "body_structure": "3 hồi siêu ngắn chuẩn viral (0-2.5s Hook nguy cấp/bất ngờ -> 2.5-8s Cao trào/Hy sinh/Nghẹt thở -> 8-13s Cứu rỗi cảm xúc/Đền đáp ấm áp)",
+        "tone": "Truyền cảm, kịch tính, chân thực, xúc động sâu sắc (người kể chuyện chứng kiến khoảnh khắc lịch sử)",
+        "pace": "Nhanh gọn, nhịp đọc 2.2 - 2.5 từ/giây, ngắt nghỉ đúng khoảnh khắc thị giác cao trào",
+        "evidence_rule": "Mô tả chuẩn xác hành động quan sát được trong khung hình (nguy hiểm, cứu hộ, che chắn, rơi đồ, ánh mắt, nụ cười). Text overlay dùng CỤM TỪ IN HOA 2-5 TỪ tương phản cao.",
+        "allowed_vocab": ["không ngờ", "khoảnh khắc", "liều mình", "nguy hiểm", "bất ngờ", "ấm áp", "cái kết", "bật khóc", "che chắn", "cứu nguy", "đền đáp"],
+        "forbidden_claims": "CẤM: 'mua ngay', 'giỏ hàng', 'quảng cáo', 'xin chào các bạn mình là', 'hãy nhấn đăng ký'.",
+        "cta_style": "Lời chốt nhân văn ngắn gọn để người xem tự thả tim, bình luận và xem lại nhiều lần (Seamless Loop).",
+    },
     "affiliate": {
         "name": "Affiliate / TikTok Shop / Review Sản Phẩm",
         "hook_strategy": "Nghịch lý hoặc trải nghiệm thực tế bất ngờ sau khi dùng thử",
@@ -1356,6 +1377,15 @@ def analyze_video_and_generate_script(
         "story": (
             "Thể loại: TÂM SỰ / ĐỜI SỐNG GẦN GŨI. "
             "Cách nói chuyện: Nhẹ nhàng, chân thành, như đang chia sẻ câu chuyện trải nghiệm của chính mình."
+        ),
+        "moonlit_emotional": (
+            "Thể loại: KỂ CHUYỆN KỊCH TÍNH & CẢM ĐỘNG (CHUẨN VIRAL MOONLIT SHORTS). "
+            "Cách nói chuyện: Giọng điệu của một người kể chuyện giàu cảm xúc, đưa người xem vào một tình huống nguy hiểm, sự hy sinh bất ngờ hoặc hành động dũng cảm đời thực. "
+            "Cấu trúc 3 hồi: "
+            "1. Cảnh 1 (0-2.5s): Hook giật mình tò mò ('Ai đó suýt mất mạng...', 'Hành động liều lĩnh khiến ai cũng thót tim...'). "
+            "2. Cảnh 2 (2.5-8s): Cao trào nghẹt thở, miêu tả chi tiết khoảnh khắc cam go. "
+            "3. Cảnh 3 (8-13s): Giải tỏa cảm xúc bằng hành động nhân văn, tình người hoặc sự đền đáp xứng đáng. "
+            "Text Overlay của mỗi cảnh phải là các CỤM TỪ IN HOA RẤT NGẮN (2-4 từ) đập vào mắt người xem!"
         ),
         "auto": (
             "Thể loại: TỰ ĐỘNG NHẬN DIỆN VÀ NÓI CHUYỆN TỰ NHIÊN. "

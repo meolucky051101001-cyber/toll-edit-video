@@ -106,7 +106,8 @@ def _geometry_score(
 
     width = right - left
     height = bottom - top
-    if not (0.0 <= left < right <= 1.0 and 0.01 <= top < bottom <= 0.995):
+    # Captions may touch either edge; do not silently reject the bottom 4%.
+    if not (0.0 <= left < right <= 1.0 and 0.0 <= top < bottom <= 1.0):
         return None
     # Burned-in captions can legitimately run almost edge-to-edge (the source
     # may even crop the first/last glyph).  Rejecting boxes wider than 90%
@@ -392,7 +393,11 @@ def select_chinese_subtitle_band(
             default_top, default_bottom, "default", 0, {}, 0
         )
 
+    reliability_cache = {}
     def reliable(item):
+        cached = reliability_cache.get(id(item))
+        if cached is not None:
+            return cached
         related = [
             other for other in candidates if not other.composite
             and abs(other.center_y - item.center_y) <= 0.035
@@ -403,37 +408,10 @@ def select_chinese_subtitle_band(
         ]
         seen_segments = {other.segment_id for other in related}
         matching_segments = {other.segment_id for other in related if other.strong_text_match}
-        # Repeated unmatched scene text must not enter through bracket recovery.
-        # Position alone is not evidence: genuine fixed-position dialogue with
-        # changing text or matching ASR remains eligible.
-        if len(seen_segments - {None}) >= 2 and not matching_segments:
-            return False
-        if len(seen_segments) >= 3 and len(matching_segments) / len(seen_segments) < 0.6:
-            # Overlapping acquisition windows can observe ONE genuine caption
-            # under the preceding/current/following ASR IDs. These are not
-            # three independent proofs of a persistent product label.
-            # Recover only a strongly matched phrase, temporally bracketed by
-            # different validated captions at the same position. A coincident
-            # second line or a long-lived label remains ineligible.
-            if not item.strong_text_match or len(_chinese_text(item.block['text'])) < 6:
-                return False
-            first = min(other.block['sample_time'] for other in related)
-            last = max(other.block['sample_time'] for other in related)
-            if last - first > 4.0:
-                return False
-            neighbours = [other for other in candidates if other.strong_text_match
-                and not other.composite
-                and SequenceMatcher(None, other.normalized_text, item.normalized_text,
-                                    autojunk=False).ratio() < .5
-                and abs(other.center_y - item.center_y) <= .018
-                and abs((other.block['max_y_pct'] - other.block['y_pct']) -
-                        (item.block['max_y_pct'] - item.block['y_pct'])) <= .022]
-            if any(abs(other.block['sample_time'] - seen.block['sample_time']) < .02
-                   for other in neighbours for seen in related):
-                return False
-            return (any(0 < first - other.block['sample_time'] <= 2.0 for other in neighbours)
-                    and any(0 < other.block['sample_time'] - last <= 2.0 for other in neighbours))
-        return True
+        result = not (len(seen_segments) >= 3 and
+                      len(matching_segments) / len(seen_segments) < 0.6)
+        reliability_cache[id(item)] = result
+        return result
 
     strong_candidates = [item for item in candidates if item.strong_text_match and reliable(item)]
     chosen_cluster: Optional[List[_Candidate]] = None
@@ -473,40 +451,59 @@ def select_chinese_subtitle_band(
         top, bottom = center - 0.0125, center + 0.0125
     elif height > 0.14:
         top, bottom = center - 0.07, center + 0.07
-    top = max(0.03, top)
-    bottom = min(0.96, bottom)
+    top = max(0.0, top)
+    bottom = min(1.0, bottom)
 
     selected_by_segment: Dict[int, Mapping[str, Any]] = {}
     selected_by_sample: Dict[int, List[Mapping[str, Any]]] = {}
-    # Outlined fonts can produce near-zero OCR confidence and corrupt words.
-    # Recover only an observed centered line bracketed by ASR-validated lines
-    # at the same position. Never invent a box for an empty frame.
-    def bracketed_line(item):
-        b = item.block
-        if (item.composite or not reliable(item)
-                or len(_chinese_text(b["text"])) < 4
-                or b["max_x_pct"] - b["x_pct"] < 0.30
-                or abs((b["x_pct"] + b["max_x_pct"]) / 2 - 0.5) > 0.10):
-            return False
-        anchors = [other for other in strong_candidates
-                   if other.segment_id != item.segment_id
-                   and abs(other.center_y - item.center_y) <= 0.018
-                   and abs((other.block["max_y_pct"] - other.block["y_pct"])
-                           - (b["max_y_pct"] - b["y_pct"])) <= 0.022]
-        t = b["sample_time"]
-        return (any(0 < t - a.block["sample_time"] <= 6 for a in anchors)
-                and any(0 < a.block["sample_time"] - t <= 6 for a in anchors))
-
-    recovered = [item for item in candidates
-                 if not item.strong_text_match and bracketed_line(item)]
+    strong_by_segment = {}
+    for item in strong_candidates:
+        strong_by_segment.setdefault(item.segment_id, []).append(item)
     for segment_id in segment_texts:
         # Use only validated matches, including genuine vertical motion.
-        local = [item for item in strong_candidates + recovered if item.segment_id == segment_id]
+        local = strong_by_segment.get(segment_id, [])
         selected = sorted(_best_per_sample(local), key=lambda item: item.block["sample_time"])
         if not selected:
             continue
-        selected_by_sample[int(segment_id)] = [dict(item.block) for item in selected]
-        selected_by_segment[int(segment_id)] = dict(max(selected, key=lambda item: item.rank_score).block)
+        # An ASR cue may describe only part of one long on-screen sentence.
+        # Match text to establish the anchor, then cover the complete co-linear
+        # row at THAT sample (never union different timestamps or nearby rows).
+        expanded = []
+        for anchor in selected:
+            merged = dict(anchor.block)
+            members = [anchor]
+            pool = [item for item in grouped.get(anchor.sample_key, [])
+                    if reliable(item)]
+            changed = True
+            while changed:
+                changed = False
+                for item in pool:
+                    if item in members:
+                        continue
+                    a, b = merged, item.block
+                    height_a = float(anchor.block['max_y_pct']) - float(anchor.block['y_pct'])
+                    height_b = float(b['max_y_pct']) - float(b['y_pct'])
+                    same_baseline = abs(anchor.center_y - item.center_y) <= min(.012, max(height_a, height_b) * .3)
+                    gap = max(0.0, float(b['x_pct']) - float(a['max_x_pct']),
+                              float(a['x_pct']) - float(b['max_x_pct']))
+                    overlap = min(float(a['max_x_pct']), float(b['max_x_pct'])) - max(float(a['x_pct']), float(b['x_pct']))
+                    if not same_baseline or gap > .045 or max(height_a, height_b) > min(height_a, height_b) * 1.8:
+                        continue
+                    # OCR glyph margins intentionally overlap at word seams.
+                    # Reject deep containment, not a few padded pixels.
+                    if overlap > .06 and not item.strong_text_match:
+                        continue
+                    members.append(item)
+                    merged.update(x_pct=min(a['x_pct'], b['x_pct']),
+                                  max_x_pct=max(a['max_x_pct'], b['max_x_pct']),
+                                  y_pct=min(a['y_pct'], b['y_pct']),
+                                  max_y_pct=max(a['max_y_pct'], b['max_y_pct']))
+                    changed = True
+            merged['text'] = ' '.join(item.block['text'] for item in sorted(members, key=lambda c:c.block['x_pct']))
+            expanded.append(merged)
+        selected_by_sample[int(segment_id)] = expanded
+        best = max(selected, key=lambda item: item.rank_score)
+        selected_by_segment[int(segment_id)] = expanded[selected.index(best)]
 
     return SubtitleBandSelection(
         top=top,
