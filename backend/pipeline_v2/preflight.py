@@ -18,6 +18,11 @@ from .config import PipelineSettings
 from .stage_validation import is_real_rvc_model
 
 try:
+    from backend.config.paths import AppPaths
+except ImportError:
+    from config.paths import AppPaths
+
+try:
     from ai.model_policy import RuntimeModelPolicy
     from ai.model_runtime import runtime_module_available
 except ImportError:
@@ -325,8 +330,9 @@ def run_preflight(
     checks.append(_rvc_check(root, settings))
     checks.extend(_strong_model_checks(root, env))
 
-    workspace = Path(env.get("AUTODUB_WORKSPACE", str(root / "workspace")))
-    output = Path(env.get("AUTODUB_OUTPUT_DIR", str(root / "output")))
+    paths = AppPaths.from_environment(root, env)
+    workspace = paths.workspace
+    output = paths.output_dir
     for name, directory in (("workspace", workspace), ("output", output)):
         error = _writable_directory(directory)
         checks.append(

@@ -13,6 +13,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Mapping, Optional, Tuple
 
+try:
+    from backend.config.paths import AppPaths
+except ImportError:
+    from config.paths import AppPaths
+
 
 def _clean(value: Optional[str], default: str) -> str:
     candidate = str(value or "").strip()
@@ -71,7 +76,7 @@ class RuntimeModelPolicy:
         fast = speed_profile == "fast"
         root = Path(project_root or Path(__file__).resolve().parents[2])
         default_runtime = root / "backend" / "model_venv" / "Scripts" / "python.exe"
-        default_cache = root / "models"
+        default_cache = AppPaths.from_environment(root, env).model_cache
         runtime_python = _clean(env.get("MODEL_RUNTIME_PYTHON"), "")
         if not runtime_python and default_runtime.is_file():
             runtime_python = str(default_runtime)

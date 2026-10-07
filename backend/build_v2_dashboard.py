@@ -1,7 +1,12 @@
 import re
+import os
 from pathlib import Path
 
-v1_template = Path(r"C:\tool v1\backend\templates\dashboard.html")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+template_env = os.getenv("AUTODUB_V1_DASHBOARD_TEMPLATE", "").strip()
+v1_template = Path(template_env) if template_env else Path(__file__).resolve().parent / "templates" / "dashboard.html"
+if not v1_template.is_absolute():
+    v1_template = PROJECT_ROOT / v1_template
 content = v1_template.read_text(encoding="utf-8")
 
 # 1. Remove the script in <head> so that <script> only occurs once at the bottom
@@ -62,6 +67,9 @@ assert len(parts) == 2, f"Expected 2 parts on <script> split, got {len(parts)}"
 assert "<script>" not in parts[0], "Found extra <script> in head/html!"
 
 # 10. Write to Tool V2 templates
-out_path = Path(r"C:\tool v2\backend\templates\dashboard.html")
+output_env = os.getenv("AUTODUB_DASHBOARD_TEMPLATE", "").strip()
+out_path = Path(output_env) if output_env else Path(__file__).resolve().parent / "templates" / "dashboard.html"
+if not out_path.is_absolute():
+    out_path = PROJECT_ROOT / out_path
 out_path.write_text(content, encoding="utf-8")
 print(f"Successfully generated {out_path} ({len(content)} chars, {len(content.splitlines())} lines)")

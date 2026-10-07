@@ -1,0 +1,2 @@
+# Optional/heavy model runtime dependencies remain isolated from the bot venv.
+-r backend/requirements-models.txt

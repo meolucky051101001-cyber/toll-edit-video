@@ -1,0 +1,12 @@
+# Lightweight dependencies for linting and focused CPU-only unit tests.
+# Install the production runtime separately from requirements.txt as needed.
+ruff>=0.11,<1
+pytest>=8,<9
+numpy>=1.23.5,<2
+Pillow>=9.2,<13
+opencv-python-headless==4.10.0.84
+fastapi>=0.110,<1
+requests>=2.31,<3
+yt-dlp>=2024.4
+srt>=3.5,<4
+gmssl>=3.2.2,<4

@@ -9,6 +9,9 @@ from environment import load_environment
 
 BASE_DIR = Path(__file__).resolve().parent
 load_environment(BASE_DIR)
+from config.paths import AppPaths
+
+PATHS = AppPaths.from_environment(BASE_DIR.parent)
 
 from ai.transcription import extract_subtitles_whisper, save_srt
 from ai.translation import translate_subtitles
@@ -35,8 +38,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-WORKSPACE = os.getenv("AUTODUB_WORKSPACE", str(BASE_DIR.parent / "workspace"))
-OUTPUT_DIR = os.getenv("AUTODUB_OUTPUT_DIR", r"D:\video tool v2")
+WORKSPACE = str(PATHS.workspace)
+OUTPUT_DIR = str(PATHS.output_dir)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 os.makedirs(WORKSPACE, exist_ok=True)
 

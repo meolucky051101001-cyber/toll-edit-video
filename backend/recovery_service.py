@@ -17,6 +17,11 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    from backend.config.paths import AppPaths
+except ImportError:
+    from config.paths import AppPaths
+
 logger = logging.getLogger("recovery_service")
 
 # Token cache for valid resume plans: { token: { "job_id": ..., "created_at": ..., "plan": ... } }
@@ -41,11 +46,12 @@ def compute_file_fingerprint(file_path: Path) -> Optional[str]:
 
 class RecoveryService:
     def __init__(self, workspace_path: Optional[str] = None):
+        base_dir = Path(__file__).resolve().parent
+        self.paths = AppPaths.from_environment(base_dir.parent)
         if workspace_path:
             self.workspace = Path(workspace_path)
         else:
-            base_dir = Path(__file__).resolve().parent
-            self.workspace = Path(os.getenv("AUTODUB_WORKSPACE", str(base_dir.parent / "workspace")))
+            self.workspace = self.paths.workspace
         self.control_dir = self.workspace / "control"
         self.control_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.control_dir / "job_recovery_states.json"
@@ -75,15 +81,23 @@ class RecoveryService:
             candidates_dirs.append(input_dir)
             candidates_dirs.append(input_dir / "processed")
 
-        # Default standard paths
-        candidates_dirs.extend([
-            Path(r"D:\video tool v2"),
-            Path(r"D:\video_input"),
-            Path(r"D:\video_input\processed"),
-            Path(r"D:\phoi"),
-            Path(r"D:\video_input_v2"),
-            self.workspace / "input",
-        ])
+        candidates_dirs.extend(
+            [
+                self.paths.input_dir,
+                self.paths.input_dir / "processed",
+                self.paths.output_dir,
+                self.workspace / "downloads",
+                self.workspace / "input",
+            ]
+        )
+        if self.paths.shared_workspace_dir:
+            candidates_dirs.extend(
+                [
+                    self.paths.shared_workspace_dir / "downloads",
+                    self.paths.shared_workspace_dir / "input",
+                    self.paths.shared_workspace_dir / "output",
+                ]
+            )
 
         for c_dir in candidates_dirs:
             if not c_dir.is_dir():
@@ -133,10 +147,11 @@ class RecoveryService:
         if output_dir:
             candidates_dirs.append(output_dir)
         candidates_dirs.extend([
-            Path(r"D:\video tool v2"),
-            Path(r"D:\banve"),
+            self.paths.output_dir,
             self.workspace / "output"
         ])
+        if self.paths.shared_workspace_dir:
+            candidates_dirs.append(self.paths.shared_workspace_dir / "output")
 
         for c_dir in candidates_dirs:
             if not c_dir.is_dir():

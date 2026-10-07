@@ -194,8 +194,10 @@ class SubtitleCoverGeometryTests(unittest.TestCase):
         )
         self.assertIsNotNone(match)
         box_x, box_y, box_width, box_height = map(int, match.groups())
-        self.assertEqual(box_x, 36)
-        self.assertEqual(box_width, 648)
+        # The white cover must contain the full source region; it may extend
+        # past the normalized source bounds to include the configured padding.
+        self.assertLessEqual(box_x, 10)
+        self.assertGreaterEqual(box_x + box_width, 716)
         self.assertLessEqual(box_y, int(0.104 * 1280))
         self.assertGreaterEqual(box_y + box_height, int(0.149 * 1280))
 

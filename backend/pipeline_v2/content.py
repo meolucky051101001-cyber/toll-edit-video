@@ -5,6 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Sequence
 
+try:
+    from backend.config.paths import AppPaths
+except ImportError:
+    from config.paths import AppPaths
+
 from .segments import RuntimeSegment, segment_from_dict, segment_to_dict
 from .stage_validation import is_real_rvc_model
 
@@ -93,13 +98,13 @@ merge_runtime_segments = merge_ocr_geometry
 def discover_rvc_model(workspace: Path) -> Optional[Path]:
     workspace_path = Path(workspace).resolve()
     repo_root = Path(__file__).resolve().parents[2]
+    paths = AppPaths.from_environment(repo_root)
     search_dirs = [
         repo_root / "MyVoiceModel_v2",
-        Path(r"C:\tool v2\MyVoiceModel_v2"),
+        paths.shared_assets_dir / "MyVoiceModel_v2",
         workspace_path.parent / "MyVoiceModel_v2",
         workspace_path / "MyVoiceModel_v2",
-        repo_root / "models" / "rvc",
-        Path(r"C:\tool v2\models\rvc"),
+        paths.model_cache / "rvc",
         workspace_path.parent / "models" / "rvc",
         workspace_path / "models" / "rvc",
     ]

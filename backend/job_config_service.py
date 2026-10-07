@@ -13,8 +13,13 @@ import uuid
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
+try:
+    from backend.config.paths import AppPaths
+except ImportError:
+    from config.paths import AppPaths
+
 ROOT_DIR = Path(__file__).resolve().parent
-WORKSPACE_DIR = Path(os.getenv("AUTODUB_WORKSPACE", str(ROOT_DIR.parent / "workspace")))
+WORKSPACE_DIR = AppPaths.from_environment(ROOT_DIR.parent).workspace
 CONTROL_DIR = WORKSPACE_DIR / "control"
 CONTROL_DIR.mkdir(parents=True, exist_ok=True)
 

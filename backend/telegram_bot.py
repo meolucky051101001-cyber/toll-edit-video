@@ -93,14 +93,15 @@ from url_utils import extract_http_urls
 from social_downloader import sanitize_url
 from video_utils import extract_audio_from_video, mix_audio_pydub, process_video
 
-WORKSPACE = os.path.abspath(
-    os.getenv(
-        "AUTODUB_WORKSPACE",
-        os.path.join(os.path.dirname(__file__), "..", "workspace"),
-    )
-)
-INPUT_DIR = os.path.abspath(os.getenv("AUTODUB_INPUT_DIR", r"D:\video phôi"))
-OUTPUT_DIR = os.path.abspath(os.getenv("AUTODUB_OUTPUT_DIR", r"D:\video tool v2"))
+try:
+    from config.paths import AppPaths
+except ImportError:
+    from backend.config.paths import AppPaths
+
+PATHS = AppPaths.from_environment(Path(__file__).resolve().parent.parent)
+WORKSPACE = str(PATHS.workspace)
+INPUT_DIR = str(PATHS.input_dir)
+OUTPUT_DIR = str(PATHS.output_dir)
 os.makedirs(WORKSPACE, exist_ok=True)
 
 logging.basicConfig(
@@ -333,11 +334,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "3️⃣ Dịch phụ đề sang Tiếng Việt (Gemini 3.7 Flash)\n"
         "4️⃣ Tách giọng & giữ nhạc nền (BS-RoFormer, fallback Demucs)\n"
         "5️⃣ Lồng tiếng Tiếng Việt (Microsoft Neural TTS)\n"
-        "6️⃣ Xuất video chất lượng cao lưu vào `D:\\video tool v2`\n\n"
+        "6️⃣ Xuất video chất lượng cao vào thư mục đầu ra đã cấu hình.\n\n"
         "📌 *Lệnh hỗ trợ:*\n"
         "• `/llm` - Cấu hình mô hình AI dịch thuật (Google Gemini / OpenAI GPT-4o / DeepSeek V4)\n"
-        "• `/batch` - Tự động quét & edit hàng loạt video trong thư mục `D:\\video_input` trên máy\n"
-        "• `/batch D:\\thu_muc` - Chỉ định thư mục chứa video cần edit\n"
+        "• `/batch` - Quét hàng loạt video trong thư mục đầu vào đã cấu hình\n"
+        "• `/batch <đường_dẫn>` - Chỉ định thư mục chứa video cần edit\n"
         "• `/status` - Kiểm tra trạng thái hàng đợi\n"
         "• `/stop` - Dừng khẩn cấp toàn bộ tác vụ"
     )
@@ -349,6 +350,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "✅ Bot đang hoạt động!\n"
         f"📂 Workspace: {WORKSPACE}\n"
+        f"📥 Đầu vào: {INPUT_DIR}\n"
+        f"📤 Đầu ra: {OUTPUT_DIR}\n"
         "🎯 Gửi link video để bắt đầu."
     )
 
@@ -356,8 +359,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== LỆNH /batch =====
 async def cmd_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Xử lý hàng loạt video từ thư mục cục bộ (mặc định: D:\\video_input)
-    Cú pháp: /batch hoặc /batch D:\\duong_dan_thu_muc
+    Xử lý hàng loạt video từ thư mục cục bộ đã cấu hình.
+    Cú pháp: /batch hoặc /batch <đường_dẫn_thư_mục>
     """
     input_dir = INPUT_DIR
     if context.args and len(context.args) > 0:
