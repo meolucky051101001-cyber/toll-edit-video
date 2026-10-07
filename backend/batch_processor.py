@@ -1,8 +1,8 @@
 """
 Batch Video Processor - Tự động xử lý hàng loạt video từ thư mục máy tính (Offline / Local Folder)
-- Quét toàn bộ video trong thư mục đầu vào (mặc định: D:\\video_input)
+- Quét toàn bộ video trong thư mục đầu vào đã cấu hình.
 - Xử lý tuần tự từng video một để tối ưu RAM/CPU, không gây giật lag
-- Xuất thành phẩm trực tiếp vào thư mục đầu ra (mặc định: D:\\banve)
+- Xuất thành phẩm trực tiếp vào thư mục đầu ra đã cấu hình.
 """
 
 import os
@@ -28,17 +28,17 @@ sys.path.insert(0, BASE_DIR)
 from environment import load_environment
 
 load_environment(Path(__file__).resolve().parent)
+try:
+    from config.paths import AppPaths
+except ImportError:
+    from backend.config.paths import AppPaths
+
+PATHS = AppPaths.from_environment(Path(BASE_DIR).parent)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-WORKSPACE = os.path.abspath(
-    os.getenv("AUTODUB_WORKSPACE", os.path.join(BASE_DIR, "..", "workspace"))
-)
-DEFAULT_INPUT_DIR = os.path.abspath(
-    os.getenv("AUTODUB_INPUT_DIR", r"D:\video_input")
-)
-DEFAULT_OUTPUT_DIR = os.path.abspath(
-    os.getenv("AUTODUB_OUTPUT_DIR", r"D:\video tool v2")
-)
+WORKSPACE = str(PATHS.workspace)
+DEFAULT_INPUT_DIR = str(PATHS.input_dir)
+DEFAULT_OUTPUT_DIR = str(PATHS.output_dir)
 os.makedirs(WORKSPACE, exist_ok=True)
 
 logger = logging.getLogger("batch_processor")

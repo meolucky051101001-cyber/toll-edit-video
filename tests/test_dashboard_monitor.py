@@ -27,7 +27,12 @@ class MonitorTests(unittest.TestCase):
             records["qc"]["status"] = "completed"
             records["deliver"]["status"] = "completed"
             target.write_text(json.dumps({"stages": records}))
-            self.assertEqual(d.read_status()["percent"], 100)
+            with patch.object(
+                d,
+                "verify_dashboard_delivery",
+                return_value={"valid": True, "pending": False, "reason": "Đã xác minh."},
+            ):
+                self.assertEqual(d.read_status()["percent"], 100)
 
     def test_running_is_not_claimed_live(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(d, "WORKSPACE", Path(temp)):
@@ -35,6 +40,27 @@ class MonitorTests(unittest.TestCase):
             target.parent.mkdir(parents=True)
             target.write_text(json.dumps({"stages": {"ocr": {"status": "running"}}}))
             self.assertIn("chưa xác minh", d.read_status()["message"])
+
+    def test_translation_model_uses_job_checkpoint_provenance(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(d, "WORKSPACE", Path(temp)):
+            pipeline = Path(temp) / "video" / "pipeline_v2"
+            target = pipeline / "job_manifest.json"
+            target.parent.mkdir(parents=True)
+            target.write_text(json.dumps({
+                "job_id": "video",
+                "metadata": {"model_policy": {"gemini_model": "gemini-3.8-flash"}},
+                "stages": {"translate": {"status": "completed"}},
+            }), encoding="utf-8")
+            batches = pipeline / "artifacts" / "translation" / "batches"
+            batches.mkdir(parents=True)
+            (batches / "00001.json").write_text(json.dumps({
+                "quality": {"provider": "gemini", "model": "gemini-2.5-flash", "models": ["gemini-2.5-flash"]}
+            }), encoding="utf-8")
+
+            state = d.read_status()
+            self.assertEqual(state["configured_gemini_model"], "gemini-3.8-flash")
+            self.assertEqual(state["translation_models"], ["gemini-2.5-flash"])
+            self.assertEqual(state["active_translation_model"], "gemini-2.5-flash")
 
     def test_template(self):
         page = d.dashboard()

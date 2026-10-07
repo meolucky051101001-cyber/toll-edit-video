@@ -15,10 +15,15 @@ from fastapi import FastAPI, Form, HTTPException, Body, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from dashboard_media import media_status, paginate_listing, paginate_output, verify_dashboard_delivery
 from environment import read_environment
+try:
+    from config.paths import AppPaths
+except ImportError:
+    from backend.config.paths import AppPaths
 
 ROOT = Path(__file__).resolve().parent
 ENV = read_environment(ROOT)
-WORKSPACE = Path(ENV.get("AUTODUB_WORKSPACE", str(ROOT.parent / "workspace")))
+PATHS = AppPaths.from_environment(ROOT.parent, ENV)
+WORKSPACE = PATHS.workspace
 
 def _resolve_queue_db() -> Path:
     bs = WORKSPACE / "bot_system"
@@ -27,7 +32,7 @@ def _resolve_queue_db() -> Path:
         return target
     return WORKSPACE / "queue_v2.sqlite3"
 
-INPUT = Path(ENV.get("AUTODUB_INPUT_DIR", r"D:\video phôi"))
+INPUT = PATHS.input_dir
 
 def get_input_dir() -> Path:
     cfg = WORKSPACE / "dashboard_input.json"
@@ -41,7 +46,7 @@ def get_input_dir() -> Path:
             pass
     return INPUT
 
-_env_output = Path(ENV.get("AUTODUB_OUTPUT_DIR", r"D:\video tool v2")).resolve()
+_env_output = PATHS.output_dir
 if not _env_output.is_dir():
     _env_output.mkdir(parents=True, exist_ok=True)
 OUTPUT = _env_output
@@ -110,7 +115,7 @@ UI_STEPS = [
         [
             "Ghép phụ đề ASS & hòa âm đồng bộ",
             "Render GPU phần cứng NVENC 8000k",
-            "Khớp luồng chống đơ & Xuất D:\\video tool v2",
+            "Khớp luồng chống đơ & thư mục xuất theo cấu hình",
         ],
     ),
 ]
@@ -254,6 +259,42 @@ def is_v2_worker_running(workspace=None, job_id=None):
     except Exception:
         pass
     return False
+
+
+def _translation_models_for_job(manifest_path, manifest_data):
+    """Read exact successful translation models saved in per-batch checkpoints."""
+    models = []
+    batch_dir = manifest_path.parent / "artifacts" / "translation" / "batches"
+    if batch_dir.is_dir():
+        for checkpoint in sorted(batch_dir.glob("*.json"))[-512:]:
+            try:
+                quality = json.loads(checkpoint.read_text(encoding="utf-8")).get("quality", {})
+                found = quality.get("models") or ([quality.get("model")] if quality.get("model") else [])
+                if not found and quality.get("provider"):
+                    found = ["{} · chưa ghi nhận model".format(quality["provider"].upper())]
+                for model in found:
+                    if model and model not in models:
+                        models.append(str(model))
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+    if models:
+        return models
+
+    # Older jobs keep aggregate translation provenance in this artifact.
+    context_path = manifest_path.parent / "artifacts" / "translation" / "context.json"
+    try:
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        for batch in context.get("batches", []):
+            found = batch.get("models") or ([batch.get("model")] if batch.get("model") else [])
+            if not found and batch.get("provider"):
+                found = ["{} · chưa ghi nhận model".format(batch["provider"].upper())]
+            for model in found:
+                if model and model not in models:
+                    models.append(str(model))
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return models
+
 
 def read_status():
     candidates = sorted(WORKSPACE.glob("*/pipeline_v2/job_manifest.json"),
@@ -1369,7 +1410,7 @@ def read_queue():
         except Exception:
             pass
 
-    for q_candidate in [WORKSPACE / "telegram_queue.json", Path(r"C:\tool v2\workspace\telegram_queue.json"), Path(r"C:\tool v1\workspace\telegram_queue.json")]:
+    for q_candidate in [WORKSPACE / "telegram_queue.json"]:
         if q_candidate.is_file():
             try:
                 data = json.loads(q_candidate.read_text(encoding="utf-8"))
@@ -1400,8 +1441,6 @@ async def api_process_queue():
     """Kích hoạt xử lý lại danh sách video đang đợi trong hàng chờ V2."""
     queue_candidates = [
         WORKSPACE / "telegram_queue.json",
-        Path(r"C:\tool v2\workspace\telegram_queue.json"),
-        Path(r"C:\tool v1\workspace\telegram_queue.json"),
     ]
     queue_file = None
     for qc in queue_candidates:
@@ -1428,14 +1467,14 @@ async def api_process_queue():
         return {"status": "empty", "message": "Không tìm thấy hàng chờ video hoặc hàng chờ đang trống."}
 
     # 1. Gỡ cờ pause nếu Tool V2 đang bị tạm dừng
-    for pause_candidate in [WORKSPACE / "control" / "v2.pause", Path(r"C:\tool v2\workspace\control\v2.pause"), Path(r"C:\tool v1\workspace\control\v2.pause")]:
+    for pause_candidate in [WORKSPACE / "control" / "v2.pause"]:
         try:
             pause_candidate.unlink(missing_ok=True)
         except Exception:
             pass
 
     # 2. Ghi cờ kích hoạt telegram_queue_trigger.flag
-    for trigger_candidate in [WORKSPACE / "telegram_queue_trigger.flag", Path(r"C:\tool v2\workspace\telegram_queue_trigger.flag")]:
+    for trigger_candidate in [WORKSPACE / "telegram_queue_trigger.flag"]:
         try:
             trigger_candidate.parent.mkdir(parents=True, exist_ok=True)
             trigger_candidate.write_text(str(time.time()), encoding="utf-8")
@@ -1483,13 +1522,13 @@ async def api_process_queue():
 @app.post("/api/queue/clear")
 async def api_clear_queue():
     """Xóa sạch hàng chờ V2."""
-    for clear_flag in [WORKSPACE / "telegram_queue_clear.flag", Path(r"C:\tool v2\workspace\telegram_queue_clear.flag")]:
+    for clear_flag in [WORKSPACE / "telegram_queue_clear.flag"]:
         try:
             clear_flag.parent.mkdir(parents=True, exist_ok=True)
             clear_flag.write_text(str(time.time()), encoding="utf-8")
         except Exception:
             pass
-    for q_file in [WORKSPACE / "telegram_queue.json", Path(r"C:\tool v2\workspace\telegram_queue.json")]:
+    for q_file in [WORKSPACE / "telegram_queue.json"]:
         try:
             if q_file.is_file():
                 q_file.write_text(json.dumps({"items": [], "updated_at": time.time()}), encoding="utf-8")
@@ -1585,7 +1624,7 @@ async def api_move_queue_item(request: Request):
             print(f"Lỗi api_move_queue_item (SQLite): {e}", flush=True)
             raise HTTPException(500, f"Lỗi di chuyển video V2: {str(e)}")
 
-    for q_candidate in [WORKSPACE / "telegram_queue.json", Path(r"C:\tool v2\workspace\telegram_queue.json")]:
+    for q_candidate in [WORKSPACE / "telegram_queue.json"]:
         if q_candidate.is_file():
             try:
                 data = json.loads(q_candidate.read_text(encoding="utf-8"))
@@ -1677,7 +1716,7 @@ async def api_delete_queue_item(request: Request):
             print(f"Lỗi api_delete_queue_item (SQLite): {e}", flush=True)
             raise HTTPException(500, f"Lỗi xóa video V2: {str(e)}")
 
-    for q_candidate in [WORKSPACE / "telegram_queue.json", Path(r"C:\tool v2\workspace\telegram_queue.json")]:
+    for q_candidate in [WORKSPACE / "telegram_queue.json"]:
         if q_candidate.is_file():
             try:
                 data = json.loads(q_candidate.read_text(encoding="utf-8"))
