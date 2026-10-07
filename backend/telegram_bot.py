@@ -212,6 +212,8 @@ async def safe_edit_status(status_msg, text, parse_mode=None, retries=3):
                     pass
                 continue
             logger.warning(f"Lỗi cập nhật status Telegram (Lần {attempt+1}/{retries}): {e}")
+            if "parse" in str(e).lower() or "entity" in str(e).lower():
+                parse_mode = None
             if attempt < retries - 1:
                 await asyncio.sleep(1.0)
 

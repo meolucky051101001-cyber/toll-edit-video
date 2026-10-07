@@ -272,12 +272,12 @@ def extract_douyin_video_id(url: str) -> str:
     # 3. Nếu là shortlink v.douyin.com
     if "v.douyin.com" in url:
         try:
-            res = requests.get(url, headers={"User-Agent": USER_AGENTS["mobile"]}, allow_redirects=False, timeout=25)
+            res = requests.get(url, headers={"User-Agent": USER_AGENTS["mobile"]}, allow_redirects=False, timeout=10)
             loc = res.headers.get("Location") or ""
             sub_match = re.search(r'/(?:video|note)/(\d+)', loc) or re.search(r'modal_id=(\d+)', loc)
             if sub_match:
                 return sub_match.group(1)
-            res2 = requests.get(url, headers={"User-Agent": USER_AGENTS["mobile"]}, allow_redirects=True, timeout=25)
+            res2 = requests.get(url, headers={"User-Agent": USER_AGENTS["mobile"]}, allow_redirects=True, timeout=10)
             sub_match2 = re.search(r'/(?:video|note)/(\d+)', res2.url) or re.search(r'modal_id=(\d+)', res2.url)
             if sub_match2:
                 return sub_match2.group(1)
@@ -292,12 +292,10 @@ def resolve_douyin_so9(url: str, video_id: str = "") -> tuple:
     Trả về (success, video_url, title, error_message).
     """
     candidate_urls = []
-    if url:
-        candidate_urls.append(url.strip())
     if video_id:
-        std_url = f"https://www.douyin.com/video/{video_id}"
-        if std_url not in candidate_urls:
-            candidate_urls.append(std_url)
+        candidate_urls.append(f"https://www.douyin.com/video/{video_id}")
+    if url and url not in candidate_urls:
+        candidate_urls.append(url)
 
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -306,6 +304,7 @@ def resolve_douyin_so9(url: str, video_id: str = "") -> tuple:
         'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
     }
 
+    timeout_seconds = int(os.getenv("SO9_RESOLVER_TIMEOUT", "50"))
     last_err = ""
     for target in candidate_urls:
         try:
@@ -317,29 +316,47 @@ def resolve_douyin_so9(url: str, video_id: str = "") -> tuple:
                 continue
             res.encoding = 'utf-8'
 
-            match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>', res.text)
-            if not match:
-                last_err = "Không tìm thấy dữ liệu __NEXT_DATA__ từ SO9"
-                continue
+                match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>', res.text)
+                if not match:
+                    last_err = "Không tìm thấy dữ liệu __NEXT_DATA__ từ SO9"
+                    if attempt == 0:
+                        time.sleep(2)
+                        continue
+                    break
 
-            payload = json.loads(match.group(1))
-            d_data = payload.get("props", {}).get("pageProps", {}).get("downloadData")
-            if isinstance(d_data, dict):
-                video_info = d_data.get("data", {})
-                video_url = video_info.get("video")
-                title = video_info.get("title") or (f"douyin_{video_id}" if video_id else "douyin_video")
-                if video_url:
-                    logger.info(f"Bóc tách Douyin thành công qua SO9: {video_url[:80]}...")
-                    return True, video_url, title, ""
-                else:
-                    last_err = d_data.get("message") or "SO9 không trả về link tải video"
-            else:
-                last_err = f"SO9 trả về dữ liệu không hợp lệ cho {target}"
-        except Exception as exc:
-            last_err = f"Lỗi kết nối SO9: {exc}"
-            logger.warning(f"SO9 resolver gặp lỗi với link {target}: {exc}")
+                payload = json.loads(match.group(1))
+                d_data = payload.get("props", {}).get("pageProps", {}).get("downloadData")
+                if isinstance(d_data, dict):
+                    video_info = d_data.get("data", {}) or {}
+                    video_url = video_info.get("video")
+                    raw_title = str(video_info.get("title") or "").strip()
+                    title = raw_title or (f"douyin_{video_id}" if video_id else "douyin_video")
+                    if video_url:
+                        logger.info("Bóc tách Douyin thành công qua SO9: %s", sanitize_url(video_url))
+                        return True, video_url, title, ""
+                    else:
+                        msg = d_data.get("message") or "SO9 chưa sẵn sàng link tải video"
+                        last_err = msg
+                        if attempt == 0:
+                            logger.info(f"SO9 đang xử lý video ({msg}), chờ 3s thử lại...")
+                            time.sleep(3)
+                            continue
+            except requests.exceptions.Timeout:
+                last_err = f"SO9 hết thời gian chờ ({timeout_seconds}s)"
+                logger.warning(f"SO9 timeout lần {attempt + 1} với link {sanitize_url(target)}")
+                if attempt == 0:
+                    logger.info("SO9 có thể đang crawl video ngầm từ Douyin; thử lại lần 2 sau 3s...")
+                    time.sleep(3)
+                    continue
+            except Exception as exc:
+                last_err = f"Lỗi kết nối SO9: {exc}"
+                logger.warning(f"SO9 resolver gặp lỗi với link {sanitize_url(target)}: {exc}")
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
 
     return False, "", "", last_err or "Bóc tách SO9 thất bại"
+
 
 def resolve_douyin_viesnap(url: str, timeout: int = 15) -> tuple:
     """
@@ -357,7 +374,7 @@ def resolve_douyin_viesnap(url: str, timeout: int = 15) -> tuple:
             "https://api.viesnap.com/douyin/info",
             json={"url": url.strip()},
             headers=headers,
-            timeout=timeout
+            timeout=timeout,
         )
         if r.status_code == 200:
             r.encoding = 'utf-8'
@@ -374,12 +391,12 @@ def resolve_douyin_viesnap(url: str, timeout: int = 15) -> tuple:
                         req_headers = json.loads(raw)
                     except Exception:
                         req_headers = {}
-                logger.info(f"Bóc tách Douyin thành công qua Viesnap/Montague: {cdn_url[:80]}...")
+                logger.info("Bóc tách Douyin thành công qua Viesnap/Montague: %s", sanitize_url(cdn_url))
                 return True, cdn_url, title, req_headers, ""
             return False, "", "", {}, "Viesnap không trả về cdn_url"
         return False, "", "", {}, f"Viesnap trả về HTTP {r.status_code}"
     except Exception as e:
-        return False, "", "", {}, f"Lỗi kết nối Viesnap: {e}"
+        return False, "", "", {}, f"Lỗi kết nối Viesnap: {sanitize_exception(e)}"
 
 # =========================================================================
 # 1. BÓC TÁCH DOUYIN & TIKTOK (NO WATERMARK)
@@ -388,21 +405,31 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
     """
     Tải video Douyin / TikTok không logo (Full HD) qua API giải mã trực tiếp.
     """
-    logger.info(f"Đang giải mã Douyin/TikTok không logo: {url}")
+    logger.info(f"Đang giải mã Douyin/TikTok không logo: {sanitize_url(url)}")
     os.makedirs(output_dir, exist_ok=True)
     lower_url = url.lower()
     is_douyin = any(k in lower_url for k in ["douyin.com", "iesdouyin.com"])
     
     # Chuẩn hóa link nếu là link tìm kiếm trên web có modal_id
     video_id = extract_douyin_video_id(url) if is_douyin else ""
+    target_urls = [url]
+    if video_id:
+        target_urls.insert(0, f"https://www.douyin.com/video/{video_id}")
+        target_urls.insert(1, f"https://www.iesdouyin.com/share/video/{video_id}/")
+
+    resolver_error = ""
 
     # 1. Chiến lược cho Douyin:
     if is_douyin:
-        # Tầng 1: Bóc tách qua Montague / Viesnap Resolver (Tốc độ siêu nhanh ~1.5s, API trực tiếp không watermark)
+        diagnostics = []
+        # Tầng 1: Bóc tách qua Montague / Viesnap Resolver (Tốc độ siêu nhanh ~1.5s, API trực tiếp không watermark từ Tool V1)
         try:
             logger.info("Thử bóc tách Douyin qua Montague / Viesnap Resolver...")
+            t0 = time.monotonic()
             ok_vn, v_url_vn, v_title_vn, v_headers_vn, err_vn = resolve_douyin_viesnap(url)
+            t_resolve = time.monotonic() - t0
             if ok_vn and v_url_vn:
+                logger.info(f"[RESOLVE] Montague/Viesnap thành công trong {t_resolve:.2f}s")
                 safe_title = clean_filename(v_title_vn or (f"douyin_{video_id}" if video_id else "douyin_video"))
                 target_path = os.path.join(output_dir, f"{prefix}_{safe_title}.mp4")
                 if download_parallel_range(v_url_vn, target_path, workers=4):
@@ -415,30 +442,83 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
         except Exception as e_vn:
             logger.warning(f"Montague/Viesnap Resolver gặp lỗi: {e_vn}")
 
-        # Tầng 2: Bóc tách qua SO9 Downloader (Dự phòng chất lượng cao)
+                # Ưu tiên tải HTTP Range 6 workers song song để đạt tốc độ tối đa (~3s thay vì ~68s)
+                if download_parallel_range(v_url_vn, target_path, workers=6, headers=v_headers_vn):
+                    logger.info("Tải thành công Douyin không logo qua Montague/Viesnap (Range): %s", target_path)
+                    return True, target_path, v_title_vn, ""
+
+                # Fallback sang stream nếu máy chủ từ chối Range
+                if download_file_stream(v_url_vn, target_path, headers=v_headers_vn):
+                    logger.info("Tải thành công Douyin không logo qua Montague/Viesnap (Stream): %s", target_path)
+                    return True, target_path, v_title_vn, ""
+
+                diagnostics.append(f"Viesnap: bóc tách OK ({t_resolve:.2f}s) nhưng tải video thất bại (cả Range và Stream)")
+                logger.warning("Tải luồng video từ Montague/Viesnap thất bại.")
+            else:
+                diagnostics.append(f"Viesnap: {err_vn or 'không trả về cdn_url'}")
+        except Exception as e_vn:
+            diagnostics.append(f"Viesnap: {sanitize_exception(e_vn)}")
+            logger.warning("Montague/Viesnap Resolver gặp lỗi: %s", sanitize_exception(e_vn))
+
+        # Tầng 2: API web chính chủ + X-Bogus / A-Bogus (nếu có cookie hợp lệ)
+        if video_id:
+            try:
+                t0 = time.monotonic()
+                info = resolve_douyin_video(video_id)
+                t_resolve = time.monotonic() - t0
+                logger.info(f"[RESOLVE] Douyin direct thành công trong {t_resolve:.2f}s")
+                safe_title = clean_filename(info.title)
+                target_path = os.path.join(output_dir, f"{prefix}_{safe_title}.mp4")
+                for media_url in info.media_urls:
+                    if download_parallel_range(media_url, target_path, workers=6, headers=dict(info.download_headers)):
+                        logger.info("Tải thành công Douyin trực tiếp (Range): %s", target_path)
+                        return True, target_path, info.title, ""
+                    if download_file_stream(
+                        media_url,
+                        target_path,
+                        headers=dict(info.download_headers),
+                        timeout=(10, 90),
+                    ):
+                        logger.info("Tải thành công Douyin trực tiếp (Stream): %s", target_path)
+                        return True, target_path, info.title, ""
+                diagnostics.append("Direct: đã trả metadata nhưng các CDN video đều tải thất bại")
+            except DouyinDirectError as exc:
+                diagnostics.append(f"Direct: {exc}")
+                logger.warning("Douyin direct resolver không thành công: %s", exc)
+            except Exception as e_direct:
+                diagnostics.append(f"Direct: {sanitize_exception(e_direct)}")
+                logger.warning("Douyin direct resolver lỗi: %s", sanitize_exception(e_direct))
+        else:
+            diagnostics.append("Direct: không trích xuất được video ID")
+
+        # Tầng 3: Bóc tách qua SO9 Downloader (Dự phòng chất lượng cao)
         try:
-            logger.info("Thử bóc tách Douyin qua SO9 Resolver dự phòng...")
+            logger.info("Thử bóc tách Douyin qua SO9 Resolver...")
+            t0 = time.monotonic()
             ok, v_url, v_title, err = resolve_douyin_so9(url, video_id=video_id)
+            t_resolve = time.monotonic() - t0
             if ok and v_url:
+                logger.info(f"[RESOLVE] SO9 thành công trong {t_resolve:.2f}s")
                 safe_title = clean_filename(v_title or (f"douyin_{video_id}" if video_id else "douyin_video"))
                 target_path = os.path.join(output_dir, f"{prefix}_{safe_title}.mp4")
                 if download_parallel_range(v_url, target_path, workers=6):
-                    logger.info(f"Tải thành công Douyin không logo qua SO9 (Range): {target_path}")
+                    logger.info("Tải thành công Douyin không logo qua SO9 (Range): %s", target_path)
                     return True, target_path, v_title, ""
-                if download_file_stream(v_url, target_path):
-                    logger.info(f"Tải thành công Douyin không logo qua SO9 (Stream): {target_path}")
+                if download_file_stream(v_url, target_path, timeout=(15, 60)):
+                    logger.info("Tải thành công Douyin không logo qua SO9 (Stream): %s", target_path)
                     return True, target_path, v_title, ""
-                logger.warning("Tải luồng video từ SO9 thất bại.")
+                diagnostics.append(f"SO9: bóc tách OK ({t_resolve:.2f}s) nhưng tải luồng video thất bại")
+                logger.warning("Tải luồng video từ SO9 thất bại, chuyển sang chiến lược tiếp theo.")
+            else:
+                diagnostics.append(f"SO9: {err or 'không có link'}")
         except Exception as e_so9:
-            logger.warning(f"SO9 Downloader gặp lỗi: {e_so9}")
+            diagnostics.append(f"SO9: {sanitize_exception(e_so9)}")
+            logger.warning("SO9 Downloader gặp lỗi: %s", sanitize_exception(e_so9))
 
-        # Đã loại bỏ hoàn toàn các tầng chết:
-        # - Tầng TikWM (không hỗ trợ Douyin, chỉ gây delay 36s)
-        # - Tầng Direct API v2 cũ (iesdouyin.com/web/api/v2/aweme/iteminfo/ đã bị ByteDance khai tử, gây lỗi JSONDecodeError)
-        return False, "", "", "Bóc tách Douyin thất bại qua cả Montague/Viesnap và SO9"
+        all_err = " | ".join(diagnostics) if diagnostics else (resolver_error or "Tất cả các nguồn bóc tách Douyin đều thất bại")
+        return False, "", "", f"Bóc tách Douyin thất bại: {all_err}"
 
     # 2. Chiến lược dành riêng cho TikTok: TikWM Multi-platform API
-    target_urls = [url]
     for t_url in target_urls:
         try:
             api_url = "https://www.tikwm.com/api/"
@@ -457,12 +537,13 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
                         
                         target_path = os.path.join(output_dir, f"{prefix}_{safe_title}.mp4")
                         if download_file_stream(video_url, target_path):
-                            logger.info(f"Tải thành công TikTok không logo: {target_path}")
+                            logger.info(f"Tải thành công Douyin/TikTok không logo: {target_path}")
                             return True, target_path, title, ""
         except Exception as e:
             logger.warning(f"TikWM thử link {sanitize_url(t_url)} lỗi: {e}")
 
-    return False, "", "", "Không thể bóc tách link TikTok qua API"
+    error = resolver_error or "Không thể bóc tách link TikTok qua API"
+    return False, "", "", error
 
 import urllib.request
 import concurrent.futures
@@ -522,8 +603,6 @@ def download_parallel_range(
                     if getattr(shared_state, 'stop_requested', False) or (deadline and (time.monotonic() - transfer_start > deadline)):
                         return part_name, False
                     try:
-                        import socket
-                        socket.setdefaulttimeout(15)
                         p_req = urllib.request.Request(url)
                         p_req.add_header('User-Agent', USER_AGENTS["desktop"])
                         if headers:
@@ -531,7 +610,7 @@ def download_parallel_range(
                                 if hk.lower() != 'user-agent':
                                     p_req.add_header(hk, str(hv))
                         p_req.add_header('Range', f'bytes={current_start}-{end}')
-                        with urllib.request.urlopen(p_req, timeout=15) as p_resp:
+                        with urllib.request.urlopen(p_req, timeout=12) as p_resp:
                             require_partial_content(
                                 getattr(p_resp, "status", p_resp.getcode()),
                                 p_resp.headers,
@@ -628,9 +707,6 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
         }
-        xhs_cookie = os.getenv("XHS_COOKIE", "").strip()
-        if xhs_cookie:
-            headers['Cookie'] = xhs_cookie
         
         # Chuẩn hóa link rút gọn sang HTTPS để tránh bị timeout trên một số mạng
         target_fetch_url = url.strip()
@@ -772,19 +848,10 @@ def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
         # Đối với Douyin: ByteDance chặn 100% các request yt-dlp nếu không có cookies (HTTP 403 Forbidden).
         # Nếu không có cookie, dừng ngay lập tức thay vì để yt-dlp treo retry 60s - 120s vô ích.
         if any(k in lower_url for k in ["douyin.com", "iesdouyin.com"]):
-            douyin_cookie = None
-            for cand in [
-                os.getenv("DOUYIN_COOKIE_FILE", ""),
-                os.path.join(os.path.dirname(__file__), "douyin_cookies.txt"),
-                os.path.join(os.path.dirname(__file__), "..", "douyin_cookies.txt")
-            ]:
-                if cand and os.path.exists(cand):
-                    douyin_cookie = os.path.abspath(cand)
-                    break
-
-            if not douyin_cookie:
-                logger.warning("Bỏ qua tầng yt-dlp cho Douyin vì không có file cookie (tránh treo timeout 60s).")
-                return False, "", "", err or "Bóc tách Douyin thất bại qua SO9 (không có cookie dự phòng cho yt-dlp)"
+            cookie_file = configured_cookie_file()
+            if not cookie_file:
+                logger.warning("Bỏ qua tầng yt-dlp cho Douyin vì không có file cookie hợp lệ (tránh treo timeout 60s).")
+                return False, "", "", err or "Bóc tách Douyin thất bại qua các tầng giải mã (Montague/Viesnap, Direct, SO9)"
 
     # 2. Nhánh Xiaohongshu
     elif any(k in lower_url for k in ["xiaohongshu.com", "xhslink.com"]):
@@ -807,28 +874,26 @@ def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
         "-o", safe_output_template,
         "--no-playlist",
         "--restrict-filenames",
-        "--socket-timeout", "30",
-        "--retries", "2",
+        "--socket-timeout", "60",
+        "--retries", "3",
         "--user-agent", USER_AGENTS["desktop"],
         "--referer", "https://www.douyin.com/",
     ]
-    if "douyin.com" in lower_url and 'douyin_cookie' in locals() and douyin_cookie:
-        cmd_download.extend(["--cookies", douyin_cookie])
+    if "douyin.com" in lower_url:
+        cookie_file = configured_cookie_file()
+        if cookie_file:
+            cmd_download.extend(["--cookies", cookie_file])
     cmd_download.append(clean_target_url)
     
     try:
-        raw_timeout = os.getenv("SOCIAL_DOWNLOAD_TIMEOUT_SECONDS", "120.0")
-        try:
-            configured_timeout = float(raw_timeout)
-        except (ValueError, TypeError):
-            configured_timeout = 120.0
-        if configured_timeout <= 0:
-            configured_timeout = 120.0
+        configured_timeout = float(
+            os.getenv("SOCIAL_DOWNLOAD_TIMEOUT_SECONDS", "0")
+        )
         proc = subprocess.run(
             cmd_download,
             capture_output=True,
             text=True,
-            timeout=configured_timeout,
+            timeout=configured_timeout if configured_timeout > 0 else None,
             creationflags=CREATE_NO_WINDOW
         )
         
@@ -842,17 +907,15 @@ def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
                 return False, "", "", str(probe_error)
             return True, final_path, downloaded[0], ""
         else:
-            return False, "", "", proc.stderr[:400] if proc.stderr else "Không tìm thấy file sau khi tải"
-    except subprocess.TimeoutExpired as e:
-        # Cleanup any partial files left by yt-dlp
-        try:
-            for f in os.listdir(output_dir):
-                if f.startswith(prefix) and (f.endswith(".part") or f.endswith(".ytdl")):
-                    os.remove(os.path.join(output_dir, f))
-        except Exception as cleanup_err:
-            pass
-        return False, "", "", f"Tải video quá lâu (>{configured_timeout}s)"
+            raw_err = proc.stderr or ""
+            if "403" in raw_err or "Forbidden" in raw_err or "Fresh cookies" in raw_err:
+                clean_err = "Douyin chặn truy cập trực tiếp (HTTP 403 / cần cookie)"
+            elif "timed out" in raw_err.lower() or "timeout" in raw_err.lower():
+                clean_err = "Quá thời gian chờ tải video từ máy chủ nguồn"
+            else:
+                clean_err = raw_err[:250].strip() if raw_err else "Không tìm thấy file sau khi tải"
+            return False, "", "", clean_err
+    except subprocess.TimeoutExpired:
+        return False, "", "", "Tải video quá lâu (>5 phút)"
     except Exception as e:
         return False, "", "", str(e)
-
-
