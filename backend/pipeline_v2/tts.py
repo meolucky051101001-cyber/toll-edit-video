@@ -128,8 +128,20 @@ async def generate_tts_audio_v2(
                     is_silent_fallback = await _synthesize_edge_with_rescue(
                         mapped_voice, allow_capcut_rescue=False
                     )
+                elif voice_source == "vieneu" or mapped_voice.startswith("vieneu-"):
+                    from ai.vieneu_tts_service import generate_tts_vieneu
+                    await generate_tts_vieneu(text, str(raw), voice=mapped_voice)
                 else:
                     await asyncio.to_thread(_run_capcut_tts, text, str(raw), mapped_voice)
+            elif voice_source == "vieneu":
+                from ai.vieneu_tts_service import generate_tts_vieneu
+                v_target = voice_param or "Hải Đăng"
+                if enable_auto_gender:
+                    if seg_gender == "male":
+                        v_target = "Hải Đăng"
+                    elif seg_gender == "female":
+                        v_target = "Mai Anh"
+                await generate_tts_vieneu(text, str(raw), voice=v_target)
             elif voice_source == "capcut":
                 capcut_v = "BV075_streaming" if (enable_auto_gender and seg_gender == "male") else voice_param
                 await asyncio.to_thread(_run_capcut_tts, text, str(raw), capcut_v)

@@ -1,0 +1,213 @@
+{
+  "timestamp": "2026-09-14T03:51:20.382470+00:00",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU, 6141 MiB, 610.62",
+    "platform": "win32",
+    "python": "3.10.11"
+  },
+  "pipeline_configuration": {
+    "speed_profile": "fast",
+    "asr_backend": "faster-whisper (cuda fp16)",
+    "vocal_separation": "Meta Demucs htdemucs",
+    "ffmpeg_encoder": "h264_nvenc",
+    "rvc_enabled": true,
+    "rvc_model": "C:\\tool v2\\MyVoiceModel_v2\\mi-giong_cua_toi_v2.pth",
+    "cache_policy": "per-stage content hash (warm runs reuse cached artifacts)",
+    "vram_reporting": "peak_vram_mb is total GPU VRAM used; delta_vram_mb is pipeline net delta (empirical approximation on Windows WDDM)",
+    "realtime_ratio_definition": "total_time_seconds / actual_duration_seconds (<1.0x is faster than realtime)"
+  },
+  "results": [
+    {
+      "duration_minutes": 0.32,
+      "actual_duration_seconds": 19.47,
+      "mode": "cold",
+      "total_time_seconds": 346.5,
+      "realtime_ratio": 17.8,
+      "peak_ram_mb": 5659.99,
+      "avg_ram_mb": 1530.88,
+      "baseline_vram_mb": 353.0,
+      "peak_vram_mb": 2715.0,
+      "delta_vram_mb": 2362.0,
+      "rewrite_rounds": 0,
+      "error_count": 0,
+      "status": "SUCCESS",
+      "video_source": "workspace\\downloads\\queue_9b27caac49724208a7dddf53872cb7e9_20s速通展示牌谷美文件夹变身美萌门挂.mp4",
+      "stages": [
+        {
+          "name": "input",
+          "duration_seconds": 0.16,
+          "status": "completed"
+        },
+        {
+          "name": "extract_audio",
+          "duration_seconds": 0.24,
+          "status": "completed"
+        },
+        {
+          "name": "demucs",
+          "duration_seconds": 20.66,
+          "status": "completed"
+        },
+        {
+          "name": "transcribe",
+          "duration_seconds": 27.38,
+          "status": "completed"
+        },
+        {
+          "name": "ocr",
+          "duration_seconds": 76.43,
+          "status": "completed"
+        },
+        {
+          "name": "translate",
+          "duration_seconds": 49.33,
+          "status": "completed"
+        },
+        {
+          "name": "timing",
+          "duration_seconds": 24.55,
+          "status": "completed"
+        },
+        {
+          "name": "tts",
+          "duration_seconds": 15.95,
+          "status": "completed"
+        },
+        {
+          "name": "rvc",
+          "duration_seconds": 57.16,
+          "status": "completed"
+        },
+        {
+          "name": "subtitles",
+          "duration_seconds": 0.5,
+          "status": "completed"
+        },
+        {
+          "name": "mix_legacy",
+          "duration_seconds": 0.0,
+          "status": "skipped"
+        },
+        {
+          "name": "mix_v2",
+          "duration_seconds": 1.67,
+          "status": "completed"
+        },
+        {
+          "name": "render",
+          "duration_seconds": 37.22,
+          "status": "completed"
+        },
+        {
+          "name": "qc",
+          "duration_seconds": 6.94,
+          "status": "completed"
+        },
+        {
+          "name": "deliver",
+          "duration_seconds": 0.1,
+          "status": "completed"
+        }
+      ],
+      "metadata": {
+        "rvc_enabled": true
+      }
+    },
+    {
+      "duration_minutes": 0.32,
+      "actual_duration_seconds": 19.47,
+      "mode": "warm",
+      "total_time_seconds": 28.18,
+      "realtime_ratio": 1.45,
+      "peak_ram_mb": 609.59,
+      "avg_ram_mb": 492.45,
+      "baseline_vram_mb": 366.0,
+      "peak_vram_mb": 454.0,
+      "delta_vram_mb": 88.0,
+      "rewrite_rounds": 0,
+      "error_count": 0,
+      "status": "SUCCESS",
+      "video_source": "workspace\\downloads\\queue_9b27caac49724208a7dddf53872cb7e9_20s速通展示牌谷美文件夹变身美萌门挂.mp4",
+      "stages": [
+        {
+          "name": "deliver",
+          "duration_seconds": 0.0,
+          "status": "completed [reused from cache]"
+        },
+        {
+          "name": "demucs",
+          "duration_seconds": 0.0,
+          "status": "completed [reused from cache]"
+        },
+        {
+          "name": "extract_audio",
+          "duration_seconds": 0.0,
+          "status": "completed [reused from cache]"
+        },
+        {
+          "name": "input",
+          "duration_seconds": 0.0,
+          "status": "completed [reused from cache]"
+        },
+        {
+          "name": "mix_legacy",
+          "duration_seconds": 0.0,
+          "status": "skipped"
+        },
+        {
+          "name": "mix_v2",
+          "duration_seconds": 0.0,
+          "status": "completed [reused from cache]"
+        },
+        {
+          "name": "ocr",
+          "duration_seconds": 0.0,
+          "status": "completed [reused from cache]"
+        },
+        {
+          "name": "qc",
+          "duration_seconds": 0.0,
+          "status": "completed [reused from cache]"
+        },
+        {
+          "name": "render",
+          "duration_seconds": 0.0,
+          "status": "completed [reused from cache]"
+        },
+        {
+          "name": "rvc",
+          "duration_seconds": 0.0,
+          "status": "completed [reused from cache]"
+        },
+        {
+          "name": "subtitles",
+          "duration_seconds": 0.0,
+          "status": "completed [reused from cache]"
+        },
+        {
+          "name": "timing",
+          "duration_seconds": 0.0,
+          "status": "completed [reused from cache]"
+        },
+        {
+          "name": "transcribe",
+          "duration_seconds": 0.0,
+          "status": "completed [reused from cache]"
+        },
+        {
+          "name": "translate",
+          "duration_seconds": 0.0,
+          "status": "completed [reused from cache]"
+        },
+        {
+          "name": "tts",
+          "duration_seconds": 0.0,
+          "status": "completed [reused from cache]"
+        }
+      ],
+      "metadata": {
+        "rvc_enabled": true
+      }
+    }
+  ]
+}
