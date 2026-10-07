@@ -18,6 +18,11 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 
+try:
+    from backend.config.paths import AppPaths
+except ImportError:
+    from config.paths import AppPaths
+
 from ai.scriptwriting import (
     analyze_video_and_generate_script,
     generate_video_script,
@@ -68,24 +73,9 @@ def _update_task_progress(
         "updated_at": time.time()
     }
 
-# Thư mục lưu trữ workspace kịch bản & file âm thanh, phụ đề (tuyệt đối không lưu vào D:\banve hoặc D:\video phôi)
-def _get_script_workspace() -> Path:
-    candidates = [
-        Path(__file__).resolve().parent.parent / "workspace" / "script_workspace",
-        Path(r"C:\tool v1\workspace\script_workspace"),
-        Path(__file__).resolve().parent / "workspace" / "script_workspace",
-    ]
-    for c in candidates:
-        try:
-            c.mkdir(parents=True, exist_ok=True)
-            return c
-        except Exception:
-            continue
-    fallback = Path(__file__).resolve().parent.parent / "workspace" / "script_workspace"
-    fallback.mkdir(parents=True, exist_ok=True)
-    return fallback
-
-SCRIPT_WORKSPACE = _get_script_workspace()
+PATHS = AppPaths.from_environment(Path(__file__).resolve().parents[1])
+SCRIPT_WORKSPACE = PATHS.workspace / "script_workspace"
+SCRIPT_WORKSPACE.mkdir(parents=True, exist_ok=True)
 PREVIEWS_DIR = SCRIPT_WORKSPACE / "previews"
 PREVIEWS_DIR.mkdir(parents=True, exist_ok=True)
 

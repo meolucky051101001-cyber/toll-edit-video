@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -28,6 +29,7 @@ class FFmpegMixSettings:
     loudness_range: float = 11.0
     voice_chunk_seconds: float = 300.0
     max_inputs_per_pass: int = 64
+    output_sample_rate: int = 48000
 
     def __post_init__(self) -> None:
         if not 0.000001 <= self.duck_threshold <= 1.0:
@@ -315,7 +317,7 @@ def _render_scalable_voice_bus(
     with concat_file.open("w", encoding="utf-8", newline="\n") as handle:
         handle.write("ffconcat version 1.0\n")
         for item in chunk_paths:
-            escaped = str(item.resolve()).replace("'", "'\\''")
+            escaped = item.resolve().as_posix().replace("'", "'\\''")
             handle.write("file '{}'\n".format(escaped))
         handle.flush()
         os.fsync(handle.fileno())
@@ -364,7 +366,9 @@ def build_ffmpeg_mix_command(
     for dub in dubs:
         command.extend(["-i", dub["path"]])
 
-    limiter_linear = 10 ** (config.true_peak_dbtp / 20.0)
+    # Apply 0.2 dB headroom to alimiter to prevent transient overshoot above target true peak
+    limiter_target_db = min(config.true_peak_dbtp, config.true_peak_dbtp - 0.2)
+    limiter_linear = 10 ** (limiter_target_db / 20.0)
     filters = []
     if dubs:
         voice_labels = []
@@ -426,6 +430,8 @@ def build_ffmpeg_mix_command(
             "[mix_out]",
             "-c:a",
             "pcm_s24le",
+            "-ar",
+            str(config.output_sample_rate),
             "-f",
             "wav",
             str(output_path),
@@ -465,6 +471,20 @@ def mix_audio_ffmpeg(
                     dub.get("index", "unknown")
                 )
             )
+    # Verify available disk space before generating large mixes
+    try:
+        free_bytes = shutil.disk_usage(str(output.parent)).free
+        min_required_bytes = max(50 * 1024 * 1024, int(Path(background_audio).stat().st_size * 2))
+        if free_bytes < min_required_bytes:
+            raise OSError(
+                "Insufficient disk space for FFmpeg mix: {}MB free, need {}MB".format(
+                    free_bytes // (1024 * 1024), min_required_bytes // (1024 * 1024)
+                )
+            )
+    except Exception as exc:
+        if isinstance(exc, OSError):
+            raise
+
     if len(dubs) <= config.max_inputs_per_pass:
         command, dub_count = build_ffmpeg_mix_command(
             background_audio,
@@ -497,4 +517,15 @@ def mix_audio_ffmpeg(
             dub_count = len(dubs)
     if not output.is_file() or output.stat().st_size == 0:
         raise RuntimeError("FFmpeg mix failed")
+
+    # Validate output duration matches background duration within tolerance
+    output_duration = _probe_duration(output, "ffprobe", _remaining_timeout(deadline))
+    duration_drift = abs(output_duration - background_duration)
+    if duration_drift > 0.25:
+        raise RuntimeError(
+            "FFmpeg mix duration drifted: output is {:.3f}s, background is {:.3f}s (drift {:.3f}s > 0.25s)".format(
+                output_duration, background_duration, duration_drift
+            )
+        )
+
     return FFmpegMixResult(str(output), dub_count, command)

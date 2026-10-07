@@ -139,3 +139,5 @@ def snapshot_completed_legacy_run(
         )
         recorder.store.save(recorder.manifest)
     return recorder.store.path
+
+

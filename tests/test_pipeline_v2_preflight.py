@@ -3,10 +3,35 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from backend.pipeline_v2.preflight import run_preflight
+from backend.pipeline_v2.preflight import _dependency_check, run_preflight
 
 
 class PreflightTests(unittest.TestCase):
+    def test_broken_dependencies_block_readiness(self):
+        completed = mock.Mock(
+            returncode=1,
+            stdout="package-a requires package-b<2, but package-b 3 is installed.\n",
+            stderr="",
+        )
+        with mock.patch(
+            "backend.pipeline_v2.preflight.subprocess.run", return_value=completed
+        ):
+            check = _dependency_check()
+        self.assertEqual(check.status, "error")
+        self.assertIn("package-a", check.message)
+
+    def test_invalid_distribution_warning_blocks_readiness(self):
+        completed = mock.Mock(
+            returncode=0,
+            stdout="No broken requirements found.\n",
+            stderr="WARNING: Ignoring invalid distribution -orch\n",
+        )
+        with mock.patch(
+            "backend.pipeline_v2.preflight.subprocess.run", return_value=completed
+        ):
+            check = _dependency_check()
+        self.assertEqual(check.status, "error")
+
     def test_placeholder_token_is_reported_as_missing(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch(
             "backend.pipeline_v2.preflight.importlib.util.find_spec",

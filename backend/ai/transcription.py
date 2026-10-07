@@ -9,9 +9,16 @@ if isinstance(sys.stderr, io.TextIOWrapper):
     try: sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     except Exception: pass
 
+import re
 import srt
 from datetime import timedelta
-from faster_whisper import WhisperModel
+import threading
+
+from .model_policy import current_model_policy
+from .model_runtime import ModelRuntimeError, run_model_stage, runtime_module_available
+
+
+logger = logging.getLogger(__name__)
 
 from .v1_model_policy import current_v1_model_policy
 import logging

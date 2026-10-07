@@ -8,6 +8,7 @@ import gc
 import json
 import os
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
@@ -67,11 +68,12 @@ def _run_ocr(payload: Mapping[str, Any]) -> Dict[str, Any]:
     from ocr_utils import perform_video_ocr, release_ocr_reader
 
     segments = segments_from_dicts(payload.get("segments", []))
-    batches = chunked(
-        segments, max(1, int(payload.get("batch_segments", len(segments) or 1)))
-    )
+    # OCR already bounds image batches. Keep transcript context intact so a
+    # batch's final cue is not mistakenly sampled through the end of the video.
+    batches = [segments]
     try:
         block_count = 0
+        sampling_metrics = {}
         width, height = 1080, 1920
         main_positions = []
         for batch in batches:
@@ -80,6 +82,8 @@ def _run_ocr(payload: Mapping[str, Any]) -> Dict[str, Any]:
                 target_lang=str(payload.get("target_lang", "vi")),
                 sample_rate=float(payload.get("sample_rate", 1.0)),
                 srt_segments=batch,
+                adaptive=bool(payload.get("enable_adaptive_ocr", False)),
+                metrics=sampling_metrics,
             )
             block_count += len(blocks)
             main_positions.append(float(main_y_pct))
@@ -94,6 +98,8 @@ def _run_ocr(payload: Mapping[str, Any]) -> Dict[str, Any]:
             "height": height,
             "main_y_pct": main_y_pct,
             "block_count": block_count,
+            "sampling_metrics": sampling_metrics,
+            "gap_detections": sampling_metrics.get("gap_detections", []),
         }
     finally:
         release_ocr_reader()
@@ -145,15 +151,76 @@ def run_request(request: Mapping[str, Any]) -> Dict[str, Any]:
     return handler(dict(request.get("payload", {})))
 
 
+def run_session_mode(session_dir: Path) -> int:
+    session_dir.mkdir(parents=True, exist_ok=True)
+    stop_file = session_dir / "stop"
+    request_number = 0
+    try:
+        while not stop_file.exists():
+            request_number += 1
+            request_name = "request-{:06d}.json".format(request_number)
+            response_name = "response-{:06d}.json".format(request_number)
+            request_path = session_dir / request_name
+            response_path = session_dir / response_name
+
+            while not request_path.is_file():
+                if stop_file.exists():
+                    return 0
+                time.sleep(0.02)
+
+            try:
+                request = json.loads(request_path.read_text(encoding="utf-8"))
+                result = run_request(request)
+                atomic_write_json(
+                    str(response_path),
+                    {"schema_version": 1, "success": True, "result": result},
+                )
+            except BaseException as exc:
+                atomic_write_json(
+                    str(response_path),
+                    {
+                        "schema_version": 1,
+                        "success": False,
+                        "error": "{}: {}".format(type(exc).__name__, exc),
+                        "traceback": traceback.format_exc(),
+                    },
+                )
+            finally:
+                try:
+                    if request_path.is_file():
+                        request_path.unlink()
+                except OSError:
+                    pass
+                gc.collect()
+        return 0
+    finally:
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one pipeline v2 GPU stage")
-    parser.add_argument("--request", required=True)
-    parser.add_argument("--response", required=True)
+    parser.add_argument("--request", required=False)
+    parser.add_argument("--response", required=False)
+    parser.add_argument("--session-dir", required=False)
     return parser
 
 
 def main(argv: Sequence[str] = None) -> int:
     args = build_argument_parser().parse_args(argv)
+    if args.session_dir:
+        return run_session_mode(Path(args.session_dir))
+
+    if not args.request or not args.response:
+        sys.stderr.write("Either --session-dir or both --request and --response must be provided\n")
+        return 2
+
     try:
         request = json.loads(Path(args.request).read_text(encoding="utf-8"))
         result = run_request(request)

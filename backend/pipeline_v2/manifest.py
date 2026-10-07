@@ -93,3 +93,5 @@ class ManifestStore:
             if record is None or not artifacts.validate(record).valid:
                 return False
         return True
+
+

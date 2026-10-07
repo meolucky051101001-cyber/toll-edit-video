@@ -1,6 +1,6 @@
 """
 render_history.py - Quản lý và lưu trữ vĩnh viễn thời gian render/edit của từng video thành phẩm.
-Lưu trữ vào D:\banve\.render_history.json để dùng chung cho cả Tool V1, Tool V2 và Telegram Bot.
+Có thể đọc lịch sử workspace dùng chung nếu được cấu hình qua environment.
 """
 import os
 import json
@@ -10,15 +10,40 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
-WORKSPACE_DIR = Path(__file__).resolve().parent.parent / "workspace"
-def _resolve_history_files():
-    bot_system = WORKSPACE_DIR / "bot_system"
-    target = bot_system / ".render_history.json"
-    if target.exists() or bot_system.is_dir():
-        return target, bot_system / ".render_history.lock"
-    return WORKSPACE_DIR / ".render_history.json", WORKSPACE_DIR / ".render_history.lock"
+try:
+    from pipeline_v2.atomic_io import atomic_write_json
+except ImportError:
+    try:
+        from backend.pipeline_v2.atomic_io import atomic_write_json
+    except ImportError:
+        atomic_write_json = None
 
-HISTORY_FILE, LOCK_FILE = _resolve_history_files()
+try:
+    from backend.config.paths import AppPaths
+    from backend.environment import read_environment
+except ImportError:
+    from config.paths import AppPaths
+    from environment import read_environment
+
+BACKEND_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BACKEND_DIR.parent
+PATHS = AppPaths.from_environment(PROJECT_ROOT, read_environment(BACKEND_DIR))
+WORKSPACE_DIR = PATHS.workspace
+def _resolve_v2_history():
+    bs = WORKSPACE_DIR / "bot_system"
+    target = bs / ".render_history_v2.json"
+    if target.exists() or bs.is_dir():
+        return target
+    return WORKSPACE_DIR / ".render_history_v2.json"
+
+SHARED_HISTORY_FILE = (
+    PATHS.shared_workspace_dir / "bot_system" / ".render_history.json"
+    if PATHS.shared_workspace_dir
+    else None
+)
+V2_HISTORY_FILE = Path(os.getenv("TOOL_V2_RENDER_HISTORY", str(_resolve_v2_history())))
+HISTORY_FILE = V2_HISTORY_FILE
+
 
 def format_duration(seconds: float) -> str:
     """Định dạng giây sang dạng Xp Ys hoặc Xs."""
@@ -34,6 +59,7 @@ def format_duration(seconds: float) -> str:
     if m > 0:
         return f"{m}p {s:02d}s"
     return f"{s}s"
+
 
 def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int]:
     """Đọc toàn bộ lịch sử thời gian render từ workspace, manifests và cache runtime."""
@@ -86,6 +112,13 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
         Path(r"C:\tool v2\workspace\bot_system\job_status.json"),
         Path(r"C:\tool v2\workspace\job_status.json"),
     ]
+    if PATHS.shared_workspace_dir:
+        workspace_candidates.extend(
+            [
+                PATHS.shared_workspace_dir / "bot_system" / "job_status.json",
+                PATHS.shared_workspace_dir / "job_status.json",
+            ]
+        )
     for ws in workspace_candidates:
         if ws.is_file():
             try:
@@ -163,91 +196,108 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
             except Exception:
                 pass
 
+    # 3. Đọc bổ sung từ các job manifest V2 trong workspace
+    v2_workspaces = [WORKSPACE_DIR]
+    if PATHS.shared_workspace_dir:
+        v2_workspaces.append(PATHS.shared_workspace_dir)
+    for root_ws in v2_workspaces:
+        if root_ws.is_dir():
+            for mf in root_ws.glob("*/pipeline_v2/job_manifest.json"):
+                try:
+                    d = json.loads(mf.read_text(encoding="utf-8"))
+                    c_at = d.get("created_at")
+                    u_at = d.get("updated_at")
+                    if c_at and u_at:
+                        t0 = datetime.fromisoformat(c_at.replace("Z", "+00:00"))
+                        t1 = datetime.fromisoformat(u_at.replace("Z", "+00:00"))
+                        dur = int(round(max(0, (t1 - t0).total_seconds())))
+                        if dur > 0:
+                            jname = mf.parent.parent.name
+                            meta.setdefault(jname, dur)
+                            meta.setdefault(f"{jname}.mp4", dur)
+                            meta.setdefault(f"Dubbed_{jname}", dur)
+                            meta.setdefault(f"Dubbed_{jname}.mp4", dur)
+                            meta.setdefault(f"final_{jname}.mp4", dur)
+                            sp = d.get("metadata", {}).get("source_path")
+                            if sp:
+                                sname = Path(sp).name
+                                meta.setdefault(sname, dur)
+                                meta.setdefault(f"Dubbed_{sname}", dur)
+                                if not sname.lower().endswith(".mp4"):
+                                    meta.setdefault(f"{sname}.mp4", dur)
+                                    meta.setdefault(f"Dubbed_{sname}.mp4", dur)
+                except Exception:
+                    pass
+
     return meta
 
-def _acquire_lock(lock_path: Path, timeout: float = 10.0, stale_timeout: float = 60.0) -> bool:
-    start = time.monotonic()
-    while time.monotonic() - start < timeout:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd)
-            return True
-        except FileExistsError:
-            try:
-                mtime = os.path.getmtime(str(lock_path))
-                if time.time() - mtime > stale_timeout:
-                    try:
-                        os.unlink(str(lock_path))
-                        continue
-                    except OSError:
-                        pass
-            except OSError:
-                pass
-            time.sleep(0.1)
-        except OSError:
-            time.sleep(0.1)
-    return False
-
-def _release_lock(lock_path: Path):
-    try:
-        os.unlink(str(lock_path))
-    except OSError:
-        pass
 
 def record_render_duration(video_name_or_path: str, duration_seconds: float) -> None:
-    """Ghi nhận thời gian render của video vào file lịch sử D:\banve\.render_history.json."""
+    """Ghi nhận thời gian render đồng thời vào cả .render_history.json và .render_history_v2.json một cách an toàn."""
     if not duration_seconds or duration_seconds <= 0:
         return
-    
     clean_name = os.path.basename(video_name_or_path)
-    history_file = HISTORY_FILE
-    
-    if not _acquire_lock(LOCK_FILE, timeout=15.0):
-        return  # Bỏ qua nếu lock failed
+    dur_int = int(round(duration_seconds))
 
-    try:
-        meta: Dict[str, int] = {}
-        if history_file.exists():
-            try:
-                content = history_file.read_text(encoding="utf-8")
-                if content.strip():
-                    raw = json.loads(content)
+    target_files = [HISTORY_FILE]
+    for history_file in target_files:
+        history_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = history_file.with_name(history_file.name + ".lock")
+        lock_fd = None
+
+        # Khóa file để đồng bộ đa tiến trình trên Windows
+        try:
+            import msvcrt
+            lock_fd = open(lock_file, "a+", encoding="utf-8")
+            for _ in range(30):
+                try:
+                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except (IOError, OSError):
+                    time.sleep(0.05)
+        except Exception:
+            pass
+
+        try:
+            meta: Dict[str, int] = {}
+            if history_file.exists():
+                try:
+                    raw = json.loads(history_file.read_text(encoding="utf-8"))
                     if isinstance(raw, dict):
                         meta = {k: int(v if isinstance(v, (int, float)) else v.get("duration_seconds", 0)) 
                                 for k, v in raw.items() if v}
-            except Exception:
-                # Task 11: History corruption recovery
-                backup_file = history_file.with_name(f".render_history.corrupt.{int(time.time())}.json")
+                except Exception:
+                    meta = {}
+
+            meta[clean_name] = dur_int
+            if clean_name.startswith("Dubbed_"):
+                meta[clean_name[7:]] = dur_int
+            else:
+                meta[f"Dubbed_{clean_name}"] = dur_int
+
+            if atomic_write_json is not None:
+                atomic_write_json(history_file, meta)
+            else:
+                temporary = history_file.with_suffix(history_file.suffix + f".tmp.{os.getpid()}")
+                temporary.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+                # Thử lại khi có tranh chấp trên Windows
+                for attempt in range(8):
+                    try:
+                        temporary.replace(history_file)
+                        break
+                    except OSError:
+                        time.sleep(min(0.05 * (2 ** attempt), 0.5))
+        except Exception as e:
+            import logging
+            logging.getLogger("render_history").warning(f"Lỗi ghi nhận lịch sử render vào {history_file}: {e}")
+        finally:
+            if lock_fd:
                 try:
-                    import shutil
-                    shutil.copy2(history_file, backup_file)
-                except OSError:
+                    import msvcrt
+                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+                except Exception:
                     pass
-                meta = {}
-
-        meta[clean_name] = int(round(duration_seconds))
-        if clean_name.startswith("Dubbed_"):
-            meta[clean_name[7:]] = int(round(duration_seconds))
-        else:
-            meta[f"Dubbed_{clean_name}"] = int(round(duration_seconds))
-
-        # Atomic job state update (fsync, os.replace)
-        parent_dir = history_file.parent
-        parent_dir.mkdir(parents=True, exist_ok=True)
-        
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=parent_dir, delete=False) as tf:
-            temp_name = tf.name
-            json.dump(meta, tf, ensure_ascii=False, indent=2)
-            tf.flush()
-            os.fsync(tf.fileno())
-            
-        os.replace(temp_name, history_file)
-    except Exception:
-        if 'temp_name' in locals() and os.path.exists(temp_name):
-            try:
-                os.remove(temp_name)
-            except OSError:
-                pass
-    finally:
-        _release_lock(LOCK_FILE)
-
+                try:
+                    lock_fd.close()
+                except Exception:
+                    pass

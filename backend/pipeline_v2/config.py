@@ -52,18 +52,19 @@ class PipelineSettings:
     enable_stage_cache: bool = False
     enable_parallel_ocr_gemini: bool = False
     enable_adaptive_demucs: bool = False
-    enable_adaptive_ocr: bool = False
+    enable_adaptive_ocr: bool = True
     preserve_source_resolution: bool = True
     enable_gpu_process_isolation: bool = True
     enable_timing_solver: bool = True
     enable_ffmpeg_mix_v2: bool = False
     enable_legacy_mix_ab: bool = False
     enable_rvc: bool = True
-    atempo_min: float = 0.92
-    atempo_max: float = 1.40
+    enable_auto_gender: bool = False
+    atempo_min: float = 1.00
+    atempo_max: float = 1.50
     target_lufs: float = -15.0
     true_peak_max_dbtp: float = -1.0
-    qc_gate_policy: QCGatePolicy = QCGatePolicy.REPORT_ONLY
+    qc_gate_policy: QCGatePolicy = QCGatePolicy.BLOCK
     gpu_lock_timeout_seconds: float = 1800.0
     stage_timeout_seconds: float = 3600.0
     translation_batch_segments: int = 80
@@ -105,7 +106,7 @@ class PipelineSettings:
         env = environment if environment is not None else os.environ
         mode_value = env.get("PIPELINE_MODE", PipelineMode.V2.value).strip().lower()
         qc_value = env.get(
-            "QC_GATE_POLICY", QCGatePolicy.REPORT_ONLY.value
+            "QC_GATE_POLICY", env.get("AUTODUB_QC_GATE_POLICY", QCGatePolicy.BLOCK.value)
         ).strip().lower()
         try:
             mode = PipelineMode(mode_value)
@@ -124,7 +125,7 @@ class PipelineSettings:
                 env, "ENABLE_PARALLEL_OCR_GEMINI", False
             ),
             enable_adaptive_demucs=_env_bool(env, "ENABLE_ADAPTIVE_DEMUCS", False),
-            enable_adaptive_ocr=_env_bool(env, "ENABLE_ADAPTIVE_OCR", False),
+            enable_adaptive_ocr=_env_bool(env, "ENABLE_ADAPTIVE_OCR", True),
             preserve_source_resolution=_env_bool(
                 env, "PRESERVE_SOURCE_RESOLUTION", True
             ),
@@ -135,8 +136,9 @@ class PipelineSettings:
             enable_ffmpeg_mix_v2=_env_bool(env, "ENABLE_FFMPEG_MIX_V2", False),
             enable_legacy_mix_ab=_env_bool(env, "ENABLE_LEGACY_MIX_AB", False),
             enable_rvc=_env_bool(env, "ENABLE_RVC", True),
-            atempo_min=_env_float(env, "ATEMPO_MIN", 0.92),
-            atempo_max=_env_float(env, "ATEMPO_MAX", 1.40),
+            enable_auto_gender=_env_bool(env, "ENABLE_AUTO_GENDER", False),
+            atempo_min=_env_float(env, "ATEMPO_MIN", 1.00),
+            atempo_max=_env_float(env, "ATEMPO_MAX", 1.50),
             target_lufs=_env_float(env, "TARGET_LUFS", -15.0),
             true_peak_max_dbtp=_env_float(env, "TRUE_PEAK_MAX_DBTP", -1.0),
             qc_gate_policy=qc_policy,
@@ -167,4 +169,5 @@ class PipelineSettings:
         payload["qc_gate_policy"] = self.qc_gate_policy.value
         payload.pop("gpu_lock_timeout_seconds", None)
         payload.pop("stage_timeout_seconds", None)
+        payload.pop("enable_stage_cache", None)
         return payload

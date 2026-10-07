@@ -1,0 +1,37 @@
+name: Python quality
+
+on:
+  push:
+    branches: [main, tool-v2]
+  pull_request:
+    branches: [main, tool-v2]
+
+permissions:
+  contents: read
+
+jobs:
+  focused-checks:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install focused test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Lint changed foundation modules
+        run: ruff check backend/config tests/test_app_paths.py tests/test_pipeline_v2_config.py scripts/smoke_import_v2.py
+      - name: Run OCR, subtitle, config and downloader unit tests
+        run: >-
+          python -m unittest
+          tests.test_app_paths
+          tests.test_pipeline_v2_config
+          tests.test_refactored_boundaries
+          tests.test_pipeline_v2_download
+          tests.test_ocr_subtitle_locator
+      - name: Smoke-import core V2 modules
+        run: python scripts/smoke_import_v2.py

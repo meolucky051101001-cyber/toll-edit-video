@@ -48,6 +48,13 @@ try:
 except ImportError:
     from v1_gemini_dispatcher import call_gemini_api, DEFAULT_TRANSLATION_MODELS, DEFAULT_CONDENSATION_MODELS
 
+from .model_policy import current_model_policy, ordered_unique
+
+try:
+    from ..subtitle_text import clean_incomplete_segment_stops, normalize_subtitle_text
+except ImportError:
+    from subtitle_text import clean_incomplete_segment_stops, normalize_subtitle_text
+
 logger = logging.getLogger(__name__)
 _gemini_health_lock = threading.Lock()
 _gemini_cooldown = {}
@@ -111,12 +118,12 @@ Yêu cầu TỐI QUAN TRỌNG:
     prompt += "12. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.\n"
     prompt += "Dữ liệu:\n"
     if prior_context:
-        prompt += "Ngữ cảnh nối tiếp từ batch trước (không dịch lại):\n"
-        prompt += json.dumps(prior_context, ensure_ascii=False) + "\n"
+        prompt += "Ngữ cảnh nối tiếp từ batch trước (để duy trì xưng hô và mạch truyện, KHÔNG dịch lại):\n"
+        prompt += json.dumps(list(prior_context), ensure_ascii=False) + "\n"
     prompt += json.dumps(texts, ensure_ascii=False)
     return prompt
 
-def extract_video_frames_base64(video_path, context_start_seconds=None, context_end_seconds=None, num_frames=5):
+def extract_video_frames_base64(video_path, context_start_seconds=None, context_end_seconds=None, num_frames=3):
     if not video_path or not os.path.exists(video_path):
         return []
     # 1. Ultra-fast extraction via ffmpeg fast seek (scaled to 720p, ~1.5s total)
@@ -160,18 +167,12 @@ def extract_video_frames_base64(video_path, context_start_seconds=None, context_
     # 2. Fallback to OpenCV with strict timeout and resizing
     try:
         import cv2
-        cap = cv2.VideoCapture(video_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if context_start_seconds is not None and context_end_seconds is not None and float(context_end_seconds) > float(context_start_seconds):
-            start = max(0.0, float(context_start_seconds))
-            span = float(context_end_seconds) - start
-            positions = [("msec", (start + span * i / (num_frames + 1)) * 1000.0) for i in range(1, num_frames + 1)]
-        elif total_frames > 0:
-            step = max(total_frames // (num_frames + 1), 1)
-            positions = [("frame", i * step) for i in range(1, num_frames + 1)]
-        else:
-            positions = []
-            
+        try:
+            from ..video_sampling import sample_video_frames
+        except ImportError:
+            from video_sampling import sample_video_frames
+        frames = sample_video_frames(video_path, num_frames,
+                                     context_start_seconds, context_end_seconds)
         b64_list = []
         t0 = time.monotonic()
         for position_type, position in positions:
@@ -190,11 +191,32 @@ def extract_video_frames_base64(video_path, context_start_seconds=None, context_
                 _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
                 b64_str = base64.b64encode(buffer).decode('utf-8')
                 b64_list.append(b64_str)
-        cap.release()
         return b64_list
     except Exception as img_e:
         logger.debug(f"Không thể trích xuất ảnh từ video: {img_e}")
         return []
+
+_gemini_unhealthy_until = 0.0
+_gemini_transient_failures = 0
+
+
+def is_gemini_available() -> bool:
+    return time.time() >= _gemini_unhealthy_until
+
+
+def mark_gemini_unhealthy(cooldown_seconds: float = 30.0) -> None:
+    global _gemini_unhealthy_until
+    _gemini_unhealthy_until = time.time() + cooldown_seconds
+    logger.warning("Gemini marked unhealthy; cooling down for %g seconds", cooldown_seconds)
+
+
+def _gemini_transient_failure():
+    global _gemini_transient_failures
+    _gemini_transient_failures += 1
+    if _gemini_transient_failures >= 2:
+        mark_gemini_unhealthy(15.0)
+        _gemini_transient_failures = 0
+
 
 def translate_with_gemini(
     texts,
@@ -204,8 +226,10 @@ def translate_with_gemini(
     context_start_seconds=None,
     context_end_seconds=None,
     prior_context=None,
+    timeout=None,
     **kwargs
 ):
+    global _gemini_transient_failures
     api_key = api_key or os.getenv("GEMINI_API_KEY", "")
     if not api_key or not texts:
         return None
@@ -337,7 +361,7 @@ def translate_with_openai(
     context_start_seconds=None,
     context_end_seconds=None,
     prior_context=None,
-    model="gpt-4o",
+    model=None,
     **kwargs
 ):
     api_key = api_key or os.getenv("OPENAI_API_KEY", "")
@@ -355,10 +379,8 @@ def translate_with_openai(
                 "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
             })
             
-        openai_models = [model, "gpt-4o", "gpt-4o-mini", "chatgpt-4o-latest"]
-        seen_models = []
-        for m in openai_models:
-            if m not in seen_models: seen_models.append(m)
+        policy = current_model_policy()
+        seen_models = ordered_unique(model, *policy.openai_candidates)
             
         for om in seen_models:
             try:
@@ -380,11 +402,8 @@ def translate_with_openai(
                 if resp.status_code == 200:
                     data = resp.json()
                     text = data["choices"][0]["message"]["content"].strip()
-                    match = re.search(r'\[.*\]', text, re.DOTALL)
-                    if match:
-                        text = match.group(0)
-                    translated = json.loads(text)
-                    if len(translated) == len(texts):
+                    translated = _parse_json_array(text)
+                    if isinstance(translated, list) and len(translated) == len(texts):
                         logger.info(f"Dịch thành công bằng OpenAI ChatGPT ({om})!")
                         try:
                             import job_tracker
@@ -392,6 +411,16 @@ def translate_with_openai(
                         except Exception:
                             pass
                         return translated
+                    elif isinstance(translated, list) and len(texts) >= 4 and len(translated) != len(texts):
+                        logger.warning("OpenAI %s trả về lệch số lượng câu (%d thay vì %d). Chia nhỏ batch...", om, len(translated), len(texts))
+                        split_res = _subdivide_and_retry(
+                            translate_with_openai, texts, target_lang=target_lang, api_key=api_key,
+                            prior_context=prior_context, model=om, provider_label="OpenAI",
+                            video_path=video_path, context_start_seconds=context_start_seconds,
+                            context_end_seconds=context_end_seconds, **kwargs
+                        )
+                        if split_res:
+                            return split_res
                 else:
                     logger.warning(f"Lỗi OpenAI ({om}) HTTP {resp.status_code}: {resp.text[:200]}")
             except Exception as o_err:
@@ -405,7 +434,7 @@ def translate_with_deepseek(
     target_lang="vi",
     api_key="",
     prior_context=None,
-    model="deepseek-v4",
+    model=None,
     **kwargs
 ):
     api_key = api_key or os.getenv("DEEPSEEK_API_KEY", "")
@@ -439,11 +468,8 @@ def translate_with_deepseek(
                 if resp.status_code == 200:
                     data = resp.json()
                     text = data["choices"][0]["message"]["content"].strip()
-                    match = re.search(r'\[.*\]', text, re.DOTALL)
-                    if match:
-                        text = match.group(0)
-                    translated = json.loads(text)
-                    if len(translated) == len(texts):
+                    translated = _parse_json_array(text)
+                    if isinstance(translated, list) and len(translated) == len(texts):
                         logger.info(f"Dịch thành công bằng DeepSeek ({dm})!")
                         try:
                             import job_tracker
@@ -451,6 +477,14 @@ def translate_with_deepseek(
                         except Exception:
                             pass
                         return translated
+                    elif isinstance(translated, list) and len(texts) >= 4 and len(translated) != len(texts):
+                        logger.warning("DeepSeek %s trả về lệch số lượng câu (%d thay vì %d). Chia nhỏ batch...", dm, len(translated), len(texts))
+                        split_res = _subdivide_and_retry(
+                            translate_with_deepseek, texts, target_lang=target_lang, api_key=api_key,
+                            prior_context=prior_context, model=dm, provider_label="DeepSeek", **kwargs
+                        )
+                        if split_res:
+                            return split_res
                 else:
                     logger.warning(f"Lỗi DeepSeek ({dm}) HTTP {resp.status_code}: {resp.text[:200]}")
             except Exception as d_err:
@@ -521,6 +555,8 @@ def translate_subtitles(
     else: # auto / gemini
         providers_order = ["gemini", "openai", "deepseek"]
         
+    used_provider = None
+    provider_kind = None
     for p in providers_order:
         if translated_texts:
             break
@@ -534,6 +570,9 @@ def translate_subtitles(
                     prior_context=prior_context,
                     **kwargs
                 )
+                if translated_texts:
+                    used_provider = "gemini"
+                    provider_kind = "llm"
         elif p == "openai":
             o_key = os.getenv("OPENAI_API_KEY", "")
             if o_key:
@@ -544,6 +583,9 @@ def translate_subtitles(
                     prior_context=prior_context,
                     **kwargs
                 )
+                if translated_texts:
+                    used_provider = "openai"
+                    provider_kind = "llm"
         elif p == "deepseek":
             d_key = os.getenv("DEEPSEEK_API_KEY", "")
             if d_key:
@@ -552,6 +594,9 @@ def translate_subtitles(
                     prior_context=prior_context,
                     **kwargs
                 )
+                if translated_texts:
+                    used_provider = "deepseek"
+                    provider_kind = "llm"
                 
     # Fallback Tier: G4F Free
     if not translated_texts and enable_g4f:
@@ -571,7 +616,75 @@ def translate_subtitles(
         and len(translated_texts) == len(texts)
         and all(isinstance(item, str) and item.strip() for item in translated_texts)
     )
-    if translated_texts_valid:
+    if translated_texts_valid and strict:
+        is_valid, reasons = validate_translation_batch_quality(
+            texts,
+            translated_texts,
+            prior_context=prior_context,
+            entity_map=entity_map or kwargs.get("entity_map"),
+            glossary=glossary or kwargs.get("glossary"),
+            strict=True,
+        )
+        if not is_valid:
+            # Granular retry: Retry specifically failing items with alternate LLM candidate
+            failing_indices = set()
+            for r in reasons:
+                m = re.match(r"Câu (\d+)", r)
+                if m:
+                    failing_indices.add(int(m.group(1)) - 1)
+
+            if failing_indices:
+                sorted_failing = sorted(failing_indices)
+                failing_texts = [texts[i] for i in sorted_failing]
+                logger.warning(
+                    "Dịch thuật batch gặp %d lỗi chất lượng ở các câu %s: %s. Thử lại cụ thể các câu lỗi qua LLM...",
+                    len(reasons),
+                    [i + 1 for i in sorted_failing],
+                    reasons,
+                )
+                retranslated = None
+                available_providers = ["gemini", "openai", "deepseek"]
+                alt_providers = [p for p in available_providers if p != used_provider]
+                if not alt_providers or used_provider == "gemini":
+                    if "gemini" not in alt_providers:
+                        alt_providers.append("gemini")
+                g_key = api_key or os.getenv("GEMINI_API_KEY", "")
+                for alt_p in alt_providers:
+                    if alt_p == "openai" and os.getenv("OPENAI_API_KEY"):
+                        retranslated = translate_with_openai(failing_texts, target_lang, os.getenv("OPENAI_API_KEY"), **kwargs)
+                    elif alt_p == "deepseek" and os.getenv("DEEPSEEK_API_KEY"):
+                        retranslated = translate_with_deepseek(failing_texts, target_lang, os.getenv("DEEPSEEK_API_KEY"), **kwargs)
+                    elif alt_p == "gemini" and g_key:
+                        retranslated = translate_with_gemini(failing_texts, target_lang, g_key, **kwargs)
+                    if retranslated and len(retranslated) == len(failing_texts):
+                        for k, orig_idx in enumerate(sorted_failing):
+                            translated_texts[orig_idx] = retranslated[k]
+                        break
+
+                # Re-clean and re-validate
+                translated_texts = clean_incomplete_segment_stops(translated_texts)
+                translated_texts = ensure_speech_pauses_and_entity(
+                    texts,
+                    translated_texts,
+                    entity_map=entity_map or kwargs.get("entity_map"),
+                    prior_context=prior_context,
+                    glossary=glossary or kwargs.get("glossary"),
+                )
+                is_valid, reasons = validate_translation_batch_quality(
+                    texts,
+                    translated_texts,
+                    prior_context=prior_context,
+                    entity_map=entity_map or kwargs.get("entity_map"),
+                    glossary=glossary or kwargs.get("glossary"),
+                    strict=True,
+                )
+
+            if not is_valid:
+                raise RuntimeError(
+                    f"Strict translation mode requires a complete LLM translation conforming to quality rules: {'; '.join(reasons)}"
+                )
+
+    if translated_texts_valid and not strict:
         unchanged_cjk = [
             position
             for position, (source, translated) in enumerate(
@@ -621,7 +734,10 @@ def translate_subtitles(
         except Exception:
             pass
         return srt_segments
-    
+
+    if strict:
+        raise RuntimeError("Strict translation mode requires a complete LLM translation without machine fallback")
+
     logger.info("Falling back to Google Translate...")
     failed_segments = []
     error_keywords = [

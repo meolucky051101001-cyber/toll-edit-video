@@ -201,11 +201,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
     def format_time(td):
-        total_seconds = int(td.total_seconds())
+        ticks = max(0, round(td.total_seconds() * 100))
+        total_seconds, centiseconds = divmod(ticks, 100)
         hours = total_seconds // 3600
         minutes = (total_seconds % 3600) // 60
         seconds = total_seconds % 60
-        centiseconds = int(td.microseconds / 10000)
         return f"{hours}:{minutes:02d}:{seconds:02d}.{centiseconds:02d}"
 
     if dialogue_segments:

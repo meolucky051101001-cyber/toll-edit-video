@@ -7,6 +7,7 @@ from pathlib import Path
 from backend.pipeline_v2.segments import RuntimeSegment
 from backend.pipeline_v2.timing import (
     TimingPolicy,
+    borrow_gap_silence,
     fit_audio_to_window,
     plan_actual_timing_rewrites,
     plan_segment,
@@ -15,10 +16,31 @@ from backend.pipeline_v2.timing import (
 
 
 class TimingSolverTests(unittest.TestCase):
+    def test_borrow_gap_silence_expands_tight_segment_into_subsequent_gap(self):
+        seg1 = RuntimeSegment(
+            index=1,
+            start=timedelta(seconds=0.5),
+            end=timedelta(seconds=0.97),
+            content="da thú nữa rồi",
+            source_segment_id=66,
+        )
+        seg2 = RuntimeSegment(
+            index=2,
+            start=timedelta(seconds=1.5),
+            end=timedelta(seconds=4.0),
+            content="Chúng ta phải tìm loại vật liệu mát mẻ",
+            source_segment_id=67,
+        )
+        policy = TimingPolicy()
+        self.assertFalse(plan_segment(seg1, policy).fits)
+        expanded = borrow_gap_silence([seg1, seg2], policy)
+        self.assertTrue(plan_segment(expanded[0], policy).fits)
+        self.assertGreater(expanded[0].end.total_seconds(), 0.97)
+        self.assertLessEqual(expanded[0].end.total_seconds(), 1.5 - 0.12)
     def test_default_policy_matches_production_speed_envelope(self):
         policy = TimingPolicy()
-        self.assertEqual(policy.atempo_min, 0.92)
-        self.assertEqual(policy.atempo_max, 1.40)
+        self.assertEqual(policy.atempo_min, 1.00)
+        self.assertEqual(policy.atempo_max, 1.50)
 
     def test_budgeted_rewrite_runs_before_tts(self):
         segment = RuntimeSegment(
@@ -61,16 +83,17 @@ class TimingSolverTests(unittest.TestCase):
             content="Nếu... nếu ba...",
             source_segment_id=26,
         )
-
         solved = solve_segment_timing([segment])
-
-        self.assertGreater(len(solved.segments), 1)
+        self.assertEqual(len(solved.segments), 1)
         self.assertTrue(
-            all(any(character.isalnum() for character in item.content) for item in solved.segments)
+            all(
+                any(character.isalnum() for character in item.content)
+                for item in solved.segments
+            )
         )
         self.assertEqual(
             "".join(item.content for item in solved.segments).replace(" ", ""),
-            segment.content.replace(" ", ""),
+            "Nếunếuba",
         )
 
     def test_plan_requires_only_light_atempo(self):
@@ -104,8 +127,70 @@ class TimingSolverTests(unittest.TestCase):
         self.assertEqual(requests[0].source_segment_id, 9)
         self.assertLess(requests[0].max_characters, len(segment.content.replace(" ", "")))
 
+    def test_split_merges_short_introductory_clauses(self):
+        segment = RuntimeSegment(
+            index=146,
+            start=timedelta(seconds=585.04),
+            end=timedelta(seconds=587.76),
+            content="Sau này, tôi đã học được cách sử dụng vỏ trái cây để bảo vệ những con rồng non.",
+            source_segment_id=146,
+        )
+        solved = solve_segment_timing([segment])
+        # Short clause "Sau này," (< 4 words) must not be isolated into a 0.3s micro-segment
+        # Instead, it splits into balanced clauses where each clause has at least 4 words
+        for s in solved.segments:
+            self.assertGreaterEqual(len(s.content.split()), 4)
+            dur = (s.end - s.start).total_seconds()
+            self.assertGreaterEqual(dur, 1.0)
+        self.assertEqual(
+            "".join(s.content for s in solved.segments).replace(" ", ""),
+            segment.content.replace(" ", ""),
+        )
+
+    def test_split_merges_short_phrases_in_compound_sentences(self):
+        segment = RuntimeSegment(
+            index=154,
+            start=timedelta(seconds=618.34),
+            end=timedelta(seconds=622.48),
+            content="Assassin, tuy nhiên, đi một mình đến một con mương khác, và một con rồng miệng lạ đi theo anh ta, giữ lại nhiều hơn.",
+            source_segment_id=154,
+        )
+        solved = solve_segment_timing([segment])
+        # Must not create 1-2 word fragments like "Assassin," or "tuy nhiên,"
+        for s in solved.segments:
+            self.assertGreaterEqual(len(s.content.split()), 4)
+
+
 
 class AudioFitIntegrationTests(unittest.TestCase):
+    def test_short_audio_is_not_slowed_below_normal_speed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.wav"
+            output = root / "fitted.wav"
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=1",
+                    str(source),
+                ],
+                check=True,
+            )
+            result = fit_audio_to_window(
+                source,
+                output,
+                target_seconds=2.0,
+            )
+            self.assertEqual(result.applied_atempo, 1.00)
+            self.assertTrue(result.fits)
+            self.assertTrue(output.is_file())
+
     def test_atempo_is_capped_at_one_point_zero_eight(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -134,6 +219,40 @@ class AudioFitIntegrationTests(unittest.TestCase):
             self.assertAlmostEqual(result.applied_atempo, 1.08, places=4)
             self.assertFalse(result.fits)
             self.assertTrue(output.is_file())
+
+
+class GeminiCircuitBreakerTests(unittest.TestCase):
+    def test_gemini_timing_rewriter_bypasses_when_gemini_unavailable(self):
+        from unittest import mock
+        from backend.pipeline_v2.timing import GeminiTimingRewriter, RewriteRequest
+
+        rewriter = GeminiTimingRewriter(api_key="fake-key", models=["gemini-2.5-flash"])
+        req = RewriteRequest(segment_index=1, text="Câu quá dài", max_characters=10, target_seconds=1.0, source_segment_id=1)
+
+        with mock.patch("backend.pipeline_v2.timing._check_gemini_available", return_value=False):
+            with mock.patch("requests.post") as mock_post:
+                res = rewriter([req])
+                self.assertEqual(res, {})
+                mock_post.assert_not_called()
+
+    def test_gemini_timing_rewriter_trips_circuit_breaker_on_429(self):
+        from unittest import mock
+        from backend.pipeline_v2.timing import GeminiTimingRewriter, RewriteRequest
+
+        rewriter = GeminiTimingRewriter(api_key="fake-key", models=["model-1", "model-2"])
+        req = RewriteRequest(segment_index=1, text="Câu quá dài", max_characters=10, target_seconds=1.0, source_segment_id=1)
+
+        mock_resp = mock.Mock()
+        mock_resp.status_code = 429
+
+        with mock.patch("backend.pipeline_v2.timing._check_gemini_available", return_value=True):
+            with mock.patch("backend.pipeline_v2.timing._mark_gemini_cooldown") as mock_cooldown:
+                with mock.patch("requests.post", return_value=mock_resp) as mock_post:
+                    res = rewriter([req])
+                    self.assertEqual(res, {})
+                    mock_cooldown.assert_called_once_with(180.0)
+                    # Must break immediately and NOT try model-2!
+                    self.assertEqual(mock_post.call_count, 1)
 
 
 if __name__ == "__main__":

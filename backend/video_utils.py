@@ -635,7 +635,7 @@ def process_video(
                 print(f"Lưu ý: Không thể cấu hình delogo ({d_err})")
 
         if srt_to_use.endswith('.ass'):
-            filter_parts.append(f"subtitles='{srt_escaped}'")
+            srt_filter_str = f"subtitles='{srt_escaped}'"
         else:
             filter_parts.append(f"subtitles='{srt_escaped}':force_style='{style_str}'")
             

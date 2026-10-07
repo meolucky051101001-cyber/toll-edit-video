@@ -109,7 +109,13 @@ def _geometry_score(
     # Captions may touch either edge; do not silently reject the bottom 4%.
     if not (0.0 <= left < right <= 1.0 and 0.0 <= top < bottom <= 1.0):
         return None
-    if width < 0.025 or height < 0.007 or height > 0.14:
+    # Burned-in captions can legitimately run almost edge-to-edge (the source
+    # may even crop the first/last glyph).  Rejecting boxes wider than 90%
+    # drops their geometry and makes ASS fall back to text-only rendering with
+    # no white cover.  Wide scene/package text is still protected by the
+    # transcript-match and static-text checks below, so width alone must not
+    # disqualify an otherwise valid ASR-matched subtitle.
+    if width < 0.025 or width > 0.90001 or height < 0.007 or height > 0.14:
         return None
 
     pixel_aspect = (width * max(frame_width, 1)) / (
@@ -219,6 +225,11 @@ def _is_static_packaging_or_logo(cluster: Sequence[_Candidate]) -> bool:
     if best_text_score >= 0.45:
         return False
 
+    center = median(item.center_y for item in chosen)
+    # Mid-screen zone (0.25 - 0.68) is product packaging/scene text zone unless strongly matched to ASR
+    if 0.25 <= center <= 0.68 and best_text_score < 0.40:
+        return True
+
     texts = Counter(item.normalized_text for item in chosen if item.normalized_text)
     unique_texts = len(texts)
     sample_count = len(chosen)
@@ -263,11 +274,36 @@ def select_chinese_subtitle_band(
 
     grouped: Dict[Any, List[_Candidate]] = {}
     candidates: List[_Candidate] = []
+    speech_ids = list(segment_texts)
+    context_texts = {
+        sid: ''.join(segment_texts[key] for key in speech_ids[max(0, i-1):i+2])
+        for i, sid in enumerate(speech_ids)
+    }
+
+    def speech_match(text, sid):
+        score, strong = _text_match(text, segment_texts.get(sid, ''))
+        if not strong:
+            # A burnt-in caption often spans two ASR cues. Require a real
+            # phrase in this cue before consulting its immediate neighbours.
+            own = SequenceMatcher(None, _chinese_text(text),
+                                  _chinese_text(segment_texts.get(sid, '')), autojunk=False)
+            matches = own.get_matching_blocks()
+            if max((m.size for m in matches), default=0) >= 3 and sum(m.size for m in matches) >= 4:
+                context_score, context_strong = _text_match(text, context_texts.get(sid, ''))
+                if context_strong and context_score >= .65:
+                    return max(score, context_score*.9), True
+        return score, strong
+
     for ordinal, source in enumerate(blocks):
-        block = _as_mapping(source)
-        # Social handles below captions must never enlarge a subtitle union.
-        if str(block["text"]).lstrip().startswith(("@", "＠")):
+        # Respect explicit classification before mapping drops optional fields.
+        if (_value(source, "is_subtitle") is False
+                or _value(source, "is_packaging") is True
+                or _value(source, "is_static") is True
+                or _value(source, "in_subtitle_band") is False
+                or str(_value(source, "type", "")).lower() in
+                ("packaging", "background", "logo", "watermark")):
             continue
+        block = _as_mapping(source)
         if len(_chinese_text(block["text"])) < 2:
             continue
         geometry_score = _geometry_score(block, frame_width, frame_height)
@@ -280,9 +316,7 @@ def select_chinese_subtitle_band(
             if segment_id is not None
             else ("time", round(float(block.get("sample_time", ordinal)), 3))
         )
-        text_score, strong = _text_match(
-            block["text"], segment_texts.get(segment_id, "")
-        )
+        text_score, strong = speech_match(block["text"], segment_id)
         candidate = _Candidate(
             block=block,
             sample_key=sample_key,

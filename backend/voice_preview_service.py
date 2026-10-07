@@ -21,6 +21,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+try:
+    from backend.config.paths import AppPaths
+except ImportError:
+    from config.paths import AppPaths
+
+PATHS = AppPaths.from_environment(Path(__file__).resolve().parents[1])
+
 # Concurrency guard: Only 1 preview synthesis at a time to prevent resource contention
 _preview_semaphore = asyncio.Semaphore(1)
 
@@ -66,20 +73,8 @@ FALLBACK_CATALOG = [
 
 
 def resolve_workspace_dir() -> Path:
-    ws_env = os.getenv("AUTODUB_WORKSPACE")
-    if ws_env and Path(ws_env).is_dir():
-        return Path(ws_env)
-    for c in [
-        Path(r"C:\tool v1\workspace"),
-        Path(r"C:\tool v2\workspace"),
-        Path(__file__).resolve().parent.parent / "workspace",
-    ]:
-        if c.is_dir():
-            return c
-    # Fallback to local workspace in backend parent
-    fallback = Path(__file__).resolve().parent.parent / "workspace"
-    fallback.mkdir(parents=True, exist_ok=True)
-    return fallback
+    PATHS.workspace.mkdir(parents=True, exist_ok=True)
+    return PATHS.workspace
 
 
 def get_cache_dir() -> Path:
@@ -101,9 +96,16 @@ def get_voice_catalog() -> List[Dict[str, Any]]:
     candidates = [
         ws / "bot_system" / "control" / "voice_catalog.json",
         ws / "control" / "voice_catalog.json",
-        Path(r"C:\tool v1\workspace\bot_system\control\voice_catalog.json"),
-        Path(r"C:\tool v1\workspace\control\voice_catalog.json"),
+        PATHS.shared_assets_dir / "bot_system" / "control" / "voice_catalog.json",
+        PATHS.shared_assets_dir / "control" / "voice_catalog.json",
     ]
+    if PATHS.shared_workspace_dir:
+        candidates.extend(
+            [
+                PATHS.shared_workspace_dir / "bot_system" / "control" / "voice_catalog.json",
+                PATHS.shared_workspace_dir / "control" / "voice_catalog.json",
+            ]
+        )
     for p in candidates:
         if p.is_file():
             try:
@@ -119,9 +121,16 @@ def resolve_verified_sample(voice_id: str) -> Optional[Path]:
     candidates = [
         ws / "bot_system" / "control" / "voice_checks",
         ws / "control" / "voice_checks",
-        Path(r"C:\tool v1\workspace\bot_system\control\voice_checks"),
-        Path(r"C:\tool v1\workspace\control\voice_checks"),
+        PATHS.shared_assets_dir / "bot_system" / "control" / "voice_checks",
+        PATHS.shared_assets_dir / "control" / "voice_checks",
     ]
+    if PATHS.shared_workspace_dir:
+        candidates.extend(
+            [
+                PATHS.shared_workspace_dir / "bot_system" / "control" / "voice_checks",
+                PATHS.shared_workspace_dir / "control" / "voice_checks",
+            ]
+        )
     for folder in candidates:
         if not folder.is_dir():
             continue

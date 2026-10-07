@@ -17,6 +17,11 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    from backend.config.paths import AppPaths
+except ImportError:
+    from config.paths import AppPaths
+
 logger = logging.getLogger("recovery_service")
 
 # Token cache for valid resume plans: { token: { "job_id": ..., "created_at": ..., "plan": ... } }
@@ -41,11 +46,12 @@ def compute_file_fingerprint(file_path: Path) -> Optional[str]:
 
 class RecoveryService:
     def __init__(self, workspace_path: Optional[str] = None):
+        base_dir = Path(__file__).resolve().parent
+        self.paths = AppPaths.from_environment(base_dir.parent)
         if workspace_path:
             self.workspace = Path(workspace_path)
         else:
-            base_dir = Path(__file__).resolve().parent
-            self.workspace = Path(os.getenv("AUTODUB_WORKSPACE", str(base_dir.parent / "workspace")))
+            self.workspace = self.paths.workspace
         self.control_dir = self.workspace / "control"
         self.control_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.control_dir / "job_recovery_states.json"
@@ -75,14 +81,23 @@ class RecoveryService:
             candidates_dirs.append(input_dir)
             candidates_dirs.append(input_dir / "processed")
 
-        # Default standard paths
-        candidates_dirs.extend([
-            Path(r"D:\video_input"),
-            Path(r"D:\video_input\processed"),
-            Path(r"D:\phoi"),
-            Path(r"D:\video_input_v2"),
-            self.workspace / "input",
-        ])
+        candidates_dirs.extend(
+            [
+                self.paths.input_dir,
+                self.paths.input_dir / "processed",
+                self.paths.output_dir,
+                self.workspace / "downloads",
+                self.workspace / "input",
+            ]
+        )
+        if self.paths.shared_workspace_dir:
+            candidates_dirs.extend(
+                [
+                    self.paths.shared_workspace_dir / "downloads",
+                    self.paths.shared_workspace_dir / "input",
+                    self.paths.shared_workspace_dir / "output",
+                ]
+            )
 
         for c_dir in candidates_dirs:
             if not c_dir.is_dir():
@@ -132,10 +147,11 @@ class RecoveryService:
         if output_dir:
             candidates_dirs.append(output_dir)
         candidates_dirs.extend([
-            Path(r"D:\banve"),
-            Path(r"D:\video tool v2"),
+            self.paths.output_dir,
             self.workspace / "output"
         ])
+        if self.paths.shared_workspace_dir:
+            candidates_dirs.append(self.paths.shared_workspace_dir / "output")
 
         for c_dir in candidates_dirs:
             if not c_dir.is_dir():
@@ -206,7 +222,6 @@ class RecoveryService:
         is_completed = completed_file is not None
 
         # 4. Stage inspection & invalidation matrix
-        # Stages definitions
         stage_definitions = [
             {
                 "id": "extract_audio",
@@ -415,7 +430,6 @@ class RecoveryService:
         lock_fd = None
         try:
             lock_fd = open(self.lock_file, "w")
-            # Simple non-blocking lock check
             import msvcrt
             msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
         except (IOError, OSError):
@@ -435,7 +449,6 @@ class RecoveryService:
                 # Clean only downstream invalid artifacts to prevent mixed partial state
                 if ws_dir and ws_dir.is_dir():
                     if first_rerun in ["tts_dubbing", "mix", "render"]:
-                        # Remove downstream final renders and mixed audio
                         (ws_dir / f"final_{clean_name}.mp4").unlink(missing_ok=True)
                         (ws_dir / "mixed.wav").unlink(missing_ok=True)
                         (ws_dir / "mixed_audio.mp3").unlink(missing_ok=True)
