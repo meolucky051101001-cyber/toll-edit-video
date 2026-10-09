@@ -157,7 +157,7 @@ class DownloadService:
             if count > 0:
                 db.commit()
 
-        # Clean up dangling .part files
+        # Clean up dangling .part files and partial album directories
         try:
             if self.temp_dir.exists():
                 for part in self.temp_dir.glob("*.part"):
@@ -165,6 +165,12 @@ class DownloadService:
                         part.unlink(missing_ok=True)
                     except Exception:
                         pass
+                for album_dir in self.temp_dir.glob("*_album"):
+                    if album_dir.is_dir():
+                        try:
+                            shutil.rmtree(album_dir, ignore_errors=True)
+                        except Exception:
+                            pass
         except Exception:
             pass
 
@@ -185,7 +191,7 @@ class DownloadService:
             await asyncio.gather(*self.active_tasks.values(), return_exceptions=True)
             self.active_tasks.clear()
 
-        # Clean up any partial files
+        # Clean up any partial files and album directories
         try:
             if self.temp_dir.exists():
                 for part_file in self.temp_dir.glob("*.part"):
@@ -193,6 +199,12 @@ class DownloadService:
                         part_file.unlink(missing_ok=True)
                     except Exception:
                         pass
+                for album_dir in self.temp_dir.glob("*_album"):
+                    if album_dir.is_dir():
+                        try:
+                            shutil.rmtree(album_dir, ignore_errors=True)
+                        except Exception:
+                            pass
         except Exception as e:
             logger.warning("Error cleaning partial files on shutdown: %s", e)
 

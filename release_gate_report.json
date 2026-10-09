@@ -1,7 +1,7 @@
 {
   "verdict": "APPROVED (OFFLINE FIXTURES) - PENDING LIVE CRAWL",
-  "duration_seconds": 206.86,
-  "timestamp": "2026-10-05T17:35:54Z",
+  "duration_seconds": 243.15,
+  "timestamp": "2026-10-09T06:29:11Z",
   "strict_live_run": {
     "executed": true,
     "command": "python scripts/release_gate.py --live --require-live",
@@ -62,40 +62,40 @@
     "2_database": {
       "passed": true,
       "detail": "SQLite database schema verified (5 core tables present)",
-      "duration_s": 0.25
+      "duration_s": 0.27
     },
     "3_ruff_linter": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 0.08
+      "duration_s": 0.09
     },
     "4_mypy_types": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 0.3
+      "duration_s": 0.32
     },
     "5_frontend_eslint": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 5.14
+      "duration_s": 6.85
     },
     "6_frontend_typecheck": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 1.93
+      "duration_s": 2.42
     },
     "7_frontend_build": {
       "passed": true,
       "exit_code": 0,
-      "duration_s": 13.58
+      "duration_s": 34.62
     },
     "8_backend_pytest": {
       "passed": true,
       "exit_code": 0,
-      "tests_passed": 545,
+      "tests_passed": 547,
       "tests_failed": 0,
       "tests_skipped": 3,
-      "duration_s": 147.77
+      "duration_s": 153.27
     },
     "9_fixture_benchmark": {
       "passed": true,
@@ -151,14 +151,14 @@
         }
       },
       "test_suites_passed": 12,
-      "duration_s": 2.39
+      "duration_s": 3.04
     },
     "10_frontend_playwright_e2e": {
       "passed": true,
       "exit_code": 0,
       "tests_passed": 29,
       "specs_count": 8,
-      "duration_s": 35.35
+      "duration_s": 42.13
     },
     "11_live_crawl_acceptance": {
       "executed": false,

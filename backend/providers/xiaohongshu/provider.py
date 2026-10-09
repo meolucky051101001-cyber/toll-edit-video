@@ -18,6 +18,7 @@ from backend.providers.base import (
     SearchProvider,
     SelectorChangedError,
     UserActionRequired,
+    apply_search_filters_and_sorting,
 )
 from backend.providers.xiaohongshu.parser import (
     note_url,
@@ -579,13 +580,15 @@ class XiaohongshuProvider(SearchProvider):
                 # turn into hundreds of detail navigations or exhaust the job timeout.
                 needs_detail.sort(key=lambda cand: detail_card_priority(cand, query_terms, term_frequencies))
                 remaining_needed = max(0, limit - len(results))
-                detail_budget = min(15, max(5, remaining_needed))
+                detail_budget = min(len(needs_detail), max(6, remaining_needed * 3), 25)
                 if len(results) < limit and needs_detail:
                     assert self.browser.context is not None
                     detail = await self.browser.context.new_page()
                     should_close_detail = True
                     try:
                         for cand in needs_detail[:detail_budget]:
+                            if len(results) >= limit:
+                                break
                             link = str(cand["link"])
                             canonical = str(cand.get("canonical") or link)
                             note_id = str(cand.get("note_id") or canonical.rsplit("/", 1)[1])
@@ -679,7 +682,7 @@ class XiaohongshuProvider(SearchProvider):
                     raise SelectorChangedError(
                         "Chưa xác minh được video trong các bài đã mở. Không tạo kết quả thay thế."
                     )
-                return results
+                return apply_search_filters_and_sorting(results, filters=filters, limit=limit)
             except BrowserTimeout:
                 raise ProviderTimeoutError("Xiaohongshu phản hồi quá chậm. Thử lại sau.") from None
             except Error:

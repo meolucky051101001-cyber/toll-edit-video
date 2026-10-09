@@ -284,25 +284,6 @@ class BrowserService:
             # Use the installed browser's native UA, plugins and security isolation.
 
 
-            TRACKER_DOMAINS = (
-                "sensorsdata.cn",
-                "growingio.com",
-                "hm.baidu.com",
-                "google-analytics.com",
-            )
-
-            async def block_resources(route):
-                req = route.request
-                url = req.url.lower()
-                if (
-                    req.resource_type in {"media", "font"}
-                    or any(url.endswith(ext) or ext + "?" in url for ext in HEAVY_EXTENSIONS)
-                    or any(domain in url for domain in TRACKER_DOMAINS)
-                ):
-                    await route.abort()
-                else:
-                    await route.continue_()
-
             # Sanitize profile cookies: purge dummy/corrupt values that trigger HTTP 500 on Xiaohongshu servers
             try:
                 from backend.services.cookie_service import DUMMY_SUBSTRINGS

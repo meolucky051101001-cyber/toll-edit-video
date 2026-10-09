@@ -609,4 +609,25 @@ async def test_dns_cache_and_async_resolution():
         assert ips_sync == ips_async
 
 
+def test_download_service_recovers_interrupted_album_dirs(download_test_env):
+    sessions, svc, dl_dir = download_test_env
+
+    temp_dir = dl_dir / ".temp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    dangling_album = temp_dir / "job_test_123_album"
+    dangling_album.mkdir(parents=True, exist_ok=True)
+    (dangling_album / "001.jpg").write_text("dummy")
+    dangling_part = temp_dir / "job_test_456.part"
+    dangling_part.write_text("dummy")
+
+    assert dangling_album.is_dir()
+    assert dangling_part.is_file()
+
+    # Recovery should clean up both .part and *_album
+    svc.recover_interrupted_jobs()
+
+    assert not dangling_part.exists()
+    assert not dangling_album.exists()
+
+
 
