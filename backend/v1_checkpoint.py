@@ -134,26 +134,11 @@ class ManifestManager:
         """Ghi manifest an toàn qua file tạm và atomic rename với retry trên Windows."""
         manifest.updated_at = time.time()
         file_path = self._manifest_file(manifest.job_id)
-        temp_file = file_path.with_suffix(".tmp." + uuid.uuid4().hex[:8])
         try:
-            temp_file.write_text(
-                json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2),
-                encoding="utf-8"
-            )
-            # Thử lại 5 lần nếu Windows bị khóa chia sẻ file tạm thời ([WinError 5] Access is denied)
-            for rep_attempt in range(5):
-                try:
-                    os.replace(temp_file, file_path)
-                    break
-                except (PermissionError, OSError) as rep_err:
-                    if rep_attempt == 4:
-                        raise
-                    time.sleep(0.06 * (rep_attempt + 1))
+            from pipeline_v2.atomic_io import atomic_write_json
+            atomic_write_json(file_path, manifest.to_dict())
         except Exception as exc:
             logger.error("Lỗi ghi manifest nguyên tử cho job %s: %s", manifest.job_id, exc)
-            if temp_file.is_file():
-                try: temp_file.unlink()
-                except OSError: pass
             raise RuntimeError(f"Cannot persist checkpoint for job {manifest.job_id}") from exc
 
     def load_manifest(self, job_id: str) -> Optional[JobManifest]:

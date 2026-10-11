@@ -177,7 +177,9 @@ class TestV1AutoVoice(unittest.TestCase):
         os.makedirs(out_folder, exist_ok=True)
 
         # Mock generate_single_tts: cau 1 va 3 thanh cong, cau 2 that bai sau retry
+        attempts = []
         async def mock_single_tts(seg, folder, source, param, key, **kwargs):
+            attempts.append((seg.index, source, param))
             if seg.index == 2:
                 return None  # Failure
             p = os.path.join(folder, f"{seg.index}.mp3")
@@ -192,7 +194,8 @@ class TestV1AutoVoice(unittest.TestCase):
                 "content": seg.content
             }
 
-        with patch("ai.voice_cloning.generate_single_tts", side_effect=mock_single_tts):
+        import inspect
+        with patch.dict(inspect.unwrap(generate_dubbing_audio).__globals__, {"generate_single_tts": mock_single_tts}):
             # Goi generate_dubbing_audio voi giong locked la capcut-BV075_streaming
             with self.assertRaises(RuntimeError) as ctx:
                 asyncio.run(generate_dubbing_audio(
@@ -202,9 +205,25 @@ class TestV1AutoVoice(unittest.TestCase):
             # Kiem tra nguyen nhan loi: Phai la TTSIncompleteError voi thong diep ro rang
             cause = ctx.exception.__cause__
             self.assertIsInstance(cause, TTSIncompleteError)
-            self.assertIn("thất bại với giọng", str(cause))
+            self.assertIn("giọng đã khóa", str(cause))
             cue2_audio = os.path.join(out_folder, "2.mp3")
             self.assertFalse(os.path.exists(cue2_audio), "File loi khong duoc phep ton tai tren dia!")
+            self.assertEqual({(source, param) for _, source, param in attempts}, {("capcut", "BV075_streaming")})
+            self.assertTrue(os.path.exists(os.path.join(out_folder, "1.mp3")))
+            self.assertTrue(os.path.exists(os.path.join(out_folder, "3.mp3")))
+
+    def test_provider_exception_retries_only_the_locked_voice(self):
+        import inspect
+        cue = SimpleNamespace(index=1, start=timedelta(0), end=timedelta(seconds=2), content="Xin chao")
+        generate = AsyncMock(side_effect=RuntimeError("provider unavailable"))
+        with patch.dict(inspect.unwrap(generate_dubbing_audio).__globals__, {"generate_single_tts": generate}), \
+             patch.object(asyncio, "sleep", new_callable=AsyncMock):
+            with self.assertRaisesRegex(RuntimeError, "TTS incomplete"):
+                asyncio.run(generate_dubbing_audio(
+                    [cue], os.path.join(self.temp_dir, "failed"), voice_source="capcut", voice_param="BV075_streaming"
+                ))
+        self.assertEqual(generate.await_count, 4)
+        self.assertEqual({(c.args[2], c.args[3]) for c in generate.await_args_list}, {("capcut", "BV075_streaming")})
 
     def test_07_resume_and_persistence_integrity(self):
         """Kiem tra tinh ben vung khi retry/resume tu voice_lock.json."""

@@ -1,30 +1,26 @@
 import unittest
 from datetime import timedelta
-from backend.ai.transcription import _join_aligned_tokens
-from backend.ai.translation import build_translation_prompt
+from types import SimpleNamespace
+from backend.ai.transcription import _merge_short_fragments, _transcribe_raw_segments
+from backend.ai.translation import ensure_speech_pauses_and_entity
 from backend.subtitle_text import normalize_subtitle_text
 from backend.pipeline_v2.timing import TimingPolicy, estimate_tts_duration
 
 
 class SpeechPausesAndPunctuationTests(unittest.TestCase):
-    def test_join_aligned_tokens_inserts_comma_between_cjk_lines(self):
-        # When two separate CJK speech segments without punctuation are joined,
-        # a comma is inserted to mark the speech pause boundary between phrases.
+    def test_complete_cjk_phrases_are_not_merged_across_speech_pauses(self):
         left = "假如一颗榴莲被扔回一亿五千万年前的侏罗纪"
         right = "你砸下来的时候"
-        joined = _join_aligned_tokens(left, right, join_cjk_lines_with_comma=True)
-        self.assertEqual(joined, "假如一颗榴莲被扔回一亿五千万年前的侏罗纪，你砸下来的时候")
+        segments = [{"start": 0, "end": 4, "text": left}, {"start": 4.3, "end": 6, "text": right}]
+        self.assertEqual(_merge_short_fragments(segments), segments)
 
-    def test_join_aligned_tokens_does_not_duplicate_existing_punctuation(self):
+    def test_transcription_preserves_source_punctuation_without_duplication(self):
         left = "假如一颗榴莲被扔回一亿五千万年前的侏罗纪，"
         right = "你砸下来的时候"
-        joined = _join_aligned_tokens(left, right, join_cjk_lines_with_comma=True)
-        self.assertEqual(joined, "假如一颗榴莲被扔回一亿五千万年前的侏罗纪，你砸下来的时候")
-
-        left_period = "第一句。"
-        right_period = "第二句。"
-        joined_period = _join_aligned_tokens(left_period, right_period, join_cjk_lines_with_comma=True)
-        self.assertEqual(joined_period, "第一句。第二句。")
+        text = left + right
+        model = SimpleNamespace(transcribe=lambda *a, **kw: (
+            [SimpleNamespace(start=0, end=5, text=text, words=[])], None))
+        self.assertEqual(_transcribe_raw_segments(model, "fixture.wav")[0]["text"], text)
 
     def test_normalize_subtitle_text_preserves_commas_and_cleans_duplicates(self):
         text = "  Giả sử  , , một quả sầu riêng, khi rơi xuống .  "
@@ -39,12 +35,15 @@ class SpeechPausesAndPunctuationTests(unittest.TestCase):
         # Punctuation pauses should increase the estimated duration
         self.assertGreater(dur2, dur1)
 
-    def test_translation_prompt_contains_pause_and_comma_rules(self):
-        texts = ["假如一颗榴莲被扔回一亿五千万年前的侏罗纪，你砸下来的时候"]
-        prompt = build_translation_prompt(texts, target_lang="vi")
-        self.assertIn("DẤU NGẮT NGHỈ (DẤU PHẨY, DẤU CHẤM)", prompt)
-        self.assertIn("dấu phẩy (,)", prompt)
-        self.assertIn("Viết hoa chữ cái đầu câu", prompt)
+    def test_translation_adds_pauses_only_when_the_source_contains_them(self):
+        translated = ["khi trời mưa chúng ta sẽ ở nhà"]
+        with_pause = ensure_speech_pauses_and_entity(["下雨时，我们待在家。"], translated)[0]
+        without_pause = ensure_speech_pauses_and_entity(["下雨时我们待在家"], translated)[0]
+        self.assertTrue(with_pause.startswith("Khi"))
+        self.assertIn(",", with_pause)
+        self.assertTrue(with_pause.endswith("."))
+        self.assertNotIn(",", without_pause)
+        self.assertFalse(without_pause.endswith("."))
 
 
 if __name__ == "__main__":

@@ -19,6 +19,15 @@ import argparse
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] %(message)s")
 logger = logging.getLogger("v1_separator_worker")
 
@@ -347,7 +356,8 @@ def main():
         output_str = json.dumps(result_payload, ensure_ascii=False)
         if args.output_json:
             Path(args.output_json).write_text(output_str, encoding="utf-8")
-        print(output_str)
+        # Ensure stdout is 100% ASCII-safe on Windows to prevent charmap/cp1252 UnicodeEncodeError
+        print(json.dumps(result_payload, ensure_ascii=True))
         sys.exit(0)
 
     except torch.cuda.OutOfMemoryError as oom_err:
@@ -361,7 +371,7 @@ def main():
         output_str = json.dumps(err_payload, ensure_ascii=False)
         if args.output_json:
             Path(args.output_json).write_text(output_str, encoding="utf-8")
-        print(output_str)
+        print(json.dumps(err_payload, ensure_ascii=True))
         sys.exit(20)
 
     except Exception as exc:
@@ -374,7 +384,7 @@ def main():
         output_str = json.dumps(err_payload, ensure_ascii=False)
         if args.output_json:
             Path(args.output_json).write_text(output_str, encoding="utf-8")
-        print(output_str)
+        print(json.dumps(err_payload, ensure_ascii=True))
         sys.exit(1)
 
     finally:

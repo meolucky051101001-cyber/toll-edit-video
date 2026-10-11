@@ -122,6 +122,8 @@ def separate_vocals_demucs(
     from v1_separator_lock import separator_gpu_lock
 
     def _run_cancellable_proc(cmd, t_limit):
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -129,6 +131,7 @@ def separate_vocals_demucs(
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env,
             creationflags=CREATE_NO_WINDOW,
         )
         proc_deadline = time.monotonic() + float(t_limit)
@@ -559,7 +562,8 @@ def process_video(
     except Exception:
         temp_subs_dir = base_dir
 
-    unique_sub_name = f"temp_burn_{int(time.time())}_{uuid.uuid4().hex[:6]}" + (".ass" if srt_path.endswith('.ass') else ".srt")
+    is_ass = srt_path.lower().endswith('.ass')
+    unique_sub_name = f"temp_burn_{int(time.time())}_{uuid.uuid4().hex[:6]}" + (".ass" if is_ass else ".srt")
     safe_sub_path = os.path.join(temp_subs_dir, unique_sub_name)
     try:
         shutil.copy2(srt_path, safe_sub_path)
@@ -586,62 +590,84 @@ def process_video(
         logger.info("V1 render size source=%dx%d output=%dx%d stream=%s cover_excluded=%s fps=%.6f",
                     original_w, original_h, w, h, source_video.index, source_video.has_cover, source_video.fps)
         
-        # NVENC H.264 hardware limit is 4096px per dimension. Downscale oversized/8K/4.3K to standard 1080p bounds.
+        # Xử lý tỷ lệ khung hình theo yêu cầu người dùng:
+        # 1. Video đã có kích thước dọc 9:16 sẵn (|ratio - 9/16| <= 0.035): Giữ nguyên kích thước gốc,
+        #    không chỉnh sửa gì cả (chỉ hạ kích thước nếu vượt trần phần cứng NVENC 4096px).
+        # 2. Video không phải tỷ lệ 9:16 (ngang 16:9, 4:3, vuông 1:1, dọc 3:4/4:5): Lúc render tự động chuyển về khung dọc 9:16 (1080x1920)
+        #    kết hợp nền mờ Blur Background giữ trọn vẹn chi tiết video gốc ở giữa.
+        #    Đồng thời burn phụ đề trực tiếp lên foreground [v2] ở độ phân giải gốc để khớp 100% tọa độ che OCR tiếng Trung.
         orig_w, orig_h = w, h
-        target_w, target_h = w, h
-        max_dim = max(w, h)
-        if max_dim > 3840 or min(w, h) > 2160 or max_dim > 4096:
-            ratio = min(1080.0 / min(w, h), 1920.0 / max_dim)
-            target_w = int(w * ratio) // 2 * 2
-            target_h = int(h * ratio) // 2 * 2
-            filter_parts.append(f"scale={target_w}:{target_h}")
-            w, h = target_w, target_h
-            logger.info("NVENC H.264 bounds enforced: scaled %dx%d -> %dx%d", orig_w, orig_h, w, h)
+        is_already_9_16 = abs((orig_w / orig_h) - (9.0 / 16.0)) <= 0.035
 
-        # Xóa sạch toàn bộ watermark ở cả 4 góc video (Logo Tiểu Hồng Thư và ID tác giả nhảy trên/dưới)
+        # Chuẩn bị subtitle filter
+        if is_ass:
+            sub_filter = f"subtitles='{srt_escaped}'"
+        else:
+            sub_filter = f"subtitles='{srt_escaped}':force_style='{style_str}'"
+
+        # Chuẩn bị delogo filters nếu có yêu cầu
+        delogo_filters = []
         if delogo:
             try:
-                
-                if w > 0 and h > 0:
-                    # 1. Góc dưới phải (Logo đáy)
-                    br_w = max(int(w * 0.19), 10)
-                    br_h = max(int(h * 0.065), 10)
-                    br_x = w - br_w - int(w * 0.01)
-                    br_y = h - br_h - int(h * 0.01)
+                if orig_w > 0 and orig_h > 0:
+                    br_w = max(int(orig_w * 0.19), 10)
+                    br_h = max(int(orig_h * 0.065), 10)
+                    br_x = orig_w - br_w - int(orig_w * 0.01)
+                    br_y = orig_h - br_h - int(orig_h * 0.01)
                     
-                    # 2. Góc dưới trái (ID/Avatar đáy)
-                    bl_w = max(int(w * 0.38), 10)
-                    bl_h = max(int(h * 0.065), 10)
-                    bl_x = int(w * 0.01)
-                    bl_y = h - bl_h - int(h * 0.01)
+                    bl_w = max(int(orig_w * 0.38), 10)
+                    bl_h = max(int(orig_h * 0.065), 10)
+                    bl_x = int(orig_w * 0.01)
+                    bl_y = orig_h - bl_h - int(orig_h * 0.01)
                     
-                    # 3. Góc trên trái (Logo nhảy lên đỉnh)
-                    tl_w = max(int(w * 0.20), 10)
-                    tl_h = max(int(h * 0.055), 10)
-                    tl_x = int(w * 0.01)
-                    tl_y = int(h * 0.01)
+                    tl_w = max(int(orig_w * 0.20), 10)
+                    tl_h = max(int(orig_h * 0.055), 10)
+                    tl_x = int(orig_w * 0.01)
+                    tl_y = int(orig_h * 0.01)
                     
-                    # 4. Góc trên phải (ID/Avatar nhảy lên đỉnh)
-                    tr_w = max(int(w * 0.32), 10)
-                    tr_h = max(int(h * 0.055), 10)
-                    tr_x = w - tr_w - int(w * 0.01)
-                    tr_y = int(h * 0.01)
+                    tr_w = max(int(orig_w * 0.32), 10)
+                    tr_h = max(int(orig_h * 0.055), 10)
+                    tr_x = orig_w - tr_w - int(orig_w * 0.01)
+                    tr_y = int(orig_h * 0.01)
                     
-                    filter_parts.append(f"delogo=x={br_x}:y={br_y}:w={br_w}:h={br_h}")
-                    filter_parts.append(f"delogo=x={bl_x}:y={bl_y}:w={bl_w}:h={bl_h}")
-                    filter_parts.append(f"delogo=x={tl_x}:y={tl_y}:w={tl_w}:h={tl_h}")
-                    filter_parts.append(f"delogo=x={tr_x}:y={tr_y}:w={tr_w}:h={tr_h}")
+                    delogo_filters = [
+                        f"delogo=x={br_x}:y={br_y}:w={br_w}:h={br_h}",
+                        f"delogo=x={bl_x}:y={bl_y}:w={bl_w}:h={bl_h}",
+                        f"delogo=x={tl_x}:y={tl_y}:w={tl_w}:h={tl_h}",
+                        f"delogo=x={tr_x}:y={tr_y}:w={tr_w}:h={tr_h}",
+                    ]
             except Exception as d_err:
-                print(f"Lưu ý: Không thể cấu hình delogo ({d_err})")
+                logger.warning("Không thể cấu hình delogo (%s)", d_err)
 
-        if srt_to_use.endswith('.ass'):
-            srt_filter_str = f"subtitles='{srt_escaped}'"
+        if not is_already_9_16:
+            pre_split = (",".join(delogo_filters) + ",") if delogo_filters else ""
+            blur_bg_filter = (
+                f"{pre_split}split[v1][v2];"
+                "[v1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5[bg];"
+                f"[v2]{sub_filter},scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
+                "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p"
+            )
+            filter_complex = blur_bg_filter
+            w, h = 1080, 1920
+            logger.info("Chuyển đổi video không phải 9:16 sang khung dọc 9:16 với nền mờ: %dx%d -> 1080x1920", orig_w, orig_h)
         else:
-            filter_parts.append(f"subtitles='{srt_escaped}':force_style='{style_str}'")
-            
-        # Convert to 8-bit YUV420P so 10-bit HEVC/HDR source does not cause NVENC "10 bit encode not supported"
-        filter_parts.append("format=yuv420p")
-        filter_complex = ",".join(filter_parts)
+            filter_parts = []
+            if delogo_filters:
+                filter_parts.extend(delogo_filters)
+            max_dim = max(w, h)
+            if max_dim > 3840 or min(w, h) > 2160 or max_dim > 4096:
+                ratio = min(1080.0 / min(w, h), 1920.0 / max_dim)
+                target_w = int(w * ratio) // 2 * 2
+                target_h = int(h * ratio) // 2 * 2
+                filter_parts.append(f"scale={target_w}:{target_h}")
+                w, h = target_w, target_h
+                logger.info("NVENC H.264 bounds enforced: scaled %dx%d -> %dx%d", orig_w, orig_h, w, h)
+            else:
+                logger.info("Video dọc 9:16 giữ nguyên kích thước gốc: %dx%d", w, h)
+
+            filter_parts.append(sub_filter)
+            filter_parts.append("format=yuv420p")
+            filter_complex = ",".join(filter_parts)
         
         video_bitrate_kbps = 8000
         b_v = f"{video_bitrate_kbps}k"

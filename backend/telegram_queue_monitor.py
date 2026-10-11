@@ -20,6 +20,7 @@ SNAPSHOT = _resolve_snapshot_path()
 class MonitoredQueue(asyncio.Queue):
     def __init__(self):
         super().__init__()
+        self.active_job = None
         # Importing the bot in a spawned worker must not erase the real queue.
 
     def publish(self):
@@ -27,7 +28,10 @@ class MonitoredQueue(asyncio.Queue):
             return
         try:
             items = []
-            for i, job in enumerate(self._queue, 1):
+            jobs = list(self._queue)
+            if self.active_job is not None:
+                jobs.insert(0, self.active_job)
+            for i, job in enumerate(jobs, 1):
                 if isinstance(job, dict):
                     name = str(job.get("filename") or job.get("url") or "Video tiếp tục xử lý")
                     chat_id = None
@@ -51,6 +55,8 @@ class MonitoredQueue(asyncio.Queue):
                         "job_overrides": job.get("job_overrides"),
                         "resume_state": job.get("resume_state"),
                         "retry_count": job.get("retry_count", 0),
+                        "job_id": job.get("job_id"),
+                        "in_progress": job is self.active_job,
                     })
                 else:
                     items.append({
@@ -60,7 +66,9 @@ class MonitoredQueue(asyncio.Queue):
                         "url": str(job) if str(job).startswith("http") else "",
                         "source": "Telegram"
                     })
-            atomic_write_json(SNAPSHOT, {"items": items, "updated_at": time.time(), "pid": os.getpid()})
+            active = items.pop(0) if self.active_job is not None else None
+            atomic_write_json(SNAPSHOT, {"items": items, "active_job": active,
+                                         "updated_at": time.time(), "pid": os.getpid()})
         except Exception:
             logging.getLogger(__name__).exception("Cannot publish queue snapshot")
 
@@ -70,18 +78,22 @@ class MonitoredQueue(asyncio.Queue):
 
     def get_nowait(self):
         item = super().get_nowait()
+        self.active_job = item
         self.publish()
         return item
+
+    def task_done(self):
+        super().task_done()
+        self.active_job = None
+        self.publish()
 
     def clear(self):
         """Xóa sạch hàng đợi hiện tại và cập nhật lại file JSON."""
         while not self.empty():
             try:
-                self.get_nowait()
+                super().get_nowait()
+                super().task_done()
             except Exception:
                 break
-        try:
-            atomic_write_json(SNAPSHOT, {"items": [], "updated_at": time.time(), "pid": os.getpid()})
-        except Exception:
-            pass
+        self.publish()
 

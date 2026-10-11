@@ -2,7 +2,7 @@
 v1_timing_solver.py - Timing Solver chống đè giọng và co giãn nhịp điệu (Tool V1 - Giai đoạn 4).
 Hỗ trợ:
 - Tính toán chính xác timing window giữa các câu thoại (chống audio collision).
-- Co giãn tốc độ tự nhiên trong ngưỡng an toàn [0.85x - 1.35x] (tránh méo giọng chipmunk).
+- Căn tốc độ giọng đọc trong ngưỡng [1.00x - 1.50x].
 - Nhận diện câu vượt ngưỡng để gom batch nén ngữ nghĩa qua Gemini.
 """
 
@@ -18,9 +18,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Ngưỡng tốc độ tự nhiên tối đa an toàn (1.35x). Trên ngưỡng này sẽ kích hoạt nén câu Gemini
-DEFAULT_MIN_SPEED = 0.85
-DEFAULT_MAX_NATURAL_SPEED = float(os.getenv("V1_MAX_NATURAL_SPEED", "1.35"))
+try:
+    from .v1_speech_guard import MIN_NATURAL_SPEED, natural_speed_limit
+except ImportError:
+    from v1_speech_guard import MIN_NATURAL_SPEED, natural_speed_limit
+
+DEFAULT_MIN_SPEED = MIN_NATURAL_SPEED
+DEFAULT_MAX_NATURAL_SPEED = natural_speed_limit()
 HARD_GAP_BETWEEN_SPEECH_S = 0.08  # Khoảng đệm an toàn giữa 2 câu thoại
 
 
@@ -76,6 +80,7 @@ def calculate_atempo_factor(
     - Nếu ratio nằm trong [1.03, max_speed]: trả về (ratio, 'atempo_fit').
     - Nếu ratio > max_speed: trả về (max_speed, 'needs_condensation').
     """
+    max_speed = natural_speed_limit(max_speed)
     if window_duration <= 0 or actual_duration <= 0:
         return 1.0, "normal"
 

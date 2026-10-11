@@ -148,7 +148,8 @@ def get_batch_job_dir(video_path: str | Path, workspace: str = WORKSPACE) -> str
 
 
 async def process_single_local_video(video_path: str, output_dir: str, progress_callback=None,
-                                     queue_index=None, queue_total=None, video_mode: str = "auto") -> bool:
+                                     queue_index=None, queue_total=None, video_mode: str = "auto", *,
+                                     job_id=None, overrides=None, resume_if_possible=True, work_dir=None) -> bool:
     """
     Quy trình 6 bước AI Dubbing cho 1 file video cục bộ
     """
@@ -157,7 +158,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
     if queue_index is not None or not status.get("active") or status.get("video_name") != file_name:
         job_tracker.start_video(file_name, queue_index or 1, queue_total or 1)
     base_name = os.path.splitext(file_name)[0]
-    out_dir = get_batch_job_dir(video_path, WORKSPACE)
+    out_dir = str(work_dir or get_batch_job_dir(video_path, WORKSPACE))
     if Path(out_dir).resolve().parent != Path(WORKSPACE).resolve():
         raise RuntimeError("Thư mục batch nằm ngoài workspace.")
     os.makedirs(out_dir, exist_ok=True)
@@ -264,10 +265,10 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             from job_config_service import get_frozen_config
             from v1_orchestrator import V1Orchestrator
             orch = V1Orchestrator(WORKSPACE)
-            job_id = f"batch_{base_name}_{int(time.time())}"
+            job_id = job_id or f"batch_{base_name}_{int(time.time())}"
             final_dest = os.path.join(output_dir, f"Dubbed_{base_name}.mp4")
             frozen_plan = get_frozen_config(file_name, workspace_path=WORKSPACE) or {}
-            frozen_effective = frozen_plan.get("effective_config", {})
+            frozen_effective = {**frozen_plan.get("effective_config", {}), **(overrides or {})}
             planned_mode = frozen_effective.get("video_mode") or video_mode or "auto"
 
             async def _batch_orch_progress(st, step, tot, pct, msg, d):
@@ -284,6 +285,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 overrides=frozen_effective,
                 progress_callback=_batch_orch_progress,
                 stop_checker=lambda: getattr(shared_state, 'stop_requested', False),
+                resume_if_possible=resume_if_possible,
             )
             if not res.get('tracker_finalized'):
                 job_tracker.finish_video(file_name, res["final_video"], time.monotonic() - orch_started)

@@ -1,5 +1,6 @@
 """Exercise adaptive acquisition with timed frames; only OCR inference is fake."""
 import importlib
+import inspect
 import sys
 import tempfile
 import unittest
@@ -106,7 +107,7 @@ class AdaptiveSamplingTests(unittest.TestCase):
         moved = [item for item in samples if item[0] > 3.1]
         self.assertTrue(absent)
         self.assertTrue(all(not item[4]["rows"] for item in absent))
-        self.assertTrue(all(item[4]["rows"][0][0][0][1] == 208 for item in moved))
+        self.assertTrue(all(item[4]["rows"][0][0][0][1] == 240 for item in moved))
         self.assertGreater(metrics["refinement_frames"], 0)
 
     def test_long_stable_cue_periodically_refreshes_recognition(self):
@@ -114,6 +115,23 @@ class AdaptiveSamplingTests(unittest.TestCase):
         self.assertGreater(metrics["refinement_frames"], 2)
         self.assertLess(metrics["recognized_frames"], 20)
         self.assertLessEqual(metrics["peak_batch_frames"], 12)
+
+    def test_long_silent_gap_does_not_expand_tracking_acquisition(self):
+        samples, metrics, _ = self.acquire(120, lambda t: 480,
+            [cue(1, 0, 2), cue(2, 118, 120)])
+        self.assertLessEqual(metrics["sampled_frames"], 40)
+        self.assertLessEqual(metrics["recognized_frames"], 12)
+        self.assertTrue(any(item[0] < 2 for item in samples))
+        self.assertTrue(any(item[0] > 118 for item in samples))
+
+    def test_captions_at_frame_edges_are_not_cropped_before_recognition(self):
+        for top in (2, 615):
+            with self.subTest(top=top):
+                samples, _, _ = self.acquire(2, lambda t: top)
+                observed = [item[4]["rows"][0][0][0][1]
+                            for item in samples if item[4]["rows"]]
+                self.assertTrue(observed)
+                self.assertTrue(all(y == top for y in observed))
 
     def test_incomplete_results_fail_and_release_capture(self):
         cap = TimedCapture(2, lambda t: 480)
@@ -172,8 +190,9 @@ class AdaptiveSamplingTests(unittest.TestCase):
                 cap = TimedCapture(3, lambda t: None if disappear and t >= 1.8 else 480)
                 metrics = {}
                 with self.subTest(disappear=disappear), patch.object(module.cv2, "VideoCapture", return_value=cap), patch.object(module, "_readtext_batch", side_effect=recognize):
-                    module.perform_video_ocr("fixture.mp4", srt_segments=segments,
-                                             adaptive=True, metrics=metrics)
+                    inspect.unwrap(module.perform_video_ocr)(
+                        "fixture.mp4", srt_segments=segments,
+                        adaptive=True, metrics=metrics)
                 tracks = segments[0].tracking_blocks
                 self.assertTrue(tracks)
                 self.assertLess(tracks[0].start, .2)
@@ -183,6 +202,49 @@ class AdaptiveSamplingTests(unittest.TestCase):
                     self.assertAlmostEqual(tracks[-1].end, 3)
                     self.assertTrue(all(b.start <= a.end + .001 for a, b in zip(tracks, tracks[1:])))
                 self.assertEqual(metrics["mode"], "adaptive")
+
+    def test_production_tracking_keeps_observed_caption_motion(self):
+        module = importlib.import_module("backend.ocr_utils")
+        segments = [cue(1, 0, 3)]
+        cap = TimedCapture(3, lambda t: 480 if t < 1.5 else 240)
+        with patch.object(module.cv2, "VideoCapture", return_value=cap), patch.object(
+                module, "_readtext_batch", side_effect=recognize):
+            inspect.unwrap(module.perform_video_ocr)("fixture.mp4", srt_segments=segments)
+        tracks = segments[0].tracking_blocks
+        self.assertTrue(tracks)
+        before = [item for item in tracks if item.end <= 1.4]
+        after = [item for item in tracks if item.start >= 1.6]
+        self.assertTrue(before)
+        self.assertTrue(after)
+        self.assertTrue(all(item.y_pct > .7 for item in before))
+        self.assertTrue(all(item.max_y_pct < .45 for item in after))
+
+    def test_production_default_tracks_caption_at_each_frame_edge(self):
+        module = importlib.import_module("backend.ocr_utils")
+        for top in (2, 615):
+            segments = [cue(1, 0, 2)]
+            cap = TimedCapture(2, lambda t: top)
+            with self.subTest(top=top), patch.object(module.cv2, "VideoCapture", return_value=cap), patch.object(
+                    module, "_readtext_batch", side_effect=recognize):
+                inspect.unwrap(module.perform_video_ocr)("fixture.mp4", srt_segments=segments)
+                self.assertEqual(segments[0].ocr_mask_status, "located")
+                self.assertTrue(segments[0].tracking_blocks)
+                for item in segments[0].tracking_blocks:
+                    self.assertLessEqual(item.y_pct, top / 640)
+                    self.assertGreaterEqual(item.max_y_pct, (top + 19) / 640)
+
+    def test_production_decode_failure_does_not_claim_absent_captions(self):
+        module = importlib.import_module("backend.ocr_utils")
+        for adaptive in (False, True):
+            cap = TimedCapture(3, lambda t: 480)
+            cap.read = lambda: (False, None)
+            with self.subTest(adaptive=adaptive), patch.object(
+                    module.cv2, "VideoCapture", return_value=cap), patch.object(
+                    module, "_readtext_batch", side_effect=recognize):
+                with self.assertRaisesRegex(RuntimeError, "decode|frame|unresolved"):
+                    inspect.unwrap(module.perform_video_ocr)(
+                        "fixture.mp4", srt_segments=[cue(1, 0, 3)], adaptive=adaptive)
+                self.assertTrue(cap.released)
 
 
 if __name__ == "__main__":

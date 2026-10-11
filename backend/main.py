@@ -2,6 +2,7 @@ from fastapi import FastAPI, Form, Body, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import os
+import sys
 import asyncio
 import datetime
 import logging
@@ -46,6 +47,7 @@ import job_tracker
 logger = logging.getLogger("main_api")
 
 app = FastAPI()
+app.state.pipeline_runtime = sys.modules[__name__]
 
 ALLOWED_CORS_ORIGINS = [
     origin.strip()
@@ -1641,12 +1643,17 @@ async def api_task_history():
     )
 
 
-async def single_video_runner(video_path: str, output_dir: str, job_id: str):
+async def single_video_runner(video_path: str, output_dir: str, job_id: str, *,
+                              recovery_mode: str = "recover", config_overrides=None,
+                              work_dir=None, pipeline_lock_held: bool = False):
     from batch_processor import process_single_local_video
-    async with UNIFIED_PIPELINE_LOCK:
+    async def execute():
         try:
             job_tracker.start_batch(1, str(Path(video_path).parent), output_dir, job_id=job_id)
-            ok = await process_single_local_video(video_path, output_dir)
+            ok = await process_single_local_video(
+                video_path, output_dir, job_id=job_id, overrides=config_overrides,
+                resume_if_possible=recovery_mode != "restart", work_dir=work_dir,
+            )
             if ok:
                 job_tracker.finish_batch()
             else:
@@ -1654,6 +1661,16 @@ async def single_video_runner(video_path: str, output_dir: str, job_id: str):
         except Exception as e:
             logger.error(f"Lỗi chạy retry video qua API: {e}", exc_info=True)
             job_tracker.fail_batch(str(e), job_id=job_id)
+        finally:
+            job_tracker.release_batch(job_id)
+    if pipeline_lock_held:
+        try:
+            await execute()
+        finally:
+            UNIFIED_PIPELINE_LOCK.release()
+    else:
+        async with UNIFIED_PIPELINE_LOCK:
+            await execute()
 
 
 @app.post("/api/retry-video")
@@ -1997,12 +2014,13 @@ async def api_get_feature_flags():
             flags["QWEN_ASR_READINESS_REASON"] = str(readiness_error)
         return flags
     except Exception:
+        from v1_speech_guard import natural_speed_limit
         return {
             "ENABLE_QWEN_ASR": os.getenv("ENABLE_QWEN_ASR", "false").lower() in ("true", "1", "yes"),
             "V1_ASR_CHUNKING": os.getenv("V1_ASR_CHUNKING", "true").lower() in ("true", "1", "yes"),
             "V1_SMART_SKIP_OCR": os.getenv("V1_SMART_SKIP_OCR", "true").lower() in ("true", "1", "yes"),
             "V1_QC_POLICY": os.getenv("V1_QC_POLICY", "REPORT_ONLY"),
-            "V1_MAX_NATURAL_SPEED": float(os.getenv("V1_MAX_NATURAL_SPEED", "1.35")),
+            "V1_MAX_NATURAL_SPEED": natural_speed_limit(),
             "V1_TTS_WORKERS": int(os.getenv("V1_TTS_WORKERS", "6")),
             "V1_USE_ORCHESTRATOR": True,
         }

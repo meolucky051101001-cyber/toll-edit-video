@@ -1,5 +1,6 @@
 """Reuse OCR only while the observed subtitle pixels remain nearly identical."""
 import cv2
+import hashlib
 import numpy as np
 
 
@@ -16,20 +17,16 @@ class SubtitleFrameCache:
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         gray = cv2.resize(gray, (360, max(12, round(crop.shape[0]*360/w))))
         edges = cv2.Canny(gray, 60, 160) > 0
-        return gray, edges
+        return gray, edges, hashlib.sha256(crop.tobytes()).digest()
 
     def lookup(self, signature, timestamp):
-        gray, edges = signature
-        for when, old_gray, old_edges, result in reversed(self.entries):
+        gray, edges, digest = signature
+        for when, old_gray, old_edges, old_digest, result in reversed(self.entries):
             # Periodic recognition bounds accumulated visual drift.
             if abs(timestamp-when) > self.max_age or gray.shape != old_gray.shape:
                 continue
-            delta = np.abs(gray.astype(np.int16)-old_gray.astype(np.int16))
-            changed = np.logical_xor(edges, old_edges).sum()
-            ink = max(1, np.logical_or(edges, old_edges).sum())
-            edge_ratio = changed / ink
-            mean_delta = delta.mean()
-            if (edge_ratio <= 0.12 and mean_delta <= 8.0) or (edge_ratio <= 0.08 and mean_delta <= 12.0) or (mean_delta <= 6.0 and edge_ratio <= 0.15):
+            # Whole-frame averages can hide one changed glyph or a small move.
+            if digest == old_digest:
                 self.hits += 1
                 return result
         return None
@@ -41,8 +38,8 @@ class SubtitleFrameCache:
     def visual_diff(self, sig1, sig2):
         if not sig1 or not sig2:
             return 999.0, 1.0
-        gray1, edges1 = sig1
-        gray2, edges2 = sig2
+        gray1, edges1 = sig1[:2]
+        gray2, edges2 = sig2[:2]
         if gray1.shape != gray2.shape:
             return 999.0, 1.0
         delta = np.abs(gray1.astype(np.int16) - gray2.astype(np.int16))

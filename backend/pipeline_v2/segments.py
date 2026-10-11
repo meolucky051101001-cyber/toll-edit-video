@@ -45,24 +45,25 @@ class RuntimeSegment:
 
 
 def _block_to_dict(block: Any) -> Dict[str, Any]:
+    value = block.get if isinstance(block, Mapping) else lambda key, default=None: getattr(block, key, default)
     res = {
-        "text": str(getattr(block, "text", "")),
-        "start": float(getattr(block, "start", 0.0)),
-        "end": float(getattr(block, "end", 0.0)),
-        "x_pct": float(getattr(block, "x_pct", 0.0)),
-        "max_x_pct": float(getattr(block, "max_x_pct", 0.0)),
-        "y_pct": float(getattr(block, "y_pct", 0.0)),
-        "max_y_pct": float(getattr(block, "max_y_pct", 0.0)),
+        "text": str(value("text", "")),
+        "start": float(value("start", 0.0)),
+        "end": float(value("end", 0.0)),
+        "x_pct": float(value("x_pct", 0.0)),
+        "max_x_pct": float(value("max_x_pct", 0.0)),
+        "y_pct": float(value("y_pct", 0.0)),
+        "max_y_pct": float(value("max_y_pct", 0.0)),
     }
-    for key in ("prob", "is_subtitle", "is_packaging", "is_static", "in_subtitle_band", "type"):
-        val = getattr(block, key, None) if not isinstance(block, dict) else block.get(key)
+    for key in ("prob", "is_subtitle", "is_packaging", "is_static", "in_subtitle_band", "type", "geometry_verified"):
+        val = value(key)
         if val is not None:
             res[key] = val
     return res
 
 
 def _block_from_dict(data: Mapping[str, Any]) -> GeometryBlock:
-    return GeometryBlock(
+    block = GeometryBlock(
         text=str(data.get("text", "")),
         start=float(data.get("start", 0.0)),
         end=float(data.get("end", 0.0)),
@@ -77,6 +78,9 @@ def _block_from_dict(data: Mapping[str, Any]) -> GeometryBlock:
         in_subtitle_band=bool(data["in_subtitle_band"]) if data.get("in_subtitle_band") is not None else None,
         type=str(data["type"]) if data.get("type") is not None else None,
     )
+    if 'geometry_verified' in data:
+        block.geometry_verified = bool(data['geometry_verified'])
+    return block
 
 
 def segment_to_dict(segment: Any) -> Dict[str, Any]:
@@ -106,6 +110,8 @@ def segment_to_dict(segment: Any) -> Dict[str, Any]:
         "in_subtitle_band",
         "is_gap_reconciled",
         "is_unvoiced_scene",
+        "ocr_mask_status",
+        "geometry_verified",
     ):
         val = getattr(segment, key, None) if not isinstance(segment, dict) else segment.get(key)
         if val is not None:
@@ -145,6 +151,9 @@ def segment_from_dict(data: Mapping[str, Any]) -> RuntimeSegment:
     for flag_key in ("is_gap_reconciled", "is_unvoiced_scene"):
         if flag_key in data:
             setattr(seg, flag_key, bool(data[flag_key]))
+    for key in ('ocr_mask_status', 'geometry_verified'):
+        if key in data:
+            setattr(seg, key, data[key])
     return seg
 
 

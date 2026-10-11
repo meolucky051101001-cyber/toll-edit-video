@@ -111,6 +111,13 @@ def ocr_proxy(fn):
     @functools.wraps(fn)
     def wrapped(video_path, *args, **kwargs):
         source = probe_main_video(video_path)
+        try:
+            import inspect
+            sig = inspect.signature(fn)
+            if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()) or "_source_duration" in sig.parameters:
+                kwargs["_source_duration"] = source.duration
+        except Exception:
+            kwargs["_source_duration"] = source.duration
         if proxy_size(source) == (source.width, source.height) and not source.has_cover and source.video_stream_count == 1:
             return fn(video_path, *args, **kwargs)
         prepared = _prepare(video_path, source)

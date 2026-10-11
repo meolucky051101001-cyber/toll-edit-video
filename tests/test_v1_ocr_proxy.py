@@ -25,6 +25,17 @@ class ProxyTests(unittest.TestCase):
             self.assertNotEqual(work.call_args.args[0],str(original))
             self.assertTrue(Path(work.call_args.args[0]).exists())
             self.assertEqual(original.read_bytes(),b"original")
+            self.assertEqual(work.call_args.kwargs["_source_duration"], source.duration)
+
+    def test_direct_vfr_input_passes_probed_timeline_duration(self):
+        source = MainVideo(0, 960, 540, 116 / 9, 9., 1, 0, False)
+        work = Mock(return_value=([], 960, 540, .8))
+        with patch.object(proxy, "probe_main_video", return_value=source), \
+             patch.object(proxy, "_prepare") as prepare:
+            result = proxy.ocr_proxy(work)("vfr.mp4", _source_duration=5.8)
+        self.assertEqual(result, ([], 960, 540, .8))
+        prepare.assert_not_called()
+        work.assert_called_once_with("vfr.mp4", _source_duration=9.)
 
     def test_cancel_does_not_start_original_after_proxy(self):
         source=MainVideo(1,2160,3840,30,2,2,1,True)

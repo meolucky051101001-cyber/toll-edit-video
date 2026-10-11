@@ -10,6 +10,10 @@ PERMANENT_ERROR_NAMES = {
     "SpeechTimingError",
     "CriticalQualityError",
     "GeminiAuthError",
+    "GeminiResponseError",
+    "GeminiRequestError",
+    "GeminiConfigError",
+    "GeminiCancelledError",
     "BatchStopRequested",
     "UnsupportedResolutionError",
 }

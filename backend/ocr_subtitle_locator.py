@@ -86,14 +86,16 @@ def _text_match(block_text: Any, speech_text: Any) -> Tuple[float, bool]:
     strong = (len(block) == 2 and block == speech) or (len(block) >= 3 and (
         contained
         or (longest >= 3 and longest_coverage >= 0.45)
-        or (ordered >= 4 and ordered_coverage >= 0.65 and ratio >= 0.22)
+        or (ordered >= 4 and ordered_coverage >= 0.55 and ratio >= 0.20)
+        or (ordered >= 4 and ratio >= 0.50)
     )
     )
     return min(1.0, score), strong
 
 
 def _geometry_score(
-    block: Mapping[str, Any], frame_width: int, frame_height: int
+    block: Mapping[str, Any], frame_width: int, frame_height: int,
+    max_height: float = 0.14,
 ) -> Optional[float]:
     try:
         left = float(_value(block, "x_pct", 0.0))
@@ -115,7 +117,7 @@ def _geometry_score(
     # no white cover.  Wide scene/package text is still protected by the
     # transcript-match and static-text checks below, so width alone must not
     # disqualify an otherwise valid ASR-matched subtitle.
-    if width < 0.025 or width > 0.90001 or height < 0.007 or height > 0.14:
+    if width < 0.025 or height < 0.007 or height > max_height:
         return None
 
     pixel_aspect = (width * max(frame_width, 1)) / (
@@ -144,6 +146,7 @@ def _as_mapping(block: Any) -> Dict[str, Any]:
         "prob": float(_value(block, "prob", 0.0) or 0.0),
         "sample_segment_id": _value(block, "sample_segment_id"),
         "sample_time": float(_value(block, "sample_time", 0.0) or 0.0),
+        "sample_in_cue": bool(_value(block, "sample_in_cue", True)),
     }
 
 
@@ -304,9 +307,9 @@ def select_chinese_subtitle_band(
                 ("packaging", "background", "logo", "watermark")):
             continue
         block = _as_mapping(source)
-        if len(_chinese_text(block["text"])) < 2:
+        if block["text"].lstrip().startswith(("@", "＠")) or len(_chinese_text(block["text"])) < 2:
             continue
-        geometry_score = _geometry_score(block, frame_width, frame_height)
+        geometry_score = _geometry_score(block, frame_width, frame_height, max_height=.24)
         if geometry_score is None:
             continue
         raw_segment_id = block.get("sample_segment_id")
@@ -317,6 +320,8 @@ def select_chinese_subtitle_band(
             else ("time", round(float(block.get("sample_time", ordinal)), 3))
         )
         text_score, strong = speech_match(block["text"], segment_id)
+        if block['max_y_pct'] - block['y_pct'] > .14 and not strong:
+            continue
         candidate = _Candidate(
             block=block,
             sample_key=sample_key,
@@ -348,7 +353,7 @@ def select_chinese_subtitle_band(
                     continue
                 ordered_pair = sorted((first, second), key=lambda c: c.block["x_pct"]) if same_line else (first, second)
                 combined = _combined_block(*ordered_pair)
-                if combined["max_y_pct"] - combined["y_pct"] > 0.16:
+                if combined["max_y_pct"] - combined["y_pct"] > 0.30:
                     continue
                 horizontal_overlap = not (
                     first.block["max_x_pct"] < second.block["x_pct"]
@@ -370,7 +375,7 @@ def select_chinese_subtitle_band(
                     first.text_score, second.text_score
                 ):
                     continue
-                geometry_score = _geometry_score(combined, frame_width, frame_height)
+                geometry_score = _geometry_score(combined, frame_width, frame_height, max_height=0.30)
                 if geometry_score is None:
                     continue
                 composites.append(
@@ -400,6 +405,7 @@ def select_chinese_subtitle_band(
             return cached
         related = [
             other for other in candidates if not other.composite
+            and other.block.get('sample_in_cue', True)
             and abs(other.center_y - item.center_y) <= 0.035
             and abs((other.block["x_pct"] + other.block["max_x_pct"]) -
                     (item.block["x_pct"] + item.block["max_x_pct"])) <= 0.10
@@ -408,8 +414,25 @@ def select_chinese_subtitle_band(
         ]
         seen_segments = {other.segment_id for other in related}
         matching_segments = {other.segment_id for other in related if other.strong_text_match}
-        result = not (len(seen_segments) >= 3 and
-                      len(matching_segments) / len(seen_segments) < 0.6)
+        result = not ((len(seen_segments) >= 2 and not matching_segments) or
+                      (len(seen_segments) >= 3 and
+                       len(matching_segments) / len(seen_segments) < 0.6))
+        if not result and item.strong_text_match:
+            # Imported observations may lack cue bounds. A caption bracketed
+            # by two different matched rows is a transition, not a static label.
+            times = [other.block['sample_time'] for other in related]
+            before = [other for other in candidates if not other.composite
+                      and other.strong_text_match and other.segment_id not in matching_segments
+                      and abs(other.center_y-item.center_y) <= .035
+                      and 0 < min(times)-other.block['sample_time'] <= 1.5
+                      and other.normalized_text != item.normalized_text]
+            after = [other for other in candidates if not other.composite
+                     and other.strong_text_match and other.segment_id not in matching_segments
+                     and abs(other.center_y-item.center_y) <= .035
+                     and 0 < other.block['sample_time']-max(times) <= 1.5
+                     and other.normalized_text != item.normalized_text]
+            result = any(a.segment_id != b.segment_id and
+                         a.normalized_text != b.normalized_text for a in before for b in after)
         reliability_cache[id(item)] = result
         return result
 
@@ -427,7 +450,35 @@ def select_chinese_subtitle_band(
             if seed_support >= 2 or sample_count <= 2 or best_text_score >= 0.85:
                 chosen_cluster = best_seed
 
-    # Spatial variation alone must not seed a subtitle band.
+    # Spatial variation alone must not seed a subtitle band unless real speech is present
+    # and dynamic, centered Chinese subtitles are visually detected across segments.
+    if not chosen_cluster:
+        has_real_speech = any(
+            len(_chinese_text(s)) >= 2 and s.strip().lower() != "speech unavailable"
+            for s in segment_texts.values()
+        )
+        if has_real_speech and candidates:
+            all_clusters = _cluster_candidates([c for c in candidates if not c.composite and reliable(c)])
+            valid_clusters = [c for c in all_clusters if not _is_static_packaging_or_logo(c)]
+            candidate_clusters = []
+            for cluster in valid_clusters:
+                samples = _best_per_sample(cluster)
+                if len(samples) < 2:
+                    continue
+                med_cx = median((c.block["x_pct"] + c.block["max_x_pct"]) * 0.5 for c in samples)
+                if abs(med_cx - 0.5) > 0.12:
+                    continue
+                med_h = median(c.block["max_y_pct"] - c.block["y_pct"] for c in samples)
+                if not (0.02 <= med_h <= 0.10):
+                    continue
+                unique_texts = {c.normalized_text for c in samples}
+                if len(unique_texts) < 2:
+                    continue
+                candidate_clusters.append((len(samples), cluster))
+            if candidate_clusters:
+                candidate_clusters.sort(key=lambda x: x[0], reverse=True)
+                chosen_cluster = candidate_clusters[0][1]
+                mode = "visual_match"
 
     if not chosen_cluster:
         return SubtitleBandSelection(
@@ -457,8 +508,37 @@ def select_chinese_subtitle_band(
     selected_by_segment: Dict[int, Mapping[str, Any]] = {}
     selected_by_sample: Dict[int, List[Mapping[str, Any]]] = {}
     strong_by_segment = {}
-    for item in strong_candidates:
-        strong_by_segment.setdefault(item.segment_id, []).append(item)
+    if mode == "visual_match" and chosen_cluster:
+        for item in chosen_cluster:
+            if item.segment_id is not None:
+                strong_by_segment.setdefault(item.segment_id, []).append(item)
+    else:
+        for item in strong_candidates:
+            strong_by_segment.setdefault(item.segment_id, []).append(item)
+    if mode == "asr_match":
+        # A corrupt recognition may still locate a row precisely. Require both
+        # neighbouring cues to confirm this track before reusing observed bounds.
+        for position, segment_id in enumerate(speech_ids):
+            if strong_by_segment.get(segment_id):
+                continue
+            previous = strong_by_segment.get(speech_ids[position - 1], []) if position > 0 else []
+            following = strong_by_segment.get(speech_ids[position + 1], []) if position + 1 < len(speech_ids) else []
+            if not previous and not following:
+                continue
+            if (not previous or not following) and len(strong_by_segment) < 2:
+                continue
+            anchors = previous + following
+            anchor_center = median(item.center_y for item in anchors)
+            anchor_height = median(item.block["max_y_pct"] - item.block["y_pct"] for item in anchors)
+            observed = [item for item in candidates if not item.composite
+                        and item.segment_id == segment_id and reliable(item)
+                        and len(_chinese_text(item.block["text"])) >= 4
+                        and abs(item.center_y - anchor_center) <= 0.025
+                        and abs(anchor_center - center) <= 0.035
+                        and item.block["max_x_pct"] - item.block["x_pct"] >= 0.25
+                        and 0.7 * anchor_height <= item.block["max_y_pct"] - item.block["y_pct"] <= 1.5 * anchor_height]
+            if observed:
+                strong_by_segment[segment_id] = observed
     for segment_id in segment_texts:
         # Use only validated matches, including genuine vertical motion.
         local = strong_by_segment.get(segment_id, [])

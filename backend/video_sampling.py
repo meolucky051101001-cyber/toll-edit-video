@@ -41,6 +41,6 @@ def sample_video_frames(video_path, count=5, start=None, end=None, max_width=960
             "-fps_mode", "vfr", "-frames:v", str(count), "-threads", "2", pattern],
             timeout=60, check=True, **options)
         frames = [cv2.imread(str(path)) for path in sorted(Path(directory).glob("*.png"))]
-        if not frames or any(frame is None for frame in frames):
-            raise RuntimeError("GPU video sampling returned missing/unreadable frames")
+        if len(frames) != count or any(frame is None for frame in frames):
+            raise RuntimeError("GPU video sampling returned incomplete/unreadable frames (expected {}, received {})".format(count, len(frames)))
         return frames

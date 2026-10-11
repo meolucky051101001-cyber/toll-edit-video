@@ -49,7 +49,7 @@ class TestGeminiStabilityCodex(unittest.TestCase):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmp_dir.name) / "test_circuit.db"
         self.breaker = GeminiCircuitBreaker(self.db_path)
-        self.breaker_patch = patch("ai.v1_gemini_dispatcher.circuit_breaker", self.breaker)
+        self.breaker_patch = patch.dict(call_gemini_api.__globals__, {"circuit_breaker": self.breaker})
         self.breaker_patch.start()
         self.orig_workspace = os.environ.get("AUTODUB_WORKSPACE")
         os.environ["AUTODUB_WORKSPACE"] = self.tmp_dir.name
@@ -175,7 +175,8 @@ class TestGeminiStabilityCodex(unittest.TestCase):
             }]
         }
         
-        with patch("ai.translation.call_gemini_api", return_value=(mock_data, "gemini-3.5-flash-lite")):
+        with patch.dict(condense_vietnamese_subtitles_batch.__globals__, {
+                "call_gemini_api": MagicMock(return_value=(mock_data, "gemini-3.5-flash-lite"))}):
             res = condense_vietnamese_subtitles_batch(items, api_key=self.fake_key)
             self.assertIn(1, res)
             self.assertEqual(res[1], "Hôm nay ta đi chơi công viên")
@@ -203,7 +204,7 @@ class TestGeminiStabilityCodex(unittest.TestCase):
             call_count += 1
             return mock_data, "gemini-3.5-flash-lite"
 
-        with patch("ai.translation.call_gemini_api", side_effect=fake_call_api):
+        with patch.dict(condense_vietnamese_subtitles_batch.__globals__, {"call_gemini_api": fake_call_api}):
             res = condense_vietnamese_subtitles_batch(items, api_key=self.fake_key)
             # All 9 items sent in EXACTLY 1 API call!
             self.assertEqual(call_count, 1)
@@ -265,7 +266,8 @@ class TestGeminiStabilityCodex(unittest.TestCase):
             {"index": 1, "text": "Hôm nay trời mưa to rất buồn", "target_seconds": 1.0, "target_words": 3},
             {"index": 2, "text": "Ngày mai trời sẽ nắng ấm", "target_seconds": 1.0, "target_words": 3}
         ]
-        with patch("ai.translation.call_gemini_api", side_effect=GeminiQuotaExhaustedError("All models down")):
+        with patch.dict(condense_vietnamese_subtitles_batch.__globals__, {
+                "call_gemini_api": MagicMock(side_effect=GeminiQuotaExhaustedError("All models down"))}):
             res = condense_vietnamese_subtitles_batch(items, api_key=self.fake_key)
             # Must return empty dict gracefully, so caller falls back to original full texts
             self.assertEqual(res, {})

@@ -653,7 +653,9 @@ def update_step(step: float, step_name: str, percent: Optional[int] = None, deta
             w = _CURRENT_STATE["workers"][wid_str]
             w_prev_step = w.get("step")
             w_step_durations = dict(w.get("step_durations") or {})
-            w_current_step_start = w.get("current_step_start") or now
+            w_current_step_start = w.get("current_step_start")
+            if w_current_step_start is None:
+                w_current_step_start = now
             if w_prev_step and w_prev_step != step and w_prev_step > 0:
                 w_step_durations[str(w_prev_step)] = round(now - w_current_step_start, 1)
 
@@ -667,13 +669,15 @@ def update_step(step: float, step_name: str, percent: Optional[int] = None, deta
                 "percent": percent,
                 "details": details,
                 "step_durations": w_step_durations,
-                "current_step_start": now,
+                "current_step_start": w_current_step_start if w_prev_step == step else now,
                 "updated_at": now,
             })
 
         prev_step = _CURRENT_STATE.get("step")
         step_durations = dict(_CURRENT_STATE.get("step_durations") or {})
-        current_step_start = _CURRENT_STATE.get("current_step_start") or now
+        current_step_start = _CURRENT_STATE.get("current_step_start")
+        if current_step_start is None:
+            current_step_start = now
         if prev_step and prev_step != step and prev_step > 0:
             step_durations[str(prev_step)] = round(now - current_step_start, 1)
 
@@ -691,7 +695,7 @@ def update_step(step: float, step_name: str, percent: Optional[int] = None, deta
             "percent": percent,
             "details": details,
             "step_durations": step_durations,
-            "current_step_start": now,
+            "current_step_start": current_step_start if prev_step == step else now,
             "updated_at": now,
         })
         _save_state_to_disk()

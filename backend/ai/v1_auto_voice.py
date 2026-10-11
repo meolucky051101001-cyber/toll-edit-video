@@ -711,6 +711,8 @@ def get_locked_voice(
     expected_video_hash: Optional[str] = None,
     expected_mode: Optional[str] = None,
     expected_dual_voice: Optional[bool] = None,
+    expected_job_id: Optional[str] = None,
+    expected_config_hash: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Kiem tra va doc voice_lock.json neu da ton tai trong thu muc job va hop le."""
     lock_file = Path(out_dir) / VOICE_LOCK_FILENAME
@@ -722,6 +724,12 @@ def get_locked_voice(
                 logger.warning("File snapshot khóa giọng %s thiếu trường bắt buộc.", lock_file)
                 return None
             data.setdefault("rule_version", "v1_codex_voice_snapshot_1.0")
+
+            if expected_job_id and data.get("job_id") != expected_job_id:
+                return None
+            if not expected_job_id and expected_config_hash and data.get("config_hash"):
+                if data["config_hash"] != expected_config_hash:
+                    return None
 
             if expected_video_hash and data.get("video_hash"):
                 if data["video_hash"] != expected_video_hash:
@@ -778,6 +786,10 @@ def decide_video_voice(
     is_dual = bool(auto_cfg.get("dual_voice", False))
     resolved_job_id = job_id or out_dir_path.name
     content_hash = compute_file_sha256(video_path or original_audio_path)
+    config_hash = hashlib.sha256(json.dumps(
+        {key: auto_cfg.get(key) for key in ("dual_voice", "female_voice_id", "male_voice_id", "manual_voice")},
+        sort_keys=True, ensure_ascii=False, default=str,
+    ).encode("utf-8")).hexdigest()
 
     # 1. Kiểm tra snapshot đã tồn tại và hợp lệ
     if not force_reselect:
@@ -786,6 +798,8 @@ def decide_video_voice(
             expected_video_hash=content_hash if content_hash else None,
             expected_mode=actual_mode,
             expected_dual_voice=is_dual if actual_mode != "manual" else False,
+            expected_job_id=job_id,
+            expected_config_hash=config_hash,
         )
         if existing:
             logger.info(
@@ -1008,6 +1022,7 @@ def decide_video_voice(
     locked["job_id"] = resolved_job_id
     locked["video_hash"] = content_hash
     locked["voice_mode"] = actual_mode
+    locked["config_hash"] = config_hash
     locked["analysis_time_sec"] = round(pitch_elapsed, 4)
     locked["rule_version"] = "v1_codex_voice_snapshot_2.0"
     locked["locked_at"] = datetime.now(timezone.utc).isoformat()

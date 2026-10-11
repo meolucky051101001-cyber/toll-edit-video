@@ -20,7 +20,15 @@ def is_allowed_command_during_pause(cmd_text: str) -> bool:
     if not cmd_text:
         return False
     txt = cmd_text.strip().split()[0].lower()
-    return txt.startswith("/voice_auto") or txt.startswith("/voice") or txt == "/start"
+    return (
+        txt.startswith("/voice_auto")
+        or txt.startswith("/voice")
+        or txt.startswith("/muse")
+        or txt.startswith("/spark")
+        or txt.startswith("/video")
+        or txt == "/start"
+        or txt == "/status"
+    )
 
 def install(application, namespace, key):
     flag=FLAGS/(key+'.pause')

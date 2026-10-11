@@ -66,12 +66,8 @@ class RecoveryService:
             return {}
 
     def _write_states(self, states: Dict[str, Any]):
-        try:
-            tmp = self.state_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps(states, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(tmp, self.state_file)
-        except Exception as e:
-            logger.error(f"Lỗi ghi recovery states: {e}")
+        from pipeline_v2.atomic_io import atomic_write_json
+        atomic_write_json(self.state_file, states)
 
     def find_source_video(self, job_id: str, input_dir: Optional[Path] = None) -> Optional[Path]:
         """Tìm file video nguồn gốc dựa trên tên hoặc job_id."""
@@ -409,6 +405,9 @@ class RecoveryService:
                 "message": "Đã tiếp tục tiến trình video đang tạm dừng.",
             }
 
+        if mode not in {"recover", "restart"}:
+            raise ValueError(f"Unsupported recovery mode: {mode}")
+
         # Token validation for recover mode
         if mode == "recover":
             if not plan_token or plan_token not in _ACTIVE_PLAN_TOKENS:
@@ -425,13 +424,16 @@ class RecoveryService:
             raise FileNotFoundError(f"Không tìm thấy file video nguồn cho {clean_name}.")
 
         ws_dir = self.find_job_workspace(clean_name, source_path=source_path)
+        if not ws_dir.resolve().is_relative_to(self.workspace.resolve()) or ws_dir.resolve() == self.workspace.resolve():
+            raise ValueError("Recovery artifacts must stay inside the job workspace")
+        if mode == "recover" and compute_file_fingerprint(source_path) != token_info["plan"]["source_file"]["fingerprint"]:
+            raise ValueError("Video nguồn đã thay đổi; hãy tạo lại kế hoạch khôi phục.")
 
         # Atomic lock to prevent two workers claiming the job concurrently
         lock_fd = None
         try:
-            lock_fd = open(self.lock_file, "w")
-            import msvcrt
-            msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+            from pipeline_v2.interprocess_lock import CrossProcessLock
+            lock_fd = CrossProcessLock(self.lock_file, name="Recovery", timeout_seconds=1, poll_interval=0.02).acquire()
         except (IOError, OSError):
             raise RuntimeError("Đang có tiến trình khác thực hiện khôi phục tác vụ. Vui lòng đợi trong giây lát!")
 
@@ -450,9 +452,10 @@ class RecoveryService:
                 if ws_dir and ws_dir.is_dir():
                     if first_rerun in ["tts_dubbing", "mix", "render"]:
                         (ws_dir / f"final_{clean_name}.mp4").unlink(missing_ok=True)
-                        (ws_dir / "mixed.wav").unlink(missing_ok=True)
-                        (ws_dir / "mixed_audio.mp3").unlink(missing_ok=True)
-                        (ws_dir / "pipeline_v2" / "artifacts" / "mix" / "mixed.wav").unlink(missing_ok=True)
+                        if first_rerun in ["tts_dubbing", "mix"]:
+                            (ws_dir / "mixed.wav").unlink(missing_ok=True)
+                            (ws_dir / "mixed_audio.mp3").unlink(missing_ok=True)
+                            (ws_dir / "pipeline_v2" / "artifacts" / "mix" / "mixed.wav").unlink(missing_ok=True)
                         (ws_dir / "pipeline_v2" / "artifacts" / "render" / "rendered.mp4").unlink(missing_ok=True)
                     if first_rerun == "tts_dubbing":
                         (ws_dir / "dubbed_voice.mp3").unlink(missing_ok=True)
@@ -479,6 +482,8 @@ class RecoveryService:
                     "reused_stages": plan["summary"]["reusable_stages"],
                     "retry_count": current_retry + 1,
                     "source_video": str(source_path.resolve()),
+                    "work_dir": str(ws_dir.resolve()),
+                    "frozen_config": states[clean_name]["frozen_config"],
                     "message": f"Đã bắt đầu khôi phục tác vụ '{source_path.name}' từ bước: {first_rerun}.",
                 }
 
@@ -487,6 +492,8 @@ class RecoveryService:
                 if ws_dir and ws_dir.is_dir():
                     try:
                         for item in ws_dir.iterdir():
+                            if item.resolve() == source_path.resolve():
+                                continue
                             if item.is_file() and (item.suffix in [".srt", ".json", ".wav", ".mp3", ".mp4", ".tmp"] or "checkpoint" in item.name):
                                 item.unlink(missing_ok=True)
                             elif item.is_dir() and item.name in ["dubbing", "pipeline_v2"]:
@@ -512,6 +519,8 @@ class RecoveryService:
                     "resume_from_stage": "extract_audio",
                     "retry_count": 0,
                     "source_video": str(source_path.resolve()),
+                    "work_dir": str(ws_dir.resolve()),
+                    "frozen_config": config_overrides,
                     "message": f"Đã xóa toàn bộ checkpoint cũ và bắt đầu chạy lại từ đầu video '{source_path.name}'.",
                 }
             else:
@@ -520,8 +529,6 @@ class RecoveryService:
         finally:
             if lock_fd:
                 try:
-                    import msvcrt
-                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
-                    lock_fd.close()
+                    lock_fd.release()
                 except Exception:
                     pass

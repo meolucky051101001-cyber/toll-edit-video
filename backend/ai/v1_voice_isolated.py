@@ -18,7 +18,7 @@ async def generate_dubbing_audio_isolated(segments, output_folder, voice_source=
         from batch_control import run, stop_check
         import shared_state
     backend = Path(__file__).resolve().parents[1]
-    from v1_speech_guard import coalesce_tiny_same_voice_cues, SpeechTimingError
+    from v1_speech_guard import coalesce_tiny_same_voice_cues, SpeechTimingError, natural_speed_limit
     for s in segments:
         info = (segment_voices or {}).get(str(s.index))
         if info:
@@ -53,8 +53,7 @@ async def generate_dubbing_audio_isolated(segments, output_folder, voice_source=
             worker_env = dict(os.environ, PYTHONIOENCODING='utf-8')
             if tts_workers is not None:
                 worker_env['V1_TTS_WORKERS'] = str(tts_workers)
-            if max_natural_speed is not None:
-                worker_env['V1_MAX_NATURAL_SPEED'] = str(max_natural_speed)
+            worker_env['V1_MAX_NATURAL_SPEED'] = str(natural_speed_limit(max_natural_speed))
             if api_key:
                 worker_env['VOICE_API_KEY'] = str(api_key)
                 worker_env['FPT_API_KEY'] = str(api_key)

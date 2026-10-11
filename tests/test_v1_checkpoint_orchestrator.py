@@ -139,9 +139,10 @@ class CheckpointOrchestratorTests(unittest.TestCase):
             video_file = Path(tmp_dir) / "short_clip.mp4"
             video_file.write_bytes(b"dummy clip data")
 
-            with mock.patch("backend.v1_video_router.extract_media_metadata") as mock_extract:
-                from backend.v1_video_router import VideoMetadata
-                mock_extract.return_value = VideoMetadata(duration_s=45.0, width=1920, height=1080, fps=30.0)
+            from backend.v1_video_router import VideoMetadata
+            router_globals = orch.plan_job.__globals__["create_router_snapshot"].__globals__
+            with mock.patch.dict(router_globals, {"extract_media_metadata": mock.Mock(
+                    return_value=VideoMetadata(duration_s=45.0, width=1920, height=1080, fps=30.0))}):
 
                 plan = orch.plan_job(video_file, "job_orch_01", user_mode="auto")
                 self.assertEqual(plan["job_id"], "job_orch_01")

@@ -9,6 +9,9 @@ import requests
 import subprocess
 import sys
 import logging
+import math
+import tempfile
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 try:
@@ -41,6 +44,41 @@ except ImportError:  # Running telegram_bot.py directly from backend/ on Windows
 logger = logging.getLogger(__name__)
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
+
+
+def _download_stopped():
+    try:
+        from batch_control import stop_check
+        predicate = stop_check.get()
+        if predicate and predicate():
+            return True
+    except ImportError:
+        pass
+    state = sys.modules.get("shared_state")
+    return bool(state and getattr(state, "stop_requested", False))
+
+
+def run_download(command, **kwargs):
+    try:
+        from .batch_control import run, stop_check
+    except ImportError:
+        from batch_control import run, stop_check
+    token = None
+    if stop_check.get() is None:
+        token = stop_check.set(lambda: bool(getattr(sys.modules.get("shared_state"), "stop_requested", False)))
+    try:
+        return run(command, **kwargs)
+    finally:
+        if token is not None:
+            stop_check.reset(token)
+
+
+def _download_timeout():
+    try:
+        value = float(os.getenv("SOCIAL_DOWNLOAD_TIMEOUT_SECONDS", "120") or "120")
+    except ValueError:
+        value = 120.0
+    return value if math.isfinite(value) and value > 0 else 120.0
 
 
 def sanitize_url(url: str) -> str:
@@ -186,6 +224,8 @@ def download_file_stream(url: str, dest_path: str, headers: dict = None, timeout
             require_complete_response(response.status_code, response.headers)
             with open(temporary_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=512 * 1024):  # 512KB per chunk
+                    if _download_stopped():
+                        raise RuntimeError("Video download stopped")
                     if chunk:
                         f.write(chunk)
                         if deadline and (time.monotonic() - transfer_start > deadline):
@@ -823,7 +863,8 @@ def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
             clean_target_url = f"https://www.douyin.com/video/{v_id}"
 
     logger.info(f"Sử dụng Universal Downloader cho: {sanitize_url(clean_target_url)}")
-    safe_output_template = os.path.join(output_dir, f"{prefix}_%(title).30s.%(ext)s")
+    staging = tempfile.TemporaryDirectory(prefix=".social-download-", dir=output_dir)
+    safe_output_template = os.path.join(staging.name, f"{prefix}_%(title).30s.%(ext)s")
     
     cmd_download = [
         sys.executable, "-m", "yt_dlp",
@@ -844,25 +885,29 @@ def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
     cmd_download.append(clean_target_url)
     
     try:
-        configured_timeout = float(
-            os.getenv("SOCIAL_DOWNLOAD_TIMEOUT_SECONDS", "0")
-        )
-        proc = subprocess.run(
+        configured_timeout = _download_timeout()
+        proc = run_download(
             cmd_download,
             capture_output=True,
             text=True,
-            timeout=configured_timeout if configured_timeout > 0 else None,
+            timeout=configured_timeout,
             creationflags=CREATE_NO_WINDOW
         )
         
-        downloaded = [f for f in os.listdir(output_dir) if f.startswith(prefix) and f.endswith(".mp4")]
-        if downloaded:
-            final_path = os.path.join(output_dir, downloaded[0])
+        downloaded = [f for f in os.listdir(staging.name) if f.startswith(prefix) and f.endswith(".mp4")]
+        if proc.returncode == 0 and downloaded:
+            staged_path = os.path.join(staging.name, downloaded[0])
             try:
-                probe_downloaded_video(final_path)
+                probe_downloaded_video(staged_path)
             except DownloadValidationError as probe_error:
                 logger.warning("yt-dlp output failed ffprobe validation: %s", probe_error)
                 return False, "", "", str(probe_error)
+            try:
+                from .pipeline_v2.atomic_io import atomic_copy_file
+            except ImportError:
+                from pipeline_v2.atomic_io import atomic_copy_file
+            final_path = os.path.join(output_dir, downloaded[0])
+            atomic_copy_file(staged_path, final_path)
             return True, final_path, downloaded[0], ""
         else:
             raw_err = proc.stderr or ""
@@ -874,6 +919,8 @@ def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
                 clean_err = raw_err[:250].strip() if raw_err else "Không tìm thấy file sau khi tải"
             return False, "", "", clean_err
     except subprocess.TimeoutExpired:
-        return False, "", "", "Tải video quá lâu (>5 phút)"
+        return False, "", "", f"Tải video vượt giới hạn {configured_timeout:.0f} giây"
     except Exception as e:
         return False, "", "", str(e)
+    finally:
+        staging.cleanup()

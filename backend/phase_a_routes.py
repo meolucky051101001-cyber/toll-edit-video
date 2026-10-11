@@ -167,6 +167,14 @@ async def api_patch_queued_job_config(job_id: str, payload: Dict[str, Any] = Bod
 
 @router.post("/api/jobs/batch")
 async def api_jobs_batch(request: Request, payload: Dict[str, Any] = Body(...)):
+    key = payload.get("idempotency_key")
+    if key:
+        with job_config_service.idempotency_lock(key):
+            return _enqueue_jobs_batch(request, payload)
+    return _enqueue_jobs_batch(request, payload)
+
+
+def _enqueue_jobs_batch(request: Request, payload: Dict[str, Any]):
     """
     Xếp hàng hàng loạt video với cấu hình đóng băng riêng từng video.
     Hỗ trợ Idempotency key ngăn chặn double-click / gửi trùng.
