@@ -4,9 +4,8 @@ Giải quyết triệt để nguy cơ tràn đĩa (Disk Full Crash) trên ổ D:
 
 Tính năng:
 1. clean_completed_job_intermediate_files:
-   - Sau khi job xuất bản thành công tới D:\\banve\\Dubbed_*.mp4, lập tức xóa video trùng lặp
-     (final_*.mp4) và các file stem âm thanh PCM cực nặng (mixed.wav, vocals.wav, no_vocals.wav, bs_roformer/*.wav).
-   - Bảo toàn 100% các tệp metadata nhẹ quan trọng: manifest.json, qc_report.json, .srt, .ass.
+   - Sau khi xác minh bản giao video, xóa bản render trùng và file tạm không còn cần thiết.
+   - Bảo toàn audio checkpoint, manifest, QC, phụ đề và nguồn để tiếp tục hoặc sửa job.
 2. clean_stale_workspace_jobs:
    - Quét và dọn dẹp các tệp trung gian của tất cả các job cũ đã hoàn tất trong D:\\workspace quá 24h.
 3. clean_stale_downloads:
@@ -27,10 +26,6 @@ logger = logging.getLogger(__name__)
 
 # Các đuôi file và mẫu tên file trung gian dung lượng lớn cần dọn dẹp sau khi job xong
 INTERMEDIATE_FILE_PATTERNS = [
-    "mixed.wav",
-    "original.wav",
-    "vocals.wav",
-    "no_vocals.wav",
     "*_fit_in.wav",
     "*_fit_out.wav",
     "*_fit_stage.mp3",
@@ -49,119 +44,94 @@ def get_disk_free_gb(path: str | Path) -> float:
         return 999.0
 
 
-def clean_completed_job_intermediate_files(job_id: str, workspace_dir: str | Path) -> int:
-    """
-    Dọn dẹp các file trung gian nặng của một job cụ thể sau khi đã xuất bản video thành phẩm tới D:\\banve.
-    Trả về số bytes đã giải phóng.
-    """
+def _job_manifests(workspace_dir):
+    from v1_checkpoint import ManifestManager
     ws = Path(workspace_dir)
-    job_dir = ws / job_id
-    if not job_dir.is_dir():
-        # Kiểm tra nếu job_dir nằm trực tiếp trong workspace với tên job
+    directory = ws / "bot_system" / "manifests"
+    if not directory.is_dir():
+        return []
+    manager = ManifestManager(ws)
+    return [m for p in directory.glob("*.manifest.json")
+            if (m := manager.load_manifest(p.name.removesuffix(".manifest.json"))) is not None]
+
+
+def _verified_delivery(manifest):
+    from dashboard_media import media_status
+    from v1_checkpoint import fingerprint
+    if manifest.status != "completed" or not manifest.output_video_path:
+        return False
+    expected = manifest.stages.get("video_rendering", {}).get("artifacts", {}).get("temp_render", {}).get("sha256")
+    try:
+        return bool(expected and media_status(manifest.output_video_path)["status"] == "valid"
+                    and fingerprint(manifest.output_video_path) == expected)
+    except OSError:
+        return False
+
+
+def clean_completed_job_intermediate_files(job_id: str, workspace_dir: str | Path,
+                                           job_directory: Optional[str | Path] = None) -> int:
+    """Remove disposable scratch and duplicate final video; retain checkpoint media."""
+    from v1_checkpoint import fingerprint
+    ws = Path(workspace_dir).resolve()
+    manifests = _job_manifests(ws)
+    manifest = next((m for m in manifests if m.job_id == job_id), None)
+    if not manifest or not _verified_delivery(manifest):
         return 0
+    recorded_dir = manifest.effective_config.get("output_dir")
+    if not recorded_dir:
+        return 0
+    job_dir = Path(recorded_dir).resolve()
+    if (not job_dir.is_relative_to(ws) or job_dir == ws or not job_dir.is_dir()
+            or (job_directory and Path(job_directory).resolve() != job_dir)):
+        return 0
+    for other in manifests:
+        if (other.job_id != job_id and other.status != "completed"
+                and other.effective_config.get("output_dir")
+                and Path(other.effective_config["output_dir"]).resolve() == job_dir):
+            return 0
 
+    protected = {Path(manifest.video_path).resolve(), Path(manifest.output_video_path).resolve()}
+    for stage in manifest.stages.values():
+        for artifact in stage.get("artifacts", {}).values():
+            if artifact.get("path"):
+                protected.add(Path(artifact["path"]).resolve())
     freed_bytes = 0
+    for pattern in INTERMEDIATE_FILE_PATTERNS:
+        for path in job_dir.rglob(pattern):
+            try:
+                if not path.is_file() or path.resolve() in protected or not path.resolve().is_relative_to(job_dir):
+                    continue
+                size = path.stat().st_size
+                path.unlink()
+                freed_bytes += size
+            except OSError:
+                continue
 
-    # 1. Xóa các file âm thanh WAV trung gian lớn
-    for p in job_dir.glob("*.wav"):
+    # A workspace render is redundant only after the delivered copy matches it.
+    for path in job_dir.glob("final_*.mp4"):
         try:
-            sz = p.stat().st_size
-            p.unlink()
-            freed_bytes += sz
-        except OSError:
-            pass
-
-    # 2. Xóa thư mục bs_roformer chứa stems nếu có
-    roformer_dir = job_dir / "bs_roformer"
-    if roformer_dir.is_dir():
-        try:
-            for stem in roformer_dir.glob("*.wav"):
-                try:
-                    freed_bytes += stem.stat().st_size
-                    stem.unlink()
-                except OSError:
-                    pass
-            shutil.rmtree(str(roformer_dir), ignore_errors=True)
-        except Exception:
-            pass
-
-    # 3. Xóa thư mục demucs nếu có
-    demucs_dir = job_dir / "demucs"
-    if demucs_dir.is_dir():
-        try:
-            shutil.rmtree(str(demucs_dir), ignore_errors=True)
-        except Exception:
-            pass
-
-    # 4. Xóa video trung gian final_*.mp4 trong workspace (vì đã có bản phân phối Dubbed_*.mp4 ở D:\banve)
-    for vid in job_dir.glob("final_*.mp4"):
-        try:
-            sz = vid.stat().st_size
-            vid.unlink()
-            freed_bytes += sz
-        except OSError:
-            pass
-
-    if freed_bytes > 0:
-        logger.info(f"[CLEANUP] Job {job_id}: Đã giải phóng {freed_bytes / (1024**2):.1f} MB tệp trung gian.")
+            if (path.resolve() == Path(manifest.output_video_path).resolve()
+                    or path.resolve() == Path(manifest.video_path).resolve()
+                    or not path.resolve().is_relative_to(job_dir)):
+                continue
+            expected = manifest.stages["video_rendering"]["artifacts"]["temp_render"]["sha256"]
+            if fingerprint(path) == expected:
+                size = path.stat().st_size
+                path.unlink()
+                freed_bytes += size
+        except (OSError, KeyError):
+            continue
+    if freed_bytes:
+        logger.info("[CLEANUP] Job %s: freed %.1f MB", job_id, freed_bytes / 1024**2)
     return freed_bytes
 
 
 def clean_stale_workspace_jobs(workspace_dir: str | Path, max_age_hours: float = 24.0) -> int:
-    """
-    Quét toàn bộ workspace và dọn dẹp các tệp trung gian (WAV, final_*.mp4 trùng lặp)
-    của các job đã xong quá max_age_hours.
-    """
-    ws = Path(workspace_dir)
-    if not ws.is_dir():
-        return 0
-
-    freed_bytes = 0
+    """Only completed manifests older than the retention period may be cleaned."""
     now = time.time()
-    max_age_sec = max_age_hours * 3600.0
-
-    for d in ws.iterdir():
-        if not d.is_dir() or d.name in ("bot_system", "downloads", "control", "output_receipts", "service_logs", "translation_cache", ".v1_ocr_cache"):
-            continue
-
-        try:
-            mtime = d.stat().st_mtime
-            is_stale = (now - mtime) > max_age_sec
-
-            # Dọn dẹp file WAV lớn trong các folder job cũ
-            for wav_file in d.glob("*.wav"):
-                try:
-                    sz = wav_file.stat().st_size
-                    wav_file.unlink()
-                    freed_bytes += sz
-                except OSError:
-                    pass
-
-            # Dọn dẹp thư mục bs_roformer
-            bs_dir = d / "bs_roformer"
-            if bs_dir.is_dir():
-                for stem in bs_dir.glob("*.wav"):
-                    try:
-                        freed_bytes += stem.stat().st_size
-                        stem.unlink()
-                    except OSError:
-                        pass
-                shutil.rmtree(str(bs_dir), ignore_errors=True)
-
-            # Dọn dẹp final_*.mp4 nếu job cũ hơn 24h
-            if is_stale:
-                for final_vid in d.glob("final_*.mp4"):
-                    try:
-                        freed_bytes += final_vid.stat().st_size
-                        final_vid.unlink()
-                    except OSError:
-                        pass
-        except Exception:
-            continue
-
-    if freed_bytes > 0:
-        logger.info(f"[CLEANUP] Workspace: Đã dọn dẹp và giải phóng {freed_bytes / (1024**3):.2f} GB từ các job cũ.")
-    return freed_bytes
+    return sum(clean_completed_job_intermediate_files(m.job_id, workspace_dir)
+               for m in _job_manifests(workspace_dir)
+               if m.status == "completed" and now - m.updated_at > max_age_hours * 3600)
 
 
 def clean_stale_downloads(
@@ -193,7 +163,28 @@ def clean_stale_downloads(
     # Sắp xếp file theo thời gian tăng dần (cũ nhất lên đầu)
     files.sort(key=lambda x: x[0])
 
+    # Raw media belonging to unfinished jobs or queued requests must remain resumable.
+    manifests = _job_manifests(dl_path.parent)
+    protected = {Path(m.video_path).resolve() for m in manifests if m.status != "completed"}
+    eligible = {Path(m.video_path).resolve(): m.video_fingerprint
+                for m in manifests if _verified_delivery(m)}
+    try:
+        import json
+        for snapshot in (dl_path.parent / "telegram_queue.json",
+                         dl_path.parent / "bot_system" / "telegram_queue.json"):
+            if snapshot.is_file():
+                data = json.loads(snapshot.read_text(encoding="utf-8-sig"))
+                jobs = list(data.get("items") or []) + [data.get("active_job") or {}]
+                for job in jobs:
+                    source = (job.get("resume_state") or {}).get("source_path")
+                    if source:
+                        protected.add(Path(source).resolve())
+    except (OSError, ValueError, TypeError):
+        return 0
+
     for mtime, size, file_path in files:
+        if file_path.resolve() in protected:
+            continue
         free_gb = get_disk_free_gb(dl_path)
         is_stale = (now - mtime) > max_age_sec
         is_disk_low = free_gb < min_free_gb
@@ -209,8 +200,11 @@ def clean_stale_downloads(
                 continue
 
         # Xóa file video thô nếu đã cũ hoặc ổ đĩa sắp đầy
-        if is_stale or is_disk_low:
+        if (is_stale or is_disk_low) and file_path.resolve() in eligible:
             try:
+                from v1_checkpoint import fingerprint
+                if fingerprint(file_path) != eligible[file_path.resolve()]:
+                    continue
                 file_path.unlink()
                 freed_bytes += size
                 logger.info(f"[CLEANUP] Đã xóa video thô cũ ({size / (1024**2):.1f} MB): {file_path.name}")

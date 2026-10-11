@@ -207,8 +207,8 @@ class SubtitleLayoutTests(unittest.TestCase):
             content = path.read_text(encoding="utf-8-sig")
             bg_lines = [l for l in content.splitlines() if ",BgStyle," in l]
             text_lines = [l for l in content.splitlines() if ",TextStyle," in l]
-            # Must NOT emit any BgStyle cover!
-            self.assertEqual(len(bg_lines), 0)
+            # Emits a BgStyle cover box for Vietnamese subtitle as requested in user requirement #6!
+            self.assertEqual(len(bg_lines), 1)
             self.assertEqual(len(text_lines), 1)
 
     def test_cover_box_does_not_balloon(self):
@@ -233,8 +233,7 @@ class SubtitleLayoutTests(unittest.TestCase):
             # Box height should be tight (< 60 px)
             self.assertLess(height, 65)
 
-    def test_cover_box_hard_limited_to_90_percent_width(self):
-        # Chinese bbox spanning 0.03 to 0.97 (would be 0.94 without hard limit)
+    def test_cover_box_covers_wide_source_beyond_text_margins(self):
         from backend.pipeline_v2.segments import GeometryBlock
         seg = RuntimeSegment(
             index=1, start=timedelta(seconds=0), end=timedelta(seconds=2),
@@ -250,12 +249,11 @@ class SubtitleLayoutTests(unittest.TestCase):
             match = re.search(r"\\pos\((\d+),(\d+)\).*?m (\d+) [\d.]+ l [\d.]+ [\d.]+ b [\d.]+ [\d.]+ [\d.]+ (\d+)", bg_line)
             self.assertIsNotNone(match)
             x, _, width, _ = map(int, match.groups())
-            # For normalized 720 canvas width, width MUST be <= 648 (90%) and x >= 36 (5% margin)
-            self.assertLessEqual(width, 648)
-            self.assertGreaterEqual(x, 36)
+            self.assertLessEqual(x, .03*720)
+            self.assertGreaterEqual(x+width, .97*720)
+            self.assertLessEqual(x+width, 720)
 
-    def test_cover_box_edge_to_edge_ocr_strictly_obeys_90_percent_limit(self):
-        # Even if OCR spans 0.00 to 1.00 (edge-to-edge), cover MUST NEVER exceed 90%
+    def test_cover_box_covers_edge_to_edge_ocr(self):
         from backend.pipeline_v2.segments import GeometryBlock
         seg = RuntimeSegment(
             index=1, start=timedelta(seconds=0), end=timedelta(seconds=2),
@@ -271,8 +269,8 @@ class SubtitleLayoutTests(unittest.TestCase):
             match = re.search(r"\\pos\((\d+),(\d+)\).*?m (\d+) [\d.]+ l [\d.]+ [\d.]+ b [\d.]+ [\d.]+ [\d.]+ (\d+)", bg_line)
             self.assertIsNotNone(match)
             x, _, width, _ = map(int, match.groups())
-            self.assertLessEqual(width, 648)
-            self.assertGreaterEqual(x, 36)
+            self.assertEqual(width, 720)
+            self.assertEqual(x, 0)
 
     def test_landscape_bottom_subtitle_avoids_watermark(self):
         # Long subtitle at bottom (y_pct=0.85) in 1920x1080 (Landscape)

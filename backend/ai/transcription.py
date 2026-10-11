@@ -24,6 +24,12 @@ logger = logging.getLogger(__name__)
 from .v1_model_policy import current_v1_model_policy
 import time
 
+try:
+    from faster_whisper import WhisperModel
+except ImportError:
+    WhisperModel = None
+
+
 
 def _cached_model_path(model_name, download_root):
     if os.path.isdir(model_name):
@@ -171,6 +177,9 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None, or
     """Run one ASR model and always release its CPU/GPU memory."""
 
     import torch, gc
+    global WhisperModel
+    if WhisperModel is None:
+        from faster_whisper import WhisperModel
     num_threads = max((os.cpu_count() or 4) - 1, 2)
     worker_count = max(1, int(num_workers))
 

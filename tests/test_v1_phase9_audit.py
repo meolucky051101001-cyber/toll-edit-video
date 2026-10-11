@@ -50,7 +50,7 @@ class Phase9AuditTests(unittest.TestCase):
     def test_downloader_timeout_defaults_to_finite(self):
         # When SOCIAL_DOWNLOAD_TIMEOUT_SECONDS is absent or empty, timeout must be finite (120.0), not None
         with patch.dict(os.environ, {}, clear=True):
-            with patch("subprocess.run") as mock_run:
+            with patch.object(social_downloader, "run_download") as mock_run:
                 mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
                 with patch("os.listdir", return_value=[]):
                     social_downloader.download_social_video("http://example.com/video", "temp_dir", "test_prefix")
@@ -62,17 +62,18 @@ class Phase9AuditTests(unittest.TestCase):
     def test_render_history_stale_lock_recovery(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
-            lock_path = Path(tmpdir) / ".render_history.lock"
+            history_path = Path(tmpdir) / ".render_history.json"
+            lock_path = history_path.with_name(history_path.name + ".lock")
             # Create a stale lock file older than 60 seconds
             lock_path.write_text("dummy")
             past_time = time.time() - 100.0
             os.utime(str(lock_path), (past_time, past_time))
 
-            # _acquire_lock should recover from stale lock and succeed
-            acquired = render_history._acquire_lock(lock_path, timeout=1.0, stale_timeout=60.0)
-            self.assertTrue(acquired)
-            render_history._release_lock(lock_path)
-            self.assertFalse(lock_path.exists())
+            # An unlocked file from an exited process must not block the OS lock.
+            with patch.object(render_history, "HISTORY_FILE", history_path):
+                render_history.record_render_duration("fixture.mp4", 12)
+            data = json.loads(history_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["fixture.mp4"], 12)
 
     def test_unified_pipeline_lock_identity_and_conflict(self):
         # UNIFIED_PIPELINE_LOCK must be shared by API and Batch

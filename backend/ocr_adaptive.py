@@ -26,11 +26,20 @@ class OrderedFrameReader:
         self.last_index, self.last_crop = None, None
         self.actual_time = None
         self.last_request = None
+        self.duration = duration
+        self._timestamp_frame = None
+        self._lookahead = None
+        self._decoder_time = None
+        self._eof = False
+        self._last_frame_interval = 1 / fps
         self.last_valid_index = max(0, math.ceil(duration * fps) - 1) if duration > 0 else None
 
     def read(self, timestamp):
         if self.stopped():
             raise RuntimeError("OCR cancelled")
+        timestamp = float(timestamp)
+        if not math.isfinite(timestamp) or timestamp < 0:
+            raise ValueError("OCR sample timestamp must be finite and nonnegative")
         if hasattr(self.cap, "retrieve"):
             return self._read_timestamp(timestamp)
         index = max(0, int(round(timestamp * self.fps)))
@@ -49,67 +58,116 @@ class OrderedFrameReader:
             if self.stopped():
                 raise RuntimeError("OCR cancelled")
             if not self.cap.grab():
-                raise RuntimeError("Could not decode OCR verification frame")
+                if self.last_crop is not None:
+                    return self.last_crop
+                break
             self.next_index += 1
             self.metrics["grabbed_frames"] += 1
         ok, frame = self.cap.read()
         if not ok:
-            raise RuntimeError("Could not decode OCR verification frame")
+            if self.last_crop is not None:
+                return self.last_crop
+            self.cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, (timestamp - 0.2)) * 1000)
+            ok, frame = self.cap.read()
+            if not ok:
+                if self.last_crop is not None:
+                    return self.last_crop
+                raise RuntimeError("Could not decode OCR verification frame")
         self.next_index = index + 1
         self.metrics["decoded_samples"] += 1
-        crop = frame[int(self.height * .05):int(self.height * .95), :]
-        ratio = min(1.0, 720.0 / crop.shape[1])
+        crop = frame
+        ratio = min(1.0, 960.0 / crop.shape[1])
         if ratio < 1:
-            crop = cv2.resize(crop, (720, int(crop.shape[0] * ratio)),
+            crop = cv2.resize(crop, (960, max(1, round(crop.shape[0] * ratio))),
                               interpolation=cv2.INTER_AREA)
         self.last_index, self.last_crop = index, (crop, ratio)
         return self.last_crop
 
     def _read_timestamp(self, timestamp):
-        """OpenCV frame-number arithmetic is invalid for variable-frame-rate input."""
+        """Keep the displayed frame and one later frame, using actual VFR PTS."""
         if self.last_request == timestamp:
             return self.last_crop
-        seek = (self.actual_time is None or timestamp < (self.last_request or 0)
-                or timestamp - self.actual_time > 2)
+        seek = (self._timestamp_frame is None or timestamp < (self.last_request or 0)
+                or (timestamp - self.actual_time > 2
+                    and (self._lookahead is None or timestamp >= self._lookahead[0])))
         if seek:
-            self.cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+            # Seek slightly before the request so a future VFR frame cannot
+            # replace the frame that is still displayed at the requested time.
+            self.cap.set(cv2.CAP_PROP_POS_MSEC, max(0., timestamp - 2.) * 1000)
             self.metrics["seeks"] += 1
-            ok = self.cap.grab()
-            observed = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000 if ok else None
-            # Some VFR backends implement seeking using nominal FPS and land
-            # late or past EOF. Rewind and follow actual presentation times.
-            if not ok or observed > timestamp + 1 / self.fps:
+            self._reset_timestamp_reader()
+            first = self._grab_timestamp_frame()
+            # Some backends seek using nominal FPS. Rewind if they land after
+            # the target; the timestamp checks still apply to every next frame.
+            if first is None or first[0] > timestamp + 1e-6:
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 self.metrics["seeks"] += 1
-                ok = self.cap.grab()
-                observed = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000 if ok else None
-            if not ok:
-                raise RuntimeError("Could not decode OCR verification frame")
-            self.actual_time = observed
-        while self.actual_time + 1e-6 < timestamp:
-            if self.stopped():
-                raise RuntimeError("OCR cancelled")
-            if not self.cap.grab():
-                # A valid final frame may precede the requested timestamp by
-                # one frame period; never stretch it over a longer decode gap.
-                if self.last_crop is not None and timestamp-self.actual_time <= 1 / self.fps:
+                self._reset_timestamp_reader()
+                first = self._grab_timestamp_frame()
+            if first is None or first[0] > timestamp + 1e-6:
+                if self.last_crop is not None:
                     return self.last_crop
-                raise RuntimeError("Could not decode OCR verification frame")
-            observed = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
-            if observed < self.actual_time:
-                raise RuntimeError("OCR decoder returned non-monotonic timestamps")
-            self.actual_time = observed
-            self.metrics["grabbed_frames"] += 1
-        ok, frame = self.cap.retrieve()
-        if not ok:
-            raise RuntimeError("Could not retrieve OCR verification frame")
-        crop = frame[int(self.height * .05):int(self.height * .95), :]
-        ratio = min(1., 720. / crop.shape[1])
-        if ratio < 1:
-            crop = cv2.resize(crop, (720, int(crop.shape[0] * ratio)), interpolation=cv2.INTER_AREA)
+                if first is not None:
+                    self._timestamp_frame = first
+                else:
+                    raise RuntimeError("Could not decode OCR verification frame")
+            self._timestamp_frame = first
+        while True:
+            if self._lookahead is None and not self._eof:
+                self._lookahead = self._grab_timestamp_frame()
+            if self._lookahead is None or self._lookahead[0] > timestamp + 1e-6:
+                break
+            self._timestamp_frame, self._lookahead = self._lookahead, None
+        observed, frame = self._timestamp_frame
+        if self._eof and timestamp - observed > max(1 / self.fps, self._last_frame_interval) + 1e-6:
+            if self.last_crop is not None:
+                return self.last_crop
+        if self.duration > 0 and timestamp > self.duration + 1e-6:
+            if self.last_crop is not None:
+                return self.last_crop
+        self.actual_time = observed
+        crop = self._resize_frame(frame)
         self.metrics["decoded_samples"] += 1
-        self.last_request, self.last_crop = timestamp, (crop, ratio)
+        self.last_request, self.last_crop = timestamp, crop
         return self.last_crop
+
+    def _reset_timestamp_reader(self):
+        self._timestamp_frame = self._lookahead = self._decoder_time = None
+        self._eof = False
+        self._last_frame_interval = 1 / self.fps
+
+    def _grab_timestamp_frame(self):
+        if self.stopped():
+            raise RuntimeError("OCR cancelled")
+        if not self.cap.grab():
+            self._eof = True
+            return None
+        observed = float(self.cap.get(cv2.CAP_PROP_POS_MSEC)) / 1000
+        if not math.isfinite(observed):
+            raise RuntimeError("OCR decoder returned an invalid presentation timestamp")
+        if observed < 0:
+            if observed >= -max(0.1, 1.5 / self.fps):
+                observed = 0.0
+            else:
+                raise RuntimeError("OCR decoder returned an invalid presentation timestamp")
+        if self._decoder_time is not None:
+            if observed <= self._decoder_time + 1e-9:
+                raise RuntimeError("OCR decoder returned stalled or non-monotonic timestamps")
+            self._last_frame_interval = observed - self._decoder_time
+        ok, frame = self.cap.retrieve()
+        if not ok or frame is None:
+            raise RuntimeError("Could not retrieve OCR verification frame")
+        self._decoder_time = observed
+        self.metrics["grabbed_frames"] += 1
+        return observed, frame
+
+    @staticmethod
+    def _resize_frame(frame):
+        crop = frame
+        ratio = min(1., 960. / crop.shape[1])
+        if ratio < 1:
+            crop = cv2.resize(crop, (960, max(1, round(crop.shape[0] * ratio))), interpolation=cv2.INTER_AREA)
+        return crop, ratio
 
 
 def collect_adaptive_samples(cap, segments, width, height, fps, duration,
@@ -165,8 +223,8 @@ def collect_adaptive_samples(cap, segments, width, height, fps, duration,
                         sample_time=timestamp,
                         x_pct=min(p[0] for p in box) / ratio / width,
                         max_x_pct=max(p[0] for p in box) / ratio / width,
-                        y_pct=(min(p[1] for p in box) / ratio + int(height * .05)) / height,
-                        max_y_pct=(max(p[1] for p in box) / ratio + int(height * .05)) / height,
+                        y_pct=min(p[1] for p in box) / ratio / height,
+                        max_y_pct=max(p[1] for p in box) / ratio / height,
                     ))
             band = select_chinese_subtitle_band(
                 candidates, {source_id: segment.content}, width, height)
@@ -180,13 +238,13 @@ def collect_adaptive_samples(cap, segments, width, height, fps, duration,
             exact = {}
             for (timestamp, frame, ratio), rows in zip(coarse, coarse_rows):
                 holder = {"rows": rows}
-                exact[round(timestamp * fps)] = (ratio, holder)
+                exact[timestamp] = (ratio, holder)
                 cache.remember(cache.signature(frame), timestamp, holder)
 
             left = max(0., start - .3)
             next_start = (ordered[position + 1][1].start.total_seconds()
                           if position + 1 < len(ordered) else duration)
-            right = max(end, next_start) + .3
+            right = min(end + .3, next_start) if next_start > end else end + .3
             if duration > 0:
                 right = min(right, duration)
             step = .2 if locked and end - start <= 3 else .5
@@ -208,7 +266,7 @@ def collect_adaptive_samples(cap, segments, width, height, fps, duration,
             for timestamp in times:
                 if stopped():
                     raise RuntimeError("OCR cancelled")
-                frame_key = round(timestamp * fps)
+                frame_key = timestamp
                 if frame_key in exact:
                     ratio, holder = exact[frame_key]
                 else:

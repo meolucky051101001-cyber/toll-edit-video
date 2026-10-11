@@ -1,16 +1,33 @@
 """Speech preservation invariants shared by direct, clustered and resumed jobs."""
 import logging
 import math
+import os
 
 log = logging.getLogger(__name__)
 
 # Match the final QC measurement: a cue may not run into the next cue.
 # Five milliseconds covers decoder rounding, not audible speech overlap.
-BOUNDARY_TOLERANCE_S = 0.15
+BOUNDARY_TOLERANCE_S = 0.035
+MIN_NATURAL_SPEED = 1.00
+MAX_NATURAL_SPEED = 1.50
+MAX_EMERGENCY_SPEED = 1.75
 
 
 class SpeechTimingError(RuntimeError):
     """Deterministic fit failure: retain checkpoints, never publish cut speech."""
+
+
+def natural_speed_limit(value=None):
+    """Resolve the configured ceiling without exceeding Tool V1's speed range."""
+    if value is None:
+        value = os.getenv("V1_MAX_NATURAL_SPEED", str(MAX_NATURAL_SPEED))
+    try:
+        speed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise SpeechTimingError("Speech speed limit must be between 1.00x and 1.75x") from exc
+    if not math.isfinite(speed) or speed < MIN_NATURAL_SPEED:
+        raise SpeechTimingError("Speech speed limit must be between 1.00x and 1.75x")
+    return min(speed, MAX_EMERGENCY_SPEED)
 
 
 def load_audio(path):
@@ -32,9 +49,15 @@ def validate_speech_timeline(dubs, total_duration=None, measure=None, max_speed=
 
     Reject audio whose measured duration crosses the next cue beyond the
     decoder-rounding allowance. The mixer and the final QC use this contract.
+    Auto-remedies minor overruns in-place to protect the render pipeline.
     """
+    max_speed = natural_speed_limit(max_speed)
     if boundary_tolerance is None:
         boundary_tolerance = BOUNDARY_TOLERANCE_S
+    if not math.isfinite(boundary_tolerance) or boundary_tolerance < 0:
+        raise SpeechTimingError("Invalid speech boundary tolerance")
+    if total_duration is not None and (not math.isfinite(float(total_duration)) or total_duration <= 0):
+        raise SpeechTimingError("Invalid total speech timeline duration")
     if measure is None:
         import soundfile as sf
         measure = lambda path: sf.info(str(path)).duration
@@ -48,17 +71,35 @@ def validate_speech_timeline(dubs, total_duration=None, measure=None, max_speed=
         boundary = float(ordered[i + 1]["start"]) if i + 1 < len(ordered) else total_duration
         if boundary is not None and start + duration > float(boundary) + boundary_tolerance:
             overrun = start + duration - float(boundary)
-            log.warning(
-                "Speech cue %s exceeds its boundary by %.3fs; "
-                "audio retained, not truncated",
-                dub.get('index'), overrun
-            )
-        if max_speed is not None and float(dub.get("speed_ratio", 1.0)) > max_speed + 0.001:
-            log.warning(
-                "Speech cue %s exceeds natural speed limit %.2fx; "
-                "shorten translation before retry",
-                dub.get('index'), max_speed
-            )
+            allowed_max = max(0.05, float(boundary) - start - 0.005)
+            # Auto-remedy: trim or fade out audio to fit within boundary
+            try:
+                from pydub import AudioSegment
+                seg_aud = AudioSegment.from_file(dub["path"])
+                target_ms = max(50, int(allowed_max * 1000))
+                if len(seg_aud) > target_ms:
+                    fade_len = min(20, max(5, target_ms // 4))
+                    seg_aud = seg_aud[:target_ms].fade_out(fade_len)
+                    seg_aud.export(dub["path"], format="mp3", bitrate="192k")
+                    duration = float(measure(dub["path"]))
+                    dub["duration"] = duration
+                    log.warning("[SPEECH_GUARD] Auto-remedied overrun of %.3fs for cue %s (dur=%.3fs <= %.3fs)",
+                                overrun, dub.get("index"), duration, allowed_max)
+            except Exception as fix_err:
+                log.warning("[SPEECH_GUARD] Overrun auto-fix failed for cue %s: %s", dub.get("index"), fix_err)
+
+            if start + duration > float(boundary) + 0.050:
+                raise SpeechTimingError(
+                    f"Speech cue {dub.get('index')} exceeds its boundary by {overrun:.3f}s; "
+                    "shorten translation before mixing"
+                )
+        speed = float(dub.get("speed_ratio", 1.0))
+        if not math.isfinite(speed) or speed < MIN_NATURAL_SPEED - 1e-9:
+            raise SpeechTimingError(f"Invalid speech speed at cue {dub.get('index')}")
+        if speed > max_speed + 1e-9:
+            log.info("[SPEECH_GUARD] Cue %s speed %.2fx normalized to ceiling %.2fx for timeline contract",
+                     dub.get("index"), speed, max_speed)
+            dub["speed_ratio"] = max_speed
     return ordered
 
 

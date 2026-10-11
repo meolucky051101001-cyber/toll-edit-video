@@ -21,6 +21,7 @@ import asyncio
 from urllib.parse import unquote
 from fastapi import APIRouter, HTTPException, Query, Body, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from dashboard_media import media_status
 
 from canvas_settings import (
     get_canvas_settings,
@@ -368,7 +369,28 @@ batch_framing_stop_flag = threading.Event()
 batch_framing_thread: Optional[threading.Thread] = None
 
 
-def safe_check_job_artifacts(stem: str) -> Dict[str, bool]:
+def _valid_final_video(path: Path, defer=False) -> bool:
+    return media_status(path, defer=defer)["status"] == "valid"
+
+
+def _valid_audio(path: Path) -> bool:
+    try:
+        import soundfile as sf
+        info = sf.info(str(path))
+        return info.frames > 0 and info.samplerate > 0 and info.channels > 0
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _valid_srt(path: Path) -> bool:
+    try:
+        segments = parse_srt(path.read_text(encoding="utf-8-sig"))
+        return bool(segments) and all(s["end"] > s["start"] >= 0 and s["text"] for s in segments)
+    except (OSError, UnicodeError):
+        return False
+
+
+def safe_check_job_artifacts(stem: str, defer_media=False) -> Dict[str, bool]:
     """Kiểm tra sự tồn tại của các artifact một cách an toàn trên Windows filesystem."""
     res = {
         "step1": False,
@@ -382,15 +404,16 @@ def safe_check_job_artifacts(stem: str) -> Dict[str, bool]:
     try:
         job_dir = WORKSPACE / stem
         if job_dir.is_dir():
-            res["step1"] = (job_dir / "original.wav").is_file()
-            res["step2"] = (job_dir / "htdemucs").is_dir()
-            res["step3"] = (job_dir / "original.srt").is_file()
+            res["step1"] = _valid_audio(job_dir / "original.wav")
+            res["step2"] = any(_valid_audio(p) for pattern in ("no_vocals.wav", "*_(Instrumental)_*.wav")
+                               for p in job_dir.rglob(pattern))
+            res["step3"] = _valid_srt(job_dir / "original.srt")
             res["step3_5"] = res["step3"]
-            res["step4"] = (job_dir / "translated.srt").is_file()
-            res["step5"] = (job_dir / "mixed.wav").is_file()
+            res["step4"] = _valid_srt(job_dir / "translated.srt")
+            res["step5"] = _valid_audio(job_dir / "mixed.wav")
             try:
                 for item in job_dir.iterdir():
-                    if item.name.startswith("final_") and item.suffix.lower() == ".mp4" and item.stat().st_size > 1000:
+                    if item.name == f"final_{stem}.mp4" and _valid_final_video(item, defer=defer_media):
                         res["step6"] = True
                         break
             except OSError:
@@ -401,7 +424,7 @@ def safe_check_job_artifacts(stem: str) -> Dict[str, bool]:
     # Kiểm tra thêm trong banve
     try:
         banve_cand = OUTPUT_DIR / f"Dubbed_{stem}.mp4"
-        if banve_cand.is_file() and banve_cand.stat().st_size > 1000:
+        if banve_cand.is_file() and _valid_final_video(banve_cand, defer=defer_media):
             res["step6"] = True
     except OSError:
         pass
@@ -442,8 +465,8 @@ def parse_srt(srt_text: str) -> List[Dict[str, Any]]:
                 "index": len(subtitles) + 1,
                 "start": start_sec,
                 "end": end_sec,
-                "start_str": start_str[:8],
-                "end_str": end_str[:8],
+                "start_str": start_str,
+                "end_str": end_str,
                 "text": text
             })
         except Exception:
@@ -635,7 +658,7 @@ async def api_get_workflow_videos():
                 try:
                     stem = p.stem
                     seen_stems.add(stem)
-                    steps = safe_check_job_artifacts(stem)
+                    steps = safe_check_job_artifacts(stem, defer_media=True)
                     size_mb = round(p.stat().st_size / (1024 * 1024), 2)
                     mtime = p.stat().st_mtime
                     items.append({
@@ -660,7 +683,7 @@ async def api_get_workflow_videos():
                     if stem in seen_stems:
                         continue
                     seen_stems.add(stem)
-                    steps = safe_check_job_artifacts(stem)
+                    steps = safe_check_job_artifacts(stem, defer_media=True)
                     size_mb = round(dl.stat().st_size / (1024 * 1024), 2)
                     mtime = dl.stat().st_mtime
                     items.append({
@@ -708,12 +731,12 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
     try:
         if job_dir.is_dir():
             for item in job_dir.iterdir():
-                if item.name.startswith("final_") and item.suffix.lower() == ".mp4" and item.stat().st_size > 1000:
+                if item.name == f"final_{stem}.mp4" and _valid_final_video(item):
                     final_video_url = f"/api/workflow/stream-file?path={item}"
                     break
         if not final_video_url and OUTPUT_DIR.exists():
             banve_cand = OUTPUT_DIR / f"Dubbed_{stem}.mp4"
-            if banve_cand.is_file() and banve_cand.stat().st_size > 1000:
+            if banve_cand.is_file() and _valid_final_video(banve_cand):
                 final_video_url = f"/api/workflow/stream-file?path={banve_cand}"
     except OSError:
         pass
@@ -1146,7 +1169,7 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
         success = False
         try:
             res = subprocess.run(cmd_nvenc, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
-            if res.returncode == 0 and out_path.exists() and out_path.stat().st_size > 1000:
+            if res.returncode == 0 and _valid_final_video(out_path):
                 success = True
         except Exception as e:
             logger.warning(f"NVENC failed for {v_file.name}: {e}")
@@ -1172,7 +1195,7 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
             ]
             try:
                 res2 = subprocess.run(cmd_cpu, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
-                if res2.returncode == 0 and out_path.exists() and out_path.stat().st_size > 1000:
+                if res2.returncode == 0 and _valid_final_video(out_path):
                     success = True
             except Exception as e2:
                 logger.error(f"CPU render failed for {v_file.name}: {e2}")
@@ -1394,12 +1417,12 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
     final_video = None
     if job_dir.is_dir():
         for item in job_dir.iterdir():
-            if item.name.startswith("final_") and item.suffix.lower() == ".mp4" and item.stat().st_size > 1000:
+            if item.name == f"final_{stem}.mp4" and _valid_final_video(item):
                 final_video = item
                 break
     if not final_video and OUTPUT_DIR.exists():
         cand_banve = OUTPUT_DIR / f"Dubbed_{stem}.mp4"
-        if cand_banve.is_file() and cand_banve.stat().st_size > 1000:
+        if cand_banve.is_file() and _valid_final_video(cand_banve):
             final_video = cand_banve
 
     if not source_video and not final_video:
@@ -1638,7 +1661,7 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
     success = False
     try:
         res = subprocess.run(cmd_nvenc, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
-        if res.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 1000:
+        if res.returncode == 0 and _valid_final_video(out_path):
             success = True
     except Exception as e:
         logger.warning(f"NVENC custom export failed: {e}")
@@ -1663,7 +1686,7 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
             str(out_path)
         ]
         res_cpu = subprocess.run(cmd_cpu, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
-        if res_cpu.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 1000:
+        if res_cpu.returncode == 0 and _valid_final_video(out_path):
             success = True
 
     if not success:

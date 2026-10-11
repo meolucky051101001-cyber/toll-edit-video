@@ -10,43 +10,52 @@ import sys
 import json
 import time
 import uuid
+import sqlite3
+import hashlib
+from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 ROOT_DIR = Path(__file__).resolve().parent
 WORKSPACE_DIR = Path(os.getenv("AUTODUB_WORKSPACE", str(ROOT_DIR.parent / "workspace")))
 CONTROL_DIR = WORKSPACE_DIR / "control"
-CONTROL_DIR.mkdir(parents=True, exist_ok=True)
 
 DRAFTS_FILE = CONTROL_DIR / "video_draft_configs.json"
 FROZEN_FILE = CONTROL_DIR / "job_frozen_configs.json"
 
-# Idempotency cache (key -> {result, created_at})
-_IDEMPOTENCY_CACHE: Dict[str, Dict[str, Any]] = {}
 _IDEMPOTENCY_TTL_SEC = 300.0  # 5 minutes
 
 
 def check_idempotency(key: str) -> Optional[Dict[str, Any]]:
-    now = time.time()
-    if key in _IDEMPOTENCY_CACHE:
-        entry = _IDEMPOTENCY_CACHE[key]
-        if now - entry.get("created_at", 0) < _IDEMPOTENCY_TTL_SEC:
-            return entry.get("result")
-        else:
-            del _IDEMPOTENCY_CACHE[key]
-    return None
+    with _idempotency_db() as db:
+        row = db.execute("SELECT result FROM requests WHERE key=? AND created_at>?",
+                         (key, time.time() - _IDEMPOTENCY_TTL_SEC)).fetchone()
+        return json.loads(row[0]) if row else None
 
 
 def record_idempotency(key: str, result: Dict[str, Any]):
-    now = time.time()
-    # Prune expired keys
-    expired = [k for k, v in _IDEMPOTENCY_CACHE.items() if now - v.get("created_at", 0) >= _IDEMPOTENCY_TTL_SEC]
-    for k in expired:
-        _IDEMPOTENCY_CACHE.pop(k, None)
-    _IDEMPOTENCY_CACHE[key] = {
-        "created_at": now,
-        "result": result,
-    }
+    with _idempotency_db() as db:
+        db.execute("DELETE FROM requests WHERE created_at<=?", (time.time() - _IDEMPOTENCY_TTL_SEC,))
+        db.execute("INSERT OR REPLACE INTO requests VALUES (?, ?, ?)",
+                   (key, json.dumps(result, ensure_ascii=False), time.time()))
+
+
+@contextmanager
+def _idempotency_db():
+    CONTROL_DIR.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(CONTROL_DIR / "config_requests.sqlite3", timeout=15)
+    try:
+        with db:
+            db.execute("CREATE TABLE IF NOT EXISTS requests (key TEXT PRIMARY KEY, result TEXT NOT NULL, created_at REAL NOT NULL)")
+            yield db
+    finally:
+        db.close()
+
+
+def idempotency_lock(key: str):
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return _file_lock(CONTROL_DIR / f"request-{digest}.lock")
 
 
 try:
@@ -56,24 +65,36 @@ except ImportError:
 
 
 def _atomic_write_json(file_path: Path, data: Any):
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_file = file_path.with_name(f"{file_path.name}.tmp.{uuid.uuid4().hex[:8]}")
     try:
-        with open(temp_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(temp_file, file_path)
-    finally:
-        try:
-            temp_file.unlink()
-        except OSError:
-            pass
+        from pipeline_v2.atomic_io import atomic_write_json
+    except ImportError:
+        from .pipeline_v2.atomic_io import atomic_write_json
+    atomic_write_json(file_path, data)
+
+
+def _file_lock(path: Path):
+    try:
+        from pipeline_v2.interprocess_lock import CrossProcessLock
+    except ImportError:
+        from .pipeline_v2.interprocess_lock import CrossProcessLock
+    return CrossProcessLock(path, name="JobConfig", timeout_seconds=15, poll_interval=0.02)
+
+
+@contextmanager
+def _config_transaction(path: Path):
+    with _file_lock(path.with_name(path.name + ".lock")):
+        # Refuse to replace a damaged store with an empty default.
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        if not isinstance(data, dict):
+            raise ValueError(f"Invalid job configuration store: {path}")
+        yield data
+        _atomic_write_json(path, data)
 
 
 def _frozen_file_for_workspace(workspace_path: Optional[str | Path] = None) -> Path:
     if workspace_path is None:
         return FROZEN_FILE
     file_path = Path(workspace_path) / "control" / "job_frozen_configs.json"
-    file_path.parent.mkdir(parents=True, exist_ok=True)
     return file_path
 
 
@@ -120,33 +141,21 @@ def get_video_draft(video_name: str) -> Optional[Dict[str, Any]]:
 
 def save_video_draft(video_name: str, draft_data: Dict[str, Any]) -> Dict[str, Any]:
     """Lưu hoặc cập nhật bản nháp cấu hình riêng cho 1 video."""
-    drafts = list_all_drafts()
-    now = time.time()
-    
-    current = drafts.get(video_name, {
-        "video_name": video_name,
-        "created_at": now,
-        "revision": 0,
-    })
-    
-    current["preset_id"] = draft_data.get("preset_id")
-    current["overrides"] = draft_data.get("overrides", {})
-    current["revision"] = current.get("revision", 0) + 1
-    current["updated_at"] = now
-
-    drafts[video_name] = current
-    _atomic_write_json(DRAFTS_FILE, drafts)
+    with _config_transaction(DRAFTS_FILE) as drafts:
+        now = time.time()
+        current = drafts.get(video_name, {"video_name": video_name, "created_at": now, "revision": 0})
+        current["preset_id"] = draft_data.get("preset_id")
+        current["overrides"] = draft_data.get("overrides", {})
+        current["revision"] = current.get("revision", 0) + 1
+        current["updated_at"] = now
+        drafts[video_name] = current
     return current
 
 
 def delete_video_draft(video_name: str) -> bool:
     """Xóa bản nháp cấu hình riêng của video."""
-    drafts = list_all_drafts()
-    if video_name in drafts:
-        del drafts[video_name]
-        _atomic_write_json(DRAFTS_FILE, drafts)
-        return True
-    return False
+    with _config_transaction(DRAFTS_FILE) as drafts:
+        return drafts.pop(video_name, None) is not None
 
 
 # ===== FROZEN CONFIGS (Cấu hình đóng băng gắn vào Job lúc Enqueue/Chạy) =====
@@ -283,6 +292,7 @@ def freeze_job_config(
         "batch_id": batch_id,
         "preset_id": preset_id,
         "preset_name": resolved.get("preset_name"),
+        "overrides": overrides,
         "effective_config": effective,
         "routing": router_snapshot,
         "sources": resolved.get("sources", {}),
@@ -291,14 +301,11 @@ def freeze_job_config(
         "created_at": now,
     }
 
-    frozen = list_frozen_configs(workspace_path)
-    # Lưu theo cả snapshot_id và video_name để worker dễ tra cứu
-    frozen[snapshot_id] = snapshot
-    frozen[video_name] = snapshot
-    if job_id:
-        frozen[job_id] = snapshot
-
-    _atomic_write_json(_frozen_file_for_workspace(workspace_path), frozen)
+    with _config_transaction(_frozen_file_for_workspace(workspace_path)) as frozen:
+        frozen[snapshot_id] = snapshot
+        frozen[video_name] = snapshot
+        if job_id:
+            frozen[job_id] = snapshot
     return snapshot
 
 
@@ -368,19 +375,14 @@ def get_frozen_config(
 
 def clear_frozen_config(key: str, workspace_path: Optional[str | Path] = None) -> bool:
     """Xóa snapshot đóng băng sau khi hoàn thành."""
-    frozen = list_frozen_configs(workspace_path)
-    found = False
-    snap = frozen.get(key)
-    if snap:
-        found = True
-        snap_id = snap.get("snapshot_id")
-        v_name = snap.get("video_name")
-        j_id = snap.get("job_id")
-        for k in (snap_id, v_name, j_id, key):
-            if k and k in frozen:
-                del frozen[k]
-        _atomic_write_json(_frozen_file_for_workspace(workspace_path), frozen)
-    return found
+    with _config_transaction(_frozen_file_for_workspace(workspace_path)) as frozen:
+        snap = frozen.get(key)
+        if not snap:
+            return False
+        for alias, value in list(frozen.items()):
+            if value.get("snapshot_id") == snap.get("snapshot_id"):
+                del frozen[alias]
+        return True
 
 
 def update_queued_job_config(
@@ -394,37 +396,27 @@ def update_queued_job_config(
     Cập nhật snapshot cấu hình đóng băng cho một video/job trong hàng chờ.
     Có kiểm tra optimistic locking (expected_revision).
     """
-    frozen = list_frozen_configs(workspace_path)
-    current = frozen.get(key)
-    if not current:
-        raise KeyError(f"Không tìm thấy cấu hình đóng băng cho '{key}'.")
-
-    if expected_revision is not None and current.get("revision", 1) != expected_revision:
-        raise ValueError(
-            f"Xung đột phiên bản: Cấu hình job đã bị sửa (hiện tại: {current.get('revision')}, yêu cầu: {expected_revision})."
-        )
-
-    resolved = resolve_effective_config(
-        preset_id=preset_id if preset_id is not None else current.get("preset_id"),
-        video_overrides=overrides if overrides is not None else current.get("overrides"),
-    )
-
-    current["preset_id"] = preset_id if preset_id is not None else current.get("preset_id")
-    current["preset_name"] = resolved.get("preset_name")
-    current["effective_config"] = resolved.get("effective_config", {})
-    current["sources"] = resolved.get("sources", {})
-    current["warnings"] = resolved.get("warnings", [])
-    current["revision"] = current.get("revision", 1) + 1
-    current["updated_at"] = time.time()
-
-    # Cập nhật mọi alias của snapshot
-    snap_id = current.get("snapshot_id")
-    v_name = current.get("video_name")
-    j_id = current.get("job_id")
-    for k in (snap_id, v_name, j_id, key):
-        if k:
-            frozen[k] = current
-
-    _atomic_write_json(_frozen_file_for_workspace(workspace_path), frozen)
+    with _config_transaction(_frozen_file_for_workspace(workspace_path)) as frozen:
+        current = frozen.get(key)
+        if not current:
+            raise KeyError(f"Không tìm thấy cấu hình đóng băng cho '{key}'.")
+        if expected_revision is not None and current.get("revision", 1) != expected_revision:
+            raise ValueError(f"Xung đột phiên bản: Cấu hình job đã bị sửa (hiện tại: {current.get('revision')}, yêu cầu: {expected_revision}).")
+        previous = deepcopy(current.get("effective_config") or {})
+        changes = dict(overrides or {})
+        # A partial edit must not reload a mutable preset over the frozen job.
+        resolved = resolve_effective_config(preset_id=preset_id, video_overrides=changes, system_defaults=previous)
+        current["preset_id"] = preset_id if preset_id is not None else current.get("preset_id")
+        if preset_id is not None:
+            current["preset_name"] = resolved.get("preset_name")
+        current["overrides"] = {**current.get("overrides", {}), **changes}
+        current["effective_config"] = resolved["effective_config"]
+        current["sources"] = {**current.get("sources", {}), **{k: v for k, v in resolved["sources"].items() if v != "system_default"}}
+        current["warnings"] = resolved.get("warnings", [])
+        current["revision"] = current.get("revision", 1) + 1
+        current["updated_at"] = time.time()
+        for alias, value in list(frozen.items()):
+            if value.get("snapshot_id") == current.get("snapshot_id"):
+                frozen[alias] = current
     return current
 

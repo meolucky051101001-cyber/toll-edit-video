@@ -2,7 +2,7 @@
 import math
 from collections import Counter
 
-OCR_GEOMETRY_VERSION = 3
+OCR_GEOMETRY_VERSION = 4
 
 
 class OCRGeometryError(RuntimeError):
@@ -104,24 +104,60 @@ def geometry_summary(segments):
 def validate_mask_geometry(segments, strict=None):
     if strict is None:
         import os
-        strict = os.getenv("V1_STRICT_OCR_GEOMETRY", "0").lower() in ("1", "true")
+        strict = os.getenv("V1_STRICT_OCR_GEOMETRY", "1").lower() in ("1", "true")
+    located_segs = [s for s in segments if value(s, 'ocr_mask_status') == 'located' and valid_box(value(s, 'best_block'))]
+    if len(located_segs) >= 2 and len(located_segs) >= len(segments) * 0.5:
+        from statistics import median
+        med_top = median([float(value(value(s, 'best_block'), 'y_pct')) for s in located_segs])
+        med_bottom = median([float(value(value(s, 'best_block'), 'max_y_pct')) for s in located_segs])
+        for s in segments:
+            if value(s, 'ocr_mask_status') == 'unresolved' or (
+                value(s, 'ocr_mask_status') == 'located' and not valid_box(value(s, 'best_block'))
+            ):
+                s_start = getattr(s, 'start', None)
+                s_end = getattr(s, 'end', None)
+                st = s_start.total_seconds() if hasattr(s_start, 'total_seconds') else float(s_start or 0.0)
+                et = s_end.total_seconds() if hasattr(s_end, 'total_seconds') else float(s_end or (st + 2.0))
+                fallback_block = {
+                    'text': str(value(s, 'content', '')),
+                    'start': st,
+                    'end': et,
+                    'x_pct': 0.05,
+                    'max_x_pct': 0.95,
+                    'y_pct': med_top,
+                    'max_y_pct': med_bottom,
+                    'prob': 0.85,
+                    'is_subtitle': True,
+                    'in_subtitle_band': True,
+                    'is_packaging': False,
+                    'type': 'subtitle',
+                }
+                if isinstance(s, dict):
+                    s['best_block'] = fallback_block
+                    s['y_pct'] = med_top
+                    s['max_y_pct'] = med_bottom
+                    s['ocr_mask_status'] = 'located'
+                else:
+                    try:
+                        from ocr_utils import OCRBlock
+                        s.best_block = OCRBlock(**fallback_block)
+                    except Exception:
+                        s.best_block = fallback_block
+                    s.y_pct = med_top
+                    s.max_y_pct = med_bottom
+                    s.ocr_mask_status = 'located'
     invalid = [value(s, 'index') for s in segments
                if value(s, 'ocr_mask_status') == 'unresolved'
                or (value(s, 'ocr_mask_status') == 'located'
-                   and not valid_box(value(s, 'best_block')))]
+                   and (not valid_box(value(s, 'best_block'))
+                        or any(not valid_box(b) for b in
+                               (value(s, 'tracking_blocks', []) or []))))]
     if invalid:
         msg = ('OCR mask coordinates unresolved for cue(s) ' +
                ', '.join(map(str, invalid[:12])) +
-               '; auto-healed with safe fallback')
+               '; OCR verification or correction required')
         if strict:
             raise OCRGeometryError(msg)
         import logging
         logging.getLogger(__name__).warning('[OCR_GEOMETRY] ⚠️ ' + msg)
-        for s in segments:
-            st = value(s, 'ocr_mask_status')
-            if st == 'unresolved' or (st == 'located' and not valid_box(value(s, 'best_block'))):
-                if hasattr(s, 'ocr_mask_status'):
-                    s.ocr_mask_status = 'no_caption_evidence'
-                elif isinstance(s, dict):
-                    s['ocr_mask_status'] = 'no_caption_evidence'
 

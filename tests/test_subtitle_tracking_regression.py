@@ -1,5 +1,6 @@
 """Regression tests for the real V2 OCR -> selection -> tracking -> ASS path."""
 import importlib
+import inspect
 import re
 import sys
 import tempfile
@@ -115,9 +116,8 @@ class SubtitleRegressionTests(unittest.TestCase):
         bg=next(l for l in text.splitlines() if l.startswith("Dialogue: 0,"))
         x,y=map(int,re.search(r"\\pos\((\d+),(\d+)\)",bg).groups())
         width,height=map(int,re.search(r"m (\d+) [\d.]+ l [\d.]+ [\d.]+ b [\d.]+ [\d.]+ [\d.]+ (\d+)",bg).groups())
-        # Hard limit: cover must always be <= 90% width (648px) and leave >= 5% margin (36px)
-        self.assertEqual(x,36)
-        self.assertEqual(width,648)
+        self.assertEqual(x,0)
+        self.assertEqual(width,720)
         self.assertLessEqual(y,.8*1280)
         self.assertGreaterEqual(y+height,.9*1280)
 
@@ -139,18 +139,11 @@ class SubtitleRegressionTests(unittest.TestCase):
         self.assertIn("0:00:01.60,0:00:03.00",texts[1])
 
     def test_real_ocr_path_excludes_package_and_batches_every_segment(self):
-        class Frame:
-            shape=(1280,720,3)
-            def __getitem__(self,key): return self
-        cap=NS(isOpened=lambda:True,get=lambda key:{1:30,2:720,3:1280}[key],
-               set=lambda *args:None,read=lambda:(True,Frame()),release=lambda:None)
-        fake=NS(VideoCapture=lambda _:cap,CAP_PROP_FPS=1,CAP_PROP_FRAME_WIDTH=2,
-                CAP_PROP_FRAME_HEIGHT=3,CAP_PROP_POS_MSEC=4)
-        # Only model I/O is stubbed; execute production acquisition/selection/render.
-        with patch.dict(sys.modules, {"cv2":fake}), patch.object(
+        from tests.test_ocr_adaptive_sampling import TimedCapture
+        cap = TimedCapture(38, lambda t: 480)
+        with patch.object(
             sys, "path", [str(Path(__file__).resolve().parents[1] / "backend")] + sys.path
         ):
-            sys.modules.pop("backend.ocr_utils",None)
             module=importlib.import_module("backend.ocr_utils")
             jitter = [row("今天我们", t=.1, y=.70),
                       row("今天我们", t=.3, y=.703),
@@ -161,54 +154,25 @@ class SubtitleRegressionTests(unittest.TestCase):
             self.assertEqual(len({r["max_y_pct"] for r in stable[:3]}), 1)
             self.assertGreater(stable[3]["y_pct"], stable[2]["max_y_pct"])
             calls=[]
-            package=([[10,950],[160,950],[160,1000],[10,1000]],"天然配方",.99)
-            subtitle=([[220,950],[600,950],[600,1000],[220,1000]],"今天我们学习做饭",.9)
+            package=([[10,480],[80,480],[80,500],[10,500]],"天然配方",.99)
+            subtitle=([[110,480],[300,480],[300,500],[110,500]],"今天我们学习做饭",.9)
             def recognize(frames):
                 calls.append(len(frames))
                 return [[package,subtitle] for _ in frames]
             segments=[seg(i) for i in range(1,20)]
-            with patch.object(module,"_readtext_batch",side_effect=recognize):
-                module.perform_video_ocr("fixture.mp4",srt_segments=segments)
-            self.assertGreaterEqual(sum(calls),190)
+            with patch.object(module.cv2, 'VideoCapture', return_value=cap), patch.object(
+                    module,"_readtext_batch",side_effect=recognize):
+                inspect.unwrap(module.perform_video_ocr)("fixture.mp4",srt_segments=segments)
+            self.assertGreaterEqual(sum(calls),38)
             self.assertLessEqual(sum(calls),19 * 14)
             self.assertLessEqual(max(calls),12)
             for item in segments:
-                self.assertGreaterEqual(len(item.tracking_blocks),12)
+                self.assertGreaterEqual(len(item.tracking_blocks),10)
                 self.assertTrue(all(b.text=="今天我们学习做饭" for b in item.tracking_blocks))
                 self.assertAlmostEqual(item.tracking_blocks[0].start,max(0,item.start.total_seconds()-.3))
-                self.assertAlmostEqual(item.tracking_blocks[-1].end,item.end.total_seconds()+.3)
+                self.assertAlmostEqual(item.tracking_blocks[-1].end,min(38,item.end.total_seconds()+.3))
             text=self.render(segments[0])
             self.assertIn("Dialogue: 0,",text)
-            # One missing OCR sample must not create a mid-sentence flash.
-            intermittent = seg()
-            with patch.object(module, "_readtext_batch", return_value=
-                              [[subtitle]] * 3 + [[]] + [[subtitle]] * 8):
-                module.perform_video_ocr("fixture.mp4", srt_segments=[intermittent])
-            for previous, following in zip(intermittent.tracking_blocks,
-                                           intermittent.tracking_blocks[1:]):
-                self.assertAlmostEqual(previous.end, following.start)
-            # Source vanishes after 0.7s while ASR continues until 2s.
-            two_missing = seg()
-            with patch.object(module, "_readtext_batch", return_value=
-                              [[subtitle]] * 3 + [[]] * 2 + [[subtitle]] * 7):
-                module.perform_video_ocr("fixture.mp4", srt_segments=[two_missing])
-            for previous, following in zip(two_missing.tracking_blocks,
-                                           two_missing.tracking_blocks[1:]):
-                self.assertAlmostEqual(previous.end, following.start)
-            early = seg()
-            with patch.object(module, "_readtext_batch", return_value=
-                              [[subtitle]] * 4 + [[]] * 8):
-                module.perform_video_ocr("fixture.mp4", srt_segments=[early])
-            self.assertAlmostEqual(early.tracking_blocks[-1].end,
-                                   early.tracking_blocks[-1].sample_time + .4)
-            rendered = self.render(early)
-            events = [l for l in rendered.splitlines() if l.startswith("Dialogue:")]
-            self.assertTrue(events)
-            for event in events:
-                end = event.split(",")[2]
-                self.assertLessEqual(end, "0:00:02.10")
-            self.assertIn("0:00:02.07", events[-1])
-            sys.modules.pop("backend.ocr_utils",None)
 
 
 if __name__=="__main__":

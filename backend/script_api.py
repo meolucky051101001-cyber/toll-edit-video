@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import uuid
 import logging
 import threading
 from pathlib import Path
@@ -34,6 +35,8 @@ from ai.script_tts_service import (
     render_full_script_tts,
     burn_script_to_video,
 )
+from ai.prompt_to_script import generate_doodle_script_from_ai
+from ai.doodle_engine import render_doodle_video, compose_doodle_frame
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +171,50 @@ class VideoDownloadRequest(BaseModel):
     url: str = Field(..., min_length=1, max_length=1000)
     target_folder: Optional[str] = Field(default=None, max_length=500)
 
+
+class AIDoodleVideoRequest(BaseModel):
+    prompt: Optional[str] = Field(default="", max_length=5000)
+    raw_script: Optional[str] = Field(default="", max_length=20000)
+    ai_engine: str = Field(default="muse", max_length=50)
+    voice: str = Field(default="multi_male_felipe_uranus_bigtts", max_length=100)
+    scene_count: int = Field(default=6, ge=2, le=30)
+    task_id: Optional[str] = Field(default=None, max_length=100)
+    use_hand_draw: bool = Field(default=True)
+    whiteboard_mode: str = Field(default="3band", max_length=50)
+
+
+class AIDoodleScriptRequest(BaseModel):
+    prompt: Optional[str] = Field(default="", max_length=5000)
+    raw_script: Optional[str] = Field(default="", max_length=20000)
+    ai_engine: str = Field(default="muse", max_length=50)
+    scene_count: int = Field(default=6, ge=2, le=30)
+
+
+class RenderDoodleScenesRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=500)
+    keyword_accent: str = Field(default="", max_length=100)
+    scenes: List[Dict[str, Any]] = Field(..., min_items=1)
+    voice: str = Field(default="multi_male_felipe_uranus_bigtts", max_length=100)
+    task_id: Optional[str] = Field(default=None, max_length=100)
+    use_hand_draw: bool = Field(default=True)
+    whiteboard_mode: str = Field(default="3band", max_length=50)
+
+
+class PreviewSceneFrameRequest(BaseModel):
+    title: str = Field(default="TIÊU ĐỀ VIDEO", max_length=500)
+    keyword_accent: str = Field(default="", max_length=100)
+    scene: Dict[str, Any]
+
+
+class AIChatMessageItem(BaseModel):
+    role: str = Field(default="user", max_length=20)
+    content: str = Field(..., min_length=1, max_length=20000)
+
+
+class AIChatRequest(BaseModel):
+    messages: List[AIChatMessageItem]
+    ai_engine: str = Field(default="muse", max_length=50)
+    context_script: Optional[str] = Field(default=None, max_length=10000)
 
 
 # =========================================================================
@@ -617,17 +664,174 @@ def api_auto_pipeline(req: AutoPipelineRequest):
         SCRIPT_PROCESS_LOCK.release()
 
 
+@router.get("/api/script/ai-engines")
+def api_get_ai_engines():
+    """Kiểm tra và trả về danh sách các AI Model có thể dùng để tạo kịch bản."""
+    from ai.muse_spark_service import is_muse_available
+    has_muse = is_muse_available()
+    return {
+        "status": "success",
+        "default": "muse" if has_muse else "gemini",
+        "engines": [
+            {
+                "id": "muse",
+                "name": "⚡ Meta Muse Spark 1.3 (Nhanh, Sáng tạo, Không giới hạn)",
+                "model": "muse-spark-1.3-contributor",
+                "available": has_muse
+            },
+            {
+                "id": "gemini",
+                "name": "✨ Google Gemini 2.5 Flash",
+                "model": "gemini-2.5-flash",
+                "available": True
+            }
+        ]
+    }
+
+
+@router.post("/api/script/ai-generate-script")
+def api_ai_generate_script(req: AIDoodleScriptRequest):
+    """AI sinh kịch bản phân cảnh 3-Band Doodle từ Prompt hoặc Kịch bản có sẵn."""
+    try:
+        data = generate_doodle_script_from_ai(
+            prompt=req.prompt,
+            raw_script=req.raw_script,
+            target_scene_count=req.scene_count,
+            ai_engine=req.ai_engine
+        )
+        return {"status": "success", "data": data}
+    except Exception as e:
+        logger.error(f"Lỗi sinh kịch bản AI: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
+@router.post("/api/script/ai-chat")
+def api_ai_chat(req: AIChatRequest):
+    """Trò chuyện trực tiếp với AI (Meta Muse Spark hoặc Google Gemini) trên Dashboard."""
+    try:
+        from ai.ai_chat_service import chat_with_ai
+        res = chat_with_ai(
+            messages=[m.dict() for m in req.messages],
+            ai_engine=req.ai_engine,
+            context_script=req.context_script
+        )
+        return {"status": "success", "data": res}
+    except Exception as e:
+        logger.error(f"Lỗi AI Chat: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
+@router.post("/api/script/render-doodle-scenes")
+def api_render_doodle_scenes(req: RenderDoodleScenesRequest):
+    """Render video hoàn chỉnh từ danh sách phân cảnh đã có."""
+    task_id = req.task_id or f"doodle_{int(time.time()*1000)}"
+    if not SCRIPT_PROCESS_LOCK.acquire(blocking=False):
+        _update_task_progress(task_id, 0, "Hệ thống đang xử lý tác vụ khác", status="error", error="LOCKED")
+        return JSONResponse(status_code=423, content={"status": "error", "message": "Hệ thống đang bận xử lý tác vụ khác. Vui lòng đợi trong giây lát!"})
+
+    def _worker():
+        try:
+            _update_task_progress(task_id, 10, "Bắt đầu khởi tạo quy trình dựng video...")
+            res = render_doodle_video(
+                script_data={"title": req.title, "keyword_accent": req.keyword_accent, "scenes": req.scenes},
+                voice_id=req.voice,
+                progress_callback=lambda p, msg: _update_task_progress(task_id, p, msg),
+                use_hand_draw=req.use_hand_draw,
+                whiteboard_mode=req.whiteboard_mode
+            )
+            _update_task_progress(task_id, 100, "Hoàn tất! Video đã sẵn sàng tải về.", status="completed", result=res)
+        except Exception as e:
+            logger.error(f"Lỗi render doodle video: {e}", exc_info=True)
+            _update_task_progress(task_id, 100, f"Lỗi: {e}", status="error", error=str(e))
+        finally:
+            SCRIPT_PROCESS_LOCK.release()
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return {"status": "processing", "task_id": task_id, "message": "Đang tiến hành dựng video trong nền..."}
+
+
+@router.post("/api/script/ai-generate-video")
+def api_ai_generate_video(req: AIDoodleVideoRequest):
+    """
+    1-CLICK ALL-IN-ONE:
+    Nhận Prompt hoặc Kịch bản thô -> AI tự động viết kịch bản, tạo giọng đọc TTS, vẽ tranh Doodle và ghép video 9:16!
+    """
+    task_id = req.task_id or f"doodle_{int(time.time()*1000)}"
+    if not SCRIPT_PROCESS_LOCK.acquire(blocking=False):
+        _update_task_progress(task_id, 0, "Hệ thống đang xử lý tác vụ khác", status="error", error="LOCKED")
+        return JSONResponse(status_code=423, content={"status": "error", "message": "Hệ thống đang bận xử lý tác vụ khác. Vui lòng đợi hoàn tất!"})
+
+    def _worker():
+        try:
+            _update_task_progress(task_id, 5, f"AI ({req.ai_engine}) đang nghiên cứu ý tưởng & lên kịch bản phân cảnh...")
+            script_data = generate_doodle_script_from_ai(
+                prompt=req.prompt,
+                raw_script=req.raw_script,
+                target_scene_count=req.scene_count,
+                ai_engine=req.ai_engine
+            )
+            _update_task_progress(task_id, 25, f"Đã lên xong kịch bản: '{script_data.get('title')}' ({len(script_data.get('scenes', []))} cảnh). Đang tạo âm thanh & vẽ tranh...")
+            res = render_doodle_video(
+                script_data=script_data,
+                voice_id=req.voice,
+                progress_callback=lambda p, msg: _update_task_progress(task_id, p, msg),
+                use_hand_draw=req.use_hand_draw,
+                whiteboard_mode=req.whiteboard_mode
+            )
+            res["script_data"] = script_data
+            _update_task_progress(task_id, 100, "Hoàn tất! Video thành phẩm đã sẵn sàng.", status="completed", result=res)
+        except Exception as e:
+            logger.error(f"Lỗi quy trình AI generate video: {e}", exc_info=True)
+            _update_task_progress(task_id, 100, f"Lỗi: {e}", status="error", error=str(e))
+        finally:
+            SCRIPT_PROCESS_LOCK.release()
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return {"status": "processing", "task_id": task_id, "message": "Đã khởi động quy trình AI tạo video tự động!"}
+
+
+@router.post("/api/script/preview-scene-frame")
+def api_preview_scene_frame(req: PreviewSceneFrameRequest):
+    """Tạo nhanh 1 frame ảnh 3-Band chuẩn 720x1280 để xem trước hình vẽ phân cảnh."""
+    try:
+        preview_dir = SCRIPT_WORKSPACE / "frame_previews"
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        img_name = f"preview_{int(time.time()*1000)}_{uuid.uuid4().hex[:4]}.png"
+        out_path = preview_dir / img_name
+
+        compose_doodle_frame(
+            title=req.title,
+            keyword_accent=req.keyword_accent,
+            scene=req.scene,
+            output_png=out_path
+        )
+        return {
+            "status": "success",
+            "image_url": f"/api/script/stream/frame_previews/{img_name}",
+            "image_path": str(out_path)
+        }
+    except Exception as e:
+        logger.error(f"Lỗi tạo ảnh preview phân cảnh: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
 @router.get("/api/script/stream/{file_path:path}")
 def api_stream_script_file(file_path: str):
-    """Stream audio, video hoặc tải phụ đề SRT trực tiếp từ SCRIPT_WORKSPACE."""
-    target = (SCRIPT_WORKSPACE / file_path).resolve()
-    workspace_resolved = SCRIPT_WORKSPACE.resolve()
+    """Stream audio, video hoặc tải file từ workspace."""
+    candidates = [
+        SCRIPT_WORKSPACE / file_path,
+        PATHS.workspace / "output" / file_path,
+        PATHS.workspace / "doodle_render" / file_path,
+        Path(r"C:\tool v1\workspace\output") / file_path,
+    ]
+    target = None
+    for cand in candidates:
+        if cand.exists() and cand.is_file():
+            target = cand.resolve()
+            break
 
-    if not str(target).startswith(str(workspace_resolved)):
-        raise HTTPException(status_code=403, detail="Truy cập bị từ chối")
-
-    if not target.exists() or not target.is_file():
-        raise HTTPException(status_code=404, detail="Không tìm thấy tệp")
+    if not target:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy tệp: {file_path}")
 
     suffix = target.suffix.lower()
     media_types = {
@@ -637,6 +841,9 @@ def api_stream_script_file(file_path: str):
         ".mkv": "video/x-matroska",
         ".srt": "text/plain; charset=utf-8",
         ".json": "application/json",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
     }
     media_type = media_types.get(suffix, "application/octet-stream")
     return FileResponse(path=str(target), media_type=media_type, filename=target.name)

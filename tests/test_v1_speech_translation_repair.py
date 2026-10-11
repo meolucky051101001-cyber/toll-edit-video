@@ -14,7 +14,7 @@ import time
 import types
 import unittest
 from datetime import timedelta
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 import soundfile as sf
@@ -26,20 +26,13 @@ CODE = Path(os.environ.get("V1_STABILITY_TEST_CODE", DEFAULT_CODE))
 PROD = Path(r"C:\tool v1\backend")
 TEMP = tempfile.TemporaryDirectory(prefix="v1-stability-test-")
 SCRATCH = Path(TEMP.name)
-sys.path[:0] = [str(CODE), str(PROD)]
-
-pkg = types.ModuleType("ai")
-pkg.__path__ = [str(CODE / "ai"), str(PROD / "ai")]
-sys.modules["ai"] = pkg
-sys.modules["shared_state"] = types.SimpleNamespace(stop_requested=False)
-sys.modules["job_tracker"] = types.SimpleNamespace(record_translation_model=lambda *a: None,
-    record_active_translation_model=lambda *a: None, get_status=lambda: {})
-sys.modules["ai.transcription"] = types.SimpleNamespace(save_srt=lambda *a: None, extract_subtitles_whisper=lambda *a, **k: None)
-sys.modules["v1_stage_metrics"] = types.SimpleNamespace(stage=lambda *a, **k: lambda f: f)
+TEST_PACKAGE = "_v1_speech_test"
 
 
 def load(name, file, omit=()):
     """Import real code, excluding only import-time production DB/cache writers."""
+    if name.startswith("ai."):
+        name = TEST_PACKAGE + "." + name
     source = (CODE / file).read_text(encoding="utf-8-sig")
     tree = ast.parse(source, filename=str(CODE / file))
     tree.body = [n for n in tree.body if not (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in omit for t in n.targets))]
@@ -48,20 +41,57 @@ def load(name, file, omit=()):
     mod.__package__ = name.rpartition(".")[0]
     sys.modules[name] = mod
     exec(compile(tree, str(CODE / file), "exec"), mod.__dict__)
+    parent, _, leaf = name.rpartition(".")
+    if parent in sys.modules:
+        setattr(sys.modules[parent], leaf, mod)
     return mod
 
 
-dispatcher = load("ai.v1_gemini_dispatcher", "ai/v1_gemini_dispatcher.py", ("circuit_breaker",))
-response = load("ai.v1_gemini_response", "ai/v1_gemini_response.py")
-retry = load("v1_retry_policy", "v1_retry_policy.py")
-guard = load("v1_speech_guard", "v1_speech_guard.py")
-voice = load("ai.voice_cloning", "ai/voice_cloning.py")
-translation = load("ai.translation", "ai/translation.py")
-cache = load("ai.v1_voice_cache", "ai/v1_voice_cache.py")
-qc = load("v1_quality_gate", "v1_quality_gate.py")
-isolated = load("ai.v1_voice_isolated", "ai/v1_voice_isolated.py")
-mixer = load("v1_audio_mixer", "v1_audio_mixer.py")
-hierarchy = load("v1_hierarchical_mixer", "v1_hierarchical_mixer.py")
+def setUpModule():
+    global dispatcher, response, retry, guard, voice, translation, cache, qc, isolated, mixer, hierarchy
+    global _module_patch, _path_patch
+    root = types.ModuleType(TEST_PACKAGE)
+    root.__path__ = [str(CODE), str(PROD)]
+    pkg = types.ModuleType(TEST_PACKAGE + ".ai")
+    pkg.__path__ = [str(CODE / "ai"), str(PROD / "ai")]
+    root.ai = pkg
+    shared = types.SimpleNamespace(stop_requested=False)
+    metrics = types.SimpleNamespace(stage=lambda *a, **k: lambda f: f)
+    _module_patch = patch.dict(sys.modules, {
+        TEST_PACKAGE: root,
+        TEST_PACKAGE + ".ai": pkg,
+        TEST_PACKAGE + ".shared_state": shared,
+        TEST_PACKAGE + ".v1_stage_metrics": metrics,
+        TEST_PACKAGE + ".ai.transcription": types.SimpleNamespace(save_srt=lambda *a: None,
+            extract_subtitles_whisper=lambda *a, **k: None),
+        "shared_state": shared,
+        "job_tracker": types.SimpleNamespace(record_translation_model=lambda *a: None,
+            record_active_translation_model=lambda *a: None, get_status=lambda: {}),
+        "v1_stage_metrics": metrics,
+    })
+    _path_patch = patch.object(sys, "path", [str(CODE), str(PROD), *sys.path])
+    _module_patch.start()
+    _path_patch.start()
+    # Tests replace modules only while this module runs, never during collection.
+    import batch_control
+    sys.modules[TEST_PACKAGE + ".batch_control"] = batch_control
+    dispatcher = load("ai.v1_gemini_dispatcher", "ai/v1_gemini_dispatcher.py", ("circuit_breaker",))
+    response = load("ai.v1_gemini_response", "ai/v1_gemini_response.py")
+    retry = load("v1_retry_policy", "v1_retry_policy.py")
+    guard = load("v1_speech_guard", "v1_speech_guard.py")
+    voice = load("ai.voice_cloning", "ai/voice_cloning.py")
+    translation = load("ai.translation", "ai/translation.py")
+    cache = load("ai.v1_voice_cache", "ai/v1_voice_cache.py")
+    qc = load("v1_quality_gate", "v1_quality_gate.py")
+    isolated = load("ai.v1_voice_isolated", "ai/v1_voice_isolated.py")
+    mixer = load("v1_audio_mixer", "v1_audio_mixer.py")
+    hierarchy = load("v1_hierarchical_mixer", "v1_hierarchical_mixer.py")
+
+
+def tearDownModule():
+    _path_patch.stop()
+    _module_patch.stop()
+    TEMP.cleanup()
 
 
 def reply(values, reason="STOP"):
@@ -252,7 +282,16 @@ class SpeechTests(unittest.TestCase):
         sf.write(path, np.ones(44100, dtype=np.float32) * .1, 44100)
         result, dur, speed = asyncio.run(voice.fit_audio_file(str(path), .04, str(SCRATCH / "deferred.wav")))
         self.assertGreater(dur, .9)
-        self.assertGreater(speed, 1.35)
+        self.assertEqual(speed, 1.0)
+        self.assertEqual(Path(result).read_bytes(), path.read_bytes())
+
+    def test_refit_respects_remaining_speed_budget(self):
+        path = SCRATCH / "refit-budget.wav"
+        sf.write(path, np.ones(44100, dtype=np.float32) * .1, 44100)
+        result, duration, speed = asyncio.run(voice.fit_audio_file(str(path), .9, max_speed=1.45 / 1.4))
+        self.assertEqual(result, str(path))
+        self.assertEqual(duration, 1.0)
+        self.assertEqual(speed, 1.0)
 
     def test_ffmpeg_failure_not_original_success(self):
         path = SCRATCH / "fit-fail.wav"
@@ -288,6 +327,62 @@ class QCAndCacheTests(unittest.TestCase):
 
 
 class BatchTests(unittest.TestCase):
+    def test_measured_overflow_condenses_before_publish(self):
+        cues = [cue(1, 0, 1, "xin chao")]
+        fake_cache = types.SimpleNamespace(voice_cache_key=lambda *a, **k: "k",
+            read_voice_cache=lambda *a, **k: None, write_voice_cache=Mock())
+
+        def provider(text, path, param):
+            duration = .6 if text == "chao" else 1.6
+            samples = .1 * np.sin(2 * np.pi * 230 * np.arange(int(duration * 16000)) / 16000)
+            sf.write(path, samples, 16000, format="WAV")
+
+        with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_voice_cache": fake_cache}), patch.object(
+                voice, "_run_capcut_tts", side_effect=provider), patch.object(
+                translation, "condense_vietnamese_subtitles_batch", return_value={1: "chao"}) as condense:
+            result = asyncio.run(voice.generate_dubbing_audio(cues, str(SCRATCH / "measured-condense"),
+                "capcut", "Mai", video_duration=1))
+        condense.assert_called_once()
+        self.assertEqual(cues[0].content, "chao")
+        self.assertLessEqual(sf.info(result[0]["path"]).duration, .955)
+        self.assertLessEqual(result[0]["speed_ratio"], voice.MAX_NATURAL_SPEED)
+        fake_cache.write_voice_cache.assert_called_once()
+
+    def test_unresolved_overflow_is_rejected_without_cache(self):
+        cues = [cue(1, 0, 1, "xin chao")]
+        fake_cache = types.SimpleNamespace(voice_cache_key=lambda *a, **k: "k",
+            read_voice_cache=lambda *a, **k: None, write_voice_cache=Mock())
+
+        def provider(text, path, param):
+            sf.write(path, np.full(25600, .1), 16000, format="WAV")
+
+        with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_voice_cache": fake_cache}), patch.object(
+                voice, "_run_capcut_tts", side_effect=provider), patch.object(
+                translation, "condense_vietnamese_subtitles_batch", return_value={}), self.assertRaises(
+                guard.SpeechTimingError):
+            asyncio.run(voice.generate_dubbing_audio(cues, str(SCRATCH / "unresolved-fit"),
+                "capcut", "Mai", video_duration=1))
+        fake_cache.write_voice_cache.assert_not_called()
+
+    def test_failed_condensed_audio_is_not_published(self):
+        cues = [cue(1, 0, 1, "xin chao")]
+        fake_cache = types.SimpleNamespace(voice_cache_key=lambda *a, **k: "k",
+            read_voice_cache=lambda *a, **k: None, write_voice_cache=Mock())
+
+        def provider(text, path, param):
+            if text == "chao":
+                raise ConnectionError("Provider unavailable")
+            sf.write(path, np.full(25600, .1), 16000, format="WAV")
+
+        with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_voice_cache": fake_cache}), patch.object(
+                voice, "_run_capcut_tts", side_effect=provider), patch.object(
+                translation, "condense_vietnamese_subtitles_batch", return_value={1: "chao"}), patch.object(
+                asyncio, "sleep", new=AsyncMock()), self.assertRaisesRegex(
+                voice.TTSIncompleteError, "Condensed TTS regeneration failed"):
+            asyncio.run(voice.generate_dubbing_audio(cues, str(SCRATCH / "failed-condense"),
+                "capcut", "Mai", video_duration=1))
+        fake_cache.write_voice_cache.assert_not_called()
+
     def test_dual_voice_map_never_silently_falls_back(self):
         cues = [cue(1, 0, 1), cue(2, 2, 3)]
         with self.assertRaises(voice.TTSIncompleteError):
@@ -299,14 +394,15 @@ class BatchTests(unittest.TestCase):
         cues = [cue(1, 0, 2, "câu dài")]
         async def generate(seg, folder, src, param, key, target_max_duration=None):
             clock[0] += 120
-            return {"index": seg.index, "path": "x", "start": 0, "actual_audio_duration": 2.5,
-                    "speed_ratio": 2, "content": seg.content}
+            duration = 1.0 if seg.content == "câu ngắn" else 2.5
+            return {"index": seg.index, "path": "x", "start": 0, "actual_audio_duration": duration,
+                    "speed_ratio": 1.0 if duration == 1.0 else 2.0, "content": seg.content}
         def condense(items, **kw):
             calls.append(kw["deadline"] - clock[0])
             self.assertEqual(kw["api_key"], "synthetic-gemini-key")
             return {1: "câu ngắn"}
         fake_cache = types.SimpleNamespace(voice_cache_key=lambda *a, **k: "k", read_voice_cache=lambda *a, **k: None, write_voice_cache=lambda *a, **k: None)
-        with patch.dict(sys.modules, {"ai.v1_voice_cache": fake_cache}), patch.dict(os.environ, GEMINI_API_KEY="synthetic-gemini-key"), patch.object(time, "monotonic", side_effect=lambda: clock[0]), patch.object(voice, "generate_single_tts", side_effect=generate), patch.object(translation, "condense_vietnamese_subtitles_batch", side_effect=condense), patch.object(guard, "validate_speech_timeline"), patch.object(voice.os.path, "exists", return_value=True), patch.object(voice.os.path, "getsize", return_value=1000):
+        with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_voice_cache": fake_cache}), patch.dict(os.environ, GEMINI_API_KEY="synthetic-gemini-key"), patch.object(time, "monotonic", side_effect=lambda: clock[0]), patch.object(voice, "generate_single_tts", side_effect=generate), patch.object(translation, "condense_vietnamese_subtitles_batch", side_effect=condense), patch.object(guard, "validate_speech_timeline"), patch.object(voice.os.path, "exists", return_value=True), patch.object(voice.os.path, "getsize", return_value=1000):
             asyncio.run(voice.generate_dubbing_audio(cues, str(SCRATCH / "batch"), "capcut", "Mai", api_key="synthetic-voice-key", video_duration=2))
         self.assertTrue(calls)
         self.assertGreater(calls[-1], 0)
@@ -316,29 +412,29 @@ class BatchTests(unittest.TestCase):
         def dispatch(**kw):
             calls.append(kw)
             return reply(["chào"] * (40 if len(calls) == 1 else 1)), "high"
-        fake_cache = types.SimpleNamespace(cache_key=lambda *a: "key", read_cache=lambda *a: None, write_cache=Mock())
-        with patch.dict(sys.modules, {"ai.v1_translation_cache": fake_cache}), patch.object(dispatcher, "call_gemini_api", side_effect=dispatch), patch.object(translation, "extract_video_frames_base64", return_value=[]) as frames:
-            result = translation.translate_with_gemini(["中文"] * 41, api_key="synthetic", overall_deadline=12345)
+        fake_cache = types.SimpleNamespace(cache_key=lambda *a, **k: "key", read_cache=lambda *a, **k: None, write_cache=Mock())
+        with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_translation_cache": fake_cache}), patch.object(dispatcher, "call_gemini_api", side_effect=dispatch), patch.object(translation, "extract_video_frames_base64", return_value=[]) as frames:
+            result = translation.translate_with_gemini(["中文"] * 41, api_key="synthetic", video_path="fixture.mp4", overall_deadline=12345)
         self.assertEqual(frames.call_count, 1)
         self.assertEqual(len(result), 41)
         self.assertEqual([c["overall_deadline"] for c in calls], [12345, 12345])
         self.assertTrue(all(callable(c["response_validator"]) for c in calls))
 
     def test_invalid_translation_never_cached_or_padded(self):
-        fake_cache = types.SimpleNamespace(cache_key=lambda *a: "key", read_cache=lambda *a: None, write_cache=Mock())
-        with patch.dict(sys.modules, {"ai.v1_translation_cache": fake_cache}), patch.object(dispatcher, "call_gemini_api", return_value=(reply(["chào"]), "high")), patch.object(translation, "extract_video_frames_base64", return_value=[]):
+        fake_cache = types.SimpleNamespace(cache_key=lambda *a, **k: "key", read_cache=lambda *a, **k: None, write_cache=Mock())
+        with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_translation_cache": fake_cache}), patch.object(dispatcher, "call_gemini_api", return_value=(reply(["chào"]), "high")), patch.object(translation, "extract_video_frames_base64", return_value=[]):
             self.assertIsNone(translation.translate_with_gemini(["中文", "中文"], api_key="synthetic"))
         fake_cache.write_cache.assert_not_called()
 
     def test_translation_cancel_propagates(self):
-        fake_cache = types.SimpleNamespace(cache_key=lambda *a: "key", read_cache=lambda *a: None, write_cache=Mock())
-        with patch.dict(sys.modules, {"ai.v1_translation_cache": fake_cache}), patch.object(dispatcher, "call_gemini_api", side_effect=dispatcher.GeminiCancelledError()), patch.object(translation, "extract_video_frames_base64", return_value=[]), self.assertRaises(dispatcher.GeminiCancelledError):
+        fake_cache = types.SimpleNamespace(cache_key=lambda *a, **k: "key", read_cache=lambda *a, **k: None, write_cache=Mock())
+        with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_translation_cache": fake_cache}), patch.object(dispatcher, "call_gemini_api", side_effect=dispatcher.GeminiCancelledError()), patch.object(translation, "extract_video_frames_base64", return_value=[]), self.assertRaises(dispatcher.GeminiCancelledError):
             translation.translate_with_gemini(["中文"], api_key="synthetic")
 
     def test_invalid_condensation_never_cached(self):
-        fake_cache = types.SimpleNamespace(read_condense_cache=lambda *a: None, write_condense_cache=Mock())
+        fake_cache = types.SimpleNamespace(read_condense_cache=lambda *a, **k: None, write_condense_cache=Mock())
         items = [{"index": 1, "text": "Tôi không có 5 nghìn", "target_seconds": 1, "target_words": 5}]
-        with patch.dict(sys.modules, {"ai.v1_translation_cache": fake_cache}), patch.object(translation, "call_gemini_api", return_value=(reply({"1": "Tôi có tiền"}), "high")):
+        with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_translation_cache": fake_cache}), patch.object(translation, "call_gemini_api", return_value=(reply({"1": "Tôi có tiền"}), "high")):
             self.assertEqual(translation.condense_vietnamese_subtitles_batch(items, api_key="synthetic"), {})
         fake_cache.write_condense_cache.assert_not_called()
 

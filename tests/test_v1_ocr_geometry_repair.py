@@ -18,13 +18,27 @@ import cv2
 
 CODE = Path(os.environ.get('V1_OCR_GEOMETRY_TEST_CODE', Path(__file__).resolve().parents[1] / 'backend'))
 PROD = Path(r'C:\tool v1\backend')
-sys.path[:0] = [str(CODE), str(PROD)]
+_MOCKED_NAMES = [
+    'v1_stage_metrics', 'v1_ocr_proxy', 'shared_state',
+    'ai.v1_model_policy', 'ai.v1_model_runtime',
+    'v1_ocr_geometry', 'ocr_subtitle_locator', 'ocr_utils',
+    'ass_utils', 'v1_stage_runtime'
+]
+_ORIGINAL_MODULES = {name: sys.modules.get(name) for name in _MOCKED_NAMES}
 sys.modules['v1_stage_metrics'] = types.SimpleNamespace(stage=lambda *a, **k:lambda f:f)
 sys.modules['v1_ocr_proxy'] = types.SimpleNamespace(ocr_proxy=lambda f:f)
 sys.modules['shared_state'] = types.SimpleNamespace(stop_requested=False)
 sys.modules['ai.v1_model_policy'] = types.SimpleNamespace(current_v1_model_policy=lambda:None)
 sys.modules['ai.v1_model_runtime'] = types.SimpleNamespace(V1ModelRuntimeError=RuntimeError,
     run_v1_ocr=lambda *a, **k:None, runtime_module_available=lambda *a:False)
+
+
+def tearDownModule():
+    for name, orig in _ORIGINAL_MODULES.items():
+        if orig is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = orig
 
 
 def load(name, path):
@@ -160,7 +174,7 @@ class GeometryTests(unittest.TestCase):
             runtime.save_payload(path,segments=[s],geometry_version=geo.OCR_GEOMETRY_VERSION)
             saved=runtime.load_payload(path)
             self.assertEqual(saved['segments'][0].ocr_mask_status,'located')
-            self.assertEqual(saved['geometry_version'],3)
+            self.assertEqual(saved['geometry_version'],geo.OCR_GEOMETRY_VERSION)
     def test_resume_invalidates_old_ocr_not_audio_asr(self):
         source=(CODE/'v1_orchestrator.py').read_text(encoding='utf-8-sig')
         tree=ast.parse(source)
@@ -185,7 +199,7 @@ class PipelineTests(unittest.TestCase):
         def capture(_):
             c=Capture(**capture_args);captures.append(c);return c
         with patch.object(ocr.cv2,'VideoCapture',side_effect=capture), patch.object(ocr,'_readtext_batch',side_effect=recognize):
-            result=ocr.perform_video_ocr('fixture.mp4',srt_segments=segments,ocr_strategy='smart_skip',**kwargs)
+            result=ocr.perform_video_ocr('fixture.mp4',srt_segments=segments,ocr_strategy='smart_skip',adaptive=False,**kwargs)
         self.assertTrue(all(c.released for c in captures))
         return result,captures
     @staticmethod
@@ -218,7 +232,7 @@ class PipelineTests(unittest.TestCase):
         self.run_ocr(segs,lambda frames:[[] for _ in frames])
         self.assertEqual(segs[0].ocr_mask_status,'no_caption_evidence')
     def test_all_decode_failures_not_silent_success(self):
-        with self.assertRaises(geo.OCRGeometryError):
+        with self.assertRaisesRegex(RuntimeError, 'decode'):
             self.run_ocr([segment()],lambda frames:[[] for _ in frames],capture_args={'readable':False})
     def test_report_saved_before_unresolved_error(self):
         calls=[]
@@ -232,7 +246,7 @@ class PipelineTests(unittest.TestCase):
             report=Path(tmp)/'audit.json'
             with self.assertRaises(geo.OCRGeometryError):
                 self.run_ocr([segment(),segment(2)],recognize,geometry_report_path=str(report))
-            counts=json.loads(report.read_text())['geometry']['counts']
+            counts=json.loads(report.read_text(encoding='utf-8'))['geometry']['counts']
             self.assertEqual(counts['unresolved'],1)
     def test_gpu_failure_propagated(self):
         with self.assertRaisesRegex(RuntimeError,'GPU unavailable'):

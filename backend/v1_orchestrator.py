@@ -262,7 +262,9 @@ class V1Orchestrator:
             pass
 
         overrides = dict(overrides or {})
-        requested_out_dir = Path(output_dir or (self.workspace / v_path.stem)).resolve()
+        safe_stem = v_path.stem.rstrip(". ") or "video"
+        raw_out = output_dir or (self.workspace / safe_stem)
+        requested_out_dir = Path(str(raw_out).rstrip(". ")).resolve()
         # The same input may be retried with a fresh queue ID. Reuse only a
         # non-completed manifest with verified source and the same working folder.
         if resume_if_possible and not self.manifest_manager.load_manifest(job_id):
@@ -546,10 +548,19 @@ class V1Orchestrator:
         vid_w, vid_h, main_y_pct = 1080, 1920, 0.88
         floating_segments = []
         if should_run:
-            ocr_strat = planned.get("ocr_strategy", "auto")
-            short_thresh = float(os.getenv("V1_SHORT_MAX_SECONDS", "420.0"))
-            if video_dur_s > 0 and video_dur_s <= short_thresh:
-                ocr_strat = "full"
+            flags = dict(overrides.get("feature_flags") or get_feature_flags(self.workspace))
+            enable_smart = flags.get("V1_SMART_SKIP_OCR", True)
+            ocr_strat = overrides.get("ocr_strategy") or planned.get("ocr_strategy", "auto")
+            if overrides.get("ocr_strategy"):
+                ocr_strat = overrides["ocr_strategy"]
+            elif enable_smart:
+                ocr_strat = "smart_skip"
+            elif not ocr_strat or ocr_strat == "auto":
+                short_thresh = float(os.getenv("V1_SHORT_MAX_SECONDS", "420.0"))
+                if video_dur_s > 0 and video_dur_s <= short_thresh:
+                    ocr_strat = "full"
+                else:
+                    ocr_strat = "smart_skip"
             await notify(stage_id, 4, 55.0, f"👀 Bước 4/8: Quét vị trí phụ đề chữ cứng (OCR {ocr_strat})...", {"ocr_strategy": ocr_strat})
             self.manifest_manager.record_stage_start(job_id, stage_id)
             t_out = self._calculate_stage_timeout(stage_id, video_dur_s, resolved_mode)
@@ -568,6 +579,7 @@ class V1Orchestrator:
                             api_key=gemini_key,
                             srt_segments=srt_segments,
                             ocr_strategy=ocr_strat,
+                            adaptive=False,
                             geometry_report_path=str(out_dir / 'ocr_geometry_report.json'),
                         ),
                         timeout=t_out
@@ -607,6 +619,7 @@ class V1Orchestrator:
 
         should_run = not (can_resume and stage_id in verified_stages)
         translated_segments = []
+        v1_script_mode = effective_cfg.get("script_mode") or overrides.get("script_mode") or os.getenv("SCRIPT_MODE", "default")
         if should_run:
             configured_gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.7-flash").strip() or "gemini-3.7-flash"
             try:
@@ -614,7 +627,6 @@ class V1Orchestrator:
                 job_tracker.record_active_translation_model(configured_gemini_model)
             except Exception:
                 pass
-            v1_script_mode = effective_cfg.get("script_mode") or overrides.get("script_mode") or os.getenv("SCRIPT_MODE", "default")
             script_badge = " (Kịch bản: Hài hước)" if str(v1_script_mode).lower() in ("humorous", "hai_huoc", "haihuoc", "comedy") else ""
             await notify(stage_id, 5, 65.0, f"🌐 Bước 5/8: Dịch phụ đề chuẩn ngữ cảnh bằng {configured_gemini_model}{script_badge} ({len(srt_segments)} câu)...", {"gemini_model": configured_gemini_model, "script_mode": v1_script_mode})
             self.manifest_manager.record_stage_start(job_id, stage_id)
@@ -664,11 +676,15 @@ class V1Orchestrator:
         should_run = not (can_resume and stage_id in verified_stages)
         dubbing_audio_files = []
         if should_run:
+            await notify(stage_id, 6, 75.0, "Dang long tieng (TTS)...")
             self.manifest_manager.record_stage_start(job_id, stage_id)
             t_out = self._calculate_stage_timeout(stage_id, video_dur_s, resolved_mode)
             try:
                 from ai.v1_auto_voice import decide_video_voice
                 from ai.v1_voice_isolated import generate_dubbing_audio_isolated as generate_dubbing_audio
+                import importlib
+                import ass_utils
+                importlib.reload(ass_utils)
                 from ass_utils import sync_and_clamp_subtitles, generate_ass_file
 
                 # Khóa giọng đọc
@@ -726,7 +742,7 @@ class V1Orchestrator:
                 # Đồng bộ timing và chống đè câu
                 translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
 
-                # Tạo file phụ đề ASS
+                # Tạo file phụ đề ASS chuẩn theo kích thước video nguồn để khớp 100% tọa độ OCR
                 await asyncio.to_thread(
                     generate_ass_file,
                     translated_segments,
@@ -895,26 +911,18 @@ class V1Orchestrator:
 
         if effective_delivery:
             del_p = Path(effective_delivery)
-            del_p.parent.mkdir(parents=True, exist_ok=True)
-            staged_delivery = del_p.with_name(del_p.name + f".{job_id}.partial")
-            shutil.copy2(str(final_video), str(staged_delivery))
-            os.replace(staged_delivery, del_p)
+            from pipeline_v2.atomic_io import atomic_copy_file
+            if del_p.resolve() != final_video.resolve():
+                await asyncio.to_thread(atomic_copy_file, final_video, del_p)
             published_path = str(del_p)
             logger.info("[DELIVERY_GUARD] Da tu dong luu video hoan tat toi: %s", published_path)
 
-        # Tự động dọn dẹp các tệp trung gian nặng (WAV, stems, bản sao video) sau khi phân phối thành công
-        try:
-            from workspace_cleaner import clean_completed_job_intermediate_files
-            clean_completed_job_intermediate_files(job_id, self.workspace)
-        except Exception as cl_err:
-            logger.warning("[CLEANUP] Lỗi dọn tệp trung gian job %s: %s", job_id, cl_err)
-
-        # Cập nhật manifest hoàn tất
-        manifest = self.manifest_manager.load_manifest(job_id)
-        if manifest:
-            manifest.status = "completed"
-            manifest.output_video_path = published_path
-            self.manifest_manager.save_manifest(manifest)
+        from dashboard_media import media_status
+        delivered_check = await asyncio.to_thread(media_status, published_path)
+        if delivered_check["status"] != "valid":
+            message = "Khong xac minh duoc thanh pham: " + delivered_check["reason"]
+            self.manifest_manager.record_stage_failure(job_id, "delivery", message)
+            raise RuntimeError(message)
 
         # Ghi nhận thời gian render/edit vào render_history và job_tracker vĩnh viễn
         job_duration_s = round(time.time() - t_job_start, 1)
@@ -936,6 +944,19 @@ class V1Orchestrator:
             tracker_finalized = True
         except Exception as tracker_err:
             logger.warning("Không thể ghi nhận hoàn tất job: %s", tracker_err)
+
+        manifest = self.manifest_manager.load_manifest(job_id)
+        if not manifest:
+            raise RuntimeError(f"Missing manifest at publish: {job_id}")
+        manifest.status = "completed"
+        manifest.output_video_path = published_path
+        self.manifest_manager.save_manifest(manifest)
+
+        try:
+            from workspace_cleaner import clean_completed_job_intermediate_files
+            await asyncio.to_thread(clean_completed_job_intermediate_files, job_id, self.workspace, out_dir)
+        except Exception as cl_err:
+            logger.warning("[CLEANUP] Lỗi dọn tệp trung gian job %s: %s", job_id, cl_err)
 
         await notify("publish", 8, 100.0, f"✅ Hoàn tất xuất xưởng video thành phẩm: {Path(published_path).name}", {
             "published_path": published_path,

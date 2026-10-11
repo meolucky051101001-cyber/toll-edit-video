@@ -8,7 +8,7 @@ from pathlib import Path
 GLOBAL_CACHE_DIR = Path(__file__).parent.parent / "voice_cache"
 GLOBAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-CACHE_KEY_VERSION = 10  # Strict fit/no clipping; never reuse formerly overspeed audio.
+CACHE_KEY_VERSION = 12  # Invalidate audio before the shared 1.00x-1.50x policy.
 
 def voice_cache_key(segment, voice_source, voice_param, max_duration=None):
     model = Path(str(voice_param))
@@ -27,8 +27,9 @@ def voice_cache_key(segment, voice_source, voice_param, max_duration=None):
         content = normalize_text_for_tts(content)
     except Exception:
         pass
+    from v1_speech_guard import natural_speed_limit
     raw = [CACHE_KEY_VERSION, content, voice_source, str(voice_param), fingerprint, target_dur,
-           os.getenv("V1_MAX_NATURAL_SPEED", "1.35")]
+           natural_speed_limit()]
     return hashlib.sha256(json.dumps(raw, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 def is_valid_audio(audio_path: str | Path, min_duration: float = 0.15) -> bool:

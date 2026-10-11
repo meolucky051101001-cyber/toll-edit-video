@@ -1,3 +1,4 @@
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -6,41 +7,29 @@ from backend import telegram_bot
 
 
 class TelegramBotProfileTests(unittest.IsolatedAsyncioTestCase):
-    async def test_profile_is_published_for_expected_v2_identity(self):
-        bot = SimpleNamespace(
-            get_me=AsyncMock(return_value=SimpleNamespace(username="autodub_video_v2_bot")),
-            set_my_commands=AsyncMock(),
-            set_my_name=AsyncMock(),
-            set_my_short_description=AsyncMock(),
-            set_my_description=AsyncMock(),
-        )
-        with patch.object(telegram_bot, "BOT_EXPECTED_USERNAME", "autodub_video_v2_bot"):
-            await telegram_bot.configure_bot_profile(SimpleNamespace(bot=bot))
+    async def test_start_message_identifies_tool_v1_and_voice_command(self):
+        reply = AsyncMock()
+        await telegram_bot.cmd_start(SimpleNamespace(message=SimpleNamespace(reply_text=reply)), None)
+        text = reply.call_args.args[0]
+        self.assertIn("Tool V1", text)
+        self.assertIn("/voice_auto", text)
+        self.assertNotIn("Bot V2", text)
 
-        bot.set_my_commands.assert_awaited_once_with(telegram_bot.BOT_COMMANDS)
-        bot.set_my_name.assert_awaited_once_with("AutoDub Video Bot V2")
+    def test_placeholder_credentials_are_rejected(self):
+        for value in ("YOUR_TOKEN", "PASTE_TOKEN", ""):
+            with self.subTest(value=value), patch.dict(os.environ, {"TEST_BOT_SECRET": value}):
+                self.assertEqual(telegram_bot.configured_secret("TEST_BOT_SECRET"), "")
 
-    async def test_v1_token_is_rejected_before_polling(self):
-        bot = SimpleNamespace(
-            get_me=AsyncMock(return_value=SimpleNamespace(username="autodub_video_bot")),
-        )
-        with patch.object(telegram_bot, "BOT_EXPECTED_USERNAME", "autodub_video_v2_bot"):
-            with self.assertRaisesRegex(RuntimeError, "expected @autodub_video_v2_bot"):
-                await telegram_bot.configure_bot_profile(SimpleNamespace(bot=bot))
+    def test_explicit_credential_is_preserved(self):
+        with patch.dict(os.environ, {"TEST_BOT_SECRET": "test-only-token"}):
+            self.assertEqual(telegram_bot.configured_secret("TEST_BOT_SECRET"), "test-only-token")
 
-    async def test_transient_polling_error_is_handled_as_warning(self):
-        error = telegram_bot.NetworkError("temporary read failure")
-        with patch.object(telegram_bot.logger, "warning") as warning:
-            await telegram_bot.telegram_error_handler(
-                None,
-                SimpleNamespace(error=error),
-            )
-        warning.assert_called_once()
-
-    def test_polling_uses_dedicated_request_and_error_handler(self):
+    def test_polling_registers_v1_handlers_and_keeps_pending_updates(self):
         source = telegram_bot.Path(telegram_bot.__file__).read_text(encoding="utf-8")
-        self.assertIn(".get_updates_request(get_updates_request)", source)
-        self.assertIn("app.add_error_handler(telegram_error_handler)", source)
+        self.assertIn('CommandHandler("voice_auto", cmd_voice_auto)', source)
+        self.assertIn('CommandHandler("stop", cmd_stop)', source)
+        self.assertIn("drop_pending_updates=False", source)
+        self.assertIn("install_tool_control(app, globals(), 'v1')", source)
 
 
 if __name__ == "__main__":

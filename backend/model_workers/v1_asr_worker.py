@@ -8,6 +8,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ai.transcription import extract_subtitles_whisper
 
 if __name__ == '__main__':
+    if sys.platform == "win32":
+        try:
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            if hasattr(sys.stderr, "reconfigure"):
+                sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     logging.basicConfig(level=logging.INFO)
     orig_audio = sys.argv[3] if len(sys.argv) > 3 else None
     options = json.loads(os.environ.get("V1_ASR_JOB_OPTIONS", "{}"))

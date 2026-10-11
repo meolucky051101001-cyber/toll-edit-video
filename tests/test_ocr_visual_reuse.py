@@ -1,5 +1,6 @@
 import unittest
 import importlib
+import inspect
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -59,7 +60,8 @@ class VisualReuseTests(unittest.TestCase):
                 return rows
             with patch.object(module.cv2, 'VideoCapture', return_value=cap), patch.object(
                     module, '_readtext_batch', side_effect=recognize):
-                module.perform_video_ocr('fixture.mp4', srt_segments=segments)
+                inspect.unwrap(module.perform_video_ocr)(
+                    'fixture.mp4', srt_segments=segments)
             self.assertLessEqual(len(calls), 18)
             for item in segments:
                 self.assertIsNotNone(item.best_block)
@@ -90,6 +92,20 @@ class VisualReuseTests(unittest.TestCase):
         self.assertIsNone(cache.lookup(cache.signature(np.zeros_like(image)), .2))
         self.assertIsNone(cache.lookup(cache.signature(image), 1.2))
 
+    def test_single_changed_glyph_in_long_line_invalidates_reuse(self):
+        image = np.zeros((400, 720, 3), dtype=np.uint8)
+        for index in range(30):
+            x = 22 * index + 20
+            cv2.rectangle(image, (x, 275), (x + 14, 305), (255, 255, 255), 2)
+            cv2.line(image, (x, 288), (x + 14, 288), (255, 255, 255), 2)
+        changed = image.copy()
+        changed[273:308, 327:346] = 0
+        cv2.line(changed, (328, 275), (343, 305), (255, 255, 255), 2)
+        cv2.line(changed, (343, 275), (328, 305), (255, 255, 255), 2)
+        cache = SubtitleFrameCache(0, 1)
+        cache.remember(cache.signature(image), 0, {"rows": ["old sentence"]})
+        self.assertIsNone(cache.lookup(cache.signature(changed), .2))
+
     def test_corrupt_line_between_confirmed_subtitles_recovers_observed_box(self):
         speech = {1: '教大家几个星星贴纸有趣玩法',
                   2: '然后粘上PVC纸并贴上猩猩',
@@ -116,7 +132,7 @@ class VisualReuseTests(unittest.TestCase):
         self.assertNotIn(2, result.selected_by_segment)
         self.assertNotIn(3, result.selected_by_segment)
 
-    def test_adaptive_ocr_coarse_scanning_reduces_sample_count(self):
+    def test_adaptive_default_preserves_bounded_coarse_opt_out(self):
         import importlib
         module = importlib.import_module("backend.ocr_utils")
         from datetime import timedelta
@@ -135,9 +151,6 @@ class VisualReuseTests(unittest.TestCase):
             for i in range(1, 11)
         ]
 
-        dense_timestamps = []
-        adaptive_timestamps = []
-
         # Intercept capture
         cap = SimpleNamespace(
             isOpened=lambda: True,
@@ -147,9 +160,9 @@ class VisualReuseTests(unittest.TestCase):
             release=lambda: None,
         )
 
-        dense_calls = []
-        def count_dense(imgs):
-            dense_calls.extend(imgs)
+        coarse_calls = []
+        def count_coarse(imgs):
+            coarse_calls.extend(imgs)
             return [[] for _ in imgs]
 
         adaptive_calls = []
@@ -158,16 +171,18 @@ class VisualReuseTests(unittest.TestCase):
             return [[] for _ in imgs]
 
         with patch.object(module.cv2, "VideoCapture", return_value=cap), \
-             patch.object(module, "_readtext_batch", side_effect=count_dense):
-            # Dense scan (adaptive=False)
-            module.perform_video_ocr("fixture.mp4", srt_segments=segments, adaptive=False)
+             patch.object(module, "_readtext_batch", side_effect=count_coarse):
+            inspect.unwrap(module.perform_video_ocr)(
+                "fixture.mp4", srt_segments=segments, adaptive=False)
 
         with patch.object(module.cv2, "VideoCapture", return_value=cap), \
              patch.object(module, "_readtext_batch", side_effect=count_adaptive):
-            # Adaptive scan (adaptive=True)
-            module.perform_video_ocr("fixture.mp4", srt_segments=segments, adaptive=True)
+            metrics = {}
+            inspect.unwrap(module.perform_video_ocr)(
+                "fixture.mp4", srt_segments=segments, metrics=metrics)
 
-        # Adaptive coarse scanning must use at least 50% fewer samples than dense
-        self.assertGreater(len(dense_calls), 0)
+        self.assertGreater(len(coarse_calls), 0)
+        self.assertLessEqual(len(coarse_calls), len(segments) * 4)
         self.assertGreater(len(adaptive_calls), 0)
-        self.assertLess(len(adaptive_calls), len(dense_calls) * 0.5)
+        self.assertEqual(metrics["mode"], "adaptive")
+        self.assertLessEqual(metrics["peak_batch_frames"], 12)

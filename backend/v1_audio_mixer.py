@@ -297,22 +297,6 @@ def mix_adaptive_audio(
         seg_audio = _read_audio(path)
         cur_dur = len(seg_audio) / 1000.0
 
-        if i + 1 < len(sorted_dubs):
-            next_start = float(sorted_dubs[i + 1].get("start", 0.0))
-            max_allowed = max(0.0, next_start - start_sec)
-            from v1_speech_guard import BOUNDARY_TOLERANCE_S
-            effective_tol = max(BOUNDARY_TOLERANCE_S, 0.15)
-            if cur_dur > max_allowed + effective_tol:
-                overrun = cur_dur - max_allowed
-                if max_allowed > 0.1:
-                    logger.warning(
-                        f"[MIXER_RESCUE] Cue #{dub.get('index', i)} vuot moc tiep theo {overrun:.3f}s. "
-                        f"Tu dong can chinh thoi luong de tranh loi SpeechTimingError."
-                    )
-                    trim_ms = int(max_allowed * 1000)
-                    seg_audio = seg_audio[:trim_ms]
-                    cur_dur = len(seg_audio) / 1000.0
-
         processed_dubs.append({
             "index": dub.get("index", i),
             "start": start_sec,

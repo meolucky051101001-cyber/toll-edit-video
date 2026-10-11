@@ -224,8 +224,8 @@ class PreparationTests(unittest.TestCase):
             ocr._prepare(self.source_file, self.source)
 
     def test_budget_is_bounded_for_long_video(self):
-        self.assertEqual(ocr.preparation_budget(3600), 90)
-        self.assertLess(ocr.preparation_budget(224), 90)
+        self.assertEqual(ocr.preparation_budget(3600), 180)
+        self.assertLess(ocr.preparation_budget(224), 180)
 
 
 class RenderTests(unittest.TestCase):
@@ -258,6 +258,48 @@ class RenderTests(unittest.TestCase):
         self.assertIn("h264_nvenc", command)
         self.assertNotIn("scale=", " ".join(command))
         self.assertNotIn("-r", command)
+
+    def test_ass_cover_and_text_filter_is_not_dropped(self):
+        with patch.object(media, "validate_video_output", return_value=self.source):
+            self.assertTrue(renderer(self.run_ok)(self.video, self.subs, self.audio, self.output, delogo=False))
+        command = self.commands[0]
+        filters = command[command.index("-vf") + 1]
+        self.assertEqual(filters.count("subtitles="), 1)
+        self.assertIn(".ass'", filters)
+        self.assertNotIn("force_style=", filters)
+        self.assertTrue(filters.endswith(",format=yuv420p"))
+
+    def test_uppercase_ass_preserves_mask_and_text_styles(self):
+        uppercase_subs = self.subs.with_suffix(".ASS")
+        uppercase_subs.write_text("[Script Info]\n", encoding="utf-8")
+        with patch.object(media, "validate_video_output", return_value=self.source):
+            self.assertTrue(renderer(self.run_ok)(self.video, uppercase_subs, self.audio, self.output, delogo=False))
+        command = self.commands[0]
+        filters = command[command.index("-vf") + 1]
+        self.assertIn(".ass'", filters)
+        self.assertNotIn("force_style=", filters)
+
+    def test_srt_still_receives_forced_text_style(self):
+        srt_subs = self.subs.with_suffix(".srt")
+        srt_subs.write_text("1\n00:00:00,000 --> 00:00:01,000\nTest\n", encoding="utf-8")
+        with patch.object(media, "validate_video_output", return_value=self.source):
+            self.assertTrue(renderer(self.run_ok)(self.video, srt_subs, self.audio, self.output, delogo=False))
+        command = self.commands[0]
+        filters = command[command.index("-vf") + 1]
+        self.assertEqual(filters.count("subtitles="), 1)
+        self.assertIn(".srt':force_style=", filters)
+
+    def test_ass_filter_follows_scaling_and_delogo(self):
+        source = media.select_main_video(metadata(width=4320, height=7680))
+        with patch.object(media, "probe_main_video", return_value=source), patch.object(
+            media, "validate_video_output", return_value=source
+        ):
+            self.assertTrue(renderer(self.run_ok)(self.video, self.subs, self.audio, self.output))
+        command = self.commands[0]
+        filters = command[command.index("-vf") + 1]
+        self.assertTrue(filters.startswith("scale=1080:1920,"))
+        self.assertGreater(filters.index("subtitles="), filters.rindex("delogo="))
+        self.assertLess(filters.index("subtitles="), filters.index("format=yuv420p"))
 
     def test_filter_error_does_not_retry_encoder(self):
         error = "Error initializing filter delogo: Invalid argument\n" + "tail\n" * 500

@@ -34,7 +34,7 @@ class OCRSessionTests(unittest.TestCase):
             process.poll.return_value=None
             args=["python","worker","--request",str(Path(d)/"req"),"--response",str(Path(d)/"res")]
             with patch.object(session.subprocess,"Popen",return_value=process):
-                with patch.object(session.time,"monotonic",side_effect=[0,2]):
+                with patch.object(session.time,"monotonic",side_effect=[0,.1,.2,.3,2]):
                     with self.assertRaises(subprocess.TimeoutExpired):
                         session.run_request(args,timeout=1,env={})
             process.terminate.assert_called_once()

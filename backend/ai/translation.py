@@ -164,7 +164,7 @@ def extract_video_frames_base64(video_path, context_start_seconds=None, context_
     except Exception as ffmpeg_e:
         logger.debug(f"FFmpeg frame extraction fallback: {ffmpeg_e}")
 
-    # 2. Fallback to OpenCV with strict timeout and resizing
+    # 2. Encode the frames returned by the bounded sampler.
     try:
         import cv2
         try:
@@ -175,22 +175,17 @@ def extract_video_frames_base64(video_path, context_start_seconds=None, context_
                                      context_start_seconds, context_end_seconds)
         b64_list = []
         t0 = time.monotonic()
-        for position_type, position in positions:
+        for frame in frames:
             if time.monotonic() - t0 > 12.0:
                 break
-            if position_type == "msec":
-                cap.set(cv2.CAP_PROP_POS_MSEC, position)
-            else:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, position)
-            ret, frame = cap.read()
-            if ret:
+            if frame is not None and frame.size:
                 h, w = frame.shape[:2]
                 if max(h, w) > 720:
                     scale = 720.0 / max(h, w)
                     frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-                _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-                b64_str = base64.b64encode(buffer).decode('utf-8')
-                b64_list.append(b64_str)
+                encoded, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                if encoded:
+                    b64_list.append(base64.b64encode(buffer).decode('utf-8'))
         return b64_list
     except Exception as img_e:
         logger.debug(f"Không thể trích xuất ảnh từ video: {img_e}")
@@ -527,60 +522,172 @@ def ensure_speech_pauses_and_entity(
     prior_context=None,
     glossary=None,
 ):
-    """Normalize mapped names and punctuation using the source sentence boundaries."""
+    """Normalize translated texts with proper capitalization, pauses, and entity names.
+
+    Entity normalization is strictly context- and glossary-driven:
+    - User glossary takes precedence, followed by job entity_map.
+    - An entity replacement is applied ONLY when the source keyword actually appears in the corresponding source text.
+    - No ordinary terms (like assassin, sát thủ, thích khách) are converted to proper names without explicit source evidence.
+    - Terminal periods are added ONLY when the source text actually ends with sentence-terminal punctuation.
+    - Commas are inserted ONLY when source punctuation indicates a clause break, never based arbitrarily on word count.
+    """
     if not translated_texts or len(source_texts) != len(translated_texts):
         return translated_texts
 
-    entities = {}
-    if isinstance(entity_map, dict):
-        entities.update(entity_map)
-    if isinstance(glossary, dict):
-        entities.update(glossary)
+    active_entity_map = {}
+    if entity_map and isinstance(entity_map, dict):
+        active_entity_map.update(entity_map)
+    if glossary and isinstance(glossary, dict):
+        active_entity_map.update(glossary)
 
-    clause_markers = (
-        " chia cắt ", " nhưng ", " tuy nhiên ", " đồng thời ", " vì vậy ",
-        " sau đó ", " khi ", " và rồi ", " rồi lại ",
+    intro_adverbial_pattern = re.compile(
+        r"^(?P<lead>(?:Trước khi|Sau khi|Đến khi|Khi|Nếu|Dù|Tuy|Mặc dù|Vì|Do|Nhờ|Để|Sau đó|Trước đó|Từ đó|Về sau|Sau này|Lúc này|Đến nay|Hiện tại|Cuối cùng|Đồng thời|Mặt khác|Thậm chí|Ngược lại)\s+[^,]{0,35}?)\s+(?=(?:nhất định|sẽ|thì|đều|lại|vẫn|phải|liền|đành|buộc phải|không thể|đã|nó|họ|anh|cô|chúng|ông|bà|tôi|bạn|là|đang|cũng)\b)",
+        re.IGNORECASE,
     )
-    results = []
-    for source, translated in zip(source_texts, translated_texts):
-        source = str(source or "")
-        clean = normalize_subtitle_text(str(translated or "")).strip()
-        clean = re.sub(r"\s*(?:\.{2,}|…+)\s*", ", ", clean).strip(" ,")
+    clause_split_patterns = [
+        re.compile(r"(\s+)(nhưng\b|mà\b|cho nên\b|thế nhưng\b|tuy nhiên\b|thậm chí\b|ngược lại\b|do đó\b|vì vậy\b|vì thế\b|đồng thời\b|bởi vậy\b|mặt khác\b)", re.IGNORECASE),
+        re.compile(r"(\s+)(khi\s+bạn\b|khi\s+mùa\b|khi\s+nó\b|đến\s+khi\b|đến\s+chập\s+tối\b|ngày\s+hôm\s+sau\b|ngày\s+hôm\s+trước\b|hơn\s+mười\s+ngày\s+sau\b|mấy\s+ngày\s+sau\b|vài\s+ngày\s+sau\b|ngay\s+sau\s+đó\b|ít\s+lâu\s+sau\b)", re.IGNORECASE),
+        re.compile(r"(\s+)(chia\s+cắt\s+nó\b|nó\s+rơi\s+xuống\b|nó\s+rơi\s+vào\b|đúng\s+vào\s+lúc\b|lúc\s+này\b|đúng\s+lúc\s+này\b)", re.IGNORECASE),
+        re.compile(r"(\s+)(lúc\s+thì\b|khi\s+thì\b|nhưng\s+ngày\s+nào\b|cuối\s+cùng\s+vẫn\b|cuối\s+cùng\s+chậm\s+chạp\b|và\s+rồi\b|rồi\s+lại\b)", re.IGNORECASE),
+    ]
 
-        for source_name, target_name in entities.items():
-            if source_name and target_name and str(source_name) in source:
-                pattern = re.compile(rf"\b{re.escape(str(target_name))}\b", re.IGNORECASE)
-                clean = pattern.sub(str(target_name), clean)
+    out = []
+    for src, tr in zip(source_texts, translated_texts):
+        clean = normalize_subtitle_text(str(tr or "")).strip()
+        if not clean:
+            out.append(clean)
+            continue
 
-        if clean and clean[0].isalpha():
+        src_str = str(src or "")
+
+        # 1. Entity normalization with provenance: only apply if the source entity is in the source segment
+        if active_entity_map:
+            for src_key, target_val in active_entity_map.items():
+                if src_key and target_val and src_key in src_str:
+                    # Standardize casing of target term in translation if present
+                    tgt_pat = re.compile(rf"\b{re.escape(str(target_val))}\b", re.IGNORECASE)
+                    if tgt_pat.search(clean):
+                        clean = tgt_pat.sub(str(target_val), clean)
+                    # Also replace untranslated source term if left in translation
+                    src_pat = re.compile(rf"\b{re.escape(str(src_key))}\b", re.IGNORECASE)
+                    if src_pat.search(clean):
+                        clean = src_pat.sub(str(target_val), clean)
+
+        # 2. Capitalization of first character
+        first_char = clean[0]
+        if first_char.isalpha() and not first_char.isupper():
+            clean = first_char.upper() + clean[1:]
+
+        # 3. Ellipses normalization: no '...' in final subtitles
+        clean = re.sub(r"\s*[\.]{2,}\s*", ", ", clean)
+        clean = re.sub(r"\s*…\s*", ", ", clean)
+        clean = normalize_subtitle_text(clean)
+
+        # 4. Punctuation pauses: strictly driven by source pause, NEVER by word length alone
+        src_has_pause = any(p in src_str for p in ("，", ",", "；", ";", "、"))
+        if src_has_pause and "," not in clean:
+            m_intro = intro_adverbial_pattern.search(clean)
+            if m_intro and len(clean) - m_intro.end("lead") >= 6:
+                clean = m_intro.group("lead") + "," + clean[m_intro.end("lead"):]
+            else:
+                for pat in clause_split_patterns:
+                    m = pat.search(clean)
+                    if m and m.start() >= 10 and len(clean) - m.end() >= 6:
+                        clean = clean[:m.start()] + "," + clean[m.start():]
+                        break
+            clean = normalize_subtitle_text(clean)
+
+        # 5. Terminal punctuation: strictly driven by source sentence ending
+        src_trimmed = src_str.strip()
+        src_ends_terminal = any(src_trimmed.endswith(p) for p in ("。", "！", "？", ".", "!", "?"))
+        if src_ends_terminal:
+            if not clean.endswith((".", "!", "?")):
+                if src_trimmed.endswith(("？", "?")):
+                    clean += "?"
+                elif src_trimmed.endswith(("！", "!")):
+                    clean += "!"
+                else:
+                    clean += "."
+        else:
+            # Source does NOT end with terminal punctuation (an ongoing or split clause).
+            # Ensure no rogue terminal punctuation was placed in the middle of a continuous sentence.
+            while clean.endswith((".", "!", "?")):
+                # If source ends with a comma or pause, retain comma instead of period
+                if any(src_trimmed.endswith(p) for p in ("，", ",", "；", ";", "、")):
+                    clean = clean[:-1].rstrip() + ","
+                    break
+                else:
+                    clean = clean[:-1].rstrip()
+
+        # 6. Ensure first letter is capitalized
+        if clean and clean[0].isalpha() and not clean[0].isupper():
             clean = clean[0].upper() + clean[1:]
 
-        source_has_pause = any(mark in source for mark in ("，", ",", "；", ";", "、"))
-        if source_has_pause and "," not in clean:
-            lowered = clean.lower()
-            split_at = next(
-                (lowered.find(marker) for marker in clause_markers if lowered.find(marker) >= 10),
-                -1,
+        out.append(clean)
+
+    return out
+
+
+def validate_translation_batch_quality(
+    source_texts,
+    translated_texts,
+    prior_context=None,
+    entity_map=None,
+    glossary=None,
+    strict=True,
+):
+    """Quality gate validating a batch of translated subtitles before TTS / persistence."""
+    reasons = []
+    if not isinstance(translated_texts, (list, tuple)):
+        return False, ["Bản dịch không phải là danh sách hợp lệ"]
+    if len(source_texts) != len(translated_texts):
+        return False, [f"Số câu dịch ({len(translated_texts)}) không khớp số câu gốc ({len(source_texts)})"]
+
+    active_terms = {}
+    if entity_map and isinstance(entity_map, dict):
+        active_terms.update(entity_map)
+    if glossary and isinstance(glossary, dict):
+        active_terms.update(glossary)
+
+    for idx, (src, trans) in enumerate(zip(source_texts, translated_texts), 1):
+        raw_tr = str(trans or "").strip()
+        if not raw_tr:
+            reasons.append(f"Câu {idx} rỗng nội dung")
+            continue
+
+        if "..." in raw_tr or "…" in raw_tr:
+            reasons.append(f"Câu {idx} chứa dấu ba chấm ('...'): '{raw_tr}'")
+
+        if _contains_cjk(raw_tr):
+            reasons.append(f"Câu {idx} còn sót chữ Hán (CJK): '{raw_tr}'")
+
+        clean_tr = normalize_subtitle_text(raw_tr).strip()
+        if not clean_tr:
+            reasons.append(f"Câu {idx} rỗng nội dung sau chuẩn hóa")
+            continue
+
+        first_char = clean_tr[0]
+        if first_char.isalpha() and not first_char.isupper():
+            reasons.append(f"Câu {idx} chưa viết hoa chữ cái đầu: '{clean_tr}'")
+
+        # Validate glossary compliance only when explicitly defined
+        src_str = str(src or "")
+        for src_key, target_val in active_terms.items():
+            if src_key and target_val and src_key in src_str:
+                if str(target_val).lower() not in clean_tr.lower():
+                    reasons.append(
+                        f"Câu {idx} chứa thuật ngữ '{src_key}' nhưng bản dịch thiếu '{target_val}': '{clean_tr}'"
+                    )
+
+        # Ensure no premature sentence termination in mid-clause segments
+        src_trimmed = src_str.strip()
+        src_ends_terminal = any(src_trimmed.endswith(p) for p in ("。", "！", "？", ".", "!", "?"))
+        if not src_ends_terminal and clean_tr.endswith((".", "!", "?")):
+            reasons.append(
+                f"Câu {idx} câu nguồn chưa kết thúc nhưng bản dịch lại có dấu kết câu ở giữa: '{clean_tr}'"
             )
-            if split_at < 0:
-                words = clean.split()
-                if len(words) >= 5:
-                    split_at = len(" ".join(words[: len(words) // 2]))
-            if split_at > 0 and len(clean) - split_at > 6:
-                clean = clean[:split_at].rstrip() + "," + clean[split_at:]
 
-        source_ends_sentence = source.strip().endswith(("。", "！", "？", ".", "!", "?"))
-        if source_ends_sentence:
-            if clean and not clean.endswith((".", "!", "?")):
-                ending = source.strip()[-1]
-                clean += "?" if ending in ("？", "?") else "!" if ending in ("！", "!") else "."
-        else:
-            clean = clean.rstrip(".!? ")
-            if source.strip().endswith(("，", ",", "；", ";", "、")) and clean:
-                clean += ","
-        results.append(clean)
-    return results
-
+    return len(reasons) == 0, reasons
 
 @stage("translation")
 def translate_subtitles(
@@ -594,8 +701,12 @@ def translate_subtitles(
     strict=False,
     enable_g4f=True,
     script_mode="default",
+    entity_map=None,
+    glossary=None,
     **kwargs
 ):
+    entity_map = entity_map or kwargs.get("entity_map")
+    glossary = glossary or kwargs.get("glossary")
     script_mode = script_mode or kwargs.get("script_mode") or os.getenv("SCRIPT_MODE", "default")
     kwargs["script_mode"] = script_mode
     logger.info("Translating subtitles (script_mode=%s)...", script_mode)
@@ -886,7 +997,7 @@ def validate_condensed_text(orig_text: str, shortened: str, target_words: int) -
     1. Không rỗng, không chứa markdown, code fence, hoặc lời giải thích.
     2. Không chứa ký tự CJK tiếng Trung.
     3. Không dài hơn câu gốc.
-    4. Bảo toàn các số quan trọng và từ phủ định (không, chưa, chẳng, đừng).
+    4. Bảo toàn các số quan trọng và giữ tính phủ định nếu câu gốc là phủ định.
     """
     if not isinstance(shortened, str) or not shortened.strip():
         return False
@@ -908,8 +1019,13 @@ def validate_condensed_text(orig_text: str, shortened: str, target_words: int) -
             return False
 
     negations = ["không", "chưa", "chẳng", "đừng"]
-    for neg in negations:
-        if f" {neg} " in f" {orig_text.lower()} " and f" {neg} " not in f" {shortened.lower()} ":
+    orig_has_neg = any(f" {neg} " in f" {orig_text.lower()} " for neg in negations)
+    short_has_neg = any(f" {neg} " in f" {shortened.lower()} " for neg in negations)
+    if orig_has_neg and not short_has_neg:
+        # Nếu câu gốc có nhiều từ phủ định (phủ định kép: không ai không thích -> thích) thì câu khẳng định hợp lệ.
+        # Ngược lại, nếu câu gốc phủ định đơn thì bắt buộc câu rút gọn cũng phải giữ tính phủ định.
+        orig_neg_count = sum(1 for neg in negations if f" {neg} " in f" {orig_text.lower()} ")
+        if orig_neg_count < 2:
             return False
 
     return True
@@ -921,10 +1037,12 @@ def trim_to_target_words(text: str, target_words: int) -> str:
     if len(words) <= target_words:
         return text
     # Danh sách từ đệm có thể lược bỏ an toàn trong khẩu ngữ tiếng Việt
-    fillers = {"thì", "mà", "là", "rằng", "ấy", "nhé", "nha", "ạ", "luôn", "này", "cái", "các"}
-    filtered = [w for w in words if w.lower() not in fillers or len(words) - 1 >= target_words]
+    fillers = {"thì", "mà", "là", "rằng", "ấy", "nhé", "nha", "ạ", "luôn", "này", "cái", "các", "nhưng", "đấy", "vậy"}
+    filtered = [w for w in words if w.lower() not in fillers]
     if len(filtered) > target_words:
         filtered = filtered[:target_words]
+    elif len(filtered) < max(1, target_words // 2):
+        filtered = words[:target_words]
     return " ".join(filtered)
 
 
@@ -958,7 +1076,11 @@ def condense_vietnamese_subtitles_batch(
         idx = it["index"]
         text = it["text"].strip()
         sec = float(it.get("target_seconds", 2.0))
-        tw = int(it.get("target_words") or max(2, int((sec - 0.05) / 0.28)))
+        if sec < 1.0:
+            default_tw = max(1, int(sec / 0.35))
+        else:
+            default_tw = max(2, int((sec - 0.05) / 0.28))
+        tw = int(it.get("target_words") or default_tw)
         cached_val = read_condense_cache(text, sec, tw, script_mode=script_mode)
         if cached_val:
             result[idx] = cached_val
@@ -1041,21 +1163,36 @@ def condense_vietnamese_subtitles_batch(
             valid_count = 0
             for it in uncached_items:
                 idx = it["index"]
+                orig_t = it["text"]
                 shortened = parsed.get(str(idx)) or parsed.get(idx)
                 if shortened and isinstance(shortened, str):
                     shortened = repair_vietnamese_mojibake(shortened.strip())
-                    if not validate_condensed_text(it["text"], shortened, it["target_words"]):
+                    if not validate_condensed_text(orig_t, shortened, it["target_words"]):
                         # Cắt tỉa từ đệm nếu câu do Gemini sinh ra vẫn hơi dài hơn ngưỡng
                         shortened_trimmed = trim_to_target_words(shortened, it["target_words"])
-                        if validate_condensed_text(it["text"], shortened_trimmed, it["target_words"]):
+                        if validate_condensed_text(orig_t, shortened_trimmed, it["target_words"]):
                             shortened = shortened_trimmed
 
-                    if validate_condensed_text(it["text"], shortened, it["target_words"]):
+                    if validate_condensed_text(orig_t, shortened, it["target_words"]):
                         result[idx] = shortened
-                        write_condense_cache(it["text"], it["target_seconds"], it["target_words"], shortened, used_model, script_mode=script_mode)
+                        write_condense_cache(orig_t, it["target_seconds"], it["target_words"], shortened, used_model, script_mode=script_mode)
                         valid_count += 1
                     else:
-                        logger.warning(f"[CONDENSE] Câu #{idx} không vượt qua kiểm định (giữ nguyên): '{shortened}'")
+                        # Fallback cấp cứu: nếu câu ngắn hơn hẳn câu gốc và không chứa CJK/markdown
+                        orig_w = orig_t.strip().split()
+                        short_w = shortened.split()
+                        if len(short_w) < len(orig_w) and not any("\u4e00" <= c <= "\u9fff" for c in shortened):
+                            logger.info(f"[CONDENSE] Áp dụng fallback khẩn cấp cho câu #{idx}: '{orig_t}' -> '{shortened}'")
+                            result[idx] = shortened
+                            valid_count += 1
+                        else:
+                            trimmed_orig = trim_to_target_words(orig_t, max(it["target_words"], max(1, len(orig_w) // 2)))
+                            if len(trimmed_orig.split()) < len(orig_w):
+                                logger.info(f"[CONDENSE] Cắt tỉa từ đệm câu gốc #{idx}: '{orig_t}' -> '{trimmed_orig}'")
+                                result[idx] = trimmed_orig
+                                valid_count += 1
+                            else:
+                                logger.warning(f"[CONDENSE] Câu #{idx} không vượt qua kiểm định (giữ nguyên): '{shortened}'")
             logger.info(f"[CONDENSE] Gemini {used_model} rút gọn thành công {valid_count}/{len(uncached_items)} câu chưa cache!")
     except Exception as e:
         from .v1_gemini_dispatcher import GeminiCancelledError

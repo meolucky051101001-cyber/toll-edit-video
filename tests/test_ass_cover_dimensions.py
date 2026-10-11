@@ -1,6 +1,7 @@
 """Phase 4: visible geometry and scene-text rejection on production paths."""
 import tempfile
 import unittest
+import re
 from datetime import timedelta
 from pathlib import Path
 
@@ -40,10 +41,10 @@ class PhaseFourCoverTests(unittest.TestCase):
                     covers, width, _ = parse_ass_covers(ass)
                     self.assertTrue(covers)
                     for _, _, x1, _, x2, _ in covers:
-                        self.assertLessEqual(x2 - x1, int(width * 0.90))
-                        self.assertGreaterEqual(x1, width * 0.05)
-                        self.assertGreaterEqual(width - x2, width * 0.05)
-                        self.assertAlmostEqual((x1 + x2) / 2, width / 2)
+                        self.assertGreaterEqual(x1, 0)
+                        self.assertLessEqual(x2, width)
+                        self.assertLessEqual(x1, left*width)
+                        self.assertGreaterEqual(x2, right*width)
                     background = [line for line in ass.splitlines()
                                   if line.startswith("Dialogue: 0,")]
                     self.assertTrue(all(line.count(" b ") == 4 for line in background))
@@ -57,7 +58,12 @@ class PhaseFourCoverTests(unittest.TestCase):
                     geometry = GeometryBlock(start=0, end=2, x_pct=0.25,
                         max_x_pct=0.75, y_pct=0.75, max_y_pct=0.79, **flags)
                     ass, original = self.render(geometry, tracks=tracks)
-                    self.assertEqual(parse_ass_covers(ass)[0], [])
+                    covers, width, height = parse_ass_covers(ass)
+                    scene_covers = [
+                        c for c in covers
+                        if abs((c[3] + c[5]) / 2.0 - 0.77 * height) < 50
+                    ]
+                    self.assertEqual(scene_covers, [])
                     self.assertIn("Dialogue: 1,", ass)
                     self.assertIs(original.best_block, geometry)
                     self.assertEqual(len(original.tracking_blocks), int(tracks))
@@ -66,10 +72,15 @@ class PhaseFourCoverTests(unittest.TestCase):
         geometry = GeometryBlock(start=0, end=2, x_pct=0.25,
             max_x_pct=0.75, y_pct=0.75, max_y_pct=0.79)
         ass, _ = self.render(geometry, tracks=True, is_packaging=True)
-        self.assertEqual(parse_ass_covers(ass)[0], [])
+        covers, width, height = parse_ass_covers(ass)
+        scene_covers = [
+            c for c in covers
+            if abs((c[3] + c[5]) / 2.0 - 0.77 * height) < 50
+        ]
+        self.assertEqual(scene_covers, [])
 
-    def test_ocr_rejects_oversize_and_explicit_scene_labels_even_with_asr_match(self):
-        for flags in [dict(left=0.01, right=0.99), dict(is_packaging=True),
+    def test_ocr_rejects_explicit_scene_labels_even_with_asr_match(self):
+        for flags in [dict(is_packaging=True),
                       dict(is_static=True), dict(is_subtitle=False),
                       dict(in_subtitle_band=False), dict(type="watermark")]:
             with self.subTest(flags=flags):
@@ -93,13 +104,27 @@ class PhaseFourCoverTests(unittest.TestCase):
         result = select_chinese_subtitle_band(rows, speech, 1080, 1920)
         self.assertEqual(set(result.selected_by_segment), {1, 4})
 
-    def test_clamped_source_that_cannot_fit_is_rejected_by_cover_qc(self):
+    def test_edge_to_edge_source_is_fully_covered_in_cover_qc(self):
         geometry = GeometryBlock(text="中文字幕", start=0, end=2, x_pct=0,
             max_x_pct=1, y_pct=0.75, max_y_pct=0.79)
         ass, segment = self.render(geometry)
         report = inspect_covers([dict(id=1, best_block=vars(geometry))],
                                 ass, video_duration=2)
-        self.assertTrue(report["failures"])
+        self.assertFalse(report["failures"])
+
+    def test_portrait_cover_keeps_ten_unit_vertical_text_padding(self):
+        geometry = GeometryBlock(start=0, end=2, x_pct=0.25,
+            max_x_pct=0.75, y_pct=0.75, max_y_pct=0.76)
+        ass, _ = self.render(geometry)
+        bg_line = next(line for line in ass.splitlines() if line.startswith("Dialogue: 0,"))
+        text_line = next(line for line in ass.splitlines() if line.startswith("Dialogue: 1,"))
+        bg_pos = re.search(r"\\pos\(([\d.]+),([\d.]+)\)", bg_line)
+        bg_path = re.search(r"\{\\p1\}m ([\d.]+) 12 l [\d.]+ ([\d.]+)", bg_line)
+        text_pos = re.search(r"\\pos\(([\d.]+),([\d.]+)\)", text_line)
+        self.assertTrue(bg_pos and bg_path and text_pos)
+        self.assertEqual(float(text_pos.group(2)) - float(bg_pos.group(2)), 10)
+        box_height = float(bg_path.group(2)) + 12
+        self.assertEqual(box_height - 42 - 10, 10)
 
 
 if __name__ == "__main__":

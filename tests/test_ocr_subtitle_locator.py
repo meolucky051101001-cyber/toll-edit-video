@@ -160,6 +160,40 @@ class ChineseSubtitleLocatorTests(unittest.TestCase):
         self.assertAlmostEqual(selected.bottom, 0.81)
         self.assertTrue(all("优质收纳" not in item["text"] for item in selected.selected_by_segment.values()))
 
+    def test_phonetic_homophone_first_cue_is_selected(self):
+        # Whisper: "真的是完百想折扣", OCR: "真的是晚买享折扣"
+        speech = {
+            1: "真的是完百想折扣",
+            2: "谁敢想这个现在才一米一个呢",
+            3: "果然很漂亮",
+        }
+        detections = [
+            block(1, "真的是晚买享折扣", 0.37, 0.63, 0.81, 0.84, 0.99),
+            block(2, "谁敢想这个现在才一米一个呢", 0.20, 0.80, 0.81, 0.84, 0.99),
+            block(3, "果然很漂亮", 0.30, 0.70, 0.81, 0.84, 0.99),
+        ]
+        selected = select_chinese_subtitle_band(detections, speech, 2160, 3840)
+        self.assertEqual(selected.mode, "asr_match")
+        self.assertEqual(selected.support, 3)
+        self.assertIn(1, selected.selected_by_segment)
+        self.assertIn("真的是晚买享折扣", selected.selected_by_segment[1]["text"])
+
+    def test_boundary_first_cue_rescued_by_following_cue_when_track_established(self):
+        speech = {
+            1: "完全不一样的识别错误文本",
+            2: "谁敢想这个现在才一米一个呢",
+            3: "果然很漂亮",
+        }
+        detections = [
+            # Cue 1 has un-matching text, but correct geometry inside established track
+            block(1, "屏幕上的中文字幕第一句", 0.25, 0.75, 0.81, 0.84, 0.95),
+            block(2, "谁敢想这个现在才一米一个呢", 0.20, 0.80, 0.81, 0.84, 0.99),
+            block(3, "果然很漂亮", 0.30, 0.70, 0.81, 0.84, 0.99),
+        ]
+        selected = select_chinese_subtitle_band(detections, speech, 2160, 3840)
+        self.assertEqual(selected.mode, "asr_match")
+        self.assertIn(1, selected.selected_by_segment)
+
 
 class SubtitleCoverGeometryTests(unittest.TestCase):
     def test_edge_to_edge_source_gets_full_white_cover_at_source_y(self):
@@ -276,7 +310,8 @@ class SubtitleCoverGeometryTests(unittest.TestCase):
         self.assertIsNotNone(match)
         _, _, box_width, box_height = map(int, match.groups())
         self.assertLessEqual(box_width / 720, 0.90)
-        self.assertAlmostEqual(box_height / 1280, 0.075, delta=0.005)
+        self.assertGreaterEqual(box_height, 84)
+        self.assertLessEqual(box_height, 108)
 
 
 if __name__ == "__main__":

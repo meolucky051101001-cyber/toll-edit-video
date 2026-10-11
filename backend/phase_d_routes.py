@@ -7,6 +7,8 @@ Cung cấp:
 """
 
 import logging
+import asyncio
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -25,9 +27,16 @@ _service = RecoveryService()
 
 
 class ResumeRequest(BaseModel):
-    mode: str = Field(..., description="Chế độ thực thi: 'recover', 'restart' hoặc 'unpause'")
+    mode: str = Field(..., pattern="^(recover|restart|unpause)$")
     plan_token: Optional[str] = Field(None, description="Mã xác thực kế hoạch khôi phục nhận được từ GET /resume-plan")
     config_overrides: Optional[Dict[str, Any]] = Field(None, description="Cấu hình tùy biến nếu muốn đổi thông số")
+
+
+def _runtime(request):
+    runtime = getattr(request.app.state, "pipeline_runtime", None)
+    if runtime is None:
+        raise HTTPException(409, "Ứng dụng chưa hỗ trợ thực thi khôi phục video.")
+    return runtime
 
 
 @phase_d_router.get("/{job_id}/resume-plan")
@@ -40,27 +49,15 @@ async def get_job_resume_plan(job_id: str, request: Request):
     - Mã token xác thực plan_token cho bước thực thi tiếp theo
     """
     try:
-        # Determine input and output dirs from app if available
-        input_dir = None
-        output_dir = None
-        try:
-            from main import get_input_dir, get_output_dir
-            input_dir = get_input_dir()
-            output_dir = get_output_dir()
-        except ImportError:
-            try:
-                from dashboard_monitor import get_input_dir, get_output_dir
-                input_dir = get_input_dir()
-                output_dir = get_output_dir()
-            except ImportError:
-                pass
-
-        plan = _service.build_resume_plan(
+        runtime = _runtime(request)
+        plan = await asyncio.to_thread(_service.build_resume_plan,
             job_id=job_id,
-            input_dir=input_dir,
-            output_dir=output_dir
+            input_dir=runtime.get_input_dir(),
+            output_dir=runtime.get_output_dir(),
         )
         return JSONResponse(status_code=200, content=plan)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Lỗi xây dựng kế hoạch khôi phục cho {job_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Không thể tạo kế hoạch khôi phục: {str(e)}")
@@ -75,22 +72,23 @@ async def execute_job_resume(job_id: str, payload: ResumeRequest, request: Reque
     - 'recover': Tái sử dụng các artifact đã hoàn tất, chỉ chạy các bước còn thiếu
     - 'restart': Chạy lại mới 100% từ đầu
     """
+    runtime = _runtime(request)
+    if payload.mode == "unpause":
+        return JSONResponse(content=_service.execute_resume_action(job_id=job_id, mode="unpause"))
+    lock = runtime.UNIFIED_PIPELINE_LOCK
+    task = runtime.BATCH_TASK
+    if lock.locked() or (task is not None and not task.done()) or runtime.job_tracker.get_status().get("active"):
+        raise HTTPException(409, "Đang xử lý video; chưa thể khôi phục hoặc chạy lại.")
+    await lock.acquire()
+    task_id = uuid.uuid4().hex
+    dispatched = False
+    reserved = False
     try:
-        input_dir = None
-        output_dir = None
-        try:
-            from main import get_input_dir, get_output_dir
-            input_dir = get_input_dir()
-            output_dir = get_output_dir()
-        except ImportError:
-            try:
-                from dashboard_monitor import get_input_dir, get_output_dir
-                input_dir = get_input_dir()
-                output_dir = get_output_dir()
-            except ImportError:
-                pass
-
-        result = _service.execute_resume_action(
+        input_dir, output_dir = runtime.get_input_dir(), runtime.get_output_dir()
+        # Reserve the shared slot before recovery can remove any artifacts.
+        runtime.job_tracker.start_batch(1, str(input_dir), str(output_dir), job_id=task_id)
+        reserved = True
+        result = await asyncio.to_thread(_service.execute_resume_action,
             job_id=job_id,
             mode=payload.mode,
             plan_token=payload.plan_token,
@@ -99,46 +97,18 @@ async def execute_job_resume(job_id: str, payload: ResumeRequest, request: Reque
             output_dir=output_dir,
         )
 
-        # Trigger background execution if mode is recover or restart
-        if payload.mode in ["recover", "restart"]:
-            clean_name = job_id.replace("Dubbed_", "").replace(".mp4", "").strip()
-            source_file = result.get("source_video")
-            if source_file:
-                # Dispatch for Tool V1
-                try:
-                    import main as v1_main
-                    import asyncio, uuid, shared_state
-                    if hasattr(v1_main, "single_video_runner"):
-                        status = v1_main.job_tracker.get_status()
-                        if not status.get("active"):
-                            shared_state.stop_requested = False
-                            out_dir_str = str(output_dir) if output_dir else str(Path(r"D:\banve"))
-                            jid = uuid.uuid4().hex
-                            v1_main.BATCH_TASK = asyncio.create_task(
-                                v1_main.single_video_runner(str(source_file), out_dir_str, jid),
-                                name=f"autodub-recovery-{jid}"
-                            )
-                            result["dispatched"] = True
-                            result["task_id"] = jid
-                except Exception as ex:
-                    logger.info(f"V1 direct dispatch check: {ex}")
-
-                # Dispatch for Tool V2
-                try:
-                    import dashboard_monitor as v2_main
-                    import subprocess, sys
-                    if hasattr(v2_main, "is_v2_batch_running") and not v2_main.is_v2_batch_running():
-                        python_exe = v2_main.ROOT / "venv" / "Scripts" / "python.exe"
-                        if not python_exe.exists():
-                            python_exe = Path(sys.executable)
-                        script = v2_main.ROOT / "batch_processor.py"
-                        if script.is_file():
-                            v2_main.BATCH_PROCESS = subprocess.Popen([str(python_exe), str(script)])
-                            result["dispatched"] = True
-                except Exception as ex:
-                    logger.info(f"V2 direct dispatch check: {ex}")
-
-        return JSONResponse(status_code=200, content=result)
+        if not result.get("source_video"):
+            raise RuntimeError("Không tìm thấy video nguồn để thực thi khôi phục.")
+        runtime.shared_state.stop_requested = False
+        runtime.BATCH_TASK = asyncio.create_task(
+            runtime.single_video_runner(
+                result["source_video"], str(output_dir), task_id,
+                recovery_mode=payload.mode, config_overrides=result.get("frozen_config"),
+                work_dir=result.get("work_dir"), pipeline_lock_held=True,
+            ), name=f"autodub-recovery-{task_id}",
+        )
+        dispatched = True
+        return JSONResponse(content={**result, "dispatched": True, "task_id": task_id})
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except FileNotFoundError as fe:
@@ -148,6 +118,12 @@ async def execute_job_resume(job_id: str, payload: ResumeRequest, request: Reque
     except Exception as e:
         logger.error(f"Lỗi thực thi khôi phục cho {job_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Lỗi thực thi: {str(e)}")
+    finally:
+        if not dispatched:
+            if reserved:
+                runtime.job_tracker.fail_batch("Không thể khởi chạy khôi phục", job_id=task_id)
+                runtime.job_tracker.release_batch(task_id)
+            lock.release()
 
 
 @phase_d_router.post("/{job_id}/unpause")

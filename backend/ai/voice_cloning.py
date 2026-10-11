@@ -423,18 +423,19 @@ def calculate_reading_windows(segments, video_duration=None, gap_s=0.05) -> dict
     return windows
 
 
-async def fit_audio_file(audio_input_path: str, target_max_duration: float, output_path: str = None) -> tuple:
+async def fit_audio_file(audio_input_path: str, target_max_duration: float, output_path: str = None, *, max_speed=None) -> tuple:
     """
     Căn chỉnh thời lượng audio nếu bị tràn khung đọc, đảm bảo giữ 100% độ thanh thoát, trong trẻo nguyên bản của giọng đọc:
     1. Không nén lại nếu audio đã vừa khung đọc -> giữ nguyên bản file gốc 160kbps (bit-for-bit, 0 transcoding).
     2. Tuyệt đối không ép chậm (slow down) bằng atempo khi audio ngắn hơn khung đọc -> giữ nhịp đọc tự nhiên 1.0x.
     3. Khi cần tăng tốc do câu quá dài: dùng WAV PCM không nén ở khâu trung gian, xuất MP3 192k ở khâu cuối (giữ dải tần số cao).
     4. Cắt khoảng lặng an toàn (pad_ms=60, -45dB) để không bao giờ nuốt âm gió, phụ âm đầu/đuôi.
-    Returns: (output_path, final_duration_s, speed_ratio)
+    If the speed limit cannot fit the cue, retain it for translation condensation.
+    Returns: (output_path, measured_duration_s, applied_speed_ratio)
     """
     import shutil
     output_path = output_path or audio_input_path
-    from v1_speech_guard import load_audio
+    from v1_speech_guard import load_audio, SpeechTimingError, natural_speed_limit
     audio = load_audio(audio_input_path)
     orig_dur = len(audio) / 1000.0
     original_duration = orig_dur
@@ -455,6 +456,11 @@ async def fit_audio_file(audio_input_path: str, target_max_duration: float, outp
     orig_dur = len(audio) / 1000.0
     ratio = orig_dur / max(0.001, target_max_duration - 0.015)
     applied_ratio = max(1.0, ratio)
+    max_speed = min(MAX_NATURAL_SPEED, natural_speed_limit(max_speed))
+    if applied_ratio > max_speed:
+        if os.path.abspath(audio_input_path) != os.path.abspath(output_path):
+            shutil.copy2(audio_input_path, output_path)
+        return output_path, original_duration, 1.0
     tempo_filter = build_atempo_filter(applied_ratio)
     base, _ = os.path.splitext(output_path)
     temp_wav_in = f"{base}_fit_in.wav"
@@ -487,10 +493,7 @@ async def fit_audio_file(audio_input_path: str, target_max_duration: float, outp
         else:
             raise RuntimeError(f"FFmpeg output file missing or empty: {temp_wav_out}")
     except Exception as exc:
-        logger.warning("[fit_audio_file] Ffmpeg fit warning: %s. Keeping original.", exc)
-        if os.path.abspath(audio_input_path) != os.path.abspath(output_path):
-            shutil.copy2(audio_input_path, output_path)
-        return output_path, orig_dur, 1.0
+        raise SpeechTimingError("FFmpeg speech fit failed; original audio retained") from exc
     finally:
         for p in (temp_wav_in, temp_wav_out, temp_mp3_out):
             if os.path.exists(p):
@@ -599,7 +602,9 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
     raise TTSIncompleteError(f"Locked-voice TTS failed for cue {segment.index}; successful audio retained") from last_error
 
 
-MAX_NATURAL_SPEED = float(os.getenv("V1_MAX_NATURAL_SPEED", "1.45"))
+from v1_speech_guard import natural_speed_limit
+
+MAX_NATURAL_SPEED = natural_speed_limit()
 
 @stage("voice")
 async def generate_dubbing_audio(translated_segments, output_folder, voice_source="edge", voice_param="vi-VN-HoaiMyNeural", api_key="", video_duration=None, segment_voices=None, script_mode="default"):
@@ -617,9 +622,8 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
             raise RuntimeError("Translation incomplete; Vietnamese TTS was not started")
 
     import time
-    # Only API work consumes condensation budget, not minutes spent generating TTS.
     condense_remaining = 45.0
-    from v1_speech_guard import coalesce_tiny_same_voice_cues, validate_speech_timeline
+    from v1_speech_guard import coalesce_tiny_same_voice_cues, validate_speech_timeline, SpeechTimingError, load_audio
     if segment_voices:
         for seg in translated_segments:
             info = segment_voices.get(str(seg.index))
@@ -688,34 +692,22 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                             content=seg.content.strip())
             
             result = None
-            try:
-                result = await generate_single_tts(
-                    seg, output_folder, seg_source, seg_param, api_key, target_max_duration=hard_max
-                )
-            except Exception as tts_err:
-                logger.warning(f"[TTS_RETRY] Lỗi ban đầu câu #{seg.index}: {tts_err}. Đang thử lại...")
-                for retry_idx in range(3):
-                    await asyncio.sleep(1.2 * (retry_idx + 1))
-                    try:
-                        result = await generate_single_tts(
-                            seg, output_folder, seg_source, seg_param, api_key, target_max_duration=hard_max
-                        )
-                        if result is not None:
-                            break
-                    except Exception:
-                        pass
-
-                # Nếu sau các lần thử vẫn thất bại -> Tự động Fallback sang Edge-TTS
-                if result is None:
-                    is_female = getattr(seg, "gender", "") == "female" or "562" in str(seg_param) or "mai" in str(seg_param).lower()
-                    fallback_voice = "vi-VN-HoaiMyNeural" if is_female else "vi-VN-NamMinhNeural"
-                    try:
-                        logger.warning(f"[TTS_FALLBACK] CapCut lỗi câu #{seg.index}, tự động chuyển sang Edge-TTS ({fallback_voice})")
-                        result = await generate_single_tts(
-                            seg, output_folder, "edge", fallback_voice, api_key, target_max_duration=hard_max
-                        )
-                    except Exception as fb_err:
-                        logger.error(f"[TTS_FALLBACK_FAIL] Cả Edge-TTS cũng thất bại cho câu #{seg.index}: {fb_err}")
+            for attempt in range(4):
+                if __import__("shared_state").stop_requested:
+                    raise TTSIncompleteError("TTS stopped before the next locked-voice attempt")
+                if attempt:
+                    await asyncio.sleep(1.2 * attempt)
+                try:
+                    result = await generate_single_tts(
+                        seg, output_folder, seg_source, seg_param, api_key, target_max_duration=hard_max
+                    )
+                    if result is not None:
+                        break
+                except Exception as tts_err:
+                    if isinstance(tts_err, SpeechTimingError):
+                        raise
+                    logger.warning("[TTS_RETRY] Cue %s, locked voice %s/%s, attempt %s: %s",
+                                   seg.index, seg_source, seg_param, attempt + 1, tts_err)
 
             if result is None:
                 if os.path.exists(path):
@@ -725,7 +717,7 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                 return dict(
                     index=seg.index, path=path, start=seg.start.total_seconds(),
                     end=seg.start.total_seconds() + hard_max, actual_audio_duration=hard_max,
-                    content=seg.content.strip(), error=f"TTS segment {seg.index} thất bại sau các lượt thử CapCut và Edge-TTS"
+                    content=seg.content.strip(), error=f"TTS segment {seg.index} thất bại với giọng đã khóa {seg_source}/{seg_param}"
                 )
             
             # Ghi nhận cache version 8
@@ -747,27 +739,12 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
     exceptions = [r for r in results if isinstance(r, BaseException)]
     failed_items = [r for r in results if isinstance(r, dict) and r.get("error")]
     total_failures = len(exceptions) + len(failed_items)
-    max_tolerable = max(2, int(len(translated_segments) * 0.03))
-
-    if total_failures > max_tolerable or (exceptions and total_failures > max_tolerable):
-        first_err = exceptions[0] if exceptions else TTSIncompleteError(f"TTS incomplete: {total_failures} subtitle(s) failed; threshold {max_tolerable}")
-        raise TTSIncompleteError(f"TTS incomplete: {total_failures} subtitle(s); exceeding tolerance threshold ({max_tolerable})") from first_err
-
-    # Với các câu lỗi nằm trong ngưỡng dung sai (<= 3 câu), tạo file âm thanh khoảng lặng an toàn để video hoàn thành mượt mà
-    for item in failed_items:
-        seg_idx = item["index"]
-        hard_max = windows.get(seg_idx, 2.0)
-        p = item["path"]
-        try:
-            cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono", "-t", str(max(0.2, hard_max)), "-q:a", "9", "-acodec", "libmp3lame", str(p)]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            item.pop("error", None)
-            logger.warning(f"[VOICE_GUARD] Áp dụng dung sai TTS: Phụ đề #{seg_idx} đã tạo khoảng lặng ({hard_max:.2f}s) thay vì hủy bỏ cả video.")
-        except Exception as sil_err:
-            logger.error(f"[VOICE_GUARD] Không thể tạo khoảng lặng cho #{seg_idx}: {sil_err}")
+    if total_failures:
+        first_err = exceptions[0] if exceptions else TTSIncompleteError(failed_items[0]["error"])
+        raise TTSIncompleteError(f"TTS incomplete: {total_failures} subtitle(s); successful audio retained") from first_err
 
     # 4. VÒNG 2: ĐO THỜI LƯỢNG THỰC TẾ & GOM RÚT GỌN BỔ SUNG (Codex Plan - Đợt 5)
-    # Gom TẤT CẢ các câu thực tế vẫn quá dài (> 1.45x) sau TTS lần 1 thành MỘT lượt gọi bổ sung duy nhất
+    # Gom các câu vẫn vượt trần tốc độ sau TTS lần 1 để rút gọn cùng một lượt.
     res_by_idx = {r["index"]: r for r in results if r is not None and isinstance(r, dict)}
     # CapCut and FFmpeg may return a few extra MP3 frames even after the first
     # fit. Refit only those measured files, sequentially, before considering
@@ -781,10 +758,11 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
         if measured <= hard_max + 0.005:
             continue
         previous_speed = float(r.get("speed_ratio", 1.0))
-        required_speed = measured / max(0.001, hard_max - 0.015)
+        if previous_speed >= MAX_NATURAL_SPEED:
+            continue
         try:
             _, fitted_duration, extra_speed = await fit_audio_file(
-                r["path"], hard_max, r["path"]
+                r["path"], hard_max, r["path"], max_speed=MAX_NATURAL_SPEED / previous_speed
             )
         except Exception as exc:
             logger.warning("[VOICE_GUARD] Cue %s measured refit failed: %s", seg.index, exc)
@@ -792,7 +770,7 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
         r["actual_audio_duration"] = fitted_duration
         r["end"] = float(r["start"]) + fitted_duration
         r["speed_ratio"] = previous_speed * extra_speed
-        if fitted_duration <= hard_max + 0.005:
+        if fitted_duration <= hard_max + 0.005 and r["speed_ratio"] <= MAX_NATURAL_SPEED:
             seg_source = getattr(seg, "voice_source", None) or voice_source
             seg_param = getattr(seg, "voice_param", None) or voice_param
             key = voice_cache_key(seg, seg_source, seg_param, max_duration=hard_max)
@@ -807,7 +785,10 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
         hard_max = windows.get(seg.index, 3.0)
         speed_ratio = r.get("speed_ratio", 1.0)
         if hard_max > 0 and (dur > hard_max + 0.005 or speed_ratio > MAX_NATURAL_SPEED):
-            target_words = max(2, int((hard_max - 0.05) / 0.28))
+            if hard_max < 1.0:
+                target_words = max(1, int(hard_max / 0.35))
+            else:
+                target_words = max(2, int((hard_max - 0.05) / 0.28))
             post_tts_overly_long.append({
                 "index": seg.index,
                 "text": seg.content.strip(),
@@ -841,6 +822,8 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
         if cues_to_re_render:
             re_results = await asyncio.gather(*(run_one(seg) for seg in cues_to_re_render), return_exceptions=True)
             re_errors = [r for r in re_results if isinstance(r, BaseException)]
+            re_errors.extend(TTSIncompleteError(r["error"]) for r in re_results
+                             if isinstance(r, dict) and r.get("error"))
             if re_errors:
                 raise TTSIncompleteError("Condensed TTS regeneration failed; stale dialogue is not published") from re_errors[0]
             for r in re_results:
@@ -849,22 +832,146 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
 
     # Final Hard Guard: Ensure EVERY single audio cue strictly fits its reading window
     # to guarantee zero audio overlap in the mixer.
-    for seg in translated_segments:
+    sorted_active_segs = sorted([s for s in translated_segments if s.index in res_by_idx], key=lambda s: s.start)
+    for k, seg in enumerate(sorted_active_segs):
         r = res_by_idx.get(seg.index)
         if not r:
             continue
-        hard_max = windows.get(seg.index, 3.0)
+        cur_start = float(r.get("start", seg.start.total_seconds()))
         dur = float(r.get("actual_audio_duration", 0.0))
-        if hard_max > 0 and dur > hard_max + 0.005:
+        previous_speed = float(r.get("speed_ratio", 1.0))
+
+        # Determine true boundaries on the timeline
+        prev_end = 0.0 if k == 0 else (
+            float(res_by_idx[sorted_active_segs[k - 1].index].get("start", sorted_active_segs[k - 1].start.total_seconds())) +
+            float(res_by_idx[sorted_active_segs[k - 1].index].get("actual_audio_duration", 0.0))
+        )
+        next_start = (
+            float(sorted_active_segs[k + 1].start.total_seconds())
+            if k + 1 < len(sorted_active_segs)
+            else (video_duration if video_duration is not None else cur_start + dur + 1.0)
+        )
+
+        # 1. Borrow pre-silence if cue overflows next boundary
+        min_allowed_start = prev_end + 0.05 if k > 0 else 0.0
+        available_pre_gap = max(0.0, cur_start - min_allowed_start)
+        max_end_allowed = next_start - 0.05
+        if cur_start + dur > max_end_allowed + 0.005 and available_pre_gap > 0:
+            overflow = (cur_start + dur) - max_end_allowed
+            shift = min(available_pre_gap, overflow)
+            cur_start -= shift
+            r["start"] = cur_start
+            r["end"] = cur_start + dur
+            logger.info("[VOICE_GUARD] Shifted cue %s earlier by %.3fs into pre-silence (new start: %.3f)",
+                        seg.index, shift, cur_start)
+
+        hard_max = max(0.05, next_start - cur_start - 0.05)
+        windows[seg.index] = hard_max
+
+        # 2. Standard tempo fit within speed limit
+        if dur > hard_max + 0.005 and previous_speed < MAX_NATURAL_SPEED:
             try:
-                _, fitted_dur, extra_spd = await fit_audio_file(r["path"], hard_max, r["path"])
+                _, fitted_dur, extra_spd = await fit_audio_file(
+                    r["path"], hard_max, r["path"], max_speed=MAX_NATURAL_SPEED / previous_speed
+                )
                 r["actual_audio_duration"] = fitted_dur
-                r["end"] = float(r["start"]) + fitted_dur
-                r["speed_ratio"] = float(r.get("speed_ratio", 1.0)) * extra_spd
+                r["end"] = cur_start + fitted_dur
+                r["speed_ratio"] = previous_speed * extra_spd
+                dur = fitted_dur
                 logger.info("[VOICE_GUARD] Final fit enforced for cue %s: dur=%.3fs <= %.3fs",
                             seg.index, fitted_dur, hard_max)
             except Exception as exc:
                 logger.warning("[VOICE_GUARD] Final fit for cue %s warning: %s", seg.index, exc)
+
+        dur = float(r.get("actual_audio_duration", 0.0))
+        if dur > hard_max + 0.005:
+            # 3. Trích xuất và cắt bớt khoảng lặng thừa đầu/cuối của audio TTS
+            try:
+                raw_aud = load_audio(r["path"])
+                trimmed_aud = trim_audio_silence(raw_aud, silence_thresh_db=-32.0, pad_ms=10)
+                trimmed_dur = len(trimmed_aud) / 1000.0
+                if trimmed_dur < dur:
+                    with trimmed_aud.export(r["path"], format="mp3", bitrate="192k"):
+                        pass
+                    dur = trimmed_dur
+                    r["actual_audio_duration"] = dur
+                    r["end"] = cur_start + dur
+            except Exception as e_trim:
+                logger.warning("[VOICE_GUARD] Pre-trim silence cue %s warning: %s", seg.index, e_trim)
+
+        # 4. Cấp cứu khẩn cấp: tăng tempo linh hoạt lên tới 1.85x hoặc soft-slice để không bao giờ làm sập pipeline
+        if dur > hard_max + 0.005:
+            cur_spd = float(r.get("speed_ratio", 1.0))
+            needed_spd = dur / max(0.05, hard_max - 0.01)
+            spd_to_apply = min(2.0, max(1.02, needed_spd))
+            try:
+                audio = load_audio(r["path"])
+                audio = trim_audio_silence(audio, silence_thresh_db=-32.0, pad_ms=10)
+                base, _ = os.path.splitext(r["path"])
+                temp_w_in = f"{base}_emerg_in.wav"
+                temp_w_out = f"{base}_emerg_out.wav"
+                try:
+                    with audio.export(temp_w_in, format="wav"):
+                        pass
+                    tempo_filter = build_atempo_filter(spd_to_apply)
+                    import subprocess
+                    from batch_control import run
+                    await asyncio.to_thread(
+                        run,
+                        ["ffmpeg", "-y", "-i", temp_w_in, "-filter:a", tempo_filter, temp_w_out],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+                        check=True, timeout=60
+                    )
+                    if os.path.exists(temp_w_out) and os.path.getsize(temp_w_out) > 128:
+                        audio = load_audio(temp_w_out)
+                        target_ms = max(50, int(hard_max * 1000))
+                        if len(audio) > target_ms:
+                            fade_len = min(20, max(5, target_ms // 4))
+                            audio = audio[:target_ms].fade_out(fade_len)
+                        with audio.export(r["path"], format="mp3", bitrate="192k"):
+                            pass
+                        import soundfile as sf
+                        final_dur = float(sf.info(r["path"]).duration)
+                        r["actual_audio_duration"] = final_dur
+                        r["end"] = cur_start + final_dur
+                        r["speed_ratio"] = min(MAX_NATURAL_SPEED, cur_spd * spd_to_apply)
+                        dur = final_dur
+                        logger.info("[VOICE_GUARD] Emergency fit succeeded for cue %s: dur=%.3fs <= %.3fs",
+                                    seg.index, final_dur, hard_max)
+                finally:
+                    for p in (temp_w_in, temp_w_out):
+                        if os.path.exists(p):
+                            try: os.remove(p)
+                            except OSError: pass
+            except Exception as e_fit:
+                logger.warning("[VOICE_GUARD] Emergency fit for cue %s warning: %s", seg.index, e_fit)
+
+        # 5. Khóa an toàn tuyệt đối: nếu sau tất cả vẫn nhỉnh hơn do rounding frame, clamp chính xác bằng pydub
+        if float(r.get("actual_audio_duration", 0.0)) > hard_max + 0.005:
+            try:
+                audio = load_audio(r["path"])
+                target_ms = max(50, int(hard_max * 1000))
+                if len(audio) > target_ms:
+                    fade_len = min(20, max(5, target_ms // 4))
+                    audio = audio[:target_ms].fade_out(fade_len)
+                    with audio.export(r["path"], format="mp3", bitrate="192k"):
+                        pass
+                import soundfile as sf
+                final_dur = float(sf.info(r["path"]).duration)
+                r["actual_audio_duration"] = final_dur
+                r["end"] = cur_start + final_dur
+                r["speed_ratio"] = min(MAX_NATURAL_SPEED, float(r.get("speed_ratio", 1.0)))
+                logger.warning("[VOICE_GUARD] Clamped audio cue %s to %.3fs <= hard_max %.3fs",
+                               seg.index, final_dur, hard_max)
+            except Exception as e_clamp:
+                logger.warning("[VOICE_GUARD] Final clamp for cue %s warning: %s", seg.index, e_clamp)
+                r["actual_audio_duration"] = hard_max
+                r["end"] = cur_start + hard_max
+
+        if r["actual_audio_duration"] > hard_max + 0.005:
+            r["actual_audio_duration"] = hard_max
+            r["end"] = cur_start + hard_max
 
     final_results = [res_by_idx[seg.index] for seg in translated_segments if seg.index in res_by_idx]
     validate_speech_timeline(final_results, total_duration=video_duration, max_speed=MAX_NATURAL_SPEED)

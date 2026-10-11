@@ -14,6 +14,11 @@ import math
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+try:
+    from .v1_speech_guard import natural_speed_limit
+except ImportError:
+    from v1_speech_guard import natural_speed_limit
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_FLAGS: Dict[str, Any] = {
@@ -54,6 +59,7 @@ def get_feature_flags(workspace_path: Optional[str | Path] = None) -> Dict[str, 
                 flags.update(data)
         except Exception as exc:
             logger.warning("Không thể đọc v1_feature_flags.json: %s", exc)
+    flags["V1_MAX_NATURAL_SPEED"] = natural_speed_limit(flags["V1_MAX_NATURAL_SPEED"])
     return flags
 
 
@@ -85,8 +91,8 @@ def set_feature_flags(new_flags: Dict[str, Any], workspace_path: Optional[str | 
             raise ValueError("V1_TTS_WORKERS must be an integer from 1 to 6")
     if "V1_MAX_NATURAL_SPEED" in updates:
         value = updates["V1_MAX_NATURAL_SPEED"]
-        if type(value) not in (int, float) or not math.isfinite(value) or not 1 <= value <= 1.60:
-            raise ValueError("V1_MAX_NATURAL_SPEED must be between 1 and 1.60")
+        if type(value) not in (int, float) or not math.isfinite(value) or not 1.00 <= value <= 1.50:
+            raise ValueError("V1_MAX_NATURAL_SPEED must be between 1.00 and 1.50")
 
     # Đồng bộ 2 chiều giữa V1_ASR_MODEL và ENABLE_QWEN_ASR
     if "V1_ASR_MODEL" in updates:

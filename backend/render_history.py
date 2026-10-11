@@ -62,8 +62,30 @@ def format_duration(seconds: float) -> str:
     return f"{s}s"
 
 
+def _workspace_roots():
+    candidates = [
+        WORKSPACE_DIR,
+        Path(r"D:\workspace"),
+        Path(r"C:\tool v1\workspace"),
+        Path(r"D:\workspace_v2"),
+        Path(r"C:\tool v2\workspace"),
+    ]
+    if PATHS.shared_workspace_dir:
+        candidates.append(Path(PATHS.shared_workspace_dir))
+
+    roots = {}
+    for candidate in candidates:
+        try:
+            key = os.path.normcase(str(candidate.resolve()))
+        except OSError:
+            key = os.path.normcase(os.path.abspath(str(candidate)))
+        roots.setdefault(key, candidate)
+    return list(roots.values())
+
+
 def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int]:
     """Đọc toàn bộ lịch sử thời gian render từ workspace, manifests và cache runtime."""
+    workspaces = _workspace_roots()
     history_files = [
         HISTORY_FILE,
         Path(r"D:\workspace\bot_system\.render_history.json"),
@@ -114,8 +136,9 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
         Path(r"C:\tool v2\workspace\job_status.json"),
     ]
     if PATHS.shared_workspace_dir:
+        shared_workspace = Path(PATHS.shared_workspace_dir)
         workspace_candidates.extend(
-            [workspace / "bot_system" / "job_status.json", workspace / "job_status.json"]
+            [shared_workspace / "bot_system" / "job_status.json", shared_workspace / "job_status.json"]
         )
     for ws in workspace_candidates:
         if ws.is_file():
@@ -134,10 +157,7 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
                 pass
 
     # 3. Đọc từ toàn bộ V1 Manifests (*.manifest.json)
-    manifest_dirs = [
-        Path(r"D:\workspace\bot_system\manifests"),
-        Path(r"C:\tool v1\workspace\bot_system\manifests"),
-    ]
+    manifest_dirs = [workspace / "bot_system" / "manifests" for workspace in workspaces]
     for md in manifest_dirs:
         if md.is_dir():
             try:
@@ -165,12 +185,7 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
                 pass
 
     # 4. Đọc từ toàn bộ V2 Manifests (job_manifest.json)
-    v2_ws_dirs = [
-        Path(r"D:\workspace_v2"),
-        Path(r"C:\tool v2\workspace"),
-        Path(r"D:\workspace"),
-        Path(r"C:\tool v1\workspace"),
-    ]
+    v2_ws_dirs = workspaces
     for v2_dir in v2_ws_dirs:
         if v2_dir.is_dir():
             try:
@@ -231,10 +246,10 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
                     data = json.loads(mf.read_text(encoding="utf-8"))
                     duration = manifest_duration(data)
                     if duration > 0:
-                        register(data.get("video_name", ""), duration)
+                        _register(data.get("video_name", ""), duration)
                         output_path = data.get("output_video_path")
                         if output_path:
-                            register(Path(output_path).name, duration)
+                            _register(Path(output_path).name, duration)
                 except Exception:
                     continue
 
@@ -247,10 +262,10 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
                     duration = manifest_duration(d)
                     if duration > 0:
                         job_name = mf.parent.parent.name
-                        register(job_name, duration)
+                        _register(job_name, duration)
                         source_path = d.get("metadata", {}).get("source_path")
                         if source_path:
-                            register(Path(source_path).name, duration)
+                            _register(Path(source_path).name, duration)
                 except Exception:
                     continue
 

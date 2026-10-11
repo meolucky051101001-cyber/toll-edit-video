@@ -121,14 +121,14 @@ class LongVideoEngineTests(unittest.TestCase):
         self.assertEqual(factor, 1.0)
         self.assertEqual(status, "normal")
 
-        # 2. Tràn nhẹ trong ngưỡng [1.03, 1.35] -> atempo_fit
+        # 2. Tràn nhẹ trong ngưỡng [1.03, 1.50] -> atempo_fit
         factor, status = calculate_atempo_factor(actual_duration=2.4, window_duration=2.0)
         self.assertAlmostEqual(factor, 1.2, places=1)
         self.assertEqual(status, "atempo_fit")
 
-        # 3. Tràn quá mức (> 1.35x) -> needs_condensation
+        # 3. Tràn quá mức (> 1.50x) -> needs_condensation
         factor, status = calculate_atempo_factor(actual_duration=3.5, window_duration=2.0)
-        self.assertAlmostEqual(factor, 1.35, places=2)
+        self.assertAlmostEqual(factor, DEFAULT_MAX_NATURAL_SPEED, places=2)
         self.assertEqual(status, "needs_condensation")
 
     def test_detect_overly_long_and_batch_planning(self):
