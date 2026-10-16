@@ -1,15 +1,13 @@
 # AutoDub Video Tools (Tool V1 Production)
 
 > [!IMPORTANT]
-> **THÔNG BÁO VỀ TRẠNG THÁI HỆ THỐNG (Cập nhật 10/2026):**
-> - **Tool V2 ĐÃ NGỪNG SỬ DỤNG (DEPRECATED & RETIRED):** Toàn bộ runtime, database, background service và thư mục của Tool V2 đã được dọn sạch khỏi môi trường sản xuất.
-> - **Tool V1 là hệ thống DUY NHẤT được duy trì chính thức (OFFICIAL PRODUCTION):** Đây là công cụ ổn định, hoàn chỉnh, tích hợp đầy đủ quy trình tự động 8 bước lồng tiếng/dịch thuật AI trên card NVIDIA GPU và phục vụ sản xuất thực tế qua Telegram Bot và Dashboard Monitor.
+> **Tool V1 là hệ thống chính thức (OFFICIAL PRODUCTION):** Công cụ ổn định, hoàn chỉnh, tích hợp đầy đủ quy trình tự động 8 bước lồng tiếng/dịch thuật AI trên card NVIDIA GPU và phục vụ sản xuất thực tế qua Telegram Bot và Dashboard Monitor.
 
 ---
 
 ## Mục lục
 
-1. [Tổng quan & Phân định hệ thống](#1-tổng-quan--phân-định-hệ-thống)
+1. [Tổng quan hệ thống](#1-tổng-quan-hệ-thống)
 2. [Quy trình xử lý tự động của Tool V1](#2-quy-trình-xử-lý-tự-động-của-tool-v1)
 3. [Danh mục Model AI & Cấu hình Runtime](#3-danh-mục-model-ai--cấu-hình-runtime)
 4. [Cài đặt & Khởi động Tool V1](#4-cài-đặt--khởi-động-tool-v1)
@@ -19,12 +17,11 @@
 
 ---
 
-## 1. Tổng quan & Phân định hệ thống
+## 1. Tổng quan hệ thống
 
 | Tên công cụ / Nhánh | Trạng thái | Cổng truy cập | Vai trò chính |
 | --- | --- | --- | --- |
 | **Tool V1 (Production)**<br>[`tool-v1`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v1) / [`main`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/main) | **ĐANG SỬ DỤNG (Chính thức)** | Dashboard: `http://127.0.0.1:8088`<br>Tool Control: `http://127.0.0.1:8090` | Hệ thống lồng tiếng & dịch video tự động 8 bước trọn gói, tích hợp Telegram bot, Dashboard theo dõi real-time, GPU BS-RoFormer, Whisper Turbo & Gemini AI failover. |
-| **Tool V2**<br>[`tool-v2`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v2) | **ĐÃ DỪNG / RETIRED** | *Đã tắt toàn bộ* | Phiên bản thử nghiệm pipeline theo stage; đã ngừng phát triển và loại bỏ khỏi môi trường hoạt động thực tế. |
 | **AI Video Research Tool**<br>[`tool-tim-kiem-video`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-tim-kiem-video) | **Độc lập** | Web: `http://localhost:3000`<br>API: `http://localhost:8000` | Ứng dụng nghiên cứu và thu thập video độc lập (cào dữ liệu Douyin/Xiaohongshu); không dùng chung quy trình với Tool V1. |
 
 ---
