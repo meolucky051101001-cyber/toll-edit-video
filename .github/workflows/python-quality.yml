@@ -24,7 +24,14 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements-dev.txt pytest pytest-asyncio
-      - name: Run Tool V1 Production Readiness Tests
-        run: |
-          python -m pytest tests/test_verify_production_readiness.py tests/test_v1_quality_gate.py -v
+          python -m pip install -r requirements-dev.txt
+      - name: Run Tool V1 Unit & Quality Gate Tests
+        run: >-
+          python -m unittest
+          tests.test_v1_quality_gate
+          tests.test_app_paths
+          tests.test_ocr_subtitle_locator
+          tests.test_video_utils_paths
+          tests.test_url_utils
+      - name: Run Production Readiness Tests
+        run: python -m pytest tests/test_verify_production_readiness.py -v
