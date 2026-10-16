@@ -290,8 +290,14 @@ def build_custom_ass_file(job_dir: Path, cfg: Dict[str, Any], tw: int = 1080, th
         font_color_ass = hex_to_ass_color(font_color_hex, default_hex="000000", alpha=1.0)
         bg_color_ass = hex_to_ass_color(bg_color_hex, default_hex="ffffff", alpha=bg_opacity)
 
+        stroke_width = int(cfg.get("sub_stroke_width", 0))
+        stroke_color_hex = str(cfg.get("sub_stroke_color", "#000000"))
+        shadow_enabled = bool(cfg.get("sub_shadow", False))
+        stroke_color_ass = hex_to_ass_color(stroke_color_hex, default_hex="000000", alpha=1.0)
+        shadow_val = 2 if shadow_enabled else 0
+
         new_bg_style = f"Style: BgStyle,Arial,{font_size},{bg_color_ass},{bg_color_ass},{bg_color_ass},{bg_color_ass},0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1"
-        new_txt_style = f"Style: TextStyle,{font_name},{font_size},{font_color_ass},&H000000FF,&H00000000,&H00000000,{bold_val},0,0,0,100,100,0,0,1,0,0,5,10,10,10,1"
+        new_txt_style = f"Style: TextStyle,{font_name},{font_size},{font_color_ass},&H000000FF,{stroke_color_ass},&H00000000,{bold_val},0,0,0,100,100,0,0,1,{stroke_width},{shadow_val},5,10,10,10,1"
 
         ass_text = re.sub(r"Style:\s*BgStyle,[^\r\n]+", new_bg_style, ass_text)
         ass_text = re.sub(r"Style:\s*TextStyle,[^\r\n]+", new_txt_style, ass_text)
@@ -324,7 +330,12 @@ def build_ass_force_style(cfg: Dict[str, Any], default_font_size: int = 18) -> s
     bg_color_hex = str(cfg.get("sub_bg_color", "#ffffff"))
     bg_opacity = float(cfg.get("sub_bg_opacity", 1.0))
     padding_y = int(cfg.get("sub_box_padding_y", 8))
-    outline_val = max(1, padding_y // 2)
+
+    stroke_width = int(cfg.get("sub_stroke_width", 0))
+    stroke_color_hex = str(cfg.get("sub_stroke_color", "#000000"))
+    shadow_enabled = bool(cfg.get("sub_shadow", False))
+    outline_color_ass = hex_to_ass(stroke_color_hex, default_hex="000000", alpha=1.0)
+    shadow_val = 2 if shadow_enabled else 0
 
     primary = hex_to_ass(font_color_hex, default_hex="000000", alpha=1.0)
     back = hex_to_ass(bg_color_hex, default_hex="ffffff", alpha=bg_opacity)
@@ -332,14 +343,26 @@ def build_ass_force_style(cfg: Dict[str, Any], default_font_size: int = 18) -> s
     pos_y_pct = float(cfg.get("sub_pos_y_pct", 0.82))
     margin_v = max(15, int(1920 * max(0.02, 1.0 - pos_y_pct))) if default_font_size >= 18 else max(10, int(1080 * max(0.02, 1.0 - pos_y_pct)))
 
+    if bg_opacity <= 0.05:
+        # Không có hộp nền: Sử dụng BorderStyle=1 (chữ có outline/stroke & shadow)
+        border_style = 1
+        outline_val = stroke_width if stroke_width > 0 else 0
+        outline_color = outline_color_ass
+    else:
+        # Có hộp nền: Sử dụng BorderStyle=3 (hộp bọc văn bản)
+        border_style = 3
+        outline_val = max(1, padding_y // 2)
+        outline_color = back
+
     return (
         f"FontName={font_name},"
         f"FontSize={font_size},"
         f"PrimaryColour={primary},"
+        f"OutlineColour={outline_color},"
         f"BackColour={back},"
-        f"BorderStyle=3,"
+        f"BorderStyle={border_style},"
         f"Outline={outline_val},"
-        f"Shadow=0,"
+        f"Shadow={shadow_val},"
         f"Alignment=2,"
         f"MarginV={margin_v},"
         f"Bold={bold_val}"

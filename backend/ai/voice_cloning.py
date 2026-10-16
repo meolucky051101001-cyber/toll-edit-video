@@ -15,7 +15,7 @@ from pydub import AudioSegment
 logger = logging.getLogger(__name__)
 
 edge_semaphore = asyncio.Semaphore(int(os.getenv("V1_EDGE_WORKERS", "4")))
-capcut_semaphore = threading.Semaphore(int(os.getenv("V1_CAPCUT_WORKERS", "3")))
+capcut_semaphore = threading.Semaphore(int(os.getenv("V1_CAPCUT_WORKERS", "6")))
 rvc_semaphore = asyncio.Semaphore(1)
 global_rvc_instance = None
 global_rvc_model_path = None
@@ -529,19 +529,12 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
             elif voice_source == "capcut":
                 await asyncio.to_thread(_run_capcut_tts, text, temp_raw, voice_param)
             elif voice_source == "rvc":
-                temp_rvc_raw = f"{base_audio}_temp_rvc_raw{ext}"
-                await generate_tts_edge(text, temp_rvc_raw, "vi-VN-HoaiMyNeural", pitch="+0Hz", rate="+0%")
-                await apply_rvc_clone(temp_rvc_raw, temp_raw, voice_param, strict=True)
-                if os.path.exists(temp_rvc_raw):
-                    try: os.remove(temp_rvc_raw)
-                    except OSError: pass
-            elif voice_source == "vieneu":
-                vp_lower = str(voice_param).lower()
-                if any(f in vp_lower for f in ["mai anh", "trúc ly", "thùy dung", "ngọc huyền", "ngọc trân", "mỹ duyên", "quỳnh anh", "nữ", "female"]):
-                    v_param = "BV562_streaming"
-                else:
-                    v_param = "BV075_streaming"
-                await asyncio.to_thread(_run_capcut_tts, text, temp_raw, v_param)
+                # Model RVC đã được gỡ bỏ hoàn toàn; tự động chuyển sang CapCut Mai / Thanh Niên chuẩn xác
+                rvc_fallback = "BV562_streaming" if "female" in str(voice_param).lower() or "mai" in str(voice_param).lower() or not voice_param else "BV075_streaming"
+                await asyncio.to_thread(_run_capcut_tts, text, temp_raw, rvc_fallback)
+            elif voice_source in ("vieneu", "vie-tts"):
+                from .vieneu_tts_service import generate_tts_vieneu
+                await generate_tts_vieneu(text, temp_raw, voice=voice_param)
             else:
                 await asyncio.to_thread(_run_capcut_tts, text, temp_raw, "BV075_streaming")
 

@@ -6,9 +6,9 @@ Nguyên tắc:
 2. Khóa giọng đó cho toàn bộ các câu trong video từ đầu đến cuối.
 3. Người nói tiếp theo (dù đổi nam/nữ) TUYỆT ĐỐI KHÔNG làm đổi giọng video.
 4. Quy tắc ánh xạ:
-   - Người nói đầu là NỮ -> Khóa Chí Mai (RVC chi-mai, fallback CapCut/Edge nếu thiếu runtime RVC).
+   - Người nói đầu là NỮ -> Khóa CapCut Mai (capcut-BV562_streaming, param: BV562_streaming).
    - Người nói đầu là NAM -> Khóa Thanh Niên Tự Tin (CapCut capcut-BV075_streaming, param: BV075_streaming).
-   - Không xác định / nhiễu / quá ngắn -> Fallback về giọng mặc định cấu hình; ghi log rõ ràng.
+   - Không xác định / nhiễu / quá ngắn -> Fallback về giọng mặc định cấu hình (CapCut Mai); ghi log rõ ràng.
 5. Snapshot & Persistence:
    - Lưu lựa chọn vào voice_lock.json trong thư mục job (out_dir).
    - Khi resume, retry, hoặc chạy nền: Luôn đọc trực tiếp từ voice_lock.json đã lưu,
@@ -557,15 +557,15 @@ def resolve_locked_voice(
         import voice_selection
         cfg_voice = (voice_config or {}).get("manual_voice") or voice_selection.selected()
         v_id = cfg_voice["id"]
-        v_source = cfg_voice["source"]
-        v_param = cfg_voice["param"]
-        v_label = cfg_voice["label"]
+        v_source = cfg_voice.get("source", "capcut")
+        v_param = cfg_voice.get("param", "BV562_streaming")
+        v_label = cfg_voice.get("label", "CapCut · Mai")
 
-        if v_id == "chi-mai":
-            resolved_rvc = rvc_model_path or find_rvc_model_path(workspace)
-            if not resolved_rvc or not rvc_runtime_available():
-                raise RuntimeError("Giọng thủ công đang chọn là 'chi-mai' nhưng thiếu RVC model/runtime khả dụng trên hệ thống. Dừng trước TTS.")
-            v_param = resolved_rvc
+        if v_id == "chi-mai" or v_source == "rvc":
+            v_id = VOICE_FEMALE_ID
+            v_source = "capcut"
+            v_param = VOICE_FEMALE_PARAM
+            v_label = "CapCut · Mai (Nữ Chuẩn)"
 
         logger.info("Chế độ Manual: Dùng trực tiếp giọng thủ công đã chọn: %s (%s). Bỏ qua bước nhận diện F0/HNR.", v_label, v_id)
         return {
@@ -594,25 +594,15 @@ def resolve_locked_voice(
             chosen = next((v for v in catalog if v.get("id") == VOICE_FEMALE_ID), None) or (catalog[0] if catalog else None)
 
         v_id = chosen["id"] if chosen else VOICE_FEMALE_ID
-        v_source = chosen["source"] if chosen else "rvc"
-        v_param = chosen["param"] if chosen else ""
-        v_label = chosen["label"] if chosen else "Chí Mai · RVC"
+        v_source = chosen["source"] if chosen else "capcut"
+        v_param = chosen["param"] if chosen else VOICE_FEMALE_PARAM
+        v_label = chosen["label"] if chosen else "CapCut · Mai"
 
         if v_source == "rvc" or v_id == "chi-mai":
-            resolved_rvc = rvc_model_path or find_rvc_model_path(workspace)
-            if not resolved_rvc:
-                raise RuntimeError(
-                    "Chế độ Auto Voice: Phát hiện người nói đầu là NỮ nhưng không tìm thấy file model RVC Chí Mai ('mi-giong_cua_toi_v2.pth'). "
-                    "Không âm thầm thay thế bằng CapCut Mai để bảo đảm độ thuần giọng. "
-                    "Hãy kiểm tra thư mục MyVoiceModel_v2 hoặc tắt auto voice (/voice_auto off)."
-                )
-            if not rvc_runtime_available():
-                raise RuntimeError(
-                    "Chế độ Auto Voice: Phát hiện người nói đầu là NỮ nhưng RVC runtime hoặc CUDA không khả dụng trên hệ thống. "
-                    "Dừng job trước khi tạo TTS."
-                )
-            v_param = resolved_rvc
-            v_source = "rvc"
+            v_id = VOICE_FEMALE_ID
+            v_source = "capcut"
+            v_param = VOICE_FEMALE_PARAM
+            v_label = "CapCut · Mai (Nữ Chuẩn)"
 
         return {
             "voice_id": v_id,
@@ -623,7 +613,7 @@ def resolve_locked_voice(
             "confidence": confidence,
             "median_f0": median_f0,
             "first_segment_index": first_seg_index,
-            "rule": "first_speaker_female_rvc" if v_id == VOICE_FEMALE_ID else f"first_speaker_female_{v_source}",
+            "rule": f"first_speaker_female_{v_source}",
             "voice_mode": "auto",
         }
 
@@ -639,11 +629,10 @@ def resolve_locked_voice(
         v_label = chosen["label"] if chosen else "CapCut · Thanh Niên Tự Tin"
 
         if v_source == "rvc" or v_id == "chi-mai":
-            resolved_rvc = rvc_model_path or find_rvc_model_path(workspace)
-            if not resolved_rvc or not rvc_runtime_available():
-                raise RuntimeError(f"Chế độ Auto Voice: Giọng nam đã chọn '{v_label}' cần RVC runtime/model nhưng không khả dụng.")
-            v_param = resolved_rvc
-            v_source = "rvc"
+            v_id = VOICE_MALE_ID
+            v_source = "capcut"
+            v_param = VOICE_MALE_PARAM
+            v_label = "CapCut · Thanh Niên Tự Tin"
 
         return {
             "voice_id": v_id,
@@ -654,7 +643,7 @@ def resolve_locked_voice(
             "confidence": confidence,
             "median_f0": median_f0,
             "first_segment_index": first_seg_index,
-            "rule": "first_speaker_male_capcut" if v_id == VOICE_MALE_ID else f"first_speaker_male_{v_source}",
+            "rule": f"first_speaker_male_{v_source}",
             "voice_mode": "auto",
         }
 
@@ -666,24 +655,11 @@ def resolve_locked_voice(
     v_param = cfg_voice["param"]
     v_label = cfg_voice["label"]
 
-    if v_source == "vieneu":
-        vp_lower = str(v_param).lower()
-        if any(f in vp_lower for f in ["mai anh", "trúc ly", "thùy dung", "ngọc huyền", "ngọc trân", "mỹ duyên", "quỳnh anh", "nữ", "female"]):
-            v_id = VOICE_FEMALE_ID
-            v_source = "capcut"
-            v_param = "BV562_streaming"
-            v_label = "CapCut · Mai"
-        else:
-            v_id = VOICE_MALE_ID
-            v_source = "capcut"
-            v_param = "BV075_streaming"
-            v_label = "CapCut · Thanh Niên Tự Tin"
-
-    if v_id == "chi-mai":
-        resolved_rvc = rvc_model_path or find_rvc_model_path(workspace)
-        if not resolved_rvc or not rvc_runtime_available():
-            raise RuntimeError("Fallback về giọng thủ công 'chi-mai' nhưng thiếu RVC model/runtime. Dừng trước TTS.")
-        v_param = resolved_rvc
+    if v_id == "chi-mai" or v_source == "rvc":
+        v_id = VOICE_FEMALE_ID
+        v_source = "capcut"
+        v_param = VOICE_FEMALE_PARAM
+        v_label = "CapCut · Mai (Nữ Chuẩn)"
 
     logger.info(
         "Chế độ Auto Voice: Câu đầu không xác định chắc giới tính (conf=%.2f < %.2f, F0=%.1f Hz, gender=%s). "

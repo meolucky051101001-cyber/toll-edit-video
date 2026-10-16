@@ -965,9 +965,8 @@ HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name=
           <button type="button" class="voice-chip" id="chip-vieneu-maianh" onclick="selectVoiceForPreview('vieneu-maianh')">🔥 Mai Anh (VieNeu)</button>
           <button type="button" class="voice-chip" id="chip-vieneu-trucly" onclick="selectVoiceForPreview('vieneu-trucly')">🔥 Trúc Ly (VieNeu)</button>
           <button type="button" class="voice-chip" id="chip-vieneu-thienminh" onclick="selectVoiceForPreview('vieneu-thienminh')">🔥 Thiện Minh (VieNeu)</button>
-          <button type="button" class="voice-chip active" id="chip-capcut-BV562_streaming" onclick="selectVoiceForPreview('capcut-BV562_streaming')">Chí Mai (CapCut)</button>
+          <button type="button" class="voice-chip active" id="chip-capcut-BV562_streaming" onclick="selectVoiceForPreview('capcut-BV562_streaming')">Mai (CapCut)</button>
           <button type="button" class="voice-chip" id="chip-capcut-BV075_streaming" onclick="selectVoiceForPreview('capcut-BV075_streaming')">Thanh Niên Tự Tin</button>
-          <button type="button" class="voice-chip" id="chip-chi-mai" onclick="selectVoiceForPreview('chi-mai')">Chí Mai (RVC)</button>
           <button type="button" class="voice-chip" id="chip-microsoft-hoaimy" onclick="selectVoiceForPreview('microsoft-hoaimy')">Hoài My (Nữ)</button>
           <button type="button" class="voice-chip" id="chip-microsoft-namminh" onclick="selectVoiceForPreview('microsoft-namminh')">Nam Minh (Nam)</button>
           <button type="button" class="voice-chip" id="chip-capcut-BV421_vivn_streaming" onclick="selectVoiceForPreview('capcut-BV421_vivn_streaming')">Nhỏ Ngọt Ngào</button>
@@ -1151,7 +1150,7 @@ async function stopAll() {
   }
 }
 
-let currentPreviewVoiceId = 'chi-mai';
+let currentPreviewVoiceId = 'capcut-BV562_streaming';
 let cachedVoices = [];
 
 function toggleVoicePreview() {

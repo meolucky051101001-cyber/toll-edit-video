@@ -53,6 +53,10 @@ DEFAULT_CANVAS_SETTINGS: Dict[str, Any] = {
     "sub_font_color": "#000000", # Màu chữ phụ đề (Mặc định: Đen #000000)
     "sub_font_size": 18,         # Cỡ chữ (px) (12 - 36)
     "sub_font_bold": True,       # Chữ in đậm
+    "sub_stroke_color": "#000000", # Màu viền chữ
+    "sub_stroke_width": 0,       # Độ dày viền chữ (0 - 6px)
+    "sub_shadow": False,         # Đổ bóng chữ
+    "sub_preset": "custom",      # Preset phong cách chữ nhanh
     "sub_bg_color": "#ffffff",   # Màu khung nền (Mặc định: Trắng #ffffff)
     "sub_bg_opacity": 1.0,       # Độ mờ đục khung nền (0.1 - 1.0)
     "sub_box_padding_x": 16,     # Độ rộng lề ngang khung nền (px)
@@ -220,6 +224,7 @@ def get_available_image_backgrounds() -> List[Dict[str, Any]]:
 
     dirs_to_check = [
         IMAGE_BG_DIR,
+        ROOT.parent / "workspace" / "background_images",
         PATHS.shared_assets_dir / "background_images",
     ]
 
@@ -273,7 +278,7 @@ def resolve_image_bg_path(filename_or_path: str) -> str:
     p = Path(filename_or_path)
     if p.is_file() and p.exists():
         return str(p).replace("\\", "/")
-    for d in [IMAGE_BG_DIR, PATHS.shared_assets_dir / "background_images"]:
+    for d in [IMAGE_BG_DIR, ROOT.parent / "workspace" / "background_images", PATHS.shared_assets_dir / "background_images"]:
         candidate = d / p.name
         if candidate.is_file() and candidate.exists():
             return str(candidate).replace("\\", "/")
@@ -287,7 +292,7 @@ def get_canvas_settings() -> Dict[str, Any]:
             merged = dict(DEFAULT_CANVAS_SETTINGS)
             merged.update(data)
             ratio = str(merged.get("aspect_ratio", "original")).lower()
-            if ratio not in ("original", "9:16", "16:9", "1:1"):
+            if ratio not in ("original", "9:16", "16:9", "1:1", "4:5"):
                 ratio = "original"
             merged["aspect_ratio"] = ratio
 
@@ -328,7 +333,7 @@ def save_canvas_settings(new_settings: Dict[str, Any]) -> Dict[str, Any]:
         current["anti_reup_enabled"] = bool(current.get("anti_reup_enabled", True))
 
         ratio = str(current.get("aspect_ratio", "9:16")).lower()
-        if ratio not in ("original", "9:16", "16:9", "1:1"):
+        if ratio not in ("original", "9:16", "16:9", "1:1", "4:5"):
             ratio = "9:16"
         current["aspect_ratio"] = ratio
 
@@ -352,6 +357,23 @@ def save_canvas_settings(new_settings: Dict[str, Any]) -> Dict[str, Any]:
         current["crop_padding"] = max(-30, min(30, int(current.get("crop_padding", 0))))
         current["protect_top_thumb"] = bool(current.get("protect_top_thumb", True))
         current["show_safe_guides"] = bool(current.get("show_safe_guides", True))
+
+        # Subtitle styling fields
+        current["sub_font_name"] = str(current.get("sub_font_name", "Arial"))
+        current["sub_font_color"] = str(current.get("sub_font_color", "#000000"))
+        current["sub_font_size"] = max(10, min(50, int(current.get("sub_font_size", 18))))
+        current["sub_font_bold"] = bool(current.get("sub_font_bold", True))
+        current["sub_stroke_color"] = str(current.get("sub_stroke_color", "#000000"))
+        current["sub_stroke_width"] = max(0, min(10, int(current.get("sub_stroke_width", 0))))
+        current["sub_shadow"] = bool(current.get("sub_shadow", False))
+        current["sub_preset"] = str(current.get("sub_preset", "custom"))
+        current["sub_bg_color"] = str(current.get("sub_bg_color", "#ffffff"))
+        current["sub_bg_opacity"] = round(max(0.0, min(1.0, float(current.get("sub_bg_opacity", 1.0)))), 2)
+        current["sub_box_padding_x"] = max(0, min(60, int(current.get("sub_box_padding_x", 16))))
+        current["sub_box_padding_y"] = max(0, min(40, int(current.get("sub_box_padding_y", 8))))
+        current["sub_box_radius"] = max(0, min(30, int(current.get("sub_box_radius", 8))))
+        current["sub_pos_y_pct"] = round(max(0.05, min(0.98, float(current.get("sub_pos_y_pct", 0.82)))), 4)
+        current["sub_pos_x_pct"] = round(max(0.05, min(0.95, float(current.get("sub_pos_x_pct", 0.50)))), 4)
 
         SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         SETTINGS_FILE.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")

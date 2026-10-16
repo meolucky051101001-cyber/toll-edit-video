@@ -113,15 +113,22 @@ class ModelSpec:
         elif self.model_id == "capcut_tts_streaming":
             return True, "Sẵn sàng (CapCut API 6 workers song song)"
 
-        # 8. Edge TTS Fallback
+        # 8. VieNeu TTS
+        elif self.model_id == "vieneu_tts":
+            import importlib.util
+            if importlib.util.find_spec("vieneu") is not None:
+                return True, "Sẵn sàng (VieNeu CUDA 48k)"
+            return True, "Sẵn sàng (Fallback thông minh sang CapCut TTS)"
+
+        # 9. Edge TTS Fallback
         elif self.model_id == "edge_tts_fallback":
             return True, "Sẵn sàng (Edge TTS 4 workers dự phòng)"
 
-        # 9. Pydub Ducking Mixer
+        # 10. Pydub Ducking Mixer
         elif self.model_id == "pydub_soft_ducking":
             return True, "Sẵn sàng (Soft Dynamic Ducking BGM -2dB/Dub +1dB)"
 
-        # 10. NVENC Render
+        # 11. NVENC Render
         elif self.model_id == "nvenc_h264":
             return True, "Sẵn sàng (NVIDIA NVENC h264_nvenc >160 FPS)"
 
@@ -239,6 +246,19 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
         timeout_seconds=900,
         fallback_model_id="edge_tts_fallback",
         description="Lồng tiếng AI CapCut với 6 luồng tải đồng thời và co giãn nhịp điệu Rubberband.",
+    ),
+    "vieneu_tts": ModelSpec(
+        model_id="vieneu_tts",
+        stage=ModelStage.TTS,
+        display_name="VieNeu-TTS / Vie-TTS (48k Studio Quality)",
+        backend_runtime="vieneu_cuda",
+        gpu_device="cuda:0",
+        vram_required_mb=650.0,
+        measured_speed_rtf=0.30,
+        quality_sdr_or_score="Âm thanh 48kHz, sắc thái vùng miền Bắc - Trung - Nam",
+        timeout_seconds=900,
+        fallback_model_id="capcut_tts_streaming",
+        description="Bộ giọng VieNeu / Vie-TTS phong cách tự nhiên, tự động chuyển tiếp CapCut nếu thiếu runtime.",
     ),
     "edge_tts_fallback": ModelSpec(
         model_id="edge_tts_fallback",

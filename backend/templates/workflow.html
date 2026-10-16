@@ -380,6 +380,7 @@
     .canvas-9-16 { width: 340px; height: 604px; max-height: calc(100vh - 240px); }
     .canvas-16-9 { width: 860px; height: 483px; max-width: 92%; max-height: calc(100vh - 240px); }
     .canvas-1-1 { width: 490px; height: 490px; max-height: calc(100vh - 240px); }
+    .canvas-4-5 { width: 420px; height: 525px; max-height: calc(100vh - 240px); }
     .canvas-original { width: 440px; height: 580px; max-height: calc(100vh - 240px); }
 
     /* BACKGROUND LAYER BEHIND MAIN VIDEO */
@@ -1649,7 +1650,7 @@ header {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
 header .top-right > a[href="/quy-trinh"] { background: rgba(59, 130, 246, .2) !important; border-color: rgba(96, 165, 250, .42) !important; color: #dbeafe !important; }
-header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href="http://127.0.0.1:8089/"], header .top-right > a[href="/kich-ban"] { background: rgba(148, 163, 184, .055) !important; border-color: var(--border) !important; color: #cbd5e1 !important; }
+header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href="/kich-ban"] { background: rgba(148, 163, 184, .055) !important; border-color: var(--border) !important; color: #cbd5e1 !important; }
   
 
     /* Minimal visual pass: neutral editing workspace with quiet selection states */
@@ -1697,7 +1698,7 @@ header { background: #141519; box-shadow: none; backdrop-filter: none; }
 .btn-save-sidebar { background: #30483d; color: #c1dfcf; box-shadow: none; }
 .btn-save-sidebar:hover { background: #395746; box-shadow: none; transform: none; }
 header .top-right > a[href="/quy-trinh"] { background: #27292e !important; border-color: #3a3c42 !important; color: #f0f1f2 !important; }
-header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href="http://127.0.0.1:8089/"], header .top-right > a[href="/kich-ban"] { background: #191a1e !important; border-color: #303238 !important; color: #c1c4c9 !important; }
+header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href="/kich-ban"] { background: #191a1e !important; border-color: #303238 !important; color: #c1c4c9 !important; }
   </style>
 </head>
 <body>
@@ -1729,6 +1730,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         <button class="ratio-btn" data-ratio="9:16" onclick="setRatio('9:16')">9:16</button>
         <button class="ratio-btn" data-ratio="16:9" onclick="setRatio('16:9')">16:9</button>
         <button class="ratio-btn" data-ratio="1:1" onclick="setRatio('1:1')">1:1</button>
+        <button class="ratio-btn" data-ratio="4:5" onclick="setRatio('4:5')">4:5</button>
         <button class="ratio-btn active" data-ratio="original" onclick="setRatio('original')">Gốc</button>
       </div>
     </div>
@@ -1751,7 +1753,6 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
       <!-- UNIFIED NAVIGATION LINKS -->
       <a class="btn btn-outline" href="http://127.0.0.1:8088/" style="padding: 3px 10px; border-color: transparent;" title="Về Dashboard Tool V1">Tool V1</a>
-      <a class="btn btn-outline" href="http://127.0.0.1:8089/" style="padding: 3px 10px; border-color: transparent;" title="Về Dashboard Tool V2">Tool V2</a>
       <a class="btn btn-primary" href="/quy-trinh" style="padding: 3px 10px; background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.4); color: #60a5fa;" title="Đang ở Studio Quy Trình">Quy Trình</a>
       <a class="btn btn-outline" href="/kich-ban" style="padding: 3px 10px; border-color: transparent;" title="Mở Studio Kịch Bản AI & Lồng Sub">Kịch Bản</a>
 
@@ -2019,7 +2020,37 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           </div>
         </div>
 
-        <!-- Group 1: Chữ Phụ Đề (Font, Color, Size, Bold) -->
+        <!-- MẪU PHONG CÁCH PHỤ ĐỀ NHANH (QUICK PRESETS) -->
+        <div class="form-section" style="background: rgba(16, 185, 129, 0.05); border: 1px solid rgba(16, 185, 129, 0.25); border-radius: 8px; padding: 10px 12px;">
+          <div class="form-section-title" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <span style="color: #34d399; font-weight: 700;">⭐ Phong Cách Phụ Đề Nhanh (1 Click)</span>
+            <span style="font-size: 10px; color: #10b981; font-weight: 600;">Chuẩn TikTok & Shorts</span>
+          </div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+            <button type="button" class="btn btn-outline" style="font-size: 11px; padding: 6px 8px; justify-content: center; background: rgba(250, 204, 21, 0.1); border-color: rgba(250, 204, 21, 0.35); color: #facc15; font-weight: 700;" onclick="applySubtitlePreset('yellow_black_stroke')" title="Chữ vàng rực rỡ viền đen nổi bật, không nền, chuẩn Review Phim">
+              🟡 Vàng Viền Đen
+            </button>
+            <button type="button" class="btn btn-outline" style="font-size: 11px; padding: 6px 8px; justify-content: center; background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.3); color: #ffffff; font-weight: 700;" onclick="applySubtitlePreset('white_black_box')" title="Chữ trắng sắc nét trên khung đen bo góc mờ 80%, chuẩn CapCut Viral">
+              ⚪ Trắng Khung Đen
+            </button>
+            <button type="button" class="btn btn-outline" style="font-size: 11px; padding: 6px 8px; justify-content: center; background: #f1f5f9; border-color: rgba(255, 255, 255, 0.4); color: #000000; font-weight: 700;" onclick="applySubtitlePreset('black_white_box')" title="Chữ đen rõ ràng trên khung trắng bo góc 100%, chuẩn tối giản">
+              🔘 Đen Khung Trắng
+            </button>
+            <button type="button" class="btn btn-outline" style="font-size: 11px; padding: 6px 8px; justify-content: center; background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.4); color: #34d399; font-weight: 700;" onclick="applySubtitlePreset('emerald_neon')" title="Chữ xanh ngọc neon trên khung xanh đậm sang trọng">
+              🟢 Xanh Ngọc Neon
+            </button>
+          </div>
+        </div>
+
+        <!-- LIVE PREVIEW CARD TRONG SIDEBAR -->
+        <div style="margin: 10px 0 12px 0; padding: 10px; background: radial-gradient(circle at center, #1e293b 0%, #0f172a 100%); border: 1px dashed rgba(56, 189, 248, 0.4); border-radius: 8px; text-align: center;">
+          <div style="font-size: 10px; color: #94a3b8; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;">👁️ Xem trước trực tiếp kiểu chữ</div>
+          <div style="display: inline-block; max-width: 100%; word-break: break-word;">
+            <span id="subSamplePreviewText" style="display: inline-block; font-family: Arial; font-size: 16px; font-weight: 700; color: #000000; background: #ffffff; padding: 6px 14px; border-radius: 6px; transition: all 0.2s ease;">Phụ đề mẫu xem trước</span>
+          </div>
+        </div>
+
+        <!-- Group 1: Chữ Phụ Đề (Font, Color, Size, Bold, Stroke, Shadow) -->
         <div class="form-section">
           <div class="form-section-title" style="display: flex; justify-content: space-between; align-items: center;">
             <span>🔤 Font Chữ & Màu Chữ</span>
@@ -2036,6 +2067,9 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
               <option value="Be Vietnam Pro">Be Vietnam Pro (Tối ưu Tiếng Việt)</option>
               <option value="Open Sans">Open Sans (Rõ nét, dễ đọc)</option>
               <option value="Segoe UI">Segoe UI (Thanh thoát)</option>
+              <option value="Inter">Inter (Gọn gàng, trung tính)</option>
+              <option value="UTM Bebas">UTM Bebas (Chữ hoa TikTok)</option>
+              <option value="Oswald">Oswald (Hẹp cô đọng)</option>
             </select>
           </div>
 
@@ -2053,7 +2087,8 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
               <button type="button" class="export-pill active" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubFontColorPreset('#000000', this)">⚫ Đen (Mặc định)</button>
               <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubFontColorPreset('#ffffff', this)">⚪ Trắng</button>
               <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubFontColorPreset('#facc15', this)">🟡 Vàng</button>
-              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubFontColorPreset('#38bdf8', this)">🔵 Xanh</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubFontColorPreset('#34d399', this)">🟢 Xanh ngọc</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubFontColorPreset('#38bdf8', this)">🔵 Xanh cyan</button>
               <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubFontColorPreset('#ef4444', this)">🔴 Đỏ</button>
             </div>
           </div>
@@ -2072,6 +2107,33 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             <span class="switch-label" style="font-size: 11.5px;">Chữ in đậm (Bold)</span>
             <label class="switch-toggle">
               <input type="checkbox" id="chkSubBold" checked onchange="updateSubBold(this.checked)">
+              <span class="switch-slider"></span>
+            </label>
+          </div>
+
+          <!-- Viền Chữ (Text Stroke) -->
+          <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.06);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+              <label class="form-label" style="font-size: 11px; margin-bottom: 0;">Độ dày viền chữ (Stroke):</label>
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <input type="color" id="subStrokeColorPicker" value="#000000" style="width: 22px; height: 20px; padding: 0; border: none; border-radius: 4px; cursor: pointer; background: transparent;" oninput="updateSubStrokeColor(this.value)">
+                <span id="subStrokeWidthVal" class="form-slider-val" style="font-size: 12px;">0px</span>
+              </div>
+            </div>
+            <input type="range" id="subStrokeWidthSlider" min="0" max="6" step="1" value="0" class="form-slider" oninput="updateSubStrokeWidth(this.value)">
+            <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px;">
+              <button type="button" class="export-pill" style="padding: 2px 7px; font-size: 10px;" onclick="setSubStrokePreset(0, '#000000')">Không viền (0px)</button>
+              <button type="button" class="export-pill" style="padding: 2px 7px; font-size: 10px;" onclick="setSubStrokePreset(2, '#000000')">Viền đen 2px</button>
+              <button type="button" class="export-pill" style="padding: 2px 7px; font-size: 10px;" onclick="setSubStrokePreset(3, '#000000')">Viền đen 3px</button>
+              <button type="button" class="export-pill" style="padding: 2px 7px; font-size: 10px;" onclick="setSubStrokePreset(2, '#ffffff')">Viền trắng 2px</button>
+            </div>
+          </div>
+
+          <!-- Đổ bóng chữ (Text Shadow) -->
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.06);">
+            <span class="switch-label" style="font-size: 11.5px;">Đổ bóng chữ nổi bật (Text Shadow)</span>
+            <label class="switch-toggle">
+              <input type="checkbox" id="chkSubShadow" onchange="updateSubShadow(this.checked)">
               <span class="switch-slider"></span>
             </label>
           </div>
@@ -2172,6 +2234,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             <button class="ratio-btn" data-ratio="9:16" onclick="setRatio('9:16')">9:16 (Dọc)</button>
             <button class="ratio-btn" data-ratio="16:9" onclick="setRatio('16:9')">16:9 (Ngang)</button>
             <button class="ratio-btn" data-ratio="1:1" onclick="setRatio('1:1')">1:1 (Vuông)</button>
+            <button class="ratio-btn" data-ratio="4:5" onclick="setRatio('4:5')">4:5 (Post)</button>
             <button class="ratio-btn" data-ratio="original" onclick="setRatio('original')">Gốc</button>
           </div>
         </div>
@@ -2184,11 +2247,13 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           <div class="form-slider-row">
             <input type="range" class="form-slider" id="sliderScale" min="60" max="100" value="88" oninput="updateScale(this.value)">
           </div>
-          <div style="display: flex; gap: 6px; margin-top: 6px;">
-            <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px; flex: 1; justify-content: center;" onclick="updateScale(100); document.getElementById('sliderScale').value=100;">⚡ 100% Khớp Chiều Ngang (Không thu nhỏ)</button>
-            <button class="btn btn-outline" style="font-size: 11px; padding: 4px 8px; flex: 1; justify-content: center;" onclick="updateScale(88); document.getElementById('sliderScale').value=88;">🛡️ 88% Chuẩn né quét</button>
+          <div style="display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap;">
+            <button class="btn btn-outline" style="font-size: 10.5px; padding: 4px 6px; flex: 1; min-width: 90px; justify-content: center;" onclick="updateScale(100); document.getElementById('sliderScale').value=100;">⚡ 100% Khớp Ngang</button>
+            <button class="btn btn-outline" style="font-size: 10.5px; padding: 4px 6px; flex: 1; min-width: 90px; justify-content: center;" onclick="updateScale(92); document.getElementById('sliderScale').value=92;">✨ 92% Viền Nhẹ</button>
+            <button class="btn btn-outline" style="font-size: 10.5px; padding: 4px 6px; flex: 1; min-width: 90px; justify-content: center;" onclick="updateScale(88); document.getElementById('sliderScale').value=88;">🛡️ 88% Né Quét</button>
+            <button class="btn btn-outline" style="font-size: 10.5px; padding: 4px 6px; flex: 1; min-width: 90px; justify-content: center;" onclick="updateScale(80); document.getElementById('sliderScale').value=80;">🖼️ 80% Khung Nhỏ</button>
           </div>
-          <span style="font-size: 11px; color: var(--text-dim);">Chọn 100% để giữ nguyên thước phim không bị thu nhỏ hoặc 80-90% để lộ phông nền né quét bản quyền.</span>
+          <span style="font-size: 11px; color: var(--text-dim);">Chọn 100% để giữ nguyên thước phim không bị thu nhỏ hoặc 80-92% để lộ phông nền né quét bản quyền.</span>
         </div>
 
         <div class="form-group">
@@ -3858,6 +3923,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       if (canvasSettings.aspect_ratio === '9:16') studioCanvas.classList.add('canvas-9-16');
       else if (canvasSettings.aspect_ratio === '16:9') studioCanvas.classList.add('canvas-16-9');
       else if (canvasSettings.aspect_ratio === '1:1') studioCanvas.classList.add('canvas-1-1');
+      else if (canvasSettings.aspect_ratio === '4:5') studioCanvas.classList.add('canvas-4-5');
       else studioCanvas.classList.add('canvas-original');
 
       // 2. Anti-Reup Master Switch check:
@@ -3908,8 +3974,8 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         bgMotionVideo.style.display = 'none';
         bgSolid.style.display = 'block';
         const imgUrl = resolveImageBgStreamUrl(canvasSettings.bg_image_file || canvasSettings.bg_image || 'tia_sang_vang_ngoi_sao.jpg');
-        bgSolid.style.backgroundColor = 'transparent';
-        bgSolid.style.backgroundImage = `url('${imgUrl}')`;
+        bgSolid.style.backgroundColor = '#111827';
+        bgSolid.style.backgroundImage = `url('${imgUrl}'), radial-gradient(circle at 50% 30%, #1e293b 0%, #0f172a 100%)`;
         bgSolid.style.backgroundSize = 'cover';
         bgSolid.style.backgroundPosition = 'center';
         bgSolid.style.backgroundRepeat = 'no-repeat';
@@ -4755,6 +4821,110 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       triggerAutoSaveSettings();
     }
 
+    function updateSubStrokeWidth(val) {
+      const num = parseInt(val) || 0;
+      canvasSettings.sub_stroke_width = num;
+      const slider = document.getElementById('subStrokeWidthSlider');
+      if (slider && slider.value != num) slider.value = num;
+      const valEl = document.getElementById('subStrokeWidthVal');
+      if (valEl) valEl.innerText = `${num}px`;
+      applySubtitleVisuals();
+      triggerAutoSaveSettings();
+    }
+
+    function updateSubStrokeColor(val) {
+      canvasSettings.sub_stroke_color = val;
+      const pickEl = document.getElementById('subStrokeColorPicker');
+      if (pickEl && pickEl.value !== val) pickEl.value = val;
+      applySubtitleVisuals();
+      triggerAutoSaveSettings();
+    }
+
+    function setSubStrokePreset(width, color) {
+      canvasSettings.sub_stroke_width = width;
+      canvasSettings.sub_stroke_color = color;
+      const slider = document.getElementById('subStrokeWidthSlider');
+      if (slider) slider.value = width;
+      const valEl = document.getElementById('subStrokeWidthVal');
+      if (valEl) valEl.innerText = `${width}px`;
+      const pickEl = document.getElementById('subStrokeColorPicker');
+      if (pickEl) pickEl.value = color;
+      applySubtitleVisuals();
+      triggerAutoSaveSettings();
+    }
+
+    function updateSubShadow(checked) {
+      canvasSettings.sub_shadow = Boolean(checked);
+      const chk = document.getElementById('chkSubShadow');
+      if (chk && chk.checked !== Boolean(checked)) chk.checked = Boolean(checked);
+      applySubtitleVisuals();
+      triggerAutoSaveSettings();
+    }
+
+    function applySubtitlePreset(presetKey) {
+      canvasSettings.sub_preset = presetKey;
+      if (presetKey === 'yellow_black_stroke') {
+        canvasSettings.sub_font_name = 'Arial';
+        canvasSettings.sub_font_color = '#facc15';
+        canvasSettings.sub_font_bold = true;
+        canvasSettings.sub_font_size = 22;
+        canvasSettings.sub_stroke_width = 3;
+        canvasSettings.sub_stroke_color = '#000000';
+        canvasSettings.sub_shadow = true;
+        canvasSettings.sub_bg_color = '#000000';
+        canvasSettings.sub_bg_opacity = 0.0;
+        canvasSettings.sub_box_padding_x = 12;
+        canvasSettings.sub_box_padding_y = 6;
+        canvasSettings.sub_box_radius = 6;
+        showToast('🟡 Đã áp dụng preset: Chữ Vàng Viền Đen (Chuẩn Review Phim)!');
+      } else if (presetKey === 'white_black_box') {
+        canvasSettings.sub_font_name = 'Arial';
+        canvasSettings.sub_font_color = '#ffffff';
+        canvasSettings.sub_font_bold = true;
+        canvasSettings.sub_font_size = 18;
+        canvasSettings.sub_stroke_width = 0;
+        canvasSettings.sub_stroke_color = '#000000';
+        canvasSettings.sub_shadow = false;
+        canvasSettings.sub_bg_color = '#000000';
+        canvasSettings.sub_bg_opacity = 0.85;
+        canvasSettings.sub_box_padding_x = 18;
+        canvasSettings.sub_box_padding_y = 8;
+        canvasSettings.sub_box_radius = 8;
+        showToast('⚪ Đã áp dụng preset: Chữ Trắng Khung Đen (Chuẩn CapCut Viral)!');
+      } else if (presetKey === 'black_white_box') {
+        canvasSettings.sub_font_name = 'Arial';
+        canvasSettings.sub_font_color = '#000000';
+        canvasSettings.sub_font_bold = true;
+        canvasSettings.sub_font_size = 18;
+        canvasSettings.sub_stroke_width = 0;
+        canvasSettings.sub_stroke_color = '#000000';
+        canvasSettings.sub_shadow = false;
+        canvasSettings.sub_bg_color = '#ffffff';
+        canvasSettings.sub_bg_opacity = 1.0;
+        canvasSettings.sub_box_padding_x = 16;
+        canvasSettings.sub_box_padding_y = 8;
+        canvasSettings.sub_box_radius = 8;
+        showToast('🔘 Đã áp dụng preset: Chữ Đen Khung Trắng (Chuẩn Tối Giản)!');
+      } else if (presetKey === 'emerald_neon') {
+        canvasSettings.sub_font_name = 'Arial';
+        canvasSettings.sub_font_color = '#34d399';
+        canvasSettings.sub_font_bold = true;
+        canvasSettings.sub_font_size = 20;
+        canvasSettings.sub_stroke_width = 2;
+        canvasSettings.sub_stroke_color = '#064e3b';
+        canvasSettings.sub_shadow = true;
+        canvasSettings.sub_bg_color = '#064e3b';
+        canvasSettings.sub_bg_opacity = 0.80;
+        canvasSettings.sub_box_padding_x = 16;
+        canvasSettings.sub_box_padding_y = 8;
+        canvasSettings.sub_box_radius = 8;
+        showToast('🟢 Đã áp dụng preset: Chữ Xanh Ngọc Neon (Hiện Đại)!');
+      }
+      syncSubtitleControlsFromSettings();
+      applySubtitleVisuals();
+      triggerAutoSaveSettings();
+    }
+
     function applySubtitleVisuals() {
       const fontName = canvasSettings.sub_font_name || 'Arial';
       const fontColor = canvasSettings.sub_font_color || '#000000';
@@ -4765,6 +4935,18 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       const padX = (canvasSettings.sub_box_padding_x || 16) + 'px';
       const padY = (canvasSettings.sub_box_padding_y || 8) + 'px';
       const radius = (canvasSettings.sub_box_radius || 8) + 'px';
+
+      // Stroke & Shadow
+      const strokeWidth = canvasSettings.sub_stroke_width || 0;
+      const strokeColor = canvasSettings.sub_stroke_color || '#000000';
+      const strokeCss = strokeWidth > 0 ? `${strokeWidth}px ${strokeColor}` : 'none';
+      const hasShadow = Boolean(canvasSettings.sub_shadow);
+      let shadowCss = 'none';
+      if (hasShadow) {
+        shadowCss = '0 2px 6px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.8)';
+      } else if (fontColor.toLowerCase() === '#ffffff' || fontColor.toLowerCase() === '#fff') {
+        shadowCss = '0 1px 3px rgba(0,0,0,0.8), 0 0 1px #000';
+      }
 
       // Convert hex to rgba for live preview
       let r = 255, g = 255, b = 255;
@@ -4786,11 +4968,8 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         subEl.style.backgroundColor = rgbaBg;
         subEl.style.padding = `${padY} ${padX}`;
         subEl.style.borderRadius = radius;
-        if (fontColor.toLowerCase() === '#ffffff' || fontColor.toLowerCase() === '#fff') {
-          subEl.style.textShadow = '0 1px 3px rgba(0,0,0,0.8), 0 0 1px #000';
-        } else {
-          subEl.style.textShadow = 'none';
-        }
+        subEl.style.webkitTextStroke = strokeCss;
+        subEl.style.textShadow = shadowCss;
       }
 
       // 2. Update Sample Preview Card in Sidebar
@@ -4803,11 +4982,8 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         sampleEl.style.backgroundColor = rgbaBg;
         sampleEl.style.padding = `${padY} ${padX}`;
         sampleEl.style.borderRadius = radius;
-        if (fontColor.toLowerCase() === '#ffffff' || fontColor.toLowerCase() === '#fff') {
-          sampleEl.style.textShadow = '0 1px 3px rgba(0,0,0,0.8), 0 0 1px #000';
-        } else {
-          sampleEl.style.textShadow = 'none';
-        }
+        sampleEl.style.webkitTextStroke = strokeCss;
+        sampleEl.style.textShadow = shadowCss;
       }
     }
 
@@ -4816,6 +4992,10 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       canvasSettings.sub_font_color = '#000000';
       canvasSettings.sub_font_size = 18;
       canvasSettings.sub_font_bold = true;
+      canvasSettings.sub_stroke_color = '#000000';
+      canvasSettings.sub_stroke_width = 0;
+      canvasSettings.sub_shadow = false;
+      canvasSettings.sub_preset = 'black_white_box';
       canvasSettings.sub_bg_color = '#ffffff';
       canvasSettings.sub_bg_opacity = 1.0;
       canvasSettings.sub_box_padding_x = 16;
@@ -4826,6 +5006,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
       syncSubtitleControlsFromSettings();
       applySubtitleVisuals();
+      triggerAutoSaveSettings();
       showToast('↺ Đã khôi phục kiểu chữ & khung nền về tiêu chuẩn mặc định!');
     }
 
@@ -4834,6 +5015,10 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       const fontColor = canvasSettings.sub_font_color || '#000000';
       const fontSize = canvasSettings.sub_font_size || 18;
       const isBold = canvasSettings.sub_font_bold !== false;
+      const strokeWidth = canvasSettings.sub_stroke_width !== undefined ? canvasSettings.sub_stroke_width : 0;
+      const strokeColor = canvasSettings.sub_stroke_color || '#000000';
+      const subShadow = Boolean(canvasSettings.sub_shadow);
+
       const bgColor = canvasSettings.sub_bg_color || '#ffffff';
       const opacity = canvasSettings.sub_bg_opacity !== undefined ? Math.round(canvasSettings.sub_bg_opacity * 100) : 100;
       const padX = canvasSettings.sub_box_padding_x || 16;
@@ -4846,6 +5031,11 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       if (document.getElementById('subFontSizeSlider')) document.getElementById('subFontSizeSlider').value = fontSize;
       if (document.getElementById('subFontSizeVal')) document.getElementById('subFontSizeVal').innerText = `${fontSize}px`;
       if (document.getElementById('chkSubBold')) document.getElementById('chkSubBold').checked = isBold;
+
+      if (document.getElementById('subStrokeWidthSlider')) document.getElementById('subStrokeWidthSlider').value = strokeWidth;
+      if (document.getElementById('subStrokeWidthVal')) document.getElementById('subStrokeWidthVal').innerText = `${strokeWidth}px`;
+      if (document.getElementById('subStrokeColorPicker')) document.getElementById('subStrokeColorPicker').value = strokeColor;
+      if (document.getElementById('chkSubShadow')) document.getElementById('chkSubShadow').checked = subShadow;
 
       if (document.getElementById('subBgColorPicker')) document.getElementById('subBgColorPicker').value = bgColor;
       if (document.getElementById('subBgColorHex')) document.getElementById('subBgColorHex').innerText = bgColor.toUpperCase();
@@ -5272,6 +5462,10 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       canvasSettings.sub_font_color = '#000000';
       canvasSettings.sub_font_size = 18;
       canvasSettings.sub_font_bold = true;
+      canvasSettings.sub_stroke_color = '#000000';
+      canvasSettings.sub_stroke_width = 0;
+      canvasSettings.sub_shadow = false;
+      canvasSettings.sub_preset = 'black_white_box';
       canvasSettings.sub_bg_color = '#ffffff';
       canvasSettings.sub_bg_opacity = 1.0;
       canvasSettings.sub_box_padding_x = 16;
