@@ -69,8 +69,8 @@ class V1ModelPolicy:
         configured_separator_runtime = _clean(env.get("V1_SEPARATOR_PYTHON"), "")
         if not configured_separator_runtime:
             candidates = [
+                root / "backend" / "model_venv_separator" / "Scripts" / "python.exe",
                 root / "backend" / "model_venv" / "Scripts" / "python.exe",
-                Path(r"C:\tool v2\backend\model_venv\Scripts\python.exe"),
             ]
             for cand in candidates:
                 if cand.is_file():
