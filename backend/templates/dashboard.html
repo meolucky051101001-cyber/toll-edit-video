@@ -1878,10 +1878,10 @@ header {
               <div style="display: flex; flex-direction: column; gap: 4px;">
                 <label for="autoFemaleVoiceSelect" style="color: #f472b6; font-weight: 500; display: flex; align-items: center; justify-content: space-between;">
                   <span>👩 Giọng khi nhận diện NỮ:</span>
-                  <span style="font-size: 10px; color: var(--text-muted); font-weight: normal;">(Mặc định: Chí Mai RVC)</span>
+                  <span style="font-size: 10px; color: var(--text-muted); font-weight: normal;">(Mặc định: CapCut Mai)</span>
                 </label>
                 <select id="autoFemaleVoiceSelect" onchange="saveVoiceAutoConfig()" style="background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border); border-radius: 5px; padding: 6px 10px; font-size: 12px; outline: none; cursor: pointer; transition: border-color 0.2s;">
-                  <option value="chi-mai">Chí Mai · RVC (mặc định)</option>
+                  <option value="capcut-BV562_streaming">CapCut · Mai (mặc định)</option>
                 </select>
               </div>
 
@@ -4992,7 +4992,7 @@ let inputUploading=false;
       }
 
       // 3. Dropdowns
-      const femaleId = data.female_voice_id || 'chi-mai';
+      const femaleId = data.female_voice_id || 'capcut-BV562_streaming';
       const maleId = data.male_voice_id || 'capcut-BV075_streaming';
       const femaleLabel = data.female_voice_label || femaleId;
       const maleLabel = data.male_voice_label || maleId;
@@ -6380,15 +6380,19 @@ let inputUploading=false;
       const sel = document.getElementById(selectId);
       if (!sel) return;
       const voices = [
-        { id: 'microsoft-hoaimy', label: 'Microsoft · Hoài My (nữ)' },
-        { id: 'microsoft-namminh', label: 'Microsoft · Nam Minh (nam)' },
-        { id: 'chi-mai', label: 'Chí Mai · RVC' },
+        { id: 'capcut-BV562_streaming', label: 'CapCut · Mai (Nữ Chuẩn - Mặc định)' },
+        { id: 'capcut-BV075_streaming', label: 'CapCut · Thanh Niên Tự Tin' },
+        { id: 'capcut-multi_male_felipe_uranus_bigtts', label: 'CapCut · Giọng Nam Trầm' },
         { id: 'capcut-BV421_vivn_streaming', label: 'CapCut · Nhỏ Ngọt Ngào' },
         { id: 'capcut-vi_female_huong', label: 'CapCut · Nữ Phổ Thông' },
         { id: 'capcut-BV074_streaming', label: 'CapCut · Cô Gái Hoạt Ngôn' },
-        { id: 'capcut-BV562_streaming', label: 'CapCut · Mai' },
-        { id: 'capcut-BV007_streaming', label: 'CapCut · Nam Phổ Thông' },
-        { id: 'capcut-BV008_streaming', label: 'CapCut · Nam Trầm Ấm' },
+        { id: 'vieneu-haidang', label: 'Vie-TTS · Hải Đăng (Nam Bắc 48k)' },
+        { id: 'vieneu-maianh', label: 'Vie-TTS · Mai Anh (Nữ Bắc 48k)' },
+        { id: 'vieneu-trucly', label: 'Vie-TTS · Trúc Ly (Nữ Bắc 48k)' },
+        { id: 'vieneu-thienminh', label: 'Vie-TTS · Thiện Minh (Nam Kể chuyện 48k)' },
+        { id: 'vieneu-thuydung', label: 'Vie-TTS · Thùy Dung (Nữ Nam 48k)' },
+        { id: 'microsoft-hoaimy', label: 'Microsoft · Hoài My (nữ)' },
+        { id: 'microsoft-namminh', label: 'Microsoft · Nam Minh (nam)' },
       ];
       sel.innerHTML = '<option value="">(Mặc định / Theo Preset)</option>' +
         voices.map(v => `<option value="${v.id}">${v.label}</option>`).join('');
@@ -6768,31 +6772,23 @@ let inputUploading=false;
        PHASE C: SEGMENT EDITOR & PARTIAL REGENERATION (JAVASCRIPT)
        ========================================================================== */
     let SEGMENT_VOICES = [
-      { id: 'chi-mai', name: 'Chí Mai · RVC (mặc định)' },
+      { id: 'capcut-BV562_streaming', name: 'CapCut · Mai (Nữ Chuẩn - Mặc định)' },
+      { id: 'capcut-BV075_streaming', name: 'CapCut · Thanh Niên Tự Tin' },
+      { id: 'capcut-multi_male_felipe_uranus_bigtts', name: 'CapCut · Giọng Nam Trầm' },
+      { id: 'capcut-BV421_vivn_streaming', name: 'CapCut · Nhỏ Ngọt Ngào' },
+      { id: 'capcut-vi_female_huong', name: 'CapCut · Giọng Nữ Phổ Thông' },
+      { id: 'capcut-BV074_streaming', name: 'CapCut · Cô Gái Hoạt Ngôn' },
+      { id: 'capcut-multi_female_banmai', name: 'CapCut · Ban Mai' },
+      { id: 'capcut-multi_female_richgirl_uranus_bigtts', name: 'CapCut · Review Phim' },
+      { id: 'vieneu-haidang', name: 'Vie-TTS · Hải Đăng (Nam Bắc 48k)' },
+      { id: 'vieneu-maianh', name: 'Vie-TTS · Mai Anh (Nữ Bắc 48k)' },
+      { id: 'vieneu-trucly', name: 'Vie-TTS · Trúc Ly (Nữ Bắc 48k)' },
+      { id: 'vieneu-thienminh', name: 'Vie-TTS · Thiện Minh (Nam Kể chuyện 48k)' },
+      { id: 'vieneu-thuydung', name: 'Vie-TTS · Thùy Dung (Nữ Nam 48k)' },
+      { id: 'vieneu-thaison', name: 'Vie-TTS · Thái Sơn (Nam Nam 48k)' },
+      { id: 'vieneu-phamtuyen', name: 'Vie-TTS · Phạm Tuyên (Nam Trầm ấm 48k)' },
       { id: 'microsoft-hoaimy', name: 'Microsoft · Hoài My (nữ)' },
       { id: 'microsoft-namminh', name: 'Microsoft · Nam Minh (nam)' },
-      { id: 'capcut-BV562_streaming', name: 'CapCut · Mai (Ô Mai)' },
-      { id: 'capcut-BV421_vivn_streaming', name: 'CapCut · Nhã Ngọt Ngào' },
-      { id: 'capcut-vi_female_huong', name: 'CapCut · Giọng Nữ Phổ Thông' },
-      { id: 'capcut-BV074_streaming_dsp', name: 'CapCut · Giọng Bé' },
-      { id: 'capcut-BV074_streaming', name: 'CapCut · Cô Gái Hoạt Ngôn' },
-      { id: 'capcut-BV075_streaming_vibrato_dsp', name: 'CapCut · Việt Méo' },
-      { id: 'capcut-BV075_streaming', name: 'CapCut · Thanh Niên Tự Tin' },
-      { id: 'capcut-BV560_streaming', name: 'CapCut · Alex Đại Đế' },
-      { id: 'capcut-multi_male_felipe_uranus_bigtts', name: 'CapCut · Giọng Nam Trầm' },
-      { id: 'capcut-multi_female_yangguangnv_uranus_bigtts', name: 'CapCut · Ban Mai' },
-      { id: 'capcut-multi_female_richgirl_uranus_bigtts', name: 'CapCut · Review Phim new' },
-      { id: 'capcut-multi_female_quanweinv_uranus_bigtts', name: 'CapCut · Bản Tin 1' },
-      { id: 'capcut-multi_female_stokie_uranus_bigtts', name: 'CapCut · Review Phim 4' },
-      { id: 'capcut-multi_female_sisi_uranus_bigtts', name: 'CapCut · Bản Tin nữ' },
-      { id: 'capcut-multi_female_daqi_uranus_bigtts', name: 'CapCut · Review Phim 3' },
-      { id: 'capcut-multi_female_xyf04auto_uranus_bigtts', name: 'CapCut · Review Phim 2' },
-      { id: 'capcut-multi_female_kiwi_uranus_bigtts', name: 'CapCut · Sunny Idol' },
-      { id: 'capcut-BV075_streaming_demon_dsp', name: 'CapCut · Kenny Đại Đế' },
-      { id: 'capcut-BV075_streaming_robot_dsp', name: 'CapCut · Robot VN' },
-      { id: 'capcut-multi_female_peiqi_uranus_bigtts', name: 'CapCut · Giọng Gái Mới Lớn' },
-      { id: 'capcut-multi_female_xinwenjieshuo_uranus_bigtts', name: 'CapCut · Nam bản tin' },
-      { id: 'capcut-multi_female_tianmeijieshuo_uranus_bigtts', name: 'CapCut · Quên Tên Tự Test' }
     ];
 
     let segmentVoicesLoaded = false;
@@ -6825,8 +6821,8 @@ let inputUploading=false;
 
     function syncAllSegmentsToDetectedVoice() {
       if (!currentSegmentData || !currentSegmentData.segments) return;
-      const targetVoice = currentSegmentData.detected_voice_id || 'chi-mai';
-      const targetLabel = currentSegmentData.detected_voice_label || (targetVoice === 'chi-mai' ? 'Chí Mai · RVC (mặc định)' : targetVoice);
+      const targetVoice = currentSegmentData.detected_voice_id || 'capcut-BV562_streaming';
+      const targetLabel = currentSegmentData.detected_voice_label || (targetVoice === 'capcut-BV562_streaming' ? 'CapCut · Mai (mặc định)' : targetVoice);
       let changed = 0;
       currentSegmentData.segments.forEach(seg => {
         if (seg.voice_id !== targetVoice) {
@@ -6880,8 +6876,8 @@ let inputUploading=false;
         currentSegmentData = await res.json();
 
         // Update detected voice badge
-        const detVoiceId = currentSegmentData.detected_voice_id || 'chi-mai';
-        const detVoiceLbl = currentSegmentData.detected_voice_label || (detVoiceId === 'chi-mai' ? 'Chí Mai · RVC (mặc định)' : detVoiceId);
+        const detVoiceId = currentSegmentData.detected_voice_id || 'capcut-BV562_streaming';
+        const detVoiceLbl = currentSegmentData.detected_voice_label || (detVoiceId === 'capcut-BV562_streaming' ? 'CapCut · Mai (mặc định)' : detVoiceId);
         if (voiceBadge) {
           voiceBadge.textContent = `🎙️ Giọng video: ${detVoiceLbl}`;
           voiceBadge.title = `Giọng video gốc: ${detVoiceLbl} (${detVoiceId})`;
@@ -6928,7 +6924,7 @@ let inputUploading=false;
       }
 
       const segments = currentSegmentData.segments;
-      const detectedVoiceId = currentSegmentData.detected_voice_id || 'chi-mai';
+      const detectedVoiceId = currentSegmentData.detected_voice_id || 'capcut-BV562_streaming';
       let modifiedCount = 0;
       let selectedCount = 0;
 

@@ -141,8 +141,8 @@ class VideoPipelineRunner:
             and Path(request.delivery_copy_path).resolve() == self.video_path
         ):
             raise ValueError("Pipeline delivery_copy_path must not overwrite the input video")
-        if request.voice_source not in {"edge", "fpt", "rvc", "capcut"}:
-            raise ValueError("voice_source must be edge, fpt, rvc or capcut")
+        if request.voice_source not in {"edge", "fpt", "rvc", "capcut", "vieneu", "vie-tts"}:
+            raise ValueError("voice_source must be edge, fpt, rvc, capcut, vieneu or vie-tts")
         if request.voice_source == "fpt" and not (
             request.tts_api_key or request.api_key
         ):
@@ -1249,8 +1249,8 @@ class VideoPipelineRunner:
             atempo_max=self.request.settings.atempo_max,
         )
         source = "rvc" if self._rvc_enabled() else self.request.voice_source
-        if source not in {"edge", "fpt", "rvc", "capcut"}:
-            source = "edge"
+        if source not in {"edge", "fpt", "rvc", "capcut", "vieneu", "vie-tts"}:
+            source = "capcut"
         artifacts: List[ArtifactRecord] = []
         portable_infos: List[Dict[str, Any]] = []
         actual_rewriter = (

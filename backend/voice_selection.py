@@ -19,21 +19,47 @@ def _resolve_control_dir() -> Path:
 
 BASE = _resolve_control_dir()
 BASE.mkdir(parents=True, exist_ok=True)
-ALIASES = {'capcut-vi-VN-HoaiMyNeural': 'microsoft-hoaimy', 'capcut-vi-VN-NamMinhNeural': 'microsoft-namminh'}
+ALIASES = {
+    'capcut-vi-VN-HoaiMyNeural': 'microsoft-hoaimy',
+    'capcut-vi-VN-NamMinhNeural': 'microsoft-namminh',
+    'chi-mai': 'capcut-BV562_streaming',
+    'rvc-chi-mai': 'capcut-BV562_streaming',
+}
 
 DEFAULT_CATALOG = [
-    {"id": "chi-mai", "label": "Chí Mai · RVC (mặc định)", "source": "rvc", "param": ""},
-    {"id": "microsoft-hoaimy", "label": "Microsoft · Hoài My (nữ)", "source": "edge", "param": "vi-VN-HoaiMyNeural"},
-    {"id": "microsoft-namminh", "label": "Microsoft · Nam Minh (nam)", "source": "edge", "param": "vi-VN-NamMinhNeural"},
-    {"id": "capcut-BV421_vivn_streaming", "label": "CapCut · Nhỏ Ngọt Ngào", "source": "capcut", "param": "BV421_vivn_streaming"},
-    {"id": "capcut-vi_female_huong", "label": "CapCut · Giọng Nữ Phổ Thông", "source": "capcut", "param": "vi_female_huong"},
+    # --- CAPCUT TTS (Mặc định & Khuyên dùng) ---
+    {"id": "capcut-BV562_streaming", "label": "CapCut · Mai (Nữ Chuẩn - Mặc định)", "source": "capcut", "param": "BV562_streaming"},
+    {"id": "capcut-BV075_streaming", "label": "CapCut · Thanh Niên Tự Tin (Nam Trẻ)", "source": "capcut", "param": "BV075_streaming"},
+    {"id": "capcut-multi_male_felipe_uranus_bigtts", "label": "CapCut · Nam Trầm (Chuyên Gia)", "source": "capcut", "param": "multi_male_felipe_uranus_bigtts"},
+    {"id": "capcut-BV421_vivn_streaming", "label": "CapCut · Nhỏ Ngọt Ngào (Nữ Dễ Thương)", "source": "capcut", "param": "BV421_vivn_streaming"},
+    {"id": "capcut-BV074_streaming", "label": "CapCut · Cô Gái Hoạt Ngôn (Nữ Năng Động)", "source": "capcut", "param": "BV074_streaming"},
+    {"id": "capcut-multi_female_richgirl_uranus_bigtts", "label": "CapCut · Review Phim (Kịch Tính)", "source": "capcut", "param": "multi_female_richgirl_uranus_bigtts"},
+    {"id": "capcut-vi_female_huong", "label": "CapCut · Hương (Nữ Phổ Thông)", "source": "capcut", "param": "vi_female_huong"},
+    {"id": "capcut-multi_female_banmai", "label": "CapCut · Ban Mai (Tươi Sáng)", "source": "capcut", "param": "multi_female_yangguangnv_uranus_bigtts"},
+    {"id": "capcut-BV007_streaming", "label": "CapCut · Nam Phổ Thông", "source": "capcut", "param": "BV007_streaming"},
+    {"id": "capcut-BV008_streaming", "label": "CapCut · Nam Trầm Ấm", "source": "capcut", "param": "BV008_streaming"},
     {"id": "capcut-BV074_streaming_dsp", "label": "CapCut · Giọng Bé", "source": "capcut", "param": "BV074_streaming_dsp"},
-    {"id": "capcut-BV074_streaming", "label": "CapCut · Cô Gái Hoạt Ngôn", "source": "capcut", "param": "BV074_streaming"},
-    {"id": "capcut-BV075_streaming_vibrato_dsp", "label": "CapCut · Việt Méo", "source": "capcut", "param": "BV075_streaming_vibrato_dsp"},
-    {"id": "capcut-BV562_streaming", "label": "CapCut · Mai", "source": "capcut", "param": "BV562_streaming"},
-    {"id": "capcut-BV075_streaming", "label": "CapCut · Thanh Niên Tự Tin", "source": "capcut", "param": "BV075_streaming"},
-    {"id": "capcut-multi_male_felipe_uranus_bigtts", "label": "CapCut · Giọng Nam Trầm", "source": "capcut", "param": "multi_male_felipe_uranus_bigtts"},
-    {"id": "capcut-multi_female_banmai", "label": "CapCut · Ban Mai", "source": "capcut", "param": "multi_female_yangguangnv_uranus_bigtts"}
+    {"id": "capcut-BV075_streaming_vibrato_dsp", "label": "CapCut · Việt Méo (Hài Hước)", "source": "capcut", "param": "BV075_streaming_vibrato_dsp"},
+
+    # --- VIENEU / VIE-TTS (48k Studio) ---
+    {"id": "vieneu-haidang", "label": "Vie-TTS · Hải Đăng (Nam Bắc 48k)", "source": "vieneu", "param": "Hải Đăng"},
+    {"id": "vieneu-maianh", "label": "Vie-TTS · Mai Anh (Nữ Bắc 48k)", "source": "vieneu", "param": "Mai Anh"},
+    {"id": "vieneu-trucly", "label": "Vie-TTS · Trúc Ly (Nữ Bắc 48k)", "source": "vieneu", "param": "Trúc Ly"},
+    {"id": "vieneu-thienminh", "label": "Vie-TTS · Thiện Minh (Nam Kể chuyện 48k)", "source": "vieneu", "param": "Thiện Minh"},
+    {"id": "vieneu-thuydung", "label": "Vie-TTS · Thùy Dung (Nữ Nam 48k)", "source": "vieneu", "param": "Thùy Dung"},
+    {"id": "vieneu-adambua", "label": "Vie-TTS · Adam Bựa (Nam Hài hước 48k)", "source": "vieneu", "param": "Adam bựa"},
+    {"id": "vieneu-thaison", "label": "Vie-TTS · Thái Sơn (Nam Nam 48k)", "source": "vieneu", "param": "Thái Sơn"},
+    {"id": "vieneu-phamtuyen", "label": "Vie-TTS · Phạm Tuyên (Nam Trầm ấm 48k)", "source": "vieneu", "param": "Phạm Tuyên"},
+    {"id": "vieneu-ngochuyen", "label": "Vie-TTS · Ngọc Huyền (Nữ Tự nhiên 48k)", "source": "vieneu", "param": "Ngọc Huyền"},
+    {"id": "vieneu-ngoctran", "label": "Vie-TTS · Ngọc Trân (Nữ Miền Trung 48k)", "source": "vieneu", "param": "Ngọc Trân"},
+    {"id": "vieneu-quangson", "label": "Vie-TTS · Quang Sơn (Nam Miền Trung 48k)", "source": "vieneu", "param": "Quang Sơn"},
+    {"id": "vieneu-myduyen", "label": "Vie-TTS · Mỹ Duyên (Nữ Nam Đọc truyện 48k)", "source": "vieneu", "param": "Mỹ Duyên"},
+    {"id": "vieneu-quynhanh", "label": "Vie-TTS · Quỳnh Anh (Nữ Bắc Đọc truyện 48k)", "source": "vieneu", "param": "Quỳnh Anh"},
+    {"id": "vieneu-thanhbinh", "label": "Vie-TTS · Thanh Bình (Nam Kể chuyện 48k)", "source": "vieneu", "param": "Thanh Bình"},
+
+    # --- MICROSOFT EDGE TTS ---
+    {"id": "microsoft-hoaimy", "label": "Microsoft · Hoài My (Nữ)", "source": "edge", "param": "vi-VN-HoaiMyNeural"},
+    {"id": "microsoft-namminh", "label": "Microsoft · Nam Minh (Nam)", "source": "edge", "param": "vi-VN-NamMinhNeural"},
 ]
 
 
@@ -41,7 +67,12 @@ def catalog():
     cat_file = BASE / "voice_catalog.json"
     if cat_file.is_file():
         try:
-            return json.loads(cat_file.read_text(encoding="utf-8"))
+            items = json.loads(cat_file.read_text(encoding="utf-8"))
+            # Tự động nâng cấp danh mục cũ nếu còn sót RVC / chi-mai
+            if any(v.get("id") == "chi-mai" or v.get("source") == "rvc" for v in items):
+                cat_file.write_text(json.dumps(DEFAULT_CATALOG, indent=2, ensure_ascii=False), encoding="utf-8")
+                return list(DEFAULT_CATALOG)
+            return items
         except Exception:
             pass
     try:
@@ -55,13 +86,13 @@ def selected():
     try:
         value = json.loads((BASE / "voice_selection.json").read_text(encoding="utf-8"))["id"]
     except Exception:
-        value = "chi-mai"
+        value = "capcut-BV562_streaming"
     value = ALIASES.get(value, value)
     for voice in catalog():
         if voice["id"] == value:
             return voice
     cat = catalog()
-    return cat[0] if cat else {"id": "chi-mai", "label": "Chí Mai · RVC (mặc định)", "source": "rvc", "param": ""}
+    return cat[0] if cat else DEFAULT_CATALOG[0]
 
 
 def save(voice_id):
@@ -72,17 +103,8 @@ def save(voice_id):
     os.replace(tmp,BASE/'voice_selection.json')
 def resolve_voice(default_source, default_param):
     voice = selected()
-    if voice["id"] == "chi-mai":
-        param = default_param
-        if not param or default_source != "rvc":
-            try:
-                from pipeline_v2.content import discover_rvc_model
-                param = discover_rvc_model(BASE)
-            except Exception:
-                param = None
-        if not param:
-            return "edge", "vi-VN-HoaiMyNeural", "Microsoft · Hoài My (nữ)"
-        return "rvc", str(param), voice["label"]
+    if voice.get("source") == "rvc" or voice["id"] == "chi-mai":
+        return "capcut", "BV562_streaming", "CapCut · Mai (Nữ Chuẩn - Mặc định)"
     return voice["source"], voice["param"], voice["label"]
 
 
@@ -90,14 +112,16 @@ AUTO_VOICE_CONFIG_FILE = BASE / "v2_auto_voice.json"
 
 
 def get_auto_voice_config() -> dict:
-    """Đọc cấu hình Auto Voice & Dual Voice cho Tool V2. Mặc định dual_voice luôn TẮT (False)."""
+    """Đọc cấu hình Auto Voice & Dual Voice cho Tool V1. Mặc định dual_voice luôn TẮT (False)."""
     if AUTO_VOICE_CONFIG_FILE.is_file():
         try:
             data = json.loads(AUTO_VOICE_CONFIG_FILE.read_text(encoding="utf-8"))
+            f_id = str(data.get("female_voice_id") or "capcut-BV562_streaming")
+            f_id = ALIASES.get(f_id, f_id)
             return {
                 "enabled": bool(data.get("enabled", True)),
                 "dual_voice": bool(data.get("dual_voice", False)),  # LUÔN TẮT MẶC ĐỊNH
-                "female_voice_id": str(data.get("female_voice_id") or "chi-mai"),
+                "female_voice_id": f_id,
                 "male_voice_id": str(data.get("male_voice_id") or "capcut-BV075_streaming"),
                 "updated_at": str(data.get("updated_at", "")),
                 "updated_by": str(data.get("updated_by", "default")),
@@ -107,7 +131,7 @@ def get_auto_voice_config() -> dict:
     return {
         "enabled": True,
         "dual_voice": False,
-        "female_voice_id": "chi-mai",
+        "female_voice_id": "capcut-BV562_streaming",
         "male_voice_id": "capcut-BV075_streaming",
         "updated_at": "",
         "updated_by": "default",
@@ -199,7 +223,7 @@ def get_speaker_voice_map() -> dict:
         except Exception:
             pass
     cfg = get_auto_voice_config()
-    f_prm = resolve_voice_param(cfg.get("female_voice_id", "chi-mai"))
+    f_prm = resolve_voice_param(cfg.get("female_voice_id", "capcut-BV562_streaming"))
     m_prm = resolve_voice_param(cfg.get("male_voice_id", "capcut-BV075_streaming"))
     return {
         "male": m_prm,

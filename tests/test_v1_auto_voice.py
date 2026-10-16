@@ -105,7 +105,7 @@ class TestV1AutoVoice(unittest.TestCase):
         self.assertTrue(lock_file.is_file())
 
     def test_03_first_speaker_female_real_audio_locks_chi_mai(self):
-        """Mau giong thuc te NU o cau dau -> Khoa Chi Mai (chi-mai)."""
+        """Mau giong thuc te NU o cau dau -> Khoa CapCut Mai (capcut-BV562_streaming)."""
         segs = [
             SimpleNamespace(index=1, start=timedelta(seconds=0.2), end=timedelta(seconds=2.5), content="Kính chào quý vị và các bạn"),
         ]
@@ -115,7 +115,7 @@ class TestV1AutoVoice(unittest.TestCase):
 
         self.assertEqual(locked["voice_id"], VOICE_FEMALE_ID)
         self.assertEqual(locked["detected_gender"], "female")
-        self.assertIn(locked["voice_source"], ("rvc", "capcut"))
+        self.assertEqual(locked["voice_source"], "capcut")
 
     def test_04_strictly_uses_first_utterance_never_switches_to_later_speaker(self):
         """SIET CHAT: Chi xet cau thoai dau, khong nhay sang cau 2 du cau 2 la giong khac (Codex Point 3)."""
@@ -339,26 +339,24 @@ class TestV1AutoVoice(unittest.TestCase):
         self.assertEqual(locked["detected_gender"], "manual")
         self.assertEqual(locked["rule"], "manual_selection")
 
-    def test_12_decide_voice_auto_female_fails_closed_without_rvc(self):
-        """Che do AUTO: Nguoi noi dau la Nu nhung thieu RVC runtime/model -> Phai raise RuntimeError truoc TTS."""
+    def test_12_decide_voice_auto_female_maps_legacy_chi_mai_to_capcut(self):
+        """Che do AUTO: Nguoi noi dau la Nu voi cau hinh legacy 'chi-mai' -> Tu dong chuyen huong sang CapCut Mai ma khong crash."""
         from ai.v1_auto_voice import decide_video_voice, set_auto_voice_config
         set_auto_voice_config(workspace=self.workspace, female_voice_id="chi-mai")
         segs = [
             SimpleNamespace(index=1, start=timedelta(seconds=0.2), end=timedelta(seconds=2.5), content="Kính chào quý vị và các bạn"),
         ]
-        out_job = os.path.join(self.temp_dir, "job_female_no_rvc")
+        out_job = os.path.join(self.temp_dir, "job_female_legacy_chi_mai")
 
-        with patch("ai.v1_auto_voice.find_rvc_model_path", return_value=None):
-            with self.assertRaises(RuntimeError) as ctx:
-                decide_video_voice(
-                    out_dir=out_job,
-                    srt_segments=segs,
-                    vocals_path=self.real_female_sample,
-                    voice_mode="auto",
-                    workspace=self.workspace,
-                )
-            self.assertIn("RVC Chí Mai", str(ctx.exception))
-            self.assertIn("Không âm thầm thay thế bằng CapCut Mai", str(ctx.exception))
+        locked = decide_video_voice(
+            out_dir=out_job,
+            srt_segments=segs,
+            vocals_path=self.real_female_sample,
+            voice_mode="auto",
+            workspace=self.workspace,
+        )
+        self.assertEqual(locked["voice_id"], VOICE_FEMALE_ID)
+        self.assertEqual(locked["voice_source"], "capcut")
 
     def test_13_snapshot_hash_and_mode_invalidation(self):
         """Kiem tra snapshot tu dong huy neu hash noi dung video doi hoac che do giong doi."""

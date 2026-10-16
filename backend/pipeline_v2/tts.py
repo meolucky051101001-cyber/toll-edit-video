@@ -38,7 +38,18 @@ def resolve_mapped_voice(voice_source, speaker_voice_map, speaker_id, gender,
         return None
     candidate = speaker_voice_map.get(speaker_id, speaker_voice_map.get(gender))
     voice = str(candidate or "").strip()
-    return voice or None
+    if not voice:
+        return None
+    if voice_source == "capcut":
+        if voice.startswith("vi-VN-") or voice in {"banmai", "leminh", "myan", "thuminh", "giahuy"}:
+            return None
+    elif voice_source == "edge":
+        if not voice.startswith("vi-"):
+            return None
+    elif voice_source == "fpt":
+        if voice not in {"banmai", "leminh", "myan", "thuminh", "giahuy"}:
+            return None
+    return voice
 
 
 async def generate_tts_audio_v2(
@@ -142,7 +153,7 @@ async def generate_tts_audio_v2(
                 pitch = "+15Hz" if edge_v == "vi-VN-HoaiMyNeural" else "+0Hz"
                 rate = "+15%" if edge_v == "vi-VN-HoaiMyNeural" else "+5%"
                 is_silent_fallback = await _synthesize_edge_with_rescue(
-                    edge_v, edge_pitch=pitch, edge_rate=rate, allow_capcut_rescue=False
+                    edge_v, edge_pitch=pitch, edge_rate=rate, allow_capcut_rescue=not strict_provider
                 )
             elif voice_source == "fpt":
                 try:
@@ -167,10 +178,18 @@ async def generate_tts_audio_v2(
                         _run_capcut_tts, text, str(raw), rvc_voice
                     )
                 except Exception as cap_err:
-                    logger.warning("CapCut base TTS failed for %r: %s -> using Edge TTS as vocal guide for RVC", text, cap_err)
+                    logger.warning("CapCut base TTS failed for %r: %s -> using Edge TTS", text, cap_err)
                     is_silent_fallback = await _synthesize_edge_with_rescue(
                         "vi-VN-HoaiMyNeural", edge_rate="+0%", allow_capcut_rescue=False
                     )
+            elif voice_source in ("vieneu", "vie-tts"):
+                try:
+                    from ai.vieneu_tts_service import generate_tts_vieneu
+                    await generate_tts_vieneu(text, str(raw), voice=voice_param)
+                except Exception as vi_err:
+                    logger.warning("VieNeu TTS failed for %r: %s -> fallback to CapCut", text, vi_err)
+                    fallback_v = "BV075_streaming" if (enable_auto_gender and seg_gender == "male") else "BV562_streaming"
+                    await asyncio.to_thread(_run_capcut_tts, text, str(raw), fallback_v)
             else:
                 pitch = "+15Hz" if voice_param == "vi-VN-HoaiMyNeural" else "+0Hz"
                 rate = "+15%" if voice_param == "vi-VN-HoaiMyNeural" else "+5%"

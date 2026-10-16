@@ -60,15 +60,16 @@ SAMPLE_TEXTS = [
 
 # Fallback catalog if voice_catalog.json is not found
 FALLBACK_CATALOG = [
-    {"id": "microsoft-hoaimy", "label": "Microsoft · Hoài My (nữ)", "source": "edge", "param": "vi-VN-HoaiMyNeural"},
-    {"id": "microsoft-namminh", "label": "Microsoft · Nam Minh (nam)", "source": "edge", "param": "vi-VN-NamMinhNeural"},
-    {"id": "chi-mai", "label": "Chí Mai · RVC (mặc định)", "source": "rvc", "param": ""},
+    {"id": "capcut-BV562_streaming", "label": "CapCut · Mai (Nữ Chuẩn - Mặc định)", "source": "capcut", "param": "BV562_streaming"},
+    {"id": "capcut-BV075_streaming", "label": "CapCut · Thanh Niên Tự Tin", "source": "capcut", "param": "BV075_streaming"},
+    {"id": "capcut-multi_male_felipe_uranus_bigtts", "label": "CapCut · Nam Trầm", "source": "capcut", "param": "multi_male_felipe_uranus_bigtts"},
     {"id": "capcut-BV421_vivn_streaming", "label": "CapCut · Nhỏ Ngọt Ngào", "source": "capcut", "param": "BV421_vivn_streaming"},
-    {"id": "capcut-vi_female_huong", "label": "CapCut · Giọng Nữ Phổ Thông", "source": "capcut", "param": "vi_female_huong"},
+    {"id": "capcut-vi_female_huong", "label": "CapCut · Nữ Phổ Thông", "source": "capcut", "param": "vi_female_huong"},
     {"id": "capcut-BV074_streaming", "label": "CapCut · Cô Gái Hoạt Ngôn", "source": "capcut", "param": "BV074_streaming"},
-    {"id": "capcut-BV562_streaming", "label": "CapCut · Mai", "source": "capcut", "param": "BV562_streaming"},
-    {"id": "capcut-BV007_streaming", "label": "CapCut · Nam Phổ Thông", "source": "capcut", "param": "BV007_streaming"},
-    {"id": "capcut-BV008_streaming", "label": "CapCut · Nam Trầm Ấm", "source": "capcut", "param": "BV008_streaming"},
+    {"id": "vieneu-haidang", "label": "Vie-TTS · Hải Đăng", "source": "vieneu", "param": "Hải Đăng"},
+    {"id": "vieneu-maianh", "label": "Vie-TTS · Mai Anh", "source": "vieneu", "param": "Mai Anh"},
+    {"id": "microsoft-hoaimy", "label": "Microsoft · Hoài My (Nữ)", "source": "edge", "param": "vi-VN-HoaiMyNeural"},
+    {"id": "microsoft-namminh", "label": "Microsoft · Nam Minh (Nam)", "source": "edge", "param": "vi-VN-NamMinhNeural"},
 ]
 
 
@@ -257,6 +258,12 @@ async def synthesize_voice_preview(
     speed = max(0.5, min(float(speed), 2.0))
 
     # 2. Resolve voice catalog info
+    try:
+        from voice_selection import ALIASES
+        voice_id = ALIASES.get(voice_id, voice_id)
+    except Exception:
+        pass
+
     cat = get_voice_catalog()
     voice_info = next((v for v in cat if v["id"] == voice_id), None)
     if not voice_info:
@@ -380,17 +387,31 @@ async def synthesize_voice_preview(
                             synthesized = temp_raw.is_file() and temp_raw.stat().st_size > 128
                             warning = "CapCut API chưa sẵn sàng; đã tạm thay thế bằng giọng Hoài My."
 
-                elif source == "rvc" or voice_id == "chi-mai":
-                    # For RVC/Chí Mai preview, use the verified audio sample
-                    if verified_sample and verified_sample.is_file():
-                        shutil.copy2(verified_sample, temp_raw)
-                        synthesized = True
-                    else:
-                        import edge_tts
-                        communicate = edge_tts.Communicate(text, "vi-VN-HoaiMyNeural", rate="+0%")
-                        await asyncio.wait_for(communicate.save(str(temp_raw)), timeout=15.0)
+                elif source in ("vieneu", "vie-tts"):
+                    try:
+                        from ai.vieneu_tts_service import generate_tts_vieneu
+                        await generate_tts_vieneu(text, str(temp_raw), voice=param)
                         synthesized = temp_raw.is_file() and temp_raw.stat().st_size > 128
-                        warning = "Chưa có file mẫu Chí Mai RVC, đang phát mẫu tham chiếu Hoài My."
+                    except Exception as ve:
+                        logger.warning("VieNeu TTS preview thất bại (%s), chuyển sang CapCut/Edge: %s", voice_id, ve)
+                        if verified_sample and verified_sample.is_file():
+                            shutil.copy2(verified_sample, temp_raw)
+                            synthesized = True
+                        else:
+                            from ai.voice_cloning import _run_capcut_tts
+                            await asyncio.to_thread(_run_capcut_tts, text, str(temp_raw), "BV562_streaming")
+                            synthesized = temp_raw.is_file() and temp_raw.stat().st_size > 128
+
+                elif source == "rvc" or voice_id == "chi-mai":
+                    # RVC đã bỏ; tạo preview trực tiếp bằng CapCut Mai
+                    try:
+                        from ai.voice_cloning import _run_capcut_tts
+                        await asyncio.to_thread(_run_capcut_tts, text, str(temp_raw), "BV562_streaming")
+                        synthesized = temp_raw.is_file() and temp_raw.stat().st_size > 128
+                    except Exception:
+                        if verified_sample and verified_sample.is_file():
+                            shutil.copy2(verified_sample, temp_raw)
+                            synthesized = True
 
                 if not synthesized or not temp_raw.is_file() or temp_raw.stat().st_size < 128:
                     raise RuntimeError("Không thể tạo âm thanh xem trước từ provider.")

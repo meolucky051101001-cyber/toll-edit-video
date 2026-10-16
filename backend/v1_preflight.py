@@ -87,18 +87,11 @@ def _cuda_check() -> dict:
         return _check("gpu:cuda", "warning", "probe failed: {}".format(exc))
 
 
-def _rvc_check(root: Path) -> dict:
-    models = sorted((root / "MyVoiceModel_v2").glob("*.pth"))
-    runtime_available = importlib.util.find_spec("rvc_python") is not None
-    if models and runtime_available:
-        return _check("voice:rvc", "pass", str(models[0]))
-    if models:
-        return _check(
-            "voice:rvc",
-            "warning",
-            "model có sẵn nhưng rvc-python không tương thích runtime hiện tại; dùng Edge TTS",
-        )
-    return _check("voice:rvc", "warning", "không có model; dùng Edge TTS")
+def _tts_check(root: Path) -> dict:
+    capcut_ready = importlib.util.find_spec("capcut_tts_api") is not None
+    vieneu_ready = importlib.util.find_spec("vieneu") is not None
+    msg = f"CapCut TTS: {'sẵn sàng' if capcut_ready else 'chưa cài'}; Vie-TTS: {'sẵn sàng' if vieneu_ready else 'fallback CapCut/Edge'}"
+    return _check("voice:tts", "pass", msg)
 
 
 def run_preflight(project_root: Path, interface: str) -> dict:
@@ -126,7 +119,7 @@ def run_preflight(project_root: Path, interface: str) -> dict:
     checks.append(_check("secret:GEMINI_API_KEY", "pass" if gemini else "warning", "configured" if gemini else "missing; free translation fallback remains"))
     checks.append(_cuda_check())
     checks.append(_optional_ocr_check(root, env))
-    checks.append(_rvc_check(root))
+    checks.append(_tts_check(root))
     checks.append(_directory_check("directory:workspace", Path(env.get("AUTODUB_WORKSPACE", str(root / "workspace")))))
     checks.append(_directory_check("directory:output", Path(env.get("AUTODUB_OUTPUT_DIR", r"D:\banve"))))
     return {

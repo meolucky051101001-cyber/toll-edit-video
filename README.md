@@ -38,7 +38,7 @@ Tool V1 vận hành một quy trình khép kín gồm 8 công đoạn liên hoà
 3. **Nhận dạng lời nói (ASR):** Sử dụng **Whisper Large-v3 Turbo** để bóc tách lời thoại và sinh timestamp chính xác từng mili-giây.
 4. **Nhận diện phụ đề gốc (OCR):** Quét khung hình bằng **PP-OCRv6** với thuật toán Smart Skip và cân bằng hình học phụ đề (OCR Geometry auto-heal) để xác định vị trí và thời gian phụ đề gốc cần che.
 5. **Dịch thuật AI theo ngữ cảnh:** Động cơ dịch đa kênh với cơ chế **Gemini Multi-key Failover Pool** (tự động đảo key dự phòng khi chạm quota/rate-limit), kết hợp prompt dịch tự nhiên, chuẩn văn phong Việt Nam.
-6. **Lồng tiếng & Căn nhịp đọc (TTS & Timing):** Tổng hợp giọng đọc tự nhiên (CapCut TTS đa luồng 6 worker hoặc Edge TTS), kết hợp bộ giải thuật **Timing Solver & Speed Limiter (tối đa 1.45x)** chống méo tiếng hoặc nuốt chữ.
+6. **Lồng tiếng & Căn nhịp đọc (TTS & Timing):** Tổng hợp giọng đọc tự nhiên (CapCut TTS đa luồng 6 worker chất lượng cao, Vie-TTS / VieNeu 14 giọng Bắc/Trung/Nam, Edge TTS dự phòng; loại bỏ hoàn toàn phụ thuộc model RVC nặng nề), kết hợp bộ giải thuật **Timing Solver & Speed Limiter (tối đa 1.45x)** chống méo tiếng hoặc nuốt chữ.
 7. **Hòa âm thông minh (Audio Mixing):** Bộ trộn **Hierarchical Soft Ducking** tự động hạ nhạc nền khi có lời nói, nâng nhạc nền ở khoảng lặng và chuẩn hóa âm lượng theo chuẩn quốc tế **EBU R128 (-15 LUFS)**.
 8. **Render video tăng tốc phần cứng:** Xuất video chất lượng cao thông qua **FFmpeg NVENC H.264** (NVIDIA Hardware Encoder), che phụ đề cũ mượt mà và nhúng phụ đề mới.
 
@@ -54,7 +54,7 @@ Tool V1 quản lý các model tập trung qua `backend/v1_model_registry.py` và
 | **ASR** | Whisper Large-v3 Turbo | CUDA:0 (Faster-Whisper FP16) | Standard Whisper / Fallback Cache |
 | **OCR** | PP-OCRv6 (ONNX Runtime) | ONNX Runtime GPU/DirectML | Smart Skip / Reuse visual bbox |
 | **Dịch thuật** | Gemini Flash (Multi-key Pool) | HTTP REST đa key + cache phiên | Secondary API keys / Tiered fallback |
-| **TTS** | CapCut TTS (6-workers) | Async streaming pooling | Edge-TTS (4-workers) |
+| **TTS** | CapCut TTS (6-workers) & Vie-TTS (VieNeu 14 giọng) | Async streaming pooling & fallback tự động | Edge-TTS (4-workers) |
 | **Render** | FFmpeg NVENC H.264 | NVIDIA NVENC Hardware Video Encoder | libx264 CPU encode |
 
 ---

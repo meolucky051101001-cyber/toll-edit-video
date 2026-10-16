@@ -87,7 +87,7 @@ DEFAULT_PRESETS = [
         "revision": 1,
         "tool_compatibility": "both",
         "config": {
-            "voice_id": "chi-mai",
+            "voice_id": "capcut-BV562_streaming",
             "speed": 0.95,
             "bgm_volume_db": -1.0,
             "dubbing_volume_db": 1.5,

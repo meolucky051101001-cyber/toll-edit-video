@@ -29,9 +29,20 @@ Dự án bao gồm 2 công cụ AutoDub độc lập chạy song song, được 
 
 ---
 
-## 2. DANH MỤC GIỌNG NÓI HIỆN TẠI (26 GIỌNG ĐỌC)
-Tất cả 26 giọng đều **100% HOÀN TOÀN MIỄN PHÍ (0đ)**:
-- **14 giọng VieNeu-TTS (48kHz Local GPU):**
+- **12 giọng CapCut TTS (Chất lượng cao & Mặc định):**
+  - `capcut-BV562_streaming`: Mai (Nữ Chuẩn - Mặc định)
+  - `capcut-BV075_streaming`: Thanh Niên Tự Tin (Nam Trẻ)
+  - `capcut-multi_male_felipe_uranus_bigtts`: Nam Trầm (Chuyên Gia)
+  - `capcut-BV421_vivn_streaming`: Nhỏ Ngọt Ngào (Nữ Dễ Thương)
+  - `capcut-BV074_streaming`: Cô Gái Hoạt Ngôn (Nữ Năng Động)
+  - `capcut-multi_female_richgirl_uranus_bigtts`: Review Phim (Kịch Tính)
+  - `capcut-vi_female_huong`: Hương (Nữ Phổ Thông)
+  - `capcut-multi_female_banmai`: Ban Mai (Tươi Sáng)
+  - `capcut-BV007_streaming`: Nam Phổ Thông
+  - `capcut-BV008_streaming`: Nam Trầm Ấm
+  - `capcut-BV074_streaming_dsp`: Giọng Bé (Dễ Thương)
+  - `capcut-BV075_streaming_vibrato_dsp`: Việt Méo (Hài Hước)
+- **14 giọng Vie-TTS / VieNeu (48kHz Studio):**
   - `vieneu-haidang`: Hải Đăng (Nam Bắc)
   - `vieneu-maianh`: Mai Anh (Nữ Bắc)
   - `vieneu-trucly`: Trúc Ly (Nữ Bắc)
@@ -46,21 +57,10 @@ Tất cả 26 giọng đều **100% HOÀN TOÀN MIỄN PHÍ (0đ)**:
   - `vieneu-myduyen`: Mỹ Duyên (Nữ Nam Đọc truyện)
   - `vieneu-quynhanh`: Quỳnh Anh (Nữ Bắc Đọc truyện)
   - `vieneu-thanhbinh`: Thanh Bình (Nam Kể chuyện)
-- **9 giọng CapCut TTS:**
-  - `capcut-BV562_streaming`: Mai (Chí Mai CapCut)
-  - `capcut-BV075_streaming`: Thanh Niên Tự Tin
-  - `capcut-vi_female_huong`: Nữ Phổ Thông
-  - `capcut-BV421_vivn_streaming`: Nhỏ Ngọt Ngào
-  - `capcut-multi_female_yangguangnv_uranus_bigtts`: Ban Mai
-  - `capcut-multi_female_richgirl_uranus_bigtts`: Review Phim new
-  - `capcut-BV074_streaming`: Cô Gái Hoạt Ngôn
-  - `capcut-BV074_streaming_dsp`: Giọng Bé
-  - `capcut-multi_male_felipe_uranus_bigtts`: Giọng Nam Trầm
 - **2 giọng Microsoft Edge TTS:**
   - `microsoft-hoaimy`: Hoài My (Nữ)
   - `microsoft-namminh`: Nam Minh (Nam)
-- **1 giọng RVC:**
-  - `chi-mai`: Chí Mai (RVC AI Voice Clone Offline)
+*(Model RVC đã được gỡ bỏ hoàn toàn; tự động ánh xạ cấu hình cũ sang CapCut Mai)*
 
 ---
 

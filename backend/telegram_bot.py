@@ -149,9 +149,9 @@ async def run_pipeline_v2_for_telegram(
         ),
         settings=settings,
         api_key=GEMINI_API_KEY,
-        voice_source="rvc" if rvc_model else "edge",
-        voice_param=str(rvc_model) if rvc_model else "vi-VN-HoaiMyNeural",
-        rvc_model_path=rvc_model,
+        voice_source="capcut",
+        voice_param="BV562_streaming",
+        rvc_model_path=None,
         progress=progress,
     )
     return await VideoPipelineRunner(request).run()
@@ -328,7 +328,7 @@ async def cmd_voice_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg = get_auto_voice_config(WORKSPACE)
     female_v = next((v for v in catalog if v.get("id") == cfg.get("female_voice_id")), None)
     male_v = next((v for v in catalog if v.get("id") == cfg.get("male_voice_id")), None)
-    female_label = female_v["label"] if female_v else "Chí Mai · RVC"
+    female_label = female_v["label"] if female_v else "CapCut · Mai"
     male_label = male_v["label"] if male_v else "Thanh Niên Tự Tin (CapCut)"
 
     if not args:
