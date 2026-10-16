@@ -2534,14 +2534,14 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             </button>
           </div>
           <div style="display: flex; gap: 6px;">
-            <input type="text" id="batchInputFolder" class="search-input" style="flex: 1;" value="__CONFIGURED_INPUT_DIR__" placeholder="Chọn hoặc nhập đường dẫn video nguồn">
+            <input type="text" id="batchInputFolder" class="search-input" style="flex: 1;" value="D:\workspace\downloads" placeholder="Chọn hoặc nhập đường dẫn video nguồn">
             <button type="button" class="btn btn-outline" style="padding: 0 12px; font-size: 12px; font-weight: 600; white-space: nowrap; display: flex; align-items: center; gap: 4px;" onclick="chooseBatchInputFolder()" title="Duyệt thư mục trên máy tính">
               <span>📂 Duyệt</span>
             </button>
           </div>
           <div class="folder-chips">
-            <span class="folder-chip" onclick="setBatchInputFolder(window.AUTO_DUB_PATHS.input)">Thư mục video nguồn</span>
-            <span class="folder-chip" onclick="setBatchInputFolder(window.AUTO_DUB_PATHS.output)">Thư mục thành phẩm</span>
+            <span class="folder-chip" onclick="setBatchInputFolder(window.AUTO_DUB_PATHS.input || 'D:\\workspace\\downloads')">Thư mục video tải về (downloads)</span>
+            <span class="folder-chip" onclick="setBatchInputFolder(window.AUTO_DUB_PATHS.output || 'D:\\banve')">Thư mục thành phẩm (banve)</span>
           </div>
         </div>
 
@@ -2554,13 +2554,13 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             </button>
           </div>
           <div style="display: flex; gap: 6px;">
-            <input type="text" id="batchOutputFolder" class="search-input" style="flex: 1;" value="__CONFIGURED_FRAMED_OUTPUT_DIR__" placeholder="Mặc định: thư mục thành phẩm đã cấu hình">
+            <input type="text" id="batchOutputFolder" class="search-input" style="flex: 1;" value="D:\banve\chong_reup" placeholder="Mặc định: thư mục thành phẩm đã cấu hình">
             <button type="button" class="btn btn-outline" style="padding: 0 12px; font-size: 12px; font-weight: 600; white-space: nowrap; display: flex; align-items: center; gap: 4px;" onclick="chooseBatchOutputFolder()" title="Duyệt thư mục trên máy tính">
               <span>📂 Duyệt</span>
             </button>
           </div>
           <div class="folder-chips">
-            <span class="folder-chip" onclick="setBatchOutputFolder(window.AUTO_DUB_PATHS.framed_output)">Thư mục xuất mặc định</span>
+            <span class="folder-chip" onclick="setBatchOutputFolder(window.AUTO_DUB_PATHS.framed_output || 'D:\\banve\\chong_reup')">Thư mục xuất mặc định (chong_reup)</span>
           </div>
         </div>
 
@@ -4545,6 +4545,21 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
     // Initial Load
     window.addEventListener('DOMContentLoaded', () => {
+      // Đảm bảo tuyệt đối không còn bất kỳ đường dẫn Tool V2 nào xuất hiện trong các ô nhập
+      ['batchInputFolder', 'batchOutputFolder', 'exportOutputFolder'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el && (el.value.toLowerCase().includes('v2') || el.value.includes('__CONFIGURED_') || !el.value.trim())) {
+          if (id === 'batchInputFolder') el.value = (window.AUTO_DUB_PATHS && window.AUTO_DUB_PATHS.input && !window.AUTO_DUB_PATHS.input.toLowerCase().includes('v2')) ? window.AUTO_DUB_PATHS.input : 'D:\\workspace\\downloads';
+          else if (id === 'batchOutputFolder') el.value = (window.AUTO_DUB_PATHS && window.AUTO_DUB_PATHS.framed_output && !window.AUTO_DUB_PATHS.framed_output.toLowerCase().includes('v2')) ? window.AUTO_DUB_PATHS.framed_output : 'D:\\banve\\chong_reup';
+          else if (id === 'exportOutputFolder') el.value = (window.AUTO_DUB_PATHS && window.AUTO_DUB_PATHS.output && !window.AUTO_DUB_PATHS.output.toLowerCase().includes('v2')) ? window.AUTO_DUB_PATHS.output : 'D:\\banve';
+        }
+      });
+      if (window.AUTO_DUB_PATHS) {
+        if (!window.AUTO_DUB_PATHS.input || window.AUTO_DUB_PATHS.input.toLowerCase().includes('v2')) window.AUTO_DUB_PATHS.input = 'D:\\workspace\\downloads';
+        if (!window.AUTO_DUB_PATHS.output || window.AUTO_DUB_PATHS.output.toLowerCase().includes('v2')) window.AUTO_DUB_PATHS.output = 'D:\\banve';
+        if (!window.AUTO_DUB_PATHS.framed_output || window.AUTO_DUB_PATHS.framed_output.toLowerCase().includes('v2')) window.AUTO_DUB_PATHS.framed_output = 'D:\\banve\\chong_reup';
+      }
+
       initScrubberEvents();
       initTimelineDragEvents();
       loadWorkflowData();
@@ -5519,7 +5534,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           <div style="font-size: 13px; font-weight: 700; color: #f1f5f9; margin-bottom: 6px;" id="exportModalVideoName">🎬 Video: --</div>
           <div style="display: flex; gap: 8px; align-items: center;">
             <span style="font-size: 11px; color: #94a3b8; white-space: nowrap;">Thư mục xuất:</span>
-            <input type="text" id="exportOutputFolder" class="form-input" style="flex: 1; padding: 4px 8px; font-size: 12px; height: 28px;" value="__CONFIGURED_OUTPUT_DIR__">
+            <input type="text" id="exportOutputFolder" class="form-input" style="flex: 1; padding: 4px 8px; font-size: 12px; height: 28px;" value="D:\banve">
             <button type="button" class="btn btn-outline" style="padding: 0 10px; font-size: 11px; height: 28px; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: #38bdf8; border-color: rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.08); cursor: pointer;" onclick="chooseExportOutputFolder()" title="Duyệt chọn thư mục xuất video hoàn tất">
               <span>📂 Duyệt...</span>
             </button>
