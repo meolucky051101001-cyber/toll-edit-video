@@ -72,7 +72,7 @@ Tại thư mục gốc:
 | --- | --- | --- |
 | Chạy ngầm toàn bộ hệ thống (khuyến nghị) | Nhấp đúp `KhoiDongAn.vbs` | Dùng hàng ngày — tự khởi động Telegram Bot, Dashboard (8088), Tool Control (8090) |
 | Chạy trực tiếp có console | `start_bot.bat` | Debug / xem log |
-| Dừng toàn bộ | `stop_bot.bat` hoặc `TatHoanToan.bat` | Tắt bot, dashboard, tiến trình Python và FFmpeg ngầm |
+| Dừng toàn bộ | `stop_bot.bat` hoặc `scripts\windows\TatHoanToan.bat` | Tắt bot, dashboard, tiến trình Python và FFmpeg ngầm |
 
 ---
 

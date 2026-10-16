@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT), str(ROOT / "backend")]
+sys.path[:0] = [str(ROOT), str(ROOT / "backend"), str(ROOT / "scripts" / "packaging")]  # package_v1_release.py đã chuyển vào scripts/packaging/
 import package_v1_release as package
 import job_tracker
 import render_history
