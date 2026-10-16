@@ -60,3 +60,8 @@ backend/douyin_script_data.json
 REVIEW_TOOL_V1_test_evidence.txt
 workspace_backup_safety/
 backend/run_reprocess_*.py
+# Douyin cookies
+douyin_cookies.txt
+backend/douyin_cookies.txt
+*cookie*
+*.cookies
