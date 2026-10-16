@@ -10,6 +10,8 @@ node_modules/
 cache/
 temp/
 tmp/
+temp_subs/
+backend/temp_subs/
 downloads/
 outputs/
 logs/
