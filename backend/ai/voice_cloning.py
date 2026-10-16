@@ -117,17 +117,9 @@ async def generate_tts_edge(
                 except OSError:
                     pass
                 if attempt + 1 >= max(1, int(attempts)):
-                    if "NoAudioReceived" in type(exc).__name__ or "NoAudioReceived" in str(exc) or "empty audio" in str(exc).lower():
-                        logger.warning("Edge TTS received no audio for text '%s'; generating %ss silence placeholder: %s", text_clean[:40], silence_dur, exc)
-                        cmd = [
-                            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                            "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
-                            "-t", silence_dur, "-c:a", "libmp3lame", "-b:a", "64k", str(output_path)
-                        ]
-                        res = subprocess.run(cmd, capture_output=True, timeout=10)
-                        if res.returncode == 0 and os.path.isfile(output_path) and os.path.getsize(output_path) > 0:
-                            return True
+                    logger.error("Edge TTS thất bại sau %s lần thử cho câu '%s': %s", attempts, text_clean[:40], exc)
                     break
+
                 base_delay = (
                     retry_delays[min(attempt, len(retry_delays) - 1)]
                     if retry_delays

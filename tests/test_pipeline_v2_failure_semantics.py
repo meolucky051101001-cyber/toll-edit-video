@@ -133,9 +133,12 @@ class TranslationFailureTests(unittest.TestCase):
     def test_legacy_translation_can_still_use_source_fallback(self):
         translation = self._load_translation_with_failing_google()
         segment = SimpleNamespace(index=7, content="你好")
-        result = translation.translate_subtitles(
-            [segment], strict=False, enable_g4f=False
-        )
+        with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
+            translation, "translate_with_gemini", return_value=None
+        ):
+            result = translation.translate_subtitles(
+                [segment], strict=False, enable_g4f=False
+            )
         self.assertEqual(result[0].content, "你好")
 
     def test_strict_translation_rejects_partial_cjk_without_machine_fallback(self):

@@ -22,7 +22,9 @@ backend/*.log
 
 .venv/
 venv/
+backend/venv/
 model_venv/
+backend/model_venv/
 workspace/
 
 models/

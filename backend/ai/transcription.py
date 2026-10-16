@@ -44,7 +44,65 @@ def _cached_model_path(model_name, download_root):
     return model_name
 
 
+def _join_aligned_tokens(left, right):
+    left = str(left or "")
+    right = str(right or "")
+    if not left:
+        return right
+    if not right:
+        return left
+    cjk = lambda value: any(("\u3400" <= character <= "\u4dbf") or ("\u4e00" <= character <= "\u9fff") for character in value)
+    if cjk(left[-1:]) or cjk(right[:1]) or right[:1] in "，。！？；：、,.!?;:":
+        return left + right
+    if left.endswith((" ", "\n")) or right.startswith((" ", "\n")):
+        return left + right
+    return left + " " + right
+
+
+def _aligned_units_to_segments(units):
+    """Group character/word timestamps into subtitle-sized speech windows."""
+    normalized = []
+    for unit in units or []:
+        try:
+            start = max(0.0, float(unit.get("start", 0.0)))
+            end = float(unit.get("end", start))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        text = str(unit.get("text", "") or "")
+        if not text.strip() or end <= start:
+            continue
+        normalized.append({"start": start, "end": end, "text": text})
+    normalized.sort(key=lambda item: (item["start"], item["end"]))
+
+    grouped = []
+    current = None
+    sentence_end = set("。！？!?；;")
+    for unit in normalized:
+        if current is None:
+            current = dict(unit)
+            continue
+        gap = unit["start"] - current["end"]
+        visible_length = sum(
+            1 for character in current["text"] if not character.isspace()
+        )
+        duration = unit["end"] - current["start"]
+        should_split_before = gap > 0.8 or duration > 6.0 or visible_length >= 24
+        if should_split_before:
+            grouped.append(current)
+            current = dict(unit)
+            continue
+        current["text"] = _join_aligned_tokens(current["text"], unit["text"])
+        current["end"] = max(current["end"], unit["end"])
+        if current["text"].rstrip()[-1:] in sentence_end:
+            grouped.append(current)
+            current = None
+    if current is not None:
+        grouped.append(current)
+    return grouped
+
+
 def _word_aligned_bounds(segment):
+
     """Return the audible speech bounds instead of Whisper's coarse chunk bounds."""
 
     valid_words = []
@@ -106,6 +164,40 @@ def _word_aligned_bounds(segment):
     return float(segment.start), float(segment.end)
 
 
+def _join_aligned_tokens(left, right):
+    left = str(left or "").strip()
+    right = str(right or "").strip()
+    if not left:
+        return right
+    if not right:
+        return left
+    cjk = lambda value: any("\u3400" <= character <= "\u9fff" for character in value)
+    if cjk(left[-1:]) or cjk(right[:1]) or right[:1] in "，。！？；：、,.!?;:":
+        return left + right
+    return left + " " + right
+
+
+def _group_fast_speech_windows(segments, max_seconds=3.5, max_characters=18):
+    """Bridge tiny adjacent speech windows when the speaker continued without a
+    significant pause or overlap. ASS still handles sentence display changes.
+    Only the opt-in fast profile uses this, leaving raw Whisper timing intact.
+    """
+    grouped = []
+    for item in segments:
+        if grouped:
+            previous = grouped[-1]
+            gap = float(item["start"]) - float(previous["end"])
+            duration = float(item["end"]) - float(previous["start"])
+            text = _join_aligned_tokens(previous["text"], item["text"])
+            if (0 <= gap <= 0.20 and duration <= max_seconds
+                    and len(text.replace(" ", "")) <= max_characters):
+                previous["end"] = item["end"]
+                previous["text"] = text
+                continue
+        grouped.append(dict(item))
+    return grouped
+
+
 def _merge_short_fragments(segments):
     """Merge only tiny ASR fragments, never full adjacent subtitle lines."""
 
@@ -129,6 +221,95 @@ def _merge_short_fragments(segments):
     if current is not None:
         merged.append(current)
     return merged
+
+
+SENTENCE_FINAL_PARTICLES = ("吗", "呢", "吧", "呀", "啊", "嘞", "喽", "啦", "。")
+NEW_SENTENCE_STARTERS = ("话说", "不过", "但是", "所以", "然后", "而且", "另外", "ok ", "ok,", "ok，", "ok", "那么", "其实", "不多说了", "诸位", "各位", "家人们")
+
+
+def _ends_with_sentence_boundary(text):
+    clean = text.strip().rstrip("。！？!?,，;；")
+    if not clean:
+        return False
+    if any(text.strip().endswith(p) for p in "。！？!?"):
+        return True
+    return clean.endswith(SENTENCE_FINAL_PARTICLES)
+
+
+def _starts_new_sentence(text):
+    clean = text.strip().lower()
+    return any(clean.startswith(s) for s in NEW_SENTENCE_STARTERS)
+
+
+def _merge_continuous_sentences(segments, max_gap=0.35, max_duration=4.8, max_cjk_chars=26, max_words=16):
+    """
+    Intelligently merge adjacent continuous speech fragments into natural grammatical sentences.
+    Prevents choppy, isolated word fragments in downstream AI translation and TTS,
+    which otherwise causes tiny subtitles that fail to cover underlying video text.
+    """
+    if not segments:
+        return []
+
+    merged = []
+    current = None
+    for item in segments:
+        if current is None:
+            current = dict(item)
+            continue
+
+        gap = float(item["start"]) - float(current["end"])
+        combined_dur = float(item["end"]) - float(current["start"])
+        curr_text = str(current.get("text", "")).strip()
+        next_text = str(item.get("text", "")).strip()
+
+        if not curr_text:
+            current = dict(item)
+            continue
+        if not next_text:
+            continue
+
+        is_cjk = any("\u3400" <= c <= "\u9fff" for c in curr_text + next_text)
+        curr_dur = float(current["end"]) - float(current["start"])
+        next_dur = float(item["end"]) - float(item["start"])
+
+        # Stop merging across significant pauses or when exceeding duration/length
+        if gap > max_gap or combined_dur > max_duration:
+            merged.append(current)
+            current = dict(item)
+            continue
+
+        if is_cjk:
+            clean_len = sum(1 for c in curr_text + next_text if not c.isspace() and c not in ",.?!，。？！；;、")
+            if clean_len > max_cjk_chars:
+                merged.append(current)
+                current = dict(item)
+                continue
+
+            # In Chinese speech, check grammatical sentence boundaries
+            if _ends_with_sentence_boundary(curr_text):
+                merged.append(current)
+                current = dict(item)
+                continue
+
+            if _starts_new_sentence(next_text) and curr_dur >= 1.0:
+                merged.append(current)
+                current = dict(item)
+                continue
+        else:
+            word_count = len((curr_text + " " + next_text).split())
+            if word_count > max_words or any(curr_text.endswith(p) for p in (".", "!", "?")):
+                merged.append(current)
+                current = dict(item)
+                continue
+
+        # Merge contiguous clauses
+        current["end"] = item["end"]
+        current["text"] = _join_aligned_tokens(curr_text, next_text)
+
+    if current is not None:
+        merged.append(current)
+    return merged
+
 
 def _transcribe_raw_segments(model, target_audio):
     segments, _info = model.transcribe(
@@ -244,6 +425,7 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None, or
             transcribed_segments = _transcribe_raw_segments(model, audio_path)
 
         merged_fast = _merge_short_fragments(transcribed_segments)
+        merged_fast = _merge_continuous_sentences(merged_fast)
         
         # Tự động phát hiện original.wav nếu chưa truyền vào
         if original_audio_path is None:
@@ -277,10 +459,11 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None, or
                     initial_segments=subs,
                     whisper_model=model,
                 )
-                return [
+                res = [
                     {"start": s.start.total_seconds(), "end": s.end.total_seconds(), "text": s.content}
                     for s in refined
                 ]
+                return _merge_continuous_sentences(res)
             except Exception as cond_err:
                 logging.getLogger(__name__).warning("Conditional ASR fallback skipped: %s", cond_err)
 
@@ -380,6 +563,7 @@ def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, origin
         )
 
     print("✅ V1 ASR hoàn tất bằng Faster-Whisper {}.".format(selected_model))
+    merged_segments = _merge_continuous_sentences(merged_segments)
     srt_segments = []
     for i, seg in enumerate(merged_segments, start=1):
         sub = srt.Subtitle(

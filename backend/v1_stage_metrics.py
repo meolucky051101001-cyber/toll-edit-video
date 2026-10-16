@@ -30,10 +30,12 @@ def stage(name, cleanup=None):
                 logging.getLogger("v1.performance").info(
                     "stage=%s seconds=%.2f success=%s rss_mb=%s %s",
                     name, time.monotonic()-start, ok, _memory(), resources())
+        _time = time
+        import types
         if inspect.iscoroutinefunction(fn):
             @functools.wraps(fn)
             async def wrapped(*args, **kwargs):
-                start, ok = time.monotonic(), False
+                start, ok = _time.monotonic(), False
                 try:
                     result = await fn(*args, **kwargs)
                     ok = result is not False
@@ -43,12 +45,15 @@ def stage(name, cleanup=None):
         else:
             @functools.wraps(fn)
             def wrapped(*args, **kwargs):
-                start, ok = time.monotonic(), False
+                start, ok = _time.monotonic(), False
                 try:
                     result = fn(*args, **kwargs)
                     ok = result is not False
                     return result
                 finally:
                     finish(start, ok)
+            wrapped = functools.wraps(fn)(types.FunctionType(
+                wrapped.__code__, fn.__globals__, fn.__name__, wrapped.__defaults__, wrapped.__closure__
+            ))
         return wrapped
     return decorate

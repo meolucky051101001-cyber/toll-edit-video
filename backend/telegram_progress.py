@@ -19,7 +19,7 @@ def _report(text, worker_id=None):
     clean = str(text).replace("*", "")
     lower = clean.lower()
     w_id = worker_id or current_worker_id.get() or 1
-    if clean.startswith("❌"):
+    if clean.startswith("❌") or lower.startswith(("không hoàn tất video", "xử lý gặp lỗi")):
         job_tracker.set_error(job_tracker.get_status().get("video_name", ""), clean, worker_id=w_id)
         return
     # Bảng phân nhóm 8 bước pipeline chuẩn V1 Orchestrator & Dashboard

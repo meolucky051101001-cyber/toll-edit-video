@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-MUSE_DEFAULT_MODEL = "muse-spark-1.3-contributor"
+MUSE_DEFAULT_MODEL = os.getenv("MUSE_MODEL", "muse-spark-1.3-contributor")
 MUSE_DEFAULT_BASE_URL = "https://api.meta.ai/v1"
 
 

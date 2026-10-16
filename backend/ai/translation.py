@@ -62,7 +62,80 @@ _gemini_last_good = {}
 
 
 def _contains_cjk(text):
-    return any("\u4e00" <= char <= "\u9fff" for char in str(text or ""))
+    return any(("\u4e00" <= char <= "\u9fff") or ("\u3400" <= char <= "\u4dbf") for char in str(text or ""))
+
+
+def _parse_json_array(text):
+    """Parse JSON array of strings from LLM text with resilience against markdown formatting, trailing commas, and Python syntax."""
+    if not text or not isinstance(text, str):
+        return None
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if len(lines) >= 2:
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
+    # 1. Try standard JSON
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+    # 2. Try removing trailing commas before closing bracket (e.g. '["a", "b", ]')
+    try:
+        cleaned_comma = re.sub(r",\s*\]", "]", cleaned)
+        data = json.loads(cleaned_comma)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+    # 3. Try ast.literal_eval for single-quoted Python list syntax (e.g. "['Câu 1', 'Câu 2']")
+    import ast
+    try:
+        data = ast.literal_eval(cleaned)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def _subdivide_and_retry(translate_func, texts, **kwargs):
+    """Split batch in half (divide-and-conquer) when LLM returns mismatched item count."""
+    if not texts or len(texts) < 2:
+        return None
+    mid = len(texts) // 2
+    left_texts = texts[:mid]
+    right_texts = texts[mid:]
+
+    # Left kwargs: preserve context_start_seconds, drop context_end_seconds
+    left_kwargs = dict(kwargs)
+    left_kwargs.pop("context_end_seconds", None)
+    if left_kwargs.get("duration_budgets") is not None:
+        left_kwargs["duration_budgets"] = left_kwargs["duration_budgets"][:mid]
+
+    left_res = translate_func(left_texts, **left_kwargs)
+    if not left_res or len(left_res) != len(left_texts):
+        return None
+
+    # Right kwargs: preserve context_end_seconds, drop context_start_seconds
+    right_kwargs = dict(kwargs)
+    right_kwargs.pop("context_start_seconds", None)
+    if right_kwargs.get("duration_budgets") is not None:
+        right_kwargs["duration_budgets"] = right_kwargs["duration_budgets"][mid:]
+    if "prior_context" in right_kwargs:
+        right_kwargs["prior_context"] = left_res[-2:] if len(left_res) >= 2 else left_res
+
+    right_res = translate_func(right_texts, **right_kwargs)
+    if not right_res or len(right_res) != len(right_texts):
+        return None
+
+    return list(left_res) + list(right_res)
+
 
 def build_translation_prompt(texts, target_lang="vi", prior_context=None, with_vision=True, script_mode="default"):
     lang_name = "Tiếng Việt" if target_lang == "vi" else target_lang
@@ -225,7 +298,7 @@ def translate_with_gemini(
     **kwargs
 ):
     global _gemini_transient_failures
-    api_key = api_key or os.getenv("GEMINI_API_KEY", "")
+    api_key = api_key or os.getenv("GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEYS", "")
     if not api_key or not texts:
         return None
     if kwargs.get("stop_checker") is None:
@@ -274,21 +347,14 @@ def translate_with_gemini(
                     "data": b64
                 }
             })
-        preferred_gemini = os.getenv("GEMINI_MODEL", "gemini-3.7-flash").strip()
-        candidate_models = [
-            preferred_gemini,
-            "gemini-3.7-flash",
-            "gemini-3.5-flash",
-            "gemini-3.5-flash-lite",
-            "gemini-3.6-flash",
-            "gemini-3.1-flash-lite",
-            "gemini-flash-lite-latest",
-            "gemini-3.8-flash",
-        ]
-        models_to_try = []
-        for m in candidate_models:
-            if m and m not in models_to_try:
-                models_to_try.append(m)
+        preferred_gemini = os.getenv("GEMINI_MODEL", "").strip()
+        candidate_models = []
+        if preferred_gemini:
+            candidate_models.append(preferred_gemini)
+        for m in DEFAULT_TRANSLATION_MODELS:
+            if m not in candidate_models:
+                candidate_models.append(m)
+        models_to_try = list(candidate_models)
         response = None
         account = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
         try:
@@ -339,14 +405,17 @@ def translate_with_gemini(
             pass
         return translated
     except Exception as e:
-        from .v1_gemini_dispatcher import GeminiCancelledError, GeminiAuthError, GeminiConfigError, GeminiRequestError
+        from .v1_gemini_dispatcher import GeminiCancelledError, GeminiAuthError, GeminiConfigError, GeminiRequestError, mask_secret
         if isinstance(e, GeminiCancelledError):
             raise
         # Preserve the cause if every enabled provider fails; do not lose retry
         # classification behind a generic "translation failed" message.
         kwargs.get("failure_causes", []).append(e)
-        logger.warning(f"Lỗi dịch Gemini: {e}")
+        mark_gemini_unhealthy(15.0)
+        logger.warning("Lỗi dịch Gemini: %s", mask_secret(str(e)))
     return None
+
+
 
 def translate_with_openai(
     texts,
@@ -734,7 +803,7 @@ def translate_subtitles(
         if translated_texts:
             break
         if p == "gemini":
-            g_key = api_key or os.getenv("GEMINI_API_KEY", "")
+            g_key = api_key or os.getenv("GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEYS", "")
             if g_key:
                 translated_texts = translate_with_gemini(
                     texts, target_lang, g_key, video_path,
@@ -783,6 +852,23 @@ def translate_subtitles(
         except Exception as e:
             logger.warning(f"Lỗi G4F: {e}")
             translated_texts = None
+
+    if (
+        translated_texts
+        and len(translated_texts) == len(texts)
+        and all(isinstance(item, str) for item in translated_texts)
+    ):
+        translated_texts = [
+            normalize_subtitle_text(t)
+            for t in clean_incomplete_segment_stops(translated_texts)
+        ]
+        translated_texts = ensure_speech_pauses_and_entity(
+            texts,
+            translated_texts,
+            entity_map=entity_map or kwargs.get("entity_map"),
+            prior_context=prior_context,
+            glossary=glossary or kwargs.get("glossary"),
+        )
         
     translated_texts_valid = bool(
         translated_texts
@@ -821,7 +907,7 @@ def translate_subtitles(
                 if not alt_providers or used_provider == "gemini":
                     if "gemini" not in alt_providers:
                         alt_providers.append("gemini")
-                g_key = api_key or os.getenv("GEMINI_API_KEY", "")
+                g_key = api_key or os.getenv("GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEYS", "")
                 for alt_p in alt_providers:
                     if alt_p == "openai" and os.getenv("OPENAI_API_KEY"):
                         retranslated = translate_with_openai(failing_texts, target_lang, os.getenv("OPENAI_API_KEY"), **kwargs)
@@ -835,7 +921,10 @@ def translate_subtitles(
                         break
 
                 # Re-clean and re-validate
-                translated_texts = clean_incomplete_segment_stops(translated_texts)
+                translated_texts = [
+                    normalize_subtitle_text(t)
+                    for t in clean_incomplete_segment_stops(translated_texts)
+                ]
                 translated_texts = ensure_speech_pauses_and_entity(
                     texts,
                     translated_texts,
@@ -853,8 +942,11 @@ def translate_subtitles(
                 )
 
             if not is_valid:
-                raise RuntimeError(
-                    f"Strict translation mode requires a complete LLM translation conforming to quality rules: {'; '.join(reasons)}"
+                allow_fallback = os.getenv("V1_ALLOW_TRANSLATION_FALLBACK", "false").lower() in ("true", "1", "yes")
+                if strict and not allow_fallback:
+                    raise RuntimeError(f"Strict translation mode requires a complete LLM translation conforming to quality rules: {'; '.join(reasons)}")
+                logger.warning(
+                    f"Strict translation quality check flagged: {'; '.join(reasons)}. Proceeding with sanitized translation to avoid job failure."
                 )
 
     if translated_texts_valid and not strict:
@@ -909,7 +1001,10 @@ def translate_subtitles(
         return srt_segments
 
     if strict:
-        raise RuntimeError("Strict translation mode requires a complete LLM translation without machine fallback")
+        allow_fallback = os.getenv("V1_ALLOW_TRANSLATION_FALLBACK", "false").lower() in ("true", "1", "yes")
+        if not allow_fallback:
+            raise RuntimeError("Strict translation mode requires a complete LLM translation without machine fallback")
+        logger.warning("Strict translation mode: LLM translation unavailable after retries. Falling back to machine translation to prevent job failure...")
 
     logger.info("Falling back to Google Translate...")
     failed_segments = []
@@ -954,6 +1049,9 @@ def translate_subtitles(
 
             if not isinstance(translated_text, str) or not translated_text.strip():
                 raise RuntimeError("Google Translate returned an empty result")
+            translated_text = normalize_subtitle_text(translated_text)
+            if not translated_text.strip():
+                raise RuntimeError("Google Translate returned an empty result")
             if any(k in translated_text.lower() for k in error_keywords) or translated_text.startswith("Error"):
                 raise RuntimeError("Google Translate returned an error payload: {}".format(translated_text[:120]))
             if target_lang.lower().startswith("vi") and _contains_cjk(translated_text):
@@ -970,6 +1068,9 @@ def translate_subtitles(
         if err is not None:
             logger.warning(f"Lỗi dịch thuật cho đoạn '{getattr(segment, 'content', '')}': {err}")
             failed_segments.append(int(getattr(segment, "index", 0)))
+        else:
+            if not getattr(segment, "orig_content", None):
+                segment.orig_content = segment.content
         segment.content = translated_text
         
     if failed_segments and strict:

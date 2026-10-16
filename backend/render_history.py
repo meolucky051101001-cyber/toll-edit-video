@@ -307,6 +307,12 @@ def record_render_duration(video_name_or_path: str, duration_seconds: float) -> 
                         meta = {k: int(v if isinstance(v, (int, float)) else v.get("duration_seconds", 0)) 
                                 for k, v in raw.items() if v}
                 except Exception:
+                    try:
+                        import shutil
+                        corrupt_backup = history_file.parent / f".render_history.corrupt.{int(time.time())}.json"
+                        shutil.copy2(history_file, corrupt_backup)
+                    except Exception:
+                        pass
                     meta = {}
 
             meta[clean_name] = dur_int

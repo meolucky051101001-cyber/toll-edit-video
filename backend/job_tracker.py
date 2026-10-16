@@ -961,6 +961,7 @@ def fail_batch(
             )
             return
         _freeze_progress_unlocked()
+        now = time.time()
         _CURRENT_STATE.update({
             "job_id": job_id or current_job_id,
             "active": False,
@@ -971,7 +972,20 @@ def fail_batch(
             "step_name": f"Lỗi: {error_msg}",
             "last_error": error_msg,
             "eta_seconds": None,
-            "updated_at": time.time(),
+            "updated_at": now,
         })
+        if "workers" in _CURRENT_STATE and isinstance(_CURRENT_STATE["workers"], dict):
+            for _wid_k, w in _CURRENT_STATE["workers"].items():
+                if w.get("active") or w.get("video_status") == "running":
+                    w.update({
+                        "active": False,
+                        "status": "error",
+                        "video_status": "error",
+                        "step_name": f"Lỗi: {error_msg}",
+                        "last_error": error_msg,
+                        "eta_seconds": None,
+                        "updated_at": now,
+                    })
         _save_state_to_disk()
         _release_batch_lock_unlocked(job_id or current_job_id)
+

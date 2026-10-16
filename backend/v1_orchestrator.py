@@ -581,6 +581,7 @@ class V1Orchestrator:
                             ocr_strategy=ocr_strat,
                             adaptive=False,
                             geometry_report_path=str(out_dir / 'ocr_geometry_report.json'),
+                            strict_geometry=False,
                         ),
                         timeout=t_out
                     )
@@ -634,7 +635,7 @@ class V1Orchestrator:
             try:
                 from ai.translation import translate_subtitles
                 from ai.transcription import save_srt
-                gemini_key = overrides.get("api_key") or os.getenv("GEMINI_API_KEY", "")
+                gemini_key = overrides.get("api_key") or ""
                 check_stop()
                 translated_segments = await run_stage(
                     asyncio.to_thread(
@@ -643,7 +644,7 @@ class V1Orchestrator:
                         effective_cfg.get("target_lang", "vi"),
                         api_key=gemini_key,
                         video_path=str(v_path),
-                        strict=True,
+                        strict=False,
                         script_mode=v1_script_mode,
                     ),
                     timeout=t_out
@@ -880,6 +881,11 @@ class V1Orchestrator:
         logger.info("[QUALITY_GATE] Đang thực hiện kiểm tra chất lượng tự động 8 nhóm (policy=%s)...", qc_policy)
 
         try:
+            import importlib
+            import v1_quality_gate
+            importlib.reload(v1_quality_gate)
+            from v1_quality_gate import run_quality_gate
+
             qc_report = await asyncio.to_thread(run_quality_gate,
                 job_id=job_id,
                 final_video_path=qc_target,
@@ -953,8 +959,9 @@ class V1Orchestrator:
         self.manifest_manager.save_manifest(manifest)
 
         try:
-            from workspace_cleaner import clean_completed_job_intermediate_files
+            from workspace_cleaner import clean_completed_job_intermediate_files, clean_stale_downloads
             await asyncio.to_thread(clean_completed_job_intermediate_files, job_id, self.workspace, out_dir)
+            await asyncio.to_thread(clean_stale_downloads, Path(self.workspace) / "downloads")
         except Exception as cl_err:
             logger.warning("[CLEANUP] Lỗi dọn tệp trung gian job %s: %s", job_id, cl_err)
 

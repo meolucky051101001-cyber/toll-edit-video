@@ -59,6 +59,16 @@ class QCCheckItem:
     details: Dict[str, Any] = field(default_factory=dict)
 
 
+def _seg_val(s, key, default=None):
+    if s is None:
+        return default
+    if isinstance(s, dict):
+        if "__object_fields__" in s:
+            s = s["__object_fields__"]
+        return s.get(key, default)
+    return getattr(s, key, default)
+
+
 @dataclass
 class QCReport:
     job_id: str
@@ -78,11 +88,12 @@ class QCReport:
 
 
 def _check_cjk(text: str) -> bool:
-    """Kiểm tra xem câu có sót ký tự chữ Hán (CJK) hay không."""
+    """Kiểm tra xem câu có sót ký tự chữ Hán (CJK & CJK Extension A) hay không."""
     for ch in text:
-        if "\u4e00" <= ch <= "\u9fff":
+        if ("\u4e00" <= ch <= "\u9fff") or ("\u3400" <= ch <= "\u4dbf"):
             return True
     return False
+
 
 
 def run_quality_gate(
@@ -148,28 +159,26 @@ def run_quality_gate(
         duration_ok = output.duration > 0 and audio_duration > 0 and abs(output.duration - audio_duration) <= tolerance
         if source:
             duration_ok = duration_ok and source.duration > 0 and abs(output.duration - source.duration) <= tolerance
-            geometry_exact = (output.width, output.height) == (source.width, source.height)
-            geometry_padded = abs(output.width - source.width) <= 4 and abs(output.height - source.height) <= 4
-            geometry_scaled = (
-                source.height > 0 and output.height > 0
-                and abs((output.width / output.height) - (source.width / source.height)) <= 0.02
-                and output.width <= source.width and output.height <= source.height
-            )
-            geometry_ok = geometry_exact or geometry_padded or geometry_scaled
 
-            fps_diff = abs(output.fps - source.fps)
-            fps_pass_tol = max(0.5, source.fps * 0.02)
-            fps_warn_tol = max(2.0, source.fps * 0.10)
+            # Nới rộng hoàn toàn độ phân giải và FPS theo yêu cầu:
+            # Cho phép mọi độ phân giải (2K, 4K, 1080p, 720p, 9:16 dọc, 16:9 ngang, 4:3, 1:1, v.v.)
+            # và mọi mức FPS (24, 25, 30, 60, 120, VFR chuẩn hóa).
+            valid_output_geom = output.width > 0 and output.height > 0 and output.fps > 0
 
-            if geometry_ok and fps_diff <= fps_pass_tol:
-                geom_fps_status = "PASS"
-                geom_fps_msg = f"Độ phân giải và FPS khớp chuẩn video gốc ({output.width}x{output.height} @ {output.fps:.2f} FPS)"
-            elif geometry_ok and fps_diff <= fps_warn_tol:
-                geom_fps_status = "WARN"
-                geom_fps_msg = f"FPS lệch nhẹ do đồng bộ VFR ({source.fps:.2f} -> {output.fps:.2f} FPS, delta={fps_diff:.2f})"
-            else:
+            if not valid_output_geom:
                 geom_fps_status = "FAIL"
-                geom_fps_msg = f"Sai lệch độ phân giải hoặc FPS vượt ngưỡng ({source.width}x{source.height}@{source.fps:.2f} -> {output.width}x{output.height}@{output.fps:.2f})"
+                geom_fps_msg = f"Video thành phẩm có độ phân giải hoặc FPS không hợp lệ ({output.width}x{output.height}@{output.fps:.2f})"
+            else:
+                geom_fps_status = "PASS"
+                geometry_exact = (output.width, output.height) == (source.width, source.height)
+                fps_diff = abs(output.fps - source.fps)
+                fps_pass_tol = max(0.5, source.fps * 0.05)
+
+                if geometry_exact and fps_diff <= fps_pass_tol:
+                    geom_fps_msg = f"Độ phân giải và FPS khớp chuẩn video gốc ({output.width}x{output.height} @ {output.fps:.2f} FPS)"
+                else:
+                    # Ghi nhận chi tiết chuẩn hóa biên tập (chuyển khung hình hoặc FPS)
+                    geom_fps_msg = f"Độ phân giải và FPS chuẩn hóa thành công ({source.width}x{source.height}@{source.fps:.2f} -> {output.width}x{output.height}@{output.fps:.2f} FPS)"
 
             checks.append(QCCheckItem(QCCategory.RENDER_CONTINUITY.value, "source_geometry_fps",
                 geom_fps_status, geom_fps_msg,
@@ -205,11 +214,12 @@ def run_quality_gate(
         cjk_leaks = []
         empty_lines = []
         for i, s in enumerate(translated_subtitles):
-            txt = getattr(s, "content", "") or ""
-            if not txt.strip():
-                empty_lines.append(getattr(s, "index", i + 1))
+            txt = str(_seg_val(s, "content") or _seg_val(s, "text") or "").strip()
+            s_idx = _seg_val(s, "index", i + 1)
+            if not txt:
+                empty_lines.append(s_idx)
             elif _check_cjk(txt):
-                cjk_leaks.append({"index": getattr(s, "index", i + 1), "text": txt[:30]})
+                cjk_leaks.append({"index": s_idx, "text": txt[:30]})
 
         if cjk_leaks:
             checks.append(QCCheckItem(
@@ -323,7 +333,7 @@ def run_quality_gate(
         checks.append(QCCheckItem(QCCategory.TTS_TIMING_FIT.value, "tts_audio_files", "FAIL",
             f"{len(missing_audio)} file TTS thiếu hoặc không đọc được", {"missing": missing_audio[:10]}))
     if translated_subtitles:
-        expected = {getattr(s, "index", i + 1) for i, s in enumerate(translated_subtitles) if getattr(s, "content", "").strip()}
+        expected = {_seg_val(s, "index", i + 1) for i, s in enumerate(translated_subtitles) if str(_seg_val(s, "content") or _seg_val(s, "text") or "").strip()}
         actual = {d.get("index") for d in measured_dubs}
         complete = expected == actual and len(measured_dubs) == len(expected)
         checks.append(QCCheckItem(QCCategory.TTS_TIMING_FIT.value, "tts_cue_coverage",

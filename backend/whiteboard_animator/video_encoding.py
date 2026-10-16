@@ -104,14 +104,9 @@ def encode_blank_video(out_w, out_h, total_duration, output_path, fps, bitrate, 
 
 def encode_timing_video(
         img_array, timing, draw_end, total_duration, fade_dur,
-        output_path, fps, bitrate, preset, use_nvenc=True,
+        output_path, fps, bitrate, preset, use_nvenc=True, extra_frames=None,
 ):
-    """Stream a timed pixel-reveal of img_array to an MP4.
-
-    timing holds each pixel's reveal time in seconds (inf = background).
-    Only the narrow band of actively-fading pixels is blended per frame;
-    fully-revealed pixels are committed once to a persistent buffer.
-    """
+    """Stream a timed pixel-reveal of img_array to an MP4, followed by optional live action extra_frames."""
     t2 = time.monotonic()
     h, w = img_array.shape[:2]
     out_h, out_w = h + (h % 2), w + (w % 2)
@@ -139,14 +134,11 @@ def encode_timing_video(
     t3 = time.monotonic()
     logger.info("frame prep + sort: %.2fs", t3 - t2)
 
-    # ── Encode ──
-    # Render only the draw portion + a small buffer, then use ffmpeg
-    # tpad to clone the last frame for the hold phase.  This avoids
-    # piping gigabytes of identical hold frames through stdin.
     hold_dur = max(total_duration - draw_end - fade_dur, 0)
     draw_frames = int((draw_end + fade_dur) * fps) + 1
 
-    use_tpad = hold_dur > 0.5  # worth it if > ~12 duplicate frames
+    has_extra = bool(extra_frames and len(extra_frames) > 0)
+    use_tpad = (not has_extra) and (hold_dur > 0.5)
 
     def _build_cmd(nvenc_flag):
         if use_tpad:
@@ -157,7 +149,6 @@ def encode_timing_video(
             return ffmpeg_cmd(out_w, out_h, fps, bitrate, preset, output_path, use_nvenc=nvenc_flag)
 
     cmd = _build_cmd(use_nvenc)
-
     frame_view = memoryview(frame_buf).cast("B")
 
     with _ffmpeg_pipe(cmd) as pipe:
@@ -184,9 +175,16 @@ def encode_timing_video(
                         255.0 + (s_colors_f[sl] - 255.0) * a3
                 ).astype(np.uint8)
 
-            # Reuse the same buffer view instead of allocating a multi-megabyte
-            # bytes object for every frame.
             pipe.write(frame_view)
 
+        # 3. Stream Phase 2 Live Kinetic Action frames (moving cars, charts, gears, camera zoom/shake)
+        if has_extra:
+            for ext_fr in extra_frames:
+                if ext_fr.shape[0] != out_h or ext_fr.shape[1] != out_w:
+                    ext_fr = cv2.resize(ext_fr, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+                pipe.write(memoryview(np.ascontiguousarray(ext_fr, dtype=np.uint8)).cast("B"))
+
     t4 = time.monotonic()
-    logger.info("frame pipe + encode: %.2fs (%d frames piped)", t4 - t3, draw_frames)
+    total_piped = draw_frames + (len(extra_frames) if has_extra else 0)
+    logger.info("frame pipe + encode: %.2fs (%d frames piped)", t4 - t3, total_piped)
+
