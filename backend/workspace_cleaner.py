@@ -60,7 +60,8 @@ def _verified_delivery(manifest):
     from v1_checkpoint import fingerprint
     if manifest.status != "completed" or not manifest.output_video_path:
         return False
-    expected = manifest.stages.get("video_rendering", {}).get("artifacts", {}).get("temp_render", {}).get("sha256")
+    temp_render = manifest.stages.get("video_rendering", {}).get("artifacts", {}).get("temp_render")
+    expected = temp_render.get("sha256") if isinstance(temp_render, dict) else None
     try:
         return bool(expected and media_status(manifest.output_video_path)["status"] == "valid"
                     and fingerprint(manifest.output_video_path) == expected)
@@ -92,9 +93,12 @@ def clean_completed_job_intermediate_files(job_id: str, workspace_dir: str | Pat
 
     protected = {Path(manifest.video_path).resolve(), Path(manifest.output_video_path).resolve()}
     for stage in manifest.stages.values():
-        for artifact in stage.get("artifacts", {}).values():
-            if artifact.get("path"):
-                protected.add(Path(artifact["path"]).resolve())
+        if isinstance(stage, dict):
+            for artifact in stage.get("artifacts", {}).values():
+                if isinstance(artifact, dict) and artifact.get("path"):
+                    protected.add(Path(artifact["path"]).resolve())
+                elif isinstance(artifact, (str, Path)):
+                    protected.add(Path(artifact).resolve())
     freed_bytes = 0
     for pattern in INTERMEDIATE_FILE_PATTERNS:
         for path in job_dir.rglob(pattern):
