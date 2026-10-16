@@ -67,7 +67,9 @@ class ModelSpec:
         # 1. BS-RoFormer
         if self.model_id == "bs_roformer_sdr12":
             ckpt_path = Path(r"C:\tool v1\models\v1\source-separation\model_bs_roformer_ep_317_sdr_12.9755.ckpt")
-            sep_py = Path(r"C:\tool v1\backend\model_venv\Scripts\python.exe")
+            sep_py = Path(r"C:\tool v1\backend\model_venv_separator\Scripts\python.exe")
+            if not sep_py.is_file():
+                sep_py = Path(r"C:\tool v1\backend\model_venv\Scripts\python.exe")
             if not ckpt_path.is_file():
                 return False, f"Thiếu checkpoint BS-RoFormer tại: {ckpt_path}"
             if not sep_py.is_file():

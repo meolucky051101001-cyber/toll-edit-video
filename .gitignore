@@ -25,6 +25,9 @@ venv/
 backend/venv/
 model_venv/
 backend/model_venv/
+model_venv_separator/
+backend/model_venv_separator/
+.git.worktree_bak
 workspace/
 
 models/
@@ -51,3 +54,7 @@ douyin_script_data.json
 *.bak_*
 backend/test_*
 backend/douyin_script_data.json
+*.zip
+REVIEW_TOOL_V1_test_evidence.txt
+workspace_backup_safety/
+backend/run_reprocess_*.py
