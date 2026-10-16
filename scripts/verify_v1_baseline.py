@@ -244,7 +244,7 @@ def main() -> int:
     parser.add_argument(
         "--manifest",
         type=Path,
-        default=Path(__file__).resolve().parents[1] / "V1_BASELINE_MANIFEST.sha256",
+        default=Path(__file__).resolve().parents[1] / "releases" / "V1_BASELINE_MANIFEST.sha256",
         help="Path to V1_BASELINE_MANIFEST.sha256",
     )
     parser.add_argument(

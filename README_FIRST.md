@@ -15,7 +15,7 @@ Tài liệu hướng dẫn nhanh cho người vận hành hệ thống lồng ti
 - **Chạy trực tiếp có console:**
   Chạy `start_bot.bat` để xem log trực tiếp trên màn hình.
 - **Tắt toàn bộ hệ thống:**
-  Chạy `TatHoanToan.bat` hoặc `stop_bot.bat`.
+  Chạy `scripts\windows\TatHoanToan.bat` hoặc `stop_bot.bat`.
 
 ---
 
