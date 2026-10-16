@@ -686,15 +686,18 @@ header {
 .progress-step-text { color: #c4c7cb; }
 .progress-pct-text { color: #e6e7e9; }
 .progress-bar-track { height: 8px; background: #292b30; border: 0; border-radius: 99px; }
-.progress-bar-fill { border-radius: inherit; background: #6897ad; box-shadow: none; }
+.progress-bar-fill { border-radius: inherit; background: linear-gradient(90deg, #10b981, #059669); box-shadow: 0 0 14px rgba(16, 185, 129, 0.4); }
 .steps-grid { gap: 8px; margin-top: 14px; }
 .step-item { min-height: 76px; padding: 9px 10px; border-radius: 8px; background: #141519; }
 .step-item:hover { background: #1a1b1f; border-color: #3c3e44; }
 .step-title { font-size: 12px; }
 .step-tag, .step-duration { font-size: 11px; }
 .step-icon { width: 21px; height: 21px; border-radius: 5px; background: #202126; color: #b5b8bd; }
-.step-item.active { background: rgba(89, 128, 148, .12); border-color: #587688; box-shadow: none; }
-.step-item.active .step-icon { background: rgba(104, 151, 173, .16); color: #b0cad8; }
+.step-item.active { background: rgba(16, 185, 129, .12); border-color: #10b981; box-shadow: 0 0 16px rgba(16, 185, 129, .22); }
+.step-item.active .step-icon { background: rgba(16, 185, 129, .22); color: #34d399; }
+.step-item.active .step-title { color: #f0fdf4; }
+.step-item.active .step-tag { color: #6ee7b7; font-weight: 600; }
+.step-item.active .step-duration { color: #34d399; font-weight: 600; }
 .step-item.completed { background: rgba(45, 104, 73, .08); border-color: rgba(79, 140, 103, .35); }
 .step-item.completed .step-icon { background: rgba(55, 123, 84, .16); color: #9bd0ae; }
 .stats-row { gap: 8px; margin-top: 12px; }
@@ -944,11 +947,12 @@ header {
 
     .dot-red { background: #e27d7d; }
     .step-item.failed { border-color: #885454; background: #21191a; }
-    .step-item.stopped { border-color: #635945; background: #1d1c19; }
+    .step-item.stopped { border-color: rgba(245, 158, 11, 0.5); background: rgba(245, 158, 11, 0.08); }
     .step-item.failed [id^="timeStep"], .status-invalid, .status-error { color: #e8a0a0; }
     .status-unverified { color: #c9b78d; }
-    #progressBar[data-state="error"] { background: #ba7474; }
-    #progressBar[data-state="stopped"] { background: #a29375; }
+    #progressBar[data-state="running"], #w1ProgressBar[data-state="running"] { background: linear-gradient(90deg, #10b981, #059669); box-shadow: 0 0 14px rgba(16, 185, 129, 0.4); }
+    #progressBar[data-state="error"], #w1ProgressBar[data-state="error"] { background: #ba7474; }
+    #progressBar[data-state="stopped"], #w1ProgressBar[data-state="stopped"] { background: #f59e0b; }
     .dashboard-pager { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 18px; border-top:1px solid var(--border); color:var(--text-muted); font-size:12px; }
     .dashboard-list-notice:not(:empty) { padding:8px 18px 12px; color:#d2b781; font-size:12px; }
     .v1-pipeline-panel[hidden] { display:none !important; }
@@ -1122,9 +1126,9 @@ header {
     </div>
     
     <div class="hw-status">
-      <div style="display: flex; background: rgba(255, 255, 255, 0.04); padding: 2px; border-radius: 6px; border: 1px solid var(--border); gap: 2px;">
-        <a class="btn btn-outline" href="http://127.0.0.1:8088/" style="padding: 3px 10px; background: rgba(255,255,255,0.08); color: #fff; font-weight: 600;" title="Mở dashboard Tool V1">Tool V1</a>
-        <a class="btn btn-outline" href="http://127.0.0.1:8089/" style="padding: 3px 10px; border-color: transparent;" title="Mở dashboard Tool V2">Tool V2</a>
+      <div style="display: flex; align-items: center; background: rgba(16, 185, 129, 0.08); padding: 3px 10px; border-radius: 6px; border: 1px solid rgba(16, 185, 129, 0.3); gap: 6px;" title="Hệ thống Tool V1 đang hoạt động">
+        <span class="dot dot-green"></span>
+        <span style="font-size: 11.5px; font-weight: 600; color: #34d399;">Tool V1 Production</span>
       </div>
       <a class="btn btn-outline" href="/quy-trinh" title="Mở Studio Quy trình biên tập video & chống re-up">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="m9 8 6 4-6 4Z"/></svg>
@@ -1202,7 +1206,7 @@ header {
           <div class="quick-guide-item"><strong>02 · Theo dõi xử lý</strong><p>Bấm “Bắt đầu xử lý” và xem tiến độ từng công đoạn ở thẻ phía dưới.</p></div>
           <div class="quick-guide-item"><strong>03 · Xem thành phẩm</strong><p>Mở video trong danh sách thành phẩm để kiểm tra kết quả sau khi hoàn tất.</p></div>
         </div>
-        <p class="quick-guide-note">Tool V1 chạy quy trình Legacy. Tool V2 có thêm QC Gate ở bước xuất video.</p>
+        <p class="quick-guide-note">Hệ thống xử lý video tự động Tool V1 với pipeline 8 bước tối ưu GPU RTX 4050.</p>
       </div>
     </details>
 
@@ -3181,7 +3185,9 @@ header {
       const stopped = status === 'stopped';
       const terminal = failed || interrupted || stopped;
       const pauseState = globalState.pause_state || 'running';
-      const isPaused = !terminal && !['idle', 'completed', 'recorded'].includes(status) && pauseState !== 'running';
+      const isTrulyPaused = pauseState === 'paused';
+      const isPausing = pauseState === 'pausing';
+      const isPaused = !terminal && !['idle', 'completed', 'recorded'].includes(status) && isTrulyPaused;
       const videoDone = !failed && !interrupted && data.video_status === 'completed';
 
       let currentStep = Number(data.step) || 0;
@@ -3249,7 +3255,7 @@ header {
       if (barEl) {
         const scale = percent / 100;
         barEl.style.transform = `scaleX(${scale})`;
-        barEl.dataset.state = failed ? 'error' : (terminal || isPaused ? 'stopped' : 'running');
+        barEl.dataset.state = failed ? 'error' : (terminal || isTrulyPaused ? 'stopped' : 'running');
       }
 
       if (prefix) {
@@ -3333,9 +3339,13 @@ header {
           if (timeEl) timeEl.textContent = durText ? `✓ ${durText}` : '✓ Xong';
         } else if (isWorkerActive || ['error', 'stopped', 'interrupted'].includes(data.status)) {
           if (currentStep === k) {
-            el.classList.add(failed ? 'failed' : (terminal || isPaused ? 'stopped' : 'active'));
+            el.classList.add(failed ? 'failed' : (terminal || isTrulyPaused ? 'stopped' : 'active'));
             el.setAttribute('aria-current', 'step');
-            const stageLabel = failed ? 'Lỗi' : (isPaused ? 'Tạm dừng' : (terminal ? 'Đã dừng' : 'Đang chạy'));
+            let stageLabel = 'Đang chạy';
+            if (failed) stageLabel = 'Lỗi';
+            else if (terminal) stageLabel = 'Đã dừng';
+            else if (isTrulyPaused) stageLabel = 'Tạm dừng';
+            else if (isPausing) stageLabel = 'Đang chạy (chờ tạm dừng)';
             if (timeEl) timeEl.textContent = stageLabel + (durText ? ` · ${durText}` : '');
           } else if (currentStep > k) {
             el.classList.add('completed');
@@ -3360,7 +3370,9 @@ header {
       const stopped = status === 'stopped';
       const terminal = failed || interrupted || stopped;
       const pauseState = state.pause_state || 'running';
-      const isPaused = !terminal && !['idle', 'completed', 'recorded'].includes(status) && pauseState !== 'running';
+      const isTrulyPaused = pauseState === 'paused';
+      const isPausing = pauseState === 'pausing';
+      const isPaused = !terminal && !['idle', 'completed', 'recorded'].includes(status) && (isTrulyPaused || isPausing);
       dashboardActive = Boolean(state.active) && !terminal;
       setDashboardOutputPath(state.output_dir);
       updateStepModelsUI(state);
@@ -6638,7 +6650,6 @@ let inputUploading=false;
       countEl.textContent = `${selectedPhoiFiles.size} video`;
       
       // Lấy đường dẫn thư mục xuất
-      const isV2 = window.location.port === '8089' || document.title.includes('V2');
       if (!dashboardOutputPath) await fetchBanve();
       if (!dashboardOutputPath) { showToast('Chưa đọc được thư mục xuất từ backend. Vui lòng thử lại.', 'error'); return; }
       outDirEl.textContent = dashboardOutputPath;
