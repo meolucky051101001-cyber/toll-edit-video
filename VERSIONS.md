@@ -1,59 +1,22 @@
-# Bản đồ phiên bản và nhánh
+# Bản đồ phiên bản và nhánh Git
 
-Repository lưu nhiều công cụ theo các nhánh Git độc lập. Không checkout một nhánh rồi giả định nó chứa phiên bản của nhánh khác.
+Repository lưu trữ các nhánh theo phân định rõ ràng:
 
-## Nhánh chuẩn
+---
 
-| Nhánh | Vai trò | Điểm vào / cổng tham khảo |
+## 1. Trạng thái các nhánh trên GitHub
+
+| Nhánh | Trạng thái | Vai trò chính |
 | --- | --- | --- |
-| [main](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/main) | Nhánh tổng hợp và đích nhận thay đổi chung; có thể chậm hơn nhánh tính năng cho đến khi PR được nhập | README và tài liệu tổng quan |
-| [tool-v1](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v1) | Pipeline V1, dashboard monitor và công cụ tương thích V1 | Dashboard mặc định 8088 |
-| [tool-v2](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v2) | Pipeline V2, Telegram, batch, Dashboard Monitor và API/editor | Dashboard 8089; API desktop 8000 |
-| [tool-tim-kiem-video](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-tim-kiem-video) | Ứng dụng nghiên cứu/tìm kiếm độc lập | Theo README của nhánh |
+| **`tool-v1`** | **CHÍNH THỨC (Production)** | Toàn bộ mã nguồn sản xuất của Tool V1: 8 bước xử lý tự động, GPU BS-RoFormer, Whisper Turbo, Gemini AI failover, Telegram Bot, Dashboard V1 (port 8088) và Tool Control (port 8090). |
+| **`main`** | **CHÍNH THỨC (Production Default)** | Nhánh mặc định của kho lưu trữ, đồng bộ và phản ánh trực tiếp trạng thái của Tool V1. |
+| **`tool-v2`** | **ĐÃ DỪNG (Deprecated / Retired)** | Nhánh lưu trữ lịch sử của Tool V2. Hệ thống đã dừng sử dụng hoàn toàn và được gỡ bỏ khỏi môi trường vận hành thực tế. |
+| **`tool-tim-kiem-video`**<br>(alias: `ai-video-research-tool`) | **Độc lập** | Ứng dụng nghiên cứu và thu thập video AI độc lập (crawler Douyin/Xiaohongshu), không chạy chung pipeline với Tool V1. |
 
-## Alias và nhánh tương thích
+---
 
-- **refactor/pipeline-v2** hiện cùng nội dung với **tool-v2**. Dùng **tool-v2** làm nhánh chuẩn để tránh phát triển hai bản giống nhau.
-- **ai-video-research-tool** là alias tương thích của **tool-tim-kiem-video**. Ưu tiên tên **tool-tim-kiem-video**.
-- Alias có thể được giữ để tương thích liên kết cũ; không có nghĩa đó là một sản phẩm/phiên bản riêng.
+## 2. Dịch vụ và Cổng mạng của Tool V1
 
-## Chọn nhánh
-
-~~~powershell
-git fetch origin
-git switch tool-v1
-# hoặc
-git switch tool-v2
-~~~
-
-Trước khi cập nhật máy đang chạy:
-
-1. Xác nhận đúng thư mục cài đặt và nhánh.
-2. Kiểm tra git status; sao lưu thay đổi local và .env riêng.
-3. Xem PR/commit hiện tại của nhánh trên GitHub.
-4. Chạy preflight và test phù hợp.
-5. Chỉ restart khi queue trống và không có stage AI/FFmpeg đang hoạt động.
-
-## Phân biệt service
-
-### Tool V1
-
-- FastAPI dashboard tại **127.0.0.1:8088** theo tài liệu bàn giao V1.
-- Dùng launcher/script của riêng nhánh V1.
-- Hàng đợi và tiến độ tương ứng với tracker/pipeline V1; không dùng cấu hình V2 như thể chúng tự động áp dụng.
-
-### Tool V2
-
-- **backend/dashboard_monitor.py**: Dashboard Monitor và các route Workflow, thường dùng cổng **8089**.
-- **backend/main.py**: API xử lý/editor, cổng **8000**; Electron có thể khởi chạy API trong desktop workflow.
-- **frontend/**: React + Vite + Electron; Vite dev server thường dùng **5173**.
-- **backend/telegram_bot.py**: bot Telegram; không phải dashboard web.
-- **run_batch_edit.bat**: batch processor cục bộ.
-
-### AI Video Research Tool
-
-Ứng dụng có hướng dẫn setup, database và lifecycle riêng. Dùng đúng README/start/stop script trên nhánh nghiên cứu. Cổng backend mặc định của ứng dụng này cũng có thể là **8000**, nên không chạy chồng với API Tool V2 nếu chưa cấu hình cổng khác.
-
-## Dữ liệu không nên commit
-
-Secret, cookie, profile trình duyệt, video đầu vào/đầu ra, workspace, log, cache model và hàng đợi runtime phải được giữ local. Model RVC có thể được quản lý qua Git LFS; các cache AI lớn khác thường được tạo/tải lại theo cấu hình. Đọc file .gitignore và README của nhánh trước khi thêm file.
+- **Dashboard V1 Web:** `http://127.0.0.1:8088/`
+- **Tool Control Server:** `http://127.0.0.1:8090/`
+- **Telegram Bot V1:** Vận hành qua script `KhoiDongAn.vbs` hoặc `start_bot.bat`.

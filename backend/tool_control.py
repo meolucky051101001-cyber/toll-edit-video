@@ -24,8 +24,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import psutil
 import voice_selection
 
-ROOTS = {"v1": Path(r"C:\tool v1\backend"), "v2": Path(r"C:\tool v2\backend")}
-PORTS = {"v1": 8088, "v2": 8089}
+ROOTS = {"v1": Path(r"C:\tool v1\backend")}
+PORTS = {"v1": 8088}
 TOKEN = secrets.token_urlsafe(32)
 LOCK = threading.Lock()
 FLAGS = Path(r"C:\tool v1\workspace\control")
@@ -33,7 +33,6 @@ FLAGS.mkdir(parents=True, exist_ok=True)
 
 CONTROL_DIRS = [
     Path(r"C:\tool v1\workspace\control"),
-    Path(r"C:\tool v2\workspace\control"),
 ]
 for _cd in CONTROL_DIRS:
     _cd.mkdir(parents=True, exist_ok=True)
@@ -203,12 +202,6 @@ def stop_and_release(key):
                     urllib.request.urlopen(req, timeout=1.5)
         except Exception:
             pass
-    elif key == 'v2':
-        try:
-            req = urllib.request.Request('http://127.0.0.1:8089/api/stop-batch', data=b'{}', headers={'Content-Type': 'application/json'})
-            urllib.request.urlopen(req, timeout=1.5)
-        except Exception:
-            pass
 
     # 3. Thu thập TOÀN BỘ tiến trình thuộc về Tool (kể cả supervisor, worker, render...)
     targets = {}
@@ -225,7 +218,7 @@ def stop_and_release(key):
                 continue
 
             is_tool_proc = False
-            if root_str in cmd_str or (key == 'v1' and r'c:\tool v1' in cmd_str) or (key == 'v2' and r'c:\tool v2' in cmd_str):
+            if root_str in cmd_str or (key == 'v1' and r'c:\tool v1' in cmd_str):
                 is_tool_proc = True
 
             if is_tool_proc:
@@ -291,10 +284,9 @@ def stop_and_release(key):
     return True
 
 def stop_all_tools():
-    """Tắt cả hai tool và giải phóng 100% RAM & GPU VRAM."""
+    """Tắt Tool V1 và giải phóng 100% RAM & GPU VRAM."""
     stop_and_release('v1')
-    stop_and_release('v2')
-    return 'Đã tắt cả hai Tool và giải phóng toàn bộ RAM & VRAM.'
+    return 'Đã tắt Tool V1 và giải phóng toàn bộ RAM & VRAM.'
 
 def change(key, action):
     if action == 'off_all':
@@ -308,17 +300,17 @@ def change(key, action):
         return f'Đã tắt Tool {key.upper()} và giải phóng toàn bộ RAM & VRAM.'
 
     if action == 'on':
-        other = 'v2' if key == 'v1' else 'v1'
-        # RÀNG BUỘC ĐỘC QUYỀN: Bắt buộc tắt và giải phóng 100% tool đối diện trước
-        stop_and_release(other)
-        time.sleep(0.5)
-
         # Xóa cờ pause của tool được kích hoạt
         for p in get_control_paths(key, key + '.pause'):
             try:
                 p.unlink(missing_ok=True)
             except Exception:
                 pass
+        try:
+            (Path(r"C:\tool v1\workspace\control") / "video.pause").unlink(missing_ok=True)
+            (Path(r"C:\tool v1\workspace\control") / "video.pause.ack").unlink(missing_ok=True)
+        except Exception:
+            pass
 
         procs_found = processes(key)
         names = [name for _, name in procs_found]
@@ -347,22 +339,24 @@ def change(key, action):
             if check_bots and (check_data.get('pid') in check_bots) and check_data.get('polling'):
                 break
 
-        return f'Đã bật Tool {key.upper()} thành công (Đã tắt Tool {other.upper()} & giải phóng RAM/VRAM).'
+        return f'Đã bật Tool {key.upper()} thành công.'
 
 def apply_boot_defaults():
     """
     Thiết lập trạng thái mặc định khi mở máy tính:
     - Tool V1: BẬT
-    - Tool V2: TẮT (ghi cờ v2.pause, giải phóng RAM/VRAM)
     """
     try:
-        # 1. Khóa và dọn Tool V2
-        stop_and_release('v2')
-        # 2. Mở khóa Tool V1
+        # Mở khóa Tool V1
         for p in get_control_paths('v1', 'v1.pause'):
             try: p.unlink(missing_ok=True)
             except Exception: pass
-        # 3. Khởi chạy dịch vụ Tool V1
+        try:
+            (Path(r"C:\tool v1\workspace\control") / "video.pause").unlink(missing_ok=True)
+            (Path(r"C:\tool v1\workspace\control") / "video.pause.ack").unlink(missing_ok=True)
+        except Exception: pass
+
+        # Khởi chạy dịch vụ Tool V1
         procs = processes('v1')
         names = [name for _, name in procs]
         if not any(n in names for n in ('main.py', 'dashboard_monitor.py')):
@@ -372,11 +366,6 @@ def apply_boot_defaults():
         fresh = any(data.get('pid') == p.pid for p in bots) and (time.time() - data.get('at', 0) < 8)
         if 'telegram_bot.py' not in names or not fresh:
             launch('v1', 'telegram')
-        # 4. Đảm bảo Dashboard Tool V2 cũng luôn sẵn sàng phục vụ web (0 MB VRAM)
-        procs_v2 = processes('v2')
-        names_v2 = [name for _, name in procs_v2]
-        if not any(n in names_v2 for n in ('main.py', 'dashboard_monitor.py')):
-            launch('v2', 'dashboard')
     except Exception:
         pass
 
@@ -392,15 +381,9 @@ def change_voice(voice_id):
     except (OSError, TimeoutError):
         raise ValueError('Không xác minh được batch V1; chưa đổi giọng.')
     voice_selection.save(voice_id)
-    try:
-        v2_ctrl = Path(r"C:\tool v2\workspace\control")
-        v2_ctrl.mkdir(parents=True, exist_ok=True)
-        (v2_ctrl / "voice_selection.json").write_text(json.dumps({"id": voice_id}, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
     return 'Đã lưu: ' + voice_selection.selected()['label'] + '. Video tiếp theo sẽ dùng giọng này.'
 
-HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Điều khiển Tool V1 / V2</title>
+HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Điều khiển Tool V1 & Telegram Bot</title>
 <style>
   * { box-sizing: border-box; }
   html, body {
@@ -916,16 +899,16 @@ HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name=
 <body>
 <div class="header">
   <div class="title-group">
-    <h2>⚡ Bộ điều khiển Tool V1 & V2</h2>
-    <span class="badge-rule">Chế độ độc quyền: Bật 1 Tool duy nhất hoặc Tắt cả 2</span>
+    <h2>⚡ Bộ điều khiển Tool V1 & Telegram Bot</h2>
+    <span class="badge-rule">Hệ thống xử lý video tự động Tool V1 (Bản mới nhất)</span>
   </div>
 </div>
 
 <div class="tools" id="tools"></div>
 
 <div class="actions-bar">
-  <button id="btn-off-all" class="btn-stop-all" onclick="stopAll()" title="Dừng triệt để cả 2 tool và giải phóng toàn bộ RAM & VRAM">
-    ⏹ Tắt cả 2 Tool (Giải phóng 100% RAM & VRAM)
+  <button id="btn-off-all" class="btn-stop-all" onclick="stopAll()" title="Dừng triệt để Tool V1 và giải phóng toàn bộ RAM & VRAM">
+    ⏹ Tắt Tool V1 (Giải phóng 100% RAM & VRAM)
   </button>
   <div id="message" role="status" style="margin-bottom:0; flex-grow:1;">Đang tải trạng thái hệ thống…</div>
 </div>
@@ -1060,7 +1043,7 @@ function renderTools() {
             role="switch"
             aria-checked="${isActive}"
             aria-label="Bật hoặc tắt Tool ${s.key.toUpperCase()}"
-            title="${isActive ? 'Bấm để TẮT Tool ' + s.key.toUpperCase() + ' và giải phóng tài nguyên' : 'Bấm để BẬT Tool ' + s.key.toUpperCase() + ' (Sẽ tự động tắt tool còn lại)'}"
+            title="${isActive ? 'Bấm để TẮT Tool ' + s.key.toUpperCase() + ' và giải phóng tài nguyên' : 'Bấm để BẬT Tool ' + s.key.toUpperCase()}"
             ${pending ? 'disabled' : ''}
             onclick="toggleTool('${s.key}', ${isActive})">
             <span class="switch-track" aria-hidden="true">
@@ -1093,7 +1076,6 @@ async function refresh() {
 async function toggleTool(key, currentlyActive) {
   if (pending) return;
   const action = currentlyActive ? 'off' : 'on';
-  const other = key === 'v1' ? 'v2' : 'v1';
 
   pending = true;
   pendingTarget = key;
@@ -1104,7 +1086,7 @@ async function toggleTool(key, currentlyActive) {
   if (action === 'off') {
     msgElem.textContent = `⏳ Đang tắt Tool ${key.toUpperCase()} và giải phóng toàn bộ RAM & VRAM...`;
   } else {
-    msgElem.textContent = `⏳ Đang dọn sạch Tool ${other.toUpperCase()} & khởi động Tool ${key.toUpperCase()}...`;
+    msgElem.textContent = `⏳ Đang khởi động Tool ${key.toUpperCase()} & Telegram Bot...`;
   }
 
   try {
@@ -1452,7 +1434,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed_path.startswith('/voice-preview-video/'):
             filename = Path(parsed_path).name
-            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control"), Path(r"C:\tool v2\workspace\control")]:
+            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")]:
                 target = base / 'voice_previews' / filename
                 if target.is_file():
                     return self.send_file(target, 'video/mp4')
@@ -1460,7 +1442,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed_path.startswith('/voice-preview-audio/'):
             filename = Path(parsed_path).name
-            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control"), Path(r"C:\tool v2\workspace\control")]:
+            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")]:
                 target = base / 'voice_checks' / filename
                 if target.is_file():
                     mime = 'audio/wav' if filename.endswith('.wav') else 'audio/mpeg'
@@ -1468,7 +1450,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(404, {'message': 'Audio preview not found'})
 
         if parsed_path == '/sample-video':
-            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control"), Path(r"C:\tool v2\workspace\control")]:
+            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")]:
                 target = base / 'sample_test_video.mp4'
                 if target.is_file():
                     return self.send_file(target, 'video/mp4')

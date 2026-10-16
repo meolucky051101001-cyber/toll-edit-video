@@ -1,232 +1,114 @@
-# AutoDub Video Tools
+# AutoDub Video Tools (Tool V1 Production)
 
-Repository này chứa mã nguồn và tài liệu cho ba nhóm công cụ độc lập: **Tool V1**, **Tool V2** và **AI Video Research Tool**. Các nhánh có thể khác phiên bản; chọn đúng nhánh trước khi cài hoặc chạy. README này là trang điều hướng chung, không phải bằng chứng rằng mọi nhánh hay dịch vụ đang chạy trên máy.
+> [!IMPORTANT]
+> **THÔNG BÁO VỀ TRẠNG THÁI HỆ THỐNG (Cập nhật 10/2026):**
+> - **Tool V2 ĐÃ NGỪNG SỬ DỤNG (DEPRECATED & RETIRED):** Toàn bộ runtime, database, background service và thư mục của Tool V2 đã được dọn sạch khỏi môi trường sản xuất.
+> - **Tool V1 là hệ thống DUY NHẤT được duy trì chính thức (OFFICIAL PRODUCTION):** Đây là công cụ ổn định, hoàn chỉnh, tích hợp đầy đủ quy trình tự động 8 bước lồng tiếng/dịch thuật AI trên card NVIDIA GPU và phục vụ sản xuất thực tế qua Telegram Bot và Dashboard Monitor.
+
+---
 
 ## Mục lục
 
-1. [Chọn đúng công cụ và nhánh](#1-chọn-đúng-công-cụ-và-nhánh)
-2. [Tính năng theo từng hệ thống](#2-tính-năng-theo-từng-hệ-thống)
-3. [Luồng xử lý Tool V2](#3-luồng-xử-lý-tool-v2)
-4. [Cấu trúc repository](#4-cấu-trúc-repository)
-5. [Cài đặt và khởi động Tool V2](#5-cài-đặt-và-khởi-động-tool-v2)
-6. [Cấu hình model và thư mục](#6-cấu-hình-model-và-thư-mục)
-7. [Kiểm thử và nghiệm thu](#7-kiểm-thử-và-nghiệm-thu)
-8. [Bảo mật, dữ liệu và giới hạn](#8-bảo-mật-dữ-liệu-và-giới-hạn)
-9. [Tài liệu tiếp tục đọc](#9-tài-liệu-tiếp-tục-đọc)
+1. [Tổng quan & Phân định hệ thống](#1-tổng-quan--phân-định-hệ-thống)
+2. [Quy trình xử lý tự động của Tool V1](#2-quy-trình-xử-lý-tự-động-của-tool-v1)
+3. [Danh mục Model AI & Cấu hình Runtime](#3-danh-mục-model-ai--cấu-hình-runtime)
+4. [Cài đặt & Khởi động Tool V1](#4-cài-đặt--khởi-động-tool-v1)
+5. [Cổng dịch vụ & Giao diện điều khiển](#5-cổng-dịch-vụ--giao-diện-điều-khiển)
+6. [Kiểm thử & Đảm bảo chất lượng](#6-kiểm-thử--đảm-bảo-chất-lượng)
+7. [Bảo mật & Quản lý dữ liệu](#7-bảo-mật--quản-lý-dữ-liệu)
 
-## 1. Chọn đúng công cụ và nhánh
+---
 
-| Tên công cụ | Nhánh GitHub | Cổng truy cập | Vai trò chính |
+## 1. Tổng quan & Phân định hệ thống
+
+| Tên công cụ / Nhánh | Trạng thái | Cổng truy cập | Vai trò chính |
 | --- | --- | --- | --- |
-| **Portal điều phối** | [`main`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/main) | — | Mục lục hệ sinh thái, tài liệu tổng hợp và quy chuẩn vận hành |
-| **Tool V1 (Production)** | [`tool-v1`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v1) | Dashboard `127.0.0.1:8088` | Pipeline V1 xử lý video theo hàng đợi và dashboard giám sát |
-| **Tool V2 (Next-Gen)** | [`tool-v2`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v2) | Dashboard `127.0.0.1:8089`; API desktop `127.0.0.1:8000` | Pipeline theo job/stage, phục hồi và QC; Multi-zone Cover QC, Dynamic Sampling; bot Telegram và xử lý cục bộ |
-| **Giám sát & A2UI Studio** | Tích hợp trên `tool-v1` và `tool-v2` | V1 `8088` / V2 `8089` | Dashboard giám sát; Studio Quy Trình (`/quy-trinh`) và Studio Kịch Bản (`/kich-ban`) khi service tương ứng được mount |
-| **Tool tìm kiếm video AI** | [`tool-tim-kiem-video`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-tim-kiem-video) (alias: `ai-video-research-tool`) | Web `localhost:3000`; API `localhost:8000` | Ứng dụng riêng để nghiên cứu/tìm kiếm video; xem README của nhánh để biết tính năng và cấu hình hiện hành |
+| **Tool V1 (Production)**<br>[`tool-v1`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v1) / [`main`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/main) | **ĐANG SỬ DỤNG (Chính thức)** | Dashboard: `http://127.0.0.1:8088`<br>Tool Control: `http://127.0.0.1:8090` | Hệ thống lồng tiếng & dịch video tự động 8 bước trọn gói, tích hợp Telegram bot, Dashboard theo dõi real-time, GPU BS-RoFormer, Whisper Turbo & Gemini AI failover. |
+| **Tool V2**<br>[`tool-v2`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v2) | **ĐÃ DỪNG / RETIRED** | *Đã tắt toàn bộ* | Phiên bản thử nghiệm pipeline theo stage; đã ngừng phát triển và loại bỏ khỏi môi trường hoạt động thực tế. |
+| **AI Video Research Tool**<br>[`tool-tim-kiem-video`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-tim-kiem-video) | **Độc lập** | Web: `http://localhost:3000`<br>API: `http://localhost:8000` | Ứng dụng nghiên cứu và thu thập video độc lập (cào dữ liệu Douyin/Xiaohongshu); không dùng chung quy trình với Tool V1. |
 
-Đường dẫn checkout và dữ liệu cục bộ phụ thuộc máy; Tool V2 hỗ trợ cấu hình thư mục qua ENV. Bảng này không cố định các đường dẫn Windows cá nhân hay khẳng định service đang chạy.
+---
 
-Nhánh **refactor/pipeline-v2** hiện trùng nội dung với **tool-v2**; dùng **tool-v2** làm tên chuẩn. **ai-video-research-tool** là tên nhánh tương thích của ứng dụng tìm kiếm; ưu tiên **tool-tim-kiem-video**. Luôn kiểm tra commit/PR hiện hành trước khi cập nhật máy chạy.
+## 2. Quy trình xử lý tự động của Tool V1
 
-## 2. Tính năng theo từng hệ thống
+Tool V1 vận hành một quy trình khép kín gồm 8 công đoạn liên hoàn, tối ưu hóa tốc độ và chất lượng:
 
-### Tool V1
+1. **Tiếp nhận & Chuẩn bị:** Tự động nhận link video (Douyin, TikTok, Xiaohongshu) qua Telegram Bot hoặc file video đưa vào hàng đợi; trích xuất audio stream chuẩn WAV 44.1kHz.
+2. **Tách nguồn âm thanh (Vocal Separation):** Sử dụng **BS-RoFormer (SDR 12.97 dB)** chạy trực tiếp trên GPU (CUDA 0) thông qua môi trường cách ly `backend/model_venv_separator` để tách sạch giọng gốc và nhạc nền (BGM).
+3. **Nhận dạng lời nói (ASR):** Sử dụng **Whisper Large-v3 Turbo** để bóc tách lời thoại và sinh timestamp chính xác từng mili-giây.
+4. **Nhận diện phụ đề gốc (OCR):** Quét khung hình bằng **PP-OCRv6** với thuật toán Smart Skip và cân bằng hình học phụ đề (OCR Geometry auto-heal) để xác định vị trí và thời gian phụ đề gốc cần che.
+5. **Dịch thuật AI theo ngữ cảnh:** Động cơ dịch đa kênh với cơ chế **Gemini Multi-key Failover Pool** (tự động đảo key dự phòng khi chạm quota/rate-limit), kết hợp prompt dịch tự nhiên, chuẩn văn phong Việt Nam.
+6. **Lồng tiếng & Căn nhịp đọc (TTS & Timing):** Tổng hợp giọng đọc tự nhiên (CapCut TTS đa luồng 6 worker hoặc Edge TTS), kết hợp bộ giải thuật **Timing Solver & Speed Limiter (tối đa 1.45x)** chống méo tiếng hoặc nuốt chữ.
+7. **Hòa âm thông minh (Audio Mixing):** Bộ trộn **Hierarchical Soft Ducking** tự động hạ nhạc nền khi có lời nói, nâng nhạc nền ở khoảng lặng và chuẩn hóa âm lượng theo chuẩn quốc tế **EBU R128 (-15 LUFS)**.
+8. **Render video tăng tốc phần cứng:** Xuất video chất lượng cao thông qua **FFmpeg NVENC H.264** (NVIDIA Hardware Encoder), che phụ đề cũ mượt mà và nhúng phụ đề mới.
 
-Tool V1 giữ pipeline giám sát/render kiểu V1, với các chức năng chính:
+---
 
-- Nhận video từ thư mục đầu vào, chạy lần lượt theo hàng đợi và bỏ qua sản phẩm đã tồn tại theo quy tắc của pipeline.
-- Theo dõi video hiện tại, bước đang chạy, phần trăm, thời gian và trạng thái lỗi/hoàn thành.
-- Các bước xử lý gồm trích âm thanh, tách giọng, nhận dạng lời nói, OCR phụ đề gốc, dịch, tạo giọng/lồng tiếng và render.
-- Dashboard xem danh sách đầu vào/thành phẩm, log, xem thử video, điều khiển chạy/dừng/tạm dừng/tiếp tục, quản lý hàng đợi và thử lại job khi được hỗ trợ.
-- Tùy chọn giọng/âm thanh và các trang A2UI/Studio có trong nhánh V1.
+## 3. Danh mục Model AI & Cấu hình Runtime
 
-Model thực tế có thể khác theo cấu hình và bản V1 đang dùng. Xem cấu hình local và [tài liệu bàn giao V1](https://github.com/meolucky051101001-cyber/toll-edit-video/blob/tool-v1/DASHBOARD_MONITOR_HANDOVER.md); không dùng README này để suy ra model đã chạy cho một video cụ thể.
+Tool V1 quản lý các model tập trung qua `backend/v1_model_registry.py` và `backend/ai/v1_model_policy.py`:
 
-### Tool V2
+| Công đoạn | Model mặc định | Cơ chế tăng tốc / Runtime | Fallback / Dự phòng |
+| --- | --- | --- | --- |
+| **Separation** | BS-RoFormer Ep317 (SDR 12.97dB) | CUDA:0 (`backend/model_venv_separator`) | Demucs v4 (htdemucs) |
+| **ASR** | Whisper Large-v3 Turbo | CUDA:0 (Faster-Whisper FP16) | Standard Whisper / Fallback Cache |
+| **OCR** | PP-OCRv6 (ONNX Runtime) | ONNX Runtime GPU/DirectML | Smart Skip / Reuse visual bbox |
+| **Dịch thuật** | Gemini Flash (Multi-key Pool) | HTTP REST đa key + cache phiên | Secondary API keys / Tiered fallback |
+| **TTS** | CapCut TTS (6-workers) | Async streaming pooling | Edge-TTS (4-workers) |
+| **Render** | FFmpeg NVENC H.264 | NVIDIA NVENC Hardware Video Encoder | libx264 CPU encode |
 
-Tool V2 mở rộng xử lý theo job/stage và bổ sung khả năng phục hồi, kiểm định:
+---
 
-- Nhận video từ Telegram dưới dạng link hoặc file; có hàng đợi tuần tự được lưu bền vững.
-- Xử lý video cục bộ theo batch; ghi manifest, trạng thái stage và artifact để hỗ trợ tiếp tục job sau gián đoạn.
-- Khóa tài nguyên GPU, chạy model nặng trong worker riêng khi cấu hình bật, giới hạn dữ liệu theo batch và đặt timeout.
-- Kiểm tra môi trường bằng preflight; kiểm tra chất lượng đầu ra bằng QC gate có chế độ report, warn hoặc block.
-- Dashboard theo dõi tiến độ, log, hàng đợi, lịch sử, báo cáo QC, thư mục vào/ra, retry và điều khiển job.
-- Có giao diện Electron/React/Vite cho công việc video cục bộ; API HTTP riêng; Telegram bot chạy độc lập.
-- Có trang Workflow để chỉnh canvas/khung hình, xem dữ liệu phụ đề và xuất bản chỉnh sửa; Script Studio hỗ trợ phân tích/tạo kịch bản và TTS theo các route được mount trong dashboard/API.
+## 4. Cài đặt & Khởi động Tool V1
 
-### Các model và provider của Tool V2
+### 4.1. Yêu cầu hệ thống
+- Hệ điều hành: Windows 10/11 64-bit.
+- GPU: NVIDIA GeForce (Khuyến nghị từ RTX 3050 trở lên, tối thiểu 4GB-6GB VRAM, đã cài CUDA Driver).
+- Phần mềm: Python 3.10, FFmpeg và ffprobe đã có trong biến môi trường `PATH`.
 
-Cấu hình hiện tại nằm trong **backend/.env.example** và chính sách runtime trong **backend/ai/model_policy.py**:
+### 4.2. Khởi động dịch vụ
+Tại thư mục gốc của Tool V1:
 
-| Công đoạn | Cấu hình mặc định/đường dự phòng được khai báo |
-| --- | --- |
-| Tách giọng | BS-RoFormer khi runtime/model sẵn sàng; Demucs là đường dự phòng |
-| ASR và timestamp | Qwen3-ASR 0.6B cùng ForcedAligner; Faster-Whisper Large-v3 là đường dự phòng |
-| OCR | PP-OCRv6; có đường fallback theo cấu hình/runtime |
-| Dịch | Gemini 3.8 Flash là model mặc định trong cấu hình mẫu; provider/model fallback có thể được chọn tùy cấu hình và tình trạng dịch vụ |
-| Giọng đọc | Edge-TTS và các provider tùy chọn; RVC chỉ chạy khi model và cấu hình cần thiết có sẵn |
-| Trộn/render | FFmpeg; NVENC được dùng khi môi trường NVIDIA tương thích |
+- **Khởi động chạy ngầm toàn bộ hệ thống (Khuyến nghị):**
+  Chạy file `KhoiDongAn.vbs` bằng cách nhấp đúp chuột.
+  File này sẽ tự động khởi động:
+  - Telegram Bot V1 (lắng nghe và xử lý job).
+  - Dashboard Web Server (port 8088).
+  - Tool Control Server (port 8090).
+- **Khởi động trực tiếp có cửa sổ console (Debug / Kiểm tra log):**
+  Chạy `start_bot.bat`.
+- **Dừng toàn bộ hệ thống:**
+  Chạy `stop_bot.bat` hoặc `TatHoanToan.bat` để tắt sạch bot, dashboard, các tiến trình Python và FFmpeg đang chạy ngầm.
 
-Đây là mô tả cấu hình mặc định, **không phải cam kết model đã xử lý mọi video**. Provider dự phòng có thể được gọi khi lỗi/quota; hãy xem log job để biết model/provider thực tế. README không thay đổi model đang dùng.
+---
 
-### AI Video Research Tool
+## 5. Cổng dịch vụ & Giao diện điều khiển
 
-Đây là ứng dụng riêng, có lịch sử và hướng dẫn cài đặt riêng trên nhánh **tool-tim-kiem-video**. Tính năng, cấu hình trình duyệt, dữ liệu và kiểm thử được mô tả trong [README của ứng dụng](https://github.com/meolucky051101001-cyber/toll-edit-video/blob/tool-tim-kiem-video/README.md). Không dùng script khởi động của V1/V2 cho ứng dụng này.
+- **Bảng điều khiển chính (Dashboard V1):** `http://127.0.0.1:8088/`
+  - Theo dõi tiến độ 8 bước xử lý theo thời gian thực.
+  - Xem danh sách video đầu vào, hàng đợi và thành phẩm.
+  - Trình phát video trước/sau khi dịch, log hệ thống, công tắc nhận dạng giọng tự động.
+  - Studio Quy Trình: `http://127.0.0.1:8088/quy-trinh`
+  - Studio Kịch Bản: `http://127.0.0.1:8088/kich-ban`
+- **Trung tâm điều khiển (Tool Control):** `http://127.0.0.1:8090/`
+  - Quản lý trạng thái bot, dashboard, heartbeat, tiến trình xử lý và hàng đợi.
 
-## 3. Luồng xử lý Tool V2
+---
 
-Dashboard V2 theo dõi 15 stage nội bộ; giao diện có thể nhóm thành các thẻ lớn hơn:
+## 6. Kiểm thử & Đảm bảo chất lượng
 
-1. Tiếp nhận video.
-2. Trích xuất âm thanh.
-3. BS-RoFormer hoặc Demucs dự phòng.
-4. Qwen3-ASR và căn timestamp, fallback Whisper.
-5. PP-OCRv6 đọc vùng phụ đề.
-6. Dịch theo provider/model đã cấu hình.
-7. Căn thời gian lời đọc.
-8. Tổng hợp TTS.
-9. Chuyển giọng RVC nếu bật.
-10. Tạo phụ đề.
-11. Trộn âm legacy nếu cấu hình yêu cầu.
-12. Trộn âm V2 nếu bật.
-13. Render video.
-14. Kiểm tra QC.
-15. Xuất bản thành phẩm.
-
-Một stage có thể bị bỏ qua nếu không áp dụng hoặc đã có artifact hợp lệ. Trạng thái stage trong manifest/log là nguồn kiểm tra chi tiết; không suy diễn chỉ từ phần trăm tổng.
-
-## 4. Cấu trúc repository
-
-Không di chuyển các script/launcher trong đợt tài liệu này vì một số đường dẫn được gọi trực tiếp. Các thư mục được phân loại theo vai trò:
-
-~~~text
-backend/
-  ai/                  Model, provider và xử lý AI
-  model_workers/       Worker cô lập cho model nặng
-  pipeline_v2/         Orchestrator, stage, manifest, resume, QC, GPU lock
-  templates/           Dashboard, Workflow và giao diện web
-  scripts_and_tests/   Công cụ phân tích/debug lịch sử; không phải test suite chuẩn
-frontend/               Ứng dụng React + Vite + Electron
-tests/                  Bộ test Python chính
-scripts/                Smoke test, profiler, setup và tiện ích bảo trì
-docs/                   Hướng dẫn vận hành và ghi chú kỹ thuật
-docs/baseline/           Tài liệu/fixture đối chiếu V1
-fixes_for_v1/            Tiện ích sửa/rollback dành riêng cho V1
-MyVoiceModel_v2/         Model/index RVC được quản lý bằng Git LFS
-*.bat, *.vbs             Launcher và tiện ích Windows ở thư mục gốc
-~~~
-
-Các file bàn giao/phiên bản ở thư mục gốc được lập chỉ mục trong [docs/README.md](docs/README.md).
-
-## 5. Cài đặt và khởi động Tool V2
-
-Các lệnh dưới đây dành cho Windows PowerShell và checkout nhánh **tool-v2**.
-
-### Chuẩn bị
-
-- Windows 10/11; Python 3.10 được dùng trong hướng dẫn V2 hiện tại.
-- NVIDIA driver/GPU nếu cần tăng tốc CUDA/NVENC; FFmpeg và ffprobe cần có trong PATH.
-- Cài bản PyTorch/TorchAudio có CUDA phù hợp trước khi cài các dependency còn lại.
-- Node.js LTS tương thích với Vite hiện tại, dùng cho giao diện Electron/React.
-- Git LFS nếu cần tải model RVC trong repository. Các model AI lớn khác có thể được tải vào cache khi chạy.
-
-### Cài môi trường
-
+Tool V1 đi kèm bộ kiểm thử tự động toàn diện:
 ~~~powershell
-git clone --branch tool-v2 https://github.com/meolucky051101001-cyber/toll-edit-video.git
-cd toll-edit-video
-git lfs install
-git lfs pull
-
-py -3.10 -m venv backend\venv
-# Cài PyTorch CUDA tương thích với driver trước, sau đó:
-.\backend\venv\Scripts\python.exe -m pip install -r requirements.txt
-
-py -3.10 -m venv backend\model_venv
-.\backend\model_venv\Scripts\python.exe -m pip install -r backend\requirements-models.txt
-
-Copy-Item backend\.env.example backend\.env
+# Chạy bộ kiểm thử nghiệm thu sản xuất
+.\backend\venv\Scripts\python.exe -m pytest tests/test_verify_production_readiness.py tests/test_v1_quality_gate.py
 ~~~
+- Trạng thái kiểm tra sẵn sàng BS-RoFormer tách âm: `CUDA:0, SDR 12.97 dB (Ready: True)`.
+- Tất cả kiểm thử nghiệm thu đều vượt qua (12/12 passed).
 
-Mở **backend/.env** và tự điền Telegram/Gemini/provider secrets, đường dẫn model, workspace và thư mục video. Không commit file **backend/.env**. Hãy đọc hướng dẫn rollout trước khi chạy job thật.
+---
 
-### Preflight và chạy
+## 7. Bảo mật & Quản lý dữ liệu
 
-~~~powershell
-cd backend
-.\venv\Scripts\python.exe -m pipeline_v2.preflight --project-root .. --interface all
-cd ..
-~~~
-
-Chỉ nhận job thật khi preflight báo **ready=True** và không còn lỗi cấu hình quan trọng.
-
-- **Telegram bot + Electron UI:** chạy **start_bot.bat** từ thư mục gốc. Script preflight, cài npm dependency nếu thiếu, khởi động giao diện Electron/Vite và bot Telegram. Electron khởi chạy API desktop theo cấu hình của nó.
-- **Dashboard giám sát V2:** chạy riêng lệnh dưới đây; mở **http://127.0.0.1:8089**:
-
-~~~powershell
-.\backend\venv\Scripts\python.exe .\backend\dashboard_monitor.py
-~~~
-
-- **Batch cục bộ:** chạy **run_batch_edit.bat**. Kiểm tra đường dẫn đầu vào/đầu ra trước; script hiện đặt fallback riêng nếu biến môi trường chưa được khai báo.
-- **API desktop:** **backend/main.py** phục vụ API ở **http://127.0.0.1:8000** khi chạy trực tiếp hoặc được Electron khởi chạy. Tài liệu API: **http://127.0.0.1:8000/docs**.
-- **Workflow/Script Studio:** được mount trên Dashboard Monitor V2; các trang chính là **/quy-trinh** và **/kich-ban** khi service tương ứng đang chạy.
-
-Không chạy cùng lúc hai dịch vụ khác nhau trên cùng cổng. AI Video Research Tool cũng dùng cổng 8000 theo cấu hình mặc định; cần đổi cổng một bên nếu chạy đồng thời.
-
-## 6. Cấu hình model và thư mục
-
-Tạo cấu hình local từ **backend/.env.example**. Các nhóm biến thường cần xem:
-
-| Nhóm | Biến tiêu biểu | Mục đích |
-| --- | --- | --- |
-| Chế độ pipeline | PIPELINE_MODE | legacy, shadow hoặc v2 |
-| Secret/provider | BOT_TOKEN, GEMINI_API_KEY, FPT_API_KEY | Kết nối dịch vụ; chỉ lưu local |
-| Model | SOURCE_SEPARATOR_BACKEND, ASR_BACKEND, OCR_BACKEND, GEMINI_MODEL | Chọn backend/model và đường dự phòng |
-| Runtime | MODEL_RUNTIME_PYTHON, AUTODUB_MODEL_CACHE | Python/model cache riêng |
-| Thư mục | AUTODUB_WORKSPACE, AUTODUB_INPUT_DIR, AUTODUB_OUTPUT_DIR | Nơi lưu job, đầu vào và thành phẩm |
-| Chất lượng | QC_GATE_POLICY | report_only, warn hoặc block; production được khuyến nghị block |
-| Hiệu năng | ENABLE_GPU_PROCESS_ISOLATION, ENABLE_STAGE_CACHE, các batch limit | Điều chỉnh worker/cache/batch theo máy |
-| Âm thanh | ATEMPO_MIN, ATEMPO_MAX, TARGET_LUFS, TRUE_PEAK_MAX_DBTP | Căn thời lượng và mức âm thanh |
-
-Các launcher có thể đặt biến môi trường trước khi Python đọc file .env; biến đã có trong process thường được ưu tiên hơn giá trị trong .env. Vì vậy hãy kiểm tra **run_batch_edit.bat** và **backend/.env** cùng nhau nếu input/output không khớp. Đặt workspace trên ổ cục bộ, ngoài OneDrive/thư mục đồng bộ.
-
-## 7. Kiểm thử và nghiệm thu
-
-Chạy từ thư mục gốc với Python environment đã cài dependency:
-
-~~~powershell
-.\backend\venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
-~~~
-
-Kiểm tra frontend:
-
-~~~powershell
-cd frontend
-npm ci
-npm run lint
-npm run build
-cd ..
-~~~
-
-Các unit/regression test không thay thế kiểm thử video thật. Trước production, chạy preflight, xử lý một video ngắn có quyền sử dụng, nghe/xem đầu ra, kiểm tra QC report và manifest. Tích hợp Gemini, TTS, RVC, GPU và NVENC phụ thuộc key, model, driver và cấu hình máy.
-
-## 8. Bảo mật, dữ liệu và giới hạn
-
-- Không đưa **backend/.env**, Telegram token, API key, cookie/profile trình duyệt, log chứa dữ liệu riêng, URL đầu vào cá nhân hoặc video vào commit.
-- Nhánh cleanup có mẫu **urls.example.txt**; dùng bản local **urls.txt** và giữ file này ngoài Git.
-- **workspace/**, cache model, media và log là dữ liệu runtime; sao lưu/di chuyển riêng, không xem chúng là source code.
-- Dashboard/API mặc định phục vụ local; không mở ra mạng công cộng nếu chưa bổ sung xác thực và kiểm soát truy cập.
-- Tool không xác nhận quyền sử dụng nội dung, không bảo đảm quyền đăng/kiếm tiền và không thay thế bước kiểm tra giấy phép. Chỉ xử lý nội dung bạn sở hữu hoặc được phép sử dụng; tuân thủ điều khoản nền tảng và pháp luật.
-- Kết quả tải, nhận dạng, dịch, lồng tiếng và QC phụ thuộc chất lượng nguồn, provider/model và môi trường. Luôn xem lại thành phẩm trước khi xuất bản.
-
-## 9. Tài liệu tiếp tục đọc
-
-- [README_FIRST.md](README_FIRST.md) — lối vào nhanh cho người cài đặt.
-- [VERSIONS.md](VERSIONS.md) — nhánh nào chứa công cụ nào.
-- [TOOL_V2_FULL_GUIDE.md](TOOL_V2_FULL_GUIDE.md) — hướng dẫn vận hành/cấu hình V2 chi tiết.
-- [docs/pipeline_v2_rollout.md](docs/pipeline_v2_rollout.md) — preflight, mode, resume, QC và rollout.
-- [CODE_HANDOFF_2_12.md](CODE_HANDOFF_2_12.md) — ghi nhận bàn giao và giới hạn nghiệm thu V2.
-- [PHASE4_ACCEPTANCE.md](PHASE4_ACCEPTANCE.md), [PHASE5_ACCEPTANCE.md](PHASE5_ACCEPTANCE.md) — phạm vi và bằng chứng kiểm thử từng đợt.
-- [docs/README.md](docs/README.md) — mục lục tài liệu kỹ thuật.
-- [V1 handover](https://github.com/meolucky051101001-cyber/toll-edit-video/blob/tool-v1/DASHBOARD_MONITOR_HANDOVER.md) — dashboard/pipeline V1.
-- [AI Video Research Tool README](https://github.com/meolucky051101001-cyber/toll-edit-video/blob/tool-tim-kiem-video/README.md) — hướng dẫn ứng dụng tìm kiếm riêng.
+- **Không commit secrets:** Tuyệt đối không commit file `backend/.env`, chứa `BOT_TOKEN`, `GEMINI_API_KEY`, cookie mạng xã hội hoặc API keys cá nhân.
+- **Thư mục làm việc:** Dữ liệu runtime (`workspace/`, thư mục video, cache âm thanh, log) được loại trừ trong `.gitignore`.
+- **Dữ liệu model nặng:** Trọng số model và môi trường ảo (`backend/venv/`, `backend/model_venv_separator/`) được lưu trữ cục bộ, không đẩy lên Git.

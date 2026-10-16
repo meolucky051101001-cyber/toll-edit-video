@@ -371,6 +371,13 @@ class V1Orchestrator:
             if (stop_checker and stop_checker()) or job_tracker.is_stop_requested() or stop_file.exists() or stop_json.exists():
                 raise BatchStopRequested(f"Job {job_id} đã bị dừng theo yêu cầu.")
 
+        async def pause_checkpoint():
+            try:
+                import video_pause
+                await video_pause.checkpoint()
+            except Exception:
+                pass
+
         async def run_stage(awaitable, timeout):
             return await await_stage(awaitable, timeout, check_stop)
 
@@ -411,6 +418,7 @@ class V1Orchestrator:
         stage_id = "extract_audio"
         original_audio = out_dir / "original.wav"
         check_stop()
+        await pause_checkpoint()
 
         should_run = not (can_resume and stage_id in verified_stages)
         if should_run:
@@ -446,6 +454,7 @@ class V1Orchestrator:
         vocals_audio = out_dir / "vocals.wav"
         no_vocals_audio = out_dir / "no_vocals.wav"
         check_stop()
+        await pause_checkpoint()
 
         should_run = not (can_resume and stage_id in verified_stages)
         if should_run:
@@ -498,6 +507,7 @@ class V1Orchestrator:
         stage_id = "speech_asr"
         srt_original = out_dir / "original.srt"
         check_stop()
+        await pause_checkpoint()
 
         should_run = not (can_resume and stage_id in verified_stages)
         srt_segments = []
@@ -543,6 +553,7 @@ class V1Orchestrator:
         # ==================== STAGE 4: VISUAL OCR ====================
         stage_id = "visual_ocr"
         check_stop()
+        await pause_checkpoint()
 
         should_run = not (can_resume and stage_id in verified_stages)
         vid_w, vid_h, main_y_pct = 1080, 1920, 0.88
@@ -617,6 +628,7 @@ class V1Orchestrator:
         stage_id = "ai_translation"
         srt_translated = out_dir / "translated.srt"
         check_stop()
+        await pause_checkpoint()
 
         should_run = not (can_resume and stage_id in verified_stages)
         translated_segments = []
@@ -673,6 +685,7 @@ class V1Orchestrator:
         dubbing_dir = out_dir / "dubbing"
         ass_path = out_dir / "final.ass"
         check_stop()
+        await pause_checkpoint()
 
         should_run = not (can_resume and stage_id in verified_stages)
         dubbing_audio_files = []
@@ -779,6 +792,7 @@ class V1Orchestrator:
         stage_id = "audio_mixing"
         mixed_audio = out_dir / "mixed.wav"
         check_stop()
+        await pause_checkpoint()
 
         should_run = not (can_resume and stage_id in verified_stages)
         if should_run:
@@ -840,6 +854,7 @@ class V1Orchestrator:
         final_video = out_dir / f"final_{base_name}.mp4"
         temp_render_video = out_dir / f"final_{base_name}.tmp.mp4"
         check_stop()
+        await pause_checkpoint()
 
         should_run = not (can_resume and stage_id in verified_stages)
         if should_run:
