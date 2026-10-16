@@ -30,9 +30,9 @@ def _user_data_root(environment: Mapping[str, str]) -> Path:
         base = environment.get("LOCALAPPDATA") or str(
             Path.home() / "AppData" / "Local"
         )
-        return Path(base) / "AutoDubV2"
+        return Path(base) / "AutoDub"
     base = environment.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    return Path(base) / "autodub-v2"
+    return Path(base) / "autodub"
 
 
 def _configured_path(
@@ -73,7 +73,7 @@ class AppPaths:
         data_root = _configured_path(
             "AUTODUB_DATA_DIR", env, default_data_root, root
         )
-        video_root = Path.home() / "Videos" / "AutoDubV2"
+        video_root = Path.home() / "Videos" / "AutoDub"
         legacy_workspace = root / "workspace"
         workspace_default = (
             legacy_workspace
@@ -90,6 +90,12 @@ class AppPaths:
             env.get("AUTODUB_SHARED_WORKSPACE_DIR", "") or ""
         ).strip()
 
+        default_input = (
+            Path("D:/workspace/downloads")
+            if Path("D:/workspace/downloads").is_dir()
+            else (workspace_default / "downloads" if (workspace_default / "downloads").is_dir() else video_root / "input")
+        )
+
         return cls(
             project_root=root,
             data_root=data_root,
@@ -97,7 +103,7 @@ class AppPaths:
                 "AUTODUB_WORKSPACE", env, workspace_default, root
             ),
             input_dir=_configured_path(
-                "AUTODUB_INPUT_DIR", env, video_root / "input", root
+                "AUTODUB_INPUT_DIR", env, default_input, root
             ),
             output_dir=_configured_path(
                 "AUTODUB_OUTPUT_DIR", env, video_root / "output", root

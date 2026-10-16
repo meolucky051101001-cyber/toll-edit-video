@@ -521,10 +521,14 @@ async def serve_workflow_page():
         token = get_current_control_token()
         content = content.replace("__REPLACE_TOKEN__", token)
         content = content.replace("CONTROL_PLANE_TOKEN_PLACEHOLDER", token)
+        curr_paths = AppPaths.from_environment(_BACKEND_ROOT.parent, read_environment(_BACKEND_ROOT))
+        downloads_dir = curr_paths.workspace / "downloads"
+        default_in = str(downloads_dir) if downloads_dir.is_dir() else str(curr_paths.input_dir)
         configured_paths = {
-            "input": str(PATHS.input_dir),
-            "output": str(PATHS.output_dir),
-            "framed_output": str(PATHS.output_dir / "chong_reup"),
+            "input": default_in,
+            "output": str(curr_paths.output_dir),
+            "framed_output": str(curr_paths.output_dir / "chong_reup"),
+            "downloads": str(downloads_dir),
         }
         content = content.replace(
             "__CONFIGURED_INPUT_DIR__", html.escape(configured_paths["input"], quote=True)

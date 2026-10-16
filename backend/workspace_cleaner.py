@@ -180,9 +180,10 @@ def clean_stale_downloads(
                 data = json.loads(snapshot.read_text(encoding="utf-8-sig"))
                 jobs = list(data.get("items") or []) + [data.get("active_job") or {}]
                 for job in jobs:
-                    source = (job.get("resume_state") or {}).get("source_path")
-                    if source:
-                        protected.add(Path(source).resolve())
+                    if isinstance(job, dict):
+                        source = (job.get("resume_state") or {}).get("source_path")
+                        if source:
+                            protected.add(Path(source).resolve())
     except (OSError, ValueError, TypeError):
         return 0
 
