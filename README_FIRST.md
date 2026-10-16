@@ -1,41 +1,43 @@
-# Bắt đầu từ đây
+# Bắt đầu nhanh với Tool V1
 
-Đây là lối vào nhanh; bản đồ tính năng đầy đủ nằm trong [README.md](README.md).
+Tài liệu hướng dẫn nhanh cho người vận hành hệ thống lồng tiếng & dịch video tự động Tool V1. Chi tiết kiến trúc và danh mục model nằm trong [README.md](README.md).
 
-## Chọn phiên bản
+> [!NOTE]
+> **Tool V2 đã ngừng sử dụng:** Nhánh `tool-v2` và toàn bộ dịch vụ V2 đã dừng phát triển. **Tool V1** là hệ thống chuẩn production đang hoạt động hàng ngày.
 
-- **Tool V1:** checkout nhánh [tool-v1](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v1), xem [handover dashboard V1](https://github.com/meolucky051101001-cyber/toll-edit-video/blob/tool-v1/DASHBOARD_MONITOR_HANDOVER.md).
-- **Tool V2:** checkout nhánh [tool-v2](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v2), xem [hướng dẫn đầy đủ](TOOL_V2_FULL_GUIDE.md) và [rollout guide](docs/pipeline_v2_rollout.md).
-- **AI Video Research Tool:** dùng README và launcher riêng trên nhánh [tool-tim-kiem-video](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-tim-kiem-video).
+---
 
-## Checklist Tool V2
+## 1. Khởi động hệ thống
 
-1. Cài Python 3.10, Node.js LTS, FFmpeg/ffprobe; chuẩn bị driver NVIDIA nếu dùng CUDA/NVENC.
-2. Cài đúng CUDA-enabled PyTorch trước các package backend, rồi tạo backend/venv và backend/model_venv theo requirements.
-3. Tạo backend/.env từ backend/.env.example; điền secret và sửa path theo máy. Không commit .env.
-4. Chạy preflight bằng đúng venv:
+- **Chạy ngầm (Khuyến nghị hàng ngày):**
+  Nhấp đúp chuột vào file `KhoiDongAn.vbs`.
+  Hệ thống sẽ chạy ngầm cả 3 thành phần: Telegram Bot, Dashboard V1 (port 8088) và Tool Control (port 8090).
+- **Chạy trực tiếp có console:**
+  Chạy `start_bot.bat` để xem log trực tiếp trên màn hình.
+- **Tắt toàn bộ hệ thống:**
+  Chạy `TatHoanToan.bat` hoặc `stop_bot.bat`.
+
+---
+
+## 2. Truy cập giao diện
+
+- **Dashboard V1 (Giám sát tiến độ & Video):** [http://127.0.0.1:8088/](http://127.0.0.1:8088/)
+- **Trung tâm điều khiển (Tool Control):** [http://127.0.0.1:8090/](http://127.0.0.1:8090/)
+- **Studio Quy Trình:** [http://127.0.0.1:8088/quy-trinh](http://127.0.0.1:8088/quy-trinh)
+- **Studio Kịch Bản:** [http://127.0.0.1:8088/kich-ban](http://127.0.0.1:8088/kich-ban)
+
+---
+
+## 3. Cấu hình & Biến môi trường
+
+- Cấu hình đặt tại `backend/.env`.
+- Runtime tách âm BS-RoFormer: `backend/model_venv_separator/Scripts/python.exe` (sử dụng GPU CUDA:0).
+- Không commit file `.env` lên GitHub.
+
+---
+
+## 4. Kiểm tra sức khỏe hệ thống
 
 ~~~powershell
-cd backend
-.\venv\Scripts\python.exe -m pipeline_v2.preflight --project-root .. --interface all
-cd ..
+.\backend\venv\Scripts\python.exe -m pytest tests/test_verify_production_readiness.py tests/test_v1_quality_gate.py
 ~~~
-
-5. Chỉ xử lý thật khi preflight sẵn sàng; thử một video ngắn có quyền sử dụng và xem QC/report.
-6. Dùng start_bot.bat cho Telegram + Electron UI. Dashboard Monitor web cần chạy riêng bằng:
-
-~~~powershell
-.\backend\venv\Scripts\python.exe .\backend\dashboard_monitor.py
-~~~
-
-Dashboard Monitor V2: http://127.0.0.1:8089. Chi tiết batch, resume, QC, rollback và cấu hình model nằm trong [rollout guide](docs/pipeline_v2_rollout.md).
-
-## Tài liệu cốt lõi
-
-- [README.md](README.md): tính năng, service, cấu trúc và hướng dẫn tổng quan.
-- [VERSIONS.md](VERSIONS.md): nhánh và cổng service.
-- [docs/README.md](docs/README.md): mục lục tài liệu.
-- [TOOL_V2_FULL_GUIDE.md](TOOL_V2_FULL_GUIDE.md): hướng dẫn kỹ thuật chi tiết.
-- [CODE_HANDOFF_2_12.md](CODE_HANDOFF_2_12.md): ghi chú bàn giao; các test trong đó là kết quả tại thời điểm ghi, không phải CI hiện tại.
-
-Trước khi cập nhật hoặc khởi động lại bot, xác nhận đúng nhánh, queue trống và không có model/FFmpeg đang chạy. Không xóa workspace/model/media để “dọn repo”; chúng là dữ liệu runtime và phải xử lý riêng.

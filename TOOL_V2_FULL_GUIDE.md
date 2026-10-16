@@ -1,6 +1,10 @@
-﻿# 🚀 HƯỚNG DẪN TOÀN DIỆN & TÀI LIỆU KỸ THUẬT AUTO DUBBING BOT - PIPELINE V2
+# ⚠️ [DEPRECATED / ĐÃ NGỪNG SỬ DỤNG] - TÀI LIỆU LƯU TRỮ PIPELINE V2
 
-Tài liệu này tổng hợp toàn bộ kiến trúc, hướng dẫn vận hành, cấu hình và tính năng của **Pipeline v2** trong dự án **Auto Video Dubbing Bot**.
+> [!WARNING]
+> **THÔNG BÁO QUAN TRỌNG:** Tool V2 đã chính thức ngừng phát triển và từ bỏ từ tháng 10/2026. Mọi dịch vụ, runtime và môi trường liên quan đến Tool V2 đã được dọn sạch khỏi hệ thống.
+> Vui lòng tham khảo [README.md](README.md) để sử dụng hệ thống **Tool V1 (Production)** chính thức.
+
+Tài liệu dưới đây được lưu trữ chỉ với mục đích tham khảo lịch sử kiến trúc của **Pipeline v2**.
 
 ---
 
