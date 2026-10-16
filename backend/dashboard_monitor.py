@@ -944,11 +944,13 @@ async def api_retry_video(request: Request):
         except Exception:
             pass
 
+    filename = os.path.basename(str(filename or "").strip())
     if not filename:
-        raise HTTPException(status_code=400, detail="Thiếu tên video cần chạy lại (filename).")
+        raise HTTPException(status_code=400, detail="Thiếu hoặc tên video không hợp lệ (filename).")
 
     current_input = get_input_dir()
     video_path = current_input / filename
+
     
     if not video_path.is_file():
         processed_file = current_input / "processed" / filename

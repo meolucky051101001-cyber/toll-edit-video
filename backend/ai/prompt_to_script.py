@@ -42,7 +42,15 @@ class DoodleScene(BaseModel):
         default="dual_confrontation",
         description="Bố cục hiển thị: dual_confrontation (2 đối tượng 2 bên đối đầu), single_centered (1 đối tượng lớn ở giữa), action_duo (đối tượng + hành động)"
     )
-    mood_color: str = Field(default="#FFFFFF", description="Màu nền dải giữa: #FFFFFF, #5FBCE4, #3F81B2, #FFE0AC, #F2A63B")
+    action_type: Optional[str] = Field(
+        default="showcase",
+        description="Kiểu chuyển động hoạt họa chính: race (đua xe/tốc độ), chart_pie (biểu đồ tròn 50-30-20), chart_bar (biểu đồ tăng trưởng), wallet_squeeze (vắt ví/rỗng túi), brain_think (não bộ bánh răng), fight (hỗn chiến/va chạm), confrontation (đối đầu), showcase (trung tâm)"
+    )
+    camera_motion: Optional[str] = Field(
+        default="zoom_in",
+        description="Chuyển động máy quay điện ảnh: zoom_in, pan_right, shake, pulse"
+    )
+    mood_color: str = Field(default="#FFFFFF", description="Màu nền dải giữa: #FFFFFF")
 
 
 class DoodleScriptResponse(BaseModel):
@@ -160,7 +168,7 @@ def generate_doodle_script_from_ai(
     prompt: Optional[str] = None,
     raw_script: Optional[str] = None,
     target_scene_count: int = 8,
-    ai_engine: str = "muse"
+    ai_engine: str = "gemini"
 ) -> Dict[str, Any]:
     """
     Sinh kịch bản phân cảnh thông minh từ Prompt hoặc Kịch bản có sẵn.
@@ -315,6 +323,16 @@ CHỦ ĐỀ:
         if not sc.get("image_prompt"):
             v_concept = sc.get("visual_concept") or sc.get("narration") or "whiteboard line art"
             sc["image_prompt"] = f"{v_concept}, clean black line art sketch on pure white background"
+
+        # Tự động gán action_type & camera_motion từ Kinetic Scene Animator
+        try:
+            from ai.kinetic_scene_animator import detect_scene_action_spec
+            spec = detect_scene_action_spec(sc)
+            sc["action_type"] = sc.get("action_type") or spec.get("action_type", "showcase")
+            sc["camera_motion"] = sc.get("camera_motion") or spec.get("camera_motion", "zoom_in")
+        except Exception:
+            sc.setdefault("action_type", "showcase")
+            sc.setdefault("camera_motion", "zoom_in")
 
     data["ai_engine_used"] = engine_name
     return data

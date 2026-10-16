@@ -94,6 +94,32 @@ def _validate_safe_video_path(raw_path: str) -> Path:
         raise HTTPException(status_code=404, detail=f"Không tìm thấy file video: {p.name}")
     if p.suffix.lower() not in ALLOWED_VIDEO_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"Định dạng video không được hỗ trợ ({p.suffix}). Chỉ hỗ trợ: {', '.join(sorted(ALLOWED_VIDEO_EXTENSIONS))}")
+
+    allowed_roots = [
+        PATHS.project_root.resolve(),
+        PATHS.workspace.resolve(),
+        PATHS.input_dir.resolve(),
+        PATHS.output_dir.resolve(),
+        PATHS.data_root.resolve(),
+        SCRIPT_WORKSPACE.resolve(),
+        (Path.home() / "Videos").resolve(),
+        Path(r"D:\banve").resolve(),
+        Path(r"D:\workspace").resolve(),
+    ]
+    extra_roots = os.getenv("AUTODUB_ALLOWED_VIDEO_ROOTS", "")
+    if extra_roots:
+        for r in extra_roots.split(os.pathsep):
+            if r.strip():
+                try:
+                    allowed_roots.append(Path(r.strip()).resolve())
+                except Exception:
+                    pass
+    existing_roots = [r for r in allowed_roots if r.exists()]
+    if not any(p == r or p.is_relative_to(r) for r in existing_roots):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Truy cập video ngoài thư mục cho phép bị từ chối: {p.name}"
+        )
     return p
 
 
@@ -122,13 +148,13 @@ class PreviewTTSRequest(BaseModel):
     voice: str = Field(default="BV562_streaming", max_length=100)
 
 class RenderScriptRequest(BaseModel):
-    scenes: List[Dict[str, Any]] = Field(..., min_items=1)
+    scenes: List[Dict[str, Any]] = Field(..., min_length=1)
     voice: str = Field(default="BV562_streaming", max_length=100)
 
 class ExportScriptTextRequest(BaseModel):
     title: Optional[str] = Field(default="Kịch bản Video", max_length=500)
     topic: Optional[str] = Field(default="", max_length=500)
-    scenes: List[Dict[str, Any]] = Field(..., min_items=1)
+    scenes: List[Dict[str, Any]] = Field(..., min_length=1)
 
 class BurnVideoRequest(BaseModel):
     video_path: str = Field(..., min_length=1)
@@ -193,7 +219,7 @@ class AIDoodleScriptRequest(BaseModel):
 class RenderDoodleScenesRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=500)
     keyword_accent: str = Field(default="", max_length=100)
-    scenes: List[Dict[str, Any]] = Field(..., min_items=1)
+    scenes: List[Dict[str, Any]] = Field(..., min_length=1)
     voice: str = Field(default="multi_male_felipe_uranus_bigtts", max_length=100)
     task_id: Optional[str] = Field(default=None, max_length=100)
     use_hand_draw: bool = Field(default=True)
@@ -817,7 +843,18 @@ def api_preview_scene_frame(req: PreviewSceneFrameRequest):
 
 @router.get("/api/script/stream/{file_path:path}")
 def api_stream_script_file(file_path: str):
-    """Stream audio, video hoặc tải file từ workspace."""
+    """Stream audio, video hoặc tải file an toàn từ workspace (chống path traversal)."""
+    # Ngăn chặn path traversal thô sơ
+    if ".." in file_path or file_path.startswith(("/", "\\")):
+        raise HTTPException(status_code=400, detail="Đường dẫn không hợp lệ.")
+
+    allowed_roots = [
+        SCRIPT_WORKSPACE.resolve(),
+        (PATHS.workspace / "output").resolve(),
+        (PATHS.workspace / "doodle_render").resolve(),
+        Path(r"C:\tool v1\workspace\output").resolve(),
+    ]
+
     candidates = [
         SCRIPT_WORKSPACE / file_path,
         PATHS.workspace / "output" / file_path,
@@ -827,11 +864,13 @@ def api_stream_script_file(file_path: str):
     target = None
     for cand in candidates:
         if cand.exists() and cand.is_file():
-            target = cand.resolve()
-            break
+            resolved = cand.resolve()
+            if any(resolved.is_relative_to(root) for root in allowed_roots):
+                target = resolved
+                break
 
     if not target:
-        raise HTTPException(status_code=404, detail=f"Không tìm thấy tệp: {file_path}")
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy tệp hoặc đường dẫn không hợp lệ: {file_path}")
 
     suffix = target.suffix.lower()
     media_types = {
@@ -845,8 +884,12 @@ def api_stream_script_file(file_path: str):
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
     }
+    if suffix not in media_types:
+        raise HTTPException(status_code=403, detail=f"Loại tệp không được phép tải qua stream ({suffix}).")
+
     media_type = media_types.get(suffix, "application/octet-stream")
     return FileResponse(path=str(target), media_type=media_type, filename=target.name)
+
 
 
 @router.post("/api/script/stop")

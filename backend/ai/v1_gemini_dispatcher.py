@@ -32,26 +32,30 @@ WORKSPACE_DIR = BACKEND_DIR.parent / "workspace"
 DB_DIR = WORKSPACE_DIR / "bot_system"
 DB_PATH = DB_DIR / "gemini_circuit_breaker.db"
 
-# Model presets as specified in Codex Plan
+# Model presets prioritizing fastest, verified active models
 DEFAULT_TRANSLATION_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite-preview",
     "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
     "gemini-flash-lite-latest",
     "gemini-3.5-flash",
     "gemini-3.6-flash",
-    "gemini-3.1-flash-lite",
-    "gemini-3.8-flash",
     "gemini-3.7-flash",
+    "gemini-3.8-flash",
+    "gemini-flash-latest",
 ]
 
 DEFAULT_CONDENSATION_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite-preview",
     "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
     "gemini-flash-lite-latest",
     "gemini-3.5-flash",
+    "gemini-3.6-flash",
     "gemini-3.7-flash",
+    "gemini-flash-latest",
 ]
 
 # Exceptions
@@ -93,44 +97,107 @@ def mask_secret(text: str) -> str:
         return ""
     text = re.sub(r'(?i)(key|api_key|token)=([^\s&#]+)', r'\1=[REDACTED]', str(text))
     text = re.sub(r'AIza[a-zA-Z0-9_\-]{10,}', 'AIza...', text)
+    text = re.sub(r'AQ\.[a-zA-Z0-9_\-]{10,}', 'AQ...[REDACTED]', text)
     return text
 
 
-def get_gemini_api_key(explicit_key: Optional[str] = None) -> str:
+
+def get_gemini_api_keys(explicit_key: Optional[str] = None) -> List[str]:
     """
-    Validate and return the genuine GEMINI_API_KEY.
-    Strictly prevents taking FPT_API_KEY, VOICE_API_KEY, or empty credentials.
+    Validate and return a list of genuine GEMINI API keys.
+    Supports:
+    - explicit_key (single key or comma/semicolon/newline-separated string)
+    - GEMINI_API_KEYS (comma, semicolon, or newline separated in env or .env)
+    - GEMINI_API_KEY (single key in env or .env)
+    - GEMINI_API_KEY_1..N
+    Strictly filters out FPT_API_KEY, VOICE_API_KEY, and malformed strings.
     """
     fpt_key = os.getenv("FPT_API_KEY", "").strip()
     voice_key = os.getenv("VOICE_API_KEY", "").strip()
 
-    candidate = (explicit_key or "").strip()
-    # Reject if candidate is actually an FPT or voice key
-    if candidate and (candidate == fpt_key or candidate == voice_key or "fpt" in candidate.lower()):
-        candidate = ""
+    def is_valid_key(k: str) -> bool:
+        k = k.strip().strip('"').strip("'")
+        if not k or len(k) < 10:
+            return False
+        if k == fpt_key or k == voice_key or "fpt" in k.lower():
+            return False
+        return True
 
-    if not candidate:
-        candidate = os.getenv("GEMINI_API_KEY", "").strip()
+    candidates = []
 
-    if not candidate:
-        env_file = BACKEND_DIR / ".env"
-        if env_file.exists():
-            try:
-                for line in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
-                    line = line.strip()
-                    if line.startswith("GEMINI_API_KEY=") and not line.startswith("#"):
-                        candidate = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        break
-            except Exception:
-                pass
+    single_env_key = os.getenv("GEMINI_API_KEY", "").strip()
 
-    if not candidate:
-        raise GeminiConfigError("GEMINI_API_KEY is not configured in environment or .env file.")
+    # 1. Check explicit_key (only lock to explicit_key if caller passed a custom key/list different from default GEMINI_API_KEY)
+    if explicit_key and explicit_key.strip() != single_env_key:
+        for raw in re.split(r'[,;\n]+', explicit_key):
+            raw = raw.strip()
+            if is_valid_key(raw):
+                candidates.append(raw)
+        if candidates:
+            # When caller explicitly passes a custom key/list, honor only explicit keys
+            deduped = []
+            for k in candidates:
+                if k not in deduped:
+                    deduped.append(k)
+            return deduped
 
-    if len(candidate) < 10:
-        raise GeminiConfigError("GEMINI_API_KEY appears malformed or too short.")
+    # 2. Check GEMINI_API_KEYS environment variable
+    env_keys = os.getenv("GEMINI_API_KEYS", "").strip()
+    if env_keys:
+        for raw in re.split(r'[,;\n]+', env_keys):
+            raw = raw.strip()
+            if is_valid_key(raw):
+                candidates.append(raw)
 
-    return candidate
+    # 3. Check GEMINI_API_KEY environment variable
+    single_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if single_key and is_valid_key(single_key):
+        candidates.append(single_key)
+
+    # 4. Check .env file
+    env_file = BACKEND_DIR / ".env"
+    if env_file.exists():
+        try:
+            for line in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = line.strip()
+                if line.startswith("#"):
+                    continue
+                if line.startswith("GEMINI_API_KEYS="):
+                    val = line.split("=", 1)[1].strip()
+                    for raw in re.split(r'[,;\n]+', val):
+                        raw = raw.strip().strip('"').strip("'")
+                        if is_valid_key(raw):
+                            candidates.append(raw)
+                elif line.startswith("GEMINI_API_KEY="):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if is_valid_key(val):
+                        candidates.append(val)
+                elif re.match(r"^GEMINI_API_KEY_\d+=", line):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if is_valid_key(val):
+                        candidates.append(val)
+        except Exception:
+            pass
+
+    # Deduplicate while preserving order
+    deduped = []
+    for k in candidates:
+        if k not in deduped:
+            deduped.append(k)
+
+    if not deduped:
+        raise GeminiConfigError("GEMINI_API_KEY or GEMINI_API_KEYS is not configured in environment or .env file.")
+
+    return deduped
+
+
+def get_gemini_api_key(explicit_key: Optional[str] = None) -> str:
+    """
+    Validate and return the primary GEMINI_API_KEY.
+    Maintains 100% backward compatibility for single-key callers.
+    """
+    keys = get_gemini_api_keys(explicit_key)
+    return keys[0]
 
 
 def _get_account_hash(api_key: str) -> str:
@@ -171,9 +238,17 @@ class GeminiCircuitBreaker:
                     CREATE TABLE IF NOT EXISTS account_circuit (
                         account_hash TEXT PRIMARY KEY,
                         quota_exhausted_until REAL DEFAULT 0.0,
-                        last_error_type TEXT
+                        last_error_type TEXT,
+                        consecutive_429 INTEGER DEFAULT 0,
+                        last_used REAL DEFAULT 0.0
                     );
                 """)
+                # Backward-compatibility column migration for existing databases
+                for col_name, col_type in [("consecutive_429", "INTEGER DEFAULT 0"), ("last_used", "REAL DEFAULT 0.0")]:
+                    try:
+                        conn.execute(f"ALTER TABLE account_circuit ADD COLUMN {col_name} {col_type};")
+                    except Exception:
+                        pass
         except Exception as e:
             logger.warning(f"[CIRCUIT_BREAKER] Failed to initialize SQLite database: {e}")
 
@@ -231,6 +306,37 @@ class GeminiCircuitBreaker:
             return [(m, "ACTIVE") for m in candidates]
 
         return allowed
+
+    def get_min_cooldown_remaining(
+        self,
+        account_hash: str,
+        purpose: str,
+        candidates: Sequence[str],
+    ) -> Tuple[Optional[str], float]:
+        """Return the candidate model with the smallest remaining cooldown in seconds."""
+        now = time.time()
+        best_model = None
+        min_rem = float("inf")
+        try:
+            with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+                for model in candidates:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT cooldown_until FROM model_circuit "
+                        "WHERE account_hash = ? AND model = ? AND purpose = ?",
+                        (account_hash, model, purpose),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return model, 0.0
+                    cooldown_until = row[0] or 0.0
+                    rem = max(0.0, cooldown_until - now)
+                    if rem < min_rem:
+                        min_rem = rem
+                        best_model = model
+        except Exception:
+            pass
+        return best_model, min_rem if (best_model and min_rem < float("inf")) else 0.0
 
     def record_success(self, account_hash: str, model: str, purpose: str):
         now = time.time()
@@ -295,6 +401,118 @@ class GeminiCircuitBreaker:
         except Exception as e:
             logger.debug(f"[CIRCUIT_BREAKER] Failed to record failure: {e}")
 
+    def is_account_exhausted(self, account_hash: str) -> Tuple[bool, float]:
+        """Check if an account_hash is in active 429 quota exhaustion cooldown."""
+        now = time.time()
+        try:
+            with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT quota_exhausted_until FROM account_circuit WHERE account_hash = ?", (account_hash,))
+                row = cur.fetchone()
+                if row and row[0] and row[0] > now:
+                    return True, max(0.0, row[0] - now)
+        except Exception:
+            pass
+        return False, 0.0
+
+    def record_account_quota_exhausted(self, account_hash: str, retry_after_seconds: Optional[float] = None):
+        """Mark account as 429 quota exhausted with exponential backoff."""
+        now = time.time()
+        try:
+            with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT consecutive_429 FROM account_circuit WHERE account_hash = ?", (account_hash,))
+                row = cur.fetchone()
+                consec = (row[0] if row and row[0] is not None else 0) + 1
+
+                if retry_after_seconds and retry_after_seconds > 0:
+                    wait_s = min(300.0, retry_after_seconds)
+                else:
+                    # Exponential cooldown: 60s -> 120s -> 240s -> 300s max
+                    wait_s = min(300.0, 60.0 * (2 ** (consec - 1)))
+
+                quota_until = now + wait_s
+                conn.execute(
+                    "INSERT INTO account_circuit (account_hash, quota_exhausted_until, last_error_type, consecutive_429, last_used) "
+                    "VALUES (?, ?, 'HTTP_429', ?, ?) "
+                    "ON CONFLICT(account_hash) DO UPDATE SET "
+                    "quota_exhausted_until = excluded.quota_exhausted_until, "
+                    "last_error_type = 'HTTP_429', "
+                    "consecutive_429 = excluded.consecutive_429, "
+                    "last_used = excluded.last_used;",
+                    (account_hash, quota_until, consec, now)
+                )
+        except Exception as e:
+            logger.debug(f"[CIRCUIT_BREAKER] Failed to record account quota exhausted: {e}")
+
+    def record_account_success(self, account_hash: str):
+        now = time.time()
+        try:
+            with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+                conn.execute(
+                    "INSERT INTO account_circuit (account_hash, quota_exhausted_until, last_error_type, consecutive_429, last_used) "
+                    "VALUES (?, 0.0, 'SUCCESS', 0, ?) "
+                    "ON CONFLICT(account_hash) DO UPDATE SET "
+                    "quota_exhausted_until = 0.0, "
+                    "consecutive_429 = 0, "
+                    "last_used = excluded.last_used;",
+                    (account_hash, now)
+                )
+        except Exception as e:
+            logger.debug(f"[CIRCUIT_BREAKER] Failed to record account success: {e}")
+
+    def select_active_key(self, keys: Sequence[str]) -> Tuple[str, str, float]:
+        """
+        From candidate API keys, select the best active key:
+        - Filters keys where quota_exhausted_until <= now.
+        - Among active keys, picks the one with the smallest last_used (Round-Robin / LRU load balance).
+        - If all keys are in cooldown, returns the one with the smallest remaining cooldown time.
+        Returns: (selected_key, account_hash, cooldown_remaining)
+        """
+        now = time.time()
+        if not keys:
+            raise GeminiConfigError("No Gemini API keys available.")
+        if len(keys) == 1:
+            h = _get_account_hash(keys[0])
+            exhausted, rem = self.is_account_exhausted(h)
+            return keys[0], h, rem if exhausted else 0.0
+
+        key_map = {_get_account_hash(k): k for k in keys}
+        hashes = list(key_map.keys())
+
+        try:
+            with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+                cur = conn.cursor()
+                placeholders = ",".join("?" for _ in hashes)
+                cur.execute(
+                    f"SELECT account_hash, quota_exhausted_until, last_used FROM account_circuit WHERE account_hash IN ({placeholders})",
+                    hashes
+                )
+                rows = {r[0]: (r[1] or 0.0, r[2] or 0.0) for r in cur.fetchall()}
+
+                active_keys = []
+                exhausted_keys = []
+                for h in hashes:
+                    quota_until, last_used = rows.get(h, (0.0, 0.0))
+                    if quota_until <= now:
+                        active_keys.append((h, last_used))
+                    else:
+                        exhausted_keys.append((h, quota_until - now))
+
+                if active_keys:
+                    active_keys.sort(key=lambda x: x[1])
+                    best_hash = active_keys[0][0]
+                    return key_map[best_hash], best_hash, 0.0
+
+                if exhausted_keys:
+                    exhausted_keys.sort(key=lambda x: x[1])
+                    best_hash, min_rem = exhausted_keys[0]
+                    return key_map[best_hash], best_hash, min_rem
+        except Exception as e:
+            logger.warning(f"[CIRCUIT_BREAKER] Failed to query account_circuit: {e}")
+
+        return keys[0], hashes[0], 0.0
+
 
 # Global circuit breaker instance
 circuit_breaker = GeminiCircuitBreaker()
@@ -351,16 +569,17 @@ def call_gemini_api(
     """
     Centralized, resilient dispatcher for all Gemini API calls in Tool V1.
     Strictly follows Codex Plan:
-    - Verifies genuine GEMINI_API_KEY.
+    - Verifies genuine GEMINI_API_KEY / GEMINI_API_KEYS pool.
     - Honors shared circuit breaker and probe mechanics.
+    - Automatic multi-key pool rotation & instant 429 failover.
     - Enforces overall monotonic deadline.
     - Single point of retry logic.
     - Masks secrets in logs.
     """
     import requests
 
-    real_key = get_gemini_api_key(api_key)
-    account_hash = _get_account_hash(real_key)
+    keys_pool = get_gemini_api_keys(api_key)
+    curr_key, account_hash, key_cooldown = circuit_breaker.select_active_key(keys_pool)
 
     if models is None:
         if purpose == "condensation":
@@ -386,17 +605,35 @@ def call_gemini_api(
         raise GeminiCancelledError("Operation cancelled by user stop request.")
 
     candidate_statuses = circuit_breaker.get_candidate_models(account_hash, purpose, ordered_models, reserve_probe=False)
-    if not candidate_statuses:
-        # All models in circuit cooldown
-        logger.warning(
-            f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose}: Tất cả các model đều đang trong thời gian nghỉ (COOLDOWN)!"
-        )
-        raise GeminiQuotaExhaustedError("All Gemini models are currently in cooldown due to previous rate limits.")
+    if not candidate_statuses and len(keys_pool) > 1:
+        # Check if other keys in the pool have active models
+        for alt_k in keys_pool:
+            alt_h = _get_account_hash(alt_k)
+            alt_statuses = circuit_breaker.get_candidate_models(alt_h, purpose, ordered_models, reserve_probe=False)
+            if alt_statuses:
+                curr_key = alt_k
+                account_hash = alt_h
+                candidate_statuses = alt_statuses
+                break
 
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": real_key,
-    }
+    if not candidate_statuses:
+        # Check if the shortest cooldown is short enough to wait out within deadline
+        best_model, min_wait = circuit_breaker.get_min_cooldown_remaining(account_hash, purpose, ordered_models)
+        remaining = overall_deadline - time.monotonic()
+        if 0 < min_wait <= min(remaining - 5.0, 15.0):
+            logger.info(
+                f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose}: Tất cả model trong cooldown, chờ {min_wait:.1f}s cho {best_model} hồi phục..."
+            )
+            time.sleep(min_wait + 0.5)
+            candidate_statuses = circuit_breaker.get_candidate_models(account_hash, purpose, ordered_models, reserve_probe=False)
+
+    if not candidate_statuses:
+        # If still in cooldown, allow an immediate probe rescue on the top priority models rather than failing dead
+        logger.warning(
+            f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose}: Cooldown kích hoạt, cho phép probe thử nghiệm trên model ưu tiên hàng đầu: {ordered_models[:2]}"
+        )
+        candidate_statuses = [(m, "HALF_OPEN") for m in ordered_models[:2]]
+
     last_exception = None
 
     for attempt, (model, state) in enumerate(candidate_statuses):
@@ -423,95 +660,125 @@ def call_gemini_api(
         state = admitted[0][1]
 
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        masked_url = url
         t_start = time.monotonic()
 
         state_tag = f"[{state}]" if state != "ACTIVE" else ""
         logger.info(
             f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} attempt={attempt+1} {state_tag} "
-            f"timeout=({connect_timeout:.1f}s, {read_timeout:.1f}s) remaining={remaining:.1f}s"
+            f"key=[{account_hash}] timeout=({connect_timeout:.1f}s, {read_timeout:.1f}s) remaining={remaining:.1f}s"
         )
 
         _record_dispatcher_active_model(model, purpose)
 
-        try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=(connect_timeout, read_timeout))
-            resp.encoding = "utf-8"
-            elapsed_ms = int((time.monotonic() - t_start) * 1000)
+        keys_to_try = [curr_key] + [k for k in keys_pool if k != curr_key]
 
-            if resp.status_code == 200:
-                data = resp.json()
-                if stop_checker and stop_checker():
-                    raise GeminiCancelledError("Operation cancelled by user stop request.")
-                if response_validator is not None:
-                    response_validator(data)
-                circuit_breaker.record_success(account_hash, model, purpose)
-                _record_dispatcher_success_model(model, purpose)
-                logger.info(
-                    f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} "
-                    f"SUCCESS status=200 elapsed={elapsed_ms}ms"
-                )
-                return data, model
-
-            # Error handling
-            elapsed_ms = int((time.monotonic() - t_start) * 1000)
-            status = resp.status_code
-            retry_after = parse_retry_after(resp.headers.get("Retry-After"))
-
-            logger.warning(
-                f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} "
-                f"FAILED status={status} elapsed={elapsed_ms}ms retry_after={retry_after}"
-            )
-
-            circuit_breaker.record_failure(
-                account_hash, model, purpose, status, f"HTTP_{status}", retry_after
-            )
-
-            if status in (401, 403):
-                # Authentication/Permission error: stop chain immediately
-                raise GeminiAuthError(f"Gemini API key is invalid or lacks permission (HTTP {status}).")
-
-            if status == 400:
-                # Malformed request: parse structured error
-                try:
-                    err_json = resp.json()
-                    err_msg = err_json.get("error", {}).get("message", "Bad request")
-                except Exception:
-                    err_msg = resp.text[:200]
-                err_msg = mask_secret(err_msg)
-                logger.error(f"[GEMINI_DISPATCHER] HTTP 400 Bad Request: {err_msg}")
-                # Don't keep hammering if payload itself is fundamentally broken
-                if any(token in err_msg.lower() for token in ("model", "not supported", "not found")):
-                    last_exception = GeminiError(f"HTTP 400: {err_msg}")
+        for key_idx, active_key in enumerate(keys_to_try):
+            active_account_hash = _get_account_hash(active_key)
+            if len(keys_to_try) > 1 and key_idx > 0:
+                if circuit_breaker.is_account_exhausted(active_account_hash)[0]:
                     continue
-                raise GeminiRequestError(f"HTTP 400: {err_msg}")
 
-            last_exception = GeminiError(f"HTTP {status} from {model}")
+            headers = {
+                "Content-Type": "application/json",
+                "x-goog-api-key": active_key,
+            }
 
-        except requests.Timeout as e:
-            elapsed_ms = int((time.monotonic() - t_start) * 1000)
-            logger.warning(
-                f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} TIMEOUT after {elapsed_ms}ms"
-            )
-            circuit_breaker.record_failure(account_hash, model, purpose, None, "Timeout")
-            last_exception = TimeoutError(mask_secret(str(e)))
+            try:
+                resp = requests.post(url, json=payload, headers=headers, timeout=(connect_timeout, read_timeout))
+                resp.encoding = "utf-8"
+                elapsed_ms = int((time.monotonic() - t_start) * 1000)
 
-        except requests.ConnectionError as e:
-            elapsed_ms = int((time.monotonic() - t_start) * 1000)
-            logger.warning(
-                f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} CONNECTION_ERROR after {elapsed_ms}ms"
-            )
-            circuit_breaker.record_failure(account_hash, model, purpose, None, "ConnectionError")
-            last_exception = ConnectionError(mask_secret(str(e)))
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if stop_checker and stop_checker():
+                        raise GeminiCancelledError("Operation cancelled by user stop request.")
+                    if response_validator is not None:
+                        response_validator(data)
+                    circuit_breaker.record_success(active_account_hash, model, purpose)
+                    circuit_breaker.record_account_success(active_account_hash)
+                    _record_dispatcher_success_model(model, purpose)
+                    logger.info(
+                        f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} key=[{active_account_hash}] "
+                        f"SUCCESS status=200 elapsed={elapsed_ms}ms"
+                    )
+                    return data, model
 
-        except Exception as e:
-            if isinstance(e, (GeminiAuthError, GeminiRequestError, GeminiDeadlineError, GeminiCancelledError)):
-                raise
-            elapsed_ms = int((time.monotonic() - t_start) * 1000)
-            logger.warning(
-                f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} ERROR: {type(e).__name__} after {elapsed_ms}ms"
-            )
-            circuit_breaker.record_failure(account_hash, model, purpose, None, type(e).__name__)
-            last_exception = e
+                # Error handling
+                elapsed_ms = int((time.monotonic() - t_start) * 1000)
+                status = resp.status_code
+                retry_after = parse_retry_after(resp.headers.get("Retry-After"))
+
+                logger.warning(
+                    f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} key=[{active_account_hash}] "
+                    f"FAILED status={status} elapsed={elapsed_ms}ms retry_after={retry_after}"
+                )
+
+                circuit_breaker.record_failure(
+                    active_account_hash, model, purpose, status, f"HTTP_{status}", retry_after
+                )
+
+                if status == 429:
+                    circuit_breaker.record_account_quota_exhausted(active_account_hash, retry_after)
+                    # Check if another key is available in the pool
+                    available_alts = [k for k in keys_to_try[key_idx + 1:] if not circuit_breaker.is_account_exhausted(_get_account_hash(k))[0]]
+                    if available_alts:
+                        logger.warning(
+                            f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model}: Key [{active_account_hash}] bị HTTP 429 Rate Limit. "
+                            f"Lập tức chuyển sang Key [{_get_account_hash(available_alts[0])}] trong Multi-Key Pool ({len(available_alts)} keys khả dụng)..."
+                        )
+                        continue
+
+                if status in (401, 403):
+                    if len(keys_to_try) == 1:
+                        raise GeminiAuthError(f"Gemini API key is invalid or lacks permission (HTTP {status}).")
+                    else:
+                        logger.warning(
+                            f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model}: Key [{active_account_hash}] lỗi xác thực (HTTP {status}). Chuyển sang key khác..."
+                        )
+                        continue
+
+                if status == 400:
+                    try:
+                        err_json = resp.json()
+                        err_msg = err_json.get("error", {}).get("message", "Bad request")
+                    except Exception:
+                        err_msg = resp.text[:200]
+                    err_msg = mask_secret(err_msg)
+                    logger.error(f"[GEMINI_DISPATCHER] HTTP 400 Bad Request: {err_msg}")
+                    if any(token in err_msg.lower() for token in ("model", "not supported", "not found")):
+                        last_exception = GeminiError(f"HTTP 400: {err_msg}")
+                        break
+                    raise GeminiRequestError(f"HTTP 400: {err_msg}")
+
+                last_exception = GeminiError(f"HTTP {status} from {model}")
+
+            except requests.Timeout as e:
+                elapsed_ms = int((time.monotonic() - t_start) * 1000)
+                logger.warning(
+                    f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} key=[{active_account_hash}] TIMEOUT after {elapsed_ms}ms"
+                )
+                circuit_breaker.record_failure(active_account_hash, model, purpose, None, "Timeout")
+                last_exception = TimeoutError(mask_secret(str(e)))
+                break
+
+            except requests.ConnectionError as e:
+                elapsed_ms = int((time.monotonic() - t_start) * 1000)
+                logger.warning(
+                    f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} key=[{active_account_hash}] CONNECTION_ERROR after {elapsed_ms}ms"
+                )
+                circuit_breaker.record_failure(active_account_hash, model, purpose, None, "ConnectionError")
+                last_exception = ConnectionError(mask_secret(str(e)))
+                break
+
+            except Exception as e:
+                if isinstance(e, (GeminiAuthError, GeminiRequestError, GeminiDeadlineError, GeminiCancelledError)):
+                    raise
+                elapsed_ms = int((time.monotonic() - t_start) * 1000)
+                logger.warning(
+                    f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} key=[{active_account_hash}] ERROR: {type(e).__name__} after {elapsed_ms}ms"
+                )
+                circuit_breaker.record_failure(active_account_hash, model, purpose, None, type(e).__name__)
+                last_exception = e
+                break
 
     raise GeminiAllModelsFailedError(f"All candidate Gemini models failed for {purpose}: {mask_secret(str(last_exception))}") from last_exception

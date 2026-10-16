@@ -20,7 +20,10 @@ ROOT = Path(__file__).resolve().parent
 CANDIDATE = Path(os.environ.get("V1_REPAIR_TEST_CODE", str(ROOT.parent / "backend")))
 sys.path.insert(0, r"C:\tool v1\backend")
 sys.path.insert(0, str(CANDIDATE))
+import importlib
 import v1_media_streams as media
+if "v1_ocr_proxy" in sys.modules and not hasattr(sys.modules["v1_ocr_proxy"], "validate_video_output"):
+    del sys.modules["v1_ocr_proxy"]
 import v1_ocr_proxy as ocr
 SCRATCH = tempfile.TemporaryDirectory(prefix="v1-render-tests-")
 
@@ -239,7 +242,10 @@ class RenderTests(unittest.TestCase):
         self.probe = patch.object(media, "probe_main_video", return_value=self.source)
         self.probe.start()
         self.addCleanup(self.probe.stop)
-        self.shared = patch.dict(sys.modules, {"shared_state": types.SimpleNamespace(stop_requested=False)})
+        self.shared = patch.dict(sys.modules, {
+            "shared_state": types.SimpleNamespace(stop_requested=False),
+            "v1_media_streams": media,
+        })
         self.shared.start()
         self.addCleanup(self.shared.stop)
         self.commands = []

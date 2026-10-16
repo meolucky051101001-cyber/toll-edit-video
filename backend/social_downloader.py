@@ -175,7 +175,8 @@ logger.addFilter(SensitiveUrlFilter())
 
 USER_AGENTS = {
     "mobile": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-    "desktop": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    "desktop": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+    "desktop_chrome": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 }
 
 # Do not shorten this list: the same originVideoKey is not available from every
@@ -341,6 +342,7 @@ def resolve_douyin_so9(url: str, video_id: str = "") -> tuple:
                     raw_title = str(video_info.get("title") or "").strip()
                     title = raw_title or (f"douyin_{video_id}" if video_id else "douyin_video")
                     if video_url:
+                        video_url = str(video_url).replace("playwm", "play")
                         logger.info("Bóc tách Douyin thành công qua SO9: %s", sanitize_url(video_url))
                         return True, video_url, title, ""
                     else:
@@ -391,7 +393,7 @@ def resolve_douyin_viesnap(url: str, timeout: int = 15) -> tuple:
             qualities = data.get("qualities", {})
             best = qualities.get("best") or qualities.get("hd") or qualities.get("sd")
             if best and best.get("cdn_url"):
-                cdn_url = best["cdn_url"]
+                cdn_url = str(best["cdn_url"]).replace("playwm", "play")
                 req_headers = {}
                 if best.get("cdn_headers"):
                     try:
@@ -437,6 +439,7 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
             ok_vn, v_url_vn, v_title_vn, v_headers_vn, err_vn = resolve_douyin_viesnap(url)
             t_resolve = time.monotonic() - t0
             if ok_vn and v_url_vn:
+                v_url_vn = str(v_url_vn).replace("playwm", "play")
                 logger.info(f"[RESOLVE] Montague/Viesnap thành công trong {t_resolve:.2f}s")
                 safe_title = clean_filename(v_title_vn or (f"douyin_{video_id}" if video_id else "douyin_video"))
                 target_path = os.path.join(output_dir, f"{prefix}_{safe_title}.mp4")
@@ -469,6 +472,7 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
                 safe_title = clean_filename(info.title)
                 target_path = os.path.join(output_dir, f"{prefix}_{safe_title}.mp4")
                 for media_url in info.media_urls:
+                    media_url = str(media_url).replace("playwm", "play")
                     if download_parallel_range(media_url, target_path, workers=6, headers=dict(info.download_headers)):
                         logger.info("Tải thành công Douyin trực tiếp (Range): %s", target_path)
                         return True, target_path, info.title, ""
@@ -497,6 +501,7 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
             ok, v_url, v_title, err = resolve_douyin_so9(url, video_id=video_id)
             t_resolve = time.monotonic() - t0
             if ok and v_url:
+                v_url = str(v_url).replace("playwm", "play")
                 logger.info(f"[RESOLVE] SO9 thành công trong {t_resolve:.2f}s")
                 safe_title = clean_filename(v_title or (f"douyin_{video_id}" if video_id else "douyin_video"))
                 target_path = os.path.join(output_dir, f"{prefix}_{safe_title}.mp4")
@@ -531,6 +536,7 @@ def download_douyin_tiktok(url: str, output_dir: str, prefix: str) -> tuple:
                     safe_title = clean_filename(title)
                     
                     if video_url:
+                        video_url = str(video_url).replace("playwm", "play")
                         if video_url.startswith("/"):
                             video_url = "https://www.tikwm.com" + video_url
                         
@@ -565,15 +571,36 @@ def download_parallel_range(
     deadline = max_transfer_seconds or float(os.getenv("SOCIAL_STREAM_TIMEOUT_SECONDS", "180"))
     try:
         os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
+        total_size = 0
         req = urllib.request.Request(url, method='HEAD')
         req.add_header('User-Agent', USER_AGENTS["desktop"])
         if headers:
             for k, v in headers.items():
                 if k.lower() != 'user-agent':
                     req.add_header(k, str(v))
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            total_size = int(resp.headers.get('Content-Length', 0))
-            
+        try:
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                total_size = int(resp.headers.get('Content-Length', 0))
+        except Exception:
+            total_size = 0
+
+        if total_size <= 0:
+            try:
+                probe_req = urllib.request.Request(url, method='GET')
+                probe_req.add_header('User-Agent', USER_AGENTS["desktop"])
+                if headers:
+                    for k, v in headers.items():
+                        if k.lower() != 'user-agent':
+                            probe_req.add_header(k, str(v))
+                probe_req.add_header('Range', 'bytes=0-0')
+                with urllib.request.urlopen(probe_req, timeout=8) as p_resp:
+                    status_code = getattr(p_resp, "status", p_resp.getcode())
+                    cr = p_resp.headers.get('Content-Range', '')
+                    if status_code == 206 and '/' in cr:
+                        total_size = int(cr.rsplit('/', 1)[-1].strip())
+            except Exception:
+                total_size = 0
+
         if total_size <= 0:
             return False
 
@@ -695,44 +722,56 @@ def download_parallel_range(
 # =========================================================================
 def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
     """
-    Tải video Xiaohongshu (Tiểu Hồng Thư) không logo chất lượng cao
+    Tải video Xiaohongshu (Tiểu Hồng Thư) không logo chất lượng cao.
+    Triệt tiêu 100% watermark:
+    - Bóc tách luồng sạch: Stream 258 (X264 web MP4) hoặc Stream 114 (H.265 WEB).
+    - Triệt tiêu hoàn toàn stream 259 (WeChat Mini App) bị dính logo watermark.
+    - Hỗ trợ originVideoKey chất lượng gốc không nén.
     """
-    logger.info(f"Đang bóc tách Xiaohongshu: {sanitize_url(url)}")
+    logger.info(f"Đang bóc tách Xiaohongshu không watermark: {sanitize_url(url)}")
     os.makedirs(output_dir, exist_ok=True)
     try:
         import json
-        headers = {
-            'User-Agent': USER_AGENTS["mobile"],
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
-        }
         
         # Chuẩn hóa link rút gọn sang HTTPS để tránh bị timeout trên một số mạng
         target_fetch_url = url.strip()
         if target_fetch_url.startswith("http://xhslink.com"):
             target_fetch_url = target_fetch_url.replace("http://xhslink.com", "https://xhslink.com")
 
+        # Thử lấy HTML bằng Desktop UA trước (nhận stream 258 sạch trực tiếp), nếu bị login/chặn chuyển sang Mobile UA
+        uas_to_try = [USER_AGENTS["desktop"], USER_AGENTS["mobile"]]
         res = None
-        for attempt in range(2):
+        last_res = None
+        for attempt, current_ua in enumerate(uas_to_try):
+            headers = {
+                'User-Agent': current_ua,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
+            }
             try:
-                res = requests.get(target_fetch_url, headers=headers, allow_redirects=True, timeout=(15, 25))
-                if res.status_code == 200:
-                    break
+                temp_res = requests.get(target_fetch_url, headers=headers, allow_redirects=True, timeout=(15, 25))
+                last_res = temp_res
+                if temp_res.status_code == 200:
+                    real_chk = temp_res.url.lower()
+                    if "/login" not in real_chk:
+                        res = temp_res
+                        break
+                    else:
+                        logger.info("Desktop UA bị chuyển hướng về login, thử lại với Mobile UA...")
             except Exception as req_err:
                 logger.warning(f"Lần thử {attempt + 1} tải trang XHS thất bại ({req_err})")
-                if attempt == 0:
-                    headers['User-Agent'] = USER_AGENTS["desktop"]
+
+        if res is None and last_res is not None:
+            res = last_res
 
         if res is None:
-            return False, "", "", "Không thể kết nối đến máy chủ Tiểu Hồng Thư (Hết thời gian chờ / Timeout mạng)"
+            return False, "", "", "Không thể kết nối đến máy chủ Tiểu Hồng Thư (Hết thời gian chờ hoặc bị chặn)"
         if res.status_code != 200:
             return (
                 False,
                 "",
                 "",
-                "Máy chủ Tiểu Hồng Thư trả về HTTP {} sau 2 lần thử".format(
-                    res.status_code
-                ),
+                f"Máy chủ Tiểu Hồng Thư trả về HTTP {res.status_code}",
             )
 
         real_url = res.url
@@ -744,15 +783,19 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
         ).rstrip('/').lower()
         if clean_real in ["https://www.xiaohongshu.com", "http://www.xiaohongshu.com", "https://xiaohongshu.com", 
                           "https://www.xiaohongshu.com/explore", "http://www.xiaohongshu.com/explore",
-                          "https://www.xiaohongshu.com/discovery", "http://www.xiaohongshu.com/discovery"]:
-            return False, "", "", "Bài viết trên Tiểu Hồng Thư (XHS) này đã bị tác giả xóa, hết hạn hoặc không tồn tại"
+                          "https://www.xiaohongshu.com/discovery", "http://www.xiaohongshu.com/discovery",
+                          "https://www.xiaohongshu.com/login", "http://www.xiaohongshu.com/login"]:
+            return False, "", "", "Bài viết trên Tiểu Hồng Thư (XHS) này không tồn tại, đã bị tác giả xóa, hết hạn hoặc yêu cầu đăng nhập"
 
         html = res.text
         if any(msg in html for msg in ["你访问的页面不见了", "页面不存在", "该笔记已被删除", "笔记不存在", "Note not found"]):
             return False, "", "", "Bài viết trên Tiểu Hồng Thư này đã bị tác giả xóa (Trang không tồn tại)"
 
-        origin_video_url = None
-        backup_stream_urls = []
+        origin_video_urls = []
+        p1_clean = []  # Stream 258: X264 web desktop sạch 100%
+        p2_clean = []  # Stream 114/115/120/520: WEB H.265 sạch 100%
+        p3_clean = []  # Các stream web sạch khác
+        fallback_watermarked_urls = []
         title = "xiaohongshu_video"
 
         # 2. Trích xuất từ window.__INITIAL_STATE__
@@ -761,67 +804,129 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
             try:
                 raw_json = state_match.group(1).replace("undefined", "null")
                 state = json.loads(raw_json)
+                
+                # Tìm note_data qua cả 2 cấu trúc json web & mobile
                 note_data = state.get("noteData", {}).get("data", {}).get("noteData", {})
+                if not note_data:
+                    note_dict = state.get("note", {}).get("noteDetailMap", {})
+                    for k, v in note_dict.items():
+                        if isinstance(v, dict) and "note" in v:
+                            note_data = v.get("note", {})
+                            break
+                            
                 title = note_data.get("title") or note_data.get("desc", "") or "xhs_video"
                 
                 video = note_data.get("video")
                 if video and isinstance(video, dict):
-                    # ƯU TIÊN SỐ 1: Bóc tách originVideoKey (Video GỐC SẠCH 100% KHÔNG WATERMARK/LOGO)
+                    # 1. Bóc tách originVideoKey (Video GỐC SẠCH 100% KHÔNG WATERMARK/LOGO qua nhiều CDN)
                     origin_key = video.get("consumer", {}).get("originVideoKey")
                     if origin_key:
+                        keys_to_test = [origin_key]
+                        if origin_key.startswith("spectrum/"):
+                            keys_to_test.append(origin_key.replace("spectrum/", ""))
                         for dom in XHS_ORIGIN_CDN_DOMAINS:
-                            test_origin_url = f"{dom}/{origin_key}"
-                            try:
-                                h_res = requests.head(test_origin_url, headers=headers, timeout=4)
-                                if h_res.status_code == 200 and int(h_res.headers.get("Content-Length", 0)) > 10000:
-                                    origin_video_url = test_origin_url
-                                    logger.info(f"Đã tìm thấy luồng video XHS GỐC SẠCH KHÔNG LOGO: {sanitize_url(test_origin_url)}")
-                                    break
-                            except:
-                                pass
+                            for k_test in keys_to_test:
+                                test_origin_url = f"{dom}/{k_test}"
+                                try:
+                                    h_res = requests.head(test_origin_url, headers=headers, timeout=2.5)
+                                    if h_res.status_code == 200 and int(h_res.headers.get("Content-Length", 0)) > 10000:
+                                        if test_origin_url not in origin_video_urls:
+                                            origin_video_urls.append(test_origin_url)
+                                            logger.info(f"Đã tìm thấy CDN luồng gốc XHS sạch: {sanitize_url(test_origin_url)}")
+                                        break
+                                except Exception:
+                                    pass
 
-                    # Media stream backup
+                    # 2. Phân loại luồng media stream (Tách luồng sạch vs luồng dính watermark)
                     media = video.get("media", {})
                     stream = media.get("stream", {})
+                    
                     for st_type in ['h264', 'h265', 'av1', 'h266']:
                         st_list = stream.get(st_type, [])
                         if st_list and isinstance(st_list, list):
                             for item in st_list:
-                                v_u = item.get("masterUrl") or item.get("url")
-                                if v_u and v_u not in backup_stream_urls:
-                                    backup_stream_urls.append(v_u)
+                                st_type_code = item.get("streamType")
+                                st_desc = str(item.get("streamDesc") or "").upper()
+                                
+                                candidate_urls = []
+                                for k_u in ("masterUrl", "url"):
+                                    u = item.get(k_u)
+                                    if u and u not in candidate_urls:
+                                        candidate_urls.append(u)
                                 for b_u in item.get("backupUrls", []):
-                                    if b_u and b_u not in backup_stream_urls:
-                                        backup_stream_urls.append(b_u)
+                                    if b_u and b_u not in candidate_urls:
+                                        candidate_urls.append(b_u)
+                                        
+                                for v_u in candidate_urls:
+                                    # Nhận diện luồng watermark 259 (WeChat Mini App re-encode logo)
+                                    is_watermarked = (
+                                        st_type_code == 259 or
+                                        "MINI_APP" in st_desc or
+                                        "_259.mp4" in v_u or
+                                        "/259/" in v_u or
+                                        "playwm" in v_u
+                                    )
+                                    if is_watermarked:
+                                        if v_u not in fallback_watermarked_urls:
+                                            fallback_watermarked_urls.append(v_u)
+                                    elif st_type_code == 258 or "X264" in st_desc:
+                                        if v_u not in p1_clean:
+                                            p1_clean.append(v_u)
+                                    elif st_type_code in (114, 115, 120, 520) or "WEB_" in st_desc or "X265" in st_desc:
+                                        if v_u not in p2_clean:
+                                            p2_clean.append(v_u)
+                                    else:
+                                        if v_u not in p3_clean:
+                                            p3_clean.append(v_u)
+                                            
+                    logger.info(f"Bóc tách XHS: {len(p1_clean)} luồng Stream 258 (Desktop Sạch), {len(origin_video_urls)} CDN luồng gốc, {len(p2_clean)} luồng Stream H.265 Sạch, {len(p3_clean)} luồng sạch khác, {len(fallback_watermarked_urls)} luồng Stream 259 (Watermarked - ĐÃ CHẶN)")
             except Exception as e:
                 logger.warning(f"Lỗi parse JSON state của XHS: {e}")
 
         safe_title = clean_filename(title)
         target_path = os.path.join(output_dir, f"{prefix}_{safe_title}.mp4")
 
-        # 3. TẢI VIDEO GỐC SẠCH KHÔNG LOGO BẰNG RANGE MULTI-THREAD
-        if origin_video_url:
-            logger.info(f"Đang tải video XHS GỐC KHÔNG WATERMARK bằng đa luồng: {sanitize_url(origin_video_url)}")
-            if download_parallel_range(origin_video_url, target_path, workers=6):
-                logger.info(f"Tải thành công video XHS GỐC KHÔNG WATERMARK: {target_path}")
+        # 3. ƯU TIÊN SỐ 1: TẢI LUỒNG STREAM 258 (Desktop Sạch 100% không watermark, tải cực nhanh ~30s)
+        for v_url in p1_clean:
+            logger.info(f"Đang tải luồng XHS Stream 258 (Desktop Sạch 100%): {sanitize_url(v_url)}")
+            if download_parallel_range(v_url, target_path, workers=6):
+                logger.info(f"Tải thành công video XHS Stream 258 (Range): {target_path}")
                 return True, target_path, title, ""
-            # Thử lại bằng stream thông thường nếu parallel lỗi
-            if download_file_stream(origin_video_url, target_path, headers=headers, timeout=(10, 60)):
-                logger.info(f"Tải thành công video XHS GỐC: {target_path}")
+            if download_file_stream(v_url, target_path, headers=headers, timeout=(10, 60)):
+                logger.info(f"Tải thành công video XHS Stream 258 (Stream): {target_path}")
                 return True, target_path, title, ""
 
-        # 4. Dự phòng: Quét các luồng stream backup
-        for v_url in backup_stream_urls:
-            logger.info(f"Thử tải luồng backup stream: {sanitize_url(v_url)}")
-            if download_file_stream(v_url, target_path, headers=headers, timeout=(10, 40)):
-                logger.info(f"Tải thành công video XHS (stream): {target_path}")
+        # 4. ƯU TIÊN SỐ 2: TẢI VIDEO GỐC SẠCH (originVideoKey) VỚI CƠ CHẾ THỬ ĐA CDN DỰ PHÒNG
+        for orig_url in origin_video_urls:
+            logger.info(f"Đang tải video XHS GỐC SẠCH KHÔNG WATERMARK: {sanitize_url(orig_url)}")
+            if download_parallel_range(orig_url, target_path, workers=6):
+                logger.info(f"Tải thành công video XHS GỐC KHÔNG WATERMARK (Range): {target_path}")
                 return True, target_path, title, ""
+            if download_file_stream(orig_url, target_path, headers=headers, timeout=(10, 60)):
+                logger.info(f"Tải thành công video XHS GỐC KHÔNG WATERMARK (Stream): {target_path}")
+                return True, target_path, title, ""
+
+        # 5. ƯU TIÊN SỐ 3: TẢI CÁC LUỒNG WEB SẠCH KHÁC (STREAM 114/115/120/520 H.265 SẠCH)
+        remaining_clean = p2_clean + p3_clean
+        for v_url in remaining_clean:
+            logger.info(f"Đang tải luồng XHS SẠCH KHÔNG WATERMARK (H.265/Web): {sanitize_url(v_url)}")
+            if download_parallel_range(v_url, target_path, workers=6):
+                logger.info(f"Tải thành công video XHS SẠCH KHÔNG WATERMARK (Range): {target_path}")
+                return True, target_path, title, ""
+            if download_file_stream(v_url, target_path, headers=headers, timeout=(10, 60)):
+                logger.info(f"Tải thành công video XHS SẠCH KHÔNG WATERMARK (Stream): {target_path}")
+                return True, target_path, title, ""
+
+        # 6. TUYỆT ĐỐI CẤM TẢI STREAM 259 / WATERMARK
+        if fallback_watermarked_urls and not (p1_clean or origin_video_urls or remaining_clean):
+            logger.error("CẢNH BÁO: Chỉ tìm thấy luồng stream 259 có logo watermark; từ chối tải để bảo vệ chất lượng.")
+            return False, "", "", "Video Tiểu Hồng Thư này chỉ có luồng dính logo watermark (Đã chặn tải để tránh video có logo)"
 
         # Nếu là bài đăng dạng Album ảnh (không có video)
         if state_match and "imageList" in str(state_match.group(1)):
             return False, "", "", "Bài viết này là Album ảnh (không phải video)"
 
-        return False, "", "", "Không tìm thấy luồng video trong bài viết Tiểu Hồng Thư"
+        return False, "", "", "Không tìm thấy luồng video sạch trong bài viết Tiểu Hồng Thư"
     except Exception as e:
         logger.warning(f"Xiaohongshu Direct Scraper gặp lỗi: {e}")
         return False, "", "", f"Lỗi bóc tách XHS: {str(e)}"
@@ -919,8 +1024,17 @@ def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
                 clean_err = raw_err[:250].strip() if raw_err else "Không tìm thấy file sau khi tải"
             return False, "", "", clean_err
     except subprocess.TimeoutExpired:
-        return False, "", "", f"Tải video vượt giới hạn {configured_timeout:.0f} giây"
+        return False, "", "", f"Tải video vượt giới hạn {configured_timeout:.0f} giây (Tải video quá lâu (>{configured_timeout}s))"
     except Exception as e:
         return False, "", "", str(e)
     finally:
         staging.cleanup()
+        try:
+            for f in os.listdir(output_dir):
+                if f.startswith(prefix) and (f.endswith(".part") or f.endswith(".ytdl")):
+                    try:
+                        os.remove(os.path.join(output_dir, f))
+                    except OSError:
+                        pass
+        except OSError:
+            pass

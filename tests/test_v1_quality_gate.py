@@ -126,6 +126,57 @@ class QualityGateTests(unittest.TestCase):
                     workspace_path=tmp,
                 )
 
+    def test_resolution_and_fps_expansion(self):
+        """Nới rộng độ phân giải và FPS: Chấp nhận mọi video 4K, 2K, 60fps, 120fps, 9:16,..."""
+        from v1_media_streams import MainVideo
+        from unittest.mock import patch
+
+        cases = [
+            (1440, 1080, 30.0, 1080, 1920, 30.0, "PASS"),
+            (3840, 2160, 60.0, 1080, 1920, 30.0, "PASS"),
+            (2560, 1440, 60.0, 1080, 1920, 30.0, "PASS"),
+            (1920, 1080, 24.0, 1080, 1920, 30.0, "PASS"),
+            (1080, 1920, 30.0, 1080, 1920, 30.0, "PASS"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            video = tmp / "output.mp4"
+            video.write_bytes(b"dummy video content" * 1000)
+            src_video = tmp / "source.mp4"
+            src_video.write_bytes(b"dummy source content" * 1000)
+
+            audio_file = tmp / "mixed.wav"
+            audio_file.write_bytes(b"RIFF" + b"\x00" * 100)
+
+            for sw, sh, sfps, ow, oh, ofps, expected_status in cases:
+                with patch("v1_media_streams.probe_main_video") as mock_probe:
+                    mock_probe.side_effect = lambda p: (
+                        MainVideo(0, ow, oh, ofps, 10.0, 1, 1, False)
+                        if str(p) == str(video)
+                        else MainVideo(1, sw, sh, sfps, 10.0, 1, 1, False)
+                    )
+                    with patch("soundfile.info") as mock_sf, patch("cv2.VideoCapture") as mock_cap_cls:
+                        mock_sf.return_value.duration = 10.0
+                        mock_cap = unittest.mock.MagicMock()
+                        mock_cap.isOpened.return_value = True
+                        mock_cap.get.side_effect = lambda prop: 300 if prop == 7 else (ofps if prop == 5 else (ow if prop == 3 else (oh if prop == 4 else 0)))
+                        mock_cap.read.return_value = (True, "frame")
+                        mock_cap_cls.return_value = mock_cap
+
+                        rep = run_quality_gate(
+                            job_id=f"test_res_{sw}x{sh}",
+                            final_video_path=video,
+                            original_video_path=src_video,
+                            mixed_audio_path=audio_file,
+                            policy="REPORT_ONLY",
+                            workspace_path=tmp,
+                        )
+                        geom_chk = next((c for c in rep.checks if c.name == "source_geometry_fps"), None)
+                        self.assertIsNotNone(geom_chk)
+                        self.assertEqual(geom_chk.status, expected_status)
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -200,25 +200,69 @@ def compose_band_a_c_base(
     return img
 
 
+def _encode_rgb_frames_to_mp4(frames: List[np.ndarray], out_mp4: Path, fps: int = 24) -> Path:
+    """Encode a list of RGB uint8 numpy frames into an MP4 clip using NVENC (with libx264 fallback)."""
+    if not frames:
+        raise ValueError("No frames to encode")
+    h, w = frames[0].shape[:2]
+    for use_nvenc in (True, False):
+        codec = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "24"] if use_nvenc else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "rawvideo", "-vcodec", "rawvideo",
+            "-s", f"{w}x{h}", "-pix_fmt", "rgb24",
+            "-r", str(fps), "-i", "-",
+            *codec,
+            "-pix_fmt", "yuv420p",
+            "-an",
+            str(out_mp4)
+        ]
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            for fr in frames:
+                proc.stdin.write(memoryview(np.ascontiguousarray(fr, dtype=np.uint8)).cast("B"))
+            proc.stdin.close()
+            proc.wait()
+            if proc.returncode == 0 and out_mp4.exists():
+                return out_mp4
+        except Exception as e:
+            logger.debug(f"Encode frames (nvenc={use_nvenc}) failed: {e}")
+    raise RuntimeError(f"Failed to encode live action frames to {out_mp4}")
+
+
 def render_hand_drawn_band_b(
     illustration_img: Image.Image,
     duration: float,
     output_dir: Path,
     fps: int = 24,
-    show_hand: bool = True
+    show_hand: bool = True,
+    scene: Optional[Dict[str, Any]] = None
 ) -> Path:
     """
-    Diễn hoạt bàn tay vẽ thật cho hình minh họa Band B (720x420)
-    với 100% nét mực đen trên nền giấy trắng tinh.
+    Diễn hoạt 2 giai đoạn cho Band B (720x420):
+    - Giai đoạn 1 (56% thời lượng): Bàn tay thật cầm bút dạ đen vẽ bức tranh lên bảng trắng.
+    - Giai đoạn 2 (44% thời lượng): Bức tranh sau khi vẽ xong chuyển động sống động (2 mèo đua xe chạy trên đường đua, biểu đồ tách lớp, bánh răng xoay, Camera Zoom/Shake).
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     img_arr = np.array(illustration_img.convert("RGB"))
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Toàn bộ thời gian vẽ là nét bút mực đen của bàn tay thật (ink_percent=98.0)
+    total_dur = max(1.8, float(duration))
+    has_live_motion = scene is not None and not scene.get("custom_image_path")
+
+    if has_live_motion:
+        draw_phase_dur = max(1.2, round(total_dur * 0.56, 2))
+        live_phase_dur = max(0.5, round(total_dur - draw_phase_dur, 2))
+        draw_pct = 94.0
+    else:
+        draw_phase_dur = total_dur
+        live_phase_dur = 0.0
+        draw_pct = 75.0
+
     settings = Settings(
         mode="d",
-        duration=max(1.5, float(duration)),
-        draw_percent=72.0,
+        duration=draw_phase_dur,
+        draw_percent=draw_pct,
         ink_percent=98.0,
         width=720,
         height=420,
@@ -231,10 +275,40 @@ def render_hand_drawn_band_b(
         hand_scale=0.95
     )
 
-    output_dir.mkdir(parents=True, exist_ok=True)
     video_path, report = render_video(img_arr, settings, output_dir=output_dir)
-    logger.info(f"Đã render xong phân cảnh vẽ tay Band B nét đen: {video_path} ({duration:.2f}s, wall: {report.get('wall_seconds', 0):.2f}s)")
-    return Path(video_path)
+    phase1_mp4 = Path(video_path)
+
+    if has_live_motion and live_phase_dur >= 0.35:
+        try:
+            from ai.kinetic_scene_animator import generate_live_action_frames
+            live_frames_count = max(8, int(round(live_phase_dur * fps)))
+            live_frames = generate_live_action_frames(scene, num_frames=live_frames_count, width=720, height=420)
+            if live_frames:
+                uid = uuid.uuid4().hex[:8]
+                phase2_mp4 = output_dir / f"live_phase2_{uid}.mp4"
+                _encode_rgb_frames_to_mp4(live_frames, phase2_mp4, fps=fps)
+
+                combined_mp4 = output_dir / f"hand_live_combined_{uid}.mp4"
+                concat_list = output_dir / f"concat_{uid}.txt"
+                with open(concat_list, "w", encoding="utf-8") as cf:
+                    cf.write(f"file '{phase1_mp4.name}'\n")
+                    cf.write(f"file '{phase2_mp4.name}'\n")
+
+                cmd_concat = [
+                    "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                    "-i", str(concat_list), "-c", "copy", str(combined_mp4)
+                ]
+                subprocess.run(cmd_concat, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, cwd=str(output_dir))
+                logger.info(
+                    f"Đã render 2-Phase Hand-Drawn + Live Motion Band B: {combined_mp4.name} "
+                    f"(Draw: {draw_phase_dur:.2f}s + Live Motion: {live_phase_dur:.2f}s)"
+                )
+                return combined_mp4
+        except Exception as e_live:
+            logger.warning(f"Ghép Phase 2 Live Motion cho Hand-Drawn thất bại ({e_live}), dùng Phase 1.")
+
+    logger.info(f"Đã render xong phân cảnh vẽ tay Band B nét đen: {phase1_mp4} ({total_dur:.2f}s)")
+    return phase1_mp4
 
 
 # Singleton WhiteboardAnimator instance (Engine mã nguồn mở Kinoslide / masihsultani)
@@ -252,22 +326,30 @@ def render_kinetic_band_b(
     illustration_img: Image.Image,
     duration: float,
     output_dir: Path,
-    fps: int = 24
+    fps: int = 24,
+    scene: Optional[Dict[str, Any]] = None
 ) -> Path:
     """
-    Diễn hoạt bảng trắng Kinetic Reveal (từ repo masihsultani/whiteboard-animator)
-    - Tách nhận diện chữ viết CRAFT để viết tuần tự từ trái qua phải, trên xuống dưới
-    - Truy vết khung xương nét vẽ Topological Skeleton Tracing (không bị loang nét)
-    - Vẽ hình bao quanh (container) trước, chi tiết bên trong sau
-    - Tăng tốc phần cứng CUDA NVENC siêu tốc
-    - Phong cách bảng trắng sạch sẽ, không bị bàn tay che khuất nét vẽ
+    Diễn hoạt 2 giai đoạn Kinetic Reveal + Live Action Motion:
+    - Giai đoạn 1 (52% thời lượng): Truy vết khung xương nét vẽ Topological Skeleton + CRAFT Text Reveal
+    - Giai đoạn 2 (48% thời lượng): Diễn hoạt chuyển động sống động (2 mèo đua xe phóng vút, biểu đồ tách lớp, bánh răng xoay, Camera Zoom/Shake) ngay trong cùng 1 luồng FFmpeg pipe siêu tốc!
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     out_mp4 = output_dir / f"kinetic_band_b_{uuid.uuid4().hex[:8]}.mp4"
     img_arr = np.array(illustration_img.convert("RGB"))
 
-    total_dur = max(1.5, float(duration))
-    draw_dur = max(1.0, round(total_dur * 0.78, 2))
+    total_dur = max(1.8, float(duration))
+    has_live_motion = scene is not None and not scene.get("custom_image_path")
+
+    if has_live_motion:
+        draw_dur = max(0.95, round(total_dur * 0.52, 2))
+        live_dur = max(0.45, total_dur - draw_dur - 0.12)
+        live_frames_count = max(10, int(round(live_dur * fps)))
+        from ai.kinetic_scene_animator import generate_live_action_frames
+        extra_frames = generate_live_action_frames(scene, num_frames=live_frames_count, width=720, height=420)
+    else:
+        draw_dur = max(1.0, round(total_dur * 0.78, 2))
+        extra_frames = None
 
     animator = get_whiteboard_animator()
     t_start = time.perf_counter()
@@ -277,10 +359,14 @@ def render_kinetic_band_b(
         total_duration=total_dur,
         output_path=str(out_mp4),
         fps=fps,
-        use_nvenc=True
+        use_nvenc=True,
+        extra_frames=extra_frames
     )
     wall_sec = time.perf_counter() - t_start
-    logger.info(f"Đã render xong phân cảnh Kinetic Band B: {out_mp4} ({total_dur:.2f}s, wall: {wall_sec:.2f}s)")
+    logger.info(
+        f"Đã render xong 2-Phase Kinetic + Live Motion Band B: {out_mp4.name} "
+        f"({total_dur:.2f}s, live_frames={len(extra_frames) if extra_frames else 0}, wall: {wall_sec:.2f}s)"
+    )
     return out_mp4
 
 
@@ -290,18 +376,19 @@ def render_scene_band_b(
     output_dir: Path,
     fps: int = 24,
     show_hand: bool = True,
-    whiteboard_mode: str = "3band"
+    whiteboard_mode: str = "3band",
+    scene: Optional[Dict[str, Any]] = None
 ) -> Path:
     """
-    Điều phối bộ dựng Band B dựa theo tùy chọn của người dùng:
-    - Nếu whiteboard_mode == 'kinetic' hoặc show_hand is False: dùng engine Kinetic Reveal (Kinoslide)
-    - Nếu whiteboard_mode in ['hand', '3band']: dùng engine Hand-Drawn (Bàn tay người thật vẽ nét dạ đen)
+    Điều phối bộ dựng Band B 2 giai đoạn (Vẽ bảng trắng + Chuyển động thực tế) dựa theo tùy chọn người dùng:
+    - Nếu whiteboard_mode == 'kinetic' hoặc show_hand is False: dùng engine Kinetic Reveal + Live Action
+    - Nếu whiteboard_mode in ['hand', '3band']: dùng engine Hand-Drawn + Live Action
     """
     mode_clean = (whiteboard_mode or "").lower().strip()
     if mode_clean in ["kinetic", "reveal"] or not show_hand:
-        return render_kinetic_band_b(illustration_img, duration, output_dir, fps=fps)
+        return render_kinetic_band_b(illustration_img, duration, output_dir, fps=fps, scene=scene)
     else:
-        return render_hand_drawn_band_b(illustration_img, duration, output_dir, fps=fps, show_hand=True)
+        return render_hand_drawn_band_b(illustration_img, duration, output_dir, fps=fps, show_hand=True, scene=scene)
 
 
 def composite_hand_drawn_scene_3band(

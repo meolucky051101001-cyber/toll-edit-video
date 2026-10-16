@@ -102,7 +102,7 @@ def chat_with_ai(
     if context_script and context_script.strip():
         sys_instruction += f"\n\n[BỐI CẢNH DỰ ÁN HIỆN TẠI CỦA NGƯỜI DÙNG]:\n{context_script.strip()}"
 
-    selected_engine = ai_engine.lower().strip() if ai_engine else "muse"
+    selected_engine = ai_engine.lower().strip() if ai_engine else "gemini"
     has_muse = is_muse_available()
     has_gemini = bool(get_gemini_api_key())
 

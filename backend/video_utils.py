@@ -605,41 +605,42 @@ def process_video(
         else:
             sub_filter = f"subtitles='{srt_escaped}':force_style='{style_str}'"
 
-        # Chuẩn bị delogo filters nếu có yêu cầu
-        delogo_filters = []
-        if delogo:
+        def _build_delogo_filters(dw: int, dh: int):
+            if not delogo or dw <= 0 or dh <= 0:
+                return []
             try:
-                if orig_w > 0 and orig_h > 0:
-                    br_w = max(int(orig_w * 0.19), 10)
-                    br_h = max(int(orig_h * 0.065), 10)
-                    br_x = orig_w - br_w - int(orig_w * 0.01)
-                    br_y = orig_h - br_h - int(orig_h * 0.01)
-                    
-                    bl_w = max(int(orig_w * 0.38), 10)
-                    bl_h = max(int(orig_h * 0.065), 10)
-                    bl_x = int(orig_w * 0.01)
-                    bl_y = orig_h - bl_h - int(orig_h * 0.01)
-                    
-                    tl_w = max(int(orig_w * 0.20), 10)
-                    tl_h = max(int(orig_h * 0.055), 10)
-                    tl_x = int(orig_w * 0.01)
-                    tl_y = int(orig_h * 0.01)
-                    
-                    tr_w = max(int(orig_w * 0.32), 10)
-                    tr_h = max(int(orig_h * 0.055), 10)
-                    tr_x = orig_w - tr_w - int(orig_w * 0.01)
-                    tr_y = int(orig_h * 0.01)
-                    
-                    delogo_filters = [
-                        f"delogo=x={br_x}:y={br_y}:w={br_w}:h={br_h}",
-                        f"delogo=x={bl_x}:y={bl_y}:w={bl_w}:h={bl_h}",
-                        f"delogo=x={tl_x}:y={tl_y}:w={tl_w}:h={tl_h}",
-                        f"delogo=x={tr_x}:y={tr_y}:w={tr_w}:h={tr_h}",
-                    ]
+                br_w = max(int(dw * 0.19), 10)
+                br_h = max(int(dh * 0.065), 10)
+                br_x = dw - br_w - int(dw * 0.01)
+                br_y = dh - br_h - int(dh * 0.01)
+
+                bl_w = max(int(dw * 0.38), 10)
+                bl_h = max(int(dh * 0.065), 10)
+                bl_x = int(dw * 0.01)
+                bl_y = dh - bl_h - int(dh * 0.01)
+
+                tl_w = max(int(dw * 0.20), 10)
+                tl_h = max(int(dh * 0.055), 10)
+                tl_x = int(dw * 0.01)
+                tl_y = int(dh * 0.01)
+
+                tr_w = max(int(dw * 0.32), 10)
+                tr_h = max(int(dh * 0.055), 10)
+                tr_x = dw - tr_w - int(dw * 0.01)
+                tr_y = int(dh * 0.01)
+
+                return [
+                    f"delogo=x={br_x}:y={br_y}:w={br_w}:h={br_h}",
+                    f"delogo=x={bl_x}:y={bl_y}:w={bl_w}:h={bl_h}",
+                    f"delogo=x={tl_x}:y={tl_y}:w={tl_w}:h={tl_h}",
+                    f"delogo=x={tr_x}:y={tr_y}:w={tr_w}:h={tr_h}",
+                ]
             except Exception as d_err:
                 logger.warning("Không thể cấu hình delogo (%s)", d_err)
+                return []
 
         if not is_already_9_16:
+            delogo_filters = _build_delogo_filters(orig_w, orig_h)
             pre_split = (",".join(delogo_filters) + ",") if delogo_filters else ""
             blur_bg_filter = (
                 f"{pre_split}split[v1][v2];"
@@ -652,8 +653,6 @@ def process_video(
             logger.info("Chuyển đổi video không phải 9:16 sang khung dọc 9:16 với nền mờ: %dx%d -> 1080x1920", orig_w, orig_h)
         else:
             filter_parts = []
-            if delogo_filters:
-                filter_parts.extend(delogo_filters)
             max_dim = max(w, h)
             if max_dim > 3840 or min(w, h) > 2160 or max_dim > 4096:
                 ratio = min(1080.0 / min(w, h), 1920.0 / max_dim)
@@ -664,6 +663,10 @@ def process_video(
                 logger.info("NVENC H.264 bounds enforced: scaled %dx%d -> %dx%d", orig_w, orig_h, w, h)
             else:
                 logger.info("Video dọc 9:16 giữ nguyên kích thước gốc: %dx%d", w, h)
+
+            delogo_filters = _build_delogo_filters(w, h)
+            if delogo_filters:
+                filter_parts.extend(delogo_filters)
 
             filter_parts.append(sub_filter)
             filter_parts.append("format=yuv420p")

@@ -10,7 +10,13 @@ class OCRGeometryError(RuntimeError):
 
 
 def value(obj, key, default=None):
-    return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        if "__object_fields__" in obj:
+            obj = obj["__object_fields__"]
+        return obj.get(key, default)
+    return getattr(obj, key, default)
 
 
 def valid_box(block):
@@ -106,7 +112,7 @@ def validate_mask_geometry(segments, strict=None):
         import os
         strict = os.getenv("V1_STRICT_OCR_GEOMETRY", "1").lower() in ("1", "true")
     located_segs = [s for s in segments if value(s, 'ocr_mask_status') == 'located' and valid_box(value(s, 'best_block'))]
-    if len(located_segs) >= 2 and len(located_segs) >= len(segments) * 0.5:
+    if (len(located_segs) >= 2 and len(located_segs) >= len(segments) * 0.5) or (len(located_segs) >= 1 and len(segments) > 2):
         from statistics import median
         med_top = median([float(value(value(s, 'best_block'), 'y_pct')) for s in located_segs])
         med_bottom = median([float(value(value(s, 'best_block'), 'max_y_pct')) for s in located_segs])
@@ -160,4 +166,19 @@ def validate_mask_geometry(segments, strict=None):
             raise OCRGeometryError(msg)
         import logging
         logging.getLogger(__name__).warning('[OCR_GEOMETRY] ⚠️ ' + msg)
+        for s in segments:
+            st = value(s, 'ocr_mask_status')
+            if st == 'unresolved' or (
+                st == 'located'
+                and (not valid_box(value(s, 'best_block'))
+                     or any(not valid_box(b) for b in (value(s, 'tracking_blocks', []) or [])))
+            ):
+                if isinstance(s, dict):
+                    s['best_block'] = None
+                    s['tracking_blocks'] = []
+                    s['ocr_mask_status'] = 'no_caption_evidence'
+                else:
+                    s.best_block = None
+                    s.tracking_blocks = []
+                    s.ocr_mask_status = 'no_caption_evidence'
 

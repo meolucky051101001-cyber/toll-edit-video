@@ -174,7 +174,101 @@ def snapshot_legacy_telegram_run(
     )
 
 
+try:
+    from .telegram_jobs import TelegramJobPaths, build_v2_completion_caption
+except ImportError:
+    try:
+        from telegram_jobs import TelegramJobPaths, build_v2_completion_caption
+    except ImportError:
+        TelegramJobPaths = None
+        build_v2_completion_caption = None
+
+
+async def process_v2_telegram_job(
+    video_path,
+    paths,
+    title,
+    status_msg,
+    context=None,
+    chat_id=None,
+    url_or_filename=None,
+):
+    """Run and report the shared production V2 path for every Telegram input."""
+    started_at = time.time()
+    await run_pipeline_v2_for_telegram(
+        video_path,
+        str(paths.job_directory),
+        str(paths.final_video),
+        status_msg,
+        delivery_copy_path=str(paths.delivery_copy),
+    )
+    elapsed_seconds = time.time() - started_at
+    try:
+        from render_history import record_render_duration
+        record_render_duration(str(paths.delivery_copy), elapsed_seconds)
+    except Exception as exc:
+        logger.warning("Không thể ghi nhận render_history: %s", exc)
+    final_video = paths.final_video
+    if not Path(final_video).is_file() and paths.delivery_copy and Path(paths.delivery_copy).is_file():
+        final_video = paths.delivery_copy
+
+    saved_file = paths.delivery_copy if paths.delivery_copy and Path(paths.delivery_copy).is_file() else final_video
+    caption = build_v2_completion_caption(
+        title=title,
+        output_directory=OUTPUT_DIR,
+        elapsed_seconds=elapsed_seconds,
+        remaining_jobs=global_queue.qsize(),
+        saved_file_path=str(saved_file) if saved_file and Path(saved_file).is_file() else "",
+    ) if build_v2_completion_caption else f"✅ Hoàn tất: {title} (đã lưu vào máy: {saved_file})"
+
+    upload_to_telegram = os.getenv("AUTODUB_TELEGRAM_UPLOAD_VIDEO", "false").lower() in ("true", "1", "yes")
+
+    if upload_to_telegram and context and chat_id and Path(final_video).is_file():
+        await send_video_safely(
+            context,
+            chat_id,
+            str(final_video),
+            caption,
+            status_msg,
+            url_or_filename or title,
+        )
+    else:
+        if status_msg:
+            await safe_edit_status(status_msg, caption, parse_mode="Markdown")
+        elif context and chat_id:
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=caption, parse_mode="Markdown")
+            except Exception as exc:
+                logger.warning("Không thể gửi thông báo hoàn tất qua Telegram: %s", exc)
+
+
+async def run_durable_video(job):
+    """Run video job for durable queue adapter."""
+    context = job.get('context')
+    update = job.get('update')
+    job_key = job.get('job_key') or 'queue_job'
+    video = job.get('video_path')
+    paths = TelegramJobPaths.create(WORKSPACE, OUTPUT_DIR, job_key) if TelegramJobPaths else None
+    if paths:
+        paths.prepare_directories()
+    resolved_chat_id = job.get('chat_id')
+    if not resolved_chat_id and update and getattr(update, 'effective_chat', None):
+        resolved_chat_id = update.effective_chat.id
+    if not resolved_chat_id and update and getattr(update, 'message', None) and getattr(update.message, 'chat_id', None):
+        resolved_chat_id = update.message.chat_id
+    await process_v2_telegram_job(
+        video,
+        paths,
+        job.get('filename') or (Path(video).name if video else "video"),
+        None,
+        context=context,
+        chat_id=resolved_chat_id,
+        url_or_filename=job.get('url') or job.get('filename'),
+    )
+
+
 def publish_legacy_telegram_output(final_video, base_name, video_name, duration_seconds):
+
     """Atomically publish a rendered Telegram V1 video before validating completion."""
     destination = Path(OUTPUT_DIR) / f"Dubbed_{base_name}.mp4"
     atomic_copy_file(final_video, destination)
@@ -351,7 +445,7 @@ async def cmd_muse(update: Update, context: ContextTypes.DEFAULT_TYPE):
         script_data = await asyncio.to_thread(
             generate_doodle_script_from_ai,
             prompt=user_prompt,
-            ai_engine="muse"
+            ai_engine="gemini"
         )
 
         title = script_data.get("title", "VIDEO GIẢI MÃ BÍ ẨN")
@@ -854,6 +948,9 @@ async def _process_telegram_job(job):
             download_dir = Path(WORKSPACE) / "downloads"
             download_dir.mkdir(parents=True, exist_ok=True)
             if job["type"] == "url":
+                import importlib
+                import social_downloader
+                importlib.reload(social_downloader)
                 from social_downloader import download_social_video
                 await safe_edit_status(status_msg, f"Đang tải video: {name}")
                 success, path, title, error = await asyncio.to_thread(
@@ -1301,7 +1398,18 @@ def main():
             global GLOBAL_BOT_APP
             GLOBAL_BOT_APP = app
 
+            async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+                from telegram.error import NetworkError, TimedOut, RetryAfter
+                err = getattr(context, "error", None)
+                if isinstance(err, RetryAfter):
+                    logger.warning("Telegram Flood Control: tạm chờ %s giây.", getattr(err, "retry_after", 5))
+                elif isinstance(err, (TimedOut, NetworkError)):
+                    logger.warning("Telegram kết nối tạm gián đoạn (tự động khôi phục): %s", err)
+                else:
+                    logger.error("Lỗi xử lý sự kiện Telegram: %s", err, exc_info=err)
+
             # Đăng ký handlers
+            app.add_error_handler(telegram_error_handler)
             app.add_handler(CommandHandler("start", cmd_start))
             app.add_handler(CommandHandler("stop", cmd_stop))
             app.add_handler(CommandHandler("status", cmd_status))

@@ -33,7 +33,7 @@ def voice_cache_key(segment, voice_source, voice_param, max_duration=None):
     return hashlib.sha256(json.dumps(raw, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 def is_valid_audio(audio_path: str | Path, min_duration: float = 0.15) -> bool:
-    """Kiem tra audio thuc te: co the giai ma va co thoi luong hop le (Codex Requirement)."""
+    """Kiem tra audio thuc te: co the giai ma, co thoi luong hop le va khong phai audio cam (Codex Requirement)."""
     p = Path(audio_path)
     if not p.is_file() or p.stat().st_size < 256:
         return False
@@ -41,7 +41,12 @@ def is_valid_audio(audio_path: str | Path, min_duration: float = 0.15) -> bool:
         from v1_speech_guard import load_audio
         seg = load_audio(p)
         dur_s = len(seg) / 1000.0
-        return dur_s >= min_duration
+        if dur_s < min_duration:
+            return False
+        # Chặn audio câm hoàn toàn (anullsrc placeholder) không cho vào cache
+        if getattr(seg, "max", 1) == 0 or getattr(seg, "dBFS", 0.0) == -float("inf") or getattr(seg, "dBFS", 0.0) < -75.0:
+            return False
+        return True
     except Exception:
         pass
     try:
@@ -50,6 +55,7 @@ def is_valid_audio(audio_path: str | Path, min_duration: float = 0.15) -> bool:
         return info.duration >= min_duration
     except Exception:
         return False
+
 
 def read_voice_cache(path, key, text_content="", max_duration=None):
     # 1. Check job-local cache

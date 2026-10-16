@@ -53,10 +53,11 @@ ALLOWED_CORS_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
         "AUTODUB_CORS_ORIGINS",
-        "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8088,http://localhost:8088,null",
+        "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8088,http://localhost:8088",
     ).split(",")
-    if origin.strip()
+    if origin.strip() and origin.strip().lower() != "null"
 ]
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -125,10 +126,17 @@ async def security_middleware(request: Request, call_next):
     path = request.url.path
     method = request.method.upper()
     if method in ("POST", "PUT", "DELETE", "PATCH") and (path.startswith("/api/") or path.startswith("/a2ui/")):
-        if not path.startswith("/api/script/") and path != "/api/voice-preview" and not path.startswith("/api/jobs/") and path not in ("/api/stop-batch", "/api/pause-video", "/api/resume-video", "/api/audio-settings", "/api/worker-settings"):
-            token = request.headers.get("X-Local-Control-Token")
-            if not token or token != LOCAL_TOKEN:
-                return JSONResponse(status_code=403, content={"detail": "Yêu cầu thiếu hoặc sai X-Local-Control-Token"})
+        if not path.startswith("/api/script/") and path != "/api/voice-preview":
+            token = request.headers.get("X-Local-Control-Token", "")
+            if not token or not secrets.compare_digest(str(token), str(LOCAL_TOKEN)):
+                # Dự phòng cho các nút điều khiển nội bộ từ dashboard UI hợp lệ
+                is_dashboard_internal = (
+                    request.headers.get("X-Dashboard-Input") == "1"
+                    and request.headers.get("origin") in (None, "http://127.0.0.1:8088", "http://localhost:8088", "http://127.0.0.1:5173", "http://localhost:5173")
+                    and path in ("/api/stop-batch", "/api/pause-video", "/api/resume-video", "/api/audio-settings", "/api/worker-settings")
+                )
+                if not is_dashboard_internal:
+                    return JSONResponse(status_code=403, content={"detail": "Yêu cầu thiếu hoặc sai X-Local-Control-Token"})
 
 
     return await call_next(request)
@@ -281,7 +289,13 @@ def _read_log_tail(max_lines: int = 500) -> str:
     if log_file is None:
         return "Chưa có log nào."
     with open(log_file, "r", encoding="utf-8", errors="replace") as handle:
-        return "".join(handle.readlines()[-max_lines:])
+        raw_tail = "".join(handle.readlines()[-max_lines:])
+    try:
+        from ai.v1_gemini_dispatcher import mask_secret
+        return mask_secret(raw_tail)
+    except Exception:
+        return raw_tail
+
 
 
 async def locate_v1_subtitles(video_path, segments):
@@ -701,6 +715,9 @@ async def api_process_url(
         # Nanosecond prefix prevents stale-file collisions between fast retries.
         timestamp = str(time.time_ns())
         # Use the shared no-watermark downloader, including 206 + ffprobe checks.
+        import importlib
+        import social_downloader
+        importlib.reload(social_downloader)
         from social_downloader import download_social_video
 
         success, video_path, _title, download_error = await asyncio.to_thread(

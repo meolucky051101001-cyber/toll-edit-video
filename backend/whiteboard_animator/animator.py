@@ -421,6 +421,7 @@ class WhiteboardAnimator:
             preset: str = "veryfast",
             element_plan: list | None = None,
             use_nvenc: bool = True,
+            extra_frames: list | None = None,
     ):
         t0 = time.monotonic()
         img_array = self._enforce_white_bg(img_array)
@@ -503,6 +504,7 @@ class WhiteboardAnimator:
         encode_timing_video(
             img_array, timing, draw_end, total_duration, fade_dur,
             output_path, fps, bitrate, preset, use_nvenc=use_nvenc,
+            extra_frames=extra_frames,
         )
 
     # ==============================================================

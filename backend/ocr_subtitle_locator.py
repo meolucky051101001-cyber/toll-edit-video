@@ -347,7 +347,7 @@ def select_chinese_subtitle_band(
                 horizontal_gap = max(0.0,
                     second.block["x_pct"] - first.block["max_x_pct"],
                     first.block["x_pct"] - second.block["max_x_pct"])
-                if not same_line and (vertical_gap < -0.01 or vertical_gap > 0.035):
+                if not same_line and (vertical_gap < -0.035 or vertical_gap > 0.040):
                     continue
                 if same_line and horizontal_gap > 0.04:
                     continue

@@ -260,7 +260,9 @@ def generate_ass_file(
     sticker_padding_y = 8 if is_landscape else 10
     min_margin = math.ceil(canvas_x * 0.05)
     max_allowed_w = canvas_x - 2 * min_margin
-    text_max_w = max_allowed_w - (outline * 2) - (sticker_padding_x * 2)
+    # Subtitle wrapping strictly at 90% of video width:
+    # "khi nào kí tự kéo dài đến 90% chiều ngang video rồi mới xuống dòng"
+    text_max_w = int(canvas_x * 0.90)
 
     # Watermark protection zone (bottom-right red seal at X >= 0.8468, Y >= 0.9074 on landscape videos)
     if is_landscape and watermark_box is not None:
@@ -289,17 +291,8 @@ def generate_ass_file(
     def _wrap_text(text, max_w):
         if wrap_subtitle_text is not None:
             try:
-                lines = wrap_subtitle_text(text, max_w, measure)
-                if len(lines) > 1 and len(lines[-1].split()) < 3:
-                    previous, tail = lines[-2].split(), lines[-1].split()
-                    while len(tail) < 3 and len(previous) > 3:
-                        candidate = [previous[-1]] + tail
-                        if measure(" ".join(candidate)) > max_w:
-                            break
-                        tail = candidate
-                        previous.pop()
-                    lines[-2:] = [" ".join(previous), " ".join(tail)]
-                return lines
+                # Wrap greedily: text fills up to max_w (90% width) before wrapping
+                return wrap_subtitle_text(text, max_w, measure)
             except Exception:
                 pass
         chars = max(1, int(max_w / (font_size * 0.55)))
@@ -383,7 +376,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if tracks:
                 first = min(float(_block_value(b, "start", pages[0].start.total_seconds())) for b in tracks)
                 last = max(float(_block_value(b, "end", pages[-1].end.total_seconds())) for b in tracks)
-                if pages[0].start.total_seconds() - 0.30001 <= first:
+                is_short = len(str(getattr(pages[0], "content", "")).split()) <= 2
+                if not is_short and pages[0].start.total_seconds() - 0.30001 <= first:
                     pages[0].start = timedelta(seconds=max(0, min(
                         pages[0].start.total_seconds(), first)))
                 def _track_matches_held(b, t):
@@ -427,9 +421,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     if best and not _excluded_source(best):
                         curr_tracks.append(best)
 
-            # Determine whether next group shares the same visual position
+            next_is_short = len(str(getattr(groups[i + 1][1][0], "content", "")).split()) <= 2
             transition_target = boundary
-            if curr_tracks and next_tracks:
+            if not next_is_short and curr_tracks and next_tracks:
                 curr_y = (min(float(_block_value(b, "y_pct", 0)) for b in curr_tracks) + max(float(_block_value(b, "max_y_pct", 0)) for b in curr_tracks)) / 2.0
                 next_y = (min(float(_block_value(b, "y_pct", 0)) for b in next_tracks) + max(float(_block_value(b, "max_y_pct", 0)) for b in next_tracks)) / 2.0
                 if abs(curr_y - next_y) <= 0.05:
@@ -562,11 +556,46 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if seg_e <= seg_s:
                 continue
 
-            blocks = sorted(getattr(seg, "tracking_blocks", None) or [],
-                            key=lambda b: _block_value(b, "start", 0.0))
+            # Determine seg's own vertical anchor region so we never merge unrelated subtitles/titles
+            # from completely different parts of the screen (e.g. top title at y~0.25 vs bottom speech at y~0.85).
+            seg_blist = [b for b in (getattr(seg, "tracking_blocks", None) or []) if not _excluded_source(b)]
+            if not seg_blist and getattr(seg, "best_block", None):
+                bb = getattr(seg, "best_block")
+                if not _excluded_source(bb):
+                    seg_blist = [bb]
+
+            if seg_blist:
+                seg_cy = sum((float(_block_value(b, "y_pct", 0.0)) + float(_block_value(b, "max_y_pct", 0.0))) * 0.5 for b in seg_blist) / len(seg_blist)
+                seg_top = min(float(_block_value(b, "y_pct", 0.0)) for b in seg_blist)
+                seg_bottom = max(float(_block_value(b, "max_y_pct", 0.0)) for b in seg_blist)
+            else:
+                seg_cy = float(getattr(seg, "y_pct", main_y_pct) or main_y_pct)
+                seg_top = seg_cy - 0.03
+                seg_bottom = seg_cy + 0.03
+
+            blocks = getattr(seg, "tracking_blocks", None) or []
+            if not blocks and getattr(seg, "best_block", None):
+                bb = getattr(seg, "best_block")
+                if not _excluded_source(bb):
+                    blocks = [dict(
+                        start=float(_block_value(bb, "start", seg_s)),
+                        end=float(_block_value(bb, "end", seg_e)),
+                        x_pct=float(_block_value(bb, "x_pct", 0.0)),
+                        max_x_pct=float(_block_value(bb, "max_x_pct", 1.0)),
+                        y_pct=float(_block_value(bb, "y_pct", main_y_pct)),
+                        max_y_pct=float(_block_value(bb, "max_y_pct", main_y_pct + 0.05)),
+                    )]
+            blocks = sorted(blocks, key=lambda b: _block_value(b, "start", 0.0))
             blocks = [b for b in blocks if not _excluded_source(b)]
             verified = _verified_geometry(seg)
-            relevant = [b for b in held_tracks if b['end'] > seg_s and b['start'] < seg_e]
+            raw_relevant = [b for b in held_tracks if b['end'] > seg_s and b['start'] < seg_e]
+            relevant = []
+            for b in raw_relevant:
+                b_cy = (float(_block_value(b, "y_pct", 0.0)) + float(_block_value(b, "max_y_pct", 0.0))) * 0.5
+                b_span = max(float(_block_value(b, "max_y_pct", 0.0)), seg_bottom) - min(float(_block_value(b, "y_pct", 0.0)), seg_top)
+                # Only keep blocks within reasonable vertical proximity (<= 12% center delta and combined span <= 16%)
+                if abs(b_cy - seg_cy) <= 0.12 and b_span <= 0.16:
+                    relevant.append(b)
             if verified:
                 blocks = []
             if relevant:
@@ -578,12 +607,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 for left, right in zip(boundaries, boundaries[1:]):
                     active = [b for b in relevant if b['start'] < right and b['end'] > left]
                     if active:
+                        # Extra guard: If multiple active blocks span > 0.16 vertically,
+                        # retain only the ones closest to seg_cy to prevent monster bounding boxes.
+                        span_active = max(float(_block_value(b, "max_y_pct", 0.0)) for b in active) - min(float(_block_value(b, "y_pct", 0.0)) for b in active)
+                        if span_active > 0.16:
+                            active = [min(active, key=lambda b: abs((float(_block_value(b, "y_pct", 0.0)) + float(_block_value(b, "max_y_pct", 0.0))) * 0.5 - seg_cy))]
                         blocks.append(dict(start=left, end=right,
-                            x_pct=min(b['x_pct'] for b in active),
-                            max_x_pct=max(b['max_x_pct'] for b in active),
-                            y_pct=min(b['y_pct'] for b in active),
-                            max_y_pct=max(b['max_y_pct'] for b in active),
-                            **({'geometry_verified': True} if verified or all(b.get('geometry_verified') for b in active) else {})))
+                            x_pct=min(float(_block_value(b, 'x_pct', 0.0)) for b in active),
+                            max_x_pct=max(float(_block_value(b, 'max_x_pct', 0.0)) for b in active),
+                            y_pct=min(float(_block_value(b, 'y_pct', 0.0)) for b in active),
+                            max_y_pct=max(float(_block_value(b, 'max_y_pct', 0.0)) for b in active),
+                            **({'geometry_verified': True} if verified or all(_block_value(b, 'geometry_verified', False) for b in active) else {})))
             blocks = _transition_cover_blocks(blocks)
             if not verified and blocks and seg_s < float(_block_value(blocks[0], "start", seg_s)):
                 first_gap = float(_block_value(blocks[0], "start", seg_s)) - seg_s
@@ -647,113 +681,98 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
                 effective_text_w = safe_bottom_text_max_w if is_near_bottom else text_max_w
                 lines = _wrap_text(text, effective_text_w)
-                formatted_text = "\\N".join(line.replace("\\", "／").replace("{", "｛").replace("}", "｝") for line in lines)
+                if len(lines) > 2:
+                    # Enforce strictly maximum 2 lines per subtitle event
+                    lines = [lines[0], " ".join(lines[1:])]
                 num_lines = len(lines)
-                actual_text_w = math.ceil(
-                    max((measure(line) for line in lines), default=0)
-                )
+
+                scale_x = 100
+                if num_lines == 2 and measure(lines[1]) > max_allowed_w:
+                    scale_x = max(70, min(100, int((max_allowed_w / measure(lines[1])) * 100)))
+                    escaped_l0 = lines[0].replace("\\", "／").replace("{", "｛").replace("}", "｝")
+                    escaped_l1 = lines[1].replace("\\", "／").replace("{", "｛").replace("}", "｝")
+                    formatted_text = f"{escaped_l0}\\N{{\\fscx{scale_x}}}{escaped_l1}"
+                    actual_text_w = math.ceil(max(measure(lines[0]), measure(lines[1]) * (scale_x / 100.0)))
+                else:
+                    formatted_text = "\\N".join(line.replace("\\", "／").replace("{", "｛").replace("}", "｝") for line in lines)
+                    actual_text_w = math.ceil(
+                        max((measure(line) for line in lines), default=0)
+                    )
                 required_text_h = num_lines * line_h
 
                 if has_source:
                     chinese_center_x = canvas_x / 2.0
                     raw_cy_pct = (raw_y_pct + raw_max_y_pct) * 0.5
                     raw_h = int((raw_max_y_pct - raw_y_pct) * canvas_y)
-                    if abs(raw_cy_pct - med_center_pct) <= 0.015:
+                    is_in_locked_band = (
+                        abs(raw_cy_pct - med_center_pct) <= 0.015
+                        and locked_band_min_y is not None
+                        and locked_band_max_y is not None
+                    )
+                    if is_in_locked_band:
                         chinese_center_y = locked_center_y
+                        src_top = max(0, min(int(locked_band_min_y * canvas_y), int(raw_y_pct * canvas_y)))
+                        src_bottom = min(canvas_y, max(math.ceil(locked_band_max_y * canvas_y), math.ceil(raw_max_y_pct * canvas_y)))
                     else:
                         chinese_center_y = int(raw_cy_pct * canvas_y)
+                        src_top = max(0, int(raw_y_pct * canvas_y))
+                        src_bottom = min(canvas_y, math.ceil(raw_max_y_pct * canvas_y))
 
-                    max_reasonable_h = int(line_h * max(1, num_lines) * 1.8)
-                    chinese_h = min(max(raw_h, line_h * num_lines), max_reasonable_h)
+                    edge_source = (source_left_pct == 0 or source_right_pct == 1
+                                   or raw_y_pct == 0 or raw_max_y_pct == 1)
 
-                    if is_near_bottom:
-                        # 1. Geometry required to fully cover Chinese source subtitle
-                        src_l = source_left_pct * canvas_x
-                        src_r = source_right_pct * canvas_x
-                        need_x1 = src_l - sticker_padding_x
-                        need_x2 = src_r + sticker_padding_x
+                    source_box_x1 = max(0, math.floor(source_left_pct * canvas_x))
+                    source_box_x2 = min(canvas_x, math.ceil(source_right_pct * canvas_x))
+                    source_box_w = max(0, source_box_x2 - source_box_x1)
+                    source_box_h = max(0, src_bottom - src_top)
 
-                        # 2. Geometry required to fit translated text centered at chinese_center_x
-                        text_cover_w = actual_text_w + (sticker_padding_x * 2)
-                        text_x1 = chinese_center_x - (text_cover_w / 2.0)
-                        text_x2 = chinese_center_x + (text_cover_w / 2.0)
+                    text_cover_w = actual_text_w + (sticker_padding_x * 2)
 
-                        # Bounding box must cover both source subtitle and translated text
-                        box_x1 = min(need_x1, text_x1)
-                        box_x2 = max(need_x2, text_x2)
-
-                        min_margin = math.ceil(canvas_x * 0.05)
-                        box_x1 = max(min_margin, box_x1)
-
-                        # In landscape bottom area, protect watermark seal (X <= watermark_x_limit)
-                        # BUT NEVER clip below need_x2 if that would leave Chinese characters exposed!
-                        if box_x2 > watermark_x_limit:
-                            excess = box_x2 - watermark_x_limit
-                            if box_x1 - excess >= min_margin and (box_x1 - excess) <= need_x1:
-                                box_x1 -= excess
-                                box_x2 = max(need_x2, watermark_x_limit)
-                            else:
-                                box_x2 = max(need_x2, watermark_x_limit)
-
-                        draw_x = round(box_x1)
-                        draw_w = max(4, round(box_x2 - box_x1))
-                        draw_w = 2 * math.ceil(draw_w / 2)
-                        if draw_x + draw_w > watermark_x_limit and (draw_x + draw_w) > need_x2:
-                            shift_w = max(min_margin, watermark_x_limit - draw_w)
-                            if shift_w <= need_x1:
-                                draw_x = shift_w
+                    # Subtitle stickers must remain horizontally symmetric and centered.
+                    # Calculate required width symmetrically from screen center:
+                    if source_box_w > 0:
+                        dist_left = max(0.0, chinese_center_x - source_box_x1)
+                        dist_right = max(0.0, source_box_x2 - chinese_center_x)
+                        source_symmetric_w = 2.0 * max(dist_left, dist_right)
+                        target_visible_w = max(text_cover_w, source_symmetric_w)
                     else:
-                        min_cover_w = math.ceil(2 * max(
-                            chinese_center_x - source_left_pct * canvas_x,
-                            source_right_pct * canvas_x - chinese_center_x,
-                        )) + (sticker_padding_x * 2)
-                        text_cover_w = actual_text_w + (sticker_padding_x * 2)
-                        target_visible_w = min(
-                            max(min_cover_w, text_cover_w), max_allowed_w
-                        )
+                        target_visible_w = text_cover_w
+
+                    min_margin = math.ceil(canvas_x * 0.05)
+                    # When text/source reaches screen borders or covers > 95% of canvas,
+                    # span cleanly as a full-width ribbon across the screen.
+                    if edge_source or target_visible_w >= (canvas_x - (min_margin * 2)):
+                        draw_w = canvas_x
+                        draw_x = 0
+                    else:
                         draw_w = max(4, target_visible_w - (outline * 2))
-                        draw_w = min(max_allowed_w, 2 * math.ceil(draw_w / 2))
-                        draw_x = chinese_center_x - (draw_w / 2.0)
-                        min_margin = math.ceil(canvas_x * 0.05)
-                        if draw_x < min_margin:
-                            draw_x = min_margin
-                        elif draw_x + draw_w > canvas_x - min_margin:
-                            draw_x = max(min_margin, canvas_x - min_margin - draw_w)
+                        draw_w = min(max_allowed_w, 2 * math.ceil(draw_w / 2.0))
+                        draw_x = round(chinese_center_x - (draw_w / 2.0))
+                        draw_x = max(min_margin, min(draw_x, canvas_x - min_margin - draw_w))
 
-                    seg_padding_y = sticker_padding_y
-                    min_cover_h = chinese_h + 4 if chinese_h > 0 else 0
-                    text_cover_h = required_text_h + (seg_padding_y * 2)
-                    target_visible_h = min(canvas_y, max(min_cover_h, text_cover_h))
+                    if is_near_bottom and watermark_box is not None and draw_x + draw_w > watermark_x_limit:
+                        draw_x = max(min_margin, watermark_x_limit - draw_w)
 
+                    if num_lines == 1:
+                        text_box_h = required_text_h + (18 if is_landscape else 20)
+                    else:
+                        text_box_h = required_text_h + (20 if is_landscape else 24)
+
+                    target_visible_h = max(text_box_h, source_box_h)
                     draw_h = max(4, target_visible_h - (outline * 2))
                     draw_y = chinese_center_y - (draw_h // 2)
 
-                    if abs(raw_cy_pct - med_center_pct) <= 0.015 and locked_band_min_y is not None:
-                        src_top = int(locked_band_min_y * canvas_y)
-                        src_bottom = math.ceil(locked_band_max_y * canvas_y)
-                    else:
-                        src_top = int(raw_y_pct * canvas_y)
-                        src_bottom = math.ceil(raw_max_y_pct * canvas_y)
-                    if draw_y > src_top - 2:
-                        draw_h += (draw_y - (src_top - 2))
-                        draw_y = src_top - 2
-                    if draw_y + draw_h < src_bottom + 2:
-                        draw_h = (src_bottom + 2) - draw_y
+                    if source_box_h > 0:
+                        if draw_y > src_top:
+                            draw_h += (draw_y - src_top)
+                            draw_y = src_top
+                        if draw_y + draw_h < src_bottom:
+                            draw_h = src_bottom - draw_y
 
                     draw_x = max(0, draw_x)
                     draw_y = max(0, min(draw_y, canvas_y - draw_h - (outline * 2)))
 
-                    # Text stays within its layout margins; confirmed source
-                    # glyphs can require a mask all the way to the frame edge.
-                    source_x1 = max(0, math.floor(source_left_pct * canvas_x) - sticker_padding_x)
-                    right_padding = 0 if is_near_bottom and watermark_box is not None else sticker_padding_x
-                    source_x2 = min(canvas_x, math.ceil(source_right_pct * canvas_x) + right_padding)
-                    draw_right = min(canvas_x, max(draw_x + draw_w, source_x2))
-                    draw_x = min(draw_x, source_x1)
-                    draw_w = max(4, math.ceil(draw_right - draw_x))
-                    edge_source = (source_left_pct == 0 or source_right_pct == 1
-                                   or raw_y_pct == 0 or raw_max_y_pct == 1)
-                    draw_cmd = "{\\p1}" + _rounded_box(draw_w, draw_h, radius=0 if edge_source else 12) + "{\\p0}"
+                    draw_cmd = "{\\p1}" + _rounded_box(draw_w, draw_h, radius=0 if (edge_source or (draw_x == 0 and draw_w == canvas_x)) else 12) + "{\\p0}"
                     bg_line = f"{{\\an7\\pos({draw_x:g},{draw_y})}}{draw_cmd}"
                     ass_content += f"Dialogue: 0,{start_str},{end_str},BgStyle,,0,0,0,,{bg_line}\n"
 

@@ -29,10 +29,10 @@ except ImportError:
     from ocr_subtitle_locator import select_chinese_subtitle_band
 
 try:
-    from .v1_ocr_geometry import (sample_times, rescue_times, has_caption_evidence,
+    from .v1_ocr_geometry import (value, sample_times, rescue_times, has_caption_evidence,
                                   geometry_summary, validate_mask_geometry, normalized_rows)
 except ImportError:
-    from v1_ocr_geometry import (sample_times, rescue_times, has_caption_evidence,
+    from v1_ocr_geometry import (value, sample_times, rescue_times, has_caption_evidence,
                                 geometry_summary, validate_mask_geometry, normalized_rows)
 
 
@@ -308,37 +308,44 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
         except Exception:
             pass
 
-    ocr_strategy = kwargs.get("ocr_strategy")
-    if not ocr_strategy or ocr_strategy == "auto":
-        try:
+    if effective_duration > 0 and effective_duration <= short_thresh:
+        ocr_strategy = "full"
+        logger.info("Chế độ OCR cho video ngắn (%.1fs <= %.0fs): 'full' (đã tắt smart_skip)", effective_duration, short_thresh)
+    else:
+        ocr_strategy = kwargs.get("ocr_strategy")
+        if not ocr_strategy or ocr_strategy == "auto":
             try:
-                from backend.job_config_service import resolve_job_frozen_config
-            except ImportError:
-                from job_config_service import resolve_job_frozen_config
-            frozen = resolve_job_frozen_config(video_path)
-            if frozen and "effective_config" in frozen and "planned_pipeline" in frozen["effective_config"]:
-                ocr_strategy = frozen["effective_config"]["planned_pipeline"].get("ocr_strategy")
-            elif frozen and "routing" in frozen and frozen["routing"]:
-                ocr_strategy = frozen["routing"].get("planned_pipeline", {}).get("ocr_strategy")
-        except Exception:
-            pass
+                try:
+                    from backend.job_config_service import resolve_job_frozen_config
+                except ImportError:
+                    from job_config_service import resolve_job_frozen_config
+                frozen = resolve_job_frozen_config(video_path)
+                if frozen and "effective_config" in frozen and "planned_pipeline" in frozen["effective_config"]:
+                    ocr_strategy = frozen["effective_config"]["planned_pipeline"].get("ocr_strategy")
+                elif frozen and "routing" in frozen and frozen["routing"]:
+                    ocr_strategy = frozen["routing"].get("planned_pipeline", {}).get("ocr_strategy")
+            except Exception:
+                pass
 
-    if not ocr_strategy or ocr_strategy == "auto":
-        try:
-            from .v1_feature_flags import get_feature_flags
-        except ImportError:
+        if not ocr_strategy or ocr_strategy == "auto":
             try:
-                from v1_feature_flags import get_feature_flags
+                from .v1_feature_flags import get_feature_flags
             except ImportError:
-                get_feature_flags = lambda: {}
-        flags = get_feature_flags()
-        enable_smart = flags.get("V1_SMART_SKIP_OCR")
-        if enable_smart is None:
-            enable_smart = os.getenv("V1_SMART_SKIP_OCR", os.getenv("ENABLE_SMART_SKIP_OCR", "true")).strip().lower() in ("1", "true", "yes", "on")
-        else:
-            enable_smart = bool(enable_smart)
+                try:
+                    from v1_feature_flags import get_feature_flags
+                except ImportError:
+                    get_feature_flags = lambda: {}
+            flags = get_feature_flags()
+            enable_smart = flags.get("V1_SMART_SKIP_OCR")
+            if enable_smart is None:
+                enable_smart = os.getenv("V1_SMART_SKIP_OCR", os.getenv("ENABLE_SMART_SKIP_OCR", "true")).strip().lower() in ("1", "true", "yes", "on")
+            else:
+                enable_smart = bool(enable_smart)
 
-        ocr_strategy = "smart_skip" if enable_smart else "full"
+            if effective_duration > short_thresh and enable_smart:
+                ocr_strategy = "smart_skip"
+            else:
+                ocr_strategy = "full"
     
     logger.info("Chế độ OCR đã chọn: '%s' (effective_duration=%.1fs, caller=%s)", ocr_strategy, effective_duration, kwargs.get("ocr_strategy"))
 
@@ -441,6 +448,8 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
     finally:
         cap.release()
     flush_frames()
+    if target_timestamps and not captured_frames and not recognized_samples:
+        raise RuntimeError("Could not decode any video frames for OCR verification")
     def append_recognized(samples):
         for current_time, scale_ratio, target_seg, seg_idx, results, crop_offset in samples:
             sample_id = segment_id(target_seg, seg_idx)
@@ -494,7 +503,7 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
     # established subtitle ROI (or full frame if no reliable track exists).
     missing = [(i, seg) for i, seg in enumerate(srt_segments)
                if segment_id(seg, i) not in band.selected_by_segment]
-    if missing:
+    if missing and not (ocr_strategy == "full" and band.support == 0 and len(srt_segments) >= 3):
         logger.info('OCR geometry rescue: %d/%d cues, GPU only', len(missing), len(srt_segments))
         rescue_cap = cv2.VideoCapture(video_path)
         if not rescue_cap.isOpened():
@@ -618,7 +627,7 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                 else:
                     seg.y_pct = global_med_top
                     seg.max_y_pct = global_med_bottom
-                    if getattr(band, 'support', 0) >= 2:
+                    if getattr(band, 'support', 0) >= 2 or len(srt_segments) > 2:
                         seg.best_block = OCRBlock(
                             text=getattr(seg, 'content', ''),
                             start=seg_s,
@@ -705,7 +714,7 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
         if kwargs.get('include_observations'):
             details['observations'] = [vars(block) for block in all_blocks]
         save_payload(kwargs['geometry_report_path'], geometry=report, sampling=metrics, **details)
-    validate_mask_geometry(srt_segments)
+    validate_mask_geometry(srt_segments, strict=kwargs.get('strict_geometry'))
     return [], width, height, main_y_pct
 
 

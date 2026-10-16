@@ -192,68 +192,16 @@ SKETCH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 def fetch_ai_sketch(scene: Dict[str, Any], width: int = 720, height: int = 420) -> Optional[Image.Image]:
     """
-    Tự động sinh bức tranh phác thảo Whiteboard Line Art (Đen - Trắng) chi tiết 100% đúng theo
-    nội dung kịch bản (VD: 2 con mèo đua xe, cá voi, phi hành gia, biểu đồ khoa học...).
-    Sử dụng AI Text-to-Image và xử lý hậu kỳ bằng OpenCV Adaptive Threshold để đảm bảo nét mực
-    đen thuần khiết (#000000) trên nền giấy trắng tinh (#FFFFFF).
+    Tổng hợp bức tranh Multi-Layer Whiteboard Line Art (Đen - Trắng) chi tiết 100% đúng theo
+    nội dung kịch bản (VD: 2 con mèo đội mũ bảo hiểm đua xe F1 trên đường đua, biểu đồ 50-30-20,
+    vắt ví tiền, bộ não bánh răng tư duy...) bằng Kinetic Scene Composer cục bộ siêu tốc,
+    loại bỏ hoàn toàn lỗi HTTP 402 từ API bên ngoài.
     """
-    raw_prompt = (
-        scene.get("image_prompt")
-        or scene.get("visual_concept")
-        or scene.get("narration")
-        or ""
-    ).strip()
-    if not raw_prompt:
-        return None
-
-    # Làm sạch prompt và tinh chỉnh riêng cho phong cách Whiteboard Line Art
-    line_art_prompt = (
-        f"minimalist black and white coloring book line art on pure white background, "
-        f"thick clean black ink outline sketch: {raw_prompt}, "
-        f"clean continuous vector line art, simple doodle sketch, no shading, no grayscale, no colors, pure black and white"
-    )
-
-    prompt_hash = hashlib.md5(line_art_prompt.encode("utf-8")).hexdigest()[:16]
-    cache_file = SKETCH_CACHE_DIR / f"sketch_{prompt_hash}.png"
-
-    if cache_file.exists():
-        try:
-            return Image.open(cache_file).convert("RGB")
-        except Exception:
-            pass
-
     try:
-        encoded_prompt = urllib.parse.quote(line_art_prompt)
-        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&nologo=true&seed=42"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        with urllib.request.urlopen(req, timeout=12) as resp:
-            raw_bytes = resp.read()
-
-        img_raw = cv2.imdecode(np.frombuffer(raw_bytes, np.uint8), cv2.IMREAD_COLOR)
-        if img_raw is None:
-            return None
-
-        # Chuyển đổi sang nét vẽ đen trắng tuyệt đối (Adaptive Thresholding)
-        gray = cv2.cvtColor(img_raw, cv2.COLOR_BGR2GRAY)
-        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 10)
-
-        # Lọc bỏ các hạt bụi / đốm nhiễu nhỏ
-        nb_components, output, stats, _ = cv2.connectedComponentsWithStats(255 - thresh, connectivity=8)
-        sizes = stats[1:, -1]
-        nb_components = nb_components - 1
-        clean_mask = np.zeros(output.shape, dtype=np.uint8)
-        for i in range(0, nb_components):
-            if sizes[i] >= 8:
-                clean_mask[output == i + 1] = 255
-
-        clean_bw = 255 - clean_mask
-        clean_rgb = cv2.cvtColor(clean_bw, cv2.COLOR_GRAY2RGB)
-
-        cv2.imwrite(str(cache_file), clean_rgb)
-        logger.info(f"Đã sinh thành công AI Sketch: {cache_file.name} cho '{raw_prompt[:40]}...'")
-        return Image.fromarray(clean_rgb)
+        from ai.kinetic_scene_animator import render_composite_scene_frame
+        return render_composite_scene_frame(scene, width=width, height=height, phase_progress=0.0)
     except Exception as e:
-        logger.warning(f"Không thể sinh AI Sketch cho '{raw_prompt[:30]}': {e}")
+        logger.warning(f"Lỗi render_composite_scene_frame: {e}")
         return None
 
 
@@ -307,9 +255,8 @@ def draw_doodle_illustration(
     """
     Vẽ hình hoạt họa phong cách Doodle / Whiteboard chuyên biệt theo ĐÚNG Ý TƯỞNG của từng phân cảnh:
     1. Ưu tiên kiểm tra ảnh tùy chỉnh người dùng upload (nếu có).
-    2. Tự động sinh tranh Whiteboard Line Art chi tiết bằng AI Sketch Engine đúng 100% nội dung (VD: 2 con mèo đua xe).
-    3. Nạp các Vector Icons chính xác theo icon_keywords & layout (dual_confrontation, action_duo, single_centered).
-    4. Dự phòng bằng bộ vẽ procedural đa dạng nếu không có mạng.
+    2. Tổng hợp tranh Multi-Layer Whiteboard Line Art chi tiết (Kinetic Scene Composer).
+    3. Nạp các Vector Icons chính xác theo icon_keywords & layout (dự phòng).
     """
     center_x = x_offset + width // 2
     center_y = y_offset + height // 2
@@ -329,12 +276,10 @@ def draw_doodle_illustration(
         except Exception as e:
             logger.warning(f"Lỗi nạp ảnh tùy chỉnh {custom_img_path}: {e}")
 
-    # 2. TỰ ĐỘNG SINH TRANH PHÁC THẢO AI (AI WHITEBOARD SKETCH)
-    # Tự động vẽ đúng 100% nội dung kịch bản người dùng yêu cầu (VD: 2 con mèo đua xe, cá voi, robot...)
+    # 2. TỔNG HỢP TRANH MULTI-LAYER WHITEBOARD COMPOSER (CHUẨN ĐEN TRẮNG 100%)
     ai_sketch = fetch_ai_sketch(scene, width=width, height=height)
     if ai_sketch:
         img.paste(ai_sketch, (x_offset, y_offset))
-        _draw_doodle_label(draw, x_offset, y_offset, width, label)
         return
 
     # 3. XỬ LÝ THEO VECTOR ICONS (DỰ PHÒNG KHI OFFLINE)
@@ -712,7 +657,8 @@ def render_doodle_video(
                     output_dir=work_dir / f"clips",
                     fps=fps,
                     show_hand=use_hand_draw,
-                    whiteboard_mode=whiteboard_mode
+                    whiteboard_mode=whiteboard_mode,
+                    scene=sc
                 )
                 composite_hand_drawn_scene_3band(
                     band_b_video=clip_mp4,
