@@ -102,27 +102,56 @@ def _load_tokens(tokens_path: Path) -> Dict[int, str]:
 
 
 def _load_audio_16k_mono(audio_path: str | Path) -> np.ndarray:
-    """Tải audio về mảng float32 16kHz mono trong biên độ [-32768, 32767] chuẩn Kaldi."""
-    import torch
-    import torchaudio
+    """Tải audio về mảng float32 16kHz mono trong biên độ [-32768, 32767] chuẩn Kaldi (không cần nạp PyTorch)."""
+    import math
+    import soundfile as sf
+    from scipy.signal import resample_poly
 
     path_str = str(audio_path)
     try:
-        waveform, sr = torchaudio.load(path_str)
+        data, sr = sf.read(path_str, dtype="float32", always_2d=True)
+        mono = data.mean(axis=1) if data.shape[1] > 1 else data[:, 0]
         if sr != 16000:
-            waveform = torchaudio.functional.resample(waveform, sr, 16000)
+            g = math.gcd(int(sr), 16000)
+            mono = resample_poly(mono, 16000 // g, int(sr) // g).astype(np.float32)
+        return (mono * 32768.0).astype(np.float32)
+    except Exception:
+        import torch
+        import torchaudio
+        waveform, sr = torchaudio.load(path_str)
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
-        samples = (waveform.squeeze(0).numpy() * 32768.0).astype(np.float32)
-        return samples
-    except Exception:
-        import soundfile as sf
-        data, sr = sf.read(path_str, dtype="float32", always_2d=True)
-        mono = data.mean(axis=1)
-        waveform = torch.from_numpy(mono).unsqueeze(0)
         if sr != 16000:
             waveform = torchaudio.functional.resample(waveform, sr, 16000)
         return (waveform.squeeze(0).numpy() * 32768.0).astype(np.float32)
+
+
+def _build_kaldi_mel_banks(
+    num_bins: int = 80,
+    window_padded: int = 512,
+    sample_freq: float = 16000.0,
+    low_freq: float = 20.0,
+    high_freq: float = 8000.0,
+) -> np.ndarray:
+    num_fft_bins = window_padded // 2
+    fft_bin_width = sample_freq / window_padded
+    mel_low = 1127.0 * np.log(1.0 + low_freq / 700.0)
+    mel_high = 1127.0 * np.log(1.0 + high_freq / 700.0)
+    mel_delta = (mel_high - mel_low) / (num_bins + 1)
+    bins = np.arange(num_bins, dtype=np.float32)[:, None]
+    left_mel = mel_low + bins * mel_delta
+    center_mel = mel_low + (bins + 1.0) * mel_delta
+    right_mel = mel_low + (bins + 2.0) * mel_delta
+    freqs = fft_bin_width * np.arange(num_fft_bins, dtype=np.float32)[None, :]
+    mel = 1127.0 * np.log(1.0 + freqs / 700.0)
+    up_slope = (mel - left_mel) / (center_mel - left_mel)
+    down_slope = (right_mel - mel) / (right_mel - center_mel)
+    return np.maximum(0.0, np.minimum(up_slope, down_slope)).astype(np.float32)
+
+
+_KALDI_MEL_BANKS_80 = _build_kaldi_mel_banks()
+_KALDI_HAMMING_400 = (0.54 - 0.46 * np.cos(2.0 * np.pi * np.arange(400, dtype=np.float32) / 399.0)).astype(np.float32)
+_SENSEVOICE_ENGINE_CACHE: Dict[str, "SenseVoiceEngine"] = {}
 
 
 def _extract_lfr_cmvn_features(
@@ -132,26 +161,27 @@ def _extract_lfr_cmvn_features(
     neg_mean: np.ndarray,
     inv_stddev: np.ndarray,
 ) -> np.ndarray:
-    """Trích xuất Kaldi 80-dim Mel-FBank + LFR stacking + CMVN normalization."""
-    import torch
-    import torchaudio
-
+    """Trích xuất Kaldi 80-dim Mel-FBank + LFR stacking + CMVN normalization bằng NumPy thuần."""
     if samples_16k.size < 400:
         return np.zeros((0, lfr_m * 80), dtype=np.float32)
 
-    waveform = torch.from_numpy(samples_16k).unsqueeze(0)
-    fbank = torchaudio.compliance.kaldi.fbank(
-        waveform,
-        num_mel_bins=80,
-        frame_length=25.0,
-        frame_shift=10.0,
-        dither=0.0,
-        window_type="hamming",
-        sample_frequency=16000.0,
-        snip_edges=True,
-    ).numpy()
+    num_frames = 1 + (samples_16k.size - 400) // 160
+    if num_frames <= 0:
+        return np.zeros((0, lfr_m * 80), dtype=np.float32)
 
-    num_frames = fbank.shape[0]
+    frame_idx = np.arange(400)[None, :] + (np.arange(num_frames) * 160)[:, None]
+    frames = samples_16k[frame_idx].astype(np.float32, copy=True)
+    # Remove DC offset
+    frames -= np.mean(frames, axis=1, keepdims=True)
+    # Pre-emphasis (0.97)
+    frames[:, 1:] -= 0.97 * frames[:, :-1]
+    frames[:, 0] *= (1.0 - 0.97)
+    # Hamming window
+    frames *= _KALDI_HAMMING_400[None, :]
+    # Power spectrum via 512-point RFFT (keep first 256 bins per Kaldi spec)
+    spec = np.abs(np.fft.rfft(frames, n=512, axis=1)[:, :256]) ** 2
+    fbank = np.log(np.maximum(spec @ _KALDI_MEL_BANKS_80.T, np.finfo(np.float32).eps)).astype(np.float32)
+
     if num_frames < lfr_m:
         pad = np.repeat(fbank[-1:, :], lfr_m - num_frames, axis=0)
         fbank = np.concatenate([fbank, pad], axis=0)
@@ -180,9 +210,14 @@ class SenseVoiceEngine:
         tokens_file = self.model_dir / "tokens.txt"
 
         sess_opts = ort.SessionOptions()
-        sess_opts.intra_op_num_threads = max(2, min(8, (os.cpu_count() or 4) // 2))
+        sess_opts.intra_op_num_threads = max(2, min(4, (os.cpu_count() or 4) // 2))
         sess_opts.inter_op_num_threads = 1
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        try:
+            sess_opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            sess_opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
+        except Exception:
+            pass
 
         # SenseVoice INT8 ONNX chạy cực nhanh trên CPUExecutionProvider (~0.1s/clip)
         # và hoàn toàn không chiếm VRAM của GPU RTX 4050!
@@ -200,6 +235,15 @@ class SenseVoiceEngine:
         self.lang_zh = int(meta.get("lang_zh", 3))
         self.with_itn = int(meta.get("with_itn", 14))
         self.tokens = _load_tokens(tokens_file)
+
+    @classmethod
+    def get_cached(cls, model_dir: Path = DEFAULT_SENSEVOICE_DIR) -> "SenseVoiceEngine":
+        key = str(Path(model_dir).resolve())
+        eng = _SENSEVOICE_ENGINE_CACHE.get(key)
+        if eng is None:
+            eng = cls(model_dir=model_dir)
+            _SENSEVOICE_ENGINE_CACHE[key] = eng
+        return eng
 
     def infer_window(
         self,
@@ -237,11 +281,6 @@ class SenseVoiceEngine:
         )[0][0]  # shape: [T + 4, vocab_size]
 
         token_ids = np.argmax(logits, axis=-1)
-        # Tính xác suất softmax của token chiến thắng tại mỗi frame
-        max_logits = np.max(logits, axis=-1, keepdims=True)
-        exp_logits = np.exp(logits - max_logits)
-        sum_exp = np.sum(exp_logits, axis=-1)
-        top_probs = 1.0 / np.maximum(sum_exp, 1e-9)
 
         lang_tag = self.tokens.get(int(token_ids[0]), "<|auto|>") if len(token_ids) > 0 else "<|auto|>"
         emotion_tag = self.tokens.get(int(token_ids[1]), "<|NEUTRAL|>") if len(token_ids) > 1 else "<|NEUTRAL|>"
@@ -249,6 +288,11 @@ class SenseVoiceEngine:
 
         decoded_tokens: List[Dict[str, Any]] = []
         inline_events: List[str] = []
+
+        def _frame_prob(f_idx: int, win_tid: int) -> float:
+            row = logits[f_idx]
+            max_val = float(row[win_tid])
+            return float(1.0 / max(float(np.sum(np.exp(row - max_val))), 1e-9))
 
         T_total = len(token_ids)
         idx = 4
@@ -258,11 +302,12 @@ class SenseVoiceEngine:
                 idx += 1
                 continue
             start_idx = idx
-            best_prob = float(top_probs[idx])
+            best_prob = _frame_prob(idx, tid)
             while idx + 1 < T_total and int(token_ids[idx + 1]) == tid:
                 idx += 1
-                if float(top_probs[idx]) > best_prob:
-                    best_prob = float(top_probs[idx])
+                p_cur = _frame_prob(idx, tid)
+                if p_cur > best_prob:
+                    best_prob = p_cur
             end_idx = idx
             piece = self.tokens.get(tid, "")
             if piece.startswith("<|") and piece.endswith("|>"):
@@ -308,7 +353,7 @@ def analyze_audio_sensevoice(
     t0 = time.monotonic()
     samples = _load_audio_16k_mono(audio_path)
     total_dur_s = len(samples) / 16000.0
-    engine = SenseVoiceEngine()
+    engine = SenseVoiceEngine.get_cached()
 
     windows_info: List[Dict[str, Any]] = []
     all_tokens: List[Dict[str, Any]] = []

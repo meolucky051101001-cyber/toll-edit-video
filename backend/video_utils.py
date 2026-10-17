@@ -652,6 +652,16 @@ def process_video(
                 f"[v2]{sub_filter},scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
                 "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p"
             )
+            # Tích hợp Watermark bản quyền nếu bật trong cài đặt Canvas
+            try:
+                import canvas_settings, workflow_api
+                c_set = canvas_settings.get_canvas_settings()
+                if c_set.get("watermark_enabled") and c_set.get("watermark_text"):
+                    wm_part = workflow_api.build_watermark_filter(c_set, 1080, 1920)
+                    if wm_part:
+                        blur_bg_filter += wm_part
+            except Exception as _wme:
+                logger.warning("Không thể lồng watermark vào video chuyển 9:16: %s", _wme)
             filter_complex = blur_bg_filter
             w, h = 1080, 1920
             logger.info("Chuyển đổi video không phải 9:16 sang khung dọc 9:16 với nền mờ: %dx%d -> 1080x1920", orig_w, orig_h)
@@ -674,6 +684,18 @@ def process_video(
 
             filter_parts.append(sub_filter)
             filter_parts.append("format=yuv420p")
+
+            # Tích hợp Watermark bản quyền nếu bật trong cài đặt Canvas
+            try:
+                import canvas_settings, workflow_api
+                c_set = canvas_settings.get_canvas_settings()
+                if c_set.get("watermark_enabled") and c_set.get("watermark_text"):
+                    wm_part = workflow_api.build_watermark_filter(c_set, w, h).lstrip(",")
+                    if wm_part:
+                        filter_parts.append(wm_part)
+            except Exception as _wme:
+                logger.warning("Không thể lồng watermark vào video dọc 9:16: %s", _wme)
+
             filter_complex = ",".join(filter_parts)
         
         video_bitrate_kbps = 8000

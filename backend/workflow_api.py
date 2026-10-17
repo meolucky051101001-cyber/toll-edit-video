@@ -956,15 +956,22 @@ async def api_scan_batch_folder(payload: Dict[str, Any] = Body(...)):
 
 
 def build_watermark_filter(cfg: Dict[str, Any], tw: int, th: int) -> str:
-    """Tạo bộ lọc FFmpeg drawtext cho Watermark bản quyền mờ mờ cố định ở góc bên phải video."""
+    """Tạo bộ lọc FFmpeg drawtext cho Watermark bản quyền mờ mờ cố định ở góc bên phải video hoặc vị trí tùy chỉnh."""
     if not cfg.get("watermark_enabled", False):
         return ""
     text = str(cfg.get("watermark_text", "")).strip()
     if not text:
         return ""
 
-    # Thoát ký tự đặc biệt cho ffmpeg drawtext
-    clean_text = text.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:").replace("%", "\\%")
+    # Thoát ký tự đặc biệt cho ffmpeg drawtext (bao gồm dấu xuống dòng)
+    clean_text = (
+        text.replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace(":", "\\:")
+        .replace("%", "\\%")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+    )
     try:
         opacity = float(cfg.get("watermark_opacity", 0.45))
     except (ValueError, TypeError):
@@ -978,6 +985,15 @@ def build_watermark_filter(cfg: Dict[str, Any], tw: int, th: int) -> str:
     scale_factor = max(0.6, min(2.5, th / 1920.0))
     font_size = max(12, int(base_font_size * scale_factor))
 
+    # Màu chữ watermark
+    raw_color = str(cfg.get("watermark_color", "#ffffff")).strip()
+    if raw_color.startswith("#"):
+        color_hex = "0x" + raw_color[1:]
+    elif raw_color.startswith("0x"):
+        color_hex = raw_color
+    else:
+        color_hex = "white"
+
     pos = str(cfg.get("watermark_position", "top-right")).lower()
     try:
         base_margin_x = int(cfg.get("watermark_margin_x", 25))
@@ -988,23 +1004,50 @@ def build_watermark_filter(cfg: Dict[str, Any], tw: int, th: int) -> str:
     margin_x = max(10, int(base_margin_x * (tw / 1080.0)))
     margin_y = max(10, int(base_margin_y * (th / 1920.0)))
 
-    if "bottom" in pos:
+    # Vị trí hiển thị (4 góc hoặc Tự do)
+    if pos == "custom":
+        try:
+            pos_x_pct = float(cfg.get("watermark_pos_x_pct", 0.85))
+            pos_y_pct = float(cfg.get("watermark_pos_y_pct", 0.05))
+        except (ValueError, TypeError):
+            pos_x_pct, pos_y_pct = 0.85, 0.05
+        pos_x_pct = max(0.02, min(0.98, pos_x_pct))
+        pos_y_pct = max(0.02, min(0.98, pos_y_pct))
+        x_expr = f"(w*{pos_x_pct:.4f})-(tw/2)"
+        y_expr = f"(h*{pos_y_pct:.4f})-(th/2)"
+    elif pos == "bottom-right":
+        x_expr = f"w-tw-{margin_x}"
         y_expr = f"h-th-{margin_y}"
-    else:
+    elif pos == "top-left":
+        x_expr = f"{margin_x}"
+        y_expr = f"{margin_y}"
+    elif pos == "bottom-left":
+        x_expr = f"{margin_x}"
+        y_expr = f"h-th-{margin_y}"
+    else:  # Mặc định góc trên phải
+        x_expr = f"w-tw-{margin_x}"
         y_expr = f"{margin_y}"
 
-    if "left" in pos:
-        x_expr = f"{margin_x}"
-    else: # Mặc định góc bên phải video theo yêu cầu
-        x_expr = f"w-tw-{margin_x}"
+    # Tùy chọn khung huy hiệu mờ bo quanh chữ
+    box_filter = ""
+    if cfg.get("watermark_bg_enabled", False):
+        raw_bg_color = str(cfg.get("watermark_bg_color", "#000000")).strip()
+        bg_hex = ("0x" + raw_bg_color[1:]) if raw_bg_color.startswith("#") else (raw_bg_color if raw_bg_color.startswith("0x") else "black")
+        try:
+            bg_op = float(cfg.get("watermark_bg_opacity", 0.40))
+        except (ValueError, TypeError):
+            bg_op = 0.40
+        bg_op = max(0.05, min(1.0, bg_op))
+        box_border_w = max(4, int(8 * scale_factor))
+        box_filter = f":box=1:boxcolor={bg_hex}@{bg_op:.2f}:boxborderw={box_border_w}"
 
     fontfile = r"C\:/Windows/Fonts/arial.ttf"
     shadow_opacity = round(opacity * 0.75, 2)
     filt = (
         f",drawtext=fontfile='{fontfile}':text='{clean_text}':"
-        f"fontsize={font_size}:fontcolor=white@{opacity:.2f}:"
-        f"shadowcolor=black@{shadow_opacity:.2f}:shadowx=2:shadowy=2:"
-        f"x={x_expr}:y={y_expr}"
+        f"fontsize={font_size}:fontcolor={color_hex}@{opacity:.2f}:"
+        f"shadowcolor=black@{shadow_opacity:.2f}:shadowx=2:shadowy=2"
+        f"{box_filter}:x={x_expr}:y={y_expr}"
     )
     return filt
 
@@ -1518,6 +1561,185 @@ async def api_download_thumbnail(stem: str):
         return FileResponse(thumb_file, filename=f"thumbnail_{clean_stem}.jpg", media_type="image/jpeg")
     raise HTTPException(status_code=404, detail="Chưa có thumbnail cho video này")
 
+
+def _prepend_thumbnail_file(video_path: Path, thumb_path: Path, duration_s: float = 0.8) -> bool:
+    """Ghép ảnh thumbnail vào đầu video_path bằng FFmpeg NVENC (fallback CPU)."""
+    if not video_path.is_file() or not thumb_path.is_file():
+        return False
+    duration_s = max(0.2, min(5.0, float(duration_s)))
+    cmd_probe = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "stream=codec_type,width,height,r_frame_rate,sample_rate,channel_layout,channels",
+        "-of", "json", str(video_path)
+    ]
+    p_res = subprocess.run(cmd_probe, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    streams = []
+    try:
+        streams = json.loads(p_res.stdout).get("streams", [])
+    except Exception:
+        pass
+
+    v_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
+    a_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    tw = v_stream.get("width") or 1080
+    th = v_stream.get("height") or 1920
+    fps = v_stream.get("r_frame_rate") or "30/1"
+    sr = (a_stream.get("sample_rate") if a_stream else None) or "44100"
+
+    temp_out = video_path.parent / f"_prep_{video_path.name}"
+
+    # Chỉ scale và crop ảnh thumbnail [0:v] về đúng kích thước tw x th và fps của video chính [1:v]
+    # Giữ nguyên video chính [1:v] với setsar=1,fps={fps} để tránh tốn tài nguyên scale/crop toàn bộ video
+    filter_complex = (
+        f"[0:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1,fps={fps}[thumb_v];"
+        f"[1:v]setsar=1,fps={fps}[main_v];"
+        f"[thumb_v][main_v]concat=n=2:v=1:a=0[outv]"
+    )
+
+    audio_maps = []
+    if a_stream:
+        ch_layout = a_stream.get("channel_layout") or ("stereo" if a_stream.get("channels") == 2 else "mono")
+        filter_complex += (
+            f";aevalsrc=0:d={duration_s}:s={sr}[silent_raw];"
+            f"[silent_raw]aformat=sample_rates={sr}:channel_layouts={ch_layout}[silent_a];"
+            f"[1:a]aformat=sample_rates={sr}:channel_layouts={ch_layout}[main_a];"
+            f"[silent_a][main_a]concat=n=2:v=0:a=1[outa]"
+        )
+        audio_maps = ["-map", "[outa]", "-c:a", "aac", "-b:a", "192k"]
+
+    cmd_nvenc = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-t", str(duration_s), "-i", str(thumb_path),
+        "-i", str(video_path),
+        "-filter_complex", filter_complex,
+        "-map", "[outv]",
+    ] + audio_maps + [
+        "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "4000k",
+        "-shortest", "-movflags", "+faststart",
+        str(temp_out)
+    ]
+
+    success = False
+    try:
+        res = subprocess.run(cmd_nvenc, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        if res.returncode == 0 and temp_out.is_file() and temp_out.stat().st_size > 1000:
+            success = True
+    except Exception as e:
+        logger.warning(f"Prepend NVENC failed: {e}")
+
+    if not success:
+        cmd_cpu = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-t", str(duration_s), "-i", str(thumb_path),
+            "-i", str(video_path),
+            "-filter_complex", filter_complex,
+            "-map", "[outv]",
+        ] + audio_maps + [
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+            "-shortest", "-movflags", "+faststart",
+            str(temp_out)
+        ]
+        res2 = subprocess.run(cmd_cpu, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        if res2.returncode == 0 and temp_out.is_file() and temp_out.stat().st_size > 1000:
+            success = True
+
+    if success:
+        try:
+            video_path.unlink(missing_ok=True)
+            temp_out.rename(video_path)
+            return True
+        except Exception:
+            import shutil
+            shutil.copy2(temp_out, video_path)
+            temp_out.unlink(missing_ok=True)
+            return True
+    else:
+        if temp_out.is_file():
+            temp_out.unlink(missing_ok=True)
+        return False
+
+
+@router.post("/api/workflow/thumbnail/prepend")
+async def api_prepend_thumbnail_to_video(payload: Dict[str, Any] = Body(...)):
+    """Ghép ảnh Thumbnail (đã chèn chữ) vào đầu video trong khoảng thời lượng duration_s (mặc định 0.8s)."""
+    stem = payload.get("stem", "").strip()
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    duration_s = float(payload.get("duration_s", 0.8))
+    duration_s = max(0.2, min(5.0, duration_s))
+
+    # 1. Tìm thumbnail
+    thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
+    job_dir = WORKSPACE / clean_stem
+    if not thumb_file.is_file() and job_dir.is_dir() and (job_dir / "thumbnail.jpg").is_file():
+        thumb_file = job_dir / "thumbnail.jpg"
+
+    # 2. Tìm video nguồn và video thành phẩm
+    source_video = None
+    if INPUT_DIR.exists():
+        cand = INPUT_DIR / f"{stem}.mp4"
+        if cand.is_file():
+            source_video = cand
+    if not source_video and DOWNLOADS_DIR.exists():
+        cand = DOWNLOADS_DIR / f"{stem}.mp4"
+        if cand.is_file():
+            source_video = cand
+
+    final_video = None
+    if job_dir.is_dir():
+        for item in job_dir.iterdir():
+            if item.name == f"final_{stem}.mp4" and _valid_final_video(item):
+                final_video = item
+                break
+    if not final_video and OUTPUT_DIR.exists():
+        cand_banve = OUTPUT_DIR / f"Dubbed_{stem}.mp4"
+        if cand_banve.is_file() and _valid_final_video(cand_banve):
+            final_video = cand_banve
+
+    target_video = final_video if final_video else source_video
+    if not target_video or not target_video.is_file():
+        raise HTTPException(status_code=404, detail="Không tìm thấy tệp video để ghép thumbnail")
+
+    # Nếu chưa có thumbnail, tự động trích xuất frame tại 1.0s
+    if not thumb_file.is_file():
+        cmd_extract = [
+            "ffmpeg", "-y",
+            "-ss", "1.0",
+            "-i", str(target_video),
+            "-vframes", "1",
+            "-q:v", "2",
+            str(thumb_file)
+        ]
+        subprocess.run(cmd_extract, capture_output=True, timeout=10)
+
+    if not thumb_file.is_file():
+        raise HTTPException(status_code=400, detail="Không thể tạo hoặc tìm thấy ảnh thumbnail")
+
+    job_dir.mkdir(parents=True, exist_ok=True)
+    dest_final = job_dir / f"final_{stem}.mp4"
+
+    # Nếu target_video khác dest_final (ví dụ đang dùng source_video hoặc cand_banve), tạo bản sao sang dest_final trước
+    if str(target_video.resolve()) != str(dest_final.resolve()):
+        import shutil
+        shutil.copy2(target_video, dest_final)
+        target_video = dest_final
+
+    ok = _prepend_thumbnail_file(dest_final, thumb_file, duration_s)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Không thể ghép thumbnail vào đầu video bằng FFmpeg")
+
+    stream_url = f"/api/workflow/stream-file?path={dest_final}&t={time.time()}"
+    return {
+        "status": "ok",
+        "success": True,
+        "message": f"Đã ghép Thumbnail ({duration_s:.1f}s) vào đầu video thành công!",
+        "video_url": stream_url,
+        "final_video_url": stream_url,
+        "has_final": True
+    }
+
+
 # =========================================================================
 # FEATURE: CAPCUT-STYLE CUSTOM EXPORT & SRT DOWNLOAD
 # =========================================================================
@@ -1941,6 +2163,19 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
 
     if not success:
         raise HTTPException(status_code=500, detail="Không thể xuất video bằng FFmpeg")
+
+    # Gắn Thumbnail vào đầu video nếu người dùng yêu cầu
+    prepend_thumb = bool(payload.get("prepend_thumbnail", False))
+    if prepend_thumb:
+        clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+        thumb_f = THUMBNAILS_DIR / f"{clean_stem}.jpg"
+        if not thumb_f.is_file() and job_dir.is_dir() and (job_dir / "thumbnail.jpg").is_file():
+            thumb_f = job_dir / "thumbnail.jpg"
+        if thumb_f.is_file():
+            try:
+                _prepend_thumbnail_file(out_path, thumb_f, float(payload.get("thumbnail_duration_s", 0.8)))
+            except Exception as e_prep:
+                logger.warning(f"Không thể ghép thumbnail vào video xuất {out_path}: {e_prep}")
 
     # Xuất kèm file SRT nếu người dùng yêu cầu
     exported_srt_path = ""
