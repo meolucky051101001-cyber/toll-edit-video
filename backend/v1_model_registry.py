@@ -87,6 +87,17 @@ class ModelSpec:
         elif self.model_id == "whisper_large_v3_turbo":
             return True, "Sẵn sàng (Faster-Whisper CUDA FP16, RTF ~0.22x)"
 
+        # 3b. Hybrid Whisper + SenseVoice-Small (CTC 60ms)
+        elif self.model_id in ("whisper_sensevoice_hybrid", "sensevoice_small"):
+            try:
+                try:
+                    from ai.v1_sensevoice_adapter import check_sensevoice_readiness
+                except ImportError:
+                    from backend.ai.v1_sensevoice_adapter import check_sensevoice_readiness
+                return check_sensevoice_readiness(ignore_flag=True)
+            except Exception as e:
+                return False, f"Lỗi kiểm tra SenseVoice: {e}"
+
         # 4. Qwen3-ASR (Sandbox & User selectable mode)
         elif self.model_id == "qwen3_asr_preview":
             try:
@@ -187,6 +198,32 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
         timeout_seconds=600,
         fallback_model_id=None,
         description="Nhận diện giọng nói siêu tốc và chính xác cao trên GPU CUDA.",
+    ),
+    "whisper_sensevoice_hybrid": ModelSpec(
+        model_id="whisper_sensevoice_hybrid",
+        stage=ModelStage.ASR,
+        display_name="Hybrid: Faster-Whisper Turbo + SenseVoice-Small (CTC 60ms)",
+        backend_runtime="whisper_cuda_sensevoice_onnx",
+        gpu_device="cuda:0",
+        vram_required_mb=1500.0,
+        measured_speed_rtf=0.24,
+        quality_sdr_or_score="WER < 3.2% + Khớp timestamp 60ms + Lọc nhạc nền",
+        timeout_seconds=600,
+        fallback_model_id="whisper_large_v3_turbo",
+        description="Kết hợp ngữ nghĩa Faster-Whisper với bộ căn chỉnh CTC 60ms và lọc tạp âm của SenseVoice-Small.",
+    ),
+    "sensevoice_small": ModelSpec(
+        model_id="sensevoice_small",
+        stage=ModelStage.ASR,
+        display_name="SenseVoice-Small (ONNX INT8 228MB Siêu Tốc)",
+        backend_runtime="sensevoice_onnx_int8",
+        gpu_device="cpu_onnx",
+        vram_required_mb=300.0,
+        measured_speed_rtf=0.02,
+        quality_sdr_or_score="Siêu tốc < 1s, chuyên biệt tiếng Trung ngắn",
+        timeout_seconds=300,
+        fallback_model_id="whisper_large_v3_turbo",
+        description="Mô hình CTC Non-Autoregressive 228MB của Alibaba FunASR, chạy trong < 1s.",
     ),
     "qwen3_asr_preview": ModelSpec(
         model_id="qwen3_asr_preview",
@@ -333,8 +370,18 @@ def resolve_effective_model(
     # never silently substitute another model behind a job's snapshot.
     aliases = {
         ModelStage.SEPARATION: {"roformer": "bs_roformer_sdr12", "demucs": "demucs_htdemucs"},
-        ModelStage.ASR: {"whisper": "whisper_large_v3_turbo", "whisper_turbo": "whisper_large_v3_turbo",
-                         "qwen3_asr": "qwen3_asr_preview", "qwen": "qwen3_asr_preview", "qwen3": "qwen3_asr_preview"},
+        ModelStage.ASR: {
+            "whisper": "whisper_large_v3_turbo",
+            "whisper_turbo": "whisper_large_v3_turbo",
+            "whisper_sensevoice": "whisper_sensevoice_hybrid",
+            "whisper_sensevoice_hybrid": "whisper_sensevoice_hybrid",
+            "hybrid": "whisper_sensevoice_hybrid",
+            "sensevoice": "sensevoice_small",
+            "sensevoice_small": "sensevoice_small",
+            "qwen3_asr": "qwen3_asr_preview",
+            "qwen": "qwen3_asr_preview",
+            "qwen3": "qwen3_asr_preview",
+        },
     }
     if user_override and stage in aliases:
         requested = str(user_override).strip().lower()
@@ -376,6 +423,10 @@ def resolve_effective_model(
             override_norm = str(user_override).strip().lower()
             if override_norm in ("whisper", "whisper_turbo", "whisper_large_v3_turbo"):
                 return get_model("whisper_large_v3_turbo")
+            if override_norm in ("whisper_sensevoice", "whisper_sensevoice_hybrid", "hybrid"):
+                return get_model("whisper_sensevoice_hybrid")
+            if override_norm in ("sensevoice", "sensevoice_small"):
+                return get_model("sensevoice_small")
             if "qwen" in override_norm:
                 qwen_spec = get_model("qwen3_asr_preview")
                 if qwen_spec:
@@ -393,6 +444,25 @@ def resolve_effective_model(
         # Without a job-scoped choice, respect the persistent feature flag.
         try:
             try:
+                from v1_feature_flags import get_feature_flags
+            except ImportError:
+                from backend.v1_feature_flags import get_feature_flags
+            flags = get_feature_flags()
+            cfg_asr = str(flags.get("V1_ASR_MODEL", "whisper_sensevoice")).strip().lower()
+            if cfg_asr in ("whisper_sensevoice", "whisper_sensevoice_hybrid", "hybrid", ""):
+                sv_spec = get_model("whisper_sensevoice_hybrid")
+                if sv_spec and sv_spec.check_readiness()[0]:
+                    return sv_spec
+            elif cfg_asr in ("sensevoice_small", "sensevoice"):
+                sv_spec = get_model("sensevoice_small")
+                if sv_spec and sv_spec.check_readiness()[0]:
+                    return sv_spec
+            elif cfg_asr in ("whisper_turbo", "whisper"):
+                return get_model("whisper_large_v3_turbo")
+        except Exception:
+            pass
+        try:
+            try:
                 from ai.v1_qwen_asr_adapter import is_qwen_asr_enabled
             except ImportError:
                 from backend.ai.v1_qwen_asr_adapter import is_qwen_asr_enabled
@@ -402,6 +472,9 @@ def resolve_effective_model(
                     return qwen_spec
         except Exception:
             pass
+        sv_default = get_model("whisper_sensevoice_hybrid")
+        if sv_default and sv_default.check_readiness()[0]:
+            return sv_default
         return get_model("whisper_large_v3_turbo")
 
     elif stage == ModelStage.OCR:

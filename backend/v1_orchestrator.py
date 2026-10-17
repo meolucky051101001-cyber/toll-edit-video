@@ -74,6 +74,8 @@ class V1Orchestrator:
                 asr_model = "qwen3_asr"
             elif model_id == "whisper_large_v3_turbo":
                 asr_model = "whisper_turbo"
+            elif model_id == "whisper_sensevoice_hybrid":
+                asr_model = "whisper_sensevoice"
             else:
                 asr_model = model_id
         asr_model = asr_model or config.get("asr_model") or "whisper_turbo"
@@ -226,8 +228,11 @@ class V1Orchestrator:
             return max(60, min(600, int(dur * 0.5) + 60))
         elif stage == "video_rendering":
             # NVENC render 4K/high FPS cần đủ thời gian an toàn không bị timeout sớm
-            mult = 15.0 if dur <= 420 else 8.0
-            return max(900, min(5400, int(dur * mult) + 600))
+            if dur <= 420:
+                return max(900, min(5400, int(dur * 15.0) + 600))
+            # Video dài (VD 52 phút) từng bị ngắt cứng ở 5400s dù FFmpeg vẫn đang chạy.
+            # Cho trần co giãn theo thời lượng (~3x realtime), tối đa 4 giờ.
+            return max(5400, min(14400, int(dur * 3.0) + 600))
         return 900
 
     async def execute_job(
@@ -512,8 +517,15 @@ class V1Orchestrator:
         should_run = not (can_resume and stage_id in verified_stages)
         srt_segments = []
         if should_run:
-            use_qwen = planned["asr_model"] == "qwen3_asr"
-            model_display = "Qwen3-ASR 0.6B (GPU CUDA)" if use_qwen else "Faster-Whisper Large-v3 Turbo"
+            asr_m = str(planned.get("asr_model", "whisper_turbo"))
+            if asr_m == "qwen3_asr":
+                model_display = "Qwen3-ASR 0.6B (GPU CUDA)"
+            elif asr_m == "whisper_sensevoice":
+                model_display = "Hybrid: Faster-Whisper Turbo + SenseVoice-Small (CTC 60ms)"
+            elif asr_m == "sensevoice_small":
+                model_display = "SenseVoice-Small (ONNX INT8 Siêu Tốc)"
+            else:
+                model_display = "Faster-Whisper Large-v3 Turbo"
             await notify(stage_id, 3, 40.0, f"🤖 Bước 3/8: {model_display} đang nhận dạng giọng nói...")
             self.manifest_manager.record_stage_start(job_id, stage_id)
             t_out = self._calculate_stage_timeout(stage_id, video_dur_s, resolved_mode)

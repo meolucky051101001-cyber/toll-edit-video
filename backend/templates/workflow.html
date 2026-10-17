@@ -317,6 +317,25 @@
       font-size: 18px;
       flex-shrink: 0;
       border: 1px solid var(--border);
+      overflow: hidden;
+      position: relative;
+    }
+    .media-thumb-img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .canvas-watermark-overlay {
+      position: absolute;
+      pointer-events: none;
+      z-index: 18;
+      user-select: none;
+      white-space: nowrap;
+      transition: all 0.15s ease;
+      font-family: Arial, sans-serif;
+      font-weight: 700;
+      text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.85);
     }
     .media-info { flex: 1; min-width: 0; }
     .media-name { font-size: 12px; font-weight: 600; color: #f1f5f9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 3px; }
@@ -1841,6 +1860,9 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             </div>
           </div>
 
+          <!-- REALTIME WATERMARK OVERLAY -->
+          <div id="canvasWatermarkOverlay" class="canvas-watermark-overlay" style="display: none; top: 20px; right: 20px;"></div>
+
           <!-- REALTIME SUBTITLE OVERLAY -->
           <div class="canvas-subtitle-overlay" id="subtitleOverlay">
             <div class="capcut-transform-box active" id="subtitleInteractiveBox" title="Bấm và kéo để di chuyển vị trí, kéo các nút góc để phóng to/thu nhỏ như trong CapCut">
@@ -1980,10 +2002,12 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       
       <!-- TABS -->
       <div class="panel-tabs">
-        <button class="panel-tab active" onclick="switchTab('subtitle-style', this)">✍️ Kiểu Chữ & Nền</button>
+        <button class="panel-tab active" onclick="switchTab('subtitle-style', this)">✍️ Kiểu Chữ</button>
         <button class="panel-tab" onclick="switchTab('framing', this)">📐 Khung hình</button>
+        <button class="panel-tab" onclick="switchTab('watermark', this)">💧 Watermark</button>
+        <button class="panel-tab" onclick="switchTab('thumbnail', this)">🖼️ Thumbnail</button>
         <button class="panel-tab" onclick="switchTab('anti-reup', this)">🛡️ Chống Re-up</button>
-        <button class="panel-tab" onclick="switchTab('batch-folder', this)">📁 Đóng Khung Thư Mục</button>
+        <button class="panel-tab" onclick="switchTab('batch-folder', this)">📁 Hàng Loạt</button>
       </div>
 
       <!-- TAB 1: 6 PIPELINE STEPS -->
@@ -2285,7 +2309,178 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
       </div>
 
-      <!-- TAB 3: ANTI RE-UP BACKGROUND (FEATURE 3) -->
+      <!-- TAB 3: WATERMARK BẢN QUYỀN HÀNG LOẠT -->
+      <div class="panel-content" id="tabWatermark" style="display: none; flex-direction: column; gap: 14px;">
+        <div style="background: rgba(14, 165, 233, 0.1); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px; padding: 10px 12px; display: flex; align-items: flex-start; gap: 10px;">
+          <span style="font-size: 20px;">💧</span>
+          <div style="font-size: 11.5px; color: #cbd5e1; line-height: 1.45;">
+            <strong style="color: #38bdf8;">Watermark Hàng Loạt Theo File:</strong> Chữ bản quyền mờ mờ cố định ở góc bên phải video, tự động gắn vào <strong style="color: #34d399;">tất cả các file</strong> khi xuất lẻ hoặc đóng khung hàng loạt!
+          </div>
+        </div>
+
+        <!-- Master Switch Watermark -->
+        <div class="form-section">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <label class="form-label" style="font-weight: 700; color: #f1f5f9; margin: 0; display: flex; align-items: center; gap: 6px;">
+              <span>💧 Bật Watermark Bản Quyền</span>
+            </label>
+            <input type="checkbox" id="chkWatermarkEnabled" style="width: 18px; height: 18px; accent-color: #38bdf8; cursor: pointer;" onchange="updateWatermarkEnable(this.checked)">
+          </div>
+          <div style="font-size: 11px; color: var(--text-dim); line-height: 1.4;">
+            Khi bật, tên hoặc thương hiệu của bạn sẽ hiển thị mờ mờ ở góc phải video để bảo vệ bản quyền chống re-up.
+          </div>
+        </div>
+
+        <!-- Watermark Text Input -->
+        <div class="form-section">
+          <div class="form-section-title">
+            <span>✏️ Nội Dung Tên Watermark</span>
+          </div>
+          <div style="margin-bottom: 8px;">
+            <input type="text" id="inputWatermarkText" class="form-control" style="width: 100%; background: #162032; border: 1px solid #28374d; color: #f1f5f9; padding: 8px 10px; border-radius: 6px; font-size: 13px; font-weight: 600;" placeholder="Nhập tên kênh, ví dụ: @ReviewPhim60s" oninput="updateWatermarkText(this.value)">
+          </div>
+          <!-- Quick Presets for Text -->
+          <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+            <button type="button" class="btn btn-outline" style="font-size: 10px; padding: 3px 8px;" onclick="setWatermarkQuickText('@ReviewPhim')">@ReviewPhim</button>
+            <button type="button" class="btn btn-outline" style="font-size: 10px; padding: 3px 8px;" onclick="setWatermarkQuickText('@PhimHayMoiNgay')">@PhimHayMoiNgay</button>
+            <button type="button" class="btn btn-outline" style="font-size: 10px; padding: 3px 8px;" onclick="setWatermarkQuickText('Bản Quyền Review')">Bản Quyền Review</button>
+          </div>
+        </div>
+
+        <!-- Watermark Position & Opacity -->
+        <div class="form-section">
+          <div class="form-section-title">
+            <span>📍 Vị Trí Cố Định Góc Phải & Độ Mờ</span>
+          </div>
+
+          <!-- Position Radio Options -->
+          <div style="margin-bottom: 12px;">
+            <label class="form-label" style="font-size: 11px; margin-bottom: 6px;">Vị trí cố định:</label>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+              <label style="display: flex; align-items: center; gap: 6px; background: #162032; border: 1px solid #28374d; padding: 8px 10px; border-radius: 6px; font-size: 11px; cursor: pointer;">
+                <input type="radio" name="watermarkPos" value="top-right" id="radioWmTopRight" checked onchange="updateWatermarkPosition('top-right')">
+                <span>↗️ Góc Trên Phải (Chuẩn)</span>
+              </label>
+              <label style="display: flex; align-items: center; gap: 6px; background: #162032; border: 1px solid #28374d; padding: 8px 10px; border-radius: 6px; font-size: 11px; cursor: pointer;">
+                <input type="radio" name="watermarkPos" value="bottom-right" id="radioWmBottomRight" onchange="updateWatermarkPosition('bottom-right')">
+                <span>↘️ Góc Dưới Phải</span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Opacity Slider -->
+          <div style="margin-bottom: 10px;">
+            <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px;">
+              <span class="form-label" style="margin: 0;">Độ mờ mờ (Translucent):</span>
+              <span id="valWatermarkOpacity" style="color: #38bdf8; font-weight: 700;">45%</span>
+            </div>
+            <input type="range" id="sliderWatermarkOpacity" min="5" max="100" step="5" value="45" style="width: 100%; accent-color: #38bdf8;" oninput="updateWatermarkOpacity(this.value)">
+            <div style="display: flex; justify-content: space-between; font-size: 10px; color: var(--text-dim); margin-top: 2px;">
+              <span>5% (Siêu mờ)</span>
+              <span>45% (Thẩm mỹ khuyên dùng)</span>
+              <span>100% (Rõ nét)</span>
+            </div>
+          </div>
+
+          <!-- Font Size Slider -->
+          <div style="margin-bottom: 10px;">
+            <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px;">
+              <span class="form-label" style="margin: 0;">Cỡ chữ watermark:</span>
+              <span id="valWatermarkFontSize" style="color: #38bdf8; font-weight: 700;">22px</span>
+            </div>
+            <input type="range" id="sliderWatermarkFontSize" min="14" max="42" step="2" value="22" style="width: 100%; accent-color: #38bdf8;" oninput="updateWatermarkFontSize(this.value)">
+          </div>
+
+          <!-- Margin Padding Sliders -->
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+            <div>
+              <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px;">
+                <span class="form-label" style="margin: 0;">Cách lề phải (X):</span>
+                <span id="valWatermarkMarginX" style="color: #38bdf8; font-weight: 700;">25px</span>
+              </div>
+              <input type="range" id="sliderWatermarkMarginX" min="10" max="80" step="5" value="25" style="width: 100%; accent-color: #38bdf8;" oninput="updateWatermarkMarginX(this.value)">
+            </div>
+            <div>
+              <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px;">
+                <span class="form-label" style="margin: 0;">Cách lề dọc (Y):</span>
+                <span id="valWatermarkMarginY" style="color: #38bdf8; font-weight: 700;">25px</span>
+              </div>
+              <input type="range" id="sliderWatermarkMarginY" min="10" max="80" step="5" value="25" style="width: 100%; accent-color: #38bdf8;" oninput="updateWatermarkMarginY(this.value)">
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Button Save for All Files -->
+        <button type="button" class="btn btn-success" style="width: 100%; justify-content: center; padding: 10px;" onclick="saveWatermarkSettings()">
+          💾 Lưu Cấu Hình Watermark Cho Toàn Bộ File
+        </button>
+      </div>
+
+      <!-- TAB 4: CHỈNH SỬA THUMBNAIL TỪNG VIDEO -->
+      <div class="panel-content" id="tabThumbnail" style="display: none; flex-direction: column; gap: 14px;">
+        <div style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 8px; padding: 10px 12px; display: flex; align-items: flex-start; gap: 10px;">
+          <span style="font-size: 20px;">🖼️</span>
+          <div style="font-size: 11.5px; color: #cbd5e1; line-height: 1.45;">
+            <strong style="color: #34d399;">Quản Lý & Chỉnh Sửa Thumbnail:</strong> Chọn từng video ở danh sách bên trái để trích xuất khung hình đẹp nhất hoặc tải ảnh bìa riêng từ máy tính lên!
+          </div>
+        </div>
+
+        <!-- Current Video Info Card -->
+        <div class="form-section" style="background: #141d28; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;">
+          <div style="font-size: 10px; color: var(--text-dim); text-transform: uppercase; font-weight: 700; margin-bottom: 4px;">Video Đang Chọn:</div>
+          <div id="thumbSelectedVideoName" style="font-size: 12px; font-weight: 700; color: #38bdf8; word-break: break-all; line-height: 1.4;">Chưa chọn video nào</div>
+        </div>
+
+        <!-- Big Thumbnail Preview -->
+        <div class="form-section" style="text-align: center;">
+          <div class="form-section-title" style="display: flex; justify-content: space-between; align-items: center;">
+            <span>📸 Ảnh Bìa Thumbnail Hiện Tại</span>
+            <span id="thumbTimeBadge" style="font-size: 10px; color: #34d399; font-weight: 700; background: rgba(16, 185, 129, 0.15); padding: 2px 6px; border-radius: 4px;">Tại: 00:01.00</span>
+          </div>
+
+          <div style="width: 100%; aspect-ratio: 9/16; max-height: 280px; margin: 0 auto 10px; background: #0c121b; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center; position: relative;">
+            <img id="thumbMainPreviewImg" src="" alt="Thumbnail" style="width: 100%; height: 100%; object-fit: contain; display: none;">
+            <div id="thumbPlaceholder" style="font-size: 12px; color: var(--text-dim); display: flex; flex-direction: column; align-items: center; gap: 6px;">
+              <span style="font-size: 32px;">🖼️</span>
+              <span>Chưa có ảnh bìa hoặc đang tải...</span>
+            </div>
+          </div>
+
+          <!-- Quick Seek Buttons to pick best frame -->
+          <div style="margin-bottom: 10px;">
+            <div style="font-size: 10.5px; color: var(--text-dim); margin-bottom: 6px; font-weight: 600;">Tua nhanh player đến giây để chọn cảnh đẹp:</div>
+            <div style="display: flex; gap: 5px; justify-content: center; flex-wrap: wrap;">
+              <button type="button" class="btn btn-outline" style="font-size: 10px; padding: 4px 8px;" onclick="seekPlayerToSeconds(1)">01s</button>
+              <button type="button" class="btn btn-outline" style="font-size: 10px; padding: 4px 8px;" onclick="seekPlayerToSeconds(2)">02s</button>
+              <button type="button" class="btn btn-outline" style="font-size: 10px; padding: 4px 8px;" onclick="seekPlayerToSeconds(3)">03s</button>
+              <button type="button" class="btn btn-outline" style="font-size: 10px; padding: 4px 8px;" onclick="seekPlayerToSeconds(5)">05s</button>
+              <button type="button" class="btn btn-outline" style="font-size: 10px; padding: 4px 8px;" onclick="seekPlayerToSeconds(10)">10s</button>
+              <button type="button" class="btn btn-outline" style="font-size: 10px; padding: 4px 8px;" onclick="seekPlayerToSeconds(15)">15s</button>
+            </div>
+          </div>
+
+          <!-- Action Buttons -->
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            <button type="button" class="btn btn-primary" style="justify-content: center; padding: 9px; font-size: 12px; font-weight: 700;" onclick="captureThumbnailFromVideo()" title="Lấy khung hình tại giây video đang phát trên màn hình làm ảnh bìa">
+              📸 Bắt Khung Hình Này Làm Thumbnail
+            </button>
+
+            <div style="display: flex; gap: 8px;">
+              <button type="button" class="btn btn-outline" style="flex: 1; justify-content: center; font-size: 11px; padding: 8px;" onclick="document.getElementById('inputThumbUploadFile').click()" title="Tải ảnh từ máy tính của bạn làm thumbnail">
+                📁 Tải Ảnh Từ Máy
+              </button>
+              <button type="button" class="btn btn-outline" style="flex: 1; justify-content: center; font-size: 11px; padding: 8px;" onclick="downloadCurrentThumbnail()" title="Tải ảnh thumbnail này về máy">
+                ⬇️ Tải Về Máy
+              </button>
+            </div>
+            <input type="file" id="inputThumbUploadFile" accept="image/*" style="display: none;" onchange="handleThumbnailFileUpload(this)">
+          </div>
+
+        </div>
+      </div>
+
+      <!-- TAB 5: ANTI RE-UP BACKGROUND (FEATURE 3) -->
       <div class="panel-content" id="tabAntiReup" style="display: none;">
         
         <!-- MASTER ON/OFF BANNER -->
@@ -2714,7 +2909,15 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       drop_shadow: false,
       mirror: false,
       blur_sigma: 25,
-      darken_bg: 0.35
+      darken_bg: 0.35,
+      watermark_enabled: false,
+      watermark_text: '',
+      watermark_position: 'top-right',
+      watermark_opacity: 0.45,
+      watermark_font_size: 22,
+      watermark_margin_x: 25,
+      watermark_margin_y: 25,
+      watermark_color: '#ffffff'
     };
     let currentFilter = 'all';
 
@@ -4020,6 +4223,8 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       el.classList.add('active');
       const tabSub = document.getElementById('tabSubtitleStyle');
       const tabFr = document.getElementById('tabFraming');
+      const tabWm = document.getElementById('tabWatermark');
+      const tabTn = document.getElementById('tabThumbnail');
       const tabAr = document.getElementById('tabAntiReup');
       const tabBf = document.getElementById('tabBatchFolder');
 
@@ -4031,6 +4236,11 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         }
       }
       if (tabFr) tabFr.style.display = (tabId === 'framing') ? 'flex' : 'none';
+      if (tabWm) tabWm.style.display = (tabId === 'watermark') ? 'flex' : 'none';
+      if (tabTn) {
+        tabTn.style.display = (tabId === 'thumbnail') ? 'flex' : 'none';
+        if (tabId === 'thumbnail') updateThumbnailTabUI();
+      }
       if (tabAr) tabAr.style.display = (tabId === 'anti-reup') ? 'flex' : 'none';
       if (tabBf) tabBf.style.display = (tabId === 'batch-folder') ? 'flex' : 'none';
     }
@@ -4105,6 +4315,39 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           }
 
           syncAntiReupUI();
+
+          // Sync Watermark controls from canvasSettings
+          const chkWm = document.getElementById('chkWatermarkEnabled');
+          if (chkWm) chkWm.checked = Boolean(canvasSettings.watermark_enabled);
+          const inpWm = document.getElementById('inputWatermarkText');
+          if (inpWm) inpWm.value = canvasSettings.watermark_text || '';
+          if (canvasSettings.watermark_position === 'bottom-right') {
+            const rBot = document.getElementById('radioWmBottomRight');
+            if (rBot) rBot.checked = true;
+          } else {
+            const rTop = document.getElementById('radioWmTopRight');
+            if (rTop) rTop.checked = true;
+          }
+          const sWmOp = document.getElementById('sliderWatermarkOpacity');
+          const vWmOp = document.getElementById('valWatermarkOpacity');
+          const wmOpVal = Math.round((canvasSettings.watermark_opacity !== undefined ? canvasSettings.watermark_opacity : 0.45) * 100);
+          if (sWmOp) sWmOp.value = wmOpVal;
+          if (vWmOp) vWmOp.innerText = `${wmOpVal}%`;
+          const sWmFs = document.getElementById('sliderWatermarkFontSize');
+          const vWmFs = document.getElementById('valWatermarkFontSize');
+          if (sWmFs) sWmFs.value = canvasSettings.watermark_font_size || 22;
+          if (vWmFs) vWmFs.innerText = `${canvasSettings.watermark_font_size || 22}px`;
+          const sWmX = document.getElementById('sliderWatermarkMarginX');
+          const vWmX = document.getElementById('valWatermarkMarginX');
+          if (sWmX) sWmX.value = canvasSettings.watermark_margin_x || 25;
+          if (vWmX) vWmX.innerText = `${canvasSettings.watermark_margin_x || 25}px`;
+          const sWmY = document.getElementById('sliderWatermarkMarginY');
+          const vWmY = document.getElementById('valWatermarkMarginY');
+          if (sWmY) sWmY.value = canvasSettings.watermark_margin_y || 25;
+          if (vWmY) vWmY.innerText = `${canvasSettings.watermark_margin_y || 25}px`;
+
+          updateWatermarkVisual();
+
           updateBgType(canvasSettings.bg_type || 'video_motion');
           setRatio(canvasSettings.aspect_ratio || 'original');
         }
@@ -4200,8 +4443,14 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           pillHtml = `<span class="badge-pill badge-local">Tệp từ máy</span>`;
         }
 
+        const thumbUrl = v.thumbnail_url || (v.stem ? `/api/workflow/thumbnail/${encodeURIComponent(v.stem)}` : '');
+        const thumbFallback = v.is_local ? '📂' : '🎬';
+        const thumbHtml = thumbUrl
+          ? `<img src="${thumbUrl}" class="media-thumb-img" alt="thumb" loading="lazy" onerror="this.onerror=null;this.parentElement.innerHTML='${thumbFallback}';">`
+          : thumbFallback;
+
         card.innerHTML = `
-          <div class="media-thumb">${v.is_local ? '📂' : '🎬'}</div>
+          <div class="media-thumb">${thumbHtml}</div>
           <div class="media-info">
             <div class="media-name" title="${v.filename}">${v.filename}</div>
             <div class="media-meta">
@@ -4240,6 +4489,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         currentSubtitles = [];
         renderSubtitlesTimeline();
         renderStepsStatus(v.steps);
+        updateThumbnailTabUI();
         return;
       }
 
@@ -4275,6 +4525,8 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
       } catch (e) {
         console.error('Lỗi khi nạp dữ liệu video:', e);
+      } finally {
+        updateThumbnailTabUI();
       }
     }
 
@@ -5513,9 +5765,245 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       updateBgType(canvasSettings.bg_type);
       setRatio(canvasSettings.aspect_ratio);
 
-      // 4. Save to server and notify
+      // 4. Reset Watermark
+      canvasSettings.watermark_enabled = false;
+      canvasSettings.watermark_text = '';
+      canvasSettings.watermark_position = 'top-right';
+      canvasSettings.watermark_opacity = 0.45;
+      canvasSettings.watermark_font_size = 22;
+      canvasSettings.watermark_margin_x = 25;
+      canvasSettings.watermark_margin_y = 25;
+      updateWatermarkVisual();
+
+      // 5. Save to server and notify
       saveSettingsForBatch(false);
       showToast('↺ Đã reset toàn bộ cài đặt (chữ đen, nền trắng, vị trí chuẩn) về mặc định!');
+    }
+
+    // ==========================================
+    // WATERMARK FUNCTIONS (BATCH & REALTIME)
+    // ==========================================
+    function updateWatermarkVisual() {
+      const wmOverlay = document.getElementById('canvasWatermarkOverlay');
+      if (!wmOverlay) return;
+      const text = (canvasSettings.watermark_text || '').trim();
+      if (!canvasSettings.watermark_enabled || !text) {
+        wmOverlay.style.display = 'none';
+        return;
+      }
+      wmOverlay.style.display = 'block';
+      wmOverlay.innerText = text;
+
+      const isTop = (canvasSettings.watermark_position !== 'bottom-right');
+      const mx = (canvasSettings.watermark_margin_x !== undefined ? canvasSettings.watermark_margin_x : 25) + 'px';
+      const my = (canvasSettings.watermark_margin_y !== undefined ? canvasSettings.watermark_margin_y : 25) + 'px';
+
+      wmOverlay.style.right = mx;
+      if (isTop) {
+        wmOverlay.style.top = my;
+        wmOverlay.style.bottom = 'auto';
+      } else {
+        wmOverlay.style.bottom = my;
+        wmOverlay.style.top = 'auto';
+      }
+
+      const op = (canvasSettings.watermark_opacity !== undefined) ? canvasSettings.watermark_opacity : 0.45;
+      wmOverlay.style.opacity = op;
+      wmOverlay.style.fontSize = Math.round((canvasSettings.watermark_font_size || 22) * 0.75) + 'px';
+      wmOverlay.style.color = canvasSettings.watermark_color || '#ffffff';
+    }
+
+    function updateWatermarkEnable(enabled) {
+      canvasSettings.watermark_enabled = Boolean(enabled);
+      updateWatermarkVisual();
+    }
+
+    function updateWatermarkText(txt) {
+      canvasSettings.watermark_text = txt;
+      updateWatermarkVisual();
+    }
+
+    function setWatermarkQuickText(txt) {
+      const inp = document.getElementById('inputWatermarkText');
+      if (inp) inp.value = txt;
+      canvasSettings.watermark_text = txt;
+      if (!canvasSettings.watermark_enabled) {
+        canvasSettings.watermark_enabled = true;
+        const chk = document.getElementById('chkWatermarkEnabled');
+        if (chk) chk.checked = true;
+      }
+      updateWatermarkVisual();
+      showToast(`💧 Đã chọn mẫu watermark: "${txt}"`);
+    }
+
+    function updateWatermarkPosition(pos) {
+      canvasSettings.watermark_position = pos;
+      updateWatermarkVisual();
+    }
+
+    function updateWatermarkOpacity(val) {
+      const pct = parseInt(val, 10);
+      canvasSettings.watermark_opacity = pct / 100.0;
+      const lbl = document.getElementById('valWatermarkOpacity');
+      if (lbl) lbl.innerText = `${pct}%`;
+      updateWatermarkVisual();
+    }
+
+    function updateWatermarkFontSize(val) {
+      const fs = parseInt(val, 10);
+      canvasSettings.watermark_font_size = fs;
+      const lbl = document.getElementById('valWatermarkFontSize');
+      if (lbl) lbl.innerText = `${fs}px`;
+      updateWatermarkVisual();
+    }
+
+    function updateWatermarkMarginX(val) {
+      const mx = parseInt(val, 10);
+      canvasSettings.watermark_margin_x = mx;
+      const lbl = document.getElementById('valWatermarkMarginX');
+      if (lbl) lbl.innerText = `${mx}px`;
+      updateWatermarkVisual();
+    }
+
+    function updateWatermarkMarginY(val) {
+      const my = parseInt(val, 10);
+      canvasSettings.watermark_margin_y = my;
+      const lbl = document.getElementById('valWatermarkMarginY');
+      if (lbl) lbl.innerText = `${my}px`;
+      updateWatermarkVisual();
+    }
+
+    async function saveWatermarkSettings() {
+      await saveSettingsForBatch(false);
+      showToast('💧 Đã lưu cài đặt Watermark thành công! Sẽ tự động gắn vào toàn bộ video hàng loạt.');
+    }
+
+    // ==========================================
+    // THUMBNAIL MANAGEMENT FUNCTIONS (PER VIDEO)
+    // ==========================================
+    function updateThumbnailTabUI() {
+      const nameEl = document.getElementById('thumbSelectedVideoName');
+      const imgEl = document.getElementById('thumbMainPreviewImg');
+      const placeholder = document.getElementById('thumbPlaceholder');
+      const timeBadge = document.getElementById('thumbTimeBadge');
+
+      if (!currentVideo) {
+        if (nameEl) nameEl.innerText = 'Chưa chọn video nào. Vui lòng bấm chọn 1 video ở danh sách bên trái.';
+        if (imgEl) imgEl.style.display = 'none';
+        if (placeholder) placeholder.style.display = 'flex';
+        return;
+      }
+
+      if (nameEl) nameEl.innerText = currentVideo.filename;
+      const curTime = (mainPlayer && !isNaN(mainPlayer.currentTime) && mainPlayer.currentTime > 0) ? mainPlayer.currentTime : 1.0;
+      if (timeBadge) timeBadge.innerText = `Tại: ${formatTime(curTime)}`;
+
+      const thumbUrl = currentVideo.thumbnail_url || (currentVideo.stem ? `/api/workflow/thumbnail/${encodeURIComponent(currentVideo.stem)}` : '');
+      if (thumbUrl && imgEl) {
+        const cacheBuster = thumbUrl.includes('?') ? `&t=${Date.now()}` : `?t=${Date.now()}`;
+        imgEl.src = `${thumbUrl}${cacheBuster}`;
+        imgEl.style.display = 'block';
+        if (placeholder) placeholder.style.display = 'none';
+        imgEl.onerror = () => {
+          imgEl.style.display = 'none';
+          if (placeholder) placeholder.style.display = 'flex';
+        };
+      } else {
+        if (imgEl) imgEl.style.display = 'none';
+        if (placeholder) placeholder.style.display = 'flex';
+      }
+    }
+
+    function seekPlayerToSeconds(sec) {
+      if (!mainPlayer) return;
+      mainPlayer.currentTime = sec;
+      const timeBadge = document.getElementById('thumbTimeBadge');
+      if (timeBadge) timeBadge.innerText = `Tại: ${formatTime(sec)}`;
+      showToast(`⏩ Đã tua đến giây ${sec}s để bạn xem và bắt khung hình!`);
+    }
+
+    async function captureThumbnailFromVideo() {
+      if (!currentVideo || !currentVideo.stem) {
+        showToast('⚠️ Vui lòng chọn một video trong danh sách trước!');
+        return;
+      }
+      const curTime = (mainPlayer && !isNaN(mainPlayer.currentTime) && mainPlayer.currentTime > 0) ? mainPlayer.currentTime : 1.0;
+      showToast(`📸 Đang trích xuất khung hình tại ${formatTime(curTime)}...`);
+
+      try {
+        const res = await fetch('/api/workflow/thumbnail/capture', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'X-Local-Control-Token': '__REPLACE_TOKEN__'
+          },
+          body: JSON.stringify({ stem: currentVideo.stem, timestamp_s: curTime })
+        });
+        const data = await res.json();
+        if (res.ok && (data.status === 'ok' || data.success)) {
+          currentVideo.thumbnail_url = data.thumbnail_url;
+          updateThumbnailTabUI();
+          renderMediaList();
+          showToast(`✅ Đã chụp khung hình tại ${formatTime(curTime)} làm thumbnail thành công!`);
+        } else {
+          showToast(`❌ Lỗi chụp thumbnail: ${data.detail || 'Thất bại'}`);
+        }
+      } catch (err) {
+        console.error('Lỗi chụp thumbnail:', err);
+        showToast('❌ Lỗi kết nối khi chụp thumbnail.');
+      }
+    }
+
+    async function handleThumbnailFileUpload(input) {
+      if (!input.files || !input.files[0]) return;
+      if (!currentVideo || !currentVideo.stem) {
+        showToast('⚠️ Vui lòng chọn một video trước khi tải ảnh thumbnail!');
+        input.value = '';
+        return;
+      }
+      const file = input.files[0];
+      const formData = new FormData();
+      formData.append('stem', currentVideo.stem);
+      formData.append('file', file);
+
+      showToast(`⏳ Đang tải ảnh ${file.name} lên...`);
+      try {
+        const res = await fetch('/api/workflow/thumbnail/upload', {
+          method: 'POST',
+          headers: {
+            'X-Local-Control-Token': '__REPLACE_TOKEN__'
+          },
+          body: formData
+        });
+        const data = await res.json();
+        if (res.ok && (data.status === 'ok' || data.success)) {
+          currentVideo.thumbnail_url = data.thumbnail_url;
+          updateThumbnailTabUI();
+          renderMediaList();
+          showToast(`✅ Đã cập nhật ảnh thumbnail riêng từ máy thành công!`);
+        } else {
+          showToast(`❌ Lỗi tải ảnh: ${data.detail || 'Thất bại'}`);
+        }
+      } catch (err) {
+        console.error('Lỗi upload thumbnail:', err);
+        showToast('❌ Lỗi kết nối khi tải ảnh thumbnail.');
+      } finally {
+        input.value = '';
+      }
+    }
+
+    function downloadCurrentThumbnail() {
+      if (!currentVideo || !currentVideo.stem) {
+        showToast('⚠️ Vui lòng chọn một video trước!');
+        return;
+      }
+      const a = document.createElement('a');
+      a.href = `/api/workflow/thumbnail/download/${encodeURIComponent(currentVideo.stem)}`;
+      a.download = `${currentVideo.stem}_thumb.jpg`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      showToast('⬇️ Đang tải thumbnail về máy...');
     }
 
   </script>

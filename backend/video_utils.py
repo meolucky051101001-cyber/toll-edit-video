@@ -644,7 +644,11 @@ def process_video(
             pre_split = (",".join(delogo_filters) + ",") if delogo_filters else ""
             blur_bg_filter = (
                 f"{pre_split}split[v1][v2];"
-                "[v1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5[bg];"
+                # Làm mờ nền ở 1/4 độ phân giải rồi phóng lên 1080x1920: hình nền mờ
+                # tương đương boxblur=25:5 ở full-res nhưng nhanh hơn ~6-7 lần (đo thực tế
+                # 25 fps -> 169 fps với nguồn 2480x1080), tránh video dài bị timeout render.
+                "[v1]scale=270:480:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=270:480,"
+                "boxblur=6:3,scale=1080:1920:flags=bilinear[bg];"
                 f"[v2]{sub_filter},scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
                 "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p"
             )

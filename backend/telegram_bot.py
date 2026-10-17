@@ -74,24 +74,28 @@ os.makedirs(WORKSPACE, exist_ok=True)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 root_app_log = os.path.abspath(os.path.join(BASE_DIR, "..", "app.log"))
 backend_app_log = os.path.abspath(os.path.join(BASE_DIR, "app.log"))
-log_handlers = [
-    logging.FileHandler(backend_app_log, encoding='utf-8'),
-    logging.StreamHandler()
-]
-try:
-    log_handlers.append(logging.FileHandler(root_app_log, encoding='utf-8'))
-except Exception:
-    pass
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=log_handlers,
-    force=True
-)
 logger = logging.getLogger(__name__)
-logger.info("=== AUTO VIDEO DUBBING TOOL V1 STARTED === [PID: %d] [CODEX SINGLE VOICE LOCK ACTIVE]", os.getpid())
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+def _configure_bot_logging() -> None:
+    log_handlers = [
+        logging.FileHandler(backend_app_log, encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+    try:
+        log_handlers.append(logging.FileHandler(root_app_log, encoding='utf-8'))
+    except Exception:
+        pass
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=log_handlers,
+        force=True
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logger.info("=== AUTO VIDEO DUBBING TOOL V1 STARTED === [PID: %d] [CODEX SINGLE VOICE LOCK ACTIVE]", os.getpid())
 
 async def safe_edit_status(status_msg, text, parse_mode=None, retries=3):
     """
@@ -1348,6 +1352,8 @@ def main():
         print("⚠️ Một tiến trình Telegram Bot khác đang chạy! Đang tự động thoát tiến trình này để tránh render 2 lần...")
         logger.warning("Bot instance already running. Exiting duplicate process.")
         sys.exit(0)
+
+    _configure_bot_logging()
 
     if not BOT_TOKEN:
         print("=" * 60)
