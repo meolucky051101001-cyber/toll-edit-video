@@ -1741,6 +1741,197 @@ async def api_prepend_thumbnail_to_video(payload: Dict[str, Any] = Body(...)):
 
 
 # =========================================================================
+# FEATURE: CAPCUT-STYLE TIMELINE CUT, CLONE & CONCATENATION
+# =========================================================================
+
+def _apply_timeline_edits_file(video_path: Path, clips: List[Dict[str, Any]], out_path: Path) -> bool:
+    """
+    Cắt, ghép nối và nhân bản các đoạn video theo danh sách clips:
+    [{'start': 0.0, 'end': 5.2}, {'start': 10.0, 'end': 15.0}, ...]
+    Hỗ trợ kéo thả đổi thứ tự, nhân bản từng đoạn hoặc nhân bản toàn bộ video.
+    Sử dụng GPU NVENC (fallback CPU libx264) đảm bảo âm thanh và hình ảnh đồng bộ 100%.
+    """
+    if not video_path.is_file() or not clips:
+        return False
+
+    cmd_probe = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "stream=codec_type,width,height,r_frame_rate,sample_rate,channel_layout,channels",
+        "-of", "json", str(video_path)
+    ]
+    p_res = subprocess.run(cmd_probe, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    streams = []
+    try:
+        streams = json.loads(p_res.stdout).get("streams", [])
+    except Exception:
+        pass
+
+    v_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
+    a_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+
+    # Lọc danh sách clips hợp lệ
+    valid_clips = []
+    for c in clips:
+        try:
+            st = max(0.0, float(c.get("start", 0.0)))
+            en = max(st + 0.05, float(c.get("end", st + 1.0)))
+            valid_clips.append({"start": st, "end": en})
+        except Exception:
+            pass
+
+    if not valid_clips:
+        return False
+
+    n = len(valid_clips)
+    filter_lines = []
+    v_parts = []
+    a_parts = []
+
+    for idx, c in enumerate(valid_clips):
+        st = c["start"]
+        en = c["end"]
+        v_tag = f"v{idx}"
+        filter_lines.append(f"[0:v]trim=start={st:.3f}:end={en:.3f},setpts=PTS-STARTPTS[{v_tag}]")
+        v_parts.append(f"[{v_tag}]")
+
+        if a_stream:
+            a_tag = f"a{idx}"
+            filter_lines.append(f"[0:a]atrim=start={st:.3f}:end={en:.3f},asetpts=PTS-STARTPTS[{a_tag}]")
+            a_parts.append(f"[{a_tag}]")
+
+    if a_stream:
+        concat_inputs = "".join(v + a for v, a in zip(v_parts, a_parts))
+        filter_lines.append(f"{concat_inputs}concat=n={n}:v=1:a=1[outv][outa]")
+        audio_maps = ["-map", "[outa]", "-c:a", "aac", "-b:a", "192k"]
+    else:
+        concat_inputs = "".join(v_parts)
+        filter_lines.append(f"{concat_inputs}concat=n={n}:v=1:a=0[outv]")
+        audio_maps = []
+
+    filter_complex = ";".join(filter_lines)
+    temp_out = out_path.parent / f"_temp_edit_{out_path.name}"
+    temp_out.unlink(missing_ok=True)
+
+    cmd_nvenc = [
+        "ffmpeg", "-y",
+        "-i", str(video_path),
+        "-filter_complex", filter_complex,
+        "-map", "[outv]"
+    ] + audio_maps + [
+        "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "4500k",
+        "-movflags", "+faststart",
+        str(temp_out)
+    ]
+
+    success = False
+    try:
+        res = subprocess.run(cmd_nvenc, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+        if res.returncode == 0 and temp_out.is_file() and temp_out.stat().st_size > 1000:
+            success = True
+    except Exception as e:
+        logger.warning(f"Timeline edit NVENC failed: {e}")
+
+    if not success:
+        cmd_cpu = [
+            "ffmpeg", "-y",
+            "-i", str(video_path),
+            "-filter_complex", filter_complex,
+            "-map", "[outv]"
+        ] + audio_maps + [
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-movflags", "+faststart",
+            str(temp_out)
+        ]
+        res2 = subprocess.run(cmd_cpu, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+        if res2.returncode == 0 and temp_out.is_file() and temp_out.stat().st_size > 1000:
+            success = True
+
+    if success:
+        try:
+            out_path.unlink(missing_ok=True)
+            temp_out.rename(out_path)
+            return True
+        except Exception as e:
+            logger.error(f"Error renaming edited video file: {e}")
+            return False
+    return False
+
+
+@router.post("/api/workflow/timeline/apply-edits")
+async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
+    """
+    Áp dụng cắt, ghép nối, nhân bản các đoạn video theo timeline giống CapCut.
+    Payload:
+      - stem: str
+      - clips: List[Dict[str, float]] (ví dụ: [{'start': 0, 'end': 5.2}, {'start': 10, 'end': 15}])
+      - target_version: Optional[str] ('final' hoặc 'raw')
+    """
+    stem = payload.get("stem", "").strip()
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+
+    clips = payload.get("clips", [])
+    if not clips or not isinstance(clips, list):
+        raise HTTPException(status_code=400, detail="Danh sách phân đoạn clip không hợp lệ")
+
+    job_dir = WORKSPACE / clean_stem
+    cand_phoi = INPUT_DIR / f"{stem}.mp4"
+    cand_dl = DOWNLOADS_DIR / f"{stem}.mp4"
+
+    source_video = None
+    if cand_phoi.is_file():
+        source_video = cand_phoi
+    elif cand_dl.is_file():
+        source_video = cand_dl
+
+    final_video = None
+    if job_dir.is_dir():
+        for item in job_dir.iterdir():
+            if item.name == f"final_{stem}.mp4" and _valid_final_video(item):
+                final_video = item
+                break
+
+    target_version = payload.get("target_version", "final")
+    input_video = (final_video if (target_version == "final" and final_video) else (source_video or final_video))
+    if not input_video or not input_video.is_file():
+        raise HTTPException(status_code=404, detail="Không tìm thấy tệp video để chỉnh sửa")
+
+    job_dir.mkdir(parents=True, exist_ok=True)
+    dest_final = job_dir / f"final_{stem}.mp4"
+
+    ok = _apply_timeline_edits_file(input_video, clips, dest_final)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Lỗi khi cắt ghép video bằng FFmpeg")
+
+    # Tự động cập nhật thumbnail
+    thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
+    try:
+        cmd_th = [
+            "ffmpeg", "-y", "-ss", "0.8",
+            "-i", str(dest_final),
+            "-frames:v", "1", "-q:v", "2",
+            str(thumb_file)
+        ]
+        subprocess.run(cmd_th, capture_output=True, timeout=15)
+        if job_dir.is_dir() and thumb_file.is_file():
+            shutil.copy2(thumb_file, job_dir / "thumbnail.jpg")
+    except Exception:
+        pass
+
+    stream_url = f"/api/workflow/stream-file?path={dest_final}&t={time.time()}"
+    return {
+        "status": "ok",
+        "success": True,
+        "message": f"Đã cắt và ghép {len(clips)} phân đoạn video chuẩn CapCut thành công!",
+        "video_url": stream_url,
+        "final_video_url": stream_url,
+        "has_final": True,
+        "total_clips": len(clips)
+    }
+
+
+# =========================================================================
 # FEATURE: CAPCUT-STYLE CUSTOM EXPORT & SRT DOWNLOAD
 # =========================================================================
 
