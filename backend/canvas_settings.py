@@ -64,15 +64,20 @@ DEFAULT_CANVAS_SETTINGS: Dict[str, Any] = {
     "sub_box_radius": 8,         # Độ bo góc khung nền (px)
     "sub_pos_y_pct": 0.82,       # Vị trí dọc phụ đề (0.10 - 0.95 từ đỉnh xuống)
     "sub_pos_x_pct": 0.50,       # Vị trí ngang phụ đề (0.10 - 0.90 từ trái sang, 0.50 là căn giữa)
-    # Tùy chỉnh Watermark bản quyền (Cố định góc bên phải, mờ mờ, linh hoạt thay đổi văn bản)
+    # Tùy chỉnh Watermark bản quyền (Cố định góc bên phải hoặc tự do, mờ mờ, linh hoạt thay đổi văn bản)
     "watermark_enabled": False,         # Bật/tắt watermark
     "watermark_text": "",               # Văn bản watermark (ví dụ: @ReviewPhim)
-    "watermark_position": "top-right",  # "top-right" (mặc định) hoặc "bottom-right"
+    "watermark_position": "top-right",  # "top-right", "bottom-right", "top-left", "bottom-left", hoặc "custom"
     "watermark_opacity": 0.45,          # Độ mờ mờ: 0.05 đến 1.0 (mặc định 0.45 = 45% mờ mờ)
     "watermark_font_size": 22,          # Cỡ chữ watermark (12 - 48px)
     "watermark_margin_x": 25,           # Khoảng cách lề phải (px)
     "watermark_margin_y": 25,           # Khoảng cách lề trên/dưới (px)
     "watermark_color": "#ffffff",       # Màu chữ watermark (mặc định trắng)
+    "watermark_bg_enabled": False,       # Khung nền huy hiệu mờ bo góc
+    "watermark_bg_color": "#000000",     # Màu nền huy hiệu
+    "watermark_bg_opacity": 0.40,        # Độ mờ khung nền huy hiệu
+    "watermark_pos_x_pct": 0.85,         # Vị trí ngang tự do (0.02 - 0.98)
+    "watermark_pos_y_pct": 0.05,         # Vị trí dọc tự do (0.02 - 0.98)
 }
 
 def get_available_motion_backgrounds() -> List[Dict[str, Any]]:
@@ -329,12 +334,17 @@ def get_canvas_settings() -> Dict[str, Any]:
             merged["watermark_enabled"] = bool(merged.get("watermark_enabled", False))
             merged["watermark_text"] = str(merged.get("watermark_text", "")).strip()
             wm_pos = str(merged.get("watermark_position", "top-right")).lower()
-            merged["watermark_position"] = wm_pos if wm_pos in ("top-right", "bottom-right", "top-left", "bottom-left") else "top-right"
+            merged["watermark_position"] = wm_pos if wm_pos in ("top-right", "bottom-right", "top-left", "bottom-left", "custom") else "top-right"
             merged["watermark_opacity"] = round(max(0.05, min(1.0, float(merged.get("watermark_opacity", 0.45)))), 2)
             merged["watermark_font_size"] = max(10, min(80, int(merged.get("watermark_font_size", 22))))
             merged["watermark_margin_x"] = max(5, min(150, int(merged.get("watermark_margin_x", 25))))
             merged["watermark_margin_y"] = max(5, min(150, int(merged.get("watermark_margin_y", 25))))
             merged["watermark_color"] = str(merged.get("watermark_color", "#ffffff"))
+            merged["watermark_bg_enabled"] = bool(merged.get("watermark_bg_enabled", False))
+            merged["watermark_bg_color"] = str(merged.get("watermark_bg_color", "#000000"))
+            merged["watermark_bg_opacity"] = round(max(0.0, min(1.0, float(merged.get("watermark_bg_opacity", 0.40)))), 2)
+            merged["watermark_pos_x_pct"] = round(max(0.02, min(0.98, float(merged.get("watermark_pos_x_pct", 0.85)))), 4)
+            merged["watermark_pos_y_pct"] = round(max(0.02, min(0.98, float(merged.get("watermark_pos_y_pct", 0.05)))), 4)
             return merged
     except Exception as e:
         logger.warning(f"Lỗi khi đọc canvas_settings.json: {e}")
@@ -397,12 +407,17 @@ def save_canvas_settings(new_settings: Dict[str, Any]) -> Dict[str, Any]:
         current["watermark_enabled"] = bool(current.get("watermark_enabled", False))
         current["watermark_text"] = str(current.get("watermark_text", "")).strip()
         wm_pos = str(current.get("watermark_position", "top-right")).lower()
-        current["watermark_position"] = wm_pos if wm_pos in ("top-right", "bottom-right", "top-left", "bottom-left") else "top-right"
+        current["watermark_position"] = wm_pos if wm_pos in ("top-right", "bottom-right", "top-left", "bottom-left", "custom") else "top-right"
         current["watermark_opacity"] = round(max(0.05, min(1.0, float(current.get("watermark_opacity", 0.45)))), 2)
         current["watermark_font_size"] = max(10, min(80, int(current.get("watermark_font_size", 22))))
         current["watermark_margin_x"] = max(5, min(150, int(current.get("watermark_margin_x", 25))))
         current["watermark_margin_y"] = max(5, min(150, int(current.get("watermark_margin_y", 25))))
         current["watermark_color"] = str(current.get("watermark_color", "#ffffff"))
+        current["watermark_bg_enabled"] = bool(current.get("watermark_bg_enabled", False))
+        current["watermark_bg_color"] = str(current.get("watermark_bg_color", "#000000"))
+        current["watermark_bg_opacity"] = round(max(0.0, min(1.0, float(current.get("watermark_bg_opacity", 0.40)))), 2)
+        current["watermark_pos_x_pct"] = round(max(0.02, min(0.98, float(current.get("watermark_pos_x_pct", 0.85)))), 4)
+        current["watermark_pos_y_pct"] = round(max(0.02, min(0.98, float(current.get("watermark_pos_y_pct", 0.05)))), 4)
 
         SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         SETTINGS_FILE.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")

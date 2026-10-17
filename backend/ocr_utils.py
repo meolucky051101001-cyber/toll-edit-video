@@ -501,9 +501,19 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
 
     # Rescue only missing coordinates: two in-cue samples, higher resolution,
     # established subtitle ROI (or full frame if no reliable track exists).
+    # Nếu dải phụ đề cố định đã khớp rất chắc chắn (asr_match, support >= 15, độ dày dải <= 10%)
+    # và số câu khuyết ít (<= 25%), bỏ qua bước tua video cắt frame cứu hộ vì Global Subtitle Band
+    # ở bước kế tiếp sẽ tự động gán chính xác tọa độ dải phụ đề chung cho các câu này.
     missing = [(i, seg) for i, seg in enumerate(srt_segments)
                if segment_id(seg, i) not in band.selected_by_segment]
-    if missing and not (ocr_strategy == "full" and band.support == 0 and len(srt_segments) >= 3):
+    high_conf_band_locked = (
+        getattr(band, "mode", "") == "asr_match"
+        and getattr(band, "support", 0) >= 15
+        and (float(getattr(band, "bottom", 1.0)) - float(getattr(band, "top", 0.0))) <= 0.10
+        and len(srt_segments) >= 12
+        and len(missing) <= max(3, int(len(srt_segments) * 0.25))
+    )
+    if missing and not high_conf_band_locked and not (ocr_strategy == "full" and band.support == 0 and len(srt_segments) >= 3):
         logger.info('OCR geometry rescue: %d/%d cues, GPU only', len(missing), len(srt_segments))
         rescue_cap = cv2.VideoCapture(video_path)
         if not rescue_cap.isOpened():

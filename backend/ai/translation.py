@@ -1240,8 +1240,19 @@ def condense_vietnamese_subtitles_batch(
                 idx_str = str(item["index"])
                 shortened = parsed.get(idx_str) or parsed.get(item["index"])
                 if shortened and isinstance(shortened, str):
-                    if validate_condensed_text(item["text"], shortened, item["target_words"]):
+                    cleaned = repair_vietnamese_mojibake(shortened.strip())
+                    if validate_condensed_text(item["text"], cleaned, item["target_words"]):
                         has_valid = True
+                        break
+                    trimmed = trim_to_target_words(cleaned, item["target_words"])
+                    if validate_condensed_text(item["text"], trimmed, item["target_words"]):
+                        has_valid = True
+                        break
+                    orig_w = item["text"].strip().split()
+                    short_w = cleaned.split()
+                    if 0 < len(short_w) < len(orig_w) and not any("\u3400" <= c <= "\u9fff" for c in cleaned):
+                        has_valid = True
+                        break
             if not has_valid:
                 raise GeminiResponseError("No valid condensed dialogue in response")
         data, used_model = call_gemini_api(
