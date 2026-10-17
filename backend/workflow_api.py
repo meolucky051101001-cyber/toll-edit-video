@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 import asyncio
 from urllib.parse import unquote
-from fastapi import APIRouter, HTTPException, Query, Body, Request
+from fastapi import APIRouter, HTTPException, Query, Body, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from dashboard_media import media_status
 
@@ -694,7 +694,8 @@ async def api_get_workflow_videos():
                         "source": "phoi",
                         "size_mb": size_mb,
                         "created_at": mtime,
-                        "steps": steps
+                        "steps": steps,
+                        "thumbnail_url": f"/api/workflow/thumbnail/{stem}"
                     })
                 except OSError:
                     continue
@@ -719,7 +720,8 @@ async def api_get_workflow_videos():
                         "source": "downloads",
                         "size_mb": size_mb,
                         "created_at": mtime,
-                        "steps": steps
+                        "steps": steps,
+                        "thumbnail_url": f"/api/workflow/thumbnail/{stem}"
                     })
                 except OSError:
                     continue
@@ -839,6 +841,7 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
 
     return {
         "stem": stem,
+        "thumbnail_url": f"/api/workflow/thumbnail/{stem}",
         "video_url": active_video_url,
         "final_video_url": final_video_url,
         "raw_video_url": raw_video_url,
@@ -950,6 +953,60 @@ async def api_scan_batch_folder(payload: Dict[str, Any] = Body(...)):
     except Exception as e:
         logger.error(f"Lỗi quét thư mục: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def build_watermark_filter(cfg: Dict[str, Any], tw: int, th: int) -> str:
+    """Tạo bộ lọc FFmpeg drawtext cho Watermark bản quyền mờ mờ cố định ở góc bên phải video."""
+    if not cfg.get("watermark_enabled", False):
+        return ""
+    text = str(cfg.get("watermark_text", "")).strip()
+    if not text:
+        return ""
+
+    # Thoát ký tự đặc biệt cho ffmpeg drawtext
+    clean_text = text.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:").replace("%", "\\%")
+    try:
+        opacity = float(cfg.get("watermark_opacity", 0.45))
+    except (ValueError, TypeError):
+        opacity = 0.45
+    opacity = max(0.05, min(1.0, opacity))
+
+    try:
+        base_font_size = int(cfg.get("watermark_font_size", 22))
+    except (ValueError, TypeError):
+        base_font_size = 22
+    scale_factor = max(0.6, min(2.5, th / 1920.0))
+    font_size = max(12, int(base_font_size * scale_factor))
+
+    pos = str(cfg.get("watermark_position", "top-right")).lower()
+    try:
+        base_margin_x = int(cfg.get("watermark_margin_x", 25))
+        base_margin_y = int(cfg.get("watermark_margin_y", 25))
+    except (ValueError, TypeError):
+        base_margin_x = 25
+        base_margin_y = 25
+    margin_x = max(10, int(base_margin_x * (tw / 1080.0)))
+    margin_y = max(10, int(base_margin_y * (th / 1920.0)))
+
+    if "bottom" in pos:
+        y_expr = f"h-th-{margin_y}"
+    else:
+        y_expr = f"{margin_y}"
+
+    if "left" in pos:
+        x_expr = f"{margin_x}"
+    else: # Mặc định góc bên phải video theo yêu cầu
+        x_expr = f"w-tw-{margin_x}"
+
+    fontfile = r"C\:/Windows/Fonts/arial.ttf"
+    shadow_opacity = round(opacity * 0.75, 2)
+    filt = (
+        f",drawtext=fontfile='{fontfile}':text='{clean_text}':"
+        f"fontsize={font_size}:fontcolor=white@{opacity:.2f}:"
+        f"shadowcolor=black@{shadow_opacity:.2f}:shadowx=2:shadowy=2:"
+        f"x={x_expr}:y={y_expr}"
+    )
+    return filt
 
 
 def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]):
@@ -1174,6 +1231,11 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
                     f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
                 )
 
+        # Lồng Watermark mờ mờ cố định ở góc phải nếu được kích hoạt
+        wm_filt = build_watermark_filter(cfg, tw, th)
+        if wm_filt:
+            fc = fc.replace("[outv]", f"{wm_filt}[outv]")
+
         # Thử mã hóa bằng GPU NVENC trước, nếu lỗi thì fallback sang CPU x264
         cmd_nvenc = [
             "ffmpeg", "-y",
@@ -1299,6 +1361,162 @@ async def api_stop_batch_framing():
     batch_framing_state["status"] = "stopping"
     batch_framing_state["message"] = "Đang dừng lại..."
     return {"status": "ok", "message": "Đã gửi yêu cầu dừng"}
+
+# =========================================================================
+# FEATURE: THUMBNAIL MANAGEMENT (CAPTURE, UPLOAD, VIEW, DOWNLOAD)
+# =========================================================================
+
+THUMBNAILS_DIR = WORKSPACE / "thumbnails"
+THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
+
+def _find_video_for_stem(stem: str) -> Optional[Path]:
+    """Tìm đường dẫn tệp video cho stem đã chọn."""
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    job_dir = WORKSPACE / clean_stem
+    cand_phoi = INPUT_DIR / f"{stem}.mp4"
+    cand_dl = DOWNLOADS_DIR / f"{stem}.mp4"
+    cand_banve = OUTPUT_DIR / f"Dubbed_{stem}.mp4"
+    cand_step1 = job_dir / "step1_extracted.mp4" if job_dir.is_dir() else None
+    
+    for cand in (cand_banve, cand_phoi, cand_dl, cand_step1):
+        if cand and cand.is_file() and cand.stat().st_size > 1000:
+            return cand
+            
+    for d in (DOWNLOADS_DIR, INPUT_DIR, OUTPUT_DIR):
+        if d.is_dir():
+            for f in d.glob("*"):
+                if f.is_file() and f.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm") and (f.stem == stem or clean_stem in f.stem):
+                    return f
+    return None
+
+@router.get("/api/workflow/thumbnail/{stem}")
+async def api_get_video_thumbnail(stem: str):
+    """Lấy ảnh thumbnail của video theo stem. Nếu chưa có, tự động trích xuất frame tại 1.0s."""
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
+    
+    if thumb_file.is_file() and thumb_file.stat().st_size > 500:
+        return FileResponse(thumb_file, media_type="image/jpeg")
+        
+    job_dir = WORKSPACE / clean_stem
+    if job_dir.is_dir() and (job_dir / "thumbnail.jpg").is_file():
+        try:
+            import shutil
+            shutil.copy2(job_dir / "thumbnail.jpg", thumb_file)
+            return FileResponse(thumb_file, media_type="image/jpeg")
+        except Exception:
+            pass
+
+    video_source = _find_video_for_stem(stem)
+    if video_source:
+        try:
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", "1.0",
+                "-i", str(video_source),
+                "-vframes", "1",
+                "-q:v", "2",
+                str(thumb_file)
+            ]
+            res = subprocess.run(cmd, capture_output=True, timeout=12)
+            if res.returncode == 0 and thumb_file.is_file() and thumb_file.stat().st_size > 500:
+                return FileResponse(thumb_file, media_type="image/jpeg")
+        except Exception as e:
+            logger.warning(f"Lỗi tự động trích xuất thumbnail cho {stem}: {e}")
+
+    raise HTTPException(status_code=404, detail="Thumbnail not found")
+
+
+@router.post("/api/workflow/thumbnail/capture")
+async def api_capture_thumbnail(payload: Dict[str, Any] = Body(...)):
+    """Chụp khung hình tại giây chỉ định của video làm Thumbnail."""
+    stem = payload.get("stem", "").strip()
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    
+    try:
+        timestamp_s = float(payload.get("timestamp_s", 1.0))
+    except (ValueError, TypeError):
+        timestamp_s = 1.0
+    if timestamp_s < 0:
+        timestamp_s = 0.0
+        
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
+    
+    video_source = _find_video_for_stem(stem)
+    if not video_source:
+        raise HTTPException(status_code=404, detail="Không tìm thấy tệp video để chụp thumbnail")
+        
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{timestamp_s:.3f}",
+            "-i", str(video_source),
+            "-vframes", "1",
+            "-q:v", "2",
+            str(thumb_file)
+        ]
+        res = subprocess.run(cmd, capture_output=True, timeout=12)
+        if res.returncode == 0 and thumb_file.is_file() and thumb_file.stat().st_size > 500:
+            job_dir = WORKSPACE / clean_stem
+            if job_dir.is_dir():
+                try:
+                    import shutil
+                    shutil.copy2(thumb_file, job_dir / "thumbnail.jpg")
+                except Exception:
+                    pass
+            return {
+                "status": "ok",
+                "success": True,
+                "message": f"Đã chụp khung hình tại {timestamp_s:.2f}s làm Thumbnail thành công!",
+                "thumbnail_url": f"/api/workflow/thumbnail/{clean_stem}?t={time.time()}",
+                "timestamp_s": timestamp_s
+            }
+        else:
+            raise RuntimeError(f"FFmpeg capture thất bại: {res.stderr.decode('utf-8', 'ignore')}")
+    except Exception as e:
+        logger.error(f"Lỗi chụp thumbnail cho {stem}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/workflow/thumbnail/upload")
+async def api_upload_thumbnail(stem: str = Form(...), file: UploadFile = File(...)):
+    """Tải tệp ảnh từ máy tính lên để làm Thumbnail cho video."""
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
+    
+    content = await file.read()
+    if len(content) < 500:
+        raise HTTPException(status_code=400, detail="Tệp ảnh không hợp lệ hoặc quá nhỏ")
+        
+    thumb_file.write_bytes(content)
+    
+    job_dir = WORKSPACE / clean_stem
+    if job_dir.is_dir():
+        try:
+            (job_dir / "thumbnail.jpg").write_bytes(content)
+        except Exception:
+            pass
+            
+    return {
+        "status": "ok",
+        "success": True,
+        "message": f"Đã tải lên Thumbnail cho video thành công!",
+        "thumbnail_url": f"/api/workflow/thumbnail/{clean_stem}?t={time.time()}"
+    }
+
+
+@router.get("/api/workflow/thumbnail/download/{stem}")
+async def api_download_thumbnail(stem: str):
+    """Tải tệp thumbnail về máy tính."""
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
+    if thumb_file.is_file():
+        return FileResponse(thumb_file, filename=f"thumbnail_{clean_stem}.jpg", media_type="image/jpeg")
+    raise HTTPException(status_code=404, detail="Chưa có thumbnail cho video này")
 
 # =========================================================================
 # FEATURE: CAPCUT-STYLE CUSTOM EXPORT & SRT DOWNLOAD
@@ -1651,6 +1869,11 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
             v_input_path = final_video
         else:
             fc = f"[0:v]{crop_prefix}{flip_str}scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1{srt_filter}[outv]"
+
+    # Lồng Watermark mờ mờ cố định ở góc phải nếu được kích hoạt
+    wm_filt = build_watermark_filter(cfg, tw, th)
+    if wm_filt:
+        fc = fc.replace("[outv]", f"{wm_filt}[outv]")
 
     # Lắp ráp lệnh FFmpeg
     cmd_inputs = ["ffmpeg", "-y", "-i", str(v_input_path)]

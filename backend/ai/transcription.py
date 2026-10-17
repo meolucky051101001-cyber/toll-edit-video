@@ -478,19 +478,58 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None, or
 
 
 def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, original_audio_path=None, asr_model=None, *, model_id=None, chunking=None, chunk_size_s=240.0, overlap_s=0.75):
-    """Transcribe with V1's fast model (or Qwen3-ASR if selected), falling back to the proven model."""
+    """Transcribe with V1's fast model (or Hybrid Whisper+SenseVoice / SenseVoice-Small / Qwen3-ASR if selected)."""
 
     try:
         from .v1_qwen_asr_adapter import is_qwen_asr_enabled, transcribe_audio_qwen, check_qwen_readiness
     except ImportError:
         from ai.v1_qwen_asr_adapter import is_qwen_asr_enabled, transcribe_audio_qwen, check_qwen_readiness
 
-    aliases = {"whisper": "whisper_turbo", "whisper_large_v3_turbo": "whisper_turbo", "qwen": "qwen3_asr", "qwen3": "qwen3_asr", "qwen3_asr_preview": "qwen3_asr"}
+    try:
+        from .v1_sensevoice_adapter import (
+            check_sensevoice_readiness,
+            refine_whisper_with_sensevoice,
+            transcribe_audio_sensevoice,
+        )
+    except ImportError:
+        from ai.v1_sensevoice_adapter import (
+            check_sensevoice_readiness,
+            refine_whisper_with_sensevoice,
+            transcribe_audio_sensevoice,
+        )
+
+    aliases = {
+        "whisper": "whisper_turbo",
+        "whisper_large_v3_turbo": "whisper_turbo",
+        "whisper_sensevoice": "whisper_sensevoice",
+        "whisper_sensevoice_hybrid": "whisper_sensevoice",
+        "hybrid": "whisper_sensevoice",
+        "sensevoice": "sensevoice_small",
+        "sensevoice_small": "sensevoice_small",
+        "qwen": "qwen3_asr",
+        "qwen3": "qwen3_asr",
+        "qwen3_asr_preview": "qwen3_asr",
+    }
     selected = model_id if model_id is not None else asr_model
     model_id = aliases.get(str(selected).lower(), selected) if selected is not None else None
-    if model_id not in (None, "whisper_turbo", "qwen3_asr"):
+    if model_id not in (None, "whisper_turbo", "whisper_sensevoice", "sensevoice_small", "qwen3_asr"):
         raise ValueError(f"Unsupported ASR model: {model_id}")
-    use_qwen = model_id == "qwen3_asr" if model_id is not None else is_qwen_asr_enabled()
+
+    if model_id is None:
+        if is_qwen_asr_enabled():
+            model_id = "qwen3_asr"
+        else:
+            try:
+                from v1_feature_flags import get_feature_flags
+                cfg_model = str(get_feature_flags().get("V1_ASR_MODEL", "")).strip().lower()
+                if cfg_model in aliases:
+                    model_id = aliases[cfg_model]
+            except Exception:
+                pass
+        if model_id is None:
+            model_id = "whisper_sensevoice"
+
+    use_qwen = model_id == "qwen3_asr"
     if use_qwen:
         ready, reason = check_qwen_readiness(ignore_flag=True)
         if ready:
@@ -518,13 +557,25 @@ def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, origin
                     qwen_subs = transcribe_audio_qwen(audio_path, output_srt_path)
                 if qwen_subs:
                     print(f"✅ Qwen3-ASR hoàn tất nhận dạng thành công ({len(qwen_subs)} câu thoại).")
-                    # Do not set custom attributes on srt.Subtitle to avoid TypeError in Subtitle.__init__
-                    pass
                     return qwen_subs
             except Exception as qwen_err:
                 print(f"⚠️ Qwen3-ASR gặp lỗi: {qwen_err}. Tự động fallback sang Faster-Whisper Large-v3 Turbo...")
         else:
             print(f"⚠️ Qwen3-ASR chưa sẵn sàng ({reason}). Sử dụng Faster-Whisper mặc định.")
+
+    if model_id == "sensevoice_small":
+        sv_ready, sv_reason = check_sensevoice_readiness(ignore_flag=True)
+        if sv_ready:
+            print("🚀 [ASR] Đang thực thi nhận dạng siêu tốc bằng SenseVoice-Small (ONNX INT8)...")
+            try:
+                sv_subs = transcribe_audio_sensevoice(audio_path, output_srt_path)
+                if sv_subs:
+                    print(f"✅ SenseVoice-Small hoàn tất nhận dạng thành công ({len(sv_subs)} câu thoại).")
+                    return sv_subs
+            except Exception as sv_err:
+                print(f"⚠️ SenseVoice-Small gặp lỗi: {sv_err}. Tự động fallback sang Faster-Whisper Large-v3 Turbo...")
+        else:
+            print(f"⚠️ SenseVoice-Small chưa sẵn sàng ({sv_reason}). Chuyển sang Faster-Whisper.")
 
     policy = current_v1_model_policy()
     failures = []
@@ -564,6 +615,23 @@ def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, origin
 
     print("✅ V1 ASR hoàn tất bằng Faster-Whisper {}.".format(selected_model))
     merged_segments = _merge_continuous_sentences(merged_segments)
+
+    if model_id == "whisper_sensevoice":
+        sv_ready, sv_reason = check_sensevoice_readiness(ignore_flag=True)
+        if sv_ready:
+            try:
+                print("🔗 [Hybrid ASR] Đang chạy SenseVoice-Small CTC (60ms) để nắn mốc thời gian & lọc tạp âm...")
+                merged_segments = refine_whisper_with_sensevoice(
+                    merged_segments,
+                    audio_path=audio_path,
+                    original_audio_path=original_audio_path,
+                )
+            except Exception as sv_err:
+                logger.warning("Hybrid SenseVoice refinement skipped due to error: %s", sv_err)
+                print(f"⚠️ Bỏ qua bước tinh chỉnh SenseVoice ({sv_err}); giữ nguyên kết quả Faster-Whisper.")
+        else:
+            logger.info("SenseVoice not ready for hybrid refinement: %s", sv_reason)
+
     srt_segments = []
     for i, seg in enumerate(merged_segments, start=1):
         sub = srt.Subtitle(
