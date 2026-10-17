@@ -1068,6 +1068,199 @@
       color: #a7f3d0;
     }
 
+    /* CAPCUT TIMELINE TOOLBAR & INTERACTIVE VIDEO CLIPS */
+    .timeline-capcut-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 5px 12px;
+      background: #111827;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      gap: 8px;
+    }
+    .capcut-tool-group {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      flex-wrap: wrap;
+    }
+    .btn-capcut-tool {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: #1f2937;
+      border: 1px solid #374151;
+      color: #f3f4f6;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 9px;
+      border-radius: 5px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+    .btn-capcut-tool:hover {
+      background: #374151;
+      border-color: #38bdf8;
+      color: #38bdf8;
+      transform: translateY(-1px);
+    }
+    .btn-capcut-tool:active {
+      transform: translateY(0);
+    }
+    .btn-capcut-tool.btn-danger-soft:hover {
+      background: rgba(239, 68, 68, 0.15);
+      border-color: #ef4444;
+      color: #f87171;
+    }
+    .clips-summary-badge {
+      font-size: 11px;
+      color: #94a3b8;
+      font-family: monospace;
+      background: rgba(15, 23, 42, 0.7);
+      padding: 3px 8px;
+      border-radius: 4px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .btn-capcut-apply {
+      padding: 5px 12px !important;
+      font-size: 11px !important;
+      font-weight: 800 !important;
+      box-shadow: 0 2px 10px rgba(16, 185, 129, 0.35);
+    }
+
+    /* VIDEO CLIPS TRACK & DRAGGABLE CARDS */
+    .track-row-video {
+      height: 44px !important;
+      background: #0f172a !important;
+    }
+    .video-clips-container {
+      position: absolute;
+      inset: 2px 0;
+      display: flex;
+      align-items: stretch;
+      gap: 4px;
+    }
+    .timeline-clip-card {
+      position: relative;
+      height: 100%;
+      background: linear-gradient(135deg, #1e293b, #0f172a);
+      border: 1.5px solid #38bdf8;
+      border-radius: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: #f8fafc;
+      font-size: 10.5px;
+      font-weight: 700;
+      user-select: none;
+      cursor: grab;
+      transition: border-color 0.15s, box-shadow 0.15s, opacity 0.15s;
+      overflow: hidden;
+      min-width: 38px;
+      box-sizing: border-box;
+    }
+    .timeline-clip-card:active {
+      cursor: grabbing;
+    }
+    .timeline-clip-card:hover {
+      border-color: #7dd3fc;
+      box-shadow: 0 0 10px rgba(56, 189, 248, 0.35);
+    }
+    .timeline-clip-card.active-clip {
+      border-color: #facc15 !important;
+      background: linear-gradient(135deg, rgba(30, 58, 138, 0.85), rgba(15, 23, 42, 0.95)) !important;
+      box-shadow: 0 0 12px rgba(250, 204, 21, 0.5) !important;
+    }
+    .timeline-clip-card.drag-over {
+      border: 2px dashed #10b981 !important;
+      background: rgba(16, 185, 129, 0.25) !important;
+      transform: scale(1.02);
+    }
+    .timeline-clip-card.dragging {
+      opacity: 0.4;
+    }
+    .clip-trim-handle {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 8px;
+      background: rgba(250, 204, 21, 0.6);
+      cursor: ew-resize;
+      z-index: 10;
+      transition: background 0.15s, width 0.15s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .clip-trim-handle::after {
+      content: '';
+      width: 2px;
+      height: 12px;
+      background: rgba(0, 0, 0, 0.6);
+      border-radius: 1px;
+    }
+    .clip-trim-handle:hover {
+      background: #facc15;
+      width: 10px;
+    }
+    .clip-trim-handle.handle-left {
+      left: 0;
+      border-top-left-radius: 4px;
+      border-bottom-left-radius: 4px;
+    }
+    .clip-trim-handle.handle-right {
+      right: 0;
+      border-top-right-radius: 4px;
+      border-bottom-right-radius: 4px;
+    }
+    .clip-card-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      padding: 0 10px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+      pointer-events: none;
+    }
+    .clip-num-badge {
+      font-size: 9.5px;
+      background: rgba(56, 189, 248, 0.25);
+      color: #38bdf8;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-weight: 800;
+    }
+    .clip-dur-text {
+      font-size: 9.5px;
+      color: #94a3b8;
+      font-family: monospace;
+    }
+    .clip-quick-actions {
+      display: flex;
+      gap: 3px;
+      z-index: 5;
+      pointer-events: auto;
+    }
+    .btn-clip-mini {
+      background: rgba(0,0,0,0.45);
+      border: 1px solid rgba(255,255,255,0.18);
+      color: #cbd5e1;
+      font-size: 9.5px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      cursor: pointer;
+      line-height: 1.2;
+    }
+    .btn-clip-mini:hover {
+      background: rgba(255,255,255,0.25);
+      color: #fff;
+    }
+
     /* RIGHT SIDEBAR: 4 TABS */
     .settings-sidebar {
       background: var(--bg-dark);
@@ -2134,8 +2327,41 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         </div>
       </div>
 
-      <!-- MULTI-TRACK TIMELINE -->
-      <div class="timeline-container">
+      <!-- MULTI-TRACK TIMELINE (CAPCUT STYLE) -->
+      <div class="timeline-container" style="height: 205px;">
+        <!-- CAPCUT TIMELINE TOOLBAR -->
+        <div class="timeline-capcut-toolbar">
+          <div class="capcut-tool-group">
+            <button type="button" class="btn-capcut-tool" id="btnTimelineSplit" onclick="splitCurrentClip()" title="Cắt tách clip tại vị trí con trỏ (Phím tắt: S)">
+              <span class="tool-icon">✂️</span>
+              <span>Tách Đoạn (S)</span>
+            </button>
+            <button type="button" class="btn-capcut-tool" id="btnTimelineDuplicate" onclick="duplicateSelectedClip()" title="Nhân bản đoạn clip đang chọn (Phím tắt: Ctrl+D)">
+              <span class="tool-icon">📋</span>
+              <span>Nhân Bản</span>
+            </button>
+            <button type="button" class="btn-capcut-tool" id="btnTimelineDuplicateAll" onclick="duplicateAllClips()" title="Nhân đôi toàn bộ video (X2 thời lượng)">
+              <span class="tool-icon">🎞️</span>
+              <span>Nhân Đôi Video</span>
+            </button>
+            <button type="button" class="btn-capcut-tool btn-danger-soft" id="btnTimelineDelete" onclick="deleteSelectedClip()" title="Xóa đoạn đang chọn (Phím tắt: Delete)">
+              <span class="tool-icon">🗑️</span>
+              <span>Xóa Đoạn</span>
+            </button>
+            <button type="button" class="btn-capcut-tool" onclick="resetVideoClips()" title="Khôi phục toàn bộ video gốc">
+              <span class="tool-icon">↩️</span>
+              <span>Khôi Phục Gốc</span>
+            </button>
+          </div>
+
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span id="timelineClipsSummary" class="clips-summary-badge">🎬 1 Đoạn | ⏱️ 00:00.00</span>
+            <button type="button" class="btn btn-success btn-capcut-apply" id="btnApplyTimelineEdits" onclick="applyTimelineEditsToServer()" title="Áp dụng cắt ghép các đoạn clip vào video thành phẩm">
+              💾 ÁP DỤNG & GHÉP VIDEO
+            </button>
+          </div>
+        </div>
+
         <div class="timeline-tracks" id="timelineTracks" onclick="seekTimeline(event)">
           
           <!-- TRACK 1: CHINESE SUBTITLES TRACK -->
@@ -2160,15 +2386,20 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             </div>
           </div>
 
-          <!-- VIDEO TRACK -->
-          <div class="track-row">
-            <div class="track-header">🎬 Video chính</div>
-            <div class="track-content">
-              <div class="video-strip-block" id="videoStripLabel">Video Track</div>
+          <!-- TRACK 3: CAPCUT INTERACTIVE VIDEO CLIPS TRACK -->
+          <div class="track-row track-row-video" id="trackRowVideo">
+            <div class="track-header" style="display: flex; justify-content: space-between; align-items: center;">
+              <span>🎬 Video chính</span>
+              <span id="badgeVideoClipsCount" style="font-size: 9.5px; background: rgba(56, 189, 248, 0.2); color: #38bdf8; padding: 1px 5px; border-radius: 4px; font-weight: 700;">1 clip</span>
+            </div>
+            <div class="track-content" id="videoClipsTrackContent">
+              <div class="video-clips-container" id="videoClipsContainer">
+                <!-- Render động các clip kéo thả qua JavaScript -->
+              </div>
             </div>
           </div>
 
-          <!-- AUDIO TRACK -->
+          <!-- TRACK 4: AUDIO TRACK -->
           <div class="track-row">
             <div class="track-header">🎵 Âm thanh mix</div>
             <div class="track-content">
@@ -3279,6 +3510,8 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
   <div id="toastMsg">✅ Đã lưu cấu hình thành công!</div>
 
   <script>
+    const CONTROL_PLANE_TOKEN = '__REPLACE_TOKEN__';
+
     // State
     let videos = [];
     let currentVideo = null;
@@ -3364,6 +3597,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       if (canvasSettings.anti_reup_enabled && canvasSettings.bg_type === 'blur' && Math.abs(bgBlurVideo.currentTime - mainPlayer.currentTime) > 0.15) {
         bgBlurVideo.currentTime = mainPlayer.currentTime;
       }
+      handleSmartTimelinePlayback();
       updateTimecode();
       updateSubtitlesOverlay();
       updatePlayhead();
@@ -3376,6 +3610,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       updateTimecode();
       renderRulerMarks();
       renderSubtitlesTimeline();
+      initVideoClipsForCurrentVideo(true);
       updateScrubberUI();
       applyPlaybackSpeed();
     });
@@ -3550,6 +3785,15 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         togglePlay();
       } else if (e.key === 'l' || e.key === 'L') {
         skipTime(5);
+      } else if (e.key === 's' || e.key === 'S') {
+        e.preventDefault();
+        splitCurrentClip();
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        deleteSelectedClip();
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) {
+        e.preventDefault();
+        duplicateSelectedClip();
       }
     });
 
@@ -3586,6 +3830,384 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         const pct = clickX / trackWidth;
         const targetTime = pct * (mainPlayer.duration || 0);
         mainPlayer.currentTime = Math.max(0, Math.min(mainPlayer.duration || 0, targetTime));
+      }
+    }
+
+    // ========================================================
+    // CAPCUT-STYLE INTERACTIVE TIMELINE VIDEO CLIPS (CUT, CLONE, REORDER)
+    // ========================================================
+    let videoClipsState = []; // [{ id: 'clip_1', start: 0, end: 10, duration: 10 }]
+    let selectedClipId = null;
+    let isHandlingSmartPlay = false;
+
+    function initVideoClipsForCurrentVideo(forceReset = false) {
+      if (!mainPlayer) return;
+      const dur = mainPlayer.duration;
+      if (isNaN(dur) || dur <= 0) return;
+
+      if (forceReset || !videoClipsState || !videoClipsState.length) {
+        videoClipsState = [
+          {
+            id: 'clip_' + Date.now(),
+            start: 0,
+            end: dur,
+            duration: dur
+          }
+        ];
+        selectedClipId = videoClipsState[0].id;
+      }
+      renderVideoClipsTrack();
+    }
+
+    function renderVideoClipsTrack() {
+      const container = document.getElementById('videoClipsContainer');
+      const summaryEl = document.getElementById('timelineClipsSummary');
+      const badgeCount = document.getElementById('badgeVideoClipsCount');
+      if (!container) return;
+
+      if (!videoClipsState || !videoClipsState.length) {
+        const dur = (mainPlayer && !isNaN(mainPlayer.duration) && mainPlayer.duration > 0) ? mainPlayer.duration : 0;
+        if (dur > 0) {
+          videoClipsState = [{ id: 'clip_' + Date.now(), start: 0, end: dur, duration: dur }];
+          selectedClipId = videoClipsState[0].id;
+        } else {
+          container.innerHTML = '<div style="display:flex;align-items:center;padding:0 10px;font-size:11px;color:#94a3b8;">Đang tải video...</div>';
+          return;
+        }
+      }
+
+      if (!selectedClipId || !videoClipsState.some(c => c.id === selectedClipId)) {
+        selectedClipId = videoClipsState[0].id;
+      }
+
+      const totalActiveDur = videoClipsState.reduce((acc, c) => acc + Math.max(0.01, c.end - c.start), 0);
+      if (summaryEl) summaryEl.innerText = `🎬 ${videoClipsState.length} Đoạn | ⏱️ ${formatTime(totalActiveDur)}`;
+      if (badgeCount) badgeCount.innerText = `${videoClipsState.length} clip${videoClipsState.length > 1 ? 's' : ''}`;
+
+      container.innerHTML = '';
+
+      videoClipsState.forEach((clip, idx) => {
+        const clipDur = Math.max(0.01, clip.end - clip.start);
+        const widthPct = (clipDur / totalActiveDur) * 100;
+        const isActive = (clip.id === selectedClipId);
+
+        const card = document.createElement('div');
+        card.className = 'timeline-clip-card' + (isActive ? ' active-clip' : '');
+        card.style.width = `calc(${widthPct}% - 4px)`;
+        card.dataset.clipId = clip.id;
+        card.draggable = true;
+
+        card.innerHTML = `
+          <div class="clip-trim-handle handle-left" title="Kéo để chỉnh điểm bắt đầu (Trim In)" data-handle="left" data-clip-id="${clip.id}"></div>
+          
+          <div class="clip-card-inner">
+            <span class="clip-num-badge">Đoạn ${idx + 1}</span>
+            <span class="clip-dur-text">${formatTime(clip.start)} - ${formatTime(clip.end)} (${clipDur.toFixed(1)}s)</span>
+          </div>
+
+          <div class="clip-quick-actions">
+            <button type="button" class="btn-clip-mini" title="Tách tại giây hiện tại" onclick="event.stopPropagation(); splitClipAtCurrent('${clip.id}')">✂️</button>
+            <button type="button" class="btn-clip-mini" title="Nhân bản đoạn này" onclick="event.stopPropagation(); duplicateClipById('${clip.id}')">📋</button>
+            ${videoClipsState.length > 1 ? `<button type="button" class="btn-clip-mini" style="color:#f87171;" title="Xóa đoạn này" onclick="event.stopPropagation(); deleteClipById('${clip.id}')">🗑️</button>` : ''}
+          </div>
+
+          <div class="clip-trim-handle handle-right" title="Kéo để chỉnh điểm kết thúc (Trim Out)" data-handle="right" data-clip-id="${clip.id}"></div>
+        `;
+
+        card.onclick = (e) => {
+          if (e.target.closest('.clip-trim-handle') || e.target.closest('.btn-clip-mini')) return;
+          selectClip(clip.id);
+        };
+
+        // Kéo thả đổi thứ tự các đoạn video
+        card.ondragstart = (e) => {
+          e.dataTransfer.setData('text/plain', clip.id);
+          card.classList.add('dragging');
+        };
+        card.ondragover = (e) => {
+          e.preventDefault();
+          card.classList.add('drag-over');
+        };
+        card.ondragleave = () => {
+          card.classList.remove('drag-over');
+        };
+        card.ondrop = (e) => {
+          e.preventDefault();
+          card.classList.remove('drag-over');
+          const srcId = e.dataTransfer.getData('text/plain');
+          if (srcId && srcId !== clip.id) {
+            reorderClips(srcId, clip.id);
+          }
+        };
+        card.ondragend = () => {
+          card.classList.remove('dragging');
+          document.querySelectorAll('.timeline-clip-card').forEach(c => c.classList.remove('drag-over'));
+        };
+
+        container.appendChild(card);
+      });
+
+      initTrimHandleListeners();
+    }
+
+    function selectClip(clipId) {
+      selectedClipId = clipId;
+      document.querySelectorAll('#videoClipsContainer .timeline-clip-card').forEach(c => {
+        c.classList.toggle('active-clip', c.dataset.clipId === clipId);
+      });
+      const clip = videoClipsState.find(c => c.id === clipId);
+      if (clip && mainPlayer) {
+        mainPlayer.currentTime = clip.start;
+        updateTimecode();
+        updatePlayhead();
+      }
+    }
+
+    function reorderClips(srcId, targetId) {
+      const srcIdx = videoClipsState.findIndex(c => c.id === srcId);
+      const targetIdx = videoClipsState.findIndex(c => c.id === targetId);
+      if (srcIdx === -1 || targetIdx === -1 || srcIdx === targetIdx) return;
+
+      const [moved] = videoClipsState.splice(srcIdx, 1);
+      videoClipsState.splice(targetIdx, 0, moved);
+      selectedClipId = srcId;
+      renderVideoClipsTrack();
+      showToast('🔀 Đã thay đổi thứ tự đoạn video linh hoạt!');
+    }
+
+    function splitCurrentClip() {
+      if (!mainPlayer) return;
+      const t = mainPlayer.currentTime;
+      const clipIdx = videoClipsState.findIndex(c => t > c.start + 0.15 && t < c.end - 0.15);
+      if (clipIdx === -1) {
+        showToast('⚠️ Vui lòng dừng con trỏ ở giữa đoạn clip để tách (cách 2 mép ít nhất 0.2s)!');
+        return;
+      }
+
+      const orig = videoClipsState[clipIdx];
+      const clip1 = { id: 'clip_' + Date.now() + '_a', start: orig.start, end: t, duration: t - orig.start };
+      const clip2 = { id: 'clip_' + Date.now() + '_b', start: t, end: orig.end, duration: orig.end - t };
+
+      videoClipsState.splice(clipIdx, 1, clip1, clip2);
+      selectedClipId = clip2.id;
+      renderVideoClipsTrack();
+      showToast(`✂️ Đã tách đoạn clip tại ${formatTime(t)}! (Hiện có ${videoClipsState.length} đoạn)`);
+    }
+
+    function splitClipAtCurrent(clipId) {
+      selectClip(clipId);
+      splitCurrentClip();
+    }
+
+    function duplicateSelectedClip() {
+      if (!selectedClipId && videoClipsState.length) selectedClipId = videoClipsState[0].id;
+      if (!selectedClipId) return;
+      duplicateClipById(selectedClipId);
+    }
+
+    function duplicateClipById(clipId) {
+      const idx = videoClipsState.findIndex(c => c.id === clipId);
+      if (idx === -1) return;
+
+      const orig = videoClipsState[idx];
+      const newClip = {
+        id: 'clip_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+        start: orig.start,
+        end: orig.end,
+        duration: orig.duration
+      };
+
+      videoClipsState.splice(idx + 1, 0, newClip);
+      selectedClipId = newClip.id;
+      renderVideoClipsTrack();
+      showToast(`📋 Đã nhân bản đoạn video (${(newClip.end - newClip.start).toFixed(1)}s)!`);
+    }
+
+    function duplicateAllClips() {
+      if (!videoClipsState.length) return;
+      const clones = videoClipsState.map(c => ({
+        id: 'clip_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+        start: c.start,
+        end: c.end,
+        duration: c.end - c.start
+      }));
+      videoClipsState = videoClipsState.concat(clones);
+      renderVideoClipsTrack();
+      showToast(`🎞️ Đã nhân đôi toàn bộ video (Tổng cộng ${videoClipsState.length} đoạn)!`);
+    }
+
+    function deleteSelectedClip() {
+      if (!selectedClipId && videoClipsState.length) selectedClipId = videoClipsState[0].id;
+      if (!selectedClipId) return;
+      deleteClipById(selectedClipId);
+    }
+
+    function deleteClipById(clipId) {
+      if (videoClipsState.length <= 1) {
+        showToast('⚠️ Không thể xóa đoạn duy nhất còn lại! Hãy dùng "Khôi Phục Gốc" nếu muốn làm lại từ đầu.');
+        return;
+      }
+      const idx = videoClipsState.findIndex(c => c.id === clipId);
+      if (idx === -1) return;
+
+      videoClipsState.splice(idx, 1);
+      const nextIdx = Math.min(idx, videoClipsState.length - 1);
+      selectedClipId = videoClipsState[nextIdx].id;
+      renderVideoClipsTrack();
+      showToast('🗑️ Đã xóa đoạn clip khỏi timeline!');
+    }
+
+    function resetVideoClips() {
+      initVideoClipsForCurrentVideo(true);
+      showToast('↩️ Đã khôi phục video gốc nguyên bản!');
+    }
+
+    function initTrimHandleListeners() {
+      const handles = document.querySelectorAll('.clip-trim-handle');
+      handles.forEach(h => {
+        h.onmousedown = (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          const handleType = h.dataset.handle;
+          const clipId = h.dataset.clipId;
+          const clip = videoClipsState.find(c => c.id === clipId);
+          if (!clip) return;
+
+          const startClientX = e.clientX;
+          const initStart = clip.start;
+          const initEnd = clip.end;
+          const totalDur = (mainPlayer && !isNaN(mainPlayer.duration) && mainPlayer.duration > 0) ? mainPlayer.duration : 10;
+          const trackWidth = (document.getElementById('videoClipsContainer') ? document.getElementById('videoClipsContainer').clientWidth : 600) || 600;
+
+          const onMouseMove = (moveE) => {
+            const dx = moveE.clientX - startClientX;
+            const dt = (dx / trackWidth) * totalDur;
+
+            if (handleType === 'left') {
+              const newStart = Math.max(0, Math.min(initEnd - 0.2, initStart + dt));
+              clip.start = newStart;
+              clip.duration = clip.end - newStart;
+            } else if (handleType === 'right') {
+              const newEnd = Math.max(initStart + 0.2, Math.min(totalDur, initEnd + dt));
+              clip.end = newEnd;
+              clip.duration = newEnd - clip.start;
+            }
+            renderVideoClipsTrack();
+          };
+
+          const onMouseUp = () => {
+            window.removeEventListener('mousemove', onMouseMove);
+            window.removeEventListener('mouseup', onMouseUp);
+            showToast(`✂️ Đã điều chỉnh đoạn clip: ${formatTime(clip.start)} - ${formatTime(clip.end)}`);
+          };
+
+          window.addEventListener('mousemove', onMouseMove);
+          window.addEventListener('mouseup', onMouseUp);
+        };
+      });
+    }
+
+    function handleSmartTimelinePlayback() {
+      if (!mainPlayer || mainPlayer.paused || isHandlingSmartPlay) return;
+      if (!videoClipsState || videoClipsState.length <= 1) return;
+
+      const t = mainPlayer.currentTime;
+      const currIdx = videoClipsState.findIndex(c => t >= c.start && t < c.end - 0.05);
+
+      if (currIdx !== -1) {
+        if (selectedClipId !== videoClipsState[currIdx].id) {
+          selectedClipId = videoClipsState[currIdx].id;
+          document.querySelectorAll('#videoClipsContainer .timeline-clip-card').forEach(c => {
+            c.classList.toggle('active-clip', c.dataset.clipId === selectedClipId);
+          });
+        }
+      } else {
+        // Player chạy ra ngoài phạm vi các clip (đoạn đã bị cắt bỏ) hoặc đến cuối clip
+        // Tìm clip gần nhất tiếp theo
+        const nextIdx = videoClipsState.findIndex(c => c.start > t);
+        if (nextIdx !== -1) {
+          isHandlingSmartPlay = true;
+          mainPlayer.currentTime = videoClipsState[nextIdx].start;
+          setTimeout(() => { isHandlingSmartPlay = false; }, 80);
+        } else {
+          // Đã hết chuỗi clips, tua về đầu clip đầu tiên
+          isHandlingSmartPlay = true;
+          mainPlayer.currentTime = videoClipsState[0].start;
+          setTimeout(() => { isHandlingSmartPlay = false; }, 80);
+        }
+      }
+    }
+
+    async function applyTimelineEditsToServer() {
+      if (!currentVideo || !currentVideo.stem) {
+        showToast('⚠️ Vui lòng chọn một video trước!');
+        return;
+      }
+      if (!videoClipsState || !videoClipsState.length) {
+        showToast('⚠️ Không có đoạn video nào để ghép!');
+        return;
+      }
+
+      const btn = document.getElementById('btnApplyTimelineEdits');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = '⏳ Đang ghép video bằng GPU...';
+      }
+      showToast(`🎬 Đang dùng GPU FFmpeg cắt và ghép nối ${videoClipsState.length} đoạn video...`);
+
+      try {
+        const payload = {
+          stem: currentVideo.stem,
+          clips: videoClipsState.map(c => ({
+            start: parseFloat(c.start.toFixed(3)),
+            end: parseFloat(c.end.toFixed(3))
+          })),
+          target_version: currentVideoVersion || 'final'
+        };
+
+        const res = await fetch('/api/workflow/timeline/apply-edits', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Local-Control-Token': (typeof CONTROL_PLANE_TOKEN !== 'undefined' ? CONTROL_PLANE_TOKEN : '__REPLACE_TOKEN__'),
+            'X-Dashboard-Input': '1'
+          },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json();
+        if (res.ok && (data.status === 'ok' || data.success)) {
+          showToast(`🎉 ${data.message}`);
+
+          // Reload player with newly concatenated video
+          if (data.video_url && mainPlayer) {
+            currentVideo.has_final = true;
+            if (currentVideoData) {
+              currentVideoData.has_final = true;
+              currentVideoData.final_video_url = data.final_video_url;
+              currentVideoData.video_url = data.video_url;
+            }
+            mainPlayer.src = data.video_url;
+            mainPlayer.load();
+            mainPlayer.play().catch(() => {});
+          }
+
+          setTimeout(() => {
+            initVideoClipsForCurrentVideo(true);
+            renderMediaList();
+          }, 800);
+
+        } else {
+          showToast(`❌ Lỗi cắt ghép video: ${data.detail || 'Thất bại'}`);
+        }
+      } catch (err) {
+        console.error('Lỗi cắt ghép video:', err);
+        showToast('❌ Lỗi kết nối khi gửi yêu cầu cắt ghép video.');
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerText = '💾 ÁP DỤNG & GHÉP VIDEO';
+        }
       }
     }
 
