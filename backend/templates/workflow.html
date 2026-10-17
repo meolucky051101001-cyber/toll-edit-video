@@ -860,6 +860,87 @@
     }
     .image-card.active .image-card-badge { background: #d97706; color: #fff; }
 
+    /* THUMBNAIL BACKGROUNDS & FRAMES */
+    .thumb-bg-scroll-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 7px;
+      max-height: 185px;
+      overflow-y: auto;
+      padding: 6px;
+      border-radius: 8px;
+      background: rgba(10, 15, 24, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .thumb-bg-card {
+      position: relative;
+      height: 64px;
+      border-radius: 6px;
+      overflow: hidden;
+      border: 2px solid rgba(255, 255, 255, 0.12);
+      cursor: pointer;
+      background-size: cover;
+      background-position: center;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      padding: 4px 6px;
+      box-sizing: border-box;
+    }
+    .thumb-bg-card:hover {
+      border-color: #38bdf8;
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(56, 189, 248, 0.3);
+    }
+    .thumb-bg-card.active {
+      border-color: #facc15;
+      box-shadow: 0 0 12px rgba(250, 204, 21, 0.5);
+    }
+    .thumb-bg-card-overlay {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.2) 65%, transparent 100%);
+      z-index: 1;
+    }
+    .thumb-bg-card-content {
+      position: relative;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .thumb-bg-card-icon {
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+    .thumb-bg-card-title {
+      font-size: 10px;
+      font-weight: 700;
+      color: #fff;
+      text-shadow: 0 1px 3px rgba(0,0,0,0.9);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+    }
+    .thumb-bg-card-badge {
+      position: absolute;
+      top: 3px;
+      right: 3px;
+      font-size: 8.5px;
+      font-weight: 800;
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: #facc15;
+      color: #000;
+      z-index: 2;
+      display: none;
+    }
+    .thumb-bg-card.active .thumb-bg-card-badge {
+      display: block;
+    }
+
     /* MULTI-TRACK TIMELINE (BOTTOM) */
     .timeline-container {
       height: 170px;
@@ -2625,81 +2706,143 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           <input type="file" id="inputThumbUploadFile" accept="image/*" style="display: none;" onchange="handleThumbnailFileUpload(this)">
         </div>
 
-        <!-- BƯỚC 2: CHỈNH SỬA & CHÈN CHỮ LÊN THUMBNAIL (LIVE CANVAS PREVIEW) -->
+        <!-- BƯỚC 2: CHỈNH SỬA & CHÈN KHUNG NỀN / CHỮ LÊN THUMBNAIL (LIVE CANVAS PREVIEW) -->
         <div class="form-section" style="background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px; padding: 12px;">
           <div class="form-section-title" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-            <span style="color: #38bdf8; font-weight: 700;">2️⃣ Chèn Chữ Lên Khung Hình (Edit)</span>
-            <span style="font-size: 10px; color: #94a3b8;">Xem trước trực tiếp</span>
+            <span style="color: #38bdf8; font-weight: 700;">2️⃣ Khung Nền & Giật Tít Thumbnail (Edit)</span>
+            <span style="font-size: 10px; color: #94a3b8;">Xem trước trực tiếp 9:16</span>
           </div>
 
-          <!-- Big Thumbnail Preview Container with Live Text Overlay -->
-          <div id="thumbPreviewBox" style="width: 100%; aspect-ratio: 9/16; max-height: 270px; margin: 0 auto 10px; background: #0c121b; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center; position: relative;">
-            <img id="thumbMainPreviewImg" src="" alt="Thumbnail" style="width: 100%; height: 100%; object-fit: contain; display: none;">
+          <!-- Big Thumbnail Preview Container with Live Layers -->
+          <div id="thumbPreviewBox" style="width: 100%; aspect-ratio: 9/16; max-height: 280px; margin: 0 auto 12px; background: #0c121b; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center; position: relative; box-shadow: 0 8px 24px rgba(0,0,0,0.6);">
+            <!-- Layer 1: Background Template Image -->
+            <img id="thumbBgPreviewImg" src="" alt="Thumbnail Background" style="position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: none; z-index: 1;">
             
-            <!-- Live interactive text overlay on thumbnail -->
-            <div id="thumbLiveTextOverlay" style="position: absolute; left: 10px; right: 10px; top: 18%; text-align: center; pointer-events: none; transition: top 0.15s ease; z-index: 5; display: none;">
-              <span id="thumbLiveTextSpan" style="display: inline-block; font-family: Arial, sans-serif; font-size: 18px; font-weight: 800; color: #facc15; background: rgba(0, 0, 0, 0.8); padding: 5px 12px; border-radius: 6px; line-height: 1.3; text-shadow: 1px 1px 2px rgba(0,0,0,0.9); box-shadow: 0 4px 12px rgba(0,0,0,0.5); word-break: break-word;">
-                Nội dung chữ mẫu
-              </span>
+            <!-- Layer 2: Main Captured Video Frame -->
+            <img id="thumbMainPreviewImg" src="" alt="Thumbnail" style="position: relative; max-width: 100%; max-height: 100%; object-fit: contain; display: none; z-index: 2; transition: all 0.25s ease;">
+            
+            <!-- Layer 3: Border Effect Overlay -->
+            <div id="thumbBorderOverlay" style="position: absolute; inset: 6px; border: 2px solid transparent; pointer-events: none; z-index: 4; border-radius: 4px; display: none;"></div>
+
+            <!-- Layer 4: Live interactive text & headline banner overlay -->
+            <div id="thumbLiveTextOverlay" style="position: absolute; left: 0; right: 0; top: 18%; text-align: center; pointer-events: none; transition: top 0.15s ease; z-index: 5; display: none;">
+              <div id="thumbLiveBannerWrap" style="display: inline-block; width: 100%; padding: 4px 8px; box-sizing: border-box; transition: all 0.2s ease;">
+                <span id="thumbLiveTextSpan" style="display: inline-block; font-family: Arial, sans-serif; font-size: 18px; font-weight: 900; color: #facc15; background: rgba(0, 0, 0, 0.85); padding: 5px 12px; border-radius: 6px; line-height: 1.3; text-shadow: 1px 1px 2px rgba(0,0,0,0.9); box-shadow: 0 4px 12px rgba(0,0,0,0.5); word-break: break-word;">
+                  Nội dung chữ mẫu
+                </span>
+              </div>
             </div>
 
-            <div id="thumbPlaceholder" style="font-size: 12px; color: var(--text-dim); display: flex; flex-direction: column; align-items: center; gap: 6px;">
+            <div id="thumbPlaceholder" style="font-size: 12px; color: var(--text-dim); display: flex; flex-direction: column; align-items: center; gap: 6px; z-index: 1;">
               <span style="font-size: 32px;">🖼️</span>
               <span>Chưa có ảnh bìa hoặc đang tải...</span>
             </div>
           </div>
 
-          <!-- Input Text -->
-          <div style="margin-bottom: 8px;">
-            <label class="form-label" style="font-size: 11px; margin-bottom: 4px;">Nội dung chữ chèn lên thumbnail:</label>
-            <textarea id="inputThumbText" class="form-control" rows="2" style="width: 100%; background: #162032; border: 1px solid #28374d; color: #f1f5f9; padding: 6px 10px; border-radius: 6px; font-size: 12px; line-height: 1.4; resize: vertical;" placeholder="Nhập tiêu đề hoặc giật tít, ví dụ: ĐỒ DECOR SIÊU XỊN GIÁ CHỈ 1K" oninput="updateThumbTextVisual()"></textarea>
+          <!-- MỤC A: BỘ SƯU TẬP 12 KHUNG NỀN ĐẸP -->
+          <div style="margin-bottom: 12px; background: rgba(15, 23, 42, 0.5); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 10px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+              <span style="font-size: 11px; font-weight: 700; color: #facc15; display: flex; align-items: center; gap: 5px;">
+                🎨 Chọn Khung Nền Thumbnail (12 Mẫu HD)
+              </span>
+              <button type="button" class="btn btn-outline" style="font-size: 9.5px; padding: 2px 7px; color: #94a3b8;" onclick="clearThumbBackground()">
+                🚫 Bỏ Phông Nền
+              </button>
+            </div>
+
+            <!-- Chế độ lồng ảnh với khung nền -->
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; margin-bottom: 8px;">
+              <button type="button" class="btn btn-outline active-framing" id="btnThumbFramingFit" style="font-size: 10px; padding: 4px; justify-content: center; background: rgba(56, 189, 248, 0.15); border-color: #38bdf8; color: #38bdf8; font-weight: 700;" onclick="setThumbFramingMode('fit_inside')">
+                🖼️ Lồng Giữa (Douyin)
+              </button>
+              <button type="button" class="btn btn-outline" id="btnThumbFramingCover" style="font-size: 10px; padding: 4px; justify-content: center;" onclick="setThumbFramingMode('cover')">
+                🖥️ Tràn Khung
+              </button>
+              <button type="button" class="btn btn-outline" id="btnThumbFramingOnly" style="font-size: 10px; padding: 4px; justify-content: center;" onclick="setThumbFramingMode('bg_only')">
+                🎨 Chỉ Dùng Nền Bìa
+              </button>
+            </div>
+
+            <!-- Danh sách lưới các khung nền đẹp -->
+            <div id="thumbBgScrollGrid" class="thumb-bg-scroll-grid">
+              <!-- Render động qua JavaScript -->
+            </div>
+          </div>
+
+          <!-- MỤC B: DẢI BANNER GIẬT TÍT & CHỮ (HEADLINE BANNER) -->
+          <div style="margin-bottom: 12px; background: rgba(15, 23, 42, 0.5); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 10px;">
+            <label class="form-label" style="font-size: 11px; margin-bottom: 6px; font-weight: 700; color: #38bdf8;">
+              🏷️ Kiểu Dải Banner Giật Tít:
+            </label>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-bottom: 8px;">
+              <button type="button" class="btn btn-outline" id="btnBannerYellow" style="font-size: 10px; padding: 5px; justify-content: center; background: rgba(250, 204, 21, 0.18); border-color: rgba(250, 204, 21, 0.5); color: #facc15; font-weight: 800;" onclick="setThumbBannerStyle('full_yellow')">
+                🟨 Dải Vàng Douyin (Hot)
+              </button>
+              <button type="button" class="btn btn-outline" id="btnBannerRed" style="font-size: 10px; padding: 5px; justify-content: center; background: rgba(220, 38, 38, 0.18); border-color: rgba(220, 38, 38, 0.5); color: #f87171; font-weight: 800;" onclick="setThumbBannerStyle('full_red')">
+                🟥 Dải Đỏ Kịch Tính
+              </button>
+              <button type="button" class="btn btn-outline" id="btnBannerBlackGold" style="font-size: 10px; padding: 5px; justify-content: center; background: rgba(15, 23, 42, 0.6); border-color: #eab308; color: #fde047; font-weight: 800;" onclick="setThumbBannerStyle('full_black_gold')">
+                ⬛ Đen Cinema Viền Vàng
+              </button>
+              <button type="button" class="btn btn-outline" id="btnBannerNeon" style="font-size: 10px; padding: 5px; justify-content: center; background: rgba(6, 182, 212, 0.18); border-color: rgba(6, 182, 212, 0.5); color: #38bdf8; font-weight: 800;" onclick="setThumbBannerStyle('neon_blue')">
+                🟦 Neon Cyberpunk
+              </button>
+              <button type="button" class="btn btn-outline" id="btnBannerBox" style="font-size: 10px; padding: 5px; justify-content: center; color: #cbd5e1;" onclick="setThumbBannerStyle('box_black')">
+                🔲 Hộp Bo Góc Mờ
+              </button>
+              <button type="button" class="btn btn-outline" id="btnBannerNone" style="font-size: 10px; padding: 5px; justify-content: center; color: #94a3b8;" onclick="setThumbBannerStyle('none')">
+                🚫 Chữ Nổi Không Nền
+              </button>
+            </div>
+
+            <!-- Viền Khung Thumbnail (Border Accents) -->
+            <div style="margin-top: 8px;">
+              <div style="font-size: 10.5px; color: var(--text-dim); margin-bottom: 4px;">Viền Khung Thumbnail:</div>
+              <div style="display: flex; gap: 4px; flex-wrap: wrap;">
+                <button type="button" class="btn btn-outline" id="btnBorderNone" style="font-size: 9.5px; padding: 3px 6px; border-color: #38bdf8; color: #38bdf8;" onclick="setThumbBorderStyle('none')">🚫 Không Viền</button>
+                <button type="button" class="btn btn-outline" id="btnBorderGold" style="font-size: 9.5px; padding: 3px 6px;" onclick="setThumbBorderStyle('gold_double')">🟡 Chỉ Vàng Kim</button>
+                <button type="button" class="btn btn-outline" id="btnBorderRed" style="font-size: 9.5px; padding: 3px 6px;" onclick="setThumbBorderStyle('red_drama')">🔴 Viền Đỏ Giật Tít</button>
+                <button type="button" class="btn btn-outline" id="btnBorderNeon" style="font-size: 9.5px; padding: 3px 6px;" onclick="setThumbBorderStyle('neon_glow')">⚡ Viền Neon Sáng</button>
+                <button type="button" class="btn btn-outline" id="btnBorderCinema" style="font-size: 9.5px; padding: 3px 6px;" onclick="setThumbBorderStyle('cinema_box')">🎬 Dải Đen Cinema</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- MỤC C: NỘI DUNG CHỮ & VỊ TRÍ & CỠ CHỮ -->
+          <div style="margin-bottom: 10px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+              <label class="form-label" style="font-size: 11px; margin: 0; font-weight: 700;">Nội dung chữ chèn lên thumbnail:</label>
+              <button type="button" class="btn btn-outline" style="font-size: 9.5px; padding: 1px 6px; color: #f87171;" onclick="clearThumbText()">Xóa chữ</button>
+            </div>
+            <textarea id="inputThumbText" class="form-control" rows="2" style="width: 100%; background: #162032; border: 1px solid #28374d; color: #f1f5f9; padding: 6px 10px; border-radius: 6px; font-size: 12px; line-height: 1.4; resize: vertical;" placeholder="Nhập tiêu đề hoặc giật tít, ví dụ: REVIEW PHIM HAY HACK NÃO CỰC MẠNH" oninput="updateThumbTextVisual()"></textarea>
           </div>
 
           <!-- Quick Text Presets -->
-          <div style="display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px;">
-            <button type="button" class="btn btn-outline" style="font-size: 10px; padding: 3px 6px;" onclick="setThumbQuickText('ĐỒ DECOR SIÊU XỊN')">🏷️ Decor Siêu Xịn</button>
-            <button type="button" class="btn btn-outline" style="font-size: 10px; padding: 3px 6px;" onclick="setThumbQuickText('REVIEW PHIM HAY')">🏷️ Review Phim</button>
-            <button type="button" class="btn btn-outline" style="font-size: 10px; padding: 3px 6px;" onclick="setThumbQuickText('HACK NÃO CỰC MẠNH')">🏷️ Hack Não</button>
-            <button type="button" class="btn btn-outline" style="font-size: 10px; padding: 3px 6px;" onclick="setThumbQuickText('TẬP 1 - XEM NGAY')">🏷️ Tập 1</button>
-          </div>
-
-          <!-- Quick Style Presets -->
-          <div style="margin-bottom: 10px;">
-            <label class="form-label" style="font-size: 11px; margin-bottom: 4px;">Phong cách chữ nhanh (1 Click):</label>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px;">
-              <button type="button" class="btn btn-outline" style="font-size: 10.5px; padding: 5px 8px; justify-content: center; background: rgba(250, 204, 21, 0.15); border-color: rgba(250, 204, 21, 0.4); color: #facc15; font-weight: 700;" onclick="applyThumbTextPreset('yellow_black')">
-                🟡 Chữ Vàng Khung Đen
-              </button>
-              <button type="button" class="btn btn-outline" style="font-size: 10.5px; padding: 5px 8px; justify-content: center; background: rgba(239, 68, 68, 0.15); border-color: rgba(239, 68, 68, 0.4); color: #f87171; font-weight: 700;" onclick="applyThumbTextPreset('white_red')">
-                🔴 Chữ Trắng Khung Đỏ
-              </button>
-              <button type="button" class="btn btn-outline" style="font-size: 10.5px; padding: 5px 8px; justify-content: center; background: rgba(255, 255, 255, 0.12); border-color: rgba(255, 255, 255, 0.35); color: #ffffff; font-weight: 700;" onclick="applyThumbTextPreset('white_black')">
-                ⚪ Trắng Khung Đen
-              </button>
-              <button type="button" class="btn btn-outline" style="font-size: 10.5px; padding: 5px 8px; justify-content: center; background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.4); color: #34d399; font-weight: 700;" onclick="applyThumbTextPreset('emerald_neon')">
-                🟢 Xanh Ngọc Neon
-              </button>
-            </div>
+          <div style="display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 10px;">
+            <button type="button" class="btn btn-outline" style="font-size: 9.5px; padding: 2px 6px;" onclick="setThumbQuickText('ĐỒ DECOR SIÊU XỊN')">🏷️ Decor Siêu Xịn</button>
+            <button type="button" class="btn btn-outline" style="font-size: 9.5px; padding: 2px 6px;" onclick="setThumbQuickText('REVIEW PHIM HAY')">🏷️ Review Phim</button>
+            <button type="button" class="btn btn-outline" style="font-size: 9.5px; padding: 2px 6px;" onclick="setThumbQuickText('HACK NÃO CỰC MẠNH')">🏷️ Hack Não</button>
+            <button type="button" class="btn btn-outline" style="font-size: 9.5px; padding: 2px 6px;" onclick="setThumbQuickText('TẬP 1 - XEM NGAY')">🏷️ Tập 1</button>
+            <button type="button" class="btn btn-outline" style="font-size: 9.5px; padding: 2px 6px;" onclick="setThumbQuickText('BÍ QUYẾT TRIỆU VIEW')">🏷️ Triệu View</button>
           </div>
 
           <!-- Position & Size Controls -->
-          <div style="margin-bottom: 10px;">
-            <label class="form-label" style="font-size: 11px; margin-bottom: 4px;">Vị trí chữ trên thumbnail:</label>
+          <div style="margin-bottom: 12px;">
             <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 5px; margin-bottom: 6px;">
-              <button type="button" class="btn btn-outline" id="btnThumbPosTop" style="font-size: 11px; padding: 5px; justify-content: center; background: #162032;" onclick="setThumbPositionPct(0.18)">⬆️ Đầu Ảnh</button>
-              <button type="button" class="btn btn-outline" id="btnThumbPosCenter" style="font-size: 11px; padding: 5px; justify-content: center; background: #162032;" onclick="setThumbPositionPct(0.48)">⏹️ Giữa Ảnh</button>
-              <button type="button" class="btn btn-outline" id="btnThumbPosBottom" style="font-size: 11px; padding: 5px; justify-content: center; background: #162032;" onclick="setThumbPositionPct(0.78)">⬇️ Cuối Ảnh</button>
+              <button type="button" class="btn btn-outline" id="btnThumbPosTop" style="font-size: 10.5px; padding: 4px; justify-content: center; background: #162032;" onclick="setThumbPositionPct(0.18)">⬆️ Đầu Ảnh</button>
+              <button type="button" class="btn btn-outline" id="btnThumbPosCenter" style="font-size: 10.5px; padding: 4px; justify-content: center; background: #162032;" onclick="setThumbPositionPct(0.48)">⏹️ Giữa Ảnh</button>
+              <button type="button" class="btn btn-outline" id="btnThumbPosBottom" style="font-size: 10.5px; padding: 4px; justify-content: center; background: #162032;" onclick="setThumbPositionPct(0.78)">⬇️ Cuối Ảnh</button>
             </div>
             <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 2px;">
-              <span style="color: var(--text-dim);">Cỡ chữ:</span>
+              <span style="color: var(--text-dim);">Cỡ chữ giật tít:</span>
               <span id="valThumbFontSize" style="color: #38bdf8; font-weight: 700;">22px</span>
             </div>
             <input type="range" id="sliderThumbFontSize" min="14" max="44" step="2" value="22" style="width: 100%; accent-color: #38bdf8;" oninput="updateThumbFontSize(this.value)">
           </div>
 
-          <!-- Save Text To Thumbnail Button -->
-          <button type="button" class="btn btn-success" style="width: 100%; justify-content: center; padding: 9px; font-weight: 700;" onclick="saveEditedThumbnailWithText()">
-            💾 ÁP DỤNG & LƯU CHỮ VÀO THUMBNAIL
+          <!-- Save Thumbnail Button -->
+          <button type="button" class="btn btn-success" style="width: 100%; justify-content: center; padding: 10px; font-weight: 800; font-size: 12px; box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4);" onclick="saveEditedThumbnailWithText()">
+            💾 ÁP DỤNG & LƯU THUMBNAIL HOÀN TẤT
           </button>
         </div>
 
@@ -4583,13 +4726,27 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           if (chkWm) chkWm.checked = Boolean(canvasSettings.watermark_enabled);
           const inpWm = document.getElementById('inputWatermarkText');
           if (inpWm) inpWm.value = canvasSettings.watermark_text || '';
+          const colWm = document.getElementById('inputWatermarkColor');
+          if (colWm) colWm.value = canvasSettings.watermark_color || '#ffffff';
+          const vColWm = document.getElementById('valWatermarkColor');
+          if (vColWm) vColWm.innerText = canvasSettings.watermark_color || '#ffffff';
+          const bgChkWm = document.getElementById('chkWmBgEnabled');
+          if (bgChkWm) bgChkWm.checked = Boolean(canvasSettings.watermark_bg_enabled);
+
           if (canvasSettings.watermark_position === 'bottom-right') {
-            const rBot = document.getElementById('radioWmBottomRight');
-            if (rBot) rBot.checked = true;
-          } else {
-            const rTop = document.getElementById('radioWmTopRight');
-            if (rTop) rTop.checked = true;
+            const r = document.getElementById('radioWmBottomRight');
+            if (r) r.checked = true;
+          } else if (canvasSettings.watermark_position === 'top-left') {
+            const r = document.getElementById('radioWmTopLeft');
+            if (r) r.checked = true;
+          } else if (canvasSettings.watermark_position === 'bottom-left') {
+            const r = document.getElementById('radioWmBottomLeft');
+            if (r) r.checked = true;
+          } else if (canvasSettings.watermark_position === 'top-right') {
+            const r = document.getElementById('radioWmTopRight');
+            if (r) r.checked = true;
           }
+
           const sWmOp = document.getElementById('sliderWatermarkOpacity');
           const vWmOp = document.getElementById('valWatermarkOpacity');
           const wmOpVal = Math.round((canvasSettings.watermark_opacity !== undefined ? canvasSettings.watermark_opacity : 0.45) * 100);
@@ -5078,6 +5235,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       initTimelineDragEvents();
       loadWorkflowData();
       initCapcutInteractiveEngine();
+      initWatermarkInteractions();
       syncSubtitleControlsFromSettings();
     });
 
@@ -6046,36 +6204,163 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
     }
 
     // ==========================================
-    // WATERMARK FUNCTIONS (BATCH & REALTIME)
+    // WATERMARK FUNCTIONS (BATCH & REALTIME & INTERACTIVE)
     // ==========================================
+    let isEditingWmText = false;
+    let isWmDragging = false;
+    let isPotentialWmDrag = false;
+    let wmDragStartX = 0;
+    let wmDragStartY = 0;
+    let startWmPosX = 0.85;
+    let startWmPosY = 0.05;
+
     function updateWatermarkVisual() {
       const wmOverlay = document.getElementById('canvasWatermarkOverlay');
-      if (!wmOverlay) return;
-      const text = (canvasSettings.watermark_text || '').trim();
+      const box = document.getElementById('watermarkInteractiveBox');
+      const textSpan = document.getElementById('canvasWatermarkText');
+      if (!wmOverlay || !box || !textSpan) return;
+
+      const text = (canvasSettings.watermark_text !== undefined ? canvasSettings.watermark_text : '').trim();
       if (!canvasSettings.watermark_enabled || !text) {
         wmOverlay.style.display = 'none';
         return;
       }
       wmOverlay.style.display = 'block';
-      wmOverlay.innerText = text;
-
-      const isTop = (canvasSettings.watermark_position !== 'bottom-right');
-      const mx = (canvasSettings.watermark_margin_x !== undefined ? canvasSettings.watermark_margin_x : 25) + 'px';
-      const my = (canvasSettings.watermark_margin_y !== undefined ? canvasSettings.watermark_margin_y : 25) + 'px';
-
-      wmOverlay.style.right = mx;
-      if (isTop) {
-        wmOverlay.style.top = my;
-        wmOverlay.style.bottom = 'auto';
-      } else {
-        wmOverlay.style.bottom = my;
-        wmOverlay.style.top = 'auto';
+      if (!isEditingWmText) {
+        textSpan.innerText = text;
       }
 
+      // Position logic: 4 corners or custom free drag
+      const pos = (canvasSettings.watermark_position || 'top-right').toLowerCase();
+      const mx = (canvasSettings.watermark_margin_x !== undefined ? canvasSettings.watermark_margin_x : 25);
+      const my = (canvasSettings.watermark_margin_y !== undefined ? canvasSettings.watermark_margin_y : 25);
+
+      if (pos === 'custom') {
+        const px = ((canvasSettings.watermark_pos_x_pct !== undefined ? canvasSettings.watermark_pos_x_pct : 0.85) * 100);
+        const py = ((canvasSettings.watermark_pos_y_pct !== undefined ? canvasSettings.watermark_pos_y_pct : 0.05) * 100);
+        box.style.left = `${px}%`;
+        box.style.top = `${py}%`;
+        box.style.right = 'auto';
+        box.style.bottom = 'auto';
+        box.style.transform = 'translate(-50%, -50%)';
+      } else {
+        box.style.transform = 'none';
+        if (pos === 'bottom-right') {
+          box.style.right = mx + 'px';
+          box.style.bottom = my + 'px';
+          box.style.left = 'auto';
+          box.style.top = 'auto';
+        } else if (pos === 'top-left') {
+          box.style.left = mx + 'px';
+          box.style.top = my + 'px';
+          box.style.right = 'auto';
+          box.style.bottom = 'auto';
+        } else if (pos === 'bottom-left') {
+          box.style.left = mx + 'px';
+          box.style.bottom = my + 'px';
+          box.style.right = 'auto';
+          box.style.bottom = 'auto';
+        } else { // default 'top-right'
+          box.style.right = mx + 'px';
+          box.style.top = my + 'px';
+          box.style.left = 'auto';
+          box.style.bottom = 'auto';
+        }
+      }
+
+      // Opacity, Font Size, Color & Badge Box
       const op = (canvasSettings.watermark_opacity !== undefined) ? canvasSettings.watermark_opacity : 0.45;
-      wmOverlay.style.opacity = op;
-      wmOverlay.style.fontSize = Math.round((canvasSettings.watermark_font_size || 22) * 0.75) + 'px';
-      wmOverlay.style.color = canvasSettings.watermark_color || '#ffffff';
+      const fs = Math.round((canvasSettings.watermark_font_size || 22) * 0.75);
+      const col = canvasSettings.watermark_color || '#ffffff';
+
+      textSpan.style.opacity = op;
+      textSpan.style.fontSize = fs + 'px';
+      textSpan.style.color = col;
+
+      // Badge Background
+      if (canvasSettings.watermark_bg_enabled) {
+        const bgCol = canvasSettings.watermark_bg_color || '#000000';
+        const bgOp = (canvasSettings.watermark_bg_opacity !== undefined) ? canvasSettings.watermark_bg_opacity : 0.40;
+        let r = 0, g = 0, b = 0;
+        if (bgCol.startsWith('#') && bgCol.length === 7) {
+          r = parseInt(bgCol.substring(1, 3), 16) || 0;
+          g = parseInt(bgCol.substring(3, 5), 16) || 0;
+          b = parseInt(bgCol.substring(5, 7), 16) || 0;
+        }
+        box.style.background = `rgba(${r}, ${g}, ${b}, ${bgOp})`;
+        box.style.borderRadius = '6px';
+        box.style.padding = '4px 10px';
+      } else {
+        box.style.background = 'transparent';
+        box.style.padding = '3px 6px';
+      }
+
+      // Quick toolbar sync
+      const qCol = document.getElementById('quickWmColorPicker');
+      if (qCol && col) qCol.value = col.startsWith('#') ? col : '#ffffff';
+      const badgeBtn = document.getElementById('btnToggleWmBadge');
+      if (badgeBtn) {
+        badgeBtn.style.color = canvasSettings.watermark_bg_enabled ? '#38bdf8' : '#f1f5f9';
+      }
+    }
+
+    function startEditingWatermarkText(e) {
+      if (e) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+      const box = document.getElementById('watermarkInteractiveBox');
+      const textSpan = document.getElementById('canvasWatermarkText');
+      if (!box || !textSpan) return;
+
+      isEditingWmText = true;
+      box.classList.add('editing');
+      textSpan.setAttribute('contenteditable', 'true');
+      textSpan.classList.add('editing-active');
+      textSpan.focus();
+
+      const range = document.createRange();
+      range.selectNodeContents(textSpan);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+
+    function stopEditingWatermarkText(save = true) {
+      if (!isEditingWmText) return;
+      const box = document.getElementById('watermarkInteractiveBox');
+      const textSpan = document.getElementById('canvasWatermarkText');
+      if (!box || !textSpan) return;
+
+      isEditingWmText = false;
+      textSpan.setAttribute('contenteditable', 'false');
+      textSpan.classList.remove('editing-active');
+      box.classList.remove('editing');
+
+      if (save) {
+        const newText = textSpan.innerText.trim();
+        canvasSettings.watermark_text = newText;
+        const inp = document.getElementById('inputWatermarkText');
+        if (inp) inp.value = newText;
+        if (!canvasSettings.watermark_enabled && newText) {
+          canvasSettings.watermark_enabled = true;
+          const chk = document.getElementById('chkWatermarkEnabled');
+          if (chk) chk.checked = true;
+        }
+        updateWatermarkVisual();
+      } else {
+        updateWatermarkVisual();
+      }
+    }
+
+    function handleWmTextKeyDown(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        stopEditingWatermarkText(true);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        stopEditingWatermarkText(false);
+      }
     }
 
     function updateWatermarkEnable(enabled) {
@@ -6085,6 +6370,10 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
     function updateWatermarkText(txt) {
       canvasSettings.watermark_text = txt;
+      if (!isEditingWmText) {
+        const textSpan = document.getElementById('canvasWatermarkText');
+        if (textSpan) textSpan.innerText = txt || '';
+      }
       updateWatermarkVisual();
     }
 
@@ -6099,6 +6388,90 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       }
       updateWatermarkVisual();
       showToast(`💧 Đã chọn mẫu watermark: "${txt}"`);
+    }
+
+    function updateWatermarkColor(col) {
+      canvasSettings.watermark_color = col;
+      const inp = document.getElementById('inputWatermarkColor');
+      if (inp) inp.value = col;
+      const lbl = document.getElementById('valWatermarkColor');
+      if (lbl) lbl.innerText = col;
+      updateWatermarkVisual();
+    }
+
+    function updateWatermarkBgEnable(enabled) {
+      canvasSettings.watermark_bg_enabled = Boolean(enabled);
+      const chk = document.getElementById('chkWmBgEnabled');
+      if (chk) chk.checked = canvasSettings.watermark_bg_enabled;
+      updateWatermarkVisual();
+    }
+
+    function toggleWatermarkBadge(e) {
+      if (e) e.stopPropagation();
+      updateWatermarkBgEnable(!canvasSettings.watermark_bg_enabled);
+      showToast(canvasSettings.watermark_bg_enabled ? '🏷️ Đã bật khung nền huy hiệu mờ' : '⚪ Đã tắt khung nền huy hiệu');
+    }
+
+    function quickStepWmFontSize(delta) {
+      const cur = canvasSettings.watermark_font_size || 22;
+      const next = Math.max(12, Math.min(48, cur + delta));
+      canvasSettings.watermark_font_size = next;
+      const slider = document.getElementById('sliderWatermarkFontSize');
+      if (slider) slider.value = next;
+      const lbl = document.getElementById('valWatermarkFontSize');
+      if (lbl) lbl.innerText = `${next}px`;
+      updateWatermarkVisual();
+    }
+
+    function cycleWatermarkPosition(e) {
+      if (e) e.stopPropagation();
+      const positions = ['top-right', 'bottom-right', 'bottom-left', 'top-left'];
+      const cur = (canvasSettings.watermark_position || 'top-right').toLowerCase();
+      const idx = positions.indexOf(cur);
+      const next = positions[(idx + 1) % positions.length];
+      updateWatermarkPosition(next);
+      const radio = document.getElementById(`radioWm${next.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join('')}`);
+      if (radio) radio.checked = true;
+      showToast(`📍 Đã chuyển sang vị trí: ${next}`);
+    }
+
+    function applyWatermarkStylePreset(preset) {
+      if (preset === 'white_shadow') {
+        canvasSettings.watermark_color = '#ffffff';
+        canvasSettings.watermark_bg_enabled = false;
+        canvasSettings.watermark_opacity = 0.45;
+      } else if (preset === 'badge_black') {
+        canvasSettings.watermark_color = '#ffffff';
+        canvasSettings.watermark_bg_enabled = true;
+        canvasSettings.watermark_bg_color = '#000000';
+        canvasSettings.watermark_bg_opacity = 0.45;
+        canvasSettings.watermark_opacity = 0.85;
+      } else if (preset === 'yellow_shadow') {
+        canvasSettings.watermark_color = '#facc15';
+        canvasSettings.watermark_bg_enabled = false;
+        canvasSettings.watermark_opacity = 0.70;
+      } else if (preset === 'neon_cyan') {
+        canvasSettings.watermark_color = '#38bdf8';
+        canvasSettings.watermark_bg_enabled = false;
+        canvasSettings.watermark_opacity = 0.80;
+      }
+
+      // Sync UI sliders & pickers
+      const colInp = document.getElementById('inputWatermarkColor');
+      if (colInp) colInp.value = canvasSettings.watermark_color;
+      const colLbl = document.getElementById('valWatermarkColor');
+      if (colLbl) colLbl.innerText = canvasSettings.watermark_color;
+
+      const bgChk = document.getElementById('chkWmBgEnabled');
+      if (bgChk) bgChk.checked = canvasSettings.watermark_bg_enabled;
+
+      const opSlider = document.getElementById('sliderWatermarkOpacity');
+      if (opSlider) opSlider.value = Math.round(canvasSettings.watermark_opacity * 100);
+      const opLbl = document.getElementById('valWatermarkOpacity');
+      if (opLbl) opLbl.innerText = `${Math.round(canvasSettings.watermark_opacity * 100)}%`;
+
+      updateWatermarkVisual();
+      showToast('🎨 Đã áp dụng phong cách watermark!');
     }
 
     function updateWatermarkPosition(pos) {
@@ -6138,91 +6511,477 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       updateWatermarkVisual();
     }
 
+    function initWatermarkInteractions() {
+      const box = document.getElementById('watermarkInteractiveBox');
+      const overlay = document.getElementById('canvasWatermarkOverlay');
+      if (!box || !overlay) return;
+
+      box.addEventListener('mousedown', (e) => {
+        if (e.target.closest('.watermark-mini-toolbar') || isEditingWmText) return;
+        isPotentialWmDrag = true;
+        isWmDragging = false;
+        wmDragStartX = e.clientX;
+        wmDragStartY = e.clientY;
+
+        const overlayRect = overlay.getBoundingClientRect();
+        const boxRect = box.getBoundingClientRect();
+        startWmPosX = (boxRect.left + boxRect.width / 2 - overlayRect.left) / overlayRect.width;
+        startWmPosY = (boxRect.top + boxRect.height / 2 - overlayRect.top) / overlayRect.height;
+        e.preventDefault();
+      });
+
+      window.addEventListener('mousemove', (e) => {
+        if (!isWmDragging && !isPotentialWmDrag) return;
+        const overlayRect = overlay.getBoundingClientRect();
+        if (!overlayRect.width || !overlayRect.height) return;
+
+        if (isPotentialWmDrag && !isWmDragging) {
+          const dist = Math.hypot(e.clientX - wmDragStartX, e.clientY - wmDragStartY);
+          if (dist > 4) {
+            isWmDragging = true;
+            box.classList.add('dragging');
+          }
+        }
+
+        if (isWmDragging) {
+          const dx = (e.clientX - wmDragStartX) / overlayRect.width;
+          const dy = (e.clientY - wmDragStartY) / overlayRect.height;
+          const newX = Math.max(0.04, Math.min(0.96, startWmPosX + dx));
+          const newY = Math.max(0.04, Math.min(0.96, startWmPosY + dy));
+          canvasSettings.watermark_position = 'custom';
+          canvasSettings.watermark_pos_x_pct = newX;
+          canvasSettings.watermark_pos_y_pct = newY;
+          updateWatermarkVisual();
+        }
+      });
+
+      window.addEventListener('mouseup', () => {
+        isPotentialWmDrag = false;
+        if (isWmDragging) {
+          isWmDragging = false;
+          box.classList.remove('dragging');
+        }
+      });
+    }
+
     async function saveWatermarkSettings() {
       await saveSettingsForBatch(false);
       showToast('💧 Đã lưu cài đặt Watermark thành công! Sẽ tự động gắn vào toàn bộ video hàng loạt.');
     }
 
-    // ==========================================
-    // THUMBNAIL MANAGEMENT FUNCTIONS (PER VIDEO)
-    // ==========================================
-    // ==========================================
-    // THUMBNAIL MANAGEMENT & TEXT EDIT & PREPEND
-    // ==========================================
-    let thumbTextState = {
+    // ========================================================
+    // THUMBNAIL MANAGEMENT & 12 BACKGROUND PRESETS & HD BANNER
+    // ========================================================
+    let thumbEditState = {
       text: '',
       pos_y_pct: 0.18,
       font_size: 22,
-      font_color: '#facc15',
-      bg_color: 'rgba(0, 0, 0, 0.85)',
+      font_color: '#000000',
+      bg_color: '#facc15',
       has_box: true,
       stroke_color: '#000000',
-      stroke_width: 3
+      stroke_width: 0,
+      bg_image_id: '',
+      bg_image_url: '',
+      framing_mode: 'fit_inside', // 'fit_inside', 'cover', 'bg_only'
+      banner_style: 'full_yellow', // 'full_yellow', 'full_red', 'full_black_gold', 'neon_blue', 'box_black', 'none'
+      border_style: 'none' // 'none', 'gold_double', 'red_drama', 'neon_glow', 'cinema_box'
     };
+    // Alias for legacy calls
+    let thumbTextState = thumbEditState;
+
+    async function renderThumbBgSelector() {
+      const grid = document.getElementById('thumbBgScrollGrid');
+      if (!grid) return;
+
+      // Nạp danh sách backgrounds nếu chưa có
+      let bgs = (availableImageBgs && availableImageBgs.length) ? availableImageBgs : [];
+      if (!bgs.length) {
+        try {
+          const res = await fetch('/api/workflow/image-backgrounds');
+          if (res.ok) {
+            const data = await res.json();
+            if (data.image_backgrounds && data.image_backgrounds.length) {
+              bgs = data.image_backgrounds;
+              availableImageBgs = bgs;
+            }
+          }
+        } catch (e) {
+          console.error('Lỗi nạp background cho thumbnail:', e);
+        }
+      }
+
+      grid.innerHTML = '';
+
+      // Thẻ 0: Ảnh gốc (Không dùng khung nền)
+      const noneCard = document.createElement('div');
+      noneCard.className = 'thumb-bg-card' + (!thumbEditState.bg_image_url ? ' active' : '');
+      noneCard.style.background = '#141d28';
+      noneCard.onclick = () => clearThumbBackground();
+      noneCard.innerHTML = `
+        <div class="thumb-bg-card-overlay"></div>
+        <div class="thumb-bg-card-content">
+          <span class="thumb-bg-card-icon">🚫</span>
+          <span class="thumb-bg-card-title">Ảnh Gốc (Không nền)</span>
+        </div>
+        <div class="thumb-bg-card-badge">${!thumbEditState.bg_image_url ? 'Đang chọn' : ''}</div>
+      `;
+      grid.appendChild(noneCard);
+
+      // 12 Thẻ Khung Nền HD
+      bgs.forEach(b => {
+        const isSel = (thumbEditState.bg_image_id === b.filename || thumbEditState.bg_image_id === b.id);
+        const card = document.createElement('div');
+        card.className = 'thumb-bg-card' + (isSel ? ' active' : '');
+        card.dataset.file = b.filename;
+        card.dataset.id = b.id;
+
+        const streamUrl = b.url || `/api/workflow/stream-file?path=${encodeURIComponent(b.path || '')}`;
+        card.style.backgroundImage = `url('${streamUrl}')`;
+
+        card.onclick = () => selectThumbBg(b.filename, streamUrl, b.id);
+        card.innerHTML = `
+          <div class="thumb-bg-card-overlay"></div>
+          <div class="thumb-bg-card-content">
+            <span class="thumb-bg-card-icon">${b.icon || '🖼️'}</span>
+            <span class="thumb-bg-card-title" title="${b.title}">${b.title.replace(/^[^\s]+\s*/, '')}</span>
+          </div>
+          <div class="thumb-bg-card-badge">${isSel ? 'Đang chọn' : ''}</div>
+        `;
+        grid.appendChild(card);
+      });
+    }
+
+    function selectThumbBg(filename, streamUrl, bgId) {
+      thumbEditState.bg_image_id = filename || bgId;
+      thumbEditState.bg_image_url = streamUrl;
+
+      // Update card active classes
+      document.querySelectorAll('#thumbBgScrollGrid .thumb-bg-card').forEach(c => {
+        const match = (c.dataset.file === filename || c.dataset.id === bgId);
+        c.classList.toggle('active', match);
+        const badge = c.querySelector('.thumb-bg-card-badge');
+        if (badge) badge.innerText = match ? 'Đang chọn' : '';
+      });
+
+      updateThumbTextVisual();
+      showToast(`🎨 Đã chọn khung nền: ${filename.replace('.jpg', '')}`);
+    }
+
+    function clearThumbBackground() {
+      thumbEditState.bg_image_id = '';
+      thumbEditState.bg_image_url = '';
+
+      document.querySelectorAll('#thumbBgScrollGrid .thumb-bg-card').forEach((c, idx) => {
+        c.classList.toggle('active', idx === 0);
+        const badge = c.querySelector('.thumb-bg-card-badge');
+        if (badge) badge.innerText = (idx === 0) ? 'Đang chọn' : '';
+      });
+
+      updateThumbTextVisual();
+      showToast('⚪ Đã chuyển về chế độ ảnh gốc (không dùng phông nền)');
+    }
+
+    function setThumbFramingMode(mode) {
+      thumbEditState.framing_mode = mode;
+      const bFit = document.getElementById('btnThumbFramingFit');
+      const bCover = document.getElementById('btnThumbFramingCover');
+      const bOnly = document.getElementById('btnThumbFramingOnly');
+
+      [bFit, bCover, bOnly].forEach(b => {
+        if (!b) return;
+        b.style.background = 'transparent';
+        b.style.borderColor = 'rgba(255,255,255,0.2)';
+        b.style.color = '#cbd5e1';
+      });
+
+      const activeBtn = (mode === 'fit_inside') ? bFit : (mode === 'cover' ? bCover : bOnly);
+      if (activeBtn) {
+        activeBtn.style.background = 'rgba(56, 189, 248, 0.15)';
+        activeBtn.style.borderColor = '#38bdf8';
+        activeBtn.style.color = '#38bdf8';
+      }
+
+      updateThumbTextVisual();
+      if (mode === 'fit_inside') showToast('🖼️ Đã chọn: Lồng video ở giữa chuẩn Douyin (để lộ nền trên dưới)');
+      else if (mode === 'cover') showToast('🖥️ Đã chọn: Ảnh video tràn toàn khung');
+      else showToast('🎨 Đã chọn: Chỉ dùng khung nền làm bìa');
+    }
+
+    function setThumbBannerStyle(style) {
+      thumbEditState.banner_style = style;
+
+      // Update button highlights
+      const mapBtns = {
+        'full_yellow': 'btnBannerYellow',
+        'full_red': 'btnBannerRed',
+        'full_black_gold': 'btnBannerBlackGold',
+        'neon_blue': 'btnBannerNeon',
+        'box_black': 'btnBannerBox',
+        'none': 'btnBannerNone'
+      };
+
+      Object.entries(mapBtns).forEach(([k, id]) => {
+        const btn = document.getElementById(id);
+        if (!btn) return;
+        btn.classList.toggle('active', k === style);
+        if (k === style) {
+          btn.style.boxShadow = '0 0 10px rgba(56, 189, 248, 0.4)';
+        } else {
+          btn.style.boxShadow = 'none';
+        }
+      });
+
+      // Update color settings
+      if (style === 'full_yellow') {
+        thumbEditState.font_color = '#000000';
+        thumbEditState.bg_color = '#facc15';
+        thumbEditState.has_box = true;
+        thumbEditState.stroke_width = 0;
+      } else if (style === 'full_red') {
+        thumbEditState.font_color = '#ffffff';
+        thumbEditState.bg_color = '#dc2626';
+        thumbEditState.has_box = true;
+        thumbEditState.stroke_color = '#000000';
+        thumbEditState.stroke_width = 2;
+      } else if (style === 'full_black_gold') {
+        thumbEditState.font_color = '#fde047';
+        thumbEditState.bg_color = 'rgba(9, 9, 11, 0.94)';
+        thumbEditState.has_box = true;
+        thumbEditState.stroke_color = '#000000';
+        thumbEditState.stroke_width = 2;
+      } else if (style === 'neon_blue') {
+        thumbEditState.font_color = '#ffffff';
+        thumbEditState.bg_color = 'rgba(15, 23, 42, 0.9)';
+        thumbEditState.has_box = true;
+        thumbEditState.stroke_color = '#06b6d4';
+        thumbEditState.stroke_width = 2;
+      } else if (style === 'box_black') {
+        thumbEditState.font_color = '#facc15';
+        thumbEditState.bg_color = 'rgba(0, 0, 0, 0.85)';
+        thumbEditState.has_box = true;
+        thumbEditState.stroke_color = '#000000';
+        thumbEditState.stroke_width = 2;
+      } else if (style === 'none') {
+        thumbEditState.font_color = '#ffffff';
+        thumbEditState.bg_color = 'transparent';
+        thumbEditState.has_box = false;
+        thumbEditState.stroke_color = '#000000';
+        thumbEditState.stroke_width = 3;
+      }
+
+      updateThumbTextVisual();
+      showToast('🏷️ Đã cập nhật kiểu dải banner giật tít!');
+    }
+
+    function setThumbBorderStyle(style) {
+      thumbEditState.border_style = style;
+
+      const mapBtns = {
+        'none': 'btnBorderNone',
+        'gold_double': 'btnBorderGold',
+        'red_drama': 'btnBorderRed',
+        'neon_glow': 'btnBorderNeon',
+        'cinema_box': 'btnBorderCinema'
+      };
+
+      Object.entries(mapBtns).forEach(([k, id]) => {
+        const btn = document.getElementById(id);
+        if (!btn) return;
+        const isActive = (k === style);
+        btn.style.borderColor = isActive ? '#38bdf8' : 'rgba(255,255,255,0.2)';
+        btn.style.color = isActive ? '#38bdf8' : '#cbd5e1';
+      });
+
+      updateThumbTextVisual();
+      showToast('✨ Đã cập nhật hiệu ứng viền khung thumbnail!');
+    }
 
     function updateThumbTextVisual() {
       const inp = document.getElementById('inputThumbText');
-      if (inp) thumbTextState.text = inp.value;
+      if (inp) thumbEditState.text = inp.value;
+
+      // 1. LAYER NỀN (BACKGROUND TEMPLATE)
+      const bgImgEl = document.getElementById('thumbBgPreviewImg');
+      if (bgImgEl) {
+        if (thumbEditState.bg_image_url) {
+          bgImgEl.src = thumbEditState.bg_image_url;
+          bgImgEl.style.display = 'block';
+        } else {
+          bgImgEl.style.display = 'none';
+        }
+      }
+
+      // 2. LAYER ẢNH VIDEO CHÍNH
+      const mainImgEl = document.getElementById('thumbMainPreviewImg');
+      if (mainImgEl) {
+        if (thumbEditState.framing_mode === 'bg_only') {
+          mainImgEl.style.display = 'none';
+        } else {
+          // Chỉ hiển thị nếu đã có ảnh nguồn
+          if (mainImgEl.getAttribute('src')) {
+            mainImgEl.style.display = 'block';
+            if (thumbEditState.bg_image_url && thumbEditState.framing_mode === 'fit_inside') {
+              // Lồng video ở giữa, để lộ nền trên dưới
+              mainImgEl.style.maxWidth = '88%';
+              mainImgEl.style.maxHeight = '88%';
+              mainImgEl.style.borderRadius = '6px';
+              mainImgEl.style.boxShadow = '0 6px 20px rgba(0, 0, 0, 0.65)';
+            } else {
+              // Phủ toàn khung
+              mainImgEl.style.maxWidth = '100%';
+              mainImgEl.style.maxHeight = '100%';
+              mainImgEl.style.borderRadius = '0';
+              mainImgEl.style.boxShadow = 'none';
+            }
+          }
+        }
+      }
+
+      // 3. LAYER VIỀN KHUNG
+      const borderEl = document.getElementById('thumbBorderOverlay');
+      if (borderEl) {
+        const bStyle = thumbEditState.border_style || 'none';
+        if (bStyle === 'gold_double') {
+          borderEl.style.display = 'block';
+          borderEl.style.border = '2px solid #eab308';
+          borderEl.style.outline = '1px solid rgba(234, 179, 8, 0.6)';
+          borderEl.style.outlineOffset = '-4px';
+          borderEl.style.boxShadow = 'none';
+        } else if (bStyle === 'red_drama') {
+          borderEl.style.display = 'block';
+          borderEl.style.border = '3px solid #ef4444';
+          borderEl.style.outline = 'none';
+          borderEl.style.boxShadow = 'none';
+        } else if (bStyle === 'neon_glow') {
+          borderEl.style.display = 'block';
+          borderEl.style.border = '2px solid #22d3ee';
+          borderEl.style.outline = 'none';
+          borderEl.style.boxShadow = 'inset 0 0 8px #06b6d4, 0 0 8px #06b6d4';
+        } else if (bStyle === 'cinema_box') {
+          borderEl.style.display = 'block';
+          borderEl.style.border = 'none';
+          borderEl.style.borderTop = '14px solid #000000';
+          borderEl.style.borderBottom = '14px solid #000000';
+          borderEl.style.outline = 'none';
+          borderEl.style.boxShadow = 'none';
+        } else {
+          borderEl.style.display = 'none';
+        }
+      }
+
+      // 4. LAYER BANNER & CHỮ GIẬT TÍT
       const overlay = document.getElementById('thumbLiveTextOverlay');
+      const bannerWrap = document.getElementById('thumbLiveBannerWrap');
       const span = document.getElementById('thumbLiveTextSpan');
       if (!overlay || !span) return;
 
-      if (!thumbTextState.text.trim()) {
+      const txt = (thumbEditState.text || '').trim();
+      if (!txt) {
         overlay.style.display = 'none';
         return;
       }
+
       overlay.style.display = 'block';
-      overlay.style.top = Math.round(thumbTextState.pos_y_pct * 100) + '%';
-      span.innerText = thumbTextState.text;
-      span.style.color = thumbTextState.font_color;
-      span.style.background = thumbTextState.has_box ? thumbTextState.bg_color : 'transparent';
-      span.style.fontSize = thumbTextState.font_size + 'px';
-      if (thumbTextState.stroke_width > 0) {
-        span.style.webkitTextStroke = `${thumbTextState.stroke_width * 0.7}px ${thumbTextState.stroke_color}`;
-      } else {
+      overlay.style.top = Math.round(thumbEditState.pos_y_pct * 100) + '%';
+      span.innerText = txt;
+      span.style.fontSize = `${thumbEditState.font_size}px`;
+      span.style.color = thumbEditState.font_color;
+
+      const bStyle = thumbEditState.banner_style || 'full_yellow';
+      if (bStyle === 'full_yellow') {
+        if (bannerWrap) {
+          bannerWrap.style.background = '#facc15';
+          bannerWrap.style.boxShadow = '0 2px 10px rgba(0,0,0,0.5)';
+          bannerWrap.style.borderTop = '2px solid #000';
+          bannerWrap.style.borderBottom = '2px solid #000';
+        }
+        span.style.background = 'transparent';
+        span.style.color = '#000000';
         span.style.webkitTextStroke = 'none';
+        span.style.textShadow = 'none';
+        span.style.boxShadow = 'none';
+      } else if (bStyle === 'full_red') {
+        if (bannerWrap) {
+          bannerWrap.style.background = '#dc2626';
+          bannerWrap.style.boxShadow = '0 2px 10px rgba(0,0,0,0.5)';
+          bannerWrap.style.borderTop = '2px solid #ffffff';
+          bannerWrap.style.borderBottom = '2px solid #ffffff';
+        }
+        span.style.background = 'transparent';
+        span.style.color = '#ffffff';
+        span.style.webkitTextStroke = '1px #000000';
+        span.style.textShadow = '1px 1px 2px rgba(0,0,0,0.8)';
+        span.style.boxShadow = 'none';
+      } else if (bStyle === 'full_black_gold') {
+        if (bannerWrap) {
+          bannerWrap.style.background = 'rgba(9, 9, 11, 0.94)';
+          bannerWrap.style.boxShadow = '0 2px 12px rgba(0,0,0,0.7)';
+          bannerWrap.style.borderTop = '2px solid #eab308';
+          bannerWrap.style.borderBottom = '2px solid #eab308';
+        }
+        span.style.background = 'transparent';
+        span.style.color = '#fde047';
+        span.style.webkitTextStroke = '0.5px #000';
+        span.style.textShadow = '0 1px 3px rgba(0,0,0,0.9)';
+        span.style.boxShadow = 'none';
+      } else if (bStyle === 'neon_blue') {
+        if (bannerWrap) {
+          bannerWrap.style.background = 'linear-gradient(90deg, #0f172a, #1e1b4b, #0f172a)';
+          bannerWrap.style.boxShadow = '0 0 12px rgba(6, 182, 212, 0.5)';
+          bannerWrap.style.borderTop = '2px solid #38bdf8';
+          bannerWrap.style.borderBottom = '2px solid #38bdf8';
+        }
+        span.style.background = 'transparent';
+        span.style.color = '#38bdf8';
+        span.style.webkitTextStroke = '0.5px #000';
+        span.style.textShadow = '0 0 6px #06b6d4';
+        span.style.boxShadow = 'none';
+      } else if (bStyle === 'box_black') {
+        if (bannerWrap) {
+          bannerWrap.style.background = 'transparent';
+          bannerWrap.style.boxShadow = 'none';
+          bannerWrap.style.borderTop = 'none';
+          bannerWrap.style.borderBottom = 'none';
+        }
+        span.style.background = 'rgba(0, 0, 0, 0.85)';
+        span.style.color = '#facc15';
+        span.style.webkitTextStroke = '1px #000';
+        span.style.textShadow = '1px 1px 2px rgba(0,0,0,0.9)';
+        span.style.boxShadow = '0 4px 12px rgba(0,0,0,0.5)';
+      } else {
+        if (bannerWrap) {
+          bannerWrap.style.background = 'transparent';
+          bannerWrap.style.boxShadow = 'none';
+          bannerWrap.style.borderTop = 'none';
+          bannerWrap.style.borderBottom = 'none';
+        }
+        span.style.background = 'transparent';
+        span.style.color = thumbEditState.font_color || '#ffffff';
+        span.style.webkitTextStroke = '1.2px #000000';
+        span.style.textShadow = '2px 2px 4px rgba(0,0,0,0.9)';
+        span.style.boxShadow = 'none';
       }
     }
 
     function setThumbQuickText(txt) {
       const inp = document.getElementById('inputThumbText');
       if (inp) inp.value = txt;
-      thumbTextState.text = txt;
+      thumbEditState.text = txt;
       updateThumbTextVisual();
       showToast(`✏️ Đã chọn chữ mẫu: "${txt}"`);
     }
 
-    function applyThumbTextPreset(preset) {
-      if (preset === 'yellow_black') {
-        thumbTextState.font_color = '#facc15';
-        thumbTextState.bg_color = 'rgba(0, 0, 0, 0.85)';
-        thumbTextState.has_box = true;
-        thumbTextState.stroke_color = '#000000';
-        thumbTextState.stroke_width = 3;
-      } else if (preset === 'white_red') {
-        thumbTextState.font_color = '#ffffff';
-        thumbTextState.bg_color = 'rgba(220, 38, 38, 0.92)';
-        thumbTextState.has_box = true;
-        thumbTextState.stroke_color = '#000000';
-        thumbTextState.stroke_width = 2;
-      } else if (preset === 'white_black') {
-        thumbTextState.font_color = '#ffffff';
-        thumbTextState.bg_color = 'rgba(15, 23, 42, 0.88)';
-        thumbTextState.has_box = true;
-        thumbTextState.stroke_color = '#000000';
-        thumbTextState.stroke_width = 2;
-      } else if (preset === 'emerald_neon') {
-        thumbTextState.font_color = '#34d399';
-        thumbTextState.bg_color = 'rgba(6, 78, 59, 0.9)';
-        thumbTextState.has_box = true;
-        thumbTextState.stroke_color = '#000000';
-        thumbTextState.stroke_width = 2;
-      }
+    function clearThumbText() {
+      const inp = document.getElementById('inputThumbText');
+      if (inp) inp.value = '';
+      thumbEditState.text = '';
       updateThumbTextVisual();
+      showToast('🗑️ Đã xóa nội dung chữ trên thumbnail');
     }
 
     function setThumbPositionPct(pct) {
-      thumbTextState.pos_y_pct = pct;
+      thumbEditState.pos_y_pct = pct;
       updateThumbTextVisual();
       const bTop = document.getElementById('btnThumbPosTop');
       const bCenter = document.getElementById('btnThumbPosCenter');
@@ -6235,7 +6994,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
     function updateThumbFontSize(val) {
       const sz = parseInt(val, 10);
-      thumbTextState.font_size = sz;
+      thumbEditState.font_size = sz;
       const lbl = document.getElementById('valThumbFontSize');
       if (lbl) lbl.innerText = `${sz}px`;
       updateThumbTextVisual();
@@ -6286,7 +7045,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       if (thumbUrl && imgEl) {
         const cacheBuster = thumbUrl.includes('?') ? `&t=${Date.now()}` : `?t=${Date.now()}`;
         imgEl.src = `${thumbUrl}${cacheBuster}`;
-        imgEl.style.display = 'block';
+        imgEl.style.display = (thumbEditState.framing_mode === 'bg_only') ? 'none' : 'block';
         if (placeholder) placeholder.style.display = 'none';
         imgEl.onerror = () => {
           imgEl.style.display = 'none';
@@ -6296,6 +7055,8 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         if (imgEl) imgEl.style.display = 'none';
         if (placeholder) placeholder.style.display = 'flex';
       }
+
+      renderThumbBgSelector();
       updateThumbTextVisual();
     }
 
@@ -6383,43 +7144,226 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         return;
       }
       const img = document.getElementById('thumbMainPreviewImg');
-      if (!img || !img.src) {
-        showToast('⚠️ Chưa có ảnh thumbnail để chèn chữ! Hãy bấm "Bắt Khung Hình" trước.');
+      if (!img || (!img.src && thumbEditState.framing_mode !== 'bg_only')) {
+        showToast('⚠️ Chưa có ảnh thumbnail! Hãy bấm "Bắt Khung Hình Này" trước.');
         return;
       }
 
-      showToast('⏳ Đang kết xuất ảnh thumbnail đã chèn chữ...');
+      showToast('⏳ Đang kết xuất ảnh thumbnail chất lượng cao 1080x1920 HD...');
 
       try {
         const offCanvas = document.createElement('canvas');
-        const nw = img.naturalWidth || 720;
-        const nh = img.naturalHeight || 1280;
-        offCanvas.width = nw;
-        offCanvas.height = nh;
+        const TARGET_W = 1080;
+        const TARGET_H = 1920;
+        offCanvas.width = TARGET_W;
+        offCanvas.height = TARGET_H;
         const ctx = offCanvas.getContext('2d');
 
-        // Draw base image
-        ctx.drawImage(img, 0, 0, nw, nh);
+        // 1. VẼ NỀN (NẾU CÓ CHỌN KHUNG NỀN)
+        if (thumbEditState.bg_image_url) {
+          const bgImg = new Image();
+          bgImg.crossOrigin = 'anonymous';
+          await new Promise((resolve) => {
+            bgImg.onload = resolve;
+            bgImg.onerror = resolve;
+            bgImg.src = thumbEditState.bg_image_url;
+          });
+          if (bgImg.complete && bgImg.naturalWidth > 0) {
+            ctx.drawImage(bgImg, 0, 0, TARGET_W, TARGET_H);
+          } else {
+            const grad = ctx.createLinearGradient(0, 0, 0, TARGET_H);
+            grad.addColorStop(0, '#0f172a');
+            grad.addColorStop(1, '#020617');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, TARGET_W, TARGET_H);
+          }
+        } else {
+          ctx.fillStyle = '#0a0f18';
+          ctx.fillRect(0, 0, TARGET_W, TARGET_H);
+        }
 
-        // Draw text if any
-        const text = (thumbTextState.text || '').trim();
+        // 2. VẼ ẢNH VIDEO CHÍNH (NẾU KHÔNG PHẢI CHẾ ĐỘ CHỈ DÙNG ẢNH NỀN)
+        if (thumbEditState.framing_mode !== 'bg_only' && img && img.src && img.complete) {
+          const nw = img.naturalWidth || TARGET_W;
+          const nh = img.naturalHeight || TARGET_H;
+          const aspect = nw / nh;
+
+          let drawW, drawH, drawX, drawY;
+
+          if (thumbEditState.bg_image_url && thumbEditState.framing_mode === 'fit_inside') {
+            // Lồng ảnh ở giữa: Chiều ngang chiếm 88% hoặc vừa khít, có bo góc và đổ bóng
+            const targetScale = 0.88;
+            drawW = Math.round(TARGET_W * targetScale);
+            drawH = Math.round(drawW / aspect);
+            if (drawH > TARGET_H * 0.88) {
+              drawH = Math.round(TARGET_H * 0.88);
+              drawW = Math.round(drawH * aspect);
+            }
+            drawX = Math.round((TARGET_W - drawW) / 2);
+            drawY = Math.round((TARGET_H - drawH) / 2);
+
+            // Vẽ đổ bóng mềm phía sau ảnh video
+            ctx.save();
+            ctx.shadowColor = 'rgba(0, 0, 0, 0.7)';
+            ctx.shadowBlur = 36;
+            ctx.shadowOffsetX = 0;
+            ctx.shadowOffsetY = 14;
+
+            const cornerR = 24;
+            ctx.beginPath();
+            if (ctx.roundRect) {
+              ctx.roundRect(drawX, drawY, drawW, drawH, cornerR);
+            } else {
+              ctx.rect(drawX, drawY, drawW, drawH);
+            }
+            ctx.fillStyle = '#000000';
+            ctx.fill();
+            ctx.restore();
+
+            // Clip và vẽ ảnh
+            ctx.save();
+            ctx.beginPath();
+            if (ctx.roundRect) {
+              ctx.roundRect(drawX, drawY, drawW, drawH, cornerR);
+            } else {
+              ctx.rect(drawX, drawY, drawW, drawH);
+            }
+            ctx.clip();
+            ctx.drawImage(img, drawX, drawY, drawW, drawH);
+            ctx.restore();
+
+            // Viền mỏng xung quanh video lồng
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            if (ctx.roundRect) {
+              ctx.roundRect(drawX, drawY, drawW, drawH, cornerR);
+            } else {
+              ctx.rect(drawX, drawY, drawW, drawH);
+            }
+            ctx.stroke();
+            ctx.restore();
+
+          } else {
+            // Toàn màn hình
+            const scale = Math.max(TARGET_W / nw, TARGET_H / nh);
+            drawW = nw * scale;
+            drawH = nh * scale;
+            drawX = (TARGET_W - drawW) / 2;
+            drawY = (TARGET_H - drawH) / 2;
+            ctx.drawImage(img, drawX, drawY, drawW, drawH);
+          }
+        }
+
+        // 3. VẼ VIỀN KHUNG THUMBNAIL (NẾU CÓ)
+        if (thumbEditState.border_style && thumbEditState.border_style !== 'none') {
+          const bStyle = thumbEditState.border_style;
+          const pad = 24;
+          const bW = TARGET_W - pad * 2;
+          const bH = TARGET_H - pad * 2;
+
+          ctx.save();
+          if (bStyle === 'gold_double') {
+            ctx.strokeStyle = '#eab308';
+            ctx.lineWidth = 8;
+            ctx.strokeRect(pad, pad, bW, bH);
+            ctx.strokeStyle = 'rgba(234, 179, 8, 0.55)';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(pad + 16, pad + 16, bW - 32, bH - 32);
+          } else if (bStyle === 'neon_glow') {
+            ctx.shadowColor = '#06b6d4';
+            ctx.shadowBlur = 28;
+            ctx.strokeStyle = '#22d3ee';
+            ctx.lineWidth = 10;
+            ctx.strokeRect(pad, pad, bW, bH);
+          } else if (bStyle === 'red_drama') {
+            ctx.strokeStyle = '#ef4444';
+            ctx.lineWidth = 12;
+            ctx.strokeRect(pad, pad, bW, bH);
+          } else if (bStyle === 'cinema_box') {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
+            ctx.fillRect(0, 0, TARGET_W, 140);
+            ctx.fillRect(0, TARGET_H - 140, TARGET_W, 140);
+            ctx.fillStyle = '#eab308';
+            ctx.fillRect(0, 137, TARGET_W, 4);
+            ctx.fillRect(0, TARGET_H - 141, TARGET_W, 4);
+          }
+          ctx.restore();
+        }
+
+        // 4. VẼ BANNER & CHỮ GIẬT TÍT (NẾU CÓ TEXT)
+        const text = (thumbEditState.text || '').trim();
         if (text) {
           const lines = text.split('\n');
-          const previewWidth = (document.getElementById('thumbPreviewBox') ? document.getElementById('thumbPreviewBox').clientWidth : 240) || 240;
-          const scaleFactor = nw / previewWidth;
-          const canvasFontSize = Math.round(thumbTextState.font_size * scaleFactor * 0.9);
+          const scaleFactor = TARGET_W / 360; 
+          const canvasFontSize = Math.round(thumbEditState.font_size * scaleFactor);
           const lineHeight = Math.round(canvasFontSize * 1.35);
 
-          ctx.font = `bold ${canvasFontSize}px Arial, sans-serif`;
+          ctx.font = `900 ${canvasFontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
 
-          const centerY = nh * thumbTextState.pos_y_pct;
+          const centerY = Math.round(TARGET_H * thumbEditState.pos_y_pct);
           const totalTextHeight = lines.length * lineHeight;
           const startY = centerY - (totalTextHeight / 2) + (lineHeight / 2);
 
-          // Draw background box if enabled
-          if (thumbTextState.has_box) {
+          const bStyle = thumbEditState.banner_style || 'full_yellow';
+
+          // 4A. VẼ BANNER
+          if (bStyle === 'full_yellow') {
+            const bannerH = totalTextHeight + Math.round(canvasFontSize * 0.9);
+            const bannerY = centerY - (bannerH / 2);
+            ctx.save();
+            ctx.shadowColor = 'rgba(0,0,0,0.5)';
+            ctx.shadowBlur = 20;
+            ctx.fillStyle = '#facc15';
+            ctx.fillRect(0, bannerY, TARGET_W, bannerH);
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, bannerY - 3, TARGET_W, 3);
+            ctx.fillRect(0, bannerY + bannerH, TARGET_W, 3);
+            ctx.restore();
+          } else if (bStyle === 'full_red') {
+            const bannerH = totalTextHeight + Math.round(canvasFontSize * 0.9);
+            const bannerY = centerY - (bannerH / 2);
+            ctx.save();
+            ctx.shadowColor = 'rgba(0,0,0,0.5)';
+            ctx.shadowBlur = 20;
+            ctx.fillStyle = '#dc2626';
+            ctx.fillRect(0, bannerY, TARGET_W, bannerH);
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, bannerY - 2, TARGET_W, 2);
+            ctx.fillRect(0, bannerY + bannerH, TARGET_W, 2);
+            ctx.restore();
+          } else if (bStyle === 'full_black_gold') {
+            const bannerH = totalTextHeight + Math.round(canvasFontSize * 0.9);
+            const bannerY = centerY - (bannerH / 2);
+            ctx.save();
+            ctx.shadowColor = 'rgba(0,0,0,0.7)';
+            ctx.shadowBlur = 24;
+            ctx.fillStyle = 'rgba(9, 9, 11, 0.94)';
+            ctx.fillRect(0, bannerY, TARGET_W, bannerH);
+            ctx.fillStyle = '#eab308';
+            ctx.fillRect(0, bannerY - 3, TARGET_W, 3);
+            ctx.fillRect(0, bannerY + bannerH, TARGET_W, 3);
+            ctx.restore();
+          } else if (bStyle === 'neon_blue') {
+            const bannerH = totalTextHeight + Math.round(canvasFontSize * 0.9);
+            const bannerY = centerY - (bannerH / 2);
+            ctx.save();
+            ctx.shadowColor = '#06b6d4';
+            ctx.shadowBlur = 30;
+            const nGrad = ctx.createLinearGradient(0, bannerY, TARGET_W, bannerY);
+            nGrad.addColorStop(0, '#0f172a');
+            nGrad.addColorStop(0.5, '#1e1b4b');
+            nGrad.addColorStop(1, '#0f172a');
+            ctx.fillStyle = nGrad;
+            ctx.fillRect(0, bannerY, TARGET_W, bannerH);
+            ctx.fillStyle = '#38bdf8';
+            ctx.fillRect(0, bannerY - 3, TARGET_W, 3);
+            ctx.fillRect(0, bannerY + bannerH, TARGET_W, 3);
+            ctx.restore();
+          } else if (bStyle === 'box_black' || thumbEditState.has_box) {
             let maxLineWidth = 0;
             lines.forEach(l => {
               const w = ctx.measureText(l).width;
@@ -6428,13 +7372,16 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
             const padX = Math.round(canvasFontSize * 0.7);
             const padY = Math.round(canvasFontSize * 0.45);
-            const boxW = maxLineWidth + padX * 2;
+            const boxW = Math.min(TARGET_W - 40, maxLineWidth + padX * 2);
             const boxH = totalTextHeight + padY * 2;
-            const boxX = (nw - boxW) / 2;
+            const boxX = (TARGET_W - boxW) / 2;
             const boxY = centerY - (boxH / 2);
             const radius = Math.round(canvasFontSize * 0.35);
 
-            ctx.fillStyle = thumbTextState.bg_color;
+            ctx.save();
+            ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
+            ctx.shadowBlur = 18;
+            ctx.fillStyle = thumbEditState.bg_color || 'rgba(0, 0, 0, 0.85)';
             if (ctx.roundRect) {
               ctx.beginPath();
               ctx.roundRect(boxX, boxY, boxW, boxH, radius);
@@ -6442,23 +7389,26 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             } else {
               ctx.fillRect(boxX, boxY, boxW, boxH);
             }
+            ctx.restore();
           }
 
-          // Draw text stroke and fill
+          // 4B. VẼ CHỮ
           lines.forEach((line, idx) => {
             const y = startY + idx * lineHeight;
-            if (thumbTextState.stroke_width > 0) {
-              ctx.lineWidth = Math.round(thumbTextState.stroke_width * scaleFactor);
-              ctx.strokeStyle = thumbTextState.stroke_color;
+            ctx.save();
+            if (thumbEditState.stroke_width > 0) {
+              ctx.lineWidth = Math.round(thumbEditState.stroke_width * scaleFactor * 1.2);
+              ctx.strokeStyle = thumbEditState.stroke_color;
               ctx.lineJoin = 'round';
-              ctx.strokeText(line, nw / 2, y);
+              ctx.strokeText(line, TARGET_W / 2, y);
             }
-            ctx.fillStyle = thumbTextState.font_color;
-            ctx.fillText(line, nw / 2, y);
+            ctx.fillStyle = thumbEditState.font_color;
+            ctx.fillText(line, TARGET_W / 2, y);
+            ctx.restore();
           });
         }
 
-        // Convert canvas to blob and upload
+        // 5. CHUYỂN CANVAS SANG JPEG VÀ UPLOAD
         const blob = await new Promise(r => offCanvas.toBlob(r, 'image/jpeg', 0.95));
         if (!blob) {
           showToast('❌ Lỗi tạo blob ảnh');
@@ -6478,19 +7428,15 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         const data = await res.json();
         if (res.ok && (data.status === 'ok' || data.success)) {
           currentVideo.thumbnail_url = data.thumbnail_url;
-          const inp = document.getElementById('inputThumbText');
-          if (inp) inp.value = '';
-          thumbTextState.text = '';
-          updateThumbTextVisual();
           updateThumbnailTabUI();
           renderMediaList();
-          showToast('✅ Đã lưu ảnh Thumbnail đã chèn chữ thành công!');
+          showToast('🎉 Đã tạo & lưu ảnh Thumbnail HD hoàn chỉnh thành công! Bạn có thể bấm "Ghép vào đầu video" ngay.');
         } else {
           showToast(`❌ Lỗi lưu thumbnail: ${data.detail || 'Thất bại'}`);
         }
 
       } catch (err) {
-        console.error('Lỗi khi chèn chữ vào thumbnail:', err);
+        console.error('Lỗi khi chèn khung nền và chữ vào thumbnail:', err);
         showToast('❌ Lỗi xử lý ảnh thumbnail');
       }
     }
