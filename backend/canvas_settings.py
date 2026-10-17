@@ -233,6 +233,38 @@ def get_available_image_backgrounds() -> List[Dict[str, Any]]:
             "icon": "👑",
             "category": "metallic",
             "color": "#eab308"
+        },
+        "khung_dien_anh_cinema.jpg": {
+            "id": "khung_dien_anh_cinema",
+            "title": "🎬 Khung Điện Ảnh Bìa Phim Cinema",
+            "desc": "Khung letterbox điện ảnh với viền chỉ vàng sang trọng trên dưới",
+            "icon": "🎬",
+            "category": "cinema",
+            "color": "#18181b"
+        },
+        "khung_giat_tit_do_den.jpg": {
+            "id": "khung_giat_tit_do_den",
+            "title": "🔴 Khung Viền Giật Tít Đỏ Đen",
+            "desc": "Dải banner đỏ đen kịch tính, độ tương phản cao thu hút tương tác",
+            "icon": "🔴",
+            "category": "danger",
+            "color": "#dc2626"
+        },
+        "khung_neon_glow_border.jpg": {
+            "id": "khung_neon_glow_border",
+            "title": "⚡ Khung Viền Phát Sáng Neon Glow",
+            "desc": "Viền phát sáng kép neon cyan-magenta kèm 4 góc vuông hiện đại",
+            "icon": "⚡",
+            "category": "neon",
+            "color": "#38bdf8"
+        },
+        "xanh_dai_duong_deepsea.jpg": {
+            "id": "xanh_dai_duong_deepsea",
+            "title": "🌊 Xanh Đại Dương Biển Sâu",
+            "desc": "Xanh biển sâu thẳm kết hợp luồng ánh sáng chiếu rọi từ trên cao",
+            "icon": "🌊",
+            "category": "ocean",
+            "color": "#0284c7"
         }
     }
 
