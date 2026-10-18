@@ -1178,6 +1178,23 @@
       background: rgba(16, 185, 129, 0.25) !important;
       transform: scale(1.02);
     }
+    .timeline-clip-card.drop-before {
+      border-left: 5px solid #38bdf8 !important;
+      box-shadow: -6px 0 16px rgba(56, 189, 248, 0.9) !important;
+      background: rgba(56, 189, 248, 0.2) !important;
+    }
+    .timeline-clip-card.drop-after {
+      border-right: 5px solid #38bdf8 !important;
+      box-shadow: 6px 0 16px rgba(56, 189, 248, 0.9) !important;
+      background: rgba(56, 189, 248, 0.2) !important;
+    }
+    .clip-num-badge.hook-badge {
+      background: linear-gradient(135deg, #ef4444, #f59e0b) !important;
+      color: #ffffff !important;
+      border: 1px solid #facc15;
+      font-weight: 800;
+      box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
+    }
     .timeline-clip-card.dragging {
       opacity: 0.4;
     }
@@ -2337,6 +2354,14 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             <button type="button" class="btn-capcut-tool" id="btnTimelineSplit" onclick="splitCurrentClip()" title="Cắt tách đoạn video tại vị trí con trỏ (Phím tắt: C)">
               <span class="tool-icon">✂️</span>
               <span>Cắt Đoạn (C)</span>
+            </button>
+            <button type="button" class="btn-capcut-tool" id="btnTimelineMoveToHook" onclick="moveSelectedClipToHook()" title="Đưa đoạn clip đang chọn lên đầu video (00:00) làm Hook">
+              <span class="tool-icon">🧲</span>
+              <span>Làm Hook</span>
+            </button>
+            <button type="button" class="btn-capcut-tool" id="btnTimelineCloneToHook" onclick="cloneSelectedClipToHook()" title="Nhân bản đoạn đang chọn và đưa lên đầu làm Hook (Giữ nguyên đoạn gốc)">
+              <span class="tool-icon">📌</span>
+              <span>Nhân Bản Hook</span>
             </button>
             <button type="button" class="btn-capcut-tool" id="btnTimelineUndo" onclick="undoTimelineEdit()" title="Hoàn tác thao tác vừa làm (Phím tắt: Ctrl+Z)">
               <span class="tool-icon">↩️</span>
@@ -4071,6 +4096,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         const clipDur = Math.max(0.01, clip.end - clip.start);
         const widthPct = (clipDur / totalActiveDur) * 100;
         const isActive = (clip.id === selectedClipId);
+        const isHook = (idx === 0 && videoClipsState.length > 1);
 
         const card = document.createElement('div');
         card.className = 'timeline-clip-card' + (isActive ? ' active-clip' : '');
@@ -4082,11 +4108,12 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           <div class="clip-trim-handle handle-left" title="Kéo để chỉnh điểm bắt đầu (Trim In)" data-handle="left" data-clip-id="${clip.id}"></div>
           
           <div class="clip-card-inner">
-            <span class="clip-num-badge">Đoạn ${idx + 1}</span>
+            <span class="clip-num-badge ${isHook ? 'hook-badge' : ''}">${isHook ? '🧲 Hook (Đoạn 1)' : `Đoạn ${idx + 1}`}</span>
             <span class="clip-dur-text">${formatTime(clip.start)} - ${formatTime(clip.end)} (${clipDur.toFixed(1)}s)</span>
           </div>
 
           <div class="clip-quick-actions">
+            ${!isHook ? `<button type="button" class="btn-clip-mini" title="Đưa đoạn này lên đầu làm Hook (00:00)" onclick="event.stopPropagation(); moveClipToHook('${clip.id}')">🧲 Hook</button>` : ''}
             <button type="button" class="btn-clip-mini" title="Cắt tại giây hiện tại (Phím C)" onclick="event.stopPropagation(); splitClipAtCurrent('${clip.id}')">✂️</button>
             <button type="button" class="btn-clip-mini" title="Copy & Dán nhân bản đoạn này (Ctrl+C / Ctrl+V)" onclick="event.stopPropagation(); duplicateClipById('${clip.id}')">📋</button>
             ${videoClipsState.length > 1 ? `<button type="button" class="btn-clip-mini" style="color:#f87171;" title="Xóa đoạn này (Delete)" onclick="event.stopPropagation(); deleteClipById('${clip.id}')">🗑️</button>` : ''}
@@ -4104,29 +4131,39 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           selectClip(clip.id, clickedClipTime);
         };
 
-        // Kéo thả đổi thứ tự các đoạn video
+        // Kéo thả đổi thứ tự các đoạn video chuẩn CapCut (hỗ trợ chèn trước / sau linh hoạt)
         card.ondragstart = (e) => {
           e.dataTransfer.setData('text/plain', clip.id);
           card.classList.add('dragging');
         };
         card.ondragover = (e) => {
           e.preventDefault();
-          card.classList.add('drag-over');
+          const cardRect = card.getBoundingClientRect();
+          const isLeftHalf = (e.clientX - cardRect.left) < cardRect.width / 2;
+          if (isLeftHalf) {
+            card.classList.add('drop-before');
+            card.classList.remove('drop-after');
+          } else {
+            card.classList.add('drop-after');
+            card.classList.remove('drop-before');
+          }
         };
         card.ondragleave = () => {
-          card.classList.remove('drag-over');
+          card.classList.remove('drop-before', 'drop-after');
         };
         card.ondrop = (e) => {
           e.preventDefault();
-          card.classList.remove('drag-over');
+          const cardRect = card.getBoundingClientRect();
+          const isLeftHalf = (e.clientX - cardRect.left) < cardRect.width / 2;
+          card.classList.remove('drop-before', 'drop-after');
           const srcId = e.dataTransfer.getData('text/plain');
           if (srcId && srcId !== clip.id) {
-            reorderClips(srcId, clip.id);
+            insertClipAt(srcId, clip.id, isLeftHalf ? 'before' : 'after');
           }
         };
         card.ondragend = () => {
           card.classList.remove('dragging');
-          document.querySelectorAll('.timeline-clip-card').forEach(c => c.classList.remove('drag-over'));
+          document.querySelectorAll('.timeline-clip-card').forEach(c => c.classList.remove('drop-before', 'drop-after', 'drag-over'));
         };
 
         container.appendChild(card);
@@ -4157,18 +4194,84 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       }
     }
 
-    function reorderClips(srcId, targetId) {
+    function insertClipAt(srcId, targetId, position = 'before') {
       const srcIdx = videoClipsState.findIndex(c => c.id === srcId);
-      const targetIdx = videoClipsState.findIndex(c => c.id === targetId);
-      if (srcIdx === -1 || targetIdx === -1 || srcIdx === targetIdx) return;
+      let targetIdx = videoClipsState.findIndex(c => c.id === targetId);
+      if (srcIdx === -1 || targetIdx === -1) return;
 
-      pushTimelineHistory('Đổi thứ tự đoạn');
+      pushTimelineHistory('Chèn đổi vị trí đoạn');
 
       const [moved] = videoClipsState.splice(srcIdx, 1);
+      targetIdx = videoClipsState.findIndex(c => c.id === targetId);
+      if (position === 'after') {
+        targetIdx += 1;
+      }
+      targetIdx = Math.max(0, Math.min(videoClipsState.length, targetIdx));
+
       videoClipsState.splice(targetIdx, 0, moved);
       selectedClipId = srcId;
       renderVideoClipsTrack();
-      showToast('🔀 Đã thay đổi thứ tự đoạn video! (Nhấn Ctrl+Z nếu muốn hoàn tác)');
+
+      if (targetIdx === 0) {
+        showToast('🧲 Đã đưa đoạn video lên ĐẦU VIDEO (HOOK) thành công!');
+      } else {
+        showToast(`🔀 Đã chèn đoạn video vào vị trí Đoạn ${targetIdx + 1}!`);
+      }
+    }
+
+    function reorderClips(srcId, targetId) {
+      insertClipAt(srcId, targetId, 'before');
+    }
+
+    function moveClipToHook(clipId) {
+      const idx = videoClipsState.findIndex(c => c.id === clipId);
+      if (idx === -1) return;
+      if (idx === 0) {
+        showToast('ℹ️ Đoạn này đã nằm ở đầu video (Hook) rồi!');
+        return;
+      }
+      pushTimelineHistory('Đưa đoạn lên đầu làm Hook');
+      const [moved] = videoClipsState.splice(idx, 1);
+      videoClipsState.unshift(moved);
+      selectedClipId = clipId;
+      renderVideoClipsTrack();
+      if (mainPlayer) {
+        mainPlayer.currentTime = moved.start;
+        updateTimecode();
+        updatePlayhead();
+      }
+      showToast('🧲 Đã đưa đoạn này lên ĐẦU VIDEO (HOOK) mở đầu!');
+    }
+
+    function moveSelectedClipToHook() {
+      if (!selectedClipId && videoClipsState.length) selectedClipId = videoClipsState[0].id;
+      if (!selectedClipId) return;
+      moveClipToHook(selectedClipId);
+    }
+
+    function cloneSelectedClipToHook() {
+      if (!selectedClipId && videoClipsState.length) selectedClipId = videoClipsState[0].id;
+      if (!selectedClipId) return;
+      const idx = videoClipsState.findIndex(c => c.id === selectedClipId);
+      if (idx === -1) return;
+
+      pushTimelineHistory('Nhân bản làm Hook đầu video');
+      const orig = videoClipsState[idx];
+      const hookClip = {
+        id: 'clip_hook_' + Date.now(),
+        start: orig.start,
+        end: orig.end,
+        duration: orig.end - orig.start
+      };
+      videoClipsState.unshift(hookClip);
+      selectedClipId = hookClip.id;
+      renderVideoClipsTrack();
+      if (mainPlayer) {
+        mainPlayer.currentTime = hookClip.start;
+        updateTimecode();
+        updatePlayhead();
+      }
+      showToast(`📌 Đã nhân bản đoạn (${(hookClip.end - hookClip.start).toFixed(1)}s) đưa lên làm HOOK đầu video (Giữ nguyên đoạn gốc)!`);
     }
 
     function splitCurrentClip() {
@@ -4333,7 +4436,10 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       if (!videoClipsState || videoClipsState.length <= 1) return;
 
       const t = mainPlayer.currentTime;
-      const currIdx = videoClipsState.findIndex(c => t >= c.start && t < c.end - 0.05);
+      let currIdx = videoClipsState.findIndex(c => c.id === selectedClipId && t >= c.start && t < c.end - 0.08);
+      if (currIdx === -1) {
+        currIdx = videoClipsState.findIndex(c => t >= c.start && t < c.end - 0.08);
+      }
 
       if (currIdx !== -1) {
         if (selectedClipId !== videoClipsState[currIdx].id) {
@@ -4343,19 +4449,20 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           });
         }
       } else {
-        // Player chạy ra ngoài phạm vi các clip (đoạn đã bị cắt bỏ) hoặc đến cuối clip
-        // Tìm clip gần nhất tiếp theo
-        const nextIdx = videoClipsState.findIndex(c => c.start > t);
-        if (nextIdx !== -1) {
-          isHandlingSmartPlay = true;
-          mainPlayer.currentTime = videoClipsState[nextIdx].start;
-          setTimeout(() => { isHandlingSmartPlay = false; }, 80);
-        } else {
-          // Đã hết chuỗi clips, tua về đầu clip đầu tiên
-          isHandlingSmartPlay = true;
-          mainPlayer.currentTime = videoClipsState[0].start;
-          setTimeout(() => { isHandlingSmartPlay = false; }, 80);
-        }
+        // Player chạy hết clip hiện tại: Tự động nhảy sang clip tiếp theo theo đúng thứ tự mảng
+        let activeIdx = videoClipsState.findIndex(c => c.id === selectedClipId);
+        if (activeIdx === -1) activeIdx = 0;
+
+        const nextIdx = (activeIdx + 1 < videoClipsState.length) ? activeIdx + 1 : 0;
+        isHandlingSmartPlay = true;
+        selectedClipId = videoClipsState[nextIdx].id;
+        mainPlayer.currentTime = videoClipsState[nextIdx].start;
+
+        document.querySelectorAll('#videoClipsContainer .timeline-clip-card').forEach(c => {
+          c.classList.toggle('active-clip', c.dataset.clipId === selectedClipId);
+        });
+
+        setTimeout(() => { isHandlingSmartPlay = false; }, 90);
       }
     }
 
