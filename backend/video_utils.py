@@ -641,14 +641,14 @@ def process_video(
 
         if not is_already_9_16:
             delogo_filters = _build_delogo_filters(orig_w, orig_h)
-            pre_split = (",".join(delogo_filters) + ",") if delogo_filters else ""
+            pre_split = ",".join(["format=yuv420p"] + delogo_filters) + ","
             blur_bg_filter = (
                 f"{pre_split}split[v1][v2];"
-                # Làm mờ nền ở 1/4 độ phân giải rồi phóng lên 1080x1920: hình nền mờ
-                # tương đương boxblur=25:5 ở full-res nhưng nhanh hơn ~6-7 lần (đo thực tế
-                # 25 fps -> 169 fps với nguồn 2480x1080), tránh video dài bị timeout render.
-                "[v1]scale=270:480:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=270:480,"
-                "boxblur=6:3,scale=1080:1920:flags=bilinear[bg];"
+                # Bắt buộc ép format=yuv420p trước khi split/crop/boxblur vì NVDEC (-hwaccel cuda)
+                # giải mã ra khung nv12 (interleaved UV); nếu crop+boxblur trực tiếp trên nv12 sẽ
+                # làm lệch stride kênh UV khiến nửa bên phải (x >= 540) bị lỗi màu xanh lá cây (U=0, V=0).
+                "[v1]scale=360:640:force_original_aspect_ratio=increase:flags=bilinear,crop=360:640,"
+                "boxblur=8:3,scale=1080:1920:flags=bilinear[bg];"
                 f"[v2]{sub_filter},scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
                 "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p"
             )
