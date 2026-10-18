@@ -2242,9 +2242,11 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
           <!-- REALTIME SUBTITLE OVERLAY -->
           <div class="canvas-subtitle-overlay" id="subtitleOverlay">
-            <div class="capcut-transform-box active" id="subtitleInteractiveBox" title="Bấm và kéo để di chuyển vị trí, kéo các nút góc để phóng to/thu nhỏ như trong CapCut">
+            <div class="capcut-transform-box active" id="subtitleInteractiveBox" title="Bấm trực tiếp vào dòng chữ để gõ sửa, giữ chuột để kéo di chuyển vị trí">
               <!-- Mini Floating Toolbar on video -->
               <div class="capcut-mini-toolbar" id="capcutMiniToolbar">
+                <button type="button" class="capcut-mini-btn" onclick="goToPrevSubtitle(event)" title="Chuyển đến câu phụ đề trước đó">⏮️ Trước</button>
+                <button type="button" class="capcut-mini-btn" onclick="goToNextSubtitle(event)" title="Chuyển đến câu phụ đề kế tiếp">⏭️ Sau</button>
                 <label class="capcut-mini-btn" title="Đổi màu chữ trực tiếp">
                   🎨 Chữ
                   <input type="color" id="quickTextColorPicker" value="#000000" style="position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none;" oninput="updateSubFontColor(this.value)">
@@ -2255,14 +2257,14 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
                 </label>
                 <button type="button" class="capcut-mini-btn" onclick="quickStepFontSize(-2)" title="Thu nhỏ chữ">A-</button>
                 <button type="button" class="capcut-mini-btn" onclick="quickStepFontSize(2)" title="Phóng to chữ">A+</button>
-                <button type="button" class="capcut-mini-btn" id="btnEditSubText" onclick="startEditingSubText(event)" title="Nhấp để gõ sửa chữ trực tiếp trên video (hoặc nhấp đúp vào chữ)">✏️ Sửa chữ</button>
+                <button type="button" class="capcut-mini-btn" id="btnEditSubText" onclick="startEditingSubText(event)" title="Bấm để gõ sửa chữ trực tiếp trên video">✏️ Sửa chữ</button>
                 <button type="button" class="capcut-mini-btn" id="btnClearSubText" onclick="clearOrHideSubtitle(event)" title="Xóa chữ hoặc ẩn khung phụ đề khỏi video" style="color: #f87171;">🗑️ Xóa / Ẩn</button>
                 <button type="button" class="capcut-mini-btn" onclick="resetSubtitleStyleToDefault()" title="Khôi phục tiêu chuẩn mặc định">↺ Mặc định</button>
               </div>
 
               <!-- Main Subtitle Text and Background Box -->
-              <div class="sub-vietnamese-text" id="subVietnameseText" style="cursor: grab;" contenteditable="false" spellcheck="false" title="Nhấp đúp hoặc bấm nút '✏️ Sửa chữ' để chỉnh sửa chữ trực tiếp">
-                Phụ đề mẫu (Nhấp đúp để sửa chữ)
+              <div class="sub-vietnamese-text" id="subVietnameseText" style="cursor: text;" contenteditable="false" spellcheck="false" title="👆 Bấm trực tiếp vào đây để sửa nội dung chữ ngay!">
+                Phụ đề mẫu (Bấm chuột vào để sửa chữ)
               </div>
               <div class="sub-original-text" id="subOriginalText" style="display: none;">Phụ đề gốc</div>
 
@@ -2441,7 +2443,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         <div style="background: rgba(14, 165, 233, 0.1); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px; padding: 8px 10px; display: flex; align-items: center; gap: 8px;">
           <span style="font-size: 18px;">✨</span>
           <div style="font-size: 11px; color: #cbd5e1; line-height: 1.4;">
-            <strong style="color: #38bdf8;">Chuẩn CapCut:</strong> Bấm giữ chuột vào khung chữ trên video để <strong>kéo di chuyển vị trí</strong>, kéo các <strong>nút tròn ở 4 góc</strong> để phóng to / thu nhỏ, hoặc <strong>nhấp đúp vào chữ</strong> để gõ sửa nội dung!
+            <strong style="color: #38bdf8;">Chuẩn CapCut:</strong> <strong>Bấm trực tiếp vào dòng chữ trên video</strong> để gõ sửa nội dung ngay lập tức (video sẽ tự động dừng lại để bạn gõ), giữ chuột để <strong>kéo di chuyển vị trí</strong>, hoặc kéo 4 góc để phóng to/thu nhỏ!
           </div>
         </div>
 
@@ -4436,12 +4438,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
       const isSubtitleEditTab = document.getElementById('tabSubtitleStyle') && document.getElementById('tabSubtitleStyle').style.display !== 'none';
       
-      // If watching final video version and NOT in subtitle edit tab, hide overlay
-      if (currentVideoVersion === 'final' && !isSubtitleEditTab) {
-        subtitleOverlay.style.display = 'none';
-        return;
-      }
-
+      // Luôn hiển thị lớp phủ phụ đề tương tác để người dùng có thể bấm trực tiếp vào chữ trên video để sửa ở mọi chế độ
       subtitleOverlay.style.display = 'flex';
       applySubtitlePosition();
 
@@ -4480,7 +4477,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           if (box) box.style.display = 'inline-flex';
           if (restoreBtn) restoreBtn.style.display = 'none';
           if (togglePanelBtn) togglePanelBtn.innerText = '🗑️ Ẩn Khung Sub';
-          const defaultSample = 'Phụ đề mẫu (Nhấp đúp để sửa chữ)';
+          const defaultSample = 'Phụ đề mẫu (Bấm chuột vào để sửa chữ)';
           subVietnameseText.innerText = (customSampleSubText !== undefined && customSampleSubText !== '') ? customSampleSubText : defaultSample;
           subOriginalText.style.display = 'none';
         }
@@ -4490,7 +4487,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         if (isSubtitleEditTab) {
           if (box) box.style.display = 'inline-flex';
           if (restoreBtn) restoreBtn.style.display = 'none';
-          subVietnameseText.innerText = customSampleSubText || 'Phụ đề mẫu (Nhấp đúp để sửa chữ)';
+          subVietnameseText.innerText = customSampleSubText || 'Phụ đề mẫu (Bấm chuột vào để sửa chữ)';
           subOriginalText.style.display = 'none';
         } else {
           if (box) box.style.display = 'none';
@@ -4526,10 +4523,10 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         btnRaw.className = 'version-btn';
         mainPlayer.src = currentVideoData.final_video_url;
         bgBlurVideo.src = currentVideoData.final_video_url;
-        subtitleOverlay.style.display = 'none';
+        subtitleOverlay.style.display = 'flex';
         document.getElementById('audioStripLabel').innerText = 'Giọng đọc AI RVC đã lồng vào video hoàn tất';
         document.getElementById('videoStripLabel').innerText = 'Video thành phẩm (Đã che sub gốc & ghép phụ đề cứng)';
-        showToast('✨ Đang xem Bản Hoàn Tất (Lồng tiếng AI & Che sub)');
+        showToast('✨ Đang xem Bản Hoàn Tất (Lồng tiếng AI & Che sub) - Bấm trực tiếp vào chữ trên video để sửa');
       } else {
         btnFinal.className = 'version-btn';
         btnRaw.className = 'version-btn active-raw';
@@ -4538,6 +4535,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           mainPlayer.src = rawUrl;
           bgBlurVideo.src = rawUrl;
         }
+        subtitleOverlay.style.display = 'flex';
         document.getElementById('audioStripLabel').innerText = 'Giọng đọc AI RVC + Nhạc nền BGM';
         document.getElementById('videoStripLabel').innerText = 'Video phôi gốc';
         showToast('📹 Đang xem Video Phôi Gốc');
@@ -5949,11 +5947,19 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           clip.style.width = `${widthPct}%`;
           clip.title = `[${sub.start_str || formatTime(sub.start)} -> ${sub.end_str || formatTime(sub.end)}]
 🇻🇳 ${sub.text}`;
-          clip.innerText = sub.text;
           clip.onclick = (e) => {
             e.stopPropagation();
-            mainPlayer.currentTime = sub.start;
-            mainPlayer.play().catch(() => {});
+            mainPlayer.currentTime = sub.start + 0.05;
+            mainPlayer.pause();
+            updateSubtitlesOverlay();
+            showToast(`💬 Đã chọn câu #${sub.index || ''}: "${sub.text}". Bấm trực tiếp vào chữ trên video để sửa!`);
+          };
+          clip.ondblclick = (e) => {
+            e.stopPropagation();
+            mainPlayer.currentTime = sub.start + 0.05;
+            mainPlayer.pause();
+            updateSubtitlesOverlay();
+            startEditingSubText();
           };
           subAiTrack.appendChild(clip);
         });
@@ -6604,10 +6610,22 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       const textEl = document.getElementById('subVietnameseText');
       if (!box || !overlay || !textEl) return;
 
-      // Double-click directly on text to enter inline edit mode
+      // Click trực tiếp vào chữ để sửa ngay lập tức!
+      textEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (mainPlayer && !mainPlayer.paused) {
+          mainPlayer.pause();
+        }
+        startEditingSubText();
+      });
+
+      // Double-click trực tiếp trên text
       textEl.addEventListener('dblclick', (e) => {
         e.stopPropagation();
         e.preventDefault();
+        if (mainPlayer && !mainPlayer.paused) {
+          mainPlayer.pause();
+        }
         startEditingSubText();
       });
 
@@ -6655,7 +6673,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           e.preventDefault();
           e.stopPropagation();
         } else {
-          // PREPARE POTENTIAL DRAGGING (differentiate between click to select vs dragging)
+          // PREPARE POTENTIAL DRAGGING OR CLICK-TO-EDIT
           isPotentialSubDrag = true;
           isSubDragging = false;
           isSubResizing = false;
@@ -6665,7 +6683,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           startSubPosY = (canvasSettings.sub_pos_y_pct !== undefined) ? canvasSettings.sub_pos_y_pct : 0.80;
           
           box.classList.add('active');
-          if (!isEditingSubText) {
+          if (e.target !== textEl && !textEl.contains(e.target)) {
             e.preventDefault();
           }
           e.stopPropagation();
@@ -6731,6 +6749,15 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
       window.addEventListener('mouseup', () => {
         let changed = false;
+        if (isPotentialSubDrag && !isSubDragging && !isSubResizing) {
+          isPotentialSubDrag = false;
+          // Người dùng bấm trực tiếp vào khung subtitle mà không kéo di chuyển
+          if (mainPlayer && !mainPlayer.paused) {
+            mainPlayer.pause();
+          }
+          startEditingSubText();
+          return;
+        }
         isPotentialSubDrag = false;
         if (isSubDragging) {
           isSubDragging = false;
@@ -6760,6 +6787,11 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       const textEl = document.getElementById('subVietnameseText');
       if (!box || !textEl) return;
 
+      // Tự động tạm dừng video để chữ không bị trôi qua câu khác
+      if (mainPlayer && !mainPlayer.paused) {
+        mainPlayer.pause();
+      }
+
       box.style.display = 'inline-flex';
       box.classList.add('active');
       box.classList.add('editing');
@@ -6770,7 +6802,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       textEl.focus();
 
       const cur = textEl.innerText.trim();
-      const isPlaceholder = cur === 'Phụ đề mẫu (Nhấp đúp để sửa chữ)' || cur === 'hôm nay khui sáu mươi cuộn băng dính washi';
+      const isPlaceholder = cur === 'Phụ đề mẫu (Nhấp đúp để sửa chữ)' || cur === 'Phụ đề mẫu (Bấm chuột vào để sửa chữ)' || cur === 'hôm nay khui sáu mươi cuộn băng dính washi';
       
       const range = document.createRange();
       range.selectNodeContents(textEl);
@@ -6780,6 +6812,37 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       const sel = window.getSelection();
       sel.removeAllRanges();
       sel.addRange(range);
+
+      showToast('✏️ Đang sửa trực tiếp phụ đề trên video! Gõ xong bấm ra ngoài hoặc Enter để lưu.');
+    }
+
+    function goToPrevSubtitle(e) {
+      if (e) { e.stopPropagation(); e.preventDefault(); }
+      if (!currentSubtitles || !currentSubtitles.length || !mainPlayer) return;
+      const t = mainPlayer.currentTime || 0;
+      let prevSub = null;
+      for (let i = currentSubtitles.length - 1; i >= 0; i--) {
+        if (currentSubtitles[i].end < t - 0.15) {
+          prevSub = currentSubtitles[i];
+          break;
+        }
+      }
+      if (!prevSub) prevSub = currentSubtitles[0];
+      mainPlayer.currentTime = prevSub.start + 0.05;
+      mainPlayer.pause();
+      updateSubtitlesOverlay();
+      showToast(`⏮️ Câu #${prevSub.index || '1'}: "${prevSub.text || ''}"`);
+    }
+
+    function goToNextSubtitle(e) {
+      if (e) { e.stopPropagation(); e.preventDefault(); }
+      if (!currentSubtitles || !currentSubtitles.length || !mainPlayer) return;
+      const t = mainPlayer.currentTime || 0;
+      let nextSub = currentSubtitles.find(s => s.start > t + 0.15);
+      if (!nextSub) nextSub = currentSubtitles[currentSubtitles.length - 1];
+      mainPlayer.currentTime = nextSub.start + 0.05;
+      mainPlayer.pause();
+      updateSubtitlesOverlay();
     }
 
     function stopEditingSubText(save = true) {
