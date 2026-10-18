@@ -2332,25 +2332,33 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         <!-- CAPCUT TIMELINE TOOLBAR -->
         <div class="timeline-capcut-toolbar">
           <div class="capcut-tool-group">
-            <button type="button" class="btn-capcut-tool" id="btnTimelineSplit" onclick="splitCurrentClip()" title="Cắt tách clip tại vị trí con trỏ (Phím tắt: S)">
+            <button type="button" class="btn-capcut-tool" id="btnTimelineSplit" onclick="splitCurrentClip()" title="Cắt tách đoạn video tại vị trí con trỏ (Phím tắt: C)">
               <span class="tool-icon">✂️</span>
-              <span>Tách Đoạn (S)</span>
+              <span>Cắt Đoạn (C)</span>
             </button>
-            <button type="button" class="btn-capcut-tool" id="btnTimelineDuplicate" onclick="duplicateSelectedClip()" title="Nhân bản đoạn clip đang chọn (Phím tắt: Ctrl+D)">
+            <button type="button" class="btn-capcut-tool" id="btnTimelineUndo" onclick="undoTimelineEdit()" title="Hoàn tác thao tác vừa làm (Phím tắt: Ctrl+Z)">
+              <span class="tool-icon">↩️</span>
+              <span>Hoàn Tác (Ctrl+Z)</span>
+            </button>
+            <button type="button" class="btn-capcut-tool" id="btnTimelineCopy" onclick="copySelectedClip()" title="Sao chép đoạn clip đang chọn (Phím tắt: Ctrl+C)">
+              <span class="tool-icon">📄</span>
+              <span>Copy (Ctrl+C)</span>
+            </button>
+            <button type="button" class="btn-capcut-tool" id="btnTimelinePaste" onclick="pasteCopiedClip()" title="Dán đoạn clip đã sao chép vào sau đoạn đang chọn (Phím tắt: Ctrl+V)">
               <span class="tool-icon">📋</span>
-              <span>Nhân Bản</span>
+              <span>Dán (Ctrl+V)</span>
             </button>
             <button type="button" class="btn-capcut-tool" id="btnTimelineDuplicateAll" onclick="duplicateAllClips()" title="Nhân đôi toàn bộ video (X2 thời lượng)">
               <span class="tool-icon">🎞️</span>
               <span>Nhân Đôi Video</span>
             </button>
-            <button type="button" class="btn-capcut-tool btn-danger-soft" id="btnTimelineDelete" onclick="deleteSelectedClip()" title="Xóa đoạn đang chọn (Phím tắt: Delete)">
+            <button type="button" class="btn-capcut-tool btn-danger-soft" id="btnTimelineDelete" onclick="deleteSelectedClip()" title="Xóa đoạn đang chọn (Phím tắt: Delete / Backspace)">
               <span class="tool-icon">🗑️</span>
-              <span>Xóa Đoạn</span>
+              <span>Xóa (Del)</span>
             </button>
-            <button type="button" class="btn-capcut-tool" onclick="resetVideoClips()" title="Khôi phục toàn bộ video gốc">
-              <span class="tool-icon">↩️</span>
-              <span>Khôi Phục Gốc</span>
+            <button type="button" class="btn-capcut-tool" onclick="resetVideoClips()" title="Khôi phục toàn bộ video gốc ban đầu">
+              <span class="tool-icon">🔄</span>
+              <span>Gốc</span>
             </button>
           </div>
 
@@ -3753,6 +3761,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
       [tracksEl, rulerEl].filter(Boolean).forEach(el => {
         el.addEventListener('mousedown', (e) => {
+          if (e.target.closest('.clip-trim-handle') || e.target.closest('.btn-clip-mini')) return;
           isTimelineDragging = true;
           seekTimelineAt(e.clientX);
         });
@@ -3769,7 +3778,54 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
     // GLOBAL KEYBOARD HOTKEYS
     window.addEventListener('keydown', (e) => {
-      if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
+      if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable) return;
+
+      const isCtrl = e.ctrlKey || e.metaKey;
+      const keyLower = (e.key || '').toLowerCase();
+
+      // Ctrl + Z (Undo) / Ctrl + Shift + Z or Ctrl + Y (Redo)
+      if (isCtrl && keyLower === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          redoTimelineEdit();
+        } else {
+          undoTimelineEdit();
+        }
+        return;
+      }
+      if (isCtrl && keyLower === 'y') {
+        e.preventDefault();
+        redoTimelineEdit();
+        return;
+      }
+
+      // Ctrl + C (Copy đoạn video đang chọn)
+      if (isCtrl && keyLower === 'c') {
+        const selText = window.getSelection ? window.getSelection().toString().trim() : '';
+        if (!selText) {
+          e.preventDefault();
+          copySelectedClip();
+          return;
+        }
+      }
+
+      // Ctrl + V (Dán đoạn video đã copy)
+      if (isCtrl && keyLower === 'v') {
+        e.preventDefault();
+        pasteCopiedClip();
+        return;
+      }
+
+      // Ctrl + D (Nhân bản nhanh đoạn đang chọn)
+      if (isCtrl && keyLower === 'd') {
+        e.preventDefault();
+        duplicateSelectedClip();
+        return;
+      }
+
+      // Không kích hoạt phím đơn nếu đang giữ Ctrl/Alt/Meta
+      if (isCtrl || e.altKey) return;
+
       if (e.code === 'Space') {
         e.preventDefault();
         togglePlay();
@@ -3779,21 +3835,18 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       } else if (e.code === 'ArrowRight') {
         e.preventDefault();
         skipTime(e.shiftKey ? 1 : 5);
-      } else if (e.key === 'j' || e.key === 'J') {
+      } else if (keyLower === 'j') {
         skipTime(-5);
-      } else if (e.key === 'k' || e.key === 'K') {
+      } else if (keyLower === 'k') {
         togglePlay();
-      } else if (e.key === 'l' || e.key === 'L') {
+      } else if (keyLower === 'l') {
         skipTime(5);
-      } else if (e.key === 's' || e.key === 'S') {
+      } else if (keyLower === 'c' || keyLower === 's') {
         e.preventDefault();
         splitCurrentClip();
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
         deleteSelectedClip();
-      } else if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) {
-        e.preventDefault();
-        duplicateSelectedClip();
       }
     });
 
@@ -3834,11 +3887,134 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
     }
 
     // ========================================================
-    // CAPCUT-STYLE INTERACTIVE TIMELINE VIDEO CLIPS (CUT, CLONE, REORDER)
+    // CAPCUT-STYLE INTERACTIVE TIMELINE VIDEO CLIPS (CUT, COPY, PASTE, UNDO, REORDER)
     // ========================================================
     let videoClipsState = []; // [{ id: 'clip_1', start: 0, end: 10, duration: 10 }]
     let selectedClipId = null;
     let isHandlingSmartPlay = false;
+    let timelineUndoStack = [];
+    let timelineRedoStack = [];
+    let copiedClipBuffer = null;
+
+    function pushTimelineHistory(actionLabel = '') {
+      if (!videoClipsState || !videoClipsState.length) return;
+      timelineUndoStack.push({
+        clips: JSON.parse(JSON.stringify(videoClipsState)),
+        selectedClipId: selectedClipId,
+        actionLabel: actionLabel
+      });
+      if (timelineUndoStack.length > 40) {
+        timelineUndoStack.shift();
+      }
+      timelineRedoStack = [];
+      updateTimelineToolbarStates();
+    }
+
+    function updateTimelineToolbarStates() {
+      const undoBtn = document.getElementById('btnTimelineUndo');
+      if (undoBtn) {
+        undoBtn.style.opacity = timelineUndoStack.length > 0 ? '1' : '0.55';
+        undoBtn.title = timelineUndoStack.length > 0
+          ? `Hoàn tác thao tác vừa làm (${timelineUndoStack.length} bước lưu - Phím tắt: Ctrl+Z)`
+          : 'Chưa có thao tác nào để hoàn tác (Phím tắt: Ctrl+Z)';
+      }
+      const pasteBtn = document.getElementById('btnTimelinePaste');
+      if (pasteBtn) {
+        pasteBtn.style.opacity = copiedClipBuffer ? '1' : '0.65';
+        if (copiedClipBuffer) {
+          const clipDur = Math.max(0.1, copiedClipBuffer.end - copiedClipBuffer.start).toFixed(1);
+          pasteBtn.title = `Dán đoạn đã copy (${formatTime(copiedClipBuffer.start)} - ${formatTime(copiedClipBuffer.end)}, ${clipDur}s) - Phím tắt: Ctrl+V`;
+        }
+      }
+    }
+
+    function undoTimelineEdit() {
+      if (!timelineUndoStack.length) {
+        showToast('ℹ️ Không còn thao tác nào trước đó để hoàn tác (Ctrl+Z)!');
+        return;
+      }
+      const prevState = timelineUndoStack.pop();
+      timelineRedoStack.push({
+        clips: JSON.parse(JSON.stringify(videoClipsState)),
+        selectedClipId: selectedClipId,
+        actionLabel: prevState.actionLabel
+      });
+      videoClipsState = prevState.clips;
+      selectedClipId = prevState.selectedClipId;
+      renderVideoClipsTrack();
+      updateTimelineToolbarStates();
+      showToast(`↩️ Đã hoàn tác (Ctrl+Z)! Còn ${videoClipsState.length} đoạn video.`);
+    }
+
+    function redoTimelineEdit() {
+      if (!timelineRedoStack.length) {
+        showToast('ℹ️ Không có thao tác nào để làm lại (Ctrl+Y)!');
+        return;
+      }
+      const nextState = timelineRedoStack.pop();
+      timelineUndoStack.push({
+        clips: JSON.parse(JSON.stringify(videoClipsState)),
+        selectedClipId: selectedClipId,
+        actionLabel: nextState.actionLabel
+      });
+      videoClipsState = nextState.clips;
+      selectedClipId = nextState.selectedClipId;
+      renderVideoClipsTrack();
+      updateTimelineToolbarStates();
+      showToast(`↪️ Đã làm lại thao tác (Ctrl+Y)! Hiện có ${videoClipsState.length} đoạn video.`);
+    }
+
+    function copySelectedClip() {
+      if (!videoClipsState || !videoClipsState.length) return;
+      if (!selectedClipId || !videoClipsState.some(c => c.id === selectedClipId)) {
+        selectedClipId = videoClipsState[0].id;
+      }
+      const clipIdx = videoClipsState.findIndex(c => c.id === selectedClipId);
+      if (clipIdx === -1) return;
+      const clip = videoClipsState[clipIdx];
+      copiedClipBuffer = {
+        start: clip.start,
+        end: clip.end,
+        duration: clip.end - clip.start,
+        sourceIndex: clipIdx + 1
+      };
+      updateTimelineToolbarStates();
+      // Hiệu ứng nháy nhẹ trên đoạn vừa copy
+      const cardEl = document.querySelector(`#videoClipsContainer .timeline-clip-card[data-clip-id="${selectedClipId}"]`);
+      if (cardEl) {
+        cardEl.style.transition = 'transform 0.15s ease, box-shadow 0.15s ease';
+        cardEl.style.transform = 'scale(0.97)';
+        setTimeout(() => { cardEl.style.transform = ''; }, 160);
+      }
+      showToast(`📄 Đã sao chép Đoạn ${clipIdx + 1} (${formatTime(clip.start)} - ${formatTime(clip.end)})! Nhấn Ctrl+V để dán.`);
+    }
+
+    function pasteCopiedClip() {
+      if (!videoClipsState || !videoClipsState.length) return;
+      if (!copiedClipBuffer) {
+        // Nếu người dùng chưa bấm Ctrl+C lần nào mà bấm Ctrl+V luôn, tự động copy đoạn đang chọn để dán tiện lợi
+        copySelectedClip();
+        if (!copiedClipBuffer) return;
+      }
+
+      pushTimelineHistory('Dán đoạn clip');
+
+      let insertIdx = videoClipsState.findIndex(c => c.id === selectedClipId);
+      if (insertIdx === -1) insertIdx = videoClipsState.length - 1;
+
+      const newClip = {
+        id: 'clip_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+        start: copiedClipBuffer.start,
+        end: copiedClipBuffer.end,
+        duration: copiedClipBuffer.end - copiedClipBuffer.start
+      };
+
+      videoClipsState.splice(insertIdx + 1, 0, newClip);
+      selectedClipId = newClip.id;
+      renderVideoClipsTrack();
+      updateTimelineToolbarStates();
+      showToast(`📋 Đã dán đoạn video (${(newClip.end - newClip.start).toFixed(1)}s) vào vị trí Đoạn ${insertIdx + 2} (Ctrl+V)!`);
+    }
 
     function initVideoClipsForCurrentVideo(forceReset = false) {
       if (!mainPlayer) return;
@@ -3855,8 +4031,11 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           }
         ];
         selectedClipId = videoClipsState[0].id;
+        timelineUndoStack = [];
+        timelineRedoStack = [];
       }
       renderVideoClipsTrack();
+      updateTimelineToolbarStates();
     }
 
     function renderVideoClipsTrack() {
@@ -3906,9 +4085,9 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           </div>
 
           <div class="clip-quick-actions">
-            <button type="button" class="btn-clip-mini" title="Tách tại giây hiện tại" onclick="event.stopPropagation(); splitClipAtCurrent('${clip.id}')">✂️</button>
-            <button type="button" class="btn-clip-mini" title="Nhân bản đoạn này" onclick="event.stopPropagation(); duplicateClipById('${clip.id}')">📋</button>
-            ${videoClipsState.length > 1 ? `<button type="button" class="btn-clip-mini" style="color:#f87171;" title="Xóa đoạn này" onclick="event.stopPropagation(); deleteClipById('${clip.id}')">🗑️</button>` : ''}
+            <button type="button" class="btn-clip-mini" title="Cắt tại giây hiện tại (Phím C)" onclick="event.stopPropagation(); splitClipAtCurrent('${clip.id}')">✂️</button>
+            <button type="button" class="btn-clip-mini" title="Copy & Dán nhân bản đoạn này (Ctrl+C / Ctrl+V)" onclick="event.stopPropagation(); duplicateClipById('${clip.id}')">📋</button>
+            ${videoClipsState.length > 1 ? `<button type="button" class="btn-clip-mini" style="color:#f87171;" title="Xóa đoạn này (Delete)" onclick="event.stopPropagation(); deleteClipById('${clip.id}')">🗑️</button>` : ''}
           </div>
 
           <div class="clip-trim-handle handle-right" title="Kéo để chỉnh điểm kết thúc (Trim Out)" data-handle="right" data-clip-id="${clip.id}"></div>
@@ -3916,7 +4095,11 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
         card.onclick = (e) => {
           if (e.target.closest('.clip-trim-handle') || e.target.closest('.btn-clip-mini')) return;
-          selectClip(clip.id);
+          e.stopPropagation();
+          const cardRect = card.getBoundingClientRect();
+          const relRatio = cardRect.width > 0 ? Math.max(0, Math.min(1, (e.clientX - cardRect.left) / cardRect.width)) : 0;
+          const clickedClipTime = clip.start + relRatio * (clip.end - clip.start);
+          selectClip(clip.id, clickedClipTime);
         };
 
         // Kéo thả đổi thứ tự các đoạn video
@@ -3948,18 +4131,27 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       });
 
       initTrimHandleListeners();
+      updateTimelineToolbarStates();
     }
 
-    function selectClip(clipId) {
+    function selectClip(clipId, seekToTime = null) {
       selectedClipId = clipId;
       document.querySelectorAll('#videoClipsContainer .timeline-clip-card').forEach(c => {
         c.classList.toggle('active-clip', c.dataset.clipId === clipId);
       });
       const clip = videoClipsState.find(c => c.id === clipId);
       if (clip && mainPlayer) {
-        mainPlayer.currentTime = clip.start;
-        updateTimecode();
-        updatePlayhead();
+        if (typeof seekToTime === 'number' && !isNaN(seekToTime)) {
+          mainPlayer.currentTime = Math.max(clip.start, Math.min(clip.end, seekToTime));
+          updateTimecode();
+          updatePlayhead();
+          updateScrubberUI();
+        } else if (mainPlayer.currentTime < clip.start || mainPlayer.currentTime > clip.end) {
+          mainPlayer.currentTime = clip.start;
+          updateTimecode();
+          updatePlayhead();
+          updateScrubberUI();
+        }
       }
     }
 
@@ -3968,34 +4160,45 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       const targetIdx = videoClipsState.findIndex(c => c.id === targetId);
       if (srcIdx === -1 || targetIdx === -1 || srcIdx === targetIdx) return;
 
+      pushTimelineHistory('Đổi thứ tự đoạn');
+
       const [moved] = videoClipsState.splice(srcIdx, 1);
       videoClipsState.splice(targetIdx, 0, moved);
       selectedClipId = srcId;
       renderVideoClipsTrack();
-      showToast('🔀 Đã thay đổi thứ tự đoạn video linh hoạt!');
+      showToast('🔀 Đã thay đổi thứ tự đoạn video! (Nhấn Ctrl+Z nếu muốn hoàn tác)');
     }
 
     function splitCurrentClip() {
-      if (!mainPlayer) return;
+      if (!mainPlayer || !videoClipsState || !videoClipsState.length) return;
       const t = mainPlayer.currentTime;
-      const clipIdx = videoClipsState.findIndex(c => t > c.start + 0.15 && t < c.end - 0.15);
+
+      // Ưu tiên kiểm tra đoạn đang được chọn trước (nếu có nhiều đoạn trùng vùng thời gian do copy/paste)
+      let clipIdx = videoClipsState.findIndex(c => c.id === selectedClipId && t > c.start + 0.12 && t < c.end - 0.12);
       if (clipIdx === -1) {
-        showToast('⚠️ Vui lòng dừng con trỏ ở giữa đoạn clip để tách (cách 2 mép ít nhất 0.2s)!');
+        clipIdx = videoClipsState.findIndex(c => t > c.start + 0.12 && t < c.end - 0.12);
+      }
+
+      if (clipIdx === -1) {
+        showToast('⚠️ Hãy di chuyển thanh thời gian (Playhead) vào bên trong đoạn video (cách mép ít nhất 0.15s) rồi bấm phím C để cắt!');
         return;
       }
 
+      pushTimelineHistory('Cắt đoạn video');
+
       const orig = videoClipsState[clipIdx];
-      const clip1 = { id: 'clip_' + Date.now() + '_a', start: orig.start, end: t, duration: t - orig.start };
-      const clip2 = { id: 'clip_' + Date.now() + '_b', start: t, end: orig.end, duration: orig.end - t };
+      const nowTs = Date.now();
+      const clip1 = { id: 'clip_' + nowTs + '_a', start: orig.start, end: t, duration: t - orig.start };
+      const clip2 = { id: 'clip_' + nowTs + '_b', start: t, end: orig.end, duration: orig.end - t };
 
       videoClipsState.splice(clipIdx, 1, clip1, clip2);
       selectedClipId = clip2.id;
       renderVideoClipsTrack();
-      showToast(`✂️ Đã tách đoạn clip tại ${formatTime(t)}! (Hiện có ${videoClipsState.length} đoạn)`);
+      showToast(`✂️ Đã cắt tách đoạn video tại ${formatTime(t)} (Phím C)! Bấm Ctrl+Z để hoàn tác.`);
     }
 
     function splitClipAtCurrent(clipId) {
-      selectClip(clipId);
+      selectedClipId = clipId;
       splitCurrentClip();
     }
 
@@ -4009,22 +4212,26 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       const idx = videoClipsState.findIndex(c => c.id === clipId);
       if (idx === -1) return;
 
+      pushTimelineHistory('Nhân bản đoạn');
+
       const orig = videoClipsState[idx];
+      copiedClipBuffer = { start: orig.start, end: orig.end, duration: orig.end - orig.start, sourceIndex: idx + 1 };
       const newClip = {
         id: 'clip_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
         start: orig.start,
         end: orig.end,
-        duration: orig.duration
+        duration: orig.end - orig.start
       };
 
       videoClipsState.splice(idx + 1, 0, newClip);
       selectedClipId = newClip.id;
       renderVideoClipsTrack();
-      showToast(`📋 Đã nhân bản đoạn video (${(newClip.end - newClip.start).toFixed(1)}s)!`);
+      showToast(`📋 Đã sao chép & dán đoạn video (${(newClip.end - newClip.start).toFixed(1)}s)!`);
     }
 
     function duplicateAllClips() {
       if (!videoClipsState.length) return;
+      pushTimelineHistory('Nhân đôi toàn bộ video');
       const clones = videoClipsState.map(c => ({
         id: 'clip_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
         start: c.start,
@@ -4044,22 +4251,32 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
     function deleteClipById(clipId) {
       if (videoClipsState.length <= 1) {
-        showToast('⚠️ Không thể xóa đoạn duy nhất còn lại! Hãy dùng "Khôi Phục Gốc" nếu muốn làm lại từ đầu.');
+        showToast('⚠️ Không thể xóa đoạn duy nhất còn lại! Bạn có thể kéo mép 2 đầu để cắt ngắn đoạn này.');
         return;
       }
       const idx = videoClipsState.findIndex(c => c.id === clipId);
       if (idx === -1) return;
 
+      pushTimelineHistory('Xóa đoạn video');
+
       videoClipsState.splice(idx, 1);
       const nextIdx = Math.min(idx, videoClipsState.length - 1);
       selectedClipId = videoClipsState[nextIdx].id;
       renderVideoClipsTrack();
-      showToast('🗑️ Đã xóa đoạn clip khỏi timeline!');
+      showToast('🗑️ Đã xóa đoạn clip! (Nhấn Ctrl+Z nếu muốn lấy lại)');
     }
 
     function resetVideoClips() {
-      initVideoClipsForCurrentVideo(true);
-      showToast('↩️ Đã khôi phục video gốc nguyên bản!');
+      if (videoClipsState.length > 0) {
+        pushTimelineHistory('Khôi phục gốc');
+      }
+      const dur = (mainPlayer && !isNaN(mainPlayer.duration) && mainPlayer.duration > 0) ? mainPlayer.duration : 0;
+      if (dur > 0) {
+        videoClipsState = [{ id: 'clip_' + Date.now(), start: 0, end: dur, duration: dur }];
+        selectedClipId = videoClipsState[0].id;
+      }
+      renderVideoClipsTrack();
+      showToast('🔄 Đã khôi phục về 1 đoạn video gốc! (Bấm Ctrl+Z để hoàn tác)');
     }
 
     function initTrimHandleListeners() {
@@ -4072,6 +4289,8 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           const clipId = h.dataset.clipId;
           const clip = videoClipsState.find(c => c.id === clipId);
           if (!clip) return;
+
+          pushTimelineHistory('Kéo chỉnh độ dài đoạn');
 
           const startClientX = e.clientX;
           const initStart = clip.start;
@@ -4098,7 +4317,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           const onMouseUp = () => {
             window.removeEventListener('mousemove', onMouseMove);
             window.removeEventListener('mouseup', onMouseUp);
-            showToast(`✂️ Đã điều chỉnh đoạn clip: ${formatTime(clip.start)} - ${formatTime(clip.end)}`);
+            showToast(`✂️ Đã chỉnh độ dài đoạn: ${formatTime(clip.start)} - ${formatTime(clip.end)} (Ctrl+Z để hoàn tác)`);
           };
 
           window.addEventListener('mousemove', onMouseMove);
