@@ -1904,6 +1904,60 @@ async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
     if not ok:
         raise HTTPException(status_code=500, detail="Lỗi khi cắt ghép video bằng FFmpeg")
 
+    # Tự động đồng bộ và căn chỉnh lại tệp phụ đề translated.srt theo timeline clips mới
+    updated_subs = []
+    trans_srt_file = job_dir / "translated.srt"
+    orig_srt_file = job_dir / "original.srt"
+    if trans_srt_file.is_file():
+        try:
+            old_trans_subs = parse_srt(trans_srt_file.read_text(encoding="utf-8", errors="replace"))
+            old_orig_subs = parse_srt(orig_srt_file.read_text(encoding="utf-8", errors="replace")) if orig_srt_file.is_file() else []
+            
+            accum_dur = 0.0
+            new_trans_srt_blocks = []
+            new_orig_srt_blocks = []
+            new_sub_idx = 1
+            
+            for c in clips:
+                c_st = float(c.get("start", 0.0))
+                c_en = float(c.get("end", c_st + 1.0))
+                c_dur = max(0.01, c_en - c_st)
+                
+                for idx_s, s in enumerate(old_trans_subs):
+                    s_st = float(s.get("start", 0.0))
+                    s_en = float(s.get("end", s_st + 1.0))
+                    
+                    ov_st = max(s_st, c_st)
+                    ov_en = min(s_en, c_en)
+                    if ov_en > ov_st + 0.2:
+                        rel_st = accum_dur + (ov_st - c_st)
+                        rel_en = accum_dur + (ov_en - c_st)
+                        txt = (s.get("text") or "").strip()
+                        orig_txt = old_orig_subs[idx_s].get("text", "") if idx_s < len(old_orig_subs) else ""
+                        
+                        updated_subs.append({
+                            "index": new_sub_idx,
+                            "start": round(rel_st, 3),
+                            "end": round(rel_en, 3),
+                            "start_str": format_srt_timestamp(rel_st),
+                            "end_str": format_srt_timestamp(rel_en),
+                            "text": txt,
+                            "original_text": orig_txt
+                        })
+                        new_trans_srt_blocks.append(f"{new_sub_idx}\n{format_srt_timestamp(rel_st)} --> {format_srt_timestamp(rel_en)}\n{txt}\n")
+                        if orig_txt:
+                            new_orig_srt_blocks.append(f"{new_sub_idx}\n{format_srt_timestamp(rel_st)} --> {format_srt_timestamp(rel_en)}\n{orig_txt}\n")
+                        new_sub_idx += 1
+                        
+                accum_dur += c_dur
+                
+            if new_trans_srt_blocks:
+                trans_srt_file.write_text("\n".join(new_trans_srt_blocks), encoding="utf-8")
+            if new_orig_srt_blocks and orig_srt_file.is_file():
+                orig_srt_file.write_text("\n".join(new_orig_srt_blocks), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Error re-timing subtitles on timeline edit: {e}")
+
     # Tự động cập nhật thumbnail
     thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
     try:
@@ -1927,7 +1981,8 @@ async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
         "video_url": stream_url,
         "final_video_url": stream_url,
         "has_final": True,
-        "total_clips": len(clips)
+        "total_clips": len(clips),
+        "subtitles": updated_subs
     }
 
 
