@@ -56,9 +56,11 @@ def _json_value(value: Any) -> Any:
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(_json_value(payload), ensure_ascii=False), encoding="utf-8"
-    )
+    serialized = json.dumps(_json_value(payload), ensure_ascii=False)
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write(serialized)
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(str(temporary), str(path))
 
 
