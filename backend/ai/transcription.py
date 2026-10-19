@@ -458,6 +458,7 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None, or
                     original_audio_path=original_audio_path,
                     initial_segments=subs,
                     whisper_model=model,
+                    vocals_audio_path=audio_path,
                 )
                 res = [
                     {"start": s.start.total_seconds(), "end": s.end.total_seconds(), "text": s.content}

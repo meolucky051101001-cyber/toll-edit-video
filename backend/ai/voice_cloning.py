@@ -640,27 +640,7 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                 "current_seconds": est_duration
             })
 
-    if overly_long_items and condense_remaining > 2.0:
-        print(f"[VOICE_GUARD] Vòng 1: Gom {len(overly_long_items)} câu dự kiến quá dài (> {MAX_NATURAL_SPEED}x), rút gọn theo lô...")
-        from .translation import condense_vietnamese_subtitles_batch
-        condense_started = time.monotonic()
-        condensed_map = await asyncio.to_thread(
-            condense_vietnamese_subtitles_batch,
-            overly_long_items,
-            api_key=os.getenv("GEMINI_API_KEY", ""),
-            deadline=condense_started + min(25.0, condense_remaining),
-            stop_checker=lambda: bool(__import__('shared_state').stop_requested),
-            job_id="round1_pre_tts",
-            script_mode=script_mode
-        )
-        condense_remaining = max(0.0, condense_remaining - (time.monotonic() - condense_started))
-        for seg in translated_segments:
-            if seg.index in condensed_map:
-                old_text = seg.content
-                seg.content = condensed_map[seg.index]
-                print(f"[VOICE_GUARD] Đã rút gọn câu #{seg.index}: '{old_text[:35]}...' -> '{seg.content}'")
-
-    limiter = asyncio.Semaphore(int(os.getenv("V1_TTS_WORKERS", "4")))
+    limiter = asyncio.Semaphore(int(os.getenv("V1_TTS_WORKERS", "6")))
     async def run_one(seg):
         async with limiter:
             if not seg.content.strip() or not re.search(r'\w', seg.content):
@@ -684,7 +664,7 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                     await asyncio.sleep(1.2 * attempt)
                 try:
                     result = await generate_single_tts(
-                        seg, output_folder, seg_source, seg_param, api_key, target_max_duration=hard_max
+                        seg, output_folder, seg_source, seg_param, api_key, hard_max
                     )
                     if result is not None:
                         break
@@ -720,7 +700,38 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                 )
             return result
 
-    results = await asyncio.gather(*(run_one(seg) for seg in translated_segments), return_exceptions=True)
+    if overly_long_items and condense_remaining > 2.0:
+        long_indices = {item["index"] for item in overly_long_items}
+        # Khởi chạy ngay lập tức các câu độ dài bình thường song song với lúc chờ Gemini rút gọn câu dài
+        task_map = {
+            i: asyncio.create_task(run_one(seg))
+            for i, seg in enumerate(translated_segments)
+            if seg.index not in long_indices
+        }
+        print(f"[VOICE_GUARD] Vòng 1: Gom {len(overly_long_items)} câu dự kiến quá dài (> {MAX_NATURAL_SPEED}x), rút gọn song song khi đang đọc {len(task_map)} câu thường...")
+        from .translation import condense_vietnamese_subtitles_batch
+        condense_started = time.monotonic()
+        condensed_map = await asyncio.to_thread(
+            condense_vietnamese_subtitles_batch,
+            overly_long_items,
+            api_key=os.getenv("GEMINI_API_KEY", ""),
+            deadline=condense_started + min(25.0, condense_remaining),
+            stop_checker=lambda: bool(__import__('shared_state').stop_requested),
+            job_id="round1_pre_tts",
+            script_mode=script_mode
+        )
+        condense_remaining = max(0.0, condense_remaining - (time.monotonic() - condense_started))
+        for i, seg in enumerate(translated_segments):
+            if seg.index in condensed_map:
+                old_text = seg.content
+                seg.content = condensed_map[seg.index]
+                print(f"[VOICE_GUARD] Đã rút gọn câu #{seg.index}: '{old_text[:35]}...' -> '{seg.content}'")
+            if i not in task_map:
+                task_map[i] = asyncio.create_task(run_one(seg))
+        ordered_tasks = [task_map[i] for i in range(len(translated_segments))]
+        results = await asyncio.gather(*ordered_tasks, return_exceptions=True)
+    else:
+        results = await asyncio.gather(*(run_one(seg) for seg in translated_segments), return_exceptions=True)
     exceptions = [r for r in results if isinstance(r, BaseException)]
     failed_items = [r for r in results if isinstance(r, dict) and r.get("error")]
     total_failures = len(exceptions) + len(failed_items)

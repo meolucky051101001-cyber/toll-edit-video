@@ -51,15 +51,31 @@ def get_ocr_reader():
         reader = easyocr.Reader(['ch_sim'], gpu=False)
     return reader
 
-def release_ocr_reader():
+def _close_ocr_session():
+    import sys
+    called = set()
+    for mod_name in ("backend.ai.v1_model_runtime", "ai.v1_model_runtime"):
+        mod = sys.modules.get(mod_name)
+        fn = getattr(mod, "close_session", None) if mod is not None else None
+        if callable(fn) and id(fn) not in called:
+            called.add(id(fn))
+            fn()
+    if not called:
+        try:
+            from .ai.v1_model_runtime import close_session
+        except ImportError:
+            from ai.v1_model_runtime import close_session
+        close_session()
+
+
+def release_ocr_reader(force_close_session: bool = False):
     global reader, _paddle_failed
+    was_failed = _paddle_failed
     _paddle_failed = False
     _frame_cache.clear()
-    try:
-        from .ai.v1_model_runtime import close_session
-    except ImportError:
-        from ai.v1_model_runtime import close_session
-    close_session()
+    keep_warm = os.getenv("V1_OCR_KEEP_WARM", "1").strip().lower() not in ("0", "false", "no")
+    if force_close_session or was_failed or not keep_warm:
+        _close_ocr_session()
     if reader is not None:
         logger.info("🧹 Đang giải phóng bộ nhớ RAM/VRAM của EasyOCR...")
         del reader
@@ -121,9 +137,10 @@ def _recognize_batch(frames):
         try:
             with tempfile.TemporaryDirectory(prefix="autodub-v1-ocr-frames-") as temporary:
                 paths = []
+                png_params = [int(getattr(cv2, "IMWRITE_PNG_COMPRESSION", 16)), 1]
                 for index, frame in enumerate(frames):
                     path = Path(temporary) / "frame_{:04d}.png".format(index)
-                    if not cv2.imwrite(str(path), frame):
+                    if not cv2.imwrite(str(path), frame, png_params):
                         raise OSError("Could not write OCR frame {}".format(path))
                     paths.append(str(path))
 
@@ -166,11 +183,7 @@ def _recognize_batch(frames):
         except (V1ModelRuntimeError, OSError, RuntimeError, TypeError, ValueError) as exc:
             # Close the failed model BEFORE opening the CPU fallback. Stay on
             # fallback until this video ends instead of loading both repeatedly.
-            try:
-                from .ai.v1_model_runtime import close_session
-            except ImportError:
-                from ai.v1_model_runtime import close_session
-            close_session()
+            _close_ocr_session()
             _paddle_failed = True
             logger.error("PP-OCRv6 GPU failed; CPU fallback disabled: %s", exc)
 

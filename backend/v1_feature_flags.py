@@ -28,7 +28,7 @@ DEFAULT_FLAGS: Dict[str, Any] = {
     "V1_SMART_SKIP_OCR": True,
     "V1_QC_POLICY": "REPORT_ONLY",
     "V1_MAX_NATURAL_SPEED": 1.50,
-    "V1_TTS_WORKERS": 4,
+    "V1_TTS_WORKERS": 6,
     "V1_USE_ORCHESTRATOR": True,
     "V1_VIDEO_MODE": "AUTO",
     "V1_SHORT_SEPARATOR": "roformer",

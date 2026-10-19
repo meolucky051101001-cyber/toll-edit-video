@@ -202,34 +202,37 @@ class AIDoodleVideoRequest(BaseModel):
     prompt: Optional[str] = Field(default="", max_length=5000)
     raw_script: Optional[str] = Field(default="", max_length=20000)
     ai_engine: str = Field(default="muse", max_length=50)
-    voice: str = Field(default="multi_male_felipe_uranus_bigtts", max_length=100)
-    scene_count: int = Field(default=6, ge=2, le=30)
+    voice: str = Field(default="BV075_streaming", max_length=100)
+    scene_count: int = Field(default=12, ge=2, le=30)
     task_id: Optional[str] = Field(default=None, max_length=100)
-    use_hand_draw: bool = Field(default=True)
-    whiteboard_mode: str = Field(default="3band", max_length=50)
+    use_hand_draw: bool = Field(default=False)
+    whiteboard_mode: str = Field(default="kinetic", max_length=50)
+    satori_band_a: Optional[bool] = Field(default=None)
 
 
 class AIDoodleScriptRequest(BaseModel):
     prompt: Optional[str] = Field(default="", max_length=5000)
     raw_script: Optional[str] = Field(default="", max_length=20000)
     ai_engine: str = Field(default="muse", max_length=50)
-    scene_count: int = Field(default=6, ge=2, le=30)
+    scene_count: int = Field(default=12, ge=2, le=30)
 
 
 class RenderDoodleScenesRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=500)
     keyword_accent: str = Field(default="", max_length=100)
     scenes: List[Dict[str, Any]] = Field(..., min_length=1)
-    voice: str = Field(default="multi_male_felipe_uranus_bigtts", max_length=100)
+    voice: str = Field(default="BV075_streaming", max_length=100)
     task_id: Optional[str] = Field(default=None, max_length=100)
-    use_hand_draw: bool = Field(default=True)
-    whiteboard_mode: str = Field(default="3band", max_length=50)
+    use_hand_draw: bool = Field(default=False)
+    whiteboard_mode: str = Field(default="kinetic", max_length=50)
+    satori_band_a: Optional[bool] = Field(default=None)
 
 
 class PreviewSceneFrameRequest(BaseModel):
     title: str = Field(default="TIÊU ĐỀ VIDEO", max_length=500)
     keyword_accent: str = Field(default="", max_length=100)
     scene: Dict[str, Any]
+    satori_band_a: Optional[bool] = Field(default=None)
 
 
 class AIChatMessageItem(BaseModel):
@@ -694,7 +697,10 @@ def api_auto_pipeline(req: AutoPipelineRequest):
 def api_get_ai_engines():
     """Kiểm tra và trả về danh sách các AI Model có thể dùng để tạo kịch bản."""
     from ai.muse_spark_service import is_muse_available
+    from ai.scriptwriting import GEMINI_SCRIPT_MODEL
     has_muse = is_muse_available()
+    gemini_model = (GEMINI_SCRIPT_MODEL or "gemini-3.6-flash").strip()
+    gemini_pretty = gemini_model.replace("gemini-", "").replace("-", " ").title()
     return {
         "status": "success",
         "default": "muse" if has_muse else "gemini",
@@ -707,12 +713,42 @@ def api_get_ai_engines():
             },
             {
                 "id": "gemini",
-                "name": "✨ Google Gemini 2.5 Flash",
-                "model": "gemini-2.5-flash",
+                "name": f"✨ Google Gemini {gemini_pretty}",
+                "model": gemini_model,
                 "available": True
             }
         ]
     }
+
+
+@router.get("/api/script/render-capabilities")
+def api_render_capabilities():
+    """Báo cáo năng lực các engine nâng cấp để Studio hiển thị tuỳ chọn (Remotion, Satori...)."""
+    remotion_cap = {
+        "enabled": False,
+        "available": False,
+        "mode_id": "remotion",
+        "label": "🎬 Remotion Draw-On + Camera (Beta)",
+    }
+    try:
+        from ai.remotion_renderer import is_available as _rem_available, remotion_enabled as _rem_enabled
+        remotion_cap["enabled"] = bool(_rem_enabled())
+        remotion_cap["available"] = bool(_rem_available())
+    except Exception as exc:  # noqa: BLE001 — thông tin phụ trợ, không chặn studio
+        logger.warning(f"Không kiểm tra được năng lực engine Remotion: {exc}")
+    return {"status": "success", "data": {"remotion": remotion_cap}}
+
+
+@router.get("/api/script/assets/{asset_name}")
+def api_script_asset(asset_name: str):
+    """Phục vụ tài nguyên tĩnh của Studio (ví dụ howler.min.js) với kiểm tra chống path traversal."""
+    if not asset_name or ".." in asset_name or "/" in asset_name or "\\" in asset_name:
+        raise HTTPException(status_code=400, detail="Tên tài nguyên không hợp lệ.")
+    asset_path = Path(__file__).resolve().parent / "templates" / "assets" / asset_name
+    if not asset_path.is_file():
+        raise HTTPException(status_code=404, detail="Không tìm thấy tài nguyên.")
+    media_type = "application/javascript" if asset_path.suffix == ".js" else "application/octet-stream"
+    return FileResponse(str(asset_path), media_type=media_type)
 
 
 @router.post("/api/script/ai-generate-script")
@@ -763,7 +799,8 @@ def api_render_doodle_scenes(req: RenderDoodleScenesRequest):
                 voice_id=req.voice,
                 progress_callback=lambda p, msg: _update_task_progress(task_id, p, msg),
                 use_hand_draw=req.use_hand_draw,
-                whiteboard_mode=req.whiteboard_mode
+                whiteboard_mode=req.whiteboard_mode,
+                satori_band_a=req.satori_band_a
             )
             _update_task_progress(task_id, 100, "Hoàn tất! Video đã sẵn sàng tải về.", status="completed", result=res)
         except Exception as e:
@@ -802,7 +839,8 @@ def api_ai_generate_video(req: AIDoodleVideoRequest):
                 voice_id=req.voice,
                 progress_callback=lambda p, msg: _update_task_progress(task_id, p, msg),
                 use_hand_draw=req.use_hand_draw,
-                whiteboard_mode=req.whiteboard_mode
+                whiteboard_mode=req.whiteboard_mode,
+                satori_band_a=req.satori_band_a
             )
             res["script_data"] = script_data
             _update_task_progress(task_id, 100, "Hoàn tất! Video thành phẩm đã sẵn sàng.", status="completed", result=res)
@@ -829,7 +867,8 @@ def api_preview_scene_frame(req: PreviewSceneFrameRequest):
             title=req.title,
             keyword_accent=req.keyword_accent,
             scene=req.scene,
-            output_png=out_path
+            output_png=out_path,
+            prefer_satori=req.satori_band_a
         )
         return {
             "status": "success",

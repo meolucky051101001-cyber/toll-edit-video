@@ -503,14 +503,22 @@ async def cmd_muse(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🤖 Biên soạn bởi: Meta Muse Spark 1.3"
         )
 
-        await send_video_safely(
-            context=context,
-            chat_id=chat_id,
-            final_video=video_path,
-            caption=caption,
-            status_msg=status_msg,
-            url_or_filename=title
-        )
+        upload_to_telegram = os.getenv("AUTODUB_TELEGRAM_UPLOAD_VIDEO", "false").lower() in ("true", "1", "yes")
+        if upload_to_telegram:
+            await send_video_safely(
+                context=context,
+                chat_id=chat_id,
+                final_video=video_path,
+                caption=caption,
+                status_msg=status_msg,
+                url_or_filename=title
+            )
+        else:
+            await safe_edit_status(
+                status_msg,
+                f"✅ *Đã render xong video thành công!*\n\n{caption}\n\n📁 *Đã lưu tại:* `{video_path}`",
+                parse_mode="Markdown"
+            )
 
     except Exception as e:
         logger.error(f"Lỗi khi xử lý Muse Spark video: {e}", exc_info=True)
