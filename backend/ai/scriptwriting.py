@@ -561,14 +561,21 @@ def call_gemini(
     api_key: Optional[str] = None,
     system_instruction: str = "",
     response_schema: Optional[Dict[str, Any]] = None,
-    structured_output: bool = True
+    structured_output: bool = True,
+    preferred_model: Optional[str] = None
 ) -> Optional[str]:
-    """Gọi Google Gemini API (hỗ trợ cả văn bản thuần túy và Multimodal Vision) với chính sách retry và Structured Output thông minh."""
+    """Gọi Google Gemini API (hỗ trợ cả văn bản thuần túy và Multimodal Vision) với chính sách retry và Structured Output thông minh.
+
+    preferred_model: nếu có, model này được thử TRƯỚC cả danh sách mặc định
+    (dùng cho Studio: ưu tiên bản Gemini mới mà không đổi model của pipeline khác).
+    """
     key = get_gemini_api_key(api_key)
     if not key:
         raise ValueError("Chưa cấu hình GEMINI_API_KEY trong hệ thống!")
 
     models_to_try = []
+    if preferred_model and preferred_model.strip():
+        models_to_try.append(preferred_model.strip())
     for m in GEMINI_FALLBACK_MODELS:
         if m and m not in models_to_try:
             models_to_try.append(m)

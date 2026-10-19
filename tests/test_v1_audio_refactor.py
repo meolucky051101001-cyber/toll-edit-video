@@ -66,6 +66,30 @@ class AudioRefactorTests(unittest.TestCase):
             windows = [(c.args[2], c.args[3]) for c in retry.call_args_list]
             self.assertEqual(windows, [(0, 8), (8, 16), (16, 18)])
 
+    def test_vocal_stem_gate_skips_pure_bgm_gaps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            orig_path = Path(directory) / 'original.wav'
+            vocals_path = Path(directory) / 'vocals.wav'
+            # original.wav has loud BGM (-15 dBFS) across all 16s
+            Sine(220).to_audio_segment(duration=16000, volume=-15).export(orig_path, format='wav')
+            # vocals.wav is silent in [0, 8s] (pure BGM intro) and has voice in [8s, 16s] (-20 dBFS)
+            vocals = (
+                AudioSegment.silent(duration=8000, frame_rate=44100)
+                + Sine(440).to_audio_segment(duration=8000, volume=-20)
+            )
+            vocals.export(vocals_path, format='wav')
+            with patch('backend.ai.v1_conditional_asr.retranscribe_gap_snippet', return_value=[]) as retry:
+                run_conditional_asr(
+                    str(orig_path),
+                    [],
+                    object(),
+                    max_retry_audio_seconds=18,
+                    max_snippet_seconds=8,
+                    vocals_audio_path=str(vocals_path),
+                )
+            windows = [(c.args[2], c.args[3]) for c in retry.call_args_list]
+            self.assertEqual(windows, [(8, 16)])
+
     def test_missing_voice_is_an_error(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'bgm.wav'

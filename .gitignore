@@ -60,6 +60,10 @@ backend/douyin_script_data.json
 REVIEW_TOOL_V1_test_evidence.txt
 workspace_backup_safety/
 backend/run_reprocess_*.py
+# Cho phép commit file test mới trong tests/ (rule "test_*" phía trên chỉ nhằm chặn file output test ở thư mục gốc)
+!tests/**
+# ...nhưng vẫn chặn rác sinh ra trong tests/ khi chạy pytest
+tests/__pycache__/
 # Douyin cookies
 douyin_cookies.txt
 backend/douyin_cookies.txt

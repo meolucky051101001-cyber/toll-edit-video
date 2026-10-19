@@ -65,7 +65,7 @@ def extract_subtitles_isolated(audio_path, output_srt_path, original_audio_path=
             pass
     import gc, time
     if not os.environ.get("PYTEST_CURRENT_TEST"):
-        time.sleep(1.0)
+        time.sleep(0.15)
 
     env = dict(os.environ, V1_ASR_REUSE='0', PYTHONIOENCODING='utf-8', V1_ASR_JOB_OPTIONS=json.dumps(job_options))
     with tempfile.TemporaryDirectory(prefix='v1-asr-') as folder:

@@ -132,12 +132,14 @@ def compose_band_a_c_base(
     keyword_accent: str,
     scene: Dict[str, Any],
     width: int = CANVAS_W,
-    height: int = CANVAS_H
+    height: int = CANVAS_H,
+    prefer_satori: Optional[bool] = None
 ) -> Image.Image:
     """
     Tạo khung ảnh tĩnh 720x1280 chuẩn BẢNG TRẮNG NỀN TRẮNG KHUNG ĐEN (Black on White):
     - Toàn bộ nền video là Màu Trắng (#FFFFFF)
     - Band A (0 .. 420): Khung tiêu đề chữ đen in hoa đậm, viền đen thanh lịch
+      (dùng engine Satori nếu được bật — fail-open về PIL khi lỗi/thiếu Node)
     - Band B (420 .. 840): Khung bảng trắng để video bàn tay vẽ bút dạ đen đè lên
     - Band C (840 .. 1280): Khung phụ đề chữ đen rõ nét trên nền trắng
     - Khung viền đen 4 góc bao quanh toàn bộ video chuẩn tranh vẽ bảng trắng
@@ -146,21 +148,39 @@ def compose_band_a_c_base(
     draw = ImageDraw.Draw(img)
 
     # 1. BAND A: TIÊU ĐỀ NỀN TRẮNG CHỮ ĐEN (0 .. 420)
-    font_badge = get_system_font(size=20, bold=True)
-    draw.rounded_rectangle([30, 24, 250, 64], radius=8, fill=(245, 245, 245), outline=COLOR_BLACK, width=2)
-    draw.text((45, 33), "★ KHÁM PHÁ BÍ MẬT", font=font_badge, fill=COLOR_BLACK)
+    band_a_done = False
+    use_satori = prefer_satori
+    if use_satori is None:
+        use_satori = os.getenv("SCRIPT_SATORI_BAND_A", "0").strip().lower() in ("1", "true", "on", "yes")
+    if use_satori:
+        try:
+            from ai.satori_renderer import is_available as _satori_available
+            from ai.satori_renderer import render_band_a_png as _satori_band_a_png
 
-    font_title = get_system_font(size=44, bold=True)
-    title_clean = title.strip().upper()
-    title_lines = wrap_text_lines(title_clean, font_title, width - 60, draw)
-    curr_y = 85
+            if _satori_available():
+                ba_img = _satori_band_a_png(title=title, keyword_accent=keyword_accent, width=width, height=BAND_A_H)
+                if ba_img is not None:
+                    img.paste(ba_img, (0, 0), ba_img)
+                    band_a_done = True
+        except Exception as e_satori:  # noqa: BLE001 — fail-open về PIL
+            logger.warning(f"Satori Band A (whiteboard) không khả dụng, dùng PIL dự phòng: {e_satori}")
 
-    for line in title_lines[:4]:
-        line_bbox = draw.textbbox((0, 0), line, font=font_title)
-        line_w = line_bbox[2] - line_bbox[0]
-        curr_x = (width - line_w) // 2
-        draw.text((curr_x, curr_y), line, font=font_title, fill=COLOR_BLACK)
-        curr_y += 54
+    if not band_a_done:
+        font_badge = get_system_font(size=20, bold=True)
+        draw.rounded_rectangle([30, 24, 250, 64], radius=8, fill=(245, 245, 245), outline=COLOR_BLACK, width=2)
+        draw.text((45, 33), "★ KHÁM PHÁ BÍ MẬT", font=font_badge, fill=COLOR_BLACK)
+
+        font_title = get_system_font(size=44, bold=True)
+        title_clean = title.strip().upper()
+        title_lines = wrap_text_lines(title_clean, font_title, width - 60, draw)
+        curr_y = 85
+
+        for line in title_lines[:4]:
+            line_bbox = draw.textbbox((0, 0), line, font=font_title)
+            line_w = line_bbox[2] - line_bbox[0]
+            curr_x = (width - line_w) // 2
+            draw.text((curr_x, curr_y), line, font=font_title, fill=COLOR_BLACK)
+            curr_y += 54
 
     # Đường phân cách viền đen giữa Band A và B
     draw.line([(0, BAND_A_H), (width, BAND_A_H)], fill=COLOR_BLACK, width=4)

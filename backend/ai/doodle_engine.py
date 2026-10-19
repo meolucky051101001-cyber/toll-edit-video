@@ -476,13 +476,14 @@ def compose_doodle_frame(
     title: str,
     keyword_accent: str,
     scene: Dict[str, Any],
-    output_png: Path
+    output_png: Path,
+    prefer_satori: Optional[bool] = None
 ):
     """
     Tạo 1 frame ảnh hoàn chỉnh kích thước 720x1280 (chuẩn 9:16) phong cách Whiteboard:
     - Toàn bộ nền là Màu Trắng (#FFFFFF)
     - Khung viền và các dải ngăn cách màu đen (#000000)
-    - Band A: Tiêu đề chữ đen in hoa
+    - Band A: Tiêu đề chữ đen in hoa (ưu tiên engine Satori nếu được bật — fail-open về PIL)
     - Band B: Hình vẽ Doodle nét đen
     - Band C: Phụ đề chữ đen rõ nét trên nền trắng
     """
@@ -490,26 +491,51 @@ def compose_doodle_frame(
     draw = ImageDraw.Draw(img)
 
     # 1. BAND A: TIÊU ĐỀ NỀN TRẮNG CHỮ ĐEN (0 .. 420)
-    font_badge = get_system_font(size=18, bold=True)
-    badge_text = "★ KHÁM PHÁ BÍ MẬT"
-    b_bbox = draw.textbbox((0, 0), badge_text, font=font_badge)
-    bw = b_bbox[2] - b_bbox[0]
-    badge_x = (CANVAS_W - bw) // 2
-    draw.rounded_rectangle([badge_x - 12, 25, badge_x + bw + 12, 58], radius=6, fill=(245, 245, 245), outline=COLOR_BLACK, width=2)
-    draw.text((badge_x, 32), badge_text, font=font_badge, fill=COLOR_BLACK)
+    #    Đường nâng cấp Satori (Node sidecar): bật bằng tham số prefer_satori hoặc SCRIPT_SATORI_BAND_A=1.
+    #    Mọi lỗi (thiếu node, timeout, SVG hỏng...) đều tự động lùi về bộ vẽ PIL bên dưới.
+    band_a_done = False
+    use_satori = prefer_satori
+    if use_satori is None:
+        use_satori = os.getenv("SCRIPT_SATORI_BAND_A", "0").strip().lower() in ("1", "true", "on", "yes")
+    if use_satori:
+        try:
+            from ai.satori_renderer import is_available as _satori_available
+            from ai.satori_renderer import render_band_a_png as _satori_band_a_png
+            if _satori_available():
+                ba_img = _satori_band_a_png(
+                    title=title,
+                    keyword_accent=keyword_accent,
+                    width=CANVAS_W,
+                    height=BAND_A_H,
+                )
+                if ba_img is not None:
+                    img.paste(ba_img, (0, 0), ba_img)
+                    band_a_done = True
+                    logger.debug("Band A render bằng Satori (Node sidecar).")
+        except Exception as e_satori:  # noqa: BLE001 — fail-open về PIL
+            logger.warning(f"Satori Band A không khả dụng, dùng PIL dự phòng: {e_satori}")
 
-    font_title = get_system_font(size=38, bold=True)
-    title_lines = wrap_text_lines(title.strip().upper(), font_title, CANVAS_W - 80, draw)
-    title_total_h = len(title_lines) * 54
-    title_start_y = 75 + (BAND_A_H - 120 - title_total_h) // 2
+    if not band_a_done:
+        font_badge = get_system_font(size=18, bold=True)
+        badge_text = "★ KHÁM PHÁ BÍ MẬT"
+        b_bbox = draw.textbbox((0, 0), badge_text, font=font_badge)
+        bw = b_bbox[2] - b_bbox[0]
+        badge_x = (CANVAS_W - bw) // 2
+        draw.rounded_rectangle([badge_x - 12, 25, badge_x + bw + 12, 58], radius=6, fill=(245, 245, 245), outline=COLOR_BLACK, width=2)
+        draw.text((badge_x, 32), badge_text, font=font_badge, fill=COLOR_BLACK)
 
-    curr_y = title_start_y
-    for line in title_lines:
-        line_bbox = draw.textbbox((0, 0), line, font=font_title)
-        line_w = line_bbox[2] - line_bbox[0]
-        curr_x = (CANVAS_W - line_w) // 2
-        draw.text((curr_x, curr_y), line, font=font_title, fill=COLOR_BLACK)
-        curr_y += 54
+        font_title = get_system_font(size=38, bold=True)
+        title_lines = wrap_text_lines(title.strip().upper(), font_title, CANVAS_W - 80, draw)
+        title_total_h = len(title_lines) * 54
+        title_start_y = 75 + (BAND_A_H - 120 - title_total_h) // 2
+
+        curr_y = title_start_y
+        for line in title_lines:
+            line_bbox = draw.textbbox((0, 0), line, font=font_title)
+            line_w = line_bbox[2] - line_bbox[0]
+            curr_x = (CANVAS_W - line_w) // 2
+            draw.text((curr_x, curr_y), line, font=font_title, fill=COLOR_BLACK)
+            curr_y += 54
 
     # Đường phân cách viền đen giữa Band A và Band B
     draw.line([(0, BAND_A_H), (CANVAS_W, BAND_A_H)], fill=COLOR_BLACK, width=4)
@@ -573,21 +599,49 @@ def compose_doodle_frame(
 # PIPELINE RENDER VIDEO HOÀN CHỈNH BẰNG FFMPEG
 # =========================================================================
 
+def mirror_output_video(video_path: Path, copy_dir: Optional[str] = None) -> Optional[Path]:
+    """Copy gương video thành phẩm sang thư mục lưu trữ (vd D:\\kich_ban).
+
+    Thư mục lấy từ tham số hoặc biến môi trường SCRIPT_OUTPUT_COPY_DIR (rỗng = tắt).
+    Mọi lỗi copy đều bị nuốt + chỉ ghi log cảnh báo — KHÔNG bao giờ làm hỏng render.
+    """
+    raw = (copy_dir if copy_dir is not None else os.getenv("SCRIPT_OUTPUT_COPY_DIR", "")).strip()
+    if not raw:
+        return None
+    try:
+        target_dir = Path(raw)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        dest = target_dir / Path(video_path).name
+        shutil.copy2(video_path, dest)
+        logger.info(f"Đã copy video thành phẩm sang thư mục gương: {dest}")
+        return dest
+    except Exception as e:
+        logger.warning(f"Copy video sang '{raw}' thất bại (bỏ qua, video chính vẫn nguyên vẹn): {e}")
+        return None
+
+
 def render_doodle_video(
     script_data: Dict[str, Any],
-    voice_id: str = "multi_male_felipe_uranus_bigtts",
+    voice_id: str = "BV075_streaming",
     output_video_path: Optional[Path] = None,
     progress_callback: Optional[Callable[[int, str], None]] = None,
-    use_hand_draw: bool = True,
-    whiteboard_mode: str = "3band",
-    fps: int = 24
+    use_hand_draw: bool = False,
+    whiteboard_mode: str = "kinetic",
+    fps: int = 24,
+    satori_band_a: Optional[bool] = None
 ) -> Dict[str, Any]:
     """
     Render toàn bộ video Doodle từ kịch bản phân cảnh:
     1. Sinh TTS âm thanh từng cảnh (CapCut/Edge TTS)
-    2. Diễn hoạt bàn tay vẽ thật (Hand-Drawn Moving Pen Animation) bằng CUDA + NVENC
+    2. Diễn hoạt nét vẽ tự chạy (Kinetic Reveal — đã bỏ bàn tay vẽ từ 18/10/2026) bằng CUDA + NVENC
     3. Ghép khung 3-Band chuẩn 720x1280 (hoặc fullscreen) bằng FFmpeg
-    4. Concat thành video MP4 hoàn chỉnh với chuẩn âm lượng -16 LUFS
+    4. Concat thành video MP4 hoàn chỉnh với chuẩn âm lượng -16 LUFS (+faststart)
+
+    Nâng cấp 2026-10-18:
+    - whiteboard_mode="remotion": dùng engine Remotion (draw-on + camera + Lottie) cho từng cảnh,
+      lỗi bất kỳ tự động lùi về chuỗi engine cũ (không bao giờ làm hỏng pipeline).
+    - satori_band_a: ép bật/tắt Band A Satori (None = theo biến môi trường SCRIPT_SATORI_BAND_A).
+    - Mặc định mới (chiều 18/10): kinetic + use_hand_draw=False + giọng BV075 "Thanh Niên Tự Tin".
     """
     job_id = f"doodle_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     work_dir = Path(r"C:\tool v1\workspace\doodle_render") / job_id
@@ -637,8 +691,50 @@ def render_doodle_video(
         dur_padded = round(duration + 0.25, 2)
         seg_mp4 = work_dir / f"seg_{scene_num:03d}.mp4"
 
+        mode_clean = (whiteboard_mode or "").lower().strip()
         rendered_with_animation = False
-        if use_hand_draw or (whiteboard_mode or "").lower() in ["kinetic", "reveal"]:
+
+        # Đường nâng cấp Remotion (vẽ nét + camera + Lottie): chọn bằng "Phong cách diễn hoạt" = remotion.
+        # Mọi lỗi (thiếu Node, npm install, render fail...) đều tự động lùi về chuỗi engine cũ bên dưới.
+        if mode_clean == "remotion":
+            try:
+                from ai.remotion_renderer import (
+                    is_available as _rem_available,
+                    build_scene_props as _rem_build_props,
+                    render_doodle_scene as _rem_render_scene,
+                )
+
+                if _rem_available():
+                    rem_props = _rem_build_props(
+                        title=title,
+                        keyword_accent=keyword_accent,
+                        scene=sc,
+                        duration_sec=dur_padded,
+                        fps=fps,
+                    )
+                    remotion_raw = work_dir / f"remotion_{scene_num:03d}.mp4"
+                    _rem_render_scene(rem_props, remotion_raw)
+                    # Ghép giọng đọc TTS bằng FFmpeg để đồng bộ codec/âm thanh với các segment còn lại
+                    cmd_mux = [
+                        "ffmpeg", "-y",
+                        "-i", str(remotion_raw),
+                        "-i", str(audio_file),
+                        "-map", "0:v", "-map", "1:a",
+                        "-c:v", "copy",
+                        "-c:a", "aac", "-b:a", "192k",
+                        "-shortest",
+                        str(seg_mp4)
+                    ]
+                    subprocess.run(cmd_mux, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                    rendered_with_animation = True
+                    logger.info(f"Cảnh {scene_num}: render bằng engine Remotion (draw-on + camera).")
+                else:
+                    logger.warning("Đã chọn Remotion nhưng engine chưa khả dụng (thiếu Node/npm install) — dùng engine cũ.")
+            except Exception as e_rem:
+                logger.warning(f"Remotion lỗi ở cảnh {scene_num}: {e_rem} — chuyển sang engine cũ.")
+                rendered_with_animation = False
+
+        if not rendered_with_animation and (use_hand_draw or mode_clean in ["kinetic", "reveal", "remotion"]):
             try:
                 from ai.whiteboard_hand_engine import (
                     compose_band_b_image,
@@ -647,7 +743,7 @@ def render_doodle_video(
                     composite_hand_drawn_scene_3band
                 )
                 band_b_img = compose_band_b_image(sc)
-                base_img = compose_band_a_c_base(title, keyword_accent, sc)
+                base_img = compose_band_a_c_base(title, keyword_accent, sc, prefer_satori=satori_band_a)
                 base_png = work_dir / f"base_{scene_num:03d}.png"
                 base_img.save(base_png)
 
@@ -676,7 +772,7 @@ def render_doodle_video(
         if not rendered_with_animation:
             # Vẽ frame 3-Band và render tĩnh dự phòng
             frame_png = work_dir / f"frame_{scene_num:03d}.png"
-            compose_doodle_frame(title, keyword_accent, sc, frame_png)
+            compose_doodle_frame(title, keyword_accent, sc, frame_png, prefer_satori=satori_band_a)
 
             cmd_seg = [
                 "ffmpeg", "-y",
@@ -727,6 +823,7 @@ def render_doodle_video(
         "-c:v", "copy",
         "-c:a", "aac",
         "-b:a", "192k",
+        "-movflags", "+faststart",
         str(output_video_path)
     ]
     try:
@@ -738,6 +835,9 @@ def render_doodle_video(
     final_dur = get_audio_duration(output_video_path)
     file_size_mb = round(os.path.getsize(output_video_path) / (1024 * 1024), 2)
 
+    # Copy gương sang thư mục lưu trữ (SCRIPT_OUTPUT_COPY_DIR, vd D:\kich_ban) — lỗi chỉ log, không raise.
+    mirrored_path = mirror_output_video(output_video_path)
+
     if progress_callback:
         progress_callback(100, "Hoàn tất! Video sẵn sàng.")
 
@@ -747,10 +847,12 @@ def render_doodle_video(
         "job_id": job_id,
         "video_path": str(output_video_path),
         "video_filename": output_video_path.name,
+        "copied_to": str(mirrored_path) if mirrored_path else None,
         "download_url": f"/api/script/stream/{output_video_path.name}",
         "duration": final_dur,
         "file_size_mb": file_size_mb,
         "scene_count": len(scenes),
         "use_hand_draw": use_hand_draw,
-        "whiteboard_mode": whiteboard_mode
+        "whiteboard_mode": whiteboard_mode,
+        "satori_band_a": satori_band_a
     }

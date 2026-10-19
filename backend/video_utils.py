@@ -649,7 +649,7 @@ def process_video(
                 # làm lệch stride kênh UV khiến nửa bên phải (x >= 540) bị lỗi màu xanh lá cây (U=0, V=0).
                 "[v1]scale=360:640:force_original_aspect_ratio=increase:flags=bilinear,crop=360:640,"
                 "boxblur=8:3,scale=1080:1920:flags=bilinear[bg];"
-                f"[v2]{sub_filter},scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
+                f"[v2]{sub_filter},scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos[fg];"
                 "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p"
             )
             # Tích hợp Watermark bản quyền nếu bật trong cài đặt Canvas
@@ -703,7 +703,7 @@ def process_video(
         
         # NVIDIA encoding only. No MediaFoundation/software CPU fallback.
         encoders_to_try = [
-            ['h264_nvenc', '-preset', 'p4', '-tune', 'hq', '-b:v', b_v, '-spatial-aq', '1'],
+            ['h264_nvenc', '-preset', 'p4', '-tune', 'hq', '-rc', 'vbr', '-cq', '20', '-b:v', b_v, '-maxrate', '12000k', '-bufsize', '16000k', '-spatial-aq', '1'],
             ['h264_nvenc', '-preset', 'fast', '-b:v', b_v],
         ]
         
