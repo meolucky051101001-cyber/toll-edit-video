@@ -2368,6 +2368,47 @@ def _retime_subtitles_to_timeline(
     return updated
 
 
+def _run_ffmpeg_ctl(cmd: List[str], job_ctl: Optional[Dict[str, Any]] = None, timeout: int = 900):
+    """
+    P6.3: chạy ffmpeg với hỗ trợ tiến độ + huỷ job.
+    job_ctl: {"cancelled": bool, "proc": Popen|None, "progress": fn(0..1)|None, "total_dur": float}
+    Không có job_ctl → hành vi cũ (subprocess.run).
+    Huỷ: endpoint đặt cancelled=True + kill proc → readline EOF → trả CompletedProcess rc=99.
+    """
+    if not job_ctl:
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace",
+    )
+    job_ctl["proc"] = proc
+    err_tail: List[str] = []
+    time_re = re.compile(r"time=\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+    total = float(job_ctl.get("total_dur") or 0.0)
+    cb = job_ctl.get("progress")
+    try:
+        for line in proc.stderr:
+            err_tail.append(line)
+            if len(err_tail) > 200:
+                err_tail.pop(0)
+            if cb and total > 0:
+                m = time_re.search(line)
+                if m:
+                    secs = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+                    try:
+                        cb(min(1.0, secs / total))
+                    except Exception:
+                        pass
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    rc = 99 if job_ctl.get("cancelled") else proc.returncode
+    return subprocess.CompletedProcess(cmd, rc, "", "".join(err_tail))
+
+
 def _apply_timeline_edits_file(
     video_path: Path,
     clips: List[Dict[str, Any]],
@@ -2376,6 +2417,7 @@ def _apply_timeline_edits_file(
     overlay_clips: Optional[List[Dict[str, Any]]] = None,
     audio_clips: Optional[List[Dict[str, Any]]] = None,
     workspace_dir: Optional[Path] = None,
+    job_ctl: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
     Cắt, ghép nối và nhân bản các đoạn video theo danh sách clips:
@@ -2385,6 +2427,7 @@ def _apply_timeline_edits_file(
     P3: text_clips (burn ASS) + overlay_clips (overlay filter ảnh) đặt đúng vị trí file xuất
         (at/dur trên timeline có gap được map qua _timeline_to_output_t).
     P5: audio_clips (nhạc nền/SFX dataURL) trộn lên audio sẵn có, có volume/fade/ducking.
+    P6.3: job_ctl ({"cancelled", "proc", "progress", "total_dur"}) — render nền có tiến độ + huỷ.
     Sử dụng GPU NVENC (fallback CPU libx264) đảm bảo âm thanh và hình ảnh đồng bộ 100%.
     """
     if not video_path.is_file() or not clips:
@@ -2555,14 +2598,20 @@ def _apply_timeline_edits_file(
     ]
 
     success = False
+    if job_ctl is not None:
+        job_ctl.setdefault("total_dur", graph.get("total_dur") or 0.0)
+        if job_ctl.get("cancelled"):
+            return False
     try:
-        res = subprocess.run(cmd_nvenc, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+        res = _run_ffmpeg_ctl(cmd_nvenc, job_ctl, timeout=600)
         if res.returncode == 0 and temp_out.is_file() and temp_out.stat().st_size > 1000:
             success = True
     except Exception as e:
         logger.warning(f"Timeline edit NVENC failed: {e}")
 
     if not success:
+        if job_ctl is not None and job_ctl.get("cancelled"):
+            return False
         cmd_cpu = [
             "ffmpeg", "-y",
             "-i", str(video_path),
@@ -2574,7 +2623,11 @@ def _apply_timeline_edits_file(
             "-movflags", "+faststart",
             str(temp_out)
         ]
-        res2 = subprocess.run(cmd_cpu, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+        try:
+            res2 = _run_ffmpeg_ctl(cmd_cpu, job_ctl, timeout=600)
+        except Exception as e:
+            logger.warning(f"Timeline edit CPU failed: {e}")
+            res2 = subprocess.CompletedProcess(cmd_cpu, 1, "", "")
         if res2.returncode == 0 and temp_out.is_file() and temp_out.stat().st_size > 1000:
             success = True
 
@@ -2591,8 +2644,13 @@ def _apply_timeline_edits_file(
 
 @router.post("/api/workflow/timeline/apply-edits")
 async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
+    """Render đồng bộ (giữ tương thích client cũ; client mới dùng /apply-edits-async P6.3)."""
+    return _execute_apply_edits(payload)
+
+
+def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
-    Áp dụng cắt, ghép nối, nhân bản các đoạn video theo timeline giống CapCut.
+    Thân dùng chung cho render đồng bộ và render nền P6.3.
     Payload:
       - stem: str
       - clips: List[Dict] — mỗi clip:
@@ -2605,7 +2663,17 @@ async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
       - overlay_clips: Optional[List[Dict]] — P3: {id, src dataURL ảnh, at, dur, pos, scale, opacity}
       - audio_clips: Optional[List[Dict]] — P5: {id, src dataURL nhạc, at, dur, volume, fadeIn,
         fadeOut, muted, duck} — trộn lên audio nền có sẵn (giọng AI + BGM)
+    job_ctl: P6.3 — {"cancelled", "proc", "progress", "stage_cb", "total_dur"}
     """
+    def _prog(pct: int, msg: str) -> None:
+        if job_ctl:
+            cb = job_ctl.get("stage_cb")
+            if cb:
+                try:
+                    cb(pct, msg)
+                except Exception:
+                    pass
+
     stem = payload.get("stem", "").strip()
     if not stem:
         raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
@@ -2639,19 +2707,25 @@ async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
 
     job_dir.mkdir(parents=True, exist_ok=True)
     dest_final = job_dir / f"final_{stem}.mp4"
+    _prog(10, "Đã tìm thấy video nguồn")
 
     text_clips_in = payload.get("text_clips") if isinstance(payload.get("text_clips"), list) else []
     overlay_clips_in = payload.get("overlay_clips") if isinstance(payload.get("overlay_clips"), list) else []
     audio_clips_in = payload.get("audio_clips") if isinstance(payload.get("audio_clips"), list) else []
+    _prog(20, "Bắt đầu render FFmpeg (GPU)...")
     ok = _apply_timeline_edits_file(
         input_video, clips, dest_final,
         text_clips=text_clips_in,
         overlay_clips=overlay_clips_in,
         audio_clips=audio_clips_in,
         workspace_dir=job_dir,
+        job_ctl=job_ctl,
     )
     if not ok:
         raise HTTPException(status_code=500, detail="Lỗi khi cắt ghép video bằng FFmpeg")
+    if job_ctl and job_ctl.get("cancelled"):
+        raise HTTPException(status_code=499, detail="Đã huỷ render")
+    _prog(85, "Đã render xong — căn lại phụ đề...")
 
     # Tự động đồng bộ và căn chỉnh lại tệp phụ đề translated.srt theo timeline clips mới
     # (P2: _retime_subtitles_to_timeline tính cả speed/freeze của từng clip)
@@ -2677,6 +2751,7 @@ async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
                 orig_srt_file.write_text("\n".join(new_orig_srt_blocks), encoding="utf-8")
         except Exception as e:
             logger.warning(f"Error re-timing subtitles on timeline edit: {e}")
+    _prog(93, "Đang cập nhật thumbnail...")
 
     # Tự động cập nhật thumbnail
     thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
@@ -2825,6 +2900,97 @@ async def api_audio_waveform(stem: str = Query(...), version: str = Query("final
     except Exception:
         pass
     return {"exists": True, "cached": False, "duration": round(duration, 3), "peaks": peaks, "buckets": n}
+
+
+# =========================================================================
+# P6.3: RENDER NỀN CHO APPLY-EDITS (job + tiến độ + huỷ + hàng đợi GPU 1 luồng)
+# =========================================================================
+_TIMELINE_RENDER_JOBS: Dict[str, Dict[str, Any]] = {}
+_TIMELINE_RENDER_LOCK = threading.Lock()
+_TIMELINE_RENDER_SEM = threading.Semaphore(1)  # GPU RTX 4050 chỉ render 1 job cùng lúc
+
+
+def _timeline_render_worker(job_id: str, payload: Dict[str, Any]) -> None:
+    job = _TIMELINE_RENDER_JOBS.get(job_id)
+    if job is None:
+        return
+    job_ctl: Dict[str, Any] = {
+        "cancelled": False,
+        "proc": None,
+        "total_dur": 0.0,
+        "progress": lambda frac: job.update({
+            "progress": 20 + int(max(0.0, min(1.0, frac)) * 60),
+            "stage": "Đang render FFmpeg (GPU)...",
+        }),
+        "stage_cb": lambda pct, msg: job.update({"progress": int(pct), "stage": msg}),
+    }
+    job["job_ctl"] = job_ctl
+    job.update({"status": "running", "progress": 5, "stage": "Chuẩn bị..."})
+    with _TIMELINE_RENDER_SEM:
+        if job_ctl["cancelled"]:
+            job.update({"status": "cancelled", "stage": "Đã huỷ", "progress": 0})
+            return
+        try:
+            result = _execute_apply_edits(payload, job_ctl=job_ctl)
+            job.update({"status": "done", "progress": 100, "stage": "Hoàn tất", "result": result})
+        except HTTPException as e:
+            status = "cancelled" if job_ctl.get("cancelled") else "error"
+            job.update({"status": status, "stage": str(e.detail)[:200], "error": str(e.detail)})
+        except Exception as e:
+            logger.exception("Timeline render job lỗi")
+            job.update({"status": "error", "stage": str(e)[:200], "error": str(e)})
+
+
+@router.post("/api/workflow/timeline/apply-edits-async")
+async def api_apply_timeline_edits_async(payload: Dict[str, Any] = Body(...)):
+    """P6.3: tạo job render nền (hàng đợi GPU 1 luồng), trả job_id ngay để client poll tiến độ."""
+    stem = (payload.get("stem") or "").strip()
+    if not stem or not isinstance(payload.get("clips"), list) or not payload.get("clips"):
+        raise HTTPException(status_code=400, detail="Payload render nền không hợp lệ (thiếu stem/clips)")
+    import uuid as _uuid
+
+    job_id = _uuid.uuid4().hex[:12]
+    job: Dict[str, Any] = {"status": "queued", "progress": 0, "stage": "Trong hàng đợi GPU...", "created_at": time.time()}
+    with _TIMELINE_RENDER_LOCK:
+        # dọn job cũ hơn 30 phút
+        for k in [k for k, v in _TIMELINE_RENDER_JOBS.items() if time.time() - v.get("created_at", 0) > 1800]:
+            _TIMELINE_RENDER_JOBS.pop(k, None)
+        _TIMELINE_RENDER_JOBS[job_id] = job
+    threading.Thread(target=_timeline_render_worker, args=(job_id, payload), daemon=True).start()
+    return {"status": "ok", "job_id": job_id}
+
+
+@router.get("/api/workflow/timeline/render-status")
+async def api_timeline_render_status(job_id: str = Query(...)):
+    job = _TIMELINE_RENDER_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job render")
+    return {
+        "status": job.get("status"),
+        "progress": job.get("progress", 0),
+        "stage": job.get("stage", ""),
+        "result": job.get("result"),
+    }
+
+
+@router.post("/api/workflow/timeline/render-cancel")
+async def api_timeline_render_cancel(payload: Dict[str, Any] = Body(...)):
+    """P6.3: huỷ job render — kill tiến trình ffmpeg đang chạy."""
+    job_id = str((payload or {}).get("job_id") or "")
+    job = _TIMELINE_RENDER_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job render")
+    ctl = job.get("job_ctl") or {}
+    ctl["cancelled"] = True
+    proc = ctl.get("proc")
+    if proc is not None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    if job.get("status") in ("queued", "running"):
+        job.update({"status": "cancelled", "stage": "Đã huỷ bởi người dùng", "progress": 0})
+    return {"status": "ok", "cancelled": True}
 
 
 @router.get("/api/workflow/download-srt")
