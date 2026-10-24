@@ -1,0 +1,13 @@
+{
+  "title": "80% NGƯỜI MỚI BỎ CUỘC TRONG 30 NGÀY ĐẦU",
+  "keywordAccent": "80%",
+  "accentColor": "#FF1E1E",
+  "badgeText": "★ KHÁM PHÁ BÍ MẬT",
+  "narration": "Phần lớn người mới bỏ cuộc chỉ vì không hiểu đúng bản chất của trò chơi này.",
+  "doodleLabel": "TỶ LỆ",
+  "durationSec": 5,
+  "fps": 24,
+  "actionType": "chart_pie",
+  "cameraMotion": "pan_right",
+  "numbers": [50, 30, 20]
+}

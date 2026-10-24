@@ -1,0 +1,23 @@
+{
+  "name": "tool-v1-render-node",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Node sidecar cho Studio Kịch Bản (Tool V1) — Satori Band A renderer. Chạy npm install tại thư mục này trước khi dùng.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "satori:title": "node satori/render_title.mjs"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.536",
+    "@remotion/lottie": "^4.0.536",
+    "@remotion/paths": "^4.0.536",
+    "lottie-web": "^5.13.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "remotion": "^4.0.536",
+    "satori": "^0.62.0"
+  }
+}
