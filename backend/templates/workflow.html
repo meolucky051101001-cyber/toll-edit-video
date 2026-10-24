@@ -1040,6 +1040,11 @@
       transition: background 0.15s;
     }
     .sub-clip:hover { background: linear-gradient(135deg, #2563eb, #0ea5e9); border-color: #fff; }
+    .sub-clip.cue-active {
+      border: 1.5px solid #facc15 !important;
+      box-shadow: 0 0 0 1px rgba(250, 204, 21, 0.55), 0 2px 8px rgba(250, 204, 21, 0.35);
+      filter: brightness(1.18);
+    }
     .video-strip-block {
       position: absolute;
       top: 3px;
@@ -4730,11 +4735,23 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       const t = mainPlayer.currentTime || 0;
 
       let activeSub = currentSubtitles ? currentSubtitles.find(s => t >= s.start && t <= s.end) : null;
-      
+
       // If no subtitle at exact second but in edit mode, pick first or closest subtitle so box is always interactive
       if (!activeSub && isSubtitleEditTab && currentSubtitles && currentSubtitles.length) {
         activeSub = currentSubtitles[0];
       }
+
+      // P8: highlight câu phụ đề đang phát trên timeline (cả track Trung lẫn AI)
+      try {
+        document.querySelectorAll('.sub-clip.cue-active').forEach(c => c.classList.remove('cue-active'));
+        if (activeSub) {
+          document.querySelectorAll('.sub-clip').forEach(c => {
+            if (Math.abs(parseFloat(c.dataset.subStart || '-999') - activeSub.start) < 0.05) {
+              c.classList.add('cue-active');
+            }
+          });
+        }
+      } catch (err) { /* bỏ qua — highlight là phụ */ }
 
       if (activeSub) {
         if (box) box.style.display = 'inline-flex';
@@ -6213,10 +6230,25 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           clip.title = `[${sub.start_str || formatTime(sub.start)} -> ${sub.end_str || formatTime(sub.end)}]
 🇨🇳 ${txt}`;
           clip.innerText = txt;
+          clip.dataset.subStart = sub.start;
+          clip.dataset.subEnd = sub.end;
+          // P8: chặn scrub của track cha để bấm/double-click vào card sub hoạt động trọn vẹn
+          clip.addEventListener('mousedown', (e) => e.stopPropagation());
           clip.onclick = (e) => {
             e.stopPropagation();
             mainPlayer.currentTime = sub.start;
-            mainPlayer.play().catch(() => {});
+            updateSubtitlesOverlay();
+            updateTimecode();
+            updatePlayhead();
+          };
+          clip.ondblclick = (e) => {
+            e.stopPropagation();
+            mainPlayer.currentTime = sub.start;
+            mainPlayer.pause();
+            updateSubtitlesOverlay();
+            const tabBtn = [...document.querySelectorAll('.panel-tab')].find(b => b.textContent.includes('Kiểu Chữ'));
+            if (tabBtn) tabBtn.click();
+            showToast('🇨🇳 Đã nhảy tới câu — sửa nội dung trong tab Kiểu Chữ hoặc bấm thẳng chữ trên video');
           };
           subCnTrack.appendChild(clip);
         });
@@ -6245,6 +6277,11 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           const widthPct = Math.max(0.15, ((tlB - tlA) / span) * 100);
           clip.style.left = `${leftPct}%`;
           clip.style.width = `${widthPct}%`;
+          // P8: hiện nội dung câu phụ đề ngay trên card (trước đây chỉ là thanh xanh trống)
+          clip.innerText = sub.text || '(trống)';
+          clip.dataset.subStart = sub.start;
+          clip.dataset.subEnd = sub.end;
+          clip.addEventListener('mousedown', (e) => e.stopPropagation());
           clip.title = `[${sub.start_str || formatTime(sub.start)} -> ${sub.end_str || formatTime(sub.end)}]
 🇻🇳 ${sub.text}`;
           clip.onclick = (e) => {
@@ -6252,7 +6289,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             mainPlayer.currentTime = sub.start + 0.05;
             mainPlayer.pause();
             updateSubtitlesOverlay();
-            showToast(`💬 Đã chọn câu #${sub.index || ''}: "${sub.text}". Bấm trực tiếp vào chữ trên video để sửa!`);
+            showToast(`💬 Đã chọn câu #${sub.index || ''}: "${sub.text}". Double-click để sửa trực tiếp!`);
           };
           clip.ondblclick = (e) => {
             e.stopPropagation();
