@@ -1965,8 +1965,163 @@ def _build_timeline_filter_graph(
     }
 
 
-def _retime_subtitles_to_timeline(
-    trans_subs: List[Dict[str, Any]],
+# =========================================================================
+# P3: TEXT / OVERLAY CLIPS (chữ tự do + logo/sticker, burn ASS + overlay filter)
+# =========================================================================
+
+def _hex_to_ass_color(hex_color: str, alpha: str = "00") -> str:
+    """'#RRGGBB' → '&HAABBGGRR' (ASS dùng BGR; alpha 00 = đục)."""
+    m = re.fullmatch(r"#?([0-9A-Fa-f]{6})", (hex_color or "").strip())
+    if not m:
+        return f"&H{alpha}FFFFFF"
+    v = m.group(1).upper()
+    r, g, b = v[0:2], v[2:4], v[4:6]
+    return f"&H{alpha}{b}{g}{r}".upper()
+
+
+def _ass_time(seconds: float) -> str:
+    """Giây → 'H:MM:SS.CC' (centisecond) theo chuẩn ASS."""
+    s = max(0.0, float(seconds))
+    cs = int(round(s * 100))
+    h, rem = divmod(cs, 360000)
+    mm, rem = divmod(rem, 6000)
+    ss, cc = divmod(rem, 100)
+    return f"{h}:{mm:02d}:{ss:02d}.{cc:02d}"
+
+
+def _build_text_ass_clips(
+    text_clips: List[Dict[str, Any]],
+    play_res_x: int = 1080,
+    play_res_y: int = 1920,
+) -> str:
+    """
+    P3: sinh nội dung file ASS cho các clip chữ tự do — HÀM THUẦN để unit test.
+
+    Mỗi clip: {at, dur (giây TRONG FILE XUẤT — đã map qua _timeline_to_output_t),
+               text, pos {x,y} chuẩn hóa (tâm chữ), style {fontSize, color, outlineColor,
+               outlineWidth, bgOpacity, bold}, animIn ('none'|'fade'|'slideUp'|'pop'),
+               animOut ('none'|'fade')}
+    Mỗi clip một Style riêng (để dùng BorderStyle=3 — khung nền — khi bgOpacity > 0).
+    Vị trí dùng \\an5 + \\pos theo PlayRes thật nên khớp preview ≤ 1-2 px.
+    """
+    res_x = max(2, int(play_res_x or 1080))
+    res_y = max(2, int(play_res_y or 1920))
+    lines = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        f"PlayResX: {res_x}",
+        f"PlayResY: {res_y}",
+        "WrapStyle: 2",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+        "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
+        "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+    ]
+
+    def _clip_style(i: int, c: Dict[str, Any]) -> str:
+        style = c.get("style") or {}
+        fs = max(12.0, float(style.get("fontSize", 64) or 64))
+        color = _hex_to_ass_color(style.get("color", "#FFFFFF"))
+        oc = _hex_to_ass_color(style.get("outlineColor", "#000000"))
+        ow = max(0.0, float(style.get("outlineWidth", 3) or 3))
+        bg_op = min(1.0, max(0.0, float(style.get("bgOpacity", 0) or 0)))
+        bold = -1 if style.get("bold") else 0
+        back_alpha = f"{int(round((1.0 - bg_op) * 255)):02X}"
+        border_style = 3 if bg_op > 0.01 else 1
+        return (
+            f"Style: TC{i},Arial,{fs:.0f},{color},&H00FFFFFF,{oc},"
+            f"&H{back_alpha}000000,{bold},0,0,0,100,100,0,0,{border_style},{ow:.1f},0,5,10,10,10,1"
+        )
+
+    body_styles: List[str] = []
+    body_events: List[str] = []
+    for i, c in enumerate(text_clips):
+        body_styles.append(_clip_style(i, c))
+        at = max(0.0, float(c.get("at", 0.0) or 0.0))
+        dur = max(0.1, float(c.get("dur", 3.0) or 3.0))
+        pos = c.get("pos") if isinstance(c.get("pos"), dict) else {}
+        px = min(1.0, max(0.0, float(pos.get("x", 0.5)))) * res_x
+        py = min(1.0, max(0.0, float(pos.get("y", 0.8)))) * res_y
+
+        anim_in = (c.get("animIn") or "none").strip().lower()
+        anim_out = (c.get("animOut") or "none").strip().lower()
+        tags = ["\\an5"]
+        if anim_in == "slideup":
+            tags.append(f"\\move({px:.0f},{min(res_y - 2, py + 140):.0f},{px:.0f},{py:.0f},0,250)")
+        else:
+            tags.append(f"\\pos({px:.0f},{py:.0f})")
+        if anim_in == "pop":
+            tags.append("\\fscx40\\fscy40\\t(0,220,\\fscx100\\fscy100)")
+        if anim_in == "fade" or anim_out == "fade":
+            in_ms = 250 if anim_in == "fade" else 0
+            out_ms = 250 if anim_out == "fade" else 0
+            tags.append(f"\\fad({in_ms},{out_ms})")
+
+        raw_text = str(c.get("text") or "").replace("{", "(").replace("}", ")").strip()
+        ass_text = raw_text.replace("\r\n", "\n").replace("\n", "\\N") or " "
+        body_events.append(
+            f"Dialogue: 0,{_ass_time(at)},{_ass_time(at + dur)},TC{i},,0,0,0,,"
+            f"{{{''.join(tags)}}}{ass_text}"
+        )
+
+    lines.extend(body_styles)
+    lines.extend(["", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"])
+    lines.extend(body_events)
+    return "\n".join(lines) + "\n"
+
+
+def _timeline_to_output_t(clips_with_at: List[Dict[str, Any]], graph: Dict[str, Any], t: float) -> float:
+    """
+    Map giây trên TIMELINE (có gap) → giây trong FILE XUẤT (gap bị concat ghép lại).
+    Dùng cho text/overlay để chữ xuất hiện đúng nội dung như preview (P3).
+    """
+    seg_starts = graph.get("seg_starts") or []
+    seg_durs = graph.get("seg_durs") or []
+    if not seg_starts:
+        return max(0.0, float(t or 0.0))
+    best = None
+    best_at = None
+    for i, c in enumerate(clips_with_at):
+        at_i = max(0.0, float(c.get("at", 0.0) or 0.0))
+        if at_i <= float(t or 0.0) + 1e-6 and (best_at is None or at_i >= best_at):
+            best, best_at = i, at_i
+    if best is None:
+        return float(seg_starts[0])
+    at_i = best_at or 0.0
+    dur_i = float(seg_durs[best]) if best < len(seg_durs) else 0.0
+    local = min(max(0.0, float(t or 0.0) - at_i), dur_i)
+    return float(seg_starts[best]) + local
+
+
+def _decode_overlay_assets(overlay_clips: List[Dict[str, Any]], workspace_dir: Path) -> List[Optional[Path]]:
+    """Giải mã dataURL ảnh overlay → file trong <workspace>/overlay_assets (P3). None nếu hỏng."""
+    import base64
+
+    assets_dir = Path(workspace_dir) / "overlay_assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    paths: List[Optional[Path]] = []
+    for i, c in enumerate(overlay_clips or []):
+        src = str(c.get("src") or "")
+        m = re.match(r"data:image/(png|jpeg|jpg|webp);base64,", src)
+        if not m:
+            paths.append(None)
+            continue
+        ext = "jpg" if m.group(1) in ("jpeg", "jpg") else m.group(1)
+        try:
+            raw = base64.b64decode(src[m.end():], validate=False)
+        except Exception:
+            paths.append(None)
+            continue
+        cid = re.sub(r"[^\w\-]", "", str(c.get("id", "")))[:40] or f"ov{i}"
+        p = assets_dir / f"{cid}.{ext}"
+        p.write_bytes(raw)
+        paths.append(p)
+    return paths
+
+
+def _retime_subtitles_to_timeline(    trans_subs: List[Dict[str, Any]],
     orig_subs: List[Dict[str, Any]],
     clips: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -2007,11 +2162,21 @@ def _retime_subtitles_to_timeline(
     return updated
 
 
-def _apply_timeline_edits_file(video_path: Path, clips: List[Dict[str, Any]], out_path: Path) -> bool:
+def _apply_timeline_edits_file(
+    video_path: Path,
+    clips: List[Dict[str, Any]],
+    out_path: Path,
+    text_clips: Optional[List[Dict[str, Any]]] = None,
+    overlay_clips: Optional[List[Dict[str, Any]]] = None,
+    workspace_dir: Optional[Path] = None,
+) -> bool:
     """
     Cắt, ghép nối và nhân bản các đoạn video theo danh sách clips:
-    [{'start': 0.0, 'end': 5.2}, {'start': 10.0, 'end': 15.0}, ...]
+    [{'start': 0.0, 'end': 5.2, 'at': 0.0, 'speed': 1.0, ...}, ...]
     Hỗ trợ kéo thả đổi thứ tự, nhân bản từng đoạn hoặc nhân bản toàn bộ video.
+    P2: speed/volume/fade/crop/rotate/flip/reverse/freeze/detachAudio.
+    P3: text_clips (burn ASS) + overlay_clips (overlay filter ảnh) đặt đúng vị trí file xuất
+        (at/dur trên timeline có gap được map qua _timeline_to_output_t).
     Sử dụng GPU NVENC (fallback CPU libx264) đảm bảo âm thanh và hình ảnh đồng bộ 100%.
     """
     if not video_path.is_file() or not clips:
@@ -2034,8 +2199,8 @@ def _apply_timeline_edits_file(video_path: Path, clips: List[Dict[str, Any]], ou
     src_w = int(v_stream.get("width") or 0)
     src_h = int(v_stream.get("height") or 0)
 
-    # Lọc danh sách clips hợp lệ (giữ nguyên thuộc tính hiệu ứng P2 client gửi kèm)
-    _effect_keys = ("speed", "volume", "muted", "keepPitch", "fadeIn", "fadeOut",
+    # Lọc danh sách clips hợp lệ (giữ nguyên thuộc tính hiệu ứng P2/P3 client gửi kèm)
+    _effect_keys = ("at", "speed", "volume", "muted", "keepPitch", "fadeIn", "fadeOut",
                     "crop", "rotate", "flipH", "flipV", "reverse", "freeze", "detachAudio")
     valid_clips = []
     for c in clips:
@@ -2057,14 +2222,74 @@ def _apply_timeline_edits_file(video_path: Path, clips: List[Dict[str, Any]], ou
     if not graph or not graph.get("filter_lines"):
         return False
 
-    filter_complex = ";".join(graph["filter_lines"])
     audio_maps = ["-map", "[outa]", "-c:a", "aac", "-b:a", "192k"] if a_stream else []
+
+    # ---- P3: text burn (ASS) + overlay ảnh trên đầu kết quả concat ----
+    overlay_inputs: List[str] = []
+    text_clips = [c for c in (text_clips or []) if isinstance(c, dict)]
+    overlay_clips = [c for c in (overlay_clips or []) if isinstance(c, dict)]
+    if text_clips or overlay_clips:
+        base_dir = Path(workspace_dir) if workspace_dir else out_path.parent
+        # đổi tag đầu ra của concat thành [basev] rồi xâu chuỗi hậu xử lý
+        graph["filter_lines"][-1] = graph["filter_lines"][-1].replace("[outv]", "[basev]", 1)
+        cur = "[basev]"
+
+        if overlay_clips:
+            asset_paths = _decode_overlay_assets(overlay_clips, base_dir)
+            for i, (oc, asset) in enumerate(zip(overlay_clips, asset_paths)):
+                if not asset:
+                    logger.warning(f"Overlay clip #{i}: ảnh hỏng/không hỗ trợ — bỏ qua")
+                    continue
+                at_tl = max(0.0, float(oc.get("at", 0.0) or 0.0))
+                dur_tl = max(0.1, float(oc.get("dur", 3.0) or 3.0))
+                at_out = _timeline_to_output_t(valid_clips, graph, at_tl)
+                end_out = _timeline_to_output_t(valid_clips, graph, at_tl + dur_tl)
+                pos = oc.get("pos") if isinstance(oc.get("pos"), dict) else {}
+                px = min(1.0, max(0.0, float(pos.get("x", 0.5))))
+                py = min(1.0, max(0.0, float(pos.get("y", 0.85))))
+                scale = min(3.0, max(0.05, float(oc.get("scale", 1.0) or 1.0)))
+                opacity = min(1.0, max(0.0, float(oc.get("opacity", 1.0) or 1.0)))
+                img_idx = 1 + len(overlay_inputs)
+                overlay_inputs.append(str(asset))
+                pre = ["format=rgba"]
+                if opacity < 0.999:
+                    pre.append(f"colorchannelmixer=aa={opacity:.3f}")
+                if abs(scale - 1.0) > 1e-3:
+                    pre.append(f"scale='max(2,trunc(iw*{scale:.4f}/2)*2)':-2")
+                ov_tag = f"vo{i}"
+                graph["filter_lines"].append(f"[{img_idx}:v]{','.join(pre)}[ovi{i}]")
+                graph["filter_lines"].append(
+                    f"{cur}[ovi{i}]overlay=x='main_w*{px:.4f}-w/2':y='main_h*{py:.4f}-h/2'"
+                    f":enable='between(t,{at_out:.3f},{at_out + end_out - at_out:.3f})'[{ov_tag}]"
+                )
+                cur = f"[{ov_tag}]"
+
+        if text_clips:
+            mapped = []
+            for tc in text_clips:
+                at_tl = max(0.0, float(tc.get("at", 0.0) or 0.0))
+                dur_tl = max(0.1, float(tc.get("dur", 3.0) or 3.0))
+                at_out = _timeline_to_output_t(valid_clips, graph, at_tl)
+                end_out = _timeline_to_output_t(valid_clips, graph, at_tl + dur_tl)
+                mapped.append({**tc, "at": at_out, "dur": max(0.1, end_out - at_out)})
+            ass_path = base_dir / "text_clips.ass"
+            ass_path.write_text(_build_text_ass_clips(mapped, src_w or 1080, src_h or 1920), encoding="utf-8")
+            try:
+                ass_ref = os.path.relpath(str(ass_path), os.getcwd()).replace("\\", "/")
+            except ValueError:
+                ass_ref = str(ass_path).replace("\\", "/").replace(":", "\\:")
+            graph["filter_lines"].append(f"{cur}subtitles='{ass_ref}'[outv]")
+        else:
+            graph["filter_lines"].append(f"{cur}null[outv]")
+
+    filter_complex = ";".join(graph["filter_lines"])
     temp_out = out_path.parent / f"_temp_edit_{out_path.name}"
     temp_out.unlink(missing_ok=True)
 
     cmd_nvenc = [
         "ffmpeg", "-y",
         "-i", str(video_path),
+    ] + [x for p in overlay_inputs for x in ("-i", p)] + [
         "-filter_complex", filter_complex,
         "-map", "[outv]"
     ] + audio_maps + [
@@ -2085,6 +2310,7 @@ def _apply_timeline_edits_file(video_path: Path, clips: List[Dict[str, Any]], ou
         cmd_cpu = [
             "ffmpeg", "-y",
             "-i", str(video_path),
+        ] + [x for p in overlay_inputs for x in ("-i", p)] + [
             "-filter_complex", filter_complex,
             "-map", "[outv]"
         ] + audio_maps + [
@@ -2118,6 +2344,9 @@ async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
            crop {x,y,w,h} chuẩn hóa, rotate (0/90/180/270), flipH, flipV, reverse,
            freeze (giây đóng băng đầu đoạn), detachAudio}
       - target_version: Optional[str] ('final' hoặc 'raw')
+      - text_clips: Optional[List[Dict]] — P3: {id, text, at, dur, pos {x,y}, style {...}, animIn, animOut}
+        (at/dur trên timeline; backend tự map về vị trí file xuất và burn bằng ASS)
+      - overlay_clips: Optional[List[Dict]] — P3: {id, src dataURL ảnh, at, dur, pos, scale, opacity}
     """
     stem = payload.get("stem", "").strip()
     if not stem:
@@ -2153,7 +2382,14 @@ async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
     job_dir.mkdir(parents=True, exist_ok=True)
     dest_final = job_dir / f"final_{stem}.mp4"
 
-    ok = _apply_timeline_edits_file(input_video, clips, dest_final)
+    text_clips_in = payload.get("text_clips") if isinstance(payload.get("text_clips"), list) else []
+    overlay_clips_in = payload.get("overlay_clips") if isinstance(payload.get("overlay_clips"), list) else []
+    ok = _apply_timeline_edits_file(
+        input_video, clips, dest_final,
+        text_clips=text_clips_in,
+        overlay_clips=overlay_clips_in,
+        workspace_dir=job_dir,
+    )
     if not ok:
         raise HTTPException(status_code=500, detail="Lỗi khi cắt ghép video bằng FFmpeg")
 

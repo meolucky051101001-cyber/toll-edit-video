@@ -1308,6 +1308,31 @@
       border-color: #34d399;
       color: #34d399;
     }
+    /* P3: clip chữ & logo trên timeline + preview layer */
+    .timeline-clip-card.text-clip-card {
+      border-color: #34d399;
+      background: linear-gradient(135deg, #123528, #0d1f2d);
+    }
+    .timeline-clip-card.overlay-clip-card {
+      border-color: #a78bfa;
+      background: linear-gradient(135deg, #2b2350, #0d1f2d);
+    }
+    .top-text-box {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      white-space: pre-wrap;
+      text-align: center;
+      pointer-events: auto;
+      cursor: move;
+      line-height: 1.25;
+      max-width: 92%;
+    }
+    .top-overlay-img {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      pointer-events: auto;
+      cursor: move;
+    }
     .clip-card-inner {
       display: flex;
       align-items: center;
@@ -2292,6 +2317,8 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           <!-- FOREGROUND MAIN VIDEO -->
           <div class="canvas-fg-container" id="fgContainer">
             <video class="canvas-main-video" id="mainPlayer" playsinline></video>
+            <!-- P3: LỚP CHỮ & LOGO TỰ DO TRÊN PREVIEW -->
+            <div id="textOverlayPreviewLayer" style="position: absolute; inset: 0; z-index: 12; pointer-events: none; overflow: hidden;"></div>
           </div>
 
           <!-- SAFE ZONE GUIDES OVERLAY (VISUAL BOUNDARIES - BẢO VỆ NỘI DUNG 100%) -->
@@ -2426,7 +2453,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       </div>
 
       <!-- MULTI-TRACK TIMELINE (CAPCUT STYLE) -->
-      <div class="timeline-container" style="height: 205px;">
+      <div class="timeline-container" style="height: 250px;">
         <!-- CAPCUT TIMELINE TOOLBAR -->
         <div class="timeline-capcut-toolbar">
           <div class="capcut-tool-group">
@@ -2532,6 +2559,23 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             </div>
           </div>
 
+          <!-- TRACK 3.5: TEXT & OVERLAY TRACK (P3 - CHỮ TỰ DO + LOGO/STICKER) -->
+          <div class="track-row" id="trackRowText">
+            <div class="track-header" style="display: flex; justify-content: space-between; align-items: center; gap: 4px;">
+              <span>📝 Chữ &amp; Logo</span>
+              <span style="display: flex; gap: 3px; align-items: center;">
+                <span id="badgeTextClipsCount" style="font-size: 9px; background: rgba(52, 211, 153, 0.18); color: #34d399; padding: 1px 5px; border-radius: 4px; font-weight: 700;">0 clip</span>
+                <button type="button" class="cp-chip" id="btnAddTextClip" title="Thêm chữ tại vị trí playhead">＋A</button>
+                <button type="button" class="cp-chip" id="btnAddOverlayClip" title="Thêm ảnh/logo/sticker từ máy">＋🖼️</button>
+              </span>
+            </div>
+            <div class="track-content" id="textOverlayTrackContent">
+              <div class="video-clips-container" id="textOverlayTrack">
+                <!-- Render động các clip chữ/logo qua JavaScript -->
+              </div>
+            </div>
+          </div>
+
           <!-- TRACK 4: AUDIO TRACK -->
           <div class="track-row">
             <div class="track-header">🎵 Âm thanh mix</div>
@@ -2553,6 +2597,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         <button class="panel-tab active" onclick="switchTab('subtitle-style', this)">✍️ Kiểu Chữ</button>
         <button class="panel-tab" onclick="switchTab('framing', this)">📐 Khung hình</button>
         <button class="panel-tab" onclick="switchTab('clip-props', this)">⚙️ Thuộc Tính Clip</button>
+        <button class="panel-tab" onclick="switchTab('text-props', this)">📝 Chữ &amp; Logo</button>
         <button class="panel-tab" onclick="switchTab('watermark', this)">💧 Watermark</button>
         <button class="panel-tab" onclick="switchTab('thumbnail', this)">🖼️ Thumbnail</button>
         <button class="panel-tab" onclick="switchTab('anti-reup', this)">🛡️ Chống Re-up</button>
@@ -2934,6 +2979,71 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           </div>
         </div>
       </div>
+
+      <!-- P3: PANEL CHỮ & LOGO (text/overlay clips) -->
+      <div class="panel-content" id="tabTextProps" style="display: none; flex-direction: column; gap: 10px;">
+        <div id="tpEmptyMsg" style="font-size: 11.5px; color: #94a3b8; line-height: 1.6;">Bấm “＋A” (thêm chữ) hoặc “＋🖼️” (thêm logo) trên track <b>Chữ &amp; Logo</b>, rồi bấm vào clip để sửa nội dung, kiểu chữ, hiệu ứng và thời lượng.</div>
+        <div id="tpBody" style="display: none; flex-direction: column; gap: 10px;">
+          <div style="font-size: 11px; color: #cbd5e1;"><b id="tpClipTitle">Chữ</b> · <span id="tpClipInfo" style="color: #64748b; font-family: monospace;"></span></div>
+
+          <div id="tpTextSection">
+            <div style="font-size: 10.5px; color: #94a3b8; font-weight: 700; margin-bottom: 3px;">NỘI DUNG</div>
+            <textarea id="tpText" rows="2" placeholder="Gõ nội dung chữ..." style="width: 100%; background: #0f172a; border: 1px solid rgba(255,255,255,0.12); color: #e2e8f0; border-radius: 5px; padding: 6px; font-size: 12px; resize: vertical; box-sizing: border-box;"></textarea>
+          </div>
+
+          <div id="tpStyleSection">
+            <div style="font-size: 10.5px; color: #94a3b8; font-weight: 700; margin-bottom: 4px;">PRESET KIỂU CHỮ</div>
+            <div style="display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px;">
+              <button type="button" class="cp-chip" data-tpreset="vang">🟡 Vàng viền đen</button>
+              <button type="button" class="cp-chip" data-tpreset="trang">⚪ Trắng khung đen</button>
+              <button type="button" class="cp-chip" data-tpreset="den">⚫ Đen khung trắng</button>
+              <button type="button" class="cp-chip" data-tpreset="neon">🟢 Xanh ngọc neon</button>
+            </div>
+            <div style="display: flex; gap: 6px; align-items: center;">
+              <span style="font-size: 10.5px; color: #94a3b8;">Cỡ</span>
+              <input type="range" id="tpFontSize" min="24" max="160" step="2" value="64" style="flex: 1; accent-color: #38bdf8;">
+              <span id="tpFontSizeVal" style="font-family: monospace; font-size: 10px; color: #38bdf8; min-width: 26px;">64</span>
+            </div>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 6px;">
+              <label style="font-size: 10.5px; color: #94a3b8; display: flex; align-items: center; gap: 3px;">Màu <input type="color" id="tpColor" value="#FFEB3B" style="width: 32px; height: 22px; background: none; border: none; cursor: pointer; padding: 0;"></label>
+              <label style="font-size: 10.5px; color: #94a3b8; display: flex; align-items: center; gap: 3px;">Viền <input type="color" id="tpOutlineColor" value="#000000" style="width: 32px; height: 22px; background: none; border: none; cursor: pointer; padding: 0;"></label>
+              <label style="font-size: 10.5px; color: #94a3b8; display: flex; align-items: center; gap: 3px;">Dày <input type="number" id="tpOutlineWidth" min="0" max="12" step="0.5" value="3" style="width: 48px; background: #0f172a; border: 1px solid rgba(255,255,255,0.12); color: #e2e8f0; border-radius: 4px; padding: 2px 4px; font-size: 11px;"></label>
+              <label style="font-size: 10.5px; color: #94a3b8; display: flex; align-items: center; gap: 3px; cursor: pointer;"><input type="checkbox" id="tpBold"> Đậm</label>
+            </div>
+            <div style="display: flex; gap: 6px; align-items: center; margin-top: 6px;">
+              <span style="font-size: 10.5px; color: #94a3b8;">Nền mờ</span>
+              <input type="range" id="tpBgOpacity" min="0" max="100" step="5" value="0" style="flex: 1; accent-color: #38bdf8;">
+              <span id="tpBgOpacityVal" style="font-family: monospace; font-size: 10px; color: #38bdf8; min-width: 32px;">0%</span>
+            </div>
+          </div>
+
+          <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+            <span style="font-size: 10.5px; color: #94a3b8;">Vào</span>
+            <select id="tpAnimIn" style="background: #0f172a; border: 1px solid rgba(255,255,255,0.12); color: #e2e8f0; border-radius: 5px; font-size: 10.5px; padding: 3px 5px;">
+              <option value="none">Không</option><option value="fade">Fade</option><option value="slideUp">Trượt lên</option><option value="pop">Pop</option>
+            </select>
+            <span style="font-size: 10.5px; color: #94a3b8;">Ra</span>
+            <select id="tpAnimOut" style="background: #0f172a; border: 1px solid rgba(255,255,255,0.12); color: #e2e8f0; border-radius: 5px; font-size: 10.5px; padding: 3px 5px;">
+              <option value="none">Không</option><option value="fade">Fade</option>
+            </select>
+          </div>
+
+          <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+            <span style="font-size: 10.5px; color: #94a3b8;">Tại (s)</span>
+            <input type="number" id="tpAt" min="0" step="0.1" value="0" style="width: 68px; background: #0f172a; border: 1px solid rgba(255,255,255,0.12); color: #e2e8f0; border-radius: 4px; padding: 2px 4px; font-size: 11px;">
+            <span style="font-size: 10.5px; color: #94a3b8;">Dài (s)</span>
+            <input type="number" id="tpDur" min="0.3" step="0.1" value="3" style="width: 60px; background: #0f172a; border: 1px solid rgba(255,255,255,0.12); color: #e2e8f0; border-radius: 4px; padding: 2px 4px; font-size: 11px;">
+            <span id="tpScaleWrap" style="display: none; font-size: 10.5px; color: #94a3b8; align-items: center; gap: 3px;">Cỡ <input type="number" id="tpScale" min="0.05" max="3" step="0.05" value="1" style="width: 52px; background: #0f172a; border: 1px solid rgba(255,255,255,0.12); color: #e2e8f0; border-radius: 4px; padding: 2px 4px; font-size: 11px;"></span>
+            <span id="tpOpacityWrap" style="display: none; font-size: 10.5px; color: #94a3b8; align-items: center; gap: 3px;">Mờ <input type="number" id="tpOpacity" min="0" max="1" step="0.05" value="1" style="width: 52px; background: #0f172a; border: 1px solid rgba(255,255,255,0.12); color: #e2e8f0; border-radius: 4px; padding: 2px 4px; font-size: 11px;"></span>
+          </div>
+
+          <div style="display: flex; gap: 6px;">
+            <button type="button" class="cp-chip" id="tpCenter">⌖ Giữa màn</button>
+            <button type="button" class="cp-chip" id="tpDelete" style="border-color: #ef4444; color: #f87171;">🗑️ Xóa clip</button>
+          </div>
+        </div>
+      </div>
+      <input type="file" id="tpFileInput" accept="image/png,image/jpeg,image/webp" style="display: none;">
 
       <div class="panel-content" id="tabWatermark" style="display: none; flex-direction: column; gap: 14px;">
         <div style="background: rgba(14, 165, 233, 0.1); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px; padding: 10px 12px; display: flex; align-items: flex-start; gap: 10px;">
@@ -3810,6 +3920,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       handleSmartTimelinePlayback();
       updateTimecode();
       updateSubtitlesOverlay();
+      renderTextOverlayPreview(); // P3: hiện/ẩn chữ & logo theo playhead
       updatePlayhead();
       updateScrubberUI();
     });
@@ -3975,6 +4086,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       initTimelineZoomControls();
       initVideoTrackRubberBand();
       initClipPropsPanel();
+      initTextTrackUI();
       startTimelineAutosave();
     }
 
@@ -4372,7 +4484,9 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       fps: 30,
       canvas: { w: 1080, h: 1920 },
       tracks: [
-        { id: 'v1', type: 'video', name: 'Video chính', clips: [] }
+        { id: 'v1', type: 'video', name: 'Video chính', clips: [] },
+        { id: 't1', type: 'text', name: 'Chữ', clips: [] },
+        { id: 'o1', type: 'overlay', name: 'Logo/Sticker', clips: [] }
       ]
     };
     let selectedClipId = null;
@@ -4483,12 +4597,17 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           return false;
         }
 
-        (proj.tracks || []).forEach(t => { if (t && Array.isArray(t.clips)) migrateClipsToAt(t.clips); });
+        // Chỉ migrate `at` cho track VIDEO (text/overlay đã dùng at/dur riêng)
+        (proj.tracks || []).forEach(t => { if (t && t.type === 'video' && Array.isArray(t.clips)) migrateClipsToAt(t.clips); });
+        // Project cũ (lưu trước P3) có thể thiếu track text/overlay → tự bổ sung để không mất tính năng
+        const mergedTracks = (proj.tracks || []).filter(t => t && t.type === 'video');
+        if (!mergedTracks.some(t => t.type === 'text')) mergedTracks.push({ id: 't1', type: 'text', name: 'Chữ', clips: [] });
+        if (!mergedTracks.some(t => t.type === 'overlay')) mergedTracks.push({ id: 'o1', type: 'overlay', name: 'Logo/Sticker', clips: [] });
         timelineProject = {
           version: proj.version || 1,
           fps: proj.fps || 30,
           canvas: proj.canvas || { w: 1080, h: 1920 },
-          tracks: proj.tracks
+          tracks: mergedTracks
         };
         selectedClipId = clips[0].id;
         selectedClipIds = [selectedClipId];
@@ -4665,6 +4784,8 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       if (rulerEl) rulerEl.style.minWidth = widthPx ? (widthPx + 228) + 'px' : '';
       const clipsContainer = document.getElementById('videoClipsContainer');
       if (clipsContainer) clipsContainer.style.width = widthPx ? widthPx + 'px' : '';
+      const textTrackContainer = document.getElementById('textOverlayTrack');
+      if (textTrackContainer) textTrackContainer.style.width = widthPx ? widthPx + 'px' : '';
       const audioStrip = document.getElementById('audioStripLabel');
       if (audioStrip) audioStrip.style.width = widthPx ? (widthPx - 8) + 'px' : '';
       const slider = document.getElementById('timelineZoomSlider');
@@ -5147,6 +5268,451 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       window.addEventListener('resize', () => { if (cropEditorActive) renderCropOverlay(); });
     }
 
+    // ========================================================
+    // P3: TRACK CHỮ & LOGO (text/overlay clips) + PREVIEW + PANEL
+    // ========================================================
+    let selectedTextClipId = null;
+
+    function getTextTrack() { return timelineProject.tracks.find(t => t.type === 'text') || null; }
+    function getOverlayTrack() { return timelineProject.tracks.find(t => t.type === 'overlay') || null; }
+    function getAllTextClips() { return [...(getTextTrack()?.clips || []), ...(getOverlayTrack()?.clips || [])]; }
+    function getSelectedTextClip() { return getAllTextClips().find(c => c.id === selectedTextClipId) || null; }
+
+    const TEXT_PRESETS = {
+      vang: { fontSize: 64, color: '#FFEB3B', outlineColor: '#000000', outlineWidth: 3, bgOpacity: 0, bold: true },
+      trang: { fontSize: 56, color: '#FFFFFF', outlineColor: '#000000', outlineWidth: 2, bgOpacity: 0.75, bold: false },
+      den: { fontSize: 56, color: '#0B1220', outlineColor: '#FFFFFF', outlineWidth: 3, bgOpacity: 0, bold: true },
+      neon: { fontSize: 64, color: '#00E5CC', outlineColor: '#00E5CC', outlineWidth: 4, bgOpacity: 0, bold: true }
+    };
+
+    function newTextClip(atTl) {
+      return {
+        id: 'txt_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+        text: 'Chữ mới',
+        at: Math.max(0, atTl || 0),
+        dur: 3,
+        pos: { x: 0.5, y: 0.8 },
+        style: { ...TEXT_PRESETS.vang },
+        animIn: 'fade',
+        animOut: 'none'
+      };
+    }
+
+    function addTextClipAtPlayhead() {
+      const track = getTextTrack();
+      if (!track) return;
+      pushTimelineHistory('Thêm chữ');
+      const clip = newTextClip(getEditedTimelineTime());
+      track.clips.push(clip);
+      selectTextClip(clip.id);
+      renderTextOverlayTrack();
+      renderTextOverlayPreview();
+      showToast('📝 Đã thêm chữ — kéo trực tiếp trên video để đặt vị trí, sửa trong panel Chữ & Logo');
+    }
+
+    function addOverlayClipFromFile(file) {
+      const track = getOverlayTrack();
+      if (!track || !file) return;
+      if (file.size > 3 * 1024 * 1024) {
+        showToast('⚠️ Ảnh quá lớn (>3MB). Hãy dùng logo/ảnh nhỏ hơn!');
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        pushTimelineHistory('Thêm logo/ảnh overlay');
+        const clip = {
+          id: 'ovl_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+          src: String(reader.result || ''),
+          name: file.name,
+          at: Math.max(0, getEditedTimelineTime()),
+          dur: 3,
+          pos: { x: 0.8, y: 0.88 },
+          scale: 1,
+          opacity: 1
+        };
+        track.clips.push(clip);
+        selectTextClip(clip.id);
+        renderTextOverlayTrack();
+        renderTextOverlayPreview();
+        showToast('🖼️ Đã thêm ảnh overlay — kéo trực tiếp trên video để đặt vị trí');
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function deleteTextClipById(clipId) {
+      const clip = getAllTextClips().find(c => c.id === clipId);
+      if (!clip) return;
+      pushTimelineHistory('Xóa chữ/logo');
+      const t = getTextTrack();
+      const o = getOverlayTrack();
+      if (t) t.clips = t.clips.filter(c => c.id !== clipId);
+      if (o) o.clips = o.clips.filter(c => c.id !== clipId);
+      if (selectedTextClipId === clipId) selectedTextClipId = null;
+      renderTextOverlayTrack();
+      renderTextOverlayPreview();
+      updateTextPropsPanel();
+    }
+
+    function selectTextClip(clipId) {
+      selectedTextClipId = clipId;
+      clearMultiSelect();
+      document.querySelectorAll('#textOverlayTrack .timeline-clip-card').forEach(c => {
+        c.classList.toggle('active-clip', c.dataset.textClipId === clipId);
+      });
+      updateTextPropsPanel();
+      openTextPropsTab();
+    }
+
+    function openTextPropsTab() {
+      const btn = [...document.querySelectorAll('.panel-tab')].find(b => b.textContent.includes('Chữ & Logo'));
+      if (btn && document.getElementById('tabTextProps')?.style.display === 'none') btn.click();
+    }
+
+    function renderTextOverlayTrack() {
+      const container = document.getElementById('textOverlayTrack');
+      if (!container) return;
+      container.innerHTML = '';
+      const all = getAllTextClips();
+      const badge = document.getElementById('badgeTextClipsCount');
+      if (badge) badge.innerText = `${all.length} clip`;
+
+      all.forEach((clip) => {
+        const isText = String(clip.id).startsWith('txt_');
+        const dur = Math.max(0.1, clip.dur || 3);
+        const widthPx = Math.max(3, Math.round(dur * timelinePxPerSec) - 2);
+        const leftPx = Math.round((clip.at || 0) * timelinePxPerSec) + 1;
+        const card = document.createElement('div');
+        card.className = 'timeline-clip-card ' + (isText ? 'text-clip-card' : 'overlay-clip-card') + (clip.id === selectedTextClipId ? ' active-clip' : '');
+        card.style.left = leftPx + 'px';
+        card.style.width = widthPx + 'px';
+        card.dataset.textClipId = clip.id;
+        const label = isText
+          ? `📝 ${(clip.text || '').slice(0, 22) || '(trống)'}`
+          : `🖼️ ${clip.name || 'ảnh'}`;
+        card.innerHTML = `
+          <div class="clip-trim-handle handle-left" data-thandle="left" data-text-clip-id="${clip.id}" title="Kéo đổi thời lượng"></div>
+          <div class="clip-card-inner"><span class="clip-num-badge">${isText ? '📝' : '🖼️'}</span><span class="clip-dur-text" style="overflow:hidden;">${label} (${dur.toFixed(1)}s)</span></div>
+          <button type="button" class="btn-clip-mini" style="color:#f87171;" title="Xóa" onclick="event.stopPropagation(); deleteTextClipById('${clip.id}')">🗑️</button>
+          <div class="clip-trim-handle handle-right" data-thandle="right" data-text-clip-id="${clip.id}" title="Kéo đổi thời lượng"></div>
+        `;
+
+        card.addEventListener('mousedown', (e) => {
+          if (e.target.closest('.clip-trim-handle') || e.target.closest('.btn-clip-mini')) return;
+          e.stopPropagation();
+          e.preventDefault();
+          selectTextClip(clip.id);
+          pushTimelineHistory('Di chuyển chữ/logo trên timeline');
+          const startX = e.clientX;
+          const at0 = clip.at || 0;
+          const onMove = (ev) => {
+            clip.at = Math.max(0, snapTimelineTime(at0 + (ev.clientX - startX) / timelinePxPerSec, null));
+            renderTextOverlayTrack();
+            renderTextOverlayPreview();
+          };
+          const onUp = () => {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+            hideSnapGuide();
+            updateTextPropsPanel();
+          };
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup', onUp);
+        });
+
+        card.addEventListener('click', (e) => {
+          if (e.target.closest('.clip-trim-handle') || e.target.closest('.btn-clip-mini')) return;
+          e.stopPropagation();
+          selectTextClip(clip.id);
+        });
+
+        container.appendChild(card);
+      });
+
+      container.querySelectorAll('[data-thandle]').forEach(h => {
+        h.addEventListener('mousedown', (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          const clip = getAllTextClips().find(c => c.id === h.dataset.textClipId);
+          if (!clip) return;
+          selectTextClip(clip.id);
+          pushTimelineHistory('Đổi thời lượng chữ/logo');
+          const startX = e.clientX;
+          const dur0 = Math.max(0.1, clip.dur || 3);
+          const at0 = clip.at || 0;
+          const isLeft = h.dataset.thandle === 'left';
+          const onMove = (ev) => {
+            const d = (ev.clientX - startX) / timelinePxPerSec;
+            if (isLeft) {
+              const newAt = Math.max(0, at0 + d);
+              clip.dur = Math.max(0.3, dur0 - (newAt - at0));
+              clip.at = newAt;
+            } else {
+              clip.dur = Math.max(0.3, dur0 + d);
+            }
+            renderTextOverlayTrack();
+            renderTextOverlayPreview();
+          };
+          const onUp = () => {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+            updateTextPropsPanel();
+          };
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup', onUp);
+        });
+      });
+    }
+
+    function renderTextOverlayPreview() {
+      const layer = document.getElementById('textOverlayPreviewLayer');
+      if (!layer) return;
+      layer.innerHTML = '';
+      const disp = getVideoDisplayRect();
+      if (!disp) return;
+      const layerRect = layer.getBoundingClientRect();
+      const tlT = getEditedTimelineTime();
+      const scaleF = disp.width / 1080; // fontSize trong style đặt theo canvas 1080px
+      getAllTextClips().forEach(clip => {
+        const at = clip.at || 0;
+        const dur = Math.max(0.1, clip.dur || 3);
+        if (tlT < at - 0.01 || tlT > at + dur + 0.01) return; // chỉ hiện khi playhead đang trong clip
+        const isText = String(clip.id).startsWith('txt_');
+        let el = null;
+        if (isText) {
+          const st = clip.style || {};
+          el = document.createElement('div');
+          el.className = 'top-text-box';
+          el.innerText = clip.text || '';
+          el.style.fontSize = Math.max(8, (st.fontSize || 64) * scaleF) + 'px';
+          el.style.color = st.color || '#FFFFFF';
+          el.style.fontWeight = st.bold ? '800' : '600';
+          const ow = st.outlineWidth === undefined ? 3 : st.outlineWidth;
+          el.style.webkitTextStroke = `${Math.max(0.4, ow * scaleF * 0.6)}px ${st.outlineColor || '#000000'}`;
+          el.style.textShadow = `0 0 ${2 * scaleF}px ${st.outlineColor || '#000000'}`;
+          if ((st.bgOpacity || 0) > 0.01) {
+            el.style.background = `rgba(0,0,0,${st.bgOpacity})`;
+            el.style.padding = `${4 * scaleF}px ${10 * scaleF}px`;
+            el.style.borderRadius = `${4 * scaleF}px`;
+          }
+        } else {
+          el = document.createElement('img');
+          el.className = 'top-overlay-img';
+          el.src = clip.src || '';
+          el.style.opacity = (clip.opacity === undefined ? 1 : clip.opacity);
+          el.onload = () => {
+            el.style.width = Math.max(4, el.naturalWidth * (clip.scale || 1) * scaleF) + 'px';
+            el.style.left = (disp.left - layerRect.left + (clip.pos?.x ?? 0.5) * disp.width) + 'px';
+          };
+        }
+        if (!el) return;
+        el.style.left = (disp.left - layerRect.left + (clip.pos?.x ?? 0.5) * disp.width) + 'px';
+        el.style.top = (disp.top - layerRect.top + (clip.pos?.y ?? 0.8) * disp.height) + 'px';
+        el.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          selectTextClip(clip.id);
+          pushTimelineHistory('Kéo vị trí chữ/logo trên video');
+          const startX = e.clientX, startY = e.clientY;
+          const p0 = { x: clip.pos?.x ?? 0.5, y: clip.pos?.y ?? 0.8 };
+          const onMove = (ev) => {
+            clip.pos = {
+              x: Math.max(0, Math.min(1, p0.x + (ev.clientX - startX) / disp.width)),
+              y: Math.max(0, Math.min(1, p0.y + (ev.clientY - startY) / disp.height))
+            };
+            renderTextOverlayPreview();
+            updateTextPropsPanel();
+          };
+          const onUp = () => {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+          };
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup', onUp);
+        });
+        layer.appendChild(el);
+      });
+    }
+
+    const _tpEditPushed = {};
+    function ensureTextPropHistory(key, label) {
+      if (!_tpEditPushed[key]) { pushTimelineHistory(label); _tpEditPushed[key] = true; }
+    }
+    function commitTextPropEdit(key) { _tpEditPushed[key] = false; }
+
+    function updateTextPropsPanel() {
+      const empty = document.getElementById('tpEmptyMsg');
+      const body = document.getElementById('tpBody');
+      if (!empty || !body) return;
+      const clip = getSelectedTextClip();
+      if (!clip) { empty.style.display = 'block'; body.style.display = 'none'; return; }
+      empty.style.display = 'none';
+      body.style.display = 'flex';
+      const isText = String(clip.id).startsWith('txt_');
+      document.getElementById('tpClipTitle').innerText = isText ? '📝 Chữ' : '🖼️ Logo/Ảnh';
+      document.getElementById('tpClipInfo').innerText = `tại ${formatTime(clip.at || 0)} · ${(clip.dur || 3).toFixed(1)}s`;
+      document.getElementById('tpTextSection').style.display = isText ? 'block' : 'none';
+      document.getElementById('tpStyleSection').style.display = isText ? 'block' : 'none';
+      document.getElementById('tpScaleWrap').style.display = isText ? 'none' : 'inline-flex';
+      document.getElementById('tpOpacityWrap').style.display = isText ? 'none' : 'inline-flex';
+      if (isText) {
+        const st = clip.style || {};
+        document.getElementById('tpText').value = clip.text || '';
+        document.getElementById('tpFontSize').value = st.fontSize || 64;
+        document.getElementById('tpFontSizeVal').innerText = String(Math.round(st.fontSize || 64));
+        document.getElementById('tpColor').value = st.color || '#FFEB3B';
+        document.getElementById('tpOutlineColor').value = st.outlineColor || '#000000';
+        document.getElementById('tpOutlineWidth').value = st.outlineWidth === undefined ? 3 : st.outlineWidth;
+        document.getElementById('tpBold').checked = !!st.bold;
+        document.getElementById('tpBgOpacity').value = Math.round((st.bgOpacity || 0) * 100);
+        document.getElementById('tpBgOpacityVal').innerText = Math.round((st.bgOpacity || 0) * 100) + '%';
+      } else {
+        document.getElementById('tpScale').value = clip.scale === undefined ? 1 : clip.scale;
+        document.getElementById('tpOpacity').value = clip.opacity === undefined ? 1 : clip.opacity;
+      }
+      document.getElementById('tpAnimIn').value = clip.animIn || 'none';
+      document.getElementById('tpAnimOut').value = clip.animOut || 'none';
+      document.getElementById('tpAt').value = +(clip.at || 0).toFixed(2);
+      document.getElementById('tpDur').value = +(clip.dur || 3).toFixed(2);
+    }
+
+    function initTextTrackUI() {
+      const $ = (id) => document.getElementById(id);
+      if (!$('btnAddTextClip') || $('btnAddTextClip').dataset.tpWired) return;
+      $('btnAddTextClip').dataset.tpWired = '1';
+      $('btnAddTextClip').addEventListener('click', addTextClipAtPlayhead);
+      $('btnAddOverlayClip').addEventListener('click', () => $('tpFileInput').click());
+      $('tpFileInput').addEventListener('change', (e) => {
+        const f = e.target.files && e.target.files[0];
+        addOverlayClipFromFile(f);
+        e.target.value = '';
+      });
+
+      $('tpText').addEventListener('input', () => {
+        const clip = getSelectedTextClip();
+        if (!clip) return;
+        ensureTextPropHistory('tpText', 'Sửa chữ');
+        clip.text = $('tpText').value;
+        renderTextOverlayTrack();
+        renderTextOverlayPreview();
+      });
+      $('tpText').addEventListener('change', () => commitTextPropEdit('tpText'));
+
+      document.querySelectorAll('#tabTextProps [data-tpreset]').forEach(b => {
+        b.addEventListener('click', () => {
+          const clip = getSelectedTextClip();
+          if (!clip) return;
+          pushTimelineHistory('Đổi preset kiểu chữ');
+          clip.style = { ...(clip.style || {}), ...TEXT_PRESETS[b.dataset.tpreset] };
+          renderTextOverlayTrack();
+          renderTextOverlayPreview();
+          updateTextPropsPanel();
+        });
+      });
+
+      $('tpFontSize').addEventListener('input', () => {
+        const clip = getSelectedTextClip();
+        if (!clip) return;
+        ensureTextPropHistory('tpFs', 'Đổi cỡ chữ');
+        clip.style = { ...(clip.style || {}), fontSize: parseFloat($('tpFontSize').value) || 64 };
+        $('tpFontSizeVal').innerText = String(Math.round(clip.style.fontSize));
+        renderTextOverlayPreview();
+      });
+      $('tpFontSize').addEventListener('change', () => commitTextPropEdit('tpFs'));
+
+      ['tpColor', 'tpOutlineColor'].forEach(id => {
+        $(id).addEventListener('input', () => {
+          const clip = getSelectedTextClip();
+          if (!clip) return;
+          ensureTextPropHistory('tpColor', 'Đổi màu chữ');
+          clip.style = { ...(clip.style || {}) };
+          if (id === 'tpColor') clip.style.color = $(id).value;
+          else clip.style.outlineColor = $(id).value;
+          renderTextOverlayPreview();
+        });
+        $(id).addEventListener('change', () => { commitTextPropEdit('tpColor'); renderTextOverlayTrack(); });
+      });
+
+      $('tpOutlineWidth').addEventListener('change', (e) => {
+        const clip = getSelectedTextClip();
+        if (!clip) return;
+        pushTimelineHistory('Đổi độ dày viền');
+        clip.style = { ...(clip.style || {}), outlineWidth: Math.max(0, parseFloat(e.target.value) || 0) };
+        renderTextOverlayPreview();
+      });
+      $('tpBold').addEventListener('change', (e) => {
+        const clip = getSelectedTextClip();
+        if (!clip) return;
+        pushTimelineHistory('Đổi đậm/nhạt');
+        clip.style = { ...(clip.style || {}), bold: e.target.checked };
+        renderTextOverlayPreview();
+      });
+      $('tpBgOpacity').addEventListener('input', () => {
+        const clip = getSelectedTextClip();
+        if (!clip) return;
+        ensureTextPropHistory('tpBg', 'Đổi nền mờ');
+        clip.style = { ...(clip.style || {}), bgOpacity: (parseFloat($('tpBgOpacity').value) || 0) / 100 };
+        $('tpBgOpacityVal').innerText = Math.round((clip.style.bgOpacity || 0) * 100) + '%';
+        renderTextOverlayPreview();
+      });
+      $('tpBgOpacity').addEventListener('change', () => commitTextPropEdit('tpBg'));
+
+      $('tpAnimIn').addEventListener('change', (e) => {
+        const clip = getSelectedTextClip();
+        if (!clip) return;
+        pushTimelineHistory('Đổi animation vào');
+        clip.animIn = e.target.value;
+      });
+      $('tpAnimOut').addEventListener('change', (e) => {
+        const clip = getSelectedTextClip();
+        if (!clip) return;
+        pushTimelineHistory('Đổi animation ra');
+        clip.animOut = e.target.value;
+      });
+      $('tpAt').addEventListener('change', (e) => {
+        const clip = getSelectedTextClip();
+        if (!clip) return;
+        pushTimelineHistory('Đổi vị trí chữ/logo');
+        clip.at = Math.max(0, parseFloat(e.target.value) || 0);
+        renderTextOverlayTrack();
+        renderTextOverlayPreview();
+      });
+      $('tpDur').addEventListener('change', (e) => {
+        const clip = getSelectedTextClip();
+        if (!clip) return;
+        pushTimelineHistory('Đổi thời lượng chữ/logo');
+        clip.dur = Math.max(0.3, parseFloat(e.target.value) || 3);
+        renderTextOverlayTrack();
+        renderTextOverlayPreview();
+      });
+      $('tpScale').addEventListener('change', (e) => {
+        const clip = getSelectedTextClip();
+        if (!clip) return;
+        pushTimelineHistory('Đổi cỡ logo');
+        clip.scale = Math.max(0.05, Math.min(3, parseFloat(e.target.value) || 1));
+        renderTextOverlayPreview();
+      });
+      $('tpOpacity').addEventListener('change', (e) => {
+        const clip = getSelectedTextClip();
+        if (!clip) return;
+        pushTimelineHistory('Đổi độ mờ logo');
+        clip.opacity = Math.max(0, Math.min(1, parseFloat(e.target.value) === 0 ? 0 : parseFloat(e.target.value) || 1));
+        renderTextOverlayPreview();
+      });
+      $('tpCenter').addEventListener('click', () => {
+        const clip = getSelectedTextClip();
+        if (!clip) return;
+        pushTimelineHistory('Đưa giữa màn hình');
+        clip.pos = { x: 0.5, y: 0.5 };
+        renderTextOverlayPreview();
+        updateTextPropsPanel();
+      });
+      $('tpDelete').addEventListener('click', () => {
+        if (selectedTextClipId) deleteTextClipById(selectedTextClipId);
+      });
+
+      window.addEventListener('resize', () => renderTextOverlayPreview());
+    }
+
     function copySelectedClip() {
       if (!videoClipsState || !videoClipsState.length) return;
       if (!selectedClipId || !videoClipsState.some(c => c.id === selectedClipId)) {
@@ -5361,12 +5927,15 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       updatePlayhead();
       updateClipPropsPanel();
       applyClipVisualPreview();
+      renderTextOverlayTrack();
+      renderTextOverlayPreview();
     }
 
     function selectClip(clipId, seekToTime = null) {
       selectedClipId = clipId;
       if (!selectedClipIds.includes(clipId)) selectedClipIds = [clipId];
       lastMultiSelectAnchorId = clipId;
+      selectedTextClipId = null; // chọn video clip → bỏ chọn chữ/logo
       document.querySelectorAll('#videoClipsContainer .timeline-clip-card').forEach(c => {
         c.classList.toggle('active-clip', c.dataset.clipId === clipId);
         c.classList.toggle('multi-selected', c.dataset.clipId !== clipId && selectedClipIds.includes(c.dataset.clipId));
@@ -5769,6 +6338,33 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             reverse: !!c.reverse,
             freeze: parseFloat((c.freeze || 0).toFixed(3)),
             detachAudio: !!c.detachAudio
+          })),
+          // P3: chữ tự do + logo/overlay (at/dur theo timeline — backend tự map về file xuất)
+          text_clips: (getTextTrack()?.clips || []).map(c => ({
+            id: c.id,
+            text: c.text || '',
+            at: +(c.at || 0).toFixed(3),
+            dur: +(c.dur || 3).toFixed(3),
+            pos: { x: +(c.pos?.x ?? 0.5).toFixed(4), y: +(c.pos?.y ?? 0.8).toFixed(4) },
+            style: {
+              fontSize: c.style?.fontSize || 64,
+              color: c.style?.color || '#FFFFFF',
+              outlineColor: c.style?.outlineColor || '#000000',
+              outlineWidth: c.style?.outlineWidth === undefined ? 3 : c.style.outlineWidth,
+              bgOpacity: c.style?.bgOpacity || 0,
+              bold: !!c.style?.bold
+            },
+            animIn: c.animIn || 'none',
+            animOut: c.animOut || 'none'
+          })),
+          overlay_clips: (getOverlayTrack()?.clips || []).map(c => ({
+            id: c.id,
+            src: c.src || '',
+            at: +(c.at || 0).toFixed(3),
+            dur: +(c.dur || 3).toFixed(3),
+            pos: { x: +(c.pos?.x ?? 0.5).toFixed(4), y: +(c.pos?.y ?? 0.85).toFixed(4) },
+            scale: c.scale === undefined ? 1 : c.scale,
+            opacity: c.opacity === undefined ? 1 : c.opacity
           })),
           target_version: currentVideoVersion || 'final'
         };
@@ -6881,6 +7477,11 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       if (tabCp) {
         tabCp.style.display = (tabId === 'clip-props') ? 'flex' : 'none';
         if (tabId === 'clip-props') updateClipPropsPanel();
+      }
+      const tabTp = document.getElementById('tabTextProps');
+      if (tabTp) {
+        tabTp.style.display = (tabId === 'text-props') ? 'flex' : 'none';
+        if (tabId === 'text-props') updateTextPropsPanel();
       }
       if (tabWm) tabWm.style.display = (tabId === 'watermark') ? 'flex' : 'none';
       if (tabTn) {
