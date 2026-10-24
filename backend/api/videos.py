@@ -89,25 +89,43 @@ def list_videos(
         "virality": JobVideo.virality_score if job_id else Video.virality_score,
         "velocity": JobVideo.velocity_score if job_id else Video.velocity_score,
     }[sort]
-    rows = db.scalars(
-        statement.order_by(order.desc().nulls_last(), Video.id)
-        .offset((page - 1) * page_size)
-        .limit(page_size)
+    rows = list(
+        db.scalars(
+            statement.order_by(order.desc().nulls_last(), Video.id)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
     )
+    # Preload the per-row relations in 2 IN queries instead of 2 queries per row
+    # (a 100-row page used to issue ~200 extra SELECTs).
+    row_ids = [row.id for row in rows]
+    imported_ids: set[str] = set()
+    if row_ids:
+        imported_ids = set(
+            db.scalars(select(ImportOrigin.video_id).where(ImportOrigin.video_id.in_(row_ids)))
+        )
+    link_map: dict[str, JobVideo] = {}
+    if job_id and row_ids:
+        links = db.scalars(
+            select(JobVideo).where(JobVideo.job_id == job_id, JobVideo.video_id.in_(row_ids))
+        )
+        link_map = {link.video_id: link for link in links}
     items = []
     for row in rows:
-        item = video_output(row, db)
+        result = VideoOut.model_validate(row)
+        if row.id in imported_ids:
+            result = result.update_validated(imported_from="mediacrawler")
         if job_id:
-            link = db.get(JobVideo, (job_id, row.id))
+            link = link_map.get(row.id)
             if link:
-                item = item.update_validated(
+                result = result.update_validated(
                     relevance_score=link.relevance_score,
                     quality_score=link.quality_score,
                     final_score=link.final_score,
                     velocity_score=link.velocity_score if link.velocity_score is not None else row.velocity_score,
                     virality_score=link.virality_score if link.virality_score is not None else row.virality_score,
                 )
-        items.append(item)
+        items.append(result)
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 

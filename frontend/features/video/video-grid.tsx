@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import { SlidersHorizontal, Search, Film, Download } from "lucide-react";
-import { useResource } from "@/lib/use-resource";
+import { useDebouncedValue, useResource } from "@/lib/use-resource";
 import { batchDownloadVideos } from "@/lib/api";
 import type { Page, Video } from "@/types";
 import { VideoCard } from "./video-card";
@@ -31,12 +31,15 @@ export function VideoGrid({
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [batchDownloading, setBatchDownloading] = useState(false);
 
+  // Debounce the free-text search so typing does not fire one fetch per keystroke.
+  const debouncedQ = useDebouncedValue(q, 300);
+
   const params = new URLSearchParams({
     page: String(page),
     sort,
     min_relevance: relevance,
     min_likes: likes,
-    q,
+    q: debouncedQ,
   });
   if (jobId) params.set("job_id", jobId);
   if (platform) params.set("platform", platform);

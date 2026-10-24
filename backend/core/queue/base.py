@@ -53,6 +53,14 @@ class BaseJobQueue(ABC):
         """Marks task failure, increments retry count, and requeues or moves to DLQ."""
         pass
 
+    async def requeue(self, item_id: str) -> bool:
+        """Puts an in-flight item back without counting a retry (clean shutdown).
+
+        Returns False when the implementation does not support it; callers then
+        fall back to nack().
+        """
+        return False
+
     @abstractmethod
     async def dead_letter(self, item_id: str, reason: str) -> None:
         """Directly relocates an item to the Dead Letter Queue."""

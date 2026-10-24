@@ -65,7 +65,7 @@
   - **Giải pháp:**
     - Hàm `persist_auth_cookies`: Tự động cộng hạn dùng **365 ngày** cho toàn bộ cookie xác thực thiết yếu (`sessionid`, `sessionid_ss`, `passport_assist_user`, `ttwid`, `web_session`, `id_token`, `a1`, `webId`).
     - Bộ lọc `is_dummy_cookie`: Chặn 100% việc nạp chuỗi giả vào phiên duyệt thật.
-    - Khôi phục tài khoản **"aaa"** trên Douyin (`sessionid = [REDACTED_DOUYIN_SESSION]`), đầy đủ 96 cookie xác thực, trạng thái `is_authenticated: True`.
+    - Khôi phục phiên đăng nhập Douyin xác thực (session cookie thật, `is_authenticated: True`); chi tiết token/cookie không ghi vào tài liệu này vì lý do bảo mật.
     - Dọn sạch `.env`, ưu tiên dùng cookie thật trong SQLite profile của trình duyệt.
     - Cô lập test suite `pytest` không ghi đè vào file `.env` thực tế.
 

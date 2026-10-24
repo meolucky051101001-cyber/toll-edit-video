@@ -49,7 +49,7 @@ async def test_xhs_inspect_and_probe_authenticated(tmp_path):
     mock_resp_200 = MagicMock(status=200)
     mock_page.goto = AsyncMock(return_value=mock_resp_200)
     mock_context.new_page = AsyncMock(return_value=mock_page)
-    service.ensure_open = AsyncMock(return_value=mock_page)
+    service._ensure_open_unlocked = AsyncMock(return_value=mock_page)
 
     is_healthy, desc = await service.probe_live()
     assert is_healthy is True
@@ -177,7 +177,7 @@ async def test_xhs_inspect_and_probe_unauthenticated_guest(tmp_path):
     mock_resp_200 = MagicMock(status=200)
     mock_page.goto = AsyncMock(return_value=mock_resp_200)
     mock_context.new_page = AsyncMock(return_value=mock_page)
-    service.ensure_open = AsyncMock(return_value=mock_page)
+    service._ensure_open_unlocked = AsyncMock(return_value=mock_page)
 
     is_healthy, desc = await service.probe_live()
     assert is_healthy is True
@@ -216,7 +216,7 @@ async def test_xhs_inspect_and_probe_captcha_challenge(tmp_path):
     mock_resp_200 = MagicMock(status=200)
     mock_page.goto = AsyncMock(return_value=mock_resp_200)
     mock_context.new_page = AsyncMock(return_value=mock_page)
-    service.ensure_open = AsyncMock(return_value=mock_page)
+    service._ensure_open_unlocked = AsyncMock(return_value=mock_page)
 
     is_healthy, desc = await service.probe_live()
     assert is_healthy is True
@@ -267,7 +267,7 @@ async def test_xhs_inspect_and_probe_stale_cookie_with_login_modal(tmp_path):
     mock_resp_200 = MagicMock(status=200)
     mock_page.goto = AsyncMock(return_value=mock_resp_200)
     mock_context.new_page = AsyncMock(return_value=mock_page)
-    service.ensure_open = AsyncMock(return_value=mock_page)
+    service._ensure_open_unlocked = AsyncMock(return_value=mock_page)
 
     is_healthy, desc = await service.probe_live()
     assert is_healthy is True
@@ -282,7 +282,7 @@ async def test_xhs_probe_network_error_503_or_timeout(tmp_path):
     mock_page.is_closed = MagicMock(return_value=False)
     mock_context.new_page = AsyncMock(return_value=mock_page)
     service.context = mock_context
-    service.ensure_open = AsyncMock(return_value=mock_page)
+    service._ensure_open_unlocked = AsyncMock(return_value=mock_page)
 
     # 1. 503 response
     mock_resp_503 = MagicMock(status=503)

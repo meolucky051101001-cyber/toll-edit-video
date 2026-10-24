@@ -71,7 +71,7 @@ async def test_production_service_headless_elevation(tmp_path: Path):
 
     with (
         patch.object(svc, "_close", new_callable=AsyncMock) as mock_close,
-        patch.object(svc, "ensure_open", new_callable=AsyncMock) as mock_ensure,
+        patch.object(svc, "_ensure_open_unlocked", new_callable=AsyncMock) as mock_ensure,
         patch.object(svc, "inspect", new_callable=AsyncMock),
     ):
         new_page = MagicMock()
@@ -93,7 +93,7 @@ async def test_production_service_headless_elevation(tmp_path: Path):
     dy_svc.page = mock_page
     with (
         patch.object(dy_svc, "_close", new_callable=AsyncMock) as mock_close,
-        patch.object(dy_svc, "ensure_open", new_callable=AsyncMock) as mock_ensure,
+        patch.object(dy_svc, "_ensure_open_unlocked", new_callable=AsyncMock) as mock_ensure,
         patch.object(dy_svc, "inspect", new_callable=AsyncMock),
     ):
         mock_ensure.return_value = new_page
@@ -555,7 +555,7 @@ async def test_automatic_elevation_does_not_persist_headful_preference(service_t
     svc.page = mock_page
     with (
         patch.object(svc, "_close", new_callable=AsyncMock),
-        patch.object(svc, "ensure_open", new_callable=AsyncMock) as mock_ensure,
+        patch.object(svc, "_ensure_open_unlocked", new_callable=AsyncMock) as mock_ensure,
         patch.object(svc, "inspect", new_callable=AsyncMock),
     ):
         mock_ensure.return_value = MagicMock()

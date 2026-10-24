@@ -1,10 +1,9 @@
 import asyncio
-import os
 import sys
 from pathlib import Path
 
-# Force UTF-8 encoding for Windows console
-os.environ["PYTHONIOENCODING"] = "utf-8"
+# Force UTF-8 encoding for Windows console (PYTHONIOENCODING set here would be
+# a no-op after interpreter start; reconfigure() below is what actually works)
 if hasattr(sys.stdout, "reconfigure"):
     getattr(sys.stdout, "reconfigure")(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):

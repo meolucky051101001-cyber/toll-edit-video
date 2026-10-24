@@ -1,3 +1,35 @@
+const DEFAULT_TIMEOUT_MS = 10000;
+
+function combineSignals(
+  caller: AbortSignal | null | undefined,
+  timeoutMs: number,
+): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  if (!caller) return timeout;
+  if (typeof AbortSignal.any === "function") return AbortSignal.any([caller, timeout]);
+  // Older runtimes: fall back to the caller's signal alone (callers that pass
+  // a signal are expected to manage their own cancellation).
+  return caller;
+}
+
+function describeApiError(body: unknown): string | null {
+  if (body == null || typeof body !== "object") return null;
+  const detail = (body as { detail?: unknown }).detail;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  // FastAPI validation errors arrive as a list of {loc, msg, type} objects.
+  if (Array.isArray(detail) && detail.length > 0) {
+    const parts = detail
+      .map((item) =>
+        item && typeof item === "object" && typeof (item as { msg?: unknown }).msg === "string"
+          ? (item as { msg: string }).msg
+          : null,
+      )
+      .filter((msg): msg is string => msg !== null);
+    if (parts.length > 0) return parts.join("; ");
+  }
+  return null;
+}
+
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   let response: Response;
   try {
@@ -5,22 +37,30 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
       ...options,
       cache: "no-store",
       headers: { "Content-Type": "application/json", ...options?.headers },
-      signal: options?.signal ?? AbortSignal.timeout(10000),
+      signal: combineSignals(options?.signal, DEFAULT_TIMEOUT_MS),
     });
-  } catch {
+  } catch (err) {
+    // A caller-initiated abort must stay recognizable so callers can ignore it.
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
     throw new Error(
       "Không kết nối được backend. Hãy chạy start.bat và thử lại.",
+      { cause: err },
     );
   }
   if (!response.ok) {
-    const body = await response.json().catch(() => null);
+    const body: unknown = await response.json().catch(() => null);
     throw new Error(
-      typeof body?.detail === "string"
-        ? body.detail
-        : "Backend chưa sẵn sàng. Kiểm tra logs/backend.log và thử lại.",
+      describeApiError(body) ??
+        "Backend chưa sẵn sàng. Kiểm tra logs/backend.log và thử lại.",
     );
   }
-  return response.json() as Promise<T>;
+  try {
+    return (await response.json()) as T;
+  } catch {
+    throw new Error(
+      `Phản hồi không hợp lệ từ backend (${response.status}). Kiểm tra logs/backend.log.`,
+    );
+  }
 }
 export const platformName = (value: string) => {
   switch (value) {

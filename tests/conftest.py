@@ -11,6 +11,8 @@ from sqlalchemy.orm import sessionmaker
 # Every pytest invocation owns a fresh database; never reuse the workstation DB.
 _TEST_DB_ROOT = Path(tempfile.mkdtemp(prefix="video-research-tests-"))
 os.environ["DATABASE_URL"] = f"sqlite:///{(_TEST_DB_ROOT / 'suite.db').as_posix()}"
+# No test carries an API token: keep the auth middleware off for the whole suite.
+os.environ["API_TOKEN"] = ""
 
 from backend.app.main import app  # noqa: E402
 from backend.core.database import Base, engine, get_db, make_engine  # noqa: E402

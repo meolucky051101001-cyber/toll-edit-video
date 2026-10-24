@@ -1,11 +1,24 @@
 import asyncio
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger("events")
+
+#: Every named SSE event type published through the EventBus. The /api/events
+#: stream advertises this list in its `connected` payload so frontend listeners
+#: can register themselves dynamically (a new backend event then needs no
+#: frontend change). Keep in sync with publish()/publish_nowait() call sites.
+EVENT_TYPES: frozenset[str] = frozenset({
+    "search:update",
+    "download:update",
+    "dubbing:update",
+    "video:metrics_update",
+    "video:virality_update",
+})
 
 
 @dataclass(frozen=True)
@@ -58,14 +71,19 @@ class EventBus:
         self.max_subscriber_queue = max_subscriber_queue
         self._subscribers: set[asyncio.Queue[ServerEvent]] = set()
         self._counter: int = 0
+        self._id_lock = threading.Lock()
+        # Loop captured the first time we publish from async context; used to
+        # hand events raised from worker threads into the loop thread safely.
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def subscriber_count(self) -> int:
         return len(self._subscribers)
 
     def _next_id(self) -> int:
-        self._counter += 1
-        return self._counter
+        with self._id_lock:
+            self._counter += 1
+            return self._counter
 
     def _dispatch_to_subscribers(self, event: ServerEvent) -> None:
         for q in list(self._subscribers):
@@ -80,6 +98,7 @@ class EventBus:
                     pass
 
     async def publish(self, event_type: str, data: dict[str, Any]) -> ServerEvent:
+        self._loop = asyncio.get_running_loop()
         event = ServerEvent(
             id=self._next_id(),
             event=event_type,
@@ -102,9 +121,21 @@ class EventBus:
         )
 
         if loop and loop.is_running():
-            loop.call_soon_threadsafe(self._dispatch_to_subscribers, event)
-        else:
+            # Same-thread dispatch is safe; remember the loop for later
+            # cross-thread publishers.
+            self._loop = loop
             self._dispatch_to_subscribers(event)
+            return
+
+        if self._loop is not None and self._loop.is_running():
+            # asyncio.Queue is not thread-safe: marshal into the loop thread
+            # instead of touching subscriber queues from a worker thread.
+            self._loop.call_soon_threadsafe(self._dispatch_to_subscribers, event)
+            return
+
+        logger.warning(
+            "Dropped event %r: no running event loop to dispatch on.", event_type
+        )
 
     def subscribe(self) -> EventSubscription:
         """Subscribes immediately to events, registering an internal queue synchronously."""

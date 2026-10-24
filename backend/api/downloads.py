@@ -1,4 +1,6 @@
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
@@ -18,7 +20,10 @@ async def request_batch_download(payload: BatchDownloadRequest, request: Request
     service = getattr(request.app.state, "download", None)
     if not service:
         raise HTTPException(503, "Dịch vụ tải chưa được khởi tạo.")
-    return service.request_batch_downloads(payload.video_ids, force=payload.force)
+    # Sync DB commits + disk stats: keep them off the event loop.
+    return await asyncio.to_thread(
+        service.request_batch_downloads, payload.video_ids, force=payload.force
+    )
 
 
 @router.post(
@@ -32,7 +37,7 @@ async def request_video_download(video_id: str, request: Request, force: bool = 
     if not service:
         raise HTTPException(503, "Dịch vụ tải chưa được khởi tạo.")
     try:
-        return service.request_download(video_id, force=force)
+        return await asyncio.to_thread(service.request_download, video_id, force=force)
     except ValueError as e:
         raise HTTPException(400, detail=str(e))
 
@@ -74,7 +79,7 @@ async def cancel_download(download_id: str, request: Request):
     if not service:
         raise HTTPException(503, "Dịch vụ tải chưa được khởi tạo.")
     try:
-        return service.cancel_download(download_id)
+        return await asyncio.to_thread(service.cancel_download, download_id)
     except ValueError as e:
         raise HTTPException(404, detail=str(e))
 

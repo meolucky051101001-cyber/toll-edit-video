@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 
 type Snapshot<T> = { path: string | null; data: T | null; error: string };
@@ -16,6 +16,12 @@ export function useResource<T>(path: string | null, interval = 0) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
     async function run() {
+      // Skip network work while the tab is hidden; keep the timer alive so
+      // polling resumes automatically when the tab becomes visible again.
+      if (typeof document !== "undefined" && document.hidden) {
+        if (active && interval) timer = setTimeout(run, interval);
+        return;
+      }
       try {
         const result = await api<T>(path!, {
           signal: AbortSignal.any([
@@ -50,4 +56,16 @@ export function useResource<T>(path: string | null, interval = 0) {
     loading: Boolean(path && !current),
     refresh,
   };
+}
+
+/** Returns `value` delayed by `delayMs`; resets the timer on every change. */
+export function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  const latest = useRef(value);
+  latest.current = value;
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(latest.current), delayMs);
+    return () => clearTimeout(timer);
+  }, [value, delayMs]);
+  return debounced;
 }

@@ -91,6 +91,8 @@ def test_offline_crawl_provider_contract_and_filters():
     with open(BENCHMARK_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
 
+    from backend.providers.base import apply_search_filters_and_sorting
+
     for group in data:
         query = group["query"]
         plan = plan_query(query)
@@ -108,15 +110,23 @@ def test_offline_crawl_provider_contract_and_filters():
             for s in group["samples"]
         ]
 
-        # Verify sorting matches requested most_liked
+        # Verify the provider sorting contract: when a provider applies
+        # apply_search_filters_and_sorting (as Douyin/XHS providers do), the
+        # output for sort_by="most_liked" must be ordered by like_count desc.
         if filters.sort_by == "most_liked":
-            items.sort(key=lambda x: x.like_count or 0, reverse=True)
-            for i in range(len(items) - 1):
-                assert (items[i].like_count or 0) >= (items[i + 1].like_count or 0)
+            source_likes = [s.get("like_count") or 0 for s in group["samples"]]
+            sorted_items = apply_search_filters_and_sorting(
+                list(items), filters=filters, limit=len(items)
+            )
+            result_likes = [item.like_count or 0 for item in sorted_items]
+            assert result_likes == sorted(source_likes, reverse=True), (
+                "apply_search_filters_and_sorting did not order most_liked "
+                f"results by like_count: {result_likes} vs source {source_likes}"
+            )
 
         # Verify ranking works accurately
         details = [rank_detailed(item, query, alternative_queries=plan.tiered_queries) for item in items]
-        assert all(d.final_score >= 0.0 for d in details)
+        assert all(0.0 <= d.final_score <= 100.0 for d in details)
 
 
 @pytest.mark.live_acceptance
@@ -340,12 +350,12 @@ async def test_live_crawl_xiaohongshu_real_results(tmp_path: Path):
 
 @pytest.mark.live_acceptance
 @pytest.mark.anyio
-async def test_live_crawl_provider_acceptance_with_filters():
+async def test_live_crawl_provider_acceptance_with_filters(tmp_path: Path):
     """Compatibility runner for existing stage 11 caller."""
     is_live_enabled = os.environ.get("LIVE_CRAWL_ENABLED") == "1"
     if not is_live_enabled:
         test_offline_crawl_provider_contract_and_filters()
     else:
         await test_live_network_probe_reachability()
-        await test_live_crawl_douyin_real_results()
-        await test_live_crawl_xiaohongshu_real_results()
+        await test_live_crawl_douyin_real_results(tmp_path)
+        await test_live_crawl_xiaohongshu_real_results(tmp_path)

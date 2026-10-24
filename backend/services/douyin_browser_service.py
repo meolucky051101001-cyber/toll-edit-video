@@ -3,6 +3,7 @@ import json
 import logging
 import re
 from pathlib import Path
+from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
 from playwright.async_api import BrowserContext, Error, Page, Playwright, async_playwright
@@ -12,6 +13,7 @@ from backend.core.config import ROOT, settings
 from backend.providers.base import ProviderUnavailableError
 from backend.providers.douyin.parser import classify_page
 from backend.services.browser_session import (
+    checkpoint_has_session_cookie,
     cleanup_stale_profile_locks,
     load_headful_preference,
     platform_navigation_url,
@@ -112,11 +114,12 @@ class DouyinBrowserService:
         if auth_file.exists():
             try:
                 data = json.loads(auth_file.read_text("utf-8"))
-                cookies = data.get("cookies", [])
-                if cookies and (data.get("grade") in {"high_quality", "valid", "basic"} or len(cookies) >= 5):
+                # Only a real login session cookie justifies a headless launch;
+                # a pile of anonymous cookies would hit the login wall.
+                if checkpoint_has_session_cookie(data):
                     return True
             except Exception:
-                pass
+                logger.debug("Could not evaluate Douyin checkpoint for headless mode")
         return False
 
     def reset_headful_session(self, force: bool = False) -> None:
@@ -144,7 +147,7 @@ class DouyinBrowserService:
             try:
                 return self.get_active_page()
             except ProviderUnavailableError:
-                return await self.ensure_open(headless_override=False)
+                return await self._ensure_open_unlocked(headless_override=False)
         try:
             active = self.get_active_page()
             current_url = platform_navigation_url(active.url, ("douyin.com",))
@@ -152,7 +155,7 @@ class DouyinBrowserService:
             current_url = None
         await self._close()
         # Navigate directly to the blocked route, never via the home feed.
-        page = await self.ensure_open(headless_override=False, initial_url=current_url)
+        page = await self._ensure_open_unlocked(headless_override=False, initial_url=current_url)
         await self.inspect(page)
         return page
 
@@ -197,7 +200,30 @@ class DouyinBrowserService:
             "is_blocked_tab": bool(self.blocked_page and not self.blocked_page.is_closed()),
         }
 
-    async def ensure_open(self, headless_override: bool | None = None, initial_url: str | None = None) -> Page:
+    async def ensure_open(
+        self,
+        headless_override: bool | None = None,
+        initial_url: str | None = None,
+    ) -> Page:
+        """Open the browser, serialized by self.lock.
+
+        Callers that already hold self.lock (providers inside a search) skip
+        the re-acquire: asyncio.Lock is not reentrant and a nested acquire
+        would deadlock. Mutual exclusion makes locked() == True proof that the
+        CURRENT caller owns the lock.
+        """
+        if self.lock.locked():
+            return await self._ensure_open_unlocked(
+                headless_override=headless_override, initial_url=initial_url
+            )
+        async with self.lock:
+            return await self._ensure_open_unlocked(
+                headless_override=headless_override, initial_url=initial_url
+            )
+
+    async def _ensure_open_unlocked(
+        self, headless_override: bool | None = None, initial_url: str | None = None
+    ) -> Page:
         if self.page and not self.page.is_closed():
             return self.page
         await self._close()
@@ -217,7 +243,7 @@ class DouyinBrowserService:
             self.context = await self.driver.chromium.launch_persistent_context(
                 str(self.profile),
                 headless=effective_headless,
-                channel=settings.xhs_browser_channel,
+                channel=settings.douyin_browser_channel or settings.xhs_browser_channel,
                 viewport={"width": 1280, "height": 900},
                 accept_downloads=False,
                 locale="zh-CN",
@@ -245,6 +271,32 @@ class DouyinBrowserService:
                     await route.continue_()
 
             await self.context.route("**/*", block_resources)
+
+            # Sanitize profile cookies: purge dummy/corrupt values that break the
+            # session restore (same fix as the Xiaohongshu service).
+            try:
+                from backend.services.cookie_service import DUMMY_SUBSTRINGS
+
+                loaded_cookies = await self.context.cookies()
+                bad_cookies = [
+                    c for c in loaded_cookies
+                    if any(dummy in str(c.get("value", "")).lower() for dummy in DUMMY_SUBSTRINGS)
+                ]
+                if bad_cookies:
+                    logger.warning(
+                        "Purging %d dummy/corrupt cookies from Douyin browser profile...",
+                        len(bad_cookies),
+                    )
+                    clean_cookies = [
+                        c for c in loaded_cookies
+                        if not any(dummy in str(c.get("value", "")).lower() for dummy in DUMMY_SUBSTRINGS)
+                    ]
+                    await self.context.clear_cookies()
+                    if clean_cookies:
+                        await self.context.add_cookies(cast(Any, clean_cookies))
+            except Exception as e:
+                logger.debug("Profile cookie sanitization skipped: %s", e)
+
             # Restore saved session cookies if present
             auth_file = self.profile / "auth_state.json"
             if auth_file.exists():
@@ -254,7 +306,7 @@ class DouyinBrowserService:
                     if cookies:
                         await restore_missing_cookies(self.context, cookies)
                 except Exception:
-                    pass
+                    logger.debug("Could not restore cookies from auth_state.json")
 
             # Inject custom cookie from settings if configured (skip dummy/test strings)
             if settings.douyin_cookie:
@@ -292,11 +344,13 @@ class DouyinBrowserService:
                 await self.page.wait_for_timeout(1500)
             await self.inspect(self.page)
             return self.page
-        except Error as exc:
+        except Exception as exc:
             logger.error("Douyin ensure_open error: %s", exc)
+            # Any failure here (not only Playwright errors) must tear down the
+            # partial context, otherwise Chromium keeps the profile locked.
             try:
                 await self._close()
-            except Error:
+            except Exception:
                 pass
             self.state = "network_error"
             if isinstance(exc, BrowserTimeout):
@@ -322,7 +376,7 @@ class DouyinBrowserService:
         active_state: str | None = None
         active_diagnostics: dict = {}
         try:
-            await self.ensure_open()
+            await self._ensure_open_unlocked()
             active_state = self.state
             active_diagnostics = dict(self.diagnostics)
             if not self.context:
@@ -386,7 +440,11 @@ class DouyinBrowserService:
             if self.context:
                 try:
                     c_list = await self.context.cookies()
-                    c_names = {c.get("name") for c in c_list if c.get("name")}
+                    c_names = {
+                        name
+                        for c in c_list
+                        if (name := c.get("name")) is not None
+                    }
                     has_session_cookie = bool(
                         c_names & {"sessionid", "sessionid_ss", "sid_guard", "passport_csrf_token", "uid_tt", "uid_tt_ss"}
                     )
@@ -494,7 +552,8 @@ class DouyinBrowserService:
                 "result_links_count": note_links,
                 "video_elements_count": video_count,
             }
-        except Exception:
+        except Exception as exc:
+            logger.debug("Exception in inspect: %s", exc, exc_info=True)
             self.state = "network_error"
         return self.state
 
@@ -507,13 +566,19 @@ class DouyinBrowserService:
                 await page.bring_to_front()
                 await self.inspect(page)
             else:
-                page = await self.ensure_open()
+                page = await self._ensure_open_unlocked()
                 page = self.get_active_page()
                 await page.bring_to_front()
                 await self.inspect(page)
         return self.snapshot()
 
     async def refresh_qr(self) -> dict:
+        if self.lock.locked():
+            return self.snapshot()
+        async with self.lock:
+            return await self._refresh_qr_unlocked()
+
+    async def _refresh_qr_unlocked(self) -> dict:
         if not self.page or self.page.is_closed():
             return self.snapshot()
         try:
@@ -540,8 +605,10 @@ class DouyinBrowserService:
             await asyncio.sleep(1)
             await self.inspect(self.page)
             self.diagnostics["qr_available"] = True
-        except Exception:
-            pass
+        except Exception as exc:
+            # Surface the failure instead of silently returning a stale snapshot
+            # the user would stare at while the QR code has already expired.
+            logger.warning("Douyin QR refresh failed: %s", exc)
         return self.snapshot()
 
     async def refresh_status(self) -> dict:

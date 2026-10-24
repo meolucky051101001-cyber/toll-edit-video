@@ -187,7 +187,7 @@ async def test_browser_service_probe_fresh_request_not_stale_status():
     mock_context.new_page = AsyncMock(return_value=mock_page)
 
     service.context = mock_context
-    service.ensure_open = AsyncMock(return_value=mock_page)
+    service._ensure_open_unlocked = AsyncMock(return_value=mock_page)
     service.inspect = AsyncMock(return_value="ready")
 
     # 1. First probe: Server returns HTTP 200
@@ -225,7 +225,7 @@ async def test_douyin_browser_service_probe_fresh_request_not_stale_status():
     mock_context.new_page = AsyncMock(return_value=mock_page)
 
     service.context = mock_context
-    service.ensure_open = AsyncMock(return_value=mock_page)
+    service._ensure_open_unlocked = AsyncMock(return_value=mock_page)
     service.inspect = AsyncMock(return_value="ready")
 
     # 1. First probe: Server returns HTTP 200

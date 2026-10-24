@@ -42,6 +42,8 @@ class DubbingService:
         self.event_bus = event_bus or get_event_bus()
         self.running_tasks: dict[str, asyncio.Task] = {}
         self._active_jobs: set[str] = set()
+        # Output lives under the ROOT-anchored config dir, not the process CWD.
+        settings.dubbing_dir.mkdir(parents=True, exist_ok=True)
 
     def list_voices(self) -> list[VoiceOption]:
         return AVAILABLE_VOICES
@@ -117,6 +119,48 @@ class DubbingService:
             self.running_tasks[job.id] = task
         return out
 
+    async def recover_interrupted_jobs(self) -> int:
+        """Restores dubbing jobs left dangling by a previous server run.
+
+        Pending jobs are re-enqueued; synthesizing/mixing jobs cannot resume
+        mid-way (TTS/mixing is a single pipeline), so they are marked failed
+        with a clear message instead of staying stuck forever.
+        """
+        requeued_ids: list[str] = []
+        failed = 0
+        with self.sessions() as db:
+            jobs = list(
+                db.scalars(
+                    select(DubbingJob).where(
+                        DubbingJob.status.in_(["pending", "synthesizing", "mixing"])
+                    )
+                )
+            )
+            for job in jobs:
+                if job.status == "pending":
+                    requeued_ids.append(job.id)
+                    continue
+                job.status = "failed"
+                job.error_message = (
+                    "Tiến trình lồng tiếng bị gián đoạn do server khởi động lại. Vui lòng tạo lại tác vụ."
+                )
+                failed += 1
+            if failed:
+                db.commit()
+
+        if requeued_ids:
+            from backend.core.queue import system_queue
+
+            for job_id in requeued_ids:
+                try:
+                    await system_queue.enqueue(
+                        task_type="dubbing", payload={"job_id": job_id}, priority=2
+                    )
+                    logger.info("Re-enqueued pending dubbing job %s after restart", job_id)
+                except Exception as exc:
+                    logger.warning("Could not re-enqueue dubbing job %s: %s", job_id, exc)
+        return len(requeued_ids) + failed
+
     async def process_dubbing(self, job_id: str) -> None:
         if job_id in self._active_jobs:
             logger.info("Dubbing job %s is already active in-memory, skipping duplicate execution", job_id)
@@ -154,7 +198,7 @@ class DubbingService:
 
             await self._emit_event(job_id, "synthesizing")
 
-            out_audio_path = f"data/dubbing/{job_id}_{voice_id}.mp3"
+            out_audio_path = str(settings.dubbing_dir / f"{job_id}_{voice_id}.mp3")
 
             try:
                 start_tts = time.perf_counter()
@@ -233,7 +277,7 @@ class DubbingService:
                 final_audio, final_video = await self.mixer.mix(
                     voiceover_audio_path=audio_path,
                     source_video_path=source_video_path,
-                    output_dir="data/dubbing",
+                    output_dir=str(settings.dubbing_dir),
                     bgm_volume_percent=bgm_vol,
                     ducking=ducking,
                 )

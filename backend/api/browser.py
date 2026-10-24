@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import math
 import random
 from io import BytesIO
@@ -8,6 +9,8 @@ from pydantic import BaseModel
 
 from backend.providers.base import ProviderUnavailableError
 from backend.services.browser_session import save_session_checkpoint
+
+logger = logging.getLogger("api.browser")
 
 router = APIRouter(prefix="/api/browser/xiaohongshu", tags=["browser"])
 douyin_router = APIRouter(prefix="/api/browser/douyin", tags=["browser"])
@@ -121,53 +124,74 @@ async def get_screenshot(request: Request, crop: str | None = None):
         raise HTTPException(503, "Không chụp được màn hình trình duyệt.")
 
 
+async def acquire_browser_lock(browser, busy_message: str, timeout: float = 0.25) -> None:
+    """Fails fast with 409 when a search holds the browser lock; otherwise the
+    caller owns the lock until it releases it (always pair with lock.release())."""
+    try:
+        await asyncio.wait_for(browser.lock.acquire(), timeout=timeout)
+    except asyncio.TimeoutError:
+        raise HTTPException(409, busy_message) from None
+
+
 @router.post("/refresh_qr")
 async def refresh_xiaohongshu_qr(request: Request):
     browser = request.app.state.browser
-    if browser.lock.locked():
-        raise HTTPException(409, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
-    return await browser.refresh_qr()
+    await acquire_browser_lock(browser, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
+    try:
+        return await browser._refresh_qr_unlocked()
+    finally:
+        browser.lock.release()
 
 
 @router.post("/click")
 async def click_xiaohongshu(payload: ClickPayload, request: Request):
     browser = request.app.state.browser
-    if browser.lock.locked():
-        raise HTTPException(409, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
+    await acquire_browser_lock(browser, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
     try:
-        page = browser.get_active_page()
-    except Exception:
-        raise HTTPException(404, "Trình duyệt chưa mở.")
-    try:
-        await page.mouse.click(payload.x, payload.y)
-        await asyncio.sleep(0.5)
-        await browser.inspect(page)
-        return browser.snapshot()
-    except Exception as e:
-        raise HTTPException(500, f"Lỗi khi click: {e}")
+        try:
+            page = browser.get_active_page()
+        except Exception:
+            raise HTTPException(404, "Trình duyệt chưa mở.") from None
+        try:
+            await page.mouse.click(payload.x, payload.y)
+            await asyncio.sleep(0.5)
+            await browser.inspect(page)
+            return browser.snapshot()
+        except Exception as e:
+            logger.warning("Browser click failed: %s", e, exc_info=True)
+            raise HTTPException(
+                500, "Không click được trên trang. Thử lại hoặc mở lại trình duyệt."
+            ) from None
+    finally:
+        browser.lock.release()
 
 
 @router.post("/drag")
 async def drag_xiaohongshu(payload: DragPayload, request: Request):
     browser = request.app.state.browser
-    if browser.lock.locked():
-        raise HTTPException(409, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
+    await acquire_browser_lock(browser, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
     try:
-        page = browser.get_active_page()
-    except Exception:
-        raise HTTPException(404, "Trình duyệt chưa mở.")
-    try:
-        await human_drag(page, payload.from_x, payload.from_y, payload.to_x, payload.to_y)
-        await asyncio.sleep(0.8)
-        await browser.inspect(page)
-        if browser.context and browser.state in {"authenticated", "page_available"}:
-            try:
-                await save_session_checkpoint(browser.context, browser.profile)
-            except Exception:
-                pass
-        return browser.snapshot()
-    except Exception as e:
-        raise HTTPException(500, f"Lỗi khi kéo trượt: {e}")
+        try:
+            page = browser.get_active_page()
+        except Exception:
+            raise HTTPException(404, "Trình duyệt chưa mở.") from None
+        try:
+            await human_drag(page, payload.from_x, payload.from_y, payload.to_x, payload.to_y)
+            await asyncio.sleep(0.8)
+            await browser.inspect(page)
+            if browser.context and browser.state in {"authenticated", "page_available"}:
+                try:
+                    await save_session_checkpoint(browser.context, browser.profile)
+                except Exception:
+                    pass
+            return browser.snapshot()
+        except Exception as e:
+            logger.warning("Browser drag failed: %s", e, exc_info=True)
+            raise HTTPException(
+                500, "Không kéo trượt được trên trang. Thử lại hoặc mở lại trình duyệt."
+            ) from None
+    finally:
+        browser.lock.release()
 
 
 
@@ -326,50 +350,62 @@ async def inspect_douyin_frames(request: Request):
 @douyin_router.post("/refresh_qr")
 async def refresh_douyin_qr(request: Request):
     browser = request.app.state.douyin_browser
-    if browser.lock.locked():
-        raise HTTPException(409, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
-    return await browser.refresh_qr()
+    await acquire_browser_lock(browser, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
+    try:
+        return await browser._refresh_qr_unlocked()
+    finally:
+        browser.lock.release()
 
 
 @douyin_router.post("/click")
 async def click_douyin(payload: ClickPayload, request: Request):
     browser = request.app.state.douyin_browser
-    if browser.lock.locked():
-        raise HTTPException(409, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
+    await acquire_browser_lock(browser, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
     try:
-        page = browser.get_active_page()
-    except Exception:
-        raise HTTPException(404, "Trình duyệt chưa mở.")
-    try:
-        await page.mouse.click(payload.x, payload.y)
-        await asyncio.sleep(0.5)
-        await browser.inspect(page)
-        return browser.snapshot()
-    except Exception as e:
-        raise HTTPException(500, f"Lỗi khi click: {e}")
+        try:
+            page = browser.get_active_page()
+        except Exception:
+            raise HTTPException(404, "Trình duyệt chưa mở.") from None
+        try:
+            await page.mouse.click(payload.x, payload.y)
+            await asyncio.sleep(0.5)
+            await browser.inspect(page)
+            return browser.snapshot()
+        except Exception as e:
+            logger.warning("Browser click failed: %s", e, exc_info=True)
+            raise HTTPException(
+                500, "Không click được trên trang. Thử lại hoặc mở lại trình duyệt."
+            ) from None
+    finally:
+        browser.lock.release()
 
 
 @douyin_router.post("/drag")
 async def drag_douyin(payload: DragPayload, request: Request):
     browser = request.app.state.douyin_browser
-    if browser.lock.locked():
-        raise HTTPException(409, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
+    await acquire_browser_lock(browser, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
     try:
-        page = browser.get_active_page()
-    except Exception:
-        raise HTTPException(404, "Trình duyệt chưa mở.")
-    try:
-        await human_drag(page, payload.from_x, payload.from_y, payload.to_x, payload.to_y)
-        await asyncio.sleep(0.8)
-        await browser.inspect(page)
-        if browser.context and browser.state in {"authenticated", "page_available"}:
-            try:
-                await save_session_checkpoint(browser.context, browser.profile)
-            except Exception:
-                pass
-        return browser.snapshot()
-    except Exception as e:
-        raise HTTPException(500, f"Lỗi khi kéo trượt: {e}")
+        try:
+            page = browser.get_active_page()
+        except Exception:
+            raise HTTPException(404, "Trình duyệt chưa mở.") from None
+        try:
+            await human_drag(page, payload.from_x, payload.from_y, payload.to_x, payload.to_y)
+            await asyncio.sleep(0.8)
+            await browser.inspect(page)
+            if browser.context and browser.state in {"authenticated", "page_available"}:
+                try:
+                    await save_session_checkpoint(browser.context, browser.profile)
+                except Exception:
+                    pass
+            return browser.snapshot()
+        except Exception as e:
+            logger.warning("Browser drag failed: %s", e, exc_info=True)
+            raise HTTPException(
+                500, "Không kéo trượt được trên trang. Thử lại hoặc mở lại trình duyệt."
+            ) from None
+    finally:
+        browser.lock.release()
 
 
 def detect_puzzle_slider_distance(
@@ -578,7 +614,10 @@ async def execute_slider_solve(page, browser) -> dict:
             break
 
     img_bytes = await page.screenshot()
-    coords = detect_puzzle_slider_distance(img_bytes, crop_box=puzzle_crop)
+    # Pure-Python pixel scan (~100k getpixel calls): run it off the event loop.
+    coords = await asyncio.to_thread(
+        detect_puzzle_slider_distance, img_bytes, crop_box=puzzle_crop
+    )
 
     from_x: float = 504.0
     from_y: float = 563.0
@@ -633,27 +672,29 @@ async def execute_slider_solve(page, browser) -> dict:
 @douyin_router.post("/auto_solve_slider")
 async def auto_solve_douyin_slider(request: Request):
     browser = request.app.state.douyin_browser
-    if browser.lock.locked():
-        raise HTTPException(409, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
+    await acquire_browser_lock(browser, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
     try:
-        page = browser.get_active_page()
-    except Exception:
-        raise HTTPException(404, "Trình duyệt chưa mở.")
-
-    return await execute_slider_solve(page, browser)
+        try:
+            page = browser.get_active_page()
+        except Exception:
+            raise HTTPException(404, "Trình duyệt chưa mở.") from None
+        return await execute_slider_solve(page, browser)
+    finally:
+        browser.lock.release()
 
 
 @router.post("/auto_solve_slider")
 async def auto_solve_xhs_slider(request: Request):
     browser = request.app.state.browser
-    if browser.lock.locked():
-        raise HTTPException(409, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
+    await acquire_browser_lock(browser, "Trình duyệt đang được sử dụng bởi tìm kiếm.")
     try:
-        page = browser.get_active_page()
-    except Exception:
-        raise HTTPException(404, "Trình duyệt chưa mở.")
-
-    return await execute_slider_solve(page, browser)
+        try:
+            page = browser.get_active_page()
+        except Exception:
+            raise HTTPException(404, "Trình duyệt chưa mở.") from None
+        return await execute_slider_solve(page, browser)
+    finally:
+        browser.lock.release()
 
 
 

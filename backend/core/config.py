@@ -15,7 +15,15 @@ class Settings(BaseSettings):
     ai_free_tier_confirmed: bool = False
     ai_timeout: float = Field(20, ge=1, le=30)
     ai_min_interval: float = Field(6, ge=0, le=60)
+    # Optional shared-secret for the local API. Empty = auth disabled (default,
+    # keeps the localhost UX unchanged). When set, every request except the
+    # allowlisted health/events/screenshot paths must carry a matching
+    # X-API-Token header (injected server-side by the Next.js proxy).
+    api_token: SecretStr = SecretStr("")
     xhs_browser_channel: Literal["chrome", "msedge", "chromium"] = "chrome"
+    # Empty = inherit xhs_browser_channel (preserves existing profiles).
+    # Set to msedge to keep Douyin on its own browser single-instance.
+    douyin_browser_channel: Literal["", "chrome", "msedge", "chromium"] = ""
     app_env: str = "development"
     database_url: str = "sqlite:///./data/app.db"
     use_mock_provider: bool = False
@@ -23,6 +31,7 @@ class Settings(BaseSettings):
     max_queries: int = Field(10, ge=1, le=10)
     search_timeout: int = Field(300, ge=10, le=600)
     download_dir: Path = ROOT / "data" / "downloads"
+    dubbing_dir: Path = ROOT / "data" / "dubbing"
     max_concurrent_downloads: int = Field(2, ge=1, le=10)
     max_concurrent_per_platform: int = Field(1, ge=1, le=5)
     download_timeout_seconds: int = Field(120, ge=10, le=600)

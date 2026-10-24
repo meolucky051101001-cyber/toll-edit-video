@@ -147,6 +147,16 @@ export function VideoDubbingModal({
       latestJob.status === "synthesizing" ||
       latestJob.status === "mixing");
 
+  // Polling fallback: guarantees job status transitions even when the SSE
+  // stream is disconnected (same pattern as the download controls).
+  useEffect(() => {
+    if (!open || !isJobActive) return;
+    const interval = setInterval(() => {
+      loadJobs();
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [open, isJobActive, loadJobs]);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -11,6 +12,10 @@ from backend.core.config import ROOT, settings
 from backend.providers.ai.gemini import FREE_TIER_MODELS
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+# Serializes every .env rewrite: concurrent cookie saves used to read-modify-
+# write the same staging file and lose updates (last writer wins).
+_env_write_lock = asyncio.Lock()
 
 
 @router.get("")
@@ -70,6 +75,12 @@ def _save_env_values(values: dict[str, str]) -> None:
         staging.unlink(missing_ok=True)
 
 
+async def save_env_values(values: dict[str, str]) -> None:
+    """Serializes .env rewrites and keeps the blocking file I/O off the loop."""
+    async with _env_write_lock:
+        await asyncio.to_thread(_save_env_values, values)
+
+
 @router.patch("")
 async def update_settings(payload: AISettingsPatch, request: Request):
     async with request.app.state.ai.lock:
@@ -81,7 +92,7 @@ async def update_settings(payload: AISettingsPatch, request: Request):
         }
         if key:
             values["AI_API_KEY"] = key
-        _save_env_values(values)
+        await save_env_values(values)
         settings.ai_provider = payload.ai_provider
         settings.ai_model = payload.ai_model
         settings.ai_free_tier_confirmed = payload.ai_free_tier_confirmed
@@ -133,8 +144,8 @@ async def get_cookie_settings():
         is_dummy_cookie,
     )
 
-    xhs_session = get_browser_session_cookie("xiaohongshu")
-    douyin_session = get_browser_session_cookie("douyin")
+    xhs_session = await asyncio.to_thread(get_browser_session_cookie, "xiaohongshu")
+    douyin_session = await asyncio.to_thread(get_browser_session_cookie, "douyin")
 
     # Evaluate active cookie (from settings or fallback to browser session)
     active_xhs = settings.xhs_cookie if (settings.xhs_cookie and not is_dummy_cookie(settings.xhs_cookie)) else xhs_session
@@ -171,7 +182,7 @@ async def save_cookie_settings(payload: CookieSettingsPatch):
             await sync_douyin_upstream_cookie(clean_dy, settings.douyin_downloader_url)
 
     if values:
-        _save_env_values(values)
+        await save_env_values(values)
 
     return await get_cookie_settings()
 
@@ -203,7 +214,7 @@ async def sync_browser_cookies(payload: CookieSyncRequest, request: Request):
         except Exception:
             pass
         if not xhs_cookie:
-            xhs_cookie = get_browser_session_cookie("xiaohongshu")
+            xhs_cookie = await asyncio.to_thread(get_browser_session_cookie, "xiaohongshu")
 
         if xhs_cookie:
             values["XHS_COOKIE"] = xhs_cookie
@@ -229,7 +240,7 @@ async def sync_browser_cookies(payload: CookieSyncRequest, request: Request):
         except Exception:
             pass
         if not douyin_cookie:
-            douyin_cookie = get_browser_session_cookie("douyin")
+            douyin_cookie = await asyncio.to_thread(get_browser_session_cookie, "douyin")
 
         if douyin_cookie:
             values["DOUYIN_COOKIE"] = douyin_cookie
@@ -238,7 +249,7 @@ async def sync_browser_cookies(payload: CookieSyncRequest, request: Request):
             await sync_douyin_upstream_cookie(douyin_cookie, settings.douyin_downloader_url)
 
     if values:
-        _save_env_values(values)
+        await save_env_values(values)
 
     return {
         "ok": len(synced) > 0,
@@ -274,7 +285,7 @@ async def quick_paste_cookies(payload: QuickPasteRequest):
         settings.xhs_cookie = cookie_str
 
     if values:
-        _save_env_values(values)
+        await save_env_values(values)
 
     platform_label = "Douyin" if platform == "douyin" else "Xiaohongshu"
     return {

@@ -560,7 +560,9 @@ def main() -> int:
     t_e2e = round(time.time() - t0, 2)
     e2e_ok = (e2e_code == 0)
     match_pw = re.search(r"(\d+)\s+passed", e2e_out)
-    pw_passed = int(match_pw.group(1)) if match_pw else (23 if e2e_ok else 0)
+    # Report only what Playwright actually printed. Fabricating a number here
+    # would make the scorecard lie about coverage when the output format changes.
+    pw_passed: int | None = int(match_pw.group(1)) if match_pw else None
 
     results["10_frontend_playwright_e2e"] = {
         "passed": e2e_ok,
@@ -570,7 +572,10 @@ def main() -> int:
         "duration_s": t_e2e,
     }
     if e2e_ok:
-        print(f"PASS ({pw_passed} tests passed across {num_specs} specs) [{t_e2e}s]")
+        if pw_passed is None:
+            print(f"PASS (tests passed count unavailable in output) across {num_specs} specs [{t_e2e}s]")
+        else:
+            print(f"PASS ({pw_passed} tests passed across {num_specs} specs) [{t_e2e}s]")
     else:
         print(f"FAIL (exit code {e2e_code})")
         print(e2e_out[:500])

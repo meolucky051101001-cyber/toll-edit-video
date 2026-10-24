@@ -1,5 +1,19 @@
-# IMPLEMENTATION STATUS: AI Video Research Tool v3.0 (RELEASE-READY)
-Last Updated: 2026-09-21 (Phases 8-11 Completed, Auto-Dubbing, Multi-Platform Matrix, Scale Infrastructure, Observability & Release Gate, Full Test Suite 348/348 Green, 0 Warnings)
+# IMPLEMENTATION STATUS: AI Video Research Tool v3.0
+Last Updated: 2026-10-24 (Review round 1 hardening: SSE event forwarding, API token auth, event-loop offloading, browser lock fixes, dubbing recovery, honest release gate)
+
+> **Cách đọc tài liệu này:** trạng thái bên dưới phản ánh kết quả chạy thực tế gần nhất
+> (suite pytest + release gate). Đừng cập nhật tay con số "X/Y Green" — hãy chạy
+> `python scripts/release_gate.py` và `pytest -q` rồi ghi lại verdict thật, kể cả khi
+> verdict là REJECTED. Gate offline (không cờ `--live`) chỉ chứng minh logic nội bộ,
+> không chứng minh DOM/API của Douyin/Xiaohongshu còn tương thích — dùng
+> `scripts\smoke_live.bat` để xác thực live.
+
+## 0. CURRENT VERIFICATION SNAPSHOT (2026-10-24)
+
+- **Backend pytest:** 572 passed, 3 skipped (live network probes), 0 failed — full suite ~155s
+- **Frontend typecheck:** `npx tsc --noEmit` — 0 errors
+- **Frontend Playwright E2E:** chạy bằng `release_gate.py` Stage 10; verdict cuối cùng lấy từ `release_gate_report.json`
+- **Live validation:** 3 live probes tự skip nếu không đặt `LIVE_CRAWL_ENABLED=1`; dùng `scripts\smoke_live.py` để kiểm tra nhanh 1 lượt tìm thật
 
 ---
 

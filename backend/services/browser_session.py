@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
@@ -14,6 +15,23 @@ from urllib.parse import urlsplit
 from playwright.async_api import BrowserContext, Error, Page
 
 from backend.services.cookie_service import persist_auth_cookies
+
+#: Cookie names that prove a real login session exists. A checkpoint holding
+#: only anonymous/tracking cookies must not be treated as an authenticated
+#: session when deciding whether a headless search can run.
+SESSION_COOKIE_NAMES = frozenset({
+    "sessionid", "sessionid_ss", "sid_guard",  # Douyin
+    "web_session", "id_token",                 # Xiaohongshu
+})
+
+
+def checkpoint_has_session_cookie(state: Mapping[str, Any]) -> bool:
+    """True when the checkpoint carries a genuine login session cookie."""
+    summary = state.get("auth_summary")
+    if isinstance(summary, dict):
+        return summary.get("has_session_cookie") is True
+    names = {c.get("name") for c in state.get("cookies", []) if isinstance(c, dict)}
+    return bool(names & SESSION_COOKIE_NAMES)
 
 
 def load_headful_preference(profile: Path) -> bool:
@@ -96,6 +114,11 @@ async def save_session_checkpoint(context: BrowserContext, profile: Path) -> Non
         return
     state: dict[str, Any] = dict(raw_state)
     state["cookies"] = persist_auth_cookies(state["cookies"])
+    cookie_names = {c.get("name") for c in state["cookies"] if isinstance(c, dict)}
+    state["auth_summary"] = {
+        "has_session_cookie": bool(cookie_names & SESSION_COOKIE_NAMES),
+        "saved_at": time.time(),
+    }
     profile.mkdir(parents=True, exist_ok=True)
     temporary: str | None = None
     try:

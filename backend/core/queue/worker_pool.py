@@ -26,6 +26,7 @@ class AdaptiveWorkerPool:
         self._retiring_workers: set[int] = set()
         self._next_worker_id = 0
         self._running = False
+        self._shutting_down = False
         self._supervisor_task: asyncio.Task | None = None
         self._idle_ticks = 0
 
@@ -56,6 +57,9 @@ class AdaptiveWorkerPool:
         if not self._running:
             return
         self._running = False
+        # Cancellation from here on is a clean shutdown, not a job failure:
+        # workers must requeue their in-flight item without burning a retry.
+        self._shutting_down = True
         if self._supervisor_task and not self._supervisor_task.done():
             self._supervisor_task.cancel()
         for worker in list(self._workers.values()):
@@ -65,6 +69,9 @@ class AdaptiveWorkerPool:
         self._workers.clear()
         self._busy_workers.clear()
         self._retiring_workers.clear()
+        requeue_flush = getattr(self.queue, "flush_pending_requeues", None)
+        if requeue_flush is not None:
+            await requeue_flush()
         logger.info("Stopped AdaptiveWorkerPool")
 
     async def _supervisor_loop(self) -> None:
@@ -145,8 +152,13 @@ class AdaptiveWorkerPool:
                         await handler(item.payload)
                         await self.queue.ack(item.id)
                     except asyncio.CancelledError:
-                        logger.warning("Worker #%d cancelled during execution of task %s, nacking", worker_id, item.id)
-                        await self.queue.nack(item.id, "Worker interrupted by pool shutdown")
+                        logger.warning("Worker #%d cancelled during execution of task %s", worker_id, item.id)
+                        if self._shutting_down and await self.queue.requeue(item.id):
+                            # Clean shutdown: the job never failed, so it keeps
+                            # its full retry budget.
+                            pass
+                        else:
+                            await self.queue.nack(item.id, "Worker interrupted")
                         raise
                     except Exception as exc:
                         logger.warning("Worker #%d failed processing task %s: %s", worker_id, item.id, exc)
@@ -162,7 +174,10 @@ class AdaptiveWorkerPool:
                 except asyncio.CancelledError:
                     if current_item is not None:
                         try:
-                            await self.queue.nack(current_item.id, "Worker cancelled during pool shutdown")
+                            if not (self._shutting_down and await self.queue.requeue(current_item.id)):
+                                await self.queue.nack(
+                                    current_item.id, "Worker cancelled during pool shutdown"
+                                )
                         except Exception:
                             pass
                     break

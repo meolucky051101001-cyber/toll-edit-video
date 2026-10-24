@@ -1,3 +1,4 @@
+import hmac
 import logging
 import sys
 import time
@@ -147,6 +148,10 @@ async def lifespan(app: FastAPI):
     app.state.download.recover_interrupted_jobs()
     await app.state.download.start()
 
+    from backend.api.dubbing import dubbing_service
+
+    await dubbing_service.recover_interrupted_jobs()
+
     from backend.services.session_keeper import SessionKeepAliveService
     app.state.session_keeper = SessionKeepAliveService(
         douyin_browser=app.state.douyin_browser,
@@ -240,6 +245,35 @@ async def local_origin(request: Request, call_next):
         return JSONResponse(
             status_code=403, content={"detail": "Chỉ nhận thao tác từ ứng dụng local."}
         )
+    return await call_next(request)
+
+
+# Paths that must stay reachable without the shared token: health probe, the
+# SSE stream (EventSource cannot send custom headers) and browser screenshots
+# rendered through <img> tags. Everything else requires X-API-Token when
+# API_TOKEN is configured; an empty token disables authentication entirely.
+_TOKEN_EXEMPT_SUFFIXES = ("/screenshot",)
+
+
+@app.middleware("http")
+async def api_token_auth(request: Request, call_next):
+    token = config.api_token.get_secret_value()
+    if token:
+        path = request.url.path
+        exempt = (
+            request.method == "OPTIONS"
+            or path == "/api/health"
+            or path.startswith("/api/events")
+            or path.startswith("/api/observability")
+            or path.endswith(_TOKEN_EXEMPT_SUFFIXES)
+        )
+        if not exempt:
+            provided = request.headers.get("x-api-token", "")
+            if not hmac.compare_digest(provided, token):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Token API không hợp lệ hoặc thiếu."},
+                )
     return await call_next(request)
 
 

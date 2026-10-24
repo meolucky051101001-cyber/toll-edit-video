@@ -14,13 +14,13 @@ EXCLUDED_DIR_NAMES = {
 
 # File extensions excluded generally (unless explicitly allowed in fixtures)
 EXCLUDED_EXTENSIONS = {
-    '.pyc', '.pyo', '.pyd', '.db', '.db-wal', '.db-shm',
+    '.pyc', '.pyo', '.pyd', '.db', '.db-wal', '.db-shm', '.db-journal',
+    '.sqlite', '.sqlite3',
     '.log', '.tar', '.gz'
 }
 
 # Specific files strictly excluded
 EXCLUDED_FILE_NAMES = {
-    '.env', '.env.local', '.env.production',
     'processes.json', 'downloader_processes.json',
     'review_round9_evidence.json'
 }
@@ -29,6 +29,13 @@ EXCLUDED_FILE_NAMES = {
 ALLOWED_FIXTURE_PATHS = {
     Path('tests/fixtures/tiny_valid.mp4')
 }
+
+# Runtime-owned data that must never ship, except these whitelisted fixtures.
+# data/benchmarks/*.json is required by the release gate (Stage 8/9) — a fresh
+# unpack must pass its own test suite.
+ALLOWED_DATA_SUBPATHS = (
+    Path('data/benchmarks'),
+)
 
 
 def should_include_file(rel_path: Path) -> bool:
@@ -45,11 +52,18 @@ def should_include_file(rel_path: Path) -> bool:
     file_name = rel_path.name
     if file_name in EXCLUDED_FILE_NAMES or file_name.endswith('.zip'):
         return False
+    # Any env-style file other than the example template is a credential risk.
+    if file_name.startswith('.env') and file_name != '.env.example':
+        return False
 
     # 4. Check data subdirectories
     if 'data' in rel_path.parts:
-        # Only allow data/.gitkeep or explicit fixtures
-        if rel_path.name != '.gitkeep':
+        # Whitelisted benchmark fixtures (JSON only — they are test data)
+        if rel_path.suffix.lower() == '.json' and any(
+            rel_path.is_relative_to(allowed) for allowed in ALLOWED_DATA_SUBPATHS
+        ):
+            pass
+        elif rel_path.name != '.gitkeep':
             return False
 
     # 5. Check logs directory
@@ -98,6 +112,11 @@ def verify_package(target_zip: Path) -> bool:
     for forbidden in ['.env', 'data/app.db', 'data/browser/auth_state.json', 'data/app.db-wal']:
         if forbidden in names:
             raise AssertionError(f'Security violation: {forbidden} found in package!')
+    # Any env-style file other than the example template is a credential leak risk.
+    for name in names:
+        base = name.rsplit('/', 1)[-1]
+        if base.startswith('.env') and base != '.env.example':
+            raise AssertionError(f'Security violation: env credential file found: {name}')
 
     for name in names:
         if name.endswith('.pyc'):
@@ -113,6 +132,10 @@ def verify_package(target_zip: Path) -> bool:
         'frontend/package.json',
         'tests/fixtures/tiny_valid.mp4',
         'tests/test_cookies.py',
+        # The release gate (Stage 8/9) hard-asserts these benchmark datasets;
+        # without them a freshly unpacked package fails its own test suite.
+        'data/benchmarks/crawled_benchmark_samples.json',
+        'data/benchmarks/independent_holdout_benchmark.json',
         'IMPLEMENTATION_STATUS.md',
         'PROJECT_COMPREHENSIVE_REVIEW.md',
         'pyproject.toml',

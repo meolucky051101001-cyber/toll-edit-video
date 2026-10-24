@@ -1,0 +1,13 @@
+{
+  "_comment": "Vocabulary powering the Xiaohongshu relevance fast-path. known_vocab seeds term extraction for craft/stationery queries; intent_pair_groups makes the strict title fast-path (must match one word from EACH group) apply only to queries inside this domain. Override by placing the same schema at data/config/xhs_vocab.json.",
+  "known_vocab": [
+    "造景", "贴纸", "镊子", "咕卡", "手账", "手帐", "剥离器", "起边器", "揭贴器",
+    "夹取", "工具", "开箱", "盲盒", "书桌", "改造", "布置", "文具", "桌面", "收纳",
+    "穿搭", "测评", "试色", "打包", "电钻", "录音", "日常", "沉浸式", "治愈",
+    "卧室", "房间", "室内", "家居", "家装", "装饰", "软装"
+  ],
+  "intent_pair_groups": [
+    ["镊子", "夹取", "剥离器", "起边器", "揭贴器"],
+    ["贴纸", "咕卡", "手账", "手帐"]
+  ]
+}

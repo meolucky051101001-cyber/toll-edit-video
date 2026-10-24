@@ -47,16 +47,30 @@ try {
         }
     }
     foreach ($folder in @('data', 'logs')) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
-    $backend = Start-Process -FilePath $pythonExe -ArgumentList @('-m','uvicorn','backend.app.main:app','--host','127.0.0.1','--port','8010') -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $projectRoot 'logs\backend.log') -RedirectStandardError (Join-Path $projectRoot 'logs\backend-error.log')
+    # Propagate the shared API token (if configured in .env) so the Next.js
+    # middleware injects it into proxied /api requests. The backend reads .env
+    # itself; only the Node process needs the explicit environment variable.
+    if (Test-Path '.env') {
+        Get-Content '.env' -Encoding UTF8 | ForEach-Object {
+            if ($_ -match '^\s*API_TOKEN\s*=\s*(.+?)\s*$') { $env:API_TOKEN = $Matches[1].Trim('"', "'") }
+        }
+    }
+    # Timestamped logs: a restart no longer truncates the log that shows the crash.
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $backendLog = Join-Path $projectRoot "logs\backend-$stamp.log"
+    $backendErrLog = Join-Path $projectRoot "logs\backend-error-$stamp.log"
+    $frontendLog = Join-Path $projectRoot "logs\frontend-$stamp.log"
+    $frontendErrLog = Join-Path $projectRoot "logs\frontend-error-$stamp.log"
+    $backend = Start-Process -FilePath $pythonExe -ArgumentList @('-m','uvicorn','backend.app.main:app','--host','127.0.0.1','--port','8010') -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $backendLog -RedirectStandardError $backendErrLog
     $startedProcesses += @{ id = $backend.Id; started = $backend.StartTime.ToUniversalTime().ToString('o'); startTicks = [string]$backend.StartTime.ToUniversalTime().Ticks; service = 'backend' }
     $startedProcesses | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $stateFile -Encoding UTF8
     $nodeExe = (Get-Command node.exe).Source
-    $frontend = Start-Process -FilePath $nodeExe -ArgumentList @(('"' + $nextScript + '"'),'start','--hostname','127.0.0.1','--port','3000') -WorkingDirectory (Join-Path $projectRoot 'frontend') -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $projectRoot 'logs\frontend.log') -RedirectStandardError (Join-Path $projectRoot 'logs\frontend-error.log')
+    $frontend = Start-Process -FilePath $nodeExe -ArgumentList @(('"' + $nextScript + '"'),'start','--hostname','127.0.0.1','--port','3000') -WorkingDirectory (Join-Path $projectRoot 'frontend') -WindowStyle Hidden -PassThru -RedirectStandardOutput $frontendLog -RedirectStandardError $frontendErrLog
     $startedProcesses += @{ id = $frontend.Id; started = $frontend.StartTime.ToUniversalTime().ToString('o'); startTicks = [string]$frontend.StartTime.ToUniversalTime().Ticks; service = 'frontend' }
     $startedProcesses | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $stateFile -Encoding UTF8
     $ready = $false
     for ($i = 0; $i -lt 60; $i++) {
-        if ($backend.HasExited -or $frontend.HasExited) { throw 'A server stopped during startup. See logs\backend-error.log and logs\frontend-error.log.' }
+        if ($backend.HasExited -or $frontend.HasExited) { throw 'A server stopped during startup. Check the newest logs\backend-error-*.log and logs\frontend-error-*.log files.' }
         try {
             $health = Invoke-RestMethod 'http://127.0.0.1:8010/api/health' -TimeoutSec 2
             $page = Invoke-WebRequest 'http://127.0.0.1:3000' -UseBasicParsing -TimeoutSec 2

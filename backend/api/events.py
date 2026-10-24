@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from fastapi import APIRouter, Request
 from starlette.responses import StreamingResponse
 
-from backend.core.events import ServerEvent, event_bus
+from backend.core.events import EVENT_TYPES, ServerEvent, event_bus
 
 logger = logging.getLogger("events")
 router = APIRouter(prefix="/api/events", tags=["events"])
@@ -22,6 +22,7 @@ async def event_generator(request: Request, bus=event_bus) -> AsyncIterator[byte
             "status": "connected",
             "timestamp": time.time(),
             "subscribers": bus.subscriber_count,
+            "event_types": sorted(EVENT_TYPES),
         }
         yield f"event: connected\ndata: {json.dumps(initial)}\n\n".encode("utf-8")
 

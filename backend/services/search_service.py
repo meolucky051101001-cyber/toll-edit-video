@@ -25,7 +25,13 @@ from backend.providers.registry import get_provider
 from backend.schemas.contracts import Platform, SearchFilters, VideoResult
 from backend.schemas.expansion import ExpansionOutcome
 from backend.services.ai_service import AIService
-from backend.services.dedup_service import canonical_url, find_existing, fingerprint
+from backend.services.dedup_service import (
+    build_dedup_index,
+    canonical_url,
+    fingerprint,
+    find_existing,
+    find_existing_preloaded,
+)
 from backend.services.identity_policy import (
     is_xhs_short_link,
     merge_share_url,
@@ -555,6 +561,7 @@ class SearchService:
                 plan = db.get(SearchPlan, job_id)
                 plan_filters = plan.filters if plan and plan.filters else {}
                 job_filters = SearchFilters(**plan_filters) if plan_filters else SearchFilters()
+                dedup_index = build_dedup_index(db, validated_batch)
                 for result in validated_batch:
                     job.found_count += 1
                     detail = rank_detailed(
@@ -636,7 +643,7 @@ class SearchService:
                         job.diagnostics = diag
                         continue
 
-                    existing = find_existing(db, result)
+                    existing = find_existing_preloaded(result, dedup_index)
                     if existing is None and (
                         job.processed_count >= job.requested_limit
                         or job.provider_counts.get(platform, 0) >= provider_limit
@@ -669,6 +676,7 @@ class SearchService:
                         )
                         db.add(existing)
                         db.flush()
+                        dedup_index.register(existing)
                         if capture_writer is not None and not result.is_mock:
                             capture_writer(
                                 result,

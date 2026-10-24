@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowUpRight,
@@ -99,7 +99,10 @@ function SearchSession({
   const [jobId, setJobId] = useState<string | null>(initialJob);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const job = useResource<Job>(jobId ? `/search/jobs/${jobId}` : null, 1000);
+  // Poll the job every second while it runs; once it reaches a terminal state
+  // stop the timer entirely (interval 0) instead of hammering a finished job.
+  const [jobPollMs, setJobPollMs] = useState(1000);
+  const job = useResource<Job>(jobId ? `/search/jobs/${jobId}` : null, jobPollMs);
   const stats = useResource<{
     total: number;
     saved: number;
@@ -107,6 +110,16 @@ function SearchSession({
     jobs: number;
   }>("/stats", 5000);
   const recent = useResource<Page<Job>>("/search/jobs", 5000);
+
+  useEffect(() => {
+    setJobPollMs(1000);
+  }, [jobId]);
+
+  useEffect(() => {
+    if (job.data && terminal.includes(job.data.status)) {
+      setJobPollMs(0);
+    }
+  }, [job.data?.status]);
 
   useSSEListener("search:update", (data: { job_id?: string; status?: string }) => {
     if (jobId && data?.job_id === jobId) {
@@ -148,10 +161,19 @@ function SearchSession({
 
     // Automatically cancel any active or waiting job before launching the new search
     if (jobId && job.data && !terminal.includes(job.data.status)) {
+      const confirmed = window.confirm(
+        "Đang có lượt tìm chưa hoàn tất. Bắt đầu lượt tìm mới sẽ hủy lượt cũ. Tiếp tục?",
+      );
+      if (!confirmed) {
+        setBusy(false);
+        return;
+      }
       try {
         await api(`/search/jobs/${jobId}/cancel`, { method: "POST" });
-      } catch {
-        // Non-blocking
+      } catch (e) {
+        setError(`Không hủy được lượt tìm cũ: ${(e as Error).message}`);
+        setBusy(false);
+        return;
       }
     }
 

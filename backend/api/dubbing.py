@@ -1,13 +1,16 @@
-from pathlib import Path
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from backend.core.config import settings
 from backend.core.database import SessionLocal, get_db
 from backend.core.events import event_bus
 from backend.schemas.dubbing import DubbingJobOut, DubbingRequest, DubbingVoicesResponse
 from backend.services.dubbing import DubbingService
+
+logger = logging.getLogger("api.dubbing")
 
 router = APIRouter(prefix="/api/dubbing", tags=["dubbing"])
 
@@ -29,7 +32,11 @@ async def create_dubbing_job(payload: DubbingRequest, db: Session = Depends(get_
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+        logger.exception("Dubbing job creation failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Không tạo được tác vụ lồng tiếng. Xem logs/app.log rồi thử lại.",
+        ) from None
 
 
 @router.get("/jobs/{job_id}", response_model=DubbingJobOut)
@@ -44,7 +51,7 @@ def get_dubbing_job(job_id: str, db: Session = Depends(get_db)):
 @router.get("/files/{filename}")
 def stream_dubbing_file(filename: str):
     """Streams generated dubbing audio or video files."""
-    base_dir = Path("data/dubbing").resolve()
+    base_dir = settings.dubbing_dir.resolve()
     target_path = (base_dir / filename).resolve()
 
     # Path traversal guard matching download service

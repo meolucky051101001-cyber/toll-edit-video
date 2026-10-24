@@ -115,7 +115,7 @@ class DownloadService:
         self.job_retry_counts: dict[str, int] = {}
 
         self.queue_manager = DownloadQueueManager(
-            handler=self._process_download_job,
+            handler=self.process_download,
             capacity=self.queue_capacity,
             worker_count=self.worker_count,
         )
@@ -137,8 +137,18 @@ class DownloadService:
         await self.queue_manager.start()
 
     async def process_download(self, download_id: str) -> None:
-        """Public entrypoint to process a download job directly or from worker queue."""
-        await self._process_download_job(download_id)
+        """Public entrypoint to process a download job directly or from worker queue.
+
+        Registers the running task in active_tasks so cancel_download() and
+        shutdown() can actually cancel the in-flight coroutine.
+        """
+        task = asyncio.current_task()
+        if task is not None:
+            self.active_tasks[download_id] = task
+        try:
+            await self._process_download_job(download_id)
+        finally:
+            self.active_tasks.pop(download_id, None)
 
     def recover_interrupted_jobs(self) -> int:
         """Marks any dangling in-progress jobs from previous server runs as interrupted."""
@@ -891,7 +901,7 @@ class DownloadService:
 
                     # Check available disk space before streaming
                     try:
-                        stat_disk = shutil.disk_usage(self.download_dir)
+                        stat_disk = await asyncio.to_thread(shutil.disk_usage, self.download_dir)
                         required_space = (total_size or 50 * 1024 * 1024) + 100 * 1024 * 1024
                         if stat_disk.free < required_space:
                             self._fail_job(
@@ -904,11 +914,7 @@ class DownloadService:
                         logger.warning("Could not check disk usage: %s", e)
 
                     # Update total size in DB
-                    with self.sessions() as db:
-                        j = db.get(DownloadJob, download_id)
-                        if j:
-                            j.total_bytes = total_size
-                            db.commit()
+                    self._set_total_size(download_id, total_size)
 
                     # Write stream with Async Disk I/O (asyncio.to_thread)
                     last_db_update = time.monotonic()
@@ -932,9 +938,9 @@ class DownloadService:
                                 )
                                 return "failed"
 
-                            # Periodic progress update (every 0.5s)
+                            # Periodic progress update (every 1s; tiny indexed commit)
                             now = time.monotonic()
-                            if now - last_db_update >= 0.5:
+                            if now - last_db_update >= 1.0:
                                 last_db_update = now
                                 self._update_job_progress(download_id, bytes_written, total_size)
 
@@ -983,11 +989,31 @@ class DownloadService:
         final_path = self.download_dir / final_filename
 
         try:
-            shutil.move(str(part_path), str(final_path))
+            await asyncio.to_thread(shutil.move, str(part_path), str(final_path))
         except Exception:
             self._fail_job(download_id, "storage_error", "Lỗi lưu trữ tập tin hoàn tất.")
             return "failed"
 
+        self._finalize_completed(download_id, final_filename, file_size)
+
+        return "completed"
+
+    def _to_event_payload(self, job: DownloadJob) -> dict[str, Any]:
+        out = self._to_out(job)
+        payload = out.model_dump(mode="json")
+        payload["download_id"] = out.id
+        return payload
+
+    def _set_total_size(self, download_id: str, total_size: int | None) -> None:
+        with self.sessions() as db:
+            j = db.get(DownloadJob, download_id)
+            if j:
+                j.total_bytes = total_size
+                db.commit()
+
+    def _finalize_completed(
+        self, download_id: str, final_filename: str, file_size: int
+    ) -> None:
         with self.sessions() as db:
             j = db.get(DownloadJob, download_id)
             if j:
@@ -1001,14 +1027,6 @@ class DownloadService:
                 db.commit()
                 if self.event_bus:
                     self.event_bus.publish_nowait("download:update", self._to_event_payload(j))
-
-        return "completed"
-
-    def _to_event_payload(self, job: DownloadJob) -> dict[str, Any]:
-        out = self._to_out(job)
-        payload = out.model_dump(mode="json")
-        payload["download_id"] = out.id
-        return payload
 
     def _update_job_status(
         self,

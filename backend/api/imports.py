@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -25,7 +26,9 @@ async def read_import(request: Request) -> ParsedImport:
         if len(body) > 2 * MAX_BYTES:
             raise HTTPException(413, "Dữ liệu gửi lên quá lớn; file tối đa 1 MB.")
     try:
-        return parse_export(ImportRequest.model_validate(json.loads(body)))
+        return await asyncio.to_thread(
+            parse_export, ImportRequest.model_validate(json.loads(body))
+        )
     except (ImportProblem, ValidationError, ValueError, RecursionError):
         raise HTTPException(
             422, "File không hợp lệ. Chọn JSON/JSONL content, tối đa 1 MB và 200 bản ghi."

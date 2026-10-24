@@ -33,7 +33,9 @@ async (args) => {
                 }
             }
         }
-    } catch (e) {}
+    } catch (e) {
+        return { error: "detail_state: " + String((e && e.message) || e) };
+    }
 
     try {
         const res = await fetch("/api/sns/web/v1/feed", {
@@ -55,8 +57,12 @@ async (args) => {
             if (originKey) {
                 return { mediaUrl: `https://sns-video-bd.xhscdn.com/${originKey}`, id: targetId };
             }
+            return { error: "feed_api_no_media_key" };
         }
-    } catch (e) {}
+        return { error: "feed_api_http_" + res.status };
+    } catch (e) {
+        return { error: "feed_api: " + String((e && e.message) || e) };
+    }
 
     return null;
 }
@@ -97,9 +103,14 @@ async (args) => {
                 if (urls.length > 0) {
                     return { mediaUrl: urls[0].replace("playwm", "play"), id: targetId };
                 }
+                return { error: "detail_api_no_play_url" };
             }
+            return { error: "detail_api_no_aweme_detail" };
         }
-    } catch (e) {}
+        return { error: "detail_api_http_" + res.status };
+    } catch (e) {
+        return { error: "detail_api: " + String((e && e.message) || e) };
+    }
 
     return null;
 }
@@ -229,6 +240,11 @@ class BrowserMediaResolver:
             result = await _eval_xhs()
 
         if not result or not isinstance(result, dict) or not result.get("mediaUrl"):
+            js_error = result.get("error") if isinstance(result, dict) else None
+            logger.warning(
+                "XHS resolver returned no media for %s (resolver_error=%s)",
+                note_id, js_error or "null",
+            )
             raise DownloadAdapterError("no_media_url", "Không thể lấy liên kết media qua phiên trình duyệt Xiaohongshu.")
 
         return ResolvedMedia(
@@ -335,6 +351,13 @@ class BrowserMediaResolver:
             result = await _resolve_internal()
 
         if not result or not isinstance(result, dict) or not result.get("mediaUrl"):
+            js_error = result.get("error") if isinstance(result, dict) else None
+            logger.warning(
+                "Douyin resolver returned no media for %s (resolver_error=%s) — "
+                "detail_api_http_403 style codes usually mean the un-signed detail "
+                "API now requires X-Bogus/a_bogus",
+                aweme_id, js_error or "null",
+            )
             raise DownloadAdapterError("no_media_url", "Không thể lấy liên kết media qua phiên trình duyệt Douyin.")
 
         clean_url = result["mediaUrl"].replace("playwm", "play")

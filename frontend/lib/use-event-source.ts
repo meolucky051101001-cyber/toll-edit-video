@@ -13,6 +13,7 @@ class SharedEventSourceManager {
   private reconnectAttempts: number = 0;
   private _status: "connecting" | "connected" | "disconnected" = "disconnected";
   private statusListeners: Set<(status: "connecting" | "connected" | "disconnected") => void> = new Set();
+  private knownEventTypes: Set<string> = new Set();
 
   private constructor() {}
 
@@ -49,28 +50,26 @@ class SharedEventSourceManager {
     try {
       this.es = new EventSource("/api/events");
 
-      this.es.addEventListener("connected", () => {
+      this.es.addEventListener("connected", (e: MessageEvent) => {
         this.setStatus("connected");
         this.reconnectAttempts = 0;
-      });
-
-      this.es.addEventListener("search:update", (e: MessageEvent) => {
+        // The backend advertises every event type it may publish; bind a
+        // generic JSON-parsing listener for each so new backend events flow
+        // without a frontend change.
         try {
-          const parsed = JSON.parse(e.data);
-          this.emit("search:update", parsed);
+          const payload = JSON.parse(e.data) as { event_types?: string[] };
+          if (Array.isArray(payload?.event_types)) {
+            payload.event_types.forEach((type) => this.bindEventType(type));
+          }
         } catch {
-          // Ignore parse errors
+          // Malformed connected payload — types subscribed via on() are still
+          // bound, so keep the connection alive.
         }
       });
 
-      this.es.addEventListener("download:update", (e: MessageEvent) => {
-        try {
-          const parsed = JSON.parse(e.data);
-          this.emit("download:update", parsed);
-        } catch {
-          // Ignore parse errors
-        }
-      });
+      // A reconnect creates a fresh EventSource with no listeners; re-bind
+      // every known event type to it.
+      this.knownEventTypes.forEach((type) => this.attachListener(type));
 
       this.es.onerror = () => {
         this.setStatus("disconnected");
@@ -92,6 +91,26 @@ class SharedEventSourceManager {
     } catch {
       this.setStatus("disconnected");
     }
+  }
+
+  /** Marks an event type as known and attaches its SSE listener if connected. */
+  private bindEventType(eventType: string) {
+    if (this.knownEventTypes.has(eventType)) return;
+    this.knownEventTypes.add(eventType);
+    this.attachListener(eventType);
+  }
+
+  /** Attaches a named SSE listener to the current connection (one per connect). */
+  private attachListener(eventType: string) {
+    if (!this.es) return;
+    this.es.addEventListener(eventType, (e: MessageEvent) => {
+      try {
+        const parsed = JSON.parse(e.data);
+        this.emit(eventType, parsed);
+      } catch {
+        // Ignore parse errors
+      }
+    });
   }
 
   private disconnect() {
@@ -129,6 +148,7 @@ class SharedEventSourceManager {
     if (!this.listeners.has(event)) {
       this.listeners.set(event, new Set());
     }
+    this.bindEventType(event);
     this.listeners.get(event)!.add(callback);
     return () => {
       this.listeners.get(event)?.delete(callback);

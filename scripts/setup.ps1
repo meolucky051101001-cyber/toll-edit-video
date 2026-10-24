@@ -18,7 +18,6 @@ try {
     }
     $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
     if ($pythonCommand -and $pythonCommand.Source -notmatch 'WindowsApps') { $pythonCandidates += $pythonCommand.Source }
-    $pythonCandidates += (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe')
     $pythonExe = $null
     foreach ($candidate in $pythonCandidates) {
         if (Test-Path -LiteralPath $candidate) {
@@ -52,6 +51,18 @@ try {
         New-Item -ItemType Directory -Path (Join-Path $projectRoot $folder) -Force | Out-Null
     }
     if (-not (Test-Path -LiteralPath '.env')) { Copy-Item -LiteralPath '.env.example' -Destination '.env' }
+    # The default XHS_BROWSER_CHANNEL=chrome requires a Chrome install that
+    # Playwright's bundled Chromium cannot replace. Warn early instead of
+    # failing at the first search.
+    $chromePaths = @(
+        "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+        "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+        "$env:LocalAppData\Google\Chrome\Application\chrome.exe"
+    )
+    $chromeInstalled = $chromePaths | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $chromeInstalled) {
+        Write-Warning 'Google Chrome was not found. XHS_BROWSER_CHANNEL defaults to chrome; set XHS_BROWSER_CHANNEL=msedge (Microsoft Edge) or install Chrome to avoid search failures.'
+    }
     Write-Host 'Setup complete. Double-click start.bat.' -ForegroundColor Green
 } catch {
     Write-Host $_.Exception.Message -ForegroundColor Red

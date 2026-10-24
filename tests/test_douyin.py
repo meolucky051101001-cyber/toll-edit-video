@@ -82,6 +82,27 @@ def test_douyin_classify_page():
     assert classify_page("拼图手工视频分享", title="精选视频") == "page_available"
 
 
+def test_douyin_classify_page_ignores_generic_english_words():
+    """Captions that merely contain 'login'/'risk' must not abort a search:
+    only real platform banners or login/verify routes flag the page."""
+    assert (
+        classify_page(
+            "Risk management tips for small business owners #business",
+            title="运营风险提示",
+            url="https://www.douyin.com/video/7300000000000000000",
+        )
+        == "page_available"
+    )
+    assert (
+        classify_page(
+            "How to login faster with password manager #tech",
+            title="科技好物分享",
+            url="https://www.douyin.com/video/7300000000000000001",
+        )
+        == "page_available"
+    )
+
+
 def test_douyin_parse_count_text():
     assert parse_count_text("1.5万") == 15000
     assert parse_count_text("2.3w") == 23000

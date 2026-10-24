@@ -125,10 +125,10 @@ async def test_elevation_opens_blocked_tab_directly_not_home(service_type, domai
     service.blocked_page = Mock(url=f"https://{domain}/search/challenge?q=abc")
     service.blocked_page.is_closed.return_value = False
     service._close = AsyncMock()
-    service.ensure_open = AsyncMock(return_value=Mock())
+    service._ensure_open_unlocked = AsyncMock(return_value=Mock())
     service.inspect = AsyncMock()
     await service.elevate_to_headful()
-    service.ensure_open.assert_awaited_once_with(headless_override=False, initial_url=service.blocked_page.url)
+    service._ensure_open_unlocked.assert_awaited_once_with(headless_override=False, initial_url=service.blocked_page.url)
 
 
 @pytest.mark.anyio
@@ -141,7 +141,7 @@ async def test_visible_window_focuses_blocked_tab(service_type, tmp_path):
     service.blocked_page = Mock()
     service.blocked_page.is_closed.return_value = False
     service.blocked_page.bring_to_front = AsyncMock()
-    service.ensure_open = AsyncMock(return_value=service.page)
+    service._ensure_open_unlocked = AsyncMock(return_value=service.page)
     service.inspect = AsyncMock()
     await service.open()
     service.blocked_page.bring_to_front.assert_awaited_once()
@@ -198,7 +198,7 @@ async def test_network_probe_does_not_hide_a_challenge_on_the_active_tab(service
     service.state = "verification_required"
     service.diagnostics = {"captcha_visible": True, "path": "/search/abc"}
     original_diagnostics = dict(service.diagnostics)
-    service.ensure_open = AsyncMock()
+    service._ensure_open_unlocked = AsyncMock()
     probe = Mock()
     probe.goto = AsyncMock(return_value=Mock(status=200))
     probe.is_closed.return_value = False
@@ -221,10 +221,10 @@ async def test_network_probe_does_not_hide_a_challenge_on_the_active_tab(service
 @pytest.mark.parametrize("service_type", [BrowserService, DouyinBrowserService])
 async def test_probe_skips_busy_browser(service_type, tmp_path):
     service = service_type(profile=tmp_path)
-    service.ensure_open = AsyncMock()
+    service._ensure_open_unlocked = AsyncMock()
     async with service.lock:
         assert await service.probe_live() == (False, "browser_busy")
-    service.ensure_open.assert_not_awaited()
+    service._ensure_open_unlocked.assert_not_awaited()
 
 
 @pytest.mark.parametrize("visible_window,state", [(True, "page_available"), (False, "verification_required")])

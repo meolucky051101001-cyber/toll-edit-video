@@ -26,6 +26,9 @@ class InMemoryPriorityQueue(BaseJobQueue):
         self._notify_event = asyncio.Event()
         self._completed_count = 0
         self._failed_count = 0
+        # Tracked delayed-requeue tasks so they are not garbage-collected mid
+        # backoff and can be awaited on shutdown.
+        self._pending_requeues: set[asyncio.Task[None]] = set()
 
     async def enqueue(
         self,
@@ -86,6 +89,27 @@ class InMemoryPriorityQueue(BaseJobQueue):
                 self._completed_count += 1
                 logger.debug("Acknowledged task %s", item_id)
 
+    async def requeue(self, item_id: str) -> bool:
+        """Puts an in-flight item back into the queue WITHOUT counting a retry.
+
+        Used when a worker is cancelled by a clean shutdown: the job never
+        actually failed, so burning a retry (or the DLQ) on it is wrong.
+        """
+        async with self._lock:
+            item = self._in_flight.pop(item_id, None)
+            if not item:
+                return False
+            item.status = "pending"
+            heapq.heappush(self._heap, item)
+            self._notify_event.set()
+            logger.info("Requeued task %s without retry penalty (shutdown)", item_id)
+            return True
+
+    async def flush_pending_requeues(self) -> None:
+        """Awaits the tracked delayed-requeue tasks (mainly for clean shutdown/tests)."""
+        if self._pending_requeues:
+            await asyncio.gather(*list(self._pending_requeues), return_exceptions=True)
+
     async def nack(self, item_id: str, error: str | None = None) -> None:
         async with self._lock:
             item = self._in_flight.pop(item_id, None)
@@ -115,7 +139,9 @@ class InMemoryPriorityQueue(BaseJobQueue):
                         heapq.heappush(self._heap, requeue_item)
                         self._notify_event.set()
 
-                asyncio.create_task(_delayed_requeue(item, delay))
+                task = asyncio.create_task(_delayed_requeue(item, delay))
+                self._pending_requeues.add(task)
+                task.add_done_callback(self._pending_requeues.discard)
 
     async def dead_letter(self, item_id: str, reason: str) -> None:
         async with self._lock:

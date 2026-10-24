@@ -1,9 +1,11 @@
 import asyncio
+import json
 import logging
 import random
 import re
 from collections import Counter
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import cast
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
@@ -11,6 +13,7 @@ from playwright.async_api import Error, Page
 from playwright.async_api import TimeoutError as BrowserTimeout
 from pydantic import HttpUrl, ValidationError
 
+from backend.core.config import ROOT
 from backend.providers.base import (
     NetworkError,
     ProviderError,
@@ -33,6 +36,40 @@ from backend.services.media_parser import extract_hashtags, parse_duration_secon
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_VOCAB_CONFIG_PATH = Path(__file__).resolve().parent / "vocab_config.json"
+_USER_VOCAB_CONFIG_PATH = ROOT / "data" / "config" / "xhs_vocab.json"
+
+
+def _load_vocab_config() -> dict:
+    """Loads the craft/stationery vocabulary. A user file at
+    data/config/xhs_vocab.json overrides the bundled defaults so new domains
+    can be added without touching code."""
+    for path in (_USER_VOCAB_CONFIG_PATH, _DEFAULT_VOCAB_CONFIG_PATH):
+        try:
+            if path.is_file():
+                data = json.loads(path.read_text("utf-8"))
+                if isinstance(data, dict):
+                    return data
+        except (OSError, ValueError) as exc:
+            logger.warning("Could not load XHS vocab config %s: %s", path, exc)
+    return {}
+
+
+_VOCAB_CONFIG = _load_vocab_config()
+KNOWN_VOCAB: tuple[str, ...] = tuple(_VOCAB_CONFIG.get("known_vocab", []))
+INTENT_PAIR_GROUPS: tuple[tuple[str, ...], ...] = tuple(
+    tuple(group) for group in _VOCAB_CONFIG.get("intent_pair_groups", [])
+)
+
+
+def query_in_known_domain(query_terms: set[str]) -> bool:
+    """True when the query clearly belongs to the configured vocabulary domain.
+    Only in-domain queries get the strict intent-pair fast-path; everything
+    else passes through to normal ranking/detail verification."""
+    if not KNOWN_VOCAB:
+        return False
+    return any(term in KNOWN_VOCAB for term in query_terms)
+
 
 def query_card_terms(query: str) -> set[str]:
     """Extract semantic search terms from query without creating cross-boundary junk bigrams."""
@@ -40,12 +77,6 @@ def query_card_terms(query: str) -> set[str]:
     latin_words = [w.lower() for w in re.findall(r"[a-zA-Z0-9]+", query) if len(w) >= 2]
     terms: set[str] = set(latin_words)
 
-    KNOWN_VOCAB = (
-        "造景", "贴纸", "镊子", "咕卡", "手账", "手帐", "剥离器", "起边器", "揭贴器",
-        "夹取", "工具", "开箱", "盲盒", "书桌", "改造", "布置", "文具", "桌面", "收纳",
-        "穿搭", "测评", "试色", "打包", "电钻", "录音", "日常", "沉浸式", "治愈",
-        "卧室", "房间", "室内", "家居", "家装", "装饰", "软装",
-    )
     for seq in cjk_seqs:
         matched_any = False
         for vocab in KNOWN_VOCAB:
@@ -248,7 +279,19 @@ class XiaohongshuProvider(SearchProvider):
                     await field.fill(query)
                     self.attempted_queries.add(query)
                     await field.press("Enter")
-                    await page.wait_for_timeout(2500)
+                    # Wait for the search-result route and rendered cards
+                    # instead of a fixed sleep: faster platforms return early,
+                    # slower ones get up to ~12s before falling back.
+                    try:
+                        await page.wait_for_url(
+                            lambda url: "/search_result" in (url or ""), timeout=6000
+                        )
+                        await page.wait_for_selector(
+                            "a[href*='/explore/'], a[href*='/search_result/'], section.note-item, [class*='note-item']",
+                            timeout=6000,
+                        )
+                    except Exception:
+                        await page.wait_for_timeout(1500)
                     try:
                         await page.keyboard.press("Escape")
                     except Exception:
@@ -540,14 +583,19 @@ class XiaohongshuProvider(SearchProvider):
                     title = cand.get("title")
                     is_card_video = bool(cand.get("is_video"))
                     matched_terms = {term for term in query_terms if term in str(title or "")}
+                    # The strict intent-pair fast-path is a craft/stationery
+                    # domain heuristic. Out-of-domain queries must not have
+                    # candidates silently demoted to the (bounded) detail
+                    # queue — they pass straight through to normal ranking.
+                    apply_intent_pairs = bool(INTENT_PAIR_GROUPS) and query_in_known_domain(query_terms)
                     if title and is_card_video and len(query_terms) >= 2:
                         if not matched_terms:
                             continue
-                        has_full_intent = (
-                            len(matched_terms) >= len(query_terms)
-                            or (
-                                any(t in str(title) for t in ("镊子", "夹取", "剥离器", "起边器", "揭贴器"))
-                                and any(t in str(title) for t in ("贴纸", "咕卡", "手账", "手帐"))
+                        has_full_intent = len(matched_terms) >= len(query_terms) or (
+                            apply_intent_pairs
+                            and all(
+                                any(t in str(title) for t in group)
+                                for group in INTENT_PAIR_GROUPS
                             )
                         )
                         if not has_full_intent:

@@ -39,6 +39,7 @@ export function ScriptAnalysisModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
   const [dubbingOpen, setDubbingOpen] = useState(false);
   const isAnalyzing = loading || (open && !analysis && !error);
 
@@ -73,7 +74,7 @@ export function ScriptAnalysisModal({
     };
   }, [open, analysis, video.id]);
 
-  function handleCopyAll() {
+  async function handleCopyAll() {
     if (!analysis) return;
     let formatted = "";
 
@@ -114,9 +115,14 @@ export function ScriptAnalysisModal({
       ].join("\n");
     }
 
-    navigator.clipboard.writeText(formatted);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(formatted);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopyError(true);
+      setTimeout(() => setCopyError(false), 3000);
+    }
   }
 
   return (
@@ -382,6 +388,11 @@ export function ScriptAnalysisModal({
                       <>
                         <Check size={14} style={{ marginRight: "0.35rem" }} />
                         Đã sao chép kịch bản!
+                      </>
+                    ) : copyError ? (
+                      <>
+                        <AlertCircle size={14} style={{ marginRight: "0.35rem" }} />
+                        Không sao chép được — hãy copy thủ công.
                       </>
                     ) : (
                       <>

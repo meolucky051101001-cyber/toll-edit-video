@@ -1,3 +1,4 @@
+import logging
 import math
 import re
 from datetime import datetime, timezone
@@ -8,6 +9,8 @@ from pydantic import HttpUrl, ValidationError
 
 from backend.providers.base import apply_search_filters_and_sorting
 from backend.schemas.contracts import SearchFilters, VideoResult
+
+logger = logging.getLogger("douyin.parser")
 
 VALID_HOSTS = {"www.douyin.com", "douyin.com"}
 
@@ -33,7 +36,7 @@ def classify_page(body: str, title: str = "", url: str = "") -> str:
                 "安全限制",
                 "访问受限",
                 "访问频次异常",
-                "risk",
+                "当前环境异常，完成验证后即可继续访问",
             ]
         )
         or "error_code=" in url_lower
@@ -70,8 +73,9 @@ def classify_page(body: str, title: str = "", url: str = "") -> str:
                 "登录后查看更多",
                 "登录后搜索",
                 "手机号登录",
+                "扫码登录后继续访问",
                 "scan qr code to log in",
-                "login",
+                "log in to continue",
                 "立即登录",
             ]
         )
@@ -524,6 +528,10 @@ def extract_douyin_ssr_json(html_content: str) -> dict[str, Any] | None:
     - window._ROUTER_DATA = {...}
     - window.__INITIAL_STATE__ = {...}
     Returns a dict with 'data' suitable for parse_search_response_json.
+
+    Every extraction failure is logged with a `ssr_parse_failed` marker so a
+    silent minifier/DOM change on Douyin shows up in logs instead of surfacing
+    as a generic empty result.
     """
     import json
     from urllib.parse import unquote
@@ -542,8 +550,8 @@ def extract_douyin_ssr_json(html_content: str) -> dict[str, Any] | None:
                 items = _find_items_in_nested_dict(parsed)
                 if items:
                     return {"data": items}
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("ssr_parse_failed RENDER_DATA decode/extract: %s", exc)
 
     # 2. Check window._ROUTER_DATA
     m_router = re.search(r'window\._ROUTER_DATA\s*=\s*(\{.*?\});\s*(?:window|</script>)', html_content, re.DOTALL)
@@ -553,8 +561,8 @@ def extract_douyin_ssr_json(html_content: str) -> dict[str, Any] | None:
             items = _find_items_in_nested_dict(parsed)
             if items:
                 return {"data": items}
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("ssr_parse_failed _ROUTER_DATA extract: %s", exc)
 
     # 3. Check window.__INITIAL_STATE__
     m_state = re.search(r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\});\s*(?:window|</script>)', html_content, re.DOTALL)
@@ -564,7 +572,13 @@ def extract_douyin_ssr_json(html_content: str) -> dict[str, Any] | None:
             items = _find_items_in_nested_dict(parsed)
             if items:
                 return {"data": items}
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("ssr_parse_failed __INITIAL_STATE__ extract: %s", exc)
 
+    if "RENDER_DATA" not in html_content and "_ROUTER_DATA" not in html_content and "__INITIAL_STATE__" not in html_content:
+        logger.warning(
+            "ssr_parse_failed: no known SSR state markers in %d bytes of HTML "
+            "(Douyin likely changed its bootstrap contract)",
+            len(html_content),
+        )
     return None

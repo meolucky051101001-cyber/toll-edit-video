@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Bookmark,
   Check,
@@ -69,6 +69,19 @@ export function VideoCard({
     video.platform === "xiaohongshu" && hasValidXhsToken(video.share_url)
       ? (video.share_url as string)
       : video.share_url || video.url;
+  // href is reachable via middle-click / context menu (bypassing the click
+  // guard), so only expose a URL that passed the platform allowlist.
+  const platformHref = isTrustedPlatformUrl(primaryUrl, video.platform)
+    ? primaryUrl
+    : undefined;
+
+  // Reset the "copied" flag with a timer owned by React (auto-cleaned on
+  // unmount instead of a bare setTimeout firing after unmount).
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1800);
+    return () => clearTimeout(timer);
+  }, [copied]);
 
   function handleOpenPlatform(e?: React.MouseEvent) {
     if (e) e.preventDefault();
@@ -109,7 +122,6 @@ export function VideoCard({
     try {
       await navigator.clipboard.writeText(primaryUrl);
       setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
     } catch {
       onError(
         "Không sao chép được. Bạn có thể chọn URL trong Chi tiết để copy thủ công.",
@@ -329,7 +341,7 @@ export function VideoCard({
             {!video.is_mock && (
               <a
                 className="button button-outline button-sm"
-                href={primaryUrl}
+                href={platformHref}
                 target="_blank"
                 rel="noopener noreferrer"
                 onClick={(e) => handleOpenPlatform(e)}
@@ -465,7 +477,7 @@ export function VideoCard({
             {!video.is_mock && (
               <a
                 className="button button-outline"
-                href={primaryUrl}
+                href={platformHref}
                 target="_blank"
                 rel="noreferrer"
                 onClick={(e) => handleOpenPlatform(e)}
