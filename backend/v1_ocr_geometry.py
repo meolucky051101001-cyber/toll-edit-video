@@ -36,7 +36,7 @@ def sample_times(start, end, count):
     start, end = max(0.0, float(start)), float(end)
     if end <= start:
         return []
-    count = max(1, min(4, int(count)))
+    count = max(1, min(8, int(count)))
     return [start + (i + .5) * (end - start) / count for i in range(count)]
 
 
