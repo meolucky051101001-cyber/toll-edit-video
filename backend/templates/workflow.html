@@ -2518,6 +2518,15 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
               <span class="tool-icon">🔄</span>
               <span>Gốc</span>
             </button>
+            <button type="button" class="btn-capcut-tool" id="btnOpenConcat" onclick="openInConcat()" title="P7: mở thư mục project của video này trong Concat (app ngoài — AGPL)">
+              <span class="tool-icon">🧩</span>
+              <span>Concat</span>
+            </button>
+            <button type="button" class="btn-capcut-tool" id="btnImportConcat" onclick="document.getElementById('concatImportInput').click()" title="P7: nhập file video xuất từ Concat vào thư viện như video phôi mới">
+              <span class="tool-icon">📥</span>
+              <span>Nhập Concat</span>
+            </button>
+            <input type="file" id="concatImportInput" accept="video/mp4,video/webm,video/x-matroska" style="display: none;" onchange="importConcatFile(this)">
           </div>
 
           <div style="display: flex; align-items: center; gap: 8px;">
@@ -7068,6 +7077,62 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           btn.disabled = false;
           btn.innerText = '💾 ÁP DỤNG & GHÉP VIDEO';
         }
+      }
+    }
+
+    // ===== P7: TÍCH HỢP CONCAT (tiến trình ngoài — AGPL) =====
+    async function openInConcat() {
+      if (!currentVideo || !currentVideo.stem) {
+        showToast('⚠️ Vui lòng chọn một video trước!');
+        return;
+      }
+      try {
+        const res = await fetch('/api/workflow/concat/open', {
+          method: 'POST',
+          headers: RENDER_TOKEN_HEADERS(),
+          body: JSON.stringify({ stem: currentVideo.stem })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showToast('🧩 Đã mở Concat với thư mục project của video này!');
+        } else {
+          showToast('❌ ' + (data.detail || 'Lỗi mở Concat'));
+        }
+      } catch (err) {
+        showToast('❌ Lỗi kết nối khi mở Concat');
+      }
+    }
+
+    async function importConcatFile(input) {
+      const f = input.files && input.files[0];
+      input.value = '';
+      if (!f) return;
+      if (!currentVideo || !currentVideo.stem) {
+        showToast('⚠️ Chọn một video trước (để đặt tên import theo video đang làm)!');
+        return;
+      }
+      const fd = new FormData();
+      fd.append('stem', currentVideo.stem);
+      fd.append('file', f, f.name);
+      showToast('📥 Đang nhập file từ Concat vào thư viện...');
+      try {
+        const res = await fetch('/api/workflow/concat/import', {
+          method: 'POST',
+          headers: {
+            'X-Local-Control-Token': (typeof CONTROL_PLANE_TOKEN !== 'undefined' ? CONTROL_PLANE_TOKEN : '__REPLACE_TOKEN__'),
+            'X-Dashboard-Input': '1'
+          },
+          body: fd
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showToast(`📥 Đã nhập ${data.filename} (${data.size_mb}MB) vào thư viện!`);
+          if (typeof renderMediaList === 'function') renderMediaList();
+        } else {
+          showToast('❌ ' + (data.detail || 'Lỗi nhập file'));
+        }
+      } catch (err) {
+        showToast('❌ Lỗi kết nối khi nhập file');
       }
     }
 
