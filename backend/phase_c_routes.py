@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from segment_editor_service import (
+    InvalidJobIdentifier,
     get_job_segments,
     get_segment_audio_path,
     publish_revised_video,
@@ -52,6 +53,8 @@ async def api_get_job_segments(job_id: str):
     try:
         data = get_job_segments(job_id.strip())
         return data
+    except InvalidJobIdentifier as bad_id:
+        raise HTTPException(status_code=400, detail=str(bad_id))
     except Exception as exc:
         logger.error("Lỗi lấy segments cho %s: %s", job_id, exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
@@ -72,6 +75,8 @@ async def api_save_job_segments_draft(job_id: str, req: SaveSegmentsDraftRequest
             expected_revision=req.expected_revision,
         )
         return res
+    except InvalidJobIdentifier as bad_id:
+        raise HTTPException(status_code=400, detail=str(bad_id))
     except ValueError as val_err:
         raise HTTPException(status_code=409, detail=str(val_err))
     except Exception as exc:
@@ -98,6 +103,8 @@ async def api_regenerate_job_segments(job_id: str, req: RegenerateSegmentsReques
             idempotency_key=req.idempotency_key or "",
         )
         return res
+    except InvalidJobIdentifier as bad_id:
+        raise HTTPException(status_code=400, detail=str(bad_id))
     except ValueError as val_err:
         raise HTTPException(status_code=409, detail=str(val_err))
     except Exception as exc:
@@ -120,6 +127,8 @@ async def api_publish_revised_job(job_id: str, req: PublishRevisedRequest):
             expected_revision=req.expected_revision,
         )
         return res
+    except InvalidJobIdentifier as bad_id:
+        raise HTTPException(status_code=400, detail=str(bad_id))
     except ValueError as val_err:
         raise HTTPException(status_code=409, detail=str(val_err))
     except Exception as exc:
@@ -132,7 +141,10 @@ async def api_get_segment_audio(job_id: str, segment_id: str):
     """
     Phục vụ stream audio MP3 của một câu cụ thể để phát nghe thử trên player.
     """
-    p = get_segment_audio_path(job_id.strip(), segment_id.strip())
+    try:
+        p = get_segment_audio_path(job_id.strip(), segment_id.strip())
+    except InvalidJobIdentifier as bad_id:
+        raise HTTPException(status_code=400, detail=str(bad_id))
     if not p or not p.is_file():
         raise HTTPException(status_code=404, detail="Không tìm thấy file âm thanh của phân đoạn này.")
 

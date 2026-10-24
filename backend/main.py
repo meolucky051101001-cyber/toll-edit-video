@@ -304,6 +304,14 @@ def _safe_media_path(folder: str, filename: str) -> Path:
     return candidate
 
 
+def _safe_preview_name(resource_id: str) -> str:
+    """Ép resource_id (voice_id) thành tên file trần — chặn path traversal qua %2F, '..', ký tự ổ đĩa."""
+    clean = (resource_id or "").strip()
+    if not clean or clean in (".", "..") or clean != Path(clean).name or any(ch in '<>:"|?*' for ch in clean):
+        raise HTTPException(status_code=400, detail="Tên tài nguyên không hợp lệ")
+    return clean
+
+
 def _read_log_tail(max_lines: int = 500) -> str:
     configured = os.getenv("AUTODUB_LOG_FILE")
     candidates = [
@@ -707,10 +715,17 @@ async def api_process_video(
 @app.get("/api/download/{filename}")
 async def download_video(filename: str):
     """Tải file video đã render xong."""
+    from batch_processor import SUPPORTED_EXTENSIONS
+
+    clean = filename.strip()
+    if not clean or clean in (".", "..") or clean != Path(clean).name or clean.startswith("."):
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Tên file không hợp lệ"})
+    if Path(clean).suffix.lower() not in SUPPORTED_EXTENSIONS:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Chỉ cho phép tải file video"})
     # Search in workspace subdirectories
     for root, dirs, files in os.walk(WORKSPACE):
-        if filename in files:
-            return FileResponse(os.path.join(root, filename), media_type="video/mp4", filename=filename)
+        if clean in files:
+            return FileResponse(os.path.join(root, clean), media_type="video/mp4", filename=clean)
     return {"status": "error", "message": "File not found"}
 
 
@@ -999,7 +1014,7 @@ async def serve_dashboard():
     if template_path.exists():
         with open(template_path, "r", encoding="utf-8") as f:
             html = f.read().replace("__REPLACE_TOKEN__", LOCAL_TOKEN)
-            return HTMLResponse(content=html)
+            return HTMLResponse(content=html, headers={"Cache-Control": "no-store"})
     return HTMLResponse("<h2>Dashboard template not found.</h2>", status_code=404)
 
 
@@ -2163,7 +2178,7 @@ async def api_get_qc_report(job_id: str):
 
 @app.get("/api/voice-preview-video/{voice_id}")
 async def api_voice_preview_video(voice_id: str):
-    filename = f"{voice_id}.mp4"
+    filename = f"{_safe_preview_name(voice_id)}.mp4"
     candidates = [
         Path(WORKSPACE) / "bot_system" / "control" / "voice_previews" / filename,
         Path(WORKSPACE) / "control" / "voice_previews" / filename,
@@ -2178,8 +2193,9 @@ async def api_voice_preview_video(voice_id: str):
 
 @app.get("/api/voice-preview-audio/{voice_id}")
 async def api_voice_preview_audio(voice_id: str):
+    clean_voice_id = _safe_preview_name(voice_id)
     for ext, media in ((".mp3", "audio/mpeg"), (".wav", "audio/wav")):
-        filename = f"{voice_id}{ext}"
+        filename = f"{clean_voice_id}{ext}"
         candidates = [
             Path(WORKSPACE) / "bot_system" / "control" / "voice_checks" / filename,
             Path(WORKSPACE) / "control" / "voice_checks" / filename,
@@ -2202,7 +2218,7 @@ async def serve_a2ui_studio():
     if template_path.exists():
         with open(template_path, "r", encoding="utf-8") as f:
             html = f.read().replace("__REPLACE_TOKEN__", LOCAL_TOKEN)
-            return HTMLResponse(content=html)
+            return HTMLResponse(content=html, headers={"Cache-Control": "no-store"})
     return HTMLResponse("<h2>A2UI Studio template not found.</h2>", status_code=404)
 
 

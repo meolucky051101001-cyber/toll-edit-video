@@ -140,14 +140,21 @@ def format_srt(segments: List[Dict[str, Any]]) -> str:
     return "\n".join(out)
 
 
+class InvalidJobIdentifier(ValueError):
+    """Định danh job chứa ký tự đường dẫn/ký tự cấm — từ chối để chặn path traversal."""
+
+
 def sanitize_job_id(job_id_or_name: str) -> str:
-    """Làm sạch định danh job/tên file để tìm kiếm an toàn."""
+    """Làm sạch định danh job/tên file để tìm kiếm an toàn (chặn path traversal)."""
     name = str(job_id_or_name).strip()
     if name.startswith("Dubbed_"):
         name = name[len("Dubbed_"):]
     if name.endswith(".mp4"):
         name = name[:-4]
-    return name.strip()
+    name = name.strip()
+    if not name or name in (".", "..") or name != Path(name).name or any(ch in '<>:"|?*' for ch in name):
+        raise InvalidJobIdentifier("Định danh job không hợp lệ (không cho phép đường dẫn hoặc ký tự cấm)")
+    return name
 
 
 def find_job_workspace(job_id_or_name: str) -> Optional[Path]:
