@@ -2418,6 +2418,7 @@ def _apply_timeline_edits_file(
     audio_clips: Optional[List[Dict[str, Any]]] = None,
     workspace_dir: Optional[Path] = None,
     job_ctl: Optional[Dict[str, Any]] = None,
+    export_frame: Optional[Dict[str, int]] = None,
 ) -> bool:
     """
     Cắt, ghép nối và nhân bản các đoạn video theo danh sách clips:
@@ -2428,6 +2429,7 @@ def _apply_timeline_edits_file(
         (at/dur trên timeline có gap được map qua _timeline_to_output_t).
     P5: audio_clips (nhạc nền/SFX dataURL) trộn lên audio sẵn có, có volume/fade/ducking.
     P6.3: job_ctl ({"cancelled", "proc", "progress", "total_dur"}) — render nền có tiến độ + huỷ.
+    P6.2: export_frame {"w","h"} — scale/pad khung xuất (9:16, 1:1, 16:9).
     Sử dụng GPU NVENC (fallback CPU libx264) đảm bảo âm thanh và hình ảnh đồng bộ 100%.
     """
     if not video_path.is_file() or not clips:
@@ -2581,6 +2583,23 @@ def _apply_timeline_edits_file(
     if (needs_video_post or needs_audio_post) and "[outv]" not in " ".join(graph["filter_lines"]):
         graph["filter_lines"].append("[basev]null[outv]")
 
+    # P6.2: preset khung xuất — scale/pad về 9:16 / 1:1 / 16:9 nếu khác kích thước nguồn
+    if export_frame:
+        try:
+            ew = int(export_frame.get("w") or 0)
+            eh = int(export_frame.get("h") or 0)
+        except Exception:
+            ew = eh = 0
+        if ew >= 64 and eh >= 64 and ew <= 4096 and eh <= 4096 and (ew != src_w or eh != src_h):
+            for i in range(len(graph["filter_lines"]) - 1, -1, -1):
+                if "[outv]" in graph["filter_lines"][i]:
+                    graph["filter_lines"][i] = graph["filter_lines"][i].replace("[outv]", "[preexp]", 1)
+                    break
+            graph["filter_lines"].append(
+                f"[preexp]scale={ew}:{eh}:force_original_aspect_ratio=decrease,"
+                f"pad={ew}:{eh}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p[outv]"
+            )
+
     filter_complex = ";".join(graph["filter_lines"])
     temp_out = out_path.parent / f"_temp_edit_{out_path.name}"
     temp_out.unlink(missing_ok=True)
@@ -2712,6 +2731,7 @@ def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, An
     text_clips_in = payload.get("text_clips") if isinstance(payload.get("text_clips"), list) else []
     overlay_clips_in = payload.get("overlay_clips") if isinstance(payload.get("overlay_clips"), list) else []
     audio_clips_in = payload.get("audio_clips") if isinstance(payload.get("audio_clips"), list) else []
+    export_frame_in = payload.get("export_frame") if isinstance(payload.get("export_frame"), dict) else None
     _prog(20, "Bắt đầu render FFmpeg (GPU)...")
     ok = _apply_timeline_edits_file(
         input_video, clips, dest_final,
@@ -2720,6 +2740,7 @@ def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, An
         audio_clips=audio_clips_in,
         workspace_dir=job_dir,
         job_ctl=job_ctl,
+        export_frame=export_frame_in,
     )
     if not ok:
         raise HTTPException(status_code=500, detail="Lỗi khi cắt ghép video bằng FFmpeg")
@@ -3057,6 +3078,107 @@ async def api_concat_import(stem: str = Form(...), file: UploadFile = File(...))
     out_path = INPUT_DIR / out_name
     out_path.write_bytes(data)
     return {"status": "ok", "filename": out_name, "size_mb": round(len(data) / 1048576, 2)}
+
+
+# =========================================================================
+# P6.2: PROXY 540p CHO PREVIEW MƯỢT + PRESET KHUNG XUẤT
+# =========================================================================
+_PROXY_GENERATING: set = set()
+
+
+def _resolve_timeline_source_video(stem: str, version: str) -> Optional[Path]:
+    """Chọn file nguồn theo phiên bản: final (mặc định) hoặc raw (phôi)."""
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    job_dir = WORKSPACE / clean_stem
+    if version != "raw":
+        cand_final = job_dir / f"final_{stem}.mp4"
+        if cand_final.is_file() and _valid_final_video(cand_final):
+            return cand_final
+    for cand in (INPUT_DIR / f"{stem}.mp4", DOWNLOADS_DIR / f"{stem}.mp4"):
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _proxy_path_for(stem: str, version: str) -> Path:
+    return WORKSPACE / re.sub(r'[^\w\-_.]', '_', stem) / f"proxy_{version}.mp4"
+
+
+def _proxy_is_fresh(proxy_path: Path, src_path: Path) -> bool:
+    return proxy_path.is_file() and proxy_path.stat().st_size > 1_000 and \
+        proxy_path.stat().st_mtime >= src_path.stat().st_mtime - 1.0
+
+
+def _proxy_generate_worker(src_path: Path, proxy_path: Path, key: str) -> None:
+    try:
+        # đuôi .mp4 để ffmpeg đo được muxer (file .mp4.tmp sẽ lỗi "Invalid argument")
+        tmp = proxy_path.parent / ("tmp_" + proxy_path.name)
+        tmp.unlink(missing_ok=True)
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-i", str(src_path),
+             "-vf", "scale='min(540,iw)':-2",
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+             "-c:a", "copy", "-movflags", "+faststart", str(tmp)],
+            capture_output=True, timeout=600,
+        )
+        if tmp.is_file() and tmp.stat().st_size > 1_000:
+            proxy_path.unlink(missing_ok=True)
+            tmp.rename(proxy_path)
+        else:
+            tmp.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning(f"Proxy generate fail cho {proxy_path.name}: {e}")
+    finally:
+        _PROXY_GENERATING.discard(key)
+
+
+@router.post("/api/workflow/proxy/generate")
+async def api_proxy_generate(payload: Dict[str, Any] = Body(...)):
+    """
+    P6.2: tạo proxy 540p nền cho preview mượt (không chặn request).
+    Trả {ready: true, url} nếu proxy đã có và mới hơn nguồn; ngược lại khởi tạo
+    thread generate và trả {ready: false, started: true}.
+    """
+    stem = (payload.get("stem") or "").strip()
+    version = payload.get("version") or "final"
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu stem")
+    src = _resolve_timeline_source_video(stem, version)
+    if not src:
+        raise HTTPException(status_code=404, detail="Không tìm thấy video nguồn")
+    proxy_path = _proxy_path_for(stem, version)
+    url = f"/api/workflow/stream-file?path={proxy_path}&t={time.time()}"
+    if _proxy_is_fresh(proxy_path, src):
+        return {"ready": True, "url": url}
+    key = f"{stem}|{version}"
+    if key not in _PROXY_GENERATING:
+        _PROXY_GENERATING.add(key)
+        proxy_path.parent.mkdir(parents=True, exist_ok=True)
+        threading.Thread(target=_proxy_generate_worker, args=(src, proxy_path, key), daemon=True).start()
+    return {"ready": False, "started": True, "url": url}
+
+
+@router.get("/api/workflow/proxy/status")
+async def api_proxy_status(stem: str = Query(...), version: str = Query("final")):
+    src = _resolve_timeline_source_video(stem, version)
+    if not src:
+        return {"ready": False, "exists": False}
+    proxy_path = _proxy_path_for(stem, version)
+    if _proxy_is_fresh(proxy_path, src):
+        return {"ready": True, "exists": True,
+                "url": f"/api/workflow/stream-file?path={proxy_path}&t={time.time()}"}
+    return {"ready": False, "exists": proxy_path.is_file(), "generating": f"{stem}|{version}" in _PROXY_GENERATING}
+
+
+@router.get("/static/js/{fname}")
+async def api_static_js(fname: str):
+    """P6.4: phục vụ module JS tách từ workflow.html (chỉ .js, chặn traversal)."""
+    if "/" in fname or "\\" in fname or ".." in fname or not fname.endswith(".js"):
+        raise HTTPException(status_code=404, detail="File không hợp lệ")
+    p = Path(__file__).resolve().parent / "static" / "js" / fname
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="Không tìm thấy file JS")
+    return FileResponse(p, media_type="application/javascript")
 
 
 @router.get("/api/workflow/download-srt")
