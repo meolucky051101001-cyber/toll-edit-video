@@ -39,6 +39,18 @@ def _block_value(block, key, default=None):
     return getattr(block, key, default)
 
 
+def _set_block_value(block, key, value):
+    if block is None:
+        return
+    if isinstance(block, dict):
+        if "__object_fields__" in block and isinstance(block["__object_fields__"], dict):
+            block["__object_fields__"][key] = value
+        else:
+            block[key] = value
+    else:
+        setattr(block, key, value)
+
+
 def _excluded_source(block):
     if block is None:
         return True
@@ -209,6 +221,31 @@ def sync_and_clamp_subtitles(translated_segments, dubbing_audio_files=None):
                     curr_seg.end = safe_end
                 else:
                     curr_seg.end = curr_seg.start + datetime.timedelta(seconds=0.1)
+
+    if dubbing_audio_files:
+        for seg in translated_segments:
+            if isinstance(seg, dict):
+                seg_s = float(seg.get("start", 0.0))
+                seg_e = float(seg.get("end", 0.0))
+                t_blocks = seg.get("tracking_blocks") or []
+            else:
+                seg_s = seg.start.total_seconds()
+                seg_e = seg.end.total_seconds()
+                t_blocks = getattr(seg, "tracking_blocks", None) or []
+            valid_tb = [b for b in t_blocks if not _excluded_source(b)]
+            valid_tb.sort(key=lambda b: float(_block_value(b, "start", 0.0)))
+            if valid_tb:
+                if float(_block_value(valid_tb[0], "start", seg_s)) > seg_s:
+                    _set_block_value(valid_tb[0], "start", seg_s)
+                if float(_block_value(valid_tb[-1], "end", seg_e)) < seg_e:
+                    _set_block_value(valid_tb[-1], "end", seg_e)
+                for k in range(len(valid_tb) - 1):
+                    ce = float(_block_value(valid_tb[k], "end", seg_s))
+                    ns = float(_block_value(valid_tb[k + 1], "start", seg_e))
+                    if ce < ns:
+                        mid = (ce + ns) * 0.5
+                        _set_block_value(valid_tb[k], "end", mid)
+                        _set_block_value(valid_tb[k + 1], "start", mid)
 
     return translated_segments
 
@@ -403,9 +440,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             boundary = groups[i + 1][1][0].start
             if any(_verified_geometry(page) for page in groups[i][1] + groups[i + 1][1]):
                 for page in groups[i][1]:
+                    old_end_s = page.end.total_seconds()
                     gap = (boundary - page.end).total_seconds()
                     if 0.0 < gap <= 0.5:
                         page.end = boundary
+                        new_end_s = boundary.total_seconds()
+                        p_tracks = [b for b in (getattr(page, "tracking_blocks", None) or []) if not _excluded_source(b)]
+                        if p_tracks:
+                            last_tb = max(p_tracks, key=lambda b: float(_block_value(b, "end", 0.0)))
+                            if float(_block_value(last_tb, "end", 0.0)) >= old_end_s - 0.55:
+                                _set_block_value(last_tb, "end", max(float(_block_value(last_tb, "end", 0.0)), new_end_s))
                     else:
                         page.end = min(page.end, boundary)
                 continue
@@ -446,6 +490,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 else:
                     page.end = min(page.end, transition_target)
         dialogue_segments = [s for s in dialogue_segments if s.end > s.start]
+        held_tracks = _held_tracking_blocks(dialogue_segments, video_duration)
         if clean_incomplete_segment_stops is not None:
             dialogue_segments = clean_incomplete_segment_stops(dialogue_segments)
         processed_segments = []
@@ -594,11 +639,21 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             raw_relevant = [b for b in held_tracks if b['end'] > seg_s and b['start'] < seg_e]
             relevant = []
             for b in raw_relevant:
-                b_cy = (float(_block_value(b, "y_pct", 0.0)) + float(_block_value(b, "max_y_pct", 0.0))) * 0.5
-                b_span = max(float(_block_value(b, "max_y_pct", 0.0)), seg_bottom) - min(float(_block_value(b, "y_pct", 0.0)), seg_top)
-                # Only keep blocks within reasonable vertical proximity (<= 12% center delta and combined span <= 16%)
-                if abs(b_cy - seg_cy) <= 0.12 and b_span <= 0.16:
-                    relevant.append(b)
+                b_y1 = float(_block_value(b, "y_pct", 0.0))
+                b_y2 = float(_block_value(b, "max_y_pct", 0.0))
+                b_cy = (b_y1 + b_y2) * 0.5
+                if seg_blist:
+                    for sb in seg_blist:
+                        sb_y1 = float(_block_value(sb, "y_pct", 0.0))
+                        sb_y2 = float(_block_value(sb, "max_y_pct", 0.0))
+                        sb_cy = (sb_y1 + sb_y2) * 0.5
+                        if abs(b_cy - sb_cy) <= 0.12 and (max(b_y2, sb_y2) - min(b_y1, sb_y1)) <= max(0.24, (sb_y2 - sb_y1) + 0.06):
+                            relevant.append(b)
+                            break
+                else:
+                    b_span = max(b_y2, seg_bottom) - min(b_y1, seg_top)
+                    if abs(b_cy - seg_cy) <= 0.12 and b_span <= 0.16:
+                        relevant.append(b)
             if verified:
                 blocks = []
             if relevant:
@@ -611,10 +666,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     active = [b for b in relevant if b['start'] < right and b['end'] > left]
                     if active:
                         # Extra guard: If multiple active blocks span > 0.16 vertically,
-                        # retain only the ones closest to seg_cy to prevent monster bounding boxes.
+                        # retain only the ones closest to the active segment block at mid_slice.
                         span_active = max(float(_block_value(b, "max_y_pct", 0.0)) for b in active) - min(float(_block_value(b, "y_pct", 0.0)) for b in active)
-                        if span_active > 0.16:
-                            active = [min(active, key=lambda b: abs((float(_block_value(b, "y_pct", 0.0)) + float(_block_value(b, "max_y_pct", 0.0))) * 0.5 - seg_cy))]
+                        if len(active) > 1 and span_active > max(0.16, max(float(_block_value(b, "max_y_pct", 0.0)) - float(_block_value(b, "y_pct", 0.0)) for b in active) + 0.04):
+                            mid_slice = (left + right) * 0.5
+                            ref_cy = seg_cy
+                            if seg_blist:
+                                best_sb = min(
+                                    seg_blist,
+                                    key=lambda sb: 0.0 if (float(_block_value(sb, "start", seg_s)) <= mid_slice <= float(_block_value(sb, "end", seg_e))) else min(abs(mid_slice - float(_block_value(sb, "start", seg_s))), abs(mid_slice - float(_block_value(sb, "end", seg_e))))
+                                )
+                                ref_cy = (float(_block_value(best_sb, "y_pct", 0.0)) + float(_block_value(best_sb, "max_y_pct", 0.0))) * 0.5
+                            active = [min(active, key=lambda b: abs((float(_block_value(b, "y_pct", 0.0)) + float(_block_value(b, "max_y_pct", 0.0))) * 0.5 - ref_cy))]
                         blocks.append(dict(start=left, end=right,
                             x_pct=min(float(_block_value(b, 'x_pct', 0.0)) for b in active),
                             max_x_pct=max(float(_block_value(b, 'max_x_pct', 0.0)) for b in active),
@@ -622,13 +685,30 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                             max_y_pct=max(float(_block_value(b, 'max_y_pct', 0.0)) for b in active),
                             **({'geometry_verified': True} if verified or all(_block_value(b, 'geometry_verified', False) for b in active) else {})))
             blocks = _transition_cover_blocks(blocks)
-            if not verified and blocks and seg_s < float(_block_value(blocks[0], "start", seg_s)):
-                first_gap = float(_block_value(blocks[0], "start", seg_s)) - seg_s
-                if first_gap <= 1.0:
+            if not verified and blocks:
+                if seg_s < float(_block_value(blocks[0], "start", seg_s)):
                     if isinstance(blocks[0], dict):
                         blocks[0]["start"] = seg_s
                     else:
                         setattr(blocks[0], "start", seg_s)
+                if float(_block_value(blocks[-1], "end", seg_e)) < seg_e:
+                    if isinstance(blocks[-1], dict):
+                        blocks[-1]["end"] = seg_e
+                    else:
+                        setattr(blocks[-1], "end", seg_e)
+                for b_idx in range(len(blocks) - 1):
+                    curr_e = float(_block_value(blocks[b_idx], "end", seg_s))
+                    next_s = float(_block_value(blocks[b_idx + 1], "start", seg_e))
+                    if curr_e < next_s:
+                        mid_t = (curr_e + next_s) * 0.5
+                        if isinstance(blocks[b_idx], dict):
+                            blocks[b_idx]["end"] = mid_t
+                        else:
+                            setattr(blocks[b_idx], "end", mid_t)
+                        if isinstance(blocks[b_idx + 1], dict):
+                            blocks[b_idx + 1]["start"] = mid_t
+                        else:
+                            setattr(blocks[b_idx + 1], "start", mid_t)
             cursor = seg_s
             for b in blocks:
                 left = max(seg_s, float(_block_value(b, "start", seg_s)))
@@ -807,7 +887,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     text_cy = draw_y + max(0, (draw_h - required_text_h) // 2)
                     text_cx = draw_x + (draw_w / 2.0)
 
-                    if not video_has_source:
+                    if not verified or not video_has_source:
                         draw_cmd = "{\\p1}" + _rounded_box(draw_w, draw_h, radius=12) + "{\\p0}"
                         bg_line = f"{{\\an7\\pos({draw_x:g},{draw_y})}}{draw_cmd}"
                         ass_content += f"Dialogue: 0,{start_str},{end_str},BgStyle,,0,0,0,,{bg_line}\n"

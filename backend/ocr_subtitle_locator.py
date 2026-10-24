@@ -83,7 +83,36 @@ def _text_match(block_text: Any, speech_text: Any) -> Tuple[float, bool]:
     contained = block in speech
 
     score = 0.65 * ratio + 0.35 * ordered_coverage
-    strong = (len(block) == 2 and block == speech) or (len(block) >= 3 and (
+
+    norm_b = str(block_text or "").lower()
+    norm_s = str(speech_text or "").lower()
+    for src, dst in (("10000", "一万"), ("1000", "一千"), ("100", "一百"), ("10", "十"), ("5k", "五千"), ("1k", "一千"), ("两", "二"), ("0", "零"), ("1", "一"), ("2", "二"), ("3", "三"), ("4", "四"), ("5", "五"), ("6", "六"), ("7", "七"), ("8", "八"), ("9", "九")):
+        norm_b = norm_b.replace(src, dst)
+        norm_s = norm_s.replace(src, dst)
+    nb_cjk = _chinese_text(norm_b)
+    ns_cjk = _chinese_text(norm_s)
+    if (nb_cjk != block or ns_cjk != speech) and len(nb_cjk) >= 2 and len(ns_cjk) >= 2:
+        nm = SequenceMatcher(None, nb_cjk, ns_cjk, autojunk=False)
+        n_matching = [item for item in nm.get_matching_blocks() if item.size]
+        n_longest = max((item.size for item in n_matching), default=0)
+        n_ordered = sum(item.size for item in n_matching)
+        longest = max(longest, n_longest)
+        ordered = max(ordered, n_ordered)
+        longest_coverage = max(longest_coverage, n_longest / float(len(nb_cjk)))
+        ordered_coverage = max(ordered_coverage, min(1.0, n_ordered / float(len(nb_cjk))))
+        ratio = max(ratio, nm.ratio())
+        contained = contained or (nb_cjk in ns_cjk)
+        score = max(score, 0.65 * ratio + 0.35 * ordered_coverage)
+
+    import re
+    b_ascii = set(re.findall(r"[a-z]{2,}|\d{2,}", str(block_text or "").lower()))
+    s_ascii = set(re.findall(r"[a-z]{2,}|\d{2,}", str(speech_text or "").lower()))
+    shared_ascii = bool(b_ascii & s_ascii) and ordered >= 2
+    short_homophone = len(block) == 3 and (longest >= 2 or (ordered >= 2 and block[0] in speech and block[-1] in speech))
+    if shared_ascii or short_homophone:
+        score = max(score, 0.56)
+
+    strong = (len(block) == 2 and (block == speech or block in speech)) or short_homophone or shared_ascii or (len(block) >= 3 and (
         contained
         or (longest >= 3 and longest_coverage >= 0.45)
         or (ordered >= 4 and ordered_coverage >= 0.55 and ratio >= 0.20)
@@ -120,13 +149,17 @@ def _geometry_score(
     if width < 0.025 or height < 0.007 or height > max_height:
         return None
 
+    cjk_count = len(_chinese_text(_value(block, "text", "")))
+    min_aspect = 0.55 if cjk_count >= 4 else 0.75
     pixel_aspect = (width * max(frame_width, 1)) / (
         height * max(frame_height, 1)
     )
-    if pixel_aspect < 0.75:
+    if pixel_aspect < min_aspect:
         return None
 
     center_x = (left + right) * 0.5
+    if cjk_count <= 2 and height > 0.085 and abs(center_x - 0.5) > 0.18:
+        return None
     centered = max(0.0, 1.0 - abs(center_x - 0.5) / 0.5)
     horizontal = min(1.0, pixel_aspect / 6.0)
     useful_width = min(1.0, width / 0.45)
@@ -286,8 +319,8 @@ def select_chinese_subtitle_band(
     def speech_match(text, sid):
         score, strong = _text_match(text, segment_texts.get(sid, ''))
         if not strong:
-            # A burnt-in caption often spans two ASR cues. Require a real
-            # phrase in this cue before consulting its immediate neighbours.
+            # A burnt-in caption often spans two ASR cues; only borrow neighbour
+            # speech when this cue already shares a meaningful Chinese phrase.
             own = SequenceMatcher(None, _chinese_text(text),
                                   _chinese_text(segment_texts.get(sid, '')), autojunk=False)
             matches = own.get_matching_blocks()

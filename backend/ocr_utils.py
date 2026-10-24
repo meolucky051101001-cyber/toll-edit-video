@@ -212,7 +212,7 @@ def stabilize_samples(samples):
     keys = ("x_pct", "max_x_pct", "y_pct", "max_y_pct")
     for row in result:
         group = groups[-1] if groups else []
-        compatible = bool(group) and row["sample_time"] - group[-1]["sample_time"] <= .40001
+        compatible = bool(group) and row["sample_time"] - group[-1]["sample_time"] <= .75001
         if compatible:
             for key in keys:
                 tolerance = .025 if "x_pct" in key else .012
@@ -375,8 +375,8 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
 
     if srt_segments:
         # Cover every speech segment; process recognition in bounded batches.
-        interval = max(0.1, min(5.0, float(os.getenv("V1_OCR_TRACK_INTERVAL", "1.2"))))
-        max_samples_per_cue = max(1, int(os.getenv("V1_OCR_MAX_SAMPLES_PER_SEGMENT", "2")))
+        interval = max(0.1, min(5.0, float(os.getenv("V1_OCR_TRACK_INTERVAL", "0.55"))))
+        max_samples_per_cue = max(1, int(os.getenv("V1_OCR_MAX_SAMPLES_PER_SEGMENT", "8")))
         total_segs = len(srt_segments)
         for seg_idx, seg in enumerate(srt_segments):
             s = seg.start.total_seconds()
@@ -388,7 +388,12 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                 e = min(e, duration)
             cue_dur = max(0.1, e - s)
             # Smart mode saves extra samples, NEVER the only geometry sample.
-            count = 1 if ocr_strategy == 'smart_skip' else min(max_samples_per_cue, max(1, math.ceil(cue_dur / interval)))
+            if ocr_strategy == 'smart_skip':
+                count = 1
+            elif cue_dur <= 2.05:
+                count = min(max_samples_per_cue, max(1, math.ceil(cue_dur / 1.2)))
+            else:
+                count = min(max_samples_per_cue, max(3, math.ceil(cue_dur / interval)))
             for t in sample_times(s, e, count):
                 target_timestamps.append((t, seg, seg_idx))
         if ocr_strategy == 'smart_skip':
