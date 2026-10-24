@@ -2121,6 +2121,97 @@ def _decode_overlay_assets(overlay_clips: List[Dict[str, Any]], workspace_dir: P
     return paths
 
 
+def _decode_audio_assets(audio_clips: List[Dict[str, Any]], workspace_dir: Path) -> List[Optional[Path]]:
+    """P5: giải mã dataURL nhạc/SFX → file trong <workspace>/audio_assets. None nếu hỏng."""
+    import base64
+
+    assets_dir = Path(workspace_dir) / "audio_assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    paths: List[Optional[Path]] = []
+    for i, c in enumerate(audio_clips or []):
+        src = str(c.get("src") or "")
+        m = re.match(r"data:audio/(mpeg|mp3|wav|x-wav|ogg|aac|m4a|mp4);base64,", src)
+        if not m:
+            paths.append(None)
+            continue
+        ext = {"mpeg": "mp3", "x-wav": "wav", "mp4": "m4a"}.get(m.group(1), m.group(1))
+        try:
+            raw = base64.b64decode(src[m.end():], validate=False)
+        except Exception:
+            paths.append(None)
+            continue
+        cid = re.sub(r"[^\w\-]", "", str(c.get("id", "")))[:40] or f"au{i}"
+        p = assets_dir / f"{cid}.{ext}"
+        p.write_bytes(raw)
+        paths.append(p)
+    return paths
+
+
+def _build_music_filter_lines(
+    music_meta: List[Dict[str, Any]],
+    base_tag: str,
+    total_dur: float,
+) -> Dict[str, Any]:
+    """
+    P5: sinh filter trộn các clip nhạc/SFX lên audio nền (hàm thuần để unit test).
+
+    music_meta: [{a_idx (index input ffmpeg), at_out, dur_out, volume, fadeIn, fadeOut,
+                  muted, duck}] — at_out/dur_out đã map sang trục file xuất.
+    base_tag: tag audio nền (vd '[basea]') — audio đã mix sẵn trong video (giọng AI + BGM).
+    Ducking: sidechaincompress nén nhạc theo mức âm của audio nền (giọng nói).
+    Trả {lines, used_split} — lines kết thúc bằng [outa], độ dài bung đủ total_dur.
+    """
+    lines: List[str] = []
+    active = [m for m in music_meta if not m.get("muted")]
+    ducked = [m for m in active if m.get("duck")]
+    if not active:
+        # tất cả bị tắt tiếng → giữ nguyên audio nền để không mất [outa]
+        lines.append(f"{base_tag}anull[outa]")
+        return {"lines": lines, "used_split": False}
+
+    used_split = bool(ducked)
+    mix_inputs: List[str] = []
+    if used_split:
+        split_tags = "".join(f"[bs{j}]" for j in range(len(ducked) + 1))
+        lines.append(f"{base_tag}asplit={len(ducked) + 1}{split_tags}")
+        base_mix_tag = "[bs0]"
+    else:
+        base_mix_tag = base_tag
+    mix_inputs.append(base_mix_tag)
+
+    duck_i = 0
+    for k, m in enumerate(active):
+        chain = ["aformat=sample_rates=44100:channel_layouts=stereo"]
+        chain.append(f"atrim=start=0:end={m['dur_out']:.3f}")
+        if abs(float(m.get("volume", 1.0)) - 1.0) > 1e-6:
+            chain.append(f"volume={float(m.get('volume', 1.0)):.5f}")
+        fade_in = float(m.get("fade_in", 0.0) or 0.0)
+        fade_out = float(m.get("fade_out", 0.0) or 0.0)
+        if fade_in > 0:
+            chain.append(f"afade=t=in:st=0:d={fade_in:.3f}")
+        if fade_out > 0:
+            chain.append(f"afade=t=out:st={max(0.0, m['dur_out'] - fade_out):.3f}:d={fade_out:.3f}")
+        chain.append(f"adelay={int(round(float(m.get('at_out', 0.0)) * 1000))}:all=1")
+        src = f"[{int(m.get('a_idx', 0))}:a]"
+        if m.get("duck"):
+            out_tag = f"[amd{k}]"
+            lines.append(f"{src}{','.join(chain)}[amraw{k}]")
+            lines.append(
+                f"[amraw{k}][bs{duck_i + 1}]sidechaincompress=threshold=0.03:ratio=6:attack=80:release=500{out_tag}"
+            )
+            duck_i += 1
+        else:
+            out_tag = f"[am{k}]"
+            lines.append(f"{src}{','.join(chain)}{out_tag}")
+        mix_inputs.append(out_tag)
+
+    lines.append(
+        f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:normalize=0:duration=longest[mxout]"
+    )
+    lines.append(f"[mxout]apad=whole_dur={max(0.1, float(total_dur or 0.0)):.3f}[outa]")
+    return {"lines": lines, "used_split": used_split}
+
+
 def _retime_subtitles_to_timeline(    trans_subs: List[Dict[str, Any]],
     orig_subs: List[Dict[str, Any]],
     clips: List[Dict[str, Any]],
@@ -2168,6 +2259,7 @@ def _apply_timeline_edits_file(
     out_path: Path,
     text_clips: Optional[List[Dict[str, Any]]] = None,
     overlay_clips: Optional[List[Dict[str, Any]]] = None,
+    audio_clips: Optional[List[Dict[str, Any]]] = None,
     workspace_dir: Optional[Path] = None,
 ) -> bool:
     """
@@ -2177,6 +2269,7 @@ def _apply_timeline_edits_file(
     P2: speed/volume/fade/crop/rotate/flip/reverse/freeze/detachAudio.
     P3: text_clips (burn ASS) + overlay_clips (overlay filter ảnh) đặt đúng vị trí file xuất
         (at/dur trên timeline có gap được map qua _timeline_to_output_t).
+    P5: audio_clips (nhạc nền/SFX dataURL) trộn lên audio sẵn có, có volume/fade/ducking.
     Sử dụng GPU NVENC (fallback CPU libx264) đảm bảo âm thanh và hình ảnh đồng bộ 100%.
     """
     if not video_path.is_file() or not clips:
@@ -2223,17 +2316,32 @@ def _apply_timeline_edits_file(
         return False
 
     audio_maps = ["-map", "[outa]", "-c:a", "aac", "-b:a", "192k"] if a_stream else []
+    base_dir = Path(workspace_dir) if workspace_dir else out_path.parent
 
-    # ---- P3: text burn (ASS) + overlay ảnh trên đầu kết quả concat ----
-    overlay_inputs: List[str] = []
+    # ---- P3/P5: hậu xử lý video (text ASS + overlay ảnh) và audio (nhạc/SFX) ----
     text_clips = [c for c in (text_clips or []) if isinstance(c, dict)]
     overlay_clips = [c for c in (overlay_clips or []) if isinstance(c, dict)]
-    if text_clips or overlay_clips:
-        base_dir = Path(workspace_dir) if workspace_dir else out_path.parent
-        # đổi tag đầu ra của concat thành [basev] rồi xâu chuỗi hậu xử lý
-        graph["filter_lines"][-1] = graph["filter_lines"][-1].replace("[outv]", "[basev]", 1)
-        cur = "[basev]"
+    audio_clips = [c for c in (audio_clips or []) if isinstance(c, dict)]
+    overlay_inputs: List[str] = []
+    music_inputs: List[str] = []
+    needs_video_post = bool(text_clips or overlay_clips)
+    needs_audio_post = bool(audio_clips) and bool(a_stream)
 
+    if needs_video_post or needs_audio_post:
+        # đổi tag đầu ra của graph thành [basev]/[basea] rồi xâu chuỗi hậu xử lý
+        # (quét toàn bộ vì mode "mix" của P2 có [outv] và [outa] ở hai dòng khác nhau)
+        for i, ln in enumerate(graph["filter_lines"]):
+            if "[outv]" in ln:
+                graph["filter_lines"][i] = ln.replace("[outv]", "[basev]", 1)
+                break
+        if needs_audio_post:
+            for i, ln in enumerate(graph["filter_lines"]):
+                if "[outa]" in ln:
+                    graph["filter_lines"][i] = ln.replace("[outa]", "[basea]", 1)
+                    break
+
+    if needs_video_post:
+        cur = "[basev]"
         if overlay_clips:
             asset_paths = _decode_overlay_assets(overlay_clips, base_dir)
             for i, (oc, asset) in enumerate(zip(overlay_clips, asset_paths)):
@@ -2260,7 +2368,7 @@ def _apply_timeline_edits_file(
                 graph["filter_lines"].append(f"[{img_idx}:v]{','.join(pre)}[ovi{i}]")
                 graph["filter_lines"].append(
                     f"{cur}[ovi{i}]overlay=x='main_w*{px:.4f}-w/2':y='main_h*{py:.4f}-h/2'"
-                    f":enable='between(t,{at_out:.3f},{at_out + end_out - at_out:.3f})'[{ov_tag}]"
+                    f":enable='between(t,{at_out:.3f},{end_out:.3f})'[{ov_tag}]"
                 )
                 cur = f"[{ov_tag}]"
 
@@ -2279,8 +2387,40 @@ def _apply_timeline_edits_file(
             except ValueError:
                 ass_ref = str(ass_path).replace("\\", "/").replace(":", "\\:")
             graph["filter_lines"].append(f"{cur}subtitles='{ass_ref}'[outv]")
+
+    if needs_audio_post:
+        # P5: nhạc/SFX trộn lên audio nền có sẵn; vị trí map qua timeline→output (gap-aware)
+        music_meta = []
+        asset_paths = _decode_audio_assets(audio_clips, base_dir)
+        for i, (ac, asset) in enumerate(zip(audio_clips, asset_paths)):
+            if not asset:
+                logger.warning(f"Audio clip #{i}: file nhạc hỏng/không hỗ trợ — bỏ qua")
+                continue
+            at_tl = max(0.0, float(ac.get("at", 0.0) or 0.0))
+            dur_tl = max(0.1, float(ac.get("dur", 3.0) or 3.0))
+            at_out = _timeline_to_output_t(valid_clips, graph, at_tl)
+            end_out = _timeline_to_output_t(valid_clips, graph, at_tl + dur_tl)
+            music_inputs.append(str(asset))
+            music_meta.append({
+                "a_idx": 1 + len(overlay_inputs) + len(music_inputs) - 1,
+                "at_out": at_out,
+                "dur_out": max(0.1, end_out - at_out),
+                "volume": min(2.0, max(0.0, float(ac.get("volume", 1.0) or 1.0))),
+                "fade_in": max(0.0, float(ac.get("fadeIn", 0.0) or 0.0)),
+                "fade_out": max(0.0, float(ac.get("fadeOut", 0.0) or 0.0)),
+                "muted": bool(ac.get("muted")),
+                "duck": bool(ac.get("duck")),
+            })
+        if music_meta:
+            music_res = _build_music_filter_lines(music_meta, "[basea]", graph.get("total_dur", 0.0))
+            graph["filter_lines"].extend(music_res["lines"])
         else:
-            graph["filter_lines"].append(f"{cur}null[outv]")
+            graph["filter_lines"].append("[basea]anull[outa]")
+
+    # Repair: nếu [outv] bị đổi thành [basev] mà chuỗi hậu xử lý không tái tạo [outv]
+    # (ví dụ chỉ có nhạc/SFX, không có text/overlay) → nối lại qua null
+    if (needs_video_post or needs_audio_post) and "[outv]" not in " ".join(graph["filter_lines"]):
+        graph["filter_lines"].append("[basev]null[outv]")
 
     filter_complex = ";".join(graph["filter_lines"])
     temp_out = out_path.parent / f"_temp_edit_{out_path.name}"
@@ -2289,7 +2429,7 @@ def _apply_timeline_edits_file(
     cmd_nvenc = [
         "ffmpeg", "-y",
         "-i", str(video_path),
-    ] + [x for p in overlay_inputs for x in ("-i", p)] + [
+    ] + [x for p in (overlay_inputs + music_inputs) for x in ("-i", p)] + [
         "-filter_complex", filter_complex,
         "-map", "[outv]"
     ] + audio_maps + [
@@ -2310,7 +2450,7 @@ def _apply_timeline_edits_file(
         cmd_cpu = [
             "ffmpeg", "-y",
             "-i", str(video_path),
-        ] + [x for p in overlay_inputs for x in ("-i", p)] + [
+        ] + [x for p in (overlay_inputs + music_inputs) for x in ("-i", p)] + [
             "-filter_complex", filter_complex,
             "-map", "[outv]"
         ] + audio_maps + [
@@ -2347,6 +2487,8 @@ async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
       - text_clips: Optional[List[Dict]] — P3: {id, text, at, dur, pos {x,y}, style {...}, animIn, animOut}
         (at/dur trên timeline; backend tự map về vị trí file xuất và burn bằng ASS)
       - overlay_clips: Optional[List[Dict]] — P3: {id, src dataURL ảnh, at, dur, pos, scale, opacity}
+      - audio_clips: Optional[List[Dict]] — P5: {id, src dataURL nhạc, at, dur, volume, fadeIn,
+        fadeOut, muted, duck} — trộn lên audio nền có sẵn (giọng AI + BGM)
     """
     stem = payload.get("stem", "").strip()
     if not stem:
@@ -2384,10 +2526,12 @@ async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
 
     text_clips_in = payload.get("text_clips") if isinstance(payload.get("text_clips"), list) else []
     overlay_clips_in = payload.get("overlay_clips") if isinstance(payload.get("overlay_clips"), list) else []
+    audio_clips_in = payload.get("audio_clips") if isinstance(payload.get("audio_clips"), list) else []
     ok = _apply_timeline_edits_file(
         input_video, clips, dest_final,
         text_clips=text_clips_in,
         overlay_clips=overlay_clips_in,
+        audio_clips=audio_clips_in,
         workspace_dir=job_dir,
     )
     if not ok:
@@ -2495,6 +2639,76 @@ async def api_save_timeline_project(payload: Dict[str, Any] = Body(...)):
     tmp.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
     tmp.replace(target)
     return {"status": "ok", "saved": True, "path": str(target), "saved_at": project["saved_at"]}
+
+
+@router.get("/api/workflow/audio/waveform")
+async def api_audio_waveform(stem: str = Query(...), version: str = Query("final"), buckets: int = Query(1600)):
+    """
+    P5: dải biên độ (waveform peaks) của audio video cho track timeline.
+    Bóc PCM 8kHz mono bằng ffmpeg, lấy max theo bucket, cache tại
+    workspace/<stem>/waveform_<version>.json (theo mtime + size file nguồn).
+    """
+    clean_stem = re.sub(r'[^\w\-_.]', '_', (stem or "").strip())
+    if not clean_stem:
+        raise HTTPException(status_code=400, detail="Thiếu stem")
+    n_buckets = max(200, min(4000, int(buckets or 1600)))
+
+    job_dir = WORKSPACE / clean_stem
+    src_file = None
+    if version != "raw":
+        cand_final = job_dir / f"final_{stem}.mp4"
+        if cand_final.is_file() and _valid_final_video(cand_final):
+            src_file = cand_final
+    if src_file is None:
+        for cand in (INPUT_DIR / f"{stem}.mp4", DOWNLOADS_DIR / f"{stem}.mp4"):
+            if cand.is_file():
+                src_file = cand
+                break
+    if src_file is None:
+        return {"exists": False}
+
+    cache_file = job_dir / f"waveform_{version}.json"
+    st = src_file.stat()
+    if cache_file.is_file():
+        try:
+            cached = json.loads(cache_file.read_text(encoding="utf-8"))
+            if (cached.get("mtime") == st.st_mtime and cached.get("size") == st.st_size
+                    and cached.get("buckets") == n_buckets and isinstance(cached.get("peaks"), list)):
+                return {"exists": True, "cached": True, "duration": cached.get("duration"),
+                        "peaks": cached.get("peaks"), "buckets": n_buckets}
+        except Exception:
+            pass
+
+    cmd = ["ffmpeg", "-v", "error", "-i", str(src_file), "-map", "0:a:0",
+           "-ac", "1", "-ar", "8000", "-f", "s16le", "-"]
+    try:
+        res = subprocess.run(cmd, capture_output=True, timeout=120)
+    except Exception as e:
+        logger.warning(f"Waveform: ffmpeg fail cho {clean_stem}: {e}")
+        return {"exists": False}
+    if res.returncode != 0 or not res.stdout:
+        return {"exists": False}
+
+    samples = np.frombuffer(res.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    duration = len(samples) / 8000.0
+    if duration <= 0:
+        return {"exists": False}
+    n = min(n_buckets, max(1, int(duration * 20)))
+    pad = (-len(samples)) % n
+    if pad:
+        samples = np.concatenate([samples, np.zeros(pad, dtype=np.float32)])
+    peaks = np.abs(samples.reshape(n, -1)).max(axis=1)
+    peaks = np.maximum(peaks, 1e-6)
+    mx = float(peaks.max())
+    peaks = (peaks / (mx if mx > 0 else 1.0)).round(4).tolist()
+
+    payload = {"mtime": st.st_mtime, "size": st.st_size, "buckets": n,
+               "duration": round(duration, 3), "peaks": peaks}
+    try:
+        cache_file.write_text(json.dumps(payload), encoding="utf-8")
+    except Exception:
+        pass
+    return {"exists": True, "cached": False, "duration": round(duration, 3), "peaks": peaks, "buckets": n}
 
 
 @router.get("/api/workflow/download-srt")
