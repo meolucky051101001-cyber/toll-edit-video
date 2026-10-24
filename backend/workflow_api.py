@@ -2993,6 +2993,72 @@ async def api_timeline_render_cancel(payload: Dict[str, Any] = Body(...)):
     return {"status": "ok", "cancelled": True}
 
 
+# =========================================================================
+# P7: TÍCH HỢP CONCAT (jub0t/concat — AGPL-3.0, CHỈ gọi như tiến trình ngoài)
+# =========================================================================
+
+CONCAT_EXE_CANDIDATES = [
+    Path(r"C:\tool v1\bin\concat\app\PFiles64\Concat\concat.exe"),
+]
+
+
+def _find_concat_exe() -> Optional[Path]:
+    for p in CONCAT_EXE_CANDIDATES:
+        if p.is_file():
+            return p
+    return None
+
+
+@router.post("/api/workflow/concat/open")
+async def api_concat_open(payload: Dict[str, Any] = Body(...)):
+    """
+    P7: mở Concat với thư mục project của video (tiến trình ngoài, detached).
+    AGPL: chỉ thực thi nhị phân, không nhúng/sao chép mã nguồn Concat.
+    """
+    stem = re.sub(r'[^\w\-_.]', '_', (payload.get("stem") or "").strip())
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    exe = _find_concat_exe()
+    if not exe:
+        raise HTTPException(status_code=404, detail="Không tìm thấy concat.exe (bin/concat/app/PFiles64/Concat/concat.exe)")
+    job_dir = WORKSPACE / stem
+    job_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        proc = subprocess.Popen(
+            [str(exe), "--project", str(job_dir)],
+            cwd=str(job_dir),
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Không mở được Concat: {e}")
+    return {"status": "ok", "pid": proc.pid, "project_dir": str(job_dir)}
+
+
+@router.post("/api/workflow/concat/import")
+async def api_concat_import(stem: str = Form(...), file: UploadFile = File(...)):
+    """
+    P7: nhập file video xuất từ Concat vào THƯ VIỆN (INPUT_DIR) như một video phôi mới,
+    để chạy lại pipeline / chỉnh sửa tiếp trong Studio.
+    """
+    stem_clean = re.sub(r'[^\w\-_.]', '_', (stem or "").strip())
+    if not stem_clean:
+        raise HTTPException(status_code=400, detail="Thiếu stem")
+    data = await file.read()
+    if len(data) < 100_000:
+        raise HTTPException(status_code=400, detail="File quá nhỏ — có thể không phải video")
+    if len(data) > 2 * 1024 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File quá lớn (>2GB)")
+    if not (data[:12].find(b"ftyp") >= 4 or data[:4] == b"\x1a\x45\xdf\xa3" or data[:3] == b"ID3" or data[:2] == b"\x00\x00"):
+        logger.warning(f"Concat import: file không nhận diện được header video quen thuộc — vẫn lưu: {file.filename}")
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    out_name = f"concat_{stem_clean[:40]}_{ts}.mp4"
+    INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = INPUT_DIR / out_name
+    out_path.write_bytes(data)
+    return {"status": "ok", "filename": out_name, "size_mb": round(len(data) / 1048576, 2)}
+
+
 @router.get("/api/workflow/download-srt")
 async def api_download_srt(stem: str = Query(...), type: str = Query("translated")):
     """
