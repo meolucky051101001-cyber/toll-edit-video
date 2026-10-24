@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     search_headless_silent: bool = True
     browser_interaction_timeout: int = Field(1800, ge=10, le=7200)
     metric_snapshot_throttle_seconds: int = Field(300, ge=1, le=86400)
+    # inspect() runs once per scroll iteration; checkpointing (storage_state +
+    # fsync) every time stalls the search. Save at most this often — _close()
+    # and explicit user-action paths (drag/auto-solve) always checkpoint.
+    session_checkpoint_min_interval: float = Field(30.0, ge=0.0, le=3600.0)
 
 
 settings = Settings()

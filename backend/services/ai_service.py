@@ -130,16 +130,35 @@ class AIService:
         if not self.config.ai_api_key.get_secret_value() or not self.config.ai_free_tier_confirmed:
             return fallback
 
+        # Route through the same serialization/min-interval/quota-cooldown as
+        # query expansion: unthrottled calls used to burn the shared free-tier
+        # quota, degrading every subsequent search expansion with 429s.
         try:
-            provider = self.factory(self.config)
-            video_payload = dict(video_data)
-            video_payload["video_id"] = video_id
-            raw = await provider.analyze_script(video_payload)
+            async with asyncio.timeout(85):
+                async with self.lock:
+                    if time.monotonic() < self.cooldown_until:
+                        raise AIError(
+                            "quota",
+                            "Gemini đang tạm nghỉ sau khi chạm hạn mức. Dùng phân tích dự phòng.",
+                        )
+                    remaining = self.config.ai_min_interval - (time.monotonic() - self.last_request)
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
+                    self.last_request = time.monotonic()
+                    provider = self.factory(self.config)
+                    video_payload = dict(video_data)
+                    video_payload["video_id"] = video_id
+                    raw = await provider.analyze_script(video_payload)
             data = json.loads(raw)
             data["video_id"] = video_id
             data["source"] = "gemini"
             data["cached"] = False
             return ScriptAnalysisOut.model_validate(data)
+        except AIError as exc:
+            if exc.code == "quota":
+                self.cooldown_until = time.monotonic() + 60
+            logger.warning("ai script analysis blocked (%s); using fallback", exc.code)
+            return fallback
         except Exception as exc:
             logger.warning("ai script analysis failed: %s; using fallback", exc)
             return fallback

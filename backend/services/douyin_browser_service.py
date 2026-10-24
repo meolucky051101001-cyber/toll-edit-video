@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 import re
 from pathlib import Path
 from typing import Any, cast
@@ -82,6 +83,7 @@ class DouyinBrowserService:
         self.allow_media = False
         self.dismiss_guest_modal = True
         self.last_http_status: int | None = None
+        self._last_checkpoint: float = 0.0
 
     def set_allow_media(self, allow: bool) -> None:
         self.allow_media = allow
@@ -522,12 +524,18 @@ class DouyinBrowserService:
             else:
                 self.state = "page_available"
 
-            # Persist session state whenever context exists with active cookies
+            # Persist session state periodically: inspect() runs on every
+            # scroll iteration and a full storage_state+fsync each time stalls
+            # the search. _close() and explicit user actions still checkpoint
+            # immediately, so the session survives any shutdown.
             if self.context:
                 try:
-                    c_list = await self.context.cookies()
-                    if c_list:
-                        await save_session_checkpoint(self.context, self.profile)
+                    now = time.monotonic()
+                    if now - self._last_checkpoint >= settings.session_checkpoint_min_interval:
+                        c_list = await self.context.cookies()
+                        if c_list:
+                            self._last_checkpoint = now
+                            await save_session_checkpoint(self.context, self.profile)
                 except Exception:
                     pass
 
@@ -657,6 +665,7 @@ class DouyinBrowserService:
                 self.driver = None
             self.state = "closed"
             self.is_currently_headless = False
+            self._last_checkpoint = 0.0
             if not getattr(self, "sticky_headful", False):
                 self.hybrid_headless = getattr(self, "default_hybrid_headless", True)
                 self.force_headful_session = False

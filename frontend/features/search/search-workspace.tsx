@@ -953,7 +953,12 @@ function SearchSession({
         </section>
       )}
       {jobId ? (
-        <VideoGrid key={jobId} jobId={jobId} initialSort={mapSortByToGridSort(sortBy)} />
+        <VideoGrid
+          key={jobId}
+          jobId={jobId}
+          initialSort={mapSortByToGridSort(sortBy)}
+          pollIntervalMs={active ? 1000 : 0}
+        />
       ) : (
         <>
           <div className="section-heading">

@@ -249,7 +249,7 @@ class XiaohongshuProvider(SearchProvider):
                         ).first
                         if await close_btn.count() > 0:
                             await close_btn.click(timeout=800)
-                        await page.wait_for_timeout(400)
+                        await page.wait_for_timeout(300)
                     except Exception:
                         pass
                     await self.gate(page, results)
@@ -266,7 +266,12 @@ class XiaohongshuProvider(SearchProvider):
                 if not on_current_results:
                     if current.path.rstrip("/") != "/explore" and current.path.rstrip("/") != "":
                         await page.goto(f"{base}/explore", wait_until="domcontentloaded", timeout=30000)
-                        await page.wait_for_timeout(1500)
+                        # Wait for the search box instead of a flat settle so a
+                        # fast load continues immediately.
+                        try:
+                            await page.wait_for_selector("input#search-input", timeout=4000)
+                        except Error:
+                            await page.wait_for_timeout(800)
                         await self.gate(page, results)
                     # XHS may render duplicate hidden inputs. Operate on the first visible one.
                     field = page.locator("input#search-input:visible").first
@@ -318,7 +323,7 @@ class XiaohongshuProvider(SearchProvider):
                 if await video_tab.count() > 0 and await video_tab.is_visible():
                     try:
                         await video_tab.click(timeout=2000)
-                        await page.wait_for_timeout(600)
+                        await page.wait_for_timeout(400)
                         on_video_tab = True
                     except Error:
                         pass

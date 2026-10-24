@@ -12,10 +12,14 @@ export function VideoGrid({
   jobId,
   library = false,
   initialSort = "best",
+  pollIntervalMs = 0,
 }: {
   jobId?: string;
   library?: boolean;
   initialSort?: string;
+  /** Poll interval for incremental results. 0 (default) = fetch once — static
+   * views (imports, finished jobs) no longer re-request every second. */
+  pollIntervalMs?: number;
 }) {
   const [platform, setPlatform] = useState("");
   const [status, setStatus] = useState(library ? "saved" : "");
@@ -55,7 +59,7 @@ export function VideoGrid({
   }
   const resource = useResource<Page<Video>>(
     `/videos?${params}`,
-    jobId ? 1000 : 0,
+    pollIntervalMs,
   );
   // Parent remounts on job switch. Progress polling keeps incremental results visible.
   function filter(setter: (s: string) => void, value: string) {
