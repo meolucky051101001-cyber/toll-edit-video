@@ -497,6 +497,10 @@ class _SDraw:
     def line(self, xy, fill, width=3):
         self.d.line(self._pts(xy), fill=fill, width=self._w(width))
 
+    def line_c(self, xy, fill, width=3):
+        """Nét gấp khúc nối cong (không gãy khúc) — dùng cho đường cong mượt."""
+        self.d.line(self._pts(xy), fill=fill, width=self._w(width), joint="curve")
+
     def ellipse(self, box, fill=None, outline=None, width=1):
         self.d.ellipse(self._box(box), fill=fill, outline=outline,
                        width=self._w(width) if outline is not None else 1)
@@ -542,7 +546,7 @@ def _ik_elbow(s, t, l1, l2, flip=-1.0):
     return (s[0] + ux * a + px * h, s[1] + uy * a + py * h)
 
 
-def _draw_cat_pose(
+def _draw_cat_pose_v3(
     variant: str = "tabby",
     head_dx: float = 0.0,
     head_dy: float = 0.0,
@@ -749,8 +753,8 @@ def _render_cat_sprite(variant: str = "tabby", facing: int = 1, lean: float = 0.
     return spr
 
 
-def _draw_cat_lying(variant: str = "black", breathe: float = 0.0,
-                    tail_flick: float = 0.0, asleep: bool = True) -> Image.Image:
+def _draw_cat_lying_v3(variant: str = "black", breathe: float = 0.0,
+                       tail_flick: float = 0.0, asleep: bool = True) -> Image.Image:
     """
     Mèo nằm dài sưởi nắng (sprite 300x160, mặt đất y=130):
     - thân duỗi dài, thở nhẹ (breathe 0..1), đuôi quét đất, mắt nhắm ngủ ngon.
@@ -804,6 +808,498 @@ def _draw_cat_lying(variant: str = "black", breathe: float = 0.0,
     if not is_black:
         for ox in (-30, -6, 18):
             sd.line([(bx + ox, by - ry + 4), (bx + ox + 10, by - ry - 8)], fill=BLACK, width=4)
+    return canvas.resize((W, H), Image.Resampling.LANCZOS)
+
+
+def _cr_spline(ctrl, samples=9, closed=False):
+    """Nội suy Catmull-Rom qua chuỗi điểm điều khiển — biến mọi nét gãy thành đường cong tay vẽ."""
+    pts = [tuple(p) for p in ctrl]
+    n = len(pts)
+    if n < 2:
+        return pts
+    out = []
+    m = n if closed else n - 1
+    for i in range(m):
+        p0 = pts[(i - 1) % n] if closed else pts[max(i - 1, 0)]
+        p1 = pts[i]
+        p2 = pts[(i + 1) % n] if closed else pts[i + 1]
+        p3 = pts[(i + 2) % n] if closed else pts[min(i + 2, n - 1)]
+        for k in range(samples):
+            t = k / float(samples)
+            t2 = t * t
+            t3 = t2 * t
+            x = 0.5 * ((2.0 * p1[0]) + (-p0[0] + p2[0]) * t
+                       + (2.0 * p0[0] - 5.0 * p1[0] + 4.0 * p2[0] - p3[0]) * t2
+                       + (-p0[0] + 3.0 * p1[0] - 3.0 * p2[0] + p3[0]) * t3)
+            y = 0.5 * ((2.0 * p1[1]) + (-p0[1] + p2[1]) * t
+                       + (2.0 * p0[1] - 5.0 * p1[1] + 4.0 * p2[1] - p3[1]) * t2
+                       + (-p0[1] + 3.0 * p1[1] - 3.0 * p2[1] + p3[1]) * t3)
+            out.append((x, y))
+    out.append(out[0] if closed else pts[-1])
+    return out
+
+
+def _taper_poly(spine, widths):
+    """Dải khép kín thuôn dần hai đầu từ xương sống + bề rộng — nét chi/đuôi kiểu bút mực."""
+    top, bot = [], []
+    n = len(spine)
+    for i in range(n):
+        x, y = spine[i]
+        if i == 0:
+            dx, dy = spine[1][0] - x, spine[1][1] - y
+        elif i == n - 1:
+            dx, dy = x - spine[-2][0], y - spine[-2][1]
+        else:
+            dx = spine[i + 1][0] - spine[i - 1][0]
+            dy = spine[i + 1][1] - spine[i - 1][1]
+        L = math.hypot(dx, dy) or 1.0
+        nx, ny = -dy / L, dx / L
+        hw = widths[i] / 2.0
+        top.append((x + nx * hw, y + ny * hw))
+        bot.append((x - nx * hw, y - ny * hw))
+    return top + bot[::-1]
+
+
+def _lerp_w(widths_ctrl, frac):
+    """Nội suy bề rộng dọc theo chi theo tiến độ 0..1."""
+    if not widths_ctrl:
+        return 6.0
+    if len(widths_ctrl) == 1:
+        return widths_ctrl[0]
+    x = max(0.0, min(1.0, frac)) * (len(widths_ctrl) - 1)
+    i = int(math.floor(x))
+    j = min(i + 1, len(widths_ctrl) - 1)
+    f = x - i
+    return widths_ctrl[i] * (1.0 - f) + widths_ctrl[j] * f
+
+
+def _resample_path(ctrl, n=6, samples=10):
+    """Lấy mẫu lại đường cong theo ĐỘ DÀI CUNG — nội suy hai tư thế (duỗi/vểnh) không bị rối."""
+    sp = _cr_spline(ctrl, samples)
+    cum = [0.0]
+    for i in range(1, len(sp)):
+        cum.append(cum[-1] + math.hypot(sp[i][0] - sp[i - 1][0], sp[i][1] - sp[i - 1][1]))
+    total = cum[-1] or 1.0
+    out = []
+    j = 1
+    for k in range(n):
+        target = total * k / float(n - 1)
+        while j < len(cum) - 1 and cum[j] < target:
+            j += 1
+        seg = cum[j] - cum[j - 1] or 1.0
+        f = (target - cum[j - 1]) / seg
+        out.append((sp[j - 1][0] + (sp[j][0] - sp[j - 1][0]) * f,
+                    sp[j - 1][1] + (sp[j][1] - sp[j - 1][1]) * f))
+    return out
+
+
+def _fur_edge(pts, amp=1.4, wl=11.0, phase=0.0):
+    """Gợn lông nhẹ trên viền khép kín — viền lởm chởm kiểu mực tay vẽ (như tranh mèo lông xù)."""
+    if amp <= 0.01 or len(pts) < 5:
+        return pts
+    n = len(pts)
+    cum = [0.0]
+    for i in range(1, n):
+        cum.append(cum[-1] + math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]))
+    out = []
+    for i in range(n):
+        p = pts[i]
+        pv = pts[i - 1]
+        nx_ = pts[(i + 1) % n]
+        dx, dy = nx_[0] - pv[0], nx_[1] - pv[1]
+        L = math.hypot(dx, dy) or 1.0
+        ux, uy = -dy / L, dx / L
+        w = math.sin(2.0 * math.pi * cum[i] / wl + phase)
+        k = amp * (0.5 * w + 0.5)
+        out.append((p[0] + ux * k, p[1] + uy * k))
+    return out
+
+
+def _draw_cat_pose(
+    variant: str = "tabby",
+    head_dx: float = 0.0,
+    head_dy: float = 0.0,
+    head_tilt: float = 0.0,
+    blink: float = 0.0,
+    pupil_dx: float = 0.6,
+    pupil_dy: float = 0.0,
+    ear: float = 0.35,
+    shout: float = 0.3,
+    bristle: float = 0.0,
+    brow: float = 0.45,
+    paw_a=None,
+    paw_b=None,
+    claw_a: float = 0.0,
+    claw_b: float = 0.0,
+    foot_a=(0.0, 0.0),
+    foot_b=(0.0, 0.0),
+    tail_lift: float = 0.45,
+    tail_flick: float = 0.0,
+    tail_puff: float = 0.0
+) -> Image.Image:
+    """
+    Rig mèo v4 (pose-driven) — dáng mèo thật, nét cong mượt như bút mực:
+    - Khối thân/đầu/hông vẽ bằng đường cong Catmull-Rom khép kín (không còn khối ellipse thô).
+    - Chi và đuôi là DẢI THUÔN hai đầu (taper) — không còn "chuỗi hạt" khớp tròn.
+    - Đầu: sọ-má-mõm liền khối, tai cong có vành trong, mắt hạnh nhân có mí + đốm sáng đồng tử,
+      mũi tam giác, miệng W / há gầm có nanh, mày biểu cảm (brow 0 mềm ↔ 1 cau), râu cong.
+    - Thân: lưng vòm — hông đùi — 2 chân sau digitigrade — 2 tay 2 khúc IK; vằn lưng/đuôi/trán
+      cho mèo vàng; lông tơ bụng/ngực/hông; lông xù gáy (bristle).
+    Trả về sprite RGBA 240x224, bàn chân chạm mốc y=208.
+    """
+    W, H = 240, 224
+    SS = 3
+    canvas = Image.new("RGBA", (W * SS, H * SS), (0, 0, 0, 0))
+    sd = _SDraw(ImageDraw.Draw(canvas), SS)
+
+    is_black = variant == "black"
+    body = BLACK if is_black else WHITE
+    edge = WHITE if is_black else BLACK
+    accent = edge
+
+    def c01(v, lo=0.0, hi=1.0):
+        return max(lo, min(hi, v))
+
+    def blob(ctrl, ow=4.2, samples=9, fur=1.5, wl=11.0, phase=0.0):
+        pts = _fur_edge(_cr_spline(ctrl, samples, closed=True), fur, wl, phase)
+        sd.polygon(pts, fill=body)
+        sd.line_c(pts, fill=edge, width=ow)
+        return pts
+
+    def limb(ctrl, widths, ow=3.3, samples=8, fur=1.2, wl=10.0, phase=0.0):
+        sp = _cr_spline(ctrl, samples)
+        n = len(sp)
+        ws = [_lerp_w(widths, i / float(n - 1)) for i in range(n)]
+        poly = _fur_edge(_taper_poly(sp, ws), fur, wl, phase)
+        sd.polygon(poly, fill=body)
+        sd.line_c(poly + [poly[0]], fill=edge, width=ow)
+        return sp
+
+    def paw(cx_, cy_, s=1.0):
+        sd.ellipse([cx_ - 15 * s, cy_ - 8 * s, cx_ + 15 * s, cy_ + 7 * s],
+                   fill=body, outline=edge, width=3.4)
+        sd.arc([cx_ - 9 * s, cy_ - 6 * s, cx_ - 1 * s, cy_ + 3 * s], 200, 340,
+               fill=accent, width=2.2)
+        sd.arc([cx_ + 1 * s, cy_ - 6 * s, cx_ + 9 * s, cy_ + 3 * s], 200, 340,
+               fill=accent, width=2.2)
+
+    # ===== 1) ĐUÔI: 3 tư thế mốc (cụp / ngang / vểnh) nội suy theo lift =====
+    lift = c01(tail_lift)
+    puff = c01(tail_puff)
+    droop = [(52.0, 140.0), (38.0, 148.0), (26.0, 158.0), (18.0, 170.0), (15.0, 182.0), (16.0, 192.0)]
+    midp = [(52.0, 140.0), (38.0, 144.0), (26.0, 148.0), (17.0, 150.0), (10.0, 148.0), (7.0, 141.0)]
+    raised = [(52.0, 140.0), (40.0, 130.0), (32.0, 116.0), (28.0, 100.0), (32.0, 88.0), (42.0, 78.0)]
+    if lift < 0.5:
+        f = lift * 2.0
+        a_path, b_path = _resample_path(droop, 6), _resample_path(midp, 6)
+    else:
+        f = (lift - 0.5) * 2.0
+        a_path, b_path = _resample_path(midp, 6), _resample_path(raised, 6)
+    tctrl = []
+    for i in range(6):
+        x = a_path[i][0] + (b_path[i][0] - a_path[i][0]) * f
+        y = a_path[i][1] + (b_path[i][1] - a_path[i][1]) * f
+        x += 4.0 * tail_flick * math.sin(i * 1.35)
+        y += 2.5 * tail_flick * math.cos(i * 1.35)
+        tctrl.append((x, y))
+    twid = [10.5 + 4 * puff, 11.0 + 4 * puff, 10.0 + 3.5 * puff,
+            8.5 + 3 * puff, 6.0 + 2.5 * puff, 3.5 + 2 * puff]
+    tsp = limb(tctrl, twid, ow=3.4, samples=7)
+    if not is_black:
+        for f0 in (0.34, 0.56):
+            i0 = int(f0 * (len(tsp) - 1))
+            x0, y0 = tsp[i0]
+            x1, y1 = tsp[i0 + 1]
+            L0 = math.hypot(x1 - x0, y1 - y0) or 1.0
+            nx, ny = -(y1 - y0) / L0, (x1 - x0) / L0
+            hw = _lerp_w(twid, i0 / float(len(tsp) - 1)) / 2.0 + 1.2
+            sd.line([(x0 - nx * hw, y0 - ny * hw), (x0 + nx * hw, y0 + ny * hw)],
+                    fill=BLACK, width=3.0)
+
+    # ===== 2) CHÂN SAU XA (chìm sau thân) =====
+    fb = foot_b if foot_b else (0.0, 0.0)
+    fx2, fy2 = 76.0 + fb[0], 204.0 + fb[1]
+    limb([(74.0, 160.0), (64.0, 186.0), (fx2, fy2 - 6.0)], [11.0, 9.0, 8.0], ow=3.2)
+    paw(fx2, fy2, 0.9)
+
+    # ===== 3) TAY XA (trụ dưới / bước) =====
+    L1 = L2 = 29.0
+
+    def arm(sh, target, claw, w1, w2, ps=0.85):
+        t = _reach_target(sh, target, L1, L2)
+        el = _ik_elbow(sh, t, L1, L2, flip=-1.0)
+        limb([sh, el, t], [w1, w1 * 0.86, w2], ow=3.2, samples=9)
+        paw(t[0], t[1], ps)
+        cp = c01(claw)
+        if cp > 0.05:
+            ang = math.atan2(t[1] - el[1], t[0] - el[0])
+            for dk in (-0.34, 0.0, 0.34):
+                a2 = ang + dk
+                x1 = t[0] + math.cos(a2) * 9.0
+                y1 = t[1] + math.sin(a2) * 8.0
+                x2 = x1 + math.cos(a2) * (4.0 + 10.0 * cp)
+                y2 = y1 + math.sin(a2) * (4.0 + 10.0 * cp)
+                sd.line([(x1, y1), (x2, y2)], fill=BLACK, width=2.8)
+
+    pb = paw_b if paw_b is not None else (166.0, 202.0)
+    arm((142.0, 144.0), pb, claw_b, 10.5, 8.5, ps=0.8)
+
+    # ===== 4) LÔNG XÙ GÁY (gốc ẩn dưới thân) =====
+    br = c01(bristle)
+    if br > 0.05:
+        for (bx_, by_) in ((84.0, 97.0), (106.0, 91.5), (126.0, 91.5)):
+            hgt = 4.0 + 11.0 * br
+            tpts = _cr_spline([(bx_ - 8.0, by_ + 6.0), (bx_ - 9.5, by_ + 6.0 - hgt * 0.55),
+                               (bx_ - 2.0, by_ + 6.0 - hgt), (bx_ + 5.0, by_ + 6.0 - hgt * 0.6),
+                               (bx_ + 8.0, by_ + 6.0)], 7, closed=True)
+            sd.polygon(tpts, fill=body)
+            sd.line_c(tpts, fill=edge, width=2.6)
+
+    # ===== 5) HÔNG ĐÙI (vẽ chìm dưới thân — chỉ hở nửa dưới) =====
+    blob([(60.0, 132.0), (82.0, 128.0), (98.0, 142.0), (102.0, 158.0), (90.0, 174.0),
+          (68.0, 178.0), (54.0, 166.0), (50.0, 148.0)], ow=4.2)
+
+    # ===== 6) THÂN: mập tròn - lưng vòm - ức vươn (mèo béo tay vẽ) =====
+    blob([(158.0, 102.0), (134.0, 94.0), (106.0, 94.0), (80.0, 100.0), (58.0, 112.0),
+          (46.0, 128.0), (46.0, 146.0), (58.0, 158.0), (86.0, 163.0), (112.0, 163.0),
+          (134.0, 158.0), (150.0, 148.0), (160.0, 130.0), (160.0, 108.0)], ow=4.2)
+
+    # ===== 7) CẲNG + BÀN CHÂN SAU GẦN =====
+    fa = foot_a if foot_a else (0.0, 0.0)
+    fx1, fy1 = 98.0 + fa[0], 204.0 + fa[1]
+    limb([(80.0, 164.0), (74.0, 190.0), (fx1, fy1 - 6.0)], [13.0, 10.5, 9.0], ow=3.2)
+    paw(fx1, fy1, 1.0)
+
+    # ===== 8) VẰN LƯNG + HÔNG (mèo vàng) =====
+    if not is_black:
+        for (x0, yb) in ((82.0, 100.0), (104.0, 95.0), (124.0, 95.0)):
+            sd.line_c([(x0, yb), (x0 - 2.0, yb + 7.0), (x0 - 3.5, yb + 13.0)],
+                      fill=BLACK, width=3.4)
+        sd.line_c([(62.0, 166.0), (68.0, 159.0), (71.0, 153.0)], fill=BLACK, width=3.2)
+        sd.line_c([(80.0, 172.0), (86.0, 166.0)], fill=BLACK, width=3.0)
+
+    # ===== 9) GẠCH LÔNG MỰC (nhóm nét cong ngắn trong viền — hiện trên cả 2 tông màu) =====
+    for (hx, hy, ddx, ddy) in ((88.0, 157.0, -3.0, -6.0), (100.0, 158.0, -1.0, -6.0),
+                               (114.0, 158.0, -3.0, -6.0), (124.0, 157.0, -1.0, -6.0),
+                               (72.0, 170.0, -4.0, -5.0), (86.0, 174.0, -2.0, -5.0),
+                               (150.0, 140.0, -5.0, -6.0), (154.0, 132.0, -5.0, -5.0),
+                               (56.0, 138.0, -4.0, -3.0),
+                               (96.0, 102.0, -3.0, -5.0), (114.0, 101.0, -3.0, -5.0)):
+        sd.line([(hx, hy), (hx + ddx, hy + ddy)], fill=accent, width=2.4)
+
+    # ===== 10) TAY GẦN (tát / giơ / chống) =====
+    pa = paw_a if paw_a is not None else (196.0, 152.0)
+    arm((160.0, 130.0), pa, claw_a, 10.5, 8.5, ps=0.85)
+
+    # ===== 10) ĐẦU: tai → sọ → mặt (đầu to kiểu mèo con, hs = hệ số phóng) =====
+    hcx, hcy = 178.0 + head_dx, 96.0 + head_dy
+    hs = 1.38
+    tilt = head_tilt
+
+    def HR(ox, oy):
+        return _cat_rot(hcx + ox * hs, hcy + oy * hs, hcx, hcy, tilt)
+
+    ef = c01(ear)
+
+    def ear_pts(ctrl):
+        out = []
+        for (x, y) in ctrl:
+            if y < -24.0:
+                y = -24.0 + (y + 24.0) * (1.0 - 0.78 * ef)
+                x -= 9.0 * ef
+            out.append((x, y))
+        return out
+
+    def draw_ear(ctrl, inner):
+        pts = _cr_spline(ear_pts(ctrl), 8, closed=True)
+        rpts = [HR(px, py) for (px, py) in pts]
+        sd.polygon(rpts, fill=body)
+        sd.line_c(rpts, fill=edge, width=3.8)
+        sd.line_c([HR(px, py) for (px, py) in inner], fill=accent, width=2.8)
+
+    draw_ear([(-20.0, -22.0), (-24.0, -36.0), (-14.0, -46.0), (-4.0, -34.0), (-1.0, -24.0)],
+             [(-15.0, -26.0), (-13.0, -36.0)])
+    draw_ear([(8.0, -24.0), (7.0, -36.0), (16.0, -48.0), (24.0, -37.0), (26.0, -24.0)],
+             [(13.0, -28.0), (15.0, -38.0)])
+    spts = _cr_spline([(0.0, -32.0), (18.0, -28.0), (26.0, -16.0), (30.0, -5.0),
+                       (27.0, 6.0), (19.0, 14.0), (9.0, 18.0), (-5.0, 20.0),
+                       (-18.0, 13.0), (-24.0, 1.0), (-22.0, -17.0)], 9, closed=True)
+    sd.polygon([HR(px, py) for (px, py) in spts], fill=body)
+    sd.line_c([HR(px, py) for (px, py) in spts], fill=edge, width=4.2)
+
+    # --- mặt: mắt hạnh nhân (mí trên + đốm sáng), mày, mũi, miệng ---
+    sh_ = c01(shout)
+    e_open = 1.0 - c01(blink) * 0.85
+    for (exo, eyo, esc) in ((-8.0, -9.0, 0.84), (13.0, -6.0, 1.0)):
+        ex, ey = HR(exo, eyo)
+        w9 = 7.8 * esc * hs
+        if e_open <= 0.30:
+            sd.arc([ex - w9, ey - 6.5 * esc * hs, ex + w9, ey + 6.5 * esc * hs], 20, 160,
+                   fill=accent, width=3.8)
+            continue
+        top = ey - (8.6 * esc * hs) * e_open
+        sd.ellipse([ex - w9, top, ex + w9, ey + 7.0 * esc * hs], fill=WHITE)
+        pw, ph = 3.6 * esc * hs, 5.8 * esc * e_open * hs
+        ppx = ex + 2.6 * c01(pupil_dx, -1.0, 1.0) * esc * hs
+        ppy = ey + 0.8 * esc * hs + 2.2 * c01(pupil_dy, -1.0, 1.0) * esc * hs
+        sd.ellipse([ppx - pw, ppy - ph, ppx + pw, ppy + ph], fill=BLACK)
+        if e_open > 0.55:
+            sd.ellipse([ppx + 0.4 * hs, ppy - ph + 1.4 * hs, ppx + 2.2 * hs,
+                        ppy - ph + 3.4 * hs], fill=WHITE)
+        sd.arc([ex - w9 - 0.4, ey - 9.6 * esc * hs, ex + w9 + 0.4, ey + 6.6 * esc * hs],
+               195, 345, fill=accent, width=3.8)
+        sd.arc([ex - w9 + 0.8, ey - 6.0 * esc * hs, ex + w9 - 0.8, ey + 8.2 * esc * hs],
+               25, 155, fill=accent, width=2.0)
+
+    b = c01(brow)
+    sd.line_c([HR(-17.0, -18.0 - 1.5 * b), HR(-9.0, -20.0 + 0.5 * b)],
+              fill=accent, width=2.6 + 0.4 * b)
+    sd.line_c([HR(0.0, -20.0 + 0.5 * b), HR(10.0, -21.0 - 2.0 * b),
+               HR(19.0, -17.5 + 2.0 * b)], fill=accent, width=3.0 + 0.5 * b)
+
+    sd.polygon([HR(19.5, -3.0), HR(28.5, -3.0), HR(24.0, 4.0)], fill=accent)
+    sd.line([HR(24.0, 4.0), HR(24.0, 8.0)], fill=accent, width=2.8)
+    if sh_ < 0.35:
+        for (axo, ayo, s_, e_) in ((19.5, 9.5, 20, 160), (28.5, 9.5, 20, 160)):
+            ax, ay = HR(axo, ayo)
+            sd.arc([ax - 6.0, ay - 6.0, ax + 6.0, ay + 6.0], s_, e_, fill=accent, width=3.0)
+    else:
+        mpts = _cr_spline([(14.0, 8.0), (24.0, 7.0), (34.0, 8.0),
+                           (31.0, 15.0 + 9.0 * sh_), (24.0, 17.0 + 11.0 * sh_),
+                           (17.0, 15.0 + 8.0 * sh_)], 7, closed=True)
+        sd.polygon([HR(px, py) for (px, py) in mpts],
+                   fill=(WHITE if is_black else BLACK))
+        for (fx, tx) in ((17.0, 21.0), (26.5, 30.5)):
+            sd.polygon([HR(fx, 8.5), HR(tx, 8.5), HR((fx + tx) / 2.0, 15.0)],
+                       fill=(BLACK if is_black else WHITE))
+
+    # râu cong (luôn đen để hiện trên nền trắng)
+    for wpts in (((27.0, 1.0), (38.0, -3.0), (47.0, -5.0)),
+                 ((29.0, 5.5), (41.0, 6.0), (48.0, 8.0)),
+                 ((28.0, 9.5), (41.0, 14.0), (46.0, 19.0))):
+        sd.line_c([HR(*p) for p in wpts], fill=BLACK, width=2.6)
+
+    # vằn trán (mèo vàng)
+    if not is_black:
+        sd.line_c([HR(-9.0, -26.0), HR(-6.0, -18.0)], fill=BLACK, width=3.6)
+        sd.line_c([HR(1.0, -28.0), HR(2.0, -19.0)], fill=BLACK, width=3.6)
+        sd.line_c([HR(-17.0, -22.0), HR(-13.0, -15.0)], fill=BLACK, width=3.4)
+
+    # lông má
+    sd.line_c([HR(-21.0, 5.0), HR(-28.0, 9.0)], fill=accent, width=3.0)
+    sd.line_c([HR(-18.0, 12.0), HR(-25.0, 17.0)], fill=accent, width=3.0)
+    sd.line_c([HR(-22.0, -2.0), HR(-28.0, 1.0)], fill=accent, width=3.0)
+
+    return canvas.resize((W, H), Image.Resampling.LANCZOS)
+
+
+def _draw_cat_lying(variant: str = "black", breathe: float = 0.0,
+                    tail_flick: float = 0.0, asleep: bool = True) -> Image.Image:
+    """
+    Mèo nằm dài sưởi nắng v4 (sprite 300x160, mặt đất y=130):
+    thân thuôn duỗi dài, đầu gối bên phải, 2 chân trước duỗi thẳng, đuôi quét đất,
+    mắt nhắm cong hạnh phúc, thở nhẹ (breathe), đuôi vẫy (tail_flick).
+    """
+    W, H, SS = 300, 160, 3
+    canvas = Image.new("RGBA", (W * SS, H * SS), (0, 0, 0, 0))
+    sd = _SDraw(ImageDraw.Draw(canvas), SS)
+    is_black = variant == "black"
+    body = BLACK if is_black else WHITE
+    edge = WHITE if is_black else BLACK
+    accent = edge
+    gy = 130.0
+    brf = 1.0 + 0.035 * math.sin(breathe * math.pi * 2.0)
+
+    def blob(ctrl, ow=4.0, samples=9, yc=0.0, sy=1.0, fur=1.4, wl=11.0, phase=0.0):
+        pts = _fur_edge(_cr_spline([(x, yc + (y - yc) * sy) for (x, y) in ctrl],
+                                   samples, closed=True), fur, wl, phase)
+        sd.polygon(pts, fill=body)
+        sd.line_c(pts, fill=edge, width=ow)
+        return pts
+
+    def limb(ctrl, widths, ow=3.2, samples=8, fur=1.1, wl=10.0, phase=0.0):
+        sp = _cr_spline(ctrl, samples)
+        n = len(sp)
+        ws = [_lerp_w(widths, i / float(n - 1)) for i in range(n)]
+        poly = _fur_edge(_taper_poly(sp, ws), fur, wl, phase)
+        sd.polygon(poly, fill=body)
+        sd.line_c(poly + [poly[0]], fill=edge, width=ow)
+        return sp
+
+    # đuôi quét đất (bên trái)
+    fl = 5.0 * tail_flick
+    tsp = limb([(146.0, 119.0), (126.0, 110.0 + fl), (104.0, 108.0 - fl * 0.8),
+                (88.0, 116.0 + fl * 0.6), (78.0, 126.0)],
+               [9.5, 8.5, 7.5, 6.0, 4.0], ow=3.2)
+
+    # thân dài (gối đầu bên phải) — bụng chạm đất y≈130
+    blob([(148.0, 118.0), (170.0, 104.0), (198.0, 98.0), (226.0, 100.0),
+          (248.0, 108.0), (256.0, 120.0), (248.0, 128.0), (222.0, 131.0),
+          (190.0, 131.0), (162.0, 129.0), (148.0, 127.0)], ow=4.2, yc=112.0, sy=brf)
+
+    # 2 chân trước duỗi thẳng về trước — thon, tách rõ, bàn chân có ngón
+    limb([(206.0, 124.0), (228.0, 126.0), (246.0, 127.0)], [9.5, 7.0, 5.5], ow=3.0, fur=0.8)
+    limb([(208.0, 129.0), (232.0, 130.0), (254.0, 131.0)], [9.0, 7.0, 5.5], ow=3.0, fur=0.8)
+    for (px_, py_) in ((249.0, 127.0), (257.0, 131.0)):
+        sd.ellipse([px_ - 7.0, py_ - 5.0, px_ + 7.0, py_ + 5.0], fill=body, outline=edge, width=2.8)
+        sd.line([(px_ - 1.5, py_ - 2.0), (px_ - 1.5, py_ + 2.5)], fill=accent, width=1.8)
+        sd.line([(px_ + 2.5, py_ - 2.0), (px_ + 2.5, py_ + 2.5)], fill=accent, width=1.8)
+
+    # đầu gối bên phải, hơi nghiêng
+    hcx, hcy = 237.0, 103.0
+    tilt = -6.0
+
+    def HR(ox, oy):
+        return _cat_rot(hcx + ox, hcy + oy, hcx, hcy, tilt)
+
+    def ear(ctrl, inner):
+        pts = _fur_edge(_cr_spline(ctrl, 8, closed=True), 1.0, 9.0)
+        rpts = [HR(px, py) for (px, py) in pts]
+        sd.polygon(rpts, fill=body)
+        sd.line_c(rpts, fill=edge, width=3.0)
+        sd.line_c([HR(px, py) for (px, py) in inner], fill=accent, width=2.2)
+
+    ear([(-19.0, -15.0), (-22.0, -29.0), (-12.0, -42.0), (-3.0, -30.0), (-1.0, -17.0)],
+        [(-14.0, -20.0), (-11.0, -32.0)])
+    ear([(6.0, -18.0), (5.0, -32.0), (15.0, -44.0), (23.0, -33.0), (24.0, -18.0)],
+        [(11.0, -23.0), (14.0, -34.0)])
+    spts = _cr_spline([(0.0, -24.0), (14.0, -21.0), (21.0, -12.0), (24.0, -3.0),
+                       (21.0, 5.0), (14.0, 11.0), (5.0, 14.0), (-6.0, 15.0),
+                       (-16.0, 10.0), (-21.0, 1.0), (-19.0, -13.0)], 8, closed=True)
+    sd.polygon([HR(px, py) for (px, py) in spts], fill=body)
+    sd.line_c([HR(px, py) for (px, py) in spts], fill=edge, width=4.0)
+
+    # mặt ngủ ngon: mắt nhắm cong, mũi, miệng mỉm
+    for (exo, eyo) in ((-7.0, -7.0), (10.0, -5.0)):
+        ex, ey = HR(exo, eyo)
+        if asleep:
+            sd.arc([ex - 6.5, ey - 5.5, ex + 6.5, ey + 5.5], 20, 160,
+                   fill=accent, width=3.0)
+        else:
+            sd.ellipse([ex - 6.0, ey - 6.0, ex + 6.0, ey + 5.0], fill=WHITE,
+                       outline=accent, width=2.4)
+            sd.ellipse([ex - 2.0, ey - 4.5, ex + 2.6, ey + 3.5], fill=BLACK)
+    sd.polygon([HR(16.0, -2.0), HR(23.0, -2.0), HR(19.5, 4.0)], fill=accent)
+    ax, ay = HR(19.5, 8.5)
+    sd.arc([ax - 5.0, ay - 4.0, ax + 5.0, ay + 4.0], 20, 160, fill=accent, width=2.4)
+    for wpts in (((22.0, 2.0), (34.0, -1.0), (45.0, -2.0)),
+                 ((23.0, 6.0), (36.0, 7.0), (47.0, 10.0))):
+        sd.line_c([HR(*p) for p in wpts], fill=BLACK, width=2.2)
+
+    # vằn lưng (mèo vàng)
+    if not is_black:
+        for (x0, y0) in ((172.0, 104.0), (196.0, 100.0), (220.0, 100.0)):
+            sd.line_c([(x0, y0 + 6.0), (x0 + 5.0, y0 - 2.0), (x0 + 8.0, y0 - 7.0)],
+                      fill=BLACK, width=3.2)
+
+    # lông tơ trong viền
+    for (x0, y0) in ((172.0, 125.0), (196.0, 127.0), (220.0, 125.0), (240.0, 122.0)):
+        sd.line([(x0, y0), (x0 - 3.0, y0 - 5.5)], fill=accent, width=2.4)
+    for (x0, y0) in ((176.0, 104.0), (206.0, 102.0), (232.0, 106.0)):
+        sd.line([(x0, y0), (x0 + 3.0, y0 + 5.5)], fill=accent, width=2.2)
+    for (x0, y0) in ((96.0, 122.0), (112.0, 118.0)):
+        sd.line([(x0, y0), (x0 - 2.5, y0 - 5.0)], fill=accent, width=2.2)
+
     return canvas.resize((W, H), Image.Resampling.LANCZOS)
 
 
@@ -2233,7 +2729,7 @@ def _compose_cat_food_scene(
                               max(5, int(10 * bell(p, 0.68, 0.80))), rot=p * 4.0)
         if sweep > 0.45:
             # mũi tên nét đứt từ bàn chân chỉ thẳng về góc nắng
-            pt_end = _reach_target((160.0, 130.0), pose["paw_a"], 27.0, 27.0)
+            pt_end = _reach_target((160.0, 130.0), pose["paw_a"], 29.0, 29.0)
             sx0, sy0 = cat_x + pt_end[0], y_base + pt_end[1]
             ex0, ey0 = float(width - 78), 96.0
             for f0 in (0.10, 0.30, 0.50):
