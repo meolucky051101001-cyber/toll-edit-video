@@ -166,8 +166,34 @@ def ensure_tool_control():
     except Exception as e:
         logger.warning("Failed to auto-start tool_control: %s", e)
 
+def _install_asyncio_quiet_disconnect_handler() -> None:
+    """Suppress noisy Windows ProactorEventLoop ConnectionResetError (WinError 10054) when browser video tags close range streams."""
+    try:
+        loop = asyncio.get_running_loop()
+        previous_handler = loop.get_exception_handler()
+
+        def _custom_exception_handler(loop_obj, context):
+            exc = context.get("exception")
+            if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+                winerror = getattr(exc, "winerror", None)
+                if winerror in (10054, 10053, None):
+                    return
+            msg = str(context.get("message") or "")
+            if "_ProactorBasePipeTransport._call_connection_lost" in msg:
+                return
+            if previous_handler is not None:
+                previous_handler(loop_obj, context)
+            else:
+                loop_obj.default_exception_handler(context)
+
+        loop.set_exception_handler(_custom_exception_handler)
+    except Exception:
+        pass
+
+
 @app.on_event("startup")
 async def on_startup():
+    _install_asyncio_quiet_disconnect_handler()
     ensure_tool_control()
     try:
         from workspace_cleaner import run_full_retention_maintenance
@@ -2269,6 +2295,41 @@ try:
     logger.info("Mounted Phase D Crash Recovery router successfully.")
 except Exception as _pde:
     logger.warning("Failed to mount phase_d_router: %s", _pde)
+
+
+@app.get("/api/v1/gemini-health")
+async def api_v1_gemini_health():
+    """Trả về trạng thái thời gian thực của Multi-Key Gemini Pool và Circuit Breaker."""
+    from ai.v1_gemini_dispatcher import get_gemini_pool_health
+    return get_gemini_pool_health()
+
+
+@app.get("/api/v1/glossary")
+async def api_v1_get_glossary():
+    """Trả về từ điển thuật ngữ tùy chỉnh (Custom Glossary) và danh sách preset chuyên ngành."""
+    from ai.translation import BUILTIN_GLOSSARY_PRESETS, load_custom_glossary
+    return {
+        "status": "ok",
+        "entries": load_custom_glossary(WORKSPACE),
+        "presets": BUILTIN_GLOSSARY_PRESETS,
+    }
+
+
+@app.post("/api/v1/glossary")
+async def api_v1_save_glossary(payload: dict = Body(...)):
+    """Lưu hoặc cập nhật từ điển thuật ngữ tùy chỉnh (Custom Glossary) theo chủ đề."""
+    from ai.translation import BUILTIN_GLOSSARY_PRESETS, save_custom_glossary
+    entries = payload.get("entries") if isinstance(payload.get("entries"), dict) else {}
+    preset = payload.get("preset")
+    merge = bool(payload.get("merge", True))
+    if preset and preset not in BUILTIN_GLOSSARY_PRESETS:
+        raise HTTPException(status_code=400, detail=f"Preset '{preset}' không tồn tại.")
+    updated = save_custom_glossary(entries=entries, preset=preset, merge=merge, workspace=WORKSPACE)
+    return {
+        "status": "ok",
+        "count": len(updated),
+        "entries": updated,
+    }
 
 
 

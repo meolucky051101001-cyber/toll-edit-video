@@ -2547,39 +2547,42 @@
       }
     }
 
-    // ===== P6.2: PROXY 540p + PRELOAD CLIP KẾ =====
+    // ===== P6.2: PROXY 540p + PRELOAD CLIP KẾ + AUTO-CUT SILENCE =====
     let _proxyActiveStem = null;
+    let _proxyRequestedStem = null;
 
     async function maybeSwitchToProxy() {
       try {
         if (!currentVideo || !currentVideo.stem) return;
-        if (currentVideoVersion !== 'final') return; // chỉ proxy bản final
-        if (_proxyActiveStem === currentVideo.stem && (mainPlayer.src || '').indexOf('proxy_final') >= 0) return;
+        const ver = (currentVideoVersion === 'raw' || currentVideoVersion === 'input') ? 'raw' : 'final';
+        const proxyTag = 'proxy_' + ver;
+        if (_proxyActiveStem === (currentVideo.stem + '|' + ver) && (mainPlayer.src || '').indexOf(proxyTag) >= 0) return;
+        const reqKey = currentVideo.stem + '|' + ver;
+        _proxyRequestedStem = reqKey;
         const res = await fetch('/api/workflow/proxy/generate', {
           method: 'POST',
           headers: RENDER_TOKEN_HEADERS(),
-          body: JSON.stringify({ stem: currentVideo.stem, version: 'final' })
+          body: JSON.stringify({ stem: currentVideo.stem, version: ver })
         });
         const data = await res.json();
         if (!res.ok || !data.url) return;
         if (data.ready) {
-          swapMainToProxy(data.url);
+          swapMainToProxy(data.url, reqKey);
           return;
         }
         // Poll chờ proxy (tối đa ~60s, 2s/lần) — không chặn thao tác
         for (let i = 0; i < 30; i++) {
           await new Promise(r => setTimeout(r, 2000));
-          if (!currentVideo || currentVideo.stem !== _proxyRequestedStem) return;
-          const sres = await fetch(`/api/workflow/proxy/status?stem=${encodeURIComponent(currentVideo.stem)}&version=final`);
+          const curVer = (currentVideoVersion === 'raw' || currentVideoVersion === 'input') ? 'raw' : 'final';
+          if (!currentVideo || (currentVideo.stem + '|' + curVer) !== _proxyRequestedStem) return;
+          const sres = await fetch(`/api/workflow/proxy/status?stem=${encodeURIComponent(currentVideo.stem)}&version=${encodeURIComponent(ver)}`);
           const st = await sres.json();
-          if (st.ready) { swapMainToProxy(st.url); return; }
+          if (st.ready) { swapMainToProxy(st.url, reqKey); return; }
         }
       } catch (err) { /* preview vẫn chạy bản full nếu proxy lỗi */ }
     }
 
-    let _proxyRequestedStem = null;
-
-    function swapMainToProxy(url) {
+    function swapMainToProxy(url, reqKey) {
       if (!mainPlayer || !url) return;
       const wasPlaying = !mainPlayer.paused;
       const t = mainPlayer.currentTime || 0;
@@ -2587,9 +2590,48 @@
       mainPlayer.load();
       mainPlayer.currentTime = t;
       if (wasPlaying) mainPlayer.play().catch(() => {});
-      _proxyActiveStem = currentVideo ? currentVideo.stem : null;
+      _proxyActiveStem = reqKey || (currentVideo ? currentVideo.stem : null);
       _proxyRequestedStem = _proxyActiveStem;
       showToast('🪶 Đang dùng proxy 540p cho preview mượt (xuất video vẫn dùng bản gốc full)');
+    }
+
+    async function autoCutTimelineSilences() {
+      try {
+        if (!currentVideo || !currentVideo.stem) {
+          showToast('⚠️ Vui lòng chọn một video trước khi cắt khoảng lặng');
+          return;
+        }
+        const ver = (currentVideoVersion === 'raw' || currentVideoVersion === 'input') ? 'raw' : 'final';
+        showToast('🔍 Đang quét và phát hiện các khoảng lặng trong video...');
+        const res = await fetch('/api/workflow/timeline/detect-silences', {
+          method: 'POST',
+          headers: RENDER_TOKEN_HEADERS(),
+          body: JSON.stringify({ stem: currentVideo.stem, version: ver, min_silence_sec: 0.65, noise_db: -35.0 })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          showToast('❌ ' + (data.detail || 'Không thể phân tích khoảng lặng'));
+          return;
+        }
+        if (!data.silence_count || !Array.isArray(data.active_clips) || data.active_clips.length === 0) {
+          showToast('✅ Video có nhịp thoại liên tục, không có khoảng lặng dài (> 0.65s) cần cắt!');
+          return;
+        }
+        if (typeof pushTimelineUndoState === 'function') {
+          pushTimelineUndoState();
+        }
+        videoClipsState = data.active_clips;
+        if (videoClipsState.length > 0) {
+          setSingleSelection(videoClipsState[0].id);
+        }
+        markTimelineProjectDirty();
+        renderVideoClipsTrack();
+        updateTimelineToolbarStates();
+        showToast(`✂️ Đã tự động cắt ${data.silence_count} khoảng lặng (tiết kiệm ${data.removed_seconds}s → còn ${data.active_clips.length} đoạn)!`);
+      } catch (err) {
+        console.error('Lỗi cắt khoảng lặng:', err);
+        showToast('❌ Lỗi kết nối khi phân tích khoảng lặng');
+      }
     }
 
     function warmPreloadForNextClip(nextIdx) {

@@ -599,11 +599,28 @@ def process_video(
         orig_w, orig_h = w, h
         is_already_9_16 = abs((orig_w / orig_h) - (9.0 / 16.0)) <= 0.035
 
-        # Chuẩn bị subtitle filter
+        # Chuẩn bị subtitle filter (hỗ trợ tùy chọn Frosted Blur cho dải phụ đề)
+        cover_style = str(kwargs.get("subtitle_cover_style") or os.getenv("V1_SUBTITLE_COVER_STYLE", "")).strip().lower()
+        if not cover_style:
+            try:
+                import canvas_settings
+                cover_style = str(canvas_settings.get_canvas_settings().get("sub_cover_style", "solid_box")).strip().lower()
+            except Exception:
+                cover_style = "solid_box"
+
         if is_ass:
             sub_filter = f"subtitles='{srt_escaped}'"
         else:
             sub_filter = f"subtitles='{srt_escaped}':force_style='{style_str}'"
+
+        if cover_style == "frosted_blur" and 0.15 <= float(main_y_pct or 0.75) <= 0.96:
+            band_y = max(0, int(orig_h * max(0.0, float(main_y_pct) - 0.04)) // 2 * 2)
+            band_h = max(24, min(orig_h - band_y, int(orig_h * 0.14)) // 2 * 2)
+            sub_filter = (
+                f"split[sub_main][sub_band];"
+                f"[sub_band]crop={orig_w}:{band_h}:0:{band_y},boxblur=16:3[sub_blurred];"
+                f"[sub_main][sub_blurred]overlay=0:{band_y},{sub_filter}"
+            )
 
         def _build_delogo_filters(dw: int, dh: int):
             if not delogo or dw <= 0 or dh <= 0:

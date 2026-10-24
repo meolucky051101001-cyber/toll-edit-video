@@ -3094,6 +3094,10 @@ def _resolve_timeline_source_video(stem: str, version: str) -> Optional[Path]:
         cand_final = job_dir / f"final_{stem}.mp4"
         if cand_final.is_file() and _valid_final_video(cand_final):
             return cand_final
+        if OUTPUT_DIR.exists():
+            cand_banve = OUTPUT_DIR / f"Dubbed_{stem}.mp4"
+            if cand_banve.is_file() and _valid_final_video(cand_banve):
+                return cand_banve
     for cand in (INPUT_DIR / f"{stem}.mp4", DOWNLOADS_DIR / f"{stem}.mp4"):
         if cand.is_file():
             return cand
@@ -3114,13 +3118,23 @@ def _proxy_generate_worker(src_path: Path, proxy_path: Path, key: str) -> None:
         # đuôi .mp4 để ffmpeg đo được muxer (file .mp4.tmp sẽ lỗi "Invalid argument")
         tmp = proxy_path.parent / ("tmp_" + proxy_path.name)
         tmp.unlink(missing_ok=True)
-        subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-i", str(src_path),
-             "-vf", "scale='min(540,iw)':-2",
-             "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
-             "-c:a", "copy", "-movflags", "+faststart", str(tmp)],
-            capture_output=True, timeout=600,
-        )
+        # Ưu tiên NVENC p1 siêu tốc trên GPU (1-2s), fallback về libx264 veryfast nếu bận
+        nvenc_cmd = [
+            "ffmpeg", "-y", "-v", "error", "-hwaccel", "cuda", "-i", str(src_path),
+            "-vf", "scale='min(540,iw)':-2,format=yuv420p",
+            "-c:v", "h264_nvenc", "-preset", "p1", "-rc", "vbr", "-cq", "28",
+            "-c:a", "copy", "-movflags", "+faststart", str(tmp),
+        ]
+        res = subprocess.run(nvenc_cmd, capture_output=True, timeout=300)
+        if res.returncode != 0 or not tmp.is_file() or tmp.stat().st_size <= 1_000:
+            tmp.unlink(missing_ok=True)
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-i", str(src_path),
+                 "-vf", "scale='min(540,iw)':-2",
+                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+                 "-c:a", "copy", "-movflags", "+faststart", str(tmp)],
+                capture_output=True, timeout=600,
+            )
         if tmp.is_file() and tmp.stat().st_size > 1_000:
             proxy_path.unlink(missing_ok=True)
             tmp.rename(proxy_path)
@@ -3168,6 +3182,108 @@ async def api_proxy_status(stem: str = Query(...), version: str = Query("final")
         return {"ready": True, "exists": True,
                 "url": f"/api/workflow/stream-file?path={proxy_path}&t={time.time()}"}
     return {"ready": False, "exists": proxy_path.is_file(), "generating": f"{stem}|{version}" in _PROXY_GENERATING}
+
+
+@router.post("/api/workflow/timeline/detect-silences")
+async def api_timeline_detect_silences(payload: Dict[str, Any] = Body(...)):
+    """
+    Phát hiện các khoảng lặng trong video bằng FFmpeg silencedetect để tự động cắt bỏ khoảng trống (Auto-Cut Silence).
+    Trả về danh sách silences và danh sách active_clips (đã loại bỏ khoảng lặng, ghép liền mạch trên timeline).
+    """
+    stem = str(payload.get("stem") or "").strip()
+    version = str(payload.get("version") or "final").strip()
+    min_silence_sec = max(0.25, min(5.0, float(payload.get("min_silence_sec", 0.65))))
+    noise_db = max(-60.0, min(-15.0, float(payload.get("noise_db", -35.0))))
+    padding_sec = max(0.0, min(0.3, float(payload.get("padding_sec", 0.08))))
+
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu stem video")
+    src = _resolve_timeline_source_video(stem, version)
+    if not src or not src.is_file():
+        raise HTTPException(status_code=404, detail="Không tìm thấy video nguồn để phân tích khoảng lặng")
+
+    def _run_silence_detect() -> Dict[str, Any]:
+        # Lấy tổng thời lượng video
+        total_dur = 0.0
+        try:
+            pr = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(src)],
+                capture_output=True, text=True, timeout=15,
+            )
+            if pr.returncode == 0 and pr.stdout.strip():
+                total_dur = float(pr.stdout.strip())
+        except Exception:
+            pass
+
+        cmd = [
+            "ffmpeg", "-hide_banner", "-nostats", "-i", str(src),
+            "-af", f"silencedetect=noise={noise_db:.1f}dB:d={min_silence_sec:.2f}",
+            "-f", "null", "-",
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+        stderr = res.stderr or ""
+        starts = [float(m.group(1)) for m in re.finditer(r"silence_start:\s*([0-9.]+)", stderr)]
+        ends = [float(m.group(1)) for m in re.finditer(r"silence_end:\s*([0-9.]+)", stderr)]
+        if total_dur <= 0 and ends:
+            total_dur = max(ends) + 1.0
+
+        silences = []
+        for idx, s_val in enumerate(starts):
+            e_val = ends[idx] if idx < len(ends) else total_dur
+            eff_s = min(e_val, s_val + padding_sec)
+            eff_e = max(eff_s, e_val - padding_sec)
+            if eff_e - eff_s >= min_silence_sec * 0.7:
+                silences.append({
+                    "start": round(eff_s, 3),
+                    "end": round(eff_e, 3),
+                    "duration": round(eff_e - eff_s, 3),
+                })
+
+        active_clips = []
+        cursor = 0.0
+        at_acc = 0.0
+        clip_idx = 1
+        for sil in silences:
+            if sil["start"] - cursor >= 0.15:
+                c_start = round(cursor, 3)
+                c_end = round(sil["start"], 3)
+                c_dur = round(c_end - c_start, 3)
+                active_clips.append({
+                    "id": f"clip_speech_{int(time.time())}_{clip_idx}",
+                    "start": c_start,
+                    "end": c_end,
+                    "at": round(at_acc, 3),
+                    "duration": c_dur,
+                })
+                at_acc += c_dur
+                clip_idx += 1
+            cursor = max(cursor, sil["end"])
+
+        if total_dur > 0 and (total_dur - cursor) >= 0.15:
+            c_start = round(cursor, 3)
+            c_end = round(total_dur, 3)
+            c_dur = round(c_end - c_start, 3)
+            active_clips.append({
+                "id": f"clip_speech_{int(time.time())}_{clip_idx}",
+                "start": c_start,
+                "end": c_end,
+                "at": round(at_acc, 3),
+                "duration": c_dur,
+            })
+            at_acc += c_dur
+
+        removed_sec = round(sum(s["duration"] for s in silences), 2)
+        return {
+            "status": "ok",
+            "total_duration": round(total_dur, 3),
+            "new_duration": round(at_acc, 3),
+            "removed_seconds": removed_sec,
+            "silence_count": len(silences),
+            "silences": silences,
+            "active_clips": active_clips,
+        }
+
+    return await asyncio.to_thread(_run_silence_detect)
 
 
 @router.get("/static/js/{fname}")
