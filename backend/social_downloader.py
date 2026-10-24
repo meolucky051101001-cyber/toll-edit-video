@@ -739,10 +739,14 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
             target_fetch_url = target_fetch_url.replace("http://xhslink.com", "https://xhslink.com")
 
         # Thử lấy HTML bằng Desktop UA trước (nhận stream 258 sạch trực tiếp), nếu bị login/chặn chuyển sang Mobile UA
-        uas_to_try = [USER_AGENTS["desktop"], USER_AGENTS["mobile"]]
+        uas_to_try = [
+            ("Desktop", USER_AGENTS["desktop"]),
+            ("Mobile", USER_AGENTS["mobile"]),
+        ]
         res = None
         last_res = None
-        for attempt, current_ua in enumerate(uas_to_try):
+        headers_used = None
+        for attempt, (ua_name, current_ua) in enumerate(uas_to_try):
             headers = {
                 'User-Agent': current_ua,
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -753,16 +757,37 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
                 last_res = temp_res
                 if temp_res.status_code == 200:
                     real_chk = temp_res.url.lower()
-                    if "/login" not in real_chk:
+                    parsed_chk = urlsplit(temp_res.url)
+                    clean_chk = urlunsplit(
+                        (parsed_chk.scheme, parsed_chk.netloc, parsed_chk.path, "", "")
+                    ).rstrip('/').lower()
+                    is_blocked = (
+                        clean_chk in [
+                            "https://www.xiaohongshu.com", "http://www.xiaohongshu.com", "https://xiaohongshu.com", "http://xiaohongshu.com",
+                            "https://www.xiaohongshu.com/explore", "http://www.xiaohongshu.com/explore",
+                            "https://www.xiaohongshu.com/discovery", "http://www.xiaohongshu.com/discovery",
+                            "https://www.xiaohongshu.com/login", "http://www.xiaohongshu.com/login"
+                        ]
+                        or "/login" in real_chk
+                        or "undertake_note_error" in real_chk
+                    )
+                    if not is_blocked:
                         res = temp_res
+                        headers_used = headers
                         break
                     else:
-                        logger.info("Desktop UA bị chuyển hướng về login, thử lại với Mobile UA...")
+                        logger.info(f"{ua_name} UA bị chuyển hướng đến {clean_chk} (explore/login/error), thử UA tiếp theo...")
             except Exception as req_err:
-                logger.warning(f"Lần thử {attempt + 1} tải trang XHS thất bại ({req_err})")
+                logger.warning(f"Lần thử {attempt + 1} ({ua_name} UA) tải trang XHS thất bại ({req_err})")
 
         if res is None and last_res is not None:
             res = last_res
+            if headers_used is None:
+                headers_used = {
+                    'User-Agent': uas_to_try[-1][1],
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
+                }
 
         if res is None:
             return False, "", "", "Không thể kết nối đến máy chủ Tiểu Hồng Thư (Hết thời gian chờ hoặc bị chặn)"
@@ -781,10 +806,10 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
         clean_real = urlunsplit(
             (parsed_real.scheme, parsed_real.netloc, parsed_real.path, "", "")
         ).rstrip('/').lower()
-        if clean_real in ["https://www.xiaohongshu.com", "http://www.xiaohongshu.com", "https://xiaohongshu.com", 
+        if clean_real in ["https://www.xiaohongshu.com", "http://www.xiaohongshu.com", "https://xiaohongshu.com", "http://xiaohongshu.com",
                           "https://www.xiaohongshu.com/explore", "http://www.xiaohongshu.com/explore",
                           "https://www.xiaohongshu.com/discovery", "http://www.xiaohongshu.com/discovery",
-                          "https://www.xiaohongshu.com/login", "http://www.xiaohongshu.com/login"]:
+                          "https://www.xiaohongshu.com/login", "http://www.xiaohongshu.com/login"] or "/login" in real_url.lower() or "undertake_note_error" in real_url.lower():
             return False, "", "", "Bài viết trên Tiểu Hồng Thư (XHS) này không tồn tại, đã bị tác giả xóa, hết hạn hoặc yêu cầu đăng nhập"
 
         html = res.text
@@ -824,18 +849,24 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
                         keys_to_test = [origin_key]
                         if origin_key.startswith("spectrum/"):
                             keys_to_test.append(origin_key.replace("spectrum/", ""))
+                        if origin_key.startswith("pre_post/"):
+                            keys_to_test.append(origin_key.replace("pre_post/", ""))
                         for dom in XHS_ORIGIN_CDN_DOMAINS:
+                            found_cdn = False
                             for k_test in keys_to_test:
                                 test_origin_url = f"{dom}/{k_test}"
                                 try:
-                                    h_res = requests.head(test_origin_url, headers=headers, timeout=2.5)
+                                    h_res = requests.head(test_origin_url, headers=headers_used, timeout=2.5)
                                     if h_res.status_code == 200 and int(h_res.headers.get("Content-Length", 0)) > 10000:
                                         if test_origin_url not in origin_video_urls:
                                             origin_video_urls.append(test_origin_url)
                                             logger.info(f"Đã tìm thấy CDN luồng gốc XHS sạch: {sanitize_url(test_origin_url)}")
+                                        found_cdn = True
                                         break
                                 except Exception:
                                     pass
+                            if found_cdn and len(origin_video_urls) >= 2:
+                                break
 
                     # 2. Phân loại luồng media stream (Tách luồng sạch vs luồng dính watermark)
                     media = video.get("media", {})
@@ -845,15 +876,15 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
                         st_list = stream.get(st_type, [])
                         if st_list and isinstance(st_list, list):
                             for item in st_list:
-                                st_type_code = item.get("streamType")
-                                st_desc = str(item.get("streamDesc") or "").upper()
+                                st_type_code = item.get("streamType") or item.get("stream_type")
+                                st_desc = str(item.get("streamDesc") or item.get("stream_desc") or "").upper()
                                 
                                 candidate_urls = []
-                                for k_u in ("masterUrl", "url"):
+                                for k_u in ("masterUrl", "url", "master_url"):
                                     u = item.get(k_u)
                                     if u and u not in candidate_urls:
                                         candidate_urls.append(u)
-                                for b_u in item.get("backupUrls", []):
+                                for b_u in (item.get("backupUrls") or item.get("backup_urls") or []):
                                     if b_u and b_u not in candidate_urls:
                                         candidate_urls.append(b_u)
                                         
@@ -892,7 +923,7 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
             if download_parallel_range(v_url, target_path, workers=6):
                 logger.info(f"Tải thành công video XHS Stream 258 (Range): {target_path}")
                 return True, target_path, title, ""
-            if download_file_stream(v_url, target_path, headers=headers, timeout=(10, 60)):
+            if download_file_stream(v_url, target_path, headers=headers_used, timeout=(10, 60)):
                 logger.info(f"Tải thành công video XHS Stream 258 (Stream): {target_path}")
                 return True, target_path, title, ""
 
@@ -902,7 +933,7 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
             if download_parallel_range(orig_url, target_path, workers=6):
                 logger.info(f"Tải thành công video XHS GỐC KHÔNG WATERMARK (Range): {target_path}")
                 return True, target_path, title, ""
-            if download_file_stream(orig_url, target_path, headers=headers, timeout=(10, 60)):
+            if download_file_stream(orig_url, target_path, headers=headers_used, timeout=(10, 60)):
                 logger.info(f"Tải thành công video XHS GỐC KHÔNG WATERMARK (Stream): {target_path}")
                 return True, target_path, title, ""
 
@@ -913,7 +944,7 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
             if download_parallel_range(v_url, target_path, workers=6):
                 logger.info(f"Tải thành công video XHS SẠCH KHÔNG WATERMARK (Range): {target_path}")
                 return True, target_path, title, ""
-            if download_file_stream(v_url, target_path, headers=headers, timeout=(10, 60)):
+            if download_file_stream(v_url, target_path, headers=headers_used, timeout=(10, 60)):
                 logger.info(f"Tải thành công video XHS SẠCH KHÔNG WATERMARK (Stream): {target_path}")
                 return True, target_path, title, ""
 

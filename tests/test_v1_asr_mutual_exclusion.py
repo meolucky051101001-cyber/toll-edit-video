@@ -27,20 +27,20 @@ class TestAsrMutualExclusion(unittest.TestCase):
 
     def setUp(self):
         # Reset về mặc định
-        set_feature_flags({"ENABLE_QWEN_ASR": False, "V1_ASR_MODEL": "whisper_turbo"})
+        set_feature_flags({"ENABLE_QWEN_ASR": False, "V1_ASR_MODEL": "whisper_sensevoice"})
 
     def tearDown(self):
-        set_feature_flags({"ENABLE_QWEN_ASR": False, "V1_ASR_MODEL": "whisper_turbo"})
+        set_feature_flags({"ENABLE_QWEN_ASR": False, "V1_ASR_MODEL": "whisper_sensevoice"})
 
-    def test_default_is_whisper_turbo(self):
-        """Kiểm tra mặc định luôn là Faster-Whisper Turbo."""
+    def test_default_is_whisper_sensevoice(self):
+        """Kiểm tra mặc định luôn là Hybrid Faster-Whisper + SenseVoice."""
         flags = get_feature_flags()
         self.assertFalse(flags.get("ENABLE_QWEN_ASR", False))
-        self.assertEqual(flags.get("V1_ASR_MODEL"), "whisper_turbo")
+        self.assertEqual(flags.get("V1_ASR_MODEL"), "whisper_sensevoice")
         self.assertFalse(is_qwen_asr_enabled())
 
         eff_model = resolve_effective_model(ModelStage.ASR)
-        self.assertEqual(eff_model.model_id, "whisper_large_v3_turbo")
+        self.assertEqual(eff_model.model_id, "whisper_sensevoice_hybrid")
 
     def test_selecting_qwen_disables_whisper(self):
         """Khi chọn Qwen3-ASR: Bật Qwen, tắt Whisper."""
@@ -53,12 +53,12 @@ class TestAsrMutualExclusion(unittest.TestCase):
         self.assertEqual(eff_model.model_id, "qwen3_asr_preview")
 
     def test_selecting_whisper_disables_qwen(self):
-        """Khi chuyển lại về Whisper: Bật Whisper, tắt Qwen."""
+        """Khi chuyển lại về Whisper Turbo: Tắt Qwen."""
         # Đầu tiên bật Qwen
         set_feature_flags({"V1_ASR_MODEL": "qwen3_asr"})
         self.assertTrue(is_qwen_asr_enabled())
 
-        # Sau đó chọn lại Whisper
+        # Sau đó chọn lại Whisper Turbo
         updated = set_feature_flags({"V1_ASR_MODEL": "whisper_turbo"})
         self.assertFalse(updated["ENABLE_QWEN_ASR"])
         self.assertEqual(updated["V1_ASR_MODEL"], "whisper_turbo")
@@ -69,10 +69,10 @@ class TestAsrMutualExclusion(unittest.TestCase):
 
     def test_video_router_planned_pipeline_contains_asr_model(self):
         """Video Router ghi nhận đúng asr_model vào planned_pipeline."""
-        # 1. Khi đang dùng mặc định Whisper
-        set_feature_flags({"V1_ASR_MODEL": "whisper_turbo"})
-        pipe_whisper = resolve_planned_pipeline(VideoMode.SHORT, VideoMetadata(duration_s=120))
-        self.assertEqual(pipe_whisper.get("asr_model"), "whisper_turbo")
+        # 1. Khi đang dùng mặc định Hybrid Whisper + SenseVoice
+        set_feature_flags({"V1_ASR_MODEL": "whisper_sensevoice"})
+        pipe_hybrid = resolve_planned_pipeline(VideoMode.SHORT, VideoMetadata(duration_s=120))
+        self.assertEqual(pipe_hybrid.get("asr_model"), "whisper_sensevoice")
 
         # 2. Khi chọn Qwen
         set_feature_flags({"V1_ASR_MODEL": "qwen3_asr"})

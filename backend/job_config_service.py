@@ -232,6 +232,10 @@ def freeze_job_config(
             planned_asr_model = "qwen3_asr"
         elif model_id == "whisper_large_v3_turbo":
             planned_asr_model = "whisper_turbo"
+        elif model_id == "whisper_sensevoice_hybrid":
+            planned_asr_model = "whisper_sensevoice"
+        elif model_id == "sensevoice_small":
+            planned_asr_model = "sensevoice_small"
     try:
         try:
             from v1_feature_flags import get_feature_flags
@@ -243,10 +247,14 @@ def freeze_job_config(
                 effective["asr_model"] = planned_asr_model
             elif flags.get("ENABLE_QWEN_ASR") or flags.get("V1_ASR_MODEL") == "qwen3_asr":
                 effective["asr_model"] = "qwen3_asr"
-            else:
+            elif flags.get("V1_ASR_MODEL") == "whisper_turbo":
                 effective["asr_model"] = "whisper_turbo"
+            elif flags.get("V1_ASR_MODEL") == "sensevoice_small":
+                effective["asr_model"] = "sensevoice_small"
+            else:
+                effective["asr_model"] = "whisper_sensevoice"
     except Exception:
-        effective.setdefault("asr_model", "whisper_turbo")
+        effective.setdefault("asr_model", "whisper_sensevoice")
 
     # Tích hợp Video Router Snapshot (Giai đoạn 1)
     router_snapshot = routing_snapshot

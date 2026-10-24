@@ -126,7 +126,7 @@ async def security_middleware(request: Request, call_next):
     path = request.url.path
     method = request.method.upper()
     if method in ("POST", "PUT", "DELETE", "PATCH") and (path.startswith("/api/") or path.startswith("/a2ui/")):
-        if not path.startswith("/api/script/") and path != "/api/voice-preview":
+        if not path.startswith("/api/script/") and not path.startswith("/api/workflow/thumbnail/") and path != "/api/voice-preview":
             token = request.headers.get("X-Local-Control-Token", "")
             if not token or not secrets.compare_digest(str(token), str(LOCAL_TOKEN)):
                 # Dự phòng cho các nút điều khiển nội bộ từ dashboard UI hợp lệ
@@ -2029,6 +2029,14 @@ async def api_get_feature_flags():
         except Exception as readiness_error:
             flags["QWEN_ASR_READY"] = False
             flags["QWEN_ASR_READINESS_REASON"] = str(readiness_error)
+        try:
+            from ai.v1_sensevoice_adapter import check_sensevoice_readiness
+            sv_ready, sv_reason = check_sensevoice_readiness(ignore_flag=True)
+            flags["SENSEVOICE_ASR_READY"] = bool(sv_ready)
+            flags["SENSEVOICE_ASR_READINESS_REASON"] = sv_reason
+        except Exception as sv_err:
+            flags["SENSEVOICE_ASR_READY"] = False
+            flags["SENSEVOICE_ASR_READINESS_REASON"] = str(sv_err)
         return flags
     except Exception:
         from v1_speech_guard import natural_speed_limit
@@ -2062,6 +2070,23 @@ async def api_set_feature_flags(payload: dict = Body(...)):
                         "status": "error",
                         "code": "QWEN_NOT_READY",
                         "message": reason,
+                    },
+                )
+        wants_sensevoice = (
+            requested_model in ("whisper_sensevoice", "whisper_sensevoice_hybrid", "hybrid", "sensevoice_small", "sensevoice")
+            or payload.get("V1_SHORT_ASR_MODEL") in ("whisper_sensevoice", "sensevoice_small")
+            or payload.get("V1_LONG_ASR_MODEL") in ("whisper_sensevoice", "sensevoice_small")
+        )
+        if wants_sensevoice:
+            from ai.v1_sensevoice_adapter import check_sensevoice_readiness
+            sv_ready, sv_reason = check_sensevoice_readiness(ignore_flag=True)
+            if not sv_ready:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "status": "error",
+                        "code": "SENSEVOICE_NOT_READY",
+                        "message": sv_reason,
                     },
                 )
         from v1_feature_flags import set_feature_flags

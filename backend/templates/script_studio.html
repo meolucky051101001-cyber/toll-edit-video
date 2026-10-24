@@ -889,7 +889,6 @@
     <div class="header-right">
       <div class="nav-switcher">
         <a href="/" class="nav-switcher-link" title="Dashboard Lồng tiếng Tool V1">Tool V1</a>
-        <a href="http://127.0.0.1:8089/" class="nav-switcher-link" title="Dashboard Tool V2">Tool V2</a>
         <a href="/quy-trinh" class="nav-switcher-link" title="Studio Quy trình biên tập video">Quy Trình</a>
         <a href="/kich-ban" class="nav-switcher-link active" title="Studio Kịch Bản AI & Video Doodle">Kịch Bản AI</a>
       </div>
@@ -985,7 +984,7 @@
         <label class="input-label">🧠 Mô Hình AI Biên Kịch (AI Model):</label>
         <select id="ai-engine-select">
           <option value="muse" selected>⚡ Meta Muse Spark 1.3 (Kết Nối Trực Tiếp, Không Giới Hạn Quota — Khuyên Dùng)</option>
-          <option value="gemini">✨ Google Gemini 2.5 Flash</option>
+          <option value="gemini">✨ Google Gemini (bản mới nhất)</option>
         </select>
       </div>
 
@@ -999,9 +998,9 @@
           </div>
           <select id="voice-select">
             <optgroup label="🎬 Giọng CapCut TTS (Tối ưu TikTok, Shorts, Reels)">
-              <option value="multi_male_felipe_uranus_bigtts" selected>Nam Trầm (Chuyên Gia) — Uy tín, triết lý</option>
+              <option value="multi_male_felipe_uranus_bigtts">Nam Trầm (Chuyên Gia) — Uy tín, triết lý</option>
               <option value="BV562_streaming">Mai (Nữ Chuẩn) — Hot TikTok, truyền cảm</option>
-              <option value="BV075_streaming">Thanh Niên Tự Tin (Nam Trẻ) — Sôi nổi, dứt khoát</option>
+              <option value="BV075_streaming" selected>Thanh Niên Tự Tin (Nam Trẻ) — Sôi nổi, dứt khoát</option>
               <option value="multi_female_richgirl_uranus_bigtts">Review Phim (Kịch Tính) — Kể chuyện bí ẩn</option>
               <option value="BV421_vivn_streaming">Nhỏ Ngọt Ngào (Nữ Dễ Thương) — Nhẹ nhàng, vlog</option>
               <option value="BV074_streaming">Cô Gái Hoạt Ngôn (Nữ Năng Động) — Nhanh nhẹn</option>
@@ -1017,31 +1016,29 @@
           <label class="input-label">⏱️ Độ dài mong muốn:</label>
           <select id="scenes-count-select">
             <option value="4">Khoảng 15s (4 phân cảnh)</option>
-            <option value="6" selected>Khoảng 25s (6 phân cảnh)</option>
+            <option value="6">Khoảng 25s (6 phân cảnh)</option>
             <option value="8">Khoảng 35s (8 phân cảnh)</option>
-            <option value="12">Khoảng 50s (12 phân cảnh)</option>
+            <option value="12" selected>Khoảng 50s (12 phân cảnh)</option>
             <option value="16">Khoảng 70s (16 phân cảnh)</option>
           </select>
         </div>
       </div>
 
-      <!-- Tùy Chọn Diễn Hoạt Bảng Trắng Bàn Tay Vẽ Thật (Whiteboard Hand-Drawn Animation) -->
+      <!-- Tùy Chọn Diễn Hoạt Bảng Trắng (Whiteboard Animation — nét vẽ tự chạy, không còn bàn tay vẽ) -->
       <div style="background: rgba(99, 102, 241, 0.08); border: 1px solid rgba(99, 102, 241, 0.28); border-radius: 12px; padding: 14px 16px; margin: 16px 0 20px 0;">
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-          <label style="font-weight: 700; font-size: 13.5px; color: #a5b4fc; display: flex; align-items: center; gap: 8px; cursor: pointer;" for="hand-draw-toggle">
+          <label style="font-weight: 700; font-size: 13.5px; color: #a5b4fc; display: flex; align-items: center; gap: 8px;">
             ✨ Diễn Hoạt Bảng Trắng Vẽ Bút Đen (Black & White Whiteboard)
           </label>
-          <input type="checkbox" id="hand-draw-toggle" checked style="width: 20px; height: 20px; accent-color: #6366f1; cursor: pointer;">
         </div>
         <p style="font-size: 12px; color: var(--text-muted); margin: 0 0 10px 0; line-height: 1.4;">
-          Hoạt hình bảng trắng nét đen trên nền trắng tinh khiết, tăng tốc phần cứng GPU NVIDIA NVENC (RTX 4050).
+          Hoạt hình bảng trắng nét đen tự chạy trên nền trắng tinh khiết (không còn bàn tay vẽ), tăng tốc phần cứng GPU NVIDIA NVENC (RTX 4050).
         </p>
         <div style="display: grid; grid-template-columns: 1.4fr 1fr; gap: 10px; font-size: 12.5px;">
           <div>
             <span style="display: block; color: var(--text-muted); margin-bottom: 4px; font-weight: 600;">🎬 Phong cách diễn hoạt:</span>
             <select id="whiteboard-mode-select" style="padding: 7px 10px; font-size: 12px; width: 100%;">
-              <option value="3band" selected>✍️ Bàn Tay Vẽ Thật (Realistic Hand-Drawn)</option>
-              <option value="kinetic">⚡ Kinetic Reveal (Nét vẽ tự chạy - Kinoslide Engine)</option>
+              <option value="kinetic" selected>⚡ Kinetic Reveal (Nét vẽ tự chạy - Kinoslide Engine)</option>
             </select>
           </div>
           <div>
@@ -1052,6 +1049,10 @@
               <option value="15">15 FPS (Render siêu tốc)</option>
             </select>
           </div>
+        </div>
+        <div style="margin-top: 10px; display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="satori-title-toggle" checked style="width: 16px; height: 16px; accent-color: #6366f1; cursor: pointer;">
+          <label for="satori-title-toggle" style="font-size: 12.5px; color: #a5b4fc; cursor: pointer;">✨ Tiêu đề Satori (chữ to, ký hiệu ★ chuẩn — tự lùi về PIL nếu thiếu Node)</label>
         </div>
       </div>
 
@@ -1106,6 +1107,11 @@
           <h2 class="card-title">📋 Chi Tiết Các Phân Cảnh (Scenes)</h2>
           <p class="card-desc" id="script-title-display"></p>
         </div>
+        <div style="margin: 4px 0 12px 0;">
+          <button class="btn-secondary" id="btn-preview-all-voices" onclick="previewAllScenesVoice()" style="font-size: 12.5px; padding: 8px 14px;">
+            🔊 Nghe liền mạch lời thoại các cảnh (Howler)
+          </button>
+        </div>
         <div class="scenes-wrapper" id="scenes-list"></div>
       </div>
     </div>
@@ -1151,6 +1157,7 @@
 
   <div id="toast"></div>
 
+  <script src="/api/script/assets/howler.min.js"></script>
   <script>
     let activeMode = 'prompt';
     let currentTaskId = null;
@@ -1189,6 +1196,132 @@
         showToast('❌ Lỗi kết nối TTS: ' + e.message, true);
         btn.innerText = '▶️ Nghe thử giọng';
       }
+    }
+
+    // =========================================================
+    // NÂNG CẤP 2026-10-18: Satori tiêu đề + Remotion mode + Howler nghe liền mạch
+    // =========================================================
+    function isSatoriTitleEnabled() {
+      const el = document.getElementById('satori-title-toggle');
+      return el ? el.checked : false;
+    }
+
+    async function refreshRenderCapabilities() {
+      try {
+        const res = await fetch('/api/script/render-capabilities');
+        const data = await res.json();
+        const rem = data && data.data && data.data.remotion;
+        const sel = document.getElementById('whiteboard-mode-select');
+        if (sel && rem && rem.enabled && rem.available && !document.getElementById('opt-remotion')) {
+          const opt = document.createElement('option');
+          opt.value = 'remotion';
+          opt.id = 'opt-remotion';
+          opt.textContent = rem.label || '🎬 Remotion Draw-On + Camera (Beta)';
+          sel.appendChild(opt);
+        }
+      } catch (e) {
+        /* im lặng — không ảnh hưởng studio */
+      }
+    }
+    refreshRenderCapabilities();
+
+    // Cập nhật nhãn engine AI từ backend (tên Gemini bản mới nhất; Muse đã đăng nhập chưa)
+    async function refreshAiEngineLabels() {
+      try {
+        const res = await fetch('/api/script/ai-engines');
+        const data = await res.json();
+        const engines = (data && data.engines) || [];
+        const sel = document.getElementById('ai-engine-select');
+        if (!sel) return;
+        for (const eng of engines) {
+          const opt = sel.querySelector('option[value="' + eng.id + '"]');
+          if (!opt) continue;
+          let label = eng.name || eng.id;
+          if (eng.available === false && eng.id === 'muse') {
+            label += ' — chưa đăng nhập (tự dùng Gemini)';
+          }
+          opt.textContent = label;
+        }
+        const museEng = engines.find(e => e.id === 'muse');
+        if (museEng && museEng.available === false && sel.value === 'muse') {
+          sel.value = 'gemini'; // Muse chưa đăng nhập → tự chọn Gemini cho khỏi nhầm
+        }
+      } catch (e) { /* im lặng — không ảnh hưởng studio */ }
+    }
+    refreshAiEngineLabels();
+
+    let sceneVoicePreview = { active: false, urls: [], howls: [], token: 0 };
+
+    function stopSceneVoicePreview() {
+      sceneVoicePreview.token += 1;
+      sceneVoicePreview.howls.forEach(h => { try { h.stop(); h.unload(); } catch (e) {} });
+      sceneVoicePreview.howls = [];
+      sceneVoicePreview.urls = [];
+      sceneVoicePreview.active = false;
+      const btn = document.getElementById('btn-preview-all-voices');
+      if (btn) btn.innerText = '🔊 Nghe liền mạch lời thoại các cảnh (Howler)';
+    }
+
+    async function previewAllScenesVoice() {
+      if (!currentScriptData || !(currentScriptData.scenes || []).length) {
+        showToast('⚠️ Chưa có kịch bản phân cảnh để nghe thử.', true);
+        return;
+      }
+      const btn = document.getElementById('btn-preview-all-voices');
+      if (sceneVoicePreview.active) { stopSceneVoicePreview(); return; }
+      if (typeof Howl === 'undefined') {
+        showToast('❌ Không tải được thư viện Howler (backend/templates/assets/howler.min.js).', true);
+        return;
+      }
+
+      const scenes = currentScriptData.scenes;
+      const voiceVal = document.getElementById('voice-select').value;
+      const token = ++sceneVoicePreview.token;
+      sceneVoicePreview.active = true;
+      if (btn) btn.innerText = '⏳ Đang tạo giọng đọc... (0/' + scenes.length + ')';
+
+      try {
+        const urls = [];
+        for (let i = 0; i < scenes.length; i++) {
+          if (token !== sceneVoicePreview.token) return;
+          if (btn) btn.innerText = `⏳ Đang tạo giọng đọc cảnh ${i + 1}/${scenes.length}...`;
+          const res = await fetch('/api/script/preview-tts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: scenes[i].narration || '', voice: voiceVal })
+          });
+          const data = await res.json();
+          urls.push(data && data.status === 'success' ? data.stream_url : null);
+        }
+        if (token !== sceneVoicePreview.token) return;
+        sceneVoicePreview.urls = urls;
+        if (btn) btn.innerText = '⏹️ Dừng nghe thử (đang phát...)';
+        playSceneVoiceAt(0, token);
+      } catch (e) {
+        showToast('❌ Lỗi nghe thử liền mạch: ' + e.message, true);
+        stopSceneVoicePreview();
+      }
+    }
+
+    function playSceneVoiceAt(index, token) {
+      if (token !== sceneVoicePreview.token) return;
+      const urls = sceneVoicePreview.urls;
+      const btn = document.getElementById('btn-preview-all-voices');
+      if (index >= urls.length) { stopSceneVoicePreview(); return; }
+      if (btn) btn.innerText = `⏹️ Dừng nghe thử (cảnh ${index + 1}/${urls.length})`;
+      const url = urls[index];
+      if (!url) { playSceneVoiceAt(index + 1, token); return; }
+      const howl = new Howl({
+        src: [url],
+        html5: true,
+        volume: 0,
+        onend: () => playSceneVoiceAt(index + 1, token),
+        onloaderror: () => playSceneVoiceAt(index + 1, token),
+        onplayerror: () => playSceneVoiceAt(index + 1, token),
+      });
+      sceneVoicePreview.howls.push(howl);
+      howl.play();
+      howl.fade(0, 1, 200);
     }
 
     function switchMode(mode) {
@@ -1470,9 +1603,8 @@
 
       currentTaskId = 'doodle_' + Date.now();
       const aiEngineVal = document.getElementById('ai-engine-select') ? document.getElementById('ai-engine-select').value : 'muse';
-      const isHandToggle = document.getElementById('hand-draw-toggle') ? document.getElementById('hand-draw-toggle').checked : true;
-      const whiteboardMode = document.getElementById('whiteboard-mode-select') ? document.getElementById('whiteboard-mode-select').value : '3band';
-      const useHandDraw = (whiteboardMode === '3band') && isHandToggle;
+      const whiteboardMode = document.getElementById('whiteboard-mode-select') ? document.getElementById('whiteboard-mode-select').value : 'kinetic';
+      const useHandDraw = false; // 18/10/2026: đã bỏ bàn tay vẽ (chỉ còn Kinetic Reveal / Remotion)
 
       try {
         const payload = {
@@ -1483,7 +1615,8 @@
           scene_count: countVal,
           task_id: currentTaskId,
           use_hand_draw: useHandDraw,
-          whiteboard_mode: whiteboardMode
+          whiteboard_mode: whiteboardMode,
+          satori_band_a: isSatoriTitleEnabled()
         };
 
         const resp = await fetch('/api/script/ai-generate-video', {
@@ -1636,7 +1769,8 @@
           body: JSON.stringify({
             title: currentScriptData.title || 'GIẢI MÃ SỰ THẬT',
             keyword_accent: currentScriptData.keyword_accent || '',
-            scene: sc
+            scene: sc,
+            satori_band_a: isSatoriTitleEnabled()
           })
         });
         const data = await resp.json();
@@ -1665,9 +1799,8 @@
       currentTaskId = 'doodle_' + Date.now();
       updateProgressUI(10, 'Đang bắt đầu dựng các phân cảnh thành video...');
 
-      const isHandToggle = document.getElementById('hand-draw-toggle') ? document.getElementById('hand-draw-toggle').checked : true;
-      const whiteboardMode = document.getElementById('whiteboard-mode-select') ? document.getElementById('whiteboard-mode-select').value : '3band';
-      const useHandDraw = (whiteboardMode === '3band') && isHandToggle;
+      const whiteboardMode = document.getElementById('whiteboard-mode-select') ? document.getElementById('whiteboard-mode-select').value : 'kinetic';
+      const useHandDraw = false; // 18/10/2026: đã bỏ bàn tay vẽ (chỉ còn Kinetic Reveal / Remotion)
 
       try {
         const payload = {
@@ -1677,7 +1810,8 @@
           voice: voiceVal,
           task_id: currentTaskId,
           use_hand_draw: useHandDraw,
-          whiteboard_mode: whiteboardMode
+          whiteboard_mode: whiteboardMode,
+          satori_band_a: isSatoriTitleEnabled()
         };
 
         const resp = await fetch('/api/script/render-doodle-scenes', {

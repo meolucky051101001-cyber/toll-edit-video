@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--service", choices=("dashboard", "telegram"), required=True)
+    parser.add_argument("--service", choices=("dashboard", "telegram", "scriptbot"), required=True)
     service = parser.parse_args().service
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
@@ -34,7 +34,12 @@ def main():
     handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     logger.addHandler(handler)
     python = ROOT / "venv" / "Scripts" / "python.exe"
-    script = ROOT / ("main.py" if service == "dashboard" else "telegram_bot.py")
+    scripts = {
+        "dashboard": "main.py",
+        "telegram": "telegram_bot.py",
+        "scriptbot": "telegram_script_bot.py",
+    }
+    script = ROOT / scripts[service]
     environment = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     # Keep the control plane available independently of either dashboard.
     try:

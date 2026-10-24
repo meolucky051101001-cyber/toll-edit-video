@@ -21,6 +21,8 @@ def capture_job_settings(workspace):
 
 ASR_ALIASES = {
     "whisper_turbo": "whisper_turbo", "whisper_large_v3_turbo": "whisper_turbo",
+    "whisper_sensevoice": "whisper_sensevoice", "whisper_sensevoice_hybrid": "whisper_sensevoice", "hybrid": "whisper_sensevoice",
+    "sensevoice_small": "sensevoice_small", "sensevoice": "sensevoice_small",
     "qwen3_asr": "qwen3_asr", "qwen3_asr_preview": "qwen3_asr",
 }
 SEPARATOR_ALIASES = {
@@ -51,7 +53,7 @@ def apply_job_policy(routing, flags, overrides=None):
         raise ValueError(f"Unsupported V1 separator: {separator}")
     asr = overrides.get("asr_model") or flags.get(f"V1_{profile}_ASR_MODEL", "inherit")
     if asr == "inherit":
-        asr = flags.get("V1_ASR_MODEL", "whisper_turbo")
+        asr = flags.get("V1_ASR_MODEL", "whisper_sensevoice")
     if asr not in ASR_ALIASES:
         raise ValueError(f"Unsupported V1 ASR model: {asr}")
     pipeline.update(

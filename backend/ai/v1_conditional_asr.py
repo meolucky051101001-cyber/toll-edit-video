@@ -202,10 +202,13 @@ def run_conditional_asr(
     max_retry_audio_seconds: float = 30.0,
     max_snippet_seconds: float = 8.0,
     retry_budget_seconds: float = 45.0,
+    vocals_audio_path: str | None = None,
 ) -> List[srt.Subtitle]:
     """
     High-level entrypoint:
     If suspicious gaps with acoustic energy exist, re-transcribes them on original_audio_path.
+    When vocals_audio_path is provided, gaps that contain only background music (no vocal energy
+    in separated vocals) are skipped to avoid 25-45s of wasted ASR on BGM intros/outros.
     Returns merged, re-indexed list of Subtitle objects.
     """
     if not os.path.exists(original_audio_path) or whisper_model is None:
@@ -217,23 +220,49 @@ def run_conditional_asr(
     except Exception:
         return list(initial_segments)
 
+    vocals_audio = None
+    if (
+        vocals_audio_path
+        and os.path.exists(vocals_audio_path)
+        and os.path.abspath(vocals_audio_path) != os.path.abspath(original_audio_path)
+    ):
+        try:
+            vocals_audio = AudioSegment.from_file(vocals_audio_path)
+        except Exception:
+            vocals_audio = None
+
     # 1. Detect gaps
     raw_gaps = detect_suspicious_gaps(initial_segments, total_duration, min_gap_seconds=min_gap_seconds)
-    # 2. Filter gaps with non-trivial energy on original audio
+    # 2. Filter gaps with non-trivial energy on original audio (and vocal stem when available)
     # Reuse the decoded audio and bound both snippet size and retry workload.
     # The wall-clock budget is checked between calls; the isolated worker
     # remains responsible for terminating a single hung model call.
     verified_gaps = []
+    skipped_bgm_gaps = 0
     remaining = max(0.0, max_retry_audio_seconds)
     if max_snippet_seconds <= 0:
         raise ValueError("max_snippet_seconds must be positive")
     for left, right in raw_gaps:
         while right - left >= 0.8 and remaining >= 0.8:
             end = min(right, left + max_snippet_seconds, left + remaining)
-            if audio[int(left * 1000):int(end * 1000)].dBFS >= -38.0:
+            start_ms, end_ms = int(left * 1000), int(end * 1000)
+            orig_dbfs = audio[start_ms:end_ms].dBFS
+            has_energy = orig_dbfs >= -38.0
+            if has_energy and vocals_audio is not None:
+                voc_slice = vocals_audio[start_ms:end_ms]
+                voc_dbfs = voc_slice.dBFS if len(voc_slice) > 0 else -float("inf")
+                # Only re-transcribe on original.wav if separated vocals still show at least faint
+                # human voice presence (>=-42 dBFS, or >=-46 dBFS when original is loud >=-32 dBFS).
+                if voc_dbfs < -42.0 and not (orig_dbfs >= -32.0 and voc_dbfs >= -46.0):
+                    has_energy = False
+                    skipped_bgm_gaps += 1
+            if has_energy:
                 verified_gaps.append((left, end))
                 remaining -= end - left
             left = end
+
+    if skipped_bgm_gaps:
+        logger.info("Skipped %d pure-BGM gap snippet(s) via vocal-stem energy gate", skipped_bgm_gaps)
 
     if not verified_gaps:
         return list(initial_segments)

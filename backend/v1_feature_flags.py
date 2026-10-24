@@ -23,12 +23,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FLAGS: Dict[str, Any] = {
     "ENABLE_QWEN_ASR": False,
-    "V1_ASR_MODEL": "whisper_turbo",
+    "V1_ASR_MODEL": "whisper_sensevoice",
     "V1_ASR_CHUNKING": True,
     "V1_SMART_SKIP_OCR": True,
     "V1_QC_POLICY": "REPORT_ONLY",
     "V1_MAX_NATURAL_SPEED": 1.50,
-    "V1_TTS_WORKERS": 4,
+    "V1_TTS_WORKERS": 6,
     "V1_USE_ORCHESTRATOR": True,
     "V1_VIDEO_MODE": "AUTO",
     "V1_SHORT_SEPARATOR": "roformer",
@@ -75,9 +75,9 @@ def set_feature_flags(new_flags: Dict[str, Any], workspace_path: Optional[str | 
             raise ValueError(f"{key} requires a boolean")
     choices = {
         "V1_VIDEO_MODE": {"AUTO", "SHORT", "MEDIUM", "LONG", "CUSTOM"},
-        "V1_ASR_MODEL": {"whisper_turbo", "qwen3_asr"},
-        "V1_SHORT_ASR_MODEL": {"inherit", "whisper_turbo", "qwen3_asr"},
-        "V1_LONG_ASR_MODEL": {"inherit", "whisper_turbo", "qwen3_asr"},
+        "V1_ASR_MODEL": {"whisper_turbo", "whisper_sensevoice", "sensevoice_small", "qwen3_asr"},
+        "V1_SHORT_ASR_MODEL": {"inherit", "whisper_turbo", "whisper_sensevoice", "sensevoice_small", "qwen3_asr"},
+        "V1_LONG_ASR_MODEL": {"inherit", "whisper_turbo", "whisper_sensevoice", "sensevoice_small", "qwen3_asr"},
         "V1_SHORT_SEPARATOR": {"roformer", "demucs"},
         "V1_LONG_SEPARATOR": {"roformer", "demucs"},
         "V1_QC_POLICY": {"REPORT_ONLY", "WARN", "BLOCK"},
@@ -100,14 +100,24 @@ def set_feature_flags(new_flags: Dict[str, Any], workspace_path: Optional[str | 
         if m in ("qwen3_asr", "qwen", "qwen3"):
             updates["ENABLE_QWEN_ASR"] = True
             updates["V1_ASR_MODEL"] = "qwen3_asr"
-        else:
+        elif m in ("whisper_sensevoice", "whisper_sensevoice_hybrid", "hybrid"):
+            updates["ENABLE_QWEN_ASR"] = False
+            updates["V1_ASR_MODEL"] = "whisper_sensevoice"
+        elif m in ("sensevoice_small", "sensevoice"):
+            updates["ENABLE_QWEN_ASR"] = False
+            updates["V1_ASR_MODEL"] = "sensevoice_small"
+        elif m in ("whisper_turbo", "whisper"):
             updates["ENABLE_QWEN_ASR"] = False
             updates["V1_ASR_MODEL"] = "whisper_turbo"
+        else:
+            updates["ENABLE_QWEN_ASR"] = False
+            updates["V1_ASR_MODEL"] = "whisper_sensevoice"
     elif "ENABLE_QWEN_ASR" in updates:
         if updates["ENABLE_QWEN_ASR"] is True:
             updates["V1_ASR_MODEL"] = "qwen3_asr"
         else:
-            updates["V1_ASR_MODEL"] = "whisper_turbo"
+            if current.get("V1_ASR_MODEL") == "qwen3_asr":
+                updates["V1_ASR_MODEL"] = "whisper_sensevoice"
 
     for k, v in updates.items():
         if k in DEFAULT_FLAGS:

@@ -355,8 +355,15 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
 
         await pause_checkpoint()
         _raise_if_stopped()
-        batch_asr_model = frozen_eff.get("asr_model", "whisper_turbo")
-        batch_asr_display = "Qwen3-ASR 0.6B (GPU CUDA)" if "qwen" in batch_asr_model.lower() else "Faster-Whisper Large-v3 Turbo"
+        batch_asr_model = str(frozen_eff.get("asr_model", "whisper_turbo"))
+        if "qwen" in batch_asr_model.lower():
+            batch_asr_display = "Qwen3-ASR 0.6B (GPU CUDA)"
+        elif batch_asr_model.lower() in ("whisper_sensevoice", "whisper_sensevoice_hybrid", "hybrid"):
+            batch_asr_display = "Hybrid: Faster-Whisper Turbo + SenseVoice-Small (CTC 60ms)"
+        elif "sensevoice" in batch_asr_model.lower():
+            batch_asr_display = "SenseVoice-Small (ONNX INT8 Siêu Tốc)"
+        else:
+            batch_asr_display = "Faster-Whisper Large-v3 Turbo"
         await notify(f"🤖 Bước 3/6: {batch_asr_display} đang nhận dạng giọng nói...")
         job_tracker.update_step(3, f"Bước 3/6: {batch_asr_display} nhận dạng giọng nói...", percent=40)
         from v1_gpu_gatekeeper import async_gpu_gatekeeper

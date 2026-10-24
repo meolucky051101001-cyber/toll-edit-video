@@ -54,7 +54,6 @@ def processes(key):
         for name in (
             "background_service.py",
             "main.py",
-            "dashboard_monitor.py",
             "telegram_bot.py",
             "batch_processor.py",
             "gpu_worker.py",
@@ -89,7 +88,7 @@ def processes(key):
                         break
             if is_match:
                 script_name = "worker"
-                for s in ("main.py", "dashboard_monitor.py", "telegram_bot.py", "background_service.py", "batch_processor.py", "gpu_worker.py", "model_runner.py", "model_runtime_runner.py"):
+                for s in ("main.py", "telegram_bot.py", "background_service.py", "batch_processor.py", "gpu_worker.py", "model_runner.py", "model_runtime_runner.py"):
                     if s in cmd_str:
                         script_name = s
                         break
@@ -214,7 +213,7 @@ def stop_and_release(key):
             cmd_str = ' '.join(cmd)
 
             # Bảo vệ bộ điều khiển trung tâm 8090, dashboard web servers và các test runner
-            if any(k in cmd_str for k in ('tool_control.py', 'test_', 'unittest', 'pytest', 'dashboard_monitor.py', 'main.py', '--service dashboard')):
+            if any(k in cmd_str for k in ('tool_control.py', 'test_', 'unittest', 'pytest', 'main.py', '--service dashboard')):
                 continue
 
             is_tool_proc = False
@@ -226,7 +225,7 @@ def stop_and_release(key):
                 try:
                     for child in p.children(recursive=True):
                         ch_cmd = ' '.join([str(c).lower() for c in (child.cmdline() or [])])
-                        if not any(k in ch_cmd for k in ('tool_control.py', 'test_', 'unittest', 'pytest', 'dashboard_monitor.py', 'main.py', '--service dashboard')):
+                        if not any(k in ch_cmd for k in ('tool_control.py', 'test_', 'unittest', 'pytest', 'main.py', '--service dashboard')):
                             targets[child.pid] = child
 
                 except (psutil.NoSuchProcess, psutil.AccessDenied):

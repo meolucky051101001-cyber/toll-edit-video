@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 import asyncio
 from urllib.parse import unquote
-from fastapi import APIRouter, HTTPException, Query, Body, Request
+from fastapi import APIRouter, HTTPException, Query, Body, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from dashboard_media import media_status
 
@@ -521,10 +521,14 @@ async def serve_workflow_page():
         token = get_current_control_token()
         content = content.replace("__REPLACE_TOKEN__", token)
         content = content.replace("CONTROL_PLANE_TOKEN_PLACEHOLDER", token)
+        curr_paths = AppPaths.from_environment(_BACKEND_ROOT.parent, read_environment(_BACKEND_ROOT))
+        downloads_dir = curr_paths.workspace / "downloads"
+        default_in = str(downloads_dir) if downloads_dir.is_dir() else str(curr_paths.input_dir)
         configured_paths = {
-            "input": str(PATHS.input_dir),
-            "output": str(PATHS.output_dir),
-            "framed_output": str(PATHS.output_dir / "chong_reup"),
+            "input": default_in,
+            "output": str(curr_paths.output_dir),
+            "framed_output": str(curr_paths.output_dir / "chong_reup"),
+            "downloads": str(downloads_dir),
         }
         content = content.replace(
             "__CONFIGURED_INPUT_DIR__", html.escape(configured_paths["input"], quote=True)
@@ -690,7 +694,8 @@ async def api_get_workflow_videos():
                         "source": "phoi",
                         "size_mb": size_mb,
                         "created_at": mtime,
-                        "steps": steps
+                        "steps": steps,
+                        "thumbnail_url": f"/api/workflow/thumbnail/{stem}"
                     })
                 except OSError:
                     continue
@@ -715,7 +720,8 @@ async def api_get_workflow_videos():
                         "source": "downloads",
                         "size_mb": size_mb,
                         "created_at": mtime,
-                        "steps": steps
+                        "steps": steps,
+                        "thumbnail_url": f"/api/workflow/thumbnail/{stem}"
                     })
                 except OSError:
                     continue
@@ -835,6 +841,7 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
 
     return {
         "stem": stem,
+        "thumbnail_url": f"/api/workflow/thumbnail/{stem}",
         "video_url": active_video_url,
         "final_video_url": final_video_url,
         "raw_video_url": raw_video_url,
@@ -946,6 +953,103 @@ async def api_scan_batch_folder(payload: Dict[str, Any] = Body(...)):
     except Exception as e:
         logger.error(f"Lỗi quét thư mục: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def build_watermark_filter(cfg: Dict[str, Any], tw: int, th: int) -> str:
+    """Tạo bộ lọc FFmpeg drawtext cho Watermark bản quyền mờ mờ cố định ở góc bên phải video hoặc vị trí tùy chỉnh."""
+    if not cfg.get("watermark_enabled", False):
+        return ""
+    text = str(cfg.get("watermark_text", "")).strip()
+    if not text:
+        return ""
+
+    # Thoát ký tự đặc biệt cho ffmpeg drawtext (bao gồm dấu xuống dòng)
+    clean_text = (
+        text.replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace(":", "\\:")
+        .replace("%", "\\%")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+    )
+    try:
+        opacity = float(cfg.get("watermark_opacity", 0.45))
+    except (ValueError, TypeError):
+        opacity = 0.45
+    opacity = max(0.05, min(1.0, opacity))
+
+    try:
+        base_font_size = int(cfg.get("watermark_font_size", 22))
+    except (ValueError, TypeError):
+        base_font_size = 22
+    scale_factor = max(0.6, min(2.5, th / 1920.0))
+    font_size = max(12, int(base_font_size * scale_factor))
+
+    # Màu chữ watermark
+    raw_color = str(cfg.get("watermark_color", "#ffffff")).strip()
+    if raw_color.startswith("#"):
+        color_hex = "0x" + raw_color[1:]
+    elif raw_color.startswith("0x"):
+        color_hex = raw_color
+    else:
+        color_hex = "white"
+
+    pos = str(cfg.get("watermark_position", "top-right")).lower()
+    try:
+        base_margin_x = int(cfg.get("watermark_margin_x", 25))
+        base_margin_y = int(cfg.get("watermark_margin_y", 25))
+    except (ValueError, TypeError):
+        base_margin_x = 25
+        base_margin_y = 25
+    margin_x = max(10, int(base_margin_x * (tw / 1080.0)))
+    margin_y = max(10, int(base_margin_y * (th / 1920.0)))
+
+    # Vị trí hiển thị (4 góc hoặc Tự do)
+    if pos == "custom":
+        try:
+            pos_x_pct = float(cfg.get("watermark_pos_x_pct", 0.85))
+            pos_y_pct = float(cfg.get("watermark_pos_y_pct", 0.05))
+        except (ValueError, TypeError):
+            pos_x_pct, pos_y_pct = 0.85, 0.05
+        pos_x_pct = max(0.02, min(0.98, pos_x_pct))
+        pos_y_pct = max(0.02, min(0.98, pos_y_pct))
+        x_expr = f"(w*{pos_x_pct:.4f})-(tw/2)"
+        y_expr = f"(h*{pos_y_pct:.4f})-(th/2)"
+    elif pos == "bottom-right":
+        x_expr = f"w-tw-{margin_x}"
+        y_expr = f"h-th-{margin_y}"
+    elif pos == "top-left":
+        x_expr = f"{margin_x}"
+        y_expr = f"{margin_y}"
+    elif pos == "bottom-left":
+        x_expr = f"{margin_x}"
+        y_expr = f"h-th-{margin_y}"
+    else:  # Mặc định góc trên phải
+        x_expr = f"w-tw-{margin_x}"
+        y_expr = f"{margin_y}"
+
+    # Tùy chọn khung huy hiệu mờ bo quanh chữ
+    box_filter = ""
+    if cfg.get("watermark_bg_enabled", False):
+        raw_bg_color = str(cfg.get("watermark_bg_color", "#000000")).strip()
+        bg_hex = ("0x" + raw_bg_color[1:]) if raw_bg_color.startswith("#") else (raw_bg_color if raw_bg_color.startswith("0x") else "black")
+        try:
+            bg_op = float(cfg.get("watermark_bg_opacity", 0.40))
+        except (ValueError, TypeError):
+            bg_op = 0.40
+        bg_op = max(0.05, min(1.0, bg_op))
+        box_border_w = max(4, int(8 * scale_factor))
+        box_filter = f":box=1:boxcolor={bg_hex}@{bg_op:.2f}:boxborderw={box_border_w}"
+
+    fontfile = r"C\:/Windows/Fonts/arial.ttf"
+    shadow_opacity = round(opacity * 0.75, 2)
+    filt = (
+        f",drawtext=fontfile='{fontfile}':text='{clean_text}':"
+        f"fontsize={font_size}:fontcolor={color_hex}@{opacity:.2f}:"
+        f"shadowcolor=black@{shadow_opacity:.2f}:shadowx=2:shadowy=2"
+        f"{box_filter}:x={x_expr}:y={y_expr}"
+    )
+    return filt
 
 
 def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]):
@@ -1170,6 +1274,11 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
                     f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
                 )
 
+        # Lồng Watermark mờ mờ cố định ở góc phải nếu được kích hoạt
+        wm_filt = build_watermark_filter(cfg, tw, th)
+        if wm_filt:
+            fc = fc.replace("[outv]", f"{wm_filt}[outv]")
+
         # Thử mã hóa bằng GPU NVENC trước, nếu lỗi thì fallback sang CPU x264
         cmd_nvenc = [
             "ffmpeg", "-y",
@@ -1297,8 +1406,1780 @@ async def api_stop_batch_framing():
     return {"status": "ok", "message": "Đã gửi yêu cầu dừng"}
 
 # =========================================================================
+# FEATURE: THUMBNAIL MANAGEMENT (CAPTURE, UPLOAD, VIEW, DOWNLOAD)
+# =========================================================================
+
+THUMBNAILS_DIR = WORKSPACE / "thumbnails"
+THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
+
+def _find_video_for_stem(stem: str) -> Optional[Path]:
+    """Tìm đường dẫn tệp video cho stem đã chọn."""
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    job_dir = WORKSPACE / clean_stem
+    cand_phoi = INPUT_DIR / f"{stem}.mp4"
+    cand_dl = DOWNLOADS_DIR / f"{stem}.mp4"
+    cand_banve = OUTPUT_DIR / f"Dubbed_{stem}.mp4"
+    cand_step1 = job_dir / "step1_extracted.mp4" if job_dir.is_dir() else None
+    
+    for cand in (cand_banve, cand_phoi, cand_dl, cand_step1):
+        if cand and cand.is_file() and cand.stat().st_size > 1000:
+            return cand
+            
+    for d in (DOWNLOADS_DIR, INPUT_DIR, OUTPUT_DIR):
+        if d.is_dir():
+            for f in d.glob("*"):
+                if f.is_file() and f.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm") and (f.stem == stem or clean_stem in f.stem):
+                    return f
+    return None
+
+@router.get("/api/workflow/thumbnail/{stem}")
+async def api_get_video_thumbnail(stem: str):
+    """Lấy ảnh thumbnail của video theo stem. Nếu chưa có, tự động trích xuất frame tại 1.0s."""
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
+    
+    if thumb_file.is_file() and thumb_file.stat().st_size > 500:
+        return FileResponse(thumb_file, media_type="image/jpeg")
+        
+    job_dir = WORKSPACE / clean_stem
+    if job_dir.is_dir() and (job_dir / "thumbnail.jpg").is_file():
+        try:
+            import shutil
+            shutil.copy2(job_dir / "thumbnail.jpg", thumb_file)
+            return FileResponse(thumb_file, media_type="image/jpeg")
+        except Exception:
+            pass
+
+    video_source = _find_video_for_stem(stem)
+    if video_source:
+        try:
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", "1.0",
+                "-i", str(video_source),
+                "-vframes", "1",
+                "-q:v", "2",
+                str(thumb_file)
+            ]
+            res = subprocess.run(cmd, capture_output=True, timeout=12)
+            if res.returncode == 0 and thumb_file.is_file() and thumb_file.stat().st_size > 500:
+                return FileResponse(thumb_file, media_type="image/jpeg")
+        except Exception as e:
+            logger.warning(f"Lỗi tự động trích xuất thumbnail cho {stem}: {e}")
+
+    raise HTTPException(status_code=404, detail="Thumbnail not found")
+
+
+@router.post("/api/workflow/thumbnail/capture")
+async def api_capture_thumbnail(payload: Dict[str, Any] = Body(...)):
+    """Chụp khung hình tại giây chỉ định của video làm Thumbnail."""
+    stem = payload.get("stem", "").strip()
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    
+    try:
+        timestamp_s = float(payload.get("timestamp_s", 1.0))
+    except (ValueError, TypeError):
+        timestamp_s = 1.0
+    if timestamp_s < 0:
+        timestamp_s = 0.0
+        
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
+    
+    video_source = _find_video_for_stem(stem)
+    if not video_source:
+        raise HTTPException(status_code=404, detail="Không tìm thấy tệp video để chụp thumbnail")
+        
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{timestamp_s:.3f}",
+            "-i", str(video_source),
+            "-vframes", "1",
+            "-q:v", "2",
+            str(thumb_file)
+        ]
+        res = subprocess.run(cmd, capture_output=True, timeout=12)
+        if res.returncode == 0 and thumb_file.is_file() and thumb_file.stat().st_size > 500:
+            job_dir = WORKSPACE / clean_stem
+            if job_dir.is_dir():
+                try:
+                    import shutil
+                    shutil.copy2(thumb_file, job_dir / "thumbnail.jpg")
+                except Exception:
+                    pass
+            return {
+                "status": "ok",
+                "success": True,
+                "message": f"Đã chụp khung hình tại {timestamp_s:.2f}s làm Thumbnail thành công!",
+                "thumbnail_url": f"/api/workflow/thumbnail/{clean_stem}?t={time.time()}",
+                "timestamp_s": timestamp_s
+            }
+        else:
+            raise RuntimeError(f"FFmpeg capture thất bại: {res.stderr.decode('utf-8', 'ignore')}")
+    except Exception as e:
+        logger.error(f"Lỗi chụp thumbnail cho {stem}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/workflow/thumbnail/upload")
+async def api_upload_thumbnail(stem: str = Form(...), file: UploadFile = File(...)):
+    """Tải tệp ảnh từ máy tính lên để làm Thumbnail cho video."""
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
+    
+    content = await file.read()
+    if len(content) < 500:
+        raise HTTPException(status_code=400, detail="Tệp ảnh không hợp lệ hoặc quá nhỏ")
+        
+    thumb_file.write_bytes(content)
+    
+    job_dir = WORKSPACE / clean_stem
+    if job_dir.is_dir():
+        try:
+            (job_dir / "thumbnail.jpg").write_bytes(content)
+        except Exception:
+            pass
+            
+    return {
+        "status": "ok",
+        "success": True,
+        "message": f"Đã tải lên Thumbnail cho video thành công!",
+        "thumbnail_url": f"/api/workflow/thumbnail/{clean_stem}?t={time.time()}"
+    }
+
+
+@router.get("/api/workflow/thumbnail/download/{stem}")
+async def api_download_thumbnail(stem: str):
+    """Tải tệp thumbnail về máy tính."""
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
+    if thumb_file.is_file():
+        return FileResponse(thumb_file, filename=f"thumbnail_{clean_stem}.jpg", media_type="image/jpeg")
+    raise HTTPException(status_code=404, detail="Chưa có thumbnail cho video này")
+
+
+def _prepend_thumbnail_file(video_path: Path, thumb_path: Path, duration_s: float = 0.8) -> bool:
+    """Ghép ảnh thumbnail vào đầu video_path bằng FFmpeg NVENC (fallback CPU)."""
+    if not video_path.is_file() or not thumb_path.is_file():
+        return False
+    duration_s = max(0.2, min(5.0, float(duration_s)))
+    cmd_probe = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "stream=codec_type,width,height,r_frame_rate,sample_rate,channel_layout,channels",
+        "-of", "json", str(video_path)
+    ]
+    p_res = subprocess.run(cmd_probe, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    streams = []
+    try:
+        streams = json.loads(p_res.stdout).get("streams", [])
+    except Exception:
+        pass
+
+    v_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
+    a_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    tw = v_stream.get("width") or 1080
+    th = v_stream.get("height") or 1920
+    fps = v_stream.get("r_frame_rate") or "30/1"
+    sr = (a_stream.get("sample_rate") if a_stream else None) or "44100"
+
+    temp_out = video_path.parent / f"_prep_{video_path.name}"
+
+    # Chỉ scale và crop ảnh thumbnail [0:v] về đúng kích thước tw x th và fps của video chính [1:v]
+    # Giữ nguyên video chính [1:v] với setsar=1,fps={fps} để tránh tốn tài nguyên scale/crop toàn bộ video
+    filter_complex = (
+        f"[0:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1,fps={fps}[thumb_v];"
+        f"[1:v]setsar=1,fps={fps}[main_v];"
+        f"[thumb_v][main_v]concat=n=2:v=1:a=0[outv]"
+    )
+
+    audio_maps = []
+    if a_stream:
+        ch_layout = a_stream.get("channel_layout") or ("stereo" if a_stream.get("channels") == 2 else "mono")
+        filter_complex += (
+            f";aevalsrc=0:d={duration_s}:s={sr}[silent_raw];"
+            f"[silent_raw]aformat=sample_rates={sr}:channel_layouts={ch_layout}[silent_a];"
+            f"[1:a]aformat=sample_rates={sr}:channel_layouts={ch_layout}[main_a];"
+            f"[silent_a][main_a]concat=n=2:v=0:a=1[outa]"
+        )
+        audio_maps = ["-map", "[outa]", "-c:a", "aac", "-b:a", "192k"]
+
+    cmd_nvenc = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-t", str(duration_s), "-i", str(thumb_path),
+        "-i", str(video_path),
+        "-filter_complex", filter_complex,
+        "-map", "[outv]",
+    ] + audio_maps + [
+        "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "4000k",
+        "-shortest", "-movflags", "+faststart",
+        str(temp_out)
+    ]
+
+    success = False
+    try:
+        res = subprocess.run(cmd_nvenc, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        if res.returncode == 0 and temp_out.is_file() and temp_out.stat().st_size > 1000:
+            success = True
+    except Exception as e:
+        logger.warning(f"Prepend NVENC failed: {e}")
+
+    if not success:
+        cmd_cpu = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-t", str(duration_s), "-i", str(thumb_path),
+            "-i", str(video_path),
+            "-filter_complex", filter_complex,
+            "-map", "[outv]",
+        ] + audio_maps + [
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+            "-shortest", "-movflags", "+faststart",
+            str(temp_out)
+        ]
+        res2 = subprocess.run(cmd_cpu, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        if res2.returncode == 0 and temp_out.is_file() and temp_out.stat().st_size > 1000:
+            success = True
+
+    if success:
+        try:
+            video_path.unlink(missing_ok=True)
+            temp_out.rename(video_path)
+            return True
+        except Exception:
+            import shutil
+            shutil.copy2(temp_out, video_path)
+            temp_out.unlink(missing_ok=True)
+            return True
+    else:
+        if temp_out.is_file():
+            temp_out.unlink(missing_ok=True)
+        return False
+
+
+@router.post("/api/workflow/thumbnail/prepend")
+async def api_prepend_thumbnail_to_video(payload: Dict[str, Any] = Body(...)):
+    """Ghép ảnh Thumbnail (đã chèn chữ) vào đầu video trong khoảng thời lượng duration_s (mặc định 0.8s)."""
+    stem = payload.get("stem", "").strip()
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    duration_s = float(payload.get("duration_s", 0.8))
+    duration_s = max(0.2, min(5.0, duration_s))
+
+    # 1. Tìm thumbnail
+    thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
+    job_dir = WORKSPACE / clean_stem
+    if not thumb_file.is_file() and job_dir.is_dir() and (job_dir / "thumbnail.jpg").is_file():
+        thumb_file = job_dir / "thumbnail.jpg"
+
+    # 2. Tìm video nguồn và video thành phẩm
+    source_video = None
+    if INPUT_DIR.exists():
+        cand = INPUT_DIR / f"{stem}.mp4"
+        if cand.is_file():
+            source_video = cand
+    if not source_video and DOWNLOADS_DIR.exists():
+        cand = DOWNLOADS_DIR / f"{stem}.mp4"
+        if cand.is_file():
+            source_video = cand
+
+    final_video = None
+    if job_dir.is_dir():
+        for item in job_dir.iterdir():
+            if item.name == f"final_{stem}.mp4" and _valid_final_video(item):
+                final_video = item
+                break
+    if not final_video and OUTPUT_DIR.exists():
+        cand_banve = OUTPUT_DIR / f"Dubbed_{stem}.mp4"
+        if cand_banve.is_file() and _valid_final_video(cand_banve):
+            final_video = cand_banve
+
+    target_video = final_video if final_video else source_video
+    if not target_video or not target_video.is_file():
+        raise HTTPException(status_code=404, detail="Không tìm thấy tệp video để ghép thumbnail")
+
+    # Nếu chưa có thumbnail, tự động trích xuất frame tại 1.0s
+    if not thumb_file.is_file():
+        cmd_extract = [
+            "ffmpeg", "-y",
+            "-ss", "1.0",
+            "-i", str(target_video),
+            "-vframes", "1",
+            "-q:v", "2",
+            str(thumb_file)
+        ]
+        subprocess.run(cmd_extract, capture_output=True, timeout=10)
+
+    if not thumb_file.is_file():
+        raise HTTPException(status_code=400, detail="Không thể tạo hoặc tìm thấy ảnh thumbnail")
+
+    job_dir.mkdir(parents=True, exist_ok=True)
+    dest_final = job_dir / f"final_{stem}.mp4"
+
+    # Nếu target_video khác dest_final (ví dụ đang dùng source_video hoặc cand_banve), tạo bản sao sang dest_final trước
+    if str(target_video.resolve()) != str(dest_final.resolve()):
+        import shutil
+        shutil.copy2(target_video, dest_final)
+        target_video = dest_final
+
+    ok = _prepend_thumbnail_file(dest_final, thumb_file, duration_s)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Không thể ghép thumbnail vào đầu video bằng FFmpeg")
+
+    stream_url = f"/api/workflow/stream-file?path={dest_final}&t={time.time()}"
+    return {
+        "status": "ok",
+        "success": True,
+        "message": f"Đã ghép Thumbnail ({duration_s:.1f}s) vào đầu video thành công!",
+        "video_url": stream_url,
+        "final_video_url": stream_url,
+        "has_final": True
+    }
+
+
+# =========================================================================
+# FEATURE: CAPCUT-STYLE TIMELINE CUT, CLONE & CONCATENATION
+# =========================================================================
+
+# Giới hạn hiệu ứng clip P2
+_TIMELINE_SPEED_MIN = 0.25
+_TIMELINE_SPEED_MAX = 4.0
+_TIMELINE_REVERSE_MAX_SRC_SEC = 60.0  # reverse buffer toàn bộ frame trong RAM
+
+
+def _timeline_clip_effects(c: Dict[str, Any]) -> Dict[str, Any]:
+    """Đọc & kẹp giới hạn thuộc tính clip kiểu CapCut (speed/volume/fade/crop/...)."""
+
+    def _num(key: str, default: float, lo: float, hi: float) -> float:
+        try:
+            v = float(c.get(key, default) or default)
+        except (TypeError, ValueError):
+            v = default
+        return max(lo, min(hi, v))
+
+    speed = _num("speed", 1.0, _TIMELINE_SPEED_MIN, _TIMELINE_SPEED_MAX)
+    crop = None
+    crop_raw = c.get("crop") if isinstance(c.get("crop"), dict) else None
+    if crop_raw:
+        try:
+            cx = min(0.95, max(0.0, float(crop_raw.get("x", 0.0))))
+            cy = min(0.95, max(0.0, float(crop_raw.get("y", 0.0))))
+            cw = min(1.0, max(0.05, float(crop_raw.get("w", 1.0))))
+            ch = min(1.0, max(0.05, float(crop_raw.get("h", 1.0))))
+            cw = min(cw, 1.0 - cx)
+            ch = min(ch, 1.0 - cy)
+            crop = {"x": cx, "y": cy, "w": cw, "h": ch}
+        except Exception:
+            crop = None
+    rot = int(_num("rotate", 0, 0, 359))
+    rot = rot - (rot % 90)
+
+    # P4: filter màu/hiệu ứng per-clip (eq/colorbalance/boxblur/vignette)
+    fx = None
+    fx_raw = c.get("fx") if isinstance(c.get("fx"), dict) else None
+    if fx_raw:
+        try:
+            fx = {
+                "brightness": max(-1.0, min(1.0, float(fx_raw.get("brightness", 0.0) or 0.0))),
+                "contrast": max(0.0, min(3.0, float(fx_raw.get("contrast", 1.0) or 1.0))),
+                "saturation": max(0.0, min(3.0, float(fx_raw.get("saturation", 1.0) or 1.0))),
+                "temperature": max(-1.0, min(1.0, float(fx_raw.get("temperature", 0.0) or 0.0))),
+                "blur": max(0.0, min(20.0, float(fx_raw.get("blur", 0.0) or 0.0))),
+                "vignette": bool(fx_raw.get("vignette")),
+            }
+            neutral = (abs(fx["brightness"]) < 1e-3 and abs(fx["contrast"] - 1.0) < 1e-3
+                       and abs(fx["saturation"] - 1.0) < 1e-3 and abs(fx["temperature"]) < 1e-3
+                       and fx["blur"] < 0.5 and not fx["vignette"])
+            if neutral:
+                fx = None
+        except Exception:
+            fx = None
+
+    return {
+        "speed": speed,
+        "volume": _num("volume", 1.0, 0.0, 2.0),
+        "muted": bool(c.get("muted")),
+        "keep_pitch": bool(c.get("keepPitch", True)),
+        "fade_in": _num("fadeIn", 0.0, 0.0, 10.0),
+        "fade_out": _num("fadeOut", 0.0, 0.0, 10.0),
+        "crop": crop,
+        "rotate": rot if rot in (90, 180, 270) else 0,
+        "flip_h": bool(c.get("flipH")),
+        "flip_v": bool(c.get("flipV")),
+        "reverse": bool(c.get("reverse")),
+        "freeze": _num("freeze", 0.0, 0.0, 10.0),
+        "detach_audio": bool(c.get("detachAudio")),
+        "fx": fx,
+    }
+
+
+def _atempo_chain(speed: float) -> List[str]:
+    """
+    Chuỗi atempo để giữ cao độ giọng khi đổi tốc độ.
+    FFmpeg chỉ nhận atempo trong [0.5, 2.0] nên phải phân tích thành tích các hệ số.
+    """
+    parts: List[str] = []
+    s = float(speed)
+    while s > 2.0 + 1e-9:
+        parts.append("atempo=2.0")
+        s /= 2.0
+    while s < 0.5 - 1e-9:
+        parts.append("atempo=0.5")
+        s *= 2.0
+    if abs(s - 1.0) > 1e-6:
+        parts.append(f"atempo={s:.5f}")
+    return parts
+
+
+def _build_timeline_filter_graph(
+    clips: List[Dict[str, Any]],
+    has_audio: bool,
+    src_w: int = 0,
+    src_h: int = 0,
+) -> Dict[str, Any]:
+    """
+    Sinh filter_complex hoàn chỉnh cho timeline CapCut (P2) — HÀM THUẦN để unit test.
+
+    Mỗi clip có thể mang: speed (0.25–4x, setpts + atempo giữ pitch), volume/mute,
+    fadeIn/fadeOut (video+audio), crop {x,y,w,h} chuẩn hóa (luôn format=yuv420p TRƯỚC
+    crop theo bug NVDEC nv12), rotate 90/180/270, flipH/flipV, reverse (giới hạn 60s
+    nguồn vì buffer cả đoạn trong RAM), freeze-frame đầu đoạn (tpad + im lặng audio
+    tương ứng), detachAudio (audio giữ tốc độ gốc → chuyển sang mode amix+adelay),
+    fx (P4: eq/colorbalance/boxblur/vignette per-clip) và trans (P4: chuyển cảnh sang
+    đoạn kế — chuỗi xfade/acrossfade thay concat, seg_starts rút ngắn theo duration).
+
+    Trả về: {"filter_lines", "mode": "concat"|"mix", "total_dur", "seg_starts",
+              "seg_durs", "effects"} — filter_lines kết thúc bằng [outv] (và [outa] nếu có âm thanh).
+    """
+    effects = [_timeline_clip_effects(c) for c in clips]
+    if not effects:
+        return {"filter_lines": [], "mode": "concat", "total_dur": 0.0, "seg_starts": [], "seg_durs": [], "effects": []}
+
+    filter_lines: List[str] = []
+    v_parts: List[str] = []
+    a_parts: List[str] = []
+    seg_starts: List[float] = []
+    seg_durs: List[float] = []
+
+    tl_cursor = 0.0
+    for idx, (c, eff) in enumerate(zip(clips, effects)):
+        st = c["start"]
+        en = c["end"]
+        src_dur = max(0.05, en - st)
+        speed = eff["speed"]
+        freeze = eff["freeze"]
+        tl_dur = src_dur / speed + freeze
+        tl_start = tl_cursor
+        tl_cursor += tl_dur
+        seg_starts.append(tl_start)
+        seg_durs.append(tl_dur)
+
+        # ---- VIDEO ----
+        v_tag = f"v{idx}"
+        vchain = [f"trim=start={st:.3f}:end={en:.3f}"]
+        if abs(speed - 1.0) > 1e-6:
+            vchain.append(f"setpts=(PTS-STARTPTS)/{speed:.5f}")
+        else:
+            vchain.append("setpts=PTS-STARTPTS")
+        # Ràng buộc repo: format=yuv420p PHẢI đứng trước crop/transpose (bug NVDEC nv12 xanh nửa phải)
+        vchain.append("format=yuv420p")
+        # P4: filter màu/hiệu ứng per-clip (đặt ngay sau format, trước crop/rotate)
+        if eff["fx"]:
+            fx = eff["fx"]
+            if abs(fx["brightness"]) > 1e-3 or abs(fx["contrast"] - 1.0) > 1e-3 or abs(fx["saturation"] - 1.0) > 1e-3:
+                vchain.append(
+                    f"eq=brightness={fx['brightness']:.3f}:contrast={fx['contrast']:.3f}:saturation={fx['saturation']:.3f}"
+                )
+            if abs(fx["temperature"]) > 1e-3:
+                t_amt = fx["temperature"] * 0.3
+                vchain.append(f"colorbalance=rs={t_amt:.3f}:bs={-t_amt:.3f}")
+            if fx["blur"] > 0:
+                vchain.append(f"boxblur={min(20, max(1, int(round(fx['blur']))))}")
+            if fx["vignette"]:
+                vchain.append("vignette=PI/5")
+        if freeze > 0:
+            vchain.append(f"tpad=start_duration={freeze:.3f}:start_mode=add:color=black")
+        if eff["crop"]:
+            cr = eff["crop"]
+            vchain.append(
+                "crop=w='trunc(iw*%.5f/2)*2':h='trunc(ih*%.5f/2)*2':"
+                "x='trunc(iw*%.5f/2)*2':y='trunc(ih*%.5f/2)*2'"
+                % (cr["w"], cr["h"], cr["x"], cr["y"])
+            )
+        if eff["rotate"] == 90:
+            vchain.append("transpose=1")
+        elif eff["rotate"] == 180:
+            vchain.append("transpose=1,transpose=1")
+        elif eff["rotate"] == 270:
+            vchain.append("transpose=2")
+        if eff["flip_h"]:
+            vchain.append("hflip")
+        if eff["flip_v"]:
+            vchain.append("vflip")
+        allow_reverse = eff["reverse"] and src_dur <= _TIMELINE_REVERSE_MAX_SRC_SEC
+        if eff["reverse"] and not allow_reverse:
+            logger.warning(
+                f"Timeline clip #{idx}: reverse bị bỏ qua vì đoạn dài {src_dur:.1f}s "
+                f">(giới hạn {_TIMELINE_REVERSE_MAX_SRC_SEC:.0f}s)"
+            )
+        if allow_reverse:
+            vchain.append("reverse")
+        if eff["fade_in"] > 0:
+            vchain.append(f"fade=t=in:st=0:d={eff['fade_in']:.3f}")
+        if eff["fade_out"] > 0:
+            vchain.append(f"fade=t=out:st={max(0.0, tl_dur - eff['fade_out']):.3f}:d={eff['fade_out']:.3f}")
+        # Sau crop/rotate kích thước thay đổi → ép về đúng kích thước nguồn để concat không lệch
+        needs_refit = bool(eff["crop"]) or eff["rotate"] in (90, 270)
+        if needs_refit and src_w > 0 and src_h > 0:
+            vchain.append(f"scale={src_w}:{src_h}:force_original_aspect_ratio=decrease")
+            vchain.append(f"pad={src_w}:{src_h}:(ow-iw)/2:(oh-ih)/2:color=black")
+        filter_lines.append("[0:v]" + ",".join(vchain) + f"[{v_tag}]")
+        v_parts.append(f"[{v_tag}]")
+
+        # ---- AUDIO ----
+        if has_audio:
+            a_tag = f"a{idx}"
+            achain = [f"atrim=start={st:.3f}:end={en:.3f}"]
+            if eff["muted"]:
+                achain.append("volume=0")  # vẫn giữ nhánh audio để concat đều
+            else:
+                if not eff["detach_audio"] and abs(speed - 1.0) > 1e-6:
+                    if eff["keep_pitch"]:
+                        achain.append("asetpts=PTS-STARTPTS")
+                        achain.extend(_atempo_chain(speed))
+                    else:
+                        achain.append(f"asetpts=(PTS-STARTPTS)/{speed:.5f}")
+                else:
+                    achain.append("asetpts=PTS-STARTPTS")
+                if abs(eff["volume"] - 1.0) > 1e-6:
+                    achain.append(f"volume={eff['volume']:.5f}")
+            if freeze > 0:
+                # im lặng đúng khoảng khung hình đóng băng để A/V khớp
+                achain.append(f"adelay={int(round(freeze * 1000))}:all=1")
+            if allow_reverse:
+                achain.append("areverse")
+            a_dur = src_dur if eff["detach_audio"] else tl_dur
+            if eff["fade_in"] > 0:
+                achain.append(f"afade=t=in:st=0:d={eff['fade_in']:.3f}")
+            if eff["fade_out"] > 0:
+                achain.append(f"afade=t=out:st={max(0.0, a_dur - eff['fade_out']):.3f}:d={eff['fade_out']:.3f}")
+            filter_lines.append("[0:a]" + ",".join(achain) + f"[{a_tag}]")
+            a_parts.append(f"[{a_tag}]")
+
+    n = len(clips)
+
+    # P4: đọc transition giữa các cặp clip liền kề (client đã dồn `at` của đoạn sau khi đặt)
+    trans_list: List[tuple] = []  # (idx, type, dur)
+    for i in range(n - 1):
+        traw = clips[i].get("trans") if isinstance(clips[i].get("trans"), dict) else None
+        if not traw:
+            continue
+        ttype = str(traw.get("type") or "").strip().lower()
+        if not ttype:
+            continue
+        tdur = max(0.0, min(1.0, float(traw.get("dur", 0.5) or 0.5)))
+        tdur = min(tdur, 0.9 * min(seg_durs[i], seg_durs[i + 1]))
+        if tdur < 0.05:
+            continue
+        trans_list.append((i, ttype, tdur))
+
+    # transition rút ngắn output: vị trí output của các đoạn sau dời về trái tương ứng
+    for (_i, _t, tdur) in trans_list:
+        for j in range(_i + 1, n):
+            seg_starts[j] -= tdur
+    total_dur = sum(seg_durs) - sum(td for (_i, _t, td) in trans_list)
+    any_detach = has_audio and any(e["detach_audio"] for e in effects)
+
+    if not trans_list:
+        if has_audio and not any_detach:
+            # Mode proven: concat A/V đồng bộ từng cặp (không đổi hành vi cũ khi không có detach)
+            concat_in = "".join(v + a for v, a in zip(v_parts, a_parts))
+            filter_lines.append(f"{concat_in}concat=n={n}:v=1:a=1[outv][outa]")
+            mode = "concat"
+        elif has_audio:
+            # Mode tách audio: video concat riêng; audio từng clip đặt đúng vị trí timeline rồi trộn
+            filter_lines.append("".join(v_parts) + f"concat=n={n}:v=1:a=0[outv]")
+            for i, (a_tag, tl_start) in enumerate(zip(a_parts, seg_starts)):
+                filter_lines.append(f"{a_tag}adelay={int(round(tl_start * 1000))}:all=1[ad{i}]")
+            filter_lines.append(
+                "".join(f"[ad{i}]" for i in range(n)) + f"amix=inputs={n}:normalize=0:duration=longest[mixout]"
+            )
+            filter_lines.append(f"[mixout]apad=whole_dur={total_dur:.3f}[outa]")
+            mode = "mix"
+        else:
+            filter_lines.append("".join(v_parts) + f"concat=n={n}:v=1:a=0[outv]")
+            mode = "concat"
+    else:
+        # P4: có transition — nối video bằng chuỗi xfade (cặp có trans) / concat (cặp thường);
+        # offset của xfade = thời điểm bắt đầu chuyển cảnh trên output
+        acc_v = seg_durs[0]
+        prev_tag = "[v0]"
+        for i in range(n - 1):
+            tr = next((t for t in trans_list if t[0] == i), None)
+            last_join = (i == n - 2)
+            if tr:
+                _i, ttype, tdur = tr
+                offset = max(0.0, acc_v - tdur)
+                out_tag = "[outv]" if last_join else f"[vx{i}]"
+                filter_lines.append(
+                    f"{prev_tag}[v{i + 1}]xfade=transition={ttype}:duration={tdur:.3f}:offset={offset:.3f}{out_tag}"
+                )
+                acc_v = acc_v + seg_durs[i + 1] - tdur
+            else:
+                out_tag = "[outv]" if last_join else f"[vc{i}]"
+                filter_lines.append(f"{prev_tag}[v{i + 1}]concat=n=2:v=1:a=0{out_tag}")
+                acc_v = acc_v + seg_durs[i + 1]
+            prev_tag = out_tag
+        if has_audio and not any_detach:
+            # audio đisong song: acrossfade tại cặp có trans, concat tại cặp thường
+            prev_a = "[a0]"
+            for i in range(n - 1):
+                tr = next((t for t in trans_list if t[0] == i), None)
+                last_join = (i == n - 2)
+                if tr:
+                    out_tag = "[outa]" if last_join else f"[ax{i}]"
+                    filter_lines.append(f"{prev_a}[a{i + 1}]acrossfade=d={tr[2]:.3f}:c1=tri:c2=tri{out_tag}")
+                else:
+                    out_tag = "[outa]" if last_join else f"[ac{i}]"
+                    filter_lines.append(f"{prev_a}[a{i + 1}]concat=n=2:v=1:a=0{out_tag}")
+                prev_a = out_tag
+            mode = "concat"
+        elif has_audio:
+            # mode mix: audio amix theo seg_starts (đã tính transition), video xfade như trên
+            for i, (a_tag, tl_start) in enumerate(zip(a_parts, seg_starts)):
+                filter_lines.append(f"{a_tag}adelay={int(round(tl_start * 1000))}:all=1[ad{i}]")
+            filter_lines.append(
+                "".join(f"[ad{i}]" for i in range(n)) + f"amix=inputs={n}:normalize=0:duration=longest[mixout]"
+            )
+            filter_lines.append(f"[mixout]apad=whole_dur={total_dur:.3f}[outa]")
+            mode = "mix"
+        else:
+            mode = "concat"
+
+    return {
+        "filter_lines": filter_lines,
+        "mode": mode,
+        "total_dur": total_dur,
+        "seg_starts": seg_starts,
+        "seg_durs": seg_durs,
+        "effects": effects,
+        "v_parts": v_parts,
+        "a_parts": a_parts,
+    }
+
+
+# =========================================================================
+# P3: TEXT / OVERLAY CLIPS (chữ tự do + logo/sticker, burn ASS + overlay filter)
+# =========================================================================
+
+def _hex_to_ass_color(hex_color: str, alpha: str = "00") -> str:
+    """'#RRGGBB' → '&HAABBGGRR' (ASS dùng BGR; alpha 00 = đục)."""
+    m = re.fullmatch(r"#?([0-9A-Fa-f]{6})", (hex_color or "").strip())
+    if not m:
+        return f"&H{alpha}FFFFFF"
+    v = m.group(1).upper()
+    r, g, b = v[0:2], v[2:4], v[4:6]
+    return f"&H{alpha}{b}{g}{r}".upper()
+
+
+def _ass_time(seconds: float) -> str:
+    """Giây → 'H:MM:SS.CC' (centisecond) theo chuẩn ASS."""
+    s = max(0.0, float(seconds))
+    cs = int(round(s * 100))
+    h, rem = divmod(cs, 360000)
+    mm, rem = divmod(rem, 6000)
+    ss, cc = divmod(rem, 100)
+    return f"{h}:{mm:02d}:{ss:02d}.{cc:02d}"
+
+
+def _build_text_ass_clips(
+    text_clips: List[Dict[str, Any]],
+    play_res_x: int = 1080,
+    play_res_y: int = 1920,
+) -> str:
+    """
+    P3: sinh nội dung file ASS cho các clip chữ tự do — HÀM THUẦN để unit test.
+
+    Mỗi clip: {at, dur (giây TRONG FILE XUẤT — đã map qua _timeline_to_output_t),
+               text, pos {x,y} chuẩn hóa (tâm chữ), style {fontSize, color, outlineColor,
+               outlineWidth, bgOpacity, bold}, animIn ('none'|'fade'|'slideUp'|'pop'),
+               animOut ('none'|'fade')}
+    Mỗi clip một Style riêng (để dùng BorderStyle=3 — khung nền — khi bgOpacity > 0).
+    Vị trí dùng \\an5 + \\pos theo PlayRes thật nên khớp preview ≤ 1-2 px.
+    """
+    res_x = max(2, int(play_res_x or 1080))
+    res_y = max(2, int(play_res_y or 1920))
+    lines = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        f"PlayResX: {res_x}",
+        f"PlayResY: {res_y}",
+        "WrapStyle: 2",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+        "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
+        "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+    ]
+
+    def _clip_style(i: int, c: Dict[str, Any]) -> str:
+        style = c.get("style") or {}
+        fs = max(12.0, float(style.get("fontSize", 64) or 64))
+        color = _hex_to_ass_color(style.get("color", "#FFFFFF"))
+        oc = _hex_to_ass_color(style.get("outlineColor", "#000000"))
+        ow = max(0.0, float(style.get("outlineWidth", 3) or 3))
+        bg_op = min(1.0, max(0.0, float(style.get("bgOpacity", 0) or 0)))
+        bold = -1 if style.get("bold") else 0
+        back_alpha = f"{int(round((1.0 - bg_op) * 255)):02X}"
+        border_style = 3 if bg_op > 0.01 else 1
+        return (
+            f"Style: TC{i},Arial,{fs:.0f},{color},&H00FFFFFF,{oc},"
+            f"&H{back_alpha}000000,{bold},0,0,0,100,100,0,0,{border_style},{ow:.1f},0,5,10,10,10,1"
+        )
+
+    body_styles: List[str] = []
+    body_events: List[str] = []
+    for i, c in enumerate(text_clips):
+        body_styles.append(_clip_style(i, c))
+        at = max(0.0, float(c.get("at", 0.0) or 0.0))
+        dur = max(0.1, float(c.get("dur", 3.0) or 3.0))
+        pos = c.get("pos") if isinstance(c.get("pos"), dict) else {}
+        px = min(1.0, max(0.0, float(pos.get("x", 0.5)))) * res_x
+        py = min(1.0, max(0.0, float(pos.get("y", 0.8)))) * res_y
+
+        anim_in = (c.get("animIn") or "none").strip().lower()
+        anim_out = (c.get("animOut") or "none").strip().lower()
+        tags = ["\\an5"]
+        if anim_in == "slideup":
+            tags.append(f"\\move({px:.0f},{min(res_y - 2, py + 140):.0f},{px:.0f},{py:.0f},0,250)")
+        else:
+            tags.append(f"\\pos({px:.0f},{py:.0f})")
+        if anim_in == "pop":
+            tags.append("\\fscx40\\fscy40\\t(0,220,\\fscx100\\fscy100)")
+        if anim_in == "fade" or anim_out == "fade":
+            in_ms = 250 if anim_in == "fade" else 0
+            out_ms = 250 if anim_out == "fade" else 0
+            tags.append(f"\\fad({in_ms},{out_ms})")
+
+        raw_text = str(c.get("text") or "").replace("{", "(").replace("}", ")").strip()
+        ass_text = raw_text.replace("\r\n", "\n").replace("\n", "\\N") or " "
+        body_events.append(
+            f"Dialogue: 0,{_ass_time(at)},{_ass_time(at + dur)},TC{i},,0,0,0,,"
+            f"{{{''.join(tags)}}}{ass_text}"
+        )
+
+    lines.extend(body_styles)
+    lines.extend(["", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"])
+    lines.extend(body_events)
+    return "\n".join(lines) + "\n"
+
+
+def _timeline_to_output_t(clips_with_at: List[Dict[str, Any]], graph: Dict[str, Any], t: float) -> float:
+    """
+    Map giây trên TIMELINE (có gap) → giây trong FILE XUẤT (gap bị concat ghép lại).
+    Dùng cho text/overlay để chữ xuất hiện đúng nội dung như preview (P3).
+    """
+    seg_starts = graph.get("seg_starts") or []
+    seg_durs = graph.get("seg_durs") or []
+    if not seg_starts:
+        return max(0.0, float(t or 0.0))
+    best = None
+    best_at = None
+    for i, c in enumerate(clips_with_at):
+        at_i = max(0.0, float(c.get("at", 0.0) or 0.0))
+        if at_i <= float(t or 0.0) + 1e-6 and (best_at is None or at_i >= best_at):
+            best, best_at = i, at_i
+    if best is None:
+        return float(seg_starts[0])
+    at_i = best_at or 0.0
+    dur_i = float(seg_durs[best]) if best < len(seg_durs) else 0.0
+    local = min(max(0.0, float(t or 0.0) - at_i), dur_i)
+    return float(seg_starts[best]) + local
+
+
+def _decode_overlay_assets(overlay_clips: List[Dict[str, Any]], workspace_dir: Path) -> List[Optional[Path]]:
+    """Giải mã dataURL ảnh overlay → file trong <workspace>/overlay_assets (P3). None nếu hỏng."""
+    import base64
+
+    assets_dir = Path(workspace_dir) / "overlay_assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    paths: List[Optional[Path]] = []
+    for i, c in enumerate(overlay_clips or []):
+        src = str(c.get("src") or "")
+        m = re.match(r"data:image/(png|jpeg|jpg|webp);base64,", src)
+        if not m:
+            paths.append(None)
+            continue
+        ext = "jpg" if m.group(1) in ("jpeg", "jpg") else m.group(1)
+        try:
+            raw = base64.b64decode(src[m.end():], validate=False)
+        except Exception:
+            paths.append(None)
+            continue
+        cid = re.sub(r"[^\w\-]", "", str(c.get("id", "")))[:40] or f"ov{i}"
+        p = assets_dir / f"{cid}.{ext}"
+        p.write_bytes(raw)
+        paths.append(p)
+    return paths
+
+
+def _decode_audio_assets(audio_clips: List[Dict[str, Any]], workspace_dir: Path) -> List[Optional[Path]]:
+    """P5: giải mã dataURL nhạc/SFX → file trong <workspace>/audio_assets. None nếu hỏng."""
+    import base64
+
+    assets_dir = Path(workspace_dir) / "audio_assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    paths: List[Optional[Path]] = []
+    for i, c in enumerate(audio_clips or []):
+        src = str(c.get("src") or "")
+        m = re.match(r"data:audio/(mpeg|mp3|wav|x-wav|ogg|aac|m4a|mp4);base64,", src)
+        if not m:
+            paths.append(None)
+            continue
+        ext = {"mpeg": "mp3", "x-wav": "wav", "mp4": "m4a"}.get(m.group(1), m.group(1))
+        try:
+            raw = base64.b64decode(src[m.end():], validate=False)
+        except Exception:
+            paths.append(None)
+            continue
+        cid = re.sub(r"[^\w\-]", "", str(c.get("id", "")))[:40] or f"au{i}"
+        p = assets_dir / f"{cid}.{ext}"
+        p.write_bytes(raw)
+        paths.append(p)
+    return paths
+
+
+def _build_music_filter_lines(
+    music_meta: List[Dict[str, Any]],
+    base_tag: str,
+    total_dur: float,
+) -> Dict[str, Any]:
+    """
+    P5: sinh filter trộn các clip nhạc/SFX lên audio nền (hàm thuần để unit test).
+
+    music_meta: [{a_idx (index input ffmpeg), at_out, dur_out, volume, fadeIn, fadeOut,
+                  muted, duck}] — at_out/dur_out đã map sang trục file xuất.
+    base_tag: tag audio nền (vd '[basea]') — audio đã mix sẵn trong video (giọng AI + BGM).
+    Ducking: sidechaincompress nén nhạc theo mức âm của audio nền (giọng nói).
+    Trả {lines, used_split} — lines kết thúc bằng [outa], độ dài bung đủ total_dur.
+    """
+    lines: List[str] = []
+    active = [m for m in music_meta if not m.get("muted")]
+    ducked = [m for m in active if m.get("duck")]
+    if not active:
+        # tất cả bị tắt tiếng → giữ nguyên audio nền để không mất [outa]
+        lines.append(f"{base_tag}anull[outa]")
+        return {"lines": lines, "used_split": False}
+
+    used_split = bool(ducked)
+    mix_inputs: List[str] = []
+    if used_split:
+        split_tags = "".join(f"[bs{j}]" for j in range(len(ducked) + 1))
+        lines.append(f"{base_tag}asplit={len(ducked) + 1}{split_tags}")
+        base_mix_tag = "[bs0]"
+    else:
+        base_mix_tag = base_tag
+    mix_inputs.append(base_mix_tag)
+
+    duck_i = 0
+    for k, m in enumerate(active):
+        chain = ["aformat=sample_rates=44100:channel_layouts=stereo"]
+        chain.append(f"atrim=start=0:end={m['dur_out']:.3f}")
+        if abs(float(m.get("volume", 1.0)) - 1.0) > 1e-6:
+            chain.append(f"volume={float(m.get('volume', 1.0)):.5f}")
+        fade_in = float(m.get("fade_in", 0.0) or 0.0)
+        fade_out = float(m.get("fade_out", 0.0) or 0.0)
+        if fade_in > 0:
+            chain.append(f"afade=t=in:st=0:d={fade_in:.3f}")
+        if fade_out > 0:
+            chain.append(f"afade=t=out:st={max(0.0, m['dur_out'] - fade_out):.3f}:d={fade_out:.3f}")
+        chain.append(f"adelay={int(round(float(m.get('at_out', 0.0)) * 1000))}:all=1")
+        src = f"[{int(m.get('a_idx', 0))}:a]"
+        if m.get("duck"):
+            out_tag = f"[amd{k}]"
+            lines.append(f"{src}{','.join(chain)}[amraw{k}]")
+            lines.append(
+                f"[amraw{k}][bs{duck_i + 1}]sidechaincompress=threshold=0.03:ratio=6:attack=80:release=500{out_tag}"
+            )
+            duck_i += 1
+        else:
+            out_tag = f"[am{k}]"
+            lines.append(f"{src}{','.join(chain)}{out_tag}")
+        mix_inputs.append(out_tag)
+
+    lines.append(
+        f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:normalize=0:duration=longest[mxout]"
+    )
+    lines.append(f"[mxout]apad=whole_dur={max(0.1, float(total_dur or 0.0)):.3f}[outa]")
+    return {"lines": lines, "used_split": used_split}
+
+
+def _retime_subtitles_to_timeline(
+    trans_subs: List[Dict[str, Any]],
+    orig_subs: List[Dict[str, Any]],
+    clips: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Map phụ đề nguồn sang trục timeline đã ghép, tính cả speed/freeze (P2) và
+    transition (P4 — transition rút ngắn output nên vị trí các đoạn sau dời về trái).
+    Trả về danh sách {index, start, end, start_str, end_str, text, original_text}.
+    """
+    updated: List[Dict[str, Any]] = []
+    accum = 0.0
+    new_idx = 1
+    n_clips = len(clips)
+    for idx_c, c in enumerate(clips):
+        c_st = float(c.get("start", 0.0))
+        c_en = float(c.get("end", c_st + 1.0))
+        eff = _timeline_clip_effects(c)
+        clip_tl_dur = max(0.01, (c_en - c_st) / eff["speed"] + eff["freeze"])
+        base_out = accum
+
+        for idx_s, s in enumerate(trans_subs):
+            s_st = float(s.get("start", 0.0))
+            s_en = float(s.get("end", s_st + 1.0))
+            ov_st = max(s_st, c_st)
+            ov_en = min(s_en, c_en)
+            if ov_en > ov_st + 0.2:
+                rel_st = base_out + eff["freeze"] + (ov_st - c_st) / eff["speed"]
+                rel_en = base_out + eff["freeze"] + (ov_en - c_st) / eff["speed"]
+                txt = (s.get("text") or "").strip()
+                orig_txt = orig_subs[idx_s].get("text", "") if idx_s < len(orig_subs) else ""
+                updated.append({
+                    "index": new_idx,
+                    "start": round(rel_st, 3),
+                    "end": round(rel_en, 3),
+                    "start_str": format_srt_timestamp(rel_st),
+                    "end_str": format_srt_timestamp(rel_en),
+                    "text": txt,
+                    "original_text": orig_txt,
+                })
+                new_idx += 1
+        accum += clip_tl_dur
+        traw = c.get("trans") if isinstance(c.get("trans"), dict) else None
+        if idx_c < n_clips - 1 and traw:
+            tdur = max(0.0, min(1.0, float(traw.get("dur", 0.5) or 0.5)))
+            if tdur >= 0.05:
+                accum -= min(tdur, 0.9 * min(clip_tl_dur, 999.0))
+    return updated
+
+
+def _run_ffmpeg_ctl(cmd: List[str], job_ctl: Optional[Dict[str, Any]] = None, timeout: int = 900):
+    """
+    P6.3: chạy ffmpeg với hỗ trợ tiến độ + huỷ job.
+    job_ctl: {"cancelled": bool, "proc": Popen|None, "progress": fn(0..1)|None, "total_dur": float}
+    Không có job_ctl → hành vi cũ (subprocess.run).
+    Huỷ: endpoint đặt cancelled=True + kill proc → readline EOF → trả CompletedProcess rc=99.
+    """
+    if not job_ctl:
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace",
+    )
+    job_ctl["proc"] = proc
+    err_tail: List[str] = []
+    time_re = re.compile(r"time=\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+    total = float(job_ctl.get("total_dur") or 0.0)
+    cb = job_ctl.get("progress")
+    try:
+        for line in proc.stderr:
+            err_tail.append(line)
+            if len(err_tail) > 200:
+                err_tail.pop(0)
+            if cb and total > 0:
+                m = time_re.search(line)
+                if m:
+                    secs = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+                    try:
+                        cb(min(1.0, secs / total))
+                    except Exception:
+                        pass
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    rc = 99 if job_ctl.get("cancelled") else proc.returncode
+    return subprocess.CompletedProcess(cmd, rc, "", "".join(err_tail))
+
+
+def _apply_timeline_edits_file(
+    video_path: Path,
+    clips: List[Dict[str, Any]],
+    out_path: Path,
+    text_clips: Optional[List[Dict[str, Any]]] = None,
+    overlay_clips: Optional[List[Dict[str, Any]]] = None,
+    audio_clips: Optional[List[Dict[str, Any]]] = None,
+    workspace_dir: Optional[Path] = None,
+    job_ctl: Optional[Dict[str, Any]] = None,
+    export_frame: Optional[Dict[str, int]] = None,
+) -> bool:
+    """
+    Cắt, ghép nối và nhân bản các đoạn video theo danh sách clips:
+    [{'start': 0.0, 'end': 5.2, 'at': 0.0, 'speed': 1.0, ...}, ...]
+    Hỗ trợ kéo thả đổi thứ tự, nhân bản từng đoạn hoặc nhân bản toàn bộ video.
+    P2: speed/volume/fade/crop/rotate/flip/reverse/freeze/detachAudio.
+    P3: text_clips (burn ASS) + overlay_clips (overlay filter ảnh) đặt đúng vị trí file xuất
+        (at/dur trên timeline có gap được map qua _timeline_to_output_t).
+    P5: audio_clips (nhạc nền/SFX dataURL) trộn lên audio sẵn có, có volume/fade/ducking.
+    P6.3: job_ctl ({"cancelled", "proc", "progress", "total_dur"}) — render nền có tiến độ + huỷ.
+    P6.2: export_frame {"w","h"} — scale/pad khung xuất (9:16, 1:1, 16:9).
+    Sử dụng GPU NVENC (fallback CPU libx264) đảm bảo âm thanh và hình ảnh đồng bộ 100%.
+    """
+    if not video_path.is_file() or not clips:
+        return False
+
+    cmd_probe = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "stream=codec_type,width,height,r_frame_rate,sample_rate,channel_layout,channels",
+        "-of", "json", str(video_path)
+    ]
+    p_res = subprocess.run(cmd_probe, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    streams = []
+    try:
+        streams = json.loads(p_res.stdout).get("streams", [])
+    except Exception:
+        pass
+
+    v_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
+    a_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    src_w = int(v_stream.get("width") or 0)
+    src_h = int(v_stream.get("height") or 0)
+
+    # Lọc danh sách clips hợp lệ (giữ nguyên thuộc tính hiệu ứng P2/P3/P4/P5 client gửi kèm)
+    _effect_keys = ("at", "speed", "volume", "muted", "keepPitch", "fadeIn", "fadeOut",
+                    "crop", "rotate", "flipH", "flipV", "reverse", "freeze", "detachAudio",
+                    "trans", "fx")
+    valid_clips = []
+    for c in clips:
+        try:
+            st = max(0.0, float(c.get("start", 0.0)))
+            en = max(st + 0.05, float(c.get("end", st + 1.0)))
+            entry = {"start": st, "end": en}
+            for k in _effect_keys:
+                if k in c:
+                    entry[k] = c[k]
+            valid_clips.append(entry)
+        except Exception:
+            pass
+
+    if not valid_clips:
+        return False
+
+    graph = _build_timeline_filter_graph(valid_clips, bool(a_stream), src_w, src_h)
+    if not graph or not graph.get("filter_lines"):
+        return False
+
+    audio_maps = ["-map", "[outa]", "-c:a", "aac", "-b:a", "192k"] if a_stream else []
+    base_dir = Path(workspace_dir) if workspace_dir else out_path.parent
+
+    # ---- P3/P5: hậu xử lý video (text ASS + overlay ảnh) và audio (nhạc/SFX) ----
+    text_clips = [c for c in (text_clips or []) if isinstance(c, dict)]
+    overlay_clips = [c for c in (overlay_clips or []) if isinstance(c, dict)]
+    audio_clips = [c for c in (audio_clips or []) if isinstance(c, dict)]
+    overlay_inputs: List[str] = []
+    music_inputs: List[str] = []
+    needs_video_post = bool(text_clips or overlay_clips)
+    needs_audio_post = bool(audio_clips) and bool(a_stream)
+
+    if needs_video_post or needs_audio_post:
+        # đổi tag đầu ra của graph thành [basev]/[basea] rồi xâu chuỗi hậu xử lý
+        # (quét toàn bộ vì mode "mix" của P2 có [outv] và [outa] ở hai dòng khác nhau)
+        for i, ln in enumerate(graph["filter_lines"]):
+            if "[outv]" in ln:
+                graph["filter_lines"][i] = ln.replace("[outv]", "[basev]", 1)
+                break
+        if needs_audio_post:
+            for i, ln in enumerate(graph["filter_lines"]):
+                if "[outa]" in ln:
+                    graph["filter_lines"][i] = ln.replace("[outa]", "[basea]", 1)
+                    break
+
+    if needs_video_post:
+        cur = "[basev]"
+        if overlay_clips:
+            asset_paths = _decode_overlay_assets(overlay_clips, base_dir)
+            for i, (oc, asset) in enumerate(zip(overlay_clips, asset_paths)):
+                if not asset:
+                    logger.warning(f"Overlay clip #{i}: ảnh hỏng/không hỗ trợ — bỏ qua")
+                    continue
+                at_tl = max(0.0, float(oc.get("at", 0.0) or 0.0))
+                dur_tl = max(0.1, float(oc.get("dur", 3.0) or 3.0))
+                at_out = _timeline_to_output_t(valid_clips, graph, at_tl)
+                end_out = _timeline_to_output_t(valid_clips, graph, at_tl + dur_tl)
+                pos = oc.get("pos") if isinstance(oc.get("pos"), dict) else {}
+                px = min(1.0, max(0.0, float(pos.get("x", 0.5))))
+                py = min(1.0, max(0.0, float(pos.get("y", 0.85))))
+                scale = min(3.0, max(0.05, float(oc.get("scale", 1.0) or 1.0)))
+                opacity = min(1.0, max(0.0, float(oc.get("opacity", 1.0) or 1.0)))
+                img_idx = 1 + len(overlay_inputs)
+                overlay_inputs.append(str(asset))
+                pre = ["format=rgba"]
+                if opacity < 0.999:
+                    pre.append(f"colorchannelmixer=aa={opacity:.3f}")
+                if abs(scale - 1.0) > 1e-3:
+                    pre.append(f"scale='max(2,trunc(iw*{scale:.4f}/2)*2)':-2")
+                ov_tag = f"vo{i}"
+                graph["filter_lines"].append(f"[{img_idx}:v]{','.join(pre)}[ovi{i}]")
+                graph["filter_lines"].append(
+                    f"{cur}[ovi{i}]overlay=x='main_w*{px:.4f}-w/2':y='main_h*{py:.4f}-h/2'"
+                    f":enable='between(t,{at_out:.3f},{end_out:.3f})'[{ov_tag}]"
+                )
+                cur = f"[{ov_tag}]"
+
+        if text_clips:
+            mapped = []
+            for tc in text_clips:
+                at_tl = max(0.0, float(tc.get("at", 0.0) or 0.0))
+                dur_tl = max(0.1, float(tc.get("dur", 3.0) or 3.0))
+                at_out = _timeline_to_output_t(valid_clips, graph, at_tl)
+                end_out = _timeline_to_output_t(valid_clips, graph, at_tl + dur_tl)
+                mapped.append({**tc, "at": at_out, "dur": max(0.1, end_out - at_out)})
+            ass_path = base_dir / "text_clips.ass"
+            ass_path.write_text(_build_text_ass_clips(mapped, src_w or 1080, src_h or 1920), encoding="utf-8")
+            try:
+                ass_ref = os.path.relpath(str(ass_path), os.getcwd()).replace("\\", "/")
+            except ValueError:
+                ass_ref = str(ass_path).replace("\\", "/").replace(":", "\\:")
+            graph["filter_lines"].append(f"{cur}subtitles='{ass_ref}'[outv]")
+
+    if needs_audio_post:
+        # P5: nhạc/SFX trộn lên audio nền có sẵn; vị trí map qua timeline→output (gap-aware)
+        music_meta = []
+        asset_paths = _decode_audio_assets(audio_clips, base_dir)
+        for i, (ac, asset) in enumerate(zip(audio_clips, asset_paths)):
+            if not asset:
+                logger.warning(f"Audio clip #{i}: file nhạc hỏng/không hỗ trợ — bỏ qua")
+                continue
+            at_tl = max(0.0, float(ac.get("at", 0.0) or 0.0))
+            dur_tl = max(0.1, float(ac.get("dur", 3.0) or 3.0))
+            at_out = _timeline_to_output_t(valid_clips, graph, at_tl)
+            end_out = _timeline_to_output_t(valid_clips, graph, at_tl + dur_tl)
+            music_inputs.append(str(asset))
+            music_meta.append({
+                "a_idx": 1 + len(overlay_inputs) + len(music_inputs) - 1,
+                "at_out": at_out,
+                "dur_out": max(0.1, end_out - at_out),
+                "volume": min(2.0, max(0.0, float(ac.get("volume", 1.0) or 1.0))),
+                "fade_in": max(0.0, float(ac.get("fadeIn", 0.0) or 0.0)),
+                "fade_out": max(0.0, float(ac.get("fadeOut", 0.0) or 0.0)),
+                "muted": bool(ac.get("muted")),
+                "duck": bool(ac.get("duck")),
+            })
+        if music_meta:
+            music_res = _build_music_filter_lines(music_meta, "[basea]", graph.get("total_dur", 0.0))
+            graph["filter_lines"].extend(music_res["lines"])
+        else:
+            graph["filter_lines"].append("[basea]anull[outa]")
+
+    # Repair: nếu [outv] bị đổi thành [basev] mà chuỗi hậu xử lý không tái tạo [outv]
+    # (ví dụ chỉ có nhạc/SFX, không có text/overlay) → nối lại qua null
+    if (needs_video_post or needs_audio_post) and "[outv]" not in " ".join(graph["filter_lines"]):
+        graph["filter_lines"].append("[basev]null[outv]")
+
+    # P6.2: preset khung xuất — scale/pad về 9:16 / 1:1 / 16:9 nếu khác kích thước nguồn
+    if export_frame:
+        try:
+            ew = int(export_frame.get("w") or 0)
+            eh = int(export_frame.get("h") or 0)
+        except Exception:
+            ew = eh = 0
+        if ew >= 64 and eh >= 64 and ew <= 4096 and eh <= 4096 and (ew != src_w or eh != src_h):
+            for i in range(len(graph["filter_lines"]) - 1, -1, -1):
+                if "[outv]" in graph["filter_lines"][i]:
+                    graph["filter_lines"][i] = graph["filter_lines"][i].replace("[outv]", "[preexp]", 1)
+                    break
+            graph["filter_lines"].append(
+                f"[preexp]scale={ew}:{eh}:force_original_aspect_ratio=decrease,"
+                f"pad={ew}:{eh}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p[outv]"
+            )
+
+    filter_complex = ";".join(graph["filter_lines"])
+    temp_out = out_path.parent / f"_temp_edit_{out_path.name}"
+    temp_out.unlink(missing_ok=True)
+
+    cmd_nvenc = [
+        "ffmpeg", "-y",
+        "-i", str(video_path),
+    ] + [x for p in (overlay_inputs + music_inputs) for x in ("-i", p)] + [
+        "-filter_complex", filter_complex,
+        "-map", "[outv]"
+    ] + audio_maps + [
+        "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "4500k",
+        "-movflags", "+faststart",
+        str(temp_out)
+    ]
+
+    success = False
+    if job_ctl is not None:
+        job_ctl.setdefault("total_dur", graph.get("total_dur") or 0.0)
+        if job_ctl.get("cancelled"):
+            return False
+    try:
+        res = _run_ffmpeg_ctl(cmd_nvenc, job_ctl, timeout=600)
+        if res.returncode == 0 and temp_out.is_file() and temp_out.stat().st_size > 1000:
+            success = True
+    except Exception as e:
+        logger.warning(f"Timeline edit NVENC failed: {e}")
+
+    if not success:
+        if job_ctl is not None and job_ctl.get("cancelled"):
+            return False
+        cmd_cpu = [
+            "ffmpeg", "-y",
+            "-i", str(video_path),
+        ] + [x for p in (overlay_inputs + music_inputs) for x in ("-i", p)] + [
+            "-filter_complex", filter_complex,
+            "-map", "[outv]"
+        ] + audio_maps + [
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-movflags", "+faststart",
+            str(temp_out)
+        ]
+        try:
+            res2 = _run_ffmpeg_ctl(cmd_cpu, job_ctl, timeout=600)
+        except Exception as e:
+            logger.warning(f"Timeline edit CPU failed: {e}")
+            res2 = subprocess.CompletedProcess(cmd_cpu, 1, "", "")
+        if res2.returncode == 0 and temp_out.is_file() and temp_out.stat().st_size > 1000:
+            success = True
+
+    if success:
+        try:
+            out_path.unlink(missing_ok=True)
+            temp_out.rename(out_path)
+            return True
+        except Exception as e:
+            logger.error(f"Error renaming edited video file: {e}")
+            return False
+    return False
+
+
+@router.post("/api/workflow/timeline/apply-edits")
+async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
+    """Render đồng bộ (giữ tương thích client cũ; client mới dùng /apply-edits-async P6.3)."""
+    return _execute_apply_edits(payload)
+
+
+def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Thân dùng chung cho render đồng bộ và render nền P6.3.
+    Payload:
+      - stem: str
+      - clips: List[Dict] — mỗi clip:
+          {start, end, speed (0.25–4x), volume (0–2), muted, keepPitch, fadeIn, fadeOut,
+           crop {x,y,w,h} chuẩn hóa, rotate (0/90/180/270), flipH, flipV, reverse,
+           freeze (giây đóng băng đầu đoạn), detachAudio}
+      - target_version: Optional[str] ('final' hoặc 'raw')
+      - text_clips: Optional[List[Dict]] — P3: {id, text, at, dur, pos {x,y}, style {...}, animIn, animOut}
+        (at/dur trên timeline; backend tự map về vị trí file xuất và burn bằng ASS)
+      - overlay_clips: Optional[List[Dict]] — P3: {id, src dataURL ảnh, at, dur, pos, scale, opacity}
+      - audio_clips: Optional[List[Dict]] — P5: {id, src dataURL nhạc, at, dur, volume, fadeIn,
+        fadeOut, muted, duck} — trộn lên audio nền có sẵn (giọng AI + BGM)
+    job_ctl: P6.3 — {"cancelled", "proc", "progress", "stage_cb", "total_dur"}
+    """
+    def _prog(pct: int, msg: str) -> None:
+        if job_ctl:
+            cb = job_ctl.get("stage_cb")
+            if cb:
+                try:
+                    cb(pct, msg)
+                except Exception:
+                    pass
+
+    stem = payload.get("stem", "").strip()
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+
+    clips = payload.get("clips", [])
+    if not clips or not isinstance(clips, list):
+        raise HTTPException(status_code=400, detail="Danh sách phân đoạn clip không hợp lệ")
+
+    job_dir = WORKSPACE / clean_stem
+    cand_phoi = INPUT_DIR / f"{stem}.mp4"
+    cand_dl = DOWNLOADS_DIR / f"{stem}.mp4"
+
+    source_video = None
+    if cand_phoi.is_file():
+        source_video = cand_phoi
+    elif cand_dl.is_file():
+        source_video = cand_dl
+
+    final_video = None
+    if job_dir.is_dir():
+        for item in job_dir.iterdir():
+            if item.name == f"final_{stem}.mp4" and _valid_final_video(item):
+                final_video = item
+                break
+
+    target_version = payload.get("target_version", "final")
+    input_video = (final_video if (target_version == "final" and final_video) else (source_video or final_video))
+    if not input_video or not input_video.is_file():
+        raise HTTPException(status_code=404, detail="Không tìm thấy tệp video để chỉnh sửa")
+
+    job_dir.mkdir(parents=True, exist_ok=True)
+    dest_final = job_dir / f"final_{stem}.mp4"
+    _prog(10, "Đã tìm thấy video nguồn")
+
+    text_clips_in = payload.get("text_clips") if isinstance(payload.get("text_clips"), list) else []
+    overlay_clips_in = payload.get("overlay_clips") if isinstance(payload.get("overlay_clips"), list) else []
+    audio_clips_in = payload.get("audio_clips") if isinstance(payload.get("audio_clips"), list) else []
+    export_frame_in = payload.get("export_frame") if isinstance(payload.get("export_frame"), dict) else None
+    _prog(20, "Bắt đầu render FFmpeg (GPU)...")
+    ok = _apply_timeline_edits_file(
+        input_video, clips, dest_final,
+        text_clips=text_clips_in,
+        overlay_clips=overlay_clips_in,
+        audio_clips=audio_clips_in,
+        workspace_dir=job_dir,
+        job_ctl=job_ctl,
+        export_frame=export_frame_in,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Lỗi khi cắt ghép video bằng FFmpeg")
+    if job_ctl and job_ctl.get("cancelled"):
+        raise HTTPException(status_code=499, detail="Đã huỷ render")
+    _prog(85, "Đã render xong — căn lại phụ đề...")
+
+    # Tự động đồng bộ và căn chỉnh lại tệp phụ đề translated.srt theo timeline clips mới
+    # (P2: _retime_subtitles_to_timeline tính cả speed/freeze của từng clip)
+    updated_subs = []
+    trans_srt_file = job_dir / "translated.srt"
+    orig_srt_file = job_dir / "original.srt"
+    if trans_srt_file.is_file():
+        try:
+            old_trans_subs = parse_srt(trans_srt_file.read_text(encoding="utf-8", errors="replace"))
+            old_orig_subs = parse_srt(orig_srt_file.read_text(encoding="utf-8", errors="replace")) if orig_srt_file.is_file() else []
+
+            updated_subs = _retime_subtitles_to_timeline(old_trans_subs, old_orig_subs, clips)
+            new_trans_srt_blocks = []
+            new_orig_srt_blocks = []
+            for u in updated_subs:
+                new_trans_srt_blocks.append(f"{u['index']}\n{u['start_str']} --> {u['end_str']}\n{u['text']}\n")
+                if u["original_text"]:
+                    new_orig_srt_blocks.append(f"{u['index']}\n{u['start_str']} --> {u['end_str']}\n{u['original_text']}\n")
+
+            if new_trans_srt_blocks:
+                trans_srt_file.write_text("\n".join(new_trans_srt_blocks), encoding="utf-8")
+            if new_orig_srt_blocks and orig_srt_file.is_file():
+                orig_srt_file.write_text("\n".join(new_orig_srt_blocks), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Error re-timing subtitles on timeline edit: {e}")
+    _prog(93, "Đang cập nhật thumbnail...")
+
+    # Tự động cập nhật thumbnail
+    thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
+    try:
+        cmd_th = [
+            "ffmpeg", "-y", "-ss", "0.8",
+            "-i", str(dest_final),
+            "-frames:v", "1", "-q:v", "2",
+            str(thumb_file)
+        ]
+        subprocess.run(cmd_th, capture_output=True, timeout=15)
+        if job_dir.is_dir() and thumb_file.is_file():
+            shutil.copy2(thumb_file, job_dir / "thumbnail.jpg")
+    except Exception:
+        pass
+
+    stream_url = f"/api/workflow/stream-file?path={dest_final}&t={time.time()}"
+    return {
+        "status": "ok",
+        "success": True,
+        "message": f"Đã cắt và ghép {len(clips)} phân đoạn video chuẩn CapCut thành công!",
+        "video_url": stream_url,
+        "final_video_url": stream_url,
+        "has_final": True,
+        "total_clips": len(clips),
+        "subtitles": updated_subs
+    }
+
+
+# =========================================================================
 # FEATURE: CAPCUT-STYLE CUSTOM EXPORT & SRT DOWNLOAD
 # =========================================================================
+
+@router.get("/api/workflow/timeline/project")
+async def api_get_timeline_project(stem: str = Query(...)):
+    """
+    Đọc project JSON đã autosave của một video (P6.1).
+    Trả {exists: False} nếu chưa có hoặc file hỏng — client tự dùng timeline mặc định.
+    """
+    clean_stem = re.sub(r'[^\w\-_.]', '_', (stem or "").strip())
+    if not clean_stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    project_file = WORKSPACE / clean_stem / "project.json"
+    if not project_file.is_file():
+        return {"exists": False}
+    try:
+        data = json.loads(project_file.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning(f"project.json của {clean_stem} hỏng JSON — bỏ qua khôi phục")
+        return {"exists": False}
+    if not isinstance(data, dict) or not isinstance(data.get("tracks"), list) or not data["tracks"]:
+        return {"exists": False}
+    return {"exists": True, "project": data, "saved_at": data.get("saved_at")}
+
+
+@router.post("/api/workflow/timeline/project")
+async def api_save_timeline_project(payload: Dict[str, Any] = Body(...)):
+    """
+    Lưu project JSON timeline cho một video (P6.1 autosave, khôi phục sau crash).
+    Ghi atomic (tmp + replace) để không bao giờ để lại project.json dở dang.
+    """
+    stem = (payload.get("stem") or "").strip()
+    project = payload.get("project")
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    if not isinstance(project, dict) or not isinstance(project.get("tracks"), list) or not project["tracks"]:
+        raise HTTPException(status_code=400, detail="Project không hợp lệ (thiếu tracks)")
+
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    job_dir = WORKSPACE / clean_stem
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    project = {**project, "stem": clean_stem, "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    target = job_dir / "project.json"
+    tmp = job_dir / "project.json.tmp"
+    tmp.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(target)
+    return {"status": "ok", "saved": True, "path": str(target), "saved_at": project["saved_at"]}
+
+
+@router.get("/api/workflow/audio/waveform")
+async def api_audio_waveform(stem: str = Query(...), version: str = Query("final"), buckets: int = Query(1600)):
+    """
+    P5: dải biên độ (waveform peaks) của audio video cho track timeline.
+    Bóc PCM 8kHz mono bằng ffmpeg, lấy max theo bucket, cache tại
+    workspace/<stem>/waveform_<version>.json (theo mtime + size file nguồn).
+    """
+    clean_stem = re.sub(r'[^\w\-_.]', '_', (stem or "").strip())
+    if not clean_stem:
+        raise HTTPException(status_code=400, detail="Thiếu stem")
+    n_buckets = max(200, min(4000, int(buckets or 1600)))
+
+    job_dir = WORKSPACE / clean_stem
+    src_file = None
+    if version != "raw":
+        cand_final = job_dir / f"final_{stem}.mp4"
+        if cand_final.is_file() and _valid_final_video(cand_final):
+            src_file = cand_final
+    if src_file is None:
+        for cand in (INPUT_DIR / f"{stem}.mp4", DOWNLOADS_DIR / f"{stem}.mp4"):
+            if cand.is_file():
+                src_file = cand
+                break
+    if src_file is None:
+        return {"exists": False}
+
+    cache_file = job_dir / f"waveform_{version}.json"
+    st = src_file.stat()
+    if cache_file.is_file():
+        try:
+            cached = json.loads(cache_file.read_text(encoding="utf-8"))
+            if (cached.get("mtime") == st.st_mtime and cached.get("size") == st.st_size
+                    and cached.get("buckets") == n_buckets and isinstance(cached.get("peaks"), list)):
+                return {"exists": True, "cached": True, "duration": cached.get("duration"),
+                        "peaks": cached.get("peaks"), "buckets": n_buckets}
+        except Exception:
+            pass
+
+    cmd = ["ffmpeg", "-v", "error", "-i", str(src_file), "-map", "0:a:0",
+           "-ac", "1", "-ar", "8000", "-f", "s16le", "-"]
+    try:
+        res = subprocess.run(cmd, capture_output=True, timeout=120)
+    except Exception as e:
+        logger.warning(f"Waveform: ffmpeg fail cho {clean_stem}: {e}")
+        return {"exists": False}
+    if res.returncode != 0 or not res.stdout:
+        return {"exists": False}
+
+    samples = np.frombuffer(res.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    duration = len(samples) / 8000.0
+    if duration <= 0:
+        return {"exists": False}
+    n = min(n_buckets, max(1, int(duration * 20)))
+    pad = (-len(samples)) % n
+    if pad:
+        samples = np.concatenate([samples, np.zeros(pad, dtype=np.float32)])
+    peaks = np.abs(samples.reshape(n, -1)).max(axis=1)
+    peaks = np.maximum(peaks, 1e-6)
+    mx = float(peaks.max())
+    peaks = (peaks / (mx if mx > 0 else 1.0)).round(4).tolist()
+
+    payload = {"mtime": st.st_mtime, "size": st.st_size, "buckets": n,
+               "duration": round(duration, 3), "peaks": peaks}
+    try:
+        cache_file.write_text(json.dumps(payload), encoding="utf-8")
+    except Exception:
+        pass
+    return {"exists": True, "cached": False, "duration": round(duration, 3), "peaks": peaks, "buckets": n}
+
+
+# =========================================================================
+# P6.3: RENDER NỀN CHO APPLY-EDITS (job + tiến độ + huỷ + hàng đợi GPU 1 luồng)
+# =========================================================================
+_TIMELINE_RENDER_JOBS: Dict[str, Dict[str, Any]] = {}
+_TIMELINE_RENDER_LOCK = threading.Lock()
+_TIMELINE_RENDER_SEM = threading.Semaphore(1)  # GPU RTX 4050 chỉ render 1 job cùng lúc
+
+
+def _timeline_render_worker(job_id: str, payload: Dict[str, Any]) -> None:
+    job = _TIMELINE_RENDER_JOBS.get(job_id)
+    if job is None:
+        return
+    job_ctl: Dict[str, Any] = {
+        "cancelled": False,
+        "proc": None,
+        "total_dur": 0.0,
+        "progress": lambda frac: job.update({
+            "progress": 20 + int(max(0.0, min(1.0, frac)) * 60),
+            "stage": "Đang render FFmpeg (GPU)...",
+        }),
+        "stage_cb": lambda pct, msg: job.update({"progress": int(pct), "stage": msg}),
+    }
+    job["job_ctl"] = job_ctl
+    job.update({"status": "running", "progress": 5, "stage": "Chuẩn bị..."})
+    with _TIMELINE_RENDER_SEM:
+        if job_ctl["cancelled"]:
+            job.update({"status": "cancelled", "stage": "Đã huỷ", "progress": 0})
+            return
+        try:
+            result = _execute_apply_edits(payload, job_ctl=job_ctl)
+            job.update({"status": "done", "progress": 100, "stage": "Hoàn tất", "result": result})
+        except HTTPException as e:
+            status = "cancelled" if job_ctl.get("cancelled") else "error"
+            job.update({"status": status, "stage": str(e.detail)[:200], "error": str(e.detail)})
+        except Exception as e:
+            logger.exception("Timeline render job lỗi")
+            job.update({"status": "error", "stage": str(e)[:200], "error": str(e)})
+
+
+@router.post("/api/workflow/timeline/apply-edits-async")
+async def api_apply_timeline_edits_async(payload: Dict[str, Any] = Body(...)):
+    """P6.3: tạo job render nền (hàng đợi GPU 1 luồng), trả job_id ngay để client poll tiến độ."""
+    stem = (payload.get("stem") or "").strip()
+    if not stem or not isinstance(payload.get("clips"), list) or not payload.get("clips"):
+        raise HTTPException(status_code=400, detail="Payload render nền không hợp lệ (thiếu stem/clips)")
+    import uuid as _uuid
+
+    job_id = _uuid.uuid4().hex[:12]
+    job: Dict[str, Any] = {"status": "queued", "progress": 0, "stage": "Trong hàng đợi GPU...", "created_at": time.time()}
+    with _TIMELINE_RENDER_LOCK:
+        # dọn job cũ hơn 30 phút
+        for k in [k for k, v in _TIMELINE_RENDER_JOBS.items() if time.time() - v.get("created_at", 0) > 1800]:
+            _TIMELINE_RENDER_JOBS.pop(k, None)
+        _TIMELINE_RENDER_JOBS[job_id] = job
+    threading.Thread(target=_timeline_render_worker, args=(job_id, payload), daemon=True).start()
+    return {"status": "ok", "job_id": job_id}
+
+
+@router.get("/api/workflow/timeline/render-status")
+async def api_timeline_render_status(job_id: str = Query(...)):
+    job = _TIMELINE_RENDER_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job render")
+    return {
+        "status": job.get("status"),
+        "progress": job.get("progress", 0),
+        "stage": job.get("stage", ""),
+        "result": job.get("result"),
+    }
+
+
+@router.post("/api/workflow/timeline/render-cancel")
+async def api_timeline_render_cancel(payload: Dict[str, Any] = Body(...)):
+    """P6.3: huỷ job render — kill tiến trình ffmpeg đang chạy."""
+    job_id = str((payload or {}).get("job_id") or "")
+    job = _TIMELINE_RENDER_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job render")
+    ctl = job.get("job_ctl") or {}
+    ctl["cancelled"] = True
+    proc = ctl.get("proc")
+    if proc is not None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    if job.get("status") in ("queued", "running"):
+        job.update({"status": "cancelled", "stage": "Đã huỷ bởi người dùng", "progress": 0})
+    return {"status": "ok", "cancelled": True}
+
+
+# =========================================================================
+# P7: TÍCH HỢP CONCAT (jub0t/concat — AGPL-3.0, CHỈ gọi như tiến trình ngoài)
+# =========================================================================
+
+CONCAT_EXE_CANDIDATES = [
+    Path(r"C:\tool v1\bin\concat\app\PFiles64\Concat\concat.exe"),
+]
+
+
+def _find_concat_exe() -> Optional[Path]:
+    for p in CONCAT_EXE_CANDIDATES:
+        if p.is_file():
+            return p
+    return None
+
+
+@router.post("/api/workflow/concat/open")
+async def api_concat_open(payload: Dict[str, Any] = Body(...)):
+    """
+    P7: mở Concat với thư mục project của video (tiến trình ngoài, detached).
+    AGPL: chỉ thực thi nhị phân, không nhúng/sao chép mã nguồn Concat.
+    """
+    stem = re.sub(r'[^\w\-_.]', '_', (payload.get("stem") or "").strip())
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    exe = _find_concat_exe()
+    if not exe:
+        raise HTTPException(status_code=404, detail="Không tìm thấy concat.exe (bin/concat/app/PFiles64/Concat/concat.exe)")
+    job_dir = WORKSPACE / stem
+    job_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        proc = subprocess.Popen(
+            [str(exe), "--project", str(job_dir)],
+            cwd=str(job_dir),
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Không mở được Concat: {e}")
+    return {"status": "ok", "pid": proc.pid, "project_dir": str(job_dir)}
+
+
+@router.post("/api/workflow/concat/import")
+async def api_concat_import(stem: str = Form(...), file: UploadFile = File(...)):
+    """
+    P7: nhập file video xuất từ Concat vào THƯ VIỆN (INPUT_DIR) như một video phôi mới,
+    để chạy lại pipeline / chỉnh sửa tiếp trong Studio.
+    """
+    stem_clean = re.sub(r'[^\w\-_.]', '_', (stem or "").strip())
+    if not stem_clean:
+        raise HTTPException(status_code=400, detail="Thiếu stem")
+    data = await file.read()
+    if len(data) < 100_000:
+        raise HTTPException(status_code=400, detail="File quá nhỏ — có thể không phải video")
+    if len(data) > 2 * 1024 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File quá lớn (>2GB)")
+    if not (data[:12].find(b"ftyp") >= 4 or data[:4] == b"\x1a\x45\xdf\xa3" or data[:3] == b"ID3" or data[:2] == b"\x00\x00"):
+        logger.warning(f"Concat import: file không nhận diện được header video quen thuộc — vẫn lưu: {file.filename}")
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    out_name = f"concat_{stem_clean[:40]}_{ts}.mp4"
+    INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = INPUT_DIR / out_name
+    out_path.write_bytes(data)
+    return {"status": "ok", "filename": out_name, "size_mb": round(len(data) / 1048576, 2)}
+
+
+# =========================================================================
+# P6.2: PROXY 540p CHO PREVIEW MƯỢT + PRESET KHUNG XUẤT
+# =========================================================================
+_PROXY_GENERATING: set = set()
+
+
+def _resolve_timeline_source_video(stem: str, version: str) -> Optional[Path]:
+    """Chọn file nguồn theo phiên bản: final (mặc định) hoặc raw (phôi)."""
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    job_dir = WORKSPACE / clean_stem
+    if version != "raw":
+        cand_final = job_dir / f"final_{stem}.mp4"
+        if cand_final.is_file() and _valid_final_video(cand_final):
+            return cand_final
+    for cand in (INPUT_DIR / f"{stem}.mp4", DOWNLOADS_DIR / f"{stem}.mp4"):
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _proxy_path_for(stem: str, version: str) -> Path:
+    return WORKSPACE / re.sub(r'[^\w\-_.]', '_', stem) / f"proxy_{version}.mp4"
+
+
+def _proxy_is_fresh(proxy_path: Path, src_path: Path) -> bool:
+    return proxy_path.is_file() and proxy_path.stat().st_size > 1_000 and \
+        proxy_path.stat().st_mtime >= src_path.stat().st_mtime - 1.0
+
+
+def _proxy_generate_worker(src_path: Path, proxy_path: Path, key: str) -> None:
+    try:
+        # đuôi .mp4 để ffmpeg đo được muxer (file .mp4.tmp sẽ lỗi "Invalid argument")
+        tmp = proxy_path.parent / ("tmp_" + proxy_path.name)
+        tmp.unlink(missing_ok=True)
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-i", str(src_path),
+             "-vf", "scale='min(540,iw)':-2",
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+             "-c:a", "copy", "-movflags", "+faststart", str(tmp)],
+            capture_output=True, timeout=600,
+        )
+        if tmp.is_file() and tmp.stat().st_size > 1_000:
+            proxy_path.unlink(missing_ok=True)
+            tmp.rename(proxy_path)
+        else:
+            tmp.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning(f"Proxy generate fail cho {proxy_path.name}: {e}")
+    finally:
+        _PROXY_GENERATING.discard(key)
+
+
+@router.post("/api/workflow/proxy/generate")
+async def api_proxy_generate(payload: Dict[str, Any] = Body(...)):
+    """
+    P6.2: tạo proxy 540p nền cho preview mượt (không chặn request).
+    Trả {ready: true, url} nếu proxy đã có và mới hơn nguồn; ngược lại khởi tạo
+    thread generate và trả {ready: false, started: true}.
+    """
+    stem = (payload.get("stem") or "").strip()
+    version = payload.get("version") or "final"
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu stem")
+    src = _resolve_timeline_source_video(stem, version)
+    if not src:
+        raise HTTPException(status_code=404, detail="Không tìm thấy video nguồn")
+    proxy_path = _proxy_path_for(stem, version)
+    url = f"/api/workflow/stream-file?path={proxy_path}&t={time.time()}"
+    if _proxy_is_fresh(proxy_path, src):
+        return {"ready": True, "url": url}
+    key = f"{stem}|{version}"
+    if key not in _PROXY_GENERATING:
+        _PROXY_GENERATING.add(key)
+        proxy_path.parent.mkdir(parents=True, exist_ok=True)
+        threading.Thread(target=_proxy_generate_worker, args=(src, proxy_path, key), daemon=True).start()
+    return {"ready": False, "started": True, "url": url}
+
+
+@router.get("/api/workflow/proxy/status")
+async def api_proxy_status(stem: str = Query(...), version: str = Query("final")):
+    src = _resolve_timeline_source_video(stem, version)
+    if not src:
+        return {"ready": False, "exists": False}
+    proxy_path = _proxy_path_for(stem, version)
+    if _proxy_is_fresh(proxy_path, src):
+        return {"ready": True, "exists": True,
+                "url": f"/api/workflow/stream-file?path={proxy_path}&t={time.time()}"}
+    return {"ready": False, "exists": proxy_path.is_file(), "generating": f"{stem}|{version}" in _PROXY_GENERATING}
+
+
+@router.get("/static/js/{fname}")
+async def api_static_js(fname: str):
+    """P6.4: phục vụ module JS tách từ workflow.html (chỉ .js, chặn traversal)."""
+    if "/" in fname or "\\" in fname or ".." in fname or not fname.endswith(".js"):
+        raise HTTPException(status_code=404, detail="File không hợp lệ")
+    p = Path(__file__).resolve().parent / "static" / "js" / fname
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="Không tìm thấy file JS")
+    return FileResponse(p, media_type="application/javascript")
+
 
 @router.get("/api/workflow/download-srt")
 async def api_download_srt(stem: str = Query(...), type: str = Query("translated")):
@@ -1648,6 +3529,11 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
         else:
             fc = f"[0:v]{crop_prefix}{flip_str}scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1{srt_filter}[outv]"
 
+    # Lồng Watermark mờ mờ cố định ở góc phải nếu được kích hoạt
+    wm_filt = build_watermark_filter(cfg, tw, th)
+    if wm_filt:
+        fc = fc.replace("[outv]", f"{wm_filt}[outv]")
+
     # Lắp ráp lệnh FFmpeg
     cmd_inputs = ["ffmpeg", "-y", "-i", str(v_input_path)]
     if extra_inputs:
@@ -1714,6 +3600,19 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
 
     if not success:
         raise HTTPException(status_code=500, detail="Không thể xuất video bằng FFmpeg")
+
+    # Gắn Thumbnail vào đầu video nếu người dùng yêu cầu
+    prepend_thumb = bool(payload.get("prepend_thumbnail", False))
+    if prepend_thumb:
+        clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+        thumb_f = THUMBNAILS_DIR / f"{clean_stem}.jpg"
+        if not thumb_f.is_file() and job_dir.is_dir() and (job_dir / "thumbnail.jpg").is_file():
+            thumb_f = job_dir / "thumbnail.jpg"
+        if thumb_f.is_file():
+            try:
+                _prepend_thumbnail_file(out_path, thumb_f, float(payload.get("thumbnail_duration_s", 0.8)))
+            except Exception as e_prep:
+                logger.warning(f"Không thể ghép thumbnail vào video xuất {out_path}: {e_prep}")
 
     # Xuất kèm file SRT nếu người dùng yêu cầu
     exported_srt_path = ""

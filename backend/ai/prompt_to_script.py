@@ -15,7 +15,7 @@ import re
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
-from ai.scriptwriting import call_gemini
+from ai.scriptwriting import call_gemini, GEMINI_SCRIPT_MODEL
 from ai.muse_spark_service import is_muse_available, call_muse_spark
 
 logger = logging.getLogger(__name__)
@@ -250,7 +250,8 @@ CHỦ ĐỀ:
             prompt=user_input_content,
             system_instruction=SYSTEM_INSTRUCTION_PROMPT_TO_SCRIPT,
             response_schema=response_schema,
-            structured_output=True
+            structured_output=True,
+            preferred_model=GEMINI_SCRIPT_MODEL
         )
         engine_name = "gemini"
 

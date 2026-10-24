@@ -374,13 +374,19 @@ def get_status() -> Dict[str, Any]:
                 state["elapsed_seconds"] = max(0, int((state.get("updated_at") or state["start_time"]) - state["start_time"]))
         if state.get("video_status") == "completed":
             from dashboard_media import media_status
-            output_path = (state.get("last_completed") or {}).get("output_path")
-            check = media_status(output_path, defer=True) if output_path else {"status": "unverified", "reason": "Chưa có đường dẫn thành phẩm để xác minh."}
-            if check["status"] != "valid":
-                state.update(active=False, status="error" if check["status"] == "invalid" else "recorded",
-                             video_status="error" if check["status"] == "invalid" else "unverified",
-                             percent=min(99, max(0, state.get("percent", 0))), eta_seconds=None,
-                             step_name=check["reason"], last_error=check["reason"])
+            last_comp = state.get("last_completed") or {}
+            output_path = last_comp.get("output_path")
+            if output_path and not Path(output_path).exists() and (last_comp.get("output_verified") or state.get("percent") == 100):
+                # File thành phẩm đã hoàn tất 100% và được người dùng di chuyển/xóa khỏi D:\banve sau khi xuất xưởng;
+                # không đánh dấu ngược thành lỗi render 99% trên Dashboard.
+                state["output_moved"] = True
+            else:
+                check = media_status(output_path, defer=False) if output_path else {"status": "unverified", "reason": "Chưa có đường dẫn thành phẩm để xác minh."}
+                if check["status"] != "valid":
+                    state.update(active=False, status="error" if check["status"] == "invalid" else "recorded",
+                                 video_status="error" if check["status"] == "invalid" else "unverified",
+                                 percent=min(99, max(0, state.get("percent", 0))), eta_seconds=None,
+                                 step_name=check["reason"], last_error=check["reason"])
         # Khi đang xử lý video mới, không lấy tên model của video trước làm nhãn (Codex Plan - Đợt 7)
         if not state.get("active") and not state.get("translation_models"):
             last_models = (state.get("last_completed") or {}).get("translation_models")
@@ -736,6 +742,7 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
         record = {
             "video_name": video_name,
             "output_path": output_path,
+            "output_verified": True,
             "duration_seconds": int(duration_seconds),
             "completed_at": now,
             "translation_models": models,

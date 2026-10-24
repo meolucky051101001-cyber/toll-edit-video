@@ -24,6 +24,9 @@ librosa>=0.10,<1
 paddleocr>=2.7,<3
 praat-parselmouth>=0.4.3,<1
 psutil>=5.9,<6
+gmssl>=3.2
+cryptography>=42
+curl_cffi>=0.7
 
 
 # Optional voice-clone providers used only when selected/configured:
