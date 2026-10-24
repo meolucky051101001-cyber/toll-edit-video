@@ -3820,7 +3820,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       updateTimecode();
       renderRulerMarks();
       renderSubtitlesTimeline();
-      initVideoClipsForCurrentVideo(true);
+      initVideoClipsForCurrentVideo(true, { restore: true }); // P6.1: thử khôi phục project đã lưu
       updateScrubberUI();
       applyPlaybackSpeed();
     });
@@ -3975,6 +3975,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       initTimelineZoomControls();
       initVideoTrackRubberBand();
       initClipPropsPanel();
+      startTimelineAutosave();
     }
 
     // ZOOM TIMELINE (Ctrl + lăn chuột / slider / phím +-): 10%–800%, neo theo con trỏ
@@ -4414,9 +4415,95 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       set(v) { timelineProject.tracks[0].clips = migrateClipsToAt(Array.isArray(v) ? v : []); }
     });
 
-    // Project JSON đầy đủ (dùng cho autosave/render ở P6 — hiện xuất ra console khi cần debug)
+    // Project JSON đầy đủ (dùng cho autosave P6.1 + render ở P6.3 — hiện xuất ra console khi cần debug)
     function getTimelineProjectSnapshot() {
       return JSON.parse(JSON.stringify(timelineProject));
+    }
+
+    // ===== P6.1: AUTOSAVE + KHÔI PHỤC PROJECT TIMELINE =====
+    let timelineProjectDirty = false;
+    let _projectSaveTimer = null;
+
+    function markTimelineProjectDirty() {
+      timelineProjectDirty = true;
+    }
+
+    async function saveTimelineProjectNow(silent = true) {
+      try {
+        if (!currentVideo || !currentVideo.stem || !videoClipsState.length) return false;
+        const payload = { stem: currentVideo.stem, project: getTimelineProjectSnapshot() };
+        const res = await fetch('/api/workflow/timeline/project', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Local-Control-Token': (typeof CONTROL_PLANE_TOKEN !== 'undefined' ? CONTROL_PLANE_TOKEN : '__REPLACE_TOKEN__'),
+            'X-Dashboard-Input': '1'
+          },
+          body: JSON.stringify(payload),
+          keepalive: true
+        });
+        if (res.ok) {
+          timelineProjectDirty = false;
+          if (!silent) showToast('💾 Đã lưu project timeline!');
+          return true;
+        }
+      } catch (err) {
+        console.warn('Lưu project timeline lỗi:', err);
+      }
+      return false;
+    }
+
+    function startTimelineAutosave() {
+      if (_projectSaveTimer) return;
+      _projectSaveTimer = setInterval(() => {
+        if (timelineProjectDirty) saveTimelineProjectNow(true);
+      }, 10000);
+      // Rời tab / tắt trang: cố gắng lưu nốt những thay đổi chưa ghi (best-effort)
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden' && timelineProjectDirty) saveTimelineProjectNow(true);
+      });
+    }
+
+    async function maybeRestoreTimelineProject(stem) {
+      try {
+        if (!stem) return false;
+        const res = await fetch(`/api/workflow/timeline/project?stem=${encodeURIComponent(stem)}`);
+        if (!res.ok) return false;
+        const data = await res.json();
+        const proj = data && data.exists ? data.project : null;
+        const track = proj && Array.isArray(proj.tracks) ? proj.tracks[0] : null;
+        const clips = track && Array.isArray(track.clips) ? track.clips : [];
+        if (!clips.length) return false;
+
+        // Chống khôi phục nhầm khi video nguồn đã thay đổi (pipeline chạy lại / tải lại video)
+        const pdur = mainPlayer && isFinite(mainPlayer.duration) ? mainPlayer.duration : 0;
+        const maxSrcEnd = clips.reduce((m, c) => Math.max(m, +c.end || 0), 0);
+        if (pdur > 0 && maxSrcEnd > pdur + 0.75) {
+          console.warn('Bỏ khôi phục project: video nguồn đã khác khi lưu', { maxSrcEnd, pdur });
+          return false;
+        }
+
+        (proj.tracks || []).forEach(t => { if (t && Array.isArray(t.clips)) migrateClipsToAt(t.clips); });
+        timelineProject = {
+          version: proj.version || 1,
+          fps: proj.fps || 30,
+          canvas: proj.canvas || { w: 1080, h: 1920 },
+          tracks: proj.tracks
+        };
+        selectedClipId = clips[0].id;
+        selectedClipIds = [selectedClipId];
+        timelineUndoStack = [];
+        timelineRedoStack = [];
+        timelineProjectDirty = false;
+        renderVideoClipsTrack();
+        updateTimelineToolbarStates();
+        const nSeg = clips.length;
+        showToast(`🔄 Đã khôi phục project timeline đã lưu (${nSeg} đoạn, lưu lúc ${data.saved_at || 'không rõ'})!`);
+        return true;
+      } catch (err) {
+        console.warn('Khôi phục project timeline lỗi:', err);
+        return false;
+      }
     }
 
     function sortClipsByAt(arr) { return arr.sort((a, b) => (a.at || 0) - (b.at || 0)); }
@@ -4480,6 +4567,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
     function pushTimelineHistory(actionLabel = '') {
       if (!videoClipsState || !videoClipsState.length) return;
+      timelineProjectDirty = true; // P6.1: mọi thao tác sửa timeline đều đánh dấu chờ autosave
       timelineUndoStack.push({
         project: JSON.parse(JSON.stringify(timelineProject)),
         selectedClipId: selectedClipId,
@@ -5116,7 +5204,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       showToast(`📋 Đã dán đoạn video (${(newClip.end - newClip.start).toFixed(1)}s) vào vị trí Đoạn ${newIdx + 1} (Ctrl+V)!`);
     }
 
-    function initVideoClipsForCurrentVideo(forceReset = false) {
+    function initVideoClipsForCurrentVideo(forceReset = false, opts = null) {
       if (!mainPlayer) return;
       const dur = mainPlayer.duration;
       if (isNaN(dur) || dur <= 0) return;
@@ -5134,6 +5222,14 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         setSingleSelection(videoClipsState[0].id);
         timelineUndoStack = [];
         timelineRedoStack = [];
+        if (opts && opts.saveFresh) {
+          // Sau apply-edits: video thành phẩm mới → project.json cũ lỗi thời, ghi đè bằng trạng thái hiện tại
+          timelineProjectDirty = true;
+          saveTimelineProjectNow(true);
+        } else if (opts && opts.restore) {
+          // P6.1: chọn video → thử khôi phục project đã autosave (khôi phục sau crash/đóng trình duyệt)
+          maybeRestoreTimelineProject(currentVideo && currentVideo.stem);
+        }
       }
       renderVideoClipsTrack();
       updateTimelineToolbarStates();
@@ -5714,7 +5810,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           }
 
           setTimeout(() => {
-            initVideoClipsForCurrentVideo(true);
+            initVideoClipsForCurrentVideo(true, { saveFresh: true }); // P6.1: ghi đè project.json bằng video thành phẩm mới
             renderMediaList();
           }, 800);
 

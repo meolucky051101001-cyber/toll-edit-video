@@ -2214,6 +2214,53 @@ async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
 # FEATURE: CAPCUT-STYLE CUSTOM EXPORT & SRT DOWNLOAD
 # =========================================================================
 
+@router.get("/api/workflow/timeline/project")
+async def api_get_timeline_project(stem: str = Query(...)):
+    """
+    Đọc project JSON đã autosave của một video (P6.1).
+    Trả {exists: False} nếu chưa có hoặc file hỏng — client tự dùng timeline mặc định.
+    """
+    clean_stem = re.sub(r'[^\w\-_.]', '_', (stem or "").strip())
+    if not clean_stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    project_file = WORKSPACE / clean_stem / "project.json"
+    if not project_file.is_file():
+        return {"exists": False}
+    try:
+        data = json.loads(project_file.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning(f"project.json của {clean_stem} hỏng JSON — bỏ qua khôi phục")
+        return {"exists": False}
+    if not isinstance(data, dict) or not isinstance(data.get("tracks"), list) or not data["tracks"]:
+        return {"exists": False}
+    return {"exists": True, "project": data, "saved_at": data.get("saved_at")}
+
+
+@router.post("/api/workflow/timeline/project")
+async def api_save_timeline_project(payload: Dict[str, Any] = Body(...)):
+    """
+    Lưu project JSON timeline cho một video (P6.1 autosave, khôi phục sau crash).
+    Ghi atomic (tmp + replace) để không bao giờ để lại project.json dở dang.
+    """
+    stem = (payload.get("stem") or "").strip()
+    project = payload.get("project")
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    if not isinstance(project, dict) or not isinstance(project.get("tracks"), list) or not project["tracks"]:
+        raise HTTPException(status_code=400, detail="Project không hợp lệ (thiếu tracks)")
+
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    job_dir = WORKSPACE / clean_stem
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    project = {**project, "stem": clean_stem, "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    target = job_dir / "project.json"
+    tmp = job_dir / "project.json.tmp"
+    tmp.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(target)
+    return {"status": "ok", "saved": True, "path": str(target), "saved_at": project["saved_at"]}
+
+
 @router.get("/api/workflow/download-srt")
 async def api_download_srt(stem: str = Query(...), type: str = Query("translated")):
     """
