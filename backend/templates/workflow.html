@@ -1358,6 +1358,18 @@
       border: 1px solid rgba(0, 0, 0, 0.35);
       box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
     }
+    #shortcutModal kbd {
+      display: inline-block;
+      background: #1e293b;
+      border: 1px solid #475569;
+      border-bottom-width: 2px;
+      border-radius: 4px;
+      padding: 0 5px;
+      font-family: monospace;
+      font-size: 10.5px;
+      color: #7dd3fc;
+      line-height: 16px;
+    }
     .clip-card-inner {
       display: flex;
       align-items: center;
@@ -2527,6 +2539,10 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             <button type="button" class="btn-capcut-tool" id="btnImportConcat" onclick="document.getElementById('concatImportInput').click()" title="P7: nhập file video xuất từ Concat vào thư viện như video phôi mới">
               <span class="tool-icon">📥</span>
               <span>Nhập Concat</span>
+            </button>
+            <button type="button" class="btn-capcut-tool" id="btnShortcutHelp" onclick="toggleShortcutModal()" title="Xem toàn bộ phím tắt của timeline (phím ?)">
+              <span class="tool-icon">⌨️</span>
+              <span>Phím Tắt</span>
             </button>
             <input type="file" id="concatImportInput" accept="video/mp4,video/webm,video/x-matroska" style="display: none;" onchange="importConcatFile(this)">
           </div>
@@ -4365,6 +4381,13 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         return;
       }
 
+      // P8: phím ? mở / đóng bảng phím tắt
+      if (e.key === '?') {
+        e.preventDefault();
+        toggleShortcutModal();
+        return;
+      }
+
       // Không kích hoạt phím đơn nếu đang giữ Ctrl/Alt/Meta
       if (isCtrl || e.altKey) return;
 
@@ -4410,7 +4433,10 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         e.preventDefault();
         zoomTimelineTo(timelinePxPerSec / 1.3);
       } else if (e.key === 'Escape') {
-        if (selectedClipIds.length > 1) {
+        const _modal = document.getElementById('shortcutModal');
+        if (_modal && _modal.style.display === 'flex') {
+          toggleShortcutModal(false); // P8: Esc đóng bảng phím tắt trước
+        } else if (selectedClipIds.length > 1) {
           clearMultiSelect();
           renderVideoClipsTrack();
           showToast('🔖 Đã bỏ chọn nhiều đoạn (Esc)');
@@ -4591,6 +4617,98 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
     </script>
     <script src="/static/js/timeline.js"></script>
     <script>
+    // ===== P8: MODAL PHÍM TẮT + KỊCH BẢN TỰ KIỂM (DevTools) =====
+    function toggleShortcutModal(force) {
+      const m = document.getElementById('shortcutModal');
+      if (!m) return;
+      const show = (typeof force === 'boolean') ? force : m.style.display !== 'flex';
+      m.style.display = show ? 'flex' : 'none';
+    }
+
+    // P8: chạy trong Console (F12) — tự kiểm tra các thao tác chính, không đụng dữ liệu server
+    async function timelineSelfTest() {
+      const R = { pass: 0, fail: 0, results: [] };
+      const check = (name, ok, detail) => {
+        R.results.push(`${ok ? '✅' : '❌'} ${name}${detail ? ' — ' + detail : ''}`);
+        R[ok ? 'pass' : 'fail']++;
+      };
+      try {
+        if (!mainPlayer || isNaN(mainPlayer.duration) || mainPlayer.duration <= 0) {
+          return { error: 'Chưa có video nào được chọn — hãy chọn video rồi chạy lại timelineSelfTest()' };
+        }
+        mainPlayer.pause(); mainPlayer.muted = true;
+        const saved = JSON.parse(JSON.stringify(timelineProject));
+        const savedSel = selectedClipId;
+        timelineUndoStack = []; timelineRedoStack = [];
+        const dur = +mainPlayer.duration.toFixed(3);
+        // Baseline sạch deterministic: 1 clip phủ toàn video, không transition/fx
+        videoClipsState = [{ id: 'clip_selftest', start: 0, end: dur, at: 0, duration: dur }];
+        setSingleSelection(window.videoClipsState[0].id);
+        timelineProjectDirty = false;
+        renderVideoClipsTrack();
+
+        check('Reset về 1 đoạn gốc', window.videoClipsState.length === 1 && Math.abs(getTimelineSpan() - dur) < 0.01);
+
+        mainPlayer.currentTime = Math.min(dur / 2, dur - 0.3);
+        splitCurrentClip();
+        check('Split tại playhead → 2 đoạn', window.videoClipsState.length === 2 && Math.abs(getTimelineSpan() - dur) < 0.01);
+
+        setClipTransition(window.videoClipsState[0].id, 'fade', 0.5);
+        check('Transition co timeline đúng 0.5s', Math.abs(getTimelineSpan() - (dur - 0.5)) < 0.01, `span=${getTimelineSpan().toFixed(2)}`);
+        undoTimelineEdit();
+        check('Undo trả lại span không transition', Math.abs(getTimelineSpan() - dur) < 0.01);
+
+        // Speed test trên đoạn CUỐI (span = max(at+dur) nên chỉ đoạn cuối quyết định span)
+        const lastClip = window.videoClipsState[window.videoClipsState.length - 1];
+        const spanBeforeSpeed = getTimelineSpan();
+        const lastDur = clipDurOf(lastClip);
+        lastClip.speed = 2;
+        renderVideoClipsTrack();
+        check('Speed 2x: đoạn cuối co span một nửa', Math.abs(getTimelineSpan() - (spanBeforeSpeed - lastDur / 2)) < 0.01, `span=${getTimelineSpan().toFixed(2)}`);
+        lastClip.speed = 1;
+        renderVideoClipsTrack();
+
+        // Gap test: đẩy lùi đoạn CUỐI → span tăng đúng mức
+        const lastClip2 = window.videoClipsState[window.videoClipsState.length - 1];
+        const spanBeforeGap = getTimelineSpan();
+        lastClip2.at = (lastClip2.at || 0) + 2;
+        renderVideoClipsTrack();
+        check('Gap: đẩy lùi đoạn cuối tăng span đúng 2s', Math.abs(getTimelineSpan() - (spanBeforeGap + 2)) < 0.01, `span=${getTimelineSpan().toFixed(2)}`);
+        lastClip2.at = (lastClip2.at || 0) - 2;
+        renderVideoClipsTrack();
+
+        seekTimelineToRatio(0.5);
+        const midT = +mainPlayer.currentTime.toFixed(2);
+        check('Seek 50% nằm trong video', midT > 0 && midT < dur);
+
+        setSnapEnabled(true);
+        const snapThr = 8 / timelinePxPerSec;
+        const edge0 = window.videoClipsState[0].at || 0;
+        const snapped = +snapTimelineTime(edge0 + snapThr * 0.3, null).toFixed(4);
+        check('Snap dính mép đoạn trong ngưỡng 8px', Math.abs(snapped - edge0) < 1e-6, `probe=${(edge0 + snapThr * 0.3).toFixed(3)} out=${snapped}`);
+        setSnapEnabled(false);
+
+        const beforeN = window.videoClipsState.length;
+        deleteClipsByIds([window.videoClipsState[0].id], false);
+        check('Ripple delete còn đúng số đoạn', window.videoClipsState.length === beforeN - 1);
+        undoTimelineEdit();
+
+        // Khôi phục trạng thái ban đầu cho người dùng
+        timelineProject = saved;
+        selectedClipId = savedSel && timelineProject.tracks[0].clips.some(c => c.id === savedSel) ? savedSel : (timelineProject.tracks[0].clips[0] || {}).id || null;
+        selectedClipIds = selectedClipId ? [selectedClipId] : [];
+        timelineUndoStack = []; timelineRedoStack = [];
+        timelineProjectDirty = false; // trạng thái khôi phục = đã lưu, không cần autosave
+        renderVideoClipsTrack();
+        check('Khôi phục trạng thái ban đầu', true);
+      } catch (err) {
+        check('Không có exception', false, String(err).slice(0, 120));
+      }
+      R.summary = `${R.pass}/${R.pass + R.fail} đạt`;
+      console.log('[timelineSelfTest]', R.summary);
+      return R;
+    }
+
     // REALTIME SUBTITLE SYNCHRONIZATION
     function updateSubtitlesOverlay() {
       if (isEditingSubText) return; // Không ghi đè khi người dùng đang trực tiếp gõ sửa chữ!
@@ -8747,6 +8865,47 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       </div>
     </div>
   </div>
+
+  <!-- P8: MODAL PHÍM TẮT TIMELINE (mở bằng phím ? hoặc nút ⌨️) -->
+  <div id="shortcutModal" style="display: none; position: fixed; inset: 0; z-index: 10000; background: rgba(2, 6, 23, 0.82); align-items: center; justify-content: center;" onclick="if (event.target === this) toggleShortcutModal()">
+    <div style="background: #0f172a; border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 12px; padding: 22px 26px; width: min(680px, 92vw); max-height: 86vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.6);">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+        <span style="font-size: 16px; font-weight: 800; color: #38bdf8;">⌨️ Phím Tắt Timeline — Studio Quy Trình</span>
+        <button type="button" class="cp-chip" onclick="toggleShortcutModal()" title="Đóng (Esc)">✕ Đóng (Esc)</button>
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px 22px; font-size: 12px; color: #cbd5e1;">
+        <div><kbd>Space</kbd> — Phát / Dừng</div>
+        <div><kbd>←</kbd> / <kbd>→</kbd> — Lùi / tiến 2s</div>
+        <div><kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd> — Lùi / tiến 0.1s</div>
+        <div><kbd>,</kbd> / <kbd>.</kbd> — Lùi / tiến 1 frame (30fps)</div>
+        <div><kbd>J</kbd> — Tua lùi liên tục</div>
+        <div><kbd>K</kbd> — Dừng / phát</div>
+        <div><kbd>L</kbd> — Tua tới nhanh 1x → 2x → 4x</div>
+        <div><kbd>C</kbd> hoặc <kbd>S</kbd> — Cắt đoạn tại playhead</div>
+        <div><kbd>Q</kbd> / <kbd>W</kbd> — Trim đầu / cuối tới playhead</div>
+        <div><kbd>Del</kbd> — Xóa đoạn (rip-nhịp dồn về trái)</div>
+        <div><kbd>Shift</kbd>+<kbd>Del</kbd> — Xóa để trống khoảng gap</div>
+        <div><kbd>Ctrl</kbd>+<kbd>Z</kbd> — Hoàn tác (40 bước)</div>
+        <div><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd> — Làm lại</div>
+        <div><kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>V</kbd> — Copy / dán đoạn</div>
+        <div><kbd>Ctrl</kbd>+<kbd>D</kbd> — Nhân bản nhanh đoạn</div>
+        <div><kbd>Ctrl</kbd>+<kbd>A</kbd> — Chọn tất cả đoạn</div>
+        <div><kbd>Esc</kbd> — Bỏ chọn nhiều đoạn / đóng bảng</div>
+        <div><kbd>N</kbd> — Bật / tắt snap dính mép</div>
+        <div><kbd>+</kbd> / <kbd>-</kbd> — Phóng to / thu nhỏ timeline</div>
+        <div><kbd>Ctrl</kbd> + lăn chuột — Zoom neo theo con trỏ (10%–800%)</div>
+        <div>Kéo vùng trống track video — Chọn nhiều đoạn</div>
+        <div>Kéo mép clip — Trim có xem trước khung hình</div>
+        <div>Kéo thả card — Đổi thứ tự / chèn trước–sau</div>
+        <div>Bấm badge 🔄 tại điểm nối — Sửa chuyển cảnh</div>
+      </div>
+      <div style="margin-top: 14px; font-size: 11px; color: #64748b; line-height: 1.6;">
+        💡 Mẹo: tất cả thao tác cắt ghép đều có <b>Ctrl+Z</b>. Bấm nút <b>💾 Áp dụng</b> lần nữa trong khi render nền để <b>huỷ</b>. Dán
+        <b>timelineSelfTest()</b> vào Console (F12) để tự kiểm tra nhanh toàn bộ thao tác chính.
+      </div>
+    </div>
+  </div>
+
 </body>
 
 </html>
