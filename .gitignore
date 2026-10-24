@@ -69,3 +69,12 @@ douyin_cookies.txt
 backend/douyin_cookies.txt
 *cookie*
 *.cookies
+
+# Du lieu Google Sheet da export (chua thong tin ca nhan) - khong commit
+secure_sheet/
+*.enc
+
+# Nhi phan nang & ban lam viec tam (Concat AGPL goi nhu tien trinh ngoai)
+bin/
+temp_dir/
+.pytest_cache/
