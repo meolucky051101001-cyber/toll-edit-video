@@ -213,7 +213,10 @@ class BrowserMediaResolver:
             try:
                 page = browser.get_active_page()
             except Exception:
-                raise DownloadAdapterError("browser_closed", "Cửa sổ trình duyệt Xiaohongshu chưa mở.")
+                try:
+                    page = await browser.ensure_open(headless_override=True)
+                except Exception as e:
+                    raise DownloadAdapterError("browser_unavailable", f"Không thể mở trình duyệt Xiaohongshu: {e}")
             try:
                 return await page.evaluate(XHS_RESOLVE_SCRIPT, {"targetId": note_id, "xsecToken": token})
             except Exception as e:
@@ -264,7 +267,7 @@ class BrowserMediaResolver:
                 page = browser.get_active_page()
             except Exception:
                 try:
-                    page = await browser.ensure_open()
+                    page = await browser.ensure_open(headless_override=True)
                 except Exception as e:
                     raise DownloadAdapterError("browser_unavailable", f"Không thể mở trình duyệt Douyin: {e}")
 

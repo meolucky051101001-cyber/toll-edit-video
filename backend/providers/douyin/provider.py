@@ -104,7 +104,7 @@ class DouyinProvider(SearchProvider):
             if state in {"login_required", "verification_required"}:
                 if self.auto_elevate and getattr(self.browser, "is_currently_headless", False):
                     try:
-                        await self.browser.elevate_to_headful()
+                        await self.browser.elevate_to_headful(persist=False)
                     except Exception:
                         pass
             raise UserActionRequired(
@@ -124,11 +124,12 @@ class DouyinProvider(SearchProvider):
         filters: SearchFilters,
         on_batch: Callable[[list[VideoResult]], Awaitable[None]] | None = None,
     ) -> list[VideoResult]:
-        if not self.auto_elevate:
-            if hasattr(self.browser, "ensure_headless_session"):
-                await self.browser.ensure_headless_session()
-            elif hasattr(self.browser, "reset_headful_session"):
-                self.browser.reset_headful_session()
+        # Searches always run headless, even when auto-elevation is enabled for
+        # challenges: drop any visible window before acquiring the lock.
+        if hasattr(self.browser, "ensure_headless_session"):
+            await self.browser.ensure_headless_session()
+        elif hasattr(self.browser, "reset_headful_session"):
+            self.browser.reset_headful_session()
         async with self.browser.lock:
             if hasattr(self.browser, "release_blocked_page"):
                 await self.browser.release_blocked_page()
@@ -449,6 +450,18 @@ class DouyinProvider(SearchProvider):
                     return apply_search_filters_and_sorting(results, filters=filters, limit=limit)
 
                 if not candidates and not results:
+                    # An empty shell (infinite skeleton, no anchors/API/SSR) on an
+                    # unauthenticated session is a login problem, not a structure
+                    # change: route to manual re-login so the session refreshes and
+                    # the search resumes. Without inspect diagnostics, keep legacy.
+                    diag = getattr(self.browser, "diagnostics", None)
+                    if isinstance(diag, dict) and not diag.get("is_authenticated", False):
+                        if self.auto_elevate and getattr(self.browser, "is_currently_headless", False):
+                            try:
+                                await self.browser.elevate_to_headful(persist=False)
+                            except Exception:
+                                pass
+                        raise UserActionRequired("waiting_for_login", MESSAGES["login_required"])
                     raise SelectorChangedError(
                         "Trang Douyin chưa có liên kết video để đọc; có thể không có kết quả hoặc cấu trúc trang đã đổi."
                     )

@@ -86,6 +86,25 @@ async def test_platform_locks_concurrency():
 
 
 @pytest.mark.anyio
+async def test_platform_slot_fails_fast_when_busy(monkeypatch):
+    from backend.core.config import settings
+    from backend.services.search_service import PlatformBusyError
+
+    monkeypatch.setattr(settings, "search_timeout", 0.1)
+    sessions = make_test_db()
+    service = SearchService(sessions)
+    lock = service.get_platform_lock("douyin")
+    await lock.acquire()
+    try:
+        with pytest.raises(PlatformBusyError, match="đang bận"):
+            async with service.platform_slot("douyin", "douyin"):
+                pass
+    finally:
+        lock.release()
+    assert not lock.locked()
+
+
+@pytest.mark.anyio
 async def test_cancel_retains_committed_batches():
     sessions = make_test_db()
 
@@ -149,5 +168,5 @@ def test_recover_interrupted_with_partial_results():
         assert "Đã lưu an toàn 5/10 video" in j1.error_message
 
         j2 = db.get(SearchJob, id2)
-        assert j2.status == "failed"
-        assert "chạy lại từ Lịch sử" in j2.error_message
+        assert j2.status == "interrupted"
+        assert "chạy tiếp từ Lịch sử" in j2.error_message

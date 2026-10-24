@@ -9,6 +9,7 @@ from playwright.async_api import async_playwright
 from backend.core.config import settings
 from backend.services.browser_service import BrowserService
 from backend.services.browser_session import (
+    cleanup_stale_profile_locks,
     restore_missing_cookies,
     save_headful_preference,
     save_session_checkpoint,
@@ -259,3 +260,63 @@ def test_user_opened_mode_survives_service_restart(service_type, tmp_path):
 def test_corrupt_mode_preference_has_safe_default(service_type, tmp_path):
     (tmp_path / "browser_preferences.json").write_text('{"prefer_headful":"false"}', encoding="utf-8")
     assert service_type(profile=tmp_path, headless=True).should_run_headless() is True
+
+
+def test_cleanup_stale_profile_locks_removes_only_lock_artifacts(tmp_path):
+    profile = tmp_path / "profile"
+    (profile / "Default").mkdir(parents=True)
+    (profile / "Default" / "Cookies").write_text("session", encoding="utf-8")
+    (profile / "auth_state.json").write_text('{"cookies": []}', encoding="utf-8")
+    (profile / "Local State").write_text("{}", encoding="utf-8")
+    (profile / "browser_preferences.json").write_text('{"prefer_headful": true}', encoding="utf-8")
+    lock_names = ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort")
+    for name in lock_names:
+        (profile / name).write_text("stale", encoding="utf-8")
+    pending_delete = profile / "douyin.CHROME_DELETE"
+    (pending_delete / "GPUPersistentCache").mkdir(parents=True)
+    (pending_delete / "GPUPersistentCache" / "data").write_text("x", encoding="utf-8")
+
+    removed = cleanup_stale_profile_locks(profile)
+
+    assert sorted(removed) == sorted([*lock_names, "douyin.CHROME_DELETE"])
+    for name in lock_names:
+        assert not (profile / name).exists()
+    assert not pending_delete.exists()
+    assert (profile / "Default" / "Cookies").read_text(encoding="utf-8") == "session"
+    assert (profile / "auth_state.json").exists()
+    assert (profile / "Local State").exists()
+    assert (profile / "browser_preferences.json").exists()
+
+
+def test_cleanup_stale_profile_locks_tolerates_missing_profile(tmp_path):
+    assert cleanup_stale_profile_locks(tmp_path / "absent") == []
+
+
+def test_cleanup_stale_profile_locks_reports_only_actual_removals(tmp_path, monkeypatch):
+    profile = tmp_path / "profile"
+    locked = profile / "douyin.CHROME_DELETE"
+    locked.mkdir(parents=True)
+    monkeypatch.setattr("backend.services.browser_session.shutil.rmtree", lambda *args, **kwargs: None)
+    assert cleanup_stale_profile_locks(profile) == []
+    assert locked.exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("service_type", [BrowserService, DouyinBrowserService])
+async def test_close_tolerates_dead_browser_target(service_type, tmp_path):
+    # The user may close the solve window (or Chrome may die) right when the
+    # search resumes: _close must swallow dead-target errors and still reset
+    # state, otherwise a raw TargetClosedError kills the whole job.
+    svc = service_type(profile=tmp_path, headless=True)
+    context = Mock()
+    context.storage_state = AsyncMock(return_value={"cookies": [], "origins": []})
+    context.close = AsyncMock(side_effect=Exception("Target page, context or browser has been closed"))
+    driver = Mock()
+    driver.stop = AsyncMock(side_effect=Exception("Connection closed"))
+    svc.context = context
+    svc.driver = driver
+    svc.state = "page_available"
+    await svc._close()
+    assert svc.context is None
+    assert svc.driver is None
+    assert svc.state == "closed"

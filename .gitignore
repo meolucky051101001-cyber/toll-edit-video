@@ -26,3 +26,5 @@ scratch/
 data_schema.sql
 database_metrics.json
 .pytest-tmp*
+video-research-tests-*
+.mypy_cache_review/

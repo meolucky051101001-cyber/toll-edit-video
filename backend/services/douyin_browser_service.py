@@ -12,6 +12,7 @@ from backend.core.config import ROOT, settings
 from backend.providers.base import ProviderUnavailableError
 from backend.providers.douyin.parser import classify_page
 from backend.services.browser_session import (
+    cleanup_stale_profile_locks,
     load_headful_preference,
     platform_navigation_url,
     restore_missing_cookies,
@@ -77,6 +78,7 @@ class DouyinBrowserService:
         self.base_url = DOUYIN_HOME
         self.diagnostics: dict = {}
         self.allow_media = False
+        self.dismiss_guest_modal = True
         self.last_http_status: int | None = None
 
     def set_allow_media(self, allow: bool) -> None:
@@ -124,20 +126,20 @@ class DouyinBrowserService:
             self.hybrid_headless = getattr(self, "default_hybrid_headless", True)
 
     async def ensure_headless_session(self) -> None:
-        if getattr(self, "sticky_headful", False):
-            return
-        if getattr(self, "force_headful_session", False):
-            self.reset_headful_session(force=True)
-            if getattr(self, "is_currently_headless", True) is False and self.context:
-                await self._close()
-        else:
-            self.reset_headful_session(force=True)
+        # Searches always run headless: drop any elevation leftover, including a
+        # manually opened window. The open context is checkpointed by _close, so
+        # the solved session survives and the search relaunches headless. The
+        # persisted prefer_headful file is left alone for manual windows.
+        self.reset_headful_session(force=True)
+        if getattr(self, "is_currently_headless", True) is False and self.context:
+            await self._close()
 
-    async def elevate_to_headful(self) -> Page:
+    async def elevate_to_headful(self, persist: bool = True) -> Page:
         self.force_headful_session = True
-        self.sticky_headful = True
         self.hybrid_headless = False
-        save_headful_preference(self.profile)
+        if persist:
+            self.sticky_headful = True
+            save_headful_preference(self.profile)
         if not getattr(self, "is_currently_headless", False):
             try:
                 return self.get_active_page()
@@ -200,12 +202,15 @@ class DouyinBrowserService:
             return self.page
         await self._close()
         self.profile.mkdir(parents=True, exist_ok=True)
+        removed_locks = cleanup_stale_profile_locks(self.profile)
+        if removed_locks:
+            logger.info("Removed stale Douyin profile locks: %s", ", ".join(sorted(removed_locks)))
         try:
             self.driver = await async_playwright().start()
-            if self.sticky_headful:
-                effective_headless = False
-            elif headless_override is not None:
+            if headless_override is not None:
                 effective_headless = headless_override
+            elif self.sticky_headful:
+                effective_headless = False
             else:
                 effective_headless = self.should_run_headless()
             self.is_currently_headless = effective_headless
@@ -377,17 +382,20 @@ class DouyinBrowserService:
 
             # Check session cookies
             has_session_cookie = False
+            c_names: set[str] = set()
             if self.context:
                 try:
                     c_list = await self.context.cookies()
-                    c_names = {c.get("name") for c in c_list}
-                    has_session_cookie = "sessionid" in c_names or "passport_csrf_token" in c_names
+                    c_names = {c.get("name") for c in c_list if c.get("name")}
+                    has_session_cookie = bool(
+                        c_names & {"sessionid", "sessionid_ss", "sid_guard", "passport_csrf_token", "uid_tt", "uid_tt_ss"}
+                    )
                 except Exception:
                     pass
 
             # Check user login status
             user_avatar = page.locator(
-                "[data-e2e='user-avatar']:visible, .avatar-wrapper:visible, .user-avatar:visible, [data-e2e='user-info']:visible"
+                "[data-e2e='user-avatar']:visible, [data-e2e='header-avatar']:visible, .avatar-wrapper:visible, .user-avatar:visible, [data-e2e='user-info']:visible, img[src*='aweme-avatar']:visible"
             )
             has_user_element = (await user_avatar.count()) > 0
             is_authenticated = bool(has_session_cookie and has_user_element)
@@ -414,8 +422,8 @@ class DouyinBrowserService:
             )
             login_modal_visible = (await login_modal.count()) > 0
 
-            # Automatically dismiss guest login popup if present
-            if login_modal_visible and not captcha_visible:
+            # Automatically dismiss guest login popup if present, unless explicitly disabled (e.g. login flow)
+            if getattr(self, "dismiss_guest_modal", True) and login_modal_visible and not captcha_visible:
                 try:
                     close_btn = page.locator(
                         ".login-panel-close:visible, .dy-account-close:visible, [data-e2e='close-icon']:visible, #login-panel [class*='close']:visible, .login-mask [class*='close']:visible, [aria-label='关闭']:visible, [aria-label='Close']:visible, .semi-modal-close:visible, [data-e2e='modal-close-button']:visible"
@@ -442,6 +450,7 @@ class DouyinBrowserService:
                 and not login_modal_visible
                 and not has_login_button
                 and not is_login_route
+                and "验证" not in title
             )
 
             if self.state in {"verification_required", "restricted"}:
@@ -563,7 +572,10 @@ class DouyinBrowserService:
                     await save_session_checkpoint(self.context, self.profile)
                 except Exception:
                     pass
-                await self.context.close()
+                try:
+                    await self.context.close()
+                except Exception:
+                    pass
         finally:
             self.context = None
             self.page = None
@@ -571,7 +583,10 @@ class DouyinBrowserService:
             self.blocked_page = None
             self.diagnostics = {}
             if self.driver:
-                await self.driver.stop()
+                try:
+                    await self.driver.stop()
+                except Exception:
+                    pass
                 self.driver = None
             self.state = "closed"
             self.is_currently_headless = False

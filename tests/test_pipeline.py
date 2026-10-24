@@ -190,8 +190,8 @@ def test_restart_recovery(sessions):
     job_id = make_job(sessions)
     SearchService(sessions).recover_interrupted()
     with sessions() as db:
-        assert db.get(SearchJob, job_id).status == "failed"
-        assert "chạy lại" in db.get(SearchJob, job_id).error_message
+        assert db.get(SearchJob, job_id).status == "interrupted"
+        assert "chạy tiếp" in db.get(SearchJob, job_id).error_message
 
 
 def test_translator_detects_cjk_and_translates_vietnamese():

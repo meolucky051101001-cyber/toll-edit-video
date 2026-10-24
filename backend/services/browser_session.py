@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -37,6 +38,43 @@ def save_headful_preference(profile: Path) -> None:
     finally:
         if temporary and os.path.exists(temporary):
             os.unlink(temporary)
+
+
+STALE_LOCK_NAMES = frozenset({
+    "SingletonLock",
+    "SingletonSocket",
+    "SingletonCookie",
+    "DevToolsActivePort",
+})
+
+
+def cleanup_stale_profile_locks(profile: Path) -> list[str]:
+    """Remove Chromium single-instance locks and pending-delete leftovers.
+
+    Call before launch_persistent_context: a previous crash leaves Singleton*
+    locks and *.CHROME_DELETE directories behind, and the next launch then
+    dies with Access denied while Chrome tries to rename them. Only lock
+    artifacts at the profile root are removed; Default/, Local State,
+    cookies and auth_state.json are never touched. Returns removed names.
+    """
+    removed: list[str] = []
+    try:
+        entries = list(profile.iterdir())
+    except OSError:
+        return removed
+    for entry in entries:
+        if entry.name not in STALE_LOCK_NAMES and not entry.name.endswith(".CHROME_DELETE"):
+            continue
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink(missing_ok=True)
+        except OSError:
+            continue
+        if not os.path.lexists(entry):
+            removed.append(entry.name)
+    return removed
 
 
 def cookie_key(cookie: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -89,6 +127,11 @@ async def visible_challenge_evidence(page: Page) -> str | None:
         "#captcha-verify-image", ".captcha-verify-container", ".captcha-verify-panel",
         ".captcha_verify_container", "[data-e2e='captcha']", "[data-testid*='captcha']",
         ".secsdk-captcha-drag-icon",
+        ".nc_scale", ".nc-container", ".btn_slide", ".verify-bar-area",
+        ".verify-move-block", ".geetest_holder", ".geetest_slider",
+        ".captcha-modal", "[class*='captcha-modal']", "[class*='captcha-container']",
+        "[class*='verify-container']", "[class*='security-verification']",
+        "[class*='verify-panel']", ".reds-captcha",
     )
     for selector in selectors:
         try:
@@ -96,7 +139,7 @@ async def visible_challenge_evidence(page: Page) -> str | None:
                 if not await candidate.is_visible():
                     continue
                 box = await candidate.bounding_box()
-                if not box or box["width"] < 80 or box["height"] < 40:
+                if not box or box["width"] < 40 or box["height"] < 25:
                     continue
                 opacity = await candidate.evaluate(
                     "element => Number.parseFloat(getComputedStyle(element).opacity || '1')"
@@ -113,7 +156,7 @@ async def visible_challenge_evidence(page: Page) -> str | None:
             if not await element.is_visible():
                 continue
             box = await element.bounding_box()
-            if not box or box["width"] < 120 or box["height"] < 80:
+            if not box or box["width"] < 100 or box["height"] < 60:
                 continue
             opacity = await element.evaluate(
                 "element => Number.parseFloat(getComputedStyle(element).opacity || '1')"

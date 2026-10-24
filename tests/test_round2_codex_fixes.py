@@ -345,7 +345,7 @@ def test_f6_streaming_checkpoint_and_interrupted_recovery():
             status="searching",
             is_mock=True,
         )
-        j_failed = SearchJob(
+        j_zero = SearchJob(
             original_query="đồ cute",
             platforms=["douyin"],
             requested_limit=10,
@@ -353,9 +353,9 @@ def test_f6_streaming_checkpoint_and_interrupted_recovery():
             status="searching",
             is_mock=True,
         )
-        db.add_all([j_interrupted, j_completed, j_failed])
+        db.add_all([j_interrupted, j_completed, j_zero])
         db.commit()
-        id_int, id_comp, id_fail = j_interrupted.id, j_completed.id, j_failed.id
+        id_int, id_comp, id_zero = j_interrupted.id, j_completed.id, j_zero.id
 
     service.recover_interrupted()
 
@@ -369,9 +369,9 @@ def test_f6_streaming_checkpoint_and_interrupted_recovery():
         assert job_comp is not None
         assert job_comp.status == "completed"
 
-        job_fail = db.get(SearchJob, id_fail)
-        assert job_fail is not None
-        assert job_fail.status == "failed"
+        job_zero = db.get(SearchJob, id_zero)
+        assert job_zero is not None
+        assert job_zero.status == "interrupted"
 
     # 2. Test streaming on_batch persisting
     with sessions() as db:

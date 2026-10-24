@@ -1,8 +1,10 @@
 "use client";
 import Link from "next/link";
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { History, ArrowUpRight, RotateCcw } from "lucide-react";
 import { useResource } from "@/lib/use-resource";
+import { api } from "@/lib/api";
 import { statusName, platformName } from "@/lib/api";
 import type { Job, Page } from "@/types";
 import { ErrorBanner } from "@/components/error-banner";
@@ -10,6 +12,24 @@ import { Button } from "@/components/ui/button";
 export default function HistoryPage() {
   const [page, setPage] = useState(1);
   const jobs = useResource<Page<Job>>(`/search/jobs?page=${page}`, 3000);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [resumeError, setResumeError] = useState("");
+  const router = useRouter();
+  async function resumeInterrupted(job: Job) {
+    setBusyId(job.id);
+    setResumeError("");
+    try {
+      await api(`/search/jobs/${job.id}/resume`, { method: "POST" });
+      const mode = job.is_mock
+        ? "mock"
+        : (job.platforms && job.platforms[0]) || "xiaohongshu";
+      router.push(`/?job=${job.id}&mode=${mode}`);
+    } catch (e) {
+      setResumeError((e as Error).message);
+    } finally {
+      setBusyId(null);
+    }
+  }
   return (
     <>
       <div className="page-heading">
@@ -19,6 +39,7 @@ export default function HistoryPage() {
         </div>
       </div>
       <ErrorBanner message={jobs.error} />
+      <ErrorBanner message={resumeError} />
       <div className="table-panel">
         <table>
           <thead>
@@ -76,6 +97,16 @@ export default function HistoryPage() {
                             >
                               <RotateCcw size={16} />
                             </Link>
+                          )}
+                          {!job.import_source && job.status === "interrupted" && (
+                            <Button
+                              variant="outline"
+                              disabled={busyId === job.id}
+                              onClick={() => resumeInterrupted(job)}
+                              aria-label={`Chạy tiếp ${job.original_query}`}
+                            >
+                              {busyId === job.id ? "Đang chạy tiếp…" : "Chạy tiếp"}
+                            </Button>
                           )}
                         </>
                       );

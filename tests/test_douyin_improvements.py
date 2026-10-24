@@ -47,7 +47,7 @@ async def test_resolve_douyin_auto_opens_browser_when_closed():
 
     resolved = await resolver.resolve_douyin(video)
 
-    assert mock_browser.ensure_open.called
+    mock_browser.ensure_open.assert_called_once_with(headless_override=True)
     assert resolved.platform == "douyin"
     assert resolved.video_id == "7412345678901234567"
     # Watermark stripped

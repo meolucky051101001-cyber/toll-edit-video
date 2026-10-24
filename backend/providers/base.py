@@ -87,12 +87,16 @@ def apply_search_filters_and_sorting(
         max_age_seconds = 182 * 86400.0  # 182 days
 
     candidates: list[VideoResult] = []
-    seen_ids: set[str] = set()
+    seen_ids: set[tuple[str, str]] = set()
 
     for vr in items:
         if not vr or not vr.platform_video_id:
             continue
-        if vr.platform_video_id in seen_ids:
+        # Key by (platform, id): bare IDs collide across platforms (and the DB
+        # dedupes by the same pair), so id-only matching would drop distinct
+        # videos as duplicates.
+        identity = (vr.platform, vr.platform_video_id)
+        if identity in seen_ids:
             continue
 
         if min_likes > 0 and (vr.like_count is None or vr.like_count < min_likes):
@@ -108,7 +112,7 @@ def apply_search_filters_and_sorting(
             if age > max_age_seconds:
                 continue
 
-        seen_ids.add(vr.platform_video_id)
+        seen_ids.add(identity)
         candidates.append(vr)
 
     # Apply sorting if requested

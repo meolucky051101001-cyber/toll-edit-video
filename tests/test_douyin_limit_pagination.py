@@ -88,6 +88,32 @@ def test_apply_search_filters_and_sorting_limits(limit: int):
         assert (filtered[i].like_count or 0) >= (filtered[i + 1].like_count or 0)
 
 
+def test_apply_search_filters_and_sorting_keeps_cross_platform_id_collision():
+    """Same numeric ID on two platforms must not dedupe each other; a true
+    same-platform duplicate must still drop."""
+
+    def make(platform: str, url: str) -> VideoResult:
+        return VideoResult(
+            platform=platform,  # type: ignore[arg-type]
+            platform_video_id="1234567890123456789",
+            url=url,  # type: ignore[arg-type]
+            title=f"{platform} title",
+            media_type="video",
+        )
+
+    items = [
+        make("douyin", "https://www.douyin.com/video/1234567890123456789"),
+        make("xiaohongshu", "https://www.xiaohongshu.com/explore/1234567890123456789"),
+        make("douyin", "https://www.douyin.com/video/1234567890123456789"),
+    ]
+    filters = SearchFilters(sort_by="relevance", publish_time="all", content_type="all")
+    filtered = apply_search_filters_and_sorting(items, filters=filters, limit=10)
+    assert [(v.platform, v.platform_video_id) for v in filtered] == [
+        ("douyin", "1234567890123456789"),
+        ("xiaohongshu", "1234567890123456789"),
+    ]
+
+
 @pytest.mark.parametrize("limit", [20, 50, 200])
 @pytest.mark.anyio
 async def test_douyin_provider_search_does_not_truncate_at_5(limit: int):

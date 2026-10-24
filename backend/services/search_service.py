@@ -40,6 +40,37 @@ TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
 logger = logging.getLogger("research")
 
 
+class PlatformBusyError(TimeoutError):
+    """Raised when a platform lock stays held past the search timeout."""
+
+
+class _PlatformSlot:
+    """Async context manager that acquires a platform lock with a timeout.
+
+    A job waiting for user interaction (login/CAPTCHA) keeps holding its
+    platform lock, so a second job for the same platform must fail fast with
+    a clear message instead of blocking forever behind the wait.
+    """
+
+    def __init__(self, lock: asyncio.Lock, timeout: float, platform_label: str):
+        self._lock = lock
+        self._timeout = timeout
+        self._platform_label = platform_label
+
+    async def __aenter__(self) -> asyncio.Lock:
+        try:
+            await asyncio.wait_for(self._lock.acquire(), timeout=self._timeout)
+        except TimeoutError:
+            raise PlatformBusyError(
+                f"Nền tảng {self._platform_label} đang bận vì có lượt tìm khác đang dùng. "
+                "Vui lòng đợi lượt đó xong rồi thử lại."
+            ) from None
+        return self._lock
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        self._lock.release()
+
+
 class SearchService:
     def __init__(
         self,
@@ -76,6 +107,14 @@ class SearchService:
         if platform not in self.platform_locks:
             self.platform_locks[platform] = asyncio.Lock()
         return self.platform_locks[platform]
+
+    def platform_slot(self, lock_key: str, platform: str) -> _PlatformSlot:
+        label = (
+            "Douyin"
+            if platform == "douyin"
+            else ("Xiaohongshu" if platform == "xiaohongshu" else platform)
+        )
+        return _PlatformSlot(self.get_platform_lock(lock_key), settings.search_timeout, label)
 
     def submit(self, job_id: str) -> None:
         task = asyncio.create_task(self.run(job_id))
@@ -159,8 +198,8 @@ class SearchService:
                         f"Lượt tìm bị gián đoạn khi ứng dụng khởi động lại. Đã lưu an toàn {job.processed_count}/{job.requested_limit} video."
                     )
                 else:
-                    job.status = "failed"
-                    job.error_message = "Ứng dụng đã dừng khi đang tìm. Bạn có thể chạy lại từ Lịch sử."
+                    job.status = "interrupted"
+                    job.error_message = "Ứng dụng đã dừng khi đang tìm. Bạn có thể chạy tiếp từ Lịch sử."
                 job.completed_at = utcnow()
             db.commit()
 
@@ -182,12 +221,12 @@ class SearchService:
                 completed_at=utcnow(),
                 error_message=str(error),
             )
-        except TimeoutError:
+        except TimeoutError as error:
             self.update(
                 job_id,
                 status="failed",
                 completed_at=utcnow(),
-                error_message="Tìm kiếm quá thời gian cho phép. Hãy giảm số kết quả và thử lại.",
+                error_message=str(error) or "Tìm kiếm quá thời gian cho phép. Hãy giảm số kết quả và thử lại.",
             )
         except Exception as error:
             message = (
@@ -237,7 +276,7 @@ class SearchService:
                 continue
             self.update(job_id, active_platform=platform)
             lock_key = "mock" if use_mock else platform
-            async with self.get_platform_lock(lock_key):
+            async with self.platform_slot(lock_key, platform):
                 async with asyncio.timeout(settings.search_timeout) as deadline:
                     self.deadlines[job_id] = deadline
                     provider = deferred_providers.pop(platform, None) or self.factory(cast(Platform, platform), use_mock)

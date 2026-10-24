@@ -39,9 +39,45 @@ def test_real_search_accepts_both_platforms_and_rejects_mismatched_modes(client,
         {"mode": "douyin", "platforms": ["douyin", "xiaohongshu"]},
         {"mode": "both", "platforms": ["douyin", "douyin"]},
         {"mode": "both", "platforms": ["douyin", "tiktok"]},
+        {"mode": "tiktok", "platforms": ["tiktok"]},
+        {"mode": "youtube_shorts", "platforms": ["youtube_shorts"]},
     ]
     for values in invalid:
         assert client.post("/api/search", json={"query": "sticker", "limit": 5, **values}).status_code == 422
+
+
+def test_resume_interrupted_resubmits_and_rejects_terminal(client, sessions, monkeypatch):
+    from backend.models import SearchJob
+
+    submitted = []
+    monkeypatch.setattr(app.state.search, "submit", submitted.append)
+    with sessions() as db:
+        job = SearchJob(
+            original_query="sticker",
+            platforms=["douyin"],
+            requested_limit=5,
+            status="interrupted",
+            is_mock=True,
+        )
+        db.add(job)
+        db.commit()
+        job_id = job.id
+    response = client.post(f"/api/search/jobs/{job_id}/resume")
+    assert response.status_code == 200
+    assert submitted == [job_id]
+
+    with sessions() as db:
+        done = SearchJob(
+            original_query="done",
+            platforms=["douyin"],
+            requested_limit=5,
+            status="completed",
+            is_mock=True,
+        )
+        db.add(done)
+        db.commit()
+        done_id = done.id
+    assert client.post(f"/api/search/jobs/{done_id}/resume").status_code == 409
 
 
 def test_filters_pagination_and_save(client, sessions):

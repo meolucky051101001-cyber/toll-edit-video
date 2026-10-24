@@ -541,6 +541,153 @@ async def test_partial_results_survive_waiting_resume():
         assert len(links) == 2
 
 
+# 18. Automatic elevation is temporary: it must not persist the headful
+# preference, otherwise every later search opens a visible window.
+@pytest.mark.anyio
+@pytest.mark.parametrize("service_type", [BrowserService, DouyinBrowserService])
+async def test_automatic_elevation_does_not_persist_headful_preference(service_type, tmp_path: Path):
+    profile = tmp_path / "profile"
+    svc = service_type(profile=profile, headless=True, hybrid_headless=True)
+    svc.is_currently_headless = True
+    mock_page = MagicMock()
+    mock_page.url = "https://example.test/explore"
+    mock_page.is_closed.return_value = False
+    svc.page = mock_page
+    with (
+        patch.object(svc, "_close", new_callable=AsyncMock),
+        patch.object(svc, "ensure_open", new_callable=AsyncMock) as mock_ensure,
+        patch.object(svc, "inspect", new_callable=AsyncMock),
+    ):
+        mock_ensure.return_value = MagicMock()
+        await svc.elevate_to_headful(persist=False)
+        assert svc.force_headful_session is True
+        assert svc.sticky_headful is False
+        assert not (profile / "browser_preferences.json").exists()
+
+        await svc.elevate_to_headful()
+        assert svc.sticky_headful is True
+        assert (profile / "browser_preferences.json").exists()
+
+
+# 19. Search preparation always returns to headless, even after an elevation
+# or a manually opened window left the service in headful mode.
+@pytest.mark.anyio
+@pytest.mark.parametrize("service_type", [BrowserService, DouyinBrowserService])
+async def test_search_preparation_returns_elevated_session_to_headless(service_type, tmp_path: Path):
+    svc = service_type(profile=tmp_path / "profile", headless=True)
+    svc.force_headful_session = True
+    svc.sticky_headful = True
+    svc.hybrid_headless = False
+    svc.is_currently_headless = False
+    context = MagicMock()
+    context.storage_state = AsyncMock(return_value={"cookies": [], "origins": []})
+    context.close = AsyncMock()
+    svc.context = context
+    svc.driver = None
+    await svc.ensure_headless_session()
+    assert svc.force_headful_session is False
+    assert svc.sticky_headful is False
+    assert svc.hybrid_headless is True
+    assert svc.should_run_headless() is True
+    context.close.assert_awaited_once()
+
+
+# 20. Provider gates elevate without persisting, so one challenge never flips
+# all later searches to visible mode.
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "provider_type,browser_spec",
+    [(XiaohongshuProvider, BrowserService), (DouyinProvider, DouyinBrowserService)],
+)
+async def test_provider_gate_elevation_is_temporary(provider_type, browser_spec):
+    browser = MagicMock(spec=browser_spec)
+    browser.is_currently_headless = True
+    browser.inspect = AsyncMock(return_value="verification_required")
+    browser.elevate_to_headful = AsyncMock()
+    provider = provider_type(browser=browser, auto_elevate=True)
+    with pytest.raises(UserActionRequired):
+        await provider.gate(MagicMock(), [])
+    browser.elevate_to_headful.assert_called_once_with(persist=False)
+
+
+# 21. XHS downloads self-heal like Douyin: a closed browser is reopened
+# instead of failing with browser_closed (e.g. downloads after app restart
+# or for imported videos, when no search has opened the browser yet).
+@pytest.mark.anyio
+async def test_xhs_resolver_reopens_closed_browser():
+    xhs_browser = MagicMock()
+    xhs_browser.lock = asyncio.Lock()
+    xhs_browser.get_active_page.side_effect = Exception("closed")
+    mock_page = MagicMock()
+    mock_page.evaluate = AsyncMock(return_value={"mediaUrl": "https://sns-video-bd.xhscdn.com/video123"})
+    xhs_browser.ensure_open = AsyncMock(return_value=mock_page)
+
+    resolver = BrowserMediaResolver(xhs_browser_service=xhs_browser)
+    video = Video(
+        id="vid_1",
+        platform="xiaohongshu",
+        platform_video_id="6" * 24,
+        canonical_url="https://www.xiaohongshu.com/explore/" + "6" * 24,
+        search_query="test",
+        search_job_id="job_1",
+    )
+    resolved = await resolver.resolve(video)
+    assert resolved.media_url == "https://sns-video-bd.xhscdn.com/video123"
+    xhs_browser.ensure_open.assert_awaited_once_with(headless_override=True)
+
+
+# 22. An explicit headless_override beats a stale persisted headful
+# preference: background paths (search, downloads) stay headless even when
+# prefer_headful was left behind by an earlier manual window.
+@pytest.mark.anyio
+@pytest.mark.parametrize("service_type", [BrowserService, DouyinBrowserService])
+@pytest.mark.parametrize("override,expected", [(True, True), (None, False)])
+async def test_explicit_headless_override_beats_sticky_preference(
+    service_type, override, expected, tmp_path: Path
+):
+    svc = service_type(profile=tmp_path / "profile", headless=True)
+    svc.sticky_headful = True
+    mock_page = MagicMock()
+    mock_page.is_closed.return_value = False
+    mock_page.set_default_timeout = MagicMock()
+    mock_page.goto = AsyncMock(return_value=MagicMock(status=200))
+    mock_page.wait_for_timeout = AsyncMock()
+    ctx = MagicMock()
+    ctx.pages = []
+    ctx.new_page = AsyncMock(return_value=mock_page)
+    ctx.route = AsyncMock()
+    ctx.cookies = AsyncMock(return_value=[])
+    ctx.clear_cookies = AsyncMock()
+    ctx.add_cookies = AsyncMock()
+    driver = MagicMock()
+    launch = AsyncMock(return_value=ctx)
+    driver.chromium.launch_persistent_context = launch
+    playwright = MagicMock()
+    playwright.start = AsyncMock(return_value=driver)
+    module = (
+        "backend.services.browser_service"
+        if service_type is BrowserService
+        else "backend.services.douyin_browser_service"
+    )
+    with (
+        patch(f"{module}.async_playwright", return_value=playwright),
+        patch.object(svc, "inspect", new_callable=AsyncMock),
+        patch.object(
+            svc, "detect_base_url", new_callable=AsyncMock, return_value="https://example.test/", create=True
+        ),
+        patch.object(
+            svc,
+            "session_navigation_url",
+            return_value="https://example.test/",
+            create=True,
+        ),
+        patch.object(svc, "navigate_preserving_session", new_callable=AsyncMock, create=True),
+    ):
+        await svc.ensure_open(headless_override=override)
+    launch.assert_awaited_once()
+    assert launch.call_args.kwargs["headless"] is expected
+
+
 def test_snapshots_include_login_url(tmp_path: Path):
     xhs = BrowserService(profile=tmp_path)
     xhs_snap = xhs.snapshot()

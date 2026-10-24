@@ -11,6 +11,7 @@ from backend.core.config import ROOT, settings
 from backend.providers.base import ProviderUnavailableError
 from backend.providers.xiaohongshu.parser import classify_page
 from backend.services.browser_session import (
+    cleanup_stale_profile_locks,
     load_headful_preference,
     platform_navigation_url,
     restore_missing_cookies,
@@ -93,20 +94,20 @@ class BrowserService:
             self.hybrid_headless = getattr(self, "default_hybrid_headless", True)
 
     async def ensure_headless_session(self) -> None:
-        if getattr(self, "sticky_headful", False):
-            return
-        if getattr(self, "force_headful_session", False):
-            self.reset_headful_session(force=True)
-            if getattr(self, "is_currently_headless", True) is False and self.context:
-                await self._close()
-        else:
-            self.reset_headful_session(force=True)
+        # Searches always run headless: drop any elevation leftover, including a
+        # manually opened window. The open context is checkpointed by _close, so
+        # the solved session survives and the search relaunches headless. The
+        # persisted prefer_headful file is left alone for manual windows.
+        self.reset_headful_session(force=True)
+        if getattr(self, "is_currently_headless", True) is False and self.context:
+            await self._close()
 
-    async def elevate_to_headful(self) -> Page:
+    async def elevate_to_headful(self, persist: bool = True) -> Page:
         self.force_headful_session = True
-        self.sticky_headful = True
         self.hybrid_headless = False
-        save_headful_preference(self.profile)
+        if persist:
+            self.sticky_headful = True
+            save_headful_preference(self.profile)
         if not getattr(self, "is_currently_headless", False):
             try:
                 return self.get_active_page()
@@ -252,12 +253,15 @@ class BrowserService:
             return self.page
         await self._close()
         self.profile.mkdir(parents=True, exist_ok=True)
+        removed_locks = cleanup_stale_profile_locks(self.profile)
+        if removed_locks:
+            logger.info("Removed stale Xiaohongshu profile locks: %s", ", ".join(sorted(removed_locks)))
         try:
             self.driver = await async_playwright().start()
-            if self.sticky_headful:
-                effective_headless = False
-            elif headless_override is not None:
+            if headless_override is not None:
                 effective_headless = headless_override
+            elif self.sticky_headful:
+                effective_headless = False
             else:
                 effective_headless = self.should_run_headless()
             self.is_currently_headless = effective_headless
@@ -633,14 +637,20 @@ class BrowserService:
                     await save_session_checkpoint(self.context, self.profile)
                 except Exception:
                     pass
-                await self.context.close()
+                try:
+                    await self.context.close()
+                except Exception:
+                    pass
         finally:
             self.context = None
             self.page = None
             self.search_page = None
             self.blocked_page = None
             if self.driver:
-                await self.driver.stop()
+                try:
+                    await self.driver.stop()
+                except Exception:
+                    pass
                 self.driver = None
             self.state = "closed"
             self.is_currently_headless = False

@@ -8,6 +8,7 @@ import {
   RotateCcw,
   X,
   Smartphone,
+  Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/error-banner";
@@ -63,6 +64,98 @@ export function BrowserControls({
   const [showQrModal, setShowQrModal] = useState(false);
   const [qrTimestamp, setQrTimestamp] = useState(0);
   const [qrUnavailable, setQrUnavailable] = useState(false);
+  const [solvingCaptcha, setSolvingCaptcha] = useState(false);
+  const [solveResult, setSolveResult] = useState<string | null>(null);
+  const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
+  const [currentDrag, setCurrentDrag] = useState<{ x: number; y: number } | null>(null);
+
+  async function handleAutoSolve() {
+    setSolvingCaptcha(true);
+    setError("");
+    setSolveResult(null);
+    try {
+      const res = await api<{
+        ok: boolean;
+        state: string;
+        drag_distance?: number;
+      }>(`${endpoint}/auto_solve_slider`, {
+        method: "POST",
+        signal: AbortSignal.timeout(45000),
+      });
+      setQrTimestamp(Date.now());
+      status.refresh();
+      refresh?.();
+      if (res.ok) {
+        setSolveResult("✅ Giải CAPTCHA thành công! Trình duyệt đã sẵn sàng.");
+      } else {
+        setSolveResult(
+          `Đã thực hiện kéo trượt (${Math.round(res.drag_distance || 0)}px). Nếu chưa vượt qua, bạn có thể bấm giải lại hoặc kéo trượt trực tiếp trên hình bên dưới.`
+        );
+      }
+    } catch (e) {
+      setError(`Không thể tự động giải CAPTCHA: ${(e as Error).message}`);
+    } finally {
+      setSolvingCaptcha(false);
+    }
+  }
+
+  const handleImageMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 1280;
+    const y = ((e.clientY - rect.top) / rect.height) * 900;
+    setDragStart({ x, y });
+    setCurrentDrag({ x, y });
+  };
+
+  const handleImageMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!dragStart) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 1280;
+    const y = ((e.clientY - rect.top) / rect.height) * 900;
+    setCurrentDrag({ x, y });
+  };
+
+  const handleImageMouseUp = async (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!dragStart) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const endX = ((e.clientX - rect.left) / rect.width) * 1280;
+    const endY = ((e.clientY - rect.top) / rect.height) * 900;
+    const dist = Math.hypot(endX - dragStart.x, endY - dragStart.y);
+
+    const start = dragStart;
+    setDragStart(null);
+    setCurrentDrag(null);
+
+    setBusy(true);
+    setError("");
+    try {
+      if (dist < 8) {
+        await api(`${endpoint}/click`, {
+          method: "POST",
+          body: JSON.stringify({ x: Math.round(start.x), y: Math.round(start.y) }),
+          headers: { "Content-Type": "application/json" },
+        });
+      } else {
+        await api(`${endpoint}/drag`, {
+          method: "POST",
+          body: JSON.stringify({
+            from_x: Math.round(start.x),
+            from_y: Math.round(start.y),
+            to_x: Math.round(endX),
+            to_y: Math.round(endY),
+          }),
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      setQrTimestamp(Date.now());
+      status.refresh();
+      refresh?.();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   async function action(actionPath: string) {
     setBusy(true);
@@ -307,11 +400,28 @@ export function BrowserControls({
             </Button>}
 
             {status.data?.state === "verification_required" && <>
-              <Button type="button" variant="outline" disabled={busy}
+              <Button
+                type="button"
+                disabled={busy || solvingCaptcha}
+                onClick={handleAutoSolve}
+                style={{
+                  background: "linear-gradient(135deg, #0d9488 0%, #0891b2 100%)",
+                  color: "#ffffff",
+                  fontWeight: 600,
+                  fontSize: "0.9rem",
+                  padding: "0.55rem 1.1rem",
+                  height: "auto",
+                  boxShadow: "0 2px 8px rgba(13, 148, 136, 0.35)",
+                }}
+              >
+                <Zap size={16} className="mr-1" />
+                {solvingCaptcha ? "Đang phân tích & giải…" : "⚡ Tự động giải CAPTCHA"}
+              </Button>
+              <Button type="button" variant="outline" disabled={busy || solvingCaptcha}
                 onClick={() => { setQrTimestamp(Date.now()); setShowVerificationPreview((shown) => !shown); }}>
                 {showVerificationPreview ? "Ẩn trang xác minh" : "Xem trang xác minh"}
               </Button>
-              <Button type="button" variant="outline" disabled={busy}
+              <Button type="button" variant="outline" disabled={busy || solvingCaptcha}
                 onClick={() => action(`${endpoint}/refresh_verification`)}>
                 <RotateCcw size={16} className="mr-1" /> Tải lại CAPTCHA không hiển thị
               </Button>
@@ -335,14 +445,85 @@ export function BrowserControls({
               </Button>
             )}
           </div>
+
+          {solveResult && (
+            <div style={{
+              margin: "0.5rem 0",
+              padding: "0.6rem 0.8rem",
+              background: solveResult.startsWith("✅") ? "#f0fdf4" : "#fefce8",
+              border: `1px solid ${solveResult.startsWith("✅") ? "#bbf7d0" : "#fef08a"}`,
+              borderRadius: "6px",
+              fontSize: "0.85rem",
+              color: solveResult.startsWith("✅") ? "#166534" : "#854d0e",
+            }}>
+              {solveResult}
+            </div>
+          )}
+
           {showVerificationPreview && status.data?.state === "verification_required" && (
             <div style={{ margin: "0.75rem 0" }}>
-              <p style={{ fontSize: "0.82rem", color: "#475569" }}>
-                Ảnh trang hiện tại để kiểm tra. Thao tác xác minh trong cửa sổ trình duyệt của tool.
-              </p>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={`/api${endpoint}/screenshot?t=${qrTimestamp}`} alt={`Trang xác minh ${platformLabel}`}
-                style={{ maxWidth: "100%", maxHeight: 420, objectFit: "contain", border: "1px solid #cbd5e1", borderRadius: 8 }} />
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.4rem" }}>
+                <p style={{ fontSize: "0.82rem", color: "#334155", margin: 0, fontWeight: 500 }}>
+                  🎯 <strong>Giải CAPTCHA trực tiếp:</strong> Nhấn <strong>&quot;⚡ Tự động giải CAPTCHA&quot;</strong> hoặc dùng chuột <strong>kéo trượt thanh slider / bấm chọn</strong> ngay trên hình dưới:
+                </p>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => setQrTimestamp(Date.now())}
+                  style={{ fontSize: "0.78rem", height: "1.8rem" }}
+                >
+                  <RotateCcw size={13} className="mr-1" /> Làm mới ảnh
+                </Button>
+              </div>
+
+              <div
+                style={{
+                  position: "relative",
+                  display: "inline-block",
+                  cursor: "crosshair",
+                  border: "2px solid #0f766e",
+                  borderRadius: "8px",
+                  overflow: "hidden",
+                  userSelect: "none",
+                  backgroundColor: "#1e293b",
+                }}
+                onMouseDown={handleImageMouseDown}
+                onMouseMove={handleImageMouseMove}
+                onMouseUp={handleImageMouseUp}
+                onMouseLeave={() => { setDragStart(null); setCurrentDrag(null); }}
+              >
+                {
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={`/api${endpoint}/screenshot?t=${qrTimestamp}`}
+                    alt={`Trang xác minh ${platformLabel}`}
+                    style={{
+                      display: "block",
+                      maxWidth: "100%",
+                      maxHeight: 460,
+                      objectFit: "contain",
+                      pointerEvents: "none",
+                    }}
+                    draggable={false}
+                  />
+                }
+                {dragStart && currentDrag && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      left: `${Math.min(dragStart.x, currentDrag.x) / 12.8}%`,
+                      top: `${Math.min(dragStart.y, currentDrag.y) / 9.0}%`,
+                      width: `${Math.max(1, Math.abs(currentDrag.x - dragStart.x) / 12.8)}%`,
+                      height: `${Math.max(2, Math.abs(currentDrag.y - dragStart.y) / 9.0)}%`,
+                      border: "2px dashed #38bdf8",
+                      backgroundColor: "rgba(56, 189, 248, 0.25)",
+                      pointerEvents: "none",
+                    }}
+                  />
+                )}
+              </div>
             </div>
           )}
           <p

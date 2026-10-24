@@ -31,7 +31,11 @@ def classify_page(body: str, title: str = "", url: str = "") -> str:
         return "restricted"
     if any(
         term in content
-        for term in ["完成验证", "拖动滑块", "安全验证", "请验证", "验证码验证", "security verification"]
+        for term in [
+            "完成验证", "拖动滑块", "安全验证", "请验证", "验证码验证", "security verification",
+            "请向右滑动", "向右滑动", "滑动滑块", "按住滑块", "拖动下方滑块", "请完成安全验证",
+            "slide to verify", "drag the slider", "drag the puzzle",
+        ]
     ):
         return "verification_required"
     if (

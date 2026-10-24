@@ -114,6 +114,44 @@ def test_douyin_provider_silent_search_passes_headless_override():
     asyncio.run(scenario())
 
 
+def test_provider_search_starts_headless_even_when_auto_elevate():
+    async def scenario():
+        for provider_type, base_url in (
+            (XiaohongshuProvider, "https://www.rednote.com"),
+            (DouyinProvider, "https://www.douyin.com"),
+        ):
+            class MockBrowser:
+                def __init__(self):
+                    self.lock = asyncio.Lock()
+                    self.base_url = base_url
+                    self.ensure_headless_session = AsyncMock()
+
+                async def ensure_open(self, headless_override=None, initial_url=None):
+                    mock_page = AsyncMock(spec=Page)
+                    mock_page.url = base_url
+                    mock_page.is_closed.return_value = False
+                    return mock_page
+
+                async def inspect(self, page):
+                    return "page_available"
+
+                async def release_blocked_page(self):
+                    pass
+
+            mock_browser = MockBrowser()
+            provider = provider_type(mock_browser, auto_elevate=True)
+            with patch.object(provider, "gate", AsyncMock()):
+                with patch("backend.providers.xiaohongshu.provider.require_search_results", create=True):
+                    with patch.object(Page, "wait_for_selector", AsyncMock()):
+                        try:
+                            await provider.search("test", 1, SearchFilters())
+                        except Exception:
+                            pass
+            mock_browser.ensure_headless_session.assert_awaited_once()
+
+    asyncio.run(scenario())
+
+
 def test_douyin_provider_filters_live_stream_cards():
     async def scenario():
         class StubSession:

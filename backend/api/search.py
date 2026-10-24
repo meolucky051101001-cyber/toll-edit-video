@@ -147,6 +147,12 @@ async def expand_query(payload: ExpandRequest, request: Request):
 @router.post("/jobs/{job_id}/resume", response_model=JobOut)
 async def resume_job(job_id: str, request: Request, db: Session = Depends(get_db)):
     job = get_job(job_id, db)
+    if job.status == "interrupted":
+        if job_id in request.app.state.search.tasks:
+            raise HTTPException(409, "Lượt tìm đang chạy rồi. Vui lòng chờ kết quả.")
+        request.app.state.search.submit(job_id)
+        db.expire_all()
+        return get_job(job_id, db)
     if job.status not in {
         "waiting_for_login",
         "waiting_for_user",
