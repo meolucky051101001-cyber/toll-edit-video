@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import json
 import logging
 import re
 import time
@@ -105,14 +106,36 @@ class SearchService:
         self.lock = asyncio.Lock()
         self.platform_locks: dict[str, asyncio.Lock] = {}
         self.waiters: dict[str, asyncio.Event] = {}
-        self.deadlines: dict[str, asyncio.Timeout] = {}
+        # Keyed per (job_id, platform) so concurrent platform crawls each pause
+        # their own timeout; plain job_id remains a legacy fallback key.
+        self.deadlines: dict[str | tuple[str, str], asyncio.Timeout] = {}
         self.waiting_contexts: dict[str, tuple[SearchProvider, UserActionRequired, str]] = {}
         self.deferred_providers: dict[str, dict[str, SearchProvider]] = {}
+        # Serializes per-job result persistence: parallel platform crawlers
+        # persist concurrently and job counters are read-modify-write.
+        self._persist_locks: dict[str, asyncio.Lock] = {}
 
     def get_platform_lock(self, platform: str) -> asyncio.Lock:
-        if platform not in self.platform_locks:
-            self.platform_locks[platform] = asyncio.Lock()
-        return self.platform_locks[platform]
+        """Per-platform mutual exclusion.
+
+        asyncio.Lock binds itself to the running loop the first time it is
+        CONTENDED (the uncontended fast path never binds). A service reused
+        across event loops — the test suite runs one loop per asyncio.run, a
+        restarted uvicorn reuses the module service — would then hit
+        "bound to a different event loop". Rebuild the lock whenever the
+        running loop differs from the one it was last handed out on.
+        """
+        loop = asyncio.get_running_loop()
+        entry = self.platform_locks.get(platform)
+        if entry is not None:
+            bound = getattr(entry, "_handed_out_on_loop", None)
+            if bound is not None and bound is not loop:
+                entry = None
+        if entry is None:
+            entry = asyncio.Lock()
+            self.platform_locks[platform] = entry
+        entry._handed_out_on_loop = loop  # type: ignore[attr-defined]
+        return entry
 
     def platform_slot(self, lock_key: str, platform: str) -> _PlatformSlot:
         label = (
@@ -248,25 +271,304 @@ class SearchService:
                     await provider.close()
                 except Exception:
                     logger.warning("job=%s deferred_provider_cleanup_failed", job_id)
+            self._persist_locks.pop(job_id, None)
+
+    def _serve_from_cache(
+        self,
+        job_id: str,
+        original_query: str,
+        platforms: list[str],
+        is_mock: bool,
+        requested_limit: int,
+        plan: SearchPlan | None,
+    ) -> bool:
+        """Replays a recent identical completed job instead of re-crawling.
+
+        Matching keys: query, platform set, mock flag, filters dict, AI flag and
+        per-query list (when both plans pin explicit queries). The source job
+        must be completed, within TTL, and hold at least `requested_limit`
+        videos. Returns True when the new job was served from cache.
+        """
+        key_filters = (plan.filters if plan and plan.filters else {}) or {}
+        new_use_ai = bool(plan.use_ai) if plan else False
+        new_queries = list(plan.queries) if plan and plan.queries else []
+        cutoff = utcnow() - timedelta(seconds=settings.search_cache_ttl_seconds)
+
+        with self.sessions() as db:
+            candidates = db.scalars(
+                select(SearchJob)
+                .where(
+                    SearchJob.status == "completed",
+                    SearchJob.is_mock == is_mock,
+                    SearchJob.created_at >= cutoff,
+                    SearchJob.id != job_id,
+                    SearchJob.processed_count >= requested_limit,
+                )
+                .order_by(SearchJob.created_at.desc())
+                .limit(25)
+            )
+            source = None
+            for candidate in candidates:
+                if sorted(candidate.platforms or []) != sorted(platforms):
+                    continue
+                if (candidate.original_query or "").strip() != (original_query or "").strip():
+                    continue
+                candidate_plan = db.get(SearchPlan, candidate.id)
+                candidate_filters = (candidate_plan.filters if candidate_plan else {}) or {}
+                if json.dumps(candidate_filters, sort_keys=True, default=str) != json.dumps(
+                    key_filters, sort_keys=True, default=str
+                ):
+                    continue
+                if (bool(candidate_plan.use_ai) if candidate_plan else False) != new_use_ai:
+                    continue
+                candidate_queries = list(candidate_plan.queries) if candidate_plan and candidate_plan.queries else []
+                if new_queries and candidate_queries and sorted(candidate_queries) != sorted(new_queries):
+                    continue
+                source = candidate
+                source_plan = candidate_plan
+                break
+
+            if source is None:
+                return False
+
+            links = list(
+                db.scalars(
+                    select(JobVideo)
+                    .where(JobVideo.job_id == source.id)
+                    .order_by(JobVideo.final_score.desc().nulls_last(), JobVideo.video_id)
+                    .limit(requested_limit)
+                )
+            )
+            new_job = db.get(SearchJob, job_id)
+            assert new_job is not None
+            for link in links:
+                db.add(
+                    JobVideo(
+                        job_id=job_id,
+                        video_id=link.video_id,
+                        relevance_score=link.relevance_score,
+                        quality_score=link.quality_score,
+                        final_score=link.final_score,
+                        velocity_score=link.velocity_score,
+                        virality_score=link.virality_score,
+                    )
+                )
+            new_job.status = "completed"
+            new_job.processed_count = len(links)
+            new_job.found_count = source.found_count
+            new_job.rejected_count = source.rejected_count
+            new_job.duplicate_count = source.duplicate_count
+            new_job.provider_counts = dict(source.provider_counts or {})
+            new_job.started_at = utcnow()
+            new_job.completed_at = utcnow()
+            new_job.error_message = None
+            new_job.diagnostics = {
+                **(source.diagnostics or {}),
+                "cache_hit": {
+                    "source_job_id": source.id,
+                    "ttl_seconds": settings.search_cache_ttl_seconds,
+                },
+            }
+            if plan and source_plan is not None:
+                plan.queries = list(source_plan.queries or [])
+                plan.source = source_plan.source
+                plan.warning = source_plan.warning
+                plan.expansion = source_plan.expansion
+            db.commit()
+        logger.info(
+            "job=%s cache_hit source=%s videos=%d", job_id, source.id, len(links)
+        )
+        self.update(job_id, status="completed")
+        return True
+
+    async def _crawl_platform(
+        self,
+        job_id: str,
+        platform: str,
+        provider_limit: int,
+        queries: list[str],
+        original_query: str,
+        use_mock: bool,
+        job_filters: SearchFilters,
+        provider_failures: dict[str, str],
+        deferred_providers: dict[str, SearchProvider],
+        deferred_gates: dict[str, UserActionRequired],
+        resume_query_at: dict[str, int],
+        provider: SearchProvider | None = None,
+        resume_from: int = 0,
+    ) -> None:
+        """Crawls one platform's quota. Runs CONCURRENTLY with other platforms
+        (each holds its own browser lock and timeout). A UserActionRequired is
+        never awaited here: the platform defers (provider and its open page are
+        kept alive) and the pipeline's sequential gate phase waits for the user
+        afterwards, because wait_for_user state is keyed per job."""
+        if provider_limit == 0:
+            return
+        self.update(job_id, active_platform=platform)
+        lock_key = "mock" if use_mock else platform
+        async with self.platform_slot(lock_key, platform):
+            async with asyncio.timeout(settings.search_timeout) as deadline:
+                self.deadlines[(job_id, platform)] = deadline
+                if provider is None:
+                    provider = self.factory(cast(Platform, platform), use_mock)
+                capture_writer = (self.capture_writer if not use_mock and getattr(provider, "capture_origin", "untrusted") == "live_provider" else None)
+                deferred = False
+                provider_failed = False
+                try:
+                    for index, term in enumerate(queries):
+                        if index < resume_from:
+                            continue
+                        with self.sessions() as db:
+                            current = db.get(SearchJob, job_id)
+                            assert current is not None
+                            remaining = provider_limit - current.provider_counts.get(platform, 0)
+                            has_precision_filter = current.min_relevance is not None
+                            if remaining <= 0 or current.processed_count >= current.requested_limit:
+                                break
+                            db.add(SearchQuery(job_id=job_id, platform=platform, query=term))
+                            db.commit()
+                        if use_mock:
+                            query_limit = max(
+                                1, (remaining + len(queries) - index - 1) // (len(queries) - index)
+                            )
+                        else:
+                            # The requested quota counts accepted videos, not raw cards.
+                            # Bound extra work per query when relevance filtering is active.
+                            query_limit = min(remaining * 3, 150) if has_precision_filter else remaining
+                        self.update(job_id, status="searching", active_platform=platform)
+
+                        streamed = False
+
+                        async def on_batch(batch: list[VideoResult]) -> None:
+                            nonlocal streamed
+                            streamed = True
+                            await self.persist_results(
+                                job_id,
+                                platform,
+                                term,
+                                batch,
+                                provider_limit,
+                                alternative_queries=queries,
+                                original_query=original_query,
+                                capture_writer=capture_writer,
+                            )
+
+                        while True:
+                            try:
+                                sig = inspect.signature(provider.search)
+                                if "on_batch" in sig.parameters:
+                                    results = await provider.search(
+                                        term,
+                                        query_limit,
+                                        job_filters,
+                                        on_batch=on_batch,
+                                    )
+                                else:
+                                    results = await provider.search(
+                                        term,
+                                        query_limit,
+                                        job_filters,
+                                    )
+                                break
+                            except UserActionRequired as gate:
+                                waiting_reason = "login_required" if gate.state == "waiting_for_login" else "verification_required"
+                                self.update(
+                                    job_id,
+                                    active_platform=platform,
+                                    waiting_reason=waiting_reason,
+                                )
+                                if gate.partial and not streamed:
+                                    await self.persist_results(
+                                        job_id,
+                                        platform,
+                                        term,
+                                        gate.partial,
+                                        provider_limit,
+                                        alternative_queries=queries,
+                                        original_query=original_query,
+                                        capture_writer=capture_writer,
+                                    )
+                                # Defer: keep the provider (and its open login/
+                                # captcha page) alive; the gate phase waits for
+                                # the user once every platform had its turn.
+                                resume_query_at[platform] = index
+                                deferred_providers[platform] = provider
+                                deferred_gates[platform] = gate
+                                deferred = True
+                                break
+                            except ProviderError as error:
+                                provider_failures[platform] = str(error)
+                                self.update(
+                                    job_id,
+                                    diagnostics={"provider_errors": dict(provider_failures)},
+                                )
+                                logger.warning(
+                                    "job=%s provider=%s query=%r error_type=%s detail=%s",
+                                    job_id, platform, term, type(error).__name__, str(error)[:400],
+                                )
+                                provider_failed = True
+                                break
+                        if deferred or provider_failed:
+                            break
+                        logger.info(
+                            "job=%s provider=%s query=%r results=%d",
+                            job_id,
+                            platform,
+                            term,
+                            len(results),
+                        )
+                        if not streamed and results:
+                            self.update(job_id, status="ranking")
+                            await self.persist_results(
+                                job_id,
+                                platform,
+                                term,
+                                results,
+                                provider_limit,
+                                alternative_queries=queries,
+                                original_query=original_query,
+                                capture_writer=capture_writer,
+                            )
+                        with self.sessions() as db:
+                            current = db.get(SearchJob, job_id)
+                            if current and (
+                                current.provider_counts.get(platform, 0) >= provider_limit
+                                or current.processed_count >= current.requested_limit
+                            ):
+                                break
+                finally:
+                    self.deadlines.pop((job_id, platform), None)
+                    if not deferred:
+                        try:
+                            await provider.close()
+                        except Exception:
+                            logger.warning("job=%s provider=%s close_failed", job_id, platform)
 
     async def pipeline(self, job_id: str) -> None:
-        self.update(job_id, status="searching", started_at=utcnow())
         with self.sessions() as db:
             job = db.get(SearchJob, job_id)
             if not job:
                 return
-            query, platforms, limit = job.original_query, job.platforms, job.requested_limit
+            query, platforms, limit = (
+                job.original_query,
+                list(job.platforms or []),
+                job.requested_limit,
+            )
             use_mock = job.is_mock
+            fresh = job.status == "pending"
             plan = db.get(SearchPlan, job_id)
             plan_filters = plan.filters if plan and plan.filters else {}
             job_filters = SearchFilters(**plan_filters) if plan_filters else SearchFilters()
+        if (
+            fresh
+            and settings.search_cache_ttl_seconds > 0
+            and self._serve_from_cache(job_id, query, platforms, use_mock, limit, plan)
+        ):
+            return
+        self.update(job_id, status="searching", started_at=utcnow())
         queries = await self.prepare_queries(job_id, query)
         if not use_mock:
             queries = queries[:3]
-        # If the first provider needs manual verification, let the other provider
-        # collect its quota before waiting. Keep the blocked provider and its page
-        # alive so the user can solve the challenge when we return to it.
-        platform_queue = list(platforms)
         platform_limits = {
             name: limit // len(platforms) + (index < limit % len(platforms))
             for index, name in enumerate(platforms)
@@ -276,170 +578,65 @@ class SearchService:
         deferred_gates: dict[str, UserActionRequired] = {}
         resume_query_at: dict[str, int] = {}
         provider_failures: dict[str, str] = {}
-        for platform_index, platform in enumerate(platform_queue):
-            provider_limit = platform_limits[platform]
-            if provider_limit == 0:
+
+        async def crawl(platform: str, provider: SearchProvider | None = None, resume_from: int = 0) -> None:
+            await self._crawl_platform(
+                job_id=job_id,
+                platform=platform,
+                provider_limit=platform_limits[platform],
+                queries=queries,
+                original_query=query,
+                use_mock=use_mock,
+                job_filters=job_filters,
+                provider_failures=provider_failures,
+                deferred_providers=deferred_providers,
+                deferred_gates=deferred_gates,
+                resume_query_at=resume_query_at,
+                provider=provider,
+                resume_from=resume_from,
+            )
+
+        # Genuinely concurrent multi-platform crawl: each platform drives its
+        # own browser/lock/timeout while the others run. Platforms that hit a
+        # login/captcha gate defer instead of waiting, so a blocked platform
+        # never stalls the other one.
+        active_platforms = [p for p in platforms if platform_limits[p] > 0]
+        if len(active_platforms) == 1:
+            await crawl(active_platforms[0])
+        else:
+            outcomes = await asyncio.gather(
+                *(crawl(p) for p in active_platforms), return_exceptions=True
+            )
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException):
+                    raise outcome
+
+        # Sequential gate phase: wait for each deferred platform's user action
+        # (wait_for_user state is keyed per job), then re-crawl it with the
+        # SAME provider so the open login/captcha page is reused.
+        gate_rounds = 0
+        while deferred_gates:
+            gate_rounds += 1
+            if gate_rounds > len(queries) + 3:
+                logger.warning("job=%s gate retry loop capped; platforms left=%s", job_id, list(deferred_gates))
+                break
+            gated = [p for p in platforms if p in deferred_gates]
+            platform = gated[0]
+            gate = deferred_gates.pop(platform)
+            provider = deferred_providers.get(platform)
+            if provider is None:
                 continue
-            self.update(job_id, active_platform=platform)
-            lock_key = "mock" if use_mock else platform
-            async with self.platform_slot(lock_key, platform):
-                async with asyncio.timeout(settings.search_timeout) as deadline:
-                    self.deadlines[job_id] = deadline
-                    provider = deferred_providers.pop(platform, None) or self.factory(cast(Platform, platform), use_mock)
-                    capture_writer = (self.capture_writer if not use_mock and getattr(provider, "capture_origin", "untrusted") == "live_provider" else None)
-                    deferred = False
-                    provider_failed = False
-                    try:
-                        deferred_gate = deferred_gates.pop(platform, None)
-                        if deferred_gate is not None:
-                            self.update(
-                                job_id,
-                                waiting_reason=(
-                                    "login_required"
-                                    if deferred_gate.state == "waiting_for_login"
-                                    else "verification_required"
-                                ),
-                            )
-                            await self.wait_for_user(
-                                job_id, deferred_gate, provider=provider, platform=platform,
-                            )
-                        for index, term in enumerate(queries):
-                            if index < resume_query_at.get(platform, 0):
-                                continue
-                            with self.sessions() as db:
-                                current = db.get(SearchJob, job_id)
-                                assert current is not None
-                                remaining = provider_limit - current.provider_counts.get(platform, 0)
-                                has_precision_filter = current.min_relevance is not None
-                                if remaining <= 0 or current.processed_count >= current.requested_limit:
-                                    break
-                                db.add(SearchQuery(job_id=job_id, platform=platform, query=term))
-                                db.commit()
-                            if use_mock:
-                                query_limit = max(
-                                    1, (remaining + len(queries) - index - 1) // (len(queries) - index)
-                                )
-                            else:
-                                # The requested quota counts accepted videos, not raw cards.
-                                # Bound extra work per query when relevance filtering is active.
-                                query_limit = min(remaining * 3, 150) if has_precision_filter else remaining
-                            self.update(job_id, status="searching", active_platform=platform)
-
-                            streamed = False
-
-                            async def on_batch(batch: list[VideoResult]) -> None:
-                                nonlocal streamed
-                                streamed = True
-                                await self.persist_results(
-                                    job_id,
-                                    platform,
-                                    term,
-                                    batch,
-                                    provider_limit,
-                                    alternative_queries=queries,
-                                    original_query=query,
-                                    capture_writer=capture_writer,
-                                )
-
-                            while True:
-                                try:
-                                    sig = inspect.signature(provider.search)
-                                    if "on_batch" in sig.parameters:
-                                        results = await provider.search(
-                                            term,
-                                            query_limit,
-                                            job_filters,
-                                            on_batch=on_batch,
-                                        )
-                                    else:
-                                        results = await provider.search(
-                                            term,
-                                            query_limit,
-                                            job_filters,
-                                        )
-                                    break
-                                except UserActionRequired as gate:
-                                    waiting_reason = "login_required" if gate.state == "waiting_for_login" else "verification_required"
-                                    self.update(
-                                        job_id,
-                                        active_platform=platform,
-                                        waiting_reason=waiting_reason,
-                                    )
-                                    if gate.partial and not streamed:
-                                        await self.persist_results(
-                                            job_id,
-                                            platform,
-                                            term,
-                                            gate.partial,
-                                            provider_limit,
-                                            alternative_queries=queries,
-                                            original_query=query,
-                                            capture_writer=capture_writer,
-                                        )
-                                    if platform_index < len(platforms) - 1 and platform not in resume_query_at:
-                                        resume_query_at[platform] = index
-                                        deferred_providers[platform] = provider
-                                        deferred_gates[platform] = gate
-                                        platform_queue.append(platform)
-                                        deferred = True
-                                        next_plat = (
-                                            platforms[platform_index + 1]
-                                            if platform_index + 1 < len(platforms)
-                                            else platform
-                                        )
-                                        self.update(
-                                            job_id,
-                                            status="searching",
-                                            active_platform=next_plat,
-                                            waiting_reason=None,
-                                            error_message=None,
-                                        )
-                                        break
-                                    await self.wait_for_user(job_id, gate, provider=provider, platform=platform)
-                                except ProviderError as error:
-                                    provider_failures[platform] = str(error)
-                                    self.update(
-                                        job_id,
-                                        diagnostics={"provider_errors": dict(provider_failures)},
-                                    )
-                                    logger.warning(
-                                        "job=%s provider=%s query=%r error_type=%s detail=%s",
-                                        job_id, platform, term, type(error).__name__, str(error)[:400],
-                                    )
-                                    provider_failed = True
-                                    break
-                            if deferred or provider_failed:
-                                break
-                            logger.info(
-                                "job=%s provider=%s query=%r results=%d",
-                                job_id,
-                                platform,
-                                term,
-                                len(results),
-                            )
-                            if not streamed and results:
-                                self.update(job_id, status="ranking")
-                                await self.persist_results(
-                                    job_id,
-                                    platform,
-                                    term,
-                                    results,
-                                    provider_limit,
-                                    alternative_queries=queries,
-                                    original_query=query,
-                                    capture_writer=capture_writer,
-                                )
-                            with self.sessions() as db:
-                                current = db.get(SearchJob, job_id)
-                                if current and (
-                                    current.provider_counts.get(platform, 0) >= provider_limit
-                                    or current.processed_count >= current.requested_limit
-                                ):
-                                    break
-                    finally:
-                        self.deadlines.pop(job_id, None)
-                        if not deferred:
-                            await provider.close()
+            self.update(
+                job_id,
+                active_platform=platform,
+                waiting_reason=(
+                    "login_required"
+                    if gate.state == "waiting_for_login"
+                    else "verification_required"
+                ),
+            )
+            await self.wait_for_user(job_id, gate, provider=provider, platform=platform)
+            await crawl(platform, provider=provider, resume_from=resume_query_at.get(platform, 0))
         with self.sessions() as db:
             job = db.get(SearchJob, job_id)
             if job and job.status not in TERMINAL:
@@ -520,6 +717,30 @@ class SearchService:
             return plan.queries[: settings.max_queries]
 
     async def persist_results(
+        self,
+        job_id: str,
+        platform: str,
+        query: str,
+        results: list[VideoResult],
+        provider_limit: int,
+        alternative_queries: list[str] | None = None,
+        original_query: str | None = None,
+        capture_writer: Callable[..., dict[str, Any]] | None = None,
+    ) -> None:
+        lock = self._persist_locks.setdefault(job_id, asyncio.Lock())
+        async with lock:
+            await self._persist_results_unlocked(
+                job_id,
+                platform,
+                query,
+                results,
+                provider_limit,
+                alternative_queries=alternative_queries,
+                original_query=original_query,
+                capture_writer=capture_writer,
+            )
+
+    async def _persist_results_unlocked(
         self,
         job_id: str,
         platform: str,
@@ -887,7 +1108,9 @@ class SearchService:
         self.waiters[job_id] = event
         if provider:
             self.waiting_contexts[job_id] = (provider, gate, platform)
-        deadline = self.deadlines.get(job_id)
+        # Deadlines are keyed per (job, platform) so concurrent platform crawls
+        # pause/resume their own timeout; plain job_id stays as a legacy fallback.
+        deadline = self.deadlines.get((job_id, platform)) or self.deadlines.get(job_id)
         when = deadline.when() if deadline else None
         remaining = max(1.0, when - asyncio.get_running_loop().time()) if when else None
         if deadline:

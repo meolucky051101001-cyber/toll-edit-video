@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     default_result_limit: int = Field(50, ge=1, le=200)
     max_queries: int = Field(10, ge=1, le=10)
     search_timeout: int = Field(300, ge=10, le=600)
+    # Re-running the exact same search within this window reuses the previous
+    # completed job's results instantly (0 disables). Matched on query,
+    # platforms, filters, AI flag and limit.
+    search_cache_ttl_seconds: int = Field(3600, ge=0, le=86400)
     download_dir: Path = ROOT / "data" / "downloads"
     dubbing_dir: Path = ROOT / "data" / "dubbing"
     max_concurrent_downloads: int = Field(2, ge=1, le=10)

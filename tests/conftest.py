@@ -13,6 +13,9 @@ _TEST_DB_ROOT = Path(tempfile.mkdtemp(prefix="video-research-tests-"))
 os.environ["DATABASE_URL"] = f"sqlite:///{(_TEST_DB_ROOT / 'suite.db').as_posix()}"
 # No test carries an API token: keep the auth middleware off for the whole suite.
 os.environ["API_TOKEN"] = ""
+# Search result cache must be opt-in per test — otherwise two pipelines with the
+# same query inside one test would silently short-circuit through the cache.
+os.environ["SEARCH_CACHE_TTL_SECONDS"] = "0"
 
 from backend.app.main import app  # noqa: E402
 from backend.core.database import Base, engine, get_db, make_engine  # noqa: E402

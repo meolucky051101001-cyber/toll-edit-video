@@ -91,7 +91,12 @@ def test_pause_resume_and_partial_persistence(sessions):
         with sessions() as db:
             job = db.get(SearchJob, job_id)
             assert job.status == "waiting_for_login" and job.processed_count == 1
-        assert service.deadlines[job_id].when() is None
+        # While waiting for the user, NO crawl deadline is ticking at all: the
+        # gate phase runs outside every platform timeout context.
+        assert not any(
+            key == job_id or (isinstance(key, tuple) and key[0] == job_id)
+            for key in service.deadlines
+        )
         assert service.resume(job_id)
         task = service.tasks[job_id]
         await task
