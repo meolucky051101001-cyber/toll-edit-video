@@ -65,6 +65,8 @@ class SearchRequest(BaseModel):
     platforms: list[Platform] = Field(default=["douyin", "xiaohongshu"], min_length=1, max_length=5)
     limit: int = Field(default=50, ge=1, le=200)
     min_relevance: float | None = Field(default=None, ge=0.0, le=100.0)
+    min_likes: int = Field(default=0, ge=0, le=100_000_000)
+    min_views: int = Field(default=0, ge=0, le=1_000_000_000)
     sort_by: Literal["relevance", "most_liked", "newest"] = "relevance"
     publish_time: Literal["all", "day", "week", "six_months"] = "all"
     content_type: Literal["all", "video", "image_text"] = "all"
@@ -97,6 +99,7 @@ class SearchRequest(BaseModel):
 
 class SearchFilters(BaseModel):
     minimum_likes: int = 0
+    minimum_views: int = 0
     minimum_relevance: float = 0.0
     sort_by: Literal["relevance", "most_liked", "newest"] = "relevance"
     publish_time: Literal["all", "day", "week", "six_months"] = "all"

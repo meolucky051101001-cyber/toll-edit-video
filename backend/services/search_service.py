@@ -598,6 +598,27 @@ class SearchService:
                             is_rejected = True
                             reject_reason = f"Thời gian đăng không thỏa mãn bộ lọc ({job_filters.publish_time})"
 
+                    # Defense-in-depth: quality thresholds (likes/views). A
+                    # like threshold rejects unknown counts too — providers
+                    # show likes on every card, so None means "not read" and
+                    # trusting it would let junk through. Views are only
+                    # reported by some platforms, so unknown views pass.
+                    if not is_rejected and job_filters.minimum_likes > 0:
+                        likes = result.like_count or 0
+                        if likes < job_filters.minimum_likes:
+                            is_rejected = True
+                            reject_reason = (
+                                f"Không đủ lượt tim tối thiểu "
+                                f"({likes} < {job_filters.minimum_likes})"
+                            )
+                    if not is_rejected and job_filters.minimum_views > 0 and result.view_count is not None:
+                        if result.view_count < job_filters.minimum_views:
+                            is_rejected = True
+                            reject_reason = (
+                                f"Không đủ lượt xem tối thiểu "
+                                f"({result.view_count} < {job_filters.minimum_views})"
+                            )
+
                     # Strict hashtag match guard
                     if not is_rejected and (job_filters.exact_hashtag or ranking_target.strip().startswith("#")):
                         if detail.missing_mandatory_intents and any(m.startswith("#") for m in detail.missing_mandatory_intents):

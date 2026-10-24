@@ -71,8 +71,9 @@ def apply_search_filters_and_sorting(
     filters: SearchFilters | None = None,
     limit: int | None = None,
 ) -> list[VideoResult]:
-    """Applies minimum_likes, content_type, publish_time filtering and sorting to VideoResults."""
+    """Applies minimum_likes/minimum_views, content_type, publish_time filtering and sorting to VideoResults."""
     min_likes = filters.minimum_likes if filters else 0
+    min_views = filters.minimum_views if filters else 0
     wanted_content_type = filters.content_type if filters else "all"
     wanted_publish_time = filters.publish_time if filters else "all"
     wanted_sort_by = filters.sort_by if filters else "relevance"
@@ -100,6 +101,11 @@ def apply_search_filters_and_sorting(
             continue
 
         if min_likes > 0 and (vr.like_count is None or vr.like_count < min_likes):
+            continue
+
+        # Views are only reported by some platforms (Douyin yes, XHS no):
+        # reject only when the count is known and below the threshold.
+        if min_views > 0 and vr.view_count is not None and vr.view_count < min_views:
             continue
 
         if wanted_content_type == "video" and vr.media_type != "video":

@@ -68,7 +68,8 @@ async def create_search(payload: SearchRequest, request: Request, db: Session = 
             queries=payload.selected_queries or [],
             source="manual" if payload.selected_queries else "original",
             filters={
-                "minimum_likes": 0,
+                "minimum_likes": payload.min_likes,
+                "minimum_views": payload.min_views,
                 "minimum_relevance": payload.min_relevance or 0.0,
                 "sort_by": payload.sort_by,
                 "publish_time": payload.publish_time,

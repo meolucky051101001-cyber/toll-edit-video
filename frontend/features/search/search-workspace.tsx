@@ -95,6 +95,8 @@ function SearchSession({
   const [sortBy, setSortBy] = useState<"relevance" | "most_liked" | "newest">("relevance");
   const [publishTime, setPublishTime] = useState<"all" | "day" | "week" | "six_months">("all");
   const [contentType, setContentType] = useState<"all" | "video" | "image_text">("all");
+  const [minLikes, setMinLikes] = useState(0);
+  const [minViews, setMinViews] = useState(0);
   const [exactHashtag, setExactHashtag] = useState(false);
   const [jobId, setJobId] = useState<string | null>(initialJob);
   const [busy, setBusy] = useState(false);
@@ -205,6 +207,8 @@ function SearchSession({
           sort_by: sortBy,
           publish_time: publishTime,
           content_type: contentType,
+          min_likes: minLikes,
+          min_views: minViews,
           exact_hashtag: exactHashtag || hasHashtag,
           target_hashtag: extractedTag,
         }),
@@ -461,6 +465,40 @@ function SearchSession({
                   ))}
                 </select>
               </label>
+              {mode !== "mock" && (
+                <>
+                  <label className="row muted" title="Bỏ qua ứng viên có lượt tim thấp hơn ngưỡng ngay khi quét — tìm nhanh và chất lượng hơn">
+                    Tim tối thiểu
+                    <select
+                      aria-label="Lượt tim tối thiểu"
+                      value={minLikes}
+                      disabled={busy}
+                      onChange={(e) => setMinLikes(Number(e.target.value))}
+                    >
+                      {[0, 100, 500, 1000, 5000, 10000, 50000, 100000].map((n) => (
+                        <option key={n} value={n}>
+                          {n === 0 ? "Mọi mức" : n >= 1000 ? `≥ ${n / 1000}K` : `≥ ${n}`}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="row muted" title="Áp dụng cho nền tảng có công khai lượt xem (Douyin); ứng viên không rõ lượt xem vẫn được giữ">
+                    View tối thiểu
+                    <select
+                      aria-label="Lượt xem tối thiểu"
+                      value={minViews}
+                      disabled={busy}
+                      onChange={(e) => setMinViews(Number(e.target.value))}
+                    >
+                      {[0, 1000, 5000, 10000, 50000, 100000, 500000, 1000000].map((n) => (
+                        <option key={n} value={n}>
+                          {n === 0 ? "Mọi mức" : n >= 1000000 ? `≥ ${n / 1000000}M` : `≥ ${n / 1000}K`}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </>
+              )}
               {mode === "douyin" && (
                 <>
                   <label className="row muted">
