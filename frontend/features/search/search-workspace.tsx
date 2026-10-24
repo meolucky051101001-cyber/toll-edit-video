@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowUpRight,
@@ -10,6 +10,7 @@ import {
   Check,
   Clock3,
   ArrowRight,
+  Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/error-banner";
@@ -28,6 +29,94 @@ import {
 import { BrowserControls } from "./browser-controls";
 
 const terminal = ["completed", "failed", "cancelled", "interrupted"];
+
+/** Preset-or-custom quality threshold: a select of common cutoffs whose last
+ * option ("Số khác…") swaps in a free number input, so users can type any
+ * value (e.g. 3700 likes) instead of picking from the list. */
+function ThresholdPicker({
+  label,
+  tooltip,
+  ariaLabel,
+  value,
+  onChange,
+  presets,
+  customStart,
+  format,
+  disabled,
+}: {
+  label: string;
+  tooltip: string;
+  ariaLabel: string;
+  value: number;
+  onChange: (value: number) => void;
+  presets: number[];
+  customStart: number;
+  format: (n: number) => string;
+  disabled?: boolean;
+}) {
+  const isPreset = value === 0 || presets.includes(value);
+  if (isPreset) {
+    return (
+      <label className="row muted" title={tooltip}>
+        {label}
+        <select
+          aria-label={ariaLabel}
+          value={value}
+          disabled={disabled}
+          onChange={(e) => {
+            if (e.target.value === "custom") {
+              onChange(customStart);
+            } else {
+              onChange(Number(e.target.value));
+            }
+          }}
+        >
+          {presets.map((n) => (
+            <option key={n} value={n}>
+              {n === 0 ? "Mọi mức" : format(n)}
+            </option>
+          ))}
+          <option value="custom">Số khác…</option>
+        </select>
+      </label>
+    );
+  }
+  return (
+    <label className="row muted" title={tooltip}>
+      {label}
+      <input
+        type="number"
+        min={0}
+        step={100}
+        aria-label={`${ariaLabel} (số tùy chọn)`}
+        value={value === 0 ? "" : value}
+        disabled={disabled}
+        style={{ width: "92px" }}
+        onChange={(e) => {
+          const parsed = Number(e.target.value);
+          onChange(
+            Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0,
+          );
+        }}
+      />
+      <button
+        type="button"
+        className="muted"
+        title="Xóa ngưỡng tùy chọn, quay lại danh mục"
+        style={{
+          border: "none",
+          background: "none",
+          cursor: "pointer",
+          padding: "0 2px",
+          font: "inherit",
+        }}
+        onClick={() => onChange(0)}
+      >
+        ✕
+      </button>
+    </label>
+  );
+}
 
 export type SearchMode = "mock" | "xiaohongshu" | "douyin" | "both" | "tiktok" | "youtube_shorts";
 
@@ -97,6 +186,31 @@ function SearchSession({
   const [contentType, setContentType] = useState<"all" | "video" | "image_text">("all");
   const [minLikes, setMinLikes] = useState(0);
   const [minViews, setMinViews] = useState(0);
+  // "Chỉ video viral" shortcut: applies tim ≥ 10K + view ≥ 100K + 1 tuần qua,
+  // and restores the user's previous thresholds when toggled off.
+  const VIRAL_PRESET = { likes: 10000, views: 100000, time: "week" as const };
+  const prevBeforeViral = useRef<{
+    likes: number;
+    views: number;
+    time: "all" | "day" | "week" | "six_months";
+  } | null>(null);
+  const viralActive =
+    minLikes >= VIRAL_PRESET.likes &&
+    minViews >= VIRAL_PRESET.views &&
+    publishTime === VIRAL_PRESET.time;
+  function toggleViralPreset() {
+    if (viralActive) {
+      const prev = prevBeforeViral.current ?? { likes: 0, views: 0, time: "all" as const };
+      setMinLikes(prev.likes);
+      setMinViews(prev.views);
+      setPublishTime(prev.time);
+    } else {
+      prevBeforeViral.current = { likes: minLikes, views: minViews, time: publishTime };
+      setMinLikes(VIRAL_PRESET.likes);
+      setMinViews(VIRAL_PRESET.views);
+      setPublishTime(VIRAL_PRESET.time);
+    }
+  }
   const [exactHashtag, setExactHashtag] = useState(false);
   const [jobId, setJobId] = useState<string | null>(initialJob);
   const [busy, setBusy] = useState(false);
@@ -467,36 +581,28 @@ function SearchSession({
               </label>
               {mode !== "mock" && (
                 <>
-                  <label className="row muted" title="Bỏ qua ứng viên có lượt tim thấp hơn ngưỡng ngay khi quét — tìm nhanh và chất lượng hơn">
-                    Tim tối thiểu
-                    <select
-                      aria-label="Lượt tim tối thiểu"
-                      value={minLikes}
-                      disabled={busy}
-                      onChange={(e) => setMinLikes(Number(e.target.value))}
-                    >
-                      {[0, 100, 500, 1000, 5000, 10000, 50000, 100000].map((n) => (
-                        <option key={n} value={n}>
-                          {n === 0 ? "Mọi mức" : n >= 1000 ? `≥ ${n / 1000}K` : `≥ ${n}`}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="row muted" title="Áp dụng cho nền tảng có công khai lượt xem (Douyin); ứng viên không rõ lượt xem vẫn được giữ">
-                    View tối thiểu
-                    <select
-                      aria-label="Lượt xem tối thiểu"
-                      value={minViews}
-                      disabled={busy}
-                      onChange={(e) => setMinViews(Number(e.target.value))}
-                    >
-                      {[0, 1000, 5000, 10000, 50000, 100000, 500000, 1000000].map((n) => (
-                        <option key={n} value={n}>
-                          {n === 0 ? "Mọi mức" : n >= 1000000 ? `≥ ${n / 1000000}M` : `≥ ${n / 1000}K`}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <ThresholdPicker
+                    label="Tim tối thiểu"
+                    tooltip="Bỏ qua ứng viên có lượt tim thấp hơn ngưỡng ngay khi quét — tìm nhanh và chất lượng hơn"
+                    ariaLabel="Lượt tim tối thiểu"
+                    value={minLikes}
+                    onChange={setMinLikes}
+                    presets={[0, 100, 500, 1000, 5000, 10000, 50000, 100000]}
+                    customStart={100}
+                    format={(n) => (n >= 1000 ? `≥ ${n / 1000}K` : `≥ ${n}`)}
+                    disabled={busy}
+                  />
+                  <ThresholdPicker
+                    label="View tối thiểu"
+                    tooltip="Áp dụng cho nền tảng có công khai lượt xem (Douyin); ứng viên không rõ lượt xem vẫn được giữ"
+                    ariaLabel="Lượt xem tối thiểu"
+                    value={minViews}
+                    onChange={setMinViews}
+                    presets={[0, 1000, 5000, 10000, 50000, 100000, 500000, 1000000]}
+                    customStart={1000}
+                    format={(n) => (n >= 1000000 ? `≥ ${n / 1000000}M` : `≥ ${n / 1000}K`)}
+                    disabled={busy}
+                  />
                 </>
               )}
               {mode === "douyin" && (
@@ -546,6 +652,20 @@ function SearchSession({
             </div>
           </div>
           <div className="row wrap" style={{ alignItems: "center", gap: "0.6rem", marginTop: "0.5rem" }}>
+            {mode !== "mock" && (
+              <button
+                type="button"
+                className={`filter-chip ${viralActive ? "active" : ""}`}
+                onClick={toggleViralPreset}
+                disabled={busy}
+                aria-pressed={viralActive}
+                data-testid="viral-preset-toggle"
+                title="Áp nhanh bộ lọc: tim ≥ 10K, view ≥ 100K, đăng trong 1 tuần qua. Bấm lần nữa để trả về ngưỡng cũ."
+              >
+                <Zap size={13} style={{ marginRight: "0.3rem" }} />
+                <span>Chỉ video viral</span>
+              </button>
+            )}
             <label className={`filter-chip ${useAI ? "active" : ""}`}>
               <input
                 type="checkbox"
