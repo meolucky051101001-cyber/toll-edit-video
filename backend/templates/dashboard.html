@@ -3189,10 +3189,16 @@ header {
         renderStatus(lastStatusData);
       }
       try {
+        const wsSettings = (lastStatusData && lastStatusData.worker_settings) || {};
         const res = await fetch('/api/worker-settings', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({concurrency: currentConcurrencyMode})
+          body: JSON.stringify({
+            concurrency: currentConcurrencyMode,
+            auto_vram_guard: wsSettings.auto_vram_guard !== undefined ? wsSettings.auto_vram_guard : true,
+            max_vram_percent_threshold: wsSettings.max_vram_percent_threshold !== undefined ? wsSettings.max_vram_percent_threshold : 85.0,
+            min_free_vram_mb: wsSettings.min_free_vram_mb !== undefined ? wsSettings.min_free_vram_mb : 1500.0
+          })
         });
         if (res.ok) {
           const saved = await res.json();

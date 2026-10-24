@@ -111,7 +111,7 @@ def save_worker_settings(
 
     try:
         SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp_file = SETTINGS_FILE.with_suffix(".tmp")
+        tmp_file = SETTINGS_FILE.with_suffix(f".{os.getpid()}.tmp")
         tmp_file.write_text(json.dumps(clean_cfg, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_file.replace(SETTINGS_FILE)
         logger.info("Đã lưu worker_settings: concurrency=%s (throttled=%s)", concurrency, clean_cfg["auto_throttled"])
@@ -159,7 +159,7 @@ def trigger_vram_emergency_downgrade(reason: str) -> bool:
 
     try:
         SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp_file = SETTINGS_FILE.with_suffix(".tmp")
+        tmp_file = SETTINGS_FILE.with_suffix(f".{os.getpid()}.tmp")
         tmp_file.write_text(json.dumps(clean_cfg, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_file.replace(SETTINGS_FILE)
         return True
@@ -177,7 +177,7 @@ def reset_vram_throttle() -> bool:
     logger.info("[VRAM_GUARD] ✅ VRAM đã an toàn trở lại. Khôi phục số luồng về %s.", cfg.get("concurrency", 1))
     clean_cfg = {
         "concurrency": int(cfg.get("concurrency", 1)),
-        "auto_vram_guard": True,
+        "auto_vram_guard": bool(cfg.get("auto_vram_guard", True)),
         "max_vram_percent_threshold": float(cfg.get("max_vram_percent_threshold", 85.0)),
         "min_free_vram_mb": float(cfg.get("min_free_vram_mb", 1500.0)),
         "auto_throttled": False,
@@ -187,7 +187,7 @@ def reset_vram_throttle() -> bool:
 
     try:
         SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp_file = SETTINGS_FILE.with_suffix(".tmp")
+        tmp_file = SETTINGS_FILE.with_suffix(f".{os.getpid()}.tmp")
         tmp_file.write_text(json.dumps(clean_cfg, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_file.replace(SETTINGS_FILE)
         return True
