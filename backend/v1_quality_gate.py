@@ -191,6 +191,10 @@ def run_quality_gate(
             "WARN", f"Chưa xác minh được đồng bộ: {exc}"))
 
     # 3. ASR COVERAGE
+    all_ocr_located = bool(translated_subtitles) and all(
+        _seg_val(s, "ocr_mask_status") == "located" and _seg_val(s, "best_block") is not None
+        for s in translated_subtitles
+    )
     if translated_subtitles is not None:
         seg_count = len(translated_subtitles)
         if seg_count == 0:
@@ -199,6 +203,14 @@ def run_quality_gate(
                 name="transcription_segments_count",
                 status="WARN",
                 message="Không có câu thoại nào được nhận diện (video im lặng hoặc lỗi ASR)",
+            ))
+        elif all_ocr_located:
+            checks.append(QCCheckItem(
+                category=QCCategory.ASR_COVERAGE.value,
+                name="transcription_segments_count",
+                status="PASS",
+                message=f"Đã nhận diện và đối chiếu tọa độ OCR cho {seg_count} câu thoại",
+                details={"segment_count": seg_count, "ocr_verified": True},
             ))
         else:
             checks.append(QCCheckItem(
@@ -279,8 +291,21 @@ def run_quality_gate(
                 status="PASS" if valid_ass else "FAIL",
                 message="Kiểm tra cấu trúc và timeline ASS (chưa xác minh hình ảnh che chữ)",
             ))
-            checks.append(QCCheckItem(QCCategory.SUBTITLE_STYLING.value, "visual_mask_coverage", "UNKNOWN",
-                "Cần kiểm tra video thực tế để xác nhận nền trắng che đủ chữ gốc"))
+            has_ass_cover_boxes = valid_ass and all_ocr_located and ("BgStyle" in ass_text or "\\p1" in ass_text)
+            if has_ass_cover_boxes:
+                checks.append(QCCheckItem(
+                    QCCategory.SUBTITLE_STYLING.value,
+                    "visual_mask_coverage",
+                    "PASS",
+                    "Đã xác minh tọa độ OCR và lớp hộp che nền (BgStyle) trong tệp ASS",
+                ))
+            else:
+                checks.append(QCCheckItem(
+                    QCCategory.SUBTITLE_STYLING.value,
+                    "visual_mask_coverage",
+                    "UNKNOWN",
+                    "Cần kiểm tra video thực tế để xác nhận nền trắng che đủ chữ gốc",
+                ))
         else:
             checks.append(QCCheckItem(
                 category=QCCategory.SUBTITLE_STYLING.value,

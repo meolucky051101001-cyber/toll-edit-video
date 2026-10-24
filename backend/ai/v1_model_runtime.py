@@ -33,6 +33,9 @@ def _worker_path() -> Path:
     return Path(__file__).resolve().parents[1] / "model_workers" / "v1_ocr_worker.py"
 
 
+_RUNTIME_MODULE_CACHE: Dict[tuple, bool] = {}
+
+
 def runtime_module_available(
     module_name: str,
     policy: Optional[V1ModelPolicy] = None,
@@ -42,6 +45,19 @@ def runtime_module_available(
     python = selected.runtime_python_path()
     if not python.is_file():
         return False
+    try:
+        cache_key = (str(python.resolve()), str(module_name))
+    except OSError:
+        cache_key = (str(python), str(module_name))
+    if cache_key in _RUNTIME_MODULE_CACHE:
+        return _RUNTIME_MODULE_CACHE[cache_key]
+    try:
+        site_pkg = python.parent.parent / "Lib" / "site-packages" / str(module_name)
+        if site_pkg.is_dir() or site_pkg.with_suffix(".py").is_file():
+            _RUNTIME_MODULE_CACHE[cache_key] = True
+            return True
+    except OSError:
+        pass
     try:
         result = subprocess.run(
             [
@@ -57,7 +73,9 @@ def runtime_module_available(
             timeout=timeout_seconds,
             creationflags=_creation_flags(),
         )
-        return result.returncode == 0
+        ok = result.returncode == 0
+        _RUNTIME_MODULE_CACHE[cache_key] = ok
+        return ok
     except (OSError, subprocess.SubprocessError):
         return False
 
@@ -104,6 +122,7 @@ def run_v1_ocr(
             "PYTHONUTF8": "1",
             "HF_HOME": str(cache_root / "huggingface"),
             "PADDLE_PDX_CACHE_HOME": str(cache_root / "paddlex"),
+            "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
         }
     )
     last_error: Optional[Exception] = None

@@ -1519,10 +1519,38 @@ class SingleInstanceServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
+_CONTROLLER_MUTEX_HANDLE = None
+
+
+def acquire_controller_mutex() -> bool:
+    """Acquire an OS-level named mutex on Windows so concurrent startups never spawn duplicates."""
+    global _CONTROLLER_MUTEX_HANDLE
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.CreateMutexW(None, False, "Local\\AutoDubV1_tool_control")
+        last_err = kernel32.GetLastError()
+        if not handle:
+            return True
+        if last_err == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(handle)
+            return False
+        _CONTROLLER_MUTEX_HANDLE = handle
+        return True
+    except Exception:
+        return True
+
+
 if __name__ == '__main__':
     bs_log = Path(r"C:\tool v1\workspace\bot_system\service_logs\tool_control.log")
     log_path = bs_log if (bs_log.parent.is_dir() or Path(r"C:\tool v1\workspace\bot_system").is_dir()) else Path(r"C:\tool v1\workspace\service_logs\tool_control.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    if not acquire_controller_mutex():
+        with open(log_path, "a", encoding="utf-8") as lf:
+            lf.write(f"PID {os.getpid()}: Mutex Local\\AutoDubV1_tool_control already held by active instance. Exiting cleanly.\n")
+        raise SystemExit(0)
     status_check = ensure_single_controller()
     if status_check == 'already_running':
         with open(log_path, "a", encoding="utf-8") as lf:

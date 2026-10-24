@@ -1,5 +1,6 @@
 import codecs
 import math
+import os
 import re
 import textwrap
 import copy
@@ -299,6 +300,8 @@ def generate_ass_file(
         return textwrap.wrap(text, width=chars) or [text]
 
     text_outline = 0
+    cover_style = str(os.getenv("V1_SUBTITLE_COVER_STYLE", "solid_box")).strip().lower()
+    bg_color_ass = "&H50FFFFFF" if cover_style == "frosted_blur" else "&H00FFFFFF"
 
     ass_content = f"""[Script Info]
 ScriptType: v4.00+
@@ -309,7 +312,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: BgStyle,Arial,{font_size},&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,0,0,0,0,100,100,0,0,1,{outline},0,5,0,0,0,1
+Style: BgStyle,Arial,{font_size},{bg_color_ass},{bg_color_ass},{bg_color_ass},{bg_color_ass},0,0,0,0,100,100,0,0,1,{outline},0,5,0,0,0,1
 Style: TextStyle,{font_name},{font_size},{font_color},&H000000FF,&H00000000,&H00000000,{bold},0,0,0,100,100,0,0,1,{text_outline},0,5,10,10,10,1
 
 [Events]

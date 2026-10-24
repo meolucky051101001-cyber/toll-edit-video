@@ -57,6 +57,7 @@ DEFAULT_CANVAS_SETTINGS: Dict[str, Any] = {
     "sub_stroke_width": 0,       # Độ dày viền chữ (0 - 6px)
     "sub_shadow": False,         # Đổ bóng chữ
     "sub_preset": "custom",      # Preset phong cách chữ nhanh
+    "sub_cover_style": "solid_box", # "solid_box" (hộp nền đặc mặc định) hoặc "frosted_blur" (kính mờ thẩm mỹ)
     "sub_bg_color": "#ffffff",   # Màu khung nền (Mặc định: Trắng #ffffff)
     "sub_bg_opacity": 1.0,       # Độ mờ đục khung nền (0.1 - 1.0)
     "sub_box_padding_x": 16,     # Độ rộng lề ngang khung nền (px)

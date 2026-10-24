@@ -646,6 +646,16 @@ def get_bot_token() -> str:
 ALLOWED_CHAT_IDS = parse_allowlist(os.getenv("TELEGRAM_SCRIPT_ALLOWED_CHAT_IDS", ""))
 
 
+async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    err = getattr(context, "error", None)
+    err_name = type(err).__name__ if err is not None else "UnknownError"
+    err_text = str(err or "")
+    if any(k in err_name for k in ("NetworkError", "ReadError", "ConnectError", "TimedOut", "RemoteProtocolError")) or "httpx." in err_text:
+        logger.warning("Kết nối Telegram Script Bot tạm gián đoạn (tự động thử lại): %s: %s", err_name, err_text)
+        return
+    logger.error("Lỗi xử lý sự kiện trên Telegram Script Bot (%s): %s", err_name, err_text, exc_info=err)
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -685,6 +695,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, on_text))
     app.add_handler(MessageHandler(~filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, on_non_text))
+    app.add_error_handler(_on_error)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 

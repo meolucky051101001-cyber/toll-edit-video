@@ -38,6 +38,9 @@ def _ordered_unique(*values: str) -> Tuple[str, ...]:
     return tuple(result)
 
 
+_SEPARATOR_RUNTIME_CACHE: dict = {}
+
+
 @dataclass(frozen=True)
 class V1ModelPolicy:
     whisper_model: str = "large-v3-turbo"
@@ -68,24 +71,41 @@ class V1ModelPolicy:
 
         configured_separator_runtime = _clean(env.get("V1_SEPARATOR_PYTHON"), "")
         if not configured_separator_runtime:
-            candidates = [
-                root / "backend" / "model_venv_separator" / "Scripts" / "python.exe",
-                root / "backend" / "model_venv" / "Scripts" / "python.exe",
-            ]
-            for cand in candidates:
-                if cand.is_file():
-                    try:
-                        import subprocess
-                        chk = subprocess.run(
-                            [str(cand), "-c", "import audio_separator"],
-                            capture_output=True,
-                            timeout=5,
-                        )
-                        if chk.returncode == 0:
+            try:
+                cache_key = str(root.resolve())
+            except OSError:
+                cache_key = str(root)
+            cached_sep = _SEPARATOR_RUNTIME_CACHE.get(cache_key)
+            if cached_sep is not None and (not cached_sep or Path(cached_sep).is_file()):
+                configured_separator_runtime = cached_sep
+            else:
+                candidates = [
+                    root / "backend" / "model_venv_separator" / "Scripts" / "python.exe",
+                    root / "backend" / "model_venv" / "Scripts" / "python.exe",
+                ]
+                for cand in candidates:
+                    if cand.is_file():
+                        site_pkg = cand.parent.parent / "Lib" / "site-packages" / "audio_separator"
+                        if site_pkg.is_dir():
                             configured_separator_runtime = str(cand)
                             break
-                    except Exception:
-                        pass
+                        try:
+                            import subprocess
+                            chk = subprocess.run(
+                                [
+                                    str(cand),
+                                    "-c",
+                                    "import importlib.util,sys;sys.exit(0 if importlib.util.find_spec('audio_separator') else 2)",
+                                ],
+                                capture_output=True,
+                                timeout=5,
+                            )
+                            if chk.returncode == 0:
+                                configured_separator_runtime = str(cand)
+                                break
+                        except Exception:
+                            pass
+                _SEPARATOR_RUNTIME_CACHE[cache_key] = configured_separator_runtime
 
         return cls(
             whisper_model=_clean(
