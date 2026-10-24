@@ -1342,6 +1342,22 @@
       pointer-events: auto;
       cursor: move;
     }
+    .trans-chip {
+      position: absolute;
+      top: 1px;
+      z-index: 20;
+      background: linear-gradient(135deg, rgba(250, 204, 21, 0.92), rgba(245, 158, 11, 0.92));
+      color: #1c1917;
+      font-size: 8.5px;
+      font-weight: 800;
+      padding: 1px 5px;
+      border-radius: 4px;
+      cursor: pointer;
+      pointer-events: auto;
+      white-space: nowrap;
+      border: 1px solid rgba(0, 0, 0, 0.35);
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+    }
     .clip-card-inner {
       display: flex;
       align-items: center;
@@ -2989,6 +3005,60 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
               <button type="button" class="cp-chip" id="cpFlipV">↕ Lật dọc</button>
             </div>
             <div id="cpCropBadge" style="display:none; font-size:10px; color:#34d399; margin-top:4px; font-family:monospace;"></div>
+          </div>
+
+          <div id="cpTransSection">
+            <div style="font-size:10.5px; color:#94a3b8; font-weight:700; margin-bottom:4px;">🔄 CHUYỂN CẢNH SANG ĐOẠN KẾ (P4)</div>
+            <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+              <select id="cpTransType" style="background:#0f172a; border:1px solid rgba(255,255,255,0.12); color:#e2e8f0; border-radius:5px; font-size:10.5px; padding:3px 5px;">
+                <option value="none">Không có</option>
+                <option value="fade">Fade (mờ dần)</option>
+                <option value="fadewhite">Fade trắng</option>
+                <option value="fadeblack">Fade đen</option>
+                <option value="dissolve">Dissolve</option>
+                <option value="slideleft">Trượt sang trái</option>
+                <option value="wipeleft">Wipe sang trái</option>
+                <option value="circleopen">Circle mở</option>
+              </select>
+              <span style="font-size:10.5px; color:#94a3b8;">Dài</span>
+              <input type="number" id="cpTransDur" min="0.2" max="1" step="0.1" value="0.5" style="width:56px; background:#0f172a; border:1px solid rgba(255,255,255,0.12); color:#e2e8f0; border-radius:4px; padding:2px 4px; font-size:11px;">s
+            </div>
+            <div id="cpTransHint" style="font-size:9.5px; color:#64748b; margin-top:3px;">Chỉ áp dụng giữa 2 đoạn liền kề; timeline tự co ngắn, phụ đề/nhạc tự canh lại.</div>
+          </div>
+
+          <div id="cpFxSection">
+            <div style="font-size:10.5px; color:#94a3b8; font-weight:700; margin-bottom:4px;">🎨 MÀU &amp; HIỆU ỨNG (đoạn này)</div>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <span style="font-size:10.5px; color:#94a3b8; width:64px;">Độ sáng</span>
+              <input type="range" id="cpFxBrightness" min="-100" max="100" step="5" value="0" style="flex:1; accent-color:#38bdf8;">
+              <span id="cpFxBrightnessVal" style="font-family:monospace; font-size:10px; color:#38bdf8; min-width:36px;">0%</span>
+            </div>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <span style="font-size:10.5px; color:#94a3b8; width:64px;">Tương phản</span>
+              <input type="range" id="cpFxContrast" min="50" max="200" step="5" value="100" style="flex:1; accent-color:#38bdf8;">
+              <span id="cpFxContrastVal" style="font-family:monospace; font-size:10px; color:#38bdf8; min-width:36px;">100%</span>
+            </div>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <span style="font-size:10.5px; color:#94a3b8; width:64px;">Bão hòa</span>
+              <input type="range" id="cpFxSaturation" min="0" max="200" step="5" value="100" style="flex:1; accent-color:#38bdf8;">
+              <span id="cpFxSaturationVal" style="font-family:monospace; font-size:10px; color:#38bdf8; min-width:36px;">100%</span>
+            </div>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <span style="font-size:10.5px; color:#94a3b8; width:64px;">Nhiệt màu</span>
+              <input type="range" id="cpFxTemperature" min="-100" max="100" step="5" value="0" style="flex:1; accent-color:#38bdf8;">
+              <span id="cpFxTemperatureVal" style="font-family:monospace; font-size:10px; color:#38bdf8; min-width:36px;">0%</span>
+            </div>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <span style="font-size:10.5px; color:#94a3b8; width:64px;">Làm mờ</span>
+              <input type="range" id="cpFxBlur" min="0" max="10" step="1" value="0" style="flex:1; accent-color:#38bdf8;">
+              <span id="cpFxBlurVal" style="font-family:monospace; font-size:10px; color:#38bdf8; min-width:36px;">0</span>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center; margin-top:2px;">
+              <label style="display:flex; align-items:center; gap:5px; font-size:10.5px; color:#94a3b8; cursor:pointer;">
+                <input type="checkbox" id="cpFxVignette"> Vignette (tối viền)
+              </label>
+              <button type="button" class="cp-chip" id="cpFxReset">↺ Đặt lại hiệu ứng</button>
+            </div>
           </div>
 
           <div style="display:flex; flex-direction:column; gap:6px;">
@@ -5038,6 +5108,30 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       } else {
         badge.style.display = 'none';
       }
+
+      // P4: transition + fx
+      const isLast = videoClipsState.indexOf(clip) === videoClipsState.length - 1;
+      const transSec = document.getElementById('cpTransSection');
+      if (transSec) transSec.style.opacity = isLast ? '0.5' : '1';
+      const tr = clip.trans || null;
+      document.getElementById('cpTransType').value = tr ? tr.type : 'none';
+      document.getElementById('cpTransDur').value = tr ? tr.dur : 0.5;
+      document.getElementById('cpTransDur').disabled = !tr || isLast;
+      document.getElementById('cpTransHint').innerText = isLast
+        ? 'Đoạn cuối — không có đoạn kế để nối chuyển cảnh.'
+        : 'Chỉ áp dụng giữa 2 đoạn liền kề; timeline tự co ngắn, phụ đề/nhạc tự canh lại.';
+      const fx = clip.fx || {};
+      document.getElementById('cpFxBrightness').value = Math.round((+fx.brightness || 0) * 100);
+      document.getElementById('cpFxBrightnessVal').innerText = Math.round((+fx.brightness || 0) * 100) + '%';
+      document.getElementById('cpFxContrast').value = Math.round((+fx.contrast === undefined ? 100 : (+fx.contrast) * 100));
+      document.getElementById('cpFxContrastVal').innerText = Math.round((+fx.contrast === undefined ? 1 : +fx.contrast) * 100) + '%';
+      document.getElementById('cpFxSaturation').value = Math.round((+fx.saturation === undefined ? 100 : (+fx.saturation) * 100));
+      document.getElementById('cpFxSaturationVal').innerText = Math.round((+fx.saturation === undefined ? 1 : +fx.saturation) * 100) + '%';
+      document.getElementById('cpFxTemperature').value = Math.round((+fx.temperature || 0) * 100);
+      document.getElementById('cpFxTemperatureVal').innerText = Math.round((+fx.temperature || 0) * 100) + '%';
+      document.getElementById('cpFxBlur').value = Math.round(+fx.blur || 0);
+      document.getElementById('cpFxBlurVal').innerText = String(Math.round(+fx.blur || 0));
+      document.getElementById('cpFxVignette').checked = !!fx.vignette;
     }
 
     function applyClipVisualPreview() {
@@ -5047,7 +5141,27 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       const rot = clip ? (clip.rotate || 0) : 0;
       const fh = clip ? !!clip.flipH : false;
       const fv = clip ? !!clip.flipV : false;
-      if (!clip || (!rot && !fh && !fv)) {
+      if (!clip) {
+        v.style.transform = '';
+        v.style.filter = '';
+        v.style.boxShadow = '';
+        return;
+      }
+      // P4: preview filter màu bằng CSS (gần đúng — render chính xác bằng FFmpeg eq/boxblur/vignette)
+      const fx = clip.fx;
+      if (fx) {
+        const parts = [];
+        if (absNz(fx.brightness)) parts.push(`brightness(${1 + (+fx.brightness || 0)})`);
+        if (Math.abs((+fx.contrast || 1) - 1) > 0.01) parts.push(`contrast(${(+fx.contrast).toFixed(2)})`);
+        if (Math.abs((+fx.saturation || 1) - 1) > 0.01) parts.push(`saturate(${(+fx.saturation).toFixed(2)})`);
+        if ((+fx.blur || 0) > 0) parts.push(`blur(${(+fx.blur * 1.2).toFixed(1)}px)`);
+        v.style.filter = parts.join(' ');
+        v.style.boxShadow = fx.vignette ? 'inset 0 0 90px rgba(0,0,0,0.7)' : '';
+      } else {
+        v.style.filter = '';
+        v.style.boxShadow = '';
+      }
+      if (!rot && !fh && !fv) {
         v.style.transform = '';
         return;
       }
@@ -5057,6 +5171,49 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       const k = (swap && r.width > 0) ? r.height / r.width : 1;
       v.style.transformOrigin = 'center center';
       v.style.transform = `rotate(${rot}deg) scale(${fh ? -k : k}, ${fv ? -k : k})`;
+    }
+
+    function absNz(v) { return Math.abs(+v || 0) > 0.01; }
+
+    // ===== P4: TRANSITION giữa 2 đoạn liền kề (xfade) =====
+    function setClipTransition(clipId, type, dur) {
+      const idx = videoClipsState.findIndex(c => c.id === clipId);
+      if (idx === -1) return false;
+      if (idx >= videoClipsState.length - 1) {
+        showToast('⚠️ Chuyển cảnh chỉ áp dụng cho đoạn có đoạn kế liền sau!');
+        return false;
+      }
+      const cur = videoClipsState[idx];
+      const next = videoClipsState[idx + 1];
+      const D0 = (cur.trans && cur.trans.dur) || 0;
+      // khoảng hở giữa 2 đoạn (bù trừ phần chồng lấn của transition đang có)
+      const gap = (next.at || 0) - ((cur.at || 0) + clipDurOf(cur)) + D0;
+      if (Math.abs(gap) > 0.05) {
+        showToast('⚠️ Chuyển cảnh chỉ áp dụng khi 2 đoạn LIỀN NHAU. Hãy xóa khoảng trống trước (Del = rip-nhịp)!');
+        return false;
+      }
+      pushTimelineHistory(type ? 'Thêm/sửa chuyển cảnh' : 'Xóa chuyển cảnh');
+      let D1 = 0;
+      if (type) {
+        D1 = Math.max(0.2, Math.min(1.0, parseFloat(dur) || 0.5, 0.9 * Math.min(clipDurOf(cur), clipDurOf(next))));
+        cur.trans = { type: type, dur: +D1.toFixed(3) };
+      } else {
+        delete cur.trans;
+      }
+      const delta = D0 - D1;
+      if (Math.abs(delta) > 1e-6) {
+        for (let k = idx + 1; k < videoClipsState.length; k++) {
+          videoClipsState[k].at = (videoClipsState[k].at || 0) + delta;
+        }
+      }
+      renderVideoClipsTrack();
+      updateClipPropsPanel();
+      return true;
+    }
+
+    function openClipPropsTab() {
+      const btn = [...document.querySelectorAll('.panel-tab')].find(b => b.textContent.includes('Thuộc Tính'));
+      if (btn && document.getElementById('tabClipProps')?.style.display === 'none') btn.click();
     }
 
     function getVideoDisplayRect() {
@@ -5316,6 +5473,76 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
       // Preview di chuyển khi đổi kích thước cửa sổ → dựng lại overlay theo đúng vị trí
       window.addEventListener('resize', () => { if (cropEditorActive) renderCropOverlay(); });
+
+      // ===== P4: chuyển cảnh + filter màu =====
+      $('cpTransType').addEventListener('change', (e) => {
+        const clip = getSelectedClip();
+        if (!clip) return;
+        const t = e.target.value;
+        setClipTransition(clip.id, t === 'none' ? null : t, document.getElementById('cpTransDur').value);
+      });
+      $('cpTransDur').addEventListener('change', (e) => {
+        const clip = getSelectedClip();
+        if (!clip || !clip.trans) return;
+        setClipTransition(clip.id, clip.trans.type, e.target.value);
+      });
+
+      const fxApply = (key, val) => {
+        const clip = getSelectedClip();
+        if (!clip) return;
+        ensurePropHistory('fx' + key, 'Đổi hiệu ứng màu');
+        clip.fx = { brightness: 0, contrast: 1, saturation: 1, temperature: 0, blur: 0, vignette: false, ...(clip.fx || {}) };
+        clip.fx[key] = val;
+        if (Math.abs(clip.fx.brightness) < 1e-3 && Math.abs(clip.fx.contrast - 1) < 1e-3
+            && Math.abs(clip.fx.saturation - 1) < 1e-3 && Math.abs(clip.fx.temperature) < 1e-3
+            && (clip.fx.blur || 0) < 0.5 && !clip.fx.vignette) {
+          delete clip.fx; // về trung tính thì gỡ hẳn cho payload gọn
+        }
+        applyClipVisualPreview();
+      };
+      $('cpFxBrightness').addEventListener('input', (e) => {
+        const v = (parseFloat(e.target.value) || 0) / 100;
+        fxApply('brightness', v);
+        document.getElementById('cpFxBrightnessVal').innerText = e.target.value + '%';
+      });
+      $('cpFxBrightness').addEventListener('change', () => commitPropEdit('fxbrightness'));
+      $('cpFxContrast').addEventListener('input', (e) => {
+        const v = (parseFloat(e.target.value) || 100) / 100;
+        fxApply('contrast', v);
+        document.getElementById('cpFxContrastVal').innerText = e.target.value + '%';
+      });
+      $('cpFxContrast').addEventListener('change', () => commitPropEdit('fxcontrast'));
+      $('cpFxSaturation').addEventListener('input', (e) => {
+        const v = (parseFloat(e.target.value) || 100) / 100;
+        fxApply('saturation', v);
+        document.getElementById('cpFxSaturationVal').innerText = e.target.value + '%';
+      });
+      $('cpFxSaturation').addEventListener('change', () => commitPropEdit('fxsaturation'));
+      $('cpFxTemperature').addEventListener('input', (e) => {
+        const v = (parseFloat(e.target.value) || 0) / 100;
+        fxApply('temperature', v);
+        document.getElementById('cpFxTemperatureVal').innerText = e.target.value + '%';
+      });
+      $('cpFxTemperature').addEventListener('change', () => commitPropEdit('fxtemperature'));
+      $('cpFxBlur').addEventListener('input', (e) => {
+        const v = parseFloat(e.target.value) || 0;
+        fxApply('blur', v);
+        document.getElementById('cpFxBlurVal').innerText = e.target.value;
+      });
+      $('cpFxBlur').addEventListener('change', () => commitPropEdit('fxblur'));
+      $('cpFxVignette').addEventListener('change', (e) => {
+        fxApply('vignette', e.target.checked);
+      });
+      $('cpFxReset').addEventListener('click', () => {
+        const clip = getSelectedClip();
+        if (!clip || !clip.fx) return;
+        pushTimelineHistory('Đặt lại hiệu ứng màu');
+        delete clip.fx;
+        renderVideoClipsTrack();
+        updateClipPropsPanel();
+        applyClipVisualPreview();
+        showToast('↺ Đã đặt lại hiệu ứng màu của đoạn này');
+      });
     }
 
     // ========================================================
@@ -6233,6 +6460,25 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         container.appendChild(card);
       });
 
+      // P4: badge chuyển cảnh tại điểm nối (bấm để sửa)
+      container.parentElement.querySelectorAll('.trans-chip').forEach(b => b.remove());
+      videoClipsState.forEach((clip, idx) => {
+        if (!clip.trans || idx >= videoClipsState.length - 1) return;
+        const next = videoClipsState[idx + 1];
+        const chip = document.createElement('div');
+        chip.className = 'trans-chip';
+        chip.style.left = Math.max(0, Math.round((next.at || 0) * timelinePxPerSec) - 36) + 'px';
+        chip.textContent = `🔄 ${clip.trans.type} ${(+(clip.trans.dur) || 0.5).toFixed(1)}s`;
+        chip.title = 'Bấm để sửa chuyển cảnh trong panel Thuộc Tính Clip';
+        chip.onclick = (e) => {
+          e.stopPropagation();
+          clearMultiSelect();
+          selectClip(clip.id);
+          openClipPropsTab();
+        };
+        container.parentElement.appendChild(chip);
+      });
+
       renderTimelineRuler();
       initTrimHandleListeners();
       updateTimelineToolbarStates();
@@ -6650,7 +6896,17 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             flipV: !!c.flipV,
             reverse: !!c.reverse,
             freeze: parseFloat((c.freeze || 0).toFixed(3)),
-            detachAudio: !!c.detachAudio
+            detachAudio: !!c.detachAudio,
+            // P4: chuyển cảnh + filter màu
+            trans: c.trans ? { type: c.trans.type, dur: +(+(c.trans.dur) || 0.5).toFixed(3) } : null,
+            fx: c.fx ? {
+              brightness: +(c.fx.brightness || 0).toFixed(3),
+              contrast: +((c.fx.contrast === undefined ? 1 : c.fx.contrast)).toFixed(3),
+              saturation: +((c.fx.saturation === undefined ? 1 : c.fx.saturation)).toFixed(3),
+              temperature: +(c.fx.temperature || 0).toFixed(3),
+              blur: +(c.fx.blur || 0).toFixed(2),
+              vignette: !!c.fx.vignette
+            } : null
           })),
           // P3: chữ tự do + logo/overlay (at/dur theo timeline — backend tự map về file xuất)
           text_clips: (getTextTrack()?.clips || []).map(c => ({

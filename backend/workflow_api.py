@@ -1776,6 +1776,28 @@ def _timeline_clip_effects(c: Dict[str, Any]) -> Dict[str, Any]:
             crop = None
     rot = int(_num("rotate", 0, 0, 359))
     rot = rot - (rot % 90)
+
+    # P4: filter màu/hiệu ứng per-clip (eq/colorbalance/boxblur/vignette)
+    fx = None
+    fx_raw = c.get("fx") if isinstance(c.get("fx"), dict) else None
+    if fx_raw:
+        try:
+            fx = {
+                "brightness": max(-1.0, min(1.0, float(fx_raw.get("brightness", 0.0) or 0.0))),
+                "contrast": max(0.0, min(3.0, float(fx_raw.get("contrast", 1.0) or 1.0))),
+                "saturation": max(0.0, min(3.0, float(fx_raw.get("saturation", 1.0) or 1.0))),
+                "temperature": max(-1.0, min(1.0, float(fx_raw.get("temperature", 0.0) or 0.0))),
+                "blur": max(0.0, min(20.0, float(fx_raw.get("blur", 0.0) or 0.0))),
+                "vignette": bool(fx_raw.get("vignette")),
+            }
+            neutral = (abs(fx["brightness"]) < 1e-3 and abs(fx["contrast"] - 1.0) < 1e-3
+                       and abs(fx["saturation"] - 1.0) < 1e-3 and abs(fx["temperature"]) < 1e-3
+                       and fx["blur"] < 0.5 and not fx["vignette"])
+            if neutral:
+                fx = None
+        except Exception:
+            fx = None
+
     return {
         "speed": speed,
         "volume": _num("volume", 1.0, 0.0, 2.0),
@@ -1790,6 +1812,7 @@ def _timeline_clip_effects(c: Dict[str, Any]) -> Dict[str, Any]:
         "reverse": bool(c.get("reverse")),
         "freeze": _num("freeze", 0.0, 0.0, 10.0),
         "detach_audio": bool(c.get("detachAudio")),
+        "fx": fx,
     }
 
 
@@ -1824,7 +1847,9 @@ def _build_timeline_filter_graph(
     fadeIn/fadeOut (video+audio), crop {x,y,w,h} chuẩn hóa (luôn format=yuv420p TRƯỚC
     crop theo bug NVDEC nv12), rotate 90/180/270, flipH/flipV, reverse (giới hạn 60s
     nguồn vì buffer cả đoạn trong RAM), freeze-frame đầu đoạn (tpad + im lặng audio
-    tương ứng) và detachAudio (audio giữ tốc độ gốc → chuyển sang mode amix+adelay).
+    tương ứng), detachAudio (audio giữ tốc độ gốc → chuyển sang mode amix+adelay),
+    fx (P4: eq/colorbalance/boxblur/vignette per-clip) và trans (P4: chuyển cảnh sang
+    đoạn kế — chuỗi xfade/acrossfade thay concat, seg_starts rút ngắn theo duration).
 
     Trả về: {"filter_lines", "mode": "concat"|"mix", "total_dur", "seg_starts",
               "seg_durs", "effects"} — filter_lines kết thúc bằng [outv] (và [outa] nếu có âm thanh).
@@ -1861,6 +1886,20 @@ def _build_timeline_filter_graph(
             vchain.append("setpts=PTS-STARTPTS")
         # Ràng buộc repo: format=yuv420p PHẢI đứng trước crop/transpose (bug NVDEC nv12 xanh nửa phải)
         vchain.append("format=yuv420p")
+        # P4: filter màu/hiệu ứng per-clip (đặt ngay sau format, trước crop/rotate)
+        if eff["fx"]:
+            fx = eff["fx"]
+            if abs(fx["brightness"]) > 1e-3 or abs(fx["contrast"] - 1.0) > 1e-3 or abs(fx["saturation"] - 1.0) > 1e-3:
+                vchain.append(
+                    f"eq=brightness={fx['brightness']:.3f}:contrast={fx['contrast']:.3f}:saturation={fx['saturation']:.3f}"
+                )
+            if abs(fx["temperature"]) > 1e-3:
+                t_amt = fx["temperature"] * 0.3
+                vchain.append(f"colorbalance=rs={t_amt:.3f}:bs={-t_amt:.3f}")
+            if fx["blur"] > 0:
+                vchain.append(f"boxblur={min(20, max(1, int(round(fx['blur']))))}")
+            if fx["vignette"]:
+                vchain.append("vignette=PI/5")
         if freeze > 0:
             vchain.append(f"tpad=start_duration={freeze:.3f}:start_mode=add:color=black")
         if eff["crop"]:
@@ -1931,27 +1970,94 @@ def _build_timeline_filter_graph(
             a_parts.append(f"[{a_tag}]")
 
     n = len(clips)
-    total_dur = sum(seg_durs)
+
+    # P4: đọc transition giữa các cặp clip liền kề (client đã dồn `at` của đoạn sau khi đặt)
+    trans_list: List[tuple] = []  # (idx, type, dur)
+    for i in range(n - 1):
+        traw = clips[i].get("trans") if isinstance(clips[i].get("trans"), dict) else None
+        if not traw:
+            continue
+        ttype = str(traw.get("type") or "").strip().lower()
+        if not ttype:
+            continue
+        tdur = max(0.0, min(1.0, float(traw.get("dur", 0.5) or 0.5)))
+        tdur = min(tdur, 0.9 * min(seg_durs[i], seg_durs[i + 1]))
+        if tdur < 0.05:
+            continue
+        trans_list.append((i, ttype, tdur))
+
+    # transition rút ngắn output: vị trí output của các đoạn sau dời về trái tương ứng
+    for (_i, _t, tdur) in trans_list:
+        for j in range(_i + 1, n):
+            seg_starts[j] -= tdur
+    total_dur = sum(seg_durs) - sum(td for (_i, _t, td) in trans_list)
     any_detach = has_audio and any(e["detach_audio"] for e in effects)
 
-    if has_audio and not any_detach:
-        # Mode proven: concat A/V đồng bộ từng cặp (không đổi hành vi cũ khi không có detach)
-        concat_in = "".join(v + a for v, a in zip(v_parts, a_parts))
-        filter_lines.append(f"{concat_in}concat=n={n}:v=1:a=1[outv][outa]")
-        mode = "concat"
-    elif has_audio:
-        # Mode tách audio: video concat riêng; audio từng clip đặt đúng vị trí timeline rồi trộn
-        filter_lines.append("".join(v_parts) + f"concat=n={n}:v=1:a=0[outv]")
-        for i, (a_tag, tl_start) in enumerate(zip(a_parts, seg_starts)):
-            filter_lines.append(f"{a_tag}adelay={int(round(tl_start * 1000))}:all=1[ad{i}]")
-        filter_lines.append(
-            "".join(f"[ad{i}]" for i in range(n)) + f"amix=inputs={n}:normalize=0:duration=longest[mixout]"
-        )
-        filter_lines.append(f"[mixout]apad=whole_dur={total_dur:.3f}[outa]")
-        mode = "mix"
+    if not trans_list:
+        if has_audio and not any_detach:
+            # Mode proven: concat A/V đồng bộ từng cặp (không đổi hành vi cũ khi không có detach)
+            concat_in = "".join(v + a for v, a in zip(v_parts, a_parts))
+            filter_lines.append(f"{concat_in}concat=n={n}:v=1:a=1[outv][outa]")
+            mode = "concat"
+        elif has_audio:
+            # Mode tách audio: video concat riêng; audio từng clip đặt đúng vị trí timeline rồi trộn
+            filter_lines.append("".join(v_parts) + f"concat=n={n}:v=1:a=0[outv]")
+            for i, (a_tag, tl_start) in enumerate(zip(a_parts, seg_starts)):
+                filter_lines.append(f"{a_tag}adelay={int(round(tl_start * 1000))}:all=1[ad{i}]")
+            filter_lines.append(
+                "".join(f"[ad{i}]" for i in range(n)) + f"amix=inputs={n}:normalize=0:duration=longest[mixout]"
+            )
+            filter_lines.append(f"[mixout]apad=whole_dur={total_dur:.3f}[outa]")
+            mode = "mix"
+        else:
+            filter_lines.append("".join(v_parts) + f"concat=n={n}:v=1:a=0[outv]")
+            mode = "concat"
     else:
-        filter_lines.append("".join(v_parts) + f"concat=n={n}:v=1:a=0[outv]")
-        mode = "concat"
+        # P4: có transition — nối video bằng chuỗi xfade (cặp có trans) / concat (cặp thường);
+        # offset của xfade = thời điểm bắt đầu chuyển cảnh trên output
+        acc_v = seg_durs[0]
+        prev_tag = "[v0]"
+        for i in range(n - 1):
+            tr = next((t for t in trans_list if t[0] == i), None)
+            last_join = (i == n - 2)
+            if tr:
+                _i, ttype, tdur = tr
+                offset = max(0.0, acc_v - tdur)
+                out_tag = "[outv]" if last_join else f"[vx{i}]"
+                filter_lines.append(
+                    f"{prev_tag}[v{i + 1}]xfade=transition={ttype}:duration={tdur:.3f}:offset={offset:.3f}{out_tag}"
+                )
+                acc_v = acc_v + seg_durs[i + 1] - tdur
+            else:
+                out_tag = "[outv]" if last_join else f"[vc{i}]"
+                filter_lines.append(f"{prev_tag}[v{i + 1}]concat=n=2:v=1:a=0{out_tag}")
+                acc_v = acc_v + seg_durs[i + 1]
+            prev_tag = out_tag
+        if has_audio and not any_detach:
+            # audio đisong song: acrossfade tại cặp có trans, concat tại cặp thường
+            prev_a = "[a0]"
+            for i in range(n - 1):
+                tr = next((t for t in trans_list if t[0] == i), None)
+                last_join = (i == n - 2)
+                if tr:
+                    out_tag = "[outa]" if last_join else f"[ax{i}]"
+                    filter_lines.append(f"{prev_a}[a{i + 1}]acrossfade=d={tr[2]:.3f}:c1=tri:c2=tri{out_tag}")
+                else:
+                    out_tag = "[outa]" if last_join else f"[ac{i}]"
+                    filter_lines.append(f"{prev_a}[a{i + 1}]concat=n=2:v=1:a=0{out_tag}")
+                prev_a = out_tag
+            mode = "concat"
+        elif has_audio:
+            # mode mix: audio amix theo seg_starts (đã tính transition), video xfade như trên
+            for i, (a_tag, tl_start) in enumerate(zip(a_parts, seg_starts)):
+                filter_lines.append(f"{a_tag}adelay={int(round(tl_start * 1000))}:all=1[ad{i}]")
+            filter_lines.append(
+                "".join(f"[ad{i}]" for i in range(n)) + f"amix=inputs={n}:normalize=0:duration=longest[mixout]"
+            )
+            filter_lines.append(f"[mixout]apad=whole_dur={total_dur:.3f}[outa]")
+            mode = "mix"
+        else:
+            mode = "concat"
 
     return {
         "filter_lines": filter_lines,
@@ -2212,22 +2318,26 @@ def _build_music_filter_lines(
     return {"lines": lines, "used_split": used_split}
 
 
-def _retime_subtitles_to_timeline(    trans_subs: List[Dict[str, Any]],
+def _retime_subtitles_to_timeline(
+    trans_subs: List[Dict[str, Any]],
     orig_subs: List[Dict[str, Any]],
     clips: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """
-    Map phụ đề nguồn sang trục timeline đã ghép, tính cả speed/freeze từng clip (P2).
+    Map phụ đề nguồn sang trục timeline đã ghép, tính cả speed/freeze (P2) và
+    transition (P4 — transition rút ngắn output nên vị trí các đoạn sau dời về trái).
     Trả về danh sách {index, start, end, start_str, end_str, text, original_text}.
     """
     updated: List[Dict[str, Any]] = []
     accum = 0.0
     new_idx = 1
-    for c in clips:
+    n_clips = len(clips)
+    for idx_c, c in enumerate(clips):
         c_st = float(c.get("start", 0.0))
         c_en = float(c.get("end", c_st + 1.0))
         eff = _timeline_clip_effects(c)
         clip_tl_dur = max(0.01, (c_en - c_st) / eff["speed"] + eff["freeze"])
+        base_out = accum
 
         for idx_s, s in enumerate(trans_subs):
             s_st = float(s.get("start", 0.0))
@@ -2235,8 +2345,8 @@ def _retime_subtitles_to_timeline(    trans_subs: List[Dict[str, Any]],
             ov_st = max(s_st, c_st)
             ov_en = min(s_en, c_en)
             if ov_en > ov_st + 0.2:
-                rel_st = accum + eff["freeze"] + (ov_st - c_st) / eff["speed"]
-                rel_en = accum + eff["freeze"] + (ov_en - c_st) / eff["speed"]
+                rel_st = base_out + eff["freeze"] + (ov_st - c_st) / eff["speed"]
+                rel_en = base_out + eff["freeze"] + (ov_en - c_st) / eff["speed"]
                 txt = (s.get("text") or "").strip()
                 orig_txt = orig_subs[idx_s].get("text", "") if idx_s < len(orig_subs) else ""
                 updated.append({
@@ -2250,6 +2360,11 @@ def _retime_subtitles_to_timeline(    trans_subs: List[Dict[str, Any]],
                 })
                 new_idx += 1
         accum += clip_tl_dur
+        traw = c.get("trans") if isinstance(c.get("trans"), dict) else None
+        if idx_c < n_clips - 1 and traw:
+            tdur = max(0.0, min(1.0, float(traw.get("dur", 0.5) or 0.5)))
+            if tdur >= 0.05:
+                accum -= min(tdur, 0.9 * min(clip_tl_dur, 999.0))
     return updated
 
 
@@ -2292,9 +2407,10 @@ def _apply_timeline_edits_file(
     src_w = int(v_stream.get("width") or 0)
     src_h = int(v_stream.get("height") or 0)
 
-    # Lọc danh sách clips hợp lệ (giữ nguyên thuộc tính hiệu ứng P2/P3 client gửi kèm)
+    # Lọc danh sách clips hợp lệ (giữ nguyên thuộc tính hiệu ứng P2/P3/P4/P5 client gửi kèm)
     _effect_keys = ("at", "speed", "volume", "muted", "keepPitch", "fadeIn", "fadeOut",
-                    "crop", "rotate", "flipH", "flipV", "reverse", "freeze", "detachAudio")
+                    "crop", "rotate", "flipH", "flipV", "reverse", "freeze", "detachAudio",
+                    "trans", "fx")
     valid_clips = []
     for c in clips:
         try:
