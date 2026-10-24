@@ -6860,6 +6860,131 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       }
     }
 
+    // ===== P6.3: RENDER NỀN — payload dùng chung + poll tiến độ + huỷ =====
+    let _activeRenderJobId = null;
+    const RENDER_TOKEN_HEADERS = () => ({
+      'Content-Type': 'application/json',
+      'X-Local-Control-Token': (typeof CONTROL_PLANE_TOKEN !== 'undefined' ? CONTROL_PLANE_TOKEN : '__REPLACE_TOKEN__'),
+      'X-Dashboard-Input': '1'
+    });
+
+    function buildTimelineRenderPayload() {
+      return {
+        stem: currentVideo.stem,
+        clips: videoClipsState.map(c => ({
+          start: parseFloat(c.start.toFixed(3)),
+          end: parseFloat(c.end.toFixed(3)),
+          at: parseFloat((c.at || 0).toFixed(3)), // P4: vị trí timeline — backend map text/nhạc theo đây
+          // P2: gửi kèm thuộc tính clip cho backend dựng filter
+          speed: clipSpeedOf(c),
+          volume: (typeof c.volume === 'number') ? parseFloat(c.volume.toFixed(3)) : 1,
+          muted: !!c.muted,
+          keepPitch: c.keepPitch !== false,
+          fadeIn: parseFloat((c.fadeIn || 0).toFixed(3)),
+          fadeOut: parseFloat((c.fadeOut || 0).toFixed(3)),
+          crop: c.crop || null,
+          rotate: c.rotate || 0,
+          flipH: !!c.flipH,
+          flipV: !!c.flipV,
+          reverse: !!c.reverse,
+          freeze: parseFloat((c.freeze || 0).toFixed(3)),
+          detachAudio: !!c.detachAudio,
+          // P4: chuyển cảnh + filter màu
+          trans: c.trans ? { type: c.trans.type, dur: +(+(c.trans.dur) || 0.5).toFixed(3) } : null,
+          fx: c.fx ? {
+            brightness: +(c.fx.brightness || 0).toFixed(3),
+            contrast: +((c.fx.contrast === undefined ? 1 : c.fx.contrast)).toFixed(3),
+            saturation: +((c.fx.saturation === undefined ? 1 : c.fx.saturation)).toFixed(3),
+            temperature: +(c.fx.temperature || 0).toFixed(3),
+            blur: +(c.fx.blur || 0).toFixed(2),
+            vignette: !!c.fx.vignette
+          } : null
+        })),
+        // P3: chữ tự do + logo/overlay (at/dur theo timeline — backend tự map về file xuất)
+        text_clips: (getTextTrack()?.clips || []).map(c => ({
+          id: c.id,
+          text: c.text || '',
+          at: +(c.at || 0).toFixed(3),
+          dur: +(c.dur || 3).toFixed(3),
+          pos: { x: +(c.pos?.x ?? 0.5).toFixed(4), y: +(c.pos?.y ?? 0.8).toFixed(4) },
+          style: {
+            fontSize: c.style?.fontSize || 64,
+            color: c.style?.color || '#FFFFFF',
+            outlineColor: c.style?.outlineColor || '#000000',
+            outlineWidth: c.style?.outlineWidth === undefined ? 3 : c.style.outlineWidth,
+            bgOpacity: c.style?.bgOpacity || 0,
+            bold: !!c.style?.bold
+          },
+          animIn: c.animIn || 'none',
+          animOut: c.animOut || 'none'
+        })),
+        overlay_clips: (getOverlayTrack()?.clips || []).map(c => ({
+          id: c.id,
+          src: c.src || '',
+          at: +(c.at || 0).toFixed(3),
+          dur: +(c.dur || 3).toFixed(3),
+          pos: { x: +(c.pos?.x ?? 0.5).toFixed(4), y: +(c.pos?.y ?? 0.85).toFixed(4) },
+          scale: c.scale === undefined ? 1 : c.scale,
+          opacity: c.opacity === undefined ? 1 : c.opacity
+        })),
+        // P5: nhạc/SFX trộn lên audio nền (volume/fade/ducking từng clip)
+        audio_clips: (getMusicTrack()?.clips || []).map(c => ({
+          id: c.id,
+          src: c.src || '',
+          at: +(c.at || 0).toFixed(3),
+          dur: +(c.dur || 3).toFixed(3),
+          volume: (typeof c.volume === 'number') ? +c.volume.toFixed(3) : 1,
+          fadeIn: parseFloat((c.fadeIn || 0).toFixed(3)),
+          fadeOut: parseFloat((c.fadeOut || 0).toFixed(3)),
+          muted: !!c.muted,
+          duck: !!c.duck
+        })),
+        target_version: currentVideoVersion || 'final'
+      };
+    }
+
+    function handleApplyEditsSuccess(data) {
+      showToast(`🎉 ${data.message || 'Đã ghép video thành công!'}`);
+      // Reload player with newly concatenated video
+      if (data.video_url && mainPlayer) {
+        currentVideo.has_final = true;
+        if (currentVideoData) {
+          currentVideoData.has_final = true;
+          currentVideoData.final_video_url = data.final_video_url;
+          currentVideoData.video_url = data.video_url;
+        }
+        mainPlayer.src = data.video_url;
+        mainPlayer.load();
+        mainPlayer.play().catch(() => {});
+      }
+      if (data.subtitles && data.subtitles.length) {
+        currentSubtitles = data.subtitles;
+        if (currentVideoData) {
+          currentVideoData.vietnamese_subtitles = data.subtitles;
+        }
+        renderSubtitlesTimeline();
+        updateSubtitlesOverlay();
+      }
+      setTimeout(() => {
+        initVideoClipsForCurrentVideo(true, { saveFresh: true }); // P6.1: ghi đè project.json bằng video thành phẩm mới
+        renderMediaList();
+      }, 800);
+    }
+
+    async function applyTimelineEditsSync(payload) {
+      const res = await fetch('/api/workflow/timeline/apply-edits', {
+        method: 'POST',
+        headers: RENDER_TOKEN_HEADERS(),
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (res.ok && (data.status === 'ok' || data.success)) {
+        handleApplyEditsSuccess(data);
+      } else {
+        showToast(`❌ Lỗi cắt ghép video: ${data.detail || 'Thất bại'}`);
+      }
+    }
+
     async function applyTimelineEditsToServer() {
       if (!currentVideo || !currentVideo.stem) {
         showToast('⚠️ Vui lòng chọn một video trước!');
@@ -6871,133 +6996,74 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       }
 
       const btn = document.getElementById('btnApplyTimelineEdits');
+
+      // P6.3: đang có job render → bấm lần nữa = HUỶ
+      if (_activeRenderJobId) {
+        try {
+          await fetch('/api/workflow/timeline/render-cancel', {
+            method: 'POST',
+            headers: RENDER_TOKEN_HEADERS(),
+            body: JSON.stringify({ job_id: _activeRenderJobId })
+          });
+          showToast('⏹️ Đã gửi yêu cầu huỷ render...');
+        } catch (err) { /* bỏ qua lỗi mạng */ }
+        return;
+      }
+
+      const payload = buildTimelineRenderPayload();
       if (btn) {
         btn.disabled = true;
-        btn.innerText = '⏳ Đang ghép video bằng GPU...';
+        btn.innerText = '⏳ Đang gửi job...';
       }
-      showToast(`🎬 Đang dùng GPU FFmpeg cắt và ghép nối ${videoClipsState.length} đoạn video...`);
+      showToast(`🎬 Đang tạo job render nền cho ${videoClipsState.length} đoạn video...`);
 
       try {
-        const payload = {
-          stem: currentVideo.stem,
-          clips: videoClipsState.map(c => ({
-            start: parseFloat(c.start.toFixed(3)),
-            end: parseFloat(c.end.toFixed(3)),
-            // P2: gửi kèm thuộc tính clip cho backend dựng filter
-            speed: clipSpeedOf(c),
-            volume: (typeof c.volume === 'number') ? parseFloat(c.volume.toFixed(3)) : 1,
-            muted: !!c.muted,
-            keepPitch: c.keepPitch !== false,
-            fadeIn: parseFloat((c.fadeIn || 0).toFixed(3)),
-            fadeOut: parseFloat((c.fadeOut || 0).toFixed(3)),
-            crop: c.crop || null,
-            rotate: c.rotate || 0,
-            flipH: !!c.flipH,
-            flipV: !!c.flipV,
-            reverse: !!c.reverse,
-            freeze: parseFloat((c.freeze || 0).toFixed(3)),
-            detachAudio: !!c.detachAudio,
-            // P4: chuyển cảnh + filter màu
-            trans: c.trans ? { type: c.trans.type, dur: +(+(c.trans.dur) || 0.5).toFixed(3) } : null,
-            fx: c.fx ? {
-              brightness: +(c.fx.brightness || 0).toFixed(3),
-              contrast: +((c.fx.contrast === undefined ? 1 : c.fx.contrast)).toFixed(3),
-              saturation: +((c.fx.saturation === undefined ? 1 : c.fx.saturation)).toFixed(3),
-              temperature: +(c.fx.temperature || 0).toFixed(3),
-              blur: +(c.fx.blur || 0).toFixed(2),
-              vignette: !!c.fx.vignette
-            } : null
-          })),
-          // P3: chữ tự do + logo/overlay (at/dur theo timeline — backend tự map về file xuất)
-          text_clips: (getTextTrack()?.clips || []).map(c => ({
-            id: c.id,
-            text: c.text || '',
-            at: +(c.at || 0).toFixed(3),
-            dur: +(c.dur || 3).toFixed(3),
-            pos: { x: +(c.pos?.x ?? 0.5).toFixed(4), y: +(c.pos?.y ?? 0.8).toFixed(4) },
-            style: {
-              fontSize: c.style?.fontSize || 64,
-              color: c.style?.color || '#FFFFFF',
-              outlineColor: c.style?.outlineColor || '#000000',
-              outlineWidth: c.style?.outlineWidth === undefined ? 3 : c.style.outlineWidth,
-              bgOpacity: c.style?.bgOpacity || 0,
-              bold: !!c.style?.bold
-            },
-            animIn: c.animIn || 'none',
-            animOut: c.animOut || 'none'
-          })),
-          overlay_clips: (getOverlayTrack()?.clips || []).map(c => ({
-            id: c.id,
-            src: c.src || '',
-            at: +(c.at || 0).toFixed(3),
-            dur: +(c.dur || 3).toFixed(3),
-            pos: { x: +(c.pos?.x ?? 0.5).toFixed(4), y: +(c.pos?.y ?? 0.85).toFixed(4) },
-            scale: c.scale === undefined ? 1 : c.scale,
-            opacity: c.opacity === undefined ? 1 : c.opacity
-          })),
-          // P5: nhạc/SFX trộn lên audio nền (volume/fade/ducking từng clip)
-          audio_clips: (getMusicTrack()?.clips || []).map(c => ({
-            id: c.id,
-            src: c.src || '',
-            at: +(c.at || 0).toFixed(3),
-            dur: +(c.dur || 3).toFixed(3),
-            volume: (typeof c.volume === 'number') ? +c.volume.toFixed(3) : 1,
-            fadeIn: parseFloat((c.fadeIn || 0).toFixed(3)),
-            fadeOut: parseFloat((c.fadeOut || 0).toFixed(3)),
-            muted: !!c.muted,
-            duck: !!c.duck
-          })),
-          target_version: currentVideoVersion || 'final'
-        };
-
-        const res = await fetch('/api/workflow/timeline/apply-edits', {
+        const res = await fetch('/api/workflow/timeline/apply-edits-async', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Local-Control-Token': (typeof CONTROL_PLANE_TOKEN !== 'undefined' ? CONTROL_PLANE_TOKEN : '__REPLACE_TOKEN__'),
-            'X-Dashboard-Input': '1'
-          },
+          headers: RENDER_TOKEN_HEADERS(),
           body: JSON.stringify(payload)
         });
-
+        if (res.status === 404) {
+          // backend cũ chưa có P6.3 → fallback render đồng bộ
+          await applyTimelineEditsSync(payload);
+          return;
+        }
         const data = await res.json();
-        if (res.ok && (data.status === 'ok' || data.success)) {
-          showToast(`🎉 ${data.message}`);
+        if (!res.ok || !data.job_id) {
+          showToast(`❌ ${data.detail || 'Không tạo được job render'}`);
+          return;
+        }
+        _activeRenderJobId = data.job_id;
+        if (btn) btn.innerText = '⏳ Trong hàng đợi GPU... (bấm để huỷ)';
 
-          // Reload player with newly concatenated video
-          if (data.video_url && mainPlayer) {
-            currentVideo.has_final = true;
-            if (currentVideoData) {
-              currentVideoData.has_final = true;
-              currentVideoData.final_video_url = data.final_video_url;
-              currentVideoData.video_url = data.video_url;
-            }
-            mainPlayer.src = data.video_url;
-            mainPlayer.load();
-            mainPlayer.play().catch(() => {});
+        // Poll tiến độ tới khi xong / lỗi / huỷ
+        while (_activeRenderJobId) {
+          await new Promise(r => setTimeout(r, 800));
+          const sres = await fetch(`/api/workflow/timeline/render-status?job_id=${encodeURIComponent(_activeRenderJobId)}`);
+          if (!sres.ok) throw new Error('Mất kết nối tới job render');
+          const st = await sres.json();
+          if (btn) btn.innerText = `⏳ ${st.progress || 0}% — ${st.stage || 'Đang xử lý'} (bấm để huỷ)`;
+          if (st.status === 'done') {
+            _activeRenderJobId = null;
+            handleApplyEditsSuccess(st.result || {});
+            break;
           }
-
-          if (data.subtitles && data.subtitles.length) {
-            currentSubtitles = data.subtitles;
-            if (currentVideoData) {
-              currentVideoData.vietnamese_subtitles = data.subtitles;
-            }
-            renderSubtitlesTimeline();
-            updateSubtitlesOverlay();
+          if (st.status === 'error') {
+            _activeRenderJobId = null;
+            showToast(`❌ Lỗi render: ${st.stage || st.error || 'Thất bại'}`);
+            break;
           }
-
-          setTimeout(() => {
-            initVideoClipsForCurrentVideo(true, { saveFresh: true }); // P6.1: ghi đè project.json bằng video thành phẩm mới
-            renderMediaList();
-          }, 800);
-
-        } else {
-          showToast(`❌ Lỗi cắt ghép video: ${data.detail || 'Thất bại'}`);
+          if (st.status === 'cancelled') {
+            _activeRenderJobId = null;
+            showToast('⏹️ Đã huỷ render');
+            break;
+          }
         }
       } catch (err) {
         console.error('Lỗi cắt ghép video:', err);
         showToast('❌ Lỗi kết nối khi gửi yêu cầu cắt ghép video.');
       } finally {
+        _activeRenderJobId = null;
         if (btn) {
           btn.disabled = false;
           btn.innerText = '💾 ÁP DỤNG & GHÉP VIDEO';
