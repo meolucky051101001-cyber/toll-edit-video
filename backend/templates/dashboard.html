@@ -3072,9 +3072,12 @@ header {
       const step7Tag = document.getElementById(prefix ? prefix + 'Step7ModelTag' : 'step7ModelTag');
       if (step7Tag) {
         let duckMode = 'Soft Ducking';
-        const duckSelect = document.getElementById('duckingModeSelect');
+        const duckSelect = document.getElementById('duckModeSelect');
         if (duckSelect && duckSelect.value) {
-          duckMode = duckSelect.value === 'hard' ? 'Hard Ducking' : (duckSelect.value === 'none' ? 'No Ducking' : 'Soft Ducking');
+          const duckVal = duckSelect.value;
+          duckMode = (duckVal === 'off' || duckVal === 'none') ? 'No Ducking'
+            : (duckVal === 'medium' || duckVal === 'hard') ? 'Medium Ducking'
+            : 'Soft Ducking';
         }
         step7Tag.textContent = `Adaptive Mixer (${duckMode})`;
         step7Tag.title = 'Bộ hòa âm tự động Adaptive Audio Mixer (EBU R128 Loudness Normalization)';
@@ -4296,7 +4299,7 @@ let inputUploading=false;
           document.getElementById('logDot').title = 'Kết nối nhật ký đang hoạt động';
         } catch (err) {
           logDisconnected = true;
-          document.getElementById('logSummary').textContent = 'Không tải được nhật ký. Đang giữ dữ liệu cũ; sẽ tự thử lại.';
+          document.getElementById('logSummaryBadge').textContent = 'Không tải được nhật ký. Đang giữ dữ liệu cũ; sẽ tự thử lại.';
         } finally { logPending = false; }
       }
       async function legacyFetchLogs() {
@@ -4329,7 +4332,8 @@ let inputUploading=false;
     }
 
     function escapeHtml(text) {
-      return text
+      if (text == null) return '';
+      return String(text)
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
@@ -4498,6 +4502,7 @@ let inputUploading=false;
 
     let queuePending = false;
     let queueMoving = false;
+    let isSubmittingBatch = false;
 
     function renderQueueTable(items) {
       const tbody = document.getElementById('queueTableBody');
@@ -6837,7 +6842,7 @@ let inputUploading=false;
           closePreRunSummaryModal();
           clearPhoiSelection();
           fetchPhoi();
-          updateStatus();
+          fetchStatus();
         } else {
           const err = await res.json().catch(() => ({}));
           showToast(err.detail || err.message || 'Lỗi khi đưa video vào hàng chờ', 'error');
