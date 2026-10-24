@@ -1027,7 +1027,8 @@ async def api_get_auth_token():
 @app.get("/api/status")
 async def api_get_status():
     """Trả về trạng thái tiến độ thời gian thực của tác vụ hiện tại."""
-    status = job_tracker.get_status()
+    # get_status có thể chạy ffprobe xác minh thành phẩm — đẩy sang thread để không block event loop
+    status = await asyncio.to_thread(job_tracker.get_status)
     import video_pause
     status["pause_state"] = video_pause.state()
     status["stop_requested"] = bool(
@@ -1046,7 +1047,7 @@ async def api_get_status():
                 ]
                 vpath = next((p for p in candidates if p.is_file()), None)
                 if vpath:
-                    dec = route_video(vpath, requested_mode=status.get("video_mode") or "AUTO")
+                    dec = await asyncio.to_thread(route_video, vpath, requested_mode=status.get("video_mode") or "AUTO")
                     req_m = str(dec.requested_mode).upper()
                     res_m = dec.resolved_mode.value
                     lbl = f"AUTO · {res_m}" if req_m == "AUTO" else f"Thủ công · {res_m}"
@@ -1096,7 +1097,7 @@ async def api_get_queue():
             for item in data.get("items", []):
                 rs_vp = item.get("resume_state", {}).get("video_path")
                 if rs_vp and Path(rs_vp).is_file():
-                    dec = route_video(rs_vp, requested_mode=item.get("video_mode") or "AUTO")
+                    dec = await asyncio.to_thread(route_video, rs_vp, requested_mode=item.get("video_mode") or "AUTO")
                     req_m = str(dec.requested_mode).upper()
                     res_m = dec.resolved_mode.value
                     lbl = f"AUTO · {res_m}" if req_m == "AUTO" else f"Thủ công · {res_m}"
@@ -1864,10 +1865,13 @@ async def api_get_worker_settings():
 @app.post("/api/worker-settings")
 async def api_save_worker_settings(payload: dict = Body(...)):
     """Lưu cấu hình số luồng (1 hoặc 2) và ngưỡng bảo vệ VRAM."""
-    concurrency = int(payload.get("concurrency", 1))
-    auto_guard = bool(payload.get("auto_vram_guard", True))
-    max_thresh = float(payload.get("max_vram_percent_threshold", 85.0))
-    min_free = float(payload.get("min_free_vram_mb", 1800.0))
+    # Merge với cấu hình hiện tại: payload một phần (vd chỉ {concurrency}) không được
+    # ghi đè ngầm các ngưỡng VRAM người dùng đã chỉnh (lỗi trượt mặc định 1500 -> 1800).
+    current = get_worker_settings()
+    concurrency = int(payload.get("concurrency", current.get("concurrency", 1)))
+    auto_guard = bool(payload.get("auto_vram_guard", current.get("auto_vram_guard", True)))
+    max_thresh = float(payload.get("max_vram_percent_threshold", current.get("max_vram_percent_threshold", 85.0)))
+    min_free = float(payload.get("min_free_vram_mb", current.get("min_free_vram_mb", 1500.0)))
     return save_worker_settings(concurrency, auto_guard, max_thresh, min_free)
 
 

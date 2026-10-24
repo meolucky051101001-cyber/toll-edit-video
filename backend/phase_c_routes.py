@@ -6,6 +6,7 @@ Mountable on both Tool V1 (main.py) and Tool V2 (dashboard_monitor.py).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -25,6 +26,39 @@ from segment_editor_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Segment Editor (Phase C)"])
+
+
+def _job_is_being_processed(job_id: str) -> bool:
+    """True nếu video này đang được worker chính xử lý — chặn sửa câu song song gây đụng file giữa chừng."""
+    try:
+        from job_tracker import get_status
+        from segment_editor_service import sanitize_job_id as _sanitize
+
+        state = get_status()
+        if not state or not state.get("active"):
+            return False
+        try:
+            target = _sanitize(job_id)
+        except Exception:
+            target = str(job_id or "")
+        if not target:
+            return False
+        active_names = [state.get("video_name") or ""]
+        for w in (state.get("workers") or {}).values():
+            if isinstance(w, dict):
+                active_names.append(w.get("video_name") or "")
+        for name in active_names:
+            if not name:
+                continue
+            try:
+                name_clean = _sanitize(name)
+            except Exception:
+                name_clean = name
+            if target == name_clean or target in name_clean or name_clean in target:
+                return True
+    except Exception:
+        return False
+    return False
 
 
 class SaveSegmentsDraftRequest(BaseModel):
@@ -51,7 +85,7 @@ async def api_get_job_segments(job_id: str):
         raise HTTPException(status_code=400, detail="Thiếu mã job_id")
 
     try:
-        data = get_job_segments(job_id.strip())
+        data = await asyncio.to_thread(get_job_segments, job_id.strip())
         return data
     except InvalidJobIdentifier as bad_id:
         raise HTTPException(status_code=400, detail=str(bad_id))
@@ -69,7 +103,8 @@ async def api_save_job_segments_draft(job_id: str, req: SaveSegmentsDraftRequest
         raise HTTPException(status_code=400, detail="Thiếu mã job_id")
 
     try:
-        res = save_segment_draft(
+        res = await asyncio.to_thread(
+            save_segment_draft,
             job_id_or_name=job_id.strip(),
             updated_segments=req.segments,
             expected_revision=req.expected_revision,
@@ -94,6 +129,11 @@ async def api_regenerate_job_segments(job_id: str, req: RegenerateSegmentsReques
         raise HTTPException(status_code=400, detail="Thiếu mã job_id")
     if not req.segment_ids:
         raise HTTPException(status_code=400, detail="Danh sách câu cần tạo lại không được để rỗng")
+    if _job_is_being_processed(job_id.strip()):
+        raise HTTPException(
+            status_code=409,
+            detail="Video này đang được xử lý trong luồng chính. Vui lòng đợi hoàn tất trước khi tạo lại âm thanh câu.",
+        )
 
     try:
         res = await regenerate_segments(
@@ -120,6 +160,11 @@ async def api_publish_revised_job(job_id: str, req: PublishRevisedRequest):
     """
     if not job_id or not job_id.strip():
         raise HTTPException(status_code=400, detail="Thiếu mã job_id")
+    if _job_is_being_processed(job_id.strip()):
+        raise HTTPException(
+            status_code=409,
+            detail="Video này đang được xử lý trong luồng chính. Vui lòng đợi hoàn tất trước khi xuất bản bản sửa.",
+        )
 
     try:
         res = await publish_revised_video(
