@@ -1744,6 +1744,269 @@ async def api_prepend_thumbnail_to_video(payload: Dict[str, Any] = Body(...)):
 # FEATURE: CAPCUT-STYLE TIMELINE CUT, CLONE & CONCATENATION
 # =========================================================================
 
+# Giới hạn hiệu ứng clip P2
+_TIMELINE_SPEED_MIN = 0.25
+_TIMELINE_SPEED_MAX = 4.0
+_TIMELINE_REVERSE_MAX_SRC_SEC = 60.0  # reverse buffer toàn bộ frame trong RAM
+
+
+def _timeline_clip_effects(c: Dict[str, Any]) -> Dict[str, Any]:
+    """Đọc & kẹp giới hạn thuộc tính clip kiểu CapCut (speed/volume/fade/crop/...)."""
+
+    def _num(key: str, default: float, lo: float, hi: float) -> float:
+        try:
+            v = float(c.get(key, default) or default)
+        except (TypeError, ValueError):
+            v = default
+        return max(lo, min(hi, v))
+
+    speed = _num("speed", 1.0, _TIMELINE_SPEED_MIN, _TIMELINE_SPEED_MAX)
+    crop = None
+    crop_raw = c.get("crop") if isinstance(c.get("crop"), dict) else None
+    if crop_raw:
+        try:
+            cx = min(0.95, max(0.0, float(crop_raw.get("x", 0.0))))
+            cy = min(0.95, max(0.0, float(crop_raw.get("y", 0.0))))
+            cw = min(1.0, max(0.05, float(crop_raw.get("w", 1.0))))
+            ch = min(1.0, max(0.05, float(crop_raw.get("h", 1.0))))
+            cw = min(cw, 1.0 - cx)
+            ch = min(ch, 1.0 - cy)
+            crop = {"x": cx, "y": cy, "w": cw, "h": ch}
+        except Exception:
+            crop = None
+    rot = int(_num("rotate", 0, 0, 359))
+    rot = rot - (rot % 90)
+    return {
+        "speed": speed,
+        "volume": _num("volume", 1.0, 0.0, 2.0),
+        "muted": bool(c.get("muted")),
+        "keep_pitch": bool(c.get("keepPitch", True)),
+        "fade_in": _num("fadeIn", 0.0, 0.0, 10.0),
+        "fade_out": _num("fadeOut", 0.0, 0.0, 10.0),
+        "crop": crop,
+        "rotate": rot if rot in (90, 180, 270) else 0,
+        "flip_h": bool(c.get("flipH")),
+        "flip_v": bool(c.get("flipV")),
+        "reverse": bool(c.get("reverse")),
+        "freeze": _num("freeze", 0.0, 0.0, 10.0),
+        "detach_audio": bool(c.get("detachAudio")),
+    }
+
+
+def _atempo_chain(speed: float) -> List[str]:
+    """
+    Chuỗi atempo để giữ cao độ giọng khi đổi tốc độ.
+    FFmpeg chỉ nhận atempo trong [0.5, 2.0] nên phải phân tích thành tích các hệ số.
+    """
+    parts: List[str] = []
+    s = float(speed)
+    while s > 2.0 + 1e-9:
+        parts.append("atempo=2.0")
+        s /= 2.0
+    while s < 0.5 - 1e-9:
+        parts.append("atempo=0.5")
+        s *= 2.0
+    if abs(s - 1.0) > 1e-6:
+        parts.append(f"atempo={s:.5f}")
+    return parts
+
+
+def _build_timeline_filter_graph(
+    clips: List[Dict[str, Any]],
+    has_audio: bool,
+    src_w: int = 0,
+    src_h: int = 0,
+) -> Dict[str, Any]:
+    """
+    Sinh filter_complex hoàn chỉnh cho timeline CapCut (P2) — HÀM THUẦN để unit test.
+
+    Mỗi clip có thể mang: speed (0.25–4x, setpts + atempo giữ pitch), volume/mute,
+    fadeIn/fadeOut (video+audio), crop {x,y,w,h} chuẩn hóa (luôn format=yuv420p TRƯỚC
+    crop theo bug NVDEC nv12), rotate 90/180/270, flipH/flipV, reverse (giới hạn 60s
+    nguồn vì buffer cả đoạn trong RAM), freeze-frame đầu đoạn (tpad + im lặng audio
+    tương ứng) và detachAudio (audio giữ tốc độ gốc → chuyển sang mode amix+adelay).
+
+    Trả về: {"filter_lines", "mode": "concat"|"mix", "total_dur", "seg_starts",
+              "seg_durs", "effects"} — filter_lines kết thúc bằng [outv] (và [outa] nếu có âm thanh).
+    """
+    effects = [_timeline_clip_effects(c) for c in clips]
+    if not effects:
+        return {"filter_lines": [], "mode": "concat", "total_dur": 0.0, "seg_starts": [], "seg_durs": [], "effects": []}
+
+    filter_lines: List[str] = []
+    v_parts: List[str] = []
+    a_parts: List[str] = []
+    seg_starts: List[float] = []
+    seg_durs: List[float] = []
+
+    tl_cursor = 0.0
+    for idx, (c, eff) in enumerate(zip(clips, effects)):
+        st = c["start"]
+        en = c["end"]
+        src_dur = max(0.05, en - st)
+        speed = eff["speed"]
+        freeze = eff["freeze"]
+        tl_dur = src_dur / speed + freeze
+        tl_start = tl_cursor
+        tl_cursor += tl_dur
+        seg_starts.append(tl_start)
+        seg_durs.append(tl_dur)
+
+        # ---- VIDEO ----
+        v_tag = f"v{idx}"
+        vchain = [f"trim=start={st:.3f}:end={en:.3f}"]
+        if abs(speed - 1.0) > 1e-6:
+            vchain.append(f"setpts=(PTS-STARTPTS)/{speed:.5f}")
+        else:
+            vchain.append("setpts=PTS-STARTPTS")
+        # Ràng buộc repo: format=yuv420p PHẢI đứng trước crop/transpose (bug NVDEC nv12 xanh nửa phải)
+        vchain.append("format=yuv420p")
+        if freeze > 0:
+            vchain.append(f"tpad=start_duration={freeze:.3f}:start_mode=add:color=black")
+        if eff["crop"]:
+            cr = eff["crop"]
+            vchain.append(
+                "crop=w='trunc(iw*%.5f/2)*2':h='trunc(ih*%.5f/2)*2':"
+                "x='trunc(iw*%.5f/2)*2':y='trunc(ih*%.5f/2)*2'"
+                % (cr["w"], cr["h"], cr["x"], cr["y"])
+            )
+        if eff["rotate"] == 90:
+            vchain.append("transpose=1")
+        elif eff["rotate"] == 180:
+            vchain.append("transpose=1,transpose=1")
+        elif eff["rotate"] == 270:
+            vchain.append("transpose=2")
+        if eff["flip_h"]:
+            vchain.append("hflip")
+        if eff["flip_v"]:
+            vchain.append("vflip")
+        allow_reverse = eff["reverse"] and src_dur <= _TIMELINE_REVERSE_MAX_SRC_SEC
+        if eff["reverse"] and not allow_reverse:
+            logger.warning(
+                f"Timeline clip #{idx}: reverse bị bỏ qua vì đoạn dài {src_dur:.1f}s "
+                f">(giới hạn {_TIMELINE_REVERSE_MAX_SRC_SEC:.0f}s)"
+            )
+        if allow_reverse:
+            vchain.append("reverse")
+        if eff["fade_in"] > 0:
+            vchain.append(f"fade=t=in:st=0:d={eff['fade_in']:.3f}")
+        if eff["fade_out"] > 0:
+            vchain.append(f"fade=t=out:st={max(0.0, tl_dur - eff['fade_out']):.3f}:d={eff['fade_out']:.3f}")
+        # Sau crop/rotate kích thước thay đổi → ép về đúng kích thước nguồn để concat không lệch
+        needs_refit = bool(eff["crop"]) or eff["rotate"] in (90, 270)
+        if needs_refit and src_w > 0 and src_h > 0:
+            vchain.append(f"scale={src_w}:{src_h}:force_original_aspect_ratio=decrease")
+            vchain.append(f"pad={src_w}:{src_h}:(ow-iw)/2:(oh-ih)/2:color=black")
+        filter_lines.append("[0:v]" + ",".join(vchain) + f"[{v_tag}]")
+        v_parts.append(f"[{v_tag}]")
+
+        # ---- AUDIO ----
+        if has_audio:
+            a_tag = f"a{idx}"
+            achain = [f"atrim=start={st:.3f}:end={en:.3f}"]
+            if eff["muted"]:
+                achain.append("volume=0")  # vẫn giữ nhánh audio để concat đều
+            else:
+                if not eff["detach_audio"] and abs(speed - 1.0) > 1e-6:
+                    if eff["keep_pitch"]:
+                        achain.append("asetpts=PTS-STARTPTS")
+                        achain.extend(_atempo_chain(speed))
+                    else:
+                        achain.append(f"asetpts=(PTS-STARTPTS)/{speed:.5f}")
+                else:
+                    achain.append("asetpts=PTS-STARTPTS")
+                if abs(eff["volume"] - 1.0) > 1e-6:
+                    achain.append(f"volume={eff['volume']:.5f}")
+            if freeze > 0:
+                # im lặng đúng khoảng khung hình đóng băng để A/V khớp
+                achain.append(f"adelay={int(round(freeze * 1000))}:all=1")
+            if allow_reverse:
+                achain.append("areverse")
+            a_dur = src_dur if eff["detach_audio"] else tl_dur
+            if eff["fade_in"] > 0:
+                achain.append(f"afade=t=in:st=0:d={eff['fade_in']:.3f}")
+            if eff["fade_out"] > 0:
+                achain.append(f"afade=t=out:st={max(0.0, a_dur - eff['fade_out']):.3f}:d={eff['fade_out']:.3f}")
+            filter_lines.append("[0:a]" + ",".join(achain) + f"[{a_tag}]")
+            a_parts.append(f"[{a_tag}]")
+
+    n = len(clips)
+    total_dur = sum(seg_durs)
+    any_detach = has_audio and any(e["detach_audio"] for e in effects)
+
+    if has_audio and not any_detach:
+        # Mode proven: concat A/V đồng bộ từng cặp (không đổi hành vi cũ khi không có detach)
+        concat_in = "".join(v + a for v, a in zip(v_parts, a_parts))
+        filter_lines.append(f"{concat_in}concat=n={n}:v=1:a=1[outv][outa]")
+        mode = "concat"
+    elif has_audio:
+        # Mode tách audio: video concat riêng; audio từng clip đặt đúng vị trí timeline rồi trộn
+        filter_lines.append("".join(v_parts) + f"concat=n={n}:v=1:a=0[outv]")
+        for i, (a_tag, tl_start) in enumerate(zip(a_parts, seg_starts)):
+            filter_lines.append(f"{a_tag}adelay={int(round(tl_start * 1000))}:all=1[ad{i}]")
+        filter_lines.append(
+            "".join(f"[ad{i}]" for i in range(n)) + f"amix=inputs={n}:normalize=0:duration=longest[mixout]"
+        )
+        filter_lines.append(f"[mixout]apad=whole_dur={total_dur:.3f}[outa]")
+        mode = "mix"
+    else:
+        filter_lines.append("".join(v_parts) + f"concat=n={n}:v=1:a=0[outv]")
+        mode = "concat"
+
+    return {
+        "filter_lines": filter_lines,
+        "mode": mode,
+        "total_dur": total_dur,
+        "seg_starts": seg_starts,
+        "seg_durs": seg_durs,
+        "effects": effects,
+        "v_parts": v_parts,
+        "a_parts": a_parts,
+    }
+
+
+def _retime_subtitles_to_timeline(
+    trans_subs: List[Dict[str, Any]],
+    orig_subs: List[Dict[str, Any]],
+    clips: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Map phụ đề nguồn sang trục timeline đã ghép, tính cả speed/freeze từng clip (P2).
+    Trả về danh sách {index, start, end, start_str, end_str, text, original_text}.
+    """
+    updated: List[Dict[str, Any]] = []
+    accum = 0.0
+    new_idx = 1
+    for c in clips:
+        c_st = float(c.get("start", 0.0))
+        c_en = float(c.get("end", c_st + 1.0))
+        eff = _timeline_clip_effects(c)
+        clip_tl_dur = max(0.01, (c_en - c_st) / eff["speed"] + eff["freeze"])
+
+        for idx_s, s in enumerate(trans_subs):
+            s_st = float(s.get("start", 0.0))
+            s_en = float(s.get("end", s_st + 1.0))
+            ov_st = max(s_st, c_st)
+            ov_en = min(s_en, c_en)
+            if ov_en > ov_st + 0.2:
+                rel_st = accum + eff["freeze"] + (ov_st - c_st) / eff["speed"]
+                rel_en = accum + eff["freeze"] + (ov_en - c_st) / eff["speed"]
+                txt = (s.get("text") or "").strip()
+                orig_txt = orig_subs[idx_s].get("text", "") if idx_s < len(orig_subs) else ""
+                updated.append({
+                    "index": new_idx,
+                    "start": round(rel_st, 3),
+                    "end": round(rel_en, 3),
+                    "start_str": format_srt_timestamp(rel_st),
+                    "end_str": format_srt_timestamp(rel_en),
+                    "text": txt,
+                    "original_text": orig_txt,
+                })
+                new_idx += 1
+        accum += clip_tl_dur
+    return updated
+
+
 def _apply_timeline_edits_file(video_path: Path, clips: List[Dict[str, Any]], out_path: Path) -> bool:
     """
     Cắt, ghép nối và nhân bản các đoạn video theo danh sách clips:
@@ -1768,47 +2031,34 @@ def _apply_timeline_edits_file(video_path: Path, clips: List[Dict[str, Any]], ou
 
     v_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
     a_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    src_w = int(v_stream.get("width") or 0)
+    src_h = int(v_stream.get("height") or 0)
 
-    # Lọc danh sách clips hợp lệ
+    # Lọc danh sách clips hợp lệ (giữ nguyên thuộc tính hiệu ứng P2 client gửi kèm)
+    _effect_keys = ("speed", "volume", "muted", "keepPitch", "fadeIn", "fadeOut",
+                    "crop", "rotate", "flipH", "flipV", "reverse", "freeze", "detachAudio")
     valid_clips = []
     for c in clips:
         try:
             st = max(0.0, float(c.get("start", 0.0)))
             en = max(st + 0.05, float(c.get("end", st + 1.0)))
-            valid_clips.append({"start": st, "end": en})
+            entry = {"start": st, "end": en}
+            for k in _effect_keys:
+                if k in c:
+                    entry[k] = c[k]
+            valid_clips.append(entry)
         except Exception:
             pass
 
     if not valid_clips:
         return False
 
-    n = len(valid_clips)
-    filter_lines = []
-    v_parts = []
-    a_parts = []
+    graph = _build_timeline_filter_graph(valid_clips, bool(a_stream), src_w, src_h)
+    if not graph or not graph.get("filter_lines"):
+        return False
 
-    for idx, c in enumerate(valid_clips):
-        st = c["start"]
-        en = c["end"]
-        v_tag = f"v{idx}"
-        filter_lines.append(f"[0:v]trim=start={st:.3f}:end={en:.3f},setpts=PTS-STARTPTS[{v_tag}]")
-        v_parts.append(f"[{v_tag}]")
-
-        if a_stream:
-            a_tag = f"a{idx}"
-            filter_lines.append(f"[0:a]atrim=start={st:.3f}:end={en:.3f},asetpts=PTS-STARTPTS[{a_tag}]")
-            a_parts.append(f"[{a_tag}]")
-
-    if a_stream:
-        concat_inputs = "".join(v + a for v, a in zip(v_parts, a_parts))
-        filter_lines.append(f"{concat_inputs}concat=n={n}:v=1:a=1[outv][outa]")
-        audio_maps = ["-map", "[outa]", "-c:a", "aac", "-b:a", "192k"]
-    else:
-        concat_inputs = "".join(v_parts)
-        filter_lines.append(f"{concat_inputs}concat=n={n}:v=1:a=0[outv]")
-        audio_maps = []
-
-    filter_complex = ";".join(filter_lines)
+    filter_complex = ";".join(graph["filter_lines"])
+    audio_maps = ["-map", "[outa]", "-c:a", "aac", "-b:a", "192k"] if a_stream else []
     temp_out = out_path.parent / f"_temp_edit_{out_path.name}"
     temp_out.unlink(missing_ok=True)
 
@@ -1863,7 +2113,10 @@ async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
     Áp dụng cắt, ghép nối, nhân bản các đoạn video theo timeline giống CapCut.
     Payload:
       - stem: str
-      - clips: List[Dict[str, float]] (ví dụ: [{'start': 0, 'end': 5.2}, {'start': 10, 'end': 15}])
+      - clips: List[Dict] — mỗi clip:
+          {start, end, speed (0.25–4x), volume (0–2), muted, keepPitch, fadeIn, fadeOut,
+           crop {x,y,w,h} chuẩn hóa, rotate (0/90/180/270), flipH, flipV, reverse,
+           freeze (giây đóng băng đầu đoạn), detachAudio}
       - target_version: Optional[str] ('final' hoặc 'raw')
     """
     stem = payload.get("stem", "").strip()
@@ -1905,6 +2158,7 @@ async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=500, detail="Lỗi khi cắt ghép video bằng FFmpeg")
 
     # Tự động đồng bộ và căn chỉnh lại tệp phụ đề translated.srt theo timeline clips mới
+    # (P2: _retime_subtitles_to_timeline tính cả speed/freeze của từng clip)
     updated_subs = []
     trans_srt_file = job_dir / "translated.srt"
     orig_srt_file = job_dir / "original.srt"
@@ -1912,45 +2166,15 @@ async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
         try:
             old_trans_subs = parse_srt(trans_srt_file.read_text(encoding="utf-8", errors="replace"))
             old_orig_subs = parse_srt(orig_srt_file.read_text(encoding="utf-8", errors="replace")) if orig_srt_file.is_file() else []
-            
-            accum_dur = 0.0
+
+            updated_subs = _retime_subtitles_to_timeline(old_trans_subs, old_orig_subs, clips)
             new_trans_srt_blocks = []
             new_orig_srt_blocks = []
-            new_sub_idx = 1
-            
-            for c in clips:
-                c_st = float(c.get("start", 0.0))
-                c_en = float(c.get("end", c_st + 1.0))
-                c_dur = max(0.01, c_en - c_st)
-                
-                for idx_s, s in enumerate(old_trans_subs):
-                    s_st = float(s.get("start", 0.0))
-                    s_en = float(s.get("end", s_st + 1.0))
-                    
-                    ov_st = max(s_st, c_st)
-                    ov_en = min(s_en, c_en)
-                    if ov_en > ov_st + 0.2:
-                        rel_st = accum_dur + (ov_st - c_st)
-                        rel_en = accum_dur + (ov_en - c_st)
-                        txt = (s.get("text") or "").strip()
-                        orig_txt = old_orig_subs[idx_s].get("text", "") if idx_s < len(old_orig_subs) else ""
-                        
-                        updated_subs.append({
-                            "index": new_sub_idx,
-                            "start": round(rel_st, 3),
-                            "end": round(rel_en, 3),
-                            "start_str": format_srt_timestamp(rel_st),
-                            "end_str": format_srt_timestamp(rel_en),
-                            "text": txt,
-                            "original_text": orig_txt
-                        })
-                        new_trans_srt_blocks.append(f"{new_sub_idx}\n{format_srt_timestamp(rel_st)} --> {format_srt_timestamp(rel_en)}\n{txt}\n")
-                        if orig_txt:
-                            new_orig_srt_blocks.append(f"{new_sub_idx}\n{format_srt_timestamp(rel_st)} --> {format_srt_timestamp(rel_en)}\n{orig_txt}\n")
-                        new_sub_idx += 1
-                        
-                accum_dur += c_dur
-                
+            for u in updated_subs:
+                new_trans_srt_blocks.append(f"{u['index']}\n{u['start_str']} --> {u['end_str']}\n{u['text']}\n")
+                if u["original_text"]:
+                    new_orig_srt_blocks.append(f"{u['index']}\n{u['start_str']} --> {u['end_str']}\n{u['original_text']}\n")
+
             if new_trans_srt_blocks:
                 trans_srt_file.write_text("\n".join(new_trans_srt_blocks), encoding="utf-8")
             if new_orig_srt_blocks and orig_srt_file.is_file():
