@@ -7006,15 +7006,6 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       applySubtitleVisuals();
     }
 
-    function updateSubFontColor(val) {
-      canvasSettings.sub_font_color = val;
-      const hexEl = document.getElementById('subFontColorHex');
-      if (hexEl) hexEl.innerText = val.toUpperCase();
-      const pickEl = document.getElementById('subFontColorPicker');
-      if (pickEl) pickEl.value = val;
-      applySubtitleVisuals();
-    }
-
     function setSubFontColorPreset(val, el) {
       canvasSettings.sub_font_color = val;
       const pickEl = document.getElementById('subFontColorPicker');

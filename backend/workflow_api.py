@@ -3560,13 +3560,6 @@ async def api_manual_translate(payload: Dict[str, Any] = Body(...)):
     return {"status": "ok", "job_id": job_id}
 
 
-@router.get("/api/workflow/manual/job-status")
-async def api_manual_job_status(job_id: str = Query(...)):
-    job = _MANUAL_JOBS.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Không tìm thấy job")
-    return {"status": job.get("status"), "progress": job.get("progress", 0),
-            "stage": job.get("stage", ""), "kind": job.get("kind", ""), "result": job.get("result")}
 
 
 @router.get("/api/workflow/manual/job-status")
