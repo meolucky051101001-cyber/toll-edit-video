@@ -1218,7 +1218,7 @@ async def api_move_queue_item(request: Request):
         raise HTTPException(400, "Dữ liệu JSON không hợp lệ")
 
     index = payload.get("index")
-    action = payload.get("action", "up")  # 'up', 'down', 'top'
+    action = payload.get("action", "up")  # 'up', 'down', 'top', 'position' (kèm 'to')
 
     if index is None or not isinstance(index, int):
         raise HTTPException(400, "Vị trí index không hợp lệ")
@@ -1246,6 +1246,13 @@ async def api_move_queue_item(request: Request):
             target = items.pop(index)
             items.insert(0, target)
             msg = f"Đã đưa video lên đầu hàng chờ (#1)!"
+        elif action == "position" and isinstance(payload.get("to"), int):
+            to = max(0, min(int(payload["to"]), n - 1))
+            if to == index:
+                return {"status": "unchanged", "items": items, "message": "Vị trí không đổi"}
+            target = items.pop(index)
+            items.insert(to, target)
+            msg = f"Đã chuyển video #{index + 1} đến vị trí #{to + 1}!"
         elif action == "down" and index < n - 1:
             items[index], items[index + 1] = items[index + 1], items[index]
             msg = f"Đã chuyển video #{index + 1} xuống vị trí #{index + 2}!"
@@ -2124,6 +2131,219 @@ async def api_disk_usage():
         ]
 
     return {"drives": await asyncio.to_thread(_all)}
+
+
+# ===== GĐ4: F16 TÌM KIẾM TOÀN CỤC · F18 XUẤT/NHẬP CẤU HÌNH =====
+
+
+@app.get("/api/search")
+async def api_global_search(q: str = ""):
+    """F16 — tìm kiếm toàn cục: video phôi, thành phẩm, preset, glossary, lịch sử (fold tiếng Việt)."""
+    import unicodedata
+
+    query = q.strip()
+    if len(query) < 2:
+        return {"groups": []}
+
+    def _fold(s) -> str:
+        return "".join(
+            c for c in unicodedata.normalize("NFD", str(s).lower().replace("đ", "d"))
+            if unicodedata.category(c) != "Mn"
+        )
+
+    needle = _fold(query)
+
+    def _match(name) -> bool:
+        return needle in _fold(name)
+
+    def _run() -> list:
+        groups = []
+        try:
+            root = get_input_dir()
+            files = [e.name for e in root.iterdir() if e.is_file()] if root.is_dir() else []
+            hits = [n for n in files if _match(n)][:5]
+            if hits:
+                groups.append({"id": "phoi", "label": "Video Phôi", "items": [{"title": n} for n in hits]})
+        except Exception:
+            pass
+        try:
+            root = get_output_dir()
+            files = [e.name for e in root.iterdir() if e.is_file()] if root.is_dir() else []
+            hits = [n for n in files if _match(n)][:5]
+            if hits:
+                groups.append({"id": "banve", "label": "Thành phẩm", "items": [{"title": n} for n in hits]})
+        except Exception:
+            pass
+        try:
+            from preset_service import list_presets
+
+            hits = [p.get("name", "?") for p in list_presets(tool="v1") if _match(p.get("name", ""))][:5]
+            if hits:
+                groups.append({"id": "preset", "label": "Preset cấu hình", "items": [{"title": n} for n in hits]})
+        except Exception:
+            pass
+        try:
+            from ai.translation import load_custom_glossary
+
+            gl = load_custom_glossary(WORKSPACE)
+            hits = [f"{k} → {v}" for k, v in gl.items() if _match(k) or _match(v)][:5]
+            if hits:
+                groups.append({"id": "glossary", "label": "Glossary", "items": [{"title": n} for n in hits]})
+        except Exception:
+            pass
+        try:
+            hist = job_tracker.get_status().get("history", [])
+            hits = [h.get("video_name", "?") for h in hist if _match(h.get("video_name", ""))][:5]
+            if hits:
+                groups.append({"id": "history", "label": "Lịch sử đã xử lý", "items": [{"title": n} for n in hits]})
+        except Exception:
+            pass
+        return groups
+
+    return {"groups": await asyncio.to_thread(_run)}
+
+
+@app.get("/api/config/export")
+async def api_export_dashboard_config():
+    """F18 — xuất toàn bộ cấu hình Dashboard ra 1 file JSON (presets, drafts, glossary, mixer, worker, voice, flags)."""
+    import time as _time
+
+    def _collect() -> dict:
+        out = {"format": "toolv1-dashboard-config", "version": 1, "exported_at": _time.time()}
+        sections = {
+            "presets": lambda: __import__("preset_service").list_presets(tool="v1"),
+            "video_drafts": lambda: __import__("job_config_service").list_all_drafts(),
+            "glossary": lambda: __import__("ai.translation", fromlist=["x"]).load_custom_glossary(WORKSPACE),
+            "audio_settings": get_audio_settings,
+            "worker_settings": get_worker_settings,
+            "voice_auto": lambda: {
+                "config": __import__("ai.v1_auto_voice", fromlist=["x"]).get_auto_voice_config(WORKSPACE),
+                "enabled": __import__("ai.v1_auto_voice", fromlist=["x"]).get_auto_voice_enabled(WORKSPACE),
+            },
+            "feature_flags": lambda: __import__("v1_feature_flags").get_feature_flags(WORKSPACE),
+        }
+        for key, fn in sections.items():
+            try:
+                out[key] = fn()
+            except Exception:
+                continue
+        return out
+
+    return await asyncio.to_thread(_collect)
+
+
+@app.post("/api/config/import")
+async def api_import_dashboard_config(payload: dict = Body(...)):
+    """F18 — phục hồi cấu hình từ file JSON đã xuất. Chỉ nhận file đúng định dạng, áp dụng qua các hàm ghi chuẩn."""
+    data = payload.get("data")
+    if not isinstance(data, dict) or data.get("format") != "toolv1-dashboard-config":
+        raise HTTPException(status_code=400, detail="File cấu hình không hợp lệ (không phải bản xuất của Tool V1 Dashboard).")
+
+    def _apply() -> dict:
+        applied, skipped = [], []
+
+        presets = data.get("presets")
+        if isinstance(presets, list) and presets:
+            try:
+                from preset_service import create_preset
+
+                cnt = 0
+                for p in presets:
+                    if isinstance(p, dict):
+                        try:
+                            create_preset(p)
+                            cnt += 1
+                        except Exception:
+                            continue
+                applied.append(f"presets ({cnt} mục)")
+            except Exception:
+                skipped.append("presets")
+
+        drafts = data.get("video_drafts")
+        if isinstance(drafts, dict) and drafts:
+            try:
+                import job_config_service as jcs
+
+                cnt = 0
+                for name, d in drafts.items():
+                    if isinstance(d, dict):
+                        try:
+                            jcs.save_video_draft(str(name), d)
+                            cnt += 1
+                        except Exception:
+                            continue
+                applied.append(f"bản nháp video ({cnt} mục)")
+            except Exception:
+                skipped.append("video_drafts")
+
+        gl = data.get("glossary")
+        if isinstance(gl, dict) and gl:
+            try:
+                from ai.translation import save_custom_glossary
+
+                save_custom_glossary(entries=gl, merge=True, workspace=WORKSPACE)
+                applied.append(f"glossary ({len(gl)} mục)")
+            except Exception:
+                skipped.append("glossary")
+
+        aud = data.get("audio_settings")
+        if isinstance(aud, dict) and aud:
+            try:
+                save_audio_settings(
+                    aud.get("bgm_volume_db", -2.0),
+                    aud.get("dubbing_volume_db", 1.0),
+                    separation_mode=aud.get("separation_mode"),
+                    ducking_mode=aud.get("ducking_mode"),
+                    script_mode=aud.get("script_mode"),
+                )
+                applied.append("mixer âm thanh")
+            except Exception:
+                skipped.append("audio_settings")
+
+        ws = data.get("worker_settings")
+        if isinstance(ws, dict) and ws:
+            try:
+                save_worker_settings(
+                    int(ws.get("concurrency", 1)),
+                    bool(ws.get("auto_vram_guard", True)),
+                    float(ws.get("max_vram_percent_threshold", 85.0)),
+                    float(ws.get("min_free_vram_mb", 1500.0)),
+                )
+                applied.append("worker/VRAM")
+            except Exception:
+                skipped.append("worker_settings")
+
+        va = data.get("voice_auto")
+        if isinstance(va, dict) and isinstance(va.get("config"), dict):
+            try:
+                from ai.v1_auto_voice import set_auto_voice_config
+
+                cfg = va["config"]
+                set_auto_voice_config(
+                    enabled=va.get("enabled") if va.get("enabled") is not None else cfg.get("enabled"),
+                    female_voice_id=cfg.get("female_voice_id"),
+                    male_voice_id=cfg.get("male_voice_id"),
+                    dual_voice=cfg.get("dual_voice"),
+                    updated_by="config-import",
+                    workspace=WORKSPACE,
+                )
+                applied.append("auto voice")
+            except Exception:
+                skipped.append("voice_auto")
+
+        flags = data.get("feature_flags")
+        if isinstance(flags, dict) and flags:
+            try:
+                from v1_feature_flags import set_feature_flags
+
+                set_feature_flags(flags, workspace_path=WORKSPACE)
+                applied.append("feature flags")
+            except Exception:
+                skipped.append("feature_flags")
+
+        return {"status": "ok", "applied": applied, "skipped": skipped}
+
+    return await asyncio.to_thread(_apply)
 
 
 

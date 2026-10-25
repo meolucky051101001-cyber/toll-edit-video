@@ -1159,6 +1159,7 @@ header {
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
         Lịch sử
       </button>
+      <button type="button" class="btn btn-outline" onclick="openPalette()" title="Tìm kiếm & thực thi nhanh (Ctrl+K)" style="font-weight:600;">🔍 Ctrl+K</button>
       <button type="button" class="btn btn-outline" onclick="toggleNotifPanel(event)" title="Trung tâm thông báo & cảnh báo (video lỗi, VRAM, lịch chạy đêm)" style="position:relative;">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
         Thông báo
@@ -1182,6 +1183,15 @@ header {
       </div>
     </div>
     <div id="notifList" style="padding:6px 10px 10px;"></div>
+  </div>
+
+  <!-- F15/F16: COMMAND PALETTE + TÌM KIẾM TOÀN CỤC (Ctrl+K) -->
+  <div id="paletteOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:13000; backdrop-filter:blur(2px);" onclick="if(event.target===this) closePalette()">
+    <div style="max-width:640px; margin:9vh auto 0; background:#0f1117; border:1px solid rgba(255,255,255,0.14); border-radius:12px; box-shadow:0 25px 60px rgba(0,0,0,0.7); overflow:hidden;">
+      <input id="paletteInput" placeholder="Gõ lệnh hoặc tìm video, preset, glossary… (↑↓ di chuyển · Enter chạy · Esc đóng)" style="width:100%; box-sizing:border-box; background:#09090b; color:#f1f5f9; border:none; border-bottom:1px solid #27272a; padding:14px 16px; font-size:13.5px; outline:none;" oninput="onPaletteInput()" onkeydown="onPaletteKey(event)" autocomplete="off">
+      <div id="paletteResults" style="max-height:54vh; overflow:auto; padding:6px;"></div>
+      <div style="padding:6px 14px; border-top:1px solid #27272a; font-size:10px; color:#71717a;">F15/F16 · lệnh nội bộ + dữ liệu thật từ hệ thống</div>
+    </div>
   </div>
 
   <div class="container">
@@ -1799,13 +1809,15 @@ header {
           </div>
           <div class="panel-body" id="collapsibleLogBody" style="display: block; padding: 0;">
             <div style="display: flex; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); background: rgba(255, 255, 255, 0.02); align-items: center; flex-wrap: wrap;">
-              <input id="logSearch" style="flex: 1; min-width: 160px; background: #18181b; color: #e4e4e7; border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; font-size: 11.5px;" aria-label="Tìm nhật ký" placeholder="Tìm kiếm nội dung log (dịch, render, gemini…)" oninput="renderLogs()">
+              <input id="logSearch" style="flex: 1; min-width: 160px; background: #18181b; color: #e4e4e7; border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; font-size: 11.5px;" aria-label="Tìm nhật ký" placeholder="Tìm kiếm nội dung log (dịch, render, gemini…)" oninput="debounceRenderLogs()">
               <select id="logFilter" style="background: #18181b; color: #e4e4e7; border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 11.5px;" aria-label="Lọc mức nhật ký" onchange="renderLogs()">
                 <option value="all">Tất cả mức độ</option>
                 <option value="error">Chỉ Lỗi (Error)</option>
                 <option value="warn">Chỉ Cảnh báo (Warning)</option>
                 <option value="info">Chỉ Thông tin (Info)</option>
               </select>
+              <button type="button" class="btn btn-outline" id="logVideoOnlyBtn" style="font-size:10.5px; padding:4px 8px; white-space:nowrap;" onclick="toggleLogVideoOnly()" title="Chỉ hiện log liên quan video đang xử lý (F20)">🎬 Video chạy</button>
+              <button type="button" class="btn btn-outline" id="logScrollPauseBtn" style="font-size:10.5px; padding:4px 8px; color:#fbbf24; border-color:rgba(245,158,11,0.3); white-space:nowrap;" onclick="toggleLogScrollPause()" title="Giữ nguyên vị trí đang đọc, tạm dừng cuộn tự động (F20)">⏸ Cuộn</button>
               <div style="display: inline-flex; align-items: center; gap: 2px; background: #18181b; padding: 2px 4px; border: 1px solid var(--border); border-radius: 6px;">
                 <span style="font-size: 10.5px; color: var(--text-muted); margin-right: 2px;">Cỡ:</span>
                 <button class="btn btn-outline" style="padding: 1px 5px; font-size: 10.5px; line-height: 1;" onclick="adjustLogZoom(-1)" title="Giảm cỡ chữ">A-</button>
@@ -2226,6 +2238,9 @@ header {
 
         <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">
           <button type="button" class="btn btn-outline" style="font-size:11.5px; padding:5px 12px;" onclick="openWorkspaceManager()" title="Xem dung lượng từng job trong workspace và dọn file tách nhạc cũ (F12)">🧹 Quản lý Workspace</button>
+          <button type="button" class="btn btn-outline" style="font-size:11.5px; padding:5px 12px;" onclick="exportDashboardConfig()" title="Xuất toàn bộ cấu hình (preset, bản nháp, glossary, mixer, worker, voice) ra 1 file JSON (F18)">⬇ Xuất cấu hình</button>
+          <button type="button" class="btn btn-outline" style="font-size:11.5px; padding:5px 12px;" onclick="document.getElementById('configImportFile').click()" title="Phục hồi cấu hình từ file JSON đã xuất (F18)">⬆ Nhập cấu hình</button>
+          <input type="file" id="configImportFile" accept=".json,application/json" style="display:none;" onchange="importDashboardConfig(this)">
         </div>
 
         <details id="glossaryPanel" style="margin-top:10px; border:1px solid var(--border); border-radius:8px; background:var(--bg-card, #111116);">
@@ -3910,6 +3925,8 @@ let inputUploading=false;
     }
 
       let logText = '', logPending = false, logDisconnected = false;
+      let logParseCacheKey = null, logParseCacheEntries = [];
+      let logVideoOnly = false, logScrollPaused = false;
       let progressLogKey = '', progressVideoKey = '';
       let progressLogEntries = [];
       function observeProgressLog(state) {
@@ -4294,14 +4311,23 @@ let inputUploading=false;
         if (!tbody) return;
         const query = (document.getElementById('logSearch').value || '').toLowerCase().trim();
         const filter = document.getElementById('logFilter').value || 'all';
-        const entries = parseLogs(logText).concat(progressLogEntries);
+        // F20: cache kết quả parse theo nội dung log — không parse lại 500 dòng mỗi phím gõ
+        if (logParseCacheKey !== logText) {
+          logParseCacheKey = logText;
+          logParseCacheEntries = parseLogs(logText);
+        }
+        const entries = logParseCacheEntries.concat(progressLogEntries);
         entries.forEach(e => { if (/success=False/.test(e.message)) e.level = 'error'; });
 
+        const videoStem = (logVideoOnly && lastStatusData && lastStatusData.video_name)
+          ? String(lastStatusData.video_name).replace(/\.[^.]+$/, '').toLowerCase() : '';
+
         const visible = entries.filter(e => {
-          const explained = explainLog(e);
+          const explained = e._explained !== undefined ? e._explained : (e._explained = explainLog(e));
           const matchFilter = (filter === 'all' || e.level === filter);
           const matchQuery = !query || (e.raw + ' ' + explained + ' ' + (e.message || '')).toLowerCase().includes(query);
-          return matchFilter && matchQuery;
+          const matchVideo = !videoStem || (e.raw + ' ' + (e.message || '')).toLowerCase().includes(videoStem.slice(0, 40));
+          return matchFilter && matchQuery && matchVideo;
         });
         currentVisibleLogs = visible;
 
@@ -4327,7 +4353,7 @@ let inputUploading=false;
           : 'white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 420px;';
 
         tbody.innerHTML = visible.map((e, idx) => {
-          const safeMsg = escapeHtml(explainLog(e));
+          const safeMsg = escapeHtml(e._explained !== undefined ? e._explained : (e._explained = explainLog(e)));
           const safeTime = escapeHtml(e.time || '--:--:--');
           const shortTime = safeTime.length > 11 ? safeTime.slice(11) : safeTime;
           
@@ -4372,7 +4398,7 @@ let inputUploading=false;
         if (chk && chk.checked !== isLogWrap) chk.checked = isLogWrap;
 
         const container = document.getElementById('logTableContainer');
-        if (isAutoScroll && container) {
+        if (isAutoScroll && !logScrollPaused && container) {
           container.scrollTop = container.scrollHeight;
         }
       }
@@ -4433,7 +4459,7 @@ let inputUploading=false;
           }).join('');
 
           term.innerHTML = styled || 'Chưa có nhật ký nào.';
-          if (isAutoScroll) {
+          if (isAutoScroll && !logScrollPaused) {
             term.scrollTop = term.scrollHeight;
           }
         }
@@ -4644,7 +4670,7 @@ let inputUploading=false;
           ? '<span style="display:inline-block;padding:1px 6px;border-radius:4px;background:rgba(34,197,94,0.15);border:1px solid rgba(34,197,94,0.35);font-weight:700;font-size:11px;font-family:ui-monospace,monospace;color:#4ade80;" title="Sẽ xử lý ngay tiếp theo">#' + escapeHtml(posText) + '</span>'
           : '<span style="display:inline-block;padding:1px 6px;border-radius:4px;background:#18181b;border:1px solid var(--border);font-weight:600;font-size:11px;font-family:ui-monospace,monospace;">#' + escapeHtml(posText) + '</span>';
 
-        return '<tr>' +
+        return '<tr draggable="true" ondragstart="onQueueDragStart(event, ' + index + ')" ondragover="onQueueDragOver(event)" ondrop="onQueueDrop(event, ' + index + ')" ondragend="onQueueDragEnd(event)" style="cursor:grab;">' +
           '<td style="font-variant-numeric: tabular-nums;">' + posBadge + '</td>' +
           '<td style="font-weight:500;max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(item.name) + '">' + escapeHtml(item.name) + '</td>' +
           '<td class="queue-source-cell"><div class="queue-source-labels">' +
@@ -8099,6 +8125,345 @@ let inputUploading=false;
         loadWorkspaceUsage();
       } catch (e) { showToast('Lỗi: ' + e.message, 'error'); }
     }
+
+    /* ==========================================================================
+       GĐ4: F15 COMMAND PALETTE · F16 TÌM TOÀN CỤC · F17 PHÍM TẮT · F18 EXPORT/IMPORT · F19 KÉO-THẢ · F20 LOG
+       ========================================================================== */
+
+    // ===== F20: tiện ích log =====
+    let debounceRenderLogsTimer = null;
+    function debounceRenderLogs() {
+      clearTimeout(debounceRenderLogsTimer);
+      debounceRenderLogsTimer = setTimeout(renderLogs, 250);
+    }
+
+    function toggleLogVideoOnly() {
+      logVideoOnly = !logVideoOnly;
+      const b = document.getElementById('logVideoOnlyBtn');
+      if (b) {
+        b.style.color = logVideoOnly ? '#7dd3fc' : '';
+        b.style.borderColor = logVideoOnly ? 'rgba(56,189,248,0.5)' : '';
+      }
+      renderLogs();
+    }
+
+    function toggleLogScrollPause() {
+      logScrollPaused = !logScrollPaused;
+      const b = document.getElementById('logScrollPauseBtn');
+      if (b) b.textContent = logScrollPaused ? '▶ Đã giữ chỗ' : '⏸ Cuộn';
+    }
+
+    // ===== F19: kéo-thả hàng chờ =====
+    let queueDragFrom = null;
+
+    function onQueueDragStart(ev, idx) {
+      queueDragFrom = idx;
+      ev.dataTransfer.effectAllowed = 'move';
+      try { ev.dataTransfer.setData('text/plain', String(idx)); } catch (e) {}
+    }
+
+    function onQueueDragOver(ev) {
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = 'move';
+      const tr = ev.target.closest ? ev.target.closest('tr') : null;
+      if (tr) tr.style.outline = '1px dashed #38bdf8';
+    }
+
+    function onQueueDragEnd(ev) {
+      document.querySelectorAll('#queueTableBody tr').forEach(r => { r.style.outline = ''; });
+    }
+
+    async function onQueueDrop(ev, toIdx) {
+      ev.preventDefault();
+      onQueueDragEnd(ev);
+      const from = queueDragFrom;
+      queueDragFrom = null;
+      if (from === null || from === toIdx || queueMoving) return;
+      queueMoving = true;
+      try {
+        const res = await fetch('/api/queue/move', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({index: from, action: 'position', to: toIdx})
+        });
+        const data = await res.json();
+        if (res.ok && Array.isArray(data.items)) {
+          renderQueueTable(data.items);
+          document.getElementById('queueBadge').textContent = data.items.length + ' video';
+          showToast(data.message || 'Đã đổi thứ tự hàng chờ.', 'success');
+        } else if (data && data.message) {
+          showToast(data.message, 'info');
+        }
+      } catch (err) {
+        showToast('Lỗi kéo-thả: ' + err.message, 'error');
+      } finally {
+        queueMoving = false;
+      }
+    }
+
+    // ===== F18: xuất / nhập cấu hình =====
+    async function exportDashboardConfig() {
+      try {
+        showToast('Đang gom cấu hình để xuất…', 'info');
+        const res = await fetch('/api/config/export', {cache: 'no-store', signal: AbortSignal.timeout(20000)});
+        if (!res.ok) { showToast('Không xuất được cấu hình.', 'error'); return; }
+        const blob = await res.blob();
+        const now = new Date();
+        const pad = (x) => String(x).padStart(2, '0');
+        const fname = `toolv1-config-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.json`;
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = fname;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+        showToast('Đã xuất file ' + fname, 'success');
+      } catch (e) { showToast('Lỗi xuất cấu hình: ' + e.message, 'error'); }
+    }
+
+    async function importDashboardConfig(inputEl) {
+      const file = inputEl && inputEl.files && inputEl.files[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        const sections = Object.keys(data).filter(k => !['format', 'version', 'exported_at'].includes(k));
+        if (!window.confirm(`Phục hồi cấu hình từ "${file.name}"?\nCác phần sẽ áp dụng: ${sections.join(', ')}.\n(Preset/bản nháp trùng tên sẽ bỏ qua, glossary sẽ gộp thêm.)`)) {
+          inputEl.value = '';
+          return;
+        }
+        const res = await fetch('/api/config/import', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({data, mode: 'merge'})
+        });
+        const d = await res.json();
+        if (!res.ok) { showToast(d.detail || 'File không hợp lệ.', 'error'); inputEl.value = ''; return; }
+        showToast('Đã nhập: ' + (d.applied || []).join(' · ') + (d.skipped && d.skipped.length ? ' (bỏ qua: ' + d.skipped.join(', ') + ')' : ''), 'success');
+        inputEl.value = '';
+        location.reload();
+      } catch (e) {
+        showToast('Không đọc được file: ' + e.message, 'error');
+        inputEl.value = '';
+      }
+    }
+
+    // ===== F15/F16: COMMAND PALETTE + TÌM KIẾM TOÀN CỤC =====
+    const PALETTE_COMMANDS = [
+      {label: '▶ Chạy batch xử lý', kw: 'run batch start chạy', run: () => startBatch()},
+      {label: '⏹ Dừng khẩn cấp toàn bộ', kw: 'stop dừng halt', run: () => { if (typeof stopBatch === 'function') stopBatch(); else showToast('Không tìm thấy hàm dừng.', 'error'); }},
+      {label: '🎬 Xử lý hàng chờ ngay', kw: 'queue process hàng chờ', run: () => processQueue()},
+      {label: '🗑 Xóa sạch hàng chờ', kw: 'queue clear xóa', run: () => clearQueue()},
+      {label: '🌙 Lên lịch chạy đêm', kw: 'schedule night đêm', run: () => scheduleNightBatch()},
+      {label: '🟢 Đổi sang 1 luồng xử lý', kw: 'worker concurrency luồng 1', run: () => changeWorkerConcurrency(1)},
+      {label: '⚡ Đổi sang 2 luồng so le', kw: 'worker concurrency luồng 2', run: () => changeWorkerConcurrency(2)},
+      {label: '🩺 Kiểm tra Preflight', kw: 'preflight health kiểm tra', run: () => openPreflightModal()},
+      {label: '🕘 Lịch sử xử lý', kw: 'history lịch sử', run: () => openTaskHistoryModal()},
+      {label: '🧹 Quản lý Workspace', kw: 'workspace dọn cleanup', run: () => openWorkspaceManager()},
+      {label: '🔔 Trung tâm thông báo', kw: 'notification thông báo', run: () => toggleNotifPanel()},
+      {label: '⬇ Xuất cấu hình ra file', kw: 'export config xuất sao lưu', run: () => exportDashboardConfig()},
+      {label: '⬆ Nhập cấu hình từ file', kw: 'import config nhập phục hồi', run: () => document.getElementById('configImportFile').click()},
+      {label: '🎬 Log: chỉ video đang chạy', kw: 'log filter video', run: () => toggleLogVideoOnly()},
+      {label: '⏸ Log: giữ chỗ đang đọc', kw: 'log scroll pause cuộn', run: () => toggleLogScrollPause()},
+      {label: '📊 Mở panel Thống kê', kw: 'stats thống kê', run: () => { const p = document.getElementById('statsPanel'); if (p) { p.open = true; p.scrollIntoView({behavior: 'smooth'}); } }},
+      {label: '📖 Mở panel Glossary & Gợi ý', kw: 'glossary từ điển', run: () => { const p = document.getElementById('glossaryPanel'); if (p) { p.open = true; p.scrollIntoView({behavior: 'smooth'}); fetchGlossaryUI(true); } }},
+      {label: '🎞 Mở Studio Quy Trình', kw: 'workflow quy trình capcut', run: () => { location.href = '/quy-trinh'; }},
+      {label: '✍️ Mở Studio Kịch Bản', kw: 'script kịch bản', run: () => { location.href = '/kich-ban'; }},
+      {label: '🔄 Tải lại trang', kw: 'reload refresh làm mới', run: () => location.reload()},
+    ];
+
+    let paletteSel = 0, paletteFlat = [], paletteSearchTimer = null, paletteSearchItems = [];
+
+    function openPalette() {
+      const ov = document.getElementById('paletteOverlay');
+      const inp = document.getElementById('paletteInput');
+      if (!ov || !inp) return;
+      ov.style.display = 'block';
+      paletteSearchItems = [];
+      inp.value = '';
+      paletteSel = 0;
+      renderPalette();
+      setTimeout(() => inp.focus(), 30);
+    }
+
+    function closePalette() {
+      const ov = document.getElementById('paletteOverlay');
+      if (ov) ov.style.display = 'none';
+    }
+
+    function fuzzyMatch(text, q) {
+      const t = String(text).toLowerCase(), s = String(q).toLowerCase();
+      let i = 0, score = 0;
+      for (const ch of s) {
+        if (ch === ' ') continue;
+        const idx = t.indexOf(ch, i);
+        if (idx === -1) return -1;
+        score += idx;
+        i = idx + 1;
+      }
+      return score;
+    }
+
+    function onPaletteInput() {
+      renderPalette();
+      clearTimeout(paletteSearchTimer);
+      const q = (document.getElementById('paletteInput').value || '').trim();
+      if (q.length >= 2) {
+        paletteSearchTimer = setTimeout(fetchPaletteSearch, 300);
+      } else {
+        paletteSearchItems = [];
+        renderPalette();
+      }
+    }
+
+    async function fetchPaletteSearch() {
+      const q = (document.getElementById('paletteInput').value || '').trim();
+      if (q.length < 2) return;
+      try {
+        const res = await fetch('/api/search?q=' + encodeURIComponent(q), {cache: 'no-store', signal: AbortSignal.timeout(8000)});
+        if (!res.ok) return;
+        const d = await res.json();
+        if ((document.getElementById('paletteInput').value || '').trim() !== q) return; // đã gõ tiếp
+        paletteSearchItems = [];
+        (d.groups || []).forEach(g => g.items.forEach(it => paletteSearchItems.push({group: g.id, label: g.label, title: it.title})));
+        renderPalette();
+      } catch (e) { /* tìm kiếm là bổ trợ */ }
+    }
+
+    function renderPalette() {
+      const box = document.getElementById('paletteResults');
+      if (!box) return;
+      const q = (document.getElementById('paletteInput').value || '').trim();
+      let cmds = PALETTE_COMMANDS;
+      if (q) {
+        cmds = PALETTE_COMMANDS
+          .map(c => ({c, s: Math.max(fuzzyMatch(c.label, q), fuzzyMatch(c.kw, q))}))
+          .filter(x => x.s >= 0)
+          .sort((a, b) => a.s - b.s)
+          .map(x => x.c)
+          .slice(0, 8);
+      } else {
+        cmds = PALETTE_COMMANDS.slice(0, 10);
+      }
+      paletteFlat = [];
+      let html = '';
+      if (cmds.length) {
+        html += '<div style="font-size:10px; color:#71717a; padding:4px 10px; text-transform:uppercase; letter-spacing:0.5px;">Lệnh</div>';
+        cmds.forEach(c => {
+          const idx = paletteFlat.push({type: 'cmd', run: c.run, label: c.label}) - 1;
+          html += paletteRowHtml(idx, '⚡', c.label, '');
+        });
+      }
+      if (paletteSearchItems.length) {
+        html += '<div style="font-size:10px; color:#71717a; padding:6px 10px 4px; text-transform:uppercase; letter-spacing:0.5px;">Dữ liệu</div>';
+        paletteSearchItems.slice(0, 12).forEach(it => {
+          const idx = paletteFlat.push({type: 'search', item: it, label: it.title}) - 1;
+          html += paletteRowHtml(idx, it.group === 'phoi' ? '📥' : it.group === 'banve' ? '📤' : it.group === 'preset' ? '📦' : it.group === 'glossary' ? '📖' : '🕘', it.title, it.label);
+        });
+      }
+      if (!paletteFlat.length) {
+        html = '<div style="padding:18px; text-align:center; color:#71717a; font-size:12px;">Không có kết quả. Gõ ít nhất 2 ký tự để tìm video/preset/glossary.</div>';
+      }
+      box.innerHTML = html;
+      highlightPaletteRow();
+    }
+
+    function paletteRowHtml(idx, icon, title, hint) {
+      return `<div class="palette-row" data-pidx="${idx}" style="display:flex; align-items:center; gap:10px; padding:8px 12px; border-radius:6px; cursor:pointer; font-size:12.5px; color:#e4e4e7;" onclick="runPaletteItem(${idx})" onmouseenter="paletteHover(${idx})">
+        <span style="width:20px; text-align:center;">${icon}</span>
+        <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(title)}</span>
+        ${hint ? `<span style="font-size:10px; color:#71717a; flex-shrink:0;">${escapeHtml(hint)}</span>` : ''}
+      </div>`;
+    }
+
+    function paletteHover(idx) { paletteSel = idx; highlightPaletteRow(); }
+
+    function highlightPaletteRow() {
+      document.querySelectorAll('.palette-row').forEach(el => {
+        el.style.background = Number(el.dataset.pidx) === paletteSel ? 'rgba(56,189,248,0.12)' : '';
+      });
+      const cur = document.querySelector(`.palette-row[data-pidx="${paletteSel}"]`);
+      if (cur) cur.scrollIntoView({block: 'nearest'});
+    }
+
+    function onPaletteKey(ev) {
+      if (ev.key === 'ArrowDown') { ev.preventDefault(); paletteSel = Math.min(paletteFlat.length - 1, paletteSel + 1); highlightPaletteRow(); }
+      else if (ev.key === 'ArrowUp') { ev.preventDefault(); paletteSel = Math.max(0, paletteSel - 1); highlightPaletteRow(); }
+      else if (ev.key === 'Enter') { ev.preventDefault(); runPaletteItem(paletteSel); }
+      else if (ev.key === 'Escape') { ev.preventDefault(); closePalette(); }
+    }
+
+    function runPaletteItem(idx) {
+      const item = paletteFlat[idx];
+      if (!item) return;
+      closePalette();
+      if (item.type === 'cmd') {
+        try { item.run(); } catch (e) { showToast('Lỗi chạy lệnh: ' + e.message, 'error'); }
+      } else {
+        runPaletteSearchItem(item.item);
+      }
+    }
+
+    function runPaletteSearchItem(it) {
+      const q = it.title;
+      if (it.group === 'phoi' || it.group === 'banve') {
+        const input = document.querySelector(`.table-quick-search[data-dashboard-search="${it.group}"]`);
+        if (input) {
+          input.value = q;
+          input.dispatchEvent(new Event('input', {bubbles: true}));
+          const panel = input.closest('.panel');
+          if (panel) panel.scrollIntoView({behavior: 'smooth', block: 'start'});
+          showToast(`Đã lọc bảng theo "${q.slice(0, 40)}…".`, 'info');
+          return;
+        }
+      }
+      if (it.group === 'preset' && typeof openPresetManagerModal === 'function') { openPresetManagerModal(); return; }
+      if (it.group === 'history' && typeof openTaskHistoryModal === 'function') { openTaskHistoryModal(); return; }
+      if (it.group === 'glossary') {
+        const p = document.getElementById('glossaryPanel');
+        if (p) { p.open = true; p.scrollIntoView({behavior: 'smooth'}); return; }
+      }
+      showToast(`Đã tìm thấy: ${q}`, 'info');
+    }
+
+    // ===== F17: phím tắt toàn cục & Segment Editor =====
+    document.addEventListener('keydown', (ev) => {
+      // Ctrl+K: bật/tắt palette
+      if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'k' || ev.key === 'K')) {
+        ev.preventDefault();
+        const po = document.getElementById('paletteOverlay');
+        if (po && po.style.display !== 'none') closePalette(); else openPalette();
+        return;
+      }
+      // F17: chỉ hoạt động khi Segment Editor đang mở
+      const segModal = document.getElementById('segmentEditorModal');
+      if (!segModal || segModal.style.display === 'none') return;
+      const inField = /^(INPUT|TEXTAREA|SELECT)$/.test((ev.target && ev.target.tagName) || '');
+      if (ev.key === 'Escape') { ev.preventDefault(); closeSegmentEditorModal(); return; }
+      if (ev.ctrlKey && ev.key === 'Enter') { ev.preventDefault(); saveSegmentDraft(); return; }
+      if (ev.ctrlKey && (ev.key === 'p' || ev.key === 'P')) {
+        ev.preventDefault();
+        const ta = document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('seg-text-input') ? document.activeElement : null;
+        const segId = ta && ta.dataset ? ta.dataset.segId : null;
+        if (segId) togglePlaySegmentAudio(segId);
+        else showToast('Đặt con trỏ vào ô văn bản của câu cần nghe, rồi bấm Ctrl+P.', 'info');
+        return;
+      }
+      if (ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+        if (inField && !ev.ctrlKey) return; // trong ô nhập: giữ caret di chuyển bình thường
+        ev.preventDefault();
+        const areas = Array.from(document.querySelectorAll('.seg-text-input'));
+        if (!areas.length) return;
+        const cur = areas.indexOf(document.activeElement);
+        const next = ev.key === 'ArrowUp' ? (cur <= 0 ? 0 : cur - 1) : (cur === -1 ? 0 : Math.min(areas.length - 1, cur + 1));
+        areas[next].focus();
+        areas[next].scrollIntoView({block: 'center', behavior: 'smooth'});
+        const row = areas[next].closest('tr');
+        if (row) {
+          row.style.transition = 'background 0.4s';
+          row.style.background = 'rgba(56,189,248,0.10)';
+          setTimeout(() => { row.style.background = ''; }, 800);
+        }
+      }
+    });
 
   </script>
 </body>
