@@ -780,24 +780,25 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
         except Exception:
             pass
 
-        # F1 — ghi 1 dòng thống kê; F13 — thông báo hoàn tất
-        try:
-            from stats_service import append_video_stats
-            append_video_stats(
-                video_name=video_name,
-                duration_s=(_CURRENT_STATE.get("router_info") or {}).get("duration_s") or 0.0,
-                total_s=duration_seconds,
-                step_durations=step_durations,
-                mode=_CURRENT_STATE.get("video_mode") or "",
-                ok=True,
-            )
-        except Exception:
-            pass
-        try:
-            from notification_service import push
-            push("success", "Hoàn tất video", f"{video_name} · mất {int(duration_seconds)}s", "pipeline")
-        except Exception:
-            pass
+        # F1 — ghi 1 dòng thống kê; F13 — thông báo hoàn tất (không phát sinh khi chạy pytest)
+        if not os.environ.get("PYTEST_CURRENT_TEST"):
+            try:
+                from stats_service import append_video_stats
+                append_video_stats(
+                    video_name=video_name,
+                    duration_s=(_CURRENT_STATE.get("router_info") or {}).get("duration_s") or 0.0,
+                    total_s=duration_seconds,
+                    step_durations=step_durations,
+                    mode=_CURRENT_STATE.get("video_mode") or "",
+                    ok=True,
+                )
+            except Exception:
+                pass
+            try:
+                from notification_service import push
+                push("success", "Hoàn tất video", f"{video_name} · mất {int(duration_seconds)}s", "pipeline")
+            except Exception:
+                pass
 
 
 def finish_batch():
@@ -831,12 +832,13 @@ def finish_batch():
         _save_state_to_disk()
         _release_batch_lock_unlocked(_CURRENT_STATE.get("job_id"))
 
-    try:
-        from notification_service import push
-        total = _CURRENT_STATE.get("queue_total", 0)
-        push("info", "Kết thúc hàng đợi", f"Đã chạy xong toàn bộ {total} video trong hàng chờ.", "pipeline")
-    except Exception:
-        pass
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        try:
+            from notification_service import push
+            total = _CURRENT_STATE.get("queue_total", 0)
+            push("info", "Kết thúc hàng đợi", f"Đã chạy xong toàn bộ {total} video trong hàng chờ.", "pipeline")
+        except Exception:
+            pass
 
 
 def release_batch(job_id: str) -> None:
@@ -879,11 +881,12 @@ def set_error(video_name: str, error_msg: str, fatal: bool = True, worker_id: Op
         })
         _save_state_to_disk()
 
-    try:
-        from notification_service import push
-        push("error", "Video xử lý lỗi", f"{video_name}: {error_msg}", "pipeline")
-    except Exception:
-        pass
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        try:
+            from notification_service import push
+            push("error", "Video xử lý lỗi", f"{video_name}: {error_msg}", "pipeline")
+        except Exception:
+            pass
 
 
 def request_stop():
