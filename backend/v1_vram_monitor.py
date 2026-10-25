@@ -137,6 +137,17 @@ def get_vram_stats(force_refresh: bool = False) -> Dict[str, Any]:
                 if pct >= max_thresh or free_mb < min_free:
                     reason = f"VRAM chạm ngưỡng nguy hiểm: {used_mb:.0f}MB/{total_mb:.0f}MB ({pct}%), chỉ còn {free_mb:.0f}MB trống."
                     trigger_vram_emergency_downgrade(reason)
+                elif (
+                    w_cfg.get("auto_throttled")
+                    and pct <= (max_thresh - 5.0)
+                    and free_mb >= (min_free + 500.0)
+                ):
+                    # Hysteresis: VRAM thoát ngưỡng với biên an toàn -> tự hồi phục số luồng như cấu hình gốc
+                    try:
+                        from worker_settings import reset_vram_throttle
+                        reset_vram_throttle()
+                    except Exception as reset_err:
+                        logger.debug("Không thể hồi phục số luồng sau khi VRAM hạ nhiệt: %s", reset_err)
                 w_cfg = get_worker_settings()
                 auto_throttled = w_cfg.get("auto_throttled", False)
                 throttle_reason = w_cfg.get("throttle_reason", "")

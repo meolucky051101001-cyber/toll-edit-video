@@ -137,7 +137,100 @@ def _subdivide_and_retry(translate_func, texts, **kwargs):
     return list(left_res) + list(right_res)
 
 
-def build_translation_prompt(texts, target_lang="vi", prior_context=None, with_vision=True, script_mode="default"):
+BUILTIN_GLOSSARY_PRESETS: Dict[str, Dict[str, str]] = {
+    "bjd_handmade": {
+        "bjd": "BJD",
+        "BJD": "BJD",
+        "手帐": "sổ tay Bullet Journal",
+        "贴手帐": "trang trí sổ tay",
+        "胶带": "băng dính Washi Tape",
+        "流麻": "quicksand shaker",
+        "咕卡": "trang trí thẻ Guka",
+    },
+    "architecture_sanheyuan": {
+        "三合院": "nhà tam hợp viện",
+        "四合院": "tứ hợp viện",
+        "占地": "diện tích đất",
+        "开间": "chiều ngang mặt tiền",
+        "进深": "chiều sâu ngôi nhà",
+        "堂屋": "gian chính giữa",
+    },
+    "football_sports": {
+        "梅西": "Messi",
+        "巴萨": "Barça",
+        "阿根廷": "Argentina",
+        "麦卡利斯特": "Mac Allister",
+        "迪马利亚": "Di María",
+        "C罗": "Cristiano Ronaldo",
+    },
+    "tech_hardware": {
+        "显卡": "card đồ họa",
+        "主板": "bo mạch chủ",
+        "散热器": "tản nhiệt",
+        "固态硬盘": "ổ cứng SSD",
+        "帧率": "mức FPS",
+    },
+}
+
+
+def _glossary_paths(workspace: Optional[str] = None) -> List[Path]:
+    base = Path(workspace) if workspace else Path(os.getenv("AUTODUB_WORKSPACE", str(Path(__file__).resolve().parents[2] / "workspace")))
+    return [
+        base / "bot_system" / "control" / "custom_glossary.json",
+        base / "control" / "custom_glossary.json",
+    ]
+
+
+def load_custom_glossary(workspace: Optional[str] = None) -> Dict[str, str]:
+    """Load user-configured custom glossary (Chinese -> Vietnamese) from workspace control directory."""
+    for p in _glossary_paths(workspace):
+        try:
+            if p.is_file():
+                raw = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    entries = raw.get("entries", raw) if "entries" in raw and isinstance(raw.get("entries"), dict) else raw
+                    return {
+                        str(k).strip(): str(v).strip()
+                        for k, v in entries.items()
+                        if str(k).strip() and str(v).strip() and not str(k).startswith("_")
+                    }
+        except Exception:
+            pass
+    return {}
+
+
+def save_custom_glossary(
+    entries: Dict[str, str],
+    preset: Optional[str] = None,
+    merge: bool = True,
+    workspace: Optional[str] = None,
+) -> Dict[str, str]:
+    """Save custom glossary atomically across workspace control directories."""
+    current = load_custom_glossary(workspace) if merge else {}
+    if preset and preset in BUILTIN_GLOSSARY_PRESETS:
+        current.update(BUILTIN_GLOSSARY_PRESETS[preset])
+    if entries and isinstance(entries, dict):
+        for k, v in entries.items():
+            k_clean = str(k).strip()
+            v_clean = str(v).strip()
+            if k_clean:
+                if v_clean:
+                    current[k_clean] = v_clean
+                else:
+                    current.pop(k_clean, None)
+    payload = json.dumps({"entries": current, "updated_at": time.time()}, ensure_ascii=False, indent=2)
+    for p in _glossary_paths(workspace):
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, p)
+        except Exception as exc:
+            logger.debug("Could not write custom glossary %s: %s", p, exc)
+    return current
+
+
+def build_translation_prompt(texts, target_lang="vi", prior_context=None, with_vision=True, script_mode="default", glossary=None):
     lang_name = "Tiếng Việt" if target_lang == "vi" else target_lang
     is_humorous = str(script_mode or "default").lower() in ("humorous", "hai_huoc", "haihuoc", "comedy")
 
@@ -188,11 +281,26 @@ Yêu cầu TỐI QUAN TRỌNG:
     if with_vision:
         prompt += "10. TRỰC QUAN: Hãy kết hợp các bức ảnh đính kèm từ video để chọn đại từ nhân xưng và danh từ chính xác tuyệt đối với ngữ cảnh.\n"
     prompt += "11. THUẬT NGỮ CÔNG NGHỆ & PHẦN CỨNG: Các tên card màn hình, CPU, GPU, đơn vị dung lượng (như RTX 4070, RX 6600 XT, Core i5, Ryzen 7, 2GB, 16GB, VRAM, FPS, CS2): BẮT BUỘC giữ nguyên tên chuẩn quốc tế, định dạng khoảng trắng rõ ràng giữa chữ và số (ví dụ: 'RTX 4070' thay vì 'RTX4070', '8 GB' hoặc '8GB'). Tuyệt đối KHÔNG dịch tên riêng hay mã hiệu kỹ thuật sang tiếng Việt.\n"
-    prompt += "12. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.\n"
+    active_glossary = load_custom_glossary()
+    if glossary and isinstance(glossary, dict):
+        active_glossary.update({str(k).strip(): str(v).strip() for k, v in glossary.items() if str(k).strip() and str(v).strip()})
+    if active_glossary and texts:
+        matched_glossary = {
+            k: v for k, v in active_glossary.items()
+            if any(k in str(t) for t in texts)
+        }
+        if matched_glossary:
+            glossary_str = ", ".join(f"'{k}' -> '{v}'" for k, v in matched_glossary.items())
+            prompt += f"12. TỪ ĐIỂN THUẬT NGỮ BẮT BUỘC (CUSTOM GLOSSARY): Khi gặp các từ gốc sau, BẮT BUỘC dịch chính xác theo quy ước: {glossary_str}.\n"
+            prompt += "13. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.\n"
+        else:
+            prompt += "12. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.\n"
+    else:
+        prompt += "12. CHỈ trả về mảng JSON chứa các chuỗi dịch, không giải thích, không markdown.\n"
     prompt += "Dữ liệu:\n"
     if prior_context:
         prompt += "Ngữ cảnh nối tiếp từ batch trước (để duy trì xưng hô và mạch truyện, KHÔNG dịch lại):\n"
-        prompt += json.dumps(list(prior_context), ensure_ascii=False) + "\n"
+        prompt += json.dumps(list(prior_context)[-4:], ensure_ascii=False) + "\n"
     prompt += json.dumps(texts, ensure_ascii=False)
     return prompt
 
@@ -320,10 +428,11 @@ def translate_with_gemini(
             chunk_texts = texts[i:i + chunk_size]
             chunk_kwargs = dict(kwargs)
             chunk_kwargs["job_id"] = f"{kwargs.get('job_id', 'translate')}_p{i // chunk_size + 1}"
+            rolling_context = all_translated[-4:] if all_translated else prior_context
             chunk_res = translate_with_gemini(
                 chunk_texts, target_lang=target_lang, api_key=api_key,
                 video_path=video_path, context_start_seconds=context_start_seconds,
-                context_end_seconds=context_end_seconds, prior_context=prior_context,
+                context_end_seconds=context_end_seconds, prior_context=rolling_context,
                 **chunk_kwargs
             )
             if not chunk_res or len(chunk_res) != len(chunk_texts):
@@ -334,7 +443,14 @@ def translate_with_gemini(
 
     try:
         script_mode = kwargs.get("script_mode") or os.getenv("SCRIPT_MODE", "default")
-        prompt = build_translation_prompt(texts, target_lang, prior_context, with_vision=True, script_mode=script_mode)
+        prompt = build_translation_prompt(
+            texts,
+            target_lang,
+            prior_context,
+            with_vision=True,
+            script_mode=script_mode,
+            glossary=kwargs.get("glossary"),
+        )
         parts = [{"text": prompt}]
         
         frames = kwargs.get("_vision_frames")
@@ -604,6 +720,9 @@ def ensure_speech_pauses_and_entity(
         return translated_texts
 
     active_entity_map = {}
+    custom_gloss = load_custom_glossary()
+    if custom_gloss:
+        active_entity_map.update(custom_gloss)
     if entity_map and isinstance(entity_map, dict):
         active_entity_map.update(entity_map)
     if glossary and isinstance(glossary, dict):

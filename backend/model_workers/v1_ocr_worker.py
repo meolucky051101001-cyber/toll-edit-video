@@ -11,6 +11,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping
 
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+
 if sys.platform == "win32":
     try:
         if hasattr(sys.stdout, "reconfigure"):
@@ -93,43 +95,70 @@ def _model(detection_model, recognition_model, engine):
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
         use_textline_orientation=False,
+        text_det_thresh=0.20,
+        text_det_box_thresh=0.40,
         engine=engine,
     )
+
+def _extract_rows_from_prediction(prediction: Any) -> list[dict[str, Any]]:
+    rows = []
+    data = _paddle_payload(prediction)
+    boxes = data.get("rec_polys")
+    if boxes is None or len(boxes) == 0:
+        boxes = data.get("dt_polys")
+    if boxes is None:
+        boxes = []
+    texts = data.get("rec_texts")
+    scores = data.get("rec_scores")
+    if texts is None:
+        texts = []
+    if scores is None:
+        scores = []
+    for index, text in enumerate(texts):
+        if index >= len(boxes):
+            break
+        rows.append(
+            {
+                "bbox": _json_value(boxes[index]),
+                "text": str(text),
+                "score": float(scores[index]) if index < len(scores) else 0.0,
+            }
+        )
+    return rows
+
 
 def _run(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     detection_model = str(payload.get("detection_model", "PP-OCRv6_tiny_det"))
     recognition_model = str(payload.get("recognition_model", "PP-OCRv6_tiny_rec"))
     engine = str(payload.get("engine", "onnxruntime"))
     ocr = _model(detection_model, recognition_model, engine)
+    raw_images = list(payload.get("images", []))
+    resolved_paths = [str(Path(p).resolve()) for p in raw_images]
     images = []
-    for image_path in payload.get("images", []):
-        resolved_path = str(Path(image_path).resolve())
-        predictions = list(ocr.predict(resolved_path))
-        rows = []
-        for prediction in predictions:
-            data = _paddle_payload(prediction)
-            boxes = data.get("rec_polys")
-            if boxes is None or len(boxes) == 0:
-                boxes = data.get("dt_polys")
-            if boxes is None:
-                boxes = []
-            texts = data.get("rec_texts")
-            scores = data.get("rec_scores")
-            if texts is None:
-                texts = []
-            if scores is None:
-                scores = []
-            for index, text in enumerate(texts):
-                if index >= len(boxes):
-                    break
-                rows.append(
-                    {
-                        "bbox": _json_value(boxes[index]),
-                        "text": str(text),
-                        "score": float(scores[index]) if index < len(scores) else 0.0,
-                    }
-                )
-        images.append({"path": str(image_path), "rows": rows})
+    batch_predictions = None
+    if len(resolved_paths) > 1:
+        try:
+            preds = list(ocr.predict(resolved_paths))
+            if len(preds) == len(resolved_paths):
+                batch_predictions = preds
+        except Exception:
+            batch_predictions = None
+
+    if batch_predictions is not None:
+        for image_path, prediction in zip(raw_images, batch_predictions):
+            images.append(
+                {
+                    "path": str(image_path),
+                    "rows": _extract_rows_from_prediction(prediction),
+                }
+            )
+    else:
+        for image_path, resolved_path in zip(raw_images, resolved_paths):
+            predictions = list(ocr.predict(resolved_path))
+            rows = []
+            for prediction in predictions:
+                rows.extend(_extract_rows_from_prediction(prediction))
+            images.append({"path": str(image_path), "rows": rows})
     return {
         "images": images,
         "gpu_sessions": len(_cuda_sessions),

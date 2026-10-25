@@ -88,24 +88,46 @@ def _get_index(seg: Any, default: int = 1) -> int:
     return default
 
 
+_AUDIO_WAVEFORM_CACHE: Dict[Tuple[str, int, int, int], Tuple[np.ndarray, int]] = {}
+
+
 def extract_segment_audio_slice(
     audio_path: str | Path,
     start_sec: float,
     end_sec: float,
     target_sr: int = 16000,
 ) -> Optional[Tuple[np.ndarray, int]]:
-    """Trich xuat doan mau audio [start_sec, end_sec] tai sample rate muc tieu."""
+    """Trich xuat doan mau audio [start_sec, end_sec] tai sample rate muc tieu (co cache waveform RAM cho Dual Voice)."""
     if not audio_path or not os.path.exists(str(audio_path)):
         return None
     try:
         import librosa
+        path_obj = Path(audio_path).resolve()
+        stat = path_obj.stat()
+        cache_key = (str(path_obj), int(stat.st_mtime_ns), int(stat.st_size), int(target_sr))
         duration = max(float(end_sec) - float(start_sec), 0.1)
-        y, sr = librosa.load(
-            str(audio_path),
-            sr=target_sr,
-            offset=max(0.0, float(start_sec)),
-            duration=duration,
-        )
+        offset = max(0.0, float(start_sec))
+
+        # Neu file am thanh <= 25 MB (~12 phut WAV 16kHz), cache toan bo mang 1D de cat lat cuc nhanh cho Dual Voice
+        if stat.st_size <= 25 * 1024 * 1024:
+            cached = _AUDIO_WAVEFORM_CACHE.get(cache_key)
+            if cached is None:
+                y_full, sr = librosa.load(str(path_obj), sr=target_sr)
+                while len(_AUDIO_WAVEFORM_CACHE) >= 2:
+                    _AUDIO_WAVEFORM_CACHE.pop(next(iter(_AUDIO_WAVEFORM_CACHE)))
+                _AUDIO_WAVEFORM_CACHE[cache_key] = (y_full, sr)
+            else:
+                y_full, sr = cached
+            s_idx = max(0, int(round(offset * sr)))
+            e_idx = min(len(y_full), int(round((offset + duration) * sr)))
+            y = y_full[s_idx:e_idx]
+        else:
+            y, sr = librosa.load(
+                str(path_obj),
+                sr=target_sr,
+                offset=offset,
+                duration=duration,
+            )
         if len(y) < sr * 0.1:
             return None
         return y, sr
@@ -757,13 +779,23 @@ def decide_video_voice(
     out_dir_path.mkdir(parents=True, exist_ok=True)
     lock_file = out_dir_path / VOICE_LOCK_FILENAME
 
-    actual_mode = voice_mode or get_auto_voice_mode(workspace)
+    raw_mode = (voice_mode or get_auto_voice_mode(workspace) or "auto").strip().lower()
+    dialogue_mode_requested = raw_mode in ("dialogue", "smart_dialogue", "dual") or (
+        os.getenv("V1_VOICE_DIALOGUE_MODE", "").strip().lower() in ("1", "true", "yes", "dialogue", "smart_dialogue")
+    )
+    actual_mode = "auto" if raw_mode in ("dialogue", "smart_dialogue", "dual") else raw_mode
     auto_cfg = voice_config if voice_config is not None else get_auto_voice_config(workspace)
-    is_dual = bool(auto_cfg.get("dual_voice", False))
+    is_dual = bool(auto_cfg.get("dual_voice", False)) or dialogue_mode_requested
     resolved_job_id = job_id or out_dir_path.name
     content_hash = compute_file_sha256(video_path or original_audio_path)
     config_hash = hashlib.sha256(json.dumps(
-        {key: auto_cfg.get(key) for key in ("dual_voice", "female_voice_id", "male_voice_id", "manual_voice")},
+        {
+            "dual_voice": is_dual,
+            "female_voice_id": auto_cfg.get("female_voice_id"),
+            "male_voice_id": auto_cfg.get("male_voice_id"),
+            "manual_voice": auto_cfg.get("manual_voice"),
+            "dialogue_mode": dialogue_mode_requested,
+        },
         sort_keys=True, ensure_ascii=False, default=str,
     ).encode("utf-8")).hexdigest()
 
@@ -816,6 +848,43 @@ def decide_video_voice(
             return_details=True,
         )
         gender_map = {i: evidence["gender"] for i, evidence in gender_evidence.items()}
+        # Smart Dialogue Hysteresis Smoothing: neu cau ngan/cam than bi unknown nhung nam giua
+        # hoac ngay sau cau da xac dinh gioi tinh do tin cay cao (>= 0.80, cach nhau <= 2.5s),
+        # ke thua gioi tinh nguoi dang noi de tranh nhay sang giong thu 3 giua hoi thoai.
+        if dialogue_mode_requested or bool(auto_cfg.get("smart_dialogue_smoothing", False)):
+            ordered_indices = [_get_index(s, idx + 1) for idx, s in enumerate(srt_segments)]
+            for pos, s_idx in enumerate(ordered_indices):
+                if gender_map.get(s_idx) != "unknown":
+                    continue
+                prev_idx = ordered_indices[pos - 1] if pos > 0 else None
+                next_idx = ordered_indices[pos + 1] if pos + 1 < len(ordered_indices) else None
+                prev_g = gender_map.get(prev_idx, "unknown") if prev_idx is not None else "unknown"
+                next_g = gender_map.get(next_idx, "unknown") if next_idx is not None else "unknown"
+                prev_conf = float(gender_evidence.get(prev_idx, {}).get("confidence", 0.0)) if prev_idx is not None else 0.0
+                next_conf = float(gender_evidence.get(next_idx, {}).get("confidence", 0.0)) if next_idx is not None else 0.0
+                if prev_g in ("male", "female") and prev_g == next_g and max(prev_conf, next_conf) >= 0.80:
+                    gender_map[s_idx] = prev_g
+                    if s_idx in gender_evidence and isinstance(gender_evidence[s_idx], dict):
+                        gender_evidence[s_idx] = dict(
+                            gender_evidence[s_idx],
+                            gender=prev_g,
+                            confidence=round(min(prev_conf, next_conf) * 0.9, 3),
+                            reason="hysteresis_sandwiched_speaker",
+                        )
+                elif prev_g in ("male", "female") and prev_conf >= 0.82:
+                    cur_seg = srt_segments[pos]
+                    prev_seg = srt_segments[pos - 1]
+                    gap_s = max(0.0, _get_start_sec(cur_seg) - _get_end_sec(prev_seg))
+                    dur_s = max(0.0, _get_end_sec(cur_seg) - _get_start_sec(cur_seg))
+                    if gap_s <= 2.0 and dur_s <= 1.8:
+                        gender_map[s_idx] = prev_g
+                        if s_idx in gender_evidence and isinstance(gender_evidence[s_idx], dict):
+                            gender_evidence[s_idx] = dict(
+                                gender_evidence[s_idx],
+                                gender=prev_g,
+                                confidence=round(prev_conf * 0.85, 3),
+                                reason="hysteresis_short_continuation",
+                            )
         pitch_elapsed = time.perf_counter() - t0
 
         female_voice_info = resolve_locked_voice(

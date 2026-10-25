@@ -16,6 +16,8 @@ import shutil
 import uuid
 import hashlib
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+import json
 
 # Cấu hình UTF-8 cho console Windows
 import io

@@ -782,3 +782,88 @@ def call_gemini_api(
                 break
 
     raise GeminiAllModelsFailedError(f"All candidate Gemini models failed for {purpose}: {mask_secret(str(last_exception))}") from last_exception
+
+
+def get_gemini_pool_health(explicit_key: Optional[str] = None) -> Dict[str, Any]:
+    """Return real-time health, cooldowns, and model circuit status across all configured Gemini API keys."""
+    now = time.time()
+    try:
+        keys = get_gemini_api_keys(explicit_key)
+    except Exception as exc:
+        return {
+            "status": "unconfigured",
+            "error": mask_secret(str(exc)),
+            "total_keys": 0,
+            "active_keys": 0,
+            "keys": [],
+            "default_translation_models": DEFAULT_TRANSLATION_MODELS,
+        }
+
+    cb = GeminiCircuitBreaker()
+    account_rows: Dict[str, Dict[str, Any]] = {}
+    model_rows: Dict[str, List[Dict[str, Any]]] = {}
+
+    try:
+        if cb.db_path.is_file():
+            with sqlite3.connect(str(cb.db_path), timeout=5.0) as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT account_hash, quota_exhausted_until, last_error_type, consecutive_429, last_used FROM account_circuit"
+                )
+                for acc_h, q_until, err_t, c_429, l_used in cur.fetchall():
+                    account_rows[str(acc_h)] = {
+                        "quota_exhausted_until": float(q_until or 0.0),
+                        "last_error_type": err_t,
+                        "consecutive_429": int(c_429 or 0),
+                        "last_used": float(l_used or 0.0),
+                    }
+                cur.execute(
+                    "SELECT account_hash, model, purpose, state, cooldown_until, consecutive_failures, last_error_type, last_error_code, last_success "
+                    "FROM model_circuit"
+                )
+                for acc_h, m_name, purp, st, cd_until, c_fail, err_t, err_c, l_succ in cur.fetchall():
+                    rem = max(0.0, float(cd_until or 0.0) - now)
+                    eff_state = st if rem > 0 else ("ACTIVE" if st == "COOLDOWN" else st)
+                    model_rows.setdefault(str(acc_h), []).append({
+                        "model": m_name,
+                        "purpose": purp,
+                        "state": eff_state,
+                        "cooldown_remaining_sec": round(rem, 1),
+                        "consecutive_failures": int(c_fail or 0),
+                        "last_error_type": err_t,
+                        "last_error_code": err_c,
+                        "last_success": l_succ,
+                    })
+    except Exception as db_err:
+        logger.debug("get_gemini_pool_health DB query warning: %s", db_err)
+
+    key_items = []
+    active_count = 0
+    for idx, k in enumerate(keys, 1):
+        acc_h = _get_account_hash(k)
+        masked = f"{k[:6]}...{k[-4:]}" if len(k) > 12 else "AIza..."
+        acc_info = account_rows.get(acc_h, {})
+        q_until = float(acc_info.get("quota_exhausted_until", 0.0))
+        cd_rem = max(0.0, q_until - now)
+        is_exhausted = cd_rem > 0
+        if not is_exhausted:
+            active_count += 1
+        key_items.append({
+            "index": idx,
+            "account_hash": acc_h,
+            "masked_key": masked,
+            "status": "COOLDOWN_429" if is_exhausted else "ACTIVE",
+            "cooldown_remaining_sec": round(cd_rem, 1),
+            "consecutive_429": int(acc_info.get("consecutive_429", 0)),
+            "last_error_type": acc_info.get("last_error_type"),
+            "last_used": acc_info.get("last_used") or None,
+            "models": model_rows.get(acc_h, []),
+        })
+
+    return {
+        "status": "healthy" if active_count > 0 else "degraded",
+        "total_keys": len(keys),
+        "active_keys": active_count,
+        "keys": key_items,
+        "default_translation_models": DEFAULT_TRANSLATION_MODELS,
+    }

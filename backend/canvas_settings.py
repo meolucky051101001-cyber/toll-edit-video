@@ -57,11 +57,14 @@ DEFAULT_CANVAS_SETTINGS: Dict[str, Any] = {
     "sub_stroke_width": 0,       # Độ dày viền chữ (0 - 6px)
     "sub_shadow": False,         # Đổ bóng chữ
     "sub_preset": "custom",      # Preset phong cách chữ nhanh
+    "sub_cover_style": "solid_box", # "solid_box" (hộp nền đặc mặc định) hoặc "frosted_blur" (kính mờ thẩm mỹ)
     "sub_bg_color": "#ffffff",   # Màu khung nền (Mặc định: Trắng #ffffff)
     "sub_bg_opacity": 1.0,       # Độ mờ đục khung nền (0.1 - 1.0)
     "sub_box_padding_x": 16,     # Độ rộng lề ngang khung nền (px)
     "sub_box_padding_y": 8,      # Độ cao lề dọc khung nền (px)
     "sub_box_radius": 8,         # Độ bo góc khung nền (px)
+    "sub_anim_in": "none",       # P8 hiệu ứng vào: "none" | "fade" | "pop" | "zoom"
+    "sub_anim_out": "none",      # P8 hiệu ứng ra: "none" | "fade"
     "sub_pos_y_pct": 0.82,       # Vị trí dọc phụ đề (0.10 - 0.95 từ đỉnh xuống)
     "sub_pos_x_pct": 0.50,       # Vị trí ngang phụ đề (0.10 - 0.90 từ trái sang, 0.50 là căn giữa)
     # Tùy chỉnh Watermark bản quyền (Cố định góc bên phải hoặc tự do, mờ mờ, linh hoạt thay đổi văn bản)
@@ -432,6 +435,9 @@ def save_canvas_settings(new_settings: Dict[str, Any]) -> Dict[str, Any]:
         current["sub_box_padding_x"] = max(0, min(60, int(current.get("sub_box_padding_x", 16))))
         current["sub_box_padding_y"] = max(0, min(40, int(current.get("sub_box_padding_y", 8))))
         current["sub_box_radius"] = max(0, min(30, int(current.get("sub_box_radius", 8))))
+        _allowed_anims = ("none", "fade", "pop", "zoom")
+        current["sub_anim_in"] = str(current.get("sub_anim_in", "none")) if str(current.get("sub_anim_in", "none")) in _allowed_anims else "none"
+        current["sub_anim_out"] = str(current.get("sub_anim_out", "none")) if str(current.get("sub_anim_out", "none")) in ("none", "fade") else "none"
         current["sub_pos_y_pct"] = round(max(0.05, min(0.98, float(current.get("sub_pos_y_pct", 0.82)))), 4)
         current["sub_pos_x_pct"] = round(max(0.05, min(0.95, float(current.get("sub_pos_x_pct", 0.50)))), 4)
 

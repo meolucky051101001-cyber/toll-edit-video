@@ -140,14 +140,21 @@ def format_srt(segments: List[Dict[str, Any]]) -> str:
     return "\n".join(out)
 
 
+class InvalidJobIdentifier(ValueError):
+    """Định danh job chứa ký tự đường dẫn/ký tự cấm — từ chối để chặn path traversal."""
+
+
 def sanitize_job_id(job_id_or_name: str) -> str:
-    """Làm sạch định danh job/tên file để tìm kiếm an toàn."""
+    """Làm sạch định danh job/tên file để tìm kiếm an toàn (chặn path traversal)."""
     name = str(job_id_or_name).strip()
     if name.startswith("Dubbed_"):
         name = name[len("Dubbed_"):]
     if name.endswith(".mp4"):
         name = name[:-4]
-    return name.strip()
+    name = name.strip()
+    if not name or name in (".", "..") or name != Path(name).name or any(ch in '<>:"|?*' for ch in name):
+        raise InvalidJobIdentifier("Định danh job không hợp lệ (không cho phép đường dẫn hoặc ký tự cấm)")
+    return name
 
 
 def find_job_workspace(job_id_or_name: str) -> Optional[Path]:
@@ -173,7 +180,21 @@ def find_job_workspace(job_id_or_name: str) -> Optional[Path]:
     return None
 
 
+_AUDIO_DURATION_CACHE: Dict[str, tuple] = {}
+
+
 def get_audio_duration_seconds(file_path: Path) -> float:
+    """Đo thời lượng audio bằng ffprobe; cache theo (mtime, size) để không gọi ffprobe lặp lại từng câu."""
+    cache_key = str(file_path)
+    try:
+        st = file_path.stat()
+        cached = _AUDIO_DURATION_CACHE.get(cache_key)
+        if cached and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+            return cached[2]
+    except Exception:
+        pass
+
+    duration = 0.0
     try:
         cmd = [
             "ffprobe",
@@ -187,13 +208,21 @@ def get_audio_duration_seconds(file_path: Path) -> float:
         ]
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         if res.returncode == 0 and res.stdout.strip():
-            return round(float(res.stdout.strip()), 2)
+            duration = round(float(res.stdout.strip()), 2)
     except Exception:
         pass
+    if duration <= 0.0:
+        try:
+            duration = round(file_path.stat().st_size / 16000.0, 2)
+        except Exception:
+            return 0.0
+
     try:
-        return round(file_path.stat().st_size / 16000.0, 2)
+        st = file_path.stat()
+        _AUDIO_DURATION_CACHE[cache_key] = (st.st_mtime_ns, st.st_size, duration)
     except Exception:
-        return 0.0
+        pass
+    return duration
 
 
 def resolve_job_voice(job_id_or_name: str, job_folder: Optional[Path] = None) -> Tuple[str, str]:
@@ -583,6 +612,10 @@ def save_segment_draft(
         if sid in seg_map:
             upd = seg_map[sid]
             new_text = (upd.get("translated_text") or "").strip()
+            if not new_text:
+                raise ValueError(
+                    f"Câu {sid} không được để trống văn bản — hãy nhập nội dung trước khi lưu."
+                )
             text_changed = new_text != s.get("translated_text", "")
             s["translated_text"] = new_text
             if "voice_id" in upd:
@@ -598,7 +631,7 @@ def save_segment_draft(
     current_data["updated_at"] = time.time()
 
     # Save atomic
-    tmp = draft_path.with_suffix(".tmp")
+    tmp = draft_path.with_suffix(f".tmp{os.getpid()}")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(current_data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, draft_path)
@@ -658,6 +691,16 @@ async def regenerate_segments(
         target_ids = set(segment_ids)
         regen_results = []
         segments = current_data.get("segments", [])
+
+        empty_ids = [
+            s.get("segment_id")
+            for s in segments
+            if s.get("segment_id") in target_ids and not (s.get("translated_text") or "").strip()
+        ]
+        if empty_ids:
+            raise ValueError(
+                "Các câu đang để trống văn bản, không thể tạo lại âm thanh: " + ", ".join(map(str, empty_ids))
+            )
 
         for s in segments:
             sid = s.get("segment_id")
@@ -754,7 +797,7 @@ async def regenerate_segments(
         current_data["updated_at"] = time.time()
 
         draft_path = get_segment_drafts_dir() / f"{clean_id}.json"
-        tmp = draft_path.with_suffix(".tmp")
+        tmp = draft_path.with_suffix(f".tmp{os.getpid()}")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(current_data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, draft_path)
@@ -836,6 +879,8 @@ async def publish_revised_video(
     # Output file name: Dubbed_{clean_id}_rev{current_rev}.mp4
     rev_filename = f"Dubbed_{clean_id}_rev{current_rev}.mp4"
     rev_filepath = out_dir / rev_filename
+    # Xuất vào file tạm (staging) rồi mới đổi tên — file thành phẩm cũ không bao giờ hỏng giữa chừng
+    staging_path = rev_filepath.with_name(rev_filename + f".part{uuid.uuid4().hex[:8]}")
 
     # Build audio track from segments using ffmpeg concat or overlay
     segments = current_data.get("segments", [])
@@ -889,8 +934,7 @@ async def publish_revised_video(
         ]
         await asyncio.to_thread(subprocess.run, cmd_concat, capture_output=True, text=True)
 
-        # Mux with video
-        # We replace the audio track with our new dubbed audio and ensure faststart for web streaming
+        # Mux với video — ghi vào file tạm (staging); chỉ đổi tên thành file thành phẩm khi ffmpeg kết thúc sạch
         cmd_mux = [
             "ffmpeg",
             "-y",
@@ -910,11 +954,12 @@ async def publish_revised_video(
             "1:a:0",
             "-movflags",
             "+faststart",
-            str(rev_filepath),
+            str(staging_path),
         ]
         p_mux = await asyncio.to_thread(subprocess.run, cmd_mux, capture_output=True, text=True)
 
-        if p_mux.returncode != 0 or not rev_filepath.is_file():
+        publish_ok = p_mux.returncode == 0 and staging_path.is_file() and staging_path.stat().st_size > 0
+        if not publish_ok:
             # If -c:v copy failed (e.g. incompatible stream or format), fallback to transcode to standard H.264
             cmd_mux_reencode = [
                 "ffmpeg",
@@ -941,25 +986,49 @@ async def publish_revised_video(
                 "1:a:0",
                 "-movflags",
                 "+faststart",
-                str(rev_filepath),
+                str(staging_path),
             ]
             p_reencode = await asyncio.to_thread(subprocess.run, cmd_mux_reencode, capture_output=True, text=True)
-            if p_reencode.returncode != 0 or not rev_filepath.is_file():
-                # Ultimate fallback to copying source
-                shutil.copy2(source_video, rev_filepath)
+            publish_ok = p_reencode.returncode == 0 and staging_path.is_file() and staging_path.stat().st_size > 0
 
+        if not publish_ok:
+            # Không còn fallback "copy video cũ + báo success" — trả lỗi rõ ràng, bản gốc giữ nguyên
+            raise RuntimeError(
+                "Không thể xuất video bản sửa (ffmpeg lỗi). File thành phẩm cũ được giữ nguyên nguyên vẹn."
+            )
+
+        os.replace(staging_path, rev_filepath)
     finally:
-        for tmp_f in [concat_list_file, merged_audio_file]:
-            if tmp_f.is_file():
-                try:
+        for tmp_f in [concat_list_file, merged_audio_file, staging_path]:
+            try:
+                if tmp_f.is_file():
                     tmp_f.unlink()
-                except OSError:
-                    pass
+            except OSError:
+                pass
+        # Dọn file staging mồ côi từ các lần xuất bản đổ vỡ trước đó
+        try:
+            for stale in out_dir.glob(rev_filename + ".part*"):
+                stale.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    # Tăng revision draft sau khi xuất bản thành công để lần xuất sau tạo file _rev(N+1) riêng
+    published_rev = current_rev + 1
+    try:
+        draft_path = get_segment_drafts_dir() / f"{clean_id}.json"
+        current_data["revision"] = published_rev
+        current_data["published_at"] = time.time()
+        tmp_draft = draft_path.with_suffix(f".tmp{os.getpid()}")
+        with open(tmp_draft, "w", encoding="utf-8") as f:
+            json.dump(current_data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_draft, draft_path)
+    except Exception as draft_err:
+        logger.warning("Không thể tăng revision draft sau xuất bản %s: %s", clean_id, draft_err)
 
     return {
         "status": "success",
         "job_id": clean_id,
-        "revision": current_rev,
+        "revision": published_rev,
         "published_filename": rev_filename,
         "published_path": str(rev_filepath),
         "published_size_mb": round(rev_filepath.stat().st_size / (1024 * 1024), 2),

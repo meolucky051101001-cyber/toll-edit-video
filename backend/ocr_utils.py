@@ -131,7 +131,8 @@ def _recognize_batch(frames):
 
     global _paddle_failed
     policy = current_v1_model_policy()
-    if not _paddle_failed and policy.ocr_backend in {"auto", "paddle"} and runtime_module_available(
+    ocr_backend = getattr(policy, "ocr_backend", "auto")
+    if not _paddle_failed and ocr_backend in {"auto", "paddle"} and runtime_module_available(
         "paddleocr", policy
     ):
         try:
@@ -147,9 +148,9 @@ def _recognize_batch(frames):
                 result = run_v1_ocr(
                     {
                         "images": paths,
-                        "detection_model": policy.paddle_detection_model,
-                        "recognition_model": policy.paddle_recognition_model,
-                        "engine": policy.paddle_engine,
+                        "detection_model": getattr(policy, "paddle_detection_model", "PP-OCRv5_mobile_det"),
+                        "recognition_model": getattr(policy, "paddle_recognition_model", "PP-OCRv5_mobile_rec"),
+                        "engine": getattr(policy, "paddle_engine", "onnx"),
                     },
                     timeout_seconds=float(
                         os.getenv("V1_OCR_TIMEOUT_SECONDS", "900")
@@ -211,7 +212,7 @@ def stabilize_samples(samples):
     keys = ("x_pct", "max_x_pct", "y_pct", "max_y_pct")
     for row in result:
         group = groups[-1] if groups else []
-        compatible = bool(group) and row["sample_time"] - group[-1]["sample_time"] <= .40001
+        compatible = bool(group) and row["sample_time"] - group[-1]["sample_time"] <= .75001
         if compatible:
             for key in keys:
                 tolerance = .025 if "x_pct" in key else .012
@@ -374,8 +375,8 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
 
     if srt_segments:
         # Cover every speech segment; process recognition in bounded batches.
-        interval = max(0.1, min(5.0, float(os.getenv("V1_OCR_TRACK_INTERVAL", "1.2"))))
-        max_samples_per_cue = max(1, int(os.getenv("V1_OCR_MAX_SAMPLES_PER_SEGMENT", "2")))
+        interval = max(0.1, min(5.0, float(os.getenv("V1_OCR_TRACK_INTERVAL", "0.55"))))
+        max_samples_per_cue = max(1, int(os.getenv("V1_OCR_MAX_SAMPLES_PER_SEGMENT", "8")))
         total_segs = len(srt_segments)
         for seg_idx, seg in enumerate(srt_segments):
             s = seg.start.total_seconds()
@@ -387,7 +388,12 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                 e = min(e, duration)
             cue_dur = max(0.1, e - s)
             # Smart mode saves extra samples, NEVER the only geometry sample.
-            count = 1 if ocr_strategy == 'smart_skip' else min(max_samples_per_cue, max(1, math.ceil(cue_dur / interval)))
+            if ocr_strategy == 'smart_skip':
+                count = 1
+            elif cue_dur <= 2.05:
+                count = min(max_samples_per_cue, max(1, math.ceil(cue_dur / 1.2)))
+            else:
+                count = min(max_samples_per_cue, max(3, math.ceil(cue_dur / interval)))
             for t in sample_times(s, e, count):
                 target_timestamps.append((t, seg, seg_idx))
         if ocr_strategy == 'smart_skip':
@@ -397,11 +403,36 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
         cap.release()
         return [], width, height, 0.85
 
+    segment_texts = {}
+    if srt_segments:
+        for idx, seg in enumerate(srt_segments):
+            s_id = getattr(seg, 'index', None)
+            s_key = s_id if s_id is not None else idx
+            segment_texts[s_key] = str(getattr(seg, 'content', '') or '').strip()
+
+        # A short ASR interjection may be printed with the next full sentence.
+        # Only borrow immediate contiguous speech; never seed from arbitrary scene text.
+        for idx, seg in enumerate(srt_segments):
+            key = getattr(seg, "index", None)
+            key = key if key is not None else idx
+            own = segment_texts[key]
+            if len("".join(c for c in own if "\u3400" <= c <= "\u9fff")) <= 4:
+                context = [own]
+                if idx and (seg.start - srt_segments[idx - 1].end).total_seconds() <= .3:
+                    context.insert(0, str(srt_segments[idx - 1].content))
+                if idx + 1 < len(srt_segments) and (srt_segments[idx + 1].start - seg.end).total_seconds() <= .3:
+                    context.append(str(srt_segments[idx + 1].content))
+                segment_texts[key] = " ".join(context)
+
     crop_y_start, crop_y_end = 0, height
     captured_frames = []
     recognized_samples = []
+    early_band_checked = False
+    early_band_locked = False
+    sampled_seg_indices = set()
 
     def flush_frames():
+        nonlocal crop_y_start, crop_y_end, early_band_checked, early_band_locked
         if not captured_frames:
             return
         if stopped():
@@ -413,6 +444,61 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
             current_time, scale_ratio, _, target_seg, seg_idx, crop_offset = item
             recognized_samples.append((current_time, scale_ratio, target_seg, seg_idx, rows, crop_offset))
         captured_frames.clear()
+
+        # Early Subtitle Band Lock: khi video có >= 16 câu thoại ở chế độ 'full'
+        # và sau 24 frame đầu tiên đã xác lập được dải phụ đề cố định độ tin cậy cao,
+        # khóa ROI theo trục dọc và chỉ lấy 1 mẫu/câu cho phần còn lại để tăng tốc 2.5x.
+        if (
+            not early_band_checked
+            and not is_adaptive
+            and ocr_strategy == "full"
+            and len(srt_segments) >= 16
+            and len(recognized_samples) >= 24
+        ):
+            early_band_checked = True
+            try:
+                early_blocks = []
+                for c_time, s_ratio, t_seg, s_idx, r_rows, c_off in recognized_samples:
+                    s_id = segment_id(t_seg, s_idx)
+                    for mb in normalized_rows(r_rows, s_ratio, c_off, width, height):
+                        eb = OCRBlock(
+                            **mb,
+                            start=c_time - 1.2,
+                            end=c_time + 1.2,
+                            sample_segment_id=s_id,
+                            sample_time=c_time,
+                        )
+                        eb.sample_in_cue = (
+                            t_seg.start.total_seconds() <= c_time < t_seg.end.total_seconds()
+                        )
+                        early_blocks.append(eb)
+                early_band = select_chinese_subtitle_band(
+                    blocks=early_blocks,
+                    segment_texts=segment_texts,
+                    frame_width=width,
+                    frame_height=height,
+                    default_top=0.75,
+                    default_bottom=0.82,
+                )
+                if (
+                    getattr(early_band, "mode", "") == "asr_match"
+                    and getattr(early_band, "support", 0) >= 10
+                    and (float(getattr(early_band, "bottom", 1.0)) - float(getattr(early_band, "top", 0.0))) <= 0.10
+                ):
+                    early_band_locked = True
+                    crop_y_start = max(0, int((float(early_band.top) - 0.18) * height))
+                    crop_y_end = min(height, math.ceil((float(early_band.bottom) + 0.18) * height))
+                    logger.info(
+                        "⚡ Early Subtitle Band Lock kích hoạt sau %d frame (support=%d, Y=%.3f..%.3f) -> ROI [%d:%d], 1 sample/cue cho phần còn lại",
+                        len(recognized_samples),
+                        early_band.support,
+                        early_band.top,
+                        early_band.bottom,
+                        crop_y_start,
+                        crop_y_end,
+                    )
+            except Exception as eb_err:
+                logger.debug("Early Subtitle Band Lock check skipped: %s", eb_err)
 
     if is_adaptive:
         try:
@@ -431,6 +517,9 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                 cap.release()
                 raise RuntimeError('OCR stop requested')
 
+            if early_band_locked and seg_idx in sampled_seg_indices:
+                continue
+
             cap.set(cv2.CAP_PROP_POS_MSEC, current_time * 1000)
             ret, frame = cap.read()
             if not ret:
@@ -439,6 +528,8 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
             if not ret:
                 logger.warning('Could not decode OCR verification frame at %.2fs, skipping frame sample', current_time)
                 continue
+
+            sampled_seg_indices.add(seg_idx)
 
             # Include both edges; bottom captions used to be clipped before OCR.
             cropped_frame = frame[crop_y_start:crop_y_end, :]
@@ -481,27 +572,6 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
         observation_times.setdefault(segment_id(item[2], item[3]), set()).add(item[0])
     sampled_ids = set(observation_times)
     recognized_samples.clear()
-
-    segment_texts = {}
-    if srt_segments:
-        for idx, seg in enumerate(srt_segments):
-            s_id = getattr(seg, 'index', None)
-            s_key = s_id if s_id is not None else idx
-            segment_texts[s_key] = str(getattr(seg, 'content', '') or '').strip()
-
-    # A short ASR interjection may be printed with the next full sentence.
-    # Only borrow immediate contiguous speech; never seed from arbitrary scene text.
-    for idx, seg in enumerate(srt_segments):
-        key = getattr(seg, "index", None)
-        key = key if key is not None else idx
-        own = segment_texts[key]
-        if len("".join(c for c in own if "\u3400" <= c <= "\u9fff")) <= 4:
-            context = [own]
-            if idx and (seg.start - srt_segments[idx - 1].end).total_seconds() <= .3:
-                context.insert(0, str(srt_segments[idx - 1].content))
-            if idx + 1 < len(srt_segments) and (srt_segments[idx + 1].start - seg.end).total_seconds() <= .3:
-                context.append(str(srt_segments[idx + 1].content))
-            segment_texts[key] = " ".join(context)
 
     band = select_chinese_subtitle_band(
         blocks=all_blocks,

@@ -174,6 +174,16 @@ async def api_jobs_batch(request: Request, payload: Dict[str, Any] = Body(...)):
     return _enqueue_jobs_batch(request, payload)
 
 
+def _safe_bare_name(value, label: str = "Tên video") -> str:
+    """Chấp nhận tên trần hợp lệ cho Windows — chặn path traversal từ client."""
+    clean = str(value or "").strip()
+    if not clean or clean in (".", "..") or clean != Path(clean).name:
+        raise HTTPException(400, f"{label} không hợp lệ (không cho phép đường dẫn).")
+    if any(ch in '<>:"|?*' for ch in clean):
+        raise HTTPException(400, f"{label} chứa ký tự không hợp lệ.")
+    return clean
+
+
 def _enqueue_jobs_batch(request: Request, payload: Dict[str, Any]):
     """
     Xếp hàng hàng loạt video với cấu hình đóng băng riêng từng video.
@@ -199,12 +209,14 @@ def _enqueue_jobs_batch(request: Request, payload: Dict[str, Any]):
         filename = it.get("filename") or it.get("name")
         if not filename:
             continue
+        filename = _safe_bare_name(filename)
         p_id = it.get("preset_id")
         ovr = dict(it.get("overrides") or {})
         # Freeze the dashboard's S/M/L choice with the item. A later global
         # mode change must not alter a job that is already queued.
         ovr.setdefault("video_mode", str(it.get("video_mode") or batch_video_mode))
-        job_id = it.get("job_id") or f"{batch_id}_{filename}"
+        raw_job_id = it.get("job_id")
+        job_id = _safe_bare_name(raw_job_id, label="Mã job") if raw_job_id else f"{batch_id}_{filename}"
 
         # Đóng băng cấu hình cho video này
         snapshot = job_config_service.freeze_job_config(

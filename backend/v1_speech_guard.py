@@ -94,7 +94,7 @@ def validate_speech_timeline(dubs, total_duration=None, measure=None, max_speed=
                     "shorten translation before mixing"
                 )
         speed = float(dub.get("speed_ratio", 1.0))
-        if not math.isfinite(speed) or speed < MIN_NATURAL_SPEED - 1e-9:
+        if not math.isfinite(speed) or speed < MIN_NATURAL_SPEED - 1e-9 or speed > MAX_EMERGENCY_SPEED + 1e-9:
             raise SpeechTimingError(f"Invalid speech speed at cue {dub.get('index')}")
         if speed > max_speed + 1e-9:
             log.info("[SPEECH_GUARD] Cue %s speed %.2fx normalized to ceiling %.2fx for timeline contract",

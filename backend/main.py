@@ -166,9 +166,39 @@ def ensure_tool_control():
     except Exception as e:
         logger.warning("Failed to auto-start tool_control: %s", e)
 
+def _install_asyncio_quiet_disconnect_handler() -> None:
+    """Suppress noisy Windows ProactorEventLoop ConnectionResetError (WinError 10054) when browser video tags close range streams."""
+    try:
+        loop = asyncio.get_running_loop()
+        previous_handler = loop.get_exception_handler()
+
+        def _custom_exception_handler(loop_obj, context):
+            exc = context.get("exception")
+            if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+                winerror = getattr(exc, "winerror", None)
+                if winerror in (10054, 10053, None):
+                    return
+            msg = str(context.get("message") or "")
+            if "_ProactorBasePipeTransport._call_connection_lost" in msg:
+                return
+            if previous_handler is not None:
+                previous_handler(loop_obj, context)
+            else:
+                loop_obj.default_exception_handler(context)
+
+        loop.set_exception_handler(_custom_exception_handler)
+    except Exception:
+        pass
+
+
 @app.on_event("startup")
 async def on_startup():
+    _install_asyncio_quiet_disconnect_handler()
     ensure_tool_control()
+    try:
+        asyncio.create_task(_night_batch_watcher())
+    except Exception as e:
+        logger.warning("Không thể khởi động bộ theo dõi lịch chạy đêm: %s", e)
     try:
         from workspace_cleaner import run_full_retention_maintenance
         asyncio.create_task(asyncio.to_thread(run_full_retention_maintenance))
@@ -276,6 +306,14 @@ def _safe_media_path(folder: str, filename: str) -> Path:
     if not candidate.is_file():
         raise HTTPException(status_code=404, detail="File không tồn tại")
     return candidate
+
+
+def _safe_preview_name(resource_id: str) -> str:
+    """Ép resource_id (voice_id) thành tên file trần — chặn path traversal qua %2F, '..', ký tự ổ đĩa."""
+    clean = (resource_id or "").strip()
+    if not clean or clean in (".", "..") or clean != Path(clean).name or any(ch in '<>:"|?*' for ch in clean):
+        raise HTTPException(status_code=400, detail="Tên tài nguyên không hợp lệ")
+    return clean
 
 
 def _read_log_tail(max_lines: int = 500) -> str:
@@ -681,10 +719,17 @@ async def api_process_video(
 @app.get("/api/download/{filename}")
 async def download_video(filename: str):
     """Tải file video đã render xong."""
+    from batch_processor import SUPPORTED_EXTENSIONS
+
+    clean = filename.strip()
+    if not clean or clean in (".", "..") or clean != Path(clean).name or clean.startswith("."):
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Tên file không hợp lệ"})
+    if Path(clean).suffix.lower() not in SUPPORTED_EXTENSIONS:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Chỉ cho phép tải file video"})
     # Search in workspace subdirectories
     for root, dirs, files in os.walk(WORKSPACE):
-        if filename in files:
-            return FileResponse(os.path.join(root, filename), media_type="video/mp4", filename=filename)
+        if clean in files:
+            return FileResponse(os.path.join(root, clean), media_type="video/mp4", filename=clean)
     return {"status": "error", "message": "File not found"}
 
 
@@ -973,7 +1018,7 @@ async def serve_dashboard():
     if template_path.exists():
         with open(template_path, "r", encoding="utf-8") as f:
             html = f.read().replace("__REPLACE_TOKEN__", LOCAL_TOKEN)
-            return HTMLResponse(content=html)
+            return HTMLResponse(content=html, headers={"Cache-Control": "no-store"})
     return HTMLResponse("<h2>Dashboard template not found.</h2>", status_code=404)
 
 
@@ -986,7 +1031,8 @@ async def api_get_auth_token():
 @app.get("/api/status")
 async def api_get_status():
     """Trả về trạng thái tiến độ thời gian thực của tác vụ hiện tại."""
-    status = job_tracker.get_status()
+    # get_status có thể chạy ffprobe xác minh thành phẩm — đẩy sang thread để không block event loop
+    status = await asyncio.to_thread(job_tracker.get_status)
     import video_pause
     status["pause_state"] = video_pause.state()
     status["stop_requested"] = bool(
@@ -1005,7 +1051,7 @@ async def api_get_status():
                 ]
                 vpath = next((p for p in candidates if p.is_file()), None)
                 if vpath:
-                    dec = route_video(vpath, requested_mode=status.get("video_mode") or "AUTO")
+                    dec = await asyncio.to_thread(route_video, vpath, requested_mode=status.get("video_mode") or "AUTO")
                     req_m = str(dec.requested_mode).upper()
                     res_m = dec.resolved_mode.value
                     lbl = f"AUTO · {res_m}" if req_m == "AUTO" else f"Thủ công · {res_m}"
@@ -1055,7 +1101,7 @@ async def api_get_queue():
             for item in data.get("items", []):
                 rs_vp = item.get("resume_state", {}).get("video_path")
                 if rs_vp and Path(rs_vp).is_file():
-                    dec = route_video(rs_vp, requested_mode=item.get("video_mode") or "AUTO")
+                    dec = await asyncio.to_thread(route_video, rs_vp, requested_mode=item.get("video_mode") or "AUTO")
                     req_m = str(dec.requested_mode).upper()
                     res_m = dec.resolved_mode.value
                     lbl = f"AUTO · {res_m}" if req_m == "AUTO" else f"Thủ công · {res_m}"
@@ -1823,11 +1869,146 @@ async def api_get_worker_settings():
 @app.post("/api/worker-settings")
 async def api_save_worker_settings(payload: dict = Body(...)):
     """Lưu cấu hình số luồng (1 hoặc 2) và ngưỡng bảo vệ VRAM."""
-    concurrency = int(payload.get("concurrency", 1))
-    auto_guard = bool(payload.get("auto_vram_guard", True))
-    max_thresh = float(payload.get("max_vram_percent_threshold", 85.0))
-    min_free = float(payload.get("min_free_vram_mb", 1800.0))
+    # Merge với cấu hình hiện tại: payload một phần (vd chỉ {concurrency}) không được
+    # ghi đè ngầm các ngưỡng VRAM người dùng đã chỉnh (lỗi trượt mặc định 1500 -> 1800).
+    current = get_worker_settings()
+    concurrency = int(payload.get("concurrency", current.get("concurrency", 1)))
+    auto_guard = bool(payload.get("auto_vram_guard", current.get("auto_vram_guard", True)))
+    max_thresh = float(payload.get("max_vram_percent_threshold", current.get("max_vram_percent_threshold", 85.0)))
+    min_free = float(payload.get("min_free_vram_mb", current.get("min_free_vram_mb", 1500.0)))
     return save_worker_settings(concurrency, auto_guard, max_thresh, min_free)
+
+
+# ===== F13: TRUNG TÂM THÔNG BÁO · F1: THỐNG KÊ HIỆU SUẤT · F9: LỊCH CHẠY ĐÊM =====
+
+
+@app.get("/api/notifications")
+async def api_get_notifications(unread: bool = False, limit: int = 50):
+    """Danh sách thông báo + số chưa đọc (poll nhẹ, đọc file JSON nhỏ)."""
+    from notification_service import list_notifications, unread_count
+
+    items = await asyncio.to_thread(list_notifications, unread, limit)
+    return {"items": items, "unread_count": await asyncio.to_thread(unread_count)}
+
+
+@app.post("/api/notifications/mark-read")
+async def api_mark_notifications_read(payload: dict = Body(...)):
+    from notification_service import mark_read
+
+    ids = payload.get("ids")
+    changed = await asyncio.to_thread(
+        mark_read, ids if isinstance(ids, list) else None, bool(payload.get("all"))
+    )
+    return {"marked": changed}
+
+
+@app.post("/api/notifications/test")
+async def api_test_notification():
+    from notification_service import push
+
+    return await asyncio.to_thread(
+        push, "info", "Thông báo thử nghiệm",
+        "Nếu bạn thấy mục này, Trung tâm Thông báo hoạt động bình thường.", "test",
+    )
+
+
+@app.get("/api/stats/summary")
+async def api_get_stats_summary(days: int = 14):
+    """F1 — tổng hợp hiệu suất pipeline từ video_stats.json."""
+    from stats_service import get_summary
+
+    return await asyncio.to_thread(get_summary, days)
+
+
+def _schedule_file() -> Path:
+    return Path(WORKSPACE) / "control" / "schedule.json"
+
+
+@app.get("/api/schedule")
+async def api_get_schedule():
+    """F9 — đọc lịch chạy đêm hiện tại."""
+    f = _schedule_file()
+    if not f.is_file():
+        return {"active": False}
+    try:
+        data = json.loads(await asyncio.to_thread(f.read_text, encoding="utf-8"))
+        data["active"] = True
+        return data
+    except Exception:
+        return {"active": False}
+
+
+@app.post("/api/schedule")
+async def api_schedule_night_batch(payload: dict = Body(...)):
+    """F9 — lên lịch tự động chạy hàng đợi vào giờ HH:MM (một lần)."""
+    import re
+    import time
+
+    t = str(payload.get("time") or "02:00").strip()
+    if not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", t):
+        raise HTTPException(status_code=400, detail="Giờ lên lịch không hợp lệ (định dạng HH:MM, ví dụ 02:00).")
+    mode = str(payload.get("video_mode") or "AUTO").upper()
+    data = {"time": t, "video_mode": mode, "created_at": time.time(), "last_fired_date": ""}
+    f = _schedule_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(f.write_text, json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return {"active": True, **data}
+
+
+@app.delete("/api/schedule")
+async def api_cancel_schedule():
+    f = _schedule_file()
+    try:
+        await asyncio.to_thread(f.unlink)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Không hủy được lịch: {e}")
+    return {"active": False}
+
+
+async def _night_batch_watcher():
+    """F9 — theo dõi schedule.json; đến giờ thì kích hoạt batch (một lần, tự hủy nếu trễ > 30 phút)."""
+    from datetime import datetime
+
+    while True:
+        try:
+            await asyncio.sleep(30)
+            f = _schedule_file()
+            if not f.is_file():
+                continue
+            data = json.loads(await asyncio.to_thread(f.read_text, encoding="utf-8"))
+            hh, mm = str(data.get("time") or "02:00").split(":")[:2]
+            now = datetime.now()
+            target = now.replace(hour=int(hh) % 24, minute=int(mm) % 60, second=0, microsecond=0)
+            today = now.strftime("%Y-%m-%d")
+            if data.get("last_fired_date") == today:
+                continue
+            if now < target:
+                continue
+            from notification_service import push
+
+            if (now - target).total_seconds() > 1800:
+                # Máy ngủ/tắt quá 30 phút — hủy lịch thay vì chạy đột ngột giữa ngày
+                await asyncio.to_thread(f.unlink)
+                await asyncio.to_thread(
+                    push, "warning", "Đã lỡ lịch chạy đêm",
+                    f"Quá giờ {data.get('time')} hơn 30 phút, lịch đã tự hủy để chạy an toàn.", "schedule",
+                )
+                continue
+            if not job_tracker.get_status().get("active"):
+                await asyncio.to_thread(
+                    push, "info", "Kích hoạt lịch chạy đêm",
+                    f"Đến giờ {data.get('time')} — bắt đầu xử lý hàng đợi.", "schedule",
+                )
+                await api_run_batch(None, video_mode=data.get("video_mode") or "AUTO")
+                data["last_fired_date"] = today
+                await asyncio.to_thread(f.write_text, json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("Lỗi trong night batch watcher: %s", exc)
+            await asyncio.sleep(10)
 
 
 
@@ -2137,7 +2318,7 @@ async def api_get_qc_report(job_id: str):
 
 @app.get("/api/voice-preview-video/{voice_id}")
 async def api_voice_preview_video(voice_id: str):
-    filename = f"{voice_id}.mp4"
+    filename = f"{_safe_preview_name(voice_id)}.mp4"
     candidates = [
         Path(WORKSPACE) / "bot_system" / "control" / "voice_previews" / filename,
         Path(WORKSPACE) / "control" / "voice_previews" / filename,
@@ -2152,8 +2333,9 @@ async def api_voice_preview_video(voice_id: str):
 
 @app.get("/api/voice-preview-audio/{voice_id}")
 async def api_voice_preview_audio(voice_id: str):
+    clean_voice_id = _safe_preview_name(voice_id)
     for ext, media in ((".mp3", "audio/mpeg"), (".wav", "audio/wav")):
-        filename = f"{voice_id}{ext}"
+        filename = f"{clean_voice_id}{ext}"
         candidates = [
             Path(WORKSPACE) / "bot_system" / "control" / "voice_checks" / filename,
             Path(WORKSPACE) / "control" / "voice_checks" / filename,
@@ -2176,7 +2358,7 @@ async def serve_a2ui_studio():
     if template_path.exists():
         with open(template_path, "r", encoding="utf-8") as f:
             html = f.read().replace("__REPLACE_TOKEN__", LOCAL_TOKEN)
-            return HTMLResponse(content=html)
+            return HTMLResponse(content=html, headers={"Cache-Control": "no-store"})
     return HTMLResponse("<h2>A2UI Studio template not found.</h2>", status_code=404)
 
 
@@ -2269,6 +2451,41 @@ try:
     logger.info("Mounted Phase D Crash Recovery router successfully.")
 except Exception as _pde:
     logger.warning("Failed to mount phase_d_router: %s", _pde)
+
+
+@app.get("/api/v1/gemini-health")
+async def api_v1_gemini_health():
+    """Trả về trạng thái thời gian thực của Multi-Key Gemini Pool và Circuit Breaker."""
+    from ai.v1_gemini_dispatcher import get_gemini_pool_health
+    return get_gemini_pool_health()
+
+
+@app.get("/api/v1/glossary")
+async def api_v1_get_glossary():
+    """Trả về từ điển thuật ngữ tùy chỉnh (Custom Glossary) và danh sách preset chuyên ngành."""
+    from ai.translation import BUILTIN_GLOSSARY_PRESETS, load_custom_glossary
+    return {
+        "status": "ok",
+        "entries": load_custom_glossary(WORKSPACE),
+        "presets": BUILTIN_GLOSSARY_PRESETS,
+    }
+
+
+@app.post("/api/v1/glossary")
+async def api_v1_save_glossary(payload: dict = Body(...)):
+    """Lưu hoặc cập nhật từ điển thuật ngữ tùy chỉnh (Custom Glossary) theo chủ đề."""
+    from ai.translation import BUILTIN_GLOSSARY_PRESETS, save_custom_glossary
+    entries = payload.get("entries") if isinstance(payload.get("entries"), dict) else {}
+    preset = payload.get("preset")
+    merge = bool(payload.get("merge", True))
+    if preset and preset not in BUILTIN_GLOSSARY_PRESETS:
+        raise HTTPException(status_code=400, detail=f"Preset '{preset}' không tồn tại.")
+    updated = save_custom_glossary(entries=entries, preset=preset, merge=merge, workspace=WORKSPACE)
+    return {
+        "status": "ok",
+        "count": len(updated),
+        "entries": updated,
+    }
 
 
 

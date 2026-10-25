@@ -302,6 +302,25 @@ def build_custom_ass_file(job_dir: Path, cfg: Dict[str, Any], tw: int = 1080, th
         ass_text = re.sub(r"Style:\s*BgStyle,[^\r\n]+", new_bg_style, ass_text)
         ass_text = re.sub(r"Style:\s*TextStyle,[^\r\n]+", new_txt_style, ass_text)
 
+        # P8: hiệu ứng vào/ra cho từng câu phụ đề (không đụng \pos/\move sẵn có)
+        anim_in = str(cfg.get("sub_anim_in", "none") or "none").strip().lower()
+        anim_out = str(cfg.get("sub_anim_out", "none") or "none").strip().lower()
+        anim_tags = []
+        if anim_in == "fade" or anim_out == "fade":
+            anim_tags.append(f"\\fad({250 if anim_in == 'fade' else 0},{250 if anim_out == 'fade' else 0})")
+        if anim_in == "pop":
+            anim_tags.append("\\fscx40\\fscy40\\t(0,220,\\fscx100\\fscy100)")
+        elif anim_in == "zoom":
+            anim_tags.append("\\t(0,350,\\fscx104\\fscy104)")
+        if anim_tags:
+            anim_block = "".join(anim_tags)
+            injected = []
+            for ln in ass_text.splitlines():
+                if ln.startswith("Dialogue:") and "{" in ln:
+                    ln = ln.replace("{", "{" + anim_block, 1)
+                injected.append(ln)
+            ass_text = "\n".join(injected)
+
         custom_ass = job_dir / "custom_styled.ass"
         custom_ass.write_text(ass_text, encoding="utf-8")
         return custom_ass
@@ -3094,6 +3113,10 @@ def _resolve_timeline_source_video(stem: str, version: str) -> Optional[Path]:
         cand_final = job_dir / f"final_{stem}.mp4"
         if cand_final.is_file() and _valid_final_video(cand_final):
             return cand_final
+        if OUTPUT_DIR.exists():
+            cand_banve = OUTPUT_DIR / f"Dubbed_{stem}.mp4"
+            if cand_banve.is_file() and _valid_final_video(cand_banve):
+                return cand_banve
     for cand in (INPUT_DIR / f"{stem}.mp4", DOWNLOADS_DIR / f"{stem}.mp4"):
         if cand.is_file():
             return cand
@@ -3114,13 +3137,23 @@ def _proxy_generate_worker(src_path: Path, proxy_path: Path, key: str) -> None:
         # đuôi .mp4 để ffmpeg đo được muxer (file .mp4.tmp sẽ lỗi "Invalid argument")
         tmp = proxy_path.parent / ("tmp_" + proxy_path.name)
         tmp.unlink(missing_ok=True)
-        subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-i", str(src_path),
-             "-vf", "scale='min(540,iw)':-2",
-             "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
-             "-c:a", "copy", "-movflags", "+faststart", str(tmp)],
-            capture_output=True, timeout=600,
-        )
+        # Ưu tiên NVENC p1 siêu tốc trên GPU (1-2s), fallback về libx264 veryfast nếu bận
+        nvenc_cmd = [
+            "ffmpeg", "-y", "-v", "error", "-hwaccel", "cuda", "-i", str(src_path),
+            "-vf", "scale='min(540,iw)':-2,format=yuv420p",
+            "-c:v", "h264_nvenc", "-preset", "p1", "-rc", "vbr", "-cq", "28",
+            "-c:a", "copy", "-movflags", "+faststart", str(tmp),
+        ]
+        res = subprocess.run(nvenc_cmd, capture_output=True, timeout=300)
+        if res.returncode != 0 or not tmp.is_file() or tmp.stat().st_size <= 1_000:
+            tmp.unlink(missing_ok=True)
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-i", str(src_path),
+                 "-vf", "scale='min(540,iw)':-2",
+                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+                 "-c:a", "copy", "-movflags", "+faststart", str(tmp)],
+                capture_output=True, timeout=600,
+            )
         if tmp.is_file() and tmp.stat().st_size > 1_000:
             proxy_path.unlink(missing_ok=True)
             tmp.rename(proxy_path)
@@ -3170,6 +3203,108 @@ async def api_proxy_status(stem: str = Query(...), version: str = Query("final")
     return {"ready": False, "exists": proxy_path.is_file(), "generating": f"{stem}|{version}" in _PROXY_GENERATING}
 
 
+@router.post("/api/workflow/timeline/detect-silences")
+async def api_timeline_detect_silences(payload: Dict[str, Any] = Body(...)):
+    """
+    Phát hiện các khoảng lặng trong video bằng FFmpeg silencedetect để tự động cắt bỏ khoảng trống (Auto-Cut Silence).
+    Trả về danh sách silences và danh sách active_clips (đã loại bỏ khoảng lặng, ghép liền mạch trên timeline).
+    """
+    stem = str(payload.get("stem") or "").strip()
+    version = str(payload.get("version") or "final").strip()
+    min_silence_sec = max(0.25, min(5.0, float(payload.get("min_silence_sec", 0.65))))
+    noise_db = max(-60.0, min(-15.0, float(payload.get("noise_db", -35.0))))
+    padding_sec = max(0.0, min(0.3, float(payload.get("padding_sec", 0.08))))
+
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu stem video")
+    src = _resolve_timeline_source_video(stem, version)
+    if not src or not src.is_file():
+        raise HTTPException(status_code=404, detail="Không tìm thấy video nguồn để phân tích khoảng lặng")
+
+    def _run_silence_detect() -> Dict[str, Any]:
+        # Lấy tổng thời lượng video
+        total_dur = 0.0
+        try:
+            pr = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(src)],
+                capture_output=True, text=True, timeout=15,
+            )
+            if pr.returncode == 0 and pr.stdout.strip():
+                total_dur = float(pr.stdout.strip())
+        except Exception:
+            pass
+
+        cmd = [
+            "ffmpeg", "-hide_banner", "-nostats", "-i", str(src),
+            "-af", f"silencedetect=noise={noise_db:.1f}dB:d={min_silence_sec:.2f}",
+            "-f", "null", "-",
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+        stderr = res.stderr or ""
+        starts = [float(m.group(1)) for m in re.finditer(r"silence_start:\s*([0-9.]+)", stderr)]
+        ends = [float(m.group(1)) for m in re.finditer(r"silence_end:\s*([0-9.]+)", stderr)]
+        if total_dur <= 0 and ends:
+            total_dur = max(ends) + 1.0
+
+        silences = []
+        for idx, s_val in enumerate(starts):
+            e_val = ends[idx] if idx < len(ends) else total_dur
+            eff_s = min(e_val, s_val + padding_sec)
+            eff_e = max(eff_s, e_val - padding_sec)
+            if eff_e - eff_s >= min_silence_sec * 0.7:
+                silences.append({
+                    "start": round(eff_s, 3),
+                    "end": round(eff_e, 3),
+                    "duration": round(eff_e - eff_s, 3),
+                })
+
+        active_clips = []
+        cursor = 0.0
+        at_acc = 0.0
+        clip_idx = 1
+        for sil in silences:
+            if sil["start"] - cursor >= 0.15:
+                c_start = round(cursor, 3)
+                c_end = round(sil["start"], 3)
+                c_dur = round(c_end - c_start, 3)
+                active_clips.append({
+                    "id": f"clip_speech_{int(time.time())}_{clip_idx}",
+                    "start": c_start,
+                    "end": c_end,
+                    "at": round(at_acc, 3),
+                    "duration": c_dur,
+                })
+                at_acc += c_dur
+                clip_idx += 1
+            cursor = max(cursor, sil["end"])
+
+        if total_dur > 0 and (total_dur - cursor) >= 0.15:
+            c_start = round(cursor, 3)
+            c_end = round(total_dur, 3)
+            c_dur = round(c_end - c_start, 3)
+            active_clips.append({
+                "id": f"clip_speech_{int(time.time())}_{clip_idx}",
+                "start": c_start,
+                "end": c_end,
+                "at": round(at_acc, 3),
+                "duration": c_dur,
+            })
+            at_acc += c_dur
+
+        removed_sec = round(sum(s["duration"] for s in silences), 2)
+        return {
+            "status": "ok",
+            "total_duration": round(total_dur, 3),
+            "new_duration": round(at_acc, 3),
+            "removed_seconds": removed_sec,
+            "silence_count": len(silences),
+            "silences": silences,
+            "active_clips": active_clips,
+        }
+
+    return await asyncio.to_thread(_run_silence_detect)
+
+
 @router.get("/static/js/{fname}")
 async def api_static_js(fname: str):
     """P6.4: phục vụ module JS tách từ workflow.html (chỉ .js, chặn traversal)."""
@@ -3179,6 +3314,192 @@ async def api_static_js(fname: str):
     if not p.is_file():
         raise HTTPException(status_code=404, detail="Không tìm thấy file JS")
     return FileResponse(p, media_type="application/javascript")
+
+
+# =========================================================================
+# P9: MANUAL STUDIO PIPELINE — cho video thô vào → tạo sub Trung → dịch tại chỗ → sửa/hook → xuất
+# =========================================================================
+_MANUAL_JOBS: Dict[str, Dict[str, Any]] = {}
+
+
+class _ManualSegment:
+    """Shim segment cho translate_subtitles: chỉ cần index/start(timedelta)/end/content."""
+
+    def __init__(self, index: int, start_td, end_td, content: str):
+        self.index = index
+        self.start = start_td
+        self.end = end_td
+        self.content = content
+
+
+def _manual_resolve_raw_video(stem: str) -> Optional[Path]:
+    # 1. khớp chính xác <stem>.mp4
+    for d in (INPUT_DIR, DOWNLOADS_DIR):
+        p = d / f"{stem}.mp4"
+        if p.is_file():
+            return p
+    # 2. khớp tiền tố — file thật thường có đuôi tiêu đề: <stem>_<título>.mp4
+    for d in (INPUT_DIR, DOWNLOADS_DIR):
+        if d.is_dir():
+            for p in sorted(d.glob(f"{glob_escape(stem)}*.mp4")):
+                if p.is_file():
+                    return p
+    # 3. file trong workspace job dir
+    clean = re.sub(r'[^\w\-_.]', '_', stem)
+    jd = WORKSPACE / clean
+    for name in (f"{stem}.mp4", "step1_extracted.mp4"):
+        p = jd / name
+        if p.is_file():
+            return p
+    return None
+
+
+def glob_escape(s: str) -> str:
+    return s.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
+
+
+def _manual_job_set(job_id: str, **kw) -> None:
+    job = _MANUAL_JOBS.get(job_id)
+    if job is not None:
+        job.update(kw)
+
+
+@router.post("/api/workflow/manual/generate-cn")
+async def api_manual_generate_cn(payload: Dict[str, Any] = Body(...)):
+    """
+    P9 bước 1: tạo phụ đề tiếng Trung GỐC cho video thô (tách audio + Whisper ASR),
+    KHÔNG dịch — người dùng xem/sửa sub gốc trước rồi mới gọi /manual/translate.
+    Chạy nền (GPU Whisper), trả job_id để poll /manual/job-status.
+    """
+    stem = (payload.get("stem") or "").strip()
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    video_path = _manual_resolve_raw_video(stem)
+    if not video_path:
+        raise HTTPException(status_code=404, detail="Không tìm thấy video thô cho stem này (INPUT_DIR/DOWNLOADS)")
+    import uuid as _uuid
+
+    job_id = _uuid.uuid4().hex[:12]
+    _MANUAL_JOBS[job_id] = {"status": "queued", "progress": 0, "stage": "Trong hàng đợi...", "kind": "cn", "created_at": time.time()}
+
+    def worker():
+        job = _MANUAL_JOBS[job_id]
+        try:
+            # Dùng chung GPU Whisper với pipeline — chờ pipeline chính rảnh
+            import main as main_module
+
+            job.update({"status": "running", "stage": "Chờ pipeline rảnh..."})
+            with main_module.UNIFIED_PIPELINE_LOCK:
+                clean = re.sub(r'[^\w\-_.]', '_', stem)
+                job_dir = WORKSPACE / clean
+                job_dir.mkdir(parents=True, exist_ok=True)
+                wav = job_dir / "original.wav"
+                job.update({"progress": 10, "stage": "Tách audio 16kHz..."})
+                subprocess.run(
+                    ["ffmpeg", "-y", "-v", "error", "-i", str(video_path),
+                     "-vn", "-ac", "1", "-ar", "16000", str(wav)],
+                    capture_output=True, timeout=600, check=True,
+                )
+                job.update({"progress": 25, "stage": "ASR tiếng Trung (Whisper)... — video càng dài càng lâu"})
+                from ai.v1_asr_isolated import extract_subtitles_isolated
+
+                srt_path = job_dir / "original.srt"
+                segments = extract_subtitles_isolated(wav, srt_path)
+                job.update({
+                    "status": "done", "progress": 100,
+                    "stage": f"Đã tạo {len(segments)} câu sub tiếng Trung — bấm câu trên timeline để xem/sửa",
+                    "result": {"count": len(segments), "srt": str(srt_path)},
+                })
+        except Exception as e:
+            logger.exception("Manual generate-cn job lỗi")
+            _manual_job_set(job_id, status="error", stage=str(e)[:220])
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {"status": "ok", "job_id": job_id}
+
+
+@router.post("/api/workflow/manual/translate")
+async def api_manual_translate(payload: Dict[str, Any] = Body(...)):
+    """
+    P9 bước 2: dịch NGAY TẠI ĐÓ — đọc original.srt HIỆN TẠI (đã qua người dùng sửa),
+    dịch bằng LLM (Gemini→OpenAI→DeepSeek→fallback), ghi translated.srt và trả
+    danh sách phụ đề để Studio hiển thị ngay trên timeline.
+    """
+    stem = (payload.get("stem") or "").strip()
+    target_lang = (payload.get("target_lang") or "vi").strip()
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    clean = re.sub(r'[^\w\-_.]', '_', stem)
+    job_dir = WORKSPACE / clean
+    srt_original = job_dir / "original.srt"
+    if not srt_original.is_file():
+        raise HTTPException(status_code=400, detail="Chưa có sub Trung gốc — bấm 'Sub Trung' trước đã!")
+
+    import uuid as _uuid
+
+    job_id = _uuid.uuid4().hex[:12]
+    _MANUAL_JOBS[job_id] = {"status": "queued", "progress": 0, "stage": "Trong hàng đợi...", "kind": "translate", "created_at": time.time()}
+
+    def worker():
+        job = _MANUAL_JOBS[job_id]
+        try:
+            import main as main_module
+            from datetime import timedelta
+
+            job.update({"status": "running", "stage": "Chờ pipeline rảnh..."})
+            with main_module.UNIFIED_PIPELINE_LOCK:
+                job.update({"progress": 15, "stage": "Đọc sub Trung đã sửa..."})
+                from ai.translation import translate_subtitles
+                from ai.transcription import save_srt
+
+                raw_blocks = parse_srt(srt_original.read_text(encoding="utf-8", errors="replace"))
+                if not raw_blocks:
+                    raise RuntimeError("original.srt trống hoặc lỗi định dạng")
+                segments = []
+                for i, b in enumerate(raw_blocks):
+                    segments.append(_ManualSegment(
+                        index=i + 1,
+                        start_td=timedelta(seconds=float(b.get("start", 0.0))),
+                        end_td=timedelta(seconds=float(b.get("end", 0.0))),
+                        content=(b.get("text") or "").strip(),
+                    ))
+                job.update({"progress": 30, "stage": f"Đang dịch {len(segments)} câu bằng LLM..."})
+                translate_subtitles(segments, target_lang, api_key=os.getenv("GEMINI_API_KEY", ""), video_path=None)
+                job.update({"progress": 80, "stage": "Đang ghi translated.srt..."})
+                srt_translated = job_dir / "translated.srt"
+                save_srt(segments, srt_translated)
+
+                subtitles = []
+                for seg in segments:
+                    subtitles.append({
+                        "index": seg.index,
+                        "start": round(seg.start.total_seconds(), 3),
+                        "end": round(seg.end.total_seconds(), 3),
+                        "start_str": format_srt_timestamp(seg.start.total_seconds()),
+                        "end_str": format_srt_timestamp(seg.end.total_seconds()),
+                        "text": seg.content,
+                        "original_text": raw_blocks[seg.index - 1].get("text", "") if seg.index - 1 < len(raw_blocks) else "",
+                    })
+                job.update({
+                    "status": "done", "progress": 100,
+                    "stage": f"Đã dịch {len(subtitles)} câu — timeline đã hiển thị phụ đề Việt",
+                    "result": {"count": len(subtitles), "subtitles": subtitles},
+                })
+        except Exception as e:
+            logger.exception("Manual translate job lỗi")
+            _manual_job_set(job_id, status="error", stage=str(e)[:220])
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {"status": "ok", "job_id": job_id}
+
+
+@router.get("/api/workflow/manual/job-status")
+async def api_manual_job_status(job_id: str = Query(...)):
+    job = _MANUAL_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job")
+    return {"status": job.get("status"), "progress": job.get("progress", 0),
+            "stage": job.get("stage", ""), "kind": job.get("kind", ""), "result": job.get("result")}
 
 
 @router.get("/api/workflow/download-srt")
