@@ -162,6 +162,11 @@ def trigger_vram_emergency_downgrade(reason: str) -> bool:
         tmp_file = SETTINGS_FILE.with_suffix(f".{os.getpid()}.tmp")
         tmp_file.write_text(json.dumps(clean_cfg, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_file.replace(SETTINGS_FILE)
+        try:
+            from notification_service import push
+            push("warning", "VRAM Guard hạ xuống 1 luồng", reason, "vram")
+        except Exception:
+            pass
         return True
     except Exception as e:
         logger.error("Lỗi khi ghi sự kiện hạ luồng VRAM: %s", e)
