@@ -799,6 +799,12 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
                 push("success", "Hoàn tất video", f"{video_name} · mất {int(duration_seconds)}s", "pipeline")
             except Exception:
                 pass
+            try:
+                from duplicate_guard import register as _dup_register
+                if output_path and Path(output_path).is_file():
+                    _dup_register("output", video_name, Path(output_path))
+            except Exception:
+                pass
 
 
 def finish_batch():

@@ -617,6 +617,13 @@ def save_segment_draft(
                     f"Câu {sid} không được để trống văn bản — hãy nhập nội dung trước khi lưu."
                 )
             text_changed = new_text != s.get("translated_text", "")
+            if text_changed and not os.environ.get("PYTEST_CURRENT_TEST"):
+                # F7 — học từ sửa tay: diff ngắn mức từ sẽ thành gợi ý Glossary khi lặp lại
+                try:
+                    from glossary_learning_service import record_edit
+                    record_edit(s.get("translated_text", ""), new_text, clean_id)
+                except Exception:
+                    pass
             s["translated_text"] = new_text
             if "voice_id" in upd:
                 s["voice_id"] = upd["voice_id"]

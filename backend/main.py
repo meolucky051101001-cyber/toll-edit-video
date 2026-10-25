@@ -1406,7 +1406,21 @@ async def api_input_video(request: Request):
             if target.exists():
                 target = root / (Path(name).stem + "_" + uuid.uuid4().hex[:8] + Path(name).suffix)
             tmp.rename(target)
-            return {"name": target.name, "size": total}
+            # F10 — cảnh báo trùng nội dung ngay khi tải lên + đăng ký fingerprint
+            dup_info = None
+            try:
+                from duplicate_guard import check_path as _dup_check, register as _dup_register
+                dup_info = await asyncio.to_thread(_dup_check, target)
+                await asyncio.to_thread(_dup_register, "upload", target.name, target)
+            except Exception:
+                pass
+            resp = {"name": target.name, "size": total}
+            if dup_info:
+                resp["duplicate_warning"] = (
+                    f"Nội dung trùng với '{dup_info.get('name')}' "
+                    f"({'thành phẩm đã xuất' if dup_info.get('kind') == 'output' else 'file đã tải lên trước đây'})!"
+                )
+            return resp
         finally:
             tmp.unlink(missing_ok=True)
 
@@ -2009,6 +2023,107 @@ async def _night_batch_watcher():
         except Exception as exc:
             logger.debug("Lỗi trong night batch watcher: %s", exc)
             await asyncio.sleep(10)
+
+
+# ===== GĐ3: F7 GLOSSARY LEARNING · F10 DUPLICATE GUARD · F12 WORKSPACE · F14 DISK =====
+
+
+@app.get("/api/glossary/suggestions")
+async def api_get_glossary_suggestions(min_count: int = 3):
+    """F7 — các cặp sửa tay lặp lại >= min_count lần, chờ người dùng duyệt vào Glossary."""
+    from glossary_learning_service import get_suggestions
+
+    return {"items": await asyncio.to_thread(get_suggestions, min_count)}
+
+
+@app.post("/api/glossary/suggestions/accept")
+async def api_accept_glossary_suggestion(payload: dict = Body(...)):
+    from glossary_learning_service import accept_suggestion
+
+    try:
+        res = await asyncio.to_thread(
+            accept_suggestion, payload.get("before", ""), payload.get("after", "")
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return res
+
+
+@app.post("/api/glossary/suggestions/dismiss")
+async def api_dismiss_glossary_suggestion(payload: dict = Body(...)):
+    from glossary_learning_service import dismiss_suggestion
+
+    return await asyncio.to_thread(
+        dismiss_suggestion, payload.get("before", ""), payload.get("after", "")
+    )
+
+
+@app.get("/api/phoi/duplicate-check")
+async def api_phoi_duplicate_check(filename: str):
+    """F10 — kiểm tra video phôi có trùng nội dung với video đã xử lý/tải lên trước đây."""
+    from duplicate_guard import check_path
+
+    clean = filename.strip()
+    if not clean or clean in (".", "..") or clean != Path(clean).name:
+        raise HTTPException(status_code=400, detail="Tên file không hợp lệ")
+    target = get_input_dir() / clean
+    if not target.is_file():
+        return {"duplicate": False}
+    hit = await asyncio.to_thread(check_path, target)
+    return {"duplicate": bool(hit), "info": hit}
+
+
+@app.get("/api/workspace/usage")
+async def api_workspace_usage():
+    """F12 — dung lượng từng job trong workspace (chạy quét nặng trong thread)."""
+    from workspace_usage_service import list_job_usage
+
+    return await asyncio.to_thread(list_job_usage)
+
+
+@app.post("/api/workspace/cleanup")
+async def api_workspace_cleanup(payload: dict = Body(...)):
+    """F12 — dọn stems (giữ SRT/dubbing để còn sửa câu) hoặc xóa cả job dir."""
+    from workspace_usage_service import cleanup_jobs
+
+    names = payload.get("jobs")
+    mode = str(payload.get("mode") or "stems")
+    if mode not in ("stems", "full"):
+        raise HTTPException(status_code=400, detail="Chế độ dọn không hợp lệ (stems | full)")
+    if not isinstance(names, list) or not names:
+        raise HTTPException(status_code=400, detail="Danh sách job cần dọn đang rỗng")
+    active: list = []
+    try:
+        st = job_tracker.get_status()
+        active.append(st.get("video_name") or "")
+        for w in (st.get("workers") or {}).values():
+            if isinstance(w, dict):
+                active.append(w.get("video_name") or "")
+    except Exception:
+        pass
+    return await asyncio.to_thread(cleanup_jobs, names, mode, active)
+
+
+@app.get("/api/disk-usage")
+async def api_disk_usage():
+    """F14 — dung lượng còn trống của các ổ chứa input/workspace/output."""
+    import shutil as _shutil
+
+    def _probe(label: str, p) -> dict:
+        try:
+            u = _shutil.disk_usage(str(p))
+            return {"label": label, "path": str(p), "free_gb": round(u.free / 2**30, 1), "total_gb": round(u.total / 2**30, 1)}
+        except Exception:
+            return {"label": label, "path": str(p), "free_gb": None, "total_gb": None}
+
+    def _all():
+        return [
+            _probe("input", get_input_dir()),
+            _probe("workspace", Path(WORKSPACE)),
+            _probe("output", get_output_dir()),
+        ]
+
+    return {"drives": await asyncio.to_thread(_all)}
 
 
 
