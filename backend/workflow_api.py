@@ -302,6 +302,25 @@ def build_custom_ass_file(job_dir: Path, cfg: Dict[str, Any], tw: int = 1080, th
         ass_text = re.sub(r"Style:\s*BgStyle,[^\r\n]+", new_bg_style, ass_text)
         ass_text = re.sub(r"Style:\s*TextStyle,[^\r\n]+", new_txt_style, ass_text)
 
+        # P8: hiệu ứng vào/ra cho từng câu phụ đề (không đụng \pos/\move sẵn có)
+        anim_in = str(cfg.get("sub_anim_in", "none") or "none").strip().lower()
+        anim_out = str(cfg.get("sub_anim_out", "none") or "none").strip().lower()
+        anim_tags = []
+        if anim_in == "fade" or anim_out == "fade":
+            anim_tags.append(f"\\fad({250 if anim_in == 'fade' else 0},{250 if anim_out == 'fade' else 0})")
+        if anim_in == "pop":
+            anim_tags.append("\\fscx40\\fscy40\\t(0,220,\\fscx100\\fscy100)")
+        elif anim_in == "zoom":
+            anim_tags.append("\\t(0,350,\\fscx104\\fscy104)")
+        if anim_tags:
+            anim_block = "".join(anim_tags)
+            injected = []
+            for ln in ass_text.splitlines():
+                if ln.startswith("Dialogue:") and "{" in ln:
+                    ln = ln.replace("{", "{" + anim_block, 1)
+                injected.append(ln)
+            ass_text = "\n".join(injected)
+
         custom_ass = job_dir / "custom_styled.ass"
         custom_ass.write_text(ass_text, encoding="utf-8")
         return custom_ass
@@ -3295,6 +3314,192 @@ async def api_static_js(fname: str):
     if not p.is_file():
         raise HTTPException(status_code=404, detail="Không tìm thấy file JS")
     return FileResponse(p, media_type="application/javascript")
+
+
+# =========================================================================
+# P9: MANUAL STUDIO PIPELINE — cho video thô vào → tạo sub Trung → dịch tại chỗ → sửa/hook → xuất
+# =========================================================================
+_MANUAL_JOBS: Dict[str, Dict[str, Any]] = {}
+
+
+class _ManualSegment:
+    """Shim segment cho translate_subtitles: chỉ cần index/start(timedelta)/end/content."""
+
+    def __init__(self, index: int, start_td, end_td, content: str):
+        self.index = index
+        self.start = start_td
+        self.end = end_td
+        self.content = content
+
+
+def _manual_resolve_raw_video(stem: str) -> Optional[Path]:
+    # 1. khớp chính xác <stem>.mp4
+    for d in (INPUT_DIR, DOWNLOADS_DIR):
+        p = d / f"{stem}.mp4"
+        if p.is_file():
+            return p
+    # 2. khớp tiền tố — file thật thường có đuôi tiêu đề: <stem>_<título>.mp4
+    for d in (INPUT_DIR, DOWNLOADS_DIR):
+        if d.is_dir():
+            for p in sorted(d.glob(f"{glob_escape(stem)}*.mp4")):
+                if p.is_file():
+                    return p
+    # 3. file trong workspace job dir
+    clean = re.sub(r'[^\w\-_.]', '_', stem)
+    jd = WORKSPACE / clean
+    for name in (f"{stem}.mp4", "step1_extracted.mp4"):
+        p = jd / name
+        if p.is_file():
+            return p
+    return None
+
+
+def glob_escape(s: str) -> str:
+    return s.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
+
+
+def _manual_job_set(job_id: str, **kw) -> None:
+    job = _MANUAL_JOBS.get(job_id)
+    if job is not None:
+        job.update(kw)
+
+
+@router.post("/api/workflow/manual/generate-cn")
+async def api_manual_generate_cn(payload: Dict[str, Any] = Body(...)):
+    """
+    P9 bước 1: tạo phụ đề tiếng Trung GỐC cho video thô (tách audio + Whisper ASR),
+    KHÔNG dịch — người dùng xem/sửa sub gốc trước rồi mới gọi /manual/translate.
+    Chạy nền (GPU Whisper), trả job_id để poll /manual/job-status.
+    """
+    stem = (payload.get("stem") or "").strip()
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    video_path = _manual_resolve_raw_video(stem)
+    if not video_path:
+        raise HTTPException(status_code=404, detail="Không tìm thấy video thô cho stem này (INPUT_DIR/DOWNLOADS)")
+    import uuid as _uuid
+
+    job_id = _uuid.uuid4().hex[:12]
+    _MANUAL_JOBS[job_id] = {"status": "queued", "progress": 0, "stage": "Trong hàng đợi...", "kind": "cn", "created_at": time.time()}
+
+    def worker():
+        job = _MANUAL_JOBS[job_id]
+        try:
+            # Dùng chung GPU Whisper với pipeline — chờ pipeline chính rảnh
+            import main as main_module
+
+            job.update({"status": "running", "stage": "Chờ pipeline rảnh..."})
+            with main_module.UNIFIED_PIPELINE_LOCK:
+                clean = re.sub(r'[^\w\-_.]', '_', stem)
+                job_dir = WORKSPACE / clean
+                job_dir.mkdir(parents=True, exist_ok=True)
+                wav = job_dir / "original.wav"
+                job.update({"progress": 10, "stage": "Tách audio 16kHz..."})
+                subprocess.run(
+                    ["ffmpeg", "-y", "-v", "error", "-i", str(video_path),
+                     "-vn", "-ac", "1", "-ar", "16000", str(wav)],
+                    capture_output=True, timeout=600, check=True,
+                )
+                job.update({"progress": 25, "stage": "ASR tiếng Trung (Whisper)... — video càng dài càng lâu"})
+                from ai.v1_asr_isolated import extract_subtitles_isolated
+
+                srt_path = job_dir / "original.srt"
+                segments = extract_subtitles_isolated(wav, srt_path)
+                job.update({
+                    "status": "done", "progress": 100,
+                    "stage": f"Đã tạo {len(segments)} câu sub tiếng Trung — bấm câu trên timeline để xem/sửa",
+                    "result": {"count": len(segments), "srt": str(srt_path)},
+                })
+        except Exception as e:
+            logger.exception("Manual generate-cn job lỗi")
+            _manual_job_set(job_id, status="error", stage=str(e)[:220])
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {"status": "ok", "job_id": job_id}
+
+
+@router.post("/api/workflow/manual/translate")
+async def api_manual_translate(payload: Dict[str, Any] = Body(...)):
+    """
+    P9 bước 2: dịch NGAY TẠI ĐÓ — đọc original.srt HIỆN TẠI (đã qua người dùng sửa),
+    dịch bằng LLM (Gemini→OpenAI→DeepSeek→fallback), ghi translated.srt và trả
+    danh sách phụ đề để Studio hiển thị ngay trên timeline.
+    """
+    stem = (payload.get("stem") or "").strip()
+    target_lang = (payload.get("target_lang") or "vi").strip()
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    clean = re.sub(r'[^\w\-_.]', '_', stem)
+    job_dir = WORKSPACE / clean
+    srt_original = job_dir / "original.srt"
+    if not srt_original.is_file():
+        raise HTTPException(status_code=400, detail="Chưa có sub Trung gốc — bấm 'Sub Trung' trước đã!")
+
+    import uuid as _uuid
+
+    job_id = _uuid.uuid4().hex[:12]
+    _MANUAL_JOBS[job_id] = {"status": "queued", "progress": 0, "stage": "Trong hàng đợi...", "kind": "translate", "created_at": time.time()}
+
+    def worker():
+        job = _MANUAL_JOBS[job_id]
+        try:
+            import main as main_module
+            from datetime import timedelta
+
+            job.update({"status": "running", "stage": "Chờ pipeline rảnh..."})
+            with main_module.UNIFIED_PIPELINE_LOCK:
+                job.update({"progress": 15, "stage": "Đọc sub Trung đã sửa..."})
+                from ai.translation import translate_subtitles
+                from ai.transcription import save_srt
+
+                raw_blocks = parse_srt(srt_original.read_text(encoding="utf-8", errors="replace"))
+                if not raw_blocks:
+                    raise RuntimeError("original.srt trống hoặc lỗi định dạng")
+                segments = []
+                for i, b in enumerate(raw_blocks):
+                    segments.append(_ManualSegment(
+                        index=i + 1,
+                        start_td=timedelta(seconds=float(b.get("start", 0.0))),
+                        end_td=timedelta(seconds=float(b.get("end", 0.0))),
+                        content=(b.get("text") or "").strip(),
+                    ))
+                job.update({"progress": 30, "stage": f"Đang dịch {len(segments)} câu bằng LLM..."})
+                translate_subtitles(segments, target_lang, api_key=os.getenv("GEMINI_API_KEY", ""), video_path=None)
+                job.update({"progress": 80, "stage": "Đang ghi translated.srt..."})
+                srt_translated = job_dir / "translated.srt"
+                save_srt(segments, srt_translated)
+
+                subtitles = []
+                for seg in segments:
+                    subtitles.append({
+                        "index": seg.index,
+                        "start": round(seg.start.total_seconds(), 3),
+                        "end": round(seg.end.total_seconds(), 3),
+                        "start_str": format_srt_timestamp(seg.start.total_seconds()),
+                        "end_str": format_srt_timestamp(seg.end.total_seconds()),
+                        "text": seg.content,
+                        "original_text": raw_blocks[seg.index - 1].get("text", "") if seg.index - 1 < len(raw_blocks) else "",
+                    })
+                job.update({
+                    "status": "done", "progress": 100,
+                    "stage": f"Đã dịch {len(subtitles)} câu — timeline đã hiển thị phụ đề Việt",
+                    "result": {"count": len(subtitles), "subtitles": subtitles},
+                })
+        except Exception as e:
+            logger.exception("Manual translate job lỗi")
+            _manual_job_set(job_id, status="error", stage=str(e)[:220])
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {"status": "ok", "job_id": job_id}
+
+
+@router.get("/api/workflow/manual/job-status")
+async def api_manual_job_status(job_id: str = Query(...)):
+    job = _MANUAL_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job")
+    return {"status": job.get("status"), "progress": job.get("progress", 0),
+            "stage": job.get("stage", ""), "kind": job.get("kind", ""), "result": job.get("result")}
 
 
 @router.get("/api/workflow/download-srt")

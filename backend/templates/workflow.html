@@ -1375,6 +1375,19 @@
       color: #7dd3fc;
       line-height: 16px;
     }
+    /* P8: preview animation cho hiệu ứng phụ đề */
+    @keyframes subPrevFade {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+    @keyframes subPrevPop {
+      0% { transform: scale(0.4); opacity: 0; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    @keyframes subPrevZoom {
+      0% { transform: scale(1); }
+      100% { transform: scale(1.08); }
+    }
     .clip-card-inner {
       display: flex;
       align-items: center;
@@ -2553,6 +2566,14 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
               <span class="tool-icon">⌨️</span>
               <span>Phím Tắt</span>
             </button>
+            <button type="button" class="btn-capcut-tool" id="btnManualCn" onclick="manualGenerateCn()" title="P9: tạo phụ đề tiếng Trung GỐC cho video thô (Whisper ASR chạy nền) — xem/sửa xong rồi bấm Dịch Ngay">
+              <span class="tool-icon">🎤</span>
+              <span>Sub Trung</span>
+            </button>
+            <button type="button" class="btn-capcut-tool" id="btnManualTranslate" onclick="manualTranslate()" title="P9: dịch NGAY sub Trung đã sửa thành tiếng Việt (LLM) — hiển thị lên timeline">
+              <span class="tool-icon">🌐</span>
+              <span>Dịch Ngay</span>
+            </button>
             <input type="file" id="concatImportInput" accept="video/mp4,video/webm,video/x-matroska" style="display: none;" onchange="importConcatFile(this)">
           </div>
 
@@ -2771,6 +2792,12 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
               <option value="Inter">Inter (Gọn gàng, trung tính)</option>
               <option value="UTM Bebas">UTM Bebas (Chữ hoa TikTok)</option>
               <option value="Oswald">Oswald (Hẹp cô đọng)</option>
+              <option value="Anton">Anton (Đậm, phần lớn tiêu đề)</option>
+              <option value="Nunito">Nunito (Tròn trịa, thân thiện)</option>
+              <option value="Playfair Display">Playfair Display (Sang trọng, serif)</option>
+              <option value="Impact">Impact (Đậm cực đại, meme)</option>
+              <option value="Verdana">Verdana (Rộng, dễ đọc xa)</option>
+              <option value="UTM Avo">UTM Avo (Bản Việt kinh điển)</option>
             </select>
           </div>
 
@@ -2864,6 +2891,12 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
               <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubBgColorPreset('#e0f2fe', this)">🔵 Xanh nhạt</button>
               <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubBgColorPreset('#fce7f3', this)">🌸 Hồng phấn</button>
               <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubBgColorPreset('#f1f5f9', this)">🔘 Xám nhạt</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubBgColorPreset('#fed7aa', this)">🟠 Cam đào</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubBgColorPreset('#ddd6fe', this)">🟣 Tím lavender</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubBgColorPreset('#bbf7d0', this)">🟢 Xanh mint</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubBgColorPreset('#0f172a', this)">🌙 Than đêm</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubBgColorPreset('#7c2d12', this)">🟤 Nâu đất</button>
+              <button type="button" class="export-pill" style="padding: 3px 8px; font-size: 10.5px;" onclick="setSubBgColorPreset('#164e63', this)">🔵 Navy đậm</button>
             </div>
           </div>
 
@@ -2874,6 +2907,28 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
               <span id="subBgOpacityVal" class="form-slider-val" style="font-size: 12px;">100%</span>
             </div>
             <input type="range" id="subBgOpacitySlider" min="20" max="100" step="5" value="100" class="form-slider" oninput="updateSubBgOpacity(this.value)">
+          </div>
+
+          <!-- P8: Hiệu ứng sub (animation burn vào ASS khi xuất) -->
+          <div style="margin-bottom: 10px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+              <label class="form-label" style="font-size: 11px; margin-bottom: 0;">Hiệu ứng phụ đề (animation khi xuất):</label>
+            </div>
+            <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+              <span style="font-size: 10.5px; color: #94a3b8;">Vào</span>
+              <select id="subAnimInSelect" class="form-select" style="flex: 1; min-width: 110px; background: #162032; border: 1px solid #28374d; color: #f1f5f9; padding: 5px 8px; border-radius: 6px; font-size: 11.5px; font-weight: 600;" onchange="updateSubAnim('in', this.value)">
+                <option value="none">— Không —</option>
+                <option value="fade">Fade (mờ dần)</option>
+                <option value="pop">Pop (nảy scale)</option>
+                <option value="zoom">Zoom (phóng nhẹ)</option>
+              </select>
+              <span style="font-size: 10.5px; color: #94a3b8;">Ra</span>
+              <select id="subAnimOutSelect" class="form-select" style="flex: 1; min-width: 100px; background: #162032; border: 1px solid #28374d; color: #f1f5f9; padding: 5px 8px; border-radius: 6px; font-size: 11.5px; font-weight: 600;" onchange="updateSubAnim('out', this.value)">
+                <option value="none">— Không —</option>
+                <option value="fade">Fade (mờ dần)</option>
+              </select>
+            </div>
+            <div style="font-size: 9.5px; color: #64748b; margin-top: 3px;">Áp dụng khi xuất video (burn ASS). Preview bên trên chạy thử animation.</div>
           </div>
 
           <!-- Kích thước to nhỏ khung nền: Lề ngang (Padding X) -->
@@ -4716,6 +4771,69 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       R.summary = `${R.pass}/${R.pass + R.fail} đạt`;
       console.log('[timelineSelfTest]', R.summary);
       return R;
+    }
+
+    // ===== P9: MANUAL STUDIO PIPELINE (sub Trung gốc → dịch tại chỗ → sửa/hook → xuất) =====
+    async function runManualJob(kind, btn) {
+      if (!currentVideo || !currentVideo.stem) {
+        showToast('⚠️ Vui lòng chọn một video trước!');
+        return;
+      }
+      const endpoint = kind === 'cn' ? '/api/workflow/manual/generate-cn' : '/api/workflow/manual/translate';
+      const label0 = btn.innerText;
+      btn.disabled = true;
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: RENDER_TOKEN_HEADERS(),
+          body: JSON.stringify({ stem: currentVideo.stem })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.job_id) {
+          showToast('❌ ' + (data.detail || 'Không tạo được job'));
+          return;
+        }
+        const jobId = data.job_id;
+        while (true) {
+          await new Promise(r => setTimeout(r, 1000));
+          const sres = await fetch('/api/workflow/manual/job-status?job_id=' + encodeURIComponent(jobId));
+          if (!sres.ok) throw new Error('Mất kết nối tới job');
+          const st = await sres.json();
+          btn.innerText = `⏳ ${st.progress || 0}%`;
+          btn.title = st.stage || '';
+          if (st.status === 'done') {
+            if (kind === 'cn') {
+              showToast('🎤 ' + (st.stage || 'Đã tạo sub Trung!'));
+              if (typeof loadWorkflowData === 'function') await loadWorkflowData(); // nạp sub Trung vào timeline
+            } else {
+              const subs = st.result && st.result.subtitles ? st.result.subtitles : [];
+              currentSubtitles = subs;
+              if (currentVideoData) currentVideoData.vietnamese_subtitles = subs;
+              renderSubtitlesTimeline();
+              updateSubtitlesOverlay();
+              showToast('🌐 ' + (st.stage || 'Đã dịch xong!'));
+            }
+            return;
+          }
+          if (st.status === 'error') {
+            showToast('❌ Lỗi: ' + (st.stage || 'Thất bại'));
+            return;
+          }
+        }
+      } catch (err) {
+        showToast('❌ Lỗi kết nối: ' + String(err).slice(0, 80));
+      } finally {
+        btn.disabled = false;
+        btn.innerText = label0;
+      }
+    }
+
+    function manualGenerateCn() {
+      runManualJob('cn', document.getElementById('btnManualCn'));
+    }
+
+    function manualTranslate() {
+      runManualJob('translate', document.getElementById('btnManualTranslate'));
     }
 
     // REALTIME SUBTITLE SYNCHRONIZATION
@@ -6662,6 +6780,25 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       triggerAutoSaveSettings();
     }
 
+    // P8: hiệu ứng phụ đề (burn vào ASS khi xuất) + preview animation
+    function updateSubAnim(kind, val) {
+      if (kind === 'in') canvasSettings.sub_anim_in = val;
+      else canvasSettings.sub_anim_out = val;
+      triggerAutoSaveSettings();
+      playSubPreviewAnim();
+    }
+
+    function playSubPreviewAnim() {
+      const el = document.getElementById('subSamplePreviewText');
+      if (!el) return;
+      const animIn = canvasSettings.sub_anim_in || 'none';
+      el.style.animation = 'none';
+      void el.offsetWidth; // reflow để chạy lại animation
+      if (animIn === 'fade') el.style.animation = 'subPrevFade 0.45s ease';
+      else if (animIn === 'pop') el.style.animation = 'subPrevPop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1)';
+      else if (animIn === 'zoom') el.style.animation = 'subPrevZoom 0.4s ease';
+    }
+
     function updateSubPaddingX(val) {
       const num = parseInt(val) || 16;
       canvasSettings.sub_box_padding_x = num;
@@ -6915,6 +7052,8 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       if (document.getElementById('subBgColorHex')) document.getElementById('subBgColorHex').innerText = bgColor.toUpperCase();
       if (document.getElementById('subBgOpacitySlider')) document.getElementById('subBgOpacitySlider').value = opacity;
       if (document.getElementById('subBgOpacityVal')) document.getElementById('subBgOpacityVal').innerText = `${opacity}%`;
+      if (document.getElementById('subAnimInSelect')) document.getElementById('subAnimInSelect').value = canvasSettings.sub_anim_in || 'none';
+      if (document.getElementById('subAnimOutSelect')) document.getElementById('subAnimOutSelect').value = canvasSettings.sub_anim_out || 'none';
       if (document.getElementById('subPaddingXSlider')) document.getElementById('subPaddingXSlider').value = padX;
       if (document.getElementById('subPaddingXVal')) document.getElementById('subPaddingXVal').innerText = `${padX}px`;
       if (document.getElementById('subPaddingYSlider')) document.getElementById('subPaddingYSlider').value = padY;
