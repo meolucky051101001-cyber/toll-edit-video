@@ -2574,6 +2574,10 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
               <span class="tool-icon">🌐</span>
               <span>Dịch Ngay</span>
             </button>
+            <button type="button" class="btn-capcut-tool" id="btnManualTts" onclick="manualGenerateTts()" title="P9: tạo giọng đọc tiếng Việt từ sub đã dịch bằng đúng API pipeline (CapCut/Vie-TTS/FPT/Edge) — lắp thành bản lồng full video">
+              <span class="tool-icon">🗣️</span>
+              <span>Tạo Giọng</span>
+            </button>
             <input type="file" id="concatImportInput" accept="video/mp4,video/webm,video/x-matroska" style="display: none;" onchange="importConcatFile(this)">
           </div>
 
@@ -3682,7 +3686,19 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
         <div id="vpStatus" style="font-size: 11px; color: #cbd5e1; background: #141d2c; border: 1px solid #233147; border-radius: 8px; padding: 8px 10px;">Đang tải cấu hình giọng...</div>
 
-        <button type="button" class="btn btn-success" id="btnSaveVoicePicker" style="font-weight: 800;" onclick="saveVoicePicker()">💾 LƯU CẤU HÌNH GIỌNG ĐỌC</button>
+        <div style="display: flex; gap: 8px;">
+          <button type="button" class="btn btn-success" id="btnSaveVoicePicker" style="font-weight: 800; flex: 1;" onclick="saveVoicePicker()">💾 LƯU CẤU HÌNH GIỌNG ĐỌC</button>
+        </div>
+
+        <!-- P9: bản lồng tiếng AI tạo tại Studio -->
+        <div id="vpTtsBlock" style="display: none; background: #141d2c; border: 1px solid #233147; border-radius: 8px; padding: 10px 12px;">
+          <div style="font-size: 12px; font-weight: 700; color: #f1f5f9; margin-bottom: 6px;">🗣️ BẢN LỒNG TIẾNG AI (tạo tại Studio)</div>
+          <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+            <button type="button" class="cp-chip" id="btnPlayTtsTrack" onclick="playManualTtsTrack()" style="display: none;">▶ Nghe bản lồng</button>
+            <button type="button" class="cp-chip" id="btnManualTts2" onclick="manualGenerateTts()" title="Đọc lại toàn bộ câu đã dịch bằng giọng đang chọn (ghi đè bản lồng cũ)">🔄 Đọc lại</button>
+          </div>
+          <div style="font-size: 9.5px; color: #64748b; margin-top: 4px;">Bản lồng được lắp theo đúng vị trí từng câu phụ đề. Khi xuất, tick "🎧 Trộn lồng tiếng AI" để trộn vào video.</div>
+        </div>
       </div>
       <audio id="voicePreviewAudio" style="display: none;"></audio>
 
@@ -4870,6 +4886,71 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
     function manualGenerateCn() {
       runManualJob('cn', document.getElementById('btnManualCn'));
+    }
+
+    function manualGenerateTts() {
+      if (!currentVideo || !currentVideo.stem) {
+        showToast('⚠️ Vui lòng chọn một video trước!');
+        return;
+      }
+      const btn = document.getElementById('btnManualTts') || document.getElementById('btnManualTts2');
+      const voiceSel = document.getElementById('voiceFemaleSelect');
+      const voiceId = voiceSel ? voiceSel.value : '';
+      const label0 = btn ? btn.innerText : '';
+      if (btn) { btn.disabled = true; }
+      const run = async () => {
+        try {
+          const res = await fetch('/api/workflow/manual/generate-tts', {
+            method: 'POST',
+            headers: RENDER_TOKEN_HEADERS(),
+            body: JSON.stringify({ stem: currentVideo.stem, voice_id: voiceId })
+          });
+          const data = await res.json();
+          if (!res.ok || !data.job_id) {
+            showToast('❌ ' + (data.detail || 'Không tạo được job TTS'));
+            return;
+          }
+          const jobId = data.job_id;
+          while (true) {
+            await new Promise(r => setTimeout(r, 1000));
+            const sres = await fetch('/api/workflow/manual/job-status?job_id=' + encodeURIComponent(jobId));
+            if (!sres.ok) throw new Error('Mất kết nối job');
+            const st = await sres.json();
+            if (btn) { btn.disabled = true; btn.innerText = '⏳ ' + (st.progress || 0) + '%'; btn.title = st.stage || ''; }
+            if (st.status === 'done') {
+              showToast('🗣️ ' + (st.stage || 'Đã tạo giọng đọc!'));
+              const block = document.getElementById('vpTtsBlock');
+              if (block) block.style.display = 'block';
+              const playBtn = document.getElementById('btnPlayTtsTrack');
+              if (playBtn) {
+                playBtn.style.display = 'inline-block';
+                playBtn.dataset.trackUrl = (st.result && st.result.track_url) || '';
+              }
+              return;
+            }
+            if (st.status === 'error') { showToast('❌ Lỗi TTS: ' + (st.stage || 'Thất bại')); return; }
+          }
+        } catch (err) {
+          showToast('❌ Lỗi kết nối TTS: ' + String(err).slice(0, 80));
+        } finally {
+          if (btn) { btn.disabled = false; btn.innerText = label0; }
+        }
+      };
+      run();
+    }
+
+    function playManualTtsTrack() {
+      const btn = document.getElementById('btnPlayTtsTrack');
+      const url = btn ? btn.dataset.trackUrl : '';
+      if (!url) { showToast('⚠️ Chưa có bản lồng — bấm Tạo Giọng trước!'); return; }
+      let audio = document.getElementById('voicePreviewAudio');
+      if (!audio) { audio = new Audio(); }
+      if (!audio.paused && audio.dataset.tts === '1') { audio.pause(); return; }
+      audio.pause();
+      audio.src = url;
+      audio.dataset.tts = '1';
+      audio.play().catch(() => showToast('⚠️ Không phát được bản lồng'));
+      showToast('▶ Đang phát bản lồng tiếng AI...');
     }
 
     function manualTranslate() {
@@ -6879,6 +6960,8 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         use_anti_reup: useAntiReup,
         prepend_thumbnail: prependThumb,
         thumbnail_duration_s: 0.8,
+        // P9: trộn bản lồng tiếng AI tạo tại Studio (nếu đã tạo)
+        tts_mix: !!(document.getElementById('chkTtsMix') && document.getElementById('chkTtsMix').checked),
         canvas_settings: canvasSettings
       };
 
@@ -9237,6 +9320,14 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             <button class="btn btn-outline" style="font-size: 11px; padding: 3px 8px;" onclick="downloadDirectSrt('bilingual')">📥 Tải SRT Song Ngữ</button>
           </div>
         </div>
+
+          <!-- P9: Trộn bản lồng tiếng AI tạo tại Studio -->
+          <div style="display: flex; align-items: center; justify-content: space-between; background: #141d2c; border: 1px solid #233147; border-radius: 8px; padding: 10px 12px; margin-top: 10px;">
+            <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; color: #f1f5f9; cursor: pointer;">
+              <input type="checkbox" id="chkTtsMix" style="accent-color: #0284c7; width: 16px; height: 16px;">
+              🎧 Trộn lồng tiếng AI (bản lồng tạo tại Studio) vào video xuất
+            </label>
+          </div>
 
         <!-- 6. Anti-Reup toggle option in export -->
         <div style="display: flex; align-items: center; justify-content: space-between; background: #141d2c; border: 1px solid #233147; border-radius: 8px; padding: 10px 12px;">

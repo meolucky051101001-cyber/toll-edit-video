@@ -477,7 +477,11 @@ def safe_check_job_artifacts(stem: str, defer_media=False) -> Dict[str, bool]:
 def parse_srt(srt_text: str) -> List[Dict[str, Any]]:
     """Phân tích nội dung tệp phụ đề SRT thành danh sách timestamp và text."""
     subtitles = []
-    blocks = re.split(r'\n\s*\n', srt_text.strip())
+    srt_text = srt_text.replace("\r\n", "\n").replace("\r", "\n")  # chuẩn hóa CRLF
+    blocks = re.split(r"\n\s*\n", srt_text.strip())
+    # P9: file không có dòng trống giữa các câu → tách theo mẫu "số thứ tự + dòng timestamp" đứng trước
+    if len(blocks) == 1 and srt_text.count("-->") > 1:
+        blocks = re.split(r"\n(?=\s*\d+\s*\n\d{2}:)", srt_text.strip())
     
     for block in blocks:
         lines = [l.strip() for l in block.split('\n') if l.strip()]
@@ -3324,14 +3328,26 @@ _MANUAL_JOBS: Dict[str, Dict[str, Any]] = {}
 
 
 class _ManualSegment:
-    """Shim segment cho translate_subtitles: chỉ cần index/start(timedelta)/end/content."""
+    """Shim segment cho translate_subtitles: index/start(timedelta)/end/content.
+    Copy attribute từ srt.Subtitle để tương thích mọi nhánh dịch (to_srt, compose...)."""
 
     def __init__(self, index: int, start_td, end_td, content: str):
+        try:
+            import srt as _srt_lib
+
+            base = _srt_lib.Subtitle(index=index, start=start_td, end=end_td, content=content, proprietary=())
+            self.__dict__.update(base.__dict__)
+        except ImportError:
+            pass
         self.index = index
         self.start = start_td
         self.end = end_td
         self.content = content
 
+    def to_srt(self, **kwargs) -> str:
+        start_s = format_srt_timestamp(self.start.total_seconds())
+        end_s = format_srt_timestamp(self.end.total_seconds())
+        return f"{self.index}" + chr(10) + f"{start_s} --> {end_s}" + chr(10) + self.content + chr(10)
 
 def _manual_resolve_raw_video(stem: str) -> Optional[Path]:
     # 1. khớp chính xác <stem>.mp4
@@ -3357,6 +3373,44 @@ def _manual_resolve_raw_video(stem: str) -> Optional[Path]:
 
 def glob_escape(s: str) -> str:
     return s.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
+
+
+def _wait_pipeline_free(job_id: str, max_wait_s: int = 1800) -> bool:
+    """
+    P9: asyncio.Lock của pipeline không dùng được `with` từ thread nền —
+    chờ bằng polling: pipeline lock + batch active + job_tracker state.
+    Trả False nếu hết thời gian chờ.
+    """
+    import main as main_module
+
+    deadline = time.time() + max_wait_s
+    while time.time() < deadline:
+        try:
+            if main_module.UNIFIED_PIPELINE_LOCK.locked():
+                _manual_job_set(job_id, stage="Pipeline chính đang chạy — chờ GPU rảnh...")
+                time.sleep(3)
+                continue
+        except Exception:
+            pass
+        try:
+            if job_tracker.get_status().get("active"):
+                _manual_job_set(job_id, stage="Batch pipeline đang chạy — chờ...")
+                time.sleep(3)
+                continue
+        except Exception:
+            pass
+        # P9: dọn file stop stale (video.stop/stop_request.json còn tồn tại sau khi batch xong
+        # khiến stop_requested = True vĩnh viễn — mọi API dịch/TTS đều tưởng đang bị huỷ)
+        try:
+            import shared_state as _ss
+            for _stale in (_ss.WORKSPACE / "control" / "video.stop", _ss.WORKSPACE / "bot_system" / "stop_request.json"):
+                if _stale.exists():
+                    _stale.unlink()
+                    logger.info("P9 manual job: đã dọn file stop stale %s", _stale)
+        except Exception:
+            pass
+        return True
+    return False
 
 
 def _manual_job_set(job_id: str, **kw) -> None:
@@ -3390,7 +3444,9 @@ async def api_manual_generate_cn(payload: Dict[str, Any] = Body(...)):
             import main as main_module
 
             job.update({"status": "running", "stage": "Chờ pipeline rảnh..."})
-            with main_module.UNIFIED_PIPELINE_LOCK:
+            # asyncio.Lock KHÔNG dùng được `with` đồng bộ từ thread — chờ bằng polling
+            _wait_pipeline_free(job)
+            if True:
                 clean = re.sub(r'[^\w\-_.]', '_', stem)
                 job_dir = WORKSPACE / clean
                 job_dir.mkdir(parents=True, exist_ok=True)
@@ -3448,7 +3504,16 @@ async def api_manual_translate(payload: Dict[str, Any] = Body(...)):
             from datetime import timedelta
 
             job.update({"status": "running", "stage": "Chờ pipeline rảnh..."})
-            with main_module.UNIFIED_PIPELINE_LOCK:
+            # asyncio.Lock KHÔNG dùng được `with` đồng bộ từ thread — chờ bằng polling
+            _wait_pipeline_free(job)
+            if True:
+                # P9: xóa stop flag stale (batch đã xong nhưng cờ stop chưa reset)
+                try:
+                    import shared_state
+                    if shared_state.stop_requested and not job_tracker.get_status().get("active"):
+                        shared_state.stop_requested = False
+                except Exception:
+                    pass
                 job.update({"progress": 15, "stage": "Đọc sub Trung đã sửa..."})
                 from ai.translation import translate_subtitles
                 from ai.transcription import save_srt
@@ -3465,7 +3530,8 @@ async def api_manual_translate(payload: Dict[str, Any] = Body(...)):
                         content=(b.get("text") or "").strip(),
                     ))
                 job.update({"progress": 30, "stage": f"Đang dịch {len(segments)} câu bằng LLM..."})
-                translate_subtitles(segments, target_lang, api_key=os.getenv("GEMINI_API_KEY", ""), video_path=None)
+                translate_subtitles(segments, target_lang, api_key=os.getenv("GEMINI_API_KEY", ""), video_path=None,
+                                    stop_checker=lambda: False)  # job thủ công không dính cờ stop của batch
                 job.update({"progress": 80, "stage": "Đang ghi translated.srt..."})
                 srt_translated = job_dir / "translated.srt"
                 save_srt(segments, srt_translated)
@@ -3501,6 +3567,179 @@ async def api_manual_job_status(job_id: str = Query(...)):
         raise HTTPException(status_code=404, detail="Không tìm thấy job")
     return {"status": job.get("status"), "progress": job.get("progress", 0),
             "stage": job.get("stage", ""), "kind": job.get("kind", ""), "result": job.get("result")}
+
+
+@router.get("/api/workflow/manual/job-status")
+async def api_manual_job_status(job_id: str = Query(...)):
+    job = _MANUAL_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job")
+    return {"status": job.get("status"), "progress": job.get("progress", 0),
+            "stage": job.get("stage", ""), "kind": job.get("kind", ""), "result": job.get("result")}
+
+
+@router.post("/api/workflow/manual/generate-tts")
+async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
+    """
+    P9 bước 3: tạo giọng đọc tiếng Việt NGAY TRONG Studio — đọc từng câu đã dịch trong
+    translated.srt bằng ĐÚNG các API TTS pipeline đang dùng (CapCut TTS / Vie-TTS / FPT / Edge,
+    qua generate_single_tts), speed-fit theo khoảng trống từng câu, lắp thành bản lồng
+    manual_tts_track.wav phủ full video. Trả job_id để poll /manual/job-status.
+    voice_id: tùy chọn — id giọng trong voice catalog; mặc định dùng giọng đang chọn của tool.
+    """
+    stem = (payload.get("stem") or "").strip()
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    clean = re.sub(r'[^\w\-_.]', '_', stem)
+    job_dir = WORKSPACE / clean
+    srt_translated = job_dir / "translated.srt"
+    if not srt_translated.is_file():
+        raise HTTPException(status_code=400, detail="Chưa có phụ đề Việt — dịch sub trước đã!")
+
+    # Xác định giọng: payload.voice_id > giọng đang chọn của tool (voice_selection.selected)
+    voice_id = (payload.get("voice_id") or "").strip()
+    try:
+        import voice_selection
+        voice_entry = None
+        if voice_id:
+            voice_entry = next((v for v in voice_selection.catalog() if v["id"] == voice_id), None)
+            if not voice_entry:
+                raise HTTPException(status_code=400, detail=f"Giọng '{voice_id}' không có trong catalog")
+        else:
+            voice_entry = voice_selection.selected()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi đọc catalog giọng: {e}")
+    if not voice_entry:
+        raise HTTPException(status_code=400, detail="Không xác định được giọng đọc")
+
+    video_path = _manual_resolve_raw_video(stem)
+    if not video_path:
+        raise HTTPException(status_code=404, detail="Không tìm thấy video thô cho stem này")
+    # Thời lượng video để phủ bed audio
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(video_path)],
+            capture_output=True, text=True, timeout=30)
+        video_dur = float(json.loads(probe.stdout)["format"]["duration"])
+    except Exception:
+        video_dur = 0.0
+
+    import uuid as _uuid
+
+    job_id = _uuid.uuid4().hex[:12]
+    _MANUAL_JOBS[job_id] = {"status": "queued", "progress": 0, "stage": "Trong hàng đợi...", "kind": "tts", "created_at": time.time()}
+
+    def worker():
+        job = _MANUAL_JOBS[job_id]
+        try:
+            import asyncio
+            from datetime import timedelta
+
+            voice_source = str(voice_entry.get("source") or "capcut")
+            voice_param = str(voice_entry.get("param") or "")
+            provider_label = str(voice_entry.get("label") or voice_source)
+
+            job.update({"status": "running", "progress": 5, "stage": f"Chuẩn bị giọng: {provider_label}..."})
+
+            tts_dir = job_dir / "manual_tts"
+            tts_dir.mkdir(parents=True, exist_ok=True)
+            for old in tts_dir.glob("*.mp3"):
+                old.unlink(missing_ok=True)
+
+            raw_blocks = parse_srt(srt_translated.read_text(encoding="utf-8", errors="replace"))
+            if not raw_blocks:
+                raise RuntimeError("translated.srt trống")
+            cues = []
+            for i, b in enumerate(raw_blocks):
+                cues.append(_ManualSegment(
+                    index=i + 1,
+                    start_td=timedelta(seconds=float(b.get("start", 0.0))),
+                    end_td=timedelta(seconds=float(b.get("end", 0.0))),
+                    content=(b.get("text") or "").strip(),
+                ))
+
+            from ai.voice_cloning import generate_single_tts
+
+            # P9: xóa stop flag stale (batch đã xong nhưng cờ stop chưa reset)
+            try:
+                import shared_state
+                if shared_state.stop_requested and not job_tracker.get_status().get("active"):
+                    shared_state.stop_requested = False
+            except Exception:
+                pass
+
+            async def run_all():
+                failed = []
+                total = len(cues)
+                for cue in cues:
+                    cue_dur = max(0.5, (cue.end - cue.start).total_seconds())
+                    _manual_job_set(job_id, progress=10 + int(80 * (cue.index - 1) / max(1, total)),
+                                    stage=f"Đang đọc câu {cue.index}/{total} ({provider_label})...")
+                    try:
+                        await generate_single_tts(cue, str(tts_dir), voice_source, voice_param,
+                                                  api_key=os.getenv("GEMINI_API_KEY", ""),
+                                                  target_max_duration=cue_dur)
+                    except Exception as cue_err:
+                        logger.warning(f"Manual TTS câu {cue.index} lỗi: {cue_err}")
+                        failed.append(cue.index)
+                return failed
+
+            failed_idx = asyncio.run(run_all())
+            try:
+                import shared_state
+                shared_state.stop_requested = bool(_stale_stop)
+            except Exception:
+                pass
+
+            ok_cues = [c for c in cues if (tts_dir / f"{c.index}.mp3").is_file()]
+            if not ok_cues:
+                raise RuntimeError("Không tạo được file giọng nào (API TTS lỗi?)")
+
+            # Lắp bản lồng: bed im lặng full video + từng câu đặt đúng vị trí
+            job.update({"progress": 92, "stage": "Lắp ráp bản lồng hoàn chỉnh..."})
+            dur = max(video_dur, 1.0)
+            inputs = ["ffmpeg", "-y", "-v", "error",
+                      "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo:d={dur:.3f}"]
+            fc_parts = ["[0:a]aformat=sample_rates=44100:channel_layouts=stereo,atrim=0:" + f"{dur:.3f}[bed]"]
+            amix_in = "[bed]"
+            k = 0
+            for cue in ok_cues:
+                idx_in = 1 + k
+                ms = int(round((cue.start.total_seconds()) * 1000))
+                fc_parts.append(
+                    f"[{idx_in}:a]aformat=sample_rates=44100:channel_layouts=stereo,"
+                    f"adelay={ms}:all=1[c{k}]"
+                )
+                amix_in += f"[c{k}]"
+                k += 1
+            fc_parts.append(f"{amix_in}amix=inputs={k + 1}:normalize=0:duration=first[outa]")
+            cmd = inputs[:]
+            for cue in ok_cues:
+                cmd.extend(["-i", str(tts_dir / f"{cue.index}.mp3")])
+            cmd.extend(["-filter_complex", ";".join(fc_parts), "-map", "[outa]",
+                        "-c:a", "pcm_s16le", str(job_dir / "manual_tts_track.wav")])
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if res.returncode != 0 or not (job_dir / "manual_tts_track.wav").is_file():
+                raise RuntimeError("FFmpeg lắp bản lồng thất bại: " + (res.stderr or "")[-200:])
+
+            job.update({
+                "status": "done", "progress": 100,
+                "stage": f"Đã tạo giọng đọc {len(ok_cues)}/{len(cues)} câu bằng {provider_label}"
+                         + (f" — {len(failed_idx)} câu lỗi" if failed_idx else ""),
+                "result": {
+                    "count": len(ok_cues), "failed": failed_idx,
+                    "track_url": f"/api/workflow/stream-file?path={job_dir / 'manual_tts_track.wav'}&t={time.time()}",
+                    "voice": provider_label,
+                },
+            })
+        except Exception as e:
+            logger.exception("Manual generate-tts job lỗi")
+            _manual_job_set(job_id, status="error", stage=str(e)[:220])
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {"status": "ok", "job_id": job_id}
 
 
 @router.get("/api/workflow/download-srt")
@@ -3867,6 +4106,22 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
         audio_idx = cmd_inputs.count("-i")
         cmd_inputs.extend(["-i", str(audio_input_path)])
         map_audio = f"{audio_idx}:a?"
+
+    # P9: trộn bản lồng tiếng AI (manual_tts_track.wav) lên audio xuất — flag từ modal
+    if payload.get("tts_mix"):
+        tts_wav = job_dir / "manual_tts_track.wav"
+        if tts_wav.is_file():
+            tts_idx = cmd_inputs.count("-i")
+            cmd_inputs.extend(["-i", str(tts_wav)])
+            # base audio = luồng audio của video nhập (input 0)
+            fc += (
+                f";[0:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.0[expbase];"
+                f"[{tts_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[exptts];"
+                f"[expbase][exptts]amix=inputs=2:normalize=0:duration=first[expaout]"
+            )
+            map_audio = "[expaout]"
+        else:
+            logger.warning("Export tts_mix bật nhưng thiếu manual_tts_track.wav — bỏ qua trộn")
 
     fps_args = ["-r", fps] if fps in ("24", "30", "60") else []
 
