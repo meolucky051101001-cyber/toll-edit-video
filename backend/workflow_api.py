@@ -3313,7 +3313,8 @@ async def api_static_js(fname: str):
     p = Path(__file__).resolve().parent / "static" / "js" / fname
     if not p.is_file():
         raise HTTPException(status_code=404, detail="Không tìm thấy file JS")
-    return FileResponse(p, media_type="application/javascript")
+    # no-cache: browser luôn revalidate (etag) — chỉnh sửa module có hiệu lực ngay sau reload
+    return FileResponse(p, media_type="application/javascript", headers={"Cache-Control": "no-cache"})
 
 
 # =========================================================================
