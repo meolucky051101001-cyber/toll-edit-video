@@ -19,6 +19,11 @@ STEMS_DIR_NAMES = ("bs_roformer", "demucs", "separated")
 SKIP_DIR_NAMES = {"bot_system", "control", "downloads", "voice_previews_cache", "__pycache__"}
 
 
+# Cache theo bộ root để tránh quét lại ổ đĩa nặng (17s+ trên workspace thật) trong 60s
+_USAGE_CACHE: Dict[str, Any] = {}
+_USAGE_TTL_SECONDS = 60.0
+
+
 def _workspace_roots() -> List[Path]:
     try:
         from segment_editor_service import _workspace_roots as _seg_roots
@@ -41,7 +46,13 @@ def _dir_size_mb(p: Path) -> float:
     return total / (1024 * 1024)
 
 
-def list_job_usage() -> Dict[str, Any]:
+def list_job_usage(force: bool = False) -> Dict[str, Any]:
+    roots = _workspace_roots()
+    cache_key = "|".join(str(r) for r in roots)
+    cached = _USAGE_CACHE.get(cache_key)
+    if not force and cached and time.time() - float(cached.get("_cached_at", 0)) < _USAGE_TTL_SECONDS:
+        return {k: v for k, v in cached.items() if k != "_cached_at"}
+
     jobs: List[Dict[str, Any]] = []
     total = 0.0
     for root in _workspace_roots():
@@ -71,15 +82,22 @@ def list_job_usage() -> Dict[str, Any]:
             except OSError:
                 continue
     jobs.sort(key=lambda j: -j["size_mb"])
-    return {
+    result = {
         "jobs": jobs[:200],
         "total_mb": round(total, 1),
-        "roots": [str(r) for r in _workspace_roots()],
+        "roots": [str(r) for r in roots],
     }
+    _USAGE_CACHE[cache_key] = {**result, "_cached_at": time.time()}
+    return result
+
+
+def invalidate_usage_cache() -> None:
+    _USAGE_CACHE.clear()
 
 
 def cleanup_jobs(names: List[str], mode: str = "stems", active_names=()) -> Dict[str, Any]:
     """Xóa stems (giữ SRT/dubbing) hoặc cả job dir. Chặn tên lạ và job đang xử lý."""
+    invalidate_usage_cache()
     results: List[Dict[str, Any]] = []
     active_norm = set()
     for a in (active_names or ()):
