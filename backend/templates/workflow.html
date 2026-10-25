@@ -2626,7 +2626,10 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           <div class="track-row" id="aiTrackRow">
             <div class="track-header" id="aiTrackHeader" style="display: flex; justify-content: space-between; align-items: center;">
               <span>💬 Phụ đề AI</span>
-              <span class="track-status-pill pill-muted" id="aiTrackStatus">--</span>
+              <span style="display: flex; gap: 4px; align-items: center;">
+                <button type="button" class="cp-chip" style="font-size: 9.5px; padding: 1px 6px;" onclick="event.stopPropagation(); addSubCueAtPlayhead()" title="P9: thêm câu phụ đề Việt MỚI tại vị trí playhead">＋ Câu</button>
+                <span class="track-status-pill pill-muted" id="aiTrackStatus">--</span>
+              </span>
             </div>
             <div class="track-content" id="subtitlesTrack">
               <!-- Vietnamese AI subtitle clips rendered dynamically -->
@@ -4836,6 +4839,63 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       runManualJob('translate', document.getElementById('btnManualTranslate'));
     }
 
+    // ===== P9: THÊM / XÓA CÂU PHỤ ĐỀ VIỆT TRÊN TIMELINE =====
+    function reindexSubCues() {
+      (currentSubtitles || []).forEach((s, i) => {
+        s.index = i + 1;
+        s.start_str = formatTime(s.start);
+        s.end_str = formatTime(s.end);
+      });
+    }
+
+    function addSubCueAtPlayhead() {
+      if (!mainPlayer || isNaN(mainPlayer.duration) || mainPlayer.duration <= 0) {
+        showToast('⚠️ Vui lòng chọn một video trước!');
+        return;
+      }
+      if (!currentSubtitles) currentSubtitles = [];
+      const t = mainPlayer.currentTime || 0;
+      const cue = {
+        index: 0,
+        start: +t.toFixed(3),
+        end: +Math.min(mainPlayer.duration, t + 2).toFixed(3),
+        text: 'Câu mới — double-click để sửa',
+        original_text: ''
+      };
+      // chèn đúng theo thứ tự thời gian
+      const pos = currentSubtitles.findIndex(s => s.start > cue.start);
+      if (pos === -1) currentSubtitles.push(cue);
+      else currentSubtitles.splice(pos, 0, cue);
+      reindexSubCues();
+      if (currentVideoData) currentVideoData.vietnamese_subtitles = currentSubtitles;
+      renderSubtitlesTimeline();
+      updateSubtitlesOverlay();
+      saveUpdatedSubtitlesToServer();
+      showToast(`💬 Đã thêm câu mới tại ${formatTime(t)} — double-click card để sửa nội dung. Font/khung nền dùng chung tab Kiểu Chữ.`);
+    }
+
+    function deleteSubCue(subStart) {
+      if (!currentSubtitles || !currentSubtitles.length) return;
+      const before = currentSubtitles.length;
+      currentSubtitles = currentSubtitles.filter(s => Math.abs(s.start - subStart) > 0.01);
+      if (currentSubtitles.length === before) return;
+      reindexSubCues();
+      if (currentVideoData) currentVideoData.vietnamese_subtitles = currentSubtitles;
+      renderSubtitlesTimeline();
+      updateSubtitlesOverlay();
+      // lưu kể cả khi danh sách rỗng (endpoint ghi đè translated.srt) — phải kèm token (P9 fix)
+      fetch('/api/workflow/save-subtitles', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Local-Control-Token': (typeof CONTROL_PLANE_TOKEN !== 'undefined' ? CONTROL_PLANE_TOKEN : ''),
+          'X-Dashboard-Input': '1'
+        },
+        body: JSON.stringify({ stem: currentVideoData ? currentVideoData.stem : '', subtitles: currentSubtitles })
+      }).catch(() => {});
+      showToast(`🗑️ Đã xóa câu phụ đề — còn ${currentSubtitles.length} câu`);
+    }
+
     // REALTIME SUBTITLE SYNCHRONIZATION
     function updateSubtitlesOverlay() {
       if (isEditingSubText) return; // Không ghi đè khi người dùng đang trực tiếp gõ sửa chữ!
@@ -6395,14 +6455,17 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           const widthPct = Math.max(0.15, ((tlB - tlA) / span) * 100);
           clip.style.left = `${leftPct}%`;
           clip.style.width = `${widthPct}%`;
-          // P8: hiện nội dung câu phụ đề ngay trên card (trước đây chỉ là thanh xanh trống)
-          clip.innerText = sub.text || '(trống)';
+          // P8: hiện nội dung câu phụ đề ngay trên card + nút xóa câu (quản lý sub Việt P9)
+          const safeText = String(sub.text || '(trống)').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          clip.innerHTML = `<span style="flex: 1; overflow: hidden; text-overflow: ellipsis;">${safeText}</span>` +
+            `<button type="button" class="btn-clip-mini" style="color: #fecaca; flex-shrink: 0; margin-left: 4px;" title="Xóa câu phụ đề này" onclick="event.stopPropagation(); deleteSubCue(${parseFloat(sub.start).toFixed(3)})">🗑️</button>`;
           clip.dataset.subStart = sub.start;
           clip.dataset.subEnd = sub.end;
           clip.addEventListener('mousedown', (e) => e.stopPropagation());
           clip.title = `[${sub.start_str || formatTime(sub.start)} -> ${sub.end_str || formatTime(sub.end)}]
 🇻🇳 ${sub.text}`;
           clip.onclick = (e) => {
+            if (e.target.closest('.btn-clip-mini')) return;
             e.stopPropagation();
             mainPlayer.currentTime = sub.start + 0.05;
             mainPlayer.pause();
@@ -6410,6 +6473,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             showToast(`💬 Đã chọn câu #${sub.index || ''}: "${sub.text}". Double-click để sửa trực tiếp!`);
           };
           clip.ondblclick = (e) => {
+            if (e.target.closest('.btn-clip-mini')) return;
             e.stopPropagation();
             mainPlayer.currentTime = sub.start + 0.05;
             mainPlayer.pause();
@@ -7490,7 +7554,12 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       try {
         await fetch('/api/workflow/save-subtitles', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          // P9 fix: middleware chặn POST /api/* thiếu token — trước đây save sub bị 403 NGẦM (không lưu bao giờ)!
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Local-Control-Token': (typeof CONTROL_PLANE_TOKEN !== 'undefined' ? CONTROL_PLANE_TOKEN : ''),
+            'X-Dashboard-Input': '1'
+          },
           body: JSON.stringify({
             stem: currentVideoData.stem,
             subtitles: currentSubtitles
