@@ -1159,6 +1159,11 @@ header {
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
         Lịch sử
       </button>
+      <button type="button" class="btn btn-outline" onclick="toggleNotifPanel(event)" title="Trung tâm thông báo & cảnh báo (video lỗi, VRAM, lịch chạy đêm)" style="position:relative;">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        Thông báo
+        <span id="notifBadge" style="display:none; position:absolute; top:-6px; right:-6px; background:#ef4444; color:#fff; border-radius:999px; font-size:10px; font-weight:700; min-width:16px; height:16px; line-height:16px; padding:0 4px; text-align:center;">0</span>
+      </button>
       <button type="button" class="btn btn-outline dashboard-compact-toggle" id="dashboardCompactToggle" aria-pressed="false" title="Chuyển sang bố cục gọn">Bố cục gọn</button>
       <button type="button" class="btn btn-outline" onclick="window.location.reload()" title="Tải lại trang và cập nhật dữ liệu">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
@@ -1166,6 +1171,18 @@ header {
       </button>
     </div>
   </header>
+
+  <!-- F13: DROPDOWN TRUNG TÂM THÔNG BÁO -->
+  <div id="notifPanel" style="display:none; position:fixed; top:58px; right:16px; z-index:12000; width:370px; max-height:70vh; overflow:auto; background:#0f1117; border:1px solid rgba(255,255,255,0.12); border-radius:10px; box-shadow:0 25px 50px -12px rgba(0,0,0,0.85);">
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 14px; border-bottom:1px solid #27272a; position:sticky; top:0; background:#0f1117; z-index:1;">
+      <strong style="font-size:12.5px; color:#f1f5f9;">🔔 Trung tâm Thông báo</strong>
+      <div style="display:flex; gap:6px;">
+        <button type="button" class="btn btn-outline" style="font-size:10.5px; padding:2px 8px;" onclick="markAllNotifsRead()">Đọc tất cả</button>
+        <button type="button" class="btn btn-outline" style="font-size:10.5px; padding:2px 8px;" onclick="toggleNotifPanel()">✕</button>
+      </div>
+    </div>
+    <div id="notifList" style="padding:6px 10px 10px;"></div>
+  </div>
 
   <div class="container">
     <!-- COLLAPSIBLE SYSTEM CONTROL (PORT 8090) -->
@@ -1684,8 +1701,10 @@ header {
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
               <span>Hàng Chờ Xử Lý</span>
               <span class="badge badge-gpu" id="queueBadge">Telegram</span>
+              <span class="badge badge-gpu" id="queueEtaChip" style="display:none; color:#7dd3fc;" title="Ước tính thời gian còn lại của toàn bộ hàng chờ (theo thống kê trung bình)">⏱</span>
             </div>
             <div class="panel-actions">
+              <button class="btn btn-outline" id="btnNightBatch" onclick="scheduleNightBatch()" style="font-size: 11px; padding: 4px 9px;" title="Lên lịch tự động xử lý hàng đợi vào ban đêm (ví dụ 02:00)">🌙 Lên lịch</button>
               <button class="btn btn-success" id="btnProcessQueue" onclick="processQueue()" style="font-size: 11px; padding: 4px 9px;" title="Tiếp tục xử lý ngay các link video đang đợi trong hàng chờ">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                 Xử lý hàng chờ
@@ -1697,6 +1716,7 @@ header {
             </div>
           </div>
           <div id="queueMessage" role="status" style="padding:8px 18px;color:var(--text-muted);font-size:11.5px">Đang kết nối hàng đợi…</div>
+          <div id="scheduleChip" style="display:none; margin:0 18px 6px; padding:6px 10px; border-radius:6px; background:rgba(56,189,248,0.1); border:1px solid rgba(56,189,248,0.3); color:#7dd3fc; font-size:11.5px; align-items:center; justify-content:space-between; gap:8px;"></div>
           <div class="table-quick-tools queue-quick-tools" role="search" aria-label="Tìm trong hàng chờ">
             <input class="table-quick-search" type="search" data-dashboard-search="queue" aria-label="Tìm video trong hàng chờ" aria-controls="queueTableBody" placeholder="Tìm link hoặc tên video trong hàng chờ...">
             <span class="table-filter-count" id="queueFilterCount" aria-live="polite"></span>
@@ -2196,6 +2216,13 @@ header {
             </div>
           </div>
         </details>
+
+        <details id="statsPanel" style="margin-top:10px; border:1px solid var(--border); border-radius:8px; background:var(--bg-card, #111116);">
+          <summary style="cursor:pointer; font-weight:600; font-size:12.5px; padding:10px 16px; color:#f1f5f9;">📊 Thống kê Hiệu suất Pipeline <span style="color:var(--text-muted); font-weight:400; font-size:11px;">(thời lượng từng bước · throughput · tỷ lệ lỗi)</span></summary>
+          <div style="padding:12px 16px 16px;" id="statsPanelBody">
+            <div style="font-size:11.5px; color:var(--text-muted);">Đang tải số liệu… (mở panel để tải ngay)</div>
+          </div>
+        </details>
     </div>
 
   </div>
@@ -2448,6 +2475,7 @@ header {
         </div>
 
         <div style="display:flex; justify-content:flex-end; gap:8px;">
+          <button type="button" class="btn btn-outline" style="font-size:12px; padding:6px 12px;" onclick="scheduleNightBatchFromSummary()" title="Đưa các video đã chọn vào hàng chờ và tự động chạy vào lúc 02:00 đêm">🌙 Lên lịch chạy đêm</button>
           <button type="button" class="btn btn-outline" style="font-size:12px; padding:6px 12px;" onclick="closePreRunSummaryModal()">Quay lại chỉnh sửa</button>
           <button type="button" class="btn btn-primary" id="btnConfirmBulkEnqueue" style="font-size:12px; padding:6px 18px; display:inline-flex; align-items:center; gap:6px;" onclick="confirmBulkEnqueue()">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -2654,6 +2682,27 @@ header {
       <div class="modal-body" style="padding: 14px; background: #000; display: flex; justify-content: center; align-items: center; min-height: 280px;">
         <video id="previewVideoPlayer" controls autoplay playsinline style="width: 100%; max-height: 72vh; border-radius: 6px; background: #000; outline: none; object-fit: contain; display: block;"></video>
       </div>
+    </div>
+  </div>
+
+  <!-- MODAL: SO SÁNH TRƯỚC / SAU (F5 DUAL PLAYER) -->
+  <div class="modal-backdrop" id="compareModal" onclick="closeCompareModal(event)" style="display:none; z-index:9998;">
+    <div class="modal-box" onclick="event.stopPropagation()" style="max-width:1050px; width:94%; background:#0b0f17; border:1px solid rgba(255,255,255,0.12); border-radius:12px; box-shadow:0 25px 50px -12px rgba(0,0,0,0.85);">
+      <div class="modal-header" style="padding:10px 16px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #27272a;">
+        <div class="modal-title" style="font-size:13px; font-weight:600; color:#f1f5f9;">⇄ So sánh Bản gốc ↔ Bản lồng tiếng</div>
+        <button type="button" onclick="closeCompareModal()" style="background:none; border:none; font-size:18px; color:var(--text-muted); cursor:pointer;">&times;</button>
+      </div>
+      <div style="padding:12px 14px; display:flex; gap:10px; background:#000;">
+        <div style="flex:1; min-width:0;">
+          <div style="font-size:11px; color:#a1a1aa; margin-bottom:4px; text-align:center;">Bản gốc (Tiếng Trung)</div>
+          <video id="compareOriginal" controls playsinline style="width:100%; max-height:60vh; border-radius:6px; background:#000;"></video>
+        </div>
+        <div style="flex:1; min-width:0;">
+          <div style="font-size:11px; color:#34d399; margin-bottom:4px; text-align:center;">Bản lồng tiếng (Thành phẩm)</div>
+          <video id="compareDubbed" controls playsinline style="width:100%; max-height:60vh; border-radius:6px; background:#000;"></video>
+        </div>
+      </div>
+      <div id="compareHint" style="padding:6px 16px 10px; font-size:11px; color:var(--text-muted);">Tua một bên — bên kia tự nhảy theo thời điểm gần đúng để đối chiếu khớp môi & sub.</div>
     </div>
   </div>
 
@@ -2882,16 +2931,16 @@ header {
 
     // One scheduler. Background tabs stop polling; idle dashboards poll less often.
     let dashboardPollTimer = null, dashboardPollBusy = false;
-    const dashboardNextPoll = {status: 0, phoi: 0, banve: 0, queue: 0, logs: 0};
+    const dashboardNextPoll = {status: 0, phoi: 0, banve: 0, queue: 0, logs: 0, notif: 0, schedule: 0, stats: 0};
     async function pollDashboard() {
       clearTimeout(dashboardPollTimer);
       if (document.hidden || dashboardPollBusy) return;
       dashboardPollBusy = true;
       const now = Date.now();
       const intervals = dashboardActive
-        ? {status:1500, phoi:10000, banve:10000, queue:4000, logs:4000}
-        : {status:5000, phoi:30000, banve:30000, queue:10000, logs:10000};
-      const callbacks = {status:fetchStatus, phoi:fetchPhoi, banve:fetchBanve, queue:fetchQueue, logs:fetchLogs};
+        ? {status:1500, phoi:10000, banve:10000, queue:4000, logs:4000, notif:10000, schedule:15000, stats:60000}
+        : {status:5000, phoi:30000, banve:30000, queue:10000, logs:10000, notif:30000, schedule:60000, stats:300000};
+      const callbacks = {status:fetchStatus, phoi:fetchPhoi, banve:fetchBanve, queue:fetchQueue, logs:fetchLogs, notif:fetchNotifications, schedule:fetchScheduleUI, stats:fetchStatsUI};
       await Promise.allSettled(Object.entries(callbacks).filter(([key]) => now >= dashboardNextPoll[key]).map(([key, fn]) => {
         dashboardNextPoll[key] = now + intervals[key];
         return fn();
@@ -3790,6 +3839,7 @@ let inputUploading=false;
                 <div style="display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap;">
                   <button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px; display:inline-flex; align-items:center; gap:4px; white-space: nowrap;" onclick="previewVideo('banve', '${encodedName}')"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Xem</button>
                   <button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px; display:inline-flex; align-items:center; gap:4px; white-space: nowrap;" onclick="openSegmentEditorModal('${encodedName}')" title="Chỉnh sửa từng câu & tạo lại"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Sửa câu</button>
+                  <button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px; display:inline-flex; align-items:center; gap:4px; white-space: nowrap;" onclick="openCompareModal('${encodedName}')" title="So sánh video gốc tiếng Trung và bản lồng tiếng cạnh nhau, phát đồng bộ"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3M16 3h3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-3M12 1v22"/></svg> So sánh</button>
                 </div>
               </td>
             </tr>
@@ -7429,6 +7479,283 @@ let inputUploading=false;
           btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/><line x1="19" y1="12" x2="5" y2="12"/></svg> 🚀 Xuất bản sửa mới';
         }
       }
+    }
+
+    /* ==========================================================================
+       F13: TRUNG TÂM THÔNG BÁO · F1: THỐNG KÊ · F2: BATCH ETA · F5: SO SÁNH · F9: LỊCH CHẠY ĐÊM
+       ========================================================================== */
+    let lastSeenNotifId = null;
+    let notifPanelOpen = false;
+
+    async function fetchNotifications() {
+      try {
+        const res = await fetch('/api/notifications?limit=30', {cache:'no-store', signal: AbortSignal.timeout(8000)});
+        if (!res.ok) return;
+        const data = await res.json();
+        const badge = document.getElementById('notifBadge');
+        const unread = data.unread_count || 0;
+        if (badge) {
+          badge.textContent = unread > 99 ? '99+' : String(unread);
+          badge.style.display = unread > 0 ? 'block' : 'none';
+        }
+        const items = data.items || [];
+        if (items.length) {
+          const newest = items[0].id;
+          if (lastSeenNotifId && lastSeenNotifId !== newest) {
+            items.filter(x => x.id !== lastSeenNotifId && !x.read && (x.level === 'error' || x.level === 'warning')).slice(0, 2)
+              .forEach(x => showToast(`🔔 ${x.title}${x.body ? ': ' + x.body : ''}`, x.level === 'error' ? 'error' : 'warning'));
+          }
+          lastSeenNotifId = newest;
+        }
+        if (notifPanelOpen) renderNotifList(items);
+        updateBatchEta();
+      } catch (e) { /* poll thông báo là bổ trợ — im lặng */ }
+    }
+
+    function fmtNotifTime(ts) {
+      try { return new Date(ts * 1000).toLocaleString('vi-VN', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit'}); } catch (e) { return ''; }
+    }
+
+    function renderNotifList(items) {
+      const box = document.getElementById('notifList');
+      if (!box) return;
+      if (!items || !items.length) {
+        box.innerHTML = '<div style="padding:18px; text-align:center; color:var(--text-muted); font-size:12px;">Chưa có thông báo nào. Hệ thống sẽ báo khi video lỗi, hoàn tất, VRAM Guard kích hoạt hoặc đến lịch chạy đêm.</div>';
+        return;
+      }
+      const levelColor = {info:'#38bdf8', success:'#34d399', warning:'#f59e0b', error:'#ef4444'};
+      box.innerHTML = items.map(x => `
+        <div style="padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.06); ${x.read ? 'opacity:0.5;' : ''} border-left:3px solid ${levelColor[x.level] || '#38bdf8'}; margin-bottom:4px; border-radius:4px; background:rgba(255,255,255,0.02);">
+          <div style="display:flex; justify-content:space-between; gap:8px;">
+            <strong style="font-size:12px; color:#f1f5f9;">${escapeHtml(x.title)}</strong>
+            <span style="font-size:10.5px; color:var(--text-muted); white-space:nowrap;">${escapeHtml(fmtNotifTime(x.ts))}</span>
+          </div>
+          ${x.body ? `<div style="font-size:11px; color:#a1a1aa; margin-top:3px; word-break:break-word;">${escapeHtml(x.body)}</div>` : ''}
+        </div>`).join('');
+    }
+
+    function toggleNotifPanel(e) {
+      if (e && e.stopPropagation) e.stopPropagation();
+      const panel = document.getElementById('notifPanel');
+      if (!panel) return;
+      notifPanelOpen = panel.style.display === 'none';
+      panel.style.display = notifPanelOpen ? 'block' : 'none';
+      if (notifPanelOpen) fetchNotifications();
+    }
+
+    document.addEventListener('click', (e) => {
+      const panel = document.getElementById('notifPanel');
+      if (panel && panel.style.display !== 'none' && !panel.contains(e.target)) {
+        const btn = e.target.closest ? e.target.closest('button[onclick^="toggleNotifPanel"]') : null;
+        if (!btn) { notifPanelOpen = false; panel.style.display = 'none'; }
+      }
+    });
+
+    async function markAllNotifsRead() {
+      try {
+        await fetch('/api/notifications/mark-read', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({all:true})});
+        fetchNotifications();
+      } catch (e) { showToast('Không đánh dấu được: ' + e.message, 'error'); }
+    }
+
+    // ===== F1: THỐNG KÊ HIỆU SUẤT =====
+    let statsSummaryCache = null;
+
+    async function fetchStatsUI(force) {
+      const body = document.getElementById('statsPanelBody');
+      if (!body) return;
+      const panel = document.getElementById('statsPanel');
+      if (!force && panel && !panel.open) return;
+      try {
+        const res = await fetch('/api/stats/summary?days=14', {cache:'no-store', signal: AbortSignal.timeout(10000)});
+        if (!res.ok) return;
+        statsSummaryCache = await res.json();
+        renderStats();
+        updateBatchEta();
+      } catch (e) {
+        if (force) body.innerHTML = '<div style="color:#f87171; font-size:12px;">Không tải được số liệu thống kê — sẽ thử lại.</div>';
+      }
+    }
+
+    function renderStats() {
+      const body = document.getElementById('statsPanelBody');
+      const d = statsSummaryCache;
+      if (!body || !d) return;
+      const stepNames = {1:'1 · Chuẩn bị', 2:'2 · Tách nhạc', 3:'3 · ASR', 4:'4 · OCR sub', 5:'5 · Dịch', 6:'6 · TTS/RVC', 7:'7 · Mix', 8:'8 · Render'};
+      const steps = d.per_step_median_s || {};
+      const stepVals = Object.values(steps);
+      const maxStep = Math.max(0.1, ...(stepVals.length ? stepVals : [0.1]));
+      const stepBars = Object.keys(stepNames).map(k => {
+        const v = steps[k] || 0;
+        return `<div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+          <span style="width:92px; font-size:10.5px; color:#a1a1aa; text-align:right; white-space:nowrap;">${stepNames[k]}</span>
+          <div style="flex:1; height:14px; background:rgba(255,255,255,0.05); border-radius:3px; overflow:hidden;"><div style="width:${Math.round(v / maxStep * 100)}%; height:100%; background:linear-gradient(90deg,#0ea5e9,#22d3ee);"></div></div>
+          <span style="width:52px; font-size:10.5px; color:#e4e4e7; font-variant-numeric:tabular-nums;">${v ? v + 's' : '--'}</span>
+        </div>`;
+      }).join('');
+      const days = (d.per_day || []).slice(-7);
+      const maxDay = Math.max(1, ...days.map(x => x.count));
+      const dayBars = days.map(x => `<div style="flex:1; display:flex; flex-direction:column; align-items:center; gap:3px;" title="${escapeHtml(x.date)}: ${x.count} video · ${x.source_minutes} phút nguồn · ${x.errors} lỗi">
+        <span style="font-size:10px; color:#e4e4e7;">${x.count}</span>
+        <div style="width:72%; height:34px; background:rgba(255,255,255,0.05); border-radius:3px 3px 0 0; display:flex; align-items:flex-end;"><div style="width:100%; height:${Math.round(x.count / maxDay * 100)}%; background:${x.errors ? '#f59e0b' : '#34d399'}; border-radius:3px 3px 0 0;"></div></div>
+        <span style="font-size:9.5px; color:#a1a1aa;">${escapeHtml(String(x.date).slice(5))}</span>
+      </div>`).join('');
+      body.innerHTML = `
+        <div style="display:flex; gap:14px; flex-wrap:wrap; margin-bottom:12px; font-size:12px; color:#e4e4e7;">
+          <div>✅ <strong>${d.videos}</strong> video <span style="color:var(--text-muted);">(${d.window_days} ngày)</span></div>
+          <div>🎬 <strong>${d.source_minutes}</strong> phút nguồn</div>
+          <div>⚙️ <strong>${d.processing_minutes}</strong> phút xử lý</div>
+          ${d.speed_ratio ? `<div>⚡ Tỷ lệ <strong>${d.speed_ratio}×</strong> thời gian thực</div>` : ''}
+          ${d.errors ? `<div style="color:#f87171;">🔴 <strong>${d.errors}</strong> lỗi</div>` : ''}
+        </div>
+        <div style="font-weight:600; font-size:11.5px; color:#e4e4e7; margin-bottom:6px;">Thời lượng trung vị từng bước (pipeline 8 bước)</div>
+        <div style="max-width:660px;">${stepBars || '<div style="color:var(--text-muted); font-size:11.5px;">Chưa có dữ liệu — hoàn tất video đầu tiên để bắt đầu thống kê.</div>'}</div>
+        ${dayBars ? `<div style="font-weight:600; font-size:11.5px; color:#e4e4e7; margin:12px 0 6px;">Số video theo ngày (7 ngày gần nhất)</div>
+        <div style="display:flex; gap:8px; max-width:660px;">${dayBars}</div>` : ''}`;
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const sp = document.getElementById('statsPanel');
+      if (sp) sp.addEventListener('toggle', () => { if (sp.open) fetchStatsUI(true); });
+    });
+
+    // ===== F2: BATCH ETA TOÀN HÀNG CHỜ =====
+    function updateBatchEta() {
+      const chip = document.getElementById('queueEtaChip');
+      if (!chip) return;
+      try {
+        const st = lastStatusData || {};
+        const total = Number(st.queue_total || 0);
+        if (!total) { chip.style.display = 'none'; return; }
+        const avg = (statsSummaryCache && statsSummaryCache.avg_total_s > 0) ? statsSummaryCache.avg_total_s : 480;
+        let remainSec;
+        if (st.active) {
+          const w1 = (st.workers && st.workers['1']) || {};
+          const w2 = (st.workers && st.workers['2']) || {};
+          let cur = (w1.eta_seconds || st.eta_seconds || avg);
+          if (w2.active && w2.eta_seconds) cur = Math.max(cur, w2.eta_seconds);
+          remainSec = cur + Math.max(0, total - 1) * avg / ((st.worker_settings && st.worker_settings.effective_concurrency) || 1);
+        } else {
+          remainSec = total * avg;
+        }
+        const fin = new Date(Date.now() + remainSec * 1000);
+        const hh = Math.floor(remainSec / 3600), mm = Math.round((remainSec % 3600) / 60);
+        chip.style.display = 'inline-flex';
+        chip.textContent = `⏱ ${total} video · ~${hh > 0 ? hh + 'h' + String(mm).padStart(2, '0') : mm + ' phút'} → ≈ ${fin.toLocaleTimeString('vi-VN', {hour:'2-digit', minute:'2-digit'})}`;
+        chip.title = 'Ước tính theo thời gian xử lý trung bình từ Thống kê (F2)';
+      } catch (e) { /* ETA là bổ trợ */ }
+    }
+
+    // ===== F5: SO SÁNH TRƯỚC / SAU =====
+    function openCompareModal(banveName) {
+      const modal = document.getElementById('compareModal');
+      const orig = document.getElementById('compareOriginal');
+      const dub = document.getElementById('compareDubbed');
+      const hint = document.getElementById('compareHint');
+      if (!modal || !orig || !dub) return;
+      dub.src = '/api/stream/banve/' + encodeURIComponent(banveName);
+      let originalName = String(banveName).startsWith('Dubbed_') ? String(banveName).slice(7) : '';
+      orig.removeAttribute('src'); orig.style.opacity = '0.25';
+      if (!originalName) {
+        hint.textContent = 'Không xác định được video gốc tương ứng (tên thành phẩm không có tiền tố Dubbed_).';
+      } else {
+        hint.textContent = 'Đang tìm video gốc "' + originalName + '" trong thư mục phôi...';
+        fetch('/api/phoi?page=1&page_size=200', {cache:'no-store', signal: AbortSignal.timeout(10000)})
+          .then(r => r.ok ? r.json() : {files: []})
+          .then(d => {
+            const files = d.files || d.items || [];
+            const norm = (s) => String(s).toLowerCase().replace(/\s+/g, '');
+            const hit = files.find(f => f && f.name === originalName) || files.find(f => f && norm(f.name) === norm(originalName));
+            if (hit) {
+              orig.src = '/api/stream/phoi/' + encodeURIComponent(hit.name);
+              orig.style.opacity = '1';
+              hint.textContent = 'Tua một bên — bên kia tự nhảy theo thời điểm gần đúng để đối chiếu khớp môi & sub.';
+            } else {
+              hint.textContent = 'Không tìm thấy video gốc "' + originalName + '" trong bảng Video Gốc (có thể đã xóa/đổi tên) — chỉ phát bản lồng tiếng.';
+            }
+          })
+          .catch(() => { hint.textContent = 'Không kiểm tra được thư mục video gốc — vẫn phát được bản lồng tiếng.'; });
+      }
+      [orig, dub].forEach(master => {
+        master.onseeked = () => {
+          const slave = master === orig ? dub : orig;
+          if (slave.src && Math.abs((slave.currentTime || 0) - master.currentTime) > 0.4) {
+            try { slave.currentTime = master.currentTime; } catch (e) {}
+          }
+        };
+      });
+      modal.style.display = 'flex';
+    }
+
+    function closeCompareModal(e) {
+      if (e && e.target && e.target !== document.getElementById('compareModal')) return;
+      const modal = document.getElementById('compareModal');
+      if (!modal) return;
+      ['compareOriginal', 'compareDubbed'].forEach(id => {
+        const v = document.getElementById(id);
+        if (v) { try { v.pause(); v.removeAttribute('src'); v.load(); } catch (err) {} }
+      });
+      modal.style.display = 'none';
+    }
+
+    // ===== F9: LỊCH CHẠY ĐÊM =====
+    async function fetchScheduleUI() {
+      try {
+        const res = await fetch('/api/schedule', {cache:'no-store', signal: AbortSignal.timeout(6000)});
+        if (!res.ok) return;
+        renderScheduleChip(await res.json());
+      } catch (e) { /* lịch là tùy chọn */ }
+    }
+
+    function renderScheduleChip(d) {
+      const chip = document.getElementById('scheduleChip');
+      if (!chip) return;
+      if (!d || !d.active) { chip.style.display = 'none'; return; }
+      const hhmm = d.time || '02:00';
+      const parts = hhmm.split(':').map(Number);
+      const now = new Date();
+      const target = new Date(now); target.setHours(parts[0] || 0, parts[1] || 0, 0, 0);
+      if (target <= now) target.setDate(target.getDate() + 1);
+      const mins = Math.max(0, Math.round((target - now) / 60000));
+      const wait = mins >= 60 ? Math.floor(mins / 60) + 'h' + String(mins % 60).padStart(2, '0') : mins + ' phút';
+      chip.style.display = 'flex';
+      chip.innerHTML = `<span>🌙 Đã lên lịch xử lý hàng đợi lúc <strong>${escapeHtml(hhmm)}</strong> (còn ~${wait})</span>
+        <button type="button" class="btn btn-outline" style="font-size:10.5px; padding:2px 8px; color:#f87171; border-color:rgba(239,68,68,0.3);" onclick="cancelNightBatch()">Hủy</button>`;
+    }
+
+    async function scheduleNightBatch(presetTime) {
+      let t = presetTime;
+      if (!t) {
+        t = window.prompt('Chạy tự động vào lúc mấy giờ? (HH:MM, ví dụ 02:00)', '02:00');
+        if (!t) return;
+      }
+      try {
+        const res = await fetch('/api/schedule', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({time: t, video_mode: (typeof currentV1Mode !== 'undefined' ? currentV1Mode : 'AUTO')})
+        });
+        if (res.ok) {
+          const d = await res.json();
+          showToast(`🌙 Đã lên lịch chạy lúc ${d.time}. Hệ thống sẽ tự xử lý hàng đợi khi đến giờ.`, 'success');
+          fetchScheduleUI();
+        } else {
+          const e = await res.json().catch(() => ({}));
+          showToast(e.detail || 'Giờ lên lịch không hợp lệ (HH:MM).', 'error');
+        }
+      } catch (e) { showToast('Lỗi kết nối khi lên lịch: ' + e.message, 'error'); }
+    }
+
+    async function scheduleNightBatchFromSummary() {
+      await confirmBulkEnqueue();
+      scheduleNightBatch('02:00');
+    }
+
+    async function cancelNightBatch() {
+      try {
+        const res = await fetch('/api/schedule', {method: 'DELETE'});
+        if (res.ok) { showToast('Đã hủy lịch chạy đêm.', 'info'); fetchScheduleUI(); }
+      } catch (e) { showToast('Lỗi hủy lịch: ' + e.message, 'error'); }
     }
 
   </script>

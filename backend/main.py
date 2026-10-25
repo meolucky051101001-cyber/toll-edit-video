@@ -196,6 +196,10 @@ async def on_startup():
     _install_asyncio_quiet_disconnect_handler()
     ensure_tool_control()
     try:
+        asyncio.create_task(_night_batch_watcher())
+    except Exception as e:
+        logger.warning("Không thể khởi động bộ theo dõi lịch chạy đêm: %s", e)
+    try:
         from workspace_cleaner import run_full_retention_maintenance
         asyncio.create_task(asyncio.to_thread(run_full_retention_maintenance))
     except Exception as e:
@@ -1873,6 +1877,138 @@ async def api_save_worker_settings(payload: dict = Body(...)):
     max_thresh = float(payload.get("max_vram_percent_threshold", current.get("max_vram_percent_threshold", 85.0)))
     min_free = float(payload.get("min_free_vram_mb", current.get("min_free_vram_mb", 1500.0)))
     return save_worker_settings(concurrency, auto_guard, max_thresh, min_free)
+
+
+# ===== F13: TRUNG TÂM THÔNG BÁO · F1: THỐNG KÊ HIỆU SUẤT · F9: LỊCH CHẠY ĐÊM =====
+
+
+@app.get("/api/notifications")
+async def api_get_notifications(unread: bool = False, limit: int = 50):
+    """Danh sách thông báo + số chưa đọc (poll nhẹ, đọc file JSON nhỏ)."""
+    from notification_service import list_notifications, unread_count
+
+    items = await asyncio.to_thread(list_notifications, unread, limit)
+    return {"items": items, "unread_count": await asyncio.to_thread(unread_count)}
+
+
+@app.post("/api/notifications/mark-read")
+async def api_mark_notifications_read(payload: dict = Body(...)):
+    from notification_service import mark_read
+
+    ids = payload.get("ids")
+    changed = await asyncio.to_thread(
+        mark_read, ids if isinstance(ids, list) else None, bool(payload.get("all"))
+    )
+    return {"marked": changed}
+
+
+@app.post("/api/notifications/test")
+async def api_test_notification():
+    from notification_service import push
+
+    return await asyncio.to_thread(
+        push, "info", "Thông báo thử nghiệm",
+        "Nếu bạn thấy mục này, Trung tâm Thông báo hoạt động bình thường.", "test",
+    )
+
+
+@app.get("/api/stats/summary")
+async def api_get_stats_summary(days: int = 14):
+    """F1 — tổng hợp hiệu suất pipeline từ video_stats.json."""
+    from stats_service import get_summary
+
+    return await asyncio.to_thread(get_summary, days)
+
+
+def _schedule_file() -> Path:
+    return Path(WORKSPACE) / "control" / "schedule.json"
+
+
+@app.get("/api/schedule")
+async def api_get_schedule():
+    """F9 — đọc lịch chạy đêm hiện tại."""
+    f = _schedule_file()
+    if not f.is_file():
+        return {"active": False}
+    try:
+        data = json.loads(await asyncio.to_thread(f.read_text, encoding="utf-8"))
+        data["active"] = True
+        return data
+    except Exception:
+        return {"active": False}
+
+
+@app.post("/api/schedule")
+async def api_schedule_night_batch(payload: dict = Body(...)):
+    """F9 — lên lịch tự động chạy hàng đợi vào giờ HH:MM (một lần)."""
+    import re
+    import time
+
+    t = str(payload.get("time") or "02:00").strip()
+    if not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", t):
+        raise HTTPException(status_code=400, detail="Giờ lên lịch không hợp lệ (định dạng HH:MM, ví dụ 02:00).")
+    mode = str(payload.get("video_mode") or "AUTO").upper()
+    data = {"time": t, "video_mode": mode, "created_at": time.time(), "last_fired_date": ""}
+    f = _schedule_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(f.write_text, json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return {"active": True, **data}
+
+
+@app.delete("/api/schedule")
+async def api_cancel_schedule():
+    f = _schedule_file()
+    try:
+        await asyncio.to_thread(f.unlink)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Không hủy được lịch: {e}")
+    return {"active": False}
+
+
+async def _night_batch_watcher():
+    """F9 — theo dõi schedule.json; đến giờ thì kích hoạt batch (một lần, tự hủy nếu trễ > 30 phút)."""
+    from datetime import datetime
+
+    while True:
+        try:
+            await asyncio.sleep(30)
+            f = _schedule_file()
+            if not f.is_file():
+                continue
+            data = json.loads(await asyncio.to_thread(f.read_text, encoding="utf-8"))
+            hh, mm = str(data.get("time") or "02:00").split(":")[:2]
+            now = datetime.now()
+            target = now.replace(hour=int(hh) % 24, minute=int(mm) % 60, second=0, microsecond=0)
+            today = now.strftime("%Y-%m-%d")
+            if data.get("last_fired_date") == today:
+                continue
+            if now < target:
+                continue
+            from notification_service import push
+
+            if (now - target).total_seconds() > 1800:
+                # Máy ngủ/tắt quá 30 phút — hủy lịch thay vì chạy đột ngột giữa ngày
+                await asyncio.to_thread(f.unlink)
+                await asyncio.to_thread(
+                    push, "warning", "Đã lỡ lịch chạy đêm",
+                    f"Quá giờ {data.get('time')} hơn 30 phút, lịch đã tự hủy để chạy an toàn.", "schedule",
+                )
+                continue
+            if not job_tracker.get_status().get("active"):
+                await asyncio.to_thread(
+                    push, "info", "Kích hoạt lịch chạy đêm",
+                    f"Đến giờ {data.get('time')} — bắt đầu xử lý hàng đợi.", "schedule",
+                )
+                await api_run_batch(None, video_mode=data.get("video_mode") or "AUTO")
+                data["last_fired_date"] = today
+                await asyncio.to_thread(f.write_text, json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("Lỗi trong night batch watcher: %s", exc)
+            await asyncio.sleep(10)
 
 
 
