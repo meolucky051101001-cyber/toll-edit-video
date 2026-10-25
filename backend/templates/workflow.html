@@ -2708,6 +2708,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         <button class="panel-tab" onclick="switchTab('watermark', this)">💧 Watermark</button>
         <button class="panel-tab" onclick="switchTab('thumbnail', this)">🖼️ Thumbnail</button>
         <button class="panel-tab" onclick="switchTab('anti-reup', this)">🛡️ Chống Re-up</button>
+        <button class="panel-tab" onclick="switchTab('voice-picker', this)">🎙️ Giọng Đọc</button>
         <button class="panel-tab" onclick="switchTab('batch-folder', this)">📁 Hàng Loạt</button>
       </div>
 
@@ -3649,6 +3650,42 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
 
       </div>
 
+      <!-- P9: PANEL CHỌN GIỌNG ĐỌC AI (CapCut TTS / Vie-TTS / Microsoft) -->
+      <div class="panel-content" id="tabVoicePicker" style="display: none; flex-direction: column; gap: 12px;">
+        <div style="font-size: 11.5px; color: #94a3b8; line-height: 1.6;">Chọn giọng đọc AI cho lồng tiếng — <b>28 giọng</b> từ CapCut TTS, Vie-TTS và Microsoft. Cấu hình áp dụng cho lần chạy lồng tiếng tiếp theo.</div>
+
+        <div>
+          <div class="export-section-title" style="font-size: 11px;">Chế độ giọng đọc</div>
+          <div class="export-pill-group" id="groupVoiceMode">
+            <button type="button" class="export-pill active" data-val="manual" onclick="setVoiceModePill('manual', this)">✋ Thủ công</button>
+            <button type="button" class="export-pill" data-val="auto" onclick="setVoiceModePill('auto', this)">🎯 Auto 1 giọng</button>
+            <button type="button" class="export-pill" data-val="dual" onclick="setVoiceModePill('dual', this)">🎭 Song thoại</button>
+          </div>
+          <div id="vpModeHint" style="font-size: 9.5px; color: #64748b; margin-top: 3px;">Auto: hệ thống nhận diện giọng nam/nữ trong video rồi chọn giọng tương ứng.</div>
+        </div>
+
+        <div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <label class="form-label" style="font-size: 11px; margin-bottom: 0;">🔊 Giọng NỮ (dùng khi nhận diện nữ):</label>
+            <button type="button" class="cp-chip" onclick="previewVoiceFromSelect('voiceFemaleSelect')" title="Nghe thử giọng đang chọn">▶ Nghe thử</button>
+          </div>
+          <select id="voiceFemaleSelect" class="form-select" style="width: 100%; background: #162032; border: 1px solid #28374d; color: #f1f5f9; padding: 6px 10px; border-radius: 6px; font-size: 12px; font-weight: 600;"></select>
+        </div>
+
+        <div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <label class="form-label" style="font-size: 11px; margin-bottom: 0;">🔊 Giọng NAM (dùng khi nhận diện nam):</label>
+            <button type="button" class="cp-chip" onclick="previewVoiceFromSelect('voiceMaleSelect')" title="Nghe thử giọng đang chọn">▶ Nghe thử</button>
+          </div>
+          <select id="voiceMaleSelect" class="form-select" style="width: 100%; background: #162032; border: 1px solid #28374d; color: #f1f5f9; padding: 6px 10px; border-radius: 6px; font-size: 12px; font-weight: 600;"></select>
+        </div>
+
+        <div id="vpStatus" style="font-size: 11px; color: #cbd5e1; background: #141d2c; border: 1px solid #233147; border-radius: 8px; padding: 8px 10px;">Đang tải cấu hình giọng...</div>
+
+        <button type="button" class="btn btn-success" id="btnSaveVoicePicker" style="font-weight: 800;" onclick="saveVoicePicker()">💾 LƯU CẤU HÌNH GIỌNG ĐỌC</button>
+      </div>
+      <audio id="voicePreviewAudio" style="display: none;"></audio>
+
       <!-- TAB 5: ANTI RE-UP BACKGROUND (FEATURE 3) -->
       <div class="panel-content" id="tabAntiReup" style="display: none;">
         
@@ -4543,7 +4580,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
     }
 
     </script>
-    <script src="/static/js/timeline_time_core.js"></script>
+    <script src="/static/js/timeline_time_core.js?v=2"></script>
     <script>
     function sourceTToTimelineTGlobal(srcT) {
       const clips = videoClipsState;
@@ -4682,7 +4719,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
     }
 
     </script>
-    <script src="/static/js/timeline.js"></script>
+    <script src="/static/js/timeline.js?v=2"></script>
     <script>
     // ===== P8: MODAL PHÍM TẮT + KỊCH BẢN TỰ KIỂM (DevTools) =====
     function toggleShortcutModal(force) {
@@ -4896,6 +4933,131 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       showToast(`🗑️ Đã xóa câu phụ đề — còn ${currentSubtitles.length} câu`);
     }
 
+    // ===== P9: PANEL CHỌN GIỌNG ĐỌC AI (CapCut / Vie-TTS / Microsoft) =====
+    let _voicePickerLoaded = false;
+    let _voicePreviewAudio = null;
+
+    const VOICE_SOURCE_ORDER = ['capcut', 'vieneu', 'edge'];
+    const VOICE_SOURCE_NAMES = { capcut: '🎙️ CapCut TTS', vieneu: '🇻🇳 Vie-TTS', edge: '🌐 Microsoft Edge' };
+
+    function setVoiceModePill(mode, el) {
+      document.querySelectorAll('#groupVoiceMode .export-pill').forEach(p => p.classList.remove('active'));
+      if (el) el.classList.add('active');
+      const hint = document.getElementById('vpModeHint');
+      if (hint) hint.innerText = mode === 'manual'
+        ? 'Thủ công: dùng giọng đã khóa từ lần lồng tiếng trước (không tự nhận diện).'
+        : (mode === 'dual'
+          ? 'Song thoại: hệ thống nhận diện từng đoạn là nam hay nữ và lồng 2 giọng xen kẽ.'
+          : 'Auto: hệ thống nhận diện giọng nam/nữ trong video rồi chọn giọng tương ứng.');
+    }
+
+    function currentVoiceModePill() {
+      const active = document.querySelector('#groupVoiceMode .export-pill.active');
+      return active ? active.dataset.val : 'manual';
+    }
+
+    async function loadVoicePicker() {
+      const femaleSel = document.getElementById('voiceFemaleSelect');
+      const maleSel = document.getElementById('voiceMaleSelect');
+      const status = document.getElementById('vpStatus');
+      if (!femaleSel) return;
+      try {
+        const cfg = await (await fetch('/api/voice-auto')).json();
+        const voices = cfg.voices || [];
+        // Xây select có optgroup theo nhà cung cấp
+        const build = (sel) => {
+          sel.innerHTML = '';
+          VOICE_SOURCE_ORDER.forEach(src => {
+            const group = voices.filter(v => (v.source || '').toLowerCase() === src);
+            if (!group.length) return;
+            const og = document.createElement('optgroup');
+            og.label = VOICE_SOURCE_NAMES[src] || src;
+            group.forEach(v => {
+              const opt = document.createElement('option');
+              opt.value = v.id;
+              opt.innerText = v.label;
+              og.appendChild(opt);
+            });
+            sel.appendChild(og);
+          });
+          voices.filter(v => !VOICE_SOURCE_ORDER.includes((v.source || '').toLowerCase())).forEach(v => {
+            const opt = document.createElement('option');
+            opt.value = v.id;
+            opt.innerText = v.label;
+            sel.appendChild(opt);
+          });
+        };
+        build(femaleSel);
+        build(maleSel);
+        femaleSel.value = cfg.female_voice_id;
+        maleSel.value = cfg.male_voice_id;
+        // Mode pill theo cấu hình
+        const mode = cfg.effective_mode || 'manual';
+        const pillMap = { manual: 'manual', auto_single: 'auto', auto: 'auto', dual: 'dual' };
+        const pillBtn = document.querySelector(`#groupVoiceMode .export-pill[data-val="${pillMap[mode] || 'manual'}"]`);
+        document.querySelectorAll('#groupVoiceMode .export-pill').forEach(p => p.classList.remove('active'));
+        if (pillBtn) pillBtn.classList.add('active');
+        if (status) status.innerHTML = `Đang dùng: 🎀 Nữ <b>${cfg.female_voice_label || '—'}</b> · 🎩 Nam <b>${cfg.male_voice_label || '—'}</b> · Chế độ <b>${cfg.effective_mode || 'manual'}</b>`;
+        _voicePickerLoaded = true;
+      } catch (err) {
+        if (status) status.innerText = '❌ Lỗi tải cấu hình giọng: ' + String(err).slice(0, 80);
+      }
+    }
+
+    async function saveVoicePicker() {
+      const femaleSel = document.getElementById('voiceFemaleSelect');
+      const maleSel = document.getElementById('voiceMaleSelect');
+      const status = document.getElementById('vpStatus');
+      if (!femaleSel || !maleSel) return;
+      const mode = currentVoiceModePill();
+      const body = {
+        female_voice_id: femaleSel.value,
+        male_voice_id: maleSel.value,
+        enabled: mode !== 'manual',
+        dual_voice: mode === 'dual'
+      };
+      try {
+        status.innerText = 'Đang lưu cấu hình giọng...';
+        const res = await fetch('/api/voice-auto', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Local-Control-Token': (typeof CONTROL_PLANE_TOKEN !== 'undefined' ? CONTROL_PLANE_TOKEN : ''),
+            'X-Dashboard-Input': '1'
+          },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        if (res.ok) {
+          await loadVoicePicker();
+          showToast('💾 Đã lưu cấu hình giọng đọc — lần lồng tiếng tiếp theo sẽ dùng giọng này!');
+        } else {
+          if (status) status.innerText = '❌ ' + (data.detail || 'Lỗi lưu cấu hình');
+        }
+      } catch (err) {
+        if (status) status.innerText = '❌ Lỗi kết nối khi lưu cấu hình';
+      }
+    }
+
+    function previewVoiceFromSelect(selectId) {
+      const sel = document.getElementById(selectId);
+      if (!sel || !sel.value) return;
+      const voiceId = sel.value;
+      if (!_voicePreviewAudio) _voicePreviewAudio = document.getElementById('voicePreviewAudio');
+      const audio = _voicePreviewAudio;
+      if (!audio) return;
+      if (!audio.paused && audio.dataset.voiceId === voiceId) {
+        audio.pause();
+        return;
+      }
+      audio.pause();
+      audio.src = `/api/voice-preview-audio/${encodeURIComponent(voiceId)}?cb=${Date.now()}`;
+      audio.dataset.voiceId = voiceId;
+      audio.play().catch(() => {
+        showToast(`🔇 Chưa có mẫu nghe thử cho giọng này — giọng vẫn dùng được khi lồng tiếng!`);
+      });
+    }
+
     // REALTIME SUBTITLE SYNCHRONIZATION
     function updateSubtitlesOverlay() {
       if (isEditingSubText) return; // Không ghi đè khi người dùng đang trực tiếp gõ sửa chữ!
@@ -4919,11 +5081,11 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         activeSub = currentSubtitles[0];
       }
 
-      // P8: highlight câu phụ đề đang phát trên timeline (cả track Trung lẫn AI)
+      // P8: highlight câu phụ đề đang phát trên timeline (cả track Trung lẫn AI) — dùng cache refs
       try {
-        document.querySelectorAll('.sub-clip.cue-active').forEach(c => c.classList.remove('cue-active'));
+        _subClipElsCache.forEach(c => c.classList.remove('cue-active'));
         if (activeSub) {
-          document.querySelectorAll('.sub-clip').forEach(c => {
+          _subClipElsCache.forEach(c => {
             if (Math.abs(parseFloat(c.dataset.subStart || '-999') - activeSub.start) < 0.05) {
               c.classList.add('cue-active');
             }
@@ -5967,6 +6129,11 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         tabTp.style.display = (tabId === 'text-props') ? 'flex' : 'none';
         if (tabId === 'text-props') updateTextPropsPanel();
       }
+      const tabVp = document.getElementById('tabVoicePicker');
+      if (tabVp) {
+        tabVp.style.display = (tabId === 'voice-picker') ? 'flex' : 'none';
+        if (tabId === 'voice-picker' && !_voicePickerLoaded) loadVoicePicker();
+      }
       if (tabWm) tabWm.style.display = (tabId === 'watermark') ? 'flex' : 'none';
       if (tabTn) {
         tabTn.style.display = (tabId === 'thumbnail') ? 'flex' : 'none';
@@ -6355,6 +6522,9 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       }
     }
 
+    // P8-opt: cache danh sách card sub (highlight theo playhead không quét DOM mỗi tick)
+    let _subClipElsCache = [];
+
     function renderSubtitlesTimeline() {
       const subAiTrack = document.getElementById('subtitlesTrack');
       const subCnTrack = document.getElementById('chineseSubtitlesTrack');
@@ -6493,6 +6663,9 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           subAiTrack.innerHTML = '<span class="empty-track-disabled">⚪ Chưa có phụ đề AI (Màu xám - Chưa chèn phụ đề vào video)</span>';
         }
       }
+
+      // P8-opt: cache refs card sub cho highlight theo playhead
+      _subClipElsCache = Array.from(document.querySelectorAll('.sub-clip'));
     }
 
     // SAVE SETTINGS FOR BATCH RENDERING
