@@ -74,6 +74,15 @@ def _verified_geometry(segment):
     ))
 
 
+def _is_visual_segment(segment):
+    if _block_value(segment, "visual_sub_to_speech", False):
+        return True
+    return any(
+        _block_value(block, "visual_locked", False)
+        for block in (_block_value(segment, "tracking_blocks", None) or [])
+    )
+
+
 def _transition_cover_blocks(blocks):
     """Cover sampling uncertainty at contiguous, nearby caption transitions."""
     keys = ('start', 'end', 'x_pct', 'max_x_pct', 'y_pct', 'max_y_pct')
@@ -224,6 +233,10 @@ def sync_and_clamp_subtitles(translated_segments, dubbing_audio_files=None):
 
     if dubbing_audio_files:
         for seg in translated_segments:
+            if _is_visual_segment(seg):
+                # Visual OCR cues keep the exact on-screen lifetime of the
+                # burned-in caption; only speech/text timing may stretch.
+                continue
             if isinstance(seg, dict):
                 seg_s = float(seg.get("start", 0.0))
                 seg_e = float(seg.get("end", 0.0))
@@ -440,6 +453,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             boundary = groups[i + 1][1][0].start
             if any(_verified_geometry(page) for page in groups[i][1] + groups[i + 1][1]):
                 for page in groups[i][1]:
+                    if _is_visual_segment(page):
+                        continue
                     old_end_s = page.end.total_seconds()
                     gap = (boundary - page.end).total_seconds()
                     if 0.0 < gap <= 0.5:
@@ -484,6 +499,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 transition_target = boundary
 
             for page in groups[i][1]:
+                if _is_visual_segment(page):
+                    continue
                 gap = (transition_target - page.end).total_seconds()
                 if 0.0 < gap <= 0.5:
                     page.end = transition_target
@@ -710,16 +727,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         else:
                             setattr(blocks[b_idx + 1], "start", mid_t)
             cursor = seg_s
+            seg_is_visual = _is_visual_segment(seg)
             for b in blocks:
                 left = max(seg_s, float(_block_value(b, "start", seg_s)))
                 right = min(seg_e, float(_block_value(b, "end", seg_e)))
                 if right <= left or right <= cursor:
                     continue
-                if left > cursor:
+                if left > cursor and not seg_is_visual:
                     sub_events.append({"start": cursor, "end": left, "block": None})
                 sub_events.append({"start": left, "end": right, "block": b})
                 cursor = right
-            if cursor < seg_e:
+            if cursor < seg_e and not seg_is_visual:
                 sub_events.append({
                     "start": cursor,
                     "end": seg_e,
@@ -887,7 +905,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     text_cy = draw_y + max(0, (draw_h - required_text_h) // 2)
                     text_cx = draw_x + (draw_w / 2.0)
 
-                    if not verified or not video_has_source:
+                    if not verified or not video_has_source or seg_is_visual:
                         draw_cmd = "{\\p1}" + _rounded_box(draw_w, draw_h, radius=12) + "{\\p0}"
                         bg_line = f"{{\\an7\\pos({draw_x:g},{draw_y})}}{draw_cmd}"
                         ass_content += f"Dialogue: 0,{start_str},{end_str},BgStyle,,0,0,0,,{bg_line}\n"

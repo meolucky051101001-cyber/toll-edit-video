@@ -6,8 +6,7 @@ chcp 65001 >nul
 :: =========================================================================
 
 echo Dang tim va tat tien trinh telebot_video_downloader.py...
-wmic process where "CommandLine like '%%telebot_video_downloader.py%%' and not CommandLine like '%%wmic%%'" call terminate >nul 2>&1
-powershell -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*telebot_video_downloader.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Stop-ScheduledTask -TaskName 'AutoDubV1-telebot-downloader' -ErrorAction SilentlyContinue; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*telebot_video_downloader*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
 
 echo Da tat bot tai video thanh cong!
 timeout /t 2 /nobreak >nul

@@ -8,8 +8,36 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import urllib.request
 
 ROOT = Path(__file__).resolve().parent
+DASHBOARD_STATUS_URL = "http://127.0.0.1:8088/api/status"
+
+
+def dashboard_is_healthy(timeout: float = 3.0) -> bool:
+    """A healthy 8088 listener means a dashboard is already serving; spawning again only causes WinError 10048 loops."""
+    try:
+        with urllib.request.urlopen(DASHBOARD_STATUS_URL, timeout=timeout) as response:
+            return 200 <= response.status < 300
+    except Exception:
+        return False
+
+
+def dashboard_smoke_test(python: Path) -> str:
+    """Catch syntax errors and broken router imports before spawning, so the supervisor does not restart-loop on bad code."""
+    commands = (
+        [str(python), "-m", "py_compile", "main.py", "workflow_api.py", "script_api.py"],
+        [str(python), "-c", "import workflow_api, script_api"],
+    )
+    for command in commands:
+        try:
+            result = subprocess.run(command, cwd=str(ROOT), capture_output=True, text=True, timeout=180)
+        except subprocess.TimeoutExpired:
+            return "quá thời gian: " + " ".join(command[-2:])
+        if result.returncode != 0:
+            output = (result.stderr or result.stdout or "").strip()
+            return output[-800:] or f"exit code {result.returncode}"
+    return ""
 
 
 def main():
@@ -63,6 +91,16 @@ def main():
         if service != "dashboard" and control_pause.exists():
             time.sleep(2)
             continue
+        if service == "dashboard":
+            if dashboard_is_healthy():
+                logger.info("Dashboard đã chạy khỏe trên 8088 — bỏ qua spawn trùng.")
+                time.sleep(10)
+                continue
+            smoke_problem = dashboard_smoke_test(python)
+            if smoke_problem:
+                logger.error("Smoke test dashboard thất bại, không spawn: %s", smoke_problem)
+                time.sleep(60)
+                continue
         started = time.monotonic()
         output_path = logs / (service + ".log")
         if output_path.exists() and output_path.stat().st_size > 10_000_000:

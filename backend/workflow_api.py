@@ -14,7 +14,7 @@ import subprocess
 import hashlib
 import html
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import cv2
 import numpy as np
 import asyncio
@@ -756,6 +756,43 @@ async def api_get_workflow_videos():
     return {"videos": items}
 
 
+def _find_vocal_files(job_dir: Optional[Path]) -> Tuple[Optional[Path], Optional[Path]]:
+    """
+    Tìm file nhạc nền đã tách (instrumental / no_vocals) và file giọng nói đã tách (vocals).
+    Ưu tiên thư mục bs_roformer (BS-RoFormer SDR 12.97dB), sau đó đến htdemucs và thư mục gốc.
+    """
+    if not job_dir or not isinstance(job_dir, Path) or not job_dir.is_dir():
+        return None, None
+    inst_path = None
+    voc_path = None
+
+    # 1. Kiểm tra thư mục bs_roformer
+    bs_dir = job_dir / "bs_roformer"
+    if bs_dir.is_dir():
+        for f in bs_dir.iterdir():
+            fn = f.name.lower()
+            if fn.endswith(".wav"):
+                if "instrumental" in fn and not inst_path:
+                    inst_path = f
+                elif "vocals" in fn and not voc_path:
+                    voc_path = f
+
+    # 2. Kiểm tra thư mục htdemucs hoặc quét toàn bộ job_dir
+    if not (inst_path and voc_path):
+        for root, dirs, files in os.walk(job_dir):
+            for fname in files:
+                fl = fname.lower()
+                if fl.endswith(".wav"):
+                    if (fl == "no_vocals.wav" or "instrumental" in fl or fl == "bgm.wav") and not inst_path:
+                        inst_path = Path(root) / fname
+                    elif (fl == "vocals.wav" or ("vocals" in fl and "no_vocals" not in fl)) and not voc_path:
+                        voc_path = Path(root) / fname
+            if inst_path and voc_path:
+                break
+
+    return inst_path, voc_path
+
+
 @router.get("/api/workflow/video-data")
 async def api_get_workflow_video_data(stem: str = Query(...)):
     """
@@ -857,10 +894,15 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
 
     has_demucs = False
     try:
-        if job_dir.is_dir() and (job_dir / "htdemucs").is_dir():
+        if job_dir.is_dir() and ((job_dir / "htdemucs").is_dir() or (job_dir / "bs_roformer").is_dir()):
             has_demucs = True
     except OSError:
         pass
+
+    inst_file, voc_file = _find_vocal_files(job_dir) if job_dir.is_dir() else (None, None)
+    has_vocal_sep = bool(inst_file and voc_file and inst_file.is_file() and voc_file.is_file())
+    inst_url = f"/api/workflow/stream-file?path={inst_file}" if (inst_file and inst_file.is_file()) else ""
+    voc_url = f"/api/workflow/stream-file?path={voc_file}" if (voc_file and voc_file.is_file()) else ""
 
     return {
         "stem": stem,
@@ -874,9 +916,20 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
         "chinese_subtitles": orig_subtitles,
         "vietnamese_subtitles": trans_subtitles,
         "subtitles": combined_subs,
+        "vocal_separation": {
+            "has_separated": has_vocal_sep,
+            "instrumental_url": inst_url,
+            "vocals_url": voc_url,
+            "status": "completed" if has_vocal_sep else "none"
+        },
         "steps": {
             "step1": {"ready": bool(step1_audio), "audio_url": step1_audio, "title": "Trích xuất âm thanh (original.wav)"},
-            "step2": {"ready": has_demucs, "title": "Tách âm nền Demucs (htdemucs)"},
+            "step2": {
+                "ready": has_demucs or has_vocal_sep,
+                "title": "Tách âm nền BS-RoFormer / Demucs (bs_roformer)",
+                "instrumental_url": inst_url,
+                "vocals_url": voc_url,
+            },
             "step3": {"ready": bool(orig_subtitles), "count": len(orig_subtitles), "title": "Nhận diện giọng Faster-Whisper (original.srt)"},
             "step3_5": {"ready": bool(orig_subtitles), "title": "Quét chữ & che phụ đề cũ (OCR Subtitle Band)"},
             "step4": {"ready": bool(trans_subtitles), "count": len(trans_subtitles), "title": "Dịch phụ đề Gemini AI (translated.srt)"},
@@ -1862,6 +1915,7 @@ def _build_timeline_filter_graph(
     has_audio: bool,
     src_w: int = 0,
     src_h: int = 0,
+    audio_src_idx: int = 0,
 ) -> Dict[str, Any]:
     """
     Sinh filter_complex hoàn chỉnh cho timeline CapCut (P2) — HÀM THUẦN để unit test.
@@ -1989,7 +2043,11 @@ def _build_timeline_filter_graph(
                 achain.append(f"afade=t=in:st=0:d={eff['fade_in']:.3f}")
             if eff["fade_out"] > 0:
                 achain.append(f"afade=t=out:st={max(0.0, a_dur - eff['fade_out']):.3f}:d={eff['fade_out']:.3f}")
-            filter_lines.append("[0:a]" + ",".join(achain) + f"[{a_tag}]")
+            c_vocal_mode = str(c.get("vocal_mode") or "").strip().lower()
+            if c_vocal_mode == "mute":
+                achain.append("volume=0")
+            a_in_tag = f"[{audio_src_idx}:a]"
+            filter_lines.append(a_in_tag + ",".join(achain) + f"[{a_tag}]")
             a_parts.append(f"[{a_tag}]")
 
     n = len(clips)
@@ -2442,6 +2500,7 @@ def _apply_timeline_edits_file(
     workspace_dir: Optional[Path] = None,
     job_ctl: Optional[Dict[str, Any]] = None,
     export_frame: Optional[Dict[str, int]] = None,
+    vocal_mode: str = "full",
 ) -> bool:
     """
     Cắt, ghép nối và nhân bản các đoạn video theo danh sách clips:
@@ -2495,7 +2554,24 @@ def _apply_timeline_edits_file(
     if not valid_clips:
         return False
 
-    graph = _build_timeline_filter_graph(valid_clips, bool(a_stream), src_w, src_h)
+    vocal_mode_norm = str(vocal_mode or "full").strip().lower()
+    alt_audio_path = None
+    if workspace_dir and vocal_mode_norm in ("no_vocals", "vocals"):
+        inst_f, voc_f = _find_vocal_files(Path(workspace_dir))
+        if vocal_mode_norm == "no_vocals" and inst_f and inst_f.is_file():
+            alt_audio_path = inst_f
+        elif vocal_mode_norm == "vocals" and voc_f and voc_f.is_file():
+            alt_audio_path = voc_f
+
+    extra_audio_inputs: List[str] = [str(alt_audio_path)] if (alt_audio_path and alt_audio_path.is_file()) else []
+    audio_src_idx = 1 if extra_audio_inputs else 0
+    audio_offset = len(extra_audio_inputs)
+
+    if vocal_mode_norm == "mute":
+        for c in valid_clips:
+            c["muted"] = True
+
+    graph = _build_timeline_filter_graph(valid_clips, bool(a_stream), src_w, src_h, audio_src_idx=audio_src_idx)
     if not graph or not graph.get("filter_lines"):
         return False
 
@@ -2541,7 +2617,7 @@ def _apply_timeline_edits_file(
                 py = min(1.0, max(0.0, float(pos.get("y", 0.85))))
                 scale = min(3.0, max(0.05, float(oc.get("scale", 1.0) or 1.0)))
                 opacity = min(1.0, max(0.0, float(oc.get("opacity", 1.0) or 1.0)))
-                img_idx = 1 + len(overlay_inputs)
+                img_idx = 1 + audio_offset + len(overlay_inputs)
                 overlay_inputs.append(str(asset))
                 pre = ["format=rgba"]
                 if opacity < 0.999:
@@ -2586,7 +2662,7 @@ def _apply_timeline_edits_file(
             end_out = _timeline_to_output_t(valid_clips, graph, at_tl + dur_tl)
             music_inputs.append(str(asset))
             music_meta.append({
-                "a_idx": 1 + len(overlay_inputs) + len(music_inputs) - 1,
+                "a_idx": 1 + audio_offset + len(overlay_inputs) + len(music_inputs) - 1,
                 "at_out": at_out,
                 "dur_out": max(0.1, end_out - at_out),
                 "volume": min(2.0, max(0.0, float(ac.get("volume", 1.0) or 1.0))),
@@ -2630,7 +2706,7 @@ def _apply_timeline_edits_file(
     cmd_nvenc = [
         "ffmpeg", "-y",
         "-i", str(video_path),
-    ] + [x for p in (overlay_inputs + music_inputs) for x in ("-i", p)] + [
+    ] + [x for p in (extra_audio_inputs + overlay_inputs + music_inputs) for x in ("-i", p)] + [
         "-filter_complex", filter_complex,
         "-map", "[outv]"
     ] + audio_maps + [
@@ -2657,7 +2733,7 @@ def _apply_timeline_edits_file(
         cmd_cpu = [
             "ffmpeg", "-y",
             "-i", str(video_path),
-        ] + [x for p in (overlay_inputs + music_inputs) for x in ("-i", p)] + [
+        ] + [x for p in (extra_audio_inputs + overlay_inputs + music_inputs) for x in ("-i", p)] + [
             "-filter_complex", filter_complex,
             "-map", "[outv]"
         ] + audio_maps + [
@@ -2755,6 +2831,7 @@ def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, An
     overlay_clips_in = payload.get("overlay_clips") if isinstance(payload.get("overlay_clips"), list) else []
     audio_clips_in = payload.get("audio_clips") if isinstance(payload.get("audio_clips"), list) else []
     export_frame_in = payload.get("export_frame") if isinstance(payload.get("export_frame"), dict) else None
+    vocal_mode_in = str(payload.get("vocal_mode", "full")).strip().lower()
     _prog(20, "Bắt đầu render FFmpeg (GPU)...")
     ok = _apply_timeline_edits_file(
         input_video, clips, dest_final,
@@ -2764,6 +2841,7 @@ def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, An
         workspace_dir=job_dir,
         job_ctl=job_ctl,
         export_frame=export_frame_in,
+        vocal_mode=vocal_mode_in,
     )
     if not ok:
         raise HTTPException(status_code=500, detail="Lỗi khi cắt ghép video bằng FFmpeg")
@@ -2944,6 +3022,168 @@ async def api_audio_waveform(stem: str = Query(...), version: str = Query("final
     except Exception:
         pass
     return {"exists": True, "cached": False, "duration": round(duration, 3), "peaks": peaks, "buckets": n}
+
+
+# =========================================================================
+# FEATURE: LỌC ÂM THANH NHÂN VẬT GỐC CHUẨN CAPCUT (BS-ROFORMER / DEMUCS)
+# =========================================================================
+_vocal_separation_tasks: Dict[str, Dict[str, Any]] = {}
+_vocal_separation_lock = threading.Lock()
+
+
+def _run_vocal_separation_worker(stem: str) -> None:
+    task = _vocal_separation_tasks.get(stem)
+    if not task:
+        return
+    clean_stem = re.sub(r'[^\w\-_.]', '_', (stem or "").strip())
+    job_dir = WORKSPACE / clean_stem
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        task["status"] = "running"
+        task["progress"] = 15
+        task["message"] = "Đang kiểm tra âm thanh gốc..."
+
+        # 1. Tìm hoặc trích xuất original.wav chất lượng cao
+        orig_wav = job_dir / "original.wav"
+        if not orig_wav.is_file():
+            raw_v = _manual_resolve_raw_video(stem, job_dir)
+            if not raw_v or not raw_v.is_file():
+                task["status"] = "error"
+                task["message"] = "Không tìm thấy video gốc để trích xuất âm thanh"
+                return
+            task["message"] = "Đang trích xuất âm thanh chất lượng cao từ video..."
+            try:
+                from video_utils import extract_audio_from_video
+                ok_ext = extract_audio_from_video(str(raw_v), str(orig_wav))
+            except Exception as e_ext:
+                logger.warning(f"Lỗi extract_audio_from_video: {e_ext}")
+                ok_ext = False
+            if not ok_ext or not orig_wav.is_file():
+                task["status"] = "error"
+                task["message"] = "Trích xuất âm thanh từ video thất bại"
+                return
+
+        task["progress"] = 35
+        task["message"] = "Đang lọc âm thanh bằng BS-RoFormer AI (SDR 12.97dB)..."
+
+        from video_utils import separate_vocals_demucs
+        v_path, bg_path = separate_vocals_demucs(str(orig_wav), str(job_dir))
+
+        inst_f, voc_f = _find_vocal_files(job_dir)
+        if inst_f and voc_f and inst_f.is_file() and voc_f.is_file():
+            task["status"] = "completed"
+            task["progress"] = 100
+            task["message"] = "Tách âm thanh hoàn tất!"
+            task["instrumental_url"] = f"/api/workflow/stream-file?path={inst_f}&t={time.time()}"
+            task["vocals_url"] = f"/api/workflow/stream-file?path={voc_f}&t={time.time()}"
+            task["instrumental_path"] = str(inst_f)
+            task["vocals_path"] = str(voc_f)
+            logger.info(f"Vocal separation completed for {stem}: inst={inst_f.name}, voc={voc_f.name}")
+        else:
+            task["status"] = "error"
+            task["message"] = "Không tìm thấy file kết quả sau khi tách âm"
+    except Exception as e:
+        logger.exception(f"Lỗi khi tách âm thanh AI cho {stem}: {e}")
+        task["status"] = "error"
+        task["message"] = f"Lỗi tách âm: {str(e)}"
+
+
+@router.get("/api/workflow/audio/vocal-status")
+async def api_get_vocal_status(stem: str = Query(...)):
+    clean_stem = re.sub(r'[^\w\-_.]', '_', (stem or "").strip())
+    job_dir = WORKSPACE / clean_stem
+    inst_f, voc_f = _find_vocal_files(job_dir) if job_dir.is_dir() else (None, None)
+
+    task = _vocal_separation_tasks.get(stem)
+    if inst_f and voc_f and inst_f.is_file() and voc_f.is_file():
+        return {
+            "has_separated": True,
+            "instrumental_url": f"/api/workflow/stream-file?path={inst_f}&t={time.time()}",
+            "vocals_url": f"/api/workflow/stream-file?path={voc_f}&t={time.time()}",
+            "status": "completed",
+            "progress": 100,
+            "message": "Đã có sẵn file tách âm BS-RoFormer"
+        }
+    if task:
+        return {
+            "has_separated": False,
+            "status": task.get("status", "running"),
+            "progress": task.get("progress", 0),
+            "message": task.get("message", ""),
+            "instrumental_url": task.get("instrumental_url", ""),
+            "vocals_url": task.get("vocals_url", "")
+        }
+    return {
+        "has_separated": False,
+        "status": "none",
+        "progress": 0,
+        "message": "Chưa tách âm thanh"
+    }
+
+
+@router.post("/api/workflow/audio/separate-vocals")
+async def api_trigger_separate_vocals(payload: Dict[str, Any] = Body(...)):
+    stem = payload.get("stem", "").strip()
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    job_dir = WORKSPACE / clean_stem
+
+    inst_f, voc_f = _find_vocal_files(job_dir) if job_dir.is_dir() else (None, None)
+    if inst_f and voc_f and inst_f.is_file() and voc_f.is_file():
+        return {
+            "status": "completed",
+            "progress": 100,
+            "has_separated": True,
+            "message": "Đã có sẵn file tách âm",
+            "instrumental_url": f"/api/workflow/stream-file?path={inst_f}&t={time.time()}",
+            "vocals_url": f"/api/workflow/stream-file?path={voc_f}&t={time.time()}"
+        }
+
+    with _vocal_separation_lock:
+        existing = _vocal_separation_tasks.get(stem)
+        if existing and existing.get("status") == "running":
+            return {
+                "status": "running",
+                "progress": existing.get("progress", 20),
+                "message": existing.get("message", "Đang tách...")
+            }
+
+        _vocal_separation_tasks[stem] = {
+            "status": "running",
+            "progress": 10,
+            "message": "Bắt đầu tiến trình tách âm...",
+            "started_at": time.time()
+        }
+        t = threading.Thread(target=_run_vocal_separation_worker, args=(stem,), daemon=True)
+        t.start()
+
+    return {
+        "status": "started",
+        "progress": 10,
+        "message": "Đã khởi động tiến trình tách âm BS-RoFormer AI trên GPU"
+    }
+
+
+@router.get("/api/workflow/audio/separate-status")
+async def api_get_separate_status(stem: str = Query(...)):
+    clean_stem = re.sub(r'[^\w\-_.]', '_', (stem or "").strip())
+    job_dir = WORKSPACE / clean_stem
+    inst_f, voc_f = _find_vocal_files(job_dir) if job_dir.is_dir() else (None, None)
+    if inst_f and voc_f and inst_f.is_file() and voc_f.is_file():
+        return {
+            "status": "completed",
+            "progress": 100,
+            "has_separated": True,
+            "instrumental_url": f"/api/workflow/stream-file?path={inst_f}&t={time.time()}",
+            "vocals_url": f"/api/workflow/stream-file?path={voc_f}&t={time.time()}",
+            "message": "Tách âm hoàn tất!"
+        }
+    task = _vocal_separation_tasks.get(stem)
+    if task:
+        return task
+    return {"status": "none", "progress": 0, "message": "Không có tác vụ nào"}
 
 
 # =========================================================================
@@ -3350,24 +3590,70 @@ class _ManualSegment:
         return f"{self.index}" + chr(10) + f"{start_s} --> {end_s}" + chr(10) + self.content + chr(10)
 
 def _manual_resolve_raw_video(stem: str) -> Optional[Path]:
-    # 1. khớp chính xác <stem>.mp4
-    for d in (INPUT_DIR, DOWNLOADS_DIR):
-        p = d / f"{stem}.mp4"
-        if p.is_file():
-            return p
-    # 2. khớp tiền tố — file thật thường có đuôi tiêu đề: <stem>_<título>.mp4
-    for d in (INPUT_DIR, DOWNLOADS_DIR):
-        if d.is_dir():
-            for p in sorted(d.glob(f"{glob_escape(stem)}*.mp4")):
+    clean = re.sub(r'[^\w\-_.]', '_', stem)
+    candidate_dirs = [
+        INPUT_DIR,
+        DOWNLOADS_DIR,
+        Path("D:/workspace/downloads"),
+        Path("C:/tool v1/workspace/downloads"),
+        WORKSPACE / "downloads",
+        WORKSPACE / clean,
+        WORKSPACE / stem,
+        Path("D:/workspace") / clean,
+        Path("D:/workspace") / stem,
+        OUTPUT_DIR,
+        Path("D:/banve"),
+    ]
+    seen = set()
+    dirs = []
+    for d in candidate_dirs:
+        try:
+            resolved = d.resolve()
+            if resolved not in seen and d.is_dir():
+                seen.add(resolved)
+                dirs.append(d)
+        except Exception:
+            pass
+
+    # 1. Khớp chính xác <stem>.<ext> hoặc <clean>.<ext>
+    for d in dirs:
+        for ext in (".mp4", ".mov", ".mkv", ".webm", ".avi"):
+            p = d / f"{stem}{ext}"
+            if p.is_file():
+                return p
+            p_clean = d / f"{clean}{ext}"
+            if p_clean.is_file():
+                return p_clean
+
+    # 2. Khớp tiền tố — file thật thường có đuôi tiêu đề: <stem>_<tiêu_đề>.mp4
+    for d in dirs:
+        for p in sorted(d.glob(f"{glob_escape(stem)}*.mp4")):
+            if p.is_file():
+                return p
+        if clean != stem:
+            for p in sorted(d.glob(f"{glob_escape(clean)}*.mp4")):
                 if p.is_file():
                     return p
-    # 3. file trong workspace job dir
-    clean = re.sub(r'[^\w\-_.]', '_', stem)
-    jd = WORKSPACE / clean
-    for name in (f"{stem}.mp4", "step1_extracted.mp4"):
-        p = jd / name
-        if p.is_file():
-            return p
+
+    # 3. File trong job dir (cả C: lẫn D:)
+    for d in (WORKSPACE / clean, WORKSPACE / stem, Path("D:/workspace") / clean, Path("D:/workspace") / stem):
+        if d.is_dir():
+            for name in (f"{stem}.mp4", f"{clean}.mp4", "step1_extracted.mp4", f"final_{stem}.mp4", f"final_{clean}.mp4"):
+                p = d / name
+                if p.is_file():
+                    return p
+            for p in sorted(d.glob("*.mp4")):
+                if p.is_file():
+                    return p
+
+    # 4. File thành phẩm trong banve
+    for out_d in (OUTPUT_DIR, Path("D:/banve")):
+        if out_d.is_dir():
+            for name in (f"Dubbed_{stem}.mp4", f"Dubbed_{clean}.mp4"):
+                p = out_d / name
+                if p.is_file():
+                    return p
+
     return None
 
 
@@ -3585,9 +3871,31 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
     clean = re.sub(r'[^\w\-_.]', '_', stem)
     job_dir = WORKSPACE / clean
+    job_dir.mkdir(parents=True, exist_ok=True)
     srt_translated = job_dir / "translated.srt"
-    if not srt_translated.is_file():
-        raise HTTPException(status_code=400, detail="Chưa có phụ đề Việt — dịch sub trước đã!")
+
+    # P9: Nhận phụ đề trực tiếp từ payload nếu người dùng tự gõ/sửa trong Studio
+    payload_subs = payload.get("subtitles") or []
+    if payload_subs and isinstance(payload_subs, list):
+        srt_blocks = []
+        for idx, s in enumerate(payload_subs, 1):
+            text = (s.get("text") or "").strip()
+            if not text:
+                continue
+            start = float(s.get("start", 0.0))
+            end = float(s.get("end", start + 2.0))
+            srt_blocks.append(f"{idx}\n{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}\n{text}\n")
+        if srt_blocks:
+            srt_translated.write_text("\n".join(srt_blocks), encoding="utf-8")
+
+    if not srt_translated.is_file() or not srt_translated.read_text(encoding="utf-8", errors="replace").strip():
+        single_text = (payload.get("text") or "").strip()
+        if single_text:
+            srt_translated.write_text(f"1\n00:00:00,000 --> 00:00:10,000\n{single_text}\n", encoding="utf-8")
+        elif (job_dir / "chinese.srt").is_file() or (job_dir / "raw.srt").is_file():
+            raise HTTPException(status_code=400, detail="Đã có phụ đề gốc nhưng chưa dịch — bấm nút 'Dịch Ngay' trên timeline trước khi tạo giọng!")
+        else:
+            raise HTTPException(status_code=400, detail="Chưa có phụ đề Việt — vui lòng gõ phụ đề vào ô chữ hoặc bấm 'Sub Trung ➔ Dịch Ngay' trước khi tạo giọng!")
 
     # Xác định giọng: payload.voice_id > giọng đang chọn của tool (voice_selection.selected)
     voice_id = (payload.get("voice_id") or "").strip()
@@ -3608,16 +3916,23 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=400, detail="Không xác định được giọng đọc")
 
     video_path = _manual_resolve_raw_video(stem)
-    if not video_path:
-        raise HTTPException(status_code=404, detail="Không tìm thấy video thô cho stem này")
-    # Thời lượng video để phủ bed audio
-    try:
-        probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(video_path)],
-            capture_output=True, text=True, timeout=30)
-        video_dur = float(json.loads(probe.stdout)["format"]["duration"])
-    except Exception:
-        video_dur = 0.0
+    video_dur = 0.0
+    if video_path:
+        # Thời lượng video để phủ bed audio
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(video_path)],
+                capture_output=True, text=True, timeout=30)
+            video_dur = float(json.loads(probe.stdout)["format"]["duration"])
+        except Exception:
+            video_dur = 0.0
+
+    if video_dur <= 0.0:
+        # Fallback 1: lấy từ payload frontend (mainPlayer.duration)
+        try:
+            video_dur = float(payload.get("duration") or 0.0)
+        except (TypeError, ValueError):
+            video_dur = 0.0
 
     import uuid as _uuid
 
@@ -3663,10 +3978,19 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
             except Exception:
                 pass
 
+            def _stop_requested() -> bool:
+                try:
+                    import shared_state
+                    return bool(shared_state.stop_requested)
+                except Exception:
+                    return False
+
             async def run_all():
                 failed = []
                 total = len(cues)
                 for cue in cues:
+                    if _stop_requested():
+                        return failed, True
                     cue_dur = max(0.5, (cue.end - cue.start).total_seconds())
                     _manual_job_set(job_id, progress=10 + int(80 * (cue.index - 1) / max(1, total)),
                                     stage=f"Đang đọc câu {cue.index}/{total} ({provider_label})...")
@@ -3675,24 +3999,32 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
                                                   api_key=os.getenv("GEMINI_API_KEY", ""),
                                                   target_max_duration=cue_dur)
                     except Exception as cue_err:
+                        if _stop_requested():
+                            return failed, True
                         logger.warning(f"Manual TTS câu {cue.index} lỗi: {cue_err}")
                         failed.append(cue.index)
-                return failed
+                return failed, False
 
-            failed_idx = asyncio.run(run_all())
-            try:
-                import shared_state
-                shared_state.stop_requested = bool(_stale_stop)
-            except Exception:
-                pass
+            failed_idx, was_cancelled = asyncio.run(run_all())
+            if was_cancelled:
+                done_so_far = len([c for c in cues if (tts_dir / f"{c.index}.mp3").is_file()])
+                _manual_job_set(
+                    job_id, status="cancelled",
+                    stage=f"Đã hủy tạo giọng theo lệnh dừng — {done_so_far}/{len(cues)} câu đã tạo (không phải lỗi TTS)",
+                )
+                return
 
             ok_cues = [c for c in cues if (tts_dir / f"{c.index}.mp3").is_file()]
             if not ok_cues:
-                raise RuntimeError("Không tạo được file giọng nào (API TTS lỗi?)")
+                raise RuntimeError(
+                    f"Không tạo được file giọng nào — API TTS không trả về audio "
+                    f"({len(failed_idx)}/{len(cues)} câu lỗi, xem log 'Manual TTS câu ... lỗi')"
+                )
 
             # Lắp bản lồng: bed im lặng full video + từng câu đặt đúng vị trí
             job.update({"progress": 92, "stage": "Lắp ráp bản lồng hoàn chỉnh..."})
-            dur = max(video_dur, 1.0)
+            max_cue_end = max([c.end.total_seconds() for c in cues] + [0.0]) if cues else 0.0
+            dur = max(video_dur, max_cue_end, 1.0)
             inputs = ["ffmpeg", "-y", "-v", "error",
                       "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo:d={dur:.3f}"]
             fc_parts = ["[0:a]aformat=sample_rates=44100:channel_layouts=stereo,atrim=0:" + f"{dur:.3f}[bed]"]
@@ -3817,7 +4149,8 @@ async def api_save_workflow_subtitles(payload: Dict[str, Any] = Body(...)):
     subs = payload.get("subtitles", [])
     if not stem:
         raise HTTPException(status_code=400, detail="Thiếu stem video")
-    job_dir = WORKSPACE / stem
+    clean = re.sub(r'[^\w\-_.]', '_', stem)
+    job_dir = WORKSPACE / clean
     if not job_dir.is_dir():
         job_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3921,12 +4254,22 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
     bg_image_file = str(cfg.get("bg_image_file", "tia_sang_vang_ngoi_sao.jpg"))
     auto_crop_black_bars = bool(cfg.get("auto_crop_black_bars", True))
 
-    # Audio input
-    audio_source = final_video if final_video else source_video
-    if job_dir.is_dir() and (job_dir / "mixed.wav").is_file():
-        audio_input_path = job_dir / "mixed.wav"
+    # Audio input & vocal isolation mode
+    vocal_mode = str(payload.get("vocal_mode", "full")).strip().lower()
+    inst_path, voc_path = _find_vocal_files(job_dir) if job_dir.is_dir() else (None, None)
+
+    if vocal_mode == "no_vocals" and inst_path and inst_path.is_file():
+        audio_input_path = inst_path
+    elif vocal_mode == "vocals" and voc_path and voc_path.is_file():
+        audio_input_path = voc_path
+    elif vocal_mode == "mute":
+        audio_input_path = None
     else:
-        audio_input_path = audio_source
+        audio_source = final_video if final_video else source_video
+        if job_dir.is_dir() and (job_dir / "mixed.wav").is_file():
+            audio_input_path = job_dir / "mixed.wav"
+        else:
+            audio_input_path = audio_source
 
     v_input_path = source_video if source_video else final_video
 
@@ -4095,7 +4438,9 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
 
     # Thêm audio input nếu khác video input
     map_audio = "0:a?"
-    if str(audio_input_path) != str(v_input_path):
+    if audio_input_path is None:
+        map_audio = ""
+    elif str(audio_input_path) != str(v_input_path):
         audio_idx = cmd_inputs.count("-i")
         cmd_inputs.extend(["-i", str(audio_input_path)])
         map_audio = f"{audio_idx}:a?"
@@ -4106,13 +4451,17 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
         if tts_wav.is_file():
             tts_idx = cmd_inputs.count("-i")
             cmd_inputs.extend(["-i", str(tts_wav)])
-            # base audio = luồng audio của video nhập (input 0)
-            fc += (
-                f";[0:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.0[expbase];"
-                f"[{tts_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[exptts];"
-                f"[expbase][exptts]amix=inputs=2:normalize=0:duration=first[expaout]"
-            )
-            map_audio = "[expaout]"
+            if map_audio:
+                base_tag = map_audio.replace("?", "")
+                fc += (
+                    f";{base_tag}aformat=sample_rates=44100:channel_layouts=stereo,volume=1.0[expbase];"
+                    f"[{tts_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[exptts];"
+                    f"[expbase][exptts]amix=inputs=2:normalize=0:duration=first[expaout]"
+                )
+                map_audio = "[expaout]"
+            else:
+                fc += f";[{tts_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[expaout]"
+                map_audio = "[expaout]"
         else:
             logger.warning("Export tts_mix bật nhưng thiếu manual_tts_track.wav — bỏ qua trộn")
 
@@ -4122,7 +4471,7 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
     cmd_nvenc = cmd_inputs + [
         "-filter_complex", fc,
         "-map", "[outv]",
-        "-map", map_audio,
+    ] + (["-map", map_audio] if map_audio else ["-an"]) + [
         "-c:v", "h264_nvenc",
         "-preset", "p4",
         "-b:v", f"{bitrate_kbps}k",
@@ -4150,7 +4499,7 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
         cmd_cpu = cmd_inputs + [
             "-filter_complex", fc,
             "-map", "[outv]",
-            "-map", map_audio,
+        ] + (["-map", map_audio] if map_audio else ["-an"]) + [
             "-c:v", "libx264",
             "-preset", "medium",
             "-b:v", f"{bitrate_kbps}k",

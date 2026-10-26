@@ -198,7 +198,7 @@ def freeze_job_config(
     # without persisting credentials or relying on later global settings.
     for key in ("video_mode", "voice_mode", "voice_config", "feature_flags",
                 "planned_pipeline", "planned_models", "policy_version", "qc_policy",
-                "asr_model", "separation_mode", "script_mode"):
+                "asr_model", "separation_mode", "script_mode", "visual_sub_to_speech"):
         if key in overrides:
             effective[key] = overrides[key]
     # Keep job-scoped settings tied to the workspace that owns the job.

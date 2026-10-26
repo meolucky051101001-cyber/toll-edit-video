@@ -290,6 +290,32 @@ def detect_first_speaker_gender(
     return "unknown", conf, f0, idx
 
 
+def infer_gender_from_script_context(video_path: Optional[str | Path], srt_segments: Sequence[Any]) -> Tuple[str, float]:
+    """
+    Infer gender from script content when first speaker analysis returns 'unknown'.
+    Female keywords: makeup, fashion, beauty, cooking, family, baby, etc.
+    Male keywords: automotive, tech, gaming, military, history, sports, etc.
+    Returns: (gender, confidence) with female as default if unclear.
+    """
+    video_name = Path(video_path).stem if video_path else ""
+    text = f"{video_name} " + " ".join(_get_content(seg) for seg in srt_segments if _get_content(seg))
+    lower_text = text.lower()
+    female_terms = ["化妆", "眼线", "美妆", "口红", "穿搭", "bjd", "娃娃", "妈妈", "美女", "姐姐", "妹妹",
+                    "护肤", "美甲", "甜品", "教程", "可爱", "超萌", "仙女", "闺蜜", "怀孕", "宝宝",
+                    "makeup", "fashion", "beauty", "cooking", "baby", "mom", "doll"]
+    male_terms = ["汽车", "男装", "兄弟", "足球", "篮球", "数码", "显卡", "电脑", "硬核", "大叔", "评测",
+                  "游戏", "王者", "军事", "历史", "钓鱼", "auto", "tech", "gaming", "military", "history"]
+    female_score = sum(1 for t in female_terms if t in lower_text)
+    male_score = sum(1 for t in male_terms if t in lower_text)
+    if female_score >= max(male_score, 1):
+        conf = min(0.92, 0.70 + female_score * 0.03)
+        return "female", round(conf, 3)
+    elif male_score > female_score:
+        conf = min(0.92, 0.70 + male_score * 0.03)
+        return "male", round(conf, 3)
+    return "female", 0.70
+
+
 def classify_all_segments_gender(
     srt_segments: Sequence[Any],
     vocals_path: Optional[str | Path] = None,
@@ -766,6 +792,7 @@ def decide_video_voice(
     force_reselect: bool = False,
     job_id: Optional[str] = None,
     voice_config: Optional[Dict[str, Any]] = None,
+    visual_sub_to_speech: bool = False,
 ) -> Dict[str, Any]:
     """
     Hàm quyết định giọng chung (Unified Voice Decision Function - Codex Plan):
@@ -788,16 +815,26 @@ def decide_video_voice(
     is_dual = bool(auto_cfg.get("dual_voice", False)) or dialogue_mode_requested
     resolved_job_id = job_id or out_dir_path.name
     content_hash = compute_file_sha256(video_path or original_audio_path)
+    snapshot_cfg = {
+        "dual_voice": is_dual,
+        "female_voice_id": auto_cfg.get("female_voice_id"),
+        "male_voice_id": auto_cfg.get("male_voice_id"),
+        "manual_voice": auto_cfg.get("manual_voice"),
+        "dialogue_mode": dialogue_mode_requested,
+    }
+    if visual_sub_to_speech:
+        snapshot_cfg["visual_sub_to_speech"] = True
     config_hash = hashlib.sha256(json.dumps(
-        {
-            "dual_voice": is_dual,
-            "female_voice_id": auto_cfg.get("female_voice_id"),
-            "male_voice_id": auto_cfg.get("male_voice_id"),
-            "manual_voice": auto_cfg.get("manual_voice"),
-            "dialogue_mode": dialogue_mode_requested,
-        },
+        snapshot_cfg,
         sort_keys=True, ensure_ascii=False, default=str,
     ).encode("utf-8")).hexdigest()
+    # OCR-recovered cues carry no trustworthy speaker audio; BGM pitch analysis
+    # would otherwise lock the wrong gender.
+    visual_only_transcript = (
+        bool(visual_sub_to_speech)
+        and bool(srt_segments)
+        and all(getattr(seg, "visual_sub_to_speech", False) for seg in srt_segments)
+    )
 
     # 1. Kiểm tra snapshot đã tồn tại và hợp lệ
     if not force_reselect:
@@ -841,12 +878,22 @@ def decide_video_voice(
         # DUAL VOICE: Phân vai Nam & Nữ trong cùng 1 video
         t0 = time.perf_counter()
         logger.info("👥 Chế độ Dual Voice đang BẬT: Đang phân loại giọng Nam/Nữ theo từng câu thoại...")
-        gender_evidence = classify_all_segments_gender(
-            srt_segments=srt_segments,
-            vocals_path=vocals_path,
-            original_audio_path=original_audio_path,
-            return_details=True,
-        )
+        if visual_only_transcript:
+            logger.info("🎙️ Visual OCR transcript: bỏ phân tích âm học trên nhạc nền, dùng ngữ cảnh nội dung.")
+            gender_evidence = {
+                _get_index(seg, pos + 1): {
+                    "gender": "unknown", "confidence": 0.0, "median_f0": 0.0,
+                    "reason": "visual_ocr_transcript",
+                }
+                for pos, seg in enumerate(srt_segments)
+            }
+        else:
+            gender_evidence = classify_all_segments_gender(
+                srt_segments=srt_segments,
+                vocals_path=vocals_path,
+                original_audio_path=original_audio_path,
+                return_details=True,
+            )
         gender_map = {i: evidence["gender"] for i, evidence in gender_evidence.items()}
         # Smart Dialogue Hysteresis Smoothing: neu cau ngan/cam than bi unknown nhung nam giua
         # hoac ngay sau cau da xac dinh gioi tinh do tin cay cao (>= 0.80, cach nhau <= 2.5s),
@@ -885,6 +932,25 @@ def decide_video_voice(
                                 confidence=round(prev_conf * 0.85, 3),
                                 reason="hysteresis_short_continuation",
                             )
+        dual_context_reason = ""
+        if visual_sub_to_speech and not any(
+            gender in ("male", "female") for gender in gender_map.values()
+        ):
+            inferred_gender, inferred_conf = infer_gender_from_script_context(video_path, srt_segments)
+            logger.info(
+                "🎙️ Video không lời thoại -> suy luận giọng theo ngữ cảnh nội dung: %s (conf=%.2f)",
+                inferred_gender.upper(), inferred_conf,
+            )
+            dual_context_reason = f"visual_sub_to_speech_context_gender:{inferred_gender}"
+            for pos, seg in enumerate(srt_segments):
+                seg_idx = _get_index(seg, pos + 1)
+                gender_map[seg_idx] = inferred_gender
+                gender_evidence[seg_idx] = dict(
+                    gender_evidence.get(seg_idx, {}),
+                    gender=inferred_gender,
+                    confidence=inferred_conf,
+                    reason=dual_context_reason,
+                )
         pitch_elapsed = time.perf_counter() - t0
 
         female_voice_info = resolve_locked_voice(
@@ -1036,19 +1102,34 @@ def decide_video_voice(
             "analysis_version": "dual_voice_evidence_1",
             "same_voice_for_both_roles": same_voice_for_both_roles,
         }
+        if dual_context_reason:
+            locked["reason"] = dual_context_reason
     else:
         # AUTO SINGLE VOICE: Phân tích âm học duy nhất câu thoại đầu tiên
         t0 = time.perf_counter()
-        gender, confidence, median_f0, seg_idx = detect_first_speaker_gender(
-            audio_path=vocals_path,
-            srt_segments=srt_segments,
-            backup_audio_path=original_audio_path,
-        )
+        if visual_only_transcript:
+            logger.info("🎙️ Visual OCR transcript: bỏ phân tích âm học trên nhạc nền, dùng ngữ cảnh nội dung.")
+            gender, confidence, median_f0 = "unknown", 0.0, 0.0
+            seg_idx = _get_index(srt_segments[0], 1)
+        else:
+            gender, confidence, median_f0, seg_idx = detect_first_speaker_gender(
+                audio_path=vocals_path,
+                srt_segments=srt_segments,
+                backup_audio_path=original_audio_path,
+            )
         pitch_elapsed = time.perf_counter() - t0
         logger.info(
             "⏱️ Thời gian phân tích cao độ giọng câu đầu: %.3f giây (gender=%s, conf=%.2f, F0=%.1f)",
             pitch_elapsed, gender, confidence, median_f0
         )
+
+        context_reason = ""
+        if visual_sub_to_speech and (gender == "unknown" or confidence < CONFIDENCE_THRESHOLD):
+            inferred_gender, inferred_conf = infer_gender_from_script_context(video_path, srt_segments)
+            logger.info("🎙️ Video không lời thoại -> suy luận theo ngữ cảnh nội dung: %s (conf=%.2f)", inferred_gender.upper(), inferred_conf)
+            gender = inferred_gender
+            confidence = inferred_conf
+            context_reason = f"visual_sub_to_speech_context_gender:{inferred_gender}"
 
         locked = resolve_locked_voice(
             gender=gender,
@@ -1062,6 +1143,8 @@ def decide_video_voice(
             voice_mode="auto",
         )
         locked["dual_voice"] = False
+        if context_reason:
+            locked["reason"] = context_reason
 
     # 3. Gắn metadata snapshot đầy đủ
     locked["job_id"] = resolved_job_id

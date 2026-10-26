@@ -299,6 +299,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 *Lệnh hỗ trợ:*\n"
         "• `/muse <ý tưởng>` - ⚡ Tạo video Whiteboard/Doodle bằng Meta Muse Spark AI\n"
         "• `/voice_auto [on|off]` - Bật/tắt tự nhận diện giọng nói đầu video (Tool V1)\n"
+        "• `/sub_tts [on|off]` - Bật/tắt chế độ đọc sub hình ảnh thành giọng nói (video không lời thoại)\n"
         "• `/llm` - Cấu hình mô hình AI dịch thuật (Google Gemini / OpenAI GPT-4o / DeepSeek V4)\n"
         "• `/batch` - Tự động quét & edit hàng loạt video trong thư mục `D:\\video_input` trên máy\n"
         "• `/batch D:\\thu_muc` - Chỉ định thư mục chứa video cần edit\n"
@@ -306,6 +307,69 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/stop` - Dừng khẩn cấp toàn bộ tác vụ"
     )
     await update.message.reply_text(welcome, parse_mode="Markdown")
+
+
+# ===== LỆNH /sub_tts (Opt-in: OCR sub tiếng Trung trên hình -> TTS) =====
+async def cmd_sub_tts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Bật/tắt chế độ quét phụ đề tiếng Trung gắn cứng trên hình -> dịch & lồng tiếng TTS.
+    Cú pháp:
+    /sub_tts on   - Bật (áp dụng cho video thêm vào hàng đợi từ bây giờ)
+    /sub_tts off  - Tắt
+    /sub_tts      - Xem trạng thái hiện tại
+    """
+    from v1_feature_flags import get_feature_flags, set_feature_flags
+    args = context.args
+    try:
+        enabled = bool(get_feature_flags(WORKSPACE).get("V1_VISUAL_SUB_TO_SPEECH", False))
+        if not args:
+            state = "🟢 ĐANG BẬT" if enabled else "⚪ ĐANG TẮT"
+            await update.message.reply_text(
+                f"🎬 *SUB HÌNH ẢNH ➔ GIỌNG NÓI (OCR-to-TTS)*\n\n"
+                f"📍 *Trạng thái:* {state}\n\n"
+                f"Chế độ dành cho video không có lời thoại (chỉ có chữ tiếng Trung trên hình): "
+                f"hệ thống quét OCR phụ đề, tạo file SRT có tọa độ khung che, dịch sang tiếng Việt và lồng tiếng TTS.\n\n"
+                f"👉 `/sub_tts on` - Bật\n"
+                f"👉 `/sub_tts off` - Tắt\n"
+                f"*(Alias: `/ocr_tts on|off`)*\n\n"
+                f"📌 Trạng thái được đóng băng theo từng job ngay lúc video vào hàng đợi. "
+                f"Video đang chạy/đã xếp hàng giữ nguyên cấu hình lúc gửi.",
+                parse_mode="Markdown"
+            )
+            return
+
+        subcmd = args[0].strip().lower()
+        if subcmd in ("on", "1", "enable", "bat", "bật"):
+            set_feature_flags({"V1_VISUAL_SUB_TO_SPEECH": True}, WORKSPACE)
+            await update.message.reply_text(
+                "✅ *ĐÃ BẬT CHẾ ĐỘ SUB HÌNH ẢNH ➔ GIỌNG NÓI!*\n\n"
+                "• Video không có lời thoại (hoặc chỉ có nhạc nền) sẽ được quét phụ đề tiếng Trung trên màn hình.\n"
+                "• Phụ đề khôi phục giữ đầy đủ tọa độ khung che trắng, được dịch và lồng tiếng TTS.\n\n"
+                "*(Áp dụng cho video gửi từ bây giờ. Video đang chạy/trong hàng đợi giữ nguyên chế độ cũ)*",
+                parse_mode="Markdown"
+            )
+        elif subcmd in ("off", "0", "disable", "tat", "tắt"):
+            set_feature_flags({"V1_VISUAL_SUB_TO_SPEECH": False}, WORKSPACE)
+            await update.message.reply_text(
+                "⚪ *ĐÃ TẮT CHẾ ĐỘ SUB HÌNH ẢNH ➔ GIỌNG NÓI!*\n\n"
+                "• Tool V1 trở về luồng xử lý video có lời thoại như cũ.\n"
+                "• Video không có giọng nói sẽ dừng với lỗi ASR như trước đây.\n\n"
+                "*(Áp dụng cho video gửi từ bây giờ. Video đang chạy/trong hàng đợi giữ nguyên chế độ cũ)*",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Cú pháp không hợp lệ. Vui lòng dùng:\n"
+                "• `/sub_tts on` để bật\n"
+                "• `/sub_tts off` để tắt\n"
+                "• `/sub_tts` để xem trạng thái",
+                parse_mode="Markdown"
+            )
+    except Exception as exc:
+        logger.error("Lỗi lưu cấu hình V1_VISUAL_SUB_TO_SPEECH: %s", exc)
+        await update.message.reply_text(
+            f"❌ Không thể lưu cấu hình Sub Hình Ảnh: {exc}"
+        )
 
 
 # ===== LỆNH /voice_auto (Codex Plan - Chế độ nhận diện giọng đầu video) =====
@@ -1432,6 +1496,8 @@ def main():
             app.add_handler(CommandHandler("llm", cmd_llm))
             app.add_handler(CommandHandler("voice_auto", cmd_voice_auto))
             app.add_handler(CommandHandler("voice", cmd_voice_auto))
+            app.add_handler(CommandHandler("sub_tts", cmd_sub_tts))
+            app.add_handler(CommandHandler("ocr_tts", cmd_sub_tts))
             app.add_handler(CommandHandler("muse", cmd_muse))
             app.add_handler(CommandHandler("spark", cmd_muse))
             app.add_handler(CommandHandler("video", cmd_muse))

@@ -23,10 +23,10 @@ import logging
 import requests
 from pathlib import Path
 
-# Cấu hình UTF-8 cho console Windows
-if hasattr(sys.stdout, 'reconfigure'):
+# Cấu hình UTF-8 cho console Windows (nếu chạy qua console)
+if sys.stdout is not None and hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
-if hasattr(sys.stderr, 'reconfigure'):
+if sys.stderr is not None and hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
 # Thiết lập thư mục gốc & nạp backend từ Tool V1
@@ -47,14 +47,17 @@ if str(BACKEND_DIR) not in sys.path:
 # Cấu hình gửi video lên Telegram: Mặc định là FALSE (chỉ báo thành công theo yêu cầu của bạn)
 SEND_VIDEO_TO_TELEGRAM = os.getenv("DOWNLOADER_SEND_VIDEO_TO_CHAT", "false").lower() in ("true", "1", "yes")
 
-# Cấu hình logging
+# Cấu hình logging (hỗ trợ cả console lẫn chạy ngầm pythonw)
+log_handlers = [
+    logging.FileHandler(BASE_DIR / "telebot_downloader.log", encoding="utf-8", mode="a")
+]
+if sys.stdout is not None:
+    log_handlers.append(logging.StreamHandler(sys.stdout))
+
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     level=logging.INFO,
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(BASE_DIR / "telebot_downloader.log", encoding="utf-8", mode="a")
-    ]
+    handlers=log_handlers
 )
 logger = logging.getLogger("TelebotDownloader")
 
@@ -537,7 +540,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
     logger.info("Bot đang chạy ở chế độ Polling... Nhấn Ctrl+C để dừng.")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=False)
 
 
 if __name__ == "__main__":

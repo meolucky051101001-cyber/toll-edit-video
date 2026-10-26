@@ -1,8 +1,22 @@
+import os
+import sys
+from pathlib import Path
+
+if __name__ == "__main__":
+    # Duplicate-launch guard before heavy imports: a healthy 8088 instance means this spawn is redundant.
+    import urllib.request
+    _guard_port = int(os.getenv("AUTODUB_PORT", "8088"))
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{_guard_port}/api/status", timeout=2.5) as _response:
+            if 200 <= _response.status < 300:
+                print(f"Dashboard đã chạy sẵn trên cổng {_guard_port} — thoát để tránh khởi động trùng.", file=sys.stderr, flush=True)
+                sys.exit(0)
+    except Exception:
+        pass
+
 from fastapi import FastAPI, Form, Body, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-import os
-import sys
 import asyncio
 import datetime
 import logging
@@ -10,7 +24,6 @@ import mimetypes
 import uuid
 import json
 from urllib.parse import unquote
-from pathlib import Path
 from dashboard_media import media_status, paginate_listing, paginate_output
 from typing import Optional
 
@@ -347,6 +360,49 @@ async def locate_v1_subtitles(video_path, segments):
         release_ocr_reader()
 
 
+def _audio_duration_seconds(path):
+    try:
+        import soundfile as sf
+        return float(sf.info(str(path)).duration)
+    except Exception:
+        return 0.0
+
+
+async def _apply_visual_sub_to_speech(
+    video_path, srt_original, srt_segments, visual_sub_to_speech,
+    source_duration, target_lang="vi",
+):
+    """Recover burned-in captions when the opt-in visual mode is on."""
+    from v1_job_policy import looks_like_bgm_hallucination, visual_ocr_transcript_usable
+    asr_was_empty = not srt_segments
+    if (visual_sub_to_speech and not asr_was_empty and source_duration > 0
+            and looks_like_bgm_hallucination(srt_segments, source_duration)):
+        logger.info("Visual mode: bỏ %d câu ASR nghi ảo giác nhạc nền", len(srt_segments))
+        srt_segments = []
+        asr_was_empty = True
+    if not visual_sub_to_speech:
+        return srt_segments, None, asr_was_empty
+
+    from ocr_utils import perform_video_ocr, release_ocr_reader
+    try:
+        segments, width, height, main_y = await asyncio.to_thread(
+            perform_video_ocr, video_path, target_lang=target_lang, sample_rate=1.0,
+            api_key=GEMINI_API_KEY, srt_segments=[], visual_sub_to_speech=True,
+            _source_duration=source_duration,
+        )
+    finally:
+        release_ocr_reader()
+    if not visual_ocr_transcript_usable(segments, source_duration):
+        if asr_was_empty:
+            raise RuntimeError("Không tìm thấy phụ đề động trên hình để lồng tiếng.")
+        logger.info("Visual OCR-to-TTS: không đủ phụ đề trên hình, giữ ASR %d câu", len(srt_segments))
+        return srt_segments, None, asr_was_empty
+    for idx, seg in enumerate(segments, start=1):
+        seg.index = idx
+    await asyncio.to_thread(save_srt, segments, srt_original)
+    return segments, (width, height, main_y), asr_was_empty
+
+
 async def run_api_pipeline_v2(
     video_path,
     out_dir,
@@ -598,6 +654,8 @@ async def api_process_video(
             }
         )
         frozen_eff = frozen_job.get("effective_config", {}) if frozen_job else {}
+        from v1_job_policy import resolve_visual_sub_to_speech
+        visual_sub_to_speech = resolve_visual_sub_to_speech(frozen_eff, WORKSPACE)
         job_bgm_vol = frozen_eff.get("bgm_volume_db", cur_audio_settings.get("bgm_volume_db", -2.0))
         job_dub_vol = frozen_eff.get("dubbing_volume_db", cur_audio_settings.get("dubbing_volume_db", 1.0))
         job_sep_mode = frozen_eff.get("separation_mode", cur_audio_settings.get("separation_mode", "roformer"))
@@ -617,7 +675,15 @@ async def api_process_video(
 
         # 2. Transcribe
         srt_segments = await asyncio.to_thread(extract_subtitles_isolated, vocals_audio, srt_original)
-        vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
+        source_duration = _audio_duration_seconds(original_audio)
+        srt_segments, visual_geometry, asr_was_empty = await _apply_visual_sub_to_speech(
+            video_path, srt_original, srt_segments, visual_sub_to_speech,
+            source_duration, target_lang,
+        )
+        if visual_geometry is not None:
+            vid_w, vid_h, main_y = visual_geometry
+        else:
+            vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
 
         # 3. Translate
         translated_segments = await asyncio.to_thread(translate_subtitles, 
@@ -641,6 +707,7 @@ async def api_process_video(
             video_path=video_path,
             voice_mode=api_voice_mode,
             workspace=WORKSPACE,
+            visual_sub_to_speech=visual_sub_to_speech,
         )
         effective_source = voice_lock_info["voice_source"]
         effective_param = voice_lock_info["voice_param"]
@@ -666,9 +733,10 @@ async def api_process_video(
         translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
 
         # 5. Mix audio (clean instrumental BGM + dubbing)
+        bgm_audio = original_audio if (visual_sub_to_speech and asr_was_empty) else no_vocals_audio
         await asyncio.to_thread(
             mix_audio_pydub,
-            no_vocals_audio,
+            bgm_audio,
             dubbing_audio_files,
             mixed_audio,
             original_volume_db=job_bgm_vol,
@@ -879,6 +947,8 @@ async def api_process_url(
             }
         )
         frozen_eff = frozen_job.get("effective_config", {}) if frozen_job else {}
+        from v1_job_policy import resolve_visual_sub_to_speech
+        visual_sub_to_speech = resolve_visual_sub_to_speech(frozen_eff, WORKSPACE)
         job_bgm_vol = frozen_eff.get("bgm_volume_db", cur_audio_settings.get("bgm_volume_db", -2.0))
         job_dub_vol = frozen_eff.get("dubbing_volume_db", cur_audio_settings.get("dubbing_volume_db", 1.0))
         job_sep_mode = frozen_eff.get("separation_mode", cur_audio_settings.get("separation_mode", "roformer"))
@@ -898,7 +968,15 @@ async def api_process_url(
 
         # Transcribe
         srt_segments = await asyncio.to_thread(extract_subtitles_isolated, vocals_audio, srt_original)
-        vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
+        source_duration = _audio_duration_seconds(original_audio)
+        srt_segments, visual_geometry, asr_was_empty = await _apply_visual_sub_to_speech(
+            video_path, srt_original, srt_segments, visual_sub_to_speech,
+            source_duration, target_lang,
+        )
+        if visual_geometry is not None:
+            vid_w, vid_h, main_y = visual_geometry
+        else:
+            vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
 
         # Translate
         translated_segments = await asyncio.to_thread(translate_subtitles, 
@@ -932,6 +1010,7 @@ async def api_process_url(
             video_path=None,
             voice_mode=api_voice_mode,
             workspace=WORKSPACE,
+            visual_sub_to_speech=visual_sub_to_speech,
         )
         effective_source = voice_lock_info["voice_source"]
         effective_param = voice_lock_info["voice_param"]
@@ -957,9 +1036,10 @@ async def api_process_url(
         translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
 
         # Mix audio (clean instrumental BGM + dubbing)
+        bgm_audio = original_audio if (visual_sub_to_speech and asr_was_empty) else no_vocals_audio
         await asyncio.to_thread(
             mix_audio_pydub,
-            no_vocals_audio,
+            bgm_audio,
             dubbing_audio_files,
             mixed_audio,
             original_volume_db=job_bgm_vol,
@@ -2669,17 +2749,39 @@ async def api_voice_preview_video(voice_id: str):
 @app.get("/api/voice-preview-audio/{voice_id}")
 async def api_voice_preview_audio(voice_id: str):
     clean_voice_id = _safe_preview_name(voice_id)
-    for ext, media in ((".mp3", "audio/mpeg"), (".wav", "audio/wav")):
-        filename = f"{clean_voice_id}{ext}"
-        candidates = [
-            Path(WORKSPACE) / "bot_system" / "control" / "voice_checks" / filename,
-            Path(WORKSPACE) / "control" / "voice_checks" / filename,
-            Path(r"C:\tool v1\workspace\control\voice_checks") / filename,
-            Path(r"C:\tool v1\workspace\bot_system\control\voice_checks") / filename,
-        ]
-        for p in candidates:
-            if p.is_file():
-                return FileResponse(p, media_type=media)
+    candidates_names = [clean_voice_id]
+    try:
+        import voice_selection
+        alias = voice_selection.ALIASES.get(clean_voice_id)
+        if alias and alias not in candidates_names:
+            candidates_names.append(alias)
+        for v in voice_selection.catalog():
+            if v.get("id") == clean_voice_id:
+                p = v.get("param")
+                if p:
+                    if not str(p).startswith("capcut-"):
+                        candidates_names.append(f"capcut-{p}")
+                    candidates_names.append(str(p))
+                break
+    except Exception:
+        pass
+
+    for name in candidates_names:
+        try:
+            safe_name = _safe_preview_name(name)
+        except Exception:
+            continue
+        for ext, media in ((".mp3", "audio/mpeg"), (".wav", "audio/wav")):
+            filename = f"{safe_name}{ext}"
+            candidates = [
+                Path(WORKSPACE) / "bot_system" / "control" / "voice_checks" / filename,
+                Path(WORKSPACE) / "control" / "voice_checks" / filename,
+                Path(r"C:\tool v1\workspace\control\voice_checks") / filename,
+                Path(r"C:\tool v1\workspace\bot_system\control\voice_checks") / filename,
+            ]
+            for p in candidates:
+                if p.is_file():
+                    return FileResponse(p, media_type=media)
     raise HTTPException(status_code=404, detail="Không tìm thấy audio mẫu cho giọng này.")
 
 
@@ -2825,9 +2927,22 @@ async def api_v1_save_glossary(payload: dict = Body(...)):
 
 
 
+def _dashboard_already_serving(port: int) -> bool:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=2.5) as response:
+            return 200 <= response.status < 300
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
     import uvicorn, time
     port = int(os.getenv("AUTODUB_PORT", "8088"))
+    # A healthy instance already owns the port: exit cleanly instead of fighting it and crash-looping under the supervisor.
+    if _dashboard_already_serving(port):
+        logger.warning("Dashboard đã chạy sẵn trên cổng %s — thoát để tránh khởi động trùng.", port)
+        sys.exit(0)
     for attempt in range(15):
         try:
             uvicorn.run(app, host="127.0.0.1", port=port)
@@ -2837,3 +2952,6 @@ if __name__ == "__main__":
                 time.sleep(2)
                 continue
             raise
+    else:
+        logger.error("Không thể bind cổng %s sau 15 lần thử — kiểm tra tiến trình đang giữ cổng.", port)
+        sys.exit(3)

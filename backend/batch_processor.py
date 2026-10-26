@@ -333,6 +333,14 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             }
         )
         frozen_eff = frozen_job_entry.get("effective_config", {}) if frozen_job_entry else {}
+        from v1_job_policy import (
+            looks_like_bgm_hallucination,
+            resolve_visual_sub_to_speech,
+            visual_ocr_transcript_usable,
+        )
+        visual_sub_to_speech = resolve_visual_sub_to_speech(frozen_eff, WORKSPACE)
+        asr_was_empty = False
+        visual_geometry = None
 
         await pause_checkpoint()
         _raise_if_stopped()
@@ -344,6 +352,12 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 file_name, "Không thể trích xuất âm thanh", fatal=False
             )
             return False
+        source_duration = 0.0
+        try:
+            import soundfile as sf
+            source_duration = float(sf.info(original_audio).duration)
+        except Exception:
+            pass
 
         await pause_checkpoint()
         _raise_if_stopped()
@@ -375,6 +389,48 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 lambda: asyncio.to_thread(extract_subtitles_whisper, vocals_audio, srt_original, original_audio_path=original_audio, asr_model=batch_asr_model),
                 srt_original)
         if not srt_segments:
+            asr_was_empty = True
+        elif (visual_sub_to_speech and source_duration > 0
+              and looks_like_bgm_hallucination(srt_segments, source_duration)):
+            logger.info(
+                "Visual mode: bỏ %d câu ASR nghi ảo giác nhạc nền (video không lời thoại)",
+                len(srt_segments),
+            )
+            srt_segments = []
+            asr_was_empty = True
+
+        if visual_sub_to_speech:
+            await pause_checkpoint()
+            _raise_if_stopped()
+            await notify("👀 Đang quét phụ đề tiếng Trung trên hình (Visual OCR-to-TTS)...")
+            job_tracker.update_step(3.5, "Bước 3.5/6: Quét phụ đề trên hình (Visual OCR-to-TTS)...", percent=55)
+            try:
+                async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=900.0):
+                    visual_segments, vid_w, vid_h, main_y_pct = await asyncio.to_thread(
+                        perform_video_ocr, video_path, target_lang="vi", sample_rate=1.0,
+                        api_key=GEMINI_API_KEY, srt_segments=[], visual_sub_to_speech=True,
+                        _source_duration=source_duration,
+                    )
+            finally:
+                release_ocr_reader()
+            if visual_ocr_transcript_usable(visual_segments, source_duration):
+                srt_segments = visual_segments
+                for idx, seg in enumerate(srt_segments, start=1):
+                    seg.index = idx
+                await asyncio.to_thread(save_srt, srt_segments, srt_original)
+                visual_geometry = (vid_w, vid_h, main_y_pct)
+            elif asr_was_empty:
+                await notify("⚠️ Không tìm thấy phụ đề động trên hình để lồng tiếng!")
+                job_tracker.set_error(
+                    file_name, "Không tìm thấy phụ đề động trên hình", fatal=False
+                )
+                return False
+            else:
+                logger.info(
+                    "Visual OCR-to-TTS: không đủ phụ đề trên hình, giữ ASR %d câu",
+                    len(srt_segments),
+                )
+        elif asr_was_empty:
             await notify("⚠️ Video không có giọng nói để dịch!")
             job_tracker.set_error(
                 file_name, "Video không có giọng nói để dịch", fatal=False
@@ -383,18 +439,25 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
 
         await pause_checkpoint()
         _raise_if_stopped()
-        await notify("👀 Bước 3.5/6: Đang quét vị trí phụ đề gốc...")
-        job_tracker.update_step(3.5, "Bước 3.5/6: Quét vị trí phụ đề gốc (PP-OCRv6)...", percent=55)
-        try:
-            async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=900.0):
-                _, vid_w, vid_h, main_y_pct = await asyncio.to_thread(
-                    perform_video_ocr, video_path, target_lang="vi", sample_rate=1.0, api_key=GEMINI_API_KEY, srt_segments=srt_segments
-                )
-        except Exception as e:
-            logger.warning(f"OCR Warning: {e}")
-            vid_w, vid_h, main_y_pct = 1080, 1920, 0.88
-        finally:
-            release_ocr_reader()
+        if visual_geometry is not None:
+            vid_w, vid_h, main_y_pct = visual_geometry
+            await notify("👀 Bước 3.5/6: Đã dùng kết quả quét phụ đề từ bước 3.")
+        else:
+            await notify("👀 Bước 3.5/6: Đang quét vị trí phụ đề gốc...")
+            job_tracker.update_step(3.5, "Bước 3.5/6: Quét vị trí phụ đề gốc (PP-OCRv6)...", percent=55)
+            try:
+                async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=900.0):
+                    _, vid_w, vid_h, main_y_pct = await asyncio.to_thread(
+                        perform_video_ocr, video_path, target_lang="vi", sample_rate=1.0,
+                        api_key=GEMINI_API_KEY, srt_segments=srt_segments,
+                        visual_sub_to_speech=visual_sub_to_speech,
+                        _source_duration=source_duration,
+                    )
+            except Exception as e:
+                logger.warning(f"OCR Warning: {e}")
+                vid_w, vid_h, main_y_pct = 1080, 1920, 0.88
+            finally:
+                release_ocr_reader()
 
         # XỬ LÝ THỜI GIAN CHUẨN KHI LÀM SUB & LỒNG TIẾNG (Chống lệch giọng)
         import datetime
@@ -491,6 +554,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 video_path=video_path,
                 voice_mode=batch_voice_mode,
                 workspace=WORKSPACE,
+                visual_sub_to_speech=visual_sub_to_speech,
             )
             v_source = voice_lock_info["voice_source"]
             v_param = voice_lock_info["voice_param"]
@@ -524,9 +588,11 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         v1_bgm_vol = frozen_eff.get("bgm_volume_db", -2.0)
         v1_dub_vol = frozen_eff.get("dubbing_volume_db", 1.0)
         v1_duck_mode = frozen_eff.get("ducking_mode", "soft")
+        # Music-only source: no_vocals would strip the only original audio.
+        bgm_audio = original_audio if (visual_sub_to_speech and asr_was_empty) else no_vocals_audio
         await asyncio.to_thread(
             mix_audio_pydub,
-            no_vocals_audio,
+            bgm_audio,
             dubbing_audio_files,
             mixed_audio,
             original_volume_db=v1_bgm_vol,
@@ -564,6 +630,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             "voice_id": v_id,
             "voice_source": v_source,
             "voice_mode": voice_lock_info.get("voice_mode", batch_voice_mode),
+            "visual_sub_to_speech": visual_sub_to_speech,
             "pipeline_version": "v1_codex_voice_snapshot_2.0",
             "input_sha256": fingerprint(video_path),
             "output_sha256": fingerprint(final_dest),

@@ -23,6 +23,8 @@ def is_allowed_command_during_pause(cmd_text: str) -> bool:
     return (
         txt.startswith("/voice_auto")
         or txt.startswith("/voice")
+        or txt.startswith("/sub_tts")
+        or txt.startswith("/ocr_tts")
         or txt.startswith("/muse")
         or txt.startswith("/spark")
         or txt.startswith("/video")

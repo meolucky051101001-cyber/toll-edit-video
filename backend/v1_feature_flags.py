@@ -35,6 +35,7 @@ DEFAULT_FLAGS: Dict[str, Any] = {
     "V1_LONG_SEPARATOR": "demucs",
     "V1_SHORT_ASR_MODEL": "inherit",
     "V1_LONG_ASR_MODEL": "inherit",
+    "V1_VISUAL_SUB_TO_SPEECH": False,
 }
 
 

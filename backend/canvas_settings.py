@@ -38,10 +38,10 @@ DEFAULT_CANVAS_SETTINGS: Dict[str, Any] = {
     "bg_image_file": "tia_sang_vang_ngoi_sao.jpg", # Tên tệp ảnh nền vàng tia sáng ngôi sao
     "auto_crop_black_bars": True, # Tự động phát hiện và cắt bỏ 2 viền đen trên/dưới của video phôi
     "crop_padding": 0,           # Bù lề an toàn viền đen (-30px đến +30px, 0 là chuẩn xác, <0 mở rộng video, >0 gọt nhẹ)
-    "show_safe_guides": True,    # Hiển thị thước đo an toàn viền đen trên Canvas
+    "show_safe_guides": False,    # Hiển thị thước đo an toàn viền đen trên Canvas
     "bg_motion_file": "song_bien.mp4", # Tên video nền chuyển động sóng biển
     "motion_bg_enabled": False,  # Bật/tắt background sóng biển tùy ý (Mặc định: TẮT để dùng nền vàng của người dùng)
-    "protect_top_thumb": True,   # Tự động phát hiện và bảo vệ thẻ chữ thumb trắng ở phía trên
+    "protect_top_thumb": False,   # Tự động phát hiện và bảo vệ thẻ chữ thumb trắng ở phía trên
     "video_scale": 1.0,          # 1.0 = KHỚP 100% CHIỀU NGANG, SÁT 2 BÊN MÉP (KHÔNG THU NHỎ THƯỚC PHIM)
     "border_radius": 0,          # Bo góc video chính: 0px để sát mép vuông vắn, không bo góc cắt xén video
     "drop_shadow": False,        # Đổ bóng viền video (tắt khi 100% full width để sát mép)

@@ -281,6 +281,110 @@ def _is_static_packaging_or_logo(cluster: Sequence[_Candidate]) -> bool:
     return False
 
 
+def _distinct_caption_count(samples: Sequence[_Candidate]) -> int:
+    """Count visually distinct captions, tolerating OCR jitter on the same line."""
+    distinct: List[str] = []
+    for sample in samples:
+        text = sample.normalized_text
+        if not text:
+            continue
+        if any(
+            SequenceMatcher(None, existing, text, autojunk=False).ratio() >= 0.72
+            for existing in distinct
+        ):
+            continue
+        distinct.append(text)
+    return len(distinct)
+
+
+def _has_watermark_tokens(text: Any) -> bool:
+    raw = str(text or "")
+    if raw.lstrip().startswith(("@", "＠")):
+        return True
+    return any(token in raw for token in ("抖音", "小红书", "快手", "关注", "点赞", "收藏"))
+
+
+def _is_static_visual_cluster(cluster: Sequence[_Candidate], duration: float = 0.0) -> bool:
+    """Reject banners, shop names and watermarks that never change content."""
+    samples = _best_per_sample(cluster)
+    if not samples:
+        return True
+    times = [float(item.block.get("sample_time", 0.0) or 0.0) for item in samples]
+    span = max(times) - min(times) if times else 0.0
+    distinct = _distinct_caption_count(samples)
+    token_hits = sum(1 for item in samples if _has_watermark_tokens(item.block.get("text", "")))
+    if token_hits >= max(2, int(len(samples) * 0.5)):
+        return True
+    if distinct <= 2:
+        if span >= 8.5:
+            return True
+        if duration >= 15.0 and span >= duration * 0.32:
+            return True
+        if duration > 0 and len(samples) >= 8 and span >= duration * 0.55:
+            return True
+    return False
+
+
+def _choose_visual_band(
+    candidates: Sequence[_Candidate],
+    duration: float = 0.0,
+    visual_only_mode: bool = False,
+    reliable: Optional[Any] = None,
+) -> Tuple[Optional[List[_Candidate]], bool]:
+    """Pick the dynamic caption row; visual-only mode ignores static packaging."""
+    if not candidates:
+        return None, False
+    is_reliable = reliable or (lambda item: True)
+    all_clusters = _cluster_candidates(
+        [item for item in candidates if not item.composite and is_reliable(item)]
+    )
+    # Visual-only mode must not apply the ASR-oriented "low text variability"
+    # packaging test: a real subtitle track repeats each caption across several
+    # dense samples, so low variability is expected there.
+    valid_clusters = [
+        cluster for cluster in all_clusters
+        if not (_is_static_visual_cluster(cluster, duration) if visual_only_mode
+                else _is_static_packaging_or_logo(cluster))
+    ]
+    ranked: List[Tuple[Tuple[float, ...], List[_Candidate]]] = []
+    for cluster in valid_clusters:
+        samples = _best_per_sample(cluster)
+        if len(samples) < 2:
+            continue
+        med_cx = median((c.block["x_pct"] + c.block["max_x_pct"]) * 0.5 for c in samples)
+        if abs(med_cx - 0.5) > (0.25 if visual_only_mode else 0.12):
+            continue
+        med_h = median(c.block["max_y_pct"] - c.block["y_pct"] for c in samples)
+        if not (0.02 <= med_h <= 0.10):
+            continue
+        if visual_only_mode:
+            if _distinct_caption_count(samples) < 2:
+                continue
+            med_cy = median(item.center_y for item in samples)
+            if not (0.30 <= med_cy <= 0.95):
+                continue
+            if _is_static_visual_cluster(cluster, duration):
+                continue
+            zone = 1.0 if 0.42 <= med_cy <= 0.92 else 0.0
+            centered = max(0.0, 1.0 - abs(med_cx - 0.5) / 0.25)
+            rank: Tuple[float, ...] = (
+                zone,
+                float(_distinct_caption_count(samples)),
+                float(len(samples)),
+                centered,
+            )
+        else:
+            unique_texts = {c.normalized_text for c in samples}
+            if len(unique_texts) < 2:
+                continue
+            rank = (float(len(samples)),)
+        ranked.append((rank, cluster))
+    if not ranked:
+        return None, False
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return ranked[0][1], True
+
+
 def _fallback_cluster_rank(cluster: Sequence[_Candidate]) -> Tuple[float, ...]:
     chosen = _best_per_sample(cluster)
     texts = Counter(item.normalized_text for item in chosen if item.normalized_text)
@@ -305,6 +409,8 @@ def select_chinese_subtitle_band(
     frame_height: int,
     default_top: float = DEFAULT_SUBTITLE_TOP,
     default_bottom: float = DEFAULT_SUBTITLE_BOTTOM,
+    allow_visual_only: bool = False,
+    duration: Optional[float] = None,
 ) -> SubtitleBandSelection:
     """Find one spatial subtitle track and ignore unrelated Chinese scene text."""
 
@@ -484,34 +590,33 @@ def select_chinese_subtitle_band(
                 chosen_cluster = best_seed
 
     # Spatial variation alone must not seed a subtitle band unless real speech is present
-    # and dynamic, centered Chinese subtitles are visually detected across segments.
+    # (or the opt-in visual-only mode is active) and dynamic, centered Chinese
+    # subtitles are visually detected across segments.
+    visual_only_mode = False
     if not chosen_cluster:
         has_real_speech = any(
             len(_chinese_text(s)) >= 2 and s.strip().lower() != "speech unavailable"
             for s in segment_texts.values()
         )
-        if has_real_speech and candidates:
-            all_clusters = _cluster_candidates([c for c in candidates if not c.composite and reliable(c)])
-            valid_clusters = [c for c in all_clusters if not _is_static_packaging_or_logo(c)]
-            candidate_clusters = []
-            for cluster in valid_clusters:
-                samples = _best_per_sample(cluster)
-                if len(samples) < 2:
-                    continue
-                med_cx = median((c.block["x_pct"] + c.block["max_x_pct"]) * 0.5 for c in samples)
-                if abs(med_cx - 0.5) > 0.12:
-                    continue
-                med_h = median(c.block["max_y_pct"] - c.block["y_pct"] for c in samples)
-                if not (0.02 <= med_h <= 0.10):
-                    continue
-                unique_texts = {c.normalized_text for c in samples}
-                if len(unique_texts) < 2:
-                    continue
-                candidate_clusters.append((len(samples), cluster))
-            if candidate_clusters:
-                candidate_clusters.sort(key=lambda x: x[0], reverse=True)
-                chosen_cluster = candidate_clusters[0][1]
+        if (has_real_speech or allow_visual_only) and candidates:
+            effective_duration = duration
+            if effective_duration is None:
+                effective_duration = max(
+                    (
+                        float(c.block.get("sample_time", 0.0) or 0.0)
+                        for c in candidates
+                    ),
+                    default=0.0,
+                ) + 0.5
+            chosen_cluster, visual_selected = _choose_visual_band(
+                candidates,
+                effective_duration,
+                visual_only_mode=not has_real_speech,
+                reliable=reliable,
+            )
+            if chosen_cluster and visual_selected:
                 mode = "visual_match"
+                visual_only_mode = not has_real_speech
 
     if not chosen_cluster:
         return SubtitleBandSelection(
@@ -617,6 +722,18 @@ def select_chinese_subtitle_band(
         selected_by_sample[int(segment_id)] = expanded
         best = max(selected, key=lambda item: item.rank_score)
         selected_by_segment[int(segment_id)] = expanded[selected.index(best)]
+
+    if visual_only_mode and chosen_cluster:
+        # No transcript exists to anchor rows to cues. Expose the selected
+        # surface captions by sample so OCR can build tracking blocks for the
+        # single synthetic visual cue.
+        visual_samples: Dict[int, List[Mapping[str, Any]]] = {}
+        for item in chosen_cluster:
+            sample_id = int(item.segment_id) if item.segment_id is not None else 0
+            visual_samples.setdefault(sample_id, []).append(dict(item.block))
+        for sample_blocks in visual_samples.values():
+            sample_blocks.sort(key=lambda block: float(block.get("sample_time", 0.0) or 0.0))
+        selected_by_sample = visual_samples
 
     return SubtitleBandSelection(
         top=top,

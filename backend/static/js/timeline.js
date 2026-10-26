@@ -1,3 +1,4 @@
+    let _activeDraggingClipId = null;
     // ========================================================
     // CAPCUT-STYLE INTERACTIVE TIMELINE — PROJECT JSON MULTI-TRACK CORE (P1)
     // videoClipsState giờ là ALIAS SỐNG tới track video đầu tiên của project JSON,
@@ -325,6 +326,7 @@
       localStorage.setItem('v1_timeline_pxpersec', String(Math.round(timelinePxPerSec * 100) / 100));
     }
 
+    let _zoomRafPending = null;
     function zoomTimelineTo(newPx, anchorClientX = null) {
       newPx = Math.max(TIMELINE_ZOOM_MIN, Math.min(TIMELINE_ZOOM_MAX, newPx));
       if (Math.abs(newPx - timelinePxPerSec) < 0.01) return;
@@ -336,12 +338,17 @@
         if (rect.width > 0) anchorT = (anchorClientX - rect.left) / timelinePxPerSec;
       }
       timelinePxPerSec = newPx;
-      renderVideoClipsTrack();
-      if (anchorT != null && scrollEl && content) {
-        const rect2 = content.getBoundingClientRect();
-        const desiredLeft = anchorClientX - anchorT * timelinePxPerSec;
-        scrollEl.scrollLeft += (rect2.left - desiredLeft);
-      }
+      // P8-opt: gộp các event zoom liên tiếp (Ctrl+lăn/slider) thành 1 lần render mỗi khung hình
+      if (_zoomRafPending) cancelAnimationFrame(_zoomRafPending);
+      _zoomRafPending = requestAnimationFrame(() => {
+        _zoomRafPending = null;
+        renderVideoClipsTrack();
+        if (anchorT != null && scrollEl && content) {
+          const rect2 = content.getBoundingClientRect();
+          const desiredLeft = anchorClientX - anchorT * timelinePxPerSec;
+          scrollEl.scrollLeft += (rect2.left - desiredLeft);
+        }
+      });
     }
 
     function zoomFitTimeline() {
@@ -542,7 +549,30 @@
       document.getElementById('cpFxBlur').value = Math.round(+fx.blur || 0);
       document.getElementById('cpFxBlurVal').innerText = String(Math.round(+fx.blur || 0));
       document.getElementById('cpFxVignette').checked = !!fx.vignette;
+
+      // CapCut Vocal Isolation Mode for selected clip
+      const vm = clip.vocal_mode || (typeof currentVocalIsolationMode !== 'undefined' ? currentVocalIsolationMode : 'full');
+      document.querySelectorAll('.cp-vocal-mode-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-mode') === vm);
+      });
+      const badgeVocal = document.getElementById('cpVocalStatusBadge');
+      if (badgeVocal && typeof currentVocalTracks !== 'undefined') {
+        if (currentVocalTracks.has_separated) {
+          badgeVocal.innerText = '✅ Đã tách sẵn (BS-RoFormer)';
+          badgeVocal.style.color = '#34d399';
+          badgeVocal.style.background = 'rgba(52,211,153,0.1)';
+        } else if (typeof isSeparatingVocals !== 'undefined' && isSeparatingVocals) {
+          badgeVocal.innerText = `⏳ Đang tách AI (${currentVocalTracks.progress || 0}%)...`;
+          badgeVocal.style.color = '#38bdf8';
+          badgeVocal.style.background = 'rgba(56,189,248,0.1)';
+        } else {
+          badgeVocal.innerText = '⚪ Chưa tách AI';
+          badgeVocal.style.color = '#94a3b8';
+          badgeVocal.style.background = '#1e293b';
+        }
+      }
     }
+    window.updateClipPropsPanel = updateClipPropsPanel;
 
     function applyClipVisualPreview() {
       const v = mainPlayer;
@@ -1152,6 +1182,11 @@
     }
 
     function renderTextOverlayPreview() {
+      // P8-opt: gộp theo khung hình — timeupdate + kéo thả cùng lúc chỉ render 1 lần/frame
+      scheduleRaf(_renderTextOverlayPreviewNow);
+    }
+
+    function _renderTextOverlayPreviewNow() {
       const layer = document.getElementById('textOverlayPreviewLayer');
       if (!layer) return;
       layer.innerHTML = '';
@@ -1315,12 +1350,13 @@
           const at0 = clip.at || 0;
           const onMove = (ev) => {
             clip.at = Math.max(0, snapTimelineTime(at0 + (ev.clientX - startX) / timelinePxPerSec, null));
-            renderMusicTrack();
+            scheduleRaf(() => renderMusicTrack()); // P8-opt: gộp render theo khung hình
           };
           const onUp = () => {
             window.removeEventListener('mousemove', onMove);
             window.removeEventListener('mouseup', onUp);
             hideSnapGuide();
+            renderMusicTrack();
             updateTextPropsPanel();
           };
           window.addEventListener('mousemove', onMove);
@@ -1388,30 +1424,44 @@
     }
 
     function drawAudioWaveform() {
+      // P6.2-opt: vẽ CHỈ vùng nhìn thấy trên canvas cỡ viewport (canvas 42.000px vượt giới hạn
+      // trình duyệt và tốn RAM) — canvas được định vị lại theo scrollLeft, vẽ theo rAF khi cuộn.
       const canvas = document.getElementById('audioWaveformCanvas');
-      if (!canvas) return;
+      const scrollEl = document.getElementById('timelineTracks');
+      if (!canvas || !scrollEl) return;
       const content = canvas.parentElement;
-      const width = content ? content.clientWidth : 0;
       const height = content ? content.clientHeight : 30;
-      if (width <= 0) return;
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = Math.max(1, Math.round(width * dpr));
-      canvas.height = Math.max(1, Math.round(height * dpr));
+      const viewW = scrollEl.clientWidth;
+      if (viewW <= 0 || height <= 0) return;
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const targetW = Math.max(1, Math.round(viewW * dpr));
+      const targetH = Math.max(1, Math.round(height * dpr));
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
+      canvas.style.width = viewW + 'px';
+      canvas.style.height = height + 'px';
+      canvas.style.left = scrollEl.scrollLeft + 'px'; // neo canvas vào cửa sổ nhìn thấy
       const ctx = canvas.getContext('2d');
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, width, height);
+      ctx.clearRect(0, 0, viewW, height);
       if (!_waveformCache || !_waveformCache.peaks.length) return;
       const peaks = _waveformCache.peaks;
       const n = peaks.length;
-      const span = getTimelineSpan() || _waveformCache.duration || 1;
+      const duration = _waveformCache.duration || 1;
       ctx.fillStyle = 'rgba(56, 189, 248, 0.55)';
-      const barW = Math.max(1, width / n);
+      const barSrc = duration / n;                             // giây nguồn mỗi bucket
+      const barPx = Math.max(0.75, barSrc * timelinePxPerSec); // độ rộng 1 bucket trên màn hình
+      const viewT0 = scrollEl.scrollLeft / timelinePxPerSec;   // giây timeline tại mép trái
+      const viewT1 = (scrollEl.scrollLeft + viewW) / timelinePxPerSec;
       for (let i = 0; i < n; i++) {
-        const srcT = (i / n) * _waveformCache.duration; // peak thứ i ứng với giây NGUỒN
-        const tlT = sourceTToTimelineTGlobal(srcT);      // map qua timeline đã ghép (speed/gap-aware)
-        const x = (tlT / span) * width;
+        const srcT = (i / n) * duration;
+        const tlT = sourceTToTimelineTGlobal(srcT); // map qua timeline đã ghép (speed/gap-aware)
+        if (tlT < viewT0 - barSrc || tlT > viewT1 + barSrc) continue; // ngoài cửa sổ nhìn thấy
+        const x = tlT * timelinePxPerSec - scrollEl.scrollLeft;
         const h = Math.max(1, peaks[i] * (height - 4));
-        ctx.fillRect(x, (height - h) / 2, Math.max(1, barW * 0.85), h);
+        ctx.fillRect(x, (height - h) / 2, Math.max(1, barPx * 0.85), h);
       }
     }
 
@@ -1474,6 +1524,20 @@
         renderMusicTrack();
       });
       window.addEventListener('resize', () => drawAudioWaveform());
+      // P8-opt: cuộn timeline → vẽ lại waveform theo cửa sổ nhìn thấy (rAF)
+      const tracksScroll = document.getElementById('timelineTracks');
+      if (tracksScroll && !tracksScroll.dataset.wfScrollWired) {
+        tracksScroll.dataset.wfScrollWired = '1';
+        let _wfRafQueued = false;
+        tracksScroll.addEventListener('scroll', () => {
+          if (_wfRafQueued) return;
+          _wfRafQueued = true;
+          requestAnimationFrame(() => {
+            _wfRafQueued = false;
+            drawAudioWaveform();
+          });
+        }, { passive: true });
+      }
     }
 
     function updateTextPropsPanel() {
@@ -1702,6 +1766,17 @@
         duration: copiedClipBuffer.end - copiedClipBuffer.start
       };
 
+      // THÔNG MINH: Nếu con trỏ playhead đang ở đầu video (<= 0.3s) -> Dán ngay vào ĐẦU VIDEO (HOOK)
+      const curTime = (mainPlayer && !isNaN(mainPlayer.currentTime)) ? mainPlayer.currentTime : 0;
+      if (curTime <= 0.3) {
+        rippleInsertClip(videoClipsState, 0, newClip);
+        setSingleSelection(newClip.id);
+        renderVideoClipsTrack();
+        updateTimelineToolbarStates();
+        showToast(`📋 Đã dán đoạn video (${(newClip.end - newClip.start).toFixed(1)}s) lên ĐẦU VIDEO (HOOK) thành công!`);
+        return;
+      }
+
       const insertIdx = videoClipsState.findIndex(c => c.id === selectedClipId);
       if (insertIdx === -1) {
         rippleInsertClip(videoClipsState, getTimelineSpan(), newClip);
@@ -1754,7 +1829,28 @@
       updateTimelineToolbarStates();
     }
 
-    function renderVideoClipsTrack() {
+    // ===== P8-opt: rAF scheduler — gộp nhiều render do kéo chuột/zoom thành 1 lần mỗi khung hình =====
+    const _rafQueue = new Set();
+    let _rafScheduled = false;
+    function scheduleRaf(fn) {
+      _rafQueue.add(fn);
+      if (!_rafScheduled) {
+        _rafScheduled = true;
+        requestAnimationFrame(() => {
+          _rafScheduled = false;
+          const fns = Array.from(_rafQueue);
+          _rafQueue.clear();
+          fns.forEach(f => { try { f(); } catch (err) { console.warn('rAF render lỗi:', err); } });
+        });
+      }
+    }
+
+    let _tlInteracting = false; // đang kéo trim/drag → render nhẹ, bỏ qua các panel phụ
+    function scheduleTimelineRender() {
+      scheduleRaf(() => renderVideoClipsTrack({ light: true }));
+    }
+
+    function renderVideoClipsTrack(opts = null) {
       const container = document.getElementById('videoClipsContainer');
       const summaryEl = document.getElementById('timelineClipsSummary');
       const badgeCount = document.getElementById('badgeVideoClipsCount');
@@ -1813,10 +1909,10 @@
           </div>
 
           <div class="clip-quick-actions" style="${isSuperCompact ? 'display: none;' : ''}">
-            ${(!isHook && !isCompact) ? `<button type="button" class="btn-clip-mini" title="Đưa đoạn này lên đầu làm Hook (00:00)" onclick="event.stopPropagation(); moveClipToHook('${clip.id}')">🧲</button>` : ''}
+            ${!isHook ? `<button type="button" class="btn-clip-mini" title="Đưa đoạn này lên ĐẦU VIDEO (00:00 - Làm Hook)" onclick="event.stopPropagation(); moveClipToHook('${clip.id}')" style="color: #38bdf8; font-weight: bold; font-size: 11px;">🧲</button>` : ''}
             <button type="button" class="btn-clip-mini" title="Cắt tại giây hiện tại (Phím C)" onclick="event.stopPropagation(); splitClipAtCurrent('${clip.id}')">✂️</button>
-            ${!isCompact ? `<button type="button" class="btn-clip-mini" title="Copy & Dán nhân bản đoạn này (Ctrl+C / Ctrl+V)" onclick="event.stopPropagation(); duplicateClipById('${clip.id}')">📋</button>` : ''}
-            ${videoClipsState.length > 1 ? `<button type="button" class="btn-clip-mini" style="color:#f87171;" title="Xóa đoạn này (Delete: rip-nhịp)" onclick="event.stopPropagation(); deleteClipById('${clip.id}')">🗑️</button>` : ''}
+            <button type="button" class="btn-clip-mini" title="Copy đoạn này (Ctrl+C)" onclick="event.stopPropagation(); duplicateClipById('${clip.id}')">📋</button>
+            ${videoClipsState.length > 1 ? `<button type="button" class="btn-clip-mini" style="color:#f87171;" title="Xóa đoạn này (Delete)" onclick="event.stopPropagation(); deleteClipById('${clip.id}')">🗑️</button>` : ''}
           </div>
 
           <div class="clip-trim-handle handle-right" title="Kéo để chỉnh điểm kết thúc (Trim Out) — dính snap nếu bật 🧲" data-handle="right" data-clip-id="${clip.id}"></div>
@@ -1838,19 +1934,32 @@
 
         // Kéo thả đổi thứ tự các đoạn video chuẩn CapCut (hỗ trợ chèn trước / sau linh hoạt)
         card.ondragstart = (e) => {
+          _activeDraggingClipId = clip.id;
           e.dataTransfer.setData('text/plain', clip.id);
+          e.dataTransfer.effectAllowed = 'move';
           card.classList.add('dragging');
+          document.body.classList.add('timeline-dragging-active');
         };
         card.ondragover = (e) => {
           e.preventDefault();
+          e.stopPropagation();
           const cardRect = card.getBoundingClientRect();
           const isLeftHalf = (e.clientX - cardRect.left) < cardRect.width / 2;
-          if (isLeftHalf) {
+          const headZone = document.getElementById('timelineHeadDropzone');
+
+          if (idx === 0 && isLeftHalf) {
+            if (headZone) headZone.classList.add('active');
             card.classList.add('drop-before');
             card.classList.remove('drop-after');
           } else {
-            card.classList.add('drop-after');
-            card.classList.remove('drop-before');
+            if (headZone) headZone.classList.remove('active');
+            if (isLeftHalf) {
+              card.classList.add('drop-before');
+              card.classList.remove('drop-after');
+            } else {
+              card.classList.add('drop-after');
+              card.classList.remove('drop-before');
+            }
           }
         };
         card.ondragleave = () => {
@@ -1858,21 +1967,121 @@
         };
         card.ondrop = (e) => {
           e.preventDefault();
+          e.stopPropagation();
+          const headZone = document.getElementById('timelineHeadDropzone');
+          if (headZone) headZone.classList.remove('active');
           const cardRect = card.getBoundingClientRect();
           const isLeftHalf = (e.clientX - cardRect.left) < cardRect.width / 2;
           card.classList.remove('drop-before', 'drop-after');
-          const srcId = e.dataTransfer.getData('text/plain');
+          const srcId = e.dataTransfer.getData('text/plain') || _activeDraggingClipId;
           if (srcId && srcId !== clip.id) {
-            insertClipAt(srcId, clip.id, isLeftHalf ? 'before' : 'after');
+            if (idx === 0 && isLeftHalf) {
+              moveClipToHook(srcId);
+            } else {
+              insertClipAt(srcId, clip.id, isLeftHalf ? 'before' : 'after');
+            }
           }
         };
         card.ondragend = () => {
+          _activeDraggingClipId = null;
           card.classList.remove('dragging');
+          document.body.classList.remove('timeline-dragging-active');
+          const headZone = document.getElementById('timelineHeadDropzone');
+          if (headZone) headZone.classList.remove('active');
           document.querySelectorAll('.timeline-clip-card').forEach(c => c.classList.remove('drop-before', 'drop-after', 'drag-over'));
         };
 
         container.appendChild(card);
       });
+
+      // VÙNG THẢ ĐẦU VIDEO (HEAD DROP ZONE) - Bắt mọi cú kéo thả về phía đầu timeline
+      let headZone = document.getElementById('timelineHeadDropzone');
+      if (!headZone) {
+        headZone = document.createElement('div');
+        headZone.className = 'timeline-head-dropzone';
+        headZone.id = 'timelineHeadDropzone';
+        headZone.innerHTML = `
+          <div class="head-drop-line"></div>
+          <div class="head-drop-badge">🧲 ĐẦU VIDEO (HOOK)</div>
+        `;
+        headZone.ondragover = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          headZone.classList.add('active');
+        };
+        headZone.ondragleave = (e) => {
+          headZone.classList.remove('active');
+        };
+        headZone.ondrop = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          headZone.classList.remove('active');
+          const srcId = e.dataTransfer.getData('text/plain') || _activeDraggingClipId;
+          if (srcId) moveClipToHook(srcId);
+        };
+      }
+      container.prepend(headZone);
+
+      // Bắt dragover & drop trên toàn bộ track container
+      container.ondragover = (e) => {
+        e.preventDefault();
+        if (!_activeDraggingClipId) return;
+        const rect = container.getBoundingClientRect();
+        const scrollLeft = container.parentElement ? container.parentElement.scrollLeft : 0;
+        const mouseX = e.clientX - rect.left + scrollLeft;
+        const firstCard = container.querySelector('.timeline-clip-card');
+        const firstCardLeft = firstCard ? parseFloat(firstCard.style.left || 0) : 0;
+
+        if (mouseX <= firstCardLeft + 45) {
+          headZone.classList.add('active');
+          document.querySelectorAll('.timeline-clip-card').forEach(c => c.classList.remove('drop-before', 'drop-after'));
+        } else {
+          headZone.classList.remove('active');
+        }
+      };
+
+      container.ondrop = (e) => {
+        e.preventDefault();
+        headZone.classList.remove('active');
+        const srcId = e.dataTransfer.getData('text/plain') || _activeDraggingClipId;
+        if (!srcId) return;
+        const rect = container.getBoundingClientRect();
+        const scrollLeft = container.parentElement ? container.parentElement.scrollLeft : 0;
+        const mouseX = e.clientX - rect.left + scrollLeft;
+        const firstCard = container.querySelector('.timeline-clip-card');
+        const firstCardLeft = firstCard ? parseFloat(firstCard.style.left || 0) : 0;
+
+        if (mouseX <= firstCardLeft + 60) {
+          moveClipToHook(srcId);
+        }
+      };
+
+      const trackContent = document.getElementById('videoClipsTrackContent');
+      if (trackContent && !trackContent.dataset.dropInit) {
+        trackContent.dataset.dropInit = '1';
+        trackContent.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          if (!_activeDraggingClipId) return;
+          const rect = trackContent.getBoundingClientRect();
+          const mouseX = e.clientX - rect.left + trackContent.scrollLeft;
+          if (mouseX <= 80) {
+            const hz = document.getElementById('timelineHeadDropzone');
+            if (hz) hz.classList.add('active');
+          }
+        });
+        trackContent.addEventListener('drop', (e) => {
+          e.preventDefault();
+          const hz = document.getElementById('timelineHeadDropzone');
+          if (hz) hz.classList.remove('active');
+          const srcId = e.dataTransfer.getData('text/plain') || _activeDraggingClipId;
+          if (!srcId) return;
+          const rect = trackContent.getBoundingClientRect();
+          const mouseX = e.clientX - rect.left + trackContent.scrollLeft;
+          if (mouseX <= 100) {
+            moveClipToHook(srcId);
+          }
+        });
+      }
 
       // P4: badge chuyển cảnh tại điểm nối (bấm để sửa)
       container.parentElement.querySelectorAll('.trans-chip').forEach(b => b.remove());
@@ -1897,11 +2106,14 @@
       initTrimHandleListeners();
       updateTimelineToolbarStates();
       updatePlayhead();
-      updateClipPropsPanel();
-      applyClipVisualPreview();
-      renderTextOverlayTrack();
-      renderTextOverlayPreview();
-      renderMusicTrack();
+      // P8-opt: khi đang kéo (light) bỏ qua các panel phụ nặng DOM để mousemove mượt
+      if (!opts || !opts.light) {
+        updateClipPropsPanel();
+        applyClipVisualPreview();
+        renderTextOverlayTrack();
+        renderTextOverlayPreview();
+        renderMusicTrack();
+      }
     }
 
     function selectClip(clipId, seekToTime = null) {
@@ -1973,12 +2185,14 @@
       rippleInsertClip(videoClipsState, 0, moved);
       setSingleSelection(moved.id);
       renderVideoClipsTrack();
+      const trackContent = document.getElementById('videoClipsTrackContent');
+      if (trackContent) trackContent.scrollLeft = 0;
       if (mainPlayer) {
         mainPlayer.currentTime = moved.start;
         updateTimecode();
         updatePlayhead();
       }
-      showToast('🧲 Đã đưa đoạn này lên ĐẦU VIDEO (HOOK) mở đầu!');
+      showToast('🧲 Đã đưa đoạn video lên ĐẦU VIDEO (HOOK) mở đầu!');
     }
 
     function moveSelectedClipToHook() {
@@ -2219,7 +2433,8 @@
               clip.duration = clip.end - clip.start;
               previewTrim(clip.end - 0.02);
             }
-            renderVideoClipsTrack();
+            _tlInteracting = true;
+            scheduleTimelineRender(); // P8-opt: gộp render theo khung hình khi kéo
           };
 
           const onMouseUp = () => {
@@ -2227,6 +2442,7 @@
             window.removeEventListener('mouseup', onMouseUp);
             hideSnapGuide();
             if (wasPlaying) mainPlayer.play().catch(() => {});
+            _tlInteracting = false;
             renderVideoClipsTrack();
             showToast(`✂️ Đã chỉnh độ dài đoạn: ${formatTime(clip.start)} - ${formatTime(clip.end)} (Ctrl+Z để hoàn tác)`);
           };
@@ -2284,8 +2500,10 @@
     });
 
     function buildTimelineRenderPayload() {
+      const globalVocalMode = (typeof currentVocalIsolationMode !== 'undefined' ? currentVocalIsolationMode : 'full');
       return {
         stem: currentVideo.stem,
+        vocal_mode: globalVocalMode,
         clips: videoClipsState.map(c => ({
           start: parseFloat(c.start.toFixed(3)),
           end: parseFloat(c.end.toFixed(3)),
@@ -2297,6 +2515,7 @@
           keepPitch: c.keepPitch !== false,
           fadeIn: parseFloat((c.fadeIn || 0).toFixed(3)),
           fadeOut: parseFloat((c.fadeOut || 0).toFixed(3)),
+          vocal_mode: c.vocal_mode || globalVocalMode,
           crop: c.crop || null,
           rotate: c.rotate || 0,
           flipH: !!c.flipH,

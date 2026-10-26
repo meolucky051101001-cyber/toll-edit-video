@@ -2153,6 +2153,14 @@ header {
                 </select>
               </div>
 
+              <div style="padding: 8px 12px; background: rgba(168, 85, 247, 0.06); border-radius: 6px; border: 1px solid rgba(168, 85, 247, 0.25); display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                  <div style="font-weight: 600; color: #c084fc;">🎬 Sub Hình Ảnh ➔ Giọng Nói (OCR-to-TTS)</div>
+                  <div style="font-size: 10.5px; color: var(--text-muted);">Dành cho video không có lời thoại (chỉ có chữ tiếng Trung trên hình)</div>
+                </div>
+                <input type="checkbox" id="flagVisualSubToSpeech" onchange="toggleFeatureFlag('V1_VISUAL_SUB_TO_SPEECH', this.checked)" style="cursor: pointer; width: 16px; height: 16px; accent-color: #a855f7;">
+              </div>
+
               <!-- TÙY CHỌN MÔ HÌNH ASR: Hybrid (Whisper + SenseVoice) vs Faster-Whisper vs SenseVoice-Small vs Qwen3-ASR -->
               <div style="grid-column: 1 / -1; padding: 12px 14px; background: rgba(255, 255, 255, 0.02); border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.08); display: flex; flex-direction: column; gap: 8px;">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
@@ -5445,6 +5453,9 @@ let inputUploading=false;
 
           const smartOcr = document.getElementById('flagSmartSkipOcr');
           if (smartOcr) smartOcr.checked = flags.V1_SMART_SKIP_OCR !== false;
+
+          const visualSubToSpeech = document.getElementById('flagVisualSubToSpeech');
+          if (visualSubToSpeech) visualSubToSpeech.checked = flags.V1_VISUAL_SUB_TO_SPEECH === true;
 
           const asrChunk = document.getElementById('flagAsrChunking');
           if (asrChunk) asrChunk.checked = flags.V1_ASR_CHUNKING !== false;
