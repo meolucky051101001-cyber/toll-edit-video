@@ -24,6 +24,7 @@ if os.name == 'nt':
     subprocess.Popen.__init__ = patched_init
 
 import logging
+from logging.handlers import RotatingFileHandler
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -80,11 +81,11 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 def _configure_bot_logging() -> None:
     log_handlers = [
-        logging.FileHandler(backend_app_log, encoding='utf-8'),
+        RotatingFileHandler(backend_app_log, maxBytes=10_000_000, backupCount=3, encoding='utf-8'),
         logging.StreamHandler()
     ]
     try:
-        log_handlers.append(logging.FileHandler(root_app_log, encoding='utf-8'))
+        log_handlers.append(RotatingFileHandler(root_app_log, maxBytes=10_000_000, backupCount=3, encoding='utf-8'))
     except Exception:
         pass
 
@@ -1450,6 +1451,7 @@ def main():
 
     from telegram.request import HTTPXRequest
 
+    reconnect_delay = 5
     while True:
         try:
             import asyncio
@@ -1508,10 +1510,12 @@ def main():
             from tool_control_runtime import install as install_tool_control
             install_tool_control(app, globals(), 'v1')
             app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
+            reconnect_delay = 5
         except Exception as e:
-            logger.error(f"Lỗi polling hoặc mạng gián đoạn: {e}. Đang tự động kết nối lại sau 5 giây...")
-            print(f"⚠️ Mang chập chờn hoặc loi: {e}. Dang tu dong ket noi lai sau 5 giay...")
-            time.sleep(5)
+            logger.error(f"Lỗi polling hoặc mạng gián đoạn: {e}. Đang tự động kết nối lại sau {reconnect_delay} giây...")
+            print(f"⚠️ Mang chập chờn hoặc loi: {e}. Dang tu dong ket noi lai sau {reconnect_delay} giay...")
+            time.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, 60)
 
 
 if __name__ == "__main__":

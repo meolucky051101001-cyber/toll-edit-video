@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import asyncio
 import datetime
 import logging
+from logging.handlers import RotatingFileHandler
 import mimetypes
 import uuid
 import json
@@ -59,7 +60,40 @@ import job_tracker
 
 logger = logging.getLogger("main_api")
 
+
+def _configure_dashboard_logging() -> None:
+    """Keep a rotating trail for console-launched dashboards, which otherwise log only to stdout."""
+    root_logger = logging.getLogger()
+    if any(getattr(handler, "_autodub_dashboard", False) for handler in root_logger.handlers):
+        return
+    log_dir = BASE_DIR / "logs"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(log_dir / "dashboard.log", maxBytes=10_000_000, backupCount=5, encoding="utf-8")
+    except OSError:
+        return
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    handler._autodub_dashboard = True
+    root_logger.addHandler(handler)
+    if root_logger.level == logging.NOTSET or root_logger.level > logging.INFO:
+        root_logger.setLevel(logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+if __name__ == "__main__":
+    # Importing this module (tests, E2E scripts) must not attach a second writer to the live log file.
+    _configure_dashboard_logging()
+
 app = FastAPI()
+
+
+@app.exception_handler(Exception)
+async def _log_unhandled_exception(request: Request, exc: Exception):
+    logger.error("Lỗi không xử lý tại %s %s", request.method, request.url.path, exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": "Lỗi máy chủ nội bộ — xem backend/logs/dashboard.log để biết chi tiết."})
+
+
 app.state.pipeline_runtime = sys.modules[__name__]
 
 ALLOWED_CORS_ORIGINS = [
@@ -421,6 +455,9 @@ async def run_api_pipeline_v2(
     settings = PipelineSettings.from_env()
     if settings.mode is not PipelineMode.V2:
         return None
+
+    from disk_guard import ensure_free_space
+    ensure_free_space(WORKSPACE, out_dir, published_video, purpose=f"xử lý {Path(video_path).name}")
 
     from pipeline_v2.stage_validation import is_real_rvc_model
     from pipeline_v2.video_pipeline import (
@@ -1175,6 +1212,17 @@ async def api_get_queue():
     try:
         data = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8-sig"))
         alive = job_tracker._pid_is_running(int(data.get("pid") or 0))
+        if not alive:
+            # The snapshot pid is only rewritten on the next queue event; scan for a live bot instead.
+            try:
+                import psutil
+                for proc in psutil.process_iter(["cmdline"]):
+                    cmdline = proc.info.get("cmdline") or []
+                    if any("telegram_bot.py" in str(arg) for arg in cmdline):
+                        alive = True
+                        break
+            except Exception:
+                pass
         # Bổ sung thông tin router cho từng video trong hàng chờ
         try:
             from v1_video_router import route_video

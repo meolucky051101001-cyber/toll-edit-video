@@ -186,6 +186,7 @@ VAI TRÒ: Bạn là Kỹ sư Full-Stack (Python FastAPI + Vanilla JS + PyTorch C
 - Chống khởi động trùng: `main.py` kiểm tra `/api/status` trước khi bind cổng — nếu đã có dashboard khỏe trên 8088 thì tự thoát mã 0; supervisor cũng bỏ qua spawn khi 8088 còn khỏe (tránh vòng lặp WinError 10048).
 - Khi sửa code Python ở backend: **không kill/restart khi đang có batch hoặc GPU worker chạy**. Chỉ nạp lại server vào lúc rảnh; supervisor sẽ tự khởi động lại `main.py` sau ~5 giây, hoặc bật lại thủ công theo quy trình ở mục 3.1.
 - Log vòng đời supervisor: `C:\tool v1\workspace\bot_system\service_logs\dashboard_supervisor.log` (mỗi dòng Started PID / Exited code).
+- Ổn định vận hành (2026-10-27): `app.log` xoay vòng 10 MB × 3 bản (Telegram); dashboard ghi thêm `C:\tool v1\backend\logs\dashboard.log` (10 MB × 5, kèm traceback khi API trả 500 JSON); job nền và Studio từ chối chạy khi ổ đĩa dưới `AUTODUB_MIN_FREE_GB` (mặc định 3 GB) và báo lỗi tiếng Việt thay vì hỏng giữa render; Telegram tự kết nối lại theo backoff 5 → 60 giây thay vì 5 giây cố định.
 - Kiểm tra cổng 8088: `netstat -ano | findstr :8088` hoặc `curl.exe -s http://127.0.0.1:8088/api/status`.
 - Các request POST/DELETE nội bộ yêu cầu header bảo mật `X-Local-Control-Token` (lấy từ biến JS `CONTROL_PLANE_TOKEN` hoặc `GET /api/auth-token`) và `X-Dashboard-Input: 1`.
 

@@ -3695,6 +3695,8 @@ def _wait_pipeline_free(job_id: str, max_wait_s: int = 1800) -> bool:
                     logger.info("P9 manual job: đã dọn file stop stale %s", _stale)
         except Exception:
             pass
+        from disk_guard import ensure_free_space
+        ensure_free_space(WORKSPACE, purpose="tạo phụ đề trong Studio")
         return True
     return False
 
@@ -3950,6 +3952,9 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
             provider_label = str(voice_entry.get("label") or voice_source)
 
             job.update({"status": "running", "progress": 5, "stage": f"Chuẩn bị giọng: {provider_label}..."})
+
+            from disk_guard import ensure_free_space
+            ensure_free_space(WORKSPACE, purpose="tạo giọng đọc trong Studio")
 
             tts_dir = job_dir / "manual_tts"
             tts_dir.mkdir(parents=True, exist_ok=True)

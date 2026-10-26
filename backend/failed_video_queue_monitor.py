@@ -14,6 +14,7 @@ import time
 import json
 import re
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime
 
@@ -42,7 +43,8 @@ logging.basicConfig(
     format="%(asctime)s - [FAILED_MONITOR] %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(BOT_SYSTEM / "service_logs" / "failed_video_monitor.log", encoding="utf-8")
+        RotatingFileHandler(BOT_SYSTEM / "service_logs" / "failed_video_monitor.log",
+                            maxBytes=5_000_000, backupCount=2, encoding="utf-8")
     ]
 )
 logger = logging.getLogger("failed_monitor")

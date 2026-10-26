@@ -311,6 +311,14 @@ class V1Orchestrator:
                         "final_video": str(published), "manifest_file": str(self.manifest_manager._manifest_file(job_id)),
                         "qc_status": "PREVIOUSLY_PUBLISHED", "qc_report": {}, "reused_completed": True}
 
+        import tempfile
+        from disk_guard import ensure_free_space
+        ensure_free_space(
+            self.workspace, requested_out_dir, delivery_path,
+            os.getenv("AUTODUB_OUTPUT_DIR"), tempfile.gettempdir(),
+            purpose=f"xử lý {v_path.name}",
+        )
+
         resolved_mode = manifest.video_mode
         planned = self._plan_info_from_manifest(manifest)["planned_pipeline"]
         planned.setdefault("asr_chunking", resolved_mode != "SHORT")
