@@ -7,7 +7,6 @@ Tích hợp Google Gemini Vision (video-to-script), Hook Generator, CapCut TTS 8
 from __future__ import annotations
 
 import os
-import sys
 import time
 import uuid
 import logging

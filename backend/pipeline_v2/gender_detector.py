@@ -93,15 +93,6 @@ def detect_global_pitch(audio_path: str | Path) -> tuple[float, str]:
     return 200.0, "female"
 
 
-def detect_segment_pitch(
-    vocals_path: str | Path,
-    start_sec: float,
-    end_sec: float,
-) -> Optional[float]:
-    """Return median fundamental frequency (F0 in Hz) for an audio slice, or None if unvoiced/silent."""
-    return extract_pitch_series(vocals_path, start_sec, end_sec)
-
-
 def detect_segment_gender(
     vocals_path: str | Path,
     start_sec: float,

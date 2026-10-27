@@ -1,6 +1,5 @@
 """Persist Telegram inputs before acknowledging, without serializing SDK objects."""
 import asyncio
-import hashlib
 import json
 import logging
 from pathlib import Path

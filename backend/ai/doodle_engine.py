@@ -12,11 +12,9 @@ render siêu tốc bằng resvg-py, hỗ trợ ảnh tùy chỉnh tải lên, v�
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import logging
-import math
 import os
 import re
 import shutil
@@ -28,14 +26,11 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import cv2
-import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 import resvg_py
 
 from ai.script_tts_service import (
     generate_single_tts,
-    CAPCUT_VOICES,
 )
 
 logger = logging.getLogger(__name__)

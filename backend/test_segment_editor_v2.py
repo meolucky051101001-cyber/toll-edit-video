@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """Unit & Integration tests for Phase C on Tool V2."""
 
-import asyncio
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -13,9 +11,6 @@ if str(backend_dir) not in sys.path:
 
 from segment_editor_service import (
     get_job_segments,
-    parse_srt,
-    format_srt,
-    save_segment_draft,
 )
 from fastapi.testclient import TestClient
 from dashboard_monitor import app

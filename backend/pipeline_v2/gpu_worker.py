@@ -22,7 +22,6 @@ if isinstance(sys.stderr, io.TextIOWrapper):
     except Exception: pass
 
 from .atomic_io import atomic_write_json
-from .batching import chunked
 from .segments import segments_from_dicts, segments_to_dicts
 from .stage_validation import validate_demucs_outputs, validate_transformed_audio
 

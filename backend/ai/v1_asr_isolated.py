@@ -1,7 +1,6 @@
 """Run GPU ASR outside the long-lived bot; process exit reclaims native memory."""
 import os
 import json
-import sys
 import subprocess
 import tempfile
 from pathlib import Path

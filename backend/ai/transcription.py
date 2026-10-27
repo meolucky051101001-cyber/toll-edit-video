@@ -9,14 +9,10 @@ if isinstance(sys.stderr, io.TextIOWrapper):
     try: sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     except Exception: pass
 
-import re
 import srt
 import logging
 from datetime import timedelta
-import threading
 
-from .model_policy import current_model_policy
-from .model_runtime import ModelRuntimeError, run_model_stage, runtime_module_available
 
 
 logger = logging.getLogger(__name__)
@@ -42,21 +38,6 @@ def _cached_model_path(model_name, download_root):
     except (OSError, ValueError):
         pass
     return model_name
-
-
-def _join_aligned_tokens(left, right):
-    left = str(left or "")
-    right = str(right or "")
-    if not left:
-        return right
-    if not right:
-        return left
-    cjk = lambda value: any(("\u3400" <= character <= "\u4dbf") or ("\u4e00" <= character <= "\u9fff") for character in value)
-    if cjk(left[-1:]) or cjk(right[:1]) or right[:1] in "，。！？；：、,.!?;:":
-        return left + right
-    if left.endswith((" ", "\n")) or right.startswith((" ", "\n")):
-        return left + right
-    return left + " " + right
 
 
 def _aligned_units_to_segments(units):

@@ -615,33 +615,6 @@ def render_full_script_tts(
     }
 
 
-def mix_voice_with_bgm(
-    voice_audio_path: str | Path,
-    bgm_audio_path: str | Path,
-    output_path: str | Path,
-    bgm_volume_db: float = -18.0,
-    ducking_db: float = -12.0
-) -> str:
-    """Trộn track lồng tiếng với nhạc nền BGM tự động ducking (hạ âm lượng BGM khi có thoại)."""
-    voice = AudioSegment.from_file(str(voice_audio_path))
-    bgm = AudioSegment.from_file(str(bgm_audio_path))
-
-    # Hạ âm lượng BGM cơ bản + ducking
-    bgm_ducked = bgm + (bgm_volume_db + ducking_db)
-
-    # Lặp BGM nếu ngắn hơn voice
-    if len(bgm_ducked) < len(voice):
-        loops = int(math.ceil(len(voice) / len(bgm_ducked)))
-        bgm_ducked = bgm_ducked * loops
-    bgm_ducked = bgm_ducked[:len(voice)]
-
-    mixed = bgm_ducked.overlay(voice)
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    mixed.export(str(out), format="mp3")
-    return str(out)
-
-
 def get_media_duration(file_path: str | Path) -> float:
     """Lấy thời lượng chính xác của video hoặc audio bằng ffprobe (fallback sang cv2)."""
     p = clean_fs_path(file_path)

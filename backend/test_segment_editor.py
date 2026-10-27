@@ -2,7 +2,6 @@
 """Unit & Integration tests for Phase C: Segment Editing & Partial Regeneration."""
 
 import asyncio
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -13,10 +12,8 @@ if str(backend_dir) not in sys.path:
 
 from segment_editor_service import (
     format_srt,
-    format_srt_time,
     get_job_segments,
     parse_srt,
-    parse_srt_time,
     regenerate_segments,
     save_segment_draft,
 )

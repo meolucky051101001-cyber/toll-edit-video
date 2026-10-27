@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, asdict
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,6 @@ class VideoMode(str, Enum):
 
 class UnsupportedResolutionError(ValueError):
     """Raised when video exceeds GPU hardware limit (e.g. 8K)."""
-    pass
 
 
 def get_router_thresholds() -> Dict[str, float]:

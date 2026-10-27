@@ -14,13 +14,11 @@ Strictly implements the Codex Plan for Gemini Stability & Speed:
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import re
 import sqlite3
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -61,31 +59,24 @@ DEFAULT_CONDENSATION_MODELS = [
 # Exceptions
 class GeminiError(Exception):
     """Base exception for Gemini dispatcher."""
-    pass
 
 class GeminiConfigError(GeminiError):
     """Raised when GEMINI_API_KEY is missing, invalid, or mismatched."""
-    pass
 
 class GeminiAuthError(GeminiError):
     """Raised when authentication fails (HTTP 401/403)."""
-    pass
 
 class GeminiDeadlineError(GeminiError):
     """Raised when overall deadline expires."""
-    pass
 
 class GeminiCancelledError(GeminiError):
     """Raised when job is stopped or cancelled."""
-    pass
 
 class GeminiQuotaExhaustedError(GeminiError):
     """Raised when all candidates or account are rate-limited (HTTP 429)."""
-    pass
 
 class GeminiAllModelsFailedError(GeminiError):
     """Raised when all candidate models fail within budget."""
-    pass
 
 class GeminiRequestError(GeminiError):
     """Invalid shared request; changing models cannot repair it."""

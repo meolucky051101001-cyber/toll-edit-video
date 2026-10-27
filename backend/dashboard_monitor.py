@@ -10,7 +10,7 @@ import re
 import subprocess
 import sys
 import time
-from typing import Optional, Dict, Any, List
+from typing import Optional
 from fastapi import FastAPI, Form, HTTPException, Body, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from environment import read_environment

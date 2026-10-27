@@ -9,6 +9,7 @@ if str(root) not in sys.path:
     sys.path.insert(0, str(root))
 
 import pytest
+from unittest.mock import patch
 
 def sync_backend_modules():
     for k in list(sys.modules.keys()):
@@ -28,3 +29,21 @@ def _auto_sync_modules():
     sync_backend_modules()
     yield
     sync_backend_modules()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_shared_stop_state(tmp_path):
+    """Keep stop flags out of the live workspace while tests run."""
+    import shared_state
+
+    fget = getattr(getattr(type(shared_state), "stop_requested", None), "fget", None)
+    if fget is None:
+        yield
+        return
+    old_local_stop = getattr(shared_state, "_local_stop", False)
+    shared_state._local_stop = False
+    try:
+        with patch.dict(fget.__globals__, {"WORKSPACE": tmp_path}):
+            yield
+    finally:
+        shared_state._local_stop = old_local_stop

@@ -36,7 +36,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("rerender_dual_voice_qwen")
 
-from ai.v1_auto_voice import decide_video_voice
 from ai.v1_voice_isolated import generate_dubbing_audio_isolated
 from ai.voice_cloning import fit_audio_file
 from ass_utils import generate_ass_file, sync_and_clamp_subtitles

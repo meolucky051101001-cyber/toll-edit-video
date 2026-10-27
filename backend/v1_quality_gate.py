@@ -8,7 +8,6 @@ Bảo toàn 100% video xuất xưởng, không làm gián đoạn tác vụ khi 
 from __future__ import annotations
 
 import os
-import sys
 import json
 import math
 import logging
@@ -269,7 +268,6 @@ def run_quality_gate(
     if ass_subtitle_path:
         ass_p = Path(ass_subtitle_path)
         if ass_p.is_file() and ass_p.stat().st_size > 100:
-            import re
             ass_text = ass_p.read_text(encoding="utf-8-sig")
             valid_ass = "[Script Info]" in ass_text and "[Events]" in ass_text
             events = [line for line in ass_text.splitlines() if line.startswith("Dialogue:")]

@@ -17,6 +17,8 @@ class _SharedState(types.ModuleType):
 
     @property
     def stop_requested(self) -> bool:
+        if os.getenv('AUTODUB_DISABLE_STOP_CHECK', '0').lower() in ('1', 'true', 'yes'):
+            return False
         if self._local_stop:
             return True
         try:

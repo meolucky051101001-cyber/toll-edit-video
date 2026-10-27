@@ -9,7 +9,6 @@ Tuyệt đối không chạy CPU (Fail-Closed).
 from __future__ import annotations
 
 import os
-import sys
 import gc
 import time
 import math

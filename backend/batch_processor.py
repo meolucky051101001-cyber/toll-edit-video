@@ -16,7 +16,7 @@ import shutil
 import uuid
 import hashlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Optional
 import json
 
 # Cấu hình UTF-8 cho console Windows
@@ -74,7 +74,6 @@ except Exception:
 from ai.transcription import extract_subtitles_whisper, save_srt
 from ai.translation import translate_subtitles
 from ai.v1_voice_isolated import generate_dubbing_audio_isolated
-from ai.voice_cloning import rvc_runtime_available
 from video_utils import extract_audio_from_video, mix_audio_pydub, process_video, separate_vocals_demucs
 from ass_utils import generate_ass_file
 from ocr_utils import perform_video_ocr, release_ocr_reader
@@ -214,7 +213,6 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
 
             rvc_model = discover_rvc_model(Path(WORKSPACE))
             from voice_selection import resolve_voice
-            from dataclasses import replace
             selected_source, selected_param, selected_label = resolve_voice("rvc" if rvc_model else "edge", rvc_model)
             request = VideoPipelineRequest(
                 video_path=Path(video_path),

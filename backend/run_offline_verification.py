@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict
 
 # UTF-8 encoding for Windows console with write_through for instant flush
 if hasattr(sys.stdout, "reconfigure"):

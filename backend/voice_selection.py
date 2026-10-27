@@ -213,34 +213,3 @@ DEFAULT_SPEAKER_MAP = {
     "SPEAKER_FEMALE_0": "Nhân vật nữ chính",
     "SPEAKER_FEMALE_1": "Nhân vật nữ phụ",
 }
-
-
-def get_speaker_voice_map() -> dict:
-    svm_file = BASE / "speaker_voice_map.json"
-    if svm_file.is_file():
-        try:
-            return json.loads(svm_file.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    cfg = get_auto_voice_config()
-    f_prm = resolve_voice_param(cfg.get("female_voice_id", "capcut-BV562_streaming"))
-    m_prm = resolve_voice_param(cfg.get("male_voice_id", "capcut-BV075_streaming"))
-    return {
-        "male": m_prm,
-        "female": f_prm,
-        "SPEAKER_MALE_0": m_prm,
-        "SPEAKER_MALE_1": m_prm,
-        "SPEAKER_FEMALE_0": f_prm,
-        "SPEAKER_FEMALE_1": f_prm,
-    }
-
-
-def get_speaker_map() -> dict:
-    sm_file = BASE / "speaker_map.json"
-    if sm_file.is_file():
-        try:
-            return json.loads(sm_file.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return dict(DEFAULT_SPEAKER_MAP)
-

@@ -58,18 +58,6 @@ def get_settings() -> Dict[str, Any]:
     return {"telegram_enabled": False, "chat_id": ""}
 
 
-def save_settings(telegram_enabled: bool, chat_id: str = "") -> Dict[str, Any]:
-    data = {"telegram_enabled": bool(telegram_enabled), "chat_id": str(chat_id or "").strip()}
-    try:
-        CONTROL_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = SETTINGS_FILE.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(SETTINGS_FILE)
-    except Exception as exc:
-        logger.error("Không thể ghi notification_settings.json: %s", exc)
-    return data
-
-
 def _send_telegram(level: str, title: str, body: str) -> None:
     """Đẩy thông báo qua Telegram Bot API (fire-and-forget, cần bật trong settings)."""
     cfg = get_settings()

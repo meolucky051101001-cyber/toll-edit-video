@@ -14,6 +14,9 @@ TELEGRAM BOT TẢI VIDEO DOUYIN & XIAOHONGSHU (HỖ TRỢ TẢI HÀNG LOẠT)
 
 import os
 import sys
+
+# Cách ly bot tải video hoàn toàn khỏi các cờ dừng (/stop) của Tool V1
+os.environ['AUTODUB_DISABLE_STOP_CHECK'] = '1'
 import re
 import uuid
 import time

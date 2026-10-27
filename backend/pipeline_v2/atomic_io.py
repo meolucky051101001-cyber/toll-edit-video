@@ -15,18 +15,6 @@ from typing import Any, Union
 PathLike = Union[str, os.PathLike]
 
 
-def _replace_with_retry(staged: Path, destination: Path) -> None:
-    """Tolerate brief Windows reader/AV locks without removing the old file."""
-    for attempt in range(8):
-        try:
-            os.replace(str(staged), str(destination))
-            return
-        except OSError as exc:
-            if getattr(exc, 'winerror', None) not in {5, 32, 33} or attempt == 7:
-                raise
-            time.sleep(min(0.05 * (2 ** attempt), 0.5))
-
-
 def _sync_parent_directory(path: Path) -> None:
     """Best-effort directory sync on platforms that expose O_DIRECTORY."""
 

@@ -1,6 +1,5 @@
 import os
 import sys
-import io
 from pathlib import Path
 
 # Fix Windows console UTF-8 encoding
@@ -12,7 +11,7 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception: pass
 
 import json
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional
 import requests
 import base64
 import re
@@ -521,7 +520,7 @@ def translate_with_gemini(
             pass
         return translated
     except Exception as e:
-        from .v1_gemini_dispatcher import GeminiCancelledError, GeminiAuthError, GeminiConfigError, GeminiRequestError, mask_secret
+        from .v1_gemini_dispatcher import GeminiCancelledError, mask_secret
         if isinstance(e, GeminiCancelledError):
             raise
         # Preserve the cause if every enabled provider fails; do not lose retry

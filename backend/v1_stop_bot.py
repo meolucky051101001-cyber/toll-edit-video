@@ -1,8 +1,6 @@
 """Safely stop Tool V1 Telegram bot without touching Tool V2 or other python processes."""
 import json
 import os
-import sys
-import time
 from pathlib import Path
 
 try:

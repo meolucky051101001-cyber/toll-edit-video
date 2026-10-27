@@ -10,7 +10,7 @@ from pydub import AudioSegment
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ai.voice_cloning import generate_dubbing_audio, calculate_reading_windows, MAX_NATURAL_SPEED
+from ai.voice_cloning import generate_dubbing_audio
 from ass_utils import sync_and_clamp_subtitles, generate_ass_file
 from v1_audio_mixer import mix_adaptive_audio
 from video_utils import process_video

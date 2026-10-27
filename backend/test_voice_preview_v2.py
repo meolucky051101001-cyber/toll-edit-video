@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """Unit & Integration tests for Phase B on Tool V2."""
 
-import asyncio
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -13,10 +11,7 @@ if str(backend_dir) not in sys.path:
 
 from voice_preview_service import (
     SAMPLE_TEXTS,
-    clean_cache,
-    get_preview_audio_path,
     get_voice_catalog,
-    synthesize_voice_preview,
 )
 from fastapi.testclient import TestClient
 from dashboard_monitor import app

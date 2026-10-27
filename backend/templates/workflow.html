@@ -5463,6 +5463,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
               stem: currentVideo.stem,
               voice_id: voiceId,
               subtitles: subs,
+              video_version: currentVideoVersion,
               duration: (mainPlayer && mainPlayer.duration > 0) ? mainPlayer.duration : 0
             })
           });
@@ -5571,7 +5572,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           'X-Local-Control-Token': (typeof CONTROL_PLANE_TOKEN !== 'undefined' ? CONTROL_PLANE_TOKEN : ''),
           'X-Dashboard-Input': '1'
         },
-        body: JSON.stringify({ stem: currentVideoData ? currentVideoData.stem : '', subtitles: currentSubtitles })
+        body: JSON.stringify({ stem: currentVideoData ? currentVideoData.stem : '', subtitles: currentSubtitles, video_version: currentVideoVersion })
       }).catch(() => {});
       showToast(`🗑️ Đã xóa câu phụ đề — còn ${currentSubtitles.length} câu`);
     }
@@ -6823,13 +6824,6 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       updateBatchSummaryBox();
     }
 
-    function updateImage(path) {
-      canvasSettings.bg_image = path;
-      canvasSettings.bg_image_file = path;
-      applyCanvasVisuals();
-      updateBatchSummaryBox();
-    }
-
     function resolveImageBgStreamUrl(filenameOrPath) {
       const fn = filenameOrPath || 'tia_sang_vang_ngoi_sao.jpg';
       const found = availableImageBgs.find(b => b.filename === fn || b.id === fn || b.path.endsWith(fn));
@@ -7764,6 +7758,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       fps: '30',
       format: 'mp4'
     };
+    let _activeExportJobId = null;
 
     function openExportModal() {
       if (!currentVideo) {
@@ -7777,8 +7772,14 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       }
       document.getElementById('exportProgressBox').style.display = 'none';
       document.getElementById('exportSuccessResult').style.display = 'none';
-      document.getElementById('btnStartExport').disabled = false;
-      document.getElementById('btnStartExport').innerText = '🚀 Bắt Đầu Xuất Video';
+      const startBtn = document.getElementById('btnStartExport');
+      startBtn.disabled = false;
+      if (_activeExportJobId) {
+        document.getElementById('exportProgressBox').style.display = 'flex';
+        startBtn.innerText = '⏹️ Huỷ xuất video';
+      } else {
+        startBtn.innerText = '🚀 Bắt Đầu Xuất Video';
+      }
       document.getElementById('exportModal').style.display = 'flex';
     }
 
@@ -7827,18 +7828,64 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
       showToast(`📥 Đang tải tệp phụ đề .SRT (${type})`);
     }
 
+    function handleExportSuccess(data) {
+      const btn = document.getElementById('btnStartExport');
+      const progressText = document.getElementById('exportProgressStatusText');
+      const progressFill = document.getElementById('exportProgressFill');
+      const successBox = document.getElementById('exportSuccessResult');
+      btn.disabled = false;
+      btn.innerText = '✅ Đã Xuất Thành Công';
+      progressText.innerText = '🎉 Hoàn tất xuất bản video!';
+      if (progressFill) {
+        progressFill.style.width = '100%';
+        progressFill.style.animation = 'none';
+      }
+      successBox.style.display = 'block';
+      document.getElementById('exportSuccessMsg').innerText = `🎉 Đã xuất thành công: ${data.filename} (${data.size_mb} MB)${data.exported_srt ? ' kèm tệp .SRT' : ''}`;
+
+      const btnPreview = document.getElementById('btnExportPreviewResult');
+      btnPreview.onclick = () => {
+        previewRenderedVideo(data.stream_url, data.filename);
+        closeExportModal();
+      };
+      showToast(`🎉 Xuất video thành công: ${data.filename}`);
+    }
+
     async function executeCustomExport() {
       if (!currentVideo) return;
       const btn = document.getElementById('btnStartExport');
       const progressBox = document.getElementById('exportProgressBox');
       const progressText = document.getElementById('exportProgressStatusText');
+      const progressFill = document.getElementById('exportProgressFill');
       const successBox = document.getElementById('exportSuccessResult');
 
-      btn.disabled = true;
-      btn.innerText = '⏳ Đang xuất video...';
+      // Đang có job xuất → bấm lần nữa = HUỶ
+      if (_activeExportJobId) {
+        try {
+          await fetch('/api/workflow/export-cancel', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Local-Control-Token': (typeof CONTROL_PLANE_TOKEN !== 'undefined' ? CONTROL_PLANE_TOKEN : '__REPLACE_TOKEN__')
+            },
+            body: JSON.stringify({ job_id: _activeExportJobId })
+          });
+          showToast('⏹️ Đã gửi yêu cầu huỷ xuất video...');
+          btn.disabled = true;
+          btn.innerText = '⏳ Đang huỷ...';
+        } catch (err) { /* bỏ qua lỗi mạng */ }
+        return;
+      }
+
+      btn.disabled = false;
+      btn.innerText = '⏳ Đang xuất... (bấm để huỷ)';
       progressBox.style.display = 'flex';
       successBox.style.display = 'none';
-      progressText.innerText = '⏳ Đang mã hóa video GPU NVENC... Vui lòng đợi trong giây lát!';
+      progressText.innerText = '⏳ Đang chuẩn bị xuất video...';
+      if (progressFill) {
+        progressFill.style.width = '0%';
+        progressFill.style.animation = 'pulse 1.5s infinite';
+      }
 
       const selectedSrtRadio = document.querySelector('input[name="exportSrtType"]:checked');
       const srtType = selectedSrtRadio ? selectedSrtRadio.value : 'translated';
@@ -7875,29 +7922,57 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           body: JSON.stringify(payload)
         });
         const data = await res.json();
-        if (data.status === 'ok') {
-          btn.innerText = '✅ Đã Xuất Thành Công';
-          progressText.innerText = '🎉 Hoàn tất xuất bản video!';
-          successBox.style.display = 'block';
-          document.getElementById('exportSuccessMsg').innerText = `🎉 Đã xuất thành công: ${data.filename} (${data.size_mb} MB)${data.exported_srt ? ' kèm tệp .SRT' : ''}`;
-          
-          const btnPreview = document.getElementById('btnExportPreviewResult');
-          btnPreview.onclick = () => {
-            previewRenderedVideo(data.stream_url, data.filename);
-            closeExportModal();
-          };
-          showToast(`🎉 Xuất video thành công: ${data.filename}`);
-        } else {
-          btn.disabled = false;
-          btn.innerText = '🚀 Bắt Đầu Xuất Video';
-          progressText.innerText = `❌ Lỗi: ${data.detail || data.message || 'Không thể xuất video'}`;
-          showToast(`❌ Lỗi xuất video: ${data.detail || 'Thất bại'}`);
+        if (!res.ok) throw new Error(data.detail || data.message || 'Không thể bắt đầu xuất video');
+
+        // Backend cũ trả kết quả đồng bộ ngay (không có job_id)
+        if (!data.job_id) {
+          if (data.status === 'ok') {
+            handleExportSuccess(data);
+            return;
+          }
+          throw new Error(data.detail || 'Không thể xuất video');
+        }
+
+        _activeExportJobId = data.job_id;
+        btn.disabled = false;
+        btn.innerText = '⏹️ Huỷ xuất video';
+
+        while (_activeExportJobId) {
+          await new Promise(r => setTimeout(r, 800));
+          const sres = await fetch(`/api/workflow/export-status?job_id=${encodeURIComponent(_activeExportJobId)}`);
+          if (!sres.ok) throw new Error('Mất kết nối tới job xuất video');
+          const st = await sres.json();
+          const pct = st.progress || 0;
+          progressText.innerText = `⏳ ${pct}% — ${st.stage || 'Đang xuất video...'}`;
+          if (progressFill) progressFill.style.width = `${pct}%`;
+          if (st.status === 'done') {
+            _activeExportJobId = null;
+            handleExportSuccess(st.result || {});
+            break;
+          }
+          if (st.status === 'error') {
+            _activeExportJobId = null;
+            throw new Error(st.error || st.stage || 'Thất bại');
+          }
+          if (st.status === 'cancelled') {
+            _activeExportJobId = null;
+            progressText.innerText = '⏹️ Đã huỷ xuất video';
+            showToast('⏹️ Đã huỷ xuất video');
+            break;
+          }
         }
       } catch (err) {
-        btn.disabled = false;
-        btn.innerText = '🚀 Bắt Đầu Xuất Video';
-        progressText.innerText = '❌ Lỗi kết nối tới máy chủ render';
-        showToast('❌ Lỗi kết nối máy chủ khi xuất video');
+        _activeExportJobId = null;
+        progressText.innerText = `❌ Lỗi: ${err.message || 'Không thể xuất video'}`;
+        showToast(`❌ Lỗi xuất video: ${err.message || 'Thất bại'}`);
+      } finally {
+        if (_activeExportJobId === null) {
+          btn.disabled = false;
+          if (btn.innerText.includes('Đang xuất') || btn.innerText.includes('Đang huỷ') || btn.innerText.includes('Huỷ xuất')) {
+            btn.innerText = '🚀 Bắt Đầu Xuất Video';
+          }
+          if (progressFill) progressFill.style.animation = 'none';
+        }
       }
     }
 
@@ -8744,7 +8819,8 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           },
           body: JSON.stringify({
             stem: currentVideoData.stem,
-            subtitles: currentSubtitles
+            subtitles: currentSubtitles,
+            video_version: currentVideoVersion
           })
         });
       } catch (err) {

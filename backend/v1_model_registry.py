@@ -17,8 +17,6 @@ Quản lý tập trung 5 công đoạn AI + 2 cấu hình phụ trợ:
 from __future__ import annotations
 
 import os
-import sys
-import json
 import logging
 import time
 from dataclasses import dataclass, asdict

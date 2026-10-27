@@ -11,10 +11,8 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import socket
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Optional, Union
 
@@ -25,7 +23,6 @@ PathLike = Union[str, os.PathLike]
 
 class PipelineLockTimeout(TimeoutError):
     """Raised when a process fails to acquire the global pipeline or job lock."""
-    pass
 
 
 class CrossProcessLock:
@@ -162,53 +159,3 @@ def get_job_lock(job_directory: PathLike, job_id: str = "") -> CrossProcessLock:
     """Get the job-specific cross-process lock."""
     lock_file = Path(job_directory) / ".job_execution.lock"
     return CrossProcessLock(lock_file, name=f"JobLock[{job_id}]", timeout_seconds=3600.0)
-
-
-def safe_windows_copy(
-    src: PathLike,
-    dst: PathLike,
-    max_retries: int = 5,
-    delay: float = 0.3,
-) -> Path:
-    """Safely copy a file on Windows with retries for WinError 32/5 sharing violations."""
-    src_p, dst_p = Path(src), Path(dst)
-    dst_p.parent.mkdir(parents=True, exist_ok=True)
-    temp_dst = dst_p.parent / f"{dst_p.name}.{os.getpid()}_{int(time.time() * 1000)}.tmp"
-
-    last_error: Optional[Exception] = None
-    for attempt in range(max_retries):
-        try:
-            shutil.copy2(src_p, temp_dst)
-            safe_windows_replace(temp_dst, dst_p, max_retries=max_retries, delay=delay)
-            return dst_p
-        except (OSError, PermissionError) as exc:
-            last_error = exc
-            if temp_dst.exists():
-                try:
-                    temp_dst.unlink()
-                except Exception:
-                    pass
-            time.sleep(delay * (attempt + 1))
-
-    raise OSError(f"Failed to copy {src_p} to {dst_p} after {max_retries} attempts: {last_error}")
-
-
-def safe_windows_replace(
-    src: PathLike,
-    dst: PathLike,
-    max_retries: int = 5,
-    delay: float = 0.3,
-) -> Path:
-    """Safely replace dst with src on Windows handling locks with retries."""
-    src_p, dst_p = Path(src), Path(dst)
-    last_error: Optional[Exception] = None
-
-    for attempt in range(max_retries):
-        try:
-            os.replace(src_p, dst_p)
-            return dst_p
-        except (OSError, PermissionError) as exc:
-            last_error = exc
-            time.sleep(delay * (attempt + 1))
-
-    raise OSError(f"Failed to atomically replace {dst_p} with {src_p} after {max_retries} attempts: {last_error}")

@@ -3,7 +3,6 @@ A2UI Agent Generator.
 Tao ra luong thong diep A2UI JSON dua tren video phoi hoac yeu cau nguoi dung.
 """
 
-from pathlib import Path
 from typing import List, Dict, Any, Optional
 import os
 from .protocol import A2UIMessage, CreateSurface, UpdateComponents, UpdateDataModel

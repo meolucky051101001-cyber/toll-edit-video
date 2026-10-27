@@ -54,14 +54,25 @@ class TestConcatIntegration(unittest.TestCase):
 
         with patch.object(workflow_api, "CONCAT_EXE_CANDIDATES", [fake_exe]), \
              patch.object(workflow_api.subprocess, "Popen", side_effect=fake_popen):
-            res = self.client.post("/api/workflow/concat/open", json={"stem": "vid 123/x"})
+            res = self.client.post("/api/workflow/concat/open", json={"stem": "vid 123"})
             self.assertEqual(res.status_code, 200)
             body = res.json()
             self.assertEqual(body["pid"], 4321)
             # stem được chuẩn hóa + project dir nằm trong workspace
-            self.assertIn("vid_123_x", body["project_dir"])
+            self.assertIn("vid_123", body["project_dir"])
             self.assertEqual(launched[0][0], str(fake_exe))
             self.assertEqual(launched[0][1], "--project")
+
+    def test_open_and_import_reject_path_separator_in_stem(self):
+        res = self.client.post("/api/workflow/concat/open", json={"stem": "vid/x"})
+        self.assertEqual(res.status_code, 400)
+        payload = b"\x00\x00\x00\x18ftypmp42" + b"x" * 200_000
+        res = self.client.post(
+            "/api/workflow/concat/import",
+            data={"stem": "vid/x"},
+            files={"file": ("export.mp4", payload, "video/mp4")},
+        )
+        self.assertEqual(res.status_code, 400)
 
     def test_open_requires_stem(self):
         res = self.client.post("/api/workflow/concat/open", json={"stem": ""})
@@ -79,12 +90,12 @@ class TestConcatIntegration(unittest.TestCase):
         payload = b"\x00\x00\x00\x18ftypmp42" + b"x" * 200_000
         res = self.client.post(
             "/api/workflow/concat/import",
-            data={"stem": "vid 9/x"},
+            data={"stem": "vid 9"},
             files={"file": ("export.mp4", payload, "video/mp4")},
         )
         self.assertEqual(res.status_code, 200)
         body = res.json()
-        self.assertTrue(body["filename"].startswith("concat_vid_9_x_"))
+        self.assertTrue(body["filename"].startswith("concat_vid_9_"))
         saved = self.workspace / "input" / body["filename"]
         self.assertTrue(saved.is_file())
         self.assertEqual(saved.stat().st_size, len(payload))

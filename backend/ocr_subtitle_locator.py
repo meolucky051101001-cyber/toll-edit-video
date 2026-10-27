@@ -385,23 +385,6 @@ def _choose_visual_band(
     return ranked[0][1], True
 
 
-def _fallback_cluster_rank(cluster: Sequence[_Candidate]) -> Tuple[float, ...]:
-    chosen = _best_per_sample(cluster)
-    texts = Counter(item.normalized_text for item in chosen if item.normalized_text)
-    unique_texts = len(texts)
-    repetitions = max(0, len(chosen) - unique_texts)
-    center = median(item.center_y for item in chosen)
-    score = (
-        len(chosen) * 1.5
-        + unique_texts * 1.8
-        + sum(item.text_score for item in chosen) * 1.5
-        + sum(item.geometry_score for item in chosen) / max(len(chosen), 1)
-        + _subtitle_zone_score(center) * 0.45
-        - repetitions * 2.5
-    )
-    return (score, float(unique_texts), float(len(chosen)))
-
-
 def select_chinese_subtitle_band(
     blocks: Iterable[Any],
     segment_texts: Mapping[int, str],

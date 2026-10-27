@@ -13,15 +13,13 @@ Tích hợp:
 from __future__ import annotations
 
 import os
-import sys
 import time
 import math
-import shutil
 import logging
 import asyncio
 from v1_stage_runtime import save_payload, load_payload, await_stage
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +27,11 @@ logger = logging.getLogger(__name__)
 
 try:
     from v1_checkpoint import ManifestManager, JobManifest, STAGES_ORDER, fingerprint
-    from v1_video_router import route_video, create_router_snapshot, VideoMode
+    from v1_video_router import create_router_snapshot
     from v1_model_registry import (
-        ModelStage, ModelSpec, resolve_effective_model, log_stage_telemetry
+        ModelStage, resolve_effective_model
     )
-    from v1_quality_gate import run_quality_gate, QCPolicy
-    from v1_feature_flags import get_feature_flags, sync_env_from_flags
+    from v1_feature_flags import get_feature_flags
     from v1_job_policy import (
         looks_like_bgm_hallucination as _looks_like_bgm_hallucination,
         merged_speech_coverage as _merged_speech_coverage,
@@ -42,12 +39,11 @@ try:
     )
 except ImportError:
     from .v1_checkpoint import ManifestManager, JobManifest, STAGES_ORDER, fingerprint
-    from .v1_video_router import route_video, create_router_snapshot, VideoMode
+    from .v1_video_router import create_router_snapshot
     from .v1_model_registry import (
-        ModelStage, ModelSpec, resolve_effective_model, log_stage_telemetry
+        ModelStage, resolve_effective_model
     )
-    from .v1_quality_gate import run_quality_gate, QCPolicy
-    from .v1_feature_flags import get_feature_flags, sync_env_from_flags
+    from .v1_feature_flags import get_feature_flags
     from .v1_job_policy import (
         looks_like_bgm_hallucination as _looks_like_bgm_hallucination,
         merged_speech_coverage as _merged_speech_coverage,

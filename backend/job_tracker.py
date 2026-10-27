@@ -948,6 +948,17 @@ def clear_stop_request():
         _save_state_to_disk()
 
 
+def clear_stale_stop_request() -> bool:
+    """Xóa cờ dừng còn sót lại từ job đã kết thúc, không đụng job đang chạy."""
+    try:
+        if get_status().get("active"):
+            return False
+    except Exception:
+        return False
+    clear_stop_request()
+    return True
+
+
 def is_stop_requested() -> bool:
     """Kiểm tra cờ dừng xuyên tiến trình."""
     control_stop = WORKSPACE / "control" / "video.stop"

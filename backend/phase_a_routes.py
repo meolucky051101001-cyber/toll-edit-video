@@ -3,13 +3,10 @@ Phase A API Routes - Presets, Per-Video Config, and Bulk Enqueue.
 Hỗ trợ cả Tool V1 và Tool V2 thông qua FastAPI APIRouter.
 """
 
-import os
-import sys
 import uuid
-import time
 import logging
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Request, Body, Query
 from fastapi.responses import JSONResponse
 
@@ -256,7 +253,7 @@ def _enqueue_jobs_batch(request: Request, payload: Dict[str, Any]):
         else:
             # Trigger V1 batch
             try:
-                from main import UNIFIED_PIPELINE_LOCK, BATCH_TASK, api_run_batch
+                from main import api_run_batch
                 import asyncio
                 asyncio.create_task(api_run_batch(None, video_mode=batch_video_mode))
                 execution_triggered = True

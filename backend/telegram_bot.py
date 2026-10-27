@@ -2,7 +2,6 @@
 Telegram Bot - Auto Video Dubbing
 Gửi link video → Bot tự động tải, tạo phụ đề, lồng tiếng, gửi lại video.
 """
-import torch
 import os
 import sys
 import asyncio
@@ -160,23 +159,6 @@ async def run_pipeline_v2_for_telegram(
         progress=progress,
     )
     return await VideoPipelineRunner(request).run()
-
-
-def snapshot_legacy_telegram_run(
-    video_path, out_dir, artifacts, run_started_at_epoch=None
-):
-    from pipeline_v2.config import PipelineMode, PipelineSettings
-
-    if PipelineSettings.from_env().mode is not PipelineMode.SHADOW:
-        return
-    from pipeline_v2.shadow import snapshot_completed_legacy_run
-
-    snapshot_completed_legacy_run(
-        Path(video_path),
-        Path(out_dir) / "pipeline_v2_shadow",
-        artifacts,
-        run_started_at_epoch=run_started_at_epoch,
-    )
 
 
 try:
@@ -1436,7 +1418,6 @@ def main():
         print("=" * 60)
         return
     import socket
-    import urllib.request
 
     print("Dang khoi dong Telegram Bot...")
     print(f"Workspace: {WORKSPACE}")

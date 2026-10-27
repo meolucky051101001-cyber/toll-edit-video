@@ -2,7 +2,6 @@ import os
 import asyncio
 import re
 import random
-import shutil
 import threading
 import logging
 import edge_tts
@@ -281,7 +280,6 @@ async def apply_rvc_clone(
 ):
     async with rvc_semaphore:
         print(f"Applying RVC model from {model_path} to {input_audio}...")
-        import traceback
 
         if not rvc_runtime_available():
             if strict:

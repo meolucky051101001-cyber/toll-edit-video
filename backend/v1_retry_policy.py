@@ -1,6 +1,5 @@
 """Bounded job retries only for recognizably transient failures (no AI imports)."""
 import asyncio
-import subprocess
 
 
 PERMANENT_ERROR_NAMES = {
@@ -34,6 +33,14 @@ def should_retry_job(error, attempt=0, stopped=False, max_retries=2):
         if "stop requested" in message or "operation cancelled" in message or "bị hủy" in message or "batchstoprequested" in message:
             return False
         if "unsupported filter" in message or "unsupported resolution" in message or "không được hỗ trợ" in message or "vượt quá giới hạn phần cứng" in message:
+            return False
+        if (
+            "unsupported url" in message
+            or "bài viết trên tiểu hồng thư" in message
+            or "album ảnh" in message
+            or "dính logo watermark" in message
+            or "không tìm thấy luồng video sạch" in message
+        ):
             return False
         if type(exc).__name__ in PERMANENT_ERROR_NAMES:
             return False

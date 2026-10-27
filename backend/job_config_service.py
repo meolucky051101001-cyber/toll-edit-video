@@ -6,7 +6,6 @@ Lưu trữ:
 """
 
 import os
-import sys
 import json
 import time
 import uuid
@@ -59,9 +58,9 @@ def idempotency_lock(key: str):
 
 
 try:
-    from preset_service import resolve_effective_config, get_preset
+    from preset_service import resolve_effective_config, get_preset  # noqa: F401 (patched by tests)
 except ImportError:
-    from .preset_service import resolve_effective_config, get_preset
+    from .preset_service import resolve_effective_config, get_preset  # noqa: F401 (patched by tests)
 
 
 def _atomic_write_json(file_path: Path, data: Any):

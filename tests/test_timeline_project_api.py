@@ -31,7 +31,7 @@ class TestTimelineProjectApi(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["exists"], False)
 
-    def test_save_and_roundtrip_with_stem_sanitized(self):
+    def test_save_and_roundtrip_with_stem_containing_space(self):
         project = {
             "version": 1,
             "fps": 30,
@@ -43,7 +43,7 @@ class TestTimelineProjectApi(unittest.TestCase):
         }
         res = self.client.post(
             "/api/workflow/timeline/project",
-            json={"stem": "vid one/x", "project": project},
+            json={"stem": "vid one", "project": project},
         )
         self.assertEqual(res.status_code, 200)
         body = res.json()
@@ -51,15 +51,26 @@ class TestTimelineProjectApi(unittest.TestCase):
         self.assertTrue(body["saved_at"])
         self.assertNotIn(" ", body["path"])
 
-        saved = json.loads((self.workspace / "vid_one_x" / "project.json").read_text(encoding="utf-8"))
+        saved = json.loads((self.workspace / "vid_one" / "project.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["tracks"][0]["clips"][0]["speed"], 2)
-        self.assertEqual(saved["stem"], "vid_one_x")
+        self.assertEqual(saved["stem"], "vid_one")
 
-        res2 = self.client.get("/api/workflow/timeline/project", params={"stem": "vid one/x"})
+        res2 = self.client.get("/api/workflow/timeline/project", params={"stem": "vid one"})
         self.assertEqual(res2.status_code, 200)
         data = res2.json()
         self.assertEqual(data["exists"], True)
         self.assertEqual(data["project"]["tracks"][0]["clips"][0]["id"], "c1")
+
+    def test_save_and_get_reject_traversal_stem(self):
+        project = {"version": 1, "tracks": [{"id": "v1", "clips": [{"id": "c1", "start": 0, "end": 1}]}]}
+        res = self.client.post(
+            "/api/workflow/timeline/project",
+            json={"stem": "../evil", "project": project},
+        )
+        self.assertEqual(res.status_code, 400)
+        res2 = self.client.get("/api/workflow/timeline/project", params={"stem": "../evil"})
+        self.assertEqual(res2.status_code, 400)
+        self.assertFalse((self.workspace.parent / "evil" / "project.json").exists())
 
     def test_save_is_atomic_no_tmp_file_left(self):
         project = {"version": 1, "tracks": [{"id": "v1", "clips": [{"id": "c1", "start": 0, "end": 1}]}]}

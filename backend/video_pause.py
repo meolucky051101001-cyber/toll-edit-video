@@ -1,6 +1,5 @@
 """Cooperative pause between video processing stages, shared across V1 processes."""
 import asyncio
-import os
 from pathlib import Path
 BASE = Path(__file__).resolve().parent.parent / "workspace" / "control"
 FLAG = BASE / "video.pause"

@@ -48,10 +48,9 @@ from config.paths import AppPaths
 
 PATHS = AppPaths.from_environment(BASE_DIR.parent)
 
-from ai.transcription import extract_subtitles_whisper, save_srt
+from ai.transcription import save_srt
 from ai.v1_asr_isolated import extract_subtitles_isolated
 from ai.translation import translate_subtitles
-from ai.voice_cloning import generate_dubbing_audio
 from ai.v1_voice_isolated import generate_dubbing_audio_isolated
 from video_utils import extract_audio_from_video, mix_audio_pydub, process_video, separate_vocals_demucs
 from pipeline_v2.config import PipelineMode, PipelineSettings
@@ -243,6 +242,11 @@ async def on_startup():
     _install_asyncio_quiet_disconnect_handler()
     ensure_tool_control()
     try:
+        if job_tracker.clear_stale_stop_request():
+            logger.info("Đã dọn cờ dừng còn sót từ job trước đó.")
+    except Exception as e:
+        logger.warning("Không thể dọn cờ dừng cũ: %s", e)
+    try:
         asyncio.create_task(_night_batch_watcher())
     except Exception as e:
         logger.warning("Không thể khởi động bộ theo dõi lịch chạy đêm: %s", e)
@@ -305,7 +309,6 @@ BATCH_TASK: Optional[asyncio.Task] = None
 
 def _validate_input_path(video_path: str) -> Path:
     from fastapi import HTTPException
-    import os
     from pathlib import Path
     
     clean_path = video_path.strip()
@@ -2479,9 +2482,6 @@ async def api_import_dashboard_config(payload: dict = Body(...)):
 from ai.v1_auto_voice import (
     get_auto_voice_config,
     set_auto_voice_config,
-    get_auto_voice_enabled,
-    set_auto_voice_enabled,
-    get_auto_voice_mode,
     get_manual_voice_info,
     VOICE_FEMALE_ID,
     VOICE_MALE_ID,

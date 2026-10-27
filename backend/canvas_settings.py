@@ -3,10 +3,10 @@ Quản lý cấu hình tỷ lệ khung hình và background chống re-up cho vi
 Được áp dụng khi render hàng loạt để né các thuật toán phát hiện bản quyền trên TikTok, Facebook, YouTube.
 """
 import json
-import os
 import logging
 from pathlib import Path
 from typing import Dict, Any, List
+from urllib.parse import urlencode
 
 try:
     from backend.config.paths import AppPaths
@@ -28,6 +28,10 @@ def _resolve_settings_file() -> Path:
 SETTINGS_FILE = _resolve_settings_file()
 MOTION_BG_DIR = WORKSPACE / "motion_backgrounds"
 IMAGE_BG_DIR = WORKSPACE / "background_images"
+
+
+def _stream_url(path: str) -> str:
+    return "/api/workflow/stream-file?" + urlencode({"path": path})
 
 DEFAULT_CANVAS_SETTINGS: Dict[str, Any] = {
     "anti_reup_enabled": True,   # Bật chế độ chống re-up an toàn theo yêu cầu
@@ -135,7 +139,7 @@ def get_available_motion_backgrounds() -> List[Dict[str, Any]]:
                 "icon": meta["icon"],
                 "category": meta["category"],
                 "path": clean_path,
-                "url": f"/api/workflow/stream-file?path={clean_path}"
+                "url": _stream_url(clean_path)
             })
 
     # Thêm các video mp4 khác do người dùng thêm vào thư mục motion_backgrounds
@@ -151,7 +155,7 @@ def get_available_motion_backgrounds() -> List[Dict[str, Any]]:
                 "icon": "🎬",
                 "category": "custom",
                 "path": clean_path,
-                "url": f"/api/workflow/stream-file?path={clean_path}"
+                "url": _stream_url(clean_path)
             })
 
     return results
@@ -299,7 +303,7 @@ def get_available_image_backgrounds() -> List[Dict[str, Any]]:
                 "icon": meta["icon"],
                 "category": meta["category"],
                 "path": clean_path,
-                "url": f"/api/workflow/stream-file?path={clean_path}"
+                "url": _stream_url(clean_path)
             })
 
     # Thêm các ảnh khác do người dùng tải vào thư mục background_images
@@ -315,7 +319,7 @@ def get_available_image_backgrounds() -> List[Dict[str, Any]]:
                 "icon": "🖼️",
                 "category": "custom",
                 "path": clean_path,
-                "url": f"/api/workflow/stream-file?path={clean_path}"
+                "url": _stream_url(clean_path)
             })
 
     return results

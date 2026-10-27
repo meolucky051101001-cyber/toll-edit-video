@@ -598,7 +598,6 @@ def resolve_locked_voice(
       + Câu thoại đầu là NAM -> Dùng giọng nam đã cấu hình.
       + Câu đầu không chắc (conf < 0.70) -> Fallback về giọng thủ công đang chọn, ghi log rõ lý do.
     """
-    from ai.voice_cloning import rvc_runtime_available
 
     # 1. CHẾ ĐỘ THỦ CÔNG (MANUAL MODE)
     if voice_mode == "manual":

@@ -17,7 +17,7 @@ import math
 import logging
 import argparse
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple
 
 if sys.platform == "win32":
     try:

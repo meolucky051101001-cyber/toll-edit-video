@@ -11,8 +11,7 @@ import sys
 import logging
 import math
 import tempfile
-from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 try:
     from .pipeline_v2.atomic_io import atomic_replace_file
@@ -47,6 +46,8 @@ CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 
 
 def _download_stopped():
+    if os.getenv('AUTODUB_DISABLE_STOP_CHECK', '0').lower() in ('1', 'true', 'yes'):
+        return False
     try:
         from batch_control import stop_check
         predicate = stop_check.get()
@@ -720,6 +721,50 @@ def download_parallel_range(
 # =========================================================================
 # 2. BÓC TÁCH XIAOHONGSHU (REDNOTE)
 # =========================================================================
+XHS_HOST_SUFFIXES = ("xiaohongshu.com", "rednote.com")
+XHS_BLOCKED_PATHS = {"", "/explore", "/discovery", "/login", "/404"}
+
+
+def _is_xhs_host(host: str) -> bool:
+    host = (host or "").lower().split(":")[0]
+    return any(host == suffix or host.endswith("." + suffix) for suffix in XHS_HOST_SUFFIXES)
+
+
+def _is_xhs_blocked_url(url: str) -> bool:
+    """True for home/login/404 redirects that mean the note is gone or gated."""
+    parsed = urlsplit(url)
+    path = parsed.path.rstrip("/").lower()
+    is_404 = path == "/404" or path.startswith("/404/")
+    if _is_xhs_host(parsed.netloc):
+        return path in XHS_BLOCKED_PATHS or is_404 or "undertake_note_error" in url.lower()
+    return path.endswith("/login") or is_404
+
+
+def _parse_xhs_initial_state(html: str) -> tuple:
+    """Parse window.__INITIAL_STATE__; rednote embeds JS Set() literals inside it."""
+    state_match = re.search(r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\})</script>', html, re.DOTALL)
+    if not state_match:
+        return None, ""
+    raw_state = state_match.group(1)
+    raw_json = re.sub(r"new Set\(\[[^\]]*\]\)", "[]", raw_state)
+    raw_json = re.sub(r"new Set\(\)", "[]", raw_json)
+    raw_json = raw_json.replace("undefined", "null")
+    try:
+        return json.loads(raw_json), raw_state
+    except json.JSONDecodeError:
+        return None, raw_state
+
+
+def _extract_xhs_note_data(state: dict) -> dict:
+    note_data = state.get("noteData", {}).get("data", {}).get("noteData", {})
+    if not note_data:
+        note_dict = state.get("note", {}).get("noteDetailMap", {})
+        for value in note_dict.values():
+            if isinstance(value, dict) and "note" in value:
+                return value.get("note", {})
+    return note_data
+
+
 def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
     """
     Tải video Xiaohongshu (Tiểu Hồng Thư) không logo chất lượng cao.
@@ -731,14 +776,12 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
     logger.info(f"Đang bóc tách Xiaohongshu không watermark: {sanitize_url(url)}")
     os.makedirs(output_dir, exist_ok=True)
     try:
-        import json
-        
         # Chuẩn hóa link rút gọn sang HTTPS để tránh bị timeout trên một số mạng
         target_fetch_url = url.strip()
         if target_fetch_url.startswith("http://xhslink.com"):
             target_fetch_url = target_fetch_url.replace("http://xhslink.com", "https://xhslink.com")
 
-        # Thử lấy HTML bằng Desktop UA trước (nhận stream 258 sạch trực tiếp), nếu bị login/chặn chuyển sang Mobile UA
+        # Thử Desktop UA trước (nhận stream 258 sạch trực tiếp); rednote đôi khi chỉ trả dữ liệu note cho Mobile UA
         uas_to_try = [
             ("Desktop", USER_AGENTS["desktop"]),
             ("Mobile", USER_AGENTS["mobile"]),
@@ -746,6 +789,8 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
         res = None
         last_res = None
         headers_used = None
+        parsed_state = None
+        raw_state = ""
         for attempt, (ua_name, current_ua) in enumerate(uas_to_try):
             headers = {
                 'User-Agent': current_ua,
@@ -755,28 +800,21 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
             try:
                 temp_res = requests.get(target_fetch_url, headers=headers, allow_redirects=True, timeout=(15, 25))
                 last_res = temp_res
-                if temp_res.status_code == 200:
-                    real_chk = temp_res.url.lower()
-                    parsed_chk = urlsplit(temp_res.url)
-                    clean_chk = urlunsplit(
-                        (parsed_chk.scheme, parsed_chk.netloc, parsed_chk.path, "", "")
-                    ).rstrip('/').lower()
-                    is_blocked = (
-                        clean_chk in [
-                            "https://www.xiaohongshu.com", "http://www.xiaohongshu.com", "https://xiaohongshu.com", "http://xiaohongshu.com",
-                            "https://www.xiaohongshu.com/explore", "http://www.xiaohongshu.com/explore",
-                            "https://www.xiaohongshu.com/discovery", "http://www.xiaohongshu.com/discovery",
-                            "https://www.xiaohongshu.com/login", "http://www.xiaohongshu.com/login"
-                        ]
-                        or "/login" in real_chk
-                        or "undertake_note_error" in real_chk
-                    )
-                    if not is_blocked:
-                        res = temp_res
-                        headers_used = headers
-                        break
-                    else:
-                        logger.info(f"{ua_name} UA bị chuyển hướng đến {clean_chk} (explore/login/error), thử UA tiếp theo...")
+                if temp_res.status_code != 200:
+                    continue
+                if _is_xhs_blocked_url(temp_res.url):
+                    blocked_path = urlsplit(temp_res.url).path or "/"
+                    logger.info(f"{ua_name} UA bị chuyển hướng đến {blocked_path} (explore/login/404), thử UA tiếp theo...")
+                    continue
+                current_state, current_raw = _parse_xhs_initial_state(temp_res.text)
+                note_data = _extract_xhs_note_data(current_state) if current_state else {}
+                res = temp_res
+                headers_used = headers
+                parsed_state = current_state
+                raw_state = current_raw
+                if note_data.get("video") or note_data.get("imageList"):
+                    break
+                logger.info(f"{ua_name} UA không chứa dữ liệu bài viết, thử UA tiếp theo...")
             except Exception as req_err:
                 logger.warning(f"Lần thử {attempt + 1} ({ua_name} UA) tải trang XHS thất bại ({req_err})")
 
@@ -801,16 +839,9 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
 
         real_url = res.url
         
-        # 1. Kiểm tra nếu link đã bị xóa / hết hạn (XHS tự động chuyển hướng về trang chủ hoặc /explore)
-        parsed_real = urlsplit(real_url)
-        clean_real = urlunsplit(
-            (parsed_real.scheme, parsed_real.netloc, parsed_real.path, "", "")
-        ).rstrip('/').lower()
-        if clean_real in ["https://www.xiaohongshu.com", "http://www.xiaohongshu.com", "https://xiaohongshu.com", "http://xiaohongshu.com",
-                          "https://www.xiaohongshu.com/explore", "http://www.xiaohongshu.com/explore",
-                          "https://www.xiaohongshu.com/discovery", "http://www.xiaohongshu.com/discovery",
-                          "https://www.xiaohongshu.com/login", "http://www.xiaohongshu.com/login"] or "/login" in real_url.lower() or "undertake_note_error" in real_url.lower():
-            return False, "", "", "Bài viết trên Tiểu Hồng Thư (XHS) này không tồn tại, đã bị tác giả xóa, hết hạn hoặc yêu cầu đăng nhập"
+        # 1. Kiểm tra nếu link đã bị xóa / hết hạn (XHS/Rednote tự động chuyển hướng về trang chủ, /explore, /login hoặc /404)
+        if _is_xhs_blocked_url(real_url):
+            return False, "", "", "Bài viết trên Tiểu Hồng Thư (XHS/Rednote) này không tồn tại, đã bị tác giả xóa, hết hạn hoặc yêu cầu đăng nhập"
 
         html = res.text
         if any(msg in html for msg in ["你访问的页面不见了", "页面不存在", "该笔记已被删除", "笔记不存在", "Note not found"]):
@@ -824,21 +855,14 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
         title = "xiaohongshu_video"
 
         # 2. Trích xuất từ window.__INITIAL_STATE__
-        state_match = re.search(r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\})</script>', html, re.DOTALL)
-        if state_match:
+        note_data = {}
+        if parsed_state is None:
+            parsed_state, raw_state = _parse_xhs_initial_state(html)
+        if parsed_state:
             try:
-                raw_json = state_match.group(1).replace("undefined", "null")
-                state = json.loads(raw_json)
-                
                 # Tìm note_data qua cả 2 cấu trúc json web & mobile
-                note_data = state.get("noteData", {}).get("data", {}).get("noteData", {})
-                if not note_data:
-                    note_dict = state.get("note", {}).get("noteDetailMap", {})
-                    for k, v in note_dict.items():
-                        if isinstance(v, dict) and "note" in v:
-                            note_data = v.get("note", {})
-                            break
-                            
+                note_data = _extract_xhs_note_data(parsed_state)
+
                 title = note_data.get("title") or note_data.get("desc", "") or "xhs_video"
                 
                 video = note_data.get("video")
@@ -953,8 +977,11 @@ def download_xiaohongshu(url: str, output_dir: str, prefix: str) -> tuple:
             logger.error("CẢNH BÁO: Chỉ tìm thấy luồng stream 259 có logo watermark; từ chối tải để bảo vệ chất lượng.")
             return False, "", "", "Video Tiểu Hồng Thư này chỉ có luồng dính logo watermark (Đã chặn tải để tránh video có logo)"
 
-        # Nếu là bài đăng dạng Album ảnh (không có video)
-        if state_match and "imageList" in str(state_match.group(1)):
+        # Nếu là bài đăng dạng Album ảnh (không có video); video note cũng có imageList làm ảnh bìa
+        if note_data:
+            if not note_data.get("video") and note_data.get("imageList"):
+                return False, "", "", "Bài viết này là Album ảnh (không phải video)"
+        elif "imageList" in raw_state:
             return False, "", "", "Bài viết này là Album ảnh (không phải video)"
 
         return False, "", "", "Không tìm thấy luồng video sạch trong bài viết Tiểu Hồng Thư"
@@ -987,8 +1014,8 @@ def download_social_video(url: str, output_dir: str, prefix: str) -> tuple:
                 logger.warning("Bỏ qua tầng yt-dlp cho Douyin vì không có file cookie hợp lệ (tránh treo timeout 60s).")
                 return False, "", "", err or "Bóc tách Douyin thất bại qua các tầng giải mã (Montague/Viesnap, Direct, SO9)"
 
-    # 2. Nhánh Xiaohongshu
-    elif any(k in lower_url for k in ["xiaohongshu.com", "xhslink.com"]):
+    # 2. Nhánh Xiaohongshu / Rednote (rednote.com là tên miền quốc tế của XHS)
+    elif any(k in lower_url for k in ["xiaohongshu.com", "xhslink.com", "rednote.com"]):
         return download_xiaohongshu(url, output_dir, prefix)
 
     # 3. Chuẩn hóa URL cho yt-dlp fallback

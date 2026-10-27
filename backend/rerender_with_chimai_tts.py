@@ -5,7 +5,6 @@ Re-renders previous videos with CapCut Mai (BV562_streaming - Chi Mai TTS)
 instead of Chi Mai RVC.
 """
 
-import os
 import sys
 import time
 import shutil

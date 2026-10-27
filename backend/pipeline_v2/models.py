@@ -13,13 +13,6 @@ from .stage_status import StageStatus, require_transition
 
 MANIFEST_SCHEMA_VERSION = 1
 
-from .domain import (
-    DubUtterance,
-    JobTranslationOverride,
-    JobTranslationOverrideStore,
-    SourceTextTrack,
-    VietnameseSubtitle,
-)
 
 DEFAULT_STAGE_ORDER = (
     "input",

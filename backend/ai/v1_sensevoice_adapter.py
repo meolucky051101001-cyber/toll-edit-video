@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import gc
 import logging
-import math
 import os
 import re
 import time
@@ -116,7 +115,6 @@ def _load_audio_16k_mono(audio_path: str | Path) -> np.ndarray:
             mono = resample_poly(mono, 16000 // g, int(sr) // g).astype(np.float32)
         return (mono * 32768.0).astype(np.float32)
     except Exception:
-        import torch
         import torchaudio
         waveform, sr = torchaudio.load(path_str)
         if waveform.shape[0] > 1:

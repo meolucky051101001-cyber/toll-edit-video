@@ -398,64 +398,73 @@ def _best_cluster_samples(cluster):
 
 
 def _tracking_blocks_for_cluster(cluster, start_t, end_t, band, visual_mode):
-    samples = _best_cluster_samples(cluster)
-    if not samples:
+    # A caption may occupy two text lines in the same sampled frame, so keep
+    # every distinct line per sample instead of collapsing to one block.
+    by_time = {}
+    for sample in cluster:
+        sample_time = round(float(_ocr_field(sample, "sample_time", 0.0) or 0.0), 3)
+        key = _visual_caption_key(_ocr_field(sample, "text", "")) or str(
+            _ocr_field(sample, "text", "") or ""
+        )
+        line = by_time.setdefault(sample_time, {})
+        previous = line.get(key)
+        if previous is None or (
+            float(_ocr_field(sample, "prob", 0.0) or 0.0),
+            len(str(_ocr_field(sample, "text", "") or "")),
+        ) > (
+            float(_ocr_field(previous, "prob", 0.0) or 0.0),
+            len(str(_ocr_field(previous, "text", "") or "")),
+        ):
+            line[key] = sample
+    times = sorted(by_time)
+    if not times:
         return []
     default_top = float(getattr(band, "top", 0.75) or 0.75)
     default_bottom = float(getattr(band, "bottom", 0.82) or 0.82)
     blocks = []
-    for position, sample in enumerate(samples):
-        sample_time = float(_ocr_field(sample, "sample_time", 0.0) or 0.0)
-        previous_time = (
-            float(_ocr_field(samples[position - 1], "sample_time", sample_time) or sample_time)
-            if position else sample_time
-        )
-        next_time = (
-            float(_ocr_field(samples[position + 1], "sample_time", sample_time) or sample_time)
-            if position + 1 < len(samples) else sample_time
-        )
-        left = start_t if position == 0 else (previous_time + sample_time) * 0.5
-        right = end_t if position == len(samples) - 1 else (sample_time + next_time) * 0.5
+    for position, sample_time in enumerate(times):
+        left = start_t if position == 0 else (times[position - 1] + sample_time) * 0.5
+        right = end_t if position == len(times) - 1 else (sample_time + times[position + 1]) * 0.5
         left = max(start_t, left)
         right = min(end_t, right)
         if right <= left:
             continue
+        for sample in by_time[sample_time].values():
+            def number(name, default):
+                raw = _ocr_field(sample, name, None)
+                try:
+                    return float(raw)
+                except (TypeError, ValueError):
+                    return default
 
-        def number(name, default):
-            raw = _ocr_field(sample, name, None)
-            try:
-                return float(raw)
-            except (TypeError, ValueError):
-                return default
-
-        x_pct = number("x_pct", 0.05)
-        max_x_pct = number("max_x_pct", 0.95)
-        y_pct = number("y_pct", default_top)
-        max_y_pct = number("max_y_pct", default_bottom)
-        if not (0.0 <= x_pct < max_x_pct <= 1.0):
-            x_pct, max_x_pct = 0.05, 0.95
-        if not (0.0 <= y_pct < max_y_pct <= 1.0):
-            y_pct, max_y_pct = default_top, default_bottom
-        block = OCRBlock(
-            text=str(_ocr_field(sample, "text", "") or ""),
-            start=left,
-            end=right,
-            x_pct=x_pct,
-            max_x_pct=max_x_pct,
-            y_pct=y_pct,
-            max_y_pct=max_y_pct,
-            prob=number("prob", 0.85),
-            sample_segment_id=_ocr_field(sample, "sample_segment_id"),
-            sample_time=sample_time,
-            is_subtitle=True,
-            in_subtitle_band=True,
-            is_packaging=False,
-            is_static=False,
-            type="subtitle",
-        )
-        block.geometry_verified = bool(visual_mode)
-        block.visual_locked = bool(visual_mode)
-        blocks.append(block)
+            x_pct = number("x_pct", 0.05)
+            max_x_pct = number("max_x_pct", 0.95)
+            y_pct = number("y_pct", default_top)
+            max_y_pct = number("max_y_pct", default_bottom)
+            if not (0.0 <= x_pct < max_x_pct <= 1.0):
+                x_pct, max_x_pct = 0.05, 0.95
+            if not (0.0 <= y_pct < max_y_pct <= 1.0):
+                y_pct, max_y_pct = default_top, default_bottom
+            block = OCRBlock(
+                text=str(_ocr_field(sample, "text", "") or ""),
+                start=left,
+                end=right,
+                x_pct=x_pct,
+                max_x_pct=max_x_pct,
+                y_pct=y_pct,
+                max_y_pct=max_y_pct,
+                prob=number("prob", 0.85),
+                sample_segment_id=_ocr_field(sample, "sample_segment_id"),
+                sample_time=sample_time,
+                is_subtitle=True,
+                in_subtitle_band=True,
+                is_packaging=False,
+                is_static=False,
+                type="subtitle",
+            )
+            block.geometry_verified = bool(visual_mode)
+            block.visual_locked = bool(visual_mode)
+            blocks.append(block)
     return blocks
 
 
@@ -1487,8 +1496,17 @@ def _recover_missing_subtitles_visual(all_blocks, srt_segments, band, duration=N
         prob = float(_ocr_field(b, "prob", 1.0))
         text = str(_ocr_field(b, "text", "")).strip()
         y_pct = float(_ocr_field(b, "y_pct", 0.0))
+        max_y_pct = float(_ocr_field(b, "max_y_pct", 0.0) or 0.0)
         sample_time = float(_ocr_field(b, "sample_time", 0.0))
-        if not (band.top - 0.035 <= y_pct <= band.bottom + 0.035):
+        x_pct = float(_ocr_field(b, "x_pct", 0.0) or 0.0)
+        max_x_pct = float(_ocr_field(b, "max_x_pct", 1.0) or 1.0)
+        # A two-line caption can straddle the band edge; keep any block that
+        # vertically intersects it instead of requiring the top row inside.
+        if not (max_y_pct >= band.top - 0.035 and y_pct <= band.bottom + 0.035):
+            continue
+        # Device/UI readouts sit in a narrow, off-center block; captions are
+        # either wide or centered in the frame.
+        if max_x_pct - x_pct < 0.14 and abs((x_pct + max_x_pct) * 0.5 - 0.5) > 0.15:
             continue
         if prob < 0.60 or _visual_chinese_count(text) < 2:
             continue
@@ -1502,51 +1520,152 @@ def _recover_missing_subtitles_visual(all_blocks, srt_segments, band, duration=N
     def get_st(blk):
         return float(_ocr_field(blk, "sample_time", 0.0))
 
-    candidates.sort(key=get_st)
-    clusters = []
-    current_cluster = [candidates[0]]
-    for b in candidates[1:]:
-        prev_time = get_st(current_cluster[-1])
-        same_caption = _same_visual_caption(
-            _ocr_field(current_cluster[0], "text", ""),
-            _ocr_field(b, "text", ""),
-            threshold=0.78,
+    def block_width(blk):
+        return max(0.0, float(_ocr_field(blk, "max_x_pct", 1.0) or 1.0)
+                   - float(_ocr_field(blk, "x_pct", 0.0) or 0.0))
+
+    def block_center_x(blk):
+        return (float(_ocr_field(blk, "x_pct", 0.0) or 0.0)
+                + float(_ocr_field(blk, "max_x_pct", 1.0) or 1.0)) * 0.5
+
+    def caption_line_plausible(blk):
+        width = block_width(blk)
+        cjk = _visual_chinese_count(_ocr_field(blk, "text", ""))
+        if width >= 0.16 and cjk >= 2:
+            return True
+        if width >= 0.10 and abs(block_center_x(blk) - 0.5) <= 0.05:
+            return True
+        return cjk >= 4 and width >= 0.12
+
+    def frame_caption_blocks(blocks):
+        # Appliance/UI labels sit on their own row above or below the caption
+        # with a visible gap. Keep the widest caption row plus only the rows
+        # stacked against it, so those labels never enter the cue text.
+        ordered = sorted(blocks, key=lambda blk: (
+            float(_ocr_field(blk, "y_pct", 0.0) or 0.0),
+            float(_ocr_field(blk, "x_pct", 0.0) or 0.0),
+        ))
+        plausible = [blk for blk in ordered if caption_line_plausible(blk)]
+        if not plausible:
+            return []
+        seed = max(
+            plausible,
+            key=lambda blk: (block_width(blk), _visual_chinese_count(_ocr_field(blk, "text", ""))),
         )
-        if get_st(b) - prev_time <= 0.85 and same_caption:
-            current_cluster.append(b)
+        group = [seed]
+        changed = True
+        while changed and len(group) < 2:
+            changed = False
+            group_top = min(float(_ocr_field(blk, "y_pct", 0.0) or 0.0) for blk in group)
+            group_bottom = max(float(_ocr_field(blk, "max_y_pct", 0.0) or 0.0) for blk in group)
+            for blk in plausible:
+                if any(blk is member for member in group):
+                    continue
+                top = float(_ocr_field(blk, "y_pct", 0.0) or 0.0)
+                bottom = float(_ocr_field(blk, "max_y_pct", 0.0) or 0.0)
+                gap = max(0.0, group_top - bottom, top - group_bottom)
+                if gap > 0.02:
+                    continue
+                group.append(blk)
+                changed = True
+                if len(group) >= 2:
+                    break
+        return group
+
+    def frame_caption_text(group):
+        visual_lines = []
+        for blk in sorted(group, key=lambda item: (
+            float(_ocr_field(item, "y_pct", 0.0) or 0.0),
+            float(_ocr_field(item, "x_pct", 0.0) or 0.0),
+        )):
+            text = str(_ocr_field(blk, "text", "") or "").strip()
+            if not text:
+                continue
+            center_y = (float(_ocr_field(blk, "y_pct", 0.0) or 0.0)
+                        + float(_ocr_field(blk, "max_y_pct", 0.0) or 0.0)) * 0.5
+            target = next(
+                (line for line in visual_lines if abs(line["center"] - center_y) <= 0.025),
+                None,
+            )
+            key = _visual_caption_key(text)
+            if target is None:
+                visual_lines.append({"center": center_y, "text": text, "seen": {key}})
+            elif key not in target["seen"]:
+                target["seen"].add(key)
+                target["text"] += text
+        return "\n".join(line["text"] for line in visual_lines if line["text"])
+
+    # One sampled frame can hold two caption lines. Cluster whole frames, not
+    # individual blocks, so lines never split one caption into micro-cues.
+    by_sample = {}
+    for b in candidates:
+        by_sample.setdefault(round(get_st(b), 3), []).append(b)
+
+    groups = []
+    for sample_time in sorted(by_sample):
+        captions = frame_caption_blocks(by_sample[sample_time])
+        if not captions:
+            continue
+        text = frame_caption_text(captions)
+        if not text:
+            continue
+        groups.append({"time": sample_time, "blocks": captions, "text": text,
+                       "prob": sum(float(_ocr_field(b, "prob", 0.0) or 0.0)
+                                   for b in captions) / len(captions)})
+
+    def group_score(group):
+        return (
+            group["prob"],
+            _visual_chinese_count(group["text"]),
+            len(group["text"]),
+        )
+
+    clusters = []
+    for group in groups:
+        if not clusters:
+            clusters.append([group])
+            continue
+        cluster = clusters[-1]
+        previous = cluster[-1]
+        best_text = max(cluster, key=group_score)["text"]
+        same_caption = (
+            _same_visual_caption(best_text, group["text"], threshold=0.72)
+            or _same_visual_caption(previous["text"], group["text"], threshold=0.72)
+        )
+        if group["time"] - previous["time"] <= 0.85 and same_caption:
+            cluster.append(group)
         else:
-            clusters.append(current_cluster)
-            current_cluster = [b]
-    if current_cluster:
-        clusters.append(current_cluster)
+            clusters.append([group])
 
     recovered = []
     for cluster in clusters:
-        if _is_static_packaging_or_watermark(cluster, duration):
+        cluster_blocks = [b for group in cluster for b in group["blocks"]]
+        if _is_static_packaging_or_watermark(cluster_blocks, duration):
             logger.info(
                 "Visual OCR: dropped static/watermark caption %r",
-                str(_ocr_field(cluster[0], "text", ""))[:24],
+                str(cluster[0]["text"])[:24],
             )
             continue
-        times = [get_st(b) for b in cluster]
+        times = [group["time"] for group in cluster]
         start_t = max(0.0, min(times) - 0.12)
         end_t = max(times) + 0.15
         if duration and duration > 0:
             end_t = min(end_t, duration)
         if end_t <= start_t:
             continue
+        best_group = max(cluster, key=group_score)
+        text = best_group["text"].strip()
+        if not text:
+            continue
         best_block = max(
-            cluster,
+            best_group["blocks"],
             key=lambda item: (
                 _visual_chinese_count(_ocr_field(item, "text", "")),
                 float(_ocr_field(item, "prob", 0.0)),
                 len(str(_ocr_field(item, "text", "") or "")),
             ),
         )
-        text = str(_ocr_field(best_block, "text", "")).strip()
-        if not text:
-            continue
-        tracking = _tracking_blocks_for_cluster(cluster, start_t, end_t, band, visual_mode=True)
+        tracking = _tracking_blocks_for_cluster(cluster_blocks, start_t, end_t, band, visual_mode=True)
         if not tracking:
             tracking = [_tracking_ocr_block(best_block, start_t, end_t, best_block)]
         recovered.append({
@@ -1554,7 +1673,7 @@ def _recover_missing_subtitles_visual(all_blocks, srt_segments, band, duration=N
             "end": end_t,
             "text": text,
             "best_block": best_block,
-            "samples": cluster,
+            "samples": cluster_blocks,
             "tracking_blocks": tracking,
             "visual_start_sec": start_t,
             "visual_end_sec": end_t,

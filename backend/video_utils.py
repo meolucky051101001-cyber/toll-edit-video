@@ -3,7 +3,6 @@ import sys
 import subprocess
 from batch_control import run as run_batch_subprocess
 import time
-import uuid
 import logging
 try:
     from .v1_stage_metrics import stage
@@ -369,15 +368,6 @@ def separate_vocals_demucs(
 
     raise RuntimeError(f"Demucs chạy xong nhưng không tìm thấy file output mới tại {demucs_out_dir}")
 
-def merge_audio_files_with_delay(video_path, original_audio_path, dubbing_audio_files, output_video_path, original_volume=0.1, dub_volume=1.0):
-    """
-    Ghép các file âm thanh lồng tiếng lại theo đúng mốc thời gian, trộn với âm thanh gốc đã giảm âm lượng,
-    sau đó ghép vào video đã được làm mờ/chèn sub (đầu vào là video câm hoặc video gốc tuỳ cấu hình).
-    """
-    # Create a complex filter for ffmpeg to mix all audio
-    # This is a basic implementation. A more robust way is using PyDub to generate a single mixed audio track first.
-    pass
-    
 def mix_audio_pydub(
     original_audio_path,
     dubbing_audio_files,
