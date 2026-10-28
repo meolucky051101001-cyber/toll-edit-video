@@ -15,6 +15,13 @@ def stop_v1_bot():
     control_dir = bs_control if bs_control.is_dir() else (v1_root / "workspace" / "control")
     v1_json = control_dir / "v1.json"
 
+    # Ghi ý định dừng để watchdog không tự khởi động lại bot vừa được dừng tay.
+    try:
+        control_dir.mkdir(parents=True, exist_ok=True)
+        (control_dir / "telegram.disabled").write_text("paused", encoding="utf-8")
+    except OSError:
+        pass
+
     target_pid = None
     if v1_json.is_file():
         try:

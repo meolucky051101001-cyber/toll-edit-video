@@ -169,6 +169,20 @@ class TestHealGuardrails(WatchdogTestBase):
         self.assertTrue(state["heal_paused"])
         self.assertEqual(self.run_task.call_count, 0)
 
+    def test_v1_pause_blocks_heal_for_all_components(self):
+        (self.ws / "control" / "v1.pause").write_text("", encoding="utf-8")
+        state = {
+            "components": {
+                "scriptbot": {"severity": "warning", "status": "down"},
+                "downloader": {"severity": "warning", "status": "down"},
+            },
+            "heal": {},
+        }
+        with patch.object(ops_watchdog, "_run_task") as run_task:
+            ops_watchdog._apply_heal(state, self.ws, self.now, True)
+        self.assertTrue(state["heal_paused"])
+        run_task.assert_not_called()
+
     def test_heal_respects_cooldown(self):
         self.write_state({"heal": {"dashboard": [self.now - 60]}})
         state = self.run_watchdog(heal=True, dashboard=self.down_dashboard)
@@ -238,6 +252,14 @@ class TestTelegramProbe(WatchdogTestBase):
         self.assertEqual(comp["severity"], "ok")
         self.assertEqual(comp["status"], "disabled")
 
+    def test_disabled_flag_short_circuits_telegram_probe(self):
+        (self.ws / "control" / "telegram.disabled").write_text("", encoding="utf-8")
+        with patch.object(ops_watchdog, "_pids_for") as pids:
+            comp = ops_watchdog._telegram_component(self.ws, self.now, False)
+        self.assertEqual(comp["severity"], "ok")
+        self.assertEqual(comp["status"], "disabled")
+        pids.assert_not_called()
+
     def test_newest_telemetry_wins(self):
         self._write_heartbeat({"pid": 111, "at": self.now - 500})
         newer = self.ws / "bot_system" / "control"
@@ -264,6 +286,12 @@ class TestProcessAndHttpProbes(WatchdogTestBase):
             comp = ops_watchdog._process_component(Path("x.py"), self.ws, "scriptbot.disabled")
         self.assertEqual(comp["severity"], "warning")
         self.assertEqual(comp["status"], "down")
+
+    def test_paused_missing_process_is_disabled(self):
+        with patch.object(ops_watchdog, "_pids_for", return_value=[]):
+            comp = ops_watchdog._process_component(Path("x.py"), self.ws, "scriptbot.disabled", True)
+        self.assertEqual(comp["severity"], "ok")
+        self.assertEqual(comp["status"], "disabled")
 
     def test_running_process_is_ok(self):
         with patch.object(ops_watchdog, "_pids_for", return_value=[42]):

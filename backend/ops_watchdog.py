@@ -177,6 +177,13 @@ def _control_component(now: float) -> dict:
 
 
 def _telegram_component(workspace: Path, now: float, paused: bool) -> dict:
+    if _flag_exists(workspace, "telegram.disabled"):
+        return {
+            "severity": "ok",
+            "status": "disabled",
+            "pids": [],
+            "detail": "đã tắt theo telegram.disabled",
+        }
     pids = _pids_for(ROOT / "telegram_bot.py")
     data = _read_telemetry(workspace)
     try:
@@ -212,7 +219,7 @@ def _telegram_component(workspace: Path, now: float, paused: bool) -> dict:
     return comp
 
 
-def _process_component(script: Path, workspace: Path, disabled_name: str) -> dict:
+def _process_component(script: Path, workspace: Path, disabled_name: str, paused: bool = False) -> dict:
     if _flag_exists(workspace, disabled_name):
         return {
             "severity": "ok",
@@ -223,6 +230,13 @@ def _process_component(script: Path, workspace: Path, disabled_name: str) -> dic
     pids = _pids_for(script)
     if pids:
         return {"severity": "ok", "status": "ok", "pids": pids, "detail": "đang chạy"}
+    if paused:
+        return {
+            "severity": "ok",
+            "status": "disabled",
+            "pids": [],
+            "detail": "tạm dừng theo v1.pause",
+        }
     return {"severity": "warning", "status": "down", "pids": [], "detail": "không có tiến trình"}
 
 
@@ -348,7 +362,7 @@ def _run_task(task_name: str) -> tuple[bool, str]:
 
 
 def _apply_heal(state: dict, workspace: Path, now: float, enabled: bool) -> None:
-    if _flag_exists(workspace, "ops.pause"):
+    if _flag_exists(workspace, "ops.pause") or _v1_paused(workspace):
         state["heal_paused"] = True
         return
     for name in ("control", "dashboard", "telegram", "scriptbot", "downloader"):
@@ -404,10 +418,10 @@ def run_check(workspace: Path | None = None, *, now: float | None = None, heal: 
     components["control"] = _control_component(now)
     components["telegram"] = _telegram_component(workspace, now, paused)
     components["scriptbot"] = _process_component(
-        ROOT / "telegram_script_bot.py", workspace, "scriptbot.disabled"
+        ROOT / "telegram_script_bot.py", workspace, "scriptbot.disabled", paused
     )
     components["downloader"] = _process_component(
-        PROJECT_ROOT / "telebot_video_downloader.py", workspace, "downloader.disabled"
+        PROJECT_ROOT / "telebot_video_downloader.py", workspace, "downloader.disabled", paused
     )
     components.update(_disk_components())
 

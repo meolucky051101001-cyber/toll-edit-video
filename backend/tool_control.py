@@ -220,8 +220,8 @@ def stop_and_release(key):
             cmd = [str(c).lower() for c in (p.cmdline() or [])]
             cmd_str = ' '.join(cmd)
 
-            # Bảo vệ bộ điều khiển trung tâm 8090, dashboard web servers và các test runner
-            if any(k in cmd_str for k in ('tool_control.py', 'test_', 'unittest', 'pytest', 'main.py', '--service dashboard')):
+            # Bảo vệ bộ điều khiển trung tâm 8090, dashboard web servers, watchdog và các test runner
+            if any(k in cmd_str for k in ('tool_control.py', 'test_', 'unittest', 'pytest', 'main.py', '--service dashboard', 'ops_watchdog.py')):
                 continue
 
             is_tool_proc = False
@@ -233,7 +233,7 @@ def stop_and_release(key):
                 try:
                     for child in p.children(recursive=True):
                         ch_cmd = ' '.join([str(c).lower() for c in (child.cmdline() or [])])
-                        if not any(k in ch_cmd for k in ('tool_control.py', 'test_', 'unittest', 'pytest', 'main.py', '--service dashboard')):
+                        if not any(k in ch_cmd for k in ('tool_control.py', 'test_', 'unittest', 'pytest', 'main.py', '--service dashboard', 'ops_watchdog.py')):
                             targets[child.pid] = child
 
                 except (psutil.NoSuchProcess, psutil.AccessDenied):

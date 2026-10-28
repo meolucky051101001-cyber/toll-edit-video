@@ -9,6 +9,9 @@ title Bot Tai Video Douyin va Xiaohongshu (Doc Lap)
 set "PROJECT_DIR=%~dp0"
 set "PYTHON_EXE=%PROJECT_DIR%backend\venv\Scripts\python.exe"
 
+:: Xóa cờ dừng tay để watchdog không coi bot là đã tắt
+del /q "%PROJECT_DIR%workspace\control\downloader.disabled" 2>nul
+
 if not exist "%PYTHON_EXE%" (
     echo [ERROR] Khong tim thay Python tai backend\venv\Scripts\python.exe
     pause
