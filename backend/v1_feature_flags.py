@@ -76,9 +76,9 @@ def set_feature_flags(new_flags: Dict[str, Any], workspace_path: Optional[str | 
             raise ValueError(f"{key} requires a boolean")
     choices = {
         "V1_VIDEO_MODE": {"AUTO", "SHORT", "MEDIUM", "LONG", "CUSTOM"},
-        "V1_ASR_MODEL": {"whisper_turbo", "whisper_sensevoice", "sensevoice_small", "qwen3_asr"},
-        "V1_SHORT_ASR_MODEL": {"inherit", "whisper_turbo", "whisper_sensevoice", "sensevoice_small", "qwen3_asr"},
-        "V1_LONG_ASR_MODEL": {"inherit", "whisper_turbo", "whisper_sensevoice", "sensevoice_small", "qwen3_asr"},
+        "V1_ASR_MODEL": {"whisper_turbo", "whisper_sensevoice", "sensevoice_small"},
+        "V1_SHORT_ASR_MODEL": {"inherit", "whisper_turbo", "whisper_sensevoice", "sensevoice_small"},
+        "V1_LONG_ASR_MODEL": {"inherit", "whisper_turbo", "whisper_sensevoice", "sensevoice_small"},
         "V1_SHORT_SEPARATOR": {"roformer", "demucs"},
         "V1_LONG_SEPARATOR": {"roformer", "demucs"},
         "V1_QC_POLICY": {"REPORT_ONLY", "WARN", "BLOCK"},

@@ -2091,7 +2091,6 @@ header {
                     <option value="whisper_sensevoice">Hybrid: Whisper + SenseVoice (Tối ưu)</option>
                     <option value="whisper_turbo">Whisper Turbo</option>
                     <option value="sensevoice_small">SenseVoice-Small (Siêu tốc)</option>
-                    <option value="qwen3_asr">Qwen3-ASR (cần Aligner)</option>
                   </select>
                 </fieldset>
                 <fieldset class="v1-length-profile">
@@ -2106,7 +2105,6 @@ header {
                     <option value="whisper_sensevoice">Hybrid: Whisper + SenseVoice (Tối ưu)</option>
                     <option value="whisper_turbo">Whisper Turbo</option>
                     <option value="sensevoice_small">SenseVoice-Small (Siêu tốc)</option>
-                    <option value="qwen3_asr">Qwen3-ASR (cần Aligner)</option>
                   </select>
                 </fieldset>
               </div>
@@ -2150,7 +2148,7 @@ header {
                 <input type="checkbox" id="flagVisualSubToSpeech" onchange="toggleFeatureFlag('V1_VISUAL_SUB_TO_SPEECH', this.checked)" style="cursor: pointer; width: 16px; height: 16px; accent-color: #a855f7;">
               </div>
 
-              <!-- TÙY CHỌN MÔ HÌNH ASR: Hybrid (Whisper + SenseVoice) vs Faster-Whisper vs SenseVoice-Small vs Qwen3-ASR -->
+              <!-- TÙY CHỌN MÔ HÌNH ASR: Hybrid (Whisper + SenseVoice) vs Faster-Whisper vs SenseVoice-Small -->
               <div style="grid-column: 1 / -1; padding: 12px 14px; background: rgba(255, 255, 255, 0.02); border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.08); display: flex; flex-direction: column; gap: 8px;">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
                   <div style="display: flex; align-items: center; gap: 8px;">
@@ -2197,17 +2195,7 @@ header {
                     <span id="badgeSenseVoiceActive" style="font-size: 10.5px; color: var(--text-muted);">[BẤM ĐỂ CHỌN]</span>
                   </div>
 
-                  <!-- Option 3: Qwen3-ASR 0.6B -->
-                  <div id="cardAsrQwen" onclick="selectAsrModel('qwen3_asr')" style="padding: 10px 14px; background: rgba(255, 255, 255, 0.02); border-radius: 6px; border: 1px solid var(--border); cursor: pointer; display: flex; align-items: center; justify-content: space-between; transition: all 0.2s;">
-                    <div style="display: flex; align-items: center; gap: 10px;">
-                      <input type="radio" id="radioAsrQwen" name="asr_model_radio" value="qwen3_asr" style="cursor: pointer; width: 16px; height: 16px; accent-color: #e879f9;">
-                      <div>
-                        <div style="font-weight: 600; color: #e879f9; font-size: 12px;">Qwen3-ASR 0.6B <span id="qwenReadinessBadge" style="font-size: 10px; color: #10b981; background: rgba(16,185,129,0.15); padding: 1px 6px; border-radius: 3px; font-weight: 500;">Đang kiểm tra runtime...</span></div>
-                        <div style="font-size: 10.5px; color: var(--text-muted); margin-top: 2px;">Mô hình Alibaba AI ngữ cảnh cao, GPU CUDA FP16 + Forced Alignment (~3.8 GB VRAM).</div>
-                      </div>
-                    </div>
-                    <span id="badgeQwenActive" style="font-size: 10.5px; color: var(--text-muted);">[BẤM ĐỂ CHỌN]</span>
-                  </div>
+
                 </div>
               </div>
             </div>
@@ -5284,19 +5272,6 @@ let inputUploading=false;
           mainBorder: 'rgba(245, 158, 11, 0.3)',
           stepTag: 'SenseVoice-Small',
           stepTitle: 'SenseVoice-Small 228MB ONNX INT8 (CTC 60ms)'
-        },
-        qwen3_asr: {
-          radio: document.getElementById('radioAsrQwen'),
-          card: document.getElementById('cardAsrQwen'),
-          badge: document.getElementById('badgeQwenActive'),
-          activeBg: 'rgba(232, 121, 249, 0.08)',
-          activeBorder: '#e879f9',
-          activeColor: '#e879f9',
-          mainText: '● Qwen3-ASR 0.6B (Alibaba AI GPU)',
-          mainBg: 'rgba(232, 121, 249, 0.15)',
-          mainBorder: 'rgba(232, 121, 249, 0.3)',
-          stepTag: 'Qwen3-ASR',
-          stepTitle: 'Mô hình ASR: Qwen3-ASR 0.6B GPU (NVIDIA GPU CUDA)'
         }
       };
 
@@ -5331,35 +5306,26 @@ let inputUploading=false;
       }
     }
 
-    let qwenAsrReady = true;
     let sensevoiceAsrReady = true;
 
     async function selectAsrModel(modelId, silent = false) {
       const previousModel = currentAsrModel;
-      if (modelId === 'qwen3_asr' && qwenAsrReady === false) {
-        showToast('Qwen3-ASR chưa sẵn sàng trên máy này.', 'warning');
-        updateAsrModelUI(previousModel);
-        return;
-      }
       if ((modelId === 'sensevoice_small' || modelId === 'whisper_sensevoice') && sensevoiceAsrReady === false) {
         showToast('SenseVoice chưa sẵn sàng trên máy này.', 'warning');
         updateAsrModelUI(previousModel);
         return;
       }
       updateAsrModelUI(modelId);
-      const isQwen = (modelId === 'qwen3_asr');
       const labelMap = {
         whisper_sensevoice: 'Hybrid: Faster-Whisper + SenseVoice-Small (CTC 60ms)',
         whisper_turbo: 'Faster-Whisper Large-v3 Turbo',
-        sensevoice_small: 'SenseVoice-Small (ONNX INT8 Siêu Tốc)',
-        qwen3_asr: 'Qwen3-ASR 0.6B GPU'
+        sensevoice_small: 'SenseVoice-Small (ONNX INT8 Siêu Tốc)'
       };
       try {
         const res = await fetch('/api/v1/feature-flags', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
-            ENABLE_QWEN_ASR: isQwen,
             V1_ASR_MODEL: modelId
           })
         });
@@ -5400,18 +5366,7 @@ let inputUploading=false;
             const el = document.getElementById(id);
             if (el) el.value = flags[id] || (id.endsWith('ASR_MODEL') ? 'inherit' : id.includes('SHORT') ? 'roformer' : 'demucs');
           }
-          qwenAsrReady = flags.QWEN_ASR_READY !== false;
-          const qwenCard = document.getElementById('cardAsrQwen');
-          if (qwenCard) {
-            qwenCard.title = flags.QWEN_ASR_READINESS_REASON || '';
-            qwenCard.style.opacity = qwenAsrReady ? '1' : '0.55';
-          }
-          const qwenBadge = document.getElementById('qwenReadinessBadge');
-          if (qwenBadge) {
-            qwenBadge.textContent = qwenAsrReady ? 'Sẵn sàng GPU' : 'Chưa sẵn sàng';
-            qwenBadge.style.color = qwenAsrReady ? '#10b981' : '#f59e0b';
-            qwenBadge.style.background = qwenAsrReady ? 'rgba(16,185,129,0.15)' : 'rgba(245,158,11,0.15)';
-          }
+
 
           sensevoiceAsrReady = flags.SENSEVOICE_ASR_READY !== false;
           const svReason = flags.SENSEVOICE_ASR_READINESS_REASON || '';
@@ -5444,9 +5399,7 @@ let inputUploading=false;
           const asrChunk = document.getElementById('flagAsrChunking');
           if (asrChunk) asrChunk.checked = flags.V1_ASR_CHUNKING !== false;
 
-          if (qwenAsrReady && (flags.ENABLE_QWEN_ASR === true || flags.V1_ASR_MODEL === 'qwen3_asr')) {
-            updateAsrModelUI('qwen3_asr');
-          } else if (flags.V1_ASR_MODEL === 'whisper_turbo' || flags.V1_ASR_MODEL === 'sensevoice_small') {
+          if (flags.V1_ASR_MODEL === 'whisper_turbo' || flags.V1_ASR_MODEL === 'sensevoice_small') {
             updateAsrModelUI(flags.V1_ASR_MODEL);
           } else {
             updateAsrModelUI('whisper_sensevoice');

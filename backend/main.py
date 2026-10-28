@@ -2655,14 +2655,9 @@ async def api_get_feature_flags():
     try:
         from v1_feature_flags import get_feature_flags
         flags = get_feature_flags(WORKSPACE)
-        try:
-            from ai.v1_qwen_asr_adapter import check_qwen_readiness
-            ready, reason = check_qwen_readiness(ignore_flag=True)
-            flags["QWEN_ASR_READY"] = bool(ready)
-            flags["QWEN_ASR_READINESS_REASON"] = reason
-        except Exception as readiness_error:
-            flags["QWEN_ASR_READY"] = False
-            flags["QWEN_ASR_READINESS_REASON"] = str(readiness_error)
+        # Qwen3-ASR đã được gỡ bỏ khỏi hệ thống
+        flags["QWEN_ASR_READY"] = False
+        flags["QWEN_ASR_READINESS_REASON"] = "Mô hình Qwen3-ASR đã được gỡ bỏ khỏi hệ thống"
         try:
             from ai.v1_sensevoice_adapter import check_sensevoice_readiness
             sv_ready, sv_reason = check_sensevoice_readiness(ignore_flag=True)
@@ -2695,17 +2690,14 @@ async def api_set_feature_flags(payload: dict = Body(...)):
                       or payload.get("V1_SHORT_ASR_MODEL") == "qwen3_asr"
                       or payload.get("V1_LONG_ASR_MODEL") == "qwen3_asr")
         if wants_qwen:
-            from ai.v1_qwen_asr_adapter import check_qwen_readiness
-            ready, reason = check_qwen_readiness(ignore_flag=True)
-            if not ready:
-                return JSONResponse(
-                    status_code=409,
-                    content={
-                        "status": "error",
-                        "code": "QWEN_NOT_READY",
-                        "message": reason,
-                    },
-                )
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "error",
+                    "code": "QWEN_REMOVED",
+                    "message": "Mô hình Qwen3-ASR đã được gỡ bỏ khỏi hệ thống. Vui lòng sử dụng Hybrid (Whisper + SenseVoice) hoặc Faster-Whisper Turbo.",
+                },
+            )
         wants_sensevoice = (
             requested_model in ("whisper_sensevoice", "whisper_sensevoice_hybrid", "hybrid", "sensevoice_small", "sensevoice")
             or payload.get("V1_SHORT_ASR_MODEL") in ("whisper_sensevoice", "sensevoice_small")
