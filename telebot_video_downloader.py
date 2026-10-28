@@ -50,17 +50,13 @@ if str(BACKEND_DIR) not in sys.path:
 # Cấu hình gửi video lên Telegram: Mặc định là FALSE (chỉ báo thành công theo yêu cầu của bạn)
 SEND_VIDEO_TO_TELEGRAM = os.getenv("DOWNLOADER_SEND_VIDEO_TO_CHAT", "false").lower() in ("true", "1", "yes")
 
-# Cấu hình logging (hỗ trợ cả console lẫn chạy ngầm pythonw)
-log_handlers = [
-    logging.FileHandler(BASE_DIR / "telebot_downloader.log", encoding="utf-8", mode="a")
-]
-if sys.stdout is not None:
-    log_handlers.append(logging.StreamHandler(sys.stdout))
+# Cấu hình logging dùng chung: ghi file xoay vòng 10MB x 5, tự che token/mật khẩu
+from core.logging_setup import setup_logging
 
-logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    level=logging.INFO,
-    handlers=log_handlers
+setup_logging(
+    "telebot_downloader",
+    BASE_DIR / "telebot_downloader.log",
+    fmt="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger("TelebotDownloader")
 
@@ -81,9 +77,22 @@ except Exception as e:
     logger.error(f"Lỗi khi nạp module social_downloader từ backend Tool V1: {e}")
     sys.exit(1)
 
-# Telegram Bot Token mặc định (do người dùng cung cấp)
-DEFAULT_BOT_TOKEN = "<REDACTED_TELEGRAM_BOT_TOKEN>"
-BOT_TOKEN = os.getenv("DOWNLOADER_BOT_TOKEN", "").strip() or DEFAULT_BOT_TOKEN
+def _load_bot_token() -> str:
+    """Đọc token từ biến môi trường hoặc backend/.env — không lưu token trong mã nguồn."""
+    token = os.getenv("DOWNLOADER_BOT_TOKEN", "").strip()
+    if token:
+        return token
+    env_path = BACKEND_DIR / ".env"
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith("DOWNLOADER_BOT_TOKEN="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+BOT_TOKEN = _load_bot_token()
 
 from telegram import Update, InputMediaPhoto
 from telegram.ext import (
@@ -529,11 +538,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    if not BOT_TOKEN:
+        logger.error("Thiếu DOWNLOADER_BOT_TOKEN trong biến môi trường hoặc backend/.env — bot không thể chạy.")
+        return
     logger.info("==================================================")
     logger.info("Khởi động Bot Tải Video Douyin & Xiaohongshu...")
     logger.info(f"Thư mục lưu video: {SAVE_DIR}")
     logger.info("Chế độ: BÁO THÀNH CÔNG (KHÔNG GỬI FILE VIDEO LÊN TELEGRAM)")
-    logger.info(f"Bot Token: {BOT_TOKEN[:10]}...{BOT_TOKEN[-5:]}")
+    logger.info("Bot Token: đã nạp từ biến môi trường/.env")
     logger.info("==================================================")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()

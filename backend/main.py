@@ -45,6 +45,7 @@ from environment import load_environment
 BASE_DIR = Path(__file__).resolve().parent
 load_environment(BASE_DIR)
 from config.paths import AppPaths
+from core.logging_setup import RedactingFormatter
 
 PATHS = AppPaths.from_environment(BASE_DIR.parent)
 
@@ -71,7 +72,7 @@ def _configure_dashboard_logging() -> None:
         handler = RotatingFileHandler(log_dir / "dashboard.log", maxBytes=10_000_000, backupCount=5, encoding="utf-8")
     except OSError:
         return
-    handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    handler.setFormatter(RedactingFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
     handler._autodub_dashboard = True
     root_logger.addHandler(handler)
     if root_logger.level == logging.NOTSET or root_logger.level > logging.INFO:
@@ -119,9 +120,15 @@ def _load_or_create_local_token() -> str:
     env_token = os.getenv("AUTODUB_LOCAL_TOKEN", "").strip()
     if env_token:
         return env_token
+    workspace_root = Path(
+        os.getenv(
+            "AUTODUB_WORKSPACE",
+            str(Path(__file__).resolve().parent.parent / "workspace"),
+        )
+    )
     candidate_paths = [
-        Path(__file__).resolve().parent.parent / "workspace" / "bot_system" / ".dashboard_control_token",
-        Path(__file__).resolve().parent.parent / "workspace" / ".dashboard_control_token",
+        workspace_root / "bot_system" / ".dashboard_control_token",
+        workspace_root / ".dashboard_control_token",
         Path(__file__).resolve().parent.parent / "workspace_backup_safety" / ".dashboard_control_token",
         Path(__file__).resolve().parent / ".dashboard_control_token",
     ]
@@ -1728,7 +1735,7 @@ async def api_run_batch(request: Request = None, video_mode: str = "auto"):
                 "message": "Pipeline đang bận xử lý video khác.",
             },
         )
-    if Path(r"C:\tool v1\workspace\control\v1.pause").exists():
+    if (_get_system_path("control") / "v1.pause").exists():
         raise HTTPException(409, "Tool đang tắt, không nhận batch mới.")
     status = job_tracker.get_status()
     if (BATCH_TASK is not None and not BATCH_TASK.done()) or status.get("active"):
@@ -1884,7 +1891,7 @@ async def api_retry_video(request: Request):
                 "message": "Hiện đang có tiến trình video đang xử lý, vui lòng đợi!",
             },
         )
-    if Path(r"C:\tool v1\workspace\control\v1.pause").exists():
+    if (_get_system_path("control") / "v1.pause").exists():
         raise HTTPException(409, "Tool đang tắt, không nhận xử lý video mới.")
 
     filename = ""

@@ -9,7 +9,10 @@ import subprocess
 import time
 import urllib.request
 
+from core.logging_setup import RedactingFormatter
+
 ROOT = Path(__file__).resolve().parent
+WORKSPACE = Path(os.getenv("AUTODUB_WORKSPACE", str(ROOT.parent / "workspace")))
 DASHBOARD_STATUS_URL = "http://127.0.0.1:8088/api/status"
 
 
@@ -51,14 +54,14 @@ def main():
         raise ctypes.WinError(ctypes.get_last_error())
     if ctypes.get_last_error() == 183:
         return
-    bs_logs = ROOT.parent / "workspace" / "bot_system" / "service_logs"
-    logs = bs_logs if (bs_logs.is_dir() or (ROOT.parent / "workspace" / "bot_system").is_dir()) else (ROOT.parent / "workspace" / "service_logs")
+    bs_logs = WORKSPACE / "bot_system" / "service_logs"
+    logs = bs_logs if (bs_logs.is_dir() or (WORKSPACE / "bot_system").is_dir()) else (WORKSPACE / "service_logs")
     logs.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger(service)
     logger.setLevel(logging.INFO)
     handler = RotatingFileHandler(logs / (service + "_supervisor.log"),
                                  maxBytes=2_000_000, backupCount=3, encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    handler.setFormatter(RedactingFormatter("%(asctime)s %(message)s"))
     logger.addHandler(handler)
     python = ROOT / "venv" / "Scripts" / "python.exe"
     scripts = {
@@ -74,16 +77,16 @@ def main():
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _sock:
             _sock.settimeout(0.3)
             if _sock.connect_ex(('127.0.0.1', 8090)) != 0:
-                control_python = Path(r"C:\tool v1\backend\venv\Scripts\pythonw.exe")
-                control_script = Path(r"C:\tool v1\backend\tool_control.py")
+                control_python = ROOT / "venv" / "Scripts" / "pythonw.exe"
+                control_script = ROOT / "tool_control.py"
                 subprocess.Popen([str(control_python), str(control_script)],
                                  cwd=str(control_script.parent), creationflags=subprocess.CREATE_NO_WINDOW,
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
-    bs_control = ROOT.parent / "workspace" / "bot_system" / "control"
-    control_dir = bs_control if bs_control.is_dir() else (ROOT.parent / "workspace" / "control")
+    bs_control = WORKSPACE / "bot_system" / "control"
+    control_dir = bs_control if bs_control.is_dir() else (WORKSPACE / "control")
     control_pause = control_dir / "v1.pause"
     delay = 5
     while True:

@@ -398,9 +398,8 @@ class V1Orchestrator:
         def check_stop():
             from batch_processor import BatchStopRequested
             import job_tracker
-            stop_file = Path(self.workspace) / "control" / "video.stop"
-            stop_json = Path(self.workspace) / "bot_system" / "stop_request.json"
-            if (stop_checker and stop_checker()) or job_tracker.is_stop_requested() or stop_file.exists() or stop_json.exists():
+            import stop_service
+            if (stop_checker and stop_checker()) or job_tracker.is_stop_requested() or stop_service.is_stop_requested(self.workspace):
                 raise BatchStopRequested(f"Job {job_id} đã bị dừng theo yêu cầu.")
 
         async def pause_checkpoint():

@@ -7,6 +7,8 @@ import os
 import types
 from pathlib import Path
 
+import stop_service
+
 BASE_DIR = Path(__file__).resolve().parent
 WORKSPACE = Path(os.getenv("AUTODUB_WORKSPACE", str(BASE_DIR.parent / "workspace")))
 
@@ -22,35 +24,19 @@ class _SharedState(types.ModuleType):
         if self._local_stop:
             return True
         try:
-            if (WORKSPACE / "control" / "video.stop").exists():
-                return True
+            return stop_service.is_stop_requested(WORKSPACE)
         except Exception:
-            pass
-        try:
-            if (WORKSPACE / "bot_system" / "stop_request.json").exists():
-                return True
-        except Exception:
-            pass
-        return False
+            return False
 
     @stop_requested.setter
     def stop_requested(self, val: bool):
         self._local_stop = bool(val)
-        if val:
-            try:
-                ctrl = WORKSPACE / "control"
-                ctrl.mkdir(parents=True, exist_ok=True)
-                (ctrl / "video.stop").write_text("1", encoding="utf-8")
-            except Exception:
-                pass
-        else:
-            try:
-                (WORKSPACE / "control" / "video.stop").unlink(missing_ok=True)
-            except Exception:
-                pass
-            try:
-                (WORKSPACE / "bot_system" / "stop_request.json").unlink(missing_ok=True)
-            except Exception:
-                pass
+        try:
+            if val:
+                stop_service.request_stop(WORKSPACE, source="shared_state", reason="stop_requested=True")
+            elif stop_service.is_stop_requested(WORKSPACE):
+                stop_service.clear_stop(WORKSPACE, source="shared_state", reason="stop_requested=False")
+        except Exception:
+            pass
 
 sys.modules[__name__] = _SharedState(__name__)

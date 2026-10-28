@@ -29,6 +29,8 @@ from environment import load_environment  # noqa: E402
 
 load_environment(_BACKEND_DIR)
 
+from core.logging_setup import setup_logging  # noqa: E402
+
 import requests  # noqa: E402
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update  # noqa: E402
 from telegram.ext import (  # noqa: E402
@@ -683,13 +685,10 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stdout,
+    setup_logging(
+        "telegram_script_bot",
+        fmt="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    # httpx ghi log INFO sẽ chèn cả token vào URL mỗi vòng getUpdates — hạ xuống WARNING cho sạch & kín log.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
     if isinstance(sys.stdout, io.TextIOWrapper):
         sys.stdout.reconfigure(encoding="utf-8")
     if isinstance(sys.stderr, io.TextIOWrapper):

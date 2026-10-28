@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 from pipeline_v2.atomic_io import atomic_write_json
+import stop_service
 
 BASE_DIR = Path(__file__).resolve().parent
 WORKSPACE = Path(os.getenv("AUTODUB_WORKSPACE", str(BASE_DIR.parent / "workspace")))
@@ -458,14 +459,9 @@ def start_batch(
         reserved = owner.get("job_id") == job_id and owner.get("pid") == os.getpid()
         if not reserved:
             _claim_batch_lock_unlocked(job_id)
-            try:
-                (WORKSPACE / "control" / "video.stop").unlink(missing_ok=True)
-            except Exception:
-                pass
-            try:
-                STATUS_FILE.with_name("stop_request.json").unlink(missing_ok=True)
-            except Exception:
-                pass
+            stop_service.clear_stop(
+                WORKSPACE, status_file=STATUS_FILE, source="job_tracker", reason="new batch starts"
+            )
         now = time.time()
         _CURRENT_STATE.update({
             "schema_version": 2,
@@ -715,6 +711,18 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
         message = "Chưa xác nhận thành phẩm: " + check["reason"]
         set_error(video_name, message, fatal=True, worker_id=worker_id)
         raise RuntimeError(message)
+    try:
+        import delivery_ledger
+        delivery_ledger.record(
+            "output_verified",
+            path=output_path,
+            job_id=_CURRENT_STATE.get("job_id"),
+            workspace=WORKSPACE,
+            status_file=STATUS_FILE,
+            extra={"video_name": video_name, "duration_seconds": duration_seconds},
+        )
+    except Exception:
+        pass
     with _LOCK:
         _sync_from_disk_unlocked()
         now = time.time()
@@ -899,15 +907,13 @@ def request_stop():
     """Gửi yêu cầu dừng batch (hỗ trợ đa tiến trình: main.py, telegram_bot.py, v1/v2)."""
     with _LOCK:
         _sync_from_disk_unlocked()
-        control_dir = WORKSPACE / "control"
-        control_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            (control_dir / "video.stop").write_text(str(time.time()), encoding="utf-8")
-        except Exception:
-            pass
-
-        atomic_write_json(STATUS_FILE.with_name("stop_request.json"),
-                          {"job_id": _CURRENT_STATE.get("job_id"), "requested_at": time.time()})
+        stop_service.request_stop(
+            WORKSPACE,
+            status_file=STATUS_FILE,
+            source="job_tracker",
+            reason="batch stop requested",
+            job_id=_CURRENT_STATE.get("job_id"),
+        )
         _freeze_progress_unlocked()
         now = time.time()
         if "workers" in _CURRENT_STATE and isinstance(_CURRENT_STATE["workers"], dict):
@@ -935,15 +941,7 @@ def request_stop():
 def clear_stop_request():
     """Xóa các cờ dừng khi bắt đầu một batch hoặc video mới."""
     with _LOCK:
-        control_stop = WORKSPACE / "control" / "video.stop"
-        try:
-            control_stop.unlink(missing_ok=True)
-        except Exception:
-            pass
-        try:
-            STATUS_FILE.with_name("stop_request.json").unlink(missing_ok=True)
-        except Exception:
-            pass
+        stop_service.clear_stop(WORKSPACE, status_file=STATUS_FILE, source="job_tracker")
         _CURRENT_STATE["stop_requested"] = False
         _save_state_to_disk()
 
@@ -961,12 +959,7 @@ def clear_stale_stop_request() -> bool:
 
 def is_stop_requested() -> bool:
     """Kiểm tra cờ dừng xuyên tiến trình."""
-    control_stop = WORKSPACE / "control" / "video.stop"
-    if control_stop.exists():
-        return True
-
-    stop_req_file = STATUS_FILE.with_name("stop_request.json")
-    if stop_req_file.exists():
+    if stop_service.is_stop_requested(WORKSPACE, status_file=STATUS_FILE):
         return True
 
     with _LOCK:

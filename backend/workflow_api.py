@@ -3943,10 +3943,10 @@ def _wait_pipeline_free(job_id: str, max_wait_s: int = 1800) -> bool:
         # khiến stop_requested = True vĩnh viễn — mọi API dịch/TTS đều tưởng đang bị huỷ)
         try:
             import shared_state as _ss
-            for _stale in (_ss.WORKSPACE / "control" / "video.stop", _ss.WORKSPACE / "bot_system" / "stop_request.json"):
-                if _stale.exists():
-                    _stale.unlink()
-                    logger.info("P9 manual job: đã dọn file stop stale %s", _stale)
+            import stop_service as _stop
+            if _stop.is_stop_requested(_ss.WORKSPACE):
+                _stop.clear_stop(_ss.WORKSPACE, source="workflow_api", reason="stale stop cleanup")
+                logger.info("P9 manual job: đã dọn file stop stale")
         except Exception:
             pass
         from disk_guard import ensure_free_space

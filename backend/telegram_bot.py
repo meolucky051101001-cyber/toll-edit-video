@@ -23,9 +23,9 @@ if os.name == 'nt':
     subprocess.Popen.__init__ = patched_init
 
 import logging
-from logging.handlers import RotatingFileHandler
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from core.logging_setup import setup_logging
 
 # Load .env local file
 from environment import load_environment
@@ -79,22 +79,12 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def _configure_bot_logging() -> None:
-    log_handlers = [
-        RotatingFileHandler(backend_app_log, maxBytes=10_000_000, backupCount=3, encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-    try:
-        log_handlers.append(RotatingFileHandler(root_app_log, maxBytes=10_000_000, backupCount=3, encoding='utf-8'))
-    except Exception:
-        pass
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=log_handlers,
-        force=True
+    setup_logging(
+        "telegram_bot",
+        [backend_app_log, root_app_log],
+        force=True,
+        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
     logger.info("=== AUTO VIDEO DUBBING TOOL V1 STARTED === [PID: %d] [CODEX SINGLE VOICE LOCK ACTIVE]", os.getpid())
 
 async def safe_edit_status(status_msg, text, parse_mode=None, retries=3):
