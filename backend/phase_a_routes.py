@@ -1,6 +1,5 @@
 """
-Phase A API Routes - Presets, Per-Video Config, and Bulk Enqueue.
-Hỗ trợ cả Tool V1 và Tool V2 thông qua FastAPI APIRouter.
+Phase A API Routes - Presets, Per-Video Config, and Bulk Enqueue cho Tool V1.
 """
 
 import uuid
@@ -237,29 +236,14 @@ def _enqueue_jobs_batch(request: Request, payload: Dict[str, Any]):
     message = f"Đã xếp hàng {len(frozen_items)} video với cấu hình đóng băng."
     
     if trigger_now:
-        # Kiểm tra xem đang chạy trong V1 hay V2
-        is_v2 = "tool v2" in str(Path(__file__).resolve()).lower()
-        if is_v2:
-            # Trigger V2 batch
-            try:
-                from dashboard_monitor import is_v2_batch_running, is_v2_paused, api_run_batch
-                if not is_v2_paused() and not is_v2_batch_running():
-                    import asyncio
-                    asyncio.create_task(api_run_batch(None, video_mode=batch_video_mode))
-                    execution_triggered = True
-                    message += " Đang khởi chạy tiến trình xử lý V2..."
-            except Exception as e:
-                logger.warning("Không thể tự kích hoạt batch V2: %s", e)
-        else:
-            # Trigger V1 batch
-            try:
-                from main import api_run_batch
-                import asyncio
-                asyncio.create_task(api_run_batch(None, video_mode=batch_video_mode))
-                execution_triggered = True
-                message += " Đang khởi chạy tiến trình xử lý V1..."
-            except Exception as e:
-                logger.warning("Không thể tự kích hoạt batch V1: %s", e)
+        try:
+            from main import api_run_batch
+            import asyncio
+            asyncio.create_task(api_run_batch(None, video_mode=batch_video_mode))
+            execution_triggered = True
+            message += " Đang khởi chạy tiến trình xử lý V1..."
+        except Exception as e:
+            logger.warning("Không thể tự kích hoạt batch V1: %s", e)
 
     response_data = {
         "status": "started" if execution_triggered else "enqueued",

@@ -97,6 +97,11 @@ class TestDashboardAndTracker(unittest.TestCase):
         self.assertIn("active", data)
         self.assertIn("percent", data)
         self.assertIn("status", data)
+        ram = data.get("ram")
+        self.assertIsInstance(ram, dict)
+        self.assertGreater(ram["total_gb"], 0)
+        self.assertGreaterEqual(ram["percent"], 0)
+        self.assertLessEqual(ram["percent"], 100)
 
     def test_api_phoi_endpoint(self):
         res = self.client.get("/api/phoi")

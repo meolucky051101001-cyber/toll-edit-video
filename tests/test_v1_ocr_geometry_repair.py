@@ -232,6 +232,12 @@ class PipelineTests(unittest.TestCase):
         segs=[segment()]
         self.run_ocr(segs,lambda frames:[[] for _ in frames])
         self.assertEqual(segs[0].ocr_mask_status,'no_caption_evidence')
+    def test_unmatched_caption_without_band_fails_closed(self):
+        def unmatched(frames):
+            return [[([[100, 100], [600, 100], [600, 150], [100, 150]], '完全不同字幕', .95)]
+                    for _ in frames]
+        with self.assertRaises(geo.OCRGeometryError):
+            self.run_ocr([segment()], unmatched)
     def test_all_decode_failures_not_silent_success(self):
         with self.assertRaisesRegex(RuntimeError, 'decode'):
             self.run_ocr([segment()],lambda frames:[[] for _ in frames],capture_args={'readable':False})

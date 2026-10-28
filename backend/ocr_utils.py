@@ -1361,7 +1361,8 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                 seg.tracking_blocks = []
                 seg.y_pct = 0.85
                 seg.max_y_pct = 0.90
-                seg.ocr_mask_status = 'no_caption_evidence'
+                if seg.ocr_mask_status != 'unresolved':
+                    seg.ocr_mask_status = 'no_caption_evidence'
 
     report = geometry_summary(srt_segments)
     logger.info('OCR geometry audit: %s', report)

@@ -58,6 +58,34 @@ class TestDashboardHardening(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertIn("X-Local-Control-Token", response.json()["detail"])
 
+    def test_script_route_requires_token(self):
+        unauth_client = TestClient(main.app)
+        response = unauth_client.post("/api/script/preview-tts", json={})
+        self.assertEqual(response.status_code, 403)
+        authorized = self.client.post("/api/script/preview-tts", json={})
+        self.assertEqual(authorized.status_code, 422)
+
+    def test_thumbnail_route_requires_token(self):
+        unauth_client = TestClient(main.app)
+        response = unauth_client.post(
+            "/api/workflow/thumbnail/capture", json={"stem": "sample"}
+        )
+        self.assertEqual(response.status_code, 403)
+        authorized = self.client.post(
+            "/api/workflow/thumbnail/capture", json={"stem": ""}
+        )
+        self.assertEqual(authorized.status_code, 400)
+
+    def test_auth_token_endpoint_removed(self):
+        response = TestClient(main.app).get("/api/auth-token")
+        self.assertEqual(response.status_code, 404)
+
+    def test_script_studio_page_receives_control_token(self):
+        response = TestClient(main.app).get("/kich-ban")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(main.LOCAL_TOKEN, response.text)
+        self.assertNotIn("__REPLACE_TOKEN__", response.text)
+
     def tearDown(self):
         self.input_patch.stop()
         self.output_patch.stop()

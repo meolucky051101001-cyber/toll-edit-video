@@ -1,84 +1,124 @@
-# BÁO CÁO TRẠNG THÁI HỆ THỐNG & DỰ ÁN (PROJECT STATE & HANDOFF)
-*Tạo ngày: 03/10/2026 - Dành cho Antigravity IDE & Antigravity 2.0*
+# BÁO CÁO TRẠNG THÁI TOOL V1 (PROJECT STATE & HANDOFF)
+
+*Cập nhật: 28/10/2026. Tài liệu này thay thế bản 03/10/2026 (mô tả Tool V1 + Tool V2 song song).*
 
 ---
 
 ## 1. TỔNG QUAN HỆ THỐNG
-Dự án bao gồm 2 công cụ AutoDub độc lập chạy song song, được điều phối bởi 1 bộ điều khiển trung tâm (Central Controller) trên cổng 8090:
 
-1. **Tool V1 (`C:\tool v1`):**
-   - Chuyên xử lý video ngắn (Shorts / Reels / TikTok).
-   - Backend chạy cổng: `8088` (`main.py`, `dashboard_monitor.py`, `telegram_bot.py`).
-   - Sử dụng Whisper Large V3 / Gemini, RVC (giọng Chí Mai), CapCut TTS, Edge TTS.
-   - Thư mục điều khiển: `C:\tool v1\workspace\bot_system\control\` và `C:\tool v1\workspace\control\`.
+Tool V1 là hệ thống **duy nhất** đang vận hành. Tool V2 đã ngừng sử dụng và không còn thư mục `C:\tool v2`; mọi tài liệu/tính năng nhắc tới V2, RVC hay dashboard cổng 8089 chỉ là lịch sử.
 
-2. **Tool V2 (`C:\tool v2`):**
-   - Chuyên xử lý video dài (Long-form YouTube / Podcasts / Giải thích).
-   - Backend chạy cổng: `8089` (`dashboard_monitor.py`, `telegram_bot.py`, pipeline V2).
-   - Nâng cấp đặc biệt:
-     - Tích hợp **VieNeu-TTS (48kHz Neural Vietnamese TTS)** chạy 100% cục bộ trên GPU NVIDIA (CUDA).
-     - Giao diện Dashboard V2 có chọn giọng riêng lẻ (`manualVoiceSelect`, `autoFemaleVoiceSelect`, `autoMaleVoiceSelect`).
-     - Tích hợp logic cắt phụ đề thông minh, giữ nguyên giọng gốc / dịch đè âm thanh.
-   - Thư mục điều khiển: `C:\tool v2\workspace\control\`.
+| Thành phần | Cổng | File chính |
+| --- | --- | --- |
+| Dashboard + Workflow API | `http://127.0.0.1:8088` | `backend/main.py` |
+| Tool Control (chọn giọng dùng chung) | `http://127.0.0.1:8090` | `backend/tool_control.py` |
+| Telegram Bot + Background Service | — | `backend/telegram_bot.py`, `backend/background_service.py` |
 
-3. **Bộ điều khiển trung tâm (Central Controller - `tool_control.py`):**
-   - Cổng giao diện: `http://127.0.0.1:8090`.
-   - File chạy: `C:\tool v1\backend\tool_control.py` (đồng bộ với `C:\tool v1\tool_control.py`).
-   - Quy tắc an toàn: Độc quyền (Chỉ bật 1 Tool V1 hoặc Tool V2 tại một thời điểm, hoặc tắt cả 2 để giải phóng 100% RAM & VRAM GPU).
-   - Quản lý danh mục 26 giọng đọc dùng chung, tích hợp video test giọng 14s.
+Đường dẫn giao diện:
 
----
+- Dashboard: `http://127.0.0.1:8088/`
+- Studio Quy Trình: `http://127.0.0.1:8088/quy-trinh`
+- Studio Kịch Bản: `http://127.0.0.1:8088/kich-ban`
+- Kiểm tra sức khỏe: `GET /api/status`, `GET /api/preflight`
 
-- **12 giọng CapCut TTS (Chất lượng cao & Mặc định):**
-  - `capcut-BV562_streaming`: Mai (Nữ Chuẩn - Mặc định)
-  - `capcut-BV075_streaming`: Thanh Niên Tự Tin (Nam Trẻ)
-  - `capcut-multi_male_felipe_uranus_bigtts`: Nam Trầm (Chuyên Gia)
-  - `capcut-BV421_vivn_streaming`: Nhỏ Ngọt Ngào (Nữ Dễ Thương)
-  - `capcut-BV074_streaming`: Cô Gái Hoạt Ngôn (Nữ Năng Động)
-  - `capcut-multi_female_richgirl_uranus_bigtts`: Review Phim (Kịch Tính)
-  - `capcut-vi_female_huong`: Hương (Nữ Phổ Thông)
-  - `capcut-multi_female_banmai`: Ban Mai (Tươi Sáng)
-  - `capcut-BV007_streaming`: Nam Phổ Thông
-  - `capcut-BV008_streaming`: Nam Trầm Ấm
-  - `capcut-BV074_streaming_dsp`: Giọng Bé (Dễ Thương)
-  - `capcut-BV075_streaming_vibrato_dsp`: Việt Méo (Hài Hước)
-- **14 giọng Vie-TTS / VieNeu (48kHz Studio):**
-  - `vieneu-haidang`: Hải Đăng (Nam Bắc)
-  - `vieneu-maianh`: Mai Anh (Nữ Bắc)
-  - `vieneu-trucly`: Trúc Ly (Nữ Bắc)
-  - `vieneu-thienminh`: Thiện Minh (Nam Kể chuyện)
-  - `vieneu-thuydung`: Thùy Dung (Nữ Nam)
-  - `vieneu-adambua`: Adam Bựa (Nam Hài hước)
-  - `vieneu-thaison`: Thái Sơn (Nam Nam)
-  - `vieneu-phamtuyen`: Phạm Tuyên (Nam Trầm ấm)
-  - `vieneu-ngochuyen`: Ngọc Huyền (Nữ Tự nhiên)
-  - `vieneu-ngoctran`: Ngọc Trân (Nữ Miền Trung)
-  - `vieneu-quangson`: Quang Sơn (Nam Miền Trung)
-  - `vieneu-myduyen`: Mỹ Duyên (Nữ Nam Đọc truyện)
-  - `vieneu-quynhanh`: Quỳnh Anh (Nữ Bắc Đọc truyện)
-  - `vieneu-thanhbinh`: Thanh Bình (Nam Kể chuyện)
-- **2 giọng Microsoft Edge TTS:**
-  - `microsoft-hoaimy`: Hoài My (Nữ)
-  - `microsoft-namminh`: Nam Minh (Nam)
-*(Model RVC đã được gỡ bỏ hoàn toàn; tự động ánh xạ cấu hình cũ sang CapCut Mai)*
+Khởi động / dừng:
+
+- Khởi động toàn bộ: `KhoiDongAn.vbs` (hoặc `start_bot.bat` để thấy console).
+- Chỉ mở giao diện quan sát: `Giao_Dien_Quan_Sat_Tool.bat`.
+- Dừng an toàn: `stop_bot.bat` hoặc `TatHoanToan.bat`.
 
 ---
 
-## 3. CÁC CÔNG VIỆC VỪA HOÀN TẤT GẦN ĐÂY
-1. **Phân tích 2 repo mã nguồn mở:** `Editor-AI-App` & `VieNeu-TTS`.
-2. **Triển khai Giai đoạn 1 (VieNeu-TTS):** Cài đặt thư viện `vieneu`, xây dựng service `C:\tool v2\backend\ai\vieneu_tts_service.py`, nạp 14 giọng vào danh mục `voice_catalog.json`.
-3. **Triển khai Giai đoạn 2 (Tích hợp Dashboard Tool V2):** Cập nhật `dashboard.html` để chọn giọng thủ công, giọng nữ/nam tự động theo từng nhóm optgroup.
-4. **Triển khai Giai đoạn 3 (Khung Test Giọng Controller 8090):**
-   - Sinh bộ âm thanh & video mẫu 14s cho tất cả 14 giọng VieNeu.
-   - Thêm optgroup VieNeu và các nút Quick Chip trên trang 8090.
-   - Hỗ trợ xem thử video, nghe audio riêng và bấm 1 nút lưu đồng bộ cả 2 tool.
-   - Khắc phục lỗi socket `TIME_WAIT` và thiết lập `allow_reuse_address = True`.
+## 2. QUY TRÌNH 8 BƯỚC VÀ CƠ CHẾ FAIL-CLOSED
+
+Pipeline legacy (`PIPELINE_MODE=legacy`) do `backend/v1_orchestrator.py` điều phối, có manifest/checkpoint để resume:
+
+1. Tải & chuẩn bị video, trích WAV 44.1 kHz.
+2. Tách giọng/nhạc bằng BS-RoFormer (GPU) hoặc Demucs dự phòng.
+3. ASR Whisper Large-v3 Turbo (SenseVoice tùy chọn).
+4. OCR PP-OCRv6 (Smart Skip + OCR Geometry auto-heal).
+5. Dịch thuật Gemini đa key, có kiểm tra chất lượng theo lô.
+6. TTS CapCut / Vie-TTS / Edge + Timing Solver (speed limit).
+7. Hòa âm soft-ducking, chuẩn hóa EBU R128.
+8. Render NVENC H.264, che phụ đề cũ, nhúng phụ đề mới, QC rồi mới giao video.
+
+Điểm chặn lỗi (mặc định mới):
+
+- `V1_QC_POLICY=BLOCK` trong `backend/v1_feature_flags.py` và `backend/main.py`.
+- Lỗi toàn vẹn nghiêm trọng **luôn** ném `CriticalQualityError` trước khi giao video, kể cả khi chọn `WARN` hoặc `REPORT_ONLY`.
+- Stage 3 và Stage 4 gọi OCR với `strict_geometry=True`; phụ đề phát hiện được nhưng không xác định được vùng che sẽ dừng job (`OCRGeometryError`) thay vì đoán.
+- Stage 5 gọi `translate_subtitles(strict=True)`; chỉ cho phép fallback khi đặt `V1_ALLOW_TRANSLATION_FALLBACK=true`.
+- Video không có phụ đề gốc vẫn hợp lệ và đi tiếp bình thường.
+
+Khi job dừng ở bước 4/5, hãy sửa nguyên nhân (vùng OCR, ngưỡng, prompt dịch) thay vì hạ chính sách QC. Cờ runtime nằm tại `workspace/bot_system/v1_feature_flags.json` và có thể ghi đè mặc định; file này không được commit. **Lưu ý:** file runtime hiện tại vẫn đặt `V1_QC_POLICY=REPORT_ONLY`; cần đổi sang `BLOCK` trên Dashboard khi muốn chặn giao video lỗi QC (lỗi nghiêm trọng vẫn luôn bị chặn ở mọi chế độ).
 
 ---
 
-## 4. CÁCH KIỂM TRA & VẬN HÀNH
-- **Giao diện điều khiển chung:** `http://127.0.0.1:8090`
-- **Dashboard Tool V1:** `http://127.0.0.1:8088`
-- **Dashboard Tool V2:** `http://127.0.0.1:8089`
-- File khởi động Tool V1: `C:\tool v1\Giao_Dien_Quan_Sat_Tool.bat`
-- File dừng toàn bộ: `C:\tool v1\TatHoanToan.bat`
+## 3. MÔI TRƯỜNG RUNTIME
+
+| Môi trường | Mục đích | Ghi chú |
+| --- | --- | --- |
+| `backend/venv` | Ứng dụng chính (FastAPI, bot, orchestrator) | Python 3.10.11 |
+| `backend/model_venv` | PP-OCRv6 cách ly | `paddleocr==3.7.0`, `onnxruntime-gpu==1.26.0` |
+| `backend/model_venv_separator` | BS-RoFormer tách âm | Model nặng, không đẩy lên Git |
+
+Quy tắc dependency:
+
+- `requirements.txt` (root) **không** chứa `paddleocr`; gói này chỉ cài trong runtime cách ly.
+- Pin OCR nằm ở `backend/requirements-v1-models.txt` và `backend/requirements-models.txt`.
+- Cài runtime OCR: `powershell -File backend/setup_v1_models.ps1` (thêm `-Preload` để tải sẵn model).
+
+---
+
+## 4. DANH MỤC GIỌNG ĐỌC
+
+Nguồn sự thật: `backend/voice_selection.py` (`DEFAULT_CATALOG`), lưu lựa chọn tại `workspace/bot_system/control/voice_selection.json`.
+
+- **12 giọng CapCut TTS** — mặc định `capcut-BV562_streaming` (Mai, nữ chuẩn); có `capcut-BV075_streaming` (nam trẻ) và các giọng nam/nữ khác.
+- **14 giọng Vie-TTS (48 kHz)** — Hải Đăng, Mai Anh, Trúc Ly, Thiện Minh, Thùy Dung, Adam Bựa, Thái Sơn, Phạm Tuyên, Ngọc Huyền, Ngọc Trân, Quang Sơn, Mỹ Duyên, Quỳnh Anh, Thanh Bình.
+- **2 giọng Microsoft Edge TTS** — Hoài My, Nam Minh (dự phòng).
+
+RVC và giọng `chi-mai` đã bị gỡ; mã cũ được tự động ánh xạ sang CapCut Mai. Chọn và nghe thử giọng tại Tool Control 8090.
+
+---
+
+## 5. KIỂM THỬ
+
+Bộ kiểm thử an toàn dùng trong CI (`.github/workflows/python-quality.yml`):
+
+```powershell
+.\backend\venv\Scripts\python.exe -m pytest -q --tb=short -p no:cacheprovider `
+  tests/test_app_paths.py tests/test_ocr_subtitle_locator.py tests/test_url_utils.py `
+  tests/test_v1_checkpoint_orchestrator.py tests/test_v1_ocr_geometry_repair.py `
+  tests/test_v1_quality_gate.py tests/test_pipeline_v2_failure_semantics.py `
+  tests/test_path_hardening.py tests/test_studio_render_safety.py tests/test_stop_flag_hygiene.py
+```
+
+- 81 test cũ đã lỗi thời được quarantine trong `tests/conftest.py`; không coi là test hồi quy.
+- Trước khi giao thay đổi, chạy tối thiểu nhóm trên và các test liên quan trực tiếp.
+
+---
+
+## 6. THAY ĐỔI GẦN ĐÂY (28/10/2026)
+
+1. Nối fail-closed vào pipeline chính: QC mặc định `BLOCK`, OCR strict ở stage 3/4, dịch strict ở stage 5, giữ nguyên trạng thái `unresolved` khi phát hiện phụ đề nhưng không có band tin cậy.
+2. Mở rộng CI sang 10 module kiểm thử an toàn (fail-closed, OCR geometry, render Studio, stop-flag, path hardening).
+3. Bổ sung dependency test còn thiếu vào `requirements-dev.txt`; bỏ pin `paddleocr>=2.7,<3` sai khỏi `requirements.txt` để khớp runtime `paddleocr==3.7.0`.
+4. Siết bảo mật API local: bắt buộc `X-Local-Control-Token` cho mọi request ghi `/api/*` và `/a2ui/*`, bỏ endpoint `/api/auth-token`; Dashboard/Studio nhận token inject sẵn, Telegram script bot đọc token từ workspace.
+5. Xóa mã V2 legacy (`dashboard_monitor.py`, `build_v2_dashboard.py`, test V2) và các nhánh V2 không còn chạy trong control plane.
+6. Tối ưu `GET /api/workflow/videos`: chuyển quét/kiểm tra artifact sang thread pool, thêm cache theo mtime/size; thời gian phản hồi giảm còn ~0,4–0,7 giây với ~350 video.
+7. Thêm chỉ số RAM vào `/api/status` và thanh RAM trên Dashboard cạnh VRAM.
+8. Dọn log/artifact test cũ (~110 MB) và sửa race lost-update khi ghi `.render_history` từ nhiều thread bằng khóa trong process.
+9. Cập nhật tài liệu trạng thái này theo thực tế V1-only.
+
+---
+
+## 7. NGUYÊN TẮC VẬN HÀNH AN TOÀN
+
+- Không kill/khởi động lại dashboard, bot hoặc job đang chạy nếu chưa được phép rõ ràng.
+- Không đọc/in `.env`, `douyin_cookies.txt`, token hay API key.
+- Không tự xóa/ghi đè file stop, queue hoặc dữ liệu thật trong `workspace/`.
+- Giữ `PIPELINE_MODE=legacy`; giữ nguyên 8 bước, Telegram bot, `/quy-trinh`, `/kich-ban`.
+- FFmpeg crop/blur phải ép `format=yuv420p`.
+- Giao diện 100% tiếng Việt, dark mode.
+- Visual sub-to-speech là tùy chọn, mặc định tắt (`V1_VISUAL_SUB_TO_SPEECH=false`).

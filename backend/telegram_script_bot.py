@@ -141,14 +141,40 @@ def format_script_preview(script: Dict[str, Any], engine: str, voice_nm: str) ->
 
 
 # ===== HTTP (chạy trong thread, không chặn event loop) =====
+def _control_token() -> str:
+    token = os.getenv("AUTODUB_LOCAL_TOKEN", "").strip()
+    if token:
+        return token
+    root = Path(__file__).resolve().parent.parent
+    for token_path in (
+        root / "workspace" / "bot_system" / ".dashboard_control_token",
+        root / "workspace" / ".dashboard_control_token",
+        root / "workspace_backup_safety" / ".dashboard_control_token",
+        Path(__file__).resolve().parent / ".dashboard_control_token",
+    ):
+        if token_path.is_file():
+            try:
+                return token_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                pass
+    return ""
+
+
+def _api_headers() -> Dict[str, str]:
+    token = _control_token()
+    return {"X-Local-Control-Token": token} if token else {}
+
+
 def api_get(path: str, timeout: float = 15.0) -> Dict[str, Any]:
-    resp = requests.get(f"{API_BASE}{path}", timeout=timeout)
+    resp = requests.get(f"{API_BASE}{path}", headers=_api_headers(), timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
 
 def api_post(path: str, payload: Dict[str, Any], timeout: float = 60.0) -> Tuple[int, Dict[str, Any]]:
-    resp = requests.post(f"{API_BASE}{path}", json=payload, timeout=timeout)
+    resp = requests.post(
+        f"{API_BASE}{path}", json=payload, headers=_api_headers(), timeout=timeout
+    )
     try:
         data = resp.json()
     except Exception:

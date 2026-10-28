@@ -172,17 +172,16 @@ async def security_middleware(request: Request, call_next):
     path = request.url.path
     method = request.method.upper()
     if method in ("POST", "PUT", "DELETE", "PATCH") and (path.startswith("/api/") or path.startswith("/a2ui/")):
-        if not path.startswith("/api/script/") and not path.startswith("/api/workflow/thumbnail/") and path != "/api/voice-preview":
-            token = request.headers.get("X-Local-Control-Token", "")
-            if not token or not secrets.compare_digest(str(token), str(LOCAL_TOKEN)):
-                # Dự phòng cho các nút điều khiển nội bộ từ dashboard UI hợp lệ
-                is_dashboard_internal = (
-                    request.headers.get("X-Dashboard-Input") == "1"
-                    and request.headers.get("origin") in (None, "http://127.0.0.1:8088", "http://localhost:8088", "http://127.0.0.1:5173", "http://localhost:5173")
-                    and path in ("/api/stop-batch", "/api/pause-video", "/api/resume-video", "/api/audio-settings", "/api/worker-settings")
-                )
-                if not is_dashboard_internal:
-                    return JSONResponse(status_code=403, content={"detail": "Yêu cầu thiếu hoặc sai X-Local-Control-Token"})
+        token = request.headers.get("X-Local-Control-Token", "")
+        if not token or not secrets.compare_digest(str(token), str(LOCAL_TOKEN)):
+            # Dự phòng cho các nút điều khiển nội bộ từ dashboard UI hợp lệ
+            is_dashboard_internal = (
+                request.headers.get("X-Dashboard-Input") == "1"
+                and request.headers.get("origin") in (None, "http://127.0.0.1:8088", "http://localhost:8088", "http://127.0.0.1:5173", "http://localhost:5173")
+                and path in ("/api/stop-batch", "/api/pause-video", "/api/resume-video", "/api/audio-settings", "/api/worker-settings")
+            )
+            if not is_dashboard_internal:
+                return JSONResponse(status_code=403, content={"detail": "Yêu cầu thiếu hoặc sai X-Local-Control-Token"})
 
 
     return await call_next(request)
@@ -1142,12 +1141,6 @@ async def serve_dashboard():
     return HTMLResponse("<h2>Dashboard template not found.</h2>", status_code=404)
 
 
-@app.get("/api/auth-token")
-async def api_get_auth_token():
-    """Trả về control token hợp lệ cho giao diện nội bộ localhost."""
-    return {"token": LOCAL_TOKEN}
-
-
 @app.get("/api/status")
 async def api_get_status():
     """Trả về trạng thái tiến độ thời gian thực của tác vụ hiện tại."""
@@ -1195,6 +1188,16 @@ async def api_get_status():
     try:
         from v1_vram_monitor import get_vram_stats
         status["vram"] = get_vram_stats()
+    except Exception:
+        pass
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        status["ram"] = {
+            "percent": mem.percent,
+            "used_gb": round(mem.used / (1024 ** 3), 2),
+            "total_gb": round(mem.total / (1024 ** 3), 2),
+        }
     except Exception:
         pass
     try:
@@ -2688,7 +2691,7 @@ async def api_get_feature_flags():
             "ENABLE_QWEN_ASR": os.getenv("ENABLE_QWEN_ASR", "false").lower() in ("true", "1", "yes"),
             "V1_ASR_CHUNKING": os.getenv("V1_ASR_CHUNKING", "true").lower() in ("true", "1", "yes"),
             "V1_SMART_SKIP_OCR": os.getenv("V1_SMART_SKIP_OCR", "true").lower() in ("true", "1", "yes"),
-            "V1_QC_POLICY": os.getenv("V1_QC_POLICY", "REPORT_ONLY"),
+            "V1_QC_POLICY": os.getenv("V1_QC_POLICY", "BLOCK"),
             "V1_MAX_NATURAL_SPEED": natural_speed_limit(),
             "V1_TTS_WORKERS": int(os.getenv("V1_TTS_WORKERS", "6")),
             "V1_USE_ORCHESTRATOR": True,

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 FastAPI Routes for Phase C: Segment Editing, Selective Regeneration & Revised Video Publishing.
-Mountable on both Tool V1 (main.py) and Tool V2 (dashboard_monitor.py).
+Mounted on the Tool V1 dashboard (main.py).
 """
 
 from __future__ import annotations

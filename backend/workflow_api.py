@@ -19,6 +19,7 @@ from typing import Optional, Dict, Any, List, Tuple
 import cv2
 import numpy as np
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote, unquote, urlencode
 from fastapi import APIRouter, HTTPException, Query, Body, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
@@ -508,21 +509,58 @@ def _valid_final_video(path: Path, defer=False) -> bool:
     return media_status(path, defer=defer)["status"] == "valid"
 
 
+_artifact_cache_lock = threading.Lock()
+_audio_valid_cache: Dict[tuple, bool] = {}
+_srt_valid_cache: Dict[tuple, bool] = {}
+
+
+def _artifact_cache_get(cache: Dict[tuple, bool], key: tuple) -> Optional[bool]:
+    with _artifact_cache_lock:
+        return cache.get(key)
+
+
+def _artifact_cache_put(cache: Dict[tuple, bool], key: tuple, value: bool) -> None:
+    with _artifact_cache_lock:
+        cache[key] = value
+        while len(cache) > 4096:
+            cache.pop(next(iter(cache)))
+
+
 def _valid_audio(path: Path) -> bool:
+    try:
+        stat = path.stat()
+        key = (str(path), stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        return False
+    cached = _artifact_cache_get(_audio_valid_cache, key)
+    if cached is not None:
+        return cached
     try:
         import soundfile as sf
         info = sf.info(str(path))
-        return info.frames > 0 and info.samplerate > 0 and info.channels > 0
+        valid = info.frames > 0 and info.samplerate > 0 and info.channels > 0
     except (OSError, RuntimeError, ValueError):
-        return False
+        valid = False
+    _artifact_cache_put(_audio_valid_cache, key, valid)
+    return valid
 
 
 def _valid_srt(path: Path) -> bool:
     try:
-        segments = parse_srt(path.read_text(encoding="utf-8-sig"))
-        return bool(segments) and all(s["end"] > s["start"] >= 0 and s["text"] for s in segments)
-    except (OSError, UnicodeError):
+        stat = path.stat()
+        key = (str(path), stat.st_size, stat.st_mtime_ns)
+    except OSError:
         return False
+    cached = _artifact_cache_get(_srt_valid_cache, key)
+    if cached is not None:
+        return cached
+    try:
+        segments = parse_srt(path.read_text(encoding="utf-8-sig"))
+        valid = bool(segments) and all(s["end"] > s["start"] >= 0 and s["text"] for s in segments)
+    except (OSError, UnicodeError):
+        valid = False
+    _artifact_cache_put(_srt_valid_cache, key, valid)
+    return valid
 
 
 def safe_check_job_artifacts(stem: str, defer_media=False) -> Dict[str, bool]:
@@ -868,62 +906,55 @@ async def api_choose_workflow_folder(
 @router.get("/api/workflow/videos")
 async def api_get_workflow_videos():
     """Liệt kê danh sách video trong phôi, downloads và banve kèm tình trạng 6 bước."""
-    items = []
+    items = await asyncio.to_thread(_collect_workflow_videos)
+    return {"videos": items}
+
+
+_video_scan_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="workflow-videos")
+
+
+def _workflow_video_entry(path: Path, source: str) -> Optional[Dict[str, Any]]:
+    try:
+        stat = path.stat()
+        return {
+            "stem": path.stem,
+            "filename": path.name,
+            "source": source,
+            "size_mb": round(stat.st_size / (1024 * 1024), 2),
+            "created_at": stat.st_mtime,
+            "steps": safe_check_job_artifacts(path.stem, defer_media=True),
+            "thumbnail_url": f"/api/workflow/thumbnail/{quote(path.stem, safe='')}",
+        }
+    except OSError:
+        return None
+
+
+def _collect_workflow_videos() -> List[Dict[str, Any]]:
+    candidates: List[Tuple[Path, str]] = []
     seen_stems = set()
-
-    # 1. Quét video phôi
-    if INPUT_DIR.exists():
+    for directory, source in ((INPUT_DIR, "phoi"), (DOWNLOADS_DIR, "downloads")):
+        if not directory.exists():
+            continue
         try:
-            for p in INPUT_DIR.glob("*.mp4"):
-                try:
-                    stem = p.stem
-                    seen_stems.add(stem)
-                    steps = safe_check_job_artifacts(stem, defer_media=True)
-                    size_mb = round(p.stat().st_size / (1024 * 1024), 2)
-                    mtime = p.stat().st_mtime
-                    items.append({
-                        "stem": stem,
-                        "filename": p.name,
-                        "source": "phoi",
-                        "size_mb": size_mb,
-                        "created_at": mtime,
-                        "steps": steps,
-                        "thumbnail_url": f"/api/workflow/thumbnail/{quote(stem, safe='')}"
-                    })
-                except OSError:
-                    continue
-        except OSError:
-            pass
-
-    # 2. Quét video downloads từ XHS / Telegram
-    if DOWNLOADS_DIR.exists():
-        try:
-            for dl in DOWNLOADS_DIR.glob("*.mp4"):
-                try:
-                    stem = dl.stem
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if not entry.is_file() or not entry.name.lower().endswith(".mp4"):
+                        continue
+                    stem = Path(entry.name).stem
                     if stem in seen_stems:
                         continue
                     seen_stems.add(stem)
-                    steps = safe_check_job_artifacts(stem, defer_media=True)
-                    size_mb = round(dl.stat().st_size / (1024 * 1024), 2)
-                    mtime = dl.stat().st_mtime
-                    items.append({
-                        "stem": stem,
-                        "filename": dl.name,
-                        "source": "downloads",
-                        "size_mb": size_mb,
-                        "created_at": mtime,
-                        "steps": steps,
-                        "thumbnail_url": f"/api/workflow/thumbnail/{quote(stem, safe='')}"
-                    })
-                except OSError:
-                    continue
+                    candidates.append((Path(entry.path), source))
         except OSError:
             pass
 
-    # Sắp xếp mới nhất lên đầu
-    items.sort(key=lambda x: x.get("created_at", 0), reverse=True)
-    return {"videos": items}
+    if not candidates:
+        return []
+    items = [item for item in _video_scan_pool.map(
+        lambda candidate: _workflow_video_entry(*candidate), candidates
+    ) if item]
+    items.sort(key=lambda item: item.get("created_at", 0), reverse=True)
+    return items
 
 
 def _find_vocal_files(job_dir: Optional[Path]) -> Tuple[Optional[Path], Optional[Path]]:

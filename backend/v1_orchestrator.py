@@ -606,6 +606,7 @@ class V1Orchestrator:
                                     sample_rate=1.0,
                                     api_key=overrides.get("api_key") or os.getenv("GEMINI_API_KEY", ""),
                                     srt_segments=[],
+                                    strict_geometry=True,
                                     visual_sub_to_speech=True,
                                     _source_duration=video_dur_s,
                                 ),
@@ -732,7 +733,7 @@ class V1Orchestrator:
                             ocr_strategy=ocr_strat,
                             adaptive=False,
                             geometry_report_path=str(out_dir / 'ocr_geometry_report.json'),
-                            strict_geometry=False,
+                            strict_geometry=True,
                             visual_sub_to_speech=visual_sub_to_speech,
                             _source_duration=video_dur_s,
                         ),
@@ -807,7 +808,7 @@ class V1Orchestrator:
                         effective_cfg.get("target_lang", "vi"),
                         api_key=gemini_key,
                         video_path=str(v_path),
-                        strict=False,
+                        strict=True,
                         script_mode=v1_script_mode,
                     ),
                     timeout=t_out
@@ -1047,7 +1048,7 @@ class V1Orchestrator:
 
         # ==================== STAGE 9: QUALITY GATE & PUBLISH ====================
         qc_target = temp_render_video if temp_render_video.is_file() else final_video
-        qc_policy = effective_cfg.get("qc_policy", "REPORT_ONLY")
+        qc_policy = effective_cfg.get("qc_policy", "BLOCK")
         logger.info("[QUALITY_GATE] Đang thực hiện kiểm tra chất lượng tự động 8 nhóm (policy=%s)...", qc_policy)
 
         try:

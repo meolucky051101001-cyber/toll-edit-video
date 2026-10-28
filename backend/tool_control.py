@@ -1,4 +1,4 @@
-"""Local control plane for the two fixed AutoDub installations."""
+"""Local control plane for the Tool V1 AutoDub installation."""
 import sys
 from pathlib import Path
 
@@ -73,7 +73,7 @@ def processes(key):
                 continue
 
             is_match = False
-            if root_str in cmd_str or (key == "v1" and r"c:\tool v1" in cmd_str) or (key == "v2" and r"c:\tool v2" in cmd_str):
+            if root_str in cmd_str or (key == "v1" and r"c:\tool v1" in cmd_str):
                 is_match = True
             if not is_match:
                 for arg in cmd[1:]:
@@ -315,7 +315,7 @@ def change(key, action):
         names = [name for _, name in procs_found]
 
         # Đảm bảo dashboard đang hoạt động
-        if not any(n in names for n in ('main.py', 'dashboard_monitor.py')):
+        if not any(n == 'main.py' for n in names):
             launch(key, 'dashboard')
 
         # Đảm bảo telegram bot đang hoạt động
@@ -358,7 +358,7 @@ def apply_boot_defaults():
         # Khởi chạy dịch vụ Tool V1
         procs = processes('v1')
         names = [name for _, name in procs]
-        if not any(n in names for n in ('main.py', 'dashboard_monitor.py')):
+        if 'main.py' not in names:
             launch('v1', 'dashboard')
         data = read_telemetry('v1')
         bots = [p for p, name in procs if name == 'telegram_bot.py']

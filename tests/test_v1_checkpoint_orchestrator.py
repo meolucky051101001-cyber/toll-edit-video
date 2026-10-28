@@ -1,4 +1,7 @@
+import ast
+import inspect
 import os
+import textwrap
 import unittest
 from unittest import mock
 import tempfile
@@ -133,6 +136,22 @@ class CheckpointOrchestratorTests(unittest.TestCase):
             self.assertFalse(can_resume_bad)
             self.assertEqual(next_bad, "extract_audio")
 
+    def test_main_pipeline_enables_strict_ocr_and_translation(self):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(V1Orchestrator.execute_job)))
+        calls = {"perform_video_ocr": [], "translate_subtitles": []}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            target = node.args[0]
+            name = target.id if isinstance(target, ast.Name) else ""
+            if name in calls:
+                calls[name].append({kw.arg: kw.value for kw in node.keywords})
+
+        self.assertTrue(calls["perform_video_ocr"])
+        self.assertTrue(all(call["strict_geometry"].value is True
+                            for call in calls["perform_video_ocr"]))
+        self.assertIs(calls["translate_subtitles"][0]["strict"].value, True)
+
     def test_orchestrator_planning(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             orch = V1Orchestrator(workspace_path=tmp_dir)
@@ -147,6 +166,7 @@ class CheckpointOrchestratorTests(unittest.TestCase):
                 plan = orch.plan_job(video_file, "job_orch_01", user_mode="auto")
                 self.assertEqual(plan["job_id"], "job_orch_01")
                 self.assertEqual(plan["routing"]["resolved_mode"], "SHORT")
+                self.assertEqual(plan["effective_config"]["qc_policy"], "BLOCK")
                 self.assertIn("separation", plan["planned_models"])
                 self.assertIn("asr", plan["planned_models"])
                 self.assertIn("tts", plan["planned_models"])

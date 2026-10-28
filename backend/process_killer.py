@@ -12,7 +12,6 @@ logger = logging.getLogger("process_killer")
 PROTECTED_SCRIPTS = {
     "main.py",
     "telegram_bot.py",
-    "dashboard_monitor.py",
     "background_service.py",
 }
 

@@ -26,7 +26,7 @@ DEFAULT_FLAGS: Dict[str, Any] = {
     "V1_ASR_MODEL": "whisper_sensevoice",
     "V1_ASR_CHUNKING": True,
     "V1_SMART_SKIP_OCR": True,
-    "V1_QC_POLICY": "REPORT_ONLY",
+    "V1_QC_POLICY": "BLOCK",
     "V1_MAX_NATURAL_SPEED": 1.50,
     "V1_TTS_WORKERS": 6,
     "V1_USE_ORCHESTRATOR": True,

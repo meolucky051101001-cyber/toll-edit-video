@@ -1,8 +1,8 @@
 """
 v1_quality_gate.py - Quality Gate tự động 8 nhóm kiểm tra (Tool V1 - Giai đoạn 5).
 Tự động xuất bản báo cáo QC sau khi xuất video thành phẩm.
-Chính sách: REPORT_ONLY (mặc định) / WARN / BLOCK.
-Bảo toàn 100% video xuất xưởng, không làm gián đoạn tác vụ khi ở chế độ mặc định.
+Chính sách: BLOCK (mặc định) / WARN / REPORT_ONLY.
+Lỗi toàn vẹn nghiêm trọng luôn bị chặn trước khi giao video, kể cả ở chế độ chỉ báo cáo.
 """
 
 from __future__ import annotations
@@ -109,9 +109,9 @@ def run_quality_gate(
     """
     Chạy 8 nhóm kiểm tra tự động cho video thành phẩm và xuất báo cáo JSON.
     """
-    effective_policy = (policy or os.getenv("V1_QC_POLICY", QCPolicy.REPORT_ONLY.value)).upper()
+    effective_policy = (policy or os.getenv("V1_QC_POLICY", QCPolicy.BLOCK.value)).upper()
     if effective_policy not in (QCPolicy.REPORT_ONLY.value, QCPolicy.WARN.value, QCPolicy.BLOCK.value):
-        effective_policy = QCPolicy.REPORT_ONLY.value
+        effective_policy = QCPolicy.BLOCK.value
 
     v_path = Path(final_video_path)
     video_name = v_path.name if v_path.name else "unknown_video"

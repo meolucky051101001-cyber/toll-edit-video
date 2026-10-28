@@ -250,12 +250,21 @@ class AIChatRequest(BaseModel):
 # =========================================================================
 
 def get_current_control_token() -> str:
-    token_path = Path(__file__).resolve().parent.parent / "workspace" / ".dashboard_control_token"
-    if token_path.is_file():
-        try:
-            return token_path.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
+    env_token = os.getenv("AUTODUB_LOCAL_TOKEN", "").strip()
+    if env_token:
+        return env_token
+    root = Path(__file__).resolve().parent.parent
+    for token_path in (
+        root / "workspace" / "bot_system" / ".dashboard_control_token",
+        root / "workspace" / ".dashboard_control_token",
+        root / "workspace_backup_safety" / ".dashboard_control_token",
+        Path(__file__).resolve().parent / ".dashboard_control_token",
+    ):
+        if token_path.is_file():
+            try:
+                return token_path.read_text(encoding="utf-8").strip()
+            except Exception:
+                pass
     return ""
 
 @router.get("/kich-ban", response_class=HTMLResponse)

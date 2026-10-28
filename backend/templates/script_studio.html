@@ -3,6 +3,21 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script>
+    window.LOCAL_TOKEN = "__REPLACE_TOKEN__";
+    (() => {
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = (resource, config) => {
+        if (typeof resource === 'string' && resource.startsWith('/api/')) {
+          config = config || {};
+          const headers = new Headers(config.headers || {});
+          headers.set('X-Local-Control-Token', window.LOCAL_TOKEN || '');
+          config.headers = headers;
+        }
+        return nativeFetch(resource, config);
+      };
+    })();
+  </script>
   <title>AI Video Creator — Prompt & Kịch Bản Sang Video Doodle</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

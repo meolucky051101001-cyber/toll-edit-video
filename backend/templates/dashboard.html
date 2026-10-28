@@ -19,7 +19,7 @@ window.fetch = async function() {
     try {
         res = await originalFetch(resource, config);
     } catch (netErr) {
-        if (resource && typeof resource === 'string' && resource.startsWith('/api/') && resource !== '/api/auth-token') {
+        if (resource && typeof resource === 'string' && resource.startsWith('/api/')) {
             await new Promise(r => setTimeout(r, 600));
             try {
                 res = await originalFetch(resource, config);
@@ -29,26 +29,6 @@ window.fetch = async function() {
         } else {
             throw netErr;
         }
-    }
-    // Auto-heal on 403 token mismatch: fetch new token and retry once
-    if (res && res.status === 403 && resource && typeof resource === 'string' && resource.startsWith('/api/') && resource !== '/api/auth-token') {
-        try {
-            const tokRes = await originalFetch('/api/auth-token');
-            if (tokRes.ok) {
-                const tokData = await tokRes.json();
-                if (tokData && tokData.token) {
-                    window.LOCAL_TOKEN = tokData.token;
-                    if (config && config.headers) {
-                        if (config.headers instanceof Headers) {
-                            config.headers.set('X-Local-Control-Token', window.LOCAL_TOKEN);
-                        } else {
-                            config.headers['X-Local-Control-Token'] = window.LOCAL_TOKEN;
-                        }
-                    }
-                    return await originalFetch(resource, config);
-                }
-            }
-        } catch (_) {}
     }
     return res;
 };
@@ -1268,6 +1248,15 @@ header {
         </div>
         <span id="vramText" style="font-size: 12px; font-weight: 600; min-width: 140px; text-align: right; color: var(--text);">Đang đọc VRAM...</span>
       </div>
+
+      <!-- RAM PROGRESS BAR & METRICS -->
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <span style="font-size: 11.5px; color: var(--text-muted); min-width: 65px;">RAM hệ thống:</span>
+        <div style="flex: 1; height: 10px; background: rgba(255,255,255,0.08); border-radius: 5px; overflow: hidden; position: relative;">
+          <div id="ramProgressBar" style="height: 100%; width: 0%; background: #10b981; transition: width 0.4s ease, background-color 0.4s ease; border-radius: 5px;"></div>
+        </div>
+        <span id="ramText" style="font-size: 12px; font-weight: 600; min-width: 140px; text-align: right; color: var(--text);">Đang đọc RAM...</span>
+      </div>
     </div>
 
     <!-- HERO PROGRESS CARD -->
@@ -2147,9 +2136,9 @@ header {
                   <div style="font-size: 10.5px; color: var(--text-muted);">8 nhóm kiểm tra tự động sau render</div>
                 </div>
                 <select id="selectQcPolicy" onchange="setQcPolicy(this.value)" style="background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; font-size: 11px;">
-                  <option value="REPORT_ONLY">REPORT_ONLY</option>
-                  <option value="WARN">WARN</option>
-                  <option value="BLOCK">BLOCK</option>
+                  <option value="BLOCK" selected>Chặn giao khi có lỗi</option>
+                  <option value="WARN">Cảnh báo</option>
+                  <option value="REPORT_ONLY">Chỉ báo cáo (lỗi nghiêm trọng vẫn chặn)</option>
                 </select>
               </div>
 
@@ -3215,6 +3204,22 @@ header {
       }
     }
 
+    function updateRamUI(ram) {
+      if (!ram) return;
+      const pct = Math.min(100, Math.max(0, Number(ram.percent) || 0));
+      const barEl = document.getElementById('ramProgressBar');
+      if (barEl) {
+        barEl.style.width = pct + '%';
+        barEl.style.backgroundColor = pct >= 90 ? '#ef4444' : (pct >= 75 ? '#f59e0b' : '#10b981');
+      }
+      const textEl = document.getElementById('ramText');
+      if (textEl) {
+        const used = Number(ram.used_gb) || 0;
+        const total = Number(ram.total_gb) || 0;
+        textEl.textContent = `${used.toFixed(1)} GB / ${total.toFixed(1)} GB (${pct}%)`;
+      }
+    }
+
     function updateVramUI(vram, workerSettings) {
       if (!vram) return;
       const isThrottled = Boolean(vram.auto_throttled || (workerSettings && workerSettings.auto_throttled));
@@ -3524,6 +3529,7 @@ header {
     function renderStatus(state) {
       lastStatusData = state;
       updateVramUI(state.vram, state.worker_settings);
+      updateRamUI(state.ram);
       const status = String(state.status || 'idle');
 
       const failed = status === 'error' || state.video_status === 'error';
@@ -3736,16 +3742,7 @@ let inputUploading=false;
           if (task.status !== 'waiting' || task.cancelled) continue;
           try {
             if (task.file.size > 4 * 1024 ** 3) throw new Error('File vượt giới hạn 4 GB.');
-            try { await sendDashboardUpload(task); }
-            catch (error) {
-              // XHR bypasses the fetch wrapper, so preserve its one-time token renewal.
-              if (error.status !== 403 || task.cancelled) throw error;
-              const response = await fetch('/api/auth-token', {cache:'no-store',signal:AbortSignal.timeout(8000)});
-              if (!response.ok) throw new Error('Không lấy được token điều khiển.');
-              const auth = await response.json(); window.LOCAL_TOKEN = auth.token;
-              if (task.cancelled) throw Object.assign(new Error('Đã hủy'), {cancelled:true});
-              await sendDashboardUpload(task);
-            }
+            await sendDashboardUpload(task);
             task.status = 'completed'; task.loaded = task.file.size;
           } catch (error) {
             task.status = error.cancelled || task.cancelled ? 'cancelled' : 'error';

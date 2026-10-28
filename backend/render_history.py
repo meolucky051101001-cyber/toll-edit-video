@@ -5,6 +5,7 @@ Có thể đọc lịch sử workspace dùng chung nếu được cấu hình qu
 import os
 import json
 import time
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
@@ -43,6 +44,7 @@ SHARED_HISTORY_FILE = (
 V2_HISTORY_FILE = Path(os.getenv("TOOL_V2_RENDER_HISTORY", str(_resolve_v2_history())))
 HISTORY_FILE = V2_HISTORY_FILE
 LOCK_FILE = HISTORY_FILE.with_name(HISTORY_FILE.name + ".lock")
+_RECORD_LOCK = threading.Lock()
 
 
 def format_duration(seconds: float) -> str:
@@ -279,70 +281,72 @@ def record_render_duration(video_name_or_path: str, duration_seconds: float) -> 
     dur_int = int(round(duration_seconds))
 
     target_files = [HISTORY_FILE]
-    for history_file in target_files:
-        history_file.parent.mkdir(parents=True, exist_ok=True)
-        lock_file = history_file.with_name(history_file.name + ".lock")
-        lock_fd = None
+    # msvcrt chỉ khóa giữa tiến trình; khóa thread để chống lost-update trong cùng process.
+    with _RECORD_LOCK:
+        for history_file in target_files:
+            history_file.parent.mkdir(parents=True, exist_ok=True)
+            lock_file = history_file.with_name(history_file.name + ".lock")
+            lock_fd = None
 
-        # Khóa file để đồng bộ đa tiến trình trên Windows
-        try:
-            import msvcrt
-            lock_fd = open(lock_file, "a+", encoding="utf-8")
-            for _ in range(30):
-                try:
-                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except (IOError, OSError):
-                    time.sleep(0.05)
-        except Exception:
-            pass
-
-        try:
-            meta: Dict[str, int] = {}
-            if history_file.exists():
-                try:
-                    raw = json.loads(history_file.read_text(encoding="utf-8"))
-                    if isinstance(raw, dict):
-                        meta = {k: int(v if isinstance(v, (int, float)) else v.get("duration_seconds", 0)) 
-                                for k, v in raw.items() if v}
-                except Exception:
+            # Khóa file để đồng bộ đa tiến trình trên Windows
+            try:
+                import msvcrt
+                lock_fd = open(lock_file, "a+", encoding="utf-8")
+                for _ in range(30):
                     try:
-                        import shutil
-                        corrupt_backup = history_file.parent / f".render_history.corrupt.{int(time.time())}.json"
-                        shutil.copy2(history_file, corrupt_backup)
+                        msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except (IOError, OSError):
+                        time.sleep(0.05)
+            except Exception:
+                pass
+
+            try:
+                meta: Dict[str, int] = {}
+                if history_file.exists():
+                    try:
+                        raw = json.loads(history_file.read_text(encoding="utf-8"))
+                        if isinstance(raw, dict):
+                            meta = {k: int(v if isinstance(v, (int, float)) else v.get("duration_seconds", 0))
+                                    for k, v in raw.items() if v}
+                    except Exception:
+                        try:
+                            import shutil
+                            corrupt_backup = history_file.parent / f".render_history.corrupt.{int(time.time())}.json"
+                            shutil.copy2(history_file, corrupt_backup)
+                        except Exception:
+                            pass
+                        meta = {}
+
+                meta[clean_name] = dur_int
+                if clean_name.startswith("Dubbed_"):
+                    meta[clean_name[7:]] = dur_int
+                else:
+                    meta[f"Dubbed_{clean_name}"] = dur_int
+
+                if atomic_write_json is not None:
+                    atomic_write_json(history_file, meta)
+                else:
+                    temporary = history_file.with_suffix(history_file.suffix + f".tmp.{os.getpid()}")
+                    temporary.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+                    # Thử lại khi có tranh chấp trên Windows
+                    for attempt in range(8):
+                        try:
+                            temporary.replace(history_file)
+                            break
+                        except OSError:
+                            time.sleep(min(0.05 * (2 ** attempt), 0.5))
+            except Exception as e:
+                import logging
+                logging.getLogger("render_history").warning(f"Lỗi ghi nhận lịch sử render vào {history_file}: {e}")
+            finally:
+                if lock_fd:
+                    try:
+                        import msvcrt
+                        msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
                     except Exception:
                         pass
-                    meta = {}
-
-            meta[clean_name] = dur_int
-            if clean_name.startswith("Dubbed_"):
-                meta[clean_name[7:]] = dur_int
-            else:
-                meta[f"Dubbed_{clean_name}"] = dur_int
-
-            if atomic_write_json is not None:
-                atomic_write_json(history_file, meta)
-            else:
-                temporary = history_file.with_suffix(history_file.suffix + f".tmp.{os.getpid()}")
-                temporary.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-                # Thử lại khi có tranh chấp trên Windows
-                for attempt in range(8):
                     try:
-                        temporary.replace(history_file)
-                        break
-                    except OSError:
-                        time.sleep(min(0.05 * (2 ** attempt), 0.5))
-        except Exception as e:
-            import logging
-            logging.getLogger("render_history").warning(f"Lỗi ghi nhận lịch sử render vào {history_file}: {e}")
-        finally:
-            if lock_fd:
-                try:
-                    import msvcrt
-                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
-                except Exception:
-                    pass
-                try:
-                    lock_fd.close()
-                except Exception:
-                    pass
+                        lock_fd.close()
+                    except Exception:
+                        pass

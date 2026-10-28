@@ -21,7 +21,9 @@ uvicorn[standard]>=0.29,<1
 yt-dlp>=2024.4
 g4f>=0.3.1,<1
 librosa>=0.10,<1
-paddleocr>=2.7,<3
+# PP-OCRv6 runs in the isolated runtime, not backend/venv:
+#   backend/requirements-v1-models.txt -> backend/model_venv (paddleocr==3.7.0)
+# Installing paddleocr here would conflict with that pin and is unused by main.py.
 praat-parselmouth>=0.4.3,<1
 psutil>=5.9,<6
 gmssl>=3.2

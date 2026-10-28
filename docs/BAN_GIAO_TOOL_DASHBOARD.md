@@ -26,7 +26,7 @@
 | **Thư mục Video Phôi đầu vào (`input_dir`)** | `D:\workspace\downloads` *(hoặc `D:\video phôi`)* | Nơi chứa video gốc tải về hoặc người dùng chọn qua Dashboard |
 | **Thư mục Video Thành Phẩm (`output_dir`)** | `D:\banve` | Nơi lưu các video đã lồng tiếng hoàn chỉnh (`Dubbed_*.mp4`) |
 | **Thư mục Workspace tạm (`workspace`)** | `D:\workspace` *(và `C:\tool v1\workspace`)* | Lưu các thư mục job từng video (`original.srt`, `translated.srt`, `project.json`, RoFormer stems...) |
-| **Thư mục Cache Model AI (`model_cache`)** | `C:\tool v1\models` | Lưu checkpoint BS-RoFormer, Whisper, SenseVoice, PP-OCR, VieNeu/RVC |
+| **Thư mục Cache Model AI (`model_cache`)** | `C:\tool v1\models` | Lưu checkpoint BS-RoFormer, Whisper, SenseVoice, PP-OCR, VieNeu |
 | **Thư mục AppData AutoDub (`data_root`)** | `C:\Users\admin\AppData\Local\AutoDub` | Lưu cấu hình người dùng, preset, lịch sử, token control plane |
 | **File trạng thái tiến độ (`job_status.json`)** | `C:\tool v1\workspace\job_status.json` | Lưu trạng thái thời gian thực của 2 luồng Worker |
 | **File cấu hình Mixer âm thanh** | `C:\tool v1\workspace\audio_settings.json` | Lưu BGM dB, Dubbing dB, Ducking mode, Separation engine |
@@ -82,7 +82,7 @@ Giao diện Dashboard chính là một Single-Page Application (SPA) Dark Mode g
 | `backend/dashboard_media.py` | Phân trang, lọc, tìm kiếm và kiểm tra trạng thái thành phẩm của danh sách video phôi & bản vẽ. |
 | `backend/job_tracker.py` | Quản lý trạng thái tiến độ thread-safe cho nhiều worker (`workers["1"]`, `workers["2"]`), ghi `workspace/job_status.json`. |
 | `backend/v1_orchestrator.py` | Điều phối quy trình 8 bước V1, quản lý checkpoint, retry, GPU gatekeeper, timing solver, quality gate. |
-| `backend/v1_vram_monitor.py` & `worker_settings.py` | Đọc thông số GPU NVIDIA (`nvidia-smi` / `torch.cuda`), tính toán mức an toàn VRAM và tự động điều tiết số luồng worker. |
+| `backend/v1_vram_monitor.py` & `worker_settings.py` | Đọc thông số GPU NVIDIA qua NVML (ctypes), tính toán mức an toàn VRAM và tự động điều tiết số luồng worker. |
 | `backend/phase_a_routes.py` (`preset_service.py`, `job_config_service.py`) | **Phase A**: Quản lý Preset, cấu hình nháp từng video (`video-draft`), chạy batch theo cấu hình riêng. |
 | `backend/phase_b_routes.py` (`voice_preview_service.py`) | **Phase B**: Sinh và phát audio nghe thử cho từng giọng đọc AI có cache. |
 | `backend/phase_c_routes.py` (`segment_editor_service.py`) | **Phase C**: Đọc danh sách từng câu sub của video đã hoàn thành, cho phép sửa text/giọng/tốc độ của 1 câu bất kỳ, chỉ chạy lại TTS câu đó và ghép lại video cực nhanh. |
@@ -95,9 +95,8 @@ Giao diện Dashboard chính là một Single-Page Application (SPA) Dark Mode g
 ## 4. DANH MỤC ĐẦY ĐỦ REST API CỦA DASHBOARD (`http://127.0.0.1:8088`)
 
 ### A. Giám sát & Điều khiển Batch
-- `GET /` — Trả về trang HTML Dashboard chính (`dashboard.html`).
-- `GET /api/auth-token` — Lấy `X-Local-Control-Token` bảo mật cho các lệnh POST/DELETE.
-- `GET /api/status` — Trạng thái toàn cục: tiến độ từng worker, thông số router, mixer, separator, VRAM, lịch sử gần nhất.
+- `GET /` — Trả về trang HTML Dashboard chính (`dashboard.html`); token điều khiển được inject sẵn vào HTML (không còn endpoint `/api/auth-token`).
+- `GET /api/status` — Trạng thái toàn cục: tiến độ từng worker, thông số router, mixer, separator, VRAM, RAM, lịch sử gần nhất.
 - `GET /api/vram` — Thông số GPU VRAM thời gian thực (MB đã dùng, MB trống, %, nhiệt độ, khuyến nghị số luồng).
 - `GET /api/logs` — Đọc log mới nhất từ `app.log`.
 - `GET /api/preflight` — Kiểm tra toàn diện phần cứng, thư mục, model, FFmpeg, GPU trước khi chạy.
@@ -188,12 +187,12 @@ VAI TRÒ: Bạn là Kỹ sư Full-Stack (Python FastAPI + Vanilla JS + PyTorch C
 - Log vòng đời supervisor: `C:\tool v1\workspace\bot_system\service_logs\dashboard_supervisor.log` (mỗi dòng Started PID / Exited code).
 - Ổn định vận hành (2026-10-27): `app.log` xoay vòng 10 MB × 3 bản (Telegram); dashboard ghi thêm `C:\tool v1\backend\logs\dashboard.log` (10 MB × 5, kèm traceback khi API trả 500 JSON); job nền và Studio từ chối chạy khi ổ đĩa dưới `AUTODUB_MIN_FREE_GB` (mặc định 3 GB) và báo lỗi tiếng Việt thay vì hỏng giữa render; Telegram tự kết nối lại theo backoff 5 → 60 giây thay vì 5 giây cố định.
 - Kiểm tra cổng 8088: `netstat -ano | findstr :8088` hoặc `curl.exe -s http://127.0.0.1:8088/api/status`.
-- Các request POST/DELETE nội bộ yêu cầu header bảo mật `X-Local-Control-Token` (lấy từ biến JS `CONTROL_PLANE_TOKEN` hoặc `GET /api/auth-token`) và `X-Dashboard-Input: 1`.
+- Các request POST/PUT/DELETE/PATCH tới `/api/*` và `/a2ui/*` đều bắt buộc header `X-Local-Control-Token`; Dashboard và Studio nhận token inject sẵn từ server (`window.LOCAL_TOKEN`), Telegram script bot đọc token từ `workspace/.dashboard_control_token`. Không còn `/api/auth-token`.
 
 4. KIẾN TRÚC CHỨC NĂNG CỦA TOOL DASHBOARD (dashboard.html + main.py)
 - Giám sát 2 luồng Worker (Worker 1 & Worker 2) với cơ chế Auto VRAM Guard (v1_vram_monitor.py + worker_settings.py).
 - Pipeline 8 bước (v1_orchestrator.py):
-  (1) Tải/Chuẩn bị video -> (2) Tách nhạc BS-RoFormer/Demucs -> (3) ASR SenseVoice+Whisper Hybrid -> (4) OCR tìm vùng sub Trung (PP-OCR) -> (5) Dịch ngữ cảnh bằng Gemini + Custom Glossary -> (6) Lồng tiếng TTS/RVC khớp thời lượng -> (7) Mix âm thanh Soft Ducking -> (8) Render 9:16 NVENC (che sub Trung, phủ sub Việt, chống re-up).
+  (1) Tải/Chuẩn bị video -> (2) Tách nhạc BS-RoFormer/Demucs -> (3) ASR SenseVoice+Whisper Hybrid -> (4) OCR tìm vùng sub Trung (PP-OCR) -> (5) Dịch ngữ cảnh bằng Gemini + Custom Glossary -> (6) Lồng tiếng TTS (CapCut / Vie-TTS / Edge) khớp thời lượng -> (7) Mix âm thanh Soft Ducking -> (8) Render 9:16 NVENC (che sub Trung, phủ sub Việt, chống re-up).
 - 4 Phân hệ nâng cao trên Dashboard:
   + Phase A (phase_a_routes.py, preset_service.py, job_config_service.py): Quản lý Preset cấu hình, lưu cấu hình nháp riêng cho từng video phôi, xem bảng tóm tắt trước khi chạy batch.
   + Phase B (phase_b_routes.py, voice_preview_service.py): Nghe thử giọng đọc AI trực tiếp trên Dashboard.

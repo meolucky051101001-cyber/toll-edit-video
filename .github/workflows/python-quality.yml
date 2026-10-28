@@ -25,9 +25,19 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
-      - name: Run Tool V1 core unit tests
+      - name: Run core, fail-closed, security and Studio safety tests
+        env:
+          AUTODUB_WORKSPACE: ${{ runner.temp }}/autodub-ci-workspace
+          PYTHONUTF8: "1"
         run: >-
-          python -m unittest
-          tests.test_app_paths
-          tests.test_ocr_subtitle_locator
-          tests.test_url_utils
+          python -m pytest -q --tb=short -p no:cacheprovider
+          tests/test_app_paths.py
+          tests/test_ocr_subtitle_locator.py
+          tests/test_url_utils.py
+          tests/test_v1_checkpoint_orchestrator.py
+          tests/test_v1_ocr_geometry_repair.py
+          tests/test_v1_quality_gate.py
+          tests/test_pipeline_v2_failure_semantics.py
+          tests/test_path_hardening.py
+          tests/test_studio_render_safety.py
+          tests/test_stop_flag_hygiene.py

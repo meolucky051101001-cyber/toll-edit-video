@@ -1,76 +1,62 @@
-# Tool V2 backend: current layout and safe migration plan
+# Tool V1 backend: layout and conventions
 
-## Current layout
+Tool V2 was retired; this document describes the active Tool V1 backend only.
 
-Tool V2 already has useful boundaries, but they are not yet consistently
-packaged. The current structure is:
+## Entry points
 
-| Responsibility | Current location | Direction |
+| Responsibility | Location |
+| --- | --- |
+| Dashboard + Workflow API (port 8088) | `backend/main.py` |
+| Voice control plane (port 8090) | `backend/tool_control.py` |
+| Supervisor for dashboard/bot services | `backend/background_service.py` |
+| Telegram AutoDub bot | `backend/telegram_bot.py` |
+| Telegram Studio Kịch Bản bot | `backend/telegram_script_bot.py` |
+| Batch processing | `backend/batch_processor.py` |
+
+`backend/workflow_api.py` serves `/quy-trinh`; `backend/script_api.py` serves
+`/kich-ban`; phase routers (`phase_a_routes.py` … `phase_d_routes.py`) add
+presets, voice preview, segment editing and stability endpoints.
+
+## Module boundaries
+
+| Responsibility | Location | Direction |
 | --- | --- | --- |
-| API and dashboard composition | `backend/main.py`, `backend/dashboard_monitor.py`, `backend/workflow_api.py` | Gradually extract routers into `backend/app/` |
-| Business services | `backend/*_service.py`, `backend/telegram_jobs.py` | Move reusable application rules into `backend/services/` with import shims |
-| Media pipeline | `backend/pipeline_v2/` | Keep as the canonical pipeline package; do not duplicate it under `pipelines/` |
-| AI/model integrations | `backend/ai/`, `backend/model_workers/`, `backend/social_downloader.py` | Gradually put provider adapters behind `backend/integrations/` |
-| Shared configuration | `backend/environment.py`, `backend/pipeline_v2/config.py` | `backend/config/` now owns shared filesystem path resolution; continue centralizing validated settings here |
+| HTTP composition | `backend/main.py` + API routers | Keep startup/lifespan wiring in the composition root; extract routers incrementally |
+| Business services | `backend/*_service.py`, `backend/telegram_jobs.py` | Move reusable rules into services with import shims |
+| Media pipeline | `backend/pipeline_v2/` | Canonical pipeline package; do not duplicate it elsewhere |
+| AI/model integrations | `backend/ai/`, `backend/model_workers/`, `backend/social_downloader.py` | Put provider adapters behind stable interfaces |
+| Shared configuration | `backend/environment.py`, `backend/config/paths.py`, `backend/pipeline_v2/config.py` | `backend/config/` owns shared path resolution |
 
-The existing `pipeline_v2/` and `ai/` code is used by both direct scripts and
-package imports. Moving all files at once would risk breaking Telegram, the API,
-Electron startup, batch mode, and resume checkpoints. The migration therefore
-keeps compatibility imports and changes one boundary at a time.
+Moving modules in bulk would risk Telegram, the HTTP API, batch mode and resume
+checkpoints. Change one boundary at a time and keep compatibility imports until
+callers are migrated.
 
 ## Path and environment rules
 
 - Process environment variables take precedence over `backend/.env`.
-- Absolute paths are used as-is; relative path values resolve from the repository
-  root, never from the caller's current working directory.
-- Without overrides, workspace, new model cache, and shared assets use the OS
-  user-data area; input/output default to `~/Videos/AutoDubV2/input` and
-  `output`.
-- Set `AUTODUB_DATA_DIR`, `AUTODUB_WORKSPACE`, `AUTODUB_INPUT_DIR`,
-  `AUTODUB_OUTPUT_DIR`, `AUTODUB_MODEL_CACHE`, or `AUTODUB_SHARED_ASSETS_DIR`
-  to customize locations. Set `AUTODUB_SHARED_WORKSPACE_DIR` only when V2 is
-  intentionally meant to read V1's shared history/voice assets. An existing
-  repository-level `models/` directory is preserved as the model-cache default
-  so existing weights are not silently stranded by the path migration.
-- `.env.cpu.example` and `.env.gpu.example` are small resource overlays. They do
-  not change ASR, OCR, translation, separation, or voice model selections.
+- Absolute paths are used as-is; relative values resolve from the repository
+  root, not from the caller's current working directory.
+- Main runtime data uses `AUTODUB_WORKSPACE`; input/output defaults come from
+  `AUTODUB_INPUT_DIR` / `AUTODUB_OUTPUT_DIR` and the dashboard settings.
+- Do not point production at test or benchmark directories.
 
 ## Dependency profiles
 
-- `requirements.txt`: normal bot/runtime dependencies.
-- `requirements-dev.txt`: lint tools and lightweight focused-test dependencies;
-  it does not install model weights or the entire production stack.
-- `requirements-models.txt`: convenience entrypoint to the existing isolated
-  `backend/requirements-models.txt` profile. Keep heavyweight model packages in
-  `backend/model_venv`.
-- Install the PyTorch CPU or CUDA wheel separately using the command matching
-  the installed driver from the official PyTorch selector; do not let pip replace
-  the machine's CUDA build implicitly.
-
-## Staged module migration
-
-1. **Foundation (this change):** central paths, focused tests, dependency
-   profiles, and a lint/unit/smoke CI workflow.
-2. **Integration adapters:** extract downloader, OCR, ASR, translation and TTS
-   adapters behind stable interfaces while keeping their current entry modules
-   as shims. Add fallback tests before moving each adapter.
-3. **Application services:** move queue/workflow/QC rules into `services/`; keep
-   Telegram and HTTP handlers as thin callers.
-4. **API composition:** split the large API/dashboard modules into `app/routers/`
-   and leave startup/lifespan wiring in the composition root.
-5. **Pipeline cleanup:** retain `pipeline_v2/` as the canonical `pipelines`
-   boundary unless a later change proves that renaming it adds value; test resume
-   manifests and artifact compatibility before any storage/schema migration.
+- `requirements.txt`: normal bot/runtime dependencies for `backend/venv`. It must
+  not contain `paddleocr`; OCR runs in the isolated runtime.
+- `requirements-dev.txt`: lint tools and lightweight test dependencies.
+- `backend/requirements-v1-models.txt`: PP-OCRv6 runtime for `backend/model_venv`
+  (`paddleocr==3.7.0`, `onnxruntime-gpu==1.26.0`).
+- `backend/requirements-models.txt`: heavier model profile for `backend/model_venv`.
+- Install the PyTorch CPU/CUDA wheel separately; do not let pip replace the
+  machine's CUDA build implicitly.
 
 ## Focused checks
 
 ```powershell
 python -m pip install -r requirements-dev.txt
-ruff check backend/config tests/test_app_paths.py tests/test_pipeline_v2_config.py scripts/smoke_import_v2.py
-python -m unittest tests.test_app_paths tests.test_pipeline_v2_config tests.test_refactored_boundaries tests.test_pipeline_v2_download tests.test_ocr_subtitle_locator.ChineseSubtitleLocatorTests
-python scripts/smoke_import_v2.py
+python -m pytest -q --tb=short -p no:cacheprovider tests/test_v1_checkpoint_orchestrator.py tests/test_v1_ocr_geometry_repair.py tests/test_v1_quality_gate.py tests/test_dashboard_hardening.py
 ```
 
-The end-to-end render smoke test remains a separate, opt-in check because it
-requires a source video, model runtimes, API credentials, FFmpeg and (for the
-production GPU profile) a compatible NVIDIA driver.
+The end-to-end render smoke test is opt-in: it needs a source video, model
+runtimes, API credentials, FFmpeg and (for the production profile) an NVIDIA GPU.
