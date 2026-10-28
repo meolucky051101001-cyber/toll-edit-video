@@ -39,7 +39,7 @@ def _connect(db_path: Path, timeout: float) -> Iterator[sqlite3.Connection]:
 
 # Base paths
 BACKEND_DIR = Path(__file__).resolve().parent.parent
-WORKSPACE_DIR = BACKEND_DIR.parent / "workspace"
+WORKSPACE_DIR = Path(os.getenv("AUTODUB_WORKSPACE", str(BACKEND_DIR.parent / "workspace")))
 DB_DIR = WORKSPACE_DIR / "bot_system"
 DB_PATH = DB_DIR / "gemini_circuit_breaker.db"
 

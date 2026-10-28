@@ -32,6 +32,7 @@ import resvg_py
 from ai.script_tts_service import (
     generate_single_tts,
 )
+from config.paths import repo_root
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,8 @@ COLOR_BLACK = (0, 0, 0)             # Đen thuần #000000
 COLOR_LINE = (0, 0, 0)              # Nét mực vẽ đen đậm #000000
 COLOR_ACCENT_LIME = (0, 0, 0)       # Chuyển thành Đen #000000
 
-ICON_CACHE_DIR = Path(r"C:\tool v1\workspace\icon_cache")
+WORKSPACE_ROOT = Path(os.getenv("AUTODUB_WORKSPACE", str(repo_root() / "workspace")))
+ICON_CACHE_DIR = WORKSPACE_ROOT / "icon_cache"
 ICON_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -181,7 +183,7 @@ def fetch_vector_icon(query: str, size: int = 180, color: str = "#1e1e1e") -> Op
 
 
 # Thư mục cache tranh phác thảo Whiteboard Line Art
-SKETCH_CACHE_DIR = Path(r"C:\tool v1\workspace\doodle_cache\sketches")
+SKETCH_CACHE_DIR = WORKSPACE_ROOT / "doodle_cache" / "sketches"
 SKETCH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -639,11 +641,11 @@ def render_doodle_video(
     - Mặc định mới (chiều 18/10): kinetic + use_hand_draw=False + giọng BV075 "Thanh Niên Tự Tin".
     """
     job_id = f"doodle_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-    work_dir = Path(r"C:\tool v1\workspace\doodle_render") / job_id
+    work_dir = WORKSPACE_ROOT / "doodle_render" / job_id
     work_dir.mkdir(parents=True, exist_ok=True)
 
     if not output_video_path:
-        output_dir = Path(r"C:\tool v1\workspace\output")
+        output_dir = WORKSPACE_ROOT / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
         output_video_path = output_dir / f"{job_id}_final.mp4"
 

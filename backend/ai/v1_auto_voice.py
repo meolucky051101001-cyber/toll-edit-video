@@ -30,6 +30,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from config.paths import repo_root
+
 logger = logging.getLogger("v1_auto_voice")
 
 VOICE_FEMALE_ID = "capcut-BV562_streaming"
@@ -348,7 +350,7 @@ def _resolve_control_dirs(workspace: Optional[str] = None) -> List[Path]:
         base_ws = Path(workspace)
     else:
         ws_env = os.getenv("AUTODUB_WORKSPACE")
-        base_ws = Path(ws_env) if ws_env else Path(r"C:\tool v1\workspace")
+        base_ws = Path(ws_env) if ws_env else repo_root() / "workspace"
 
     found_dirs: List[Path] = []
     seen = set()

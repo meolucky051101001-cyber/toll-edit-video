@@ -394,7 +394,13 @@ def render_full_script_tts(
     """
     job_id = f"script_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     if workspace_dir is None:
-        workspace_dir = Path(__file__).resolve().parents[2] / "workspace" / job_id
+        base_workspace = Path(
+            os.getenv(
+                "AUTODUB_WORKSPACE",
+                str(Path(__file__).resolve().parents[2] / "workspace"),
+            )
+        )
+        workspace_dir = base_workspace / job_id
     else:
         workspace_dir = Path(workspace_dir) / job_id
     workspace_dir.mkdir(parents=True, exist_ok=True)

@@ -17,10 +17,12 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from config.paths import repo_root
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_QWEN_ASR_DIR = Path(r"C:\tool v1\models\v1\qwen3_asr")
-DEFAULT_QWEN_ALIGNER_DIR = Path(r"C:\tool v1\models\v1\qwen3_forced_aligner")
+DEFAULT_QWEN_ASR_DIR = repo_root() / "models" / "v1" / "qwen3_asr"
+DEFAULT_QWEN_ALIGNER_DIR = repo_root() / "models" / "v1" / "qwen3_forced_aligner"
 
 
 def is_qwen_asr_enabled() -> bool:

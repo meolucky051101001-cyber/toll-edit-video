@@ -18,6 +18,7 @@ from __future__ import annotations
 import shutil
 import time
 import logging
+import delivery_ledger
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -105,7 +106,11 @@ def clean_completed_job_intermediate_files(job_id: str, workspace_dir: str | Pat
                 if not path.is_file() or path.resolve() in protected or not path.resolve().is_relative_to(job_dir):
                     continue
                 size = path.stat().st_size
-                path.unlink()
+                if not delivery_ledger.safe_delete(
+                    path, roots=[job_dir], reason="cleanup_intermediate", job_id=job_id,
+                    workspace=ws, expected_size=size,
+                ):
+                    continue
                 freed_bytes += size
             except OSError:
                 continue
@@ -120,7 +125,11 @@ def clean_completed_job_intermediate_files(job_id: str, workspace_dir: str | Pat
             expected = manifest.stages["video_rendering"]["artifacts"]["temp_render"]["sha256"]
             if fingerprint(path) == expected:
                 size = path.stat().st_size
-                path.unlink()
+                if not delivery_ledger.safe_delete(
+                    path, roots=[job_dir], reason="cleanup_duplicate_final", job_id=job_id,
+                    workspace=ws, expected_size=size,
+                ):
+                    continue
                 freed_bytes += size
         except (OSError, KeyError):
             continue
@@ -196,11 +205,11 @@ def clean_stale_downloads(
         # Xóa các file tải dở .downloading hoặc .part bất kể tuổi thọ nếu quá 6h
         if file_path.suffix in (".downloading", ".part") or ".range" in file_path.name:
             if (now - mtime) > 21600:
-                try:
-                    file_path.unlink()
+                if delivery_ledger.safe_delete(
+                    file_path, roots=[dl_path], reason="cleanup_partial_download",
+                    workspace=dl_path.parent, expected_size=size,
+                ):
                     freed_bytes += size
-                except OSError:
-                    pass
                 continue
 
         # Xóa file video thô nếu đã cũ hoặc ổ đĩa sắp đầy
@@ -209,7 +218,11 @@ def clean_stale_downloads(
                 from v1_checkpoint import fingerprint
                 if fingerprint(file_path) != eligible[file_path.resolve()]:
                     continue
-                file_path.unlink()
+                if not delivery_ledger.safe_delete(
+                    file_path, roots=[dl_path], reason="cleanup_stale_download",
+                    workspace=dl_path.parent, expected_size=size,
+                ):
+                    continue
                 freed_bytes += size
                 logger.info(f"[CLEANUP] Đã xóa video thô cũ ({size / (1024**2):.1f} MB): {file_path.name}")
             except OSError:

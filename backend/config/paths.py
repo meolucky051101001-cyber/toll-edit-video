@@ -25,6 +25,11 @@ def _expand_path(value: str, environment: Mapping[str, str]) -> str:
     return os.path.expanduser(_ENV_REFERENCE.sub(replace, value.strip()))
 
 
+def repo_root() -> Path:
+    """Thư mục gốc repo, ổn định dù module được import theo tên nào."""
+    return Path(__file__).resolve().parents[2]
+
+
 def _user_data_root(environment: Mapping[str, str]) -> Path:
     if os.name == "nt":
         base = environment.get("LOCALAPPDATA") or str(
@@ -68,7 +73,7 @@ class AppPaths:
         environment: Mapping[str, str] | None = None,
     ) -> AppPaths:
         env = os.environ if environment is None else environment
-        root = Path(project_root or Path(__file__).resolve().parents[2]).resolve()
+        root = Path(project_root or repo_root()).resolve()
         default_data_root = _user_data_root(env)
         data_root = _configured_path(
             "AUTODUB_DATA_DIR", env, default_data_root, root

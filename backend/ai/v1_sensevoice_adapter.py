@@ -28,9 +28,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import srt
 
+from config.paths import repo_root
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_SENSEVOICE_DIR = Path(r"C:\tool v1\models\v1\sensevoice_small")
+DEFAULT_SENSEVOICE_DIR = repo_root() / "models" / "v1" / "sensevoice_small"
 SENSEVOICE_FRAME_SHIFT_S = 0.06  # 10ms fbank * 6 LFR shift = 60ms per CTC frame
 
 NON_SPEECH_EVENTS = {"<|BGM|>", "<|Laughter|>", "<|Applause|>", "<|Cry|>", "<|Cough|>", "<|Sneeze|>", "<|nospeech|>"}

@@ -1,11 +1,21 @@
+import atexit
 import importlib
 import importlib.abc
 import importlib.util
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 root = Path(__file__).resolve().parent
 backend_dir = root / "backend"
+
+# Tiến trình con (subprocess) không nhận patch của fixture, nên chặn từ gốc:
+# mọi module đọc AUTODUB_WORKSPACE lúc import và mọi subprocess đều thấy thư mục tạm.
+_TEST_WORKSPACE = Path(tempfile.mkdtemp(prefix="autodub_test_ws_"))
+os.environ["AUTODUB_WORKSPACE"] = str(_TEST_WORKSPACE)
+atexit.register(shutil.rmtree, _TEST_WORKSPACE, True)
 if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 if str(root) not in sys.path:
@@ -60,17 +70,38 @@ if not any(getattr(finder, "_backend_alias_marker", False) for finder in sys.met
 
 @pytest.fixture(autouse=True)
 def _isolate_shared_stop_state(tmp_path):
-    """Keep stop flags out of the live workspace while tests run."""
+    """Keep stop flags and tracker files out of the live workspace while tests run."""
+    import job_tracker
     import shared_state
 
+    workspace = tmp_path / "_isolated_workspace"
+    (workspace / "control").mkdir(parents=True)
+    (workspace / "bot_system").mkdir(parents=True)
+
+    # Một số test thay sys.modules bằng stub; khi đó không có gì để cách ly.
+    old_paths = None
+    if hasattr(job_tracker, "WORKSPACE"):
+        old_paths = (job_tracker.WORKSPACE, job_tracker.STATUS_FILE, job_tracker.BATCH_LOCK_FILE)
+        job_tracker.WORKSPACE = workspace
+        job_tracker.STATUS_FILE = workspace / "bot_system" / "job_status.json"
+        job_tracker.BATCH_LOCK_FILE = workspace / "bot_system" / "batch.lock"
+
     fget = getattr(getattr(type(shared_state), "stop_requested", None), "fget", None)
-    if fget is None:
-        yield
-        return
     old_local_stop = getattr(shared_state, "_local_stop", False)
-    shared_state._local_stop = False
+    if hasattr(shared_state, "_local_stop"):
+        shared_state._local_stop = False
     try:
-        with patch.dict(fget.__globals__, {"WORKSPACE": tmp_path}):
+        if fget is None:
             yield
+        else:
+            with patch.dict(fget.__globals__, {"WORKSPACE": workspace}):
+                yield
     finally:
-        shared_state._local_stop = old_local_stop
+        if hasattr(shared_state, "_local_stop"):
+            shared_state._local_stop = old_local_stop
+        if old_paths is not None:
+            job_tracker.WORKSPACE, job_tracker.STATUS_FILE, job_tracker.BATCH_LOCK_FILE = old_paths
+
+
+def pytest_sessionfinish(session, exitstatus):
+    shutil.rmtree(_TEST_WORKSPACE, ignore_errors=True)
