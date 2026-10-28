@@ -4,7 +4,15 @@ from pathlib import Path
 
 _backend_dir = Path(__file__).resolve().parent
 _site_packages = _backend_dir / "venv" / "Lib" / "site-packages"
-if _site_packages.is_dir() and str(_site_packages) not in sys.path:
+# Control plane chay bang Python base (khong phai venv) nen can tro thang vao site-packages
+# cua venv song. Neu dang chay trong mot venv khac (vd venv_py312), chen duong nay se nap
+# binary cp310 vao tien trinh 3.12 va lam hong import (onnxruntime, soxr...).
+_running_inside_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+if (
+    not _running_inside_venv
+    and _site_packages.is_dir()
+    and str(_site_packages) not in sys.path
+):
     sys.path.insert(0, str(_site_packages))
 if str(_backend_dir) not in sys.path:
     sys.path.insert(0, str(_backend_dir))

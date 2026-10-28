@@ -214,13 +214,16 @@ class TestGeminiStabilityCodex(unittest.TestCase):
     def test_09_multi_worker_shared_cooldown_and_single_probe(self):
         # Simulate worker 1 marking model in COOLDOWN
         now = time.time()
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute(
-                "INSERT INTO model_circuit (account_hash, model, purpose, state, cooldown_until, consecutive_failures) "
-                "VALUES ('acc1', 'm1', 'translation', 'COOLDOWN', ?, 2)",
-                (now - 1.0,) # Cooldown just expired
-            )
-            conn.commit()
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO model_circuit (account_hash, model, purpose, state, cooldown_until, consecutive_failures) "
+                    "VALUES ('acc1', 'm1', 'translation', 'COOLDOWN', ?, 2)",
+                    (now - 1.0,) # Cooldown just expired
+                )
+        finally:
+            conn.close()
 
         # Worker A checks candidates: should acquire HALF_OPEN probe
         cands_a = self.breaker.get_candidate_models('acc1', 'translation', ['m1'])

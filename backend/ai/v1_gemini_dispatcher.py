@@ -19,10 +19,23 @@ import os
 import re
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _connect(db_path: Path, timeout: float) -> Iterator[sqlite3.Connection]:
+    # `with sqlite3.connect(...)` chi commit/rollback chu khong dong connection.
+    # Tren Windows connection con mo giu file lock va lam hong buoc don temp dir.
+    conn = sqlite3.connect(str(db_path), timeout=timeout)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 # Base paths
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -207,7 +220,7 @@ class GeminiCircuitBreaker:
     def _ensure_db(self):
         try:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            with sqlite3.connect(str(self.db_path), timeout=15.0) as conn:
+            with _connect(self.db_path, timeout=15.0) as conn:
                 conn.execute("PRAGMA journal_mode=WAL;")
                 conn.execute("PRAGMA synchronous=NORMAL;")
                 conn.execute("""
@@ -258,7 +271,7 @@ class GeminiCircuitBreaker:
         now = time.time()
         allowed = []
         try:
-            with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+            with _connect(self.db_path, timeout=10.0) as conn:
                 for model in candidates:
                     cur = conn.cursor()
                     cur.execute(
@@ -309,7 +322,7 @@ class GeminiCircuitBreaker:
         best_model = None
         min_rem = float("inf")
         try:
-            with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+            with _connect(self.db_path, timeout=10.0) as conn:
                 for model in candidates:
                     cur = conn.cursor()
                     cur.execute(
@@ -332,7 +345,7 @@ class GeminiCircuitBreaker:
     def record_success(self, account_hash: str, model: str, purpose: str):
         now = time.time()
         try:
-            with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+            with _connect(self.db_path, timeout=10.0) as conn:
                 conn.execute(
                     "INSERT INTO model_circuit (account_hash, model, purpose, state, cooldown_until, consecutive_failures, last_used, last_success) "
                     "VALUES (?, ?, ?, 'ACTIVE', 0.0, 0, ?, ?) "
@@ -354,7 +367,7 @@ class GeminiCircuitBreaker:
     ):
         now = time.time()
         try:
-            with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+            with _connect(self.db_path, timeout=10.0) as conn:
                 cur = conn.cursor()
                 cur.execute(
                     "SELECT consecutive_failures FROM model_circuit WHERE account_hash = ? AND model = ? AND purpose = ?",
@@ -396,7 +409,7 @@ class GeminiCircuitBreaker:
         """Check if an account_hash is in active 429 quota exhaustion cooldown."""
         now = time.time()
         try:
-            with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+            with _connect(self.db_path, timeout=10.0) as conn:
                 cur = conn.cursor()
                 cur.execute("SELECT quota_exhausted_until FROM account_circuit WHERE account_hash = ?", (account_hash,))
                 row = cur.fetchone()
@@ -410,7 +423,7 @@ class GeminiCircuitBreaker:
         """Mark account as 429 quota exhausted with exponential backoff."""
         now = time.time()
         try:
-            with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+            with _connect(self.db_path, timeout=10.0) as conn:
                 cur = conn.cursor()
                 cur.execute("SELECT consecutive_429 FROM account_circuit WHERE account_hash = ?", (account_hash,))
                 row = cur.fetchone()
@@ -439,7 +452,7 @@ class GeminiCircuitBreaker:
     def record_account_success(self, account_hash: str):
         now = time.time()
         try:
-            with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+            with _connect(self.db_path, timeout=10.0) as conn:
                 conn.execute(
                     "INSERT INTO account_circuit (account_hash, quota_exhausted_until, last_error_type, consecutive_429, last_used) "
                     "VALUES (?, 0.0, 'SUCCESS', 0, ?) "
@@ -472,7 +485,7 @@ class GeminiCircuitBreaker:
         hashes = list(key_map.keys())
 
         try:
-            with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+            with _connect(self.db_path, timeout=10.0) as conn:
                 cur = conn.cursor()
                 placeholders = ",".join("?" for _ in hashes)
                 cur.execute(
@@ -796,7 +809,7 @@ def get_gemini_pool_health(explicit_key: Optional[str] = None) -> Dict[str, Any]
 
     try:
         if cb.db_path.is_file():
-            with sqlite3.connect(str(cb.db_path), timeout=5.0) as conn:
+            with _connect(cb.db_path, timeout=5.0) as conn:
                 cur = conn.cursor()
                 cur.execute(
                     "SELECT account_hash, quota_exhausted_until, last_error_type, consecutive_429, last_used FROM account_circuit"
