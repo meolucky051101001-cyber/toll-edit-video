@@ -31,6 +31,5 @@ cryptography>=42
 curl_cffi>=0.7
 
 
-# Optional voice-clone providers used only when selected/configured:
+# Optional TTS provider installed separately when selected/configured:
 # capcut-tts-api
-# rvc-python

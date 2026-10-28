@@ -290,10 +290,6 @@ class FastProfileTests(unittest.TestCase):
                 )
                 return [audio, index]
 
-            async def _rvc_stage(self, segments):
-                self.executed_stages.append("rvc")
-                return []
-
             async def _subtitles_stage(self, segments):
                 self.executed_stages.append("subtitles")
                 return []
@@ -327,13 +323,10 @@ class FastProfileTests(unittest.TestCase):
                     enable_adaptive_demucs=False,
                     enable_adaptive_ocr=False,
                     enable_timing_solver=True,
-                    enable_rvc=True,
                     enable_ffmpeg_mix_v2=True,
                 ),
             )
             runner = EarlyAbortTestRunner(req)
-            # Force _rvc_enabled to True so RVC would normally run
-            runner._rvc_enabled = lambda: True
 
             with self.assertRaises(QCGateBlocked) as ctx:
                 asyncio.run(runner.run())
@@ -347,7 +340,6 @@ class FastProfileTests(unittest.TestCase):
             self.assertIn("timing", runner.executed_stages)
             self.assertIn("tts", runner.executed_stages)
             # CRITICAL: Verify downstream stages were NEVER executed!
-            self.assertNotIn("rvc", runner.executed_stages)
             self.assertNotIn("subtitles", runner.executed_stages)
             self.assertNotIn("mix_v2", runner.executed_stages)
             self.assertNotIn("mix_legacy", runner.executed_stages)

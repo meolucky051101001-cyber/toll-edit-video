@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 rerender_with_chimai_tts.py
-Re-renders previous videos with CapCut Mai (BV562_streaming - Chi Mai TTS)
-instead of Chi Mai RVC.
+Re-renders previous videos with CapCut Mai (BV562_streaming - Chi Mai TTS).
 """
 
 import sys
@@ -102,7 +101,7 @@ async def rerender_video(video_name: str):
     logger.info(f"Đã nạp {len(translated_segments)} đoạn phụ đề tiếng Việt từ translated.srt")
     
     # Backup old dubbing folder
-    backup_dub = folder / "dubbing_rvc_backup"
+    backup_dub = folder / "dubbing_previous_backup"
     if dubbing_dir.is_dir() and not backup_dub.exists():
         logger.info(f"Sao lưu thư mục lồng tiếng cũ sang: {backup_dub.name}")
         shutil.copytree(dubbing_dir, backup_dub)

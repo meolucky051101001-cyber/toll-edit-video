@@ -579,7 +579,7 @@ def build_domain_tracks(
                 gender=gender,
                 start_time=st,
                 end_time=et,
-                artifact_key=f"rvc/{idx}.wav",
+                artifact_key=f"tts/{idx}.mp3",
                 is_silent_placeholder=False,
             )
         )

@@ -25,7 +25,6 @@ DEFAULT_STAGE_ORDER = (
     "reconcile",
     "timing",
     "tts",
-    "rvc",
     "mix",
     "subtitles",
     "render",

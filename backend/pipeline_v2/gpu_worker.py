@@ -23,7 +23,7 @@ if isinstance(sys.stderr, io.TextIOWrapper):
 
 from .atomic_io import atomic_write_json
 from .segments import segments_from_dicts, segments_to_dicts
-from .stage_validation import validate_demucs_outputs, validate_transformed_audio
+from .stage_validation import validate_demucs_outputs
 
 
 def _prepare_legacy_imports() -> None:
@@ -104,38 +104,11 @@ def _run_ocr(payload: Mapping[str, Any]) -> Dict[str, Any]:
         release_ocr_reader()
 
 
-async def _rvc_batch(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    _prepare_legacy_imports()
-    from ai.voice_cloning import apply_rvc_clone
-
-    model_path = str(payload["model_path"])
-    completed = []
-    for item in payload.get("items", []):
-        input_path = str(item["input_path"])
-        output_path = str(item["output_path"])
-        await apply_rvc_clone(
-            input_path,
-            output_path,
-            model_path,
-            strict=True,
-        )
-        validate_transformed_audio(input_path, output_path, "RVC")
-        completed.append(
-            {"index": int(item["index"]), "output_path": output_path}
-        )
-    return {"items": completed}
-
-
-def _run_rvc(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    return asyncio.run(_rvc_batch(payload))
-
-
 _HANDLERS = {
     "health": _run_health,
     "demucs": _run_demucs,
     "whisper": _run_whisper,
     "ocr": _run_ocr,
-    "rvc": _run_rvc,
 }
 
 

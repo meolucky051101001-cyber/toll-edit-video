@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 from .config import PipelineSettings
-from .stage_validation import is_real_rvc_model
 
 try:
     from backend.config.paths import AppPaths
@@ -190,31 +189,6 @@ def _cuda_check() -> PreflightCheck:
         return PreflightCheck("gpu:cuda", "warning", "probe failed: {}".format(exc))
 
 
-def _rvc_check(project_root: Path, settings: PipelineSettings) -> PreflightCheck:
-    candidates = []
-    for directory in (
-        project_root / "MyVoiceModel_v2",
-        project_root / "models" / "rvc",
-    ):
-        if directory.is_dir():
-            candidates.extend(sorted(directory.glob("*.pth")))
-    real_models = [candidate for candidate in candidates if is_real_rvc_model(candidate)]
-    if real_models:
-        if importlib.util.find_spec("rvc_python") is None:
-            return PreflightCheck(
-                "rvc:model",
-                "warning",
-                "real model found but optional rvc-python package is missing",
-            )
-        return PreflightCheck("rvc:model", "pass", str(real_models[0]))
-    status = "warning" if settings.enable_rvc else "skipped"
-    return PreflightCheck(
-        "rvc:model",
-        status,
-        "no real .pth model found; Edge TTS remains available",
-    )
-
-
 def _strong_model_checks(
     project_root: Path, environment: Mapping[str, str]
 ) -> List[PreflightCheck]:
@@ -327,7 +301,6 @@ def run_preflight(
     checks.extend((_command_check("ffmpeg"), _command_check("ffprobe")))
     checks.append(_nvenc_check())
     checks.append(_cuda_check())
-    checks.append(_rvc_check(root, settings))
     checks.extend(_strong_model_checks(root, env))
 
     paths = AppPaths.from_environment(root, env)

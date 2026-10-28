@@ -2,8 +2,8 @@
 
 Runs 3 iterations per measurement to compute median times across all stages:
 - Cold (empty cache)
-- Warm single sentence edit (per-sentence TTS/RVC caching)
-- Warm subtitle-only edit (100% audio reuse, no TTS/RVC/mix)
+- Warm single sentence edit (per-sentence TTS caching)
+- Warm subtitle-only edit (100% audio reuse, no TTS/mix)
 """
 
 import asyncio
@@ -35,7 +35,6 @@ from pipeline_v2.video_pipeline import (
     V2_STAGE_ORDER,
     VideoPipelineRequest,
     VideoPipelineRunner,
-    discover_rvc_model,
 )
 
 logger = logging.getLogger("benchmark_v6")
@@ -68,7 +67,6 @@ async def run_single_pipeline(
     job_dir: Path,
     output_path: Path,
     settings: PipelineSettings,
-    rvc_model: Optional[Path],
     api_key: str,
 ) -> Dict[str, Any]:
     try:
@@ -85,9 +83,8 @@ async def run_single_pipeline(
         output_path=output_path,
         settings=settings,
         api_key=api_key,
-        voice_source="rvc" if rvc_model else "edge",
-        voice_param=str(rvc_model) if rvc_model else "vi-VN-HoaiMyNeural",
-        rvc_model_path=rvc_model,
+        voice_source="capcut",
+        voice_param="BV562_streaming",
     )
     runner = VideoPipelineRunner(request)
     result = await runner.run()
@@ -159,7 +156,6 @@ async def main():
     logger.info("Target Benchmark Video: %s (%s bytes, sha256=%s)", video_path.name, source_size, source_hash[:16])
 
     workspace_base = ROOT_DIR / "workspace"
-    rvc_model = discover_rvc_model(workspace_base)
     api_key = os.getenv("GEMINI_API_KEY", "")
 
     # Base settings
@@ -204,13 +200,12 @@ async def main():
             job_dir=cold_job_dir,
             output_path=cold_out,
             settings=settings_cold,
-            rvc_model=rvc_model,
             api_key=api_key,
         )
         cold_runs.append(res)
-        logger.info("  Cold Run %d: Total = %.2fs (TTS=%.2fs, RVC=%.2fs, Mix=%.2fs, Sub=%.2fs, Render=%.2fs, QC=%.2fs)",
+        logger.info("  Cold Run %d: Total = %.2fs (TTS=%.2fs, Mix=%.2fs, Sub=%.2fs, Render=%.2fs, QC=%.2fs)",
                     i, res["stage_times"]["total_pipeline_time"],
-                    res["stage_times"].get("tts", 0), res["stage_times"].get("rvc", 0),
+                    res["stage_times"].get("tts", 0),
                     res["stage_times"].get("mix_v2", 0), res["stage_times"].get("subtitles", 0),
                     res["stage_times"].get("render", 0), res["stage_times"].get("qc", 0))
 
@@ -245,7 +240,7 @@ async def main():
         if manifest_path.is_file():
             mdata = json.loads(manifest_path.read_text(encoding="utf-8"))
             stages = mdata.get("stages", {})
-            for st in ["tts", "rvc", "mix_v2", "subtitles", "render", "qc", "deliver"]:
+            for st in ["tts", "mix_v2", "subtitles", "render", "qc", "deliver"]:
                 if st in stages:
                     stages[st]["status"] = "pending"
                     stages[st]["finished_at"] = None
@@ -260,13 +255,12 @@ async def main():
             job_dir=job_dir,
             output_path=warm_out,
             settings=settings_base,
-            rvc_model=rvc_model,
             api_key=api_key,
         )
         warm_sentence_runs.append(res)
-        logger.info("  Warm 1-Sentence Run %d: Total = %.2fs (TTS=%.2fs, RVC=%.2fs, Mix=%.2fs, Sub=%.2fs, Render=%.2fs, QC=%.2fs)",
+        logger.info("  Warm 1-Sentence Run %d: Total = %.2fs (TTS=%.2fs, Mix=%.2fs, Sub=%.2fs, Render=%.2fs, QC=%.2fs)",
                     i, res["stage_times"]["total_pipeline_time"],
-                    res["stage_times"].get("tts", 0), res["stage_times"].get("rvc", 0),
+                    res["stage_times"].get("tts", 0),
                     res["stage_times"].get("mix_v2", 0), res["stage_times"].get("subtitles", 0),
                     res["stage_times"].get("render", 0), res["stage_times"].get("qc", 0))
 
@@ -303,13 +297,12 @@ async def main():
             job_dir=job_dir,
             output_path=warm_sub_out,
             settings=settings_base,
-            rvc_model=rvc_model,
             api_key=api_key,
         )
         warm_subtitle_runs.append(res)
-        logger.info("  Warm Subtitle-Only Run %d: Total = %.2fs (TTS=%.2fs, RVC=%.2fs, Mix=%.2fs, Sub=%.2fs, Render=%.2fs, QC=%.2fs)",
+        logger.info("  Warm Subtitle-Only Run %d: Total = %.2fs (TTS=%.2fs, Mix=%.2fs, Sub=%.2fs, Render=%.2fs, QC=%.2fs)",
                     i, res["stage_times"]["total_pipeline_time"],
-                    res["stage_times"].get("tts", 0), res["stage_times"].get("rvc", 0),
+                    res["stage_times"].get("tts", 0),
                     res["stage_times"].get("mix_v2", 0), res["stage_times"].get("subtitles", 0),
                     res["stage_times"].get("render", 0), res["stage_times"].get("qc", 0))
 
@@ -357,21 +350,21 @@ async def main():
     print("\n" + "=" * 92)
     print(" BẢNG TỔNG HỢP KẾT QUẢ BENCHMARK TOOL V2 - 3 BÀI ĐO ĐỘC LẬP (TRUNG VỊ 3 LẦN CHẠY)")
     print("=" * 92)
-    fmt = "{:<26} | {:<10} | {:<10} | {:<10} | {:<14} | {:<10} | {:<10}"
-    print(fmt.format("Bài đo (Benchmark)", "TTS (s)", "RVC (s)", "Mix (s)", "Subtitles (s)", "Render (s)", "QC (s)"))
+    fmt = "{:<26} | {:<10} | {:<10} | {:<14} | {:<10} | {:<10}"
+    print(fmt.format("Bài đo (Benchmark)", "TTS (s)", "Mix (s)", "Subtitles (s)", "Render (s)", "QC (s)"))
     print("-" * 92)
     
     c_m = cold_summary["median_timings"]
     w1_m = warm_sentence_summary["median_timings"]
     ws_m = warm_subtitle_summary["median_timings"]
 
-    print(fmt.format("1. Cold Thật (Rỗng cache)", f"{c_m.get('tts', 0):.2f}", f"{c_m.get('rvc', 0):.2f}",
+    print(fmt.format("1. Cold Thật (Rỗng cache)", f"{c_m.get('tts', 0):.2f}",
                      f"{c_m.get('mix_v2', 0):.2f}", f"{c_m.get('subtitles', 0):.2f}",
                      f"{c_m.get('render', 0):.2f}", f"{c_m.get('qc', 0):.2f}"))
-    print(fmt.format("2. Warm Sửa 1 câu thoại", f"{w1_m.get('tts', 0):.2f}", f"{w1_m.get('rvc', 0):.2f}",
+    print(fmt.format("2. Warm Sửa 1 câu thoại", f"{w1_m.get('tts', 0):.2f}",
                      f"{w1_m.get('mix_v2', 0):.2f}", f"{w1_m.get('subtitles', 0):.2f}",
                      f"{w1_m.get('render', 0):.2f}", f"{w1_m.get('qc', 0):.2f}"))
-    print(fmt.format("3. Warm Chỉ sửa phụ đề", f"{ws_m.get('tts', 0):.2f}", f"{ws_m.get('rvc', 0):.2f}",
+    print(fmt.format("3. Warm Chỉ sửa phụ đề", f"{ws_m.get('tts', 0):.2f}",
                      f"{ws_m.get('mix_v2', 0):.2f}", f"{ws_m.get('subtitles', 0):.2f}",
                      f"{ws_m.get('render', 0):.2f}", f"{ws_m.get('qc', 0):.2f}"))
     print("-" * 92)

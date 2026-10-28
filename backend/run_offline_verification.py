@@ -131,7 +131,6 @@ from pipeline_v2.video_pipeline import (
     PIPELINE_IMPLEMENTATION_VERSION,
     VideoPipelineRequest,
     VideoPipelineRunner,
-    discover_rvc_model,
 )
 
 
@@ -357,17 +356,15 @@ async def main():
             timed_segs = artifacts_dir / "translation" / "timed_segments.json"
             if timed_segs.is_file():
                 timed_segs.unlink(missing_ok=True)
-        for sub_dir_name in ("tts", "rvc", "subtitles", "mix_v2", "output", "qc"):
+        for sub_dir_name in ("tts", "subtitles", "mix_v2", "output", "qc"):
             sd = artifacts_dir / sub_dir_name
             if sd.is_dir():
                 shutil.rmtree(str(sd), ignore_errors=True)
         if final_output_path.is_file():
             final_output_path.unlink(missing_ok=True)
 
-    # Discover RVC Model if available
-    rvc_model = discover_rvc_model(Path(r"C:\tool v2\MyVoiceModel_v2"))
-    if not rvc_model:
-        rvc_model = discover_rvc_model(Path(r"C:\tool v2\workspace"))
+    voice_source = "capcut"
+    voice_param = "BV562_streaming"
 
     env_override = dict(os.environ)
     if is_warm_mode or cli_args.resume:
@@ -388,9 +385,8 @@ async def main():
     logger.info(f"Source Size: {source_video.stat().st_size / (1024*1024):.2f} MB")
     logger.info(f"Source Duration: {source_duration:.2f}s ({source_duration / 60.0:.2f} minutes)")
     logger.info(f"Benchmark Dir: {benchmark_dir}")
-    logger.info(f"RVC Model: {rvc_model}")
+    logger.info(f"TTS Voice: {voice_source} ({voice_param})")
     logger.info(f"Settings: QC_GATE_POLICY={settings.qc_gate_policy}, "
-                f"RVC_BATCH_SEGMENTS={settings.rvc_batch_segments}, "
                 f"TTS_BATCH_SEGMENTS={settings.tts_batch_segments}, "
                 f"ENABLE_ADAPTIVE_OCR={settings.enable_adaptive_ocr}")
     logger.info("=" * 80)
@@ -423,9 +419,8 @@ async def main():
         delivery_copy_path=None,
         settings=settings,
         api_key=os.getenv("GEMINI_API_KEY", ""),
-        voice_source="rvc" if rvc_model else "edge",
-        voice_param=str(rvc_model) if rvc_model else "vi-VN-HoaiMyNeural",
-        rvc_model_path=rvc_model,
+        voice_source=voice_source,
+        voice_param=voice_param,
         progress=async_progress,
     )
 

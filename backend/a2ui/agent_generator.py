@@ -53,7 +53,7 @@ def generate_a2ui_for_video(video_path: str, ai_analysis: Optional[Dict[str, Any
                     "component": "VoiceSelectorCard",
                     "selectedVoice": { "$bind": "/config/voice" },
                     "options": [
-                        {"id": "rvc-chimai", "name": "RVC Chí Mai (Đề xuất)", "type": "rvc", "recommended": True},
+                        {"id": "capcut-BV562_streaming", "name": "CapCut Mai (Đề xuất)", "type": "capcut", "recommended": True},
                         {"id": "edge-hoaimy", "name": "Hoài My (Edge TTS Nữ)", "type": "edge", "recommended": False},
                         {"id": "edge-namthan", "name": "Nam Thần (Edge TTS Nam)", "type": "edge", "recommended": False}
                     ],
@@ -98,7 +98,7 @@ def generate_a2ui_for_video(video_path: str, ai_analysis: Optional[Dict[str, Any
         A2UIMessage(UpdateDataModel(
             surfaceId=surface_id,
             path="/config",
-            value={"voice": "rvc-chimai"}
+            value={"voice": "capcut-BV562_streaming"}
         )).to_dict()
     ]
 

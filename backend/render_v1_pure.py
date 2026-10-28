@@ -2,7 +2,6 @@
 import os
 import sys
 import time
-from pathlib import Path
 
 # Fix Windows console UTF-8 encoding
 if hasattr(sys.stdout, "reconfigure"):
@@ -28,10 +27,11 @@ os.environ["PIPELINE_MODE"] = "legacy"
 
 from ai.transcription import extract_subtitles_whisper
 from ai.translation import translate_subtitles
-from ai.voice_cloning import generate_dubbing_audio, rvc_runtime_available
+from ai.voice_cloning import generate_dubbing_audio
 from video_utils import extract_audio_from_video, mix_audio_pydub, process_video, separate_vocals_demucs
 from ass_utils import generate_ass_file
 from ocr_utils import perform_video_ocr, release_ocr_reader
+from voice_selection import resolve_voice
 
 async def run_tool_v1(video_path: str, output_dir: str):
     file_name = os.path.basename(video_path)
@@ -75,11 +75,7 @@ async def run_tool_v1(video_path: str, output_dir: str):
     print("🌐 [Tool V1] Bước 4/6: Dịch phụ đề sang Tiếng Việt...", flush=True)
     translated_segments = await asyncio.to_thread(translate_subtitles, srt_segments, 'vi', os.getenv("GEMINI_API_KEY", ""), video_path)
 
-    rvc_models = sorted((Path(BASE_DIR).parent / "MyVoiceModel_v2").glob("*.pth"))
-    use_rvc = bool(rvc_models) and rvc_runtime_available()
-    voice_source = "rvc" if use_rvc else "edge"
-    voice_param = str(rvc_models[0]) if use_rvc else "vi-VN-HoaiMyNeural"
-    voice_label = "Chí Mai RVC v1" if use_rvc else "Hoài My (Edge dự phòng)"
+    voice_source, voice_param, voice_label = resolve_voice("capcut", "BV562_streaming")
     print(f"🎤 [Tool V1] Bước 5/6: Lồng tiếng AI ({voice_label})...", flush=True)
     dubbing_audio_files = await generate_dubbing_audio(
         translated_segments, dubbing_dir, voice_source, voice_param

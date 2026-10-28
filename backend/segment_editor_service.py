@@ -251,8 +251,6 @@ def resolve_job_voice(job_id_or_name: str, job_folder: Optional[Path] = None) ->
                 try:
                     m = json.loads(mf.read_text(encoding="utf-8"))
                     req = m.get("metadata", {}).get("request", {})
-                    if req.get("voice_source") == "rvc" or "pth" in str(req.get("rvc_model_path", "")).lower():
-                        return "capcut-BV562_streaming", "CapCut · Mai (mặc định)"
                     if req.get("voice_id"):
                         return req["voice_id"], req.get("voice_label", req["voice_id"])
                     param = str(req.get("voice_param", ""))
@@ -287,8 +285,6 @@ def resolve_job_voice(job_id_or_name: str, job_folder: Optional[Path] = None) ->
                         try:
                             m = json.loads(mf.read_text(encoding="utf-8"))
                             req = m.get("metadata", {}).get("request", {})
-                            if req.get("voice_source") == "rvc" or "pth" in str(req.get("rvc_model_path", "")).lower():
-                                return "capcut-BV562_streaming", "CapCut · Mai (mặc định)"
                             if req.get("voice_id"):
                                 return req["voice_id"], req.get("voice_label", req["voice_id"])
                         except Exception:

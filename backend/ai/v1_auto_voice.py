@@ -337,12 +337,6 @@ def classify_all_segments_gender(
 
 
 CONFIG_FILENAME = "v1_auto_voice.json"
-PREFERRED_CHI_MAI_MODELS = [
-    "mi-giong_cua_toi_v2.pth",
-    "chi-mai.pth",
-    "chimai.pth",
-    "chi_mai.pth",
-]
 
 
 def _resolve_control_dirs(workspace: Optional[str] = None) -> List[Path]:
@@ -520,55 +514,26 @@ def compute_file_sha256(file_path: Optional[str | Path], max_bytes: int = 16 * 1
         return ""
 
 
-def find_rvc_model_path(workspace: Optional[str] = None, preferred_name: Optional[str] = None) -> Optional[str]:
-    """
-    Tìm chính xác model RVC Chí Mai trong các thư mục tiêu chuẩn của hệ thống.
-    Ưu tiên các tên file cấu hình Chí Mai trước, không lấy ngẫu nhiên file .pth đầu tiên (Codex Point 1.4).
-    """
-    backend_dir = Path(__file__).resolve().parents[1]
-    ws = Path(workspace) if workspace else Path(os.getenv("AUTODUB_WORKSPACE", backend_dir.parent / "workspace"))
-    search_dirs = [
-        backend_dir.parent / "MyVoiceModel_v2",
-        ws.parent / "MyVoiceModel_v2",
-        ws / "MyVoiceModel_v2",
-        ws / "models" / "rvc",
-        backend_dir.parent / "models" / "rvc",
-    ]
-    target_names = [preferred_name] if preferred_name else PREFERRED_CHI_MAI_MODELS
-
-    # 1. Tìm chính xác theo danh sách model Chí Mai cấu hình
-    for d in search_dirs:
-        if d.is_dir():
-            for name in target_names:
-                candidate = d / name
-                try:
-                    if candidate.is_file() and candidate.stat().st_size > 1024:
-                        return str(candidate.resolve())
-                except OSError:
-                    continue
-
-    # 2. Nếu không tìm thấy tên chính xác, tìm file .pth hợp lệ trong MyVoiceModel_v2
-    for d in search_dirs:
-        if d.is_dir() and "MyVoiceModel" in d.name:
-            for f in sorted(os.listdir(d)):
-                if f.endswith(".pth"):
-                    candidate = d / f
-                    try:
-                        if candidate.stat().st_size > 1024:
-                            return str(candidate.resolve())
-                    except OSError:
-                        continue
-    return None
-
-
 def _get_catalog(workspace: Optional[str] = None) -> List[Dict[str, Any]]:
     """Lấy danh mục giọng từ control dir hoặc voice_selection module."""
+    try:
+        import voice_selection
+        supported = voice_selection.SUPPORTED_TTS_SOURCES
+    except Exception:
+        supported = {"capcut", "vieneu", "vie-tts", "edge", "fpt"}
     dirs = _resolve_control_dirs(workspace)
     for d in dirs:
         cat_file = d / "voice_catalog.json"
         if cat_file.is_file():
             try:
-                return json.loads(cat_file.read_text(encoding="utf-8"))
+                items = json.loads(cat_file.read_text(encoding="utf-8"))
+                if isinstance(items, list):
+                    filtered = [
+                        v for v in items
+                        if isinstance(v, dict) and v.get("source") in supported
+                    ]
+                    if filtered:
+                        return filtered
             except Exception:
                 pass
     try:
@@ -585,7 +550,6 @@ def resolve_locked_voice(
     first_seg_index: int,
     workspace: Optional[str] = None,
     default_voice_id: Optional[str] = None,
-    rvc_model_path: Optional[str] = None,
     voice_mode: str = "auto",
     voice_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -593,8 +557,8 @@ def resolve_locked_voice(
     Quy tắc quyết định giọng (Unified Decision Matrix):
     - Chế độ MANUAL: Dùng trực tiếp giọng thủ công đang chọn, không nhận diện.
     - Chế độ AUTO:
-      + Đọc cấu hình female_voice_id (mặc định: Chí Mai RVC) và male_voice_id (mặc định: Thanh Niên Tự Tin).
-      + Câu thoại đầu là NỮ -> Dùng giọng nữ đã cấu hình. Nếu là RVC và thiếu model/runtime, BÁO LỖI rõ ràng trước TTS.
+      + Đọc cấu hình female_voice_id (mặc định: CapCut Mai) và male_voice_id (mặc định: Thanh Niên Tự Tin).
+      + Câu thoại đầu là NỮ -> Dùng giọng nữ đã cấu hình.
       + Câu thoại đầu là NAM -> Dùng giọng nam đã cấu hình.
       + Câu đầu không chắc (conf < 0.70) -> Fallback về giọng thủ công đang chọn, ghi log rõ lý do.
     """
@@ -607,12 +571,6 @@ def resolve_locked_voice(
         v_source = cfg_voice.get("source", "capcut")
         v_param = cfg_voice.get("param", "BV562_streaming")
         v_label = cfg_voice.get("label", "CapCut · Mai")
-
-        if v_id == "chi-mai" or v_source == "rvc":
-            v_id = VOICE_FEMALE_ID
-            v_source = "capcut"
-            v_param = VOICE_FEMALE_PARAM
-            v_label = "CapCut · Mai (Nữ Chuẩn)"
 
         logger.info("Chế độ Manual: Dùng trực tiếp giọng thủ công đã chọn: %s (%s). Bỏ qua bước nhận diện F0/HNR.", v_label, v_id)
         return {
@@ -645,12 +603,6 @@ def resolve_locked_voice(
         v_param = chosen["param"] if chosen else VOICE_FEMALE_PARAM
         v_label = chosen["label"] if chosen else "CapCut · Mai"
 
-        if v_source == "rvc" or v_id == "chi-mai":
-            v_id = VOICE_FEMALE_ID
-            v_source = "capcut"
-            v_param = VOICE_FEMALE_PARAM
-            v_label = "CapCut · Mai (Nữ Chuẩn)"
-
         return {
             "voice_id": v_id,
             "voice_source": v_source,
@@ -675,12 +627,6 @@ def resolve_locked_voice(
         v_param = chosen["param"] if chosen else VOICE_MALE_PARAM
         v_label = chosen["label"] if chosen else "CapCut · Thanh Niên Tự Tin"
 
-        if v_source == "rvc" or v_id == "chi-mai":
-            v_id = VOICE_MALE_ID
-            v_source = "capcut"
-            v_param = VOICE_MALE_PARAM
-            v_label = "CapCut · Thanh Niên Tự Tin"
-
         return {
             "voice_id": v_id,
             "voice_source": v_source,
@@ -701,12 +647,6 @@ def resolve_locked_voice(
     v_source = cfg_voice["source"]
     v_param = cfg_voice["param"]
     v_label = cfg_voice["label"]
-
-    if v_id == "chi-mai" or v_source == "rvc":
-        v_id = VOICE_FEMALE_ID
-        v_source = "capcut"
-        v_param = VOICE_FEMALE_PARAM
-        v_label = "CapCut · Mai (Nữ Chuẩn)"
 
     logger.info(
         "Chế độ Auto Voice: Câu đầu không xác định chắc giới tính (conf=%.2f < %.2f, F0=%.1f Hz, gender=%s). "
@@ -786,7 +726,6 @@ def decide_video_voice(
     video_path: Optional[str | Path] = None,
     voice_mode: Optional[str] = None,
     workspace: Optional[str] = None,
-    rvc_model_path: Optional[str] = None,
     default_voice_id: Optional[str] = None,
     force_reselect: bool = False,
     job_id: Optional[str] = None,
@@ -795,7 +734,7 @@ def decide_video_voice(
 ) -> Dict[str, Any]:
     """
     Hàm quyết định giọng chung (Unified Voice Decision Function - Codex Plan):
-    - Chế độ Auto: Phân tích câu thoại đầu -> Chọn và lưu snapshot (Nữ -> Chí Mai RVC; Nam -> BV075; Unknown -> thủ công).
+    - Chế độ Auto: Phân tích câu thoại đầu -> Chọn và lưu snapshot (Nữ -> CapCut Mai; Nam -> BV075; Unknown -> thủ công).
     - Chế độ Dual Voice: Phân vai Nam & Nữ theo từng câu trong cùng 1 video.
     - Chế độ Manual: Lấy giọng đã chọn thủ công -> Lưu snapshot (Thời gian phân tích = 0s, không chạy pitch).
     - Snapshot gắn với hash nội dung video và chế độ.
@@ -868,7 +807,6 @@ def decide_video_voice(
             first_seg_index=0,
             workspace=workspace,
             default_voice_id=default_voice_id,
-            rvc_model_path=rvc_model_path,
             voice_config=voice_config,
             voice_mode="manual",
         )
@@ -959,7 +897,6 @@ def decide_video_voice(
             first_seg_index=0,
             workspace=workspace,
             default_voice_id=default_voice_id,
-            rvc_model_path=rvc_model_path,
             voice_config=voice_config,
             voice_mode="auto",
         )
@@ -970,7 +907,6 @@ def decide_video_voice(
             first_seg_index=0,
             workspace=workspace,
             default_voice_id=default_voice_id,
-            rvc_model_path=rvc_model_path,
             voice_config=voice_config,
             voice_mode="auto",
         )
@@ -992,7 +928,6 @@ def decide_video_voice(
                     first_seg_index=0,
                     workspace=workspace,
                     default_voice_id=VOICE_MALE_ID,
-                    rvc_model_path=rvc_model_path,
                     voice_config=cfg_override,
                     voice_mode="auto",
                 )
@@ -1006,7 +941,6 @@ def decide_video_voice(
                     first_seg_index=0,
                     workspace=workspace,
                     default_voice_id=VOICE_FEMALE_ID,
-                    rvc_model_path=rvc_model_path,
                     voice_config=cfg_override,
                     voice_mode="auto",
                 )
@@ -1044,7 +978,7 @@ def decide_video_voice(
                     fallback_voice_info = resolve_locked_voice(
                         gender="manual", confidence=1.0, median_f0=0.0,
                         first_seg_index=0, workspace=workspace,
-                        default_voice_id=default_voice_id, rvc_model_path=rvc_model_path,
+                        default_voice_id=default_voice_id,
                         voice_config=voice_config, voice_mode="manual",
                     )
                 chosen_v = fallback_voice_info
@@ -1137,7 +1071,6 @@ def decide_video_voice(
             first_seg_index=seg_idx,
             workspace=workspace,
             default_voice_id=default_voice_id,
-            rvc_model_path=rvc_model_path,
             voice_config=voice_config,
             voice_mode="auto",
         )
@@ -1176,7 +1109,6 @@ def lock_video_voice(
     vocals_path: Optional[str | Path] = None,
     original_audio_path: Optional[str | Path] = None,
     workspace: Optional[str] = None,
-    rvc_model_path: Optional[str] = None,
     default_voice_id: Optional[str] = None,
     force_reselect: bool = False,
     video_path: Optional[str | Path] = None,
@@ -1191,7 +1123,6 @@ def lock_video_voice(
         video_path=video_path,
         voice_mode=voice_mode,
         workspace=workspace,
-        rvc_model_path=rvc_model_path,
         default_voice_id=default_voice_id,
         force_reselect=force_reselect,
     )

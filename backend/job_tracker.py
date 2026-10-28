@@ -44,7 +44,7 @@ STEP_PERCENT_MAP = {
     3.5: 55,   # Tương thích ngược OCR
     4.0: 55,   # Quét phụ đề chữ cứng (OCR)
     5.0: 65,   # Dịch phụ đề chuẩn ngữ cảnh (Gemini AI)
-    6.0: 75,   # Lồng tiếng AI (TTS → RVC Voice)
+    6.0: 75,   # Lồng tiếng AI (TTS)
     7.0: 85,   # Trộn nhạc nền & giọng đọc (Adaptive Mixer)
     8.0: 95,   # Render video thành phẩm bằng NVENC GPU
 }

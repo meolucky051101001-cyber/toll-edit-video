@@ -402,17 +402,6 @@ async def synthesize_voice_preview(
                             await asyncio.to_thread(_run_capcut_tts, text, str(temp_raw), "BV562_streaming")
                             synthesized = temp_raw.is_file() and temp_raw.stat().st_size > 128
 
-                elif source == "rvc" or voice_id == "chi-mai":
-                    # RVC đã bỏ; tạo preview trực tiếp bằng CapCut Mai
-                    try:
-                        from ai.voice_cloning import _run_capcut_tts
-                        await asyncio.to_thread(_run_capcut_tts, text, str(temp_raw), "BV562_streaming")
-                        synthesized = temp_raw.is_file() and temp_raw.stat().st_size > 128
-                    except Exception:
-                        if verified_sample and verified_sample.is_file():
-                            shutil.copy2(verified_sample, temp_raw)
-                            synthesized = True
-
                 if not synthesized or not temp_raw.is_file() or temp_raw.stat().st_size < 128:
                     raise RuntimeError("Không thể tạo âm thanh xem trước từ provider.")
 

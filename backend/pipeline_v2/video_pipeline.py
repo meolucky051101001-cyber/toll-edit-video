@@ -27,7 +27,6 @@ from .batching import bounded_batches, chunked
 from .config import PipelineSettings, QCGatePolicy
 from .content import (
     compose_srt,
-    discover_rvc_model,
     merge_ocr_geometry,
     validate_translated_batch,
 )
@@ -37,16 +36,11 @@ from .mixer import FFmpegMixSettings, mix_audio_ffmpeg
 from .models import ArtifactRecord, FingerprintSet, JobManifest, fingerprint_json
 from .qc import QCSettings, evaluate_qc_gate, run_report_only_qc
 from .segments import RuntimeSegment, segment_to_dict, segments_from_dicts, segments_to_dicts
-from .stage_validation import (
-    discover_rvc_index_file,
-    is_real_rvc_model,
-    validate_demucs_outputs,
-)
+from .stage_validation import validate_demucs_outputs
 from .stage_status import StageStatus
 from .timing import (
     GeminiTimingRewriter,
     TimingPolicy,
-    fit_audio_to_window,
     plan_actual_timing_rewrites,
     plan_segment,
     solve_segment_timing,
@@ -67,7 +61,6 @@ V2_STAGE_ORDER = (
     "reconcile",
     "timing",
     "tts",
-    "rvc",
     "subtitles",
     "mix_legacy",
     "mix_v2",
@@ -79,7 +72,7 @@ V2_STAGE_ORDER = (
 # Bump this value whenever artifact semantics change.  It participates in the
 # manifest fingerprint so an upgraded runner cannot silently reuse output from
 # an older implementation that happened to have the same environment flags.
-PIPELINE_IMPLEMENTATION_VERSION = "2.15.0"
+PIPELINE_IMPLEMENTATION_VERSION = "2.16.0"
 TRANSLATION_CHECKPOINT_VERSION = 3
 TRANSLATION_CONTEXT_WINDOW = 12
 
@@ -100,7 +93,6 @@ class VideoPipelineRequest:
     target_lang: str = "vi"
     voice_source: str = "edge"
     voice_param: str = "vi-VN-HoaiMyNeural"
-    rvc_model_path: Optional[Path] = None
     clean_audio_hint: Optional[bool] = None
     delogo: bool = False
     progress: Optional[Callable[[str, str], Any]] = None
@@ -141,18 +133,12 @@ class VideoPipelineRunner:
             and Path(request.delivery_copy_path).resolve() == self.video_path
         ):
             raise ValueError("Pipeline delivery_copy_path must not overwrite the input video")
-        if request.voice_source not in {"edge", "fpt", "rvc", "capcut", "vieneu", "vie-tts"}:
-            raise ValueError("voice_source must be edge, fpt, rvc, capcut, vieneu or vie-tts")
+        if request.voice_source not in {"edge", "fpt", "capcut", "vieneu", "vie-tts"}:
+            raise ValueError("voice_source must be edge, fpt, capcut, vieneu or vie-tts")
         if request.voice_source == "fpt" and not (
             request.tts_api_key or request.api_key
         ):
             raise ValueError("FPT voice requires an API key")
-        if request.voice_source == "rvc" and (
-            not request.settings.enable_rvc
-            or not request.rvc_model_path
-            or not is_real_rvc_model(request.rvc_model_path)
-        ):
-            raise ValueError("RVC voice requires an enabled, real .pth model file")
         self.job_directory = Path(request.job_directory).resolve()
         self.v2_directory = self.job_directory / "pipeline_v2"
         self.artifact_store = ArtifactStore(self.v2_directory / "artifacts")
@@ -258,18 +244,13 @@ class VideoPipelineRunner:
         await self._execute("tts", lambda: self._tts_stage(timed_segments))
         final_segments = self._segments_after_tts(timed_segments)
 
-        # Early Fail-Fast: Avoid wasting GPU on RVC, audio mixing, or NVENC render if TTS produced silent fallback
+        # Early Fail-Fast: avoid wasting GPU on audio mixing or NVENC render if TTS produced silent fallback
         tts_payload = self._load_json("tts/segments.json")
         silent_count = int(tts_payload.get("silent_fallback_count", 0))
         if silent_count > 0 and self.request.settings.qc_gate_policy is QCGatePolicy.BLOCK:
             raise QCGateBlocked(
-                f"QC gate early abort: TTS stage produced {silent_count} silent fallback segment(s). Stopping pipeline before RVC, mix, and render."
+                f"QC gate early abort: TTS stage produced {silent_count} silent fallback segment(s). Stopping pipeline before mix and render."
             )
-
-        if self._rvc_enabled():
-            await self._execute("rvc", lambda: self._rvc_stage(final_segments))
-        else:
-            self._skip("rvc", "RVC model unavailable or disabled")
 
         await self._execute("subtitles", lambda: self._subtitles_stage(final_segments))
 
@@ -347,11 +328,6 @@ class VideoPipelineRunner:
                 }
             ),
         }
-        if self.request.rvc_model_path and is_real_rvc_model(self.request.rvc_model_path):
-            model_fingerprints["rvc"], _ = hash_file(self.request.rvc_model_path)
-            rvc_index = discover_rvc_index_file(self.request.rvc_model_path)
-            if rvc_index is not None:
-                model_fingerprints["rvc_index"], _ = hash_file(rvc_index)
         fingerprints = FingerprintSet(
             source_sha256=source_hash,
             config_sha256=fingerprint_json(
@@ -436,11 +412,6 @@ class VideoPipelineRunner:
                     "target_lang": self.request.target_lang,
                     "voice_source": self.request.voice_source,
                     "voice_param": self.request.voice_param,
-                    "rvc_model_path": (
-                        str(Path(self.request.rvc_model_path).resolve())
-                        if self.request.rvc_model_path
-                        else None
-                    ),
                     "clean_audio_hint": self.request.clean_audio_hint,
                     "delogo": self.request.delogo,
                     "font_name": self.request.font_name,
@@ -1233,14 +1204,6 @@ class VideoPipelineRunner:
             ),
         ]
 
-    def _rvc_enabled(self) -> bool:
-        return bool(
-            self.request.settings.enable_rvc
-            and self.request.voice_source == "rvc"
-            and self.request.rvc_model_path
-            and is_real_rvc_model(self.request.rvc_model_path)
-        )
-
     async def _tts_stage(
         self, segments: Sequence[RuntimeSegment]
     ) -> Sequence[ArtifactRecord]:
@@ -1248,9 +1211,7 @@ class VideoPipelineRunner:
             atempo_min=self.request.settings.atempo_min,
             atempo_max=self.request.settings.atempo_max,
         )
-        source = "rvc" if self._rvc_enabled() else self.request.voice_source
-        if source not in {"edge", "fpt", "rvc", "capcut", "vieneu", "vie-tts"}:
-            source = "capcut"
+        source = self.request.voice_source
         artifacts: List[ArtifactRecord] = []
         portable_infos: List[Dict[str, Any]] = []
         actual_rewriter = (
@@ -1458,308 +1419,11 @@ class VideoPipelineRunner:
         return segments_from_dicts(segments_to_dicts(fallback))
 
     def _audio_infos(self) -> List[Dict[str, Any]]:
-        key = (
-            "rvc/segments.json"
-            if self.manifest.stage("rvc").status is StageStatus.COMPLETED
-            else "tts/segments.json"
-        )
-        infos = self._load_json(key)["segments"]
+        infos = self._load_json("tts/segments.json")["segments"]
         return [
             {**item, "path": str(self._artifact_path(item["artifact_key"]))}
             for item in infos
         ]
-
-    async def _rvc_stage(
-        self, segments: Sequence[RuntimeSegment]
-    ) -> Sequence[ArtifactRecord]:
-        tts_infos = self._load_json("tts/segments.json")["segments"]
-        segment_map = {segment.index: segment for segment in segments}
-        policy = TimingPolicy(
-            atempo_min=self.request.settings.atempo_min,
-            atempo_max=self.request.settings.atempo_max,
-        )
-        tts_by_index = {int(info["index"]): info for info in tts_infos}
-        artifacts: List[ArtifactRecord] = []
-        portable: List[Dict[str, Any]] = []
-
-        session = None
-        if self.request.settings.enable_gpu_process_isolation:
-            try:
-                from .rvc_session import RVCSession
-                session = RVCSession(
-                    control_directory=self.gpu_executor.control_directory,
-                    lock_path=self.gpu_executor.lock_path,
-                    python_executable=self.gpu_executor.python_executable,
-                    lock_timeout_seconds=self.gpu_executor.lock_timeout_seconds,
-                )
-            except Exception as exc:
-                logger.warning("Could not start persistent RVCSession, falling back to per-batch: %s", exc)
-                session = None
-
-        try:
-            for batch_number, batch in enumerate(
-                chunked(tts_infos, self.request.settings.rvc_batch_segments), 1
-            ):
-                checkpoint_key = "rvc/batches/{:05d}.json".format(batch_number)
-                input_fingerprint = fingerprint_json(
-                    {
-                        "cache_generation": self._batch_scope,
-                        "pipeline_implementation_version": PIPELINE_IMPLEMENTATION_VERSION,
-                        "tts": batch,
-                        "enable_auto_gender": self.request.settings.enable_auto_gender,
-                        "model": self.manifest.fingerprints.model_sha256.get("rvc", ""),
-                        "model_index": self.manifest.fingerprints.model_sha256.get("rvc_index", ""),
-                        "atempo_min": policy.atempo_min,
-                        "atempo_max": policy.atempo_max,
-                    }
-                )
-                checkpoint_path = self.artifact_store.path_for(checkpoint_key)
-                restored = False
-                if checkpoint_path.is_file():
-                    try:
-                        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-                        audio_records = [
-                            ArtifactRecord.from_dict(item)
-                            for item in checkpoint.get("audio_artifacts", [])
-                        ]
-                        if (
-                            checkpoint.get("input_fingerprint") == input_fingerprint
-                            and len(audio_records) == len(batch)
-                            and all(
-                                self.artifact_store.validate(record).valid
-                                for record in audio_records
-                            )
-                        ):
-                            artifacts.extend(audio_records)
-                            artifacts.append(self.artifact_store.record_existing(checkpoint_key))
-                            portable.extend(checkpoint["segments"])
-                            restored = True
-                    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-                        restored = False
-                if restored:
-                    continue
-
-                cached_rvc_records: Dict[int, ArtifactRecord] = {}
-                cached_rvc_infos: Dict[int, Dict[str, Any]] = {}
-                if checkpoint_path.is_file():
-                    try:
-                        old_ckpt = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-                        cached_auto_gender = old_ckpt.get("enable_auto_gender")
-                        cached_model_sha = old_ckpt.get("rvc_model_sha256")
-                        current_model_sha = getattr(getattr(self.manifest, "fingerprints", None), "model_sha256", {}).get("rvc")
-                        cached_model_path = old_ckpt.get("rvc_model_path")
-                        current_model_path = str(self.request.rvc_model_path or "")
-
-                        model_matches = True
-                        if cached_model_sha is not None and current_model_sha is not None:
-                            if cached_model_sha != current_model_sha:
-                                model_matches = False
-                        elif cached_model_path is not None and current_model_path:
-                            if cached_model_path != current_model_path:
-                                model_matches = False
-
-                        if (
-                            (cached_auto_gender is None or cached_auto_gender == self.request.settings.enable_auto_gender)
-                            and model_matches
-                        ):
-                            old_segments = {
-                                int(s["index"]): s
-                                for s in old_ckpt.get("segments", [])
-                                if isinstance(s, dict) and "index" in s
-                            }
-                            for info in batch:
-                                idx = int(info["index"])
-                                rvc_key = "rvc/{}.wav".format(idx)
-                                if idx in old_segments and self.artifact_store.exists(rvc_key):
-                                    old_info = old_segments[idx]
-                                    tts_path = self._artifact_path(info["artifact_key"])
-                                    if tts_path.is_file():
-                                        cur_tts_sha, _ = hash_file(tts_path)
-                                        saved_tts_sha = old_info.get("tts_sha256")
-                                        sha_matches = (saved_tts_sha is not None and saved_tts_sha == cur_tts_sha)
-                                        content_matches = (
-                                            str(old_info.get("content", "")).strip() == str(info.get("content", "")).strip()
-                                            and abs(float(old_info.get("start", 0.0)) - float(info.get("start", 0.0))) < 0.05
-                                            and abs(float(old_info.get("end", 0.0)) - float(info.get("end", 0.0))) < 0.05
-                                            and str(old_info.get("gender", "")) == str(info.get("gender", ""))
-                                        )
-                                        if sha_matches or (saved_tts_sha is None and content_matches):
-                                            rec = self.artifact_store.record_existing(rvc_key)
-                                            cached_rvc_records[idx] = rec
-                                            cached_rvc_infos[idx] = {
-                                                **old_info,
-                                                "tts_sha256": cur_tts_sha,
-                                            }
-                    except Exception as exc:
-                        logger.debug("Failed checking RVC cached segments: %s", exc)
-                        cached_rvc_records = {}
-                        cached_rvc_infos = {}
-
-                with tempfile.TemporaryDirectory(
-                    prefix="rvc-batch-", dir=self.work_directory
-                ) as work:
-                    work_path = Path(work)
-                    items_to_rvc = []
-                    male_items = []
-                    new_processed_records: Dict[int, ArtifactRecord] = {}
-                    new_processed_infos: Dict[int, Dict[str, Any]] = {}
-
-                    for info in batch:
-                        idx = int(info["index"])
-                        if idx in cached_rvc_records:
-                            continue
-                        gender = str(info.get("gender", "female") or "female").lower()
-                        inp_path = str(self._artifact_path(info["artifact_key"]))
-                        inp_file = Path(inp_path)
-                        inp_is_silent = (
-                            bool(info.get("is_unvoiced_scene", False))
-                            or not inp_file.is_file()
-                            or inp_file.stat().st_size <= 256
-                        )
-                        if inp_is_silent:
-                            male_items.append({
-                                "index": info["index"],
-                                "output_path": inp_path,
-                            })
-                        elif self.request.settings.enable_auto_gender and gender == "male":
-                            male_items.append({
-                                "index": info["index"],
-                                "output_path": inp_path,
-                            })
-                        else:
-                            items_to_rvc.append({
-                                "index": info["index"],
-                                "input_path": inp_path,
-                                "output_path": str(
-                                    work_path / "{}_rvc.wav".format(info["index"])
-                                ),
-                            })
-
-                    rvc_items_result = []
-                    if items_to_rvc:
-                        payload = {
-                            "model_path": str(self.request.rvc_model_path),
-                            "items": items_to_rvc,
-                        }
-                        if session is not None:
-                            try:
-                                result = await asyncio.to_thread(
-                                    session.run,
-                                    payload,
-                                    self._resource_scaled_timeout(),
-                                )
-                            except Exception as exc:
-                                logger.warning(
-                                    "RVCSession batch failed, closing session and falling back to executor: %s",
-                                    exc,
-                                )
-                                session.close()
-                                session = None
-                                result = await asyncio.to_thread(
-                                    self.gpu_executor.run,
-                                    "rvc",
-                                    payload,
-                                    self._resource_scaled_timeout(),
-                                )
-                        elif self.request.settings.enable_gpu_process_isolation:
-                            result = await asyncio.to_thread(
-                                self.gpu_executor.run,
-                                "rvc",
-                                payload,
-                                self._resource_scaled_timeout(),
-                            )
-                        else:
-                            from .gpu_worker import run_request
-
-                            result = await asyncio.to_thread(
-                                run_request,
-                                {"schema_version": 1, "stage": "rvc", "payload": payload},
-                            )
-                        rvc_items_result = result.get("items", [])
-
-                    all_items_result = male_items + rvc_items_result
-                    for item in all_items_result:
-                        index = int(item["index"])
-                        segment = segment_map[index]
-                        fitted = work_path / "{}_fitted.wav".format(index)
-                        fit = await asyncio.to_thread(
-                            fit_audio_to_window,
-                            item["output_path"],
-                            fitted,
-                            max((segment.end - segment.start).total_seconds(), 0.1),
-                            policy,
-                        )
-                        key = "rvc/{}.wav".format(index)
-                        record = self.artifact_store.put_file(key, fitted)
-                        new_processed_records[index] = record
-                        original_info = tts_by_index[index]
-                        tts_path = self._artifact_path(original_info["artifact_key"])
-                        cur_tts_sha = hash_file(tts_path)[0] if tts_path.is_file() else ""
-                        new_processed_infos[index] = {
-                            **original_info,
-                            "artifact_key": key,
-                            "path": None,
-                            "rvc_source_audio_duration": fit.source_duration_seconds,
-                            "target_audio_duration": fit.target_duration_seconds,
-                            "actual_audio_duration": fit.output_duration_seconds,
-                            "rvc_applied_atempo": fit.applied_atempo,
-                            "timing_fits": fit.fits,
-                            "tts_sha256": cur_tts_sha,
-                        }
-
-                    batch_records = []
-                    batch_infos = []
-                    for info in batch:
-                        idx = int(info["index"])
-                        if idx in cached_rvc_records:
-                            batch_records.append(cached_rvc_records[idx])
-                            batch_infos.append(cached_rvc_infos[idx])
-                        elif idx in new_processed_records:
-                            batch_records.append(new_processed_records[idx])
-                            batch_infos.append(new_processed_infos[idx])
-                        else:
-                            raise RuntimeError(f"Missing RVC audio record for segment {idx}")
-
-                    checkpoint_record = self.artifact_store.put_json(
-                        checkpoint_key,
-                        {
-                            "input_fingerprint": input_fingerprint,
-                            "enable_auto_gender": self.request.settings.enable_auto_gender,
-                            "rvc_model_path": str(self.request.rvc_model_path or ""),
-                            "rvc_model_sha256": getattr(getattr(self.manifest, "fingerprints", None), "model_sha256", {}).get("rvc"),
-                            "audio_artifacts": [record.to_dict() for record in batch_records],
-                            "segments": batch_infos,
-                        },
-                    )
-                    artifacts.extend(batch_records)
-                    artifacts.append(checkpoint_record)
-                    portable.extend(batch_infos)
-        finally:
-            if session is not None:
-                session.close()
-
-        artifacts.append(
-            self.artifact_store.put_json(
-                "rvc/segments.json",
-                {
-                    "segments": portable,
-                    "silent_fallback_count": sum(
-                        1
-                        for info in portable
-                        if bool(info.get("is_silent_fallback", False))
-                        and not bool(info.get("is_unvoiced_scene", False))
-                    ),
-                    "unresolved_source_ids": sorted(
-                        {
-                            int(info.get("source_segment_id", info["index"]))
-                            for info in portable
-                            if not bool(info.get("timing_fits", False))
-                        }
-                    ),
-                },
-            )
-        )
-        return artifacts
 
     async def _subtitles_stage(
         self, segments: Sequence[RuntimeSegment]
@@ -1929,10 +1593,7 @@ class VideoPipelineRunner:
                         "timing_fits": bool(
                             audio_info.get("timing_fits", False)
                         ),
-                        "applied_atempo": audio_info.get(
-                            "rvc_applied_atempo",
-                            audio_info.get("applied_atempo"),
-                        ),
+                        "applied_atempo": audio_info.get("applied_atempo"),
                         "is_silent_fallback": bool(
                             audio_info.get("is_silent_fallback", False)
                         ),

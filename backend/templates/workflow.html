@@ -2908,7 +2908,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
             <div class="track-header">🎵 Âm thanh mix</div>
             <div class="track-content" style="display: flex; align-items: stretch;">
               <canvas id="audioWaveformCanvas" style="position: absolute; inset: 0; width: 100%; height: 100%;"></canvas>
-              <div class="audio-strip-block" id="audioStripLabel" style="position: relative; z-index: 2; background: transparent; border: none;">Giọng đọc AI RVC + Nhạc nền BGM</div>
+              <div class="audio-strip-block" id="audioStripLabel" style="position: relative; z-index: 2; background: transparent; border: none;">Giọng đọc AI + Nhạc nền BGM</div>
             </div>
           </div>
 
@@ -6109,7 +6109,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
         mainPlayer.src = currentVideoData.final_video_url;
         bgBlurVideo.src = currentVideoData.final_video_url;
         subtitleOverlay.style.display = 'flex';
-        document.getElementById('audioStripLabel').innerText = 'Giọng đọc AI RVC đã lồng vào video hoàn tất';
+        document.getElementById('audioStripLabel').innerText = 'Giọng đọc AI đã lồng vào video hoàn tất';
         document.getElementById('videoStripLabel').innerText = 'Video thành phẩm (Đã che sub gốc & ghép phụ đề cứng)';
         showToast('✨ Đang xem Bản Hoàn Tất (Lồng tiếng AI & Che sub) - Bấm trực tiếp vào chữ trên video để sửa');
       } else {
@@ -6121,7 +6121,7 @@ header .top-right > a[href="http://127.0.0.1:8088/"], header .top-right > a[href
           bgBlurVideo.src = rawUrl;
         }
         subtitleOverlay.style.display = 'flex';
-        document.getElementById('audioStripLabel').innerText = 'Giọng đọc AI RVC + Nhạc nền BGM';
+        document.getElementById('audioStripLabel').innerText = 'Giọng đọc AI + Nhạc nền BGM';
         document.getElementById('videoStripLabel').innerText = 'Video phôi gốc';
         showToast('📹 Đang xem Video Phôi Gốc');
       }

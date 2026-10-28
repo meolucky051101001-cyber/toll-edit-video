@@ -1135,7 +1135,7 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
             "step3": {"ready": bool(orig_subtitles), "count": len(orig_subtitles), "title": "Nhận diện giọng Faster-Whisper (original.srt)"},
             "step3_5": {"ready": bool(orig_subtitles), "title": "Quét chữ & che phụ đề cũ (OCR Subtitle Band)"},
             "step4": {"ready": bool(trans_subtitles), "count": len(trans_subtitles), "title": "Dịch phụ đề Gemini AI (translated.srt)"},
-            "step5": {"ready": bool(step5_audio), "audio_url": step5_audio, "title": "Lồng tiếng AI RVC / TTS (mixed.wav)"},
+            "step5": {"ready": bool(step5_audio), "audio_url": step5_audio, "title": "Lồng tiếng AI TTS (mixed.wav)"},
             "step6": {"ready": bool(final_video_url), "video_url": final_video_url, "title": "Xuất bản video NVENC GPU (final.mp4)"}
         }
     }

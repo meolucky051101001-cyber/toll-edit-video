@@ -128,14 +128,9 @@ async def run_pipeline_v2_for_telegram(
     """Run the opt-in v2 pipeline while legacy remains the default."""
 
     from pipeline_v2.config import PipelineSettings
-    from pipeline_v2.video_pipeline import (
-        VideoPipelineRequest,
-        VideoPipelineRunner,
-        discover_rvc_model,
-    )
+    from pipeline_v2.video_pipeline import VideoPipelineRequest, VideoPipelineRunner
 
     settings = PipelineSettings.from_env()
-    rvc_model = discover_rvc_model(Path(WORKSPACE))
 
     async def progress(stage, state):
         await safe_edit_status(
@@ -155,7 +150,6 @@ async def run_pipeline_v2_for_telegram(
         api_key=GEMINI_API_KEY,
         voice_source="capcut",
         voice_param="BV562_streaming",
-        rvc_model_path=None,
         progress=progress,
     )
     return await VideoPipelineRunner(request).run()

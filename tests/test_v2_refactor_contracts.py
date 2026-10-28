@@ -90,7 +90,6 @@ class VoiceContracts(unittest.TestCase):
             with self.subTest(provider=provider):
                 self.assertEqual(resolve_mapped_voice(provider, {'male': valid}, '', 'male'), valid)
                 self.assertIsNone(resolve_mapped_voice(provider, {'male': invalid}, '', 'male'))
-        self.assertIsNone(resolve_mapped_voice('rvc', {'male': 'BV075_streaming'}, '', 'male'))
 
 
 class BackgroundContracts(unittest.IsolatedAsyncioTestCase):

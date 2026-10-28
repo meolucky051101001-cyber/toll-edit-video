@@ -3,6 +3,21 @@ import json
 import os
 import uuid
 from pathlib import Path
+
+SUPPORTED_TTS_SOURCES = frozenset({"capcut", "vieneu", "vie-tts", "edge", "fpt"})
+
+
+class UnsupportedTTSProviderError(ValueError):
+    """An explicit provider cannot be replaced with another voice."""
+
+
+def validate_tts_source(source):
+    if not isinstance(source, str) or source not in SUPPORTED_TTS_SOURCES:
+        raise UnsupportedTTSProviderError(
+            f"Unsupported TTS provider: {source!r}. Choose CapCut, VieNeu, Edge or FPT."
+        )
+
+
 def _resolve_control_dir() -> Path:
     ws_env = os.getenv("AUTODUB_WORKSPACE")
     candidates = []
@@ -18,12 +33,9 @@ def _resolve_control_dir() -> Path:
     return Path(r"C:\tool v1\workspace\control")
 
 BASE = _resolve_control_dir()
-BASE.mkdir(parents=True, exist_ok=True)
 ALIASES = {
     'capcut-vi-VN-HoaiMyNeural': 'microsoft-hoaimy',
     'capcut-vi-VN-NamMinhNeural': 'microsoft-namminh',
-    'chi-mai': 'capcut-BV562_streaming',
-    'rvc-chi-mai': 'capcut-BV562_streaming',
 }
 
 DEFAULT_CATALOG = [
@@ -67,19 +79,13 @@ def catalog():
     cat_file = BASE / "voice_catalog.json"
     if cat_file.is_file():
         try:
-            items = json.loads(cat_file.read_text(encoding="utf-8"))
-            # Tự động nâng cấp danh mục cũ nếu còn sót RVC / chi-mai
-            if any(v.get("id") == "chi-mai" or v.get("source") == "rvc" for v in items):
-                cat_file.write_text(json.dumps(DEFAULT_CATALOG, indent=2, ensure_ascii=False), encoding="utf-8")
-                return list(DEFAULT_CATALOG)
-            return items
+            items = json.loads(cat_file.read_text(encoding="utf-8-sig"))
+            if isinstance(items, list):
+                return [v for v in items if isinstance(v, dict)
+                        and v.get("source") in SUPPORTED_TTS_SOURCES]
         except Exception:
             pass
-    try:
-        cat_file.write_text(json.dumps(DEFAULT_CATALOG, indent=2, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
-    return list(DEFAULT_CATALOG)
+    return [dict(v) for v in DEFAULT_CATALOG]
 
 
 def selected():
@@ -88,23 +94,23 @@ def selected():
     except Exception:
         value = "capcut-BV562_streaming"
     value = ALIASES.get(value, value)
-    for voice in catalog():
+    cat = catalog()
+    for voice in cat:
         if voice["id"] == value:
             return voice
-    cat = catalog()
     return cat[0] if cat else DEFAULT_CATALOG[0]
 
 
 def save(voice_id):
     voice_id = ALIASES.get(voice_id, voice_id)
     if not any(v['id']==voice_id for v in catalog()):raise ValueError('Mã giọng không hợp lệ.')
+    BASE.mkdir(parents=True, exist_ok=True)
     tmp=BASE/f'voice_selection.json.tmp.{uuid.uuid4().hex}'
     tmp.write_text(json.dumps({'id':voice_id}),encoding='utf-8')
     os.replace(tmp,BASE/'voice_selection.json')
 def resolve_voice(default_source, default_param):
     voice = selected()
-    if voice.get("source") == "rvc" or voice["id"] == "chi-mai":
-        return "capcut", "BV562_streaming", "CapCut · Mai (Nữ Chuẩn - Mặc định)"
+    validate_tts_source(voice.get("source"))
     return voice["source"], voice["param"], voice["label"]
 
 
@@ -147,8 +153,6 @@ def resolve_voice_param(voice_id: str) -> str:
     """Lấy param tương ứng với voice_id cho speaker_voice_map."""
     for v in catalog():
         if v.get("id") == voice_id:
-            if v.get("source") == "rvc" or v.get("id") == "chi-mai":
-                return "BV562_streaming"
             return v.get("param") or "BV562_streaming"
     return "BV075_streaming" if "male" in voice_id.lower() or "075" in voice_id else "BV562_streaming"
 

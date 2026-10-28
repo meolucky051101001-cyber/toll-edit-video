@@ -27,7 +27,7 @@ def cleanup_memory():
         torch.cuda.empty_cache()
 
 def is_telegram_bot_busy():
-    """Kiểm tra xem bot Telegram có đang trong quá trình tải/OCR/RVC/render hay không."""
+    """Kiểm tra xem bot Telegram có đang trong quá trình tải/OCR/TTS/render hay không."""
     app_log = Path(BASE_DIR) / "app.log"
     if not app_log.exists():
         return False
@@ -35,7 +35,7 @@ def is_telegram_bot_busy():
         with open(app_log, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
         for line in reversed(lines[-60:]):
-            if any(k in line for k in ["Đang bóc tách", "Đang tải video", "Processing audio with", "Bắt đầu OCR", "Translating subtitles", "Applying RVC", "Mixing audio", "Processing final video"]):
+            if any(k in line for k in ["Đang bóc tách", "Đang tải video", "Processing audio with", "Bắt đầu OCR", "Translating subtitles", "Generating TTS", "Mixing audio", "Processing final video"]):
                 # Tìm thấy một công đoạn đang chạy, kiểm tra xem sau đó đã có log kết thúc chưa
                 start_idx = lines.index(line)
                 for after in lines[start_idx:]:

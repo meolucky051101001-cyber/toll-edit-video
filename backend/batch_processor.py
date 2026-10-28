@@ -191,7 +191,6 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             from pipeline_v2.video_pipeline import (
                 VideoPipelineRequest,
                 VideoPipelineRunner,
-                discover_rvc_model,
             )
 
             async def v2_progress(stage: str, state: str):
@@ -211,9 +210,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 if not existing_ver.is_valid:
                     final_dest = os.path.join(output_dir, f"Dubbed_{base_name}_{source_hash_short[:6]}.mp4")
 
-            rvc_model = discover_rvc_model(Path(WORKSPACE))
             from voice_selection import resolve_voice
-            selected_source, selected_param, selected_label = resolve_voice("rvc" if rvc_model else "edge", rvc_model)
+            selected_source, selected_param, selected_label = resolve_voice("capcut", "BV562_streaming")
             request = VideoPipelineRequest(
                 video_path=Path(video_path),
                 job_directory=Path(out_dir),
@@ -222,7 +220,6 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 api_key=GEMINI_API_KEY,
                 voice_source=selected_source,
                 voice_param=selected_param,
-                rvc_model_path=rvc_model,
                 progress=v2_progress,
             )
             await VideoPipelineRunner(request).run()

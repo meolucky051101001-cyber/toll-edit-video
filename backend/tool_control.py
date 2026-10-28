@@ -1282,11 +1282,11 @@ async function loadVoices() {
     cachedVoices = d.voices;
     const select = document.getElementById('voice');
     select.replaceChildren();
-    for (const source of ['vieneu', 'rvc', 'edge', 'capcut']) {
+    for (const source of ['vieneu', 'vie-tts', 'edge', 'capcut']) {
       const group = document.createElement('optgroup');
       group.label = {
-        vieneu: '🔥 VieNeu-TTS (48kHz Tự Nhiên Cao Cấp)',
-        rvc: 'Giọng mặc định · RVC',
+        vieneu: 'VieNeu-TTS (48kHz Tự Nhiên Cao Cấp)',
+        'vie-tts': 'VieNeu-TTS',
         edge: 'Microsoft TTS',
         capcut: 'CapCut TTS'
       }[source] || source;

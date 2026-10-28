@@ -461,26 +461,7 @@ async def run_api_pipeline_v2(
     from disk_guard import ensure_free_space
     ensure_free_space(WORKSPACE, out_dir, published_video, purpose=f"xử lý {Path(video_path).name}")
 
-    from pipeline_v2.stage_validation import is_real_rvc_model
-    from pipeline_v2.video_pipeline import (
-        VideoPipelineRequest,
-        VideoPipelineRunner,
-        discover_rvc_model,
-    )
-
-    rvc_model = None
-    selected_voice_param = voice_param
-    if voice_source == "rvc":
-        candidate = Path(voice_param)
-        if is_real_rvc_model(candidate):
-            rvc_model = candidate
-        else:
-            rvc_model = discover_rvc_model(Path(WORKSPACE))
-        if rvc_model is None:
-            raise RuntimeError(
-                "RVC was requested but no real .pth model is available"
-            )
-        selected_voice_param = str(rvc_model)
+    from pipeline_v2.video_pipeline import VideoPipelineRequest, VideoPipelineRunner
 
     request = VideoPipelineRequest(
         video_path=Path(video_path),
@@ -492,8 +473,7 @@ async def run_api_pipeline_v2(
         tts_api_key=(api_key if voice_source == "fpt" else ""),
         target_lang=target_lang,
         voice_source=voice_source,
-        voice_param=selected_voice_param,
-        rvc_model_path=rvc_model,
+        voice_param=voice_param,
         font_name=font_name,
         font_color=font_color,
         font_weight=font_weight,

@@ -244,7 +244,7 @@ class RecoveryService:
             },
             {
                 "id": "tts_dubbing",
-                "name": "Bước 5: Lồng tiếng AI (TTS / RVC)",
+                "name": "Bước 5: Lồng tiếng AI (TTS)",
                 "artifacts": ["dubbed_voice.mp3", "pipeline_v2/artifacts/tts/segments.json", "dubbing"],
             },
             {

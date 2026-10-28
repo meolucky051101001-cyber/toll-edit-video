@@ -212,10 +212,22 @@ class SmokeColdEnforcementTests(unittest.TestCase):
         if str(scripts_path) not in sys.path:
             sys.path.insert(0, str(scripts_path))
         from smoke_test_v2 import parse_args
-        with patch("sys.argv", ["smoke_test_v2.py", "--with-rvc", "--video", "sample.mp4"]):
+        with patch("sys.argv", ["smoke_test_v2.py", "--video", "sample.mp4"]):
             args = parse_args()
-            self.assertTrue(args.with_rvc)
-            self.assertEqual(args.video, "sample.mp4")
+            self.assertEqual(vars(args), {"video": "sample.mp4"})
+        with patch("sys.argv", ["smoke_test_v2.py"]):
+            self.assertEqual(vars(parse_args()), {"video": ""})
+
+    def test_smoke_test_rejects_retired_option(self):
+        scripts_path = Path(__file__).resolve().parents[1] / "scripts"
+        import sys
+        if str(scripts_path) not in sys.path:
+            sys.path.insert(0, str(scripts_path))
+        from smoke_test_v2 import parse_args
+        with patch("sys.argv", ["smoke_test_v2.py", "--with-rvc"]), patch("sys.stderr"):
+            with self.assertRaises(SystemExit) as ctx:
+                parse_args()
+            self.assertEqual(ctx.exception.code, 2)
 
 
 if __name__ == '__main__':

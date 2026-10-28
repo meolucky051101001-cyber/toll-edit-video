@@ -1,4 +1,3 @@
-import asyncio
 import json
 import subprocess
 import tempfile
@@ -12,10 +11,10 @@ import backend.ai.voice_cloning as voice_cloning
 
 
 class CodeReviewFixesTests(unittest.TestCase):
-    def test_rvc_semaphore_single_instance(self):
-        """Kiểm tra rvc_semaphore chỉ có duy nhất 1 instance ở module-level."""
-        self.assertTrue(hasattr(voice_cloning, "rvc_semaphore"))
-        self.assertIsInstance(voice_cloning.rvc_semaphore, asyncio.Semaphore)
+    def test_rvc_symbols_removed_from_voice_cloning(self):
+        """RVC đã được gỡ khỏi Tool V1; module không còn semaphore/model RVC."""
+        self.assertFalse(hasattr(voice_cloning, "rvc_semaphore"))
+        self.assertFalse(hasattr(voice_cloning, "apply_rvc_clone"))
 
     def test_subdivide_and_retry_success(self):
         """Kiểm tra helper chia nhỏ thích ứng (divide-and-conquer) ghép nối thành công."""

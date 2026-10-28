@@ -1364,7 +1364,7 @@ header {
               </div>
               <div class="step-title">6. Lồng tiếng</div>
             </div>
-            <div class="step-tag" id="step6ModelTag" title="Mô hình lồng tiếng AI & Chuyển đổi âm sắc RVC">TTS → RVC Voice</div>
+            <div class="step-tag" id="step6ModelTag" title="Mô hình tạo giọng đọc TTS">Lồng tiếng TTS</div>
             <div class="step-duration" id="timeStep6" title="Thời gian chạy thực tế Bước 6">--</div>
           </div>
 
@@ -1478,7 +1478,7 @@ header {
                 <div class="step-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
                 <div class="step-title">6. Lồng tiếng</div>
               </div>
-              <div class="step-tag" id="w1Step6ModelTag" title="Mô hình lồng tiếng AI & Chuyển đổi âm sắc RVC">TTS → RVC Voice</div>
+              <div class="step-tag" id="w1Step6ModelTag" title="Mô hình tạo giọng đọc TTS">Lồng tiếng TTS</div>
               <div class="step-duration" id="w1TimeStep6" title="Thời gian chạy thực tế Bước 6">--</div>
             </div>
 
@@ -1578,7 +1578,7 @@ header {
                 <div class="step-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
                 <div class="step-title">6. Lồng tiếng</div>
               </div>
-              <div class="step-tag" id="w2Step6ModelTag" title="Mô hình lồng tiếng AI & Chuyển đổi âm sắc RVC">TTS → RVC Voice</div>
+              <div class="step-tag" id="w2Step6ModelTag" title="Mô hình tạo giọng đọc TTS">Lồng tiếng TTS</div>
               <div class="step-duration" id="w2TimeStep6" title="Thời gian chạy thực tế Bước 6">--</div>
             </div>
 
@@ -1884,11 +1884,11 @@ header {
             <div style="display: flex; flex-direction: column; gap: 5px; padding: 8px 12px; background: rgba(255, 255, 255, 0.02); border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.05);">
               <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 4px;">
                 <span style="color: var(--text-muted);">Quy tắc đang áp dụng:</span>
-                <span id="voiceAutoRuleText" style="font-weight: 500; color: #f4f4f5; text-align: right;">Nữ ➡️ Chí Mai RVC | Nam ➡️ Thanh Niên Tự Tin (CapCut)</span>
+                <span id="voiceAutoRuleText" style="font-weight: 500; color: #f4f4f5; text-align: right;">Nữ ➡️ CapCut Mai | Nam ➡️ Thanh Niên Tự Tin (CapCut)</span>
               </div>
               <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 4px;">
                 <span style="color: var(--text-muted);">Giọng thủ công cấu hình:</span>
-                <span id="voiceAutoManualVoiceText" style="color: #38bdf8; font-family: ui-monospace, monospace; font-weight: 500;">Chí Mai (RVC)</span>
+                <span id="voiceAutoManualVoiceText" style="color: #38bdf8; font-family: ui-monospace, monospace; font-weight: 500;">CapCut · Mai</span>
               </div>
             </div>
 
@@ -3046,9 +3046,8 @@ header {
     }
 
     function formatVoiceTagLabel(raw) {
-      if (!raw) return 'TTS → RVC Voice';
+      if (!raw) return 'Lồng tiếng TTS';
       let s = String(raw).trim();
-      if (s.includes('Chí Mai')) return 'Chí Mai · RVC';
       if (s.includes('Thanh Niên Tự Tin')) return 'Nam Tự Tin · CapCut';
       if (s.includes('Á Mai')) return 'Á Mai · CapCut';
       if (s.includes('·')) {
@@ -3156,7 +3155,7 @@ header {
         }
       }
 
-      // 6. Lồng tiếng (TTS & RVC)
+      // 6. Lồng tiếng (TTS)
       const step6Tag = document.getElementById(prefix ? prefix + 'Step6ModelTag' : 'step6ModelTag');
       if (step6Tag) {
         if (state && state.voice_name) {
@@ -3168,15 +3167,12 @@ header {
           const femaleText = femaleSelect && femaleSelect.selectedOptions && femaleSelect.selectedOptions[0] ? femaleSelect.selectedOptions[0].text : '';
           const maleText = maleSelect && maleSelect.selectedOptions && maleSelect.selectedOptions[0] ? maleSelect.selectedOptions[0].text : '';
           
-          if (femaleText.includes('RVC') || femaleText.includes('Chí Mai')) {
-            step6Tag.textContent = 'TTS → Chí Mai RVC';
-            step6Tag.title = `Giọng Nữ: ${femaleText} | Giọng Nam: ${maleText}`;
-          } else if (femaleText) {
+          if (femaleText) {
             step6Tag.textContent = formatVoiceTagLabel(femaleText);
             step6Tag.title = `Giọng Nữ: ${femaleText} | Giọng Nam: ${maleText}`;
           } else {
-            step6Tag.textContent = 'TTS → RVC Voice';
-            step6Tag.title = 'Mô hình lồng tiếng AI & Chuyển đổi âm sắc RVC';
+            step6Tag.textContent = 'Lồng tiếng TTS';
+            step6Tag.title = 'Mô hình tạo giọng đọc TTS';
           }
         }
       }
@@ -3372,7 +3368,7 @@ header {
         else if (stepName.includes('bước 3/8') || stepName.includes('nhận dạng') || stepName.includes('whisper')) currentStep = 3;
         else if (stepName.includes('bước 4/8') || stepName.includes('quét phụ đề') || stepName.includes('quét chữ') || stepName.includes('ocr')) currentStep = 4;
         else if (stepName.includes('bước 5/8') || stepName.includes('dịch') || stepName.includes('gemini')) currentStep = 5;
-        else if (stepName.includes('bước 6/8') || stepName.includes('lồng tiếng') || stepName.includes('tts') || stepName.includes('rvc')) currentStep = 6;
+        else if (stepName.includes('bước 6/8') || stepName.includes('lồng tiếng') || stepName.includes('tts')) currentStep = 6;
         else if (stepName.includes('bước 7/8') || stepName.includes('hòa âm') || stepName.includes('trộn âm') || stepName.includes('mixer')) currentStep = 7;
         else if (stepName.includes('bước 8/8') || stepName.includes('render') || stepName.includes('xuất video') || stepName.includes('nvenc')) currentStep = 8;
       }
@@ -3472,7 +3468,7 @@ header {
         3: ['3', 'speech_asr', 'transcribe', 'asr'],
         4: ['4', '3.5', 'visual_ocr', 'ocr'],
         5: ['5', 'ai_translation', 'translate', 'translation'],
-        6: ['6', 'ai_tts', 'tts', 'rvc', 'voice'],
+        6: ['6', 'ai_tts', 'tts', 'voice'],
         7: ['7', 'audio_mixing', 'mix', 'mixing', 'mix_v2', 'mix_legacy'],
         8: ['8', 'video_rendering', 'render', 'qc', 'deliver']
       };
@@ -4012,7 +4008,7 @@ let inputUploading=false;
             asr: '3', speech_asr: '3', transcribe: '3',
             ocr: '4', visual_ocr: '4', ocr_recognize_batch: '4',
             translation: '5', ai_translation: '5', translate: '5',
-            voice: '6', ai_tts: '6', tts: '6', rvc: '6',
+            voice: '6', ai_tts: '6', tts: '6',
             mixing: '7', audio_mixing: '7', mix: '7',
             render: '8', video_rendering: '8'
           };
@@ -4118,17 +4114,6 @@ let inputUploading=false;
           return '✨ [Đồng bộ] Khung hình sạch, các phân cảnh hiển thị phụ đề ăn khớp hoàn toàn.';
         }
 
-        // 5. Âm thanh, Lồng tiếng & RVC
-        if (/Loading.*rmvpe/i.test(msg) || /nạp mô hình phân tích cao độ/i.test(msg)) {
-          return '🎼 [Cao độ âm thanh] Đang nạp bộ phân tích cao độ giọng nói (RMVPE) chất lượng cao.';
-        }
-        if (/Loading:.*\.pth/i.test(msg) || /nạp mô hình giọng đọc/i.test(msg)) {
-          const modelName = (msg.match(/([\w_-]+\.pth)/) || [])[1] || '';
-          return `🎭 [Giọng đọc RVC] Đang nạp mô hình giọng đọc nhân vật AI ${modelName ? '(' + modelName + ')' : ''}…`;
-        }
-        if (/Hubert.*Config|current working directory/i.test(msg)) {
-          return '⚙️ [Cấu hình giọng] Khởi tạo tham số bộ xử lý âm sắc HuBERT.';
-        }
         const edgeTts = msg.match(/Edge TTS fallback voice:\s*([\w_-]+)/i);
         if (edgeTts) {
           return `🗣️ [Lồng tiếng] Tạo giọng đọc mẫu hỗ trợ qua Edge TTS (${edgeTts[1]})...`;
@@ -4976,16 +4961,18 @@ let inputUploading=false;
     }
 
     function populateVoiceSelect(selectEl, voices, selectedId) {
-      if (!selectEl || !voices || !voices.length) return;
+      if (!selectEl || !voices) return;
+      voices = voices.filter(v => ['capcut', 'vieneu', 'vie-tts', 'edge', 'fpt'].includes(v.source));
       const existingOptions = Array.from(selectEl.options).map(o => o.value);
-      const isAlreadyPopulated = voices.length > 0 && voices.every(v => existingOptions.includes(v.id));
+      const isAlreadyPopulated = voices.length === existingOptions.length && voices.every(v => existingOptions.includes(v.id));
       if (!isAlreadyPopulated) {
         selectEl.innerHTML = '';
         const groups = {
-          'rvc': { label: '⭐ RVC Model (Thuần giọng)', options: [] },
-          'edge': { label: '🌐 Microsoft TTS', options: [] },
-          'capcut': { label: '🎬 CapCut Voice', options: [] },
-          'other': { label: 'Khác', options: [] }
+          'capcut': { label: 'CapCut TTS', options: [] },
+          'vieneu': { label: 'VieNeu TTS', options: [] },
+          'vie-tts': { label: 'VieNeu TTS', options: [] },
+          'edge': { label: 'Microsoft TTS', options: [] },
+          'fpt': { label: 'FPT TTS', options: [] }
         };
         voices.forEach(v => {
           const grp = groups[v.source] || groups['other'];
@@ -5159,7 +5146,7 @@ let inputUploading=false;
 
       const manualText = document.getElementById('voiceAutoManualVoiceText');
       if (manualText && data.manual_voice) {
-        manualText.textContent = data.manual_voice.label || data.manual_voice.id || 'Chí Mai (RVC)';
+        manualText.textContent = data.manual_voice.label || data.manual_voice.id || 'CapCut · Mai';
       }
       updateStepModelsUI();
     }
@@ -7637,7 +7624,7 @@ let inputUploading=false;
       const body = document.getElementById('statsPanelBody');
       const d = statsSummaryCache;
       if (!body || !d) return;
-      const stepNames = {1:'1 · Chuẩn bị', 2:'2 · Tách nhạc', 3:'3 · ASR', 4:'4 · OCR sub', 5:'5 · Dịch', 6:'6 · TTS/RVC', 7:'7 · Mix', 8:'8 · Render'};
+      const stepNames = {1:'1 · Chuẩn bị', 2:'2 · Tách nhạc', 3:'3 · ASR', 4:'4 · OCR sub', 5:'5 · Dịch', 6:'6 · TTS', 7:'7 · Mix', 8:'8 · Render'};
       const steps = d.per_step_median_s || {};
       const stepVals = Object.values(steps);
       const maxStep = Math.max(0.1, ...(stepVals.length ? stepVals : [0.1]));

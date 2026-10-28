@@ -74,27 +74,23 @@ def enforce_clean_directory(target_dir: Path):
 async def profile_single_video(
     video_path: Path,
     label: str,
-    with_rvc: bool = False,
     output_base: Optional[Path] = None,
 ) -> Dict[str, Any]:
     env = read_environment(ROOT / "backend")
     settings = PipelineSettings.from_env(env)
-    if with_rvc:
-        settings = replace(settings, enable_rvc=True)
 
     info = probe_video_info(video_path)
     print(f"\n======================================================================")
     print(f"PROFILING: {label} ({video_path.name})")
-    print(f"Resolution: {info['resolution']}, Duration: {info['duration']}s, RVC: {with_rvc}")
+    print(f"Resolution: {info['resolution']}, Duration: {info['duration']}s")
     print(f"======================================================================")
 
     out_base = output_base or (ROOT / "workspace" / f"profiler_{label}_{int(time.time())}")
     enforce_clean_directory(out_base)
 
     out_video = out_base / f"output_{label}.mp4"
-    rvc_model = (ROOT / "MyVoiceModel_v2" / "mi-giong_cua_toi_v2.pth") if with_rvc else None
-    voice_source = "rvc" if with_rvc else "edge"
-    voice_param = str(rvc_model) if with_rvc else "vi-VN-HoaiMyNeural"
+    voice_source = "capcut"
+    voice_param = "BV562_streaming"
 
     request = VideoPipelineRequest(
         video_path=video_path,
@@ -104,7 +100,6 @@ async def profile_single_video(
         api_key=env.get("GEMINI_API_KEY", ""),
         voice_source=voice_source,
         voice_param=voice_param,
-        rvc_model_path=rvc_model,
     )
 
     run_start_utc = datetime.now(timezone.utc)
@@ -176,9 +171,6 @@ async def profile_single_video(
     for b in top_bottlenecks[:4]:
         print(f"    - {b['stage']}: {b['duration_seconds']}s ({b['percentage']}%)")
     print(f"  Combined (Whisper + Demucs): {ai_heavy_time}s ({ai_percentage}%)")
-    if with_rvc:
-        rvc_time = stage_timings.get("rvc", 0.0)
-        print(f"  RVC Voice Conversion: {rvc_time}s ({rvc_time / total_pipeline_time * 100:.1f}%)")
     print(f"  Boundary Frames Inspected: {boundary_frames_checked} (Pixel cover pass: {pixel_cover_pass})")
     print(f"  True Peak: {true_peak_val} dBTP")
     print(f"  QC Allowed: {qc_allowed}")
@@ -190,7 +182,6 @@ async def profile_single_video(
         "video_file": video_path.name,
         "resolution": info["resolution"],
         "video_duration_seconds": info["duration"],
-        "with_rvc": with_rvc,
         "total_elapsed_seconds": total_pipeline_time,
         "realtime_ratio": round(total_pipeline_time / max(0.1, info["duration"]), 2),
         "stage_timings": stage_timings,
@@ -216,7 +207,6 @@ def collect_from_workspace_dir(
     dir_path: Path,
     video_path: Path,
     label: str,
-    with_rvc: bool = False,
 ) -> Dict[str, Any]:
     info = probe_video_info(video_path)
     manifest_f = dir_path / "job" / "pipeline_v2" / "job_manifest.json"
@@ -288,9 +278,6 @@ def collect_from_workspace_dir(
     for b in top_bottlenecks[:4]:
         print(f"    - {b['stage']}: {b['duration_seconds']}s ({b['percentage']}%)")
     print(f"  Combined (Whisper + Demucs): {ai_heavy_time}s ({ai_percentage}%)")
-    if with_rvc:
-        rvc_time = stage_timings.get("rvc", 0.0)
-        print(f"  RVC Voice Conversion: {rvc_time}s ({rvc_time / total_pipeline_time * 100:.1f}%)")
     print(f"  Boundary Frames Inspected: {boundary_frames_checked} (Pixel cover pass: {pixel_cover_pass})")
     print(f"  True Peak: {true_peak_val} dBTP")
     print(f"  QC Allowed: {qc_allowed}")
@@ -302,7 +289,6 @@ def collect_from_workspace_dir(
         "video_file": video_path.name,
         "resolution": info["resolution"],
         "video_duration_seconds": info["duration"],
-        "with_rvc": with_rvc,
         "total_elapsed_seconds": total_pipeline_time,
         "realtime_ratio": round(total_pipeline_time / max(0.1, info["duration"]), 2),
         "stage_timings": stage_timings,
@@ -344,11 +330,11 @@ async def main():
         existing_c = sorted(ROOT.glob("workspace/profiler_1080p_Video_New_*"))
         if existing_a and existing_b and existing_c:
             print("Collecting benchmark and profiling data from recent runs in workspace...")
-            r1 = collect_from_workspace_dir(existing_a[-1], video_4k_a[0], "4K_Video_A_RVC", with_rvc=True)
+            r1 = collect_from_workspace_dir(existing_a[-1], video_4k_a[0], "4K_Video_A_RVC")
             results.append(r1)
-            r2 = collect_from_workspace_dir(existing_b[-1], video_4k_b[0], "4K_Video_B_New", with_rvc=False)
+            r2 = collect_from_workspace_dir(existing_b[-1], video_4k_b[0], "4K_Video_B_New")
             results.append(r2)
-            r3 = collect_from_workspace_dir(existing_c[-1], video_1080p[0], "1080p_Video_New", with_rvc=False)
+            r3 = collect_from_workspace_dir(existing_c[-1], video_1080p[0], "1080p_Video_New")
             results.append(r3)
         else:
             raise RuntimeError("FAIL: --collect-existing was specified but not all 3 profiler runs exist in workspace.")
@@ -356,22 +342,22 @@ async def main():
     if not results:
         # Default mode: COLD RUN 100% on GPU with fail-closed clean directory and fresh timestamp assertion
         if video_4k_a and video_4k_a[0].is_file():
-            r1 = await profile_single_video(video_4k_a[0], "4K_Video_A_RVC", with_rvc=True)
+            r1 = await profile_single_video(video_4k_a[0], "4K_Video_A")
             results.append(r1)
 
         if video_4k_b and video_4k_b[0].is_file():
-            r2 = await profile_single_video(video_4k_b[0], "4K_Video_B_New", with_rvc=False)
+            r2 = await profile_single_video(video_4k_b[0], "4K_Video_B_New")
             results.append(r2)
 
         if video_1080p and video_1080p[0].is_file():
-            r3 = await profile_single_video(video_1080p[0], "1080p_Video_New", with_rvc=False)
+            r3 = await profile_single_video(video_1080p[0], "1080p_Video_New")
             results.append(r3)
 
     report_path = ROOT / args.out
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_data = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "summary": "Multi-video production benchmark with dynamic bottleneck ranking and RVC",
+        "summary": "Multi-video production benchmark with dynamic bottleneck ranking",
         "results": results,
     }
     report_path.write_text(json.dumps(report_data, indent=2, ensure_ascii=False), encoding="utf-8")

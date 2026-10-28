@@ -10,14 +10,12 @@ try:
 except ImportError:
     from v1_stage_metrics import stage
 from pydub import AudioSegment
+from voice_selection import validate_tts_source
 
 logger = logging.getLogger(__name__)
 
 edge_semaphore = asyncio.Semaphore(int(os.getenv("V1_EDGE_WORKERS", "4")))
 capcut_semaphore = threading.Semaphore(int(os.getenv("V1_CAPCUT_WORKERS", "6")))
-rvc_semaphore = asyncio.Semaphore(1)
-global_rvc_instance = None
-global_rvc_model_path = None
 
 
 def build_atempo_filter(ratio: float) -> str:
@@ -34,38 +32,6 @@ def build_atempo_filter(ratio: float) -> str:
     filters.append(f"atempo={current:.6f}")
     return ",".join(filters)
 
-
-def rvc_runtime_available():
-    """Return whether the optional legacy RVC engine can actually be imported."""
-
-    import importlib.util
-
-    return importlib.util.find_spec("rvc_python") is not None
-
-
-def discover_rvc_index(model_path):
-    """Find a real RVC feature index, including training-prefixed names."""
-    from pathlib import Path
-
-    model = Path(model_path)
-    exact = model.with_suffix(".index")
-    if exact.is_file() and exact.stat().st_size > 1024:
-        return str(exact)
-    matches = [
-        candidate
-        for candidate in model.parent.glob("*.index")
-        if model.stem.lower() in candidate.stem.lower()
-        and candidate.stat().st_size > 1024
-    ]
-    if not matches:
-        return None
-    matches.sort(
-        key=lambda candidate: (
-            0 if candidate.name.lower().startswith("added_") else 1,
-            candidate.name.lower(),
-        )
-    )
-    return str(matches[0])
 
 class FPTQuotaError(Exception): pass
 class TTSIncompleteError(RuntimeError): pass
@@ -269,100 +235,6 @@ async def generate_tts_fpt(text, output_path, api_key, voice="banmai", speed="0"
             raise Exception(f"Lỗi kết nối FPT API: {response.status_code}")
 
 
-@stage("rvc_including_queue")
-async def apply_rvc_clone(
-    input_audio,
-    output_audio,
-    model_path,
-    strict=False,
-    index_path=None,
-    **kwargs,
-):
-    async with rvc_semaphore:
-        print(f"Applying RVC model from {model_path} to {input_audio}...")
-
-        if not rvc_runtime_available():
-            if strict:
-                raise RuntimeError("RVC runtime is unavailable")
-            import shutil
-
-            print("⚠️ rvc-python chưa sẵn sàng; dùng trực tiếp giọng TTS dự phòng.")
-            shutil.copy(input_audio, output_audio)
-            return
-
-        try:
-            if os.path.exists(output_audio):
-                os.remove(output_audio)
-        except OSError:
-            pass
-        
-        @stage("rvc_execution_excluding_queue")
-        def run_rvc_with_method(method="rmvpe"):
-            global global_rvc_instance, global_rvc_model_path
-            import torch
-            torch.backends.cudnn.enabled = False
-            from rvc_python.infer import RVCInference
-            if global_rvc_instance is None:
-                if not torch.cuda.is_available():
-                    raise RuntimeError("V1 requires CUDA for RVC; CPU fallback disabled")
-                global_rvc_instance = RVCInference(device="cuda:0")
-            
-            if global_rvc_model_path != model_path:
-                print("=> Nap model RVC vao VRAM (Chi chay 1 lan duy nhat)...")
-                resolved_index = index_path or discover_rvc_index(model_path)
-                if resolved_index:
-                    global_rvc_instance.load_model(
-                        model_path, version="v2", index_path=resolved_index
-                    )
-                else:
-                    global_rvc_instance.load_model(model_path, version="v2")
-                global_rvc_model_path = model_path
-            global_rvc_instance.set_params(f0up_key=0, f0method=method, index_rate=0.6, protect=0.1, filter_radius=3, rms_mix_rate=0.25)
-            global_rvc_instance.infer_file(input_audio, output_audio)
-
-        success = False
-        # Thử lần 1 bằng rmvpe
-        try:
-            await asyncio.to_thread(run_rvc_with_method, "rmvpe")
-            if os.path.exists(output_audio) and os.path.getsize(output_audio) > 100:
-                success = True
-        except Exception as e:
-            print(f"=> Lỗi RVC (rmvpe): {e}. Đang thử lại với phương pháp pm (Parselmouth)...")
-
-        # Thử lần 2 bằng pm nếu rmvpe bị lỗi (âm thanh quá ngắn hoặc không bắt được cao độ)
-        if not success:
-            try:
-                await asyncio.to_thread(run_rvc_with_method, "pm")
-                if os.path.exists(output_audio) and os.path.getsize(output_audio) > 100:
-                    success = True
-                    print(f"=> RVC Cloning (pm) thành công!")
-            except Exception as e:
-                print(f"=> Lỗi RVC (pm): {e}")
-
-        # Thử lần 3 bằng harvest
-        if not success:
-            try:
-                await asyncio.to_thread(run_rvc_with_method, "harvest")
-                if os.path.exists(output_audio) and os.path.getsize(output_audio) > 100:
-                    success = True
-                    print(f"=> RVC Cloning (harvest) thành công!")
-            except Exception as e:
-                print(f"=> Lỗi RVC (harvest): {e}")
-
-        if not success:
-            print(f"⚠️ CẢNH BÁO: RVC thất bại cả 3 phương pháp. Giữ file gốc.")
-            if strict:
-                try:
-                    if os.path.exists(output_audio):
-                        os.remove(output_audio)
-                except OSError:
-                    pass
-                raise RuntimeError("RVC conversion failed")
-            import shutil
-            shutil.copy(input_audio, output_audio)
-        else:
-            print(f"=> RVC Cloning Successful cho file {output_audio}")
-
 def trim_audio_silence(audio: AudioSegment, silence_thresh_db: float = -45.0, pad_ms: int = 60) -> AudioSegment:
     """
     Cắt bỏ khoảng lặng thừa ở đầu và cuối file âm thanh TTS một cách an toàn.
@@ -492,6 +364,7 @@ async def fit_audio_file(audio_input_path: str, target_max_duration: float, outp
 
 
 async def generate_single_tts(segment, output_folder, voice_source, voice_param, api_key, target_max_duration=None):
+    validate_tts_source(voice_source)
     import shared_state
     if shared_state.stop_requested:
         raise Exception("Bị hủy bởi lệnh /stop")
@@ -526,15 +399,9 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
                     await generate_tts_edge(text, temp_raw, voice_param, pitch="+0Hz", rate="+5%")
             elif voice_source == "capcut":
                 await asyncio.to_thread(_run_capcut_tts, text, temp_raw, voice_param)
-            elif voice_source == "rvc":
-                # Model RVC đã được gỡ bỏ hoàn toàn; tự động chuyển sang CapCut Mai / Thanh Niên chuẩn xác
-                rvc_fallback = "BV562_streaming" if "female" in str(voice_param).lower() or "mai" in str(voice_param).lower() or not voice_param else "BV075_streaming"
-                await asyncio.to_thread(_run_capcut_tts, text, temp_raw, rvc_fallback)
             elif voice_source in ("vieneu", "vie-tts"):
                 from .vieneu_tts_service import generate_tts_vieneu
                 await generate_tts_vieneu(text, temp_raw, voice=voice_param)
-            else:
-                await asyncio.to_thread(_run_capcut_tts, text, temp_raw, "BV075_streaming")
 
             # ĐO VÀ CĂN TỐC ĐỘ THEO KHOẢNG ĐỌC MỤC TIÊU (Codex Plan - Điểm 1 & 2)
             _, actual_duration_s, speed_ratio = await fit_audio_file(
@@ -591,6 +458,15 @@ MAX_NATURAL_SPEED = natural_speed_limit()
 
 @stage("voice")
 async def generate_dubbing_audio(translated_segments, output_folder, voice_source="edge", voice_param="vi-VN-HoaiMyNeural", api_key="", video_duration=None, segment_voices=None, script_mode="default"):
+    validate_tts_source(voice_source)
+    for seg in translated_segments:
+        if segment_voices:
+            info = segment_voices.get(str(seg.index))
+            if not info or not info.get("source") or not info.get("param"):
+                raise TTSIncompleteError(f"Missing locked voice for cue {seg.index}")
+            validate_tts_source(info["source"])
+        else:
+            validate_tts_source(getattr(seg, "voice_source", None) or voice_source)
     script_mode = script_mode or os.getenv("SCRIPT_MODE", "default")
     print(f"Generating TTS for dubbing using {voice_source} (Anti-Overlap Enabled, script_mode={script_mode})...")
     os.makedirs(output_folder, exist_ok=True)
@@ -609,9 +485,7 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
     from v1_speech_guard import coalesce_tiny_same_voice_cues, validate_speech_timeline, SpeechTimingError, load_audio
     if segment_voices:
         for seg in translated_segments:
-            info = segment_voices.get(str(seg.index))
-            if not info or not info.get("source") or not info.get("param"):
-                raise TTSIncompleteError(f"Missing locked voice for cue {seg.index}")
+            info = segment_voices[str(seg.index)]
             seg.voice_source, seg.voice_param = info["source"], info["param"]
             seg.gender = info.get("gender", "unknown")
     coalesce_tiny_same_voice_cues(translated_segments)
@@ -969,15 +843,4 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
 
     final_results = [res_by_idx[seg.index] for seg in translated_segments if seg.index in res_by_idx]
     validate_speech_timeline(final_results, total_duration=video_duration, max_speed=MAX_NATURAL_SPEED)
-
-    global global_rvc_instance, global_rvc_model_path
-    if global_rvc_instance is not None:
-        global_rvc_instance = None
-        global_rvc_model_path = None
-        import gc
-        gc.collect()
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
     return final_results
