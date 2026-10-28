@@ -191,6 +191,23 @@ class GeometryTests(unittest.TestCase):
     def test_unmatched_caption_evidence_is_not_silent_success(self):
         band=self.select([block()],{1:'这是当时导致伤口感染'})
         self.assertTrue(geo.has_caption_evidence([block('不同字幕',sid=2)],2,band))
+    def test_drifting_watermark_without_band_is_not_caption_evidence(self):
+        band=self.select([],{1:'字幕'})
+        marks=[block('大宝爱画画（小红书）',sid=i,t=float(i),y=y,bottom=y+.04)
+               for i,y in ((1,.08),(2,.72),(3,.93))]
+        self.assertFalse(geo.has_caption_evidence(marks,1,band))
+    def test_text_repeated_in_two_segments_still_ambiguous(self):
+        band=self.select([],{1:'字幕'})
+        marks=[block('大宝爱画画（小红书）',sid=i,t=float(i),y=y,bottom=y+.04)
+               for i,y in ((1,.08),(2,.72))]
+        self.assertTrue(geo.has_caption_evidence(marks,1,band))
+    def test_watermark_ocr_variants_not_caption_evidence(self):
+        band=self.select([],{1:'字幕'})
+        marks=[block('大宝爱画画（小红书)',sid=1,y=.80,bottom=.83),
+               block('大宝爱画画(小红书)',sid=2,y=.12,bottom=.15),
+               block('大宝爱画画（小红书》',sid=3,y=.90,bottom=.93),
+               block('大宝愛画画(小红书)',sid=4,y=.14,bottom=.17)]
+        self.assertFalse(geo.has_caption_evidence(marks,1,band))
 
 
 class PipelineTests(unittest.TestCase):

@@ -8,6 +8,7 @@ PERMANENT_ERROR_NAMES = {
     "FileNotFoundError",
     "SpeechTimingError",
     "CriticalQualityError",
+    "OCRGeometryError",
     "GeminiAuthError",
     "GeminiResponseError",
     "GeminiRequestError",

@@ -1,6 +1,7 @@
 """Mask-coordinate contracts, independent of ASR confidence and voice settings."""
 import math
 from collections import Counter
+from difflib import SequenceMatcher
 
 OCR_GEOMETRY_VERSION = 4
 
@@ -68,6 +69,37 @@ def normalized_rows(rows, scale, crop_offset, width, height):
     return result
 
 
+def _text_key(text):
+    return ''.join(ch for ch in str(text or '') if ch.isalnum())
+
+
+def _sample_key(block):
+    sid = value(block, 'sample_segment_id')
+    return sid if sid is not None else value(block, 'sample_time')
+
+
+def _repeated_packaging(blocks, text):
+    """True when text repeats across scenes, tolerating OCR punctuation and
+    character variants (watermark/logo); real caption rows change every cue."""
+    key = _text_key(text)
+    if len(key) < 2:
+        return False
+    groups = {}
+    for block in blocks:
+        other = _text_key(value(block, 'text', ''))
+        if len(other) >= 2:
+            groups.setdefault(other, set()).add(_sample_key(block))
+    for other, samples in groups.items():
+        if len(samples) < 3:
+            continue
+        if key in other or other in key:
+            return True
+        if (abs(len(key) - len(other)) <= 2
+                and SequenceMatcher(None, key, other).ratio() >= .8):
+            return True
+    return False
+
+
 def has_caption_evidence(blocks, segment_id, band):
     """Do not confuse static product labels with a missed caption track."""
     for block in blocks:
@@ -90,10 +122,7 @@ def has_caption_evidence(blocks, segment_id, band):
             if (not (center < .25 or center > .72) or width < .25
                     or bottom-top < .012 or float(value(block, 'prob', 0)) < .4):
                 continue
-        related = {value(b, 'sample_segment_id') for b in blocks
-                   if str(value(b, 'text', '')).strip() == text
-                   and abs(float(value(b, 'y_pct', 0)) - top) < .015}
-        if len(related) >= 3:
+        if _repeated_packaging(blocks, text):
             continue
         return True
     return False
