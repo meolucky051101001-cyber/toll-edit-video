@@ -130,6 +130,68 @@ class TranslationFailureTests(unittest.TestCase):
             )
         self.assertEqual(result[0].content, "Xin chào")
 
+    def test_fallback_source_language_detects_english_and_chinese(self):
+        translation = self._load_translation_with_failing_google()
+
+        self.assertEqual(
+            translation._fallback_source_language("One minute makeup tutorial"),
+            "en",
+        )
+        self.assertEqual(translation._fallback_source_language("你好，世界"), "zh-CN")
+        self.assertIsNone(translation._fallback_source_language("123 456"))
+        self.assertIsNone(translation._fallback_source_language(""))
+        self.assertIsNone(
+            translation._fallback_source_language("Xin chào các bạn")
+        )
+
+    def test_legacy_fallback_translates_english_source(self):
+        translation = self._load_translation_with_failing_google()
+        seen = {}
+
+        class RecordingGoogleTranslator:
+            def __init__(self, source=None, target=None):
+                seen["source"] = source
+                seen["target"] = target
+
+            def translate(self, text):
+                return "Hướng dẫn trang điểm một phút"
+
+        segment = SimpleNamespace(index=4, content="One minute makeup tutorial")
+        with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
+            translation, "translate_with_gemini", return_value=None
+        ), mock.patch.object(
+            translation, "GoogleTranslator", RecordingGoogleTranslator
+        ):
+            result = translation.translate_subtitles(
+                [segment], strict=False, enable_g4f=False
+            )
+        self.assertEqual(result[0].content, "Hướng dẫn trang điểm một phút")
+        self.assertEqual(seen["source"], "en")
+        self.assertEqual(seen["target"], "vi")
+
+    def test_legacy_fallback_keeps_chinese_source_language(self):
+        translation = self._load_translation_with_failing_google()
+        seen = {}
+
+        class RecordingGoogleTranslator:
+            def __init__(self, source=None, target=None):
+                seen["source"] = source
+
+            def translate(self, text):
+                return "Xin chào"
+
+        segment = SimpleNamespace(index=5, content="你好")
+        with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
+            translation, "translate_with_gemini", return_value=None
+        ), mock.patch.object(
+            translation, "GoogleTranslator", RecordingGoogleTranslator
+        ):
+            result = translation.translate_subtitles(
+                [segment], strict=False, enable_g4f=False
+            )
+        self.assertEqual(result[0].content, "Xin chào")
+        self.assertEqual(seen["source"], "zh-CN")
+
 
 class ResumeVoiceConsistencyTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod

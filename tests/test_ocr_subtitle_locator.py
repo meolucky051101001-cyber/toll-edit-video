@@ -194,6 +194,145 @@ class ChineseSubtitleLocatorTests(unittest.TestCase):
         self.assertEqual(selected.mode, "asr_match")
         self.assertIn(1, selected.selected_by_segment)
 
+    def test_non_chinese_transcript_finds_dynamic_bottom_captions(self):
+        # English ASR over burnt-in Chinese captions: no text match is possible,
+        # but real speech exists so the band must be detected visually.
+        speech = {
+            1: "One minute makeup tutorial",
+            2: "Apply foundation and concealer",
+            3: "Blend everything with a sponge",
+            4: "Set the base with loose powder",
+            5: "Finish with a glossy lip",
+        }
+        subtitles = [
+            "一分钟化妆教程",
+            "先上粉底和遮瑕",
+            "用海绵拍开底妆",
+            "散粉定妆更持久",
+            "最后涂个亮面唇",
+        ]
+        detections = []
+        for segment_id, subtitle in enumerate(subtitles, 1):
+            detections.extend(
+                [
+                    block(segment_id, "品牌名称", 0.40, 0.60, 0.44, 0.50, 0.95),
+                    block(segment_id, subtitle, 0.12, 0.88, 0.73, 0.79, 0.92),
+                ]
+            )
+
+        selected = select_chinese_subtitle_band(detections, speech, 1080, 1920)
+
+        self.assertEqual(selected.mode, "visual_match")
+        self.assertEqual(selected.support, 5)
+        self.assertAlmostEqual(selected.top, 0.73)
+        self.assertAlmostEqual(selected.bottom, 0.79)
+        self.assertEqual(selected.selected_by_segment[1]["text"], "一分钟化妆教程")
+        self.assertIn("亮面唇", selected.selected_by_segment[5]["text"])
+        self.assertTrue(selected.selected_by_sample)
+        self.assertTrue(
+            all(
+                abs(item["y_pct"] - 0.73) < 0.02
+                for rows in selected.selected_by_sample.values()
+                for item in rows
+            )
+        )
+        # The mid-screen brand label must never be covered.
+        self.assertTrue(
+            all(
+                item["text"] != "品牌名称"
+                for item in selected.selected_by_segment.values()
+            )
+        )
+
+    def test_non_chinese_transcript_without_dynamic_captions_stays_default(self):
+        speech = {index: "One minute makeup tutorial" for index in range(1, 5)}
+        detections = [
+            # Static bottom banner repeated across every cue: no caption track.
+            block(segment_id, "品牌名称", 0.30, 0.70, 0.73, 0.79, 0.95)
+            for segment_id in range(1, 5)
+        ]
+
+        selected = select_chinese_subtitle_band(detections, speech, 1080, 1920)
+
+        self.assertEqual(selected.mode, "default")
+        self.assertEqual(selected.support, 0)
+
+    def test_bilingual_captions_cover_chinese_row_only(self):
+        # Chinese row on top, English translation row underneath. Even though the
+        # English row is the one that matches the transcript, the Chinese row is
+        # the masking priority and the English row must stay untouched.
+        pairs = [
+            ("一分钟化妆教程", "One minute makeup tutorial"),
+            ("先上粉底和遮瑕", "Apply foundation and concealer"),
+            ("用海绵拍开底妆", "Blend everything with a sponge"),
+            ("散粉定妆更持久", "Set the base with loose powder"),
+        ]
+        speech = {index: english for index, (_, english) in enumerate(pairs, 1)}
+        detections = []
+        for segment_id, (chinese, english) in enumerate(pairs, 1):
+            detections.extend(
+                [
+                    block(segment_id, chinese, 0.15, 0.85, 0.73, 0.78, 0.92),
+                    block(segment_id, english, 0.12, 0.88, 0.80, 0.85, 0.90),
+                ]
+            )
+
+        selected = select_chinese_subtitle_band(detections, speech, 1080, 1920)
+
+        self.assertEqual(selected.mode, "visual_match")
+        self.assertAlmostEqual(selected.top, 0.73)
+        self.assertAlmostEqual(selected.bottom, 0.78)
+        self.assertTrue(
+            all(
+                re.search(r"[\u4e00-\u9fff]", item["text"])
+                for item in selected.selected_by_segment.values()
+            )
+        )
+        self.assertTrue(
+            all(
+                item["max_y_pct"] <= 0.78
+                for rows in selected.selected_by_sample.values()
+                for item in rows
+            )
+        )
+
+    def test_english_only_captions_are_located_from_latin_transcript(self):
+        captions = [
+            "One minute makeup tutorial",
+            "Apply foundation and concealer",
+            "Blend everything with a sponge",
+            "Set the base with loose powder",
+        ]
+        speech = {index: text for index, text in enumerate(captions, 1)}
+        detections = [
+            block(index, text, 0.12, 0.88, 0.73, 0.79, 0.90)
+            for index, text in enumerate(captions, 1)
+        ]
+
+        selected = select_chinese_subtitle_band(detections, speech, 1080, 1920)
+
+        self.assertEqual(selected.mode, "english_match")
+        self.assertEqual(selected.support, 4)
+        self.assertAlmostEqual(selected.top, 0.73)
+        self.assertAlmostEqual(selected.bottom, 0.79)
+        self.assertEqual(
+            selected.selected_by_segment[1]["text"], "One minute makeup tutorial"
+        )
+        self.assertIn(4, selected.selected_by_sample)
+
+    def test_english_scene_labels_without_transcript_support_stay_default(self):
+        speech = {index: "One minute makeup tutorial" for index in range(1, 4)}
+        detections = [
+            block(segment_id, "NEW ARRIVAL", 0.30, 0.70, 0.73, 0.79, 0.95)
+            for segment_id in range(1, 4)
+        ]
+
+        selected = select_chinese_subtitle_band(detections, speech, 1080, 1920)
+
+        self.assertEqual(selected.mode, "default")
+        self.assertEqual(selected.support, 0)
+        self.assertEqual(selected.selected_by_sample, {})
+
 
 class SubtitleCoverGeometryTests(unittest.TestCase):
     def test_edge_to_edge_source_gets_full_white_cover_at_source_y(self):

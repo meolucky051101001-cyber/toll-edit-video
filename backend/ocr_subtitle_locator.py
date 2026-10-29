@@ -122,6 +122,48 @@ def _text_match(block_text: Any, speech_text: Any) -> Tuple[float, bool]:
     return min(1.0, score), strong
 
 
+_ENGLISH_STOPWORDS = {
+    "the", "and", "you", "for", "with", "that", "this", "are", "was", "were",
+    "have", "has", "had", "not", "but", "from", "your", "can", "all", "now",
+    "get", "got", "just", "then", "they", "them", "his", "her", "its", "our",
+    "out", "one", "use", "how", "why", "what", "when", "who", "will", "would",
+    "could", "should", "about", "into", "over", "some", "more", "very", "also",
+    "like", "here", "there", "these", "those", "she", "him", "been", "being",
+    "does", "did", "so", "if", "or", "of", "in", "on", "at", "to", "is", "it",
+    "a", "an", "as", "be", "by", "do", "my", "me", "we", "us", "he", "i",
+}
+
+
+def _latin_words(value: Any) -> List[str]:
+    import re
+
+    return re.findall(r"[a-z]{2,}|\d{2,}", str(value or "").lower())
+
+
+def _english_match(block_text: Any, speech_text: Any) -> Tuple[float, bool]:
+    """Word-level match for Latin-script captions against a Latin transcript.
+
+    Only content words (not stopwords) count, so a printed label such as
+    "NEW ARRIVAL" cannot be authorised by a transcript that merely says "a".
+    """
+    block_words = _latin_words(block_text)
+    content = [
+        word for word in block_words
+        if word not in _ENGLISH_STOPWORDS and (len(word) >= 3 or word.isdigit())
+    ]
+    content_letters = sum(len(word) for word in content)
+    if content_letters < 3:
+        return 0.0, False
+    speech_words = set(_latin_words(speech_text))
+    if not speech_words:
+        return 0.0, False
+    shared = [word for word in content if word in speech_words]
+    shared_letters = sum(len(word) for word in shared)
+    coverage = min(1.0, shared_letters / float(content_letters))
+    strong = bool(shared) and shared_letters >= 3 and coverage >= 0.5
+    return coverage, strong
+
+
 def _geometry_score(
     block: Mapping[str, Any], frame_width: int, frame_height: int,
     max_height: float = 0.14,
@@ -385,6 +427,61 @@ def _choose_visual_band(
     return ranked[0][1], True
 
 
+def _choose_english_band(
+    candidates: Sequence[_Candidate],
+    duration: float = 0.0,
+    reliable: Optional[Any] = None,
+) -> Optional[List[_Candidate]]:
+    """Pick a dynamic Latin-script caption row that the transcript confirms.
+
+    English subtitles are only covered when a Chinese track was not found, so a
+    bilingual video always keeps the Chinese row as the masking priority.
+    """
+    if not candidates:
+        return None
+    is_reliable = reliable or (lambda item: True)
+    clusters = _cluster_candidates(
+        [item for item in candidates if not item.composite and is_reliable(item)]
+    )
+    ranked: List[Tuple[Tuple[float, ...], List[_Candidate]]] = []
+    for cluster in clusters:
+        samples = _best_per_sample(cluster)
+        if len(samples) < 2:
+            continue
+        distinct = _distinct_caption_count(samples)
+        if distinct < 2:
+            continue
+        med_cx = median((c.block["x_pct"] + c.block["max_x_pct"]) * 0.5 for c in samples)
+        if abs(med_cx - 0.5) > 0.25:
+            continue
+        med_h = median(c.block["max_y_pct"] - c.block["y_pct"] for c in samples)
+        if not (0.015 <= med_h <= 0.12):
+            continue
+        med_cy = median(item.center_y for item in samples)
+        if not (0.30 <= med_cy <= 0.95):
+            continue
+        if _is_static_visual_cluster(cluster, duration):
+            continue
+        centered = sum(
+            1 for c in samples
+            if abs((c.block["x_pct"] + c.block["max_x_pct"]) * 0.5 - 0.5) <= 0.18
+        )
+        if centered < max(2, int(len(samples) * 0.6)):
+            continue
+        ranked.append((
+            (
+                float(distinct),
+                float(len(samples)),
+                sum(c.text_score for c in samples) / len(samples),
+            ),
+            cluster,
+        ))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return ranked[0][1]
+
+
 def select_chinese_subtitle_band(
     blocks: Iterable[Any],
     segment_texts: Mapping[int, str],
@@ -399,6 +496,7 @@ def select_chinese_subtitle_band(
 
     grouped: Dict[Any, List[_Candidate]] = {}
     candidates: List[_Candidate] = []
+    english_candidates: List[_Candidate] = []
     speech_ids = list(segment_texts)
     context_texts = {
         sid: ''.join(segment_texts[key] for key in speech_ids[max(0, i-1):i+2])
@@ -429,7 +527,7 @@ def select_chinese_subtitle_band(
                 ("packaging", "background", "logo", "watermark")):
             continue
         block = _as_mapping(source)
-        if block["text"].lstrip().startswith(("@", "＠")) or len(_chinese_text(block["text"])) < 2:
+        if block["text"].lstrip().startswith(("@", "＠")):
             continue
         geometry_score = _geometry_score(block, frame_width, frame_height, max_height=.24)
         if geometry_score is None:
@@ -441,6 +539,25 @@ def select_chinese_subtitle_band(
             if segment_id is not None
             else ("time", round(float(block.get("sample_time", ordinal)), 3))
         )
+        if len(_chinese_text(block["text"])) < 2:
+            # A Latin-script caption is only a fallback: it may cover the row
+            # only when no Chinese track exists, and only if the transcript
+            # confirms the printed words.
+            english_score, english_strong = _english_match(
+                block["text"], segment_texts.get(segment_id, "")
+            )
+            if english_strong and block['max_y_pct'] - block['y_pct'] <= .14:
+                english_candidates.append(_Candidate(
+                    block=block,
+                    sample_key=sample_key,
+                    segment_id=segment_id,
+                    normalized_text=_normalized_text(block["text"]),
+                    center_y=(block["y_pct"] + block["max_y_pct"]) * 0.5,
+                    geometry_score=geometry_score,
+                    text_score=english_score,
+                    strong_text_match=True,
+                ))
+            continue
         text_score, strong = speech_match(block["text"], segment_id)
         if block['max_y_pct'] - block['y_pct'] > .14 and not strong:
             continue
@@ -515,7 +632,7 @@ def select_chinese_subtitle_band(
                 )
     candidates.extend(composites)
 
-    if not candidates:
+    if not candidates and not english_candidates:
         return SubtitleBandSelection(
             default_top, default_bottom, "default", 0, {}, 0
         )
@@ -572,16 +689,22 @@ def select_chinese_subtitle_band(
             if seed_support >= 2 or sample_count <= 2 or best_text_score >= 0.85:
                 chosen_cluster = best_seed
 
-    # Spatial variation alone must not seed a subtitle band unless real speech is present
-    # (or the opt-in visual-only mode is active) and dynamic, centered Chinese
-    # subtitles are visually detected across segments.
+    # Spatial variation alone must not seed a subtitle band unless a transcript
+    # exists (or the opt-in visual-only mode is active) and dynamic, centered
+    # Chinese subtitles are visually detected across segments.  A non-Chinese
+    # transcript (e.g. English ASR over burnt-in Chinese captions) still proves
+    # the video has speech, so the band must be found visually.
     visual_only_mode = False
     if not chosen_cluster:
         has_real_speech = any(
             len(_chinese_text(s)) >= 2 and s.strip().lower() != "speech unavailable"
             for s in segment_texts.values()
         )
-        if (has_real_speech or allow_visual_only) and candidates:
+        has_any_speech = has_real_speech or any(
+            str(s).strip() and str(s).strip().lower() != "speech unavailable"
+            for s in segment_texts.values()
+        )
+        if (has_any_speech or allow_visual_only) and candidates:
             effective_duration = duration
             if effective_duration is None:
                 effective_duration = max(
@@ -601,6 +724,25 @@ def select_chinese_subtitle_band(
                 mode = "visual_match"
                 visual_only_mode = not has_real_speech
 
+    # Chinese always wins: the Latin-script track is only considered when the
+    # video has no coverable Chinese subtitle row at all.
+    if not chosen_cluster and english_candidates:
+        effective_duration = duration
+        if effective_duration is None:
+            effective_duration = max(
+                (
+                    float(c.block.get("sample_time", 0.0) or 0.0)
+                    for c in english_candidates
+                ),
+                default=0.0,
+            ) + 0.5
+        english_cluster = _choose_english_band(
+            english_candidates, effective_duration, reliable
+        )
+        if english_cluster:
+            chosen_cluster = english_cluster
+            mode = "english_match"
+
     if not chosen_cluster:
         return SubtitleBandSelection(
             default_top,
@@ -608,7 +750,7 @@ def select_chinese_subtitle_band(
             "default",
             0,
             {},
-            len(candidates),
+            len(candidates) + len(english_candidates),
         )
 
     chosen = _best_per_sample(chosen_cluster)
@@ -629,7 +771,7 @@ def select_chinese_subtitle_band(
     selected_by_segment: Dict[int, Mapping[str, Any]] = {}
     selected_by_sample: Dict[int, List[Mapping[str, Any]]] = {}
     strong_by_segment = {}
-    if mode == "visual_match" and chosen_cluster:
+    if mode in ("visual_match", "english_match") and chosen_cluster:
         for item in chosen_cluster:
             if item.segment_id is not None:
                 strong_by_segment.setdefault(item.segment_id, []).append(item)

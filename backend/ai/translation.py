@@ -64,6 +64,20 @@ def _contains_cjk(text):
     return any(("\u4e00" <= char <= "\u9fff") or ("\u3400" <= char <= "\u4dbf") for char in str(text or ""))
 
 
+def _fallback_source_language(text):
+    """Source language for the machine-translation fallback, or None to skip."""
+    content = str(text or "")
+    if _contains_cjk(content):
+        return "zh-CN"
+    letters = sum(1 for char in content if char.isalpha())
+    ascii_letters = sum(1 for char in content if char.isascii() and char.isalpha())
+    # Accented Latin text (Vietnamese, French, ...) must not be forced through
+    # an English translator; leave it untouched when no LLM is available.
+    if ascii_letters >= 2 and ascii_letters == letters:
+        return "en"
+    return None
+
+
 def _parse_json_array(text):
     """Parse JSON array of strings from LLM text with resilience against markdown formatting, trailing commas, and Python syntax."""
     if not text or not isinstance(text, str):
@@ -1137,14 +1151,14 @@ def translate_subtitles(
         if not segment.content:
             return segment, segment.content, None
         orig_content = segment.content
-        if not _contains_cjk(segment.content):
+        src_lang = _fallback_source_language(segment.content)
+        if src_lang is None:
             return segment, segment.content, None
 
         if kwargs.get("stop_checker") and kwargs["stop_checker"]():
             return segment, orig_content, RuntimeError("Operation cancelled by user stop request.")
 
         try:
-            src_lang = 'zh-CN'
             translated_text = None
             try:
                 translator = GoogleTranslator(source=src_lang, target=target_lang)
@@ -1161,7 +1175,7 @@ def translate_subtitles(
                 try:
                     if MyMemoryTranslator is not None:
                         mm_target = "vi-VN" if target_lang.lower().startswith("vi") else target_lang
-                        translated_text = MyMemoryTranslator(source="zh-CN", target=mm_target).translate(segment.content)
+                        translated_text = MyMemoryTranslator(source=src_lang, target=mm_target).translate(segment.content)
                 except Exception:
                     pass
 

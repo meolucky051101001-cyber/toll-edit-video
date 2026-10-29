@@ -107,7 +107,11 @@ def has_caption_evidence(blocks, segment_id, band):
             continue
         text = str(value(block, 'text', '')).strip()
         cjk = ''.join(c for c in text if '\u3400' <= c <= '\u9fff')
-        if text.startswith(('@', '＠')) or len(cjk) < 2:
+        latin = sum(1 for c in text if c.isascii() and c.isalpha())
+        english_band = str(value(band, 'mode', '') or '') == 'english_match'
+        if text.startswith(('@', '＠')) or (
+            len(cjk) < 2 and not (english_band and latin >= 4)
+        ):
             continue
         top, bottom = value(block, 'y_pct'), value(block, 'max_y_pct')
         center = (top + bottom) / 2

@@ -208,6 +208,16 @@ class GeometryTests(unittest.TestCase):
                block('大宝爱画画（小红书》',sid=3,y=.90,bottom=.93),
                block('大宝愛画画(小红书)',sid=4,y=.14,bottom=.17)]
         self.assertFalse(geo.has_caption_evidence(marks,1,band))
+    def test_latin_row_on_english_band_is_caption_evidence(self):
+        band=locator.SubtitleBandSelection(
+            top=.73,bottom=.79,mode='english_match',support=4,
+            selected_by_segment={},candidate_count=4)
+        row=block('Blend everything with a sponge',sid=2,y=.73,bottom=.79)
+        self.assertTrue(geo.has_caption_evidence([row],2,band))
+        chinese_band=locator.SubtitleBandSelection(
+            top=.73,bottom=.79,mode='visual_match',support=4,
+            selected_by_segment={},candidate_count=4)
+        self.assertFalse(geo.has_caption_evidence([row],2,chinese_band))
 
 
 class PipelineTests(unittest.TestCase):
