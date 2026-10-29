@@ -34,9 +34,9 @@ from environment import load_environment
 
 load_environment(Path(__file__).resolve().parent)
 try:
-    from config.paths import AppPaths
+    from config.paths import AppPaths, is_downloader_save_dir
 except ImportError:
-    from backend.config.paths import AppPaths
+    from backend.config.paths import AppPaths, is_downloader_save_dir
 
 PATHS = AppPaths.from_environment(Path(BASE_DIR).parent)
 
@@ -737,6 +737,15 @@ async def _process_batch_folder(
     """
     from batch_control import stop_check
     stop_check.set(_stop_requested)
+    if is_downloader_save_dir(input_dir):
+        msg = (
+            f"⛔ Thư mục `{input_dir}` là nơi bot tải video lưu về (chỉ tải, không edit). "
+            "Hãy chọn thư mục nguồn khác."
+        )
+        logger.warning(msg)
+        if progress_callback:
+            await progress_callback(msg)
+        return
     if not os.path.exists(input_dir):
         os.makedirs(input_dir, exist_ok=True)
         msg = f"📁 Đã tạo thư mục đầu vào: `{input_dir}`. Bạn hãy thả các video cần edit vào đây nhé!"

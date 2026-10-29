@@ -50,6 +50,7 @@ FPT_API_KEY = configured_secret("FPT_API_KEY")
 # Import các module xử lý từ backend
 sys.path.insert(0, os.path.dirname(__file__))
 import job_tracker
+from config.paths import is_downloader_save_dir
 from pipeline_v2.atomic_io import atomic_copy_file
 
 # Đảm bảo console hỗ trợ UTF-8 để không bị lỗi UnicodeEncodeError
@@ -588,7 +589,15 @@ async def cmd_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
             input_dir = r"D:\video phôi"
         
     output_dir = r"D:\banve"
-    
+
+    if is_downloader_save_dir(input_dir):
+        await update.message.reply_text(
+            f"⛔ `{input_dir}` là nơi bot tải video lưu về — chỉ tải, không edit.\n"
+            "Hãy chọn thư mục khác cho `/batch`.",
+            parse_mode="Markdown"
+        )
+        return
+
     if not os.path.exists(input_dir):
         os.makedirs(input_dir, exist_ok=True)
         await update.message.reply_text(

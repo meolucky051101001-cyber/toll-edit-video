@@ -44,7 +44,7 @@ from environment import load_environment
 
 BASE_DIR = Path(__file__).resolve().parent
 load_environment(BASE_DIR)
-from config.paths import AppPaths
+from config.paths import AppPaths, is_downloader_save_dir
 from core.logging_setup import RedactingFormatter
 
 PATHS = AppPaths.from_environment(BASE_DIR.parent)
@@ -286,9 +286,15 @@ except Exception as _te:
 def get_input_dir() -> Path:
     saved = _get_system_path("dashboard_input.json")
     if saved.exists():
-        return Path(json.loads(saved.read_text(encoding="utf-8"))["path"])
+        saved_path = Path(json.loads(saved.read_text(encoding="utf-8"))["path"])
+        if not is_downloader_save_dir(saved_path):
+            return saved_path
+        logger.warning(
+            "Bỏ qua thư mục nguồn %s: đây là nơi bot tải video lưu về, chỉ tải không edit.",
+            saved_path,
+        )
     env_dir = os.getenv("AUTODUB_INPUT_DIR")
-    if env_dir and os.path.exists(env_dir):
+    if env_dir and os.path.exists(env_dir) and not is_downloader_save_dir(env_dir):
         return Path(env_dir)
     for cand in [Path(r"D:\video phôi"), Path(r"D:\video phoi"), Path(r"D:\video_input")]:
         if cand.exists():
@@ -1499,6 +1505,11 @@ async def api_input_folder(request: Request):
         path = path.resolve()
         if path == get_output_dir().resolve():
             raise HTTPException(400, "Hãy chọn thư mục nguồn khác thư mục video hoàn thành.")
+        if is_downloader_save_dir(path):
+            raise HTTPException(
+                400,
+                "Thư mục này là nơi bot Douyin/XHS lưu video tải về (chỉ tải, không edit). Hãy chọn thư mục khác.",
+            )
         dest = Path(WORKSPACE) / "dashboard_input.json"
         tmp = dest.with_suffix(".tmp")
         tmp.write_text(json.dumps({"path": str(path)}), encoding="utf-8")
