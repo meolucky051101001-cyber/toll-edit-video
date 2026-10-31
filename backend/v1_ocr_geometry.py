@@ -3,7 +3,7 @@ import math
 from collections import Counter
 from difflib import SequenceMatcher
 
-OCR_GEOMETRY_VERSION = 4
+OCR_GEOMETRY_VERSION = 5
 
 
 class OCRGeometryError(RuntimeError):
@@ -138,6 +138,32 @@ def geometry_summary(segments):
             'counts': dict(counts),
             'unresolved_indices': [value(s, 'index') for s in segments
                                    if value(s, 'ocr_mask_status') == 'unresolved']}
+
+
+def relax_subtitle_free_geometry(segments, blocks, band):
+    if not segments:
+        return None
+    no_caption = [s for s in segments if value(s, 'ocr_mask_status') == 'no_caption_evidence']
+    unresolved = [(idx, s) for idx, s in enumerate(segments)
+                  if value(s, 'ocr_mask_status') == 'unresolved']
+    if not unresolved or len(no_caption) * 5 < len(segments) * 4:
+        return None
+    segment_ids = [value(s, 'index') if value(s, 'index') is not None else idx
+                   for idx, s in unresolved]
+    if any(has_caption_evidence(blocks, sid, band) for sid in segment_ids):
+        return None
+    for (_, segment), sid in zip(unresolved, segment_ids):
+        if isinstance(segment, dict):
+            segment['best_block'] = None
+            segment['tracking_blocks'] = []
+            segment['ocr_mask_status'] = 'no_caption_evidence'
+        else:
+            segment.best_block = None
+            segment.tracking_blocks = []
+            segment.ocr_mask_status = 'no_caption_evidence'
+    return {'applied': True,
+            'reason': 'at_least_80_percent_no_caption_evidence_and_no_unresolved_cjk',
+            'converted_indices': segment_ids}
 
 
 def validate_mask_geometry(segments, strict=None):

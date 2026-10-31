@@ -35,10 +35,10 @@ except ImportError:
 
 try:
     from .v1_ocr_geometry import (value, sample_times, rescue_times, has_caption_evidence,
-                                  geometry_summary, validate_mask_geometry, normalized_rows)
+                                  geometry_summary, relax_subtitle_free_geometry, validate_mask_geometry, normalized_rows)
 except ImportError:
     from v1_ocr_geometry import (value, sample_times, rescue_times, has_caption_evidence,
-                                geometry_summary, validate_mask_geometry, normalized_rows)
+                                geometry_summary, relax_subtitle_free_geometry, validate_mask_geometry, normalized_rows)
 
 
 logger = logging.getLogger(__name__)
@@ -1364,7 +1364,11 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
                 if seg.ocr_mask_status != 'unresolved':
                     seg.ocr_mask_status = 'no_caption_evidence'
 
+    relaxation = relax_subtitle_free_geometry(srt_segments, all_blocks, band)
     report = geometry_summary(srt_segments)
+    if relaxation:
+        report['subtitle_free_relaxation'] = relaxation
+        logger.info('OCR subtitle-free relaxation: %s', relaxation)
     logger.info('OCR geometry audit: %s', report)
     if kwargs.get('geometry_report_path'):
         try:

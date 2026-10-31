@@ -282,6 +282,37 @@ class PipelineTests(unittest.TestCase):
                 self.run_ocr([segment(),segment(2)],recognize,geometry_report_path=str(report))
             counts=json.loads(report.read_text(encoding='utf-8'))['geometry']['counts']
             self.assertEqual(counts['unresolved'],1)
+    def test_mostly_subtitle_free_video_relaxes_unsampled_cue_without_mask(self):
+        segs=[segment(i) for i in range(1,5)]
+        unsampled=segment(5)
+        unsampled.end=unsampled.start
+        segs.append(unsampled)
+        with tempfile.TemporaryDirectory() as tmp:
+            report=Path(tmp)/'audit.json'
+            output=Path(tmp)/'safe.ass'
+            self.run_ocr(segs,lambda frames:[[] for _ in frames],geometry_report_path=str(report))
+            self.assertTrue(all(s.ocr_mask_status=='no_caption_evidence' for s in segs))
+            self.assertTrue(all(s.best_block is None and not s.tracking_blocks for s in segs))
+            relaxation=json.loads(report.read_text(encoding='utf-8'))['geometry']['subtitle_free_relaxation']
+            self.assertEqual(relaxation['reason'],'at_least_80_percent_no_caption_evidence_and_no_unresolved_cjk')
+            self.assertEqual(relaxation['converted_indices'],[5])
+            ass.generate_ass_file(segs,[],output)
+            self.assertIn(segs[0].content,output.read_text(encoding='utf-8-sig'))
+    def test_mostly_subtitle_free_video_with_real_cjk_still_fails_closed(self):
+        def recognize(frames):
+            results=[[] for _ in frames]
+            results[-1]=[([[100,1152],[600,1152],[600,1240],[100,1240]],'完全不同字幕',.95)]
+            return results
+        segs=[segment(i) for i in range(1,6)]
+        with tempfile.TemporaryDirectory() as tmp:
+            report=Path(tmp)/'audit.json'
+            with self.assertRaises(geo.OCRGeometryError):
+                self.run_ocr(segs,recognize,geometry_report_path=str(report))
+            geometry=json.loads(report.read_text(encoding='utf-8'))['geometry']
+            self.assertEqual(geometry['counts']['no_caption_evidence'],4)
+            self.assertEqual(geometry['counts']['unresolved'],1)
+            self.assertNotIn('subtitle_free_relaxation',geometry)
+            self.assertEqual(segs[-1].ocr_mask_status,'unresolved')
     def test_gpu_failure_propagated(self):
         with self.assertRaisesRegex(RuntimeError,'GPU unavailable'):
             self.run_ocr([segment()],lambda _:(_ for _ in ()).throw(RuntimeError('GPU unavailable')))
