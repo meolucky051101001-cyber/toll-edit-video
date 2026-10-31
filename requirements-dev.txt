@@ -3,9 +3,10 @@
 ruff>=0.11,<1
 pytest>=8,<9
 pytest-asyncio>=0.23,<1
-numpy==1.26.4
+numpy>=1.23.5,<2
 Pillow>=9.2,<13
 opencv-python-headless==4.10.0.84
+protobuf<6
 fastapi>=0.110,<1
 pydantic>=2,<3
 requests>=2.31,<3
@@ -20,4 +21,4 @@ uvicorn>=0.29,<1
 yt-dlp>=2024.4
 srt>=3.5,<4
 gmssl>=3.2.2,<4
-google-generativeai>=0.8,<1
+google-genai>=1,<3

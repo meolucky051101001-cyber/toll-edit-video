@@ -112,3 +112,10 @@ Tool V1 đi kèm bộ kiểm thử tự động toàn diện:
 - **Không commit secrets:** Tuyệt đối không commit file `backend/.env`, chứa `BOT_TOKEN`, `GEMINI_API_KEY`, cookie mạng xã hội hoặc API keys cá nhân.
 - **Thư mục làm việc:** Dữ liệu runtime (`workspace/`, thư mục video, cache âm thanh, log) được loại trừ trong `.gitignore`.
 - **Dữ liệu model nặng:** Trọng số model và môi trường ảo (`backend/venv/`, `backend/model_venv_separator/`) được lưu trữ cục bộ, không đẩy lên Git.
+
+## 8. Môi trường Python 3.12 song song
+
+Xem [hướng dẫn Phase 5](docs/phase5_python312.md) cho dependency, file chuẩn
+`requirements.lock.txt`, giới hạn wheel CapCut local và quy trình cutover/rollback
+thủ công. `requirements.lock` include file chuẩn để giữ tương thích lệnh cũ.
+Không chạy script chuyển môi trường khi dịch vụ Tool V1 còn hoạt động.
