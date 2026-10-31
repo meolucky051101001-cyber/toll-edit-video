@@ -12,6 +12,7 @@ import unittest
 import tempfile
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 try:
     from backend.v1_quality_gate import (
@@ -19,14 +20,18 @@ try:
         QCPolicy,
         QCCategory,
         QCReport,
+        CriticalQualityError,
     )
+    from backend import v1_quality_gate as qc_module
 except ImportError:
     from v1_quality_gate import (
         run_quality_gate,
         QCPolicy,
         QCCategory,
         QCReport,
+        CriticalQualityError,
     )
+    import v1_quality_gate as qc_module
 
 
 class DummySub:
@@ -125,6 +130,45 @@ class QualityGateTests(unittest.TestCase):
                     policy="BLOCK",
                     workspace_path=tmp,
                 )
+
+    def test_block_policy_stops_failed_qc_and_report_only_does_not(self):
+        """QC FAIL phải bị chặn ở cổng BLOCK; REPORT_ONLY chỉ ghi nhận lỗi."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            corrupt = tmp / "corrupt.mp4"
+            corrupt.write_bytes(os.urandom(32768))
+
+            with self.assertRaises(CriticalQualityError):
+                run_quality_gate(
+                    job_id="test_block_critical",
+                    final_video_path=corrupt,
+                    policy="BLOCK",
+                    workspace_path=tmp,
+                )
+            report = json.loads(
+                (tmp / "bot_system" / "qc_reports" / "test_block_critical.qc.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(report["policy"], "BLOCK")
+            self.assertEqual(report["overall_status"], "FAILED")
+            self.assertGreater(report["failure_count"], 0)
+
+            # Simulate a future non-critical FAIL to exercise the policy branch.
+            with patch.object(qc_module, "critical_failures", return_value=[]):
+                with self.assertRaisesRegex(RuntimeError, "Quality Gate BLOCK"):
+                    qc_module.run_quality_gate(
+                        job_id="test_block_branch",
+                        final_video_path=corrupt,
+                        policy="BLOCK",
+                        workspace_path=tmp,
+                    )
+                report_only = qc_module.run_quality_gate(
+                    job_id="test_report_only",
+                    final_video_path=corrupt,
+                    policy="REPORT_ONLY",
+                    workspace_path=tmp,
+                )
+                self.assertEqual(report_only.overall_status, "FAILED")
+                self.assertEqual(report_only.policy, "REPORT_ONLY")
 
     def test_resolution_and_fps_expansion(self):
         """Nới rộng độ phân giải và FPS: Chấp nhận mọi video 4K, 2K, 60fps, 120fps, 9:16,..."""
