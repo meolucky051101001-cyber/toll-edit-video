@@ -78,3 +78,7 @@ secure_sheet/
 bin/
 temp_dir/
 .pytest_cache/
+
+# Log xoay vong (app.log.1, ...) - khong commit
+app.log.*
+backend/app.log.*

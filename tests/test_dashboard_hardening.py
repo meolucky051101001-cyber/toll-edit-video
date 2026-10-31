@@ -121,6 +121,24 @@ class TestDashboardHardening(unittest.TestCase):
         with self.assertRaises(job_tracker.JobAlreadyRunningError):
             job_tracker.start_batch(1)
 
+    def test_release_retries_transient_permission_error(self):
+        job_tracker.start_batch(1)
+        target = job_tracker.BATCH_LOCK_FILE
+        real_unlink = Path.unlink
+        calls = []
+
+        def flaky_unlink(self, *args, **kwargs):
+            if self == target:
+                calls.append(1)
+                if len(calls) == 1:
+                    raise PermissionError(13, "busy")
+            return real_unlink(self, *args, **kwargs)
+
+        with patch.object(Path, "unlink", flaky_unlink):
+            job_tracker.finish_batch()
+        self.assertFalse(target.exists())
+        self.assertEqual(len(calls), 2)
+
     def test_mark_stopped_releases_batch_lock(self):
         job_tracker.start_batch(1)
         self.assertTrue(job_tracker.BATCH_LOCK_FILE.exists())

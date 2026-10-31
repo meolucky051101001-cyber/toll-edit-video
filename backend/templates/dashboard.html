@@ -1090,6 +1090,31 @@ header {
     .queue-panel .queue-source-labels { display:flex; align-items:center; flex-wrap:nowrap; gap:6px; }
     .queue-panel .queue-source-labels .badge { display:inline-flex; align-items:center; flex:0 0 auto; white-space:nowrap; line-height:1.4; margin:0 !important; }
     .queue-panel .queue-actions { flex-wrap:nowrap; }
+
+    /* SUBEXTRACT PAGE (client-side route #subextract) */
+    .subextract-page { position: fixed; inset: 0; z-index: 14000; background: var(--bg-dark); display: none; flex-direction: column; }
+    .subextract-page.open { display: flex; }
+    .sx-topbar { height: 52px; flex: 0 0 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; background: var(--bg-header); border-bottom: 1px solid var(--border); }
+    .sx-topbar-left, .sx-topbar-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .sx-title { display: flex; align-items: center; gap: 9px; font-weight: 600; font-size: 14px; white-space: nowrap; }
+    .sx-title small { font-size: 11.5px; color: var(--text-muted); font-weight: 400; }
+    .sx-logo { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; color: #06121a; background: linear-gradient(135deg, #22d3ee, #818cf8); flex: 0 0 auto; }
+    .sx-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border-hover); color: var(--text-sub); white-space: nowrap; }
+    .sx-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); }
+    .sx-pill.up { color: #6ee7b7; border-color: rgba(16,185,129,0.4); background: rgba(16,185,129,0.08); }
+    .sx-pill.up .dot { background: #34d399; }
+    .sx-pill.down { color: #fda4af; border-color: rgba(239,68,68,0.4); background: rgba(239,68,68,0.08); }
+    .sx-pill.down .dot { background: #f87171; }
+    .sx-body { flex: 1 1 auto; position: relative; min-height: 0; background: #080b12; }
+    .sx-frame { width: 100%; height: 100%; border: 0; display: block; background: #080b12; }
+    .sx-down { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; background: radial-gradient(600px 380px at 50% 0%, rgba(34,211,238,0.08), transparent 60%), #080b12; }
+    .sx-down-card { max-width: 480px; text-align: center; background: var(--bg-card); border: 1px solid var(--border-hover); border-radius: 14px; padding: 28px 26px; box-shadow: 0 24px 60px rgba(0,0,0,0.5); }
+    .sx-down-card h3 { font-size: 16px; margin-bottom: 8px; }
+    .sx-down-card p { font-size: 12.5px; color: var(--text-sub); line-height: 1.6; margin-bottom: 16px; }
+    .sx-down-card code { background: rgba(255,255,255,0.06); border: 1px solid var(--border); padding: 1px 6px; border-radius: 5px; font-size: 11.5px; }
+    @media (max-width: 860px) {
+      .sx-title small { display: none; }
+    }
   </style>
 </head>
 <body>
@@ -1115,6 +1140,10 @@ header {
       <a class="btn btn-outline" href="/kich-ban" title="Mở Studio Kịch Bản AI & Lồng Sub (CapCut TTS)">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
         Kịch Bản
+      </a>
+      <a class="btn btn-outline" href="#subextract" onclick="event.preventDefault(); if (window.openSubextract) { window.openSubextract(); } else { location.hash = 'subextract'; }" title="Mở SubExtract — bóc phụ đề hardsub (OCR GPU)">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M7 15h4M13 15h4M7 11h2M11 11h6"/></svg>
+        SubExtract
       </a>
       <span class="badge badge-gpu">
         <span class="dot dot-green"></span>
@@ -1150,6 +1179,37 @@ header {
       </button>
     </div>
   </header>
+
+  <!-- SUBEXTRACT: TRANG CON CLIENT-SIDE (#subextract) -->
+  <div id="subextractPage" class="subextract-page" role="region" aria-label="SubExtract - bóc phụ đề hardsub">
+    <div class="sx-topbar">
+      <div class="sx-topbar-left">
+        <span class="sx-logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M7 15h4M13 15h4M7 11h2M11 11h6"/></svg>
+        </span>
+        <span class="sx-title">SubExtract <small>Bóc phụ đề hardsub · OCR GPU</small></span>
+        <span id="sxStatus" class="sx-pill"><span class="dot"></span><span id="sxStatusText">Đang kiểm tra…</span></span>
+      </div>
+      <div class="sx-topbar-right">
+        <a class="btn btn-outline" href="/" title="Mở lại Dashboard Tool V1">Tool V1</a>
+        <a class="btn btn-outline" href="/quy-trinh" title="Studio Quy Trình">Quy Trình</a>
+        <a class="btn btn-outline" href="/kich-ban" title="Studio Kịch Bản">Kịch Bản</a>
+        <button type="button" class="btn btn-outline" onclick="window.sxReload()" title="Tải lại công cụ">↻ Tải lại</button>
+        <a class="btn btn-outline" href="http://127.0.0.1:8787/" target="_blank" rel="noopener" title="Mở SubExtract trong tab riêng">Mở tab riêng</a>
+        <button type="button" class="btn btn-primary" onclick="window.sxClose()" title="Đóng trang SubExtract (Esc)">← Dashboard</button>
+      </div>
+    </div>
+    <div class="sx-body">
+      <iframe id="sxFrame" class="sx-frame" title="SubExtract Local"></iframe>
+      <div id="sxDown" class="sx-down" style="display:none;">
+        <div class="sx-down-card">
+          <h3>SubExtract chưa chạy</h3>
+          <p>Công cụ không phản hồi trên cổng <code>8787</code>. Mở SubExtract bằng icon <strong>SubExtract</strong> ngoài Desktop (double-click), đợi 2–4 giây rồi bấm Thử lại.</p>
+          <button type="button" class="btn btn-primary" onclick="window.sxRetry()">Thử lại</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- F13: DROPDOWN TRUNG TÂM THÔNG BÁO -->
   <div id="notifPanel" style="display:none; position:fixed; top:58px; right:16px; z-index:12000; width:370px; max-height:70vh; overflow:auto; background:#0f1117; border:1px solid rgba(255,255,255,0.12); border-radius:10px; box-shadow:0 25px 50px -12px rgba(0,0,0,0.85);">
@@ -8156,6 +8216,7 @@ let inputUploading=false;
       {label: '📖 Mở panel Glossary & Gợi ý', kw: 'glossary từ điển', run: () => { const p = document.getElementById('glossaryPanel'); if (p) { p.open = true; p.scrollIntoView({behavior: 'smooth'}); fetchGlossaryUI(true); } }},
       {label: '🎞 Mở Studio Quy Trình', kw: 'workflow quy trình capcut', run: () => { location.href = '/quy-trinh'; }},
       {label: '✍️ Mở Studio Kịch Bản', kw: 'script kịch bản', run: () => { location.href = '/kich-ban'; }},
+      {label: '🔤 Mở SubExtract', kw: 'subextract phụ đề ocr hardsub srt', run: () => { if (window.openSubextract) window.openSubextract(); else location.hash = 'subextract'; }},
       {label: '🔄 Tải lại trang', kw: 'reload refresh làm mới', run: () => location.reload()},
     ];
 
@@ -8354,6 +8415,94 @@ let inputUploading=false;
       }
     });
 
+  </script>
+
+  <script>
+    (function () {
+      const PAGE = document.getElementById('subextractPage');
+      const FRAME = document.getElementById('sxFrame');
+      const DOWN = document.getElementById('sxDown');
+      const STATUS = document.getElementById('sxStatus');
+      const STATUS_TEXT = document.getElementById('sxStatusText');
+      const SX_URL = 'http://127.0.0.1:8787/';
+      const SX_HEALTH = 'http://127.0.0.1:8787/api/health';
+      let probeTimer = null;
+
+      function setStatus(state) {
+        STATUS.classList.remove('up', 'down');
+        if (state === 'up') {
+          STATUS.classList.add('up');
+          STATUS_TEXT.textContent = 'Đang chạy';
+        } else if (state === 'down') {
+          STATUS.classList.add('down');
+          STATUS_TEXT.textContent = 'Chưa chạy';
+        } else {
+          STATUS_TEXT.textContent = 'Đang kiểm tra…';
+        }
+      }
+
+      function probe() {
+        return fetch(SX_HEALTH + '?t=' + Date.now(), { mode: 'no-cors', cache: 'no-store' })
+          .then(function () { return true; })
+          .catch(function () { return false; });
+      }
+
+      function ensureFrame(force) {
+        if (force || !FRAME.getAttribute('src')) {
+          FRAME.src = SX_URL + '?embed=1&t=' + Date.now();
+        }
+      }
+
+      function refresh() {
+        probe().then(function (ok) {
+          const wasDown = DOWN.style.display !== 'none';
+          setStatus(ok ? 'up' : 'down');
+          DOWN.style.display = ok ? 'none' : 'flex';
+          if (ok) ensureFrame(wasDown);
+        });
+      }
+
+      function openPage() {
+        PAGE.classList.add('open');
+        document.body.style.overflow = 'hidden';
+        ensureFrame(false);
+        refresh();
+        clearInterval(probeTimer);
+        probeTimer = setInterval(refresh, 8000);
+      }
+
+      function closePage() {
+        PAGE.classList.remove('open');
+        document.body.style.overflow = '';
+        clearInterval(probeTimer);
+        probeTimer = null;
+        if (location.hash === '#subextract') {
+          history.replaceState(null, '', location.pathname + location.search);
+        }
+      }
+
+      window.openSubextract = function () {
+        if (location.hash !== '#subextract') {
+          location.hash = 'subextract';
+        } else {
+          openPage();
+        }
+      };
+      window.sxClose = closePage;
+      window.sxRetry = function () { setStatus(null); refresh(); };
+      window.sxReload = function () { ensureFrame(true); refresh(); };
+
+      window.addEventListener('hashchange', function () {
+        if (location.hash === '#subextract') openPage();
+        else closePage();
+      });
+
+      document.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape' && PAGE.classList.contains('open')) closePage();
+      });
+
+      if (location.hash === '#subextract') openPage();
+    })();
   </script>
 </body>
 </html>

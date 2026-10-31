@@ -272,10 +272,20 @@ def _release_batch_lock_guarded(job_id: Optional[str]) -> None:
     owner = _read_batch_lock_unlocked()
     if not job_id or not owner or owner.get("job_id") != job_id or owner.get("pid") != os.getpid():
         return
-    try:
-        BATCH_LOCK_FILE.unlink()
-    except FileNotFoundError:
-        pass
+    for attempt in range(5):
+        try:
+            BATCH_LOCK_FILE.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            # Windows rejects the delete while another process briefly has the
+            # lock file open for reading; a failed release used to leave a
+            # stale lock that blocked (and crashed) the queue worker.
+            if attempt == 4:
+                logger.error("Không xoá được batch.lock sau 5 lần thử: %s", BATCH_LOCK_FILE)
+                return
+            time.sleep(0.1)
 
 
 def _read_state_from_disk_unlocked() -> Optional[Dict[str, Any]]:
