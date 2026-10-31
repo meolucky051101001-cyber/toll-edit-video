@@ -852,6 +852,8 @@ async def process_due_network_retries(now=None):
         enqueued += 1
     if changed:
         _write_network_retry_state(state)
+    if not global_queue.empty():
+        _ensure_video_worker()
     return enqueued
 
 
@@ -875,6 +877,13 @@ def _ensure_network_retry_scheduler():
     if _network_retry_task is None or _network_retry_task.done():
         _network_retry_task = loop.create_task(_network_retry_scheduler())
     return _network_retry_task
+
+
+def _ensure_video_worker():
+    global worker_task
+    if worker_task is None or worker_task.done():
+        worker_task = asyncio.create_task(video_worker())
+    return worker_task
 
 
 async def send_video_safely(context, chat_id, final_video, caption, status_msg, url_or_filename):
@@ -965,6 +974,7 @@ async def video_worker():
             tracker_job = None
             from telegram_progress import current_job
             progress_token = None
+            result = None
             try:
                 wait_notice_sent = False
                 while tracker_job is None:
@@ -991,13 +1001,13 @@ async def video_worker():
                         job_voice_mode = get_auto_voice_mode(WORKSPACE)
 
                     if job['type'] == 'url':
-                        await process_single_url(
+                        result = await process_single_url(
                             job.get('update'), job.get('context'), job['url'], job.get('pos', 1),
                             chat_id=job.get('chat_id'), voice_mode=job_voice_mode,
                             retry_count=job.get('retry_count', 0), queue_job=job
                         )
                     elif job['type'] == 'video':
-                        await process_single_video(
+                        result = await process_single_video(
                             job.get('update'), job.get('context'), job.get('file_id'),
                             job.get('filename') or 'video.mp4', job.get('pos', 1),
                             chat_id=job.get('chat_id'), voice_mode=job_voice_mode,
@@ -1023,7 +1033,7 @@ async def video_worker():
                 else:
                     pos, update, context, url = job
                     from ai.v1_auto_voice import get_auto_voice_mode
-                    await process_single_url(update, context, url, pos, voice_mode=get_auto_voice_mode(WORKSPACE))
+                    result = await process_single_url(update, context, url, pos, voice_mode=get_auto_voice_mode(WORKSPACE))
             except asyncio.CancelledError:
                 if tracker_job:
                     job_tracker.mark_stopped()
@@ -1043,7 +1053,9 @@ async def video_worker():
                 global_queue.task_done()
                 if tracker_job:
                     state = job_tracker.get_status()
-                    if state.get("video_status") == "completed":
+                    if isinstance(result, dict) and result.get("status") == "retry_scheduled":
+                        job_tracker.mark_retry_waiting(tracker_job)
+                    elif state.get("video_status") == "completed":
                         job_tracker.finish_batch()
                     elif state.get("active"):
                         job_tracker.fail_batch("Video kết thúc mà chưa xác nhận thành phẩm.", job_id=tracker_job)

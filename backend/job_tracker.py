@@ -1006,6 +1006,32 @@ def mark_stopped(message: str = "Đã dừng theo yêu cầu") -> None:
         _release_batch_lock_unlocked(_CURRENT_STATE.get("job_id"))
 
 
+def mark_retry_waiting(job_id: str, message: str = "Đang chờ mạng; video đã được lên lịch thử lại.") -> None:
+    """Record a scheduled retry without completion or failure; the worker releases the lock."""
+    with _LOCK:
+        _sync_from_disk_unlocked()
+        if _CURRENT_STATE.get("job_id") != job_id:
+            return
+        _freeze_progress_unlocked()
+        waiting = {
+            "active": False,
+            "status": "waiting",
+            "video_status": "waiting",
+            "step_name": message,
+            "start_time": None,
+            "eta_seconds": None,
+            "last_error": None,
+            "updated_at": time.time(),
+        }
+        _CURRENT_STATE.update(waiting)
+        _CURRENT_STATE["percent"] = min(99, max(0, _CURRENT_STATE.get("percent", 0)))
+        for worker in (_CURRENT_STATE.get("workers") or {}).values():
+            if worker.get("active") or worker.get("video_status") == "running":
+                worker.update(waiting)
+                worker["percent"] = min(99, max(0, worker.get("percent", 0)))
+        _save_state_to_disk()
+
+
 def fail_batch(
     error_msg: str,
     video_name: str = "batch",

@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import json
 import tempfile
@@ -34,6 +35,7 @@ class TelegramNetworkRetryTests(unittest.IsolatedAsyncioTestCase):
         for target, value in [
             ("WORKSPACE", str(self.root)), ("OUTPUT_DIR", str(self.root / "delivery")),
             ("global_queue", monitor.MonitoredQueue()), ("_network_retry_task", None),
+            ("worker_task", SimpleNamespace(done=lambda: False)),
         ]:
             p = patch.object(bot, target, value)
             p.start()
@@ -173,6 +175,138 @@ class TelegramNetworkRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(retried)
         messages = [call.args[1] for call in status.call_args_list if len(call.args) > 1]
         self.assertTrue(any("Không hoàn tất video" in message for message in messages))
+
+    async def test_retry_only_restart_starts_one_worker_even_if_previous_worker_finished(self):
+        for previous_finished in (False, True):
+            with self.subTest(previous_finished=previous_finished):
+                previous = None
+                if previous_finished:
+                    previous = asyncio.get_running_loop().create_future()
+                    previous.set_result(None)
+                consumed = asyncio.Event()
+                keep_running = asyncio.Event()
+                restored_jobs = []
+
+                async def consume_retry():
+                    restored_jobs.append(await bot.global_queue.get())
+                    bot.global_queue.task_done()
+                    consumed.set()
+                    await keep_running.wait()
+
+                queue_file = self.root / "bot_system" / "telegram_queue.json"
+                queue_file.write_text(json.dumps({"items": [], "active_job": None}), encoding="utf-8")
+                bot.schedule_network_retry(copy.deepcopy(self.job))
+                bot._network_retry_jobs.clear()
+                with patch.object(bot, "worker_task", previous), \
+                     patch.object(bot, "video_worker", side_effect=consume_retry) as worker:
+                    try:
+                        self.assertEqual(await bot.enqueue_pending_queue_jobs(), 0)
+                        self.assertIs(bot.worker_task, previous)
+                        self._make_due()
+                        self.assertEqual(await bot.process_due_network_retries(), 1)
+                        await asyncio.wait_for(consumed.wait(), timeout=2)
+                        started = bot.worker_task
+                        self.assertIsNotNone(started)
+                        self.assertIsNot(started, previous)
+                        restored = restored_jobs[0]
+                        self.assertEqual(restored["job_id"], self.job["job_id"])
+                        self.assertEqual(restored["network_retry_count"], 1)
+                        self.assertEqual(restored["job_overrides"], self.job["job_overrides"])
+                        self.assertEqual(restored["resume_state"], self.job["resume_state"])
+
+                        second = dict(copy.deepcopy(self.job), job_id="telegram_second_retry")
+                        bot.schedule_network_retry(second)
+                        self._make_due()
+                        self.assertEqual(await bot.process_due_network_retries(), 1)
+                        self.assertIs(bot.worker_task, started)
+                        worker.assert_called_once()
+                        self.assertEqual(await bot.process_due_network_retries(), 0)
+                        self.assertEqual((await bot.global_queue.get())["job_id"], second["job_id"])
+                        bot.global_queue.task_done()
+                    finally:
+                        if bot.worker_task is not None and bot.worker_task is not previous:
+                            bot.worker_task.cancel()
+                            await asyncio.gather(bot.worker_task, return_exceptions=True)
+
+    async def _run_worker_failure(self, error, kind="url"):
+        from pipeline_v2 import download_validation
+
+        tracker = bot.job_tracker
+        job = dict(copy.deepcopy(self.job), type=kind)
+        if kind == "video":
+            job.update(url="", file_id="fixture-file", filename="input.mp4")
+        torch_stub = ModuleType("torch")
+        torch_stub.cuda = SimpleNamespace(is_available=lambda: False)
+        with patch.object(tracker, "WORKSPACE", self.root), \
+             patch.object(tracker, "STATUS_FILE", self.root / "bot_system" / "job_status.json"), \
+             patch.object(tracker, "BATCH_LOCK_FILE", self.root / "bot_system" / "batch.lock"), \
+             patch.object(tracker, "_CURRENT_STATE", copy.deepcopy(tracker._DEFAULT_STATE)), \
+             patch.dict("sys.modules", {"job_tracker": tracker, "torch": torch_stub}), \
+             patch.object(download_validation, "probe_downloaded_video"), \
+             patch("v1_checkpoint.fingerprint", return_value="source-hash"), \
+             patch.object(bot, "run_pipeline_v1_for_telegram", side_effect=error), \
+             patch.object(bot, "safe_edit_status", new_callable=AsyncMock), \
+             patch.object(tracker, "fail_batch", wraps=tracker.fail_batch) as fail, \
+             patch.object(tracker, "finish_batch", wraps=tracker.finish_batch) as finish:
+            await bot.global_queue.put(job)
+            task = asyncio.create_task(bot.video_worker())
+            try:
+                await asyncio.wait_for(bot.global_queue.join(), timeout=5)
+                state = tracker.get_status()
+                disk = json.loads(tracker.STATUS_FILE.read_text(encoding="utf-8"))
+                self.assertFalse(tracker.BATCH_LOCK_FILE.exists())
+                self.assertIsNone(bot.global_queue.active_job)
+                self.assertEqual(bot.global_queue._unfinished_tasks, 0)
+                finish.assert_not_called()
+                fail.assert_not_called()
+                return state, disk
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def _assert_worker_waits_for_network(self, kind):
+        state, disk = await self._run_worker_failure(httpx.ConnectError("offline"), kind)
+        for snapshot in (state, disk):
+            self.assertEqual(snapshot["status"], "waiting")
+            self.assertEqual(snapshot["video_status"], "waiting")
+            self.assertFalse(snapshot["active"])
+            self.assertIsNone(snapshot["last_error"])
+            self.assertIsNone(snapshot["eta_seconds"])
+            self.assertLess(snapshot["percent"], 100)
+            self.assertEqual(snapshot["history"], [])
+            self.assertIn("thử lại", snapshot["step_name"])
+            self.assertEqual(snapshot["workers"]["1"]["status"], "waiting")
+            self.assertFalse(snapshot["workers"]["1"]["active"])
+        retry = self._retry_state()["jobs"][self.job["job_id"]]
+        self.assertEqual(retry["attempt"], 1)
+        self.assertEqual(retry["delay_seconds"], 60)
+
+    async def test_url_worker_waits_for_network_without_failing_or_finishing(self):
+        await self._assert_worker_waits_for_network("url")
+
+    async def test_video_worker_waits_for_network_without_failing_or_finishing(self):
+        await self._assert_worker_waits_for_network("video")
+
+    async def test_worker_still_fails_permanent_download_error_without_retry(self):
+        state, disk = await self._run_worker_failure(
+            DownloadValidationError("ffprobe rejected the downloaded container")
+        )
+        for snapshot in (state, disk):
+            self.assertEqual(snapshot["status"], "error")
+            self.assertEqual(snapshot["video_status"], "error")
+            self.assertFalse(snapshot["active"])
+            self.assertIn("ffprobe rejected", snapshot["last_error"])
+        self.assertFalse(bot.network_retry_state_path().exists())
+
+    async def test_worker_still_fails_when_network_retries_are_exhausted(self):
+        self.job["network_retry_count"] = 3
+        state, disk = await self._run_worker_failure(httpx.ConnectError("offline"))
+        for snapshot in (state, disk):
+            self.assertEqual(snapshot["status"], "error")
+            self.assertEqual(snapshot["video_status"], "error")
+            self.assertFalse(snapshot["active"])
+            self.assertIn("offline", snapshot["last_error"])
+        self.assertFalse(bot.network_retry_state_path().exists())
 
     async def test_corrupt_video_fails_immediately_without_retry(self):
         result, set_error, status = await self._run_failing_pipeline(
