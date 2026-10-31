@@ -38,6 +38,11 @@ try:
 except ImportError:
     from backend.config.paths import AppPaths, is_downloader_save_dir
 
+try:
+    from v1_feature_flags import migrate_legacy_asr_model
+except ImportError:
+    from backend.v1_feature_flags import migrate_legacy_asr_model
+
 PATHS = AppPaths.from_environment(Path(BASE_DIR).parent)
 
 # The Tool V1 batch entrypoint is permanently isolated from Pipeline V2.
@@ -366,10 +371,10 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
 
         await pause_checkpoint()
         _raise_if_stopped()
-        batch_asr_model = str(frozen_eff.get("asr_model", "whisper_turbo"))
-        if "qwen" in batch_asr_model.lower():
-            batch_asr_display = "Qwen3-ASR 0.6B (GPU CUDA)"
-        elif batch_asr_model.lower() in ("whisper_sensevoice", "whisper_sensevoice_hybrid", "hybrid"):
+        batch_asr_model = migrate_legacy_asr_model(
+            str(frozen_eff.get("asr_model", "whisper_turbo")), "batch processor"
+        )
+        if batch_asr_model.lower() in ("whisper_sensevoice", "whisper_sensevoice_hybrid", "hybrid"):
             batch_asr_display = "Hybrid: Faster-Whisper Turbo + SenseVoice-Small (CTC 60ms)"
         elif "sensevoice" in batch_asr_model.lower():
             batch_asr_display = "SenseVoice-Small (ONNX INT8 Siêu Tốc)"

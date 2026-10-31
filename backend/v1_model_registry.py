@@ -2,7 +2,7 @@
 v1_model_registry.py - Flexible Model Registry và Quản lý Chính sách Model theo Mode (Giai đoạn 2).
 Quản lý tập trung 5 công đoạn AI + 2 cấu hình phụ trợ:
 1. Vocal / Music Separation (BS-RoFormer, Demucs v4)
-2. ASR Speech-to-Text (Whisper Large-v3 Turbo, Qwen3-ASR benchmark sandbox)
+2. ASR Speech-to-Text (Whisper Large-v3 Turbo, Whisper + SenseVoice Hybrid, SenseVoice-Small)
 3. Subtitle OCR (PP-OCRv6, Smart Skip OCR)
 4. AI Translation (Gemini Flash & Tiered fallbacks)
 5. AI Voice / TTS (CapCut TTS 6-workers, Edge TTS 4-workers)
@@ -96,18 +96,7 @@ class ModelSpec:
             except Exception as e:
                 return False, f"Lỗi kiểm tra SenseVoice: {e}"
 
-        # 4. Qwen3-ASR (Sandbox & User selectable mode)
-        elif self.model_id == "qwen3_asr_preview":
-            try:
-                try:
-                    from ai.v1_qwen_asr_adapter import check_qwen_readiness
-                except ImportError:
-                    from backend.ai.v1_qwen_asr_adapter import check_qwen_readiness
-                return check_qwen_readiness(ignore_flag=False)
-            except Exception as e:
-                return False, f"Lỗi kiểm tra Qwen3-ASR: {e}"
-
-        # 5. PP-OCRv6 Tiny
+        # 4. PP-OCRv6 Tiny
         elif self.model_id == "pp_ocrv6_tiny":
             return True, "Sẵn sàng (PaddleOCR ONNX CUDA, GPU:0)"
 
@@ -223,21 +212,6 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
         fallback_model_id="whisper_large_v3_turbo",
         description="Mô hình CTC Non-Autoregressive 228MB của Alibaba FunASR, chạy trong < 1s.",
     ),
-    "qwen3_asr_preview": ModelSpec(
-        model_id="qwen3_asr_preview",
-        stage=ModelStage.ASR,
-        display_name="Qwen3-ASR (Sandbox Benchmark Mode)",
-        backend_runtime="qwen_asr_cuda",
-        gpu_device="cuda:0",
-        vram_required_mb=2800.0,
-        measured_speed_rtf=0.35,
-        quality_sdr_or_score="Đang chờ benchmark thực nghiệm",
-        timeout_seconds=600,
-        fallback_model_id="whisper_large_v3_turbo",
-        feature_flag="ENABLE_QWEN_ASR",
-        description="Mô hình ASR Qwen thử nghiệm sau feature flag. Không bật mặc định.",
-    ),
-
     # 3. OCR
     "pp_ocrv6_tiny": ModelSpec(
         model_id="pp_ocrv6_tiny",
@@ -363,6 +337,12 @@ def resolve_effective_model(
     - An toàn: Không bao giờ trả về model chưa sẵn sàng; tự động chuyển sang fallback an toàn.
     """
     mode_norm = (video_mode or "SHORT").strip().upper()
+    if user_override:
+        try:
+            from v1_feature_flags import migrate_legacy_asr_model
+        except ImportError:
+            from backend.v1_feature_flags import migrate_legacy_asr_model
+        user_override = migrate_legacy_asr_model(user_override, "model registry")
 
     # A registry describes the frozen choice. Readiness is checked at execution,
     # never silently substitute another model behind a job's snapshot.
@@ -376,9 +356,6 @@ def resolve_effective_model(
             "hybrid": "whisper_sensevoice_hybrid",
             "sensevoice": "sensevoice_small",
             "sensevoice_small": "sensevoice_small",
-            "qwen3_asr": "qwen3_asr_preview",
-            "qwen": "qwen3_asr_preview",
-            "qwen3": "qwen3_asr_preview",
         },
     }
     if user_override and stage in aliases:
@@ -425,19 +402,6 @@ def resolve_effective_model(
                 return get_model("whisper_sensevoice_hybrid")
             if override_norm in ("sensevoice", "sensevoice_small"):
                 return get_model("sensevoice_small")
-            if "qwen" in override_norm:
-                qwen_spec = get_model("qwen3_asr_preview")
-                if qwen_spec:
-                    try:
-                        try:
-                            from ai.v1_qwen_asr_adapter import check_qwen_readiness
-                        except ImportError:
-                            from backend.ai.v1_qwen_asr_adapter import check_qwen_readiness
-                        if check_qwen_readiness(ignore_flag=True)[0]:
-                            return qwen_spec
-                    except Exception:
-                        pass
-                return get_model("whisper_large_v3_turbo")
 
         # Without a job-scoped choice, respect the persistent feature flag.
         try:
@@ -457,17 +421,6 @@ def resolve_effective_model(
                     return sv_spec
             elif cfg_asr in ("whisper_turbo", "whisper"):
                 return get_model("whisper_large_v3_turbo")
-        except Exception:
-            pass
-        try:
-            try:
-                from ai.v1_qwen_asr_adapter import is_qwen_asr_enabled
-            except ImportError:
-                from backend.ai.v1_qwen_asr_adapter import is_qwen_asr_enabled
-            if is_qwen_asr_enabled():
-                qwen_spec = get_model("qwen3_asr_preview")
-                if qwen_spec and qwen_spec.check_readiness()[0]:
-                    return qwen_spec
         except Exception:
             pass
         sv_default = get_model("whisper_sensevoice_hybrid")

@@ -1,4 +1,3 @@
-import os
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -13,11 +12,6 @@ from backend.v1_model_registry import (
     resolve_effective_model,
     log_stage_telemetry,
     MODEL_REGISTRY,
-)
-from backend.ai.v1_qwen_asr_adapter import (
-    is_qwen_asr_enabled,
-    check_qwen_readiness,
-    run_qwen_asr_benchmark,
 )
 from backend import ocr_utils
 
@@ -37,7 +31,8 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertGreaterEqual(len(asr_models), 2)
         asr_ids = [m.model_id for m in asr_models]
         self.assertIn("whisper_large_v3_turbo", asr_ids)
-        self.assertIn("qwen3_asr_preview", asr_ids)
+        self.assertIn("whisper_sensevoice_hybrid", asr_ids)
+        self.assertIn("sensevoice_small", asr_ids)
 
         # 3. OCR, Translation, TTS, Mixer, Render
         self.assertIsNotNone(get_model("pp_ocrv6_tiny"))
@@ -54,13 +49,14 @@ class ModelRegistryTests(unittest.TestCase):
         is_ready, note = whisper.check_readiness()
         self.assertTrue(is_ready)
 
-        # Qwen3-ASR should be not ready by default (flag disabled)
-        qwen = get_model("qwen3_asr_preview")
-        self.assertIsNotNone(qwen)
-        with mock.patch.dict(os.environ, {"ENABLE_QWEN_ASR": "false"}):
-            ready_qwen, note_qwen = qwen.check_readiness()
-            self.assertFalse(ready_qwen)
-            self.assertIn("flag", note_qwen.lower())
+        # Retired Qwen3-ASR ids are no longer registered.
+        self.assertIsNone(get_model("qwen3_asr_preview"))
+
+        demucs = get_model("demucs_htdemucs")
+        self.assertIsNotNone(demucs)
+        ready_demucs, note_demucs = demucs.check_readiness()
+        self.assertIsInstance(ready_demucs, bool)
+        self.assertTrue(note_demucs)
 
     def test_resolve_effective_model_by_mode(self):
         # SHORT mode
@@ -79,14 +75,16 @@ class ModelRegistryTests(unittest.TestCase):
         m_ovr = resolve_effective_model(ModelStage.SEPARATION, video_mode="SHORT", user_override="demucs_htdemucs")
         self.assertEqual(m_ovr.model_id, "demucs_htdemucs")
 
-    def test_qwen_asr_sandbox_isolation(self):
-        with mock.patch.dict(os.environ, {"ENABLE_QWEN_ASR": "false"}):
-            self.assertFalse(is_qwen_asr_enabled())
-            ready, reason = check_qwen_readiness()
-            self.assertFalse(ready)
-            # Benchmark gracefully returns None and does not crash
-            res = run_qwen_asr_benchmark("dummy.wav")
-            self.assertIsNone(res)
+    def test_legacy_asr_override_is_migrated_without_raising(self):
+        migrated = resolve_effective_model(
+            ModelStage.ASR, video_mode="SHORT", user_override="qwen3_asr"
+        )
+        self.assertEqual(migrated.model_id, "whisper_sensevoice_hybrid")
+
+        with self.assertRaises(ValueError):
+            resolve_effective_model(
+                ModelStage.ASR, video_mode="SHORT", user_override="imaginary_asr"
+            )
 
     def test_stage_telemetry_logging(self):
         whisper = get_model("whisper_large_v3_turbo")

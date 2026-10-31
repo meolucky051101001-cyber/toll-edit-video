@@ -31,7 +31,7 @@ try:
     from v1_model_registry import (
         ModelStage, resolve_effective_model
     )
-    from v1_feature_flags import get_feature_flags
+    from v1_feature_flags import get_feature_flags, migrate_legacy_asr_model
     from v1_job_policy import (
         looks_like_bgm_hallucination as _looks_like_bgm_hallucination,
         merged_speech_coverage as _merged_speech_coverage,
@@ -43,7 +43,7 @@ except ImportError:
     from .v1_model_registry import (
         ModelStage, resolve_effective_model
     )
-    from .v1_feature_flags import get_feature_flags
+    from .v1_feature_flags import get_feature_flags, migrate_legacy_asr_model
     from .v1_job_policy import (
         looks_like_bgm_hallucination as _looks_like_bgm_hallucination,
         merged_speech_coverage as _merged_speech_coverage,
@@ -76,15 +76,17 @@ class V1Orchestrator:
         if not asr_model:
             asr_spec = planned_models.get("asr") or {}
             model_id = asr_spec.get("model_id") if isinstance(asr_spec, dict) else None
-            if model_id == "qwen3_asr_preview":
-                asr_model = "qwen3_asr"
-            elif model_id == "whisper_large_v3_turbo":
+            if model_id == "whisper_large_v3_turbo":
                 asr_model = "whisper_turbo"
             elif model_id == "whisper_sensevoice_hybrid":
                 asr_model = "whisper_sensevoice"
+            elif model_id == "sensevoice_small":
+                asr_model = "sensevoice_small"
             else:
-                asr_model = model_id
-        asr_model = asr_model or config.get("asr_model") or "whisper_turbo"
+                asr_model = migrate_legacy_asr_model(model_id, "job manifest")
+        asr_model = migrate_legacy_asr_model(
+            asr_model or config.get("asr_model") or "whisper_turbo", "job manifest"
+        )
         planned["asr_model"] = asr_model
 
         return {
@@ -216,15 +218,6 @@ class V1Orchestrator:
             # BS-RoFormer RTF ~1.2x + thời gian nạp trọng số mô hình vào VRAM (~60s)
             return max(450, min(3600, int(dur * 3.5) + 300))
         elif stage == "speech_asr":
-            # Qwen3-ASR 0.6B GPU + Forced Aligner cần thời gian nạp trọng số float16 (~15s) và suy luận word tokens
-            use_qwen = False
-            try:
-                from ai.v1_qwen_asr_adapter import is_qwen_asr_enabled
-                use_qwen = is_qwen_asr_enabled() or getattr(self, "planned", {}).get("asr_model") == "qwen3_asr"
-            except Exception:
-                pass
-            if use_qwen:
-                return max(180, min(2400, int(dur * 2.5) + 180))
             return max(120, min(1800, int(dur * 2.0) + 120))
         elif stage == "visual_ocr":
             # 4K / 60fps cần thêm thời gian OCR frame processing
@@ -545,10 +538,8 @@ class V1Orchestrator:
         asr_was_empty = False
         visual_ocr_cached = False
         if should_run:
-            asr_m = str(planned.get("asr_model", "whisper_turbo"))
-            if asr_m == "qwen3_asr":
-                model_display = "Qwen3-ASR 0.6B (GPU CUDA)"
-            elif asr_m == "whisper_sensevoice":
+            asr_m = migrate_legacy_asr_model(str(planned.get("asr_model", "whisper_turbo")), "job plan")
+            if asr_m == "whisper_sensevoice":
                 model_display = "Hybrid: Faster-Whisper Turbo + SenseVoice-Small (CTC 60ms)"
             elif asr_m == "sensevoice_small":
                 model_display = "SenseVoice-Small (ONNX INT8 Siêu Tốc)"
@@ -562,7 +553,7 @@ class V1Orchestrator:
                 from ai.v1_asr_isolated import extract_subtitles_isolated as extract_subtitles_whisper
                 from v1_gpu_gatekeeper import async_gpu_gatekeeper
                 check_stop()
-                # extract_subtitles_whisper tự động điều phối Qwen3-ASR hoặc Faster-Whisper + Chunking
+                # extract_subtitles_whisper tự động điều phối Hybrid/SenseVoice hoặc Faster-Whisper + Chunking
                 async with async_gpu_gatekeeper("speech_asr", timeout_seconds=t_out):
                     srt_segments = await run_stage(
                         asyncio.to_thread(

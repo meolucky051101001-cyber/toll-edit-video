@@ -327,7 +327,11 @@ def resolve_planned_pipeline(
             "render_encoder": "h264_nvenc",
             "estimated_timeout_s": 3600,
         }
-    asr_model = overrides.get("asr_model")
+    try:
+        from v1_feature_flags import migrate_legacy_asr_model
+    except ImportError:
+        from backend.v1_feature_flags import migrate_legacy_asr_model
+    asr_model = migrate_legacy_asr_model(overrides.get("asr_model"), "video router") or None
     if not asr_model:
         try:
             try:
@@ -336,9 +340,7 @@ def resolve_planned_pipeline(
                 from backend.v1_feature_flags import get_feature_flags
             flags = get_feature_flags(workspace_path)
             cfg_model = str(flags.get("V1_ASR_MODEL", "")).strip().lower()
-            if flags.get("ENABLE_QWEN_ASR") or cfg_model == "qwen3_asr":
-                asr_model = "qwen3_asr"
-            elif cfg_model in ("whisper_sensevoice", "whisper_sensevoice_hybrid", "hybrid"):
+            if cfg_model in ("whisper_sensevoice", "whisper_sensevoice_hybrid", "hybrid"):
                 asr_model = "whisper_sensevoice"
             elif cfg_model in ("sensevoice_small", "sensevoice"):
                 asr_model = "sensevoice_small"
@@ -347,8 +349,7 @@ def resolve_planned_pipeline(
             else:
                 asr_model = "whisper_sensevoice"
         except Exception:
-            val = os.getenv("ENABLE_QWEN_ASR", "false").lower() in ("true", "1", "yes")
-            asr_model = "qwen3_asr" if val else "whisper_sensevoice"
+            asr_model = "whisper_sensevoice"
     pipeline["asr_model"] = asr_model
 
     # Quy tắc: Tắt hoàn toàn smart skip OCR cho video ngắn (dưới 7 phút / 420s).

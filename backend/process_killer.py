@@ -25,7 +25,6 @@ WORKER_SCRIPT_KEYWORDS = [
     "separator_worker",
     "v1_separator_worker",
     "demucs",
-    "v1_qwen_asr",
     "model_workers",
     "bs_roformer",
 ]

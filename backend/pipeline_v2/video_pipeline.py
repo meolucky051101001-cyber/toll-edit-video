@@ -295,8 +295,6 @@ class VideoPipelineRunner:
                 {
                     "backend": selected_models.asr_backend,
                     "speed_profile": selected_models.speed_profile,
-                    "primary": selected_models.qwen_asr_model,
-                    "aligner": selected_models.qwen_aligner_model,
                     "fallback": selected_models.whisper_model,
                 }
             ),

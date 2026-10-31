@@ -2,7 +2,7 @@
 """
 rerender_video_dual_voice.py
 Re-renders video 1790954189_866e49ab_猫九酱 with:
-1. Qwen3-ASR Forced Alignment precision timestamps (lip-sync frame-perfect).
+1. Forced-alignment precision timestamps captured from the original ASR pass (lip-sync frame-perfect).
 2. Dual Voice (Phân vai Nam & Nữ):
    - Female cues (1, 4, 8) -> CapCut Mai (BV562_streaming)
    - Male cues (2, 3, 5, 6, 7, 9, 10, 11) -> CapCut Thanh Niên Tự Tin (BV075_streaming)
@@ -34,7 +34,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
-logger = logging.getLogger("rerender_dual_voice_qwen")
+logger = logging.getLogger("rerender_dual_voice_align")
 
 from ai.v1_voice_isolated import generate_dubbing_audio_isolated
 from ai.voice_cloning import fit_audio_file
@@ -44,8 +44,8 @@ from video_utils import mix_audio_pydub, process_video
 from pydub import AudioSegment
 
 
-# Exact Qwen3-ASR Forced Alignment timestamps for each dialogue line
-QWEN_TIMINGS = {
+# Exact forced-alignment timestamps for each dialogue line
+FORCED_ALIGNMENT_TIMINGS = {
     1: (0.560, 2.240),   # Nữ: "Cậu thích kiểu như tớ không?" (Mouth opens 0.56s)
     2: (3.360, 3.920),   # Nam: "Tạm ổn thôi"
     3: (3.920, 5.280),   # Nam: "Tớ thích kiểu dễ thương cơ"
@@ -88,7 +88,7 @@ async def main():
     mixed_audio = job_dir / "mixed.wav"
 
     logger.info("==================================================")
-    logger.info("BẮT ĐẦU RE-RENDER DUAL VOICE + QWEN FORCED ALIGNMENT")
+    logger.info("BẮT ĐẦU RE-RENDER DUAL VOICE + FORCED ALIGNMENT")
     logger.info("Video: %s", job_dir.name)
     logger.info("==================================================")
 
@@ -104,11 +104,11 @@ async def main():
     vid_duration = len(AudioSegment.from_file(str(orig_audio))) / 1000.0
     logger.info("Thời lượng video: %.2f giây, Kích thước: %dx%d, main_y_pct: %.3f", vid_duration, vid_w, vid_h, main_y_pct)
 
-    # 2. Áp dụng mốc thời gian chuẩn xác từ Qwen3-ASR Forced Alignment
-    logger.info("Bước 1: Áp dụng mốc thời gian Qwen Forced Alignment cho %d câu thoại...", len(translated_segments))
+    # 2. Áp dụng mốc thời gian chuẩn xác từ Forced Alignment
+    logger.info("Bước 1: Áp dụng mốc thời gian Forced Alignment cho %d câu thoại...", len(translated_segments))
     for seg in translated_segments:
-        if seg.index in QWEN_TIMINGS:
-            st, et = QWEN_TIMINGS[seg.index]
+        if seg.index in FORCED_ALIGNMENT_TIMINGS:
+            st, et = FORCED_ALIGNMENT_TIMINGS[seg.index]
             seg.start = timedelta(seconds=st)
             seg.end = timedelta(seconds=et)
             logger.info("  -> Cue %2d: [%.3fs -> %.3fs] (%s)", seg.index, st, et, seg.content)
@@ -193,7 +193,7 @@ async def main():
             item["end"] = item["start"] + fitted_dur
             item["speed_ratio"] = float(item.get("speed_ratio", 1.0)) * spd
             st = item["start"]
-            target_et = QWEN_TIMINGS.get(idx, (0, 0))[1]
+            target_et = FORCED_ALIGNMENT_TIMINGS.get(idx, (0, 0))[1]
             logger.info("  -> Cue %2d: dur=%.2fs (target <= %.2fs), speed=%.2fx, audio_end=%.2fs (target_end=%.2fs) - KHỚP!",
                         idx, fitted_dur, tgt, item["speed_ratio"], st + fitted_dur, target_et)
 

@@ -35,6 +35,14 @@ def _choice(value: Optional[str], default: str, allowed: Tuple[str, ...]) -> str
     return candidate
 
 
+LEGACY_ASR_BACKENDS = {"qwen3": "whisper", "qwen": "whisper", "qwen3_asr": "whisper"}
+
+
+def _legacy_asr_backend(value: Optional[str]) -> Optional[str]:
+    candidate = str(value or "").strip().lower()
+    return LEGACY_ASR_BACKENDS.get(candidate, value)
+
+
 def ordered_unique(*values: str) -> Tuple[str, ...]:
     result = []
     for value in values:
@@ -52,9 +60,6 @@ class RuntimeModelPolicy:
     demucs_primary_model: str = "htdemucs_ft"
     demucs_fallback_model: str = "htdemucs"
     asr_backend: str = "auto"
-    qwen_asr_model: str = "Qwen/Qwen3-ASR-0.6B"
-    qwen_aligner_model: str = "Qwen/Qwen3-ForcedAligner-0.6B"
-    qwen_language: str = "Chinese"
     whisper_model: str = "large-v3"
     ocr_backend: str = "auto"
     paddle_ocr_version: str = "PP-OCRv6"
@@ -98,18 +103,10 @@ class RuntimeModelPolicy:
                 env.get("DEMUCS_FALLBACK_MODEL"), "htdemucs_ft" if fast else "htdemucs"
             ),
             asr_backend=_choice(
-                env.get("ASR_BACKEND"),
+                _legacy_asr_backend(env.get("ASR_BACKEND")),
                 "whisper" if fast else "auto",
-                ("auto", "qwen3", "whisper"),
+                ("auto", "whisper"),
             ),
-            qwen_asr_model=_clean(
-                env.get("QWEN_ASR_MODEL"), "Qwen/Qwen3-ASR-0.6B"
-            ),
-            qwen_aligner_model=_clean(
-                env.get("QWEN_ALIGNER_MODEL"),
-                "Qwen/Qwen3-ForcedAligner-0.6B",
-            ),
-            qwen_language=_clean(env.get("QWEN_ASR_LANGUAGE"), "Chinese"),
             whisper_model=_clean(env.get("WHISPER_MODEL"), "large-v3"),
             ocr_backend=_choice(
                 env.get("OCR_BACKEND"),

@@ -217,12 +217,6 @@ def _strong_model_checks(
     )
     modules = (
         (
-            "models:qwen3_asr",
-            "qwen_asr",
-            "{} + {}".format(policy.qwen_asr_model, policy.qwen_aligner_model),
-            "Faster-Whisper {}".format(policy.whisper_model),
-        ),
-        (
             "models:bs_roformer",
             "audio_separator",
             policy.separator_model,

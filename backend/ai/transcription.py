@@ -460,12 +460,7 @@ def _transcribe_once(audio_path, model_name, num_workers, download_root=None, or
 
 
 def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, original_audio_path=None, asr_model=None, *, model_id=None, chunking=None, chunk_size_s=240.0, overlap_s=0.75):
-    """Transcribe with V1's fast model (or Hybrid Whisper+SenseVoice / SenseVoice-Small / Qwen3-ASR if selected)."""
-
-    try:
-        from .v1_qwen_asr_adapter import is_qwen_asr_enabled, transcribe_audio_qwen, check_qwen_readiness
-    except ImportError:
-        from ai.v1_qwen_asr_adapter import is_qwen_asr_enabled, transcribe_audio_qwen, check_qwen_readiness
+    """Transcribe with V1's fast model (or Hybrid Whisper+SenseVoice / SenseVoice-Small if selected)."""
 
     try:
         from .v1_sensevoice_adapter import (
@@ -480,6 +475,11 @@ def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, origin
             transcribe_audio_sensevoice,
         )
 
+    try:
+        from v1_feature_flags import get_feature_flags, migrate_legacy_asr_model
+    except ImportError:
+        from backend.v1_feature_flags import get_feature_flags, migrate_legacy_asr_model
+
     aliases = {
         "whisper": "whisper_turbo",
         "whisper_large_v3_turbo": "whisper_turbo",
@@ -488,62 +488,22 @@ def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, origin
         "hybrid": "whisper_sensevoice",
         "sensevoice": "sensevoice_small",
         "sensevoice_small": "sensevoice_small",
-        "qwen": "qwen3_asr",
-        "qwen3": "qwen3_asr",
-        "qwen3_asr_preview": "qwen3_asr",
     }
     selected = model_id if model_id is not None else asr_model
     model_id = aliases.get(str(selected).lower(), selected) if selected is not None else None
-    if model_id not in (None, "whisper_turbo", "whisper_sensevoice", "sensevoice_small", "qwen3_asr"):
+    model_id = migrate_legacy_asr_model(model_id, "transcription")
+    if model_id not in (None, "whisper_turbo", "whisper_sensevoice", "sensevoice_small"):
         raise ValueError(f"Unsupported ASR model: {model_id}")
 
     if model_id is None:
-        if is_qwen_asr_enabled():
-            model_id = "qwen3_asr"
-        else:
-            try:
-                from v1_feature_flags import get_feature_flags
-                cfg_model = str(get_feature_flags().get("V1_ASR_MODEL", "")).strip().lower()
-                if cfg_model in aliases:
-                    model_id = aliases[cfg_model]
-            except Exception:
-                pass
+        try:
+            cfg_model = str(get_feature_flags().get("V1_ASR_MODEL", "")).strip().lower()
+            if cfg_model in aliases:
+                model_id = aliases[cfg_model]
+        except Exception:
+            pass
         if model_id is None:
             model_id = "whisper_sensevoice"
-
-    use_qwen = model_id == "qwen3_asr"
-    if use_qwen:
-        ready, reason = check_qwen_readiness(ignore_flag=True)
-        if ready:
-            print("🚀 [ASR] Người dùng đã chọn Qwen3-ASR 0.6B GPU. Đang thực thi nhận dạng...")
-            try:
-                if chunking:
-                    from .v1_asr_chunking import get_audio_duration_seconds, chunk_audio_intervals, slice_audio_chunk, deduplicate_boundary_segments
-                    import tempfile
-                    merged = []
-                    intervals = chunk_audio_intervals(get_audio_duration_seconds(audio_path), chunk_size_s, overlap_s)
-                    with tempfile.TemporaryDirectory(prefix="v1-qwen-chunks-") as folder:
-                        for number, (start, end) in enumerate(intervals):
-                            chunk_path = str(Path(folder) / f"{number}.wav")
-                            slice_audio_chunk(audio_path, start, end - start, chunk_path)
-                            chunk_subs = transcribe_audio_qwen(chunk_path, None)
-                            rows = [{"start": s.start.total_seconds() + start,
-                                     "end": s.end.total_seconds() + start, "text": s.content}
-                                    for s in chunk_subs]
-                            merged.extend(deduplicate_boundary_segments(merged, rows, start))
-                    qwen_subs = [srt.Subtitle(i, timedelta(seconds=row["start"]),
-                                 timedelta(seconds=row["end"]), row["text"])
-                                 for i, row in enumerate(merged, 1)]
-                    save_srt(qwen_subs, output_srt_path)
-                else:
-                    qwen_subs = transcribe_audio_qwen(audio_path, output_srt_path)
-                if qwen_subs:
-                    print(f"✅ Qwen3-ASR hoàn tất nhận dạng thành công ({len(qwen_subs)} câu thoại).")
-                    return qwen_subs
-            except Exception as qwen_err:
-                print(f"⚠️ Qwen3-ASR gặp lỗi: {qwen_err}. Tự động fallback sang Faster-Whisper Large-v3 Turbo...")
-        else:
-            print(f"⚠️ Qwen3-ASR chưa sẵn sàng ({reason}). Sử dụng Faster-Whisper mặc định.")
 
     if model_id == "sensevoice_small":
         sv_ready, sv_reason = check_sensevoice_readiness(ignore_flag=True)

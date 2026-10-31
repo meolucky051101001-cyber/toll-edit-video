@@ -2666,9 +2666,6 @@ async def api_get_feature_flags():
     try:
         from v1_feature_flags import get_feature_flags
         flags = get_feature_flags(WORKSPACE)
-        # Qwen3-ASR đã được gỡ bỏ khỏi hệ thống
-        flags["QWEN_ASR_READY"] = False
-        flags["QWEN_ASR_READINESS_REASON"] = "Mô hình Qwen3-ASR đã được gỡ bỏ khỏi hệ thống"
         try:
             from ai.v1_sensevoice_adapter import check_sensevoice_readiness
             sv_ready, sv_reason = check_sensevoice_readiness(ignore_flag=True)
@@ -2681,7 +2678,6 @@ async def api_get_feature_flags():
     except Exception:
         from v1_speech_guard import natural_speed_limit
         return {
-            "ENABLE_QWEN_ASR": os.getenv("ENABLE_QWEN_ASR", "false").lower() in ("true", "1", "yes"),
             "V1_ASR_CHUNKING": os.getenv("V1_ASR_CHUNKING", "true").lower() in ("true", "1", "yes"),
             "V1_SMART_SKIP_OCR": os.getenv("V1_SMART_SKIP_OCR", "true").lower() in ("true", "1", "yes"),
             "V1_QC_POLICY": os.getenv("V1_QC_POLICY", "BLOCK"),
@@ -2695,20 +2691,16 @@ async def api_get_feature_flags():
 async def api_set_feature_flags(payload: dict = Body(...)):
     """Cập nhật trạng thái các cờ tính năng nâng cấp (lưu vào biến môi trường & file cấu hình)."""
     try:
-        requested_model = str(payload.get("V1_ASR_MODEL", "")).strip().lower()
-        wants_qwen = (payload.get("ENABLE_QWEN_ASR") is True
-                      or requested_model in ("qwen3_asr", "qwen", "qwen3")
-                      or payload.get("V1_SHORT_ASR_MODEL") == "qwen3_asr"
-                      or payload.get("V1_LONG_ASR_MODEL") == "qwen3_asr")
-        if wants_qwen:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "status": "error",
-                    "code": "QWEN_REMOVED",
-                    "message": "Mô hình Qwen3-ASR đã được gỡ bỏ khỏi hệ thống. Vui lòng sử dụng Hybrid (Whisper + SenseVoice) hoặc Faster-Whisper Turbo.",
-                },
-            )
+        from v1_feature_flags import (
+            LEGACY_ASR_FLAG_KEYS,
+            migrate_legacy_asr_model,
+            set_feature_flags,
+        )
+        requested_model = migrate_legacy_asr_model(
+            str(payload.get("V1_ASR_MODEL", "")).strip().lower(), "dashboard settings"
+        )
+        if any(payload.get(key) is True for key in LEGACY_ASR_FLAG_KEYS):
+            requested_model = "whisper_sensevoice"
         wants_sensevoice = (
             requested_model in ("whisper_sensevoice", "whisper_sensevoice_hybrid", "hybrid", "sensevoice_small", "sensevoice")
             or payload.get("V1_SHORT_ASR_MODEL") in ("whisper_sensevoice", "sensevoice_small")
@@ -2726,7 +2718,6 @@ async def api_set_feature_flags(payload: dict = Body(...)):
                         "message": sv_reason,
                     },
                 )
-        from v1_feature_flags import set_feature_flags
         updated = set_feature_flags(payload, WORKSPACE)
         return {"status": "ok", "flags": updated}
     except ValueError as exc:

@@ -32,7 +32,8 @@ class V1WireupIntegrationTests(unittest.TestCase):
             tmp = Path(tmp_dir)
             flags = get_feature_flags(tmp)
             self.assertEqual(flags["V1_USE_ORCHESTRATOR"], True)
-            self.assertEqual(flags["ENABLE_QWEN_ASR"], False)
+            self.assertEqual(flags["V1_ASR_MODEL"], "whisper_sensevoice")
+            self.assertNotIn("ENABLE_QWEN_ASR", flags)
 
             # Thay đổi cờ
             set_feature_flags({"V1_SMART_SKIP_OCR": False, "V1_QC_POLICY": "BLOCK"}, tmp)

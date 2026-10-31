@@ -1,6 +1,11 @@
 """Pure, per-job model selection. Auto voice and video mode are independent."""
 from copy import deepcopy
 
+try:
+    from v1_feature_flags import migrate_legacy_asr_model
+except ImportError:
+    from .v1_feature_flags import migrate_legacy_asr_model
+
 
 def merged_speech_coverage(segments, duration_s):
     """Union of ASR speech intervals, clamped to the source timeline."""
@@ -95,7 +100,6 @@ ASR_ALIASES = {
     "whisper_turbo": "whisper_turbo", "whisper_large_v3_turbo": "whisper_turbo",
     "whisper_sensevoice": "whisper_sensevoice", "whisper_sensevoice_hybrid": "whisper_sensevoice", "hybrid": "whisper_sensevoice",
     "sensevoice_small": "sensevoice_small", "sensevoice": "sensevoice_small",
-    "qwen3_asr": "qwen3_asr", "qwen3_asr_preview": "qwen3_asr",
 }
 SEPARATOR_ALIASES = {
     "roformer": "roformer", "bs_roformer_sdr12": "roformer",
@@ -126,6 +130,7 @@ def apply_job_policy(routing, flags, overrides=None):
     asr = overrides.get("asr_model") or flags.get(f"V1_{profile}_ASR_MODEL", "inherit")
     if asr == "inherit":
         asr = flags.get("V1_ASR_MODEL", "whisper_sensevoice")
+    asr = migrate_legacy_asr_model(asr, "job policy")
     if asr not in ASR_ALIASES:
         raise ValueError(f"Unsupported V1 ASR model: {asr}")
     pipeline.update(
