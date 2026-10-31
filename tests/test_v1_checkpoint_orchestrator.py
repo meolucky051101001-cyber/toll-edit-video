@@ -14,7 +14,7 @@ from backend.v1_checkpoint import (
     fingerprint,
     STAGES_ORDER,
 )
-from backend.v1_orchestrator import V1Orchestrator
+from backend.v1_orchestrator import V1Orchestrator, resolve_qc_policy
 
 
 class CheckpointOrchestratorTests(unittest.TestCase):
@@ -166,7 +166,12 @@ class CheckpointOrchestratorTests(unittest.TestCase):
                 plan = orch.plan_job(video_file, "job_orch_01", user_mode="auto")
                 self.assertEqual(plan["job_id"], "job_orch_01")
                 self.assertEqual(plan["routing"]["resolved_mode"], "SHORT")
-                self.assertEqual(plan["effective_config"]["qc_policy"], "BLOCK")
+                # The global QC policy is read live, never frozen into a plan.
+                self.assertNotIn("qc_policy", plan["effective_config"])
+                self.assertEqual(
+                    resolve_qc_policy(plan["effective_config"], workspace_path=tmp_dir),
+                    "BLOCK",
+                )
                 self.assertIn("separation", plan["planned_models"])
                 self.assertIn("asr", plan["planned_models"])
                 self.assertIn("tts", plan["planned_models"])

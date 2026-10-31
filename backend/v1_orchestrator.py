@@ -51,6 +51,26 @@ except ImportError:
     )
 
 
+QC_POLICIES = ("REPORT_ONLY", "WARN", "BLOCK")
+
+
+def resolve_qc_policy(config=None, overrides=None, workspace_path=None) -> str:
+    """Explicit job override wins; otherwise read the single live setting."""
+    if isinstance(overrides, dict):
+        requested = str(overrides.get("qc_policy") or "").upper()
+        if requested in QC_POLICIES:
+            return requested
+    if isinstance(config, dict) and config.get("qc_policy_source") == "job":
+        requested = str(config.get("qc_policy") or "").upper()
+        if requested in QC_POLICIES:
+            return requested
+    try:
+        live = str(get_feature_flags(workspace_path).get("V1_QC_POLICY", "BLOCK")).upper()
+    except Exception:
+        return "BLOCK"
+    return live if live in QC_POLICIES else "BLOCK"
+
+
 class V1Orchestrator:
     """Bộ điều phối duy nhất thực thi pipeline lồng tiếng video cho Tool V1."""
 
@@ -150,6 +170,13 @@ class V1Orchestrator:
         voice_config = dict(overrides.get("voice_config") or get_auto_voice_config(str(self.workspace)))
         if "manual_voice" not in voice_config:
             voice_config["manual_voice"] = dict(voice_selection.selected())
+        # The global QC policy is read live at execution; only an explicit
+        # per-job choice is frozen into the snapshot.
+        explicit_qc_policy = overrides.get("qc_policy")
+        pinned_qc = (
+            {"qc_policy": explicit_qc_policy, "qc_policy_source": "job"}
+            if explicit_qc_policy else {}
+        )
         snapshot = freeze_job_config(
             video_name=path.name, job_id=job_id, routing_snapshot=routing, workspace_path=self.workspace,
             overrides={**safe_overrides,
@@ -159,7 +186,7 @@ class V1Orchestrator:
                 "asr_model": planned["asr_model"],
                 "voice_mode": overrides.get("voice_mode") or ("auto" if voice_config.get("enabled") else "manual"),
                 "voice_config": voice_config, "feature_flags": flags,
-                "qc_policy": overrides.get("qc_policy") or flags["V1_QC_POLICY"],
+                **pinned_qc,
             })
         effective_cfg = snapshot["effective_config"]
         # Config services may filter unknown preset fields; retain job-owned policy.
@@ -168,7 +195,7 @@ class V1Orchestrator:
             "video_mode": resolved_mode, "separation_mode": planned["separation_model"],
             "voice_config": voice_config, "feature_flags": flags,
             "voice_mode": overrides.get("voice_mode") or ("auto" if voice_config.get("enabled") else "manual"),
-            "qc_policy": overrides.get("qc_policy") or flags["V1_QC_POLICY"],
+            **pinned_qc,
             "visual_sub_to_speech": bool(
                 overrides.get("visual_sub_to_speech")
                 if overrides.get("visual_sub_to_speech") is not None
@@ -1038,7 +1065,7 @@ class V1Orchestrator:
 
         # ==================== STAGE 9: QUALITY GATE & PUBLISH ====================
         qc_target = temp_render_video if temp_render_video.is_file() else final_video
-        qc_policy = effective_cfg.get("qc_policy", "BLOCK")
+        qc_policy = resolve_qc_policy(effective_cfg, overrides, self.workspace)
         logger.info("[QUALITY_GATE] Đang thực hiện kiểm tra chất lượng tự động 8 nhóm (policy=%s)...", qc_policy)
 
         try:
