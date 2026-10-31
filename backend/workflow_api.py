@@ -234,8 +234,8 @@ def probe_stream_durations(file_path: str) -> Dict[str, Optional[float]]:
                 if ctype in ("video", "audio") and sdur:
                     try:
                         durations[ctype] = float(sdur)
-                    except ValueError:
-                        pass
+                    except ValueError as _phase6_exc:
+                        logger.debug('Suppressed error in workflow_api.probe_stream_durations (float): %s', type(_phase6_exc).__name__, exc_info=False)
     except Exception as e:
         logger.warning(f"Lỗi khi probe stream durations cho {file_path}: {e}")
     return durations
@@ -589,18 +589,18 @@ def safe_check_job_artifacts(stem: str, defer_media=False) -> Dict[str, bool]:
                     if item.name == f"final_{stem}.mp4" and _valid_final_video(item, defer=defer_media):
                         res["step6"] = True
                         break
-            except OSError:
-                pass
-    except OSError:
-        pass
+            except OSError as _phase6_exc:
+                logger.debug('Suppressed error in workflow_api.safe_check_job_artifacts (job_dir.iterdir): %s', type(_phase6_exc).__name__, exc_info=False)
+    except OSError as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.safe_check_job_artifacts (job_dir.is_dir): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # Kiểm tra thêm trong banve
     try:
         banve_cand = OUTPUT_DIR / f"Dubbed_{stem}.mp4"
         if banve_cand.is_file() and _valid_final_video(banve_cand, defer=defer_media):
             res["step6"] = True
-    except OSError:
-        pass
+    except OSError as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.safe_check_job_artifacts (banve_cand.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
 
     return res
 
@@ -720,8 +720,8 @@ def _payload_video_version(payload: Dict[str, Any], job_dir: Path, clean_stem: s
     try:
         if (job_dir / f"final_{clean_stem}.mp4").is_file():
             return "final"
-    except OSError:
-        pass
+    except OSError as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api._payload_video_version (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
     return "raw"
 
 
@@ -731,8 +731,8 @@ def get_current_control_token() -> str:
     if token_path.is_file():
         try:
             return token_path.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api.get_current_control_token (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
     return ""
 
 
@@ -784,8 +784,8 @@ async def api_get_canvas_settings():
     import importlib, canvas_settings
     try:
         importlib.reload(canvas_settings)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_get_canvas_settings (importlib.reload): %s', type(_phase6_exc).__name__, exc_info=False)
     cfg = canvas_settings.get_canvas_settings()
     cfg["motion_backgrounds"] = canvas_settings.get_available_motion_backgrounds()
     cfg["image_backgrounds"] = canvas_settings.get_available_image_backgrounds()
@@ -798,8 +798,8 @@ async def api_save_canvas_settings(payload: Dict[str, Any] = Body(...)):
     import importlib, canvas_settings
     try:
         importlib.reload(canvas_settings)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_save_canvas_settings (importlib.reload): %s', type(_phase6_exc).__name__, exc_info=False)
     return canvas_settings.save_canvas_settings(payload)
 
 
@@ -809,8 +809,8 @@ async def api_get_motion_backgrounds():
     import importlib, canvas_settings
     try:
         importlib.reload(canvas_settings)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_get_motion_backgrounds (importlib.reload): %s', type(_phase6_exc).__name__, exc_info=False)
     return {"motion_backgrounds": canvas_settings.get_available_motion_backgrounds()}
 
 
@@ -820,8 +820,8 @@ async def api_get_image_backgrounds():
     import importlib, canvas_settings
     try:
         importlib.reload(canvas_settings)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_get_image_backgrounds (importlib.reload): %s', type(_phase6_exc).__name__, exc_info=False)
     return {"image_backgrounds": canvas_settings.get_available_image_backgrounds()}
 
 
@@ -866,8 +866,8 @@ async def api_choose_workflow_folder(
                 dialog_title = body.get("title") or dialog_title
                 if "must_exist" in body:
                     need_exist = bool(body["must_exist"])
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api.api_choose_workflow_folder (request.json): %s', type(_phase6_exc).__name__, exc_info=False)
 
     initial = str(initial).strip().strip('"').strip("'")
     if not initial or not Path(initial).is_dir():
@@ -945,8 +945,8 @@ def _collect_workflow_videos() -> List[Dict[str, Any]]:
                         continue
                     seen_stems.add(stem)
                     candidates.append((Path(entry.path), source))
-        except OSError:
-            pass
+        except OSError as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api._collect_workflow_videos (os.scandir): %s', type(_phase6_exc).__name__, exc_info=False)
 
     if not candidates:
         return []
@@ -1014,8 +1014,8 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
             raw_video_url = stream_file_url(cand_dl)
         elif job_dir.is_dir() and (job_dir / "step1_extracted.mp4").is_file():
             raw_video_url = stream_file_url(job_dir / "step1_extracted.mp4")
-    except OSError:
-        pass
+    except OSError as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_get_workflow_video_data (cand_phoi.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # 2. Tìm video thành phẩm hoàn tất (final_video - ĐÃ LỒNG TIẾNG & CHE SUB)
     final_video_url = ""
@@ -1029,8 +1029,8 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
             banve_cand = OUTPUT_DIR / f"Dubbed_{stem}.mp4"
             if banve_cand.is_file() and _valid_final_video(banve_cand):
                 final_video_url = stream_file_url(banve_cand)
-    except OSError:
-        pass
+    except OSError as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_get_workflow_video_data (job_dir.is_dir): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # Mặc định: Nếu đã có bản hoàn tất, phát bản hoàn tất (đầy đủ âm thanh lồng tiếng & che sub)
     # Nếu chưa hoàn tất, phát bản gốc
@@ -1054,8 +1054,8 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
                     trans_subtitles = parse_srt(trans_srt_file.read_text(encoding="utf-8", errors="replace"))
                 except Exception as e:
                     logger.warning(f"Error parsing translated.srt: {e}")
-    except OSError:
-        pass
+    except OSError as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_get_workflow_video_data (job_dir.is_dir): %s', type(_phase6_exc).__name__, exc_info=False)
 
     combined_subs = []
     if trans_subtitles:
@@ -1091,15 +1091,15 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
                 step1_audio = stream_file_url(job_dir / "original.wav")
             if (job_dir / "mixed.wav").is_file():
                 step5_audio = stream_file_url(job_dir / "mixed.wav")
-    except OSError:
-        pass
+    except OSError as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_get_workflow_video_data (job_dir.is_dir): %s', type(_phase6_exc).__name__, exc_info=False)
 
     has_demucs = False
     try:
         if job_dir.is_dir() and ((job_dir / "htdemucs").is_dir() or (job_dir / "bs_roformer").is_dir()):
             has_demucs = True
-    except OSError:
-        pass
+    except OSError as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_get_workflow_video_data (job_dir.is_dir): %s', type(_phase6_exc).__name__, exc_info=False)
 
     inst_file, voc_file = _find_vocal_files(job_dir) if job_dir.is_dir() else (None, None)
     has_vocal_sep = bool(inst_file and voc_file and inst_file.is_file() and voc_file.is_file())
@@ -1155,8 +1155,8 @@ def is_safe_stream_path(target_path: Path) -> bool:
         if fld:
             try:
                 allowed_roots.append(Path(fld).resolve())
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in workflow_api.is_safe_stream_path (allowed_roots.append): %s', type(_phase6_exc).__name__, exc_info=False)
 
     resolved = target_path.resolve()
     for root in allowed_roots:
@@ -1167,8 +1167,8 @@ def is_safe_stream_path(target_path: Path) -> bool:
             try:
                 resolved.relative_to(root)
                 return True
-            except ValueError:
-                pass
+            except ValueError as _phase6_exc:
+                logger.debug('Suppressed error in workflow_api.is_safe_stream_path (resolved.relative_to): %s', type(_phase6_exc).__name__, exc_info=False)
     return False
 
 
@@ -1720,8 +1720,8 @@ def _ensure_thumbnail_file(stem: str) -> Path:
         try:
             shutil.copy2(job_dir / "thumbnail.jpg", thumb_file)
             return thumb_file
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api._ensure_thumbnail_file (shutil.copy2): %s', type(_phase6_exc).__name__, exc_info=False)
 
     video_source = _find_video_for_stem(stem)
     if video_source:
@@ -1774,8 +1774,8 @@ def _capture_thumbnail_sync(stem: str, timestamp_s: float) -> Dict[str, Any]:
             if job_dir.is_dir():
                 try:
                     shutil.copy2(thumb_file, job_dir / "thumbnail.jpg")
-                except Exception:
-                    pass
+                except Exception as _phase6_exc:
+                    logger.debug('Suppressed error in workflow_api._capture_thumbnail_sync (shutil.copy2): %s', type(_phase6_exc).__name__, exc_info=False)
             return {
                 "status": "ok",
                 "success": True,
@@ -1823,8 +1823,8 @@ async def api_upload_thumbnail(stem: str = Form(...), file: UploadFile = File(..
     if job_dir.is_dir():
         try:
             (job_dir / "thumbnail.jpg").write_bytes(content)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api.api_upload_thumbnail (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
             
     return {
         "status": "ok",
@@ -1860,8 +1860,8 @@ def _prepend_thumbnail_file(video_path: Path, thumb_path: Path, duration_s: floa
     streams = []
     try:
         streams = json.loads(p_res.stdout).get("streams", [])
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api._prepend_thumbnail_file (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
     v_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
     a_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
@@ -2695,14 +2695,14 @@ def _run_ffmpeg_ctl(cmd: List[str], job_ctl: Optional[Dict[str, Any]] = None, ti
                     secs = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
                     try:
                         cb(min(1.0, secs / total))
-                    except Exception:
-                        pass
+                    except Exception as _phase6_exc:
+                        logger.debug('Suppressed error in workflow_api._run_ffmpeg_ctl (cb): %s', type(_phase6_exc).__name__, exc_info=False)
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
             proc.kill()
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api._run_ffmpeg_ctl (proc.kill): %s', type(_phase6_exc).__name__, exc_info=False)
     rc = 99 if job_ctl.get("cancelled") else proc.returncode
     return subprocess.CompletedProcess(cmd, rc, "", "".join(err_tail))
 
@@ -2743,8 +2743,8 @@ def _apply_timeline_edits_file(
     streams = []
     try:
         streams = json.loads(p_res.stdout).get("streams", [])
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api._apply_timeline_edits_file (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
     v_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
     a_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
@@ -2765,8 +2765,8 @@ def _apply_timeline_edits_file(
                 if k in c:
                     entry[k] = c[k]
             valid_clips.append(entry)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in workflow_api._apply_timeline_edits_file (max): %s', type(_phase6_exc).__name__, exc_info=False)
 
     if not valid_clips:
         return False
@@ -3018,8 +3018,8 @@ def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, An
             if cb:
                 try:
                     cb(pct, msg)
-                except Exception:
-                    pass
+                except Exception as _phase6_exc:
+                    logger.debug('Suppressed error in workflow_api._prog (cb): %s', type(_phase6_exc).__name__, exc_info=False)
 
     stem = safe_stem(payload.get("stem"))
     clean_stem = artifact_stem(stem)
@@ -3133,8 +3133,8 @@ def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, An
         subprocess.run(cmd_th, capture_output=True, timeout=15)
         if job_dir.is_dir() and thumb_file.is_file():
             shutil.copy2(thumb_file, job_dir / "thumbnail.jpg")
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api._execute_apply_edits (str): %s', type(_phase6_exc).__name__, exc_info=False)
 
     stream_url = stream_file_url(dest_final, cache_bust=True)
     return {
@@ -3235,8 +3235,8 @@ def _build_waveform_sync(stem: str, version: str, buckets: int) -> Dict[str, Any
                     and requested == n_buckets and isinstance(cached.get("peaks"), list)):
                 return {"exists": True, "cached": True, "duration": cached.get("duration"),
                         "peaks": cached.get("peaks"), "buckets": n_buckets}
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api._build_waveform_sync (json.loads): %s', type(_phase6_exc).__name__, exc_info=False)
 
     cmd = ["ffmpeg", "-v", "error", "-i", str(src_file), "-map", "0:a:0",
            "-ac", "1", "-ar", "8000", "-f", "s16le", "-"]
@@ -3266,8 +3266,8 @@ def _build_waveform_sync(stem: str, version: str, buckets: int) -> Dict[str, Any
                "duration": round(duration, 3), "peaks": peaks}
     try:
         atomic_write_text(cache_file, json.dumps(payload))
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api._build_waveform_sync (atomic_write_text): %s', type(_phase6_exc).__name__, exc_info=False)
     return {"exists": True, "cached": False, "duration": round(duration, 3), "peaks": peaks, "buckets": n}
 
 
@@ -3524,8 +3524,8 @@ async def api_timeline_render_cancel(payload: Dict[str, Any] = Body(...)):
     if proc is not None:
         try:
             proc.kill()
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api.api_timeline_render_cancel (proc.kill): %s', type(_phase6_exc).__name__, exc_info=False)
     if job.get("status") in ("queued", "running"):
         job.update({"status": "cancelled", "stage": "Đã huỷ bởi người dùng", "progress": 0})
     return {"status": "ok", "cancelled": True}
@@ -3725,8 +3725,8 @@ async def api_timeline_detect_silences(payload: Dict[str, Any] = Body(...)):
             )
             if pr.returncode == 0 and pr.stdout.strip():
                 total_dur = float(pr.stdout.strip())
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api._run_silence_detect (subprocess.run): %s', type(_phase6_exc).__name__, exc_info=False)
 
         cmd = [
             "ffmpeg", "-hide_banner", "-nostats", "-i", str(src),
@@ -3827,8 +3827,8 @@ class _ManualSegment:
 
             base = _srt_lib.Subtitle(index=index, start=start_td, end=end_td, content=content, proprietary=())
             self.__dict__.update(base.__dict__)
-        except ImportError:
-            pass
+        except ImportError as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api.__init__ (_srt_lib.Subtitle): %s', type(_phase6_exc).__name__, exc_info=False)
         self.index = index
         self.start = start_td
         self.end = end_td
@@ -3863,8 +3863,8 @@ def _manual_resolve_raw_video(stem: str, job_dir: Optional[Path] = None) -> Opti
             if resolved not in seen and d.is_dir():
                 seen.add(resolved)
                 dirs.append(d)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api._manual_resolve_raw_video (d.resolve): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # 1. Khớp chính xác <stem>.<ext> hoặc <clean>.<ext>
     for d in dirs:
@@ -3930,15 +3930,15 @@ def _wait_pipeline_free(job_id: str, max_wait_s: int = 1800) -> bool:
                 _manual_job_set(job_id, stage="Pipeline chính đang chạy — chờ GPU rảnh...")
                 time.sleep(3)
                 continue
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in workflow_api._wait_pipeline_free (main_module.UNIFIED_PIPELINE_LOCK.locked): %s', type(_phase6_exc).__name__, exc_info=False)
         try:
             if job_tracker.get_status().get("active"):
                 _manual_job_set(job_id, stage="Batch pipeline đang chạy — chờ...")
                 time.sleep(3)
                 continue
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in workflow_api._wait_pipeline_free (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
         # P9: dọn file stop stale (video.stop/stop_request.json còn tồn tại sau khi batch xong
         # khiến stop_requested = True vĩnh viễn — mọi API dịch/TTS đều tưởng đang bị huỷ)
         try:
@@ -3947,8 +3947,8 @@ def _wait_pipeline_free(job_id: str, max_wait_s: int = 1800) -> bool:
             if _stop.is_stop_requested(_ss.WORKSPACE):
                 _stop.clear_stop(_ss.WORKSPACE, source="workflow_api", reason="stale stop cleanup")
                 logger.info("P9 manual job: đã dọn file stop stale")
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in workflow_api._wait_pipeline_free (_stop.is_stop_requested): %s', type(_phase6_exc).__name__, exc_info=False)
         from disk_guard import ensure_free_space
         ensure_free_space(WORKSPACE, purpose="tạo phụ đề trong Studio")
         return True
@@ -4047,8 +4047,8 @@ async def api_manual_translate(payload: Dict[str, Any] = Body(...)):
                     import shared_state
                     if shared_state.stop_requested and not job_tracker.get_status().get("active"):
                         shared_state.stop_requested = False
-                except Exception:
-                    pass
+                except Exception as _phase6_exc:
+                    logger.debug('Suppressed error in workflow_api.worker (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
                 job.update({"progress": 15, "stage": "Đọc sub Trung đã sửa..."})
                 from ai.translation import translate_subtitles
 
@@ -4234,8 +4234,8 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
                 import shared_state
                 if shared_state.stop_requested and not job_tracker.get_status().get("active"):
                     shared_state.stop_requested = False
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in workflow_api.worker (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
             def _stop_requested() -> bool:
                 try:
@@ -4446,8 +4446,8 @@ def _export_stage(job_ctl: Optional[Dict[str, Any]], pct: int, message: str) -> 
     if cb:
         try:
             cb(pct, message)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api._export_stage (cb): %s', type(_phase6_exc).__name__, exc_info=False)
 
 
 def _check_export_cancelled(job_ctl: Optional[Dict[str, Any]]) -> None:
@@ -4545,8 +4545,8 @@ async def api_export_cancel(payload: Dict[str, Any] = Body(...)):
     if proc is not None:
         try:
             proc.kill()
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api.api_export_cancel (proc.kill): %s', type(_phase6_exc).__name__, exc_info=False)
     if job.get("status") in ("queued", "running"):
         job.update({"status": "cancelled", "stage": "Đã huỷ bởi người dùng", "progress": 0})
     return {"status": "ok", "cancelled": True}
@@ -4958,8 +4958,8 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
         try:
             if temp_out.is_file():
                 temp_out.unlink()
-        except OSError:
-            pass
+        except OSError as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api._execute_custom_export (temp_out.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
         raise
 
     # Xuất kèm file SRT nếu người dùng yêu cầu

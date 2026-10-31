@@ -1,6 +1,9 @@
 import os
 import sys
 from pathlib import Path
+import logging
+
+logger = logging.getLogger("main_api")
 
 if __name__ == "__main__":
     # Duplicate-launch guard before heavy imports: a healthy 8088 instance means this spawn is redundant.
@@ -11,15 +14,14 @@ if __name__ == "__main__":
             if 200 <= _response.status < 300:
                 print(f"Dashboard đã chạy sẵn trên cổng {_guard_port} — thoát để tránh khởi động trùng.", file=sys.stderr, flush=True)
                 sys.exit(0)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in main.module (urllib.request.urlopen): %s', type(_phase6_exc).__name__, exc_info=False)
 
 from fastapi import FastAPI, Form, Body, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import asyncio
 import datetime
-import logging
 from logging.handlers import RotatingFileHandler
 import mimetypes
 import uuid
@@ -58,7 +60,6 @@ from pipeline_v2.config import PipelineMode, PipelineSettings
 import shared_state
 import job_tracker
 
-logger = logging.getLogger("main_api")
 
 
 def _configure_dashboard_logging() -> None:
@@ -138,15 +139,15 @@ def _load_or_create_local_token() -> str:
                 tok = p.read_text(encoding="utf-8").strip()
                 if len(tok) >= 16:
                     return tok
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main._load_or_create_local_token (p.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
     new_token = secrets.token_urlsafe(32)
     for p in candidate_paths[:2]:
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(new_token, encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main._load_or_create_local_token (p.parent.mkdir): %s', type(_phase6_exc).__name__, exc_info=False)
     return new_token
 
 LOCAL_TOKEN = _load_or_create_local_token()
@@ -239,8 +240,8 @@ def _install_asyncio_quiet_disconnect_handler() -> None:
                 loop_obj.default_exception_handler(context)
 
         loop.set_exception_handler(_custom_exception_handler)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in main._install_asyncio_quiet_disconnect_handler (asyncio.get_running_loop): %s', type(_phase6_exc).__name__, exc_info=False)
 
 
 @app.on_event("startup")
@@ -747,8 +748,8 @@ async def api_process_video(
         try:
             from pydub import AudioSegment
             vid_duration = len(AudioSegment.from_file(original_audio)) / 1000.0
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main.api_process_video (len): %s', type(_phase6_exc).__name__, exc_info=False)
 
         dubbing_audio_files = await generate_dubbing_audio_isolated(
             translated_segments, dubbing_dir,
@@ -1050,8 +1051,8 @@ async def api_process_url(
         try:
             from pydub import AudioSegment
             vid_duration = len(AudioSegment.from_file(original_audio)) / 1000.0
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main.api_process_url (len): %s', type(_phase6_exc).__name__, exc_info=False)
 
         dubbing_audio_files = await generate_dubbing_audio_isolated(
             translated_segments, dubbing_dir,
@@ -1176,13 +1177,13 @@ async def api_get_status():
                         "asr_model": dec.planned_pipeline.get("asr_model", "whisper_turbo"),
                     }
                     status["video_mode"] = res_m
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in main.api_get_status (Path): %s', type(_phase6_exc).__name__, exc_info=False)
     try:
         from v1_vram_monitor import get_vram_stats
         status["vram"] = get_vram_stats()
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in main.api_get_status (get_vram_stats): %s', type(_phase6_exc).__name__, exc_info=False)
     try:
         import psutil
         mem = psutil.virtual_memory()
@@ -1191,13 +1192,13 @@ async def api_get_status():
             "used_gb": round(mem.used / (1024 ** 3), 2),
             "total_gb": round(mem.total / (1024 ** 3), 2),
         }
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in main.api_get_status (psutil.virtual_memory): %s', type(_phase6_exc).__name__, exc_info=False)
     try:
         from worker_settings import get_worker_settings
         status["worker_settings"] = get_worker_settings()
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in main.api_get_status (get_worker_settings): %s', type(_phase6_exc).__name__, exc_info=False)
     return status
 
 
@@ -1220,8 +1221,8 @@ async def api_get_queue():
                     if any("telegram_bot.py" in str(arg) for arg in cmdline):
                         alive = True
                         break
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in main.api_get_queue (psutil.process_iter): %s', type(_phase6_exc).__name__, exc_info=False)
         # Bổ sung thông tin router cho từng video trong hàng chờ
         try:
             from v1_video_router import route_video
@@ -1240,8 +1241,8 @@ async def api_get_queue():
                         "router_label": lbl,
                         "duration_s": dec.metadata.duration_s,
                     }
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main.api_get_queue (data.get): %s', type(_phase6_exc).__name__, exc_info=False)
         return {**data, "available": alive, "message": "" if alive else "Bot đã dừng; danh sách là bản ghi cuối cùng."}
     except (OSError, ValueError, TypeError):
         raise HTTPException(503, "Không đọc được hàng đợi Telegram")
@@ -1265,8 +1266,8 @@ async def api_process_queue(request: Request):
         pause_flag = _get_system_path("control") / "v1.pause"
         try:
             pause_flag.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main.api_process_queue (pause_flag.unlink): %s', type(_phase6_exc).__name__, exc_info=False)
 
         # 2. Ghi cờ kích hoạt để bot đang chạy nhặt việc ngay lập tức
         trigger_flag = _get_system_path("telegram_queue_trigger.flag")
@@ -1285,8 +1286,8 @@ async def api_process_queue(request: Request):
                     if any('telegram_bot.py' in str(arg) for arg in cmdline):
                         alive = True
                         break
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
+                except (psutil.NoSuchProcess, psutil.AccessDenied) as _phase6_exc:
+                    logger.debug('Suppressed error in main.api_process_queue (p.info.get): %s', type(_phase6_exc).__name__, exc_info=False)
 
         if not alive:
             python = BASE_DIR / "venv" / "Scripts" / "python.exe"
@@ -1551,8 +1552,8 @@ async def api_input_video(request: Request):
                 from duplicate_guard import check_path as _dup_check, register as _dup_register
                 dup_info = await asyncio.to_thread(_dup_check, target)
                 await asyncio.to_thread(_dup_register, "upload", target.name, target)
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in main.api_input_video (asyncio.to_thread): %s', type(_phase6_exc).__name__, exc_info=False)
             resp = {"name": target.name, "size": total}
             if dup_info:
                 resp["duplicate_warning"] = (
@@ -1662,8 +1663,8 @@ def _list_banve(limit=None, offset=0, search="", status="all"):
         if v2_workspace_history.exists():
             try:
                 v2_names = set(json.loads(v2_workspace_history.read_text(encoding="utf-8")).keys())
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in main._list_banve (set): %s', type(_phase6_exc).__name__, exc_info=False)
 
         for f in sorted(os.listdir(output_dir), reverse=True):
             if f.startswith("Dubbed_queue_") or f in v2_names:
@@ -1733,8 +1734,8 @@ async def api_run_batch(request: Request = None, video_mode: str = "auto"):
                 body = await request.json()
                 if isinstance(body, dict) and body.get("video_mode"):
                     selected_mode = str(body["video_mode"]).strip()
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main.api_run_batch (request.headers.get): %s', type(_phase6_exc).__name__, exc_info=False)
 
     status = job_tracker.get_status()
     if UNIFIED_PIPELINE_LOCK.locked():
@@ -1909,14 +1910,14 @@ async def api_retry_video(request: Request):
     try:
         data = await request.json()
         filename = data.get("filename", "").strip()
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in main.api_retry_video (request.json): %s', type(_phase6_exc).__name__, exc_info=False)
     if not filename:
         try:
             form = await request.form()
             filename = form.get("filename", "").strip()
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main.api_retry_video (request.form): %s', type(_phase6_exc).__name__, exc_info=False)
 
     if not filename:
         raise HTTPException(status_code=400, detail="Thiếu tên video cần chạy lại (filename).")
@@ -2113,8 +2114,8 @@ async def api_cancel_schedule():
     f = _schedule_file()
     try:
         await asyncio.to_thread(f.unlink)
-    except FileNotFoundError:
-        pass
+    except FileNotFoundError as _phase6_exc:
+        logger.debug('Suppressed error in main.api_cancel_schedule (asyncio.to_thread): %s', type(_phase6_exc).__name__, exc_info=False)
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"Không hủy được lịch: {e}")
     return {"active": False}
@@ -2238,8 +2239,8 @@ async def api_workspace_cleanup(payload: dict = Body(...)):
         for w in (st.get("workers") or {}).values():
             if isinstance(w, dict):
                 active.append(w.get("video_name") or "")
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.warning('Suppressed error in main.api_workspace_cleanup (job_tracker.get_status): %s', type(_phase6_exc).__name__, exc_info=False)
     return await asyncio.to_thread(cleanup_jobs, names, mode, active)
 
 
@@ -2296,24 +2297,24 @@ async def api_global_search(q: str = ""):
             hits = [n for n in files if _match(n)][:5]
             if hits:
                 groups.append({"id": "phoi", "label": "Video Phôi", "items": [{"title": n} for n in hits]})
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main._run (get_input_dir): %s', type(_phase6_exc).__name__, exc_info=False)
         try:
             root = get_output_dir()
             files = [e.name for e in root.iterdir() if e.is_file()] if root.is_dir() else []
             hits = [n for n in files if _match(n)][:5]
             if hits:
                 groups.append({"id": "banve", "label": "Thành phẩm", "items": [{"title": n} for n in hits]})
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main._run (get_output_dir): %s', type(_phase6_exc).__name__, exc_info=False)
         try:
             from preset_service import list_presets
 
             hits = [p.get("name", "?") for p in list_presets(tool="v1") if _match(p.get("name", ""))][:5]
             if hits:
                 groups.append({"id": "preset", "label": "Preset cấu hình", "items": [{"title": n} for n in hits]})
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main._run (p.get): %s', type(_phase6_exc).__name__, exc_info=False)
         try:
             from ai.translation import load_custom_glossary
 
@@ -2321,15 +2322,15 @@ async def api_global_search(q: str = ""):
             hits = [f"{k} → {v}" for k, v in gl.items() if _match(k) or _match(v)][:5]
             if hits:
                 groups.append({"id": "glossary", "label": "Glossary", "items": [{"title": n} for n in hits]})
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main._run (load_custom_glossary): %s', type(_phase6_exc).__name__, exc_info=False)
         try:
             hist = job_tracker.get_status().get("history", [])
             hits = [h.get("video_name", "?") for h in hist if _match(h.get("video_name", ""))][:5]
             if hits:
                 groups.append({"id": "history", "label": "Lịch sử đã xử lý", "items": [{"title": n} for n in hits]})
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main._run (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
         return groups
 
     return {"groups": await asyncio.to_thread(_run)}
@@ -2795,8 +2796,8 @@ async def api_voice_preview_audio(voice_id: str):
                         candidates_names.append(f"capcut-{p}")
                     candidates_names.append(str(p))
                 break
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in main.api_voice_preview_audio (voice_selection.ALIASES.get): %s', type(_phase6_exc).__name__, exc_info=False)
 
     for name in candidates_names:
         try:

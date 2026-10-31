@@ -72,8 +72,8 @@ logger.setLevel(logging.INFO)
 try:
     from social_downloader import SensitiveUrlFilter
     logger.addFilter(SensitiveUrlFilter())
-except Exception:
-    pass
+except Exception as _phase6_exc:
+    logger.debug('Suppressed error in batch_processor.module (logger.addFilter): %s', type(_phase6_exc).__name__, exc_info=False)
 
 # Import các module AI
 from ai.transcription import extract_subtitles_whisper, save_srt
@@ -185,8 +185,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         if progress_callback:
             try:
                 await progress_callback(msg)
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in batch_processor.notify (progress_callback): %s', type(_phase6_exc).__name__, exc_info=False)
 
     from pipeline_v2.config import PipelineMode, PipelineSettings
     from pipeline_v2.delivery_verification import verify_delivered_product
@@ -356,8 +356,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         try:
             import soundfile as sf
             source_duration = float(sf.info(original_audio).duration)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in batch_processor.process_single_local_video (float): %s', type(_phase6_exc).__name__, exc_info=False)
 
         await pause_checkpoint()
         _raise_if_stopped()
@@ -493,8 +493,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             job_tracker.record_active_translation_model(used_model)
             logger.info(f"Hoàn tất Bước 5/8 dịch phụ đề ({len(translated_segments)} câu) bằng model: {used_model}")
             await notify(f"🌐 Bước 5/8: Đã dịch xong {len(translated_segments)} câu bằng model {used_model}")
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in batch_processor.process_single_local_video (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
         if not frozen_job_entry:
             try:
@@ -502,8 +502,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 frozen_job_entry = get_frozen_config(file_name, workspace_path=WORKSPACE)
                 if frozen_job_entry:
                     frozen_eff = frozen_job_entry.get("effective_config", {})
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in batch_processor.process_single_local_video (get_frozen_config): %s', type(_phase6_exc).__name__, exc_info=False)
 
         sources = frozen_job_entry.get("sources", {}) if frozen_job_entry else {}
         is_user_chosen = (
@@ -568,8 +568,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         try:
             from pydub import AudioSegment
             vid_duration = len(AudioSegment.from_file(original_audio)) / 1000.0
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in batch_processor.process_single_local_video (len): %s', type(_phase6_exc).__name__, exc_info=False)
 
         seg_voices = voice_lock_info.get("segment_voices") if 'voice_lock_info' in locals() and voice_lock_info else None
         dubbing_audio_files = await generate_dubbing_audio_isolated(
@@ -690,8 +690,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 torch.cuda.empty_cache()
                 if hasattr(torch.cuda, "ipc_collect"):
                     torch.cuda.ipc_collect()
-        except:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in batch_processor.process_single_local_video (torch.cuda.is_available): %s', type(_phase6_exc).__name__, exc_info=False)
 
 async def process_batch_folder(
     input_dir: str = DEFAULT_INPUT_DIR,
@@ -718,8 +718,8 @@ async def process_batch_folder(
             worker.cancel()
         try:
             await asyncio.wait({worker}, timeout=2.0)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in batch_processor.process_batch_folder (asyncio.wait): %s', type(_phase6_exc).__name__, exc_info=False)
         raise
     except job_tracker.JobAlreadyRunningError:
         raise
@@ -810,8 +810,8 @@ async def _process_batch_folder(
                         "target_archive": dest_archive,
                         "marked_at": time.time(),
                     }, f, indent=2)
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in batch_processor._safe_archive_source (os.path.join): %s', type(_phase6_exc).__name__, exc_info=False)
         return False
 
     from pipeline_v2.artifact_store import hash_file
@@ -832,10 +832,10 @@ async def _process_batch_folder(
                     if _safe_archive_source(pending_file, p_stem, os.path.basename(pending_file), p_job_dir):
                         try:
                             os.remove(marker)
-                        except Exception:
-                            pass
-        except Exception:
-            pass
+                        except Exception as _phase6_exc:
+                            logger.warning('Suppressed error in batch_processor._process_batch_folder (os.remove): %s', type(_phase6_exc).__name__, exc_info=False)
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in batch_processor._process_batch_folder (hash_file): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # Làm mới danh sách video cần xử lý sau khi hoàn tất các pending archive
     video_files = [
@@ -895,8 +895,8 @@ async def _process_batch_folder(
                 await progress_callback(skip_msg)
             try:
                 _archive_source(vpath, processed_archive)
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in batch_processor._process_batch_folder (_archive_source): %s', type(_phase6_exc).__name__, exc_info=False)
             continue
 
         if os.path.exists(expected_render):

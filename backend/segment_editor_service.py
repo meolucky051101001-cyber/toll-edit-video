@@ -191,8 +191,8 @@ def get_audio_duration_seconds(file_path: Path) -> float:
         cached = _AUDIO_DURATION_CACHE.get(cache_key)
         if cached and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
             return cached[2]
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in segment_editor_service.get_audio_duration_seconds (file_path.stat): %s', type(_phase6_exc).__name__, exc_info=False)
 
     duration = 0.0
     try:
@@ -209,8 +209,8 @@ def get_audio_duration_seconds(file_path: Path) -> float:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         if res.returncode == 0 and res.stdout.strip():
             duration = round(float(res.stdout.strip()), 2)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.warning('Suppressed error in segment_editor_service.get_audio_duration_seconds (str): %s', type(_phase6_exc).__name__, exc_info=False)
     if duration <= 0.0:
         try:
             duration = round(file_path.stat().st_size / 16000.0, 2)
@@ -220,8 +220,8 @@ def get_audio_duration_seconds(file_path: Path) -> float:
     try:
         st = file_path.stat()
         _AUDIO_DURATION_CACHE[cache_key] = (st.st_mtime_ns, st.st_size, duration)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in segment_editor_service.get_audio_duration_seconds (file_path.stat): %s', type(_phase6_exc).__name__, exc_info=False)
     return duration
 
 
@@ -243,8 +243,8 @@ def resolve_job_voice(job_id_or_name: str, job_folder: Optional[Path] = None) ->
                     if v_id:
                         lbl = data.get("voice_label") or v_id
                         return v_id, lbl
-                except Exception:
-                    pass
+                except Exception as _phase6_exc:
+                    logger.debug('Suppressed error in segment_editor_service.resolve_job_voice (json.loads): %s', type(_phase6_exc).__name__, exc_info=False)
 
         for mf in list(job_folder.rglob("job_manifest.json")) + list(job_folder.glob("job_manifest.json")):
             if mf.is_file():
@@ -262,8 +262,8 @@ def resolve_job_voice(job_id_or_name: str, job_folder: Optional[Path] = None) ->
                         return "microsoft-hoaimy", "Microsoft · Hoài My (nữ)"
                     if "NamMinh" in param:
                         return "microsoft-namminh", "Microsoft · Nam Minh (nam)"
-                except Exception:
-                    pass
+                except Exception as _phase6_exc:
+                    logger.debug('Suppressed error in segment_editor_service.resolve_job_voice (json.loads): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # 2. Tìm kiếm trong các thư mục workspace theo clean_id hoặc prefix
     roots = _workspace_roots()
@@ -278,8 +278,8 @@ def resolve_job_voice(job_id_or_name: str, job_folder: Optional[Path] = None) ->
                             data = json.loads(vl.read_text(encoding="utf-8"))
                             if data.get("voice_id"):
                                 return data["voice_id"], data.get("voice_label") or data["voice_id"]
-                        except Exception:
-                            pass
+                        except Exception as _phase6_exc:
+                            logger.debug('Suppressed error in segment_editor_service.resolve_job_voice (json.loads): %s', type(_phase6_exc).__name__, exc_info=False)
                 for mf in child.rglob("job_manifest.json"):
                     if mf.is_file():
                         try:
@@ -287,8 +287,8 @@ def resolve_job_voice(job_id_or_name: str, job_folder: Optional[Path] = None) ->
                             req = m.get("metadata", {}).get("request", {})
                             if req.get("voice_id"):
                                 return req["voice_id"], req.get("voice_label", req["voice_id"])
-                        except Exception:
-                            pass
+                        except Exception as _phase6_exc:
+                            logger.debug('Suppressed error in segment_editor_service.resolve_job_voice (json.loads): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # 3. Tra cứu từ JobConfigService (Frozen snapshot hoặc Video Drafts)
     try:
@@ -301,8 +301,8 @@ def resolve_job_voice(job_id_or_name: str, job_folder: Optional[Path] = None) ->
         if draft and draft.get("overrides", {}).get("voice_id"):
             v_id = draft["overrides"]["voice_id"]
             return v_id, draft["overrides"].get("voice_label", v_id)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in segment_editor_service.resolve_job_voice (job_config_service.get_frozen_config): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # 4. Tra cứu từ voice_selection (giọng đang được chọn trên Dashboard)
     try:
@@ -310,8 +310,8 @@ def resolve_job_voice(job_id_or_name: str, job_folder: Optional[Path] = None) ->
         sel = voice_selection.selected()
         if sel and sel.get("id"):
             return sel["id"], sel.get("label", sel["id"])
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in segment_editor_service.resolve_job_voice (voice_selection.selected): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # 5. Fallback thông minh
     return "capcut-BV562_streaming", "CapCut · Mai (mặc định)"
@@ -397,8 +397,8 @@ def get_job_segments(job_id_or_name: str) -> Dict[str, Any]:
                     try:
                         with open(draft_path, "w", encoding="utf-8") as fw:
                             json.dump(data, fw, ensure_ascii=False, indent=2)
-                    except Exception:
-                        pass
+                    except Exception as _phase6_exc:
+                        logger.debug('Suppressed error in segment_editor_service.get_job_segments (open): %s', type(_phase6_exc).__name__, exc_info=False)
                 return data
         except Exception as e:
             logger.warning("Không thể đọc draft %s: %s", draft_path, e)
@@ -458,8 +458,8 @@ def get_job_segments(job_id_or_name: str) -> Dict[str, Any]:
                             a_dur = float(meta_seg["actual_audio_duration"])
                             if a_dur > 0 and s_dur > 0:
                                 meta_speed = s_dur / a_dur
-                        except (ValueError, TypeError, ZeroDivisionError):
-                            pass
+                        except (ValueError, TypeError, ZeroDivisionError) as _phase6_exc:
+                            logger.debug('Suppressed error in segment_editor_service.get_job_segments (float): %s', type(_phase6_exc).__name__, exc_info=False)
 
                     seg_speed = estimate_segment_speed(trans, audio_dur, dur, meta_speed=meta_speed)
 
@@ -500,8 +500,8 @@ def get_job_segments(job_id_or_name: str) -> Dict[str, Any]:
             try:
                 for s in parse_srt(orig_srt.read_text(encoding="utf-8", errors="replace")):
                     orig_segments_map[s["index"]] = s.get("content", "")
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in segment_editor_service.get_job_segments (parse_srt): %s', type(_phase6_exc).__name__, exc_info=False)
 
         if trans_srt:
             try:
@@ -571,8 +571,8 @@ def get_job_segments(job_id_or_name: str) -> Dict[str, Any]:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
             os.replace(tmp, draft_path)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in segment_editor_service.get_job_segments (draft_path.with_suffix): %s', type(_phase6_exc).__name__, exc_info=False)
 
     return result
 
@@ -618,8 +618,8 @@ def save_segment_draft(
                 try:
                     from glossary_learning_service import record_edit
                     record_edit(s.get("translated_text", ""), new_text, clean_id)
-                except Exception:
-                    pass
+                except Exception as _phase6_exc:
+                    logger.debug('Suppressed error in segment_editor_service.save_segment_draft (record_edit): %s', type(_phase6_exc).__name__, exc_info=False)
             s["translated_text"] = new_text
             if "voice_id" in upd:
                 s["voice_id"] = upd["voice_id"]
@@ -723,8 +723,8 @@ async def regenerate_segments(
             if dest_audio.is_file() and not backup_audio.is_file():
                 try:
                     shutil.copy2(dest_audio, backup_audio)
-                except OSError:
-                    pass
+                except OSError as _phase6_exc:
+                    logger.warning('Suppressed error in segment_editor_service.regenerate_segments (shutil.copy2): %s', type(_phase6_exc).__name__, exc_info=False)
 
             # Synthesize fresh audio via voice_preview_service
             synth_res = await synthesize_voice_preview(
@@ -790,8 +790,8 @@ async def regenerate_segments(
             if srt_f.parent.is_dir():
                 try:
                     srt_f.write_text(new_srt_content, encoding="utf-8")
-                except Exception:
-                    pass
+                except Exception as _phase6_exc:
+                    logger.warning('Suppressed error in segment_editor_service.regenerate_segments (srt_f.write_text): %s', type(_phase6_exc).__name__, exc_info=False)
 
         # Increment revision and save draft
         new_rev = current_rev + 1
@@ -1006,14 +1006,14 @@ async def publish_revised_video(
             try:
                 if tmp_f.is_file():
                     tmp_f.unlink()
-            except OSError:
-                pass
+            except OSError as _phase6_exc:
+                logger.debug('Suppressed error in segment_editor_service.publish_revised_video (tmp_f.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
         # Dọn file staging mồ côi từ các lần xuất bản đổ vỡ trước đó
         try:
             for stale in out_dir.glob(rev_filename + ".part*"):
                 stale.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as _phase6_exc:
+            logger.debug('Suppressed error in segment_editor_service.publish_revised_video (out_dir.glob): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # Tăng revision draft sau khi xuất bản thành công để lần xuất sau tạo file _rev(N+1) riêng
     published_rev = current_rev + 1

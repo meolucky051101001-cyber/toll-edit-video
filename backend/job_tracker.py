@@ -81,15 +81,15 @@ def _get_worker_id(explicit_id: Optional[int] = None) -> int:
             val = int(explicit_id)
             if val in (1, 2):
                 return val
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as _phase6_exc:
+            logger.debug('Suppressed error in job_tracker._get_worker_id (int): %s', type(_phase6_exc).__name__, exc_info=False)
     try:
         from telegram_progress import current_worker_id
         val = current_worker_id.get()
         if val in (1, 2):
             return int(val)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in job_tracker._get_worker_id (current_worker_id.get): %s', type(_phase6_exc).__name__, exc_info=False)
     try:
         from v1_gpu_gatekeeper import get_gpu_context_id
         cid = str(get_gpu_context_id() or "")
@@ -97,8 +97,8 @@ def _get_worker_id(explicit_id: Optional[int] = None) -> int:
             return 2
         elif "worker_1" in cid:
             return 1
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in job_tracker._get_worker_id (str): %s', type(_phase6_exc).__name__, exc_info=False)
     return 1
 
 
@@ -173,8 +173,8 @@ def _process_guard():
 def _ensure_dir():
     try:
         WORKSPACE.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.warning('Suppressed error in job_tracker._ensure_dir (WORKSPACE.mkdir): %s', type(_phase6_exc).__name__, exc_info=False)
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -243,16 +243,16 @@ def _claim_batch_lock_guarded(job_id: str) -> None:
                         from worker_settings import get_worker_settings
                         if get_worker_settings().get("concurrency", 1) > 1:
                             return
-                    except Exception:
-                        pass
+                    except Exception as _phase6_exc:
+                        logger.warning('Suppressed error in job_tracker._claim_batch_lock_guarded (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
                 raise JobAlreadyRunningError(
                     "Một batch khác đang chạy (PID {}).".format(owner_pid)
                 )
 
             try:
                 BATCH_LOCK_FILE.unlink()
-            except FileNotFoundError:
-                pass
+            except FileNotFoundError as _phase6_exc:
+                logger.warning('Suppressed error in job_tracker._claim_batch_lock_guarded (BATCH_LOCK_FILE.unlink): %s', type(_phase6_exc).__name__, exc_info=False)
             continue
         try:
             os.write(descriptor, payload)
@@ -731,8 +731,8 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
             status_file=STATUS_FILE,
             extra={"video_name": video_name, "duration_seconds": duration_seconds},
         )
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.warning('Suppressed error in job_tracker.finish_video (delivery_ledger.record): %s', type(_phase6_exc).__name__, exc_info=False)
     with _LOCK:
         _sync_from_disk_unlocked()
         now = time.time()
@@ -795,8 +795,8 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
         try:
             from render_history import record_render_duration
             record_render_duration(output_path or video_name, duration_seconds)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in job_tracker.finish_video (record_render_duration): %s', type(_phase6_exc).__name__, exc_info=False)
 
         # F1 — ghi 1 dòng thống kê; F13 — thông báo hoàn tất (không phát sinh khi chạy pytest)
         if not os.environ.get("PYTEST_CURRENT_TEST"):
@@ -810,19 +810,19 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
                     mode=_CURRENT_STATE.get("video_mode") or "",
                     ok=True,
                 )
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in job_tracker.finish_video (append_video_stats): %s', type(_phase6_exc).__name__, exc_info=False)
             try:
                 from notification_service import push
                 push("success", "Hoàn tất video", f"{video_name} · mất {int(duration_seconds)}s", "pipeline")
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in job_tracker.finish_video (push): %s', type(_phase6_exc).__name__, exc_info=False)
             try:
                 from duplicate_guard import register as _dup_register
                 if output_path and Path(output_path).is_file():
                     _dup_register("output", video_name, Path(output_path))
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in job_tracker.finish_video (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
 
 def finish_batch():
@@ -861,8 +861,8 @@ def finish_batch():
             from notification_service import push
             total = _CURRENT_STATE.get("queue_total", 0)
             push("info", "Kết thúc hàng đợi", f"Đã chạy xong toàn bộ {total} video trong hàng chờ.", "pipeline")
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in job_tracker.finish_batch (_CURRENT_STATE.get): %s', type(_phase6_exc).__name__, exc_info=False)
 
 
 def release_batch(job_id: str) -> None:
@@ -909,8 +909,8 @@ def set_error(video_name: str, error_msg: str, fatal: bool = True, worker_id: Op
         try:
             from notification_service import push
             push("error", "Video xử lý lỗi", f"{video_name}: {error_msg}", "pipeline")
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in job_tracker.set_error (push): %s', type(_phase6_exc).__name__, exc_info=False)
 
 
 def request_stop():

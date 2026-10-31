@@ -1,14 +1,17 @@
 import os
 import sys
 from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Fix Windows console UTF-8 encoding
 if hasattr(sys.stdout, "reconfigure"):
     try: sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception: pass
+    except Exception as _phase6_exc: logger.debug('Suppressed error in ai.translation.module (sys.stdout.reconfigure): %s', type(_phase6_exc).__name__, exc_info=False)
 if hasattr(sys.stderr, "reconfigure"):
     try: sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception: pass
+    except Exception as _phase6_exc: logger.debug('Suppressed error in ai.translation.module (sys.stderr.reconfigure): %s', type(_phase6_exc).__name__, exc_info=False)
 
 import json
 from typing import Callable, Dict, List, Optional
@@ -27,7 +30,6 @@ try:
     from .transcription import save_srt
 except Exception:
     save_srt = None
-import logging
 import time
 import hashlib
 import threading
@@ -54,7 +56,6 @@ try:
 except ImportError:
     from subtitle_text import clean_incomplete_segment_stops, normalize_subtitle_text
 
-logger = logging.getLogger(__name__)
 _gemini_health_lock = threading.Lock()
 _gemini_cooldown = {}
 _gemini_last_good = {}
@@ -96,24 +97,24 @@ def _parse_json_array(text):
         data = json.loads(cleaned)
         if isinstance(data, list):
             return data
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in ai.translation._parse_json_array (json.loads): %s', type(_phase6_exc).__name__, exc_info=False)
     # 2. Try removing trailing commas before closing bracket (e.g. '["a", "b", ]')
     try:
         cleaned_comma = re.sub(r",\s*\]", "]", cleaned)
         data = json.loads(cleaned_comma)
         if isinstance(data, list):
             return data
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in ai.translation._parse_json_array (re.sub): %s', type(_phase6_exc).__name__, exc_info=False)
     # 3. Try ast.literal_eval for single-quoted Python list syntax (e.g. "['Câu 1', 'Câu 2']")
     import ast
     try:
         data = ast.literal_eval(cleaned)
         if isinstance(data, list):
             return data
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in ai.translation._parse_json_array (ast.literal_eval): %s', type(_phase6_exc).__name__, exc_info=False)
     return None
 
 
@@ -207,8 +208,8 @@ def load_custom_glossary(workspace: Optional[str] = None) -> Dict[str, str]:
                         for k, v in entries.items()
                         if str(k).strip() and str(v).strip() and not str(k).startswith("_")
                     }
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in ai.translation.load_custom_glossary (p.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
     return {}
 
 
@@ -337,8 +338,8 @@ def extract_video_frames_base64(video_path, context_start_seconds=None, context_
                 p_dur = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3)
                 if p_dur.returncode == 0 and p_dur.stdout.strip():
                     dur = float(p_dur.stdout.strip().decode("utf-8", "ignore"))
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in ai.translation.extract_video_frames_base64 (subprocess.run): %s', type(_phase6_exc).__name__, exc_info=False)
             if dur and dur > 0:
                 timestamps = [dur * i / (num_frames + 1) for i in range(1, num_frames + 1)]
             else:
@@ -498,8 +499,8 @@ def translate_with_gemini(
                 try:
                     import job_tracker
                     job_tracker.record_translation_model(m_cache)
-                except Exception:
-                    pass
+                except Exception as _phase6_exc:
+                    logger.warning('Suppressed error in ai.translation.translate_with_gemini (job_tracker.record_translation_model): %s', type(_phase6_exc).__name__, exc_info=False)
                 return cached["texts"]
         except ImportError:
             cache_k = None
@@ -523,15 +524,15 @@ def translate_with_gemini(
         try:
             from mojibake_repair import repair_vietnamese_mojibake
             translated = [repair_vietnamese_mojibake(t) for t in translated]
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in ai.translation.translate_with_gemini (repair_vietnamese_mojibake): %s', type(_phase6_exc).__name__, exc_info=False)
         if write_cache:
             write_cache(cache_k, translated, used_model)
         try:
             import job_tracker
             job_tracker.record_translation_model(used_model)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in ai.translation.translate_with_gemini (job_tracker.record_translation_model): %s', type(_phase6_exc).__name__, exc_info=False)
         return translated
     except Exception as e:
         from .v1_gemini_dispatcher import GeminiCancelledError, mask_secret
@@ -601,8 +602,8 @@ def translate_with_openai(
                         try:
                             import job_tracker
                             job_tracker.record_translation_model(f"OpenAI {om}")
-                        except Exception:
-                            pass
+                        except Exception as _phase6_exc:
+                            logger.warning('Suppressed error in ai.translation.translate_with_openai (job_tracker.record_translation_model): %s', type(_phase6_exc).__name__, exc_info=False)
                         return translated
                     elif isinstance(translated, list) and len(texts) >= 4 and len(translated) != len(texts):
                         logger.warning("OpenAI %s trả về lệch số lượng câu (%d thay vì %d). Chia nhỏ batch...", om, len(translated), len(texts))
@@ -667,8 +668,8 @@ def translate_with_deepseek(
                         try:
                             import job_tracker
                             job_tracker.record_translation_model(f"DeepSeek {dm}")
-                        except Exception:
-                            pass
+                        except Exception as _phase6_exc:
+                            logger.warning('Suppressed error in ai.translation.translate_with_deepseek (job_tracker.record_translation_model): %s', type(_phase6_exc).__name__, exc_info=False)
                         return translated
                     elif isinstance(translated, list) and len(texts) >= 4 and len(translated) != len(texts):
                         logger.warning("DeepSeek %s trả về lệch số lượng câu (%d thay vì %d). Chia nhỏ batch...", dm, len(translated), len(texts))
@@ -1097,8 +1098,8 @@ def translate_subtitles(
             try:
                 from mojibake_repair import repair_vietnamese_mojibake
                 translated_texts = [repair_vietnamese_mojibake(t) for t in translated_texts]
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in ai.translation.translate_subtitles (repair_vietnamese_mojibake): %s', type(_phase6_exc).__name__, exc_info=False)
             p_idx = 0
             for segment in srt_segments:
                 if not segment.content:
@@ -1113,8 +1114,8 @@ def translate_subtitles(
         try:
             from mojibake_repair import repair_vietnamese_mojibake
             translated_texts = [repair_vietnamese_mojibake(t) for t in translated_texts]
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in ai.translation.translate_subtitles (repair_vietnamese_mojibake): %s', type(_phase6_exc).__name__, exc_info=False)
         idx = 0
         for segment in srt_segments:
             if not segment.content:
@@ -1128,8 +1129,8 @@ def translate_subtitles(
             t_models = job_tracker.get_status().get("translation_models", [])
             m_name = ", ".join(t_models) if t_models else "AI"
             logger.info(f"Hoàn thành dịch {len(texts)} đoạn phụ đề bằng model: {m_name}")
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in ai.translation.translate_subtitles (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
         return srt_segments
 
     if strict:
@@ -1176,8 +1177,8 @@ def translate_subtitles(
                     if MyMemoryTranslator is not None:
                         mm_target = "vi-VN" if target_lang.lower().startswith("vi") else target_lang
                         translated_text = MyMemoryTranslator(source=src_lang, target=mm_target).translate(segment.content)
-                except Exception:
-                    pass
+                except Exception as _phase6_exc:
+                    logger.warning('Suppressed error in ai.translation._translate_one_seg (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
             if not isinstance(translated_text, str) or not translated_text.strip():
                 raise RuntimeError("Google Translate returned an empty result")
@@ -1218,8 +1219,8 @@ def translate_subtitles(
         if not t_models:
             job_tracker.record_translation_model("Google Translate (fallback)")
             logger.info("Hoàn tất dịch phụ đề bằng model: Google Translate (fallback)")
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.warning('Suppressed error in ai.translation.translate_subtitles (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
     return srt_segments
 
