@@ -55,6 +55,7 @@ class MonitoredQueue(asyncio.Queue):
                         "job_overrides": job.get("job_overrides"),
                         "resume_state": job.get("resume_state"),
                         "retry_count": job.get("retry_count", 0),
+                        "network_retry_count": job.get("network_retry_count", 0),
                         "job_id": job.get("job_id"),
                         "in_progress": job is self.active_job,
                     })

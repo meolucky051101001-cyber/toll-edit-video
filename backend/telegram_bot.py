@@ -51,7 +51,7 @@ FPT_API_KEY = configured_secret("FPT_API_KEY")
 sys.path.insert(0, os.path.dirname(__file__))
 import job_tracker
 from config.paths import is_downloader_save_dir
-from pipeline_v2.atomic_io import atomic_copy_file
+from pipeline_v2.atomic_io import atomic_copy_file, atomic_write_json
 
 # Đảm bảo console hỗ trợ UTF-8 để không bị lỗi UnicodeEncodeError
 import io
@@ -691,6 +691,7 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # 2. Xóa sạch hàng đợi
     global_queue.clear()
+    clear_network_retries()
             
     global queue_counter
     queue_counter = 0
@@ -718,6 +719,163 @@ global_queue = MonitoredQueue()
 queue_counter = 0
 worker_task = None
 GLOBAL_BOT_APP = None
+
+NETWORK_RETRY_DELAYS = (60, 300, 900)
+NETWORK_RETRY_LABELS = {60: "1 phút", 300: "5 phút", 900: "15 phút"}
+NETWORK_RETRY_FILE = "telegram_retry_state.json"
+_RETRY_JOB_FIELDS = (
+    "type", "url", "file_id", "filename", "chat_id", "voice_mode", "video_mode",
+    "job_id", "job_overrides", "resume_state", "retry_count", "network_retry_count",
+)
+_network_retry_jobs = {}
+_network_retry_task = None
+
+
+def network_retry_state_path():
+    bot_system = Path(WORKSPACE) / "bot_system"
+    return bot_system / NETWORK_RETRY_FILE if bot_system.is_dir() else Path(WORKSPACE) / NETWORK_RETRY_FILE
+
+
+def _load_network_retry_state():
+    path = network_retry_state_path()
+    try:
+        import json
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {"version": 1, "jobs": {}}
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    return {"version": 1, "jobs": jobs if isinstance(jobs, dict) else {}}
+
+
+def _write_network_retry_state(state):
+    path = network_retry_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(path, state)
+
+
+def _serialize_retry_job(job):
+    from copy import deepcopy
+    return {field: deepcopy(job.get(field)) for field in _RETRY_JOB_FIELDS}
+
+
+def schedule_network_retry(job):
+    """Persist one delayed retry per job_id; returns None when attempts are exhausted."""
+    job_id = str(job.get("job_id") or "").strip()
+    if not job_id:
+        return None
+    attempt = int(job.get("network_retry_count") or 0) + 1
+    if attempt > len(NETWORK_RETRY_DELAYS):
+        return None
+    delay = NETWORK_RETRY_DELAYS[attempt - 1]
+    now = time.time()
+    retry_job = dict(job, network_retry_count=attempt)
+    state = _load_network_retry_state()
+    state["jobs"][job_id] = {
+        "attempt": attempt,
+        "delay_seconds": delay,
+        "scheduled_at": now,
+        "next_attempt_at": now + delay,
+        "job": _serialize_retry_job(retry_job),
+    }
+    try:
+        _write_network_retry_state(state)
+    except (OSError, TypeError, ValueError):
+        logger.exception("Cannot persist Telegram network retry for %s", job_id)
+        return None
+    _network_retry_jobs[job_id] = retry_job
+    _ensure_network_retry_scheduler()
+    return {"attempt": attempt, "delay_seconds": delay, "next_attempt_at": now + delay}
+
+
+def clear_network_retries():
+    _network_retry_jobs.clear()
+    path = network_retry_state_path()
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Cannot remove Telegram network retry state", exc_info=True)
+
+
+async def process_due_network_retries(now=None):
+    """Move due persisted retries back into the live queue exactly once per job_id."""
+    now = time.time() if now is None else float(now)
+    state = _load_network_retry_state()
+    records = state["jobs"]
+    if not records:
+        return 0
+    active = getattr(global_queue, "active_job", None)
+    active_id = active.get("job_id") if isinstance(active, dict) else None
+    queued_ids = {
+        item.get("job_id")
+        for item in list(getattr(global_queue, "_queue", ()))
+        if isinstance(item, dict) and item.get("job_id")
+    }
+    changed = False
+    enqueued = 0
+    for job_id, record in list(records.items()):
+        if not isinstance(record, dict):
+            records.pop(job_id, None)
+            _network_retry_jobs.pop(job_id, None)
+            changed = True
+            continue
+        try:
+            due = float(record.get("next_attempt_at", 0))
+        except (TypeError, ValueError):
+            due = 0
+        if due > now or job_id == active_id:
+            continue
+        if job_id in queued_ids:
+            records.pop(job_id, None)
+            _network_retry_jobs.pop(job_id, None)
+            changed = True
+            continue
+        job = _network_retry_jobs.pop(job_id, None)
+        if job is None:
+            stored = record.get("job") if isinstance(record.get("job"), dict) else {}
+            job = {field: stored.get(field) for field in _RETRY_JOB_FIELDS}
+        job["network_retry_count"] = int(record.get("attempt") or 0)
+        if not (job.get("url") or job.get("file_id")):
+            records.pop(job_id, None)
+            changed = True
+            continue
+        try:
+            job = prepare_telegram_job(job)
+        except (TypeError, ValueError):
+            logger.warning("Dropping invalid Telegram network retry %s", job_id, exc_info=True)
+            records.pop(job_id, None)
+            changed = True
+            continue
+        job["pos"] = global_queue.qsize() + 1
+        await global_queue.put(job)
+        records.pop(job_id, None)
+        changed = True
+        enqueued += 1
+    if changed:
+        _write_network_retry_state(state)
+    return enqueued
+
+
+async def _network_retry_scheduler():
+    while True:
+        try:
+            await process_due_network_retries()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Telegram network retry scheduler failed")
+        await asyncio.sleep(2)
+
+
+def _ensure_network_retry_scheduler():
+    global _network_retry_task
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    if _network_retry_task is None or _network_retry_task.done():
+        _network_retry_task = loop.create_task(_network_retry_scheduler())
+    return _network_retry_task
+
 
 async def send_video_safely(context, chat_id, final_video, caption, status_msg, url_or_filename):
     file_size = os.path.getsize(final_video)
@@ -1079,10 +1237,34 @@ async def _process_telegram_job(job):
         raise
     except Exception as exc:
         logger.exception("Telegram V1 job %s failed", job["job_id"])
-        job_tracker.set_error(name, str(exc), fatal=True)
         stopped = isinstance(exc, BatchStopRequested) or shared_state.stop_requested
         blocked = isinstance(exc, (CriticalQualityError, ValueError)) or "Quality Gate BLOCK:" in str(exc)
-        from v1_retry_policy import should_retry_job
+        from v1_retry_policy import is_transient_network_error, should_retry_job
+        if not stopped and not blocked and is_transient_network_error(exc):
+            scheduled = schedule_network_retry(job)
+            if scheduled:
+                delay_label = NETWORK_RETRY_LABELS.get(
+                    scheduled["delay_seconds"], f"{scheduled['delay_seconds']} giây"
+                )
+                await safe_edit_status(
+                    status_msg,
+                    "⚠️ Mất kết nối mạng khi xử lý video.\n"
+                    f"Đang chờ mạng và sẽ thử lại sau {delay_label} "
+                    f"(lần {scheduled['attempt']}/{len(NETWORK_RETRY_DELAYS)}).",
+                )
+                logger.warning(
+                    "Telegram V1 job %s waiting for network; retry %s/%s in %ss",
+                    job["job_id"], scheduled["attempt"], len(NETWORK_RETRY_DELAYS),
+                    scheduled["delay_seconds"],
+                )
+                return {"status": "retry_scheduled", "job_id": job["job_id"]}
+            job_tracker.set_error(name, str(exc), fatal=True)
+            await safe_edit_status(
+                status_msg,
+                f"Không hoàn tất video do lỗi mạng: {str(exc)[:300]}",
+            )
+            return {"status": "failed", "job_id": job["job_id"]}
+        job_tracker.set_error(name, str(exc), fatal=True)
         if not blocked and should_retry_job(exc, attempt=job.get("retry_count", 0), stopped=stopped):
             retry = dict(job, retry_count=job.get("retry_count", 0) + 1, pos=global_queue.qsize() + 1)
             await global_queue.put(retry)
@@ -1248,6 +1430,7 @@ async def enqueue_interrupted_v2_jobs(application):
 async def enqueue_pending_queue_jobs(application=None):
     """Tự động khôi phục các link còn tồn đọng trong telegram_queue.json sau khi khởi động hoặc rớt mạng."""
     global queue_counter, worker_task
+    _ensure_network_retry_scheduler()
     bot_system = Path(WORKSPACE) / "bot_system"
     bot_system_queue = bot_system / "telegram_queue.json"
     queue_file = bot_system_queue if (bot_system_queue.is_file() or bot_system.is_dir()) else (Path(WORKSPACE) / "telegram_queue.json")
@@ -1286,6 +1469,7 @@ async def enqueue_pending_queue_jobs(application=None):
                 "video_mode": item.get("video_mode"), "job_id": item.get("job_id"),
                 "job_overrides": item.get("job_overrides"), "resume_state": item.get("resume_state"),
                 "retry_count": item.get("retry_count", 0), "update": None, "context": None,
+                "network_retry_count": item.get("network_retry_count", 0),
             }
             await global_queue.put(prepare_telegram_job(job))
             existing.add(identity(item))
@@ -1318,6 +1502,7 @@ async def queue_signal_watcher(application=None):
                 try: clear_flag.unlink(missing_ok=True)
                 except Exception: pass
                 global_queue.clear()
+                clear_network_retries()
                 logger.info("🗑️ Đã nhận lệnh xóa sạch hàng đợi từ Dashboard.")
 
             if reorder_flag.exists():
