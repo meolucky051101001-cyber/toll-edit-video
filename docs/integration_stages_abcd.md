@@ -74,3 +74,55 @@ Full Python 3.10: 1168 passed / 0 failed / 79 skipped / 1 warning / 259 subtests
 (155,52 giây); Python 3.12: 1168 passed / 0 failed / 79 skipped / 4 warnings
 (144,66 giây). Đã hết hai warning FastAPI `on_event`.
 Log `scratch/stages-abcd/c-*`; không thêm skip hoặc giảm assertion cũ.
+
+## Stage D — health check chỉ đọc sau cutover
+
+Từ `C:\tool v1`, sau khi người dùng tự dừng/chuyển/khởi động lại:
+
+```powershell
+.\backend\venv\Scripts\python.exe -B scripts\verify_runtime_health.py
+```
+
+Script mặc định kiểm tra Python **3.12** tại `backend/venv/Scripts/python.exe`,
+`python -m pip check`, preflight `--interface all --read-only` (ready=true và
+25/25 pass), dashboard :8088 và control :8090. In status/active cùng VRAM/RAM;
+active=true không phải lỗi health. Nếu control chưa có /health (404/405), kiểm
+tra TCP và ghi rõ giới hạn này; HTTP 500 không được coi là khỏe nhờ fallback.
+Chỉ gọi GET, không launch/stop/restart dịch vụ, không đổi tên/cài package venv.
+
+Ngân sách mặc định 5 giây dùng chung cho các probe chạy song song. Preflight
+read-only chạy import CUDA và OCR độc lập song song, giữ đủ 25 kiểm tra và thứ
+tự report. Nếu máy cold hoặc tải cao không kịp, báo FAIL/incomplete, exit 1;
+có thể chạy lại với `--timeout 30`. Timeout chỉ thu hồi subprocess probe do
+script tạo, không tìm/kill PID dịch vụ. OCR có deadline ngắn hơn probe cha.
+
+Quyền directory ở chế độ read-only dựa trên directory tồn tại và `os.access`,
+không tạo/xóa file kiểm tra; đây không phải bằng chứng ghi thực tế qua ACL.
+Preflight mặc định không thêm `--read-only` vẫn giữ write probe cũ. Không in
+secret, response body hay output thô của pip/preflight trong health report.
+
+Có thể xác minh staging trước cutover mà không đổi runtime:
+
+```powershell
+.\backend\venv_py312\Scripts\python.exe -B scripts\verify_runtime_health.py --python .\backend\venv_py312\Scripts\python.exe
+```
+
+Lượt read-only trên cấu hình production bằng staging 3.12.14 đạt PASS trong
+3,66 giây, pip check sạch, preflight ready=true 25/25, API idle/active=false;
+8090 chỉ xác minh TCP. Kết quả staging không khẳng định các dịch vụ đang chạy
+đã dùng Python 3.12. Không thực hiện cutover hoặc restart trong đợt này.
+
+Đối chứng venv production hiện tại: Python 3.10.11, pip check có conflict nên
+health trả FAIL trong 2,48 giây như kỳ vọng trước cutover; preflight vẫn 25/25,
+hai dịch vụ vẫn reachable. Không sửa package 3.10 để che trạng thái này.
+
+Nghiệm thu cuối: 10 test health/preflight mới pass. Full Python 3.10:
+1178 passed / 0 failed / 79 skipped / 1 warning / 261 subtests (127,10 giây).
+Full Python 3.12: 1178 passed / 0 failed / 79 skipped / 4 warnings (111,66 giây).
+Node 11 passed / 0 failed. Log `scratch/stages-abcd/d-*`. Các warning còn lại
+từ dependency testclient/audio cũ; không còn warning `on_event` của main.py.
+
+Commit theo stage: A `6f8b91c`, B `43589ef`, C `3000125`; Stage D là commit
+`feat(v1): add bounded read-only runtime health verification` chứa mục này.
+Sau nghiệm thu, chỉ fast-forward hai ref tool-v1/pre-phase7-hardening khi
+dashboard `active=false`, giữ tag Stage A tại `6f8b91c`.

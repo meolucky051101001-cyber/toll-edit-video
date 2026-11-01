@@ -94,6 +94,11 @@ lượt render thật bằng Python 3.12. Một số subprocess của pipeline v
 
 ## Cutover/rollback — chỉ người dùng tự chạy sau
 
+Đã bổ sung [health check chỉ đọc sau cutover](integration_stages_abcd.md#stage-d--health-check-chỉ-đọc-sau-cutover):
+`backend\venv\Scripts\python.exe -B scripts\verify_runtime_health.py`.
+Mặc định kỳ vọng Python 3.12, ngân sách 5 giây; import quá hạn báo FAIL/incomplete,
+có thể chạy lại với `--timeout 30`. Lệnh này không dừng/chuyển/khởi động dịch vụ.
+
 Các script được viết và kiểm tra cú pháp; **không chạy trong Phase 5**.
 
 1. Chọn lúc không còn job đang xử lý. Tự dừng Tool V1 bằng `TatHoanToan.bat`.
