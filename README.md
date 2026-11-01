@@ -64,9 +64,9 @@ Tool V1 quản lý các model tập trung qua `backend/v1_model_registry.py` và
 ### 4.1. Yêu cầu hệ thống
 - Hệ điều hành: Windows 10/11 64-bit.
 - GPU: NVIDIA GeForce (Khuyến nghị từ RTX 3050 trở lên, tối thiểu 4GB-6GB VRAM, đã cài CUDA Driver).
-- Phần mềm: Python 3.10, FFmpeg và ffprobe đã có trong biến môi trường `PATH`.
+- Phần mềm: **Python 3.12.14** là runtime chính tại `backend\venv` (bản dự phòng rollback Python 3.10.11 đặt tại `backend\venv_py310`; không còn dùng đường dẫn staging `venv_py312` sau khi đã cutover). FFmpeg và ffprobe đã có trong biến môi trường `PATH`.
 
-### 4.2. Khởi động dịch vụ
+### 4.2. Khởi động & Dừng dịch vụ theo đúng phạm vi (Scoped Shutdown)
 Tại thư mục gốc của Tool V1:
 
 - **Khởi động chạy ngầm toàn bộ hệ thống (Khuyến nghị):**
@@ -77,8 +77,11 @@ Tại thư mục gốc của Tool V1:
   - Tool Control Server (port 8090).
 - **Khởi động trực tiếp có cửa sổ console (Debug / Kiểm tra log):**
   Chạy `start_bot.bat`.
-- **Dừng toàn bộ hệ thống:**
-  Chạy `stop_bot.bat` hoặc `TatHoanToan.bat` để tắt sạch bot, dashboard, các tiến trình Python và FFmpeg đang chạy ngầm.
+- **Dừng dịch vụ an toàn theo đúng scope (`backend/v1_shutdown.py`):**
+  Các script dừng hiện tại chỉ tác động tới các tiến trình đã xác minh thuộc project root của Tool V1 (không kill mù quáng theo tên `python.exe`/`ffmpeg.exe` toàn máy và không tin PID cũ nếu không khớp script + creation time). Mặc định nếu có job đang xử lý, lệnh sẽ báo busy (exit code `2`) trừ khi truyền `--force`:
+  - `TatHoanToan.bat`: Dừng toàn bộ hệ thống Tool V1 (`--scope all`: supervisor/watchdog, control, dashboard, Telegram bot và worker con). Hỗ trợ xem trước không gây tác động qua `TatHoanToan.bat --preview` (hoặc `-WhatIf`).
+  - `stop_bot.bat`: Chỉ dừng đúng phạm vi Telegram dubbing bot (`--scope telegram`), không tắt nhầm downloader độc lập hay ứng dụng khác. Hỗ trợ `stop_bot.bat --preview`.
+  - `stop_telebot_downloader.bat`: Chỉ dừng riêng bot tải video độc lập (`--scope downloader`). Hỗ trợ `stop_telebot_downloader.bat --preview`.
 
 ---
 
@@ -95,15 +98,46 @@ Tại thư mục gốc của Tool V1:
 
 ---
 
-## 6. Kiểm thử & Đảm bảo chất lượng
+## 6. Kiểm thử, Sức khỏe Runtime & Đóng gói Phát hành
 
-Tool V1 đi kèm bộ kiểm thử tự động toàn diện:
+### 6.1. Kiểm tra sức khỏe chỉ đọc (`verify_runtime_health.py`)
 ~~~powershell
-# Chạy bộ kiểm thử nghiệm thu sản xuất
-.\backend\venv\Scripts\python.exe -m pytest tests/test_verify_production_readiness.py tests/test_v1_quality_gate.py
+# Kiểm tra nhanh (ngân sách mặc định 5 giây; khi máy vừa khởi động/cold import có thể báo FAIL/incomplete)
+.\backend\venv\Scripts\python.exe -B scripts\verify_runtime_health.py
+
+# Kiểm chứng đầy đủ 25/25 hạng mục preflight read-only, pip check và cổng 8088/8090 khi máy cold hoặc tải cao
+.\backend\venv\Scripts\python.exe -B scripts\verify_runtime_health.py --timeout 30
 ~~~
-- Trạng thái kiểm tra sẵn sàng BS-RoFormer tách âm: `CUDA:0, SDR 12.97 dB (Ready: True)`.
-- Tất cả kiểm thử nghiệm thu đều vượt qua (12/12 passed).
+
+### 6.2. Chạy bộ kiểm thử tự động
+~~~powershell
+# Chạy kiểm thử trên runtime chính Python 3.12.14
+.\backend\venv\Scripts\python.exe -B -m pytest tests -q -rs -p no:cacheprovider
+
+# Chạy kiểm thử tương thích trên môi trường dự phòng Python 3.10.11 (chạy tuần tự, không chạy song song 2 suite)
+.\backend\venv_py310\Scripts\python.exe -B -m pytest tests -q -rs -p no:cacheprovider
+
+# Chạy 11 bài kiểm thử Node cho giao diện & wrapper Dashboard
+$jsFiles = Get-ChildItem -Path "tests/js" -Recurse -Filter "*.test.js" | ForEach-Object { $_.FullName }
+node --test $jsFiles
+~~~
+
+### 6.3. Đóng gói phát hành & Manifest SHA256
+`package_v1_release.py` và `scripts/generate_release_manifest.py` dùng chung một chính sách chọn file (ưu tiên Git tracked + allowlist rõ ràng, bao gồm source/config `tools/render_node/package.json` và `package-lock.json`, loại bỏ `node_modules`, `.env`, model nặng và dữ liệu runtime):
+~~~powershell
+# Kiểm tra danh sách file dự kiến đóng gói mà không ghi file (--dry-run)
+.\backend\venv\Scripts\python.exe package_v1_release.py --dry-run
+.\backend\venv\Scripts\python.exe scripts\generate_release_manifest.py --dry-run
+
+# Tạo gói ZIP qua staging an toàn và xuất RELEASE_MANIFEST.sha256 + RELEASE_METADATA.json
+.\backend\venv\Scripts\python.exe package_v1_release.py
+.\backend\venv\Scripts\python.exe scripts\generate_release_manifest.py --test-log path\to\pytest.log
+~~~
+
+### 6.4. Các công cụ lịch sử đã vô hiệu hóa (Retired Entrypoints) & Module dùng chung
+- **Đã ngừng sử dụng (Retired, exit code `1`, không có side effect khi import):** `backend/enqueue_missing_batch.py`, `backend/sync_capcut_queue.py`, `RESTORE_SAFE_BASELINE.bat`, `ROLLBACK_TRANSLATION_FIX.bat`, `RESTORE_VOICE_LOCK_BACKUP.bat`, `rollback_to_safe_state.ps1`, `fixes_for_v1/apply_fix_to_v1.bat`, `fixes_for_v1/rollback_tool_v1.bat`, `scripts/setup_telegram_bot_v2.ps1`. Để khôi phục môi trường hoặc mã nguồn, chỉ sử dụng `git log` / `git revert` theo từng commit hoặc `scripts\rollback_py310.bat` khi cần đổi lại interpreter.
+- **Các tiện ích CLI vẫn được giữ hỗ trợ:** `scripts/verify_runtime_health.py`, `scripts/cutover_py312.bat`, `scripts/rollback_py310.bat`, `scripts/generate_release_manifest.py`, `package_v1_release.py`, `tools/sheet_crypto.py`, `telebot_video_downloader.py`.
+- **Phạm vi module `backend/pipeline_v2/`:** Dù dịch vụ độc lập Tool V2 đã retired, gói `backend/pipeline_v2/` vẫn đang được giữ lại vì cung cấp các tiện ích dùng chung cho Tool V1 (`atomic_io`, `interprocess_lock`, `stage_validation`, `qc`, `cover_qc`). Không tự ý xóa `backend/pipeline_v2/`.
 
 ---
 
