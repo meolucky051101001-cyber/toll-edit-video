@@ -4,6 +4,7 @@ import subprocess
 from batch_control import run as run_batch_subprocess
 import time
 import logging
+from v1_integrity_errors import FrozenConfigError
 try:
     from .v1_stage_metrics import stage
 except ImportError:
@@ -86,6 +87,7 @@ def separate_vocals_demucs(
                 sep_mode = frozen["effective_config"]["separation_mode"]
         except Exception as _phase6_exc:
             logger.warning('Suppressed error in video_utils.separate_vocals_demucs (get_frozen_config): %s', type(_phase6_exc).__name__, exc_info=False)
+            raise FrozenConfigError("Không xác minh được snapshot tách âm; chưa chạy job.") from _phase6_exc
 
         env_sep = os.getenv("V1_SEPARATOR_BACKEND", "").strip().lower()
         if env_sep:
@@ -408,6 +410,7 @@ def mix_audio_pydub(
                 ducking_mode = frozen["effective_config"]["ducking_mode"]
         except Exception as _phase6_exc:
             logger.warning('Suppressed error in video_utils.mix_audio_pydub (get_frozen_config): %s', type(_phase6_exc).__name__, exc_info=False)
+            raise FrozenConfigError("Không xác minh được snapshot mixer; chưa hòa âm.") from _phase6_exc
 
     print(f"Mixing audio tracks using adaptive pydub (BGM={original_volume_db}dB, Dubbing={dubbing_volume_db}dB, Ducking={ducking_mode})...")
     original_popen = None

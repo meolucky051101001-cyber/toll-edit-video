@@ -11,6 +11,7 @@ import sys
 import time
 import asyncio
 import logging
+from v1_integrity_errors import FrozenConfigError
 import gc
 import shutil
 import uuid
@@ -504,6 +505,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                     frozen_eff = frozen_job_entry.get("effective_config", {})
             except Exception as _phase6_exc:
                 logger.warning('Suppressed error in batch_processor.process_single_local_video (get_frozen_config): %s', type(_phase6_exc).__name__, exc_info=False)
+                raise FrozenConfigError("Không xác minh được snapshot giọng đọc; chưa tạo âm thanh.") from _phase6_exc
 
         sources = frozen_job_entry.get("sources", {}) if frozen_job_entry else {}
         is_user_chosen = (

@@ -2,6 +2,7 @@ import os
 import sys
 from pathlib import Path
 import logging
+from v1_integrity_errors import GlossaryConfigError
 
 logger = logging.getLogger(__name__)
 
@@ -199,17 +200,20 @@ def load_custom_glossary(workspace: Optional[str] = None) -> Dict[str, str]:
     """Load user-configured custom glossary (Chinese -> Vietnamese) from workspace control directory."""
     for p in _glossary_paths(workspace):
         try:
-            if p.is_file():
-                raw = json.loads(p.read_text(encoding="utf-8"))
-                if isinstance(raw, dict):
-                    entries = raw.get("entries", raw) if "entries" in raw and isinstance(raw.get("entries"), dict) else raw
-                    return {
-                        str(k).strip(): str(v).strip()
-                        for k, v in entries.items()
-                        if str(k).strip() and str(v).strip() and not str(k).startswith("_")
-                    }
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or ("entries" in raw and not isinstance(raw["entries"], dict)):
+                raise GlossaryConfigError("Glossary đã cấu hình không đúng định dạng.")
+            entries = raw.get("entries", raw)
+            return {
+                str(k).strip(): str(v).strip()
+                for k, v in entries.items()
+                if str(k).strip() and str(v).strip() and not str(k).startswith("_")
+            }
+        except FileNotFoundError:
+            continue
         except Exception as _phase6_exc:
             logger.warning('Suppressed error in ai.translation.load_custom_glossary (p.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
+            raise GlossaryConfigError("Không đọc được glossary đã cấu hình; chưa thực hiện dịch.") from _phase6_exc
     return {}
 
 
@@ -915,6 +919,8 @@ def translate_subtitles(
     texts = [seg.content for seg in srt_segments if seg.content]
     if not texts:
         return srt_segments
+    # Validate before provider selection so a broken glossary cannot be bypassed by fallback.
+    load_custom_glossary()
         
     translated_texts = None
     failure_causes = []

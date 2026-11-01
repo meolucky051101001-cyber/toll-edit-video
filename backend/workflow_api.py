@@ -14,6 +14,9 @@ import subprocess
 import shutil
 import hashlib
 import html
+import math
+import job_tracker
+from v1_integrity_errors import PipelineStateError
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 import cv2
@@ -2758,15 +2761,19 @@ def _apply_timeline_edits_file(
     valid_clips = []
     for c in clips:
         try:
-            st = max(0.0, float(c.get("start", 0.0)))
-            en = max(st + 0.05, float(c.get("end", st + 1.0)))
+            start_value = float(c.get("start", 0.0))
+            end_value = float(c.get("end", start_value + 1.0))
+            if not math.isfinite(start_value) or not math.isfinite(end_value):
+                raise ValueError("Non-finite clip time")
+            st = max(0.0, start_value)
+            en = max(st + 0.05, end_value)
             entry = {"start": st, "end": en}
             for k in _effect_keys:
                 if k in c:
                     entry[k] = c[k]
             valid_clips.append(entry)
-        except Exception as _phase6_exc:
-            logger.warning('Suppressed error in workflow_api._apply_timeline_edits_file (max): %s', type(_phase6_exc).__name__, exc_info=False)
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("Clip timeline không hợp lệ; chưa render video.") from exc
 
     if not valid_clips:
         return False
@@ -3922,33 +3929,31 @@ def _wait_pipeline_free(job_id: str, max_wait_s: int = 1800) -> bool:
     Trả False nếu hết thời gian chờ.
     """
     import main as main_module
+    import stop_service
+    import shared_state
 
-    deadline = time.time() + max_wait_s
-    while time.time() < deadline:
+    deadline = time.monotonic() + max_wait_s
+    while time.monotonic() < deadline:
         try:
-            if main_module.UNIFIED_PIPELINE_LOCK.locked():
-                _manual_job_set(job_id, stage="Pipeline chính đang chạy — chờ GPU rảnh...")
-                time.sleep(3)
-                continue
-        except Exception as _phase6_exc:
-            logger.warning('Suppressed error in workflow_api._wait_pipeline_free (main_module.UNIFIED_PIPELINE_LOCK.locked): %s', type(_phase6_exc).__name__, exc_info=False)
+            locked = main_module.UNIFIED_PIPELINE_LOCK.locked()
+            state = job_tracker.get_status(strict=True)
+            active = state["active"] or any(w["active"] for w in state.get("workers", {}).values())
+        except Exception as exc:
+            logger.warning("workflow_api._wait_pipeline_free: cannot verify state (%s)", type(exc).__name__, exc_info=False)
+            raise PipelineStateError("Không xác minh được khóa/trạng thái pipeline; chưa chạy tác vụ.") from exc
+        if locked or active:
+            _manual_job_set(job_id, stage="Pipeline đang chạy — chờ tài nguyên rảnh...")
+            time.sleep(min(3, max(0, deadline - time.monotonic())))
+            continue
+        # Only clear stale stop state after both sources prove that no job is active.
         try:
-            if job_tracker.get_status().get("active"):
-                _manual_job_set(job_id, stage="Batch pipeline đang chạy — chờ...")
-                time.sleep(3)
-                continue
-        except Exception as _phase6_exc:
-            logger.warning('Suppressed error in workflow_api._wait_pipeline_free (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
-        # P9: dọn file stop stale (video.stop/stop_request.json còn tồn tại sau khi batch xong
-        # khiến stop_requested = True vĩnh viễn — mọi API dịch/TTS đều tưởng đang bị huỷ)
-        try:
-            import shared_state as _ss
-            import stop_service as _stop
-            if _stop.is_stop_requested(_ss.WORKSPACE):
-                _stop.clear_stop(_ss.WORKSPACE, source="workflow_api", reason="stale stop cleanup")
-                logger.info("P9 manual job: đã dọn file stop stale")
-        except Exception as _phase6_exc:
-            logger.warning('Suppressed error in workflow_api._wait_pipeline_free (_stop.is_stop_requested): %s', type(_phase6_exc).__name__, exc_info=False)
+            if stop_service.is_stop_requested(WORKSPACE) or shared_state.stop_requested:
+                stop_service.clear_stop(WORKSPACE, source="workflow_api", reason="idle manual job starts")
+                shared_state.stop_requested = False
+                if stop_service.is_stop_requested(WORKSPACE):
+                    raise PipelineStateError("Không xóa được cờ dừng cũ; chưa chạy tác vụ.")
+        except Exception as exc:
+            raise PipelineStateError("Không xác minh được cờ dừng; chưa chạy tác vụ.") from exc
         from disk_guard import ensure_free_space
         ensure_free_space(WORKSPACE, purpose="tạo phụ đề trong Studio")
         return True
@@ -3983,7 +3988,8 @@ async def api_manual_generate_cn(payload: Dict[str, Any] = Body(...)):
             # Dùng chung GPU Whisper với pipeline — chờ pipeline chính rảnh
             job.update({"status": "running", "stage": "Chờ pipeline rảnh..."})
             # asyncio.Lock KHÔNG dùng được `with` đồng bộ từ thread — chờ bằng polling
-            _wait_pipeline_free(job)
+            if not _wait_pipeline_free(job_id):
+                raise PipelineStateError("Hết thời gian chờ pipeline rảnh; chưa chạy tác vụ.")
             if True:
                 job_dir = WORKSPACE / artifact_stem(stem)
                 job_dir.mkdir(parents=True, exist_ok=True)
@@ -4040,15 +4046,9 @@ async def api_manual_translate(payload: Dict[str, Any] = Body(...)):
 
             job.update({"status": "running", "stage": "Chờ pipeline rảnh..."})
             # asyncio.Lock KHÔNG dùng được `with` đồng bộ từ thread — chờ bằng polling
-            _wait_pipeline_free(job)
+            if not _wait_pipeline_free(job_id):
+                raise PipelineStateError("Hết thời gian chờ pipeline rảnh; chưa chạy tác vụ.")
             if True:
-                # P9: xóa stop flag stale (batch đã xong nhưng cờ stop chưa reset)
-                try:
-                    import shared_state
-                    if shared_state.stop_requested and not job_tracker.get_status().get("active"):
-                        shared_state.stop_requested = False
-                except Exception as _phase6_exc:
-                    logger.debug('Suppressed error in workflow_api.worker (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
                 job.update({"progress": 15, "stage": "Đọc sub Trung đã sửa..."})
                 from ai.translation import translate_subtitles
 

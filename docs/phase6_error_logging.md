@@ -43,7 +43,12 @@ bare except trong `backend/scripts_and_tests` (script thử nghiệm/maintenance
 Không sửa các script này hoặc các handler có fallback thực hiện công việc khác
 ngoài `pass` trong Phase 6.
 
-## Các hành vi cần người dùng quyết định — chưa sửa
+## Các hành vi phát hiện tại thời điểm bàn giao Phase 6
+
+Người dùng đã cho phép sửa các tồn đọng này trong lượt tiếp theo. Các mục dưới
+đây giữ lại như kết quả review lịch sử; bản sửa và nghiệm thu hiện tại nằm trong
+[báo cáo chuẩn bị Phase 7](pre_phase7_hardening.md). Test logging đã được cập nhật
+để kiểm tra hành vi mới đã được duyệt, không còn khẳng định các fallback lỗi cũ.
 
 Các điểm sau có sẵn trước Phase 6. Thêm log chỉ làm lộ tình trạng, không tự đổi
 chính sách xử lý lỗi:
@@ -91,6 +96,6 @@ Full suite bản cuối nằm ở `scratch/phase6/pytest-py310-verified.log` và
 không có bộ đếm subtest riêng. API dashboard trả HTTP 200 khi kiểm tra chỉ đọc.
 Không sửa requirements, lock hoặc script chuyển môi trường trong Phase 6.
 
-Các test chỉ xác nhận phần log và hành vi cũ; chúng không chứng minh các rủi ro
+Tại commit Phase 6, các test chỉ xác nhận phần log và hành vi cũ; chúng không chứng minh các rủi ro
 trên đã được sửa. Không chuyển sang Phase 7 hoặc tự thực hiện các quyết định
 chức năng. Ưu tiên người dùng duyệt xử lý ba điểm P1 trước bước refactor lớn.

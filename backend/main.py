@@ -2234,13 +2234,11 @@ async def api_workspace_cleanup(payload: dict = Body(...)):
         raise HTTPException(status_code=400, detail="Danh sách job cần dọn đang rỗng")
     active: list = []
     try:
-        st = job_tracker.get_status()
-        active.append(st.get("video_name") or "")
-        for w in (st.get("workers") or {}).values():
-            if isinstance(w, dict):
-                active.append(w.get("video_name") or "")
+        st = job_tracker.get_status(strict=True)
+        active = job_tracker.active_job_names(st)
     except Exception as _phase6_exc:
         logger.warning('Suppressed error in main.api_workspace_cleanup (job_tracker.get_status): %s', type(_phase6_exc).__name__, exc_info=False)
+        raise HTTPException(status_code=503, detail="Không xác minh được job đang chạy; chưa thực hiện dọn workspace.") from None
     return await asyncio.to_thread(cleanup_jobs, names, mode, active)
 
 

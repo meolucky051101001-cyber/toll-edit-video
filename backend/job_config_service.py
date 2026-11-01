@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+from v1_integrity_errors import FrozenConfigError
 
 ROOT_DIR = Path(__file__).resolve().parent
 WORKSPACE_DIR = Path(os.getenv("AUTODUB_WORKSPACE", str(ROOT_DIR.parent / "workspace")))
@@ -137,7 +138,7 @@ def _frozen_files_for_lookup(
     if candidate_path.is_absolute():
         for parent in candidate_path.parents:
             scoped_file = parent / "control" / "job_frozen_configs.json"
-            if scoped_file.is_file() and scoped_file not in candidates:
+            if scoped_file.exists() and scoped_file not in candidates:
                 candidates.append(scoped_file)
     if FROZEN_FILE not in candidates:
         candidates.append(FROZEN_FILE)
@@ -151,6 +152,23 @@ def _read_json_safe(file_path: Path, default_val: Any) -> Any:
         return json.loads(file_path.read_text(encoding="utf-8"))
     except Exception:
         return default_val
+
+
+def _read_frozen_store(file_path: Path) -> Dict[str, Any]:
+    """A missing store is optional; an unreadable existing store is not empty."""
+    try:
+        data = json.loads(file_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise FrozenConfigError("Không đọc được snapshot cấu hình; dừng để bảo toàn lựa chọn của job.") from exc
+    if not isinstance(data, dict) or any(
+        not isinstance(snapshot, dict)
+        or not isinstance(snapshot.get("effective_config", {}), dict)
+        for snapshot in data.values()
+    ):
+        raise FrozenConfigError("Snapshot cấu hình không hợp lệ; chưa thể chạy job.")
+    return data
 
 
 # ===== DRAFTS (Bản nháp cấu hình riêng trước khi chạy) =====
@@ -189,7 +207,7 @@ def delete_video_draft(video_name: str) -> bool:
 
 def list_frozen_configs(workspace_path: Optional[str | Path] = None) -> Dict[str, Any]:
     """Danh sách các snapshot cấu hình đóng băng."""
-    return _read_json_safe(_frozen_file_for_workspace(workspace_path), {})
+    return _read_frozen_store(_frozen_file_for_workspace(workspace_path))
 
 
 def freeze_job_config(
@@ -377,7 +395,7 @@ def resolve_job_frozen_config(
             candidates.add(f"{stripped_stem}{ext}")
 
     for file_path in _frozen_files_for_lookup(path_or_key, workspace_path):
-        frozen = _read_json_safe(file_path, {})
+        frozen = _read_frozen_store(file_path)
         if path_or_key in frozen:
             snap = frozen[path_or_key]
             return _migrate_snapshot_asr(snap) if isinstance(snap, dict) else snap

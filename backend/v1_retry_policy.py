@@ -17,6 +17,12 @@ PERMANENT_ERROR_NAMES = {
     "GeminiCancelledError",
     "BatchStopRequested",
     "UnsupportedResolutionError",
+    "FrozenConfigError",
+    "GlossaryConfigError",
+    "AudioDurationError",
+    "SegmentCommitError",
+    "JobStateReadError",
+    "PipelineStateError",
 }
 
 NETWORK_ERROR_NAMES = {

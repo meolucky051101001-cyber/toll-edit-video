@@ -97,6 +97,8 @@ def invalidate_usage_cache() -> None:
 
 def cleanup_jobs(names: List[str], mode: str = "stems", active_names=()) -> Dict[str, Any]:
     """Xóa stems (giữ SRT/dubbing) hoặc cả job dir. Chặn tên lạ và job đang xử lý."""
+    if mode not in {"stems", "full"}:
+        raise ValueError("Chế độ dọn không hợp lệ.")
     invalidate_usage_cache()
     results: List[Dict[str, Any]] = []
     active_norm = set()
@@ -132,11 +134,11 @@ def cleanup_jobs(names: List[str], mode: str = "stems", active_names=()) -> Dict
                     p = resolved / d
                     if p.is_dir():
                         freed += _dir_size_mb(p)
-                        shutil.rmtree(p, ignore_errors=True)
+                        shutil.rmtree(p)
                 results.append({"name": name, "status": "ok", "mode": "stems", "freed_mb": round(freed, 1)})
             else:
                 freed = _dir_size_mb(resolved)
-                shutil.rmtree(resolved, ignore_errors=True)
+                shutil.rmtree(resolved)
                 results.append({"name": name, "status": "ok", "mode": "full", "freed_mb": round(freed, 1)})
         except Exception as exc:
             results.append({"name": name, "status": "error", "reason": str(exc)})

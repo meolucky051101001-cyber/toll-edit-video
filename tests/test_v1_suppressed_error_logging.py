@@ -20,8 +20,9 @@ class SuppressedErrorLoggingTests(unittest.TestCase):
             self.assertIs(record.exc_info, False)
             self.assertIsNone(record.stack_info)
 
-    def test_glossary_read_failure_keeps_next_candidate_and_logs_without_payload(self):
+    def test_glossary_read_failure_blocks_and_logs_without_payload(self):
         from backend.ai import translation
+        from backend.v1_integrity_errors import GlossaryConfigError
 
         broken = Mock()
         broken.is_file.return_value = True
@@ -31,8 +32,9 @@ class SuppressedErrorLoggingTests(unittest.TestCase):
         fallback.read_text.return_value = json.dumps({"entries": {"term": "translation"}})
         with patch.object(translation, "_glossary_paths", return_value=[broken, fallback]), \
              self.assertLogs(translation.logger, level="WARNING") as captured:
-            result = translation.load_custom_glossary()
-        self.assertEqual(result, {"term": "translation"})
+            with self.assertRaises(GlossaryConfigError):
+                translation.load_custom_glossary()
+        fallback.read_text.assert_not_called()
         self.assertIn("load_custom_glossary", captured.records[0].getMessage())
         self.assertIn("OSError", captured.records[0].getMessage())
         self.assert_private_details_absent(captured.records)
@@ -49,22 +51,23 @@ class SuppressedErrorLoggingTests(unittest.TestCase):
         self.assertIn("PermissionError", captured.records[0].getMessage())
         self.assert_private_details_absent(captured.records)
 
-    def test_cleanup_tracker_failure_is_warned_and_preserves_existing_call(self):
+    def test_cleanup_tracker_failure_is_warned_and_blocks_deletion(self):
         from backend import main
         from backend import workspace_usage_service
 
         with patch.object(main.job_tracker, "get_status", side_effect=OSError(PRIVATE_DETAILS)), \
              patch.object(workspace_usage_service, "cleanup_jobs", return_value={"results": []}) as cleanup, \
              self.assertLogs(main.logger, level="WARNING") as captured:
-            result = asyncio.run(main.api_workspace_cleanup({"jobs": ["fixture_job"], "mode": "full"}))
-        self.assertEqual(result, {"results": []})
-        # No filesystem deletion occurs: cleanup is a mock. The existing policy is reported separately.
-        cleanup.assert_called_once_with(["fixture_job"], "full", [])
+            with self.assertRaises(main.HTTPException) as caught:
+                asyncio.run(main.api_workspace_cleanup({"jobs": ["fixture_job"], "mode": "full"}))
+        self.assertEqual(caught.exception.status_code, 503)
+        cleanup.assert_not_called()
         self.assertIn("api_workspace_cleanup", captured.records[0].getMessage())
         self.assert_private_details_absent(captured.records)
 
-    def test_duration_probe_failure_preserves_existing_size_estimate(self):
+    def test_duration_probe_failure_never_guesses_from_byte_size(self):
         from backend import segment_editor_service as editor
+        from backend.v1_integrity_errors import AudioDurationError
 
         with tempfile.TemporaryDirectory() as temporary:
             audio = Path(temporary) / "fixture.audio"
@@ -72,14 +75,13 @@ class SuppressedErrorLoggingTests(unittest.TestCase):
             with patch.object(editor, "_AUDIO_DURATION_CACHE", {}), \
                  patch.object(editor.subprocess, "run", side_effect=OSError(PRIVATE_DETAILS)), \
                  self.assertLogs(editor.logger, level="DEBUG") as captured:
-                duration = editor.get_audio_duration_seconds(audio)
-                cached = editor.get_audio_duration_seconds(audio)
-            self.assertEqual(duration, 2.0)
-            self.assertEqual(cached, duration)
+                with self.assertRaises(AudioDurationError):
+                    editor.get_audio_duration_seconds(audio)
+                self.assertEqual(editor._AUDIO_DURATION_CACHE, {})
         self.assertIn("get_audio_duration_seconds", captured.records[0].getMessage())
         self.assert_private_details_absent(captured.records)
 
-    def test_lock_read_errors_are_logged_without_changing_existing_fallback(self):
+    def test_lock_read_errors_are_logged_and_block_work(self):
         from backend import workflow_api as workflow
         import disk_guard
         import stop_service
@@ -97,10 +99,10 @@ class SuppressedErrorLoggingTests(unittest.TestCase):
              patch.object(stop_service, "is_stop_requested", return_value=False), \
              patch.object(disk_guard, "ensure_free_space") as space, \
              self.assertLogs(workflow.logger, level="WARNING") as captured:
-            allowed = workflow._wait_pipeline_free("fixture_job", max_wait_s=1)
-        # Phase 6 retains this existing fallback; its policy is listed for user review.
-        self.assertTrue(allowed)
-        space.assert_called_once()
-        self.assertEqual(len(captured.records), 2)
+            from backend.v1_integrity_errors import PipelineStateError
+            with self.assertRaises(PipelineStateError):
+                workflow._wait_pipeline_free("fixture_job", max_wait_s=1)
+        space.assert_not_called()
+        self.assertEqual(len(captured.records), 1)
         self.assertTrue(all("_wait_pipeline_free" in r.getMessage() for r in captured.records))
         self.assert_private_details_absent(captured.records)

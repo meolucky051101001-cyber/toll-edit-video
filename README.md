@@ -119,3 +119,6 @@ Xem [hướng dẫn Phase 5](docs/phase5_python312.md) cho dependency, file chu�
 `requirements.lock.txt`, giới hạn wheel CapCut local và quy trình cutover/rollback
 thủ công. `requirements.lock` include file chuẩn để giữ tương thích lệnh cũ.
 Không chạy script chuyển môi trường khi dịch vụ Tool V1 còn hoạt động.
+
+Bản sửa tồn đọng sau Phase 6 và golden baseline trước refactor được ghi trong
+[báo cáo chuẩn bị Phase 7](docs/pre_phase7_hardening.md).

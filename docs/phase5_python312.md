@@ -55,10 +55,14 @@ cũ không còn import trong requirements-dev bằng `google-genai` đang đư�
 Snapshot này mô tả môi trường trên máy hiện tại, không phải bộ cài offline:
 
 - `capcut-tts-api==1.0.0` được cài từ wheel local. `pip freeze` ghi tham chiếu
-  `file:` đúng metadata, nhưng wheel gốc không còn ở đường dẫn đó. Package đã cài
-  vẫn tồn tại; cần cung cấp lại wheel gốc tin cậy trước khi dựng một venv mới từ
-  lock. Không tự thay bằng package cùng tên từ registry hoặc sửa metadata để che
-  mất nguồn cài.
+  `file:` đúng metadata. Đường dẫn build gốc đã mất; ngày 01/11/2026 đã phục hồi
+  wheel từ các file đang cài sau khi đối chiếu SHA256/size với RECORD. Đã cài lại
+  offline bằng `--no-deps --no-index` chỉ trong venv_py312, xác nhận cả 8 file mã
+  nguồn giữ nguyên hash và pip check sạch. Lock hiện trỏ tới
+  `backups/wheels/capcut_tts_api-1.0.0-py3-none-any.whl`, có hash trong URL.
+  Đây là archive phục hồi, không khẳng định giống từng byte wheel gốc hoặc có
+  chữ ký nhà phát hành. Wheel được ignore, cần sao lưu riêng cùng lock khi chuyển
+  máy; xem [báo cáo chuẩn bị Phase 7](pre_phase7_hardening.md).
 - Torch 2.5.1+cu124 / TorchAudio 2.5.1+cu124 / TorchVision 0.20.1+cu124 cần nguồn
   wheel CUDA phù hợp. `pip freeze` không lưu cấu hình index đã dùng lúc cài.
 - Python base của venv_py312 nằm trong cache runtime Codex, được ghi trong

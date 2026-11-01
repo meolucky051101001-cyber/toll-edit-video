@@ -10,7 +10,7 @@ audioread==3.1.0
 av==19.0.2
 beautifulsoup4==4.15.0
 brotli==1.2.1
-capcut-tts-api @ file:///C:/tool%20v1/backend/venv_py312/capcut-build-itg8y5lr
+capcut-tts-api @ file:///C:/tool%20v1/backups/wheels/capcut_tts_api-1.0.0-py3-none-any.whl#sha256=a7b42630773a6aa44a2a076283ef315f43bd25ac1bbb193618d949163e3e2024
 certifi==2026.10.23
 cffi==2.1.1
 charset-normalizer==3.5.2

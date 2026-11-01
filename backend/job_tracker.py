@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+import math
 import threading
 import uuid
 import copy
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 from pipeline_v2.atomic_io import atomic_write_json
+from v1_integrity_errors import JobStateReadError
 import stop_service
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -288,21 +290,35 @@ def _release_batch_lock_guarded(job_id: Optional[str]) -> None:
             time.sleep(0.1)
 
 
-def _read_state_from_disk_unlocked() -> Optional[Dict[str, Any]]:
+def _read_state_from_disk_unlocked(strict: bool = False) -> Optional[Dict[str, Any]]:
     """Read the newest complete state written by this or another process."""
     if not STATUS_FILE.exists():
         return None
     try:
         with open(STATUS_FILE, "r", encoding="utf-8") as f:
             state = json.load(f)
-        return state if isinstance(state, dict) else None
+        if not isinstance(state, dict):
+            if strict:
+                raise JobStateReadError("Trạng thái job không hợp lệ; chưa thể xác minh job đang chạy.")
+            return None
+        if strict:
+            try:
+                timestamp = float(state["updated_at"])
+                valid = isinstance(state.get("active"), bool) and math.isfinite(timestamp) and timestamp >= 0
+            except (KeyError, TypeError, ValueError):
+                valid = False
+            if not valid:
+                raise JobStateReadError("Trạng thái job không đầy đủ; chưa thể xác minh job đang chạy.")
+        return state
     except (OSError, json.JSONDecodeError) as exc:
+        if strict:
+            raise JobStateReadError("Không đọc được trạng thái job; thao tác đã được chặn.") from exc
         logger.warning("Không thể đọc trạng thái job: %s", exc)
         return None
 
 
-def _sync_from_disk_unlocked() -> None:
-    disk_state = _read_state_from_disk_unlocked()
+def _sync_from_disk_unlocked(strict: bool = False) -> None:
+    disk_state = _read_state_from_disk_unlocked(strict=strict)
     if not disk_state:
         return
     disk_updated = float(disk_state.get("updated_at") or 0)
@@ -345,15 +361,31 @@ def _freeze_progress_unlocked(now=None):
             w["eta_seconds"] = None
 
 
-def get_status() -> Dict[str, Any]:
+def get_status(strict: bool = False) -> Dict[str, Any]:
     """Lấy trạng thái hiện tại (kèm cập nhật elapsed_seconds nếu đang chạy)."""
     with _LOCK:
         # Batch CLI, Dashboard và Telegram có thể chạy ở các process khác nhau.
         # Luôn nhận bản mới hơn từ đĩa, kể cả khi state trong RAM đang active.
-        _sync_from_disk_unlocked()
+        _sync_from_disk_unlocked(strict=strict)
 
         state = copy.deepcopy(_CURRENT_STATE)
         owner = _read_batch_lock_unlocked()
+        if strict:
+            if not isinstance(state.get("active"), bool) or not isinstance(state.get("workers", {}), dict):
+                raise JobStateReadError("Không xác minh được trạng thái worker; thao tác đã được chặn.")
+            if any(not isinstance(w, dict) or not isinstance(w.get("active"), bool)
+                   for w in state.get("workers", {}).values()):
+                raise JobStateReadError("Trạng thái worker không hợp lệ; thao tác đã được chặn.")
+            if BATCH_LOCK_FILE.exists():
+                try:
+                    checked_owner = json.loads(BATCH_LOCK_FILE.read_text(encoding="utf-8"))
+                    if (not isinstance(checked_owner, dict)
+                            or type(checked_owner.get("pid")) is not int or checked_owner["pid"] <= 0):
+                        raise ValueError("Invalid lock owner")
+                except (OSError, ValueError, TypeError) as exc:
+                    raise JobStateReadError("Không xác minh được khóa batch; thao tác đã được chặn.") from exc
+                if not state["active"] and _pid_is_running(checked_owner["pid"]):
+                    raise JobStateReadError("Khóa batch còn hoạt động; chưa thể xác minh trạng thái job.")
         if state.get("active") and owner and not _pid_is_running(int(owner.get("pid") or 0)):
             state.update(active=False, status="interrupted", video_status="interrupted",
                          elapsed_seconds=max(0, int((state.get("updated_at") or time.time()) - (state.get("start_time") or time.time()))),
@@ -453,6 +485,27 @@ def get_status() -> Dict[str, Any]:
                 "2": _default_worker_state(2),
             }
         return state
+
+
+def active_job_names(state: Dict[str, Any]) -> list[str]:
+    """Require identifiable active jobs before destructive/edit operations."""
+    if not isinstance(state, dict) or not isinstance(state.get("active"), bool):
+        raise JobStateReadError("Chưa xác minh được danh sách job đang chạy.")
+    workers = state.get("workers", {})
+    if not isinstance(workers, dict):
+        raise JobStateReadError("Danh sách worker không hợp lệ.")
+    names = []
+    for item in [state, *workers.values()]:
+        if not isinstance(item, dict) or not isinstance(item.get("active"), bool):
+            raise JobStateReadError("Trạng thái worker không hợp lệ.")
+        if item["active"]:
+            name = item.get("video_name")
+            if not isinstance(name, str) or not name.strip():
+                raise JobStateReadError("Job đang chạy chưa có định danh; tạm chặn thao tác.")
+            names.append(name)
+            if item.get("job_id"):
+                names.append(str(item["job_id"]))
+    return names
 
 
 def start_batch(
