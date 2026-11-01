@@ -28,6 +28,19 @@ băng, đường dẫn, callback, thời lượng và thông tin checkpoint củ
 - Test AST strict OCR/dịch được cập nhật để duyệt các helper reachable từ
   execute_job; giữ nguyên assertion strict_geometry=True và strict=True.
 
+## generate_ass_file
+
+Tách chuẩn hóa geometry và page timing, phân trang, khóa band, tạo cover event,
+format text và vẽ sticker có/không có source. Layout/band/text metrics dùng
+record bất biến; giữ deepcopy segment trước khi chỉnh thời gian và geometry.
+generate_ass_file: 653 → 134 dòng; helper dài nhất 130 dòng.
+
+72 case đối chiếu với code gốc cho output ASS giống từng byte (bao gồm BOM):
+portrait/landscape/square, source sát biên/giữa/không có, geometry verified,
+solid/frosted, có/không watermark, văn bản dài và ký tự escape. Đồng thời kiểm
+tra input không bị mutate. Golden pipeline cùng 40 test layout/cover/tracking
+đạt tổng 45 passed trên Python 3.12.
+
 Fixture `tests/fixtures/phase7/execute_job.json` giữ nguyên SHA256:
 `ee4e5a27365ebb2cded35198a545b1661248026ac1529729dda2ef283eb9bb57`.
 
@@ -36,6 +49,7 @@ Fixture `tests/fixtures/phase7/execute_job.json` giữ nguyên SHA256:
 | Hàm vừa tách | Full pytest Python 3.10 | Golden Python 3.12 |
 | --- | --- | --- |
 | execute_job | 1138 passed / 0 failed / 79 skipped / 213 subtests; 126,93 giây | 5 passed; đối chứng code gốc cũng 5 passed |
+| generate_ass_file | 1138 passed / 0 failed / 79 skipped / 213 subtests; 128,38 giây | 5 passed trong bộ tập trung 45 test |
 
 Kết quả các bước tiếp theo được ghi sau khi hoàn tất từng hàm.
 Log/bằng chứng tạm nằm dưới `scratch/phase7`, không commit dữ liệu runtime.
