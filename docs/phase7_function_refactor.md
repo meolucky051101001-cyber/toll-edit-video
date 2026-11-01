@@ -41,6 +41,20 @@ solid/frosted, có/không watermark, văn bản dài và ký tự escape. Đồn
 tra input không bị mutate. Golden pipeline cùng 40 test layout/cover/tracking
 đạt tổng 45 passed trên Python 3.12.
 
+## perform_video_ocr
+
+571 → 59 dòng ở hàm public, helper dài nhất 133 dòng. Giữ nguyên hai decorator
+stage/ocr_proxy trên entry point. Metadata/strategy, timestamps, frame sampling,
+rescue, gán geometry và ghi report được tách riêng. `_OcrFrameBatch` giữ danh
+sách frame bounded, ROI và cờ early band lock riêng cho mỗi lần gọi; không đổi
+reader/model session toàn cục.
+
+Đối chiếu AST 10 helper và flush_frames với các block gốc sau quy đổi thuộc
+tính batch: phép tính, điều kiện, vòng lặp, try/finally và lời gọi cũ khớp.
+Giữ metrics trong report, ghi report trước strict validation và các nhánh
+subtitle-free relaxation/CJK fail-closed. Bộ OCR + golden Python 3.12:
+164 passed / 9 skipped. Không sửa test OCR để đổi kỳ vọng.
+
 Fixture `tests/fixtures/phase7/execute_job.json` giữ nguyên SHA256:
 `ee4e5a27365ebb2cded35198a545b1661248026ac1529729dda2ef283eb9bb57`.
 
@@ -50,9 +64,20 @@ Fixture `tests/fixtures/phase7/execute_job.json` giữ nguyên SHA256:
 | --- | --- | --- |
 | execute_job | 1138 passed / 0 failed / 79 skipped / 213 subtests; 126,93 giây | 5 passed; đối chứng code gốc cũng 5 passed |
 | generate_ass_file | 1138 passed / 0 failed / 79 skipped / 213 subtests; 128,38 giây | 5 passed trong bộ tập trung 45 test |
+| perform_video_ocr | 1138 passed / 0 failed / 79 skipped / 213 subtests; 142,62 giây | 5 passed trong bộ OCR 164 test |
 
 Kết quả các bước tiếp theo được ghi sau khi hoàn tất từng hàm.
 Log/bằng chứng tạm nằm dưới `scratch/phase7`, không commit dữ liệu runtime.
+
+Sau khi workspace chính chuyển về nhánh hardening và xuất hiện sửa đổi
+workflow/timeline, phần còn lại tiếp tục tại worktree `C:\tool_v1_updates` trên
+cùng nhánh Phase 7. Không reset/stash hoặc ghi đè các sửa đổi ở workspace chính.
+Để tái hiện test vốn phụ thuộc dữ liệu local, worktree có junction tới trọng số
+SenseVoice và hai model venv có sẵn, cùng bản sao bốn sample giọng test. Không
+cài/sửa package hoặc thay đổi model venv gốc; các tài nguyên này được ignore.
+Runner test bằng file thật được dùng để Windows multiprocessing spawn hoạt
+động; không dùng stdin làm main. Các nhóm bị lỗi do thiếu tài nguyên/runner đã
+chạy lại đạt 39 passed / 2 skipped, gồm 5 golden và 4 batch contract trên hàm gốc.
 
 ## Nghiệm thu video thật
 
