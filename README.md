@@ -122,3 +122,7 @@ Không chạy script chuyển môi trường khi dịch vụ Tool V1 còn hoạt
 
 Bản sửa tồn đọng sau Phase 6 và golden baseline trước refactor được ghi trong
 [báo cáo chuẩn bị Phase 7](docs/pre_phase7_hardening.md).
+
+Phần tách bốn hàm lớn và bằng chứng giữ nguyên hành vi được ghi trong
+[báo cáo Phase 7](docs/phase7_function_refactor.md), gồm bước nghiệm thu video
+ngắn do người dùng chạy trên dashboard sau khi chủ động nạp code mới.
