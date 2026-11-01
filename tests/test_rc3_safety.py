@@ -20,9 +20,14 @@ class RC3Checks(unittest.TestCase):
     def test_release_boundary(self):
         for name in ("backend/.env", "backend/.ENV.local", "backend/gdrive_token.json",
                      "v1_code_changes_only.patch", "backend/model_venv/x.py",
-                     "../backend/main.py", "backend/client.key"):
+                     "../backend/main.py", "backend/client.key",
+                     "tools/render_node/node_modules/pkg/index.js",
+                     "scratch/phase7/run_suite.py",
+                     "backend/scripts_and_tests/test_ocr.py"):
             self.assertFalse(package.should_include(name), name)
-        for name in ("backend/main.py", "backend/.env.example", "tests/test_rc3_safety.py"):
+        for name in ("backend/main.py", "backend/.env.example", "tests/test_rc3_safety.py",
+                     "scripts/verify_runtime_health.py", "tools/render_node/package.json",
+                     "tools/render_node/package-lock.json", "requirements.lock"):
             self.assertTrue(package.should_include(name), name)
 
     def test_history_live_lock_cannot_be_stolen(self):
