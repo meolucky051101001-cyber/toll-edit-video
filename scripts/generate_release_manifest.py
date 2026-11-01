@@ -103,7 +103,7 @@ def collect_release_files(root: Path, target_subdirs: List[str]) -> List[Path]:
                 rel = p.relative_to(root)
                 if should_include_file(rel):
                     files.append(rel)
-    for p in sorted(list(root.glob("*.py")) + [root / "V1_BASELINE_MANIFEST.sha256"]):
+    for p in sorted(list(root.glob("*.py")) + [root / "releases" / "V1_BASELINE_MANIFEST.sha256"]):
         if p.is_file():
             rel = p.relative_to(root)
             if should_include_file(rel):
@@ -181,7 +181,7 @@ def generate_manifest(root: Path, target_subdirs: List[str], create_backup_flag:
         manifest_entries.append(f"{sha256}  {norm_path}")
         manifest_dict[norm_path] = sha256
 
-    manifest_file = root / "RELEASE_MANIFEST.sha256"
+    manifest_file = root / "releases" / "RELEASE_MANIFEST.sha256"
     manifest_file.write_text("\n".join(manifest_entries) + "\n", encoding="utf-8")
     print(f"Wrote SHA256 manifest to: {manifest_file} ({len(manifest_entries)} entries)")
 
@@ -200,7 +200,7 @@ def generate_manifest(root: Path, target_subdirs: List[str], create_backup_flag:
         "test_evidence": evidence,
         "security_hygiene": "PASS",
     }
-    meta_file = root / "RELEASE_METADATA.json"
+    meta_file = root / "releases" / "RELEASE_METADATA.json"
     meta_file.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Wrote release metadata to: {meta_file}")
 
@@ -216,7 +216,7 @@ def main():
     args = parser.parse_args()
 
     if args.verify:
-        manifest_file = ROOT / "RELEASE_MANIFEST.sha256"
+        manifest_file = ROOT / "releases" / "RELEASE_MANIFEST.sha256"
         if not manifest_file.exists():
             print(f"Error: {manifest_file} does not exist.")
             sys.exit(1)

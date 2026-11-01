@@ -1,4 +1,4 @@
-﻿"""Independent packaging and validation script for Tool V1.0 Final release.
+"""Independent packaging and validation script for Tool V1.0 Final release.
 
 Generates a clean, lightweight release zip archive for code review / deployment,
 excluding machine learning model weights, virtual environments, caches, and runtime data.
@@ -10,7 +10,8 @@ import hashlib
 import tempfile
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parent
+# Script đã chuyển vào scripts/packaging/ — lùi 3 cấp để trỏ về thư mục gốc repo.
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 OUTPUT_ZIP = ROOT_DIR / "Tool_V1.0_Reviewed_RC3.zip"
 
 EXCLUDE_DIRS = {
@@ -55,30 +56,17 @@ EXCLUDE_FILES = {
     "app.log",
 }
 
-ALLOWED_TOP_DIRS = ["backend", "tests", "docs", "assets"]
+ALLOWED_TOP_DIRS = ["backend", "tests", "docs", "assets", "scripts", "config", "releases"]
+# Chỉ các file còn nằm ở root. Các file đã chuyển vào scripts//config//releases/
+# được bao qua ALLOWED_TOP_DIRS. Đã dọn các entry stale (file không còn tồn tại).
 ALLOWED_TOP_FILES = [
     "README.md",
     "README_FIRST.md",
-    "CHATGPT_REVIEW_GUIDE.md",
-    "TOOL_V2_FULL_GUIDE.md",
-    "DASHBOARD_MONITOR_HANDOVER.md",
-    "DOCS_HE_THONG_GIAM_SAT_VA_A2UI.md",
     "requirements.txt",
-    "setup_v1.ps1",
-    "setup_new_laptop.ps1",
     "start_bot.bat",
     "stop_bot.bat",
-    "Giao_Dien_Quan_Sat_Tool.bat",
-    "RESTORE_SAFE_BASELINE.bat",
     "KhoiDongAn.vbs",
-    "MoDieuKhien.vbs",
-    "TatHoanToan.bat",
     "run_batch_edit.bat",
-    "download_audio.py",
-    "extract_wav.py",
-    "v1_code_changes_only.patch",
-    "v1_master_fix_all_phases.patch",
-    "package_v1_release.py",
 ]
 
 
@@ -193,7 +181,6 @@ def create_release_zip():
             "backend/job_tracker.py",
             "backend/templates/dashboard.html",
             "tests/test_v1_phase9_1_final_gate.py",
-            "CHATGPT_REVIEW_GUIDE.md",
             "README.md",
             "start_bot.bat",
             "stop_bot.bat",

@@ -1,3 +1,6 @@
+# Script đã chuyển vào scripts/setup/ — quay về thư mục gốc repo để các đường dẫn tương đối (backend\..., requirements.txt) hoạt động đúng.
+Set-Location (Resolve-Path (Join-Path $PSScriptRoot "..\.."))
+
 Write-Host "=============================================" -ForegroundColor Cyan
 Write-Host "       TOOL V1 - AUTO SETUP SCRIPT          " -ForegroundColor Cyan
 Write-Host "=============================================" -ForegroundColor Cyan
