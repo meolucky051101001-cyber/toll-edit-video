@@ -120,7 +120,9 @@ class TranslationFailureTests(unittest.TestCase):
                 return "Xin chào"
 
         segment = SimpleNamespace(index=23, content="你好")
-        with mock.patch.object(
+        with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
+            translation, "translate_with_gemini", return_value=None
+        ), mock.patch.object(
             translation, "GoogleTranslator", ErrorPayloadGoogleTranslator
         ), mock.patch.object(
             translation, "MyMemoryTranslator", WorkingMyMemoryTranslator
