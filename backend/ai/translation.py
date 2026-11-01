@@ -46,9 +46,9 @@ except Exception:
             return decorator
 
 try:
-    from .v1_gemini_dispatcher import call_gemini_api, DEFAULT_TRANSLATION_MODELS, DEFAULT_CONDENSATION_MODELS
+    from .v1_gemini_dispatcher import call_gemini_api, DEFAULT_TRANSLATION_MODELS, DEFAULT_CONDENSATION_MODELS, resolve_gemini_models
 except ImportError:
-    from v1_gemini_dispatcher import call_gemini_api, DEFAULT_TRANSLATION_MODELS, DEFAULT_CONDENSATION_MODELS
+    from v1_gemini_dispatcher import call_gemini_api, DEFAULT_TRANSLATION_MODELS, DEFAULT_CONDENSATION_MODELS, resolve_gemini_models
 
 from .model_policy import current_model_policy, ordered_unique
 
@@ -481,13 +481,7 @@ def translate_with_gemini(
                     "data": b64
                 }
             })
-        preferred_gemini = os.getenv("GEMINI_MODEL", "").strip()
-        candidate_models = []
-        if preferred_gemini:
-            candidate_models.append(preferred_gemini)
-        for m in DEFAULT_TRANSLATION_MODELS:
-            if m not in candidate_models:
-                candidate_models.append(m)
+        candidate_models = resolve_gemini_models("translation", DEFAULT_TRANSLATION_MODELS)
         models_to_try = list(candidate_models)
         response = None
         account = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
@@ -620,11 +614,16 @@ def translate_with_openai(
                         if split_res:
                             return split_res
                 else:
-                    logger.warning(f"Lỗi OpenAI ({om}) HTTP {resp.status_code}: {resp.text[:200]}")
+                    kwargs.get("failure_causes", []).append(
+                        requests.HTTPError(f"OpenAI HTTP {resp.status_code}", response=resp)
+                    )
+                    logger.warning("Lỗi OpenAI (%s) HTTP %s", om, resp.status_code)
             except Exception as o_err:
-                logger.warning(f"Lỗi gọi OpenAI ({om}): {o_err}")
+                kwargs.get("failure_causes", []).append(o_err)
+                logger.warning("Lỗi gọi OpenAI (%s): %s", om, type(o_err).__name__)
     except Exception as e:
-        logger.warning(f"Lỗi dịch OpenAI: {e}")
+        kwargs.get("failure_causes", []).append(e)
+        logger.warning("Lỗi dịch OpenAI: %s", type(e).__name__)
     return None
 
 def translate_with_deepseek(
@@ -684,11 +683,16 @@ def translate_with_deepseek(
                         if split_res:
                             return split_res
                 else:
-                    logger.warning(f"Lỗi DeepSeek ({dm}) HTTP {resp.status_code}: {resp.text[:200]}")
+                    kwargs.get("failure_causes", []).append(
+                        requests.HTTPError(f"DeepSeek HTTP {resp.status_code}", response=resp)
+                    )
+                    logger.warning("Lỗi DeepSeek (%s) HTTP %s", dm, resp.status_code)
             except Exception as d_err:
-                logger.warning(f"Lỗi gọi DeepSeek ({dm}): {d_err}")
+                kwargs.get("failure_causes", []).append(d_err)
+                logger.warning("Lỗi gọi DeepSeek (%s): %s", dm, type(d_err).__name__)
     except Exception as e:
-        logger.warning(f"Lỗi dịch DeepSeek: {e}")
+        kwargs.get("failure_causes", []).append(e)
+        logger.warning("Lỗi dịch DeepSeek: %s", type(e).__name__)
     return None
 
 def translate_with_g4f(texts, target_lang="vi", script_mode="default"):
@@ -1142,7 +1146,9 @@ def translate_subtitles(
     if strict:
         allow_fallback = os.getenv("V1_ALLOW_TRANSLATION_FALLBACK", "false").lower() in ("true", "1", "yes")
         if not allow_fallback:
-            raise RuntimeError("Strict translation mode requires a complete LLM translation without machine fallback")
+            raise RuntimeError(
+                "Strict translation mode requires a complete LLM translation without machine fallback"
+            ) from (failure_causes[-1] if failure_causes else None)
         logger.warning("Strict translation mode: LLM translation unavailable after retries. Falling back to machine translation to prevent job failure...")
 
     logger.info("Falling back to Google Translate...")
@@ -1397,7 +1403,7 @@ def condense_vietnamese_subtitles_batch(
         data, used_model = call_gemini_api(
             payload=payload,
             purpose="condensation",
-            models=DEFAULT_CONDENSATION_MODELS,
+            models=resolve_gemini_models("condensation", DEFAULT_CONDENSATION_MODELS, preferred=""),
             overall_deadline=deadline,
             stop_checker=stop_checker,
             job_id=job_id,

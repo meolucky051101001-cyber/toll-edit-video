@@ -4,6 +4,9 @@ Nhánh `codex/pre-phase7-hardening`, xuất phát từ Phase 6 (`fbd4fba`). Lư�
 thực hiện yêu cầu sửa lỗi tồn đọng rồi chuẩn bị Phase 7. Chưa tách các hàm lớn,
 chưa merge vào `tool-v1`, chưa push hoặc chuyển môi trường production.
 
+Đây là mốc chuẩn bị trước refactor. Kết quả triển khai tiếp theo nằm trong
+[báo cáo Phase 7](phase7_function_refactor.md).
+
 ## Các lỗi chức năng đã xử lý
 
 | Tồn đọng từ review Phase 6 | Hành vi sau sửa | Bằng chứng hồi quy |

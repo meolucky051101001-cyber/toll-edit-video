@@ -69,8 +69,25 @@ class TestStage3QCPolicyAndConcurrency(unittest.TestCase):
     def test_batch_processor_preserves_block_policy(self):
         """Batch processor must not override qc_gate_policy to WARN."""
         import inspect
+        import ast
+        import textwrap
         from backend import batch_processor
-        source = inspect.getsource(batch_processor.process_single_local_video)
+        pending = [batch_processor.process_single_local_video]
+        visited = set()
+        sources = []
+        while pending:
+            function = pending.pop()
+            if function.__name__ in visited:
+                continue
+            visited.add(function.__name__)
+            source = inspect.getsource(function)
+            sources.append(source)
+            for node in ast.walk(ast.parse(textwrap.dedent(source))):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    target = getattr(batch_processor, node.func.id, None)
+                    if inspect.isfunction(target) and target.__module__ == batch_processor.__name__:
+                        pending.append(target)
+        source = "\n".join(sources)
         # Ensure hardcoded WARN replacement is gone
         self.assertNotIn("qc_gate_policy=QCGatePolicy.WARN", source)
         self.assertNotIn("qc_gate_policy = QCGatePolicy.WARN", source)
