@@ -44,3 +44,33 @@ giây cùng giới hạn retry. Ca quality dùng bản dịch CJK và nguyên nh
 Nghiệm thu: focused 23 passed; full Python 3.10: 1160 passed / 0 failed /
 79 skipped / 3 warnings / 224 subtests (174,37 giây); Python 3.12: 1160 passed /
 0 failed / 79 skipped / 6 warnings (137,87 giây). Log `scratch/stages-abcd/b-*`.
+
+## Stage C — lifespan, control token và thứ tự Gemini
+
+FastAPI dùng lifespan, gọi `_startup_background_tasks()` với nguyên logic
+startup cũ; giữ alias `on_startup` cho caller trực tiếp. Test lifespan mock
+helper nên không khởi động tool_control, watcher hay bảo trì workspace thật.
+
+Đã rà soát template/static: năm điều khiển stop/pause/resume/audio/worker trên
+dashboard dùng wrapper fetch đầu trang, wrapper luôn thêm control token với
+object headers và Headers. Timeline/workflow có token riêng. Xóa hoàn toàn
+miễn trừ `X-Dashboard-Input`; test middleware không gọi các handler điều khiển
+thật. Node test chạy chính wrapper từ template cho cả năm endpoint.
+
+Có thể cấu hình `V1_GEMINI_TRANSLATION_MODELS` và
+`V1_GEMINI_CONDENSATION_MODELS` bằng danh sách tên model phân tách dấu phẩy.
+Danh sách override thay thế thứ tự mặc định, trim và bỏ trùng. Không đặt thì
+giữ preset/ưu tiên legacy; explicit `models` của caller vẫn được ưu tiên.
+Không thay `.env` production hoặc tự chọn model mới. Cache dịch bao gồm thứ tự
+model đã resolve nên không dùng nhầm cache của cấu hình model cũ.
+
+Model COOLDOWN không nhận request tới khi hết hạn; khi thành HALF_OPEN được
+xếp sau ACTIVE, giữ single-probe nguyên tử qua SQLite. Nếu tất cả đang cooldown,
+trả lỗi tạm thời ngay để Telegram dùng backoff, không ngủ chờ hoặc probe sớm.
+Test mới dùng SQLite tạm và HTTP mock, không đọc DB circuit production.
+
+Nghiệm thu: focused 43 passed / 1 skip quarantine có sẵn; Node 11 passed.
+Full Python 3.10: 1168 passed / 0 failed / 79 skipped / 1 warning / 259 subtests
+(155,52 giây); Python 3.12: 1168 passed / 0 failed / 79 skipped / 4 warnings
+(144,66 giây). Đã hết hai warning FastAPI `on_event`.
+Log `scratch/stages-abcd/c-*`; không thêm skip hoặc giảm assertion cũ.

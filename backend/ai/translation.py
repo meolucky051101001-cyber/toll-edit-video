@@ -46,9 +46,9 @@ except Exception:
             return decorator
 
 try:
-    from .v1_gemini_dispatcher import call_gemini_api, DEFAULT_TRANSLATION_MODELS, DEFAULT_CONDENSATION_MODELS
+    from .v1_gemini_dispatcher import call_gemini_api, DEFAULT_TRANSLATION_MODELS, DEFAULT_CONDENSATION_MODELS, resolve_gemini_models
 except ImportError:
-    from v1_gemini_dispatcher import call_gemini_api, DEFAULT_TRANSLATION_MODELS, DEFAULT_CONDENSATION_MODELS
+    from v1_gemini_dispatcher import call_gemini_api, DEFAULT_TRANSLATION_MODELS, DEFAULT_CONDENSATION_MODELS, resolve_gemini_models
 
 from .model_policy import current_model_policy, ordered_unique
 
@@ -481,13 +481,7 @@ def translate_with_gemini(
                     "data": b64
                 }
             })
-        preferred_gemini = os.getenv("GEMINI_MODEL", "").strip()
-        candidate_models = []
-        if preferred_gemini:
-            candidate_models.append(preferred_gemini)
-        for m in DEFAULT_TRANSLATION_MODELS:
-            if m not in candidate_models:
-                candidate_models.append(m)
+        candidate_models = resolve_gemini_models("translation", DEFAULT_TRANSLATION_MODELS)
         models_to_try = list(candidate_models)
         response = None
         account = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
@@ -1409,7 +1403,7 @@ def condense_vietnamese_subtitles_batch(
         data, used_model = call_gemini_api(
             payload=payload,
             purpose="condensation",
-            models=DEFAULT_CONDENSATION_MODELS,
+            models=resolve_gemini_models("condensation", DEFAULT_CONDENSATION_MODELS, preferred=""),
             overall_deadline=deadline,
             stop_checker=stop_checker,
             job_id=job_id,

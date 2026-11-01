@@ -2,6 +2,7 @@ import os
 import sys
 from pathlib import Path
 import logging
+from contextlib import asynccontextmanager
 
 logger = logging.getLogger("main_api")
 
@@ -86,7 +87,13 @@ if __name__ == "__main__":
     # Importing this module (tests, E2E scripts) must not attach a second writer to the live log file.
     _configure_dashboard_logging()
 
-app = FastAPI()
+@asynccontextmanager
+async def _app_lifespan(app: FastAPI):
+    await _startup_background_tasks()
+    yield
+
+
+app = FastAPI(lifespan=_app_lifespan)
 
 
 @app.exception_handler(Exception)
@@ -182,14 +189,7 @@ async def security_middleware(request: Request, call_next):
     if method in ("POST", "PUT", "DELETE", "PATCH") and (path.startswith("/api/") or path.startswith("/a2ui/")):
         token = request.headers.get("X-Local-Control-Token", "")
         if not token or not secrets.compare_digest(str(token), str(LOCAL_TOKEN)):
-            # Dự phòng cho các nút điều khiển nội bộ từ dashboard UI hợp lệ
-            is_dashboard_internal = (
-                request.headers.get("X-Dashboard-Input") == "1"
-                and request.headers.get("origin") in (None, "http://127.0.0.1:8088", "http://localhost:8088", "http://127.0.0.1:5173", "http://localhost:5173")
-                and path in ("/api/stop-batch", "/api/pause-video", "/api/resume-video", "/api/audio-settings", "/api/worker-settings")
-            )
-            if not is_dashboard_internal:
-                return JSONResponse(status_code=403, content={"detail": "Yêu cầu thiếu hoặc sai X-Local-Control-Token"})
+            return JSONResponse(status_code=403, content={"detail": "Yêu cầu thiếu hoặc sai X-Local-Control-Token"})
 
 
     return await call_next(request)
@@ -244,8 +244,7 @@ def _install_asyncio_quiet_disconnect_handler() -> None:
         logger.debug('Suppressed error in main._install_asyncio_quiet_disconnect_handler (asyncio.get_running_loop): %s', type(_phase6_exc).__name__, exc_info=False)
 
 
-@app.on_event("startup")
-async def on_startup():
+async def _startup_background_tasks():
     _install_asyncio_quiet_disconnect_handler()
     ensure_tool_control()
     try:
@@ -262,6 +261,11 @@ async def on_startup():
         asyncio.create_task(asyncio.to_thread(run_full_retention_maintenance))
     except Exception as e:
         logger.warning("Không thể chạy bảo trì dọn dẹp workspace: %s", e)
+
+
+# Keep direct callers compatible; startup registration belongs to lifespan.
+on_startup = _startup_background_tasks
+
 WORKSPACE = os.getenv("AUTODUB_WORKSPACE", str(BASE_DIR.parent / "workspace"))
 OUTPUT_DIR = os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")

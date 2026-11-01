@@ -95,6 +95,25 @@ class GeminiRequestError(GeminiError):
     """Invalid shared request; changing models cannot repair it."""
 
 
+def resolve_gemini_models(purpose: str, defaults=None, preferred=None) -> List[str]:
+    """Resolve an authoritative environment order, preserving legacy defaults."""
+    condensation = purpose == "condensation"
+    setting = "V1_GEMINI_CONDENSATION_MODELS" if condensation else "V1_GEMINI_TRANSLATION_MODELS"
+    configured = os.getenv(setting, "").strip()
+    if configured:
+        candidates = configured.split(",")
+    else:
+        if defaults is None:
+            defaults = DEFAULT_CONDENSATION_MODELS if condensation else DEFAULT_TRANSLATION_MODELS
+        if preferred is None:
+            preferred = os.getenv("GEMINI_CONDENSE_MODEL" if condensation else "GEMINI_MODEL", "")
+        candidates = [preferred] + list(defaults)
+    ordered = list(dict.fromkeys(str(model).strip() for model in candidates if str(model).strip()))
+    if not ordered:
+        raise GeminiConfigError(f"{setting} contains no model names")
+    return ordered
+
+
 def mask_secret(text: str) -> str:
     """Mask any API keys in URLs or strings for secure logging."""
     if not text:
@@ -309,7 +328,11 @@ class GeminiCircuitBreaker:
             logger.warning(f"[CIRCUIT_BREAKER] DB read error: {e}. Falling back to default list.")
             return [(m, "ACTIVE") for m in candidates]
 
-        return allowed
+        # Healthy candidates keep their configured order. Recovery probes come
+        # last so a recovered preview does not delay an already healthy model.
+        return [item for item in allowed if item[1] == "ACTIVE"] + [
+            item for item in allowed if item[1] == "HALF_OPEN"
+        ]
 
     def get_min_cooldown_remaining(
         self,
@@ -586,18 +609,15 @@ def call_gemini_api(
     curr_key, account_hash, key_cooldown = circuit_breaker.select_active_key(keys_pool)
 
     if models is None:
-        if purpose == "condensation":
-            pref = os.getenv("GEMINI_CONDENSE_MODEL", "").strip()
-            models = ([pref] if pref else []) + DEFAULT_CONDENSATION_MODELS
-        else:
-            pref = os.getenv("GEMINI_MODEL", "").strip()
-            models = ([pref] if pref else []) + DEFAULT_TRANSLATION_MODELS
+        models = resolve_gemini_models(purpose)
 
     # Deduplicate while preserving order
     ordered_models = []
     for m in models:
         if m and m not in ordered_models:
             ordered_models.append(m)
+    if not ordered_models:
+        raise GeminiConfigError("Gemini model list is empty")
 
     # Monotonic deadline enforcement
     if overall_deadline is None:
@@ -621,22 +641,11 @@ def call_gemini_api(
                 break
 
     if not candidate_statuses:
-        # Check if the shortest cooldown is short enough to wait out within deadline
-        best_model, min_wait = circuit_breaker.get_min_cooldown_remaining(account_hash, purpose, ordered_models)
-        remaining = overall_deadline - time.monotonic()
-        if 0 < min_wait <= min(remaining - 5.0, 15.0):
-            logger.info(
-                f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose}: Tất cả model trong cooldown, chờ {min_wait:.1f}s cho {best_model} hồi phục..."
-            )
-            time.sleep(min_wait + 0.5)
-            candidate_statuses = circuit_breaker.get_candidate_models(account_hash, purpose, ordered_models, reserve_probe=False)
-
-    if not candidate_statuses:
-        # If still in cooldown, allow an immediate probe rescue on the top priority models rather than failing dead
-        logger.warning(
-            f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose}: Cooldown kích hoạt, cho phép probe thử nghiệm trên model ưu tiên hàng đầu: {ordered_models[:2]}"
+        # Leave durable job backoff to the caller; never sleep or probe a model
+        # before its shared cooldown expires.
+        raise GeminiAllModelsFailedError(
+            "All Gemini models temporarily unavailable (cooldown); retry later."
         )
-        candidate_statuses = [(m, "HALF_OPEN") for m in ordered_models[:2]]
 
     last_exception = None
 
