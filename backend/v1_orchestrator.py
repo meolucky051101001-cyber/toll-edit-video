@@ -18,6 +18,7 @@ import math
 import logging
 import asyncio
 from v1_stage_runtime import save_payload, load_payload, await_stage
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -69,6 +70,33 @@ def resolve_qc_policy(config=None, overrides=None, workspace_path=None) -> str:
     except Exception:
         return "BLOCK"
     return live if live in QC_POLICIES else "BLOCK"
+
+
+
+@dataclass
+class _ExecutionContext:
+    """Job-owned settings/checkpoints; no state is shared between execute calls."""
+    v_path: Path
+    job_id: str
+    out_dir: Path
+    manifest: JobManifest
+    effective_cfg: dict
+    planned: dict
+    resolved_mode: str
+    overrides: dict
+    delivery_path: Optional[str | Path]
+    t_job_start: float
+    base_name: str
+    visual_sub_to_speech: bool
+    video_dur_s: float = 0.0
+    can_resume: bool = False
+    verified_stages: list = field(default_factory=list)
+    artifacts_acc: dict = field(default_factory=dict)
+    notify: Any = None
+    check_stop: Any = None
+    pause_checkpoint: Any = None
+    run_stage: Any = None
+    ocr_reader_releaser: Any = None
 
 
 class V1Orchestrator:
@@ -286,6 +314,63 @@ class V1Orchestrator:
         4. Kiểm định chất lượng Quality Gate 8 nhóm.
         5. Xuất bản (Publish/Replace) nguyên tử và gửi thông báo.
         """
+        c = self._prepare_execution(
+            video_path, job_id, output_dir, delivery_path, user_mode, overrides, resume_if_possible)
+        if isinstance(c, dict):
+            return c
+        job_id, resolved_mode = c.job_id, c.resolved_mode
+        total_steps = len(STAGES_ORDER)
+
+        async def notify(stage: str, step: int, pct: float, msg: str, details: Optional[Dict[str, Any]] = None):
+            if progress_callback:
+                d = details or {}
+                d["video_mode"] = resolved_mode
+                d["job_id"] = job_id
+                try:
+                    if asyncio.iscoroutinefunction(progress_callback):
+                        await progress_callback(stage, step, total_steps, pct, msg, d)
+                    else:
+                        progress_callback(stage, step, total_steps, pct, msg, d)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("Progress notification failed; keep processing job %s", job_id, exc_info=True)
+
+        def check_stop():
+            from batch_processor import BatchStopRequested
+            import job_tracker
+            import stop_service
+            if (stop_checker and stop_checker()) or job_tracker.is_stop_requested() or stop_service.is_stop_requested(self.workspace):
+                raise BatchStopRequested(f"Job {job_id} đã bị dừng theo yêu cầu.")
+
+        async def pause_checkpoint():
+            try:
+                import video_pause
+                await video_pause.checkpoint()
+            except Exception:
+                pass
+
+        async def run_stage(awaitable, timeout):
+            return await await_stage(awaitable, timeout, check_stop)
+
+        c.notify, c.check_stop = notify, check_stop
+        c.pause_checkpoint, c.run_stage = pause_checkpoint, run_stage
+        self._restore_execution_checkpoint(c, resume_if_possible)
+        original_audio = await self._stage_extract(c)
+        vocals_audio, no_vocals_audio = await self._stage_separate(c, original_audio)
+        srt_original, srt_segments, asr_was_empty = await self._stage_asr(c, vocals_audio, original_audio)
+        srt_segments, floating_segments, vid_w, vid_h, main_y_pct = await self._stage_ocr(
+            c, srt_original, srt_segments, asr_was_empty)
+        translated_segments, v1_script_mode = await self._stage_translate(c, srt_segments)
+        translated_segments, dubbing_audio_files, ass_path = await self._stage_tts(
+            c, original_audio, vocals_audio, srt_segments, translated_segments,
+            floating_segments, vid_w, vid_h, main_y_pct, v1_script_mode)
+        mixed_audio = await self._stage_mix(c, original_audio, no_vocals_audio, asr_was_empty, dubbing_audio_files)
+        final_video, temp_render_video = await self._stage_render(c, ass_path, mixed_audio, main_y_pct)
+        return await self._stage_qc_and_deliver(
+            c, final_video, temp_render_video, translated_segments, dubbing_audio_files, mixed_audio, ass_path)
+
+    def _prepare_execution(self, video_path, job_id, output_dir, delivery_path, user_mode, overrides, resume_if_possible):
         v_path = Path(video_path).resolve()
         if not v_path.is_file():
             raise FileNotFoundError(f"Video đầu vào không tồn tại: {v_path}")
@@ -349,6 +434,38 @@ class V1Orchestrator:
             )
         visual_sub_to_speech = bool(effective_cfg.get("visual_sub_to_speech"))
 
+        self._record_execution_router(manifest, effective_cfg, planned, resolved_mode)
+
+        # Legacy snapshots did not freeze these fields. Capture missing runtime
+        # defaults exactly once without rerouting or changing existing models.
+        # We cannot reconstruct settings that were never recorded historically.
+        if not effective_cfg.get("feature_flags") or not effective_cfg.get("voice_config"):
+            from v1_job_policy import capture_job_settings
+            captured = capture_job_settings(self.workspace)
+            for field in ("feature_flags", "voice_config", "voice_mode"):
+                if not effective_cfg.get(field):
+                    effective_cfg[field] = overrides.get(field) or captured[field]
+            effective_cfg["legacy_runtime_defaults_captured"] = True
+            logger.warning("Legacy job %s lacked runtime snapshot; captured missing settings once", job_id)
+
+        # Thư mục làm việc cho job
+        base_name = v_path.stem
+        out_dir = requested_out_dir
+        previous_out_dir = effective_cfg.get("output_dir")
+        if previous_out_dir and Path(previous_out_dir).resolve() != out_dir:
+            raise ValueError("Job đang resume phải dùng nguyên thư mục làm việc đã đóng băng.")
+        effective_cfg["output_dir"] = str(out_dir)
+        self.manifest_manager.save_manifest(manifest)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        return _ExecutionContext(
+            v_path=v_path, job_id=job_id, out_dir=out_dir, manifest=manifest,
+            effective_cfg=effective_cfg, planned=planned, resolved_mode=resolved_mode,
+            overrides=overrides, delivery_path=delivery_path, t_job_start=t_job_start,
+            base_name=base_name, visual_sub_to_speech=visual_sub_to_speech,
+        )
+
+    def _record_execution_router(self, manifest, effective_cfg, planned, resolved_mode):
         # Ghi nhận thông tin bộ điều phối video (SML Pipeline Router) vào job_tracker
         routing = getattr(manifest, "routing_snapshot", {}) or {}
         req_mode = routing.get("requested_mode") or effective_cfg.get("video_mode") or "AUTO"
@@ -376,161 +493,109 @@ class V1Orchestrator:
         except Exception as rh_err:
             logger.warning("Không thể ghi nhận router_info vào job_tracker: %s", rh_err)
 
-        # Legacy snapshots did not freeze these fields. Capture missing runtime
-        # defaults exactly once without rerouting or changing existing models.
-        # We cannot reconstruct settings that were never recorded historically.
-        if not effective_cfg.get("feature_flags") or not effective_cfg.get("voice_config"):
-            from v1_job_policy import capture_job_settings
-            captured = capture_job_settings(self.workspace)
-            for field in ("feature_flags", "voice_config", "voice_mode"):
-                if not effective_cfg.get(field):
-                    effective_cfg[field] = overrides.get(field) or captured[field]
-            effective_cfg["legacy_runtime_defaults_captured"] = True
-            logger.warning("Legacy job %s lacked runtime snapshot; captured missing settings once", job_id)
-
-        # Thư mục làm việc cho job
-        base_name = v_path.stem
-        out_dir = requested_out_dir
-        previous_out_dir = effective_cfg.get("output_dir")
-        if previous_out_dir and Path(previous_out_dir).resolve() != out_dir:
-            raise ValueError("Job đang resume phải dùng nguyên thư mục làm việc đã đóng băng.")
-        effective_cfg["output_dir"] = str(out_dir)
-        self.manifest_manager.save_manifest(manifest)
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        total_steps = len(STAGES_ORDER)
-
-        async def notify(stage: str, step: int, pct: float, msg: str, details: Optional[Dict[str, Any]] = None):
-            if progress_callback:
-                d = details or {}
-                d["video_mode"] = resolved_mode
-                d["job_id"] = job_id
-                try:
-                    if asyncio.iscoroutinefunction(progress_callback):
-                        await progress_callback(stage, step, total_steps, pct, msg, d)
-                    else:
-                        progress_callback(stage, step, total_steps, pct, msg, d)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.warning("Progress notification failed; keep processing job %s", job_id, exc_info=True)
-
-        def check_stop():
-            from batch_processor import BatchStopRequested
-            import job_tracker
-            import stop_service
-            if (stop_checker and stop_checker()) or job_tracker.is_stop_requested() or stop_service.is_stop_requested(self.workspace):
-                raise BatchStopRequested(f"Job {job_id} đã bị dừng theo yêu cầu.")
-
-        async def pause_checkpoint():
-            try:
-                import video_pause
-                await video_pause.checkpoint()
-            except Exception:
-                pass
-
-        async def run_stage(awaitable, timeout):
-            return await await_stage(awaitable, timeout, check_stop)
-
+    def _restore_execution_checkpoint(self, c, resume_if_possible):
         # Probe metadata, not full decoded audio, for long videos.
-        video_dur_s = float(manifest.routing_snapshot["metadata"]["duration_s"])
+        c.video_dur_s = float(c.manifest.routing_snapshot["metadata"]["duration_s"])
         try:
             import soundfile as sf
-            temp_probe = out_dir / "original.wav"
+            temp_probe = c.out_dir / "original.wav"
             if temp_probe.is_file():
-                video_dur_s = sf.info(str(temp_probe)).duration
+                c.video_dur_s = sf.info(str(temp_probe)).duration
         except Exception:
             pass
 
         # Kiểm tra Resume
-        can_resume = False
+        c.can_resume = False
         resume_stage = STAGES_ORDER[0]
-        verified_stages = []
+        c.verified_stages = []
         if resume_if_possible:
-            can_resume, resume_stage, resume_details = self.manifest_manager.verify_manifest_resumability(job_id)
-            verified_stages = resume_details.get("verified_stages", [])
-            if effective_cfg.get("speech_timing_version") != 3:
+            c.can_resume, resume_stage, resume_details = self.manifest_manager.verify_manifest_resumability(c.job_id)
+            c.verified_stages = resume_details.get("verified_stages", [])
+            if c.effective_cfg.get("speech_timing_version") != 3:
                 tts_pos = STAGES_ORDER.index("ai_tts")
-                verified_stages = [s for s in verified_stages if STAGES_ORDER.index(s) < tts_pos]
+                c.verified_stages = [s for s in c.verified_stages if STAGES_ORDER.index(s) < tts_pos]
             from v1_ocr_geometry import OCR_GEOMETRY_VERSION
-            if "visual_ocr" in verified_stages:
+            if "visual_ocr" in c.verified_stages:
                 try:
-                    cached_geometry = load_payload(out_dir / "ocr.json").get("geometry_version")
+                    cached_geometry = load_payload(c.out_dir / "ocr.json").get("geometry_version")
                 except (OSError, ValueError, KeyError, TypeError):
                     cached_geometry = None
                 if cached_geometry != OCR_GEOMETRY_VERSION:
                     ocr_pos = STAGES_ORDER.index("visual_ocr")
-                    verified_stages = [s for s in verified_stages if STAGES_ORDER.index(s) < ocr_pos]
+                    c.verified_stages = [s for s in c.verified_stages if STAGES_ORDER.index(s) < ocr_pos]
                     logger.info('[RESUME] Old OCR geometry: recompute OCR and dependent stages; keep audio/ASR')
 
-        artifacts_acc: Dict[str, str] = {}
+        c.artifacts_acc: Dict[str, str] = {}
 
+    async def _stage_extract(self, c):
         # ==================== STAGE 1: EXTRACT AUDIO ====================
         stage_id = "extract_audio"
-        original_audio = out_dir / "original.wav"
-        check_stop()
-        await pause_checkpoint()
+        original_audio = c.out_dir / "original.wav"
+        c.check_stop()
+        await c.pause_checkpoint()
 
-        should_run = not (can_resume and stage_id in verified_stages)
+        should_run = not (c.can_resume and stage_id in c.verified_stages)
         if should_run:
-            await notify(stage_id, 1, 10.0, "🎧 Bước 1/8: Đang trích xuất âm thanh gốc...")
-            self.manifest_manager.record_stage_start(job_id, stage_id)
-            t_out = self._calculate_stage_timeout(stage_id, video_dur_s, resolved_mode)
+            await c.notify(stage_id, 1, 10.0, "🎧 Bước 1/8: Đang trích xuất âm thanh gốc...")
+            self.manifest_manager.record_stage_start(c.job_id, stage_id)
+            t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
                 from video_utils import extract_audio_from_video
-                check_stop()
-                ok = await run_stage(
-                    asyncio.to_thread(extract_audio_from_video, str(v_path), str(original_audio)),
+                c.check_stop()
+                ok = await c.run_stage(
+                    asyncio.to_thread(extract_audio_from_video, str(c.v_path), str(original_audio)),
                     timeout=t_out
                 )
                 if not ok or not original_audio.is_file() or original_audio.stat().st_size < 1000:
                     raise RuntimeError("Trích xuất âm thanh thất bại hoặc file rỗng.")
-                self.manifest_manager.record_stage_complete(job_id, stage_id, {"original_audio": str(original_audio)})
+                self.manifest_manager.record_stage_complete(c.job_id, stage_id, {"original_audio": str(original_audio)})
             except Exception as exc:
-                self.manifest_manager.record_stage_failure(job_id, stage_id, str(exc))
+                self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))
                 raise
         else:
             logger.info("[RESUME] Bỏ qua stage 1 (extract_audio) do artifact đã được xác thực.")
-        artifacts_acc["original_audio"] = str(original_audio)
+        c.artifacts_acc["original_audio"] = str(original_audio)
 
         # Cập nhật thời lượng audio chính xác
         try:
             import soundfile as sf
-            video_dur_s = sf.info(str(original_audio)).duration
+            c.video_dur_s = sf.info(str(original_audio)).duration
         except Exception:
             pass
+        return original_audio
 
+    async def _stage_separate(self, c, original_audio):
         # ==================== STAGE 2: SEPARATE VOCALS ====================
         stage_id = "separate_vocals"
-        vocals_audio = out_dir / "vocals.wav"
-        no_vocals_audio = out_dir / "no_vocals.wav"
-        check_stop()
-        await pause_checkpoint()
+        vocals_audio = c.out_dir / "vocals.wav"
+        no_vocals_audio = c.out_dir / "no_vocals.wav"
+        c.check_stop()
+        await c.pause_checkpoint()
 
-        should_run = not (can_resume and stage_id in verified_stages)
+        should_run = not (c.can_resume and stage_id in c.verified_stages)
         if should_run:
             sep_mode = (
-                effective_cfg.get("separation_mode")
-                or effective_cfg.get("separation_model")
-                or planned.get("separation_model")
-                or planned.get("separator_engine")
-                or ("demucs" if resolved_mode in ("LONG", "MEDIUM") else "roformer")
+                c.effective_cfg.get("separation_mode")
+                or c.effective_cfg.get("separation_model")
+                or c.planned.get("separation_model")
+                or c.planned.get("separator_engine")
+                or ("demucs" if c.resolved_mode in ("LONG", "MEDIUM") else "roformer")
             )
-            await notify(stage_id, 2, 25.0, f"🧠 Bước 2/8: Bóc tách giọng nói khỏi nhạc nền ({sep_mode.upper()})...", {"model": sep_mode})
-            self.manifest_manager.record_stage_start(job_id, stage_id)
-            t_out = self._calculate_stage_timeout(stage_id, video_dur_s, resolved_mode)
+            await c.notify(stage_id, 2, 25.0, f"🧠 Bước 2/8: Bóc tách giọng nói khỏi nhạc nền ({sep_mode.upper()})...", {"model": sep_mode})
+            self.manifest_manager.record_stage_start(c.job_id, stage_id)
+            t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
                 if sep_mode != "bypass":
                     self._check_gpu_guard(stage_id)
                 from video_utils import separate_vocals_demucs
                 from v1_gpu_gatekeeper import async_gpu_gatekeeper
-                check_stop()
+                c.check_stop()
                 async with async_gpu_gatekeeper("vocal_separation", timeout_seconds=t_out):
-                    v_res, nv_res = await run_stage(
+                    v_res, nv_res = await c.run_stage(
                         asyncio.to_thread(
                             separate_vocals_demucs,
                             str(original_audio),
-                            str(out_dir),
+                            str(c.out_dir),
                             separation_mode=sep_mode,
                         ),
                         timeout=t_out
@@ -539,163 +604,110 @@ class V1Orchestrator:
                 no_vocals_audio = Path(nv_res)
                 if not vocals_audio.is_file() or not no_vocals_audio.is_file():
                     raise RuntimeError("Tách âm thanh không xuất đủ file vocals hoặc no_vocals.")
-                self.manifest_manager.record_stage_complete(job_id, stage_id, {
+                self.manifest_manager.record_stage_complete(c.job_id, stage_id, {
                     "vocals_audio": str(vocals_audio),
                     "no_vocals_audio": str(no_vocals_audio),
                 })
             except Exception as exc:
-                self.manifest_manager.record_stage_failure(job_id, stage_id, str(exc))
+                self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))
                 raise
         else:
-            saved = manifest.stages[stage_id]["artifacts"]
+            saved = c.manifest.stages[stage_id]["artifacts"]
             vocals_audio = Path(saved["vocals_audio"]["path"])
             no_vocals_audio = Path(saved["no_vocals_audio"]["path"])
             logger.info("[RESUME] Khôi phục đúng đường dẫn file tách âm đã xác thực.")
-        artifacts_acc["vocals_audio"] = str(vocals_audio)
-        artifacts_acc["no_vocals_audio"] = str(no_vocals_audio)
+        c.artifacts_acc["vocals_audio"] = str(vocals_audio)
+        c.artifacts_acc["no_vocals_audio"] = str(no_vocals_audio)
+        return vocals_audio, no_vocals_audio
 
+    async def _stage_asr(self, c, vocals_audio, original_audio):
         # ==================== STAGE 3: SPEECH ASR ====================
         stage_id = "speech_asr"
-        srt_original = out_dir / "original.srt"
-        check_stop()
-        await pause_checkpoint()
+        srt_original = c.out_dir / "original.srt"
+        c.check_stop()
+        await c.pause_checkpoint()
 
-        should_run = not (can_resume and stage_id in verified_stages)
+        should_run = not (c.can_resume and stage_id in c.verified_stages)
         srt_segments = []
         asr_was_empty = False
         visual_ocr_cached = False
         if should_run:
-            asr_m = migrate_legacy_asr_model(str(planned.get("asr_model", "whisper_turbo")), "job plan")
+            asr_m = migrate_legacy_asr_model(str(c.planned.get("asr_model", "whisper_turbo")), "job plan")
             if asr_m == "whisper_sensevoice":
                 model_display = "Hybrid: Faster-Whisper Turbo + SenseVoice-Small (CTC 60ms)"
             elif asr_m == "sensevoice_small":
                 model_display = "SenseVoice-Small (ONNX INT8 Siêu Tốc)"
             else:
                 model_display = "Faster-Whisper Large-v3 Turbo"
-            await notify(stage_id, 3, 40.0, f"🤖 Bước 3/8: {model_display} đang nhận dạng giọng nói...")
-            self.manifest_manager.record_stage_start(job_id, stage_id)
-            t_out = self._calculate_stage_timeout(stage_id, video_dur_s, resolved_mode)
+            await c.notify(stage_id, 3, 40.0, f"🤖 Bước 3/8: {model_display} đang nhận dạng giọng nói...")
+            self.manifest_manager.record_stage_start(c.job_id, stage_id)
+            t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
                 self._check_gpu_guard(stage_id)
                 from ai.v1_asr_isolated import extract_subtitles_isolated as extract_subtitles_whisper
                 from v1_gpu_gatekeeper import async_gpu_gatekeeper
-                check_stop()
+                c.check_stop()
                 # extract_subtitles_whisper tự động điều phối Hybrid/SenseVoice hoặc Faster-Whisper + Chunking
                 async with async_gpu_gatekeeper("speech_asr", timeout_seconds=t_out):
-                    srt_segments = await run_stage(
+                    srt_segments = await c.run_stage(
                         asyncio.to_thread(
                             extract_subtitles_whisper,
                             str(vocals_audio),
                             str(srt_original),
                             original_audio_path=str(original_audio),
-                            model_id=planned["asr_model"], chunking=planned["asr_chunking"],
-                            chunk_size_s=planned["asr_chunk_size_s"], overlap_s=planned["asr_overlap_s"], timeout_s=t_out,
+                            model_id=c.planned["asr_model"], chunking=c.planned["asr_chunking"],
+                            chunk_size_s=c.planned["asr_chunk_size_s"], overlap_s=c.planned["asr_overlap_s"], timeout_s=t_out,
                         ),
                         timeout=t_out
                     )
                 asr_was_empty = not srt_segments or not srt_original.is_file()
-                if visual_sub_to_speech and not asr_was_empty and _looks_like_bgm_hallucination(srt_segments, video_dur_s):
+                if c.visual_sub_to_speech and not asr_was_empty and _looks_like_bgm_hallucination(srt_segments, c.video_dur_s):
                     logger.info(
                         "🎬 Visual mode: bỏ %d câu ASR nghi ảo giác nhạc nền (phủ thoại %.1f%%)",
                         len(srt_segments),
-                        100.0 * _merged_speech_coverage(srt_segments, video_dur_s) / max(video_dur_s, 1.0),
+                        100.0 * _merged_speech_coverage(srt_segments, c.video_dur_s) / max(c.video_dur_s, 1.0),
                     )
                     srt_segments = []
                     asr_was_empty = True
-                if visual_sub_to_speech:
-                    asr_cue_count = len(srt_segments)
-                    await notify(
-                        stage_id, 3, 40.0,
-                        "Đang quét phụ đề tiếng Trung trên màn hình (Chế độ Video không lời thoại)...",
-                    )
-                    from ocr_utils import perform_video_ocr, release_ocr_reader
-                    from v1_ocr_geometry import OCR_GEOMETRY_VERSION
-                    from ai.transcription import save_srt
-                    t_ocr = self._calculate_stage_timeout("visual_ocr", video_dur_s, resolved_mode)
-                    check_stop()
-                    try:
-                        async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=t_ocr):
-                            visual_segments, vid_w_src, vid_h_src, main_y_src = await run_stage(
-                                asyncio.to_thread(
-                                    perform_video_ocr,
-                                    str(v_path),
-                                    target_lang=effective_cfg.get("target_lang", "vi"),
-                                    sample_rate=1.0,
-                                    api_key=overrides.get("api_key") or os.getenv("GEMINI_API_KEY", ""),
-                                    srt_segments=[],
-                                    strict_geometry=True,
-                                    visual_sub_to_speech=True,
-                                    _source_duration=video_dur_s,
-                                ),
-                                timeout=t_ocr
-                            )
-                    finally:
-                        release_ocr_reader()
-                    if _visual_ocr_transcript_usable(visual_segments, video_dur_s):
-                        srt_segments = visual_segments
-                        for idx, seg in enumerate(srt_segments, start=1):
-                            seg.index = idx
-                        save_srt(srt_segments, str(srt_original))
-                        save_payload(
-                            out_dir / "ocr.json",
-                            geometry_version=OCR_GEOMETRY_VERSION,
-                            segments=srt_segments,
-                            floating_segments=[],
-                            width=vid_w_src,
-                            height=vid_h_src,
-                            main_y_pct=main_y_src,
-                            visual_asr_reuse=True,
-                            asr_was_empty=asr_was_empty,
-                        )
-                        visual_ocr_cached = True
-                        logger.info(
-                            "🎬 Visual OCR-to-TTS: dùng %d câu phụ đề trên hình thay cho ASR (%s)",
-                            len(srt_segments),
-                            "ASR rỗng" if asr_was_empty else f"ASR {asr_cue_count} câu",
-                        )
-                    elif asr_was_empty:
-                        raise RuntimeError(
-                            "Video không có lời thoại và cũng không phát hiện được phụ đề tiếng Trung trên màn hình."
-                        )
-                    else:
-                        logger.info(
-                            "Visual OCR-to-TTS: không đủ phụ đề trên hình, giữ ASR %d câu",
-                            len(srt_segments),
-                        )
+                if c.visual_sub_to_speech:
+                    srt_segments, visual_ocr_cached = await self._stage_visual_transcript(
+                        c, srt_segments, asr_was_empty, srt_original, async_gpu_gatekeeper)
                 elif asr_was_empty:
                     raise RuntimeError(f"ASR ({model_display}) không nhận dạng được câu thoại nào.")
-                save_payload(out_dir / "asr.json", segments=srt_segments, asr_was_empty=asr_was_empty)
-                self.manifest_manager.record_stage_complete(job_id, stage_id, {"srt_original": str(srt_original), "asr_data": str(out_dir / "asr.json")})
+                save_payload(c.out_dir / "asr.json", segments=srt_segments, asr_was_empty=asr_was_empty)
+                self.manifest_manager.record_stage_complete(c.job_id, stage_id, {"srt_original": str(srt_original), "asr_data": str(c.out_dir / "asr.json")})
             except Exception as exc:
-                self.manifest_manager.record_stage_failure(job_id, stage_id, str(exc))
+                self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))
                 raise
         else:
             import srt
             logger.info("[RESUME] Tải lại srt_original đã cache.")
-            sidecar = out_dir / "asr.json"
+            sidecar = c.out_dir / "asr.json"
             asr_payload = load_payload(sidecar) if sidecar.is_file() else {}
             srt_segments = asr_payload.get("segments") or list(srt.parse(srt_original.read_text(encoding="utf-8")))
             asr_was_empty = bool(asr_payload.get("asr_was_empty", False))
-            ocr_sidecar = out_dir / "ocr.json"
-            if visual_sub_to_speech and ocr_sidecar.is_file():
+            ocr_sidecar = c.out_dir / "ocr.json"
+            if c.visual_sub_to_speech and ocr_sidecar.is_file():
                 cached_ocr = load_payload(ocr_sidecar)
                 visual_ocr_cached = bool(cached_ocr.get("visual_asr_reuse"))
                 if visual_ocr_cached:
                     asr_was_empty = bool(cached_ocr.get("asr_was_empty", asr_was_empty))
-        artifacts_acc["srt_original"] = str(srt_original)
+        c.artifacts_acc["srt_original"] = str(srt_original)
+        return srt_original, srt_segments, asr_was_empty
 
+    async def _stage_ocr(self, c, srt_original, srt_segments, asr_was_empty):
         # ==================== STAGE 4: VISUAL OCR ====================
         stage_id = "visual_ocr"
-        check_stop()
-        await pause_checkpoint()
+        c.check_stop()
+        await c.pause_checkpoint()
 
-        should_run = not (can_resume and stage_id in verified_stages)
+        should_run = not (c.can_resume and stage_id in c.verified_stages)
         vid_w, vid_h, main_y_pct = 1080, 1920, 0.88
         floating_segments = []
         cached_ocr_payload = None
-        if visual_sub_to_speech:
+        if c.visual_sub_to_speech:
             try:
-                candidate_ocr = load_payload(out_dir / "ocr.json")
+                candidate_ocr = load_payload(c.out_dir / "ocr.json")
             except (OSError, ValueError, KeyError, TypeError):
                 candidate_ocr = None
             if candidate_ocr and candidate_ocr.get("visual_asr_reuse"):
@@ -707,101 +719,95 @@ class V1Orchestrator:
             vid_h = int(cached_ocr_payload.get("height", vid_h))
             main_y_pct = float(cached_ocr_payload.get("main_y_pct", main_y_pct))
             if should_run:
-                await notify(
+                await c.notify(
                     stage_id, 4, 55.0,
                     "👀 Bước 4/8: Tái sử dụng kết quả quét phụ đề từ bước 3 (không quét lại)...",
                 )
-                self.manifest_manager.record_stage_start(job_id, stage_id)
-                self.manifest_manager.record_stage_complete(job_id, stage_id, {"ocr_data": str(out_dir / "ocr.json")})
+                self.manifest_manager.record_stage_start(c.job_id, stage_id)
+                self.manifest_manager.record_stage_complete(c.job_id, stage_id, {"ocr_data": str(c.out_dir / "ocr.json")})
         elif should_run:
-            flags = dict(overrides.get("feature_flags") or get_feature_flags(self.workspace))
+            flags = dict(c.overrides.get("feature_flags") or get_feature_flags(self.workspace))
             enable_smart = flags.get("V1_SMART_SKIP_OCR", True)
-            ocr_strat = overrides.get("ocr_strategy") or planned.get("ocr_strategy", "auto")
-            if overrides.get("ocr_strategy"):
-                ocr_strat = overrides["ocr_strategy"]
+            ocr_strat = c.overrides.get("ocr_strategy") or c.planned.get("ocr_strategy", "auto")
+            if c.overrides.get("ocr_strategy"):
+                ocr_strat = c.overrides["ocr_strategy"]
             elif enable_smart:
                 ocr_strat = "smart_skip"
             elif not ocr_strat or ocr_strat == "auto":
                 short_thresh = float(os.getenv("V1_SHORT_MAX_SECONDS", "420.0"))
-                if video_dur_s > 0 and video_dur_s <= short_thresh:
+                if c.video_dur_s > 0 and c.video_dur_s <= short_thresh:
                     ocr_strat = "full"
                 else:
                     ocr_strat = "smart_skip"
-            await notify(stage_id, 4, 55.0, f"👀 Bước 4/8: Quét vị trí phụ đề chữ cứng (OCR {ocr_strat})...", {"ocr_strategy": ocr_strat})
-            self.manifest_manager.record_stage_start(job_id, stage_id)
-            t_out = self._calculate_stage_timeout(stage_id, video_dur_s, resolved_mode)
+            await c.notify(stage_id, 4, 55.0, f"👀 Bước 4/8: Quét vị trí phụ đề chữ cứng (OCR {ocr_strat})...", {"ocr_strategy": ocr_strat})
+            self.manifest_manager.record_stage_start(c.job_id, stage_id)
+            t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
                 from ocr_utils import perform_video_ocr, release_ocr_reader
                 from v1_gpu_gatekeeper import async_gpu_gatekeeper
-                check_stop()
-                gemini_key = overrides.get("api_key") or os.getenv("GEMINI_API_KEY", "")
+                c.check_stop()
+                gemini_key = c.overrides.get("api_key") or os.getenv("GEMINI_API_KEY", "")
                 # Crash between stages 3/4: re-scan from an empty timeline so the
                 # cached visual cues are not appended to themselves.
-                ocr_input = [] if (visual_sub_to_speech and asr_was_empty) else srt_segments
+                ocr_input = [] if (c.visual_sub_to_speech and asr_was_empty) else srt_segments
                 async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=t_out):
-                    ocr_result, vid_w, vid_h, main_y_pct = await run_stage(
+                    ocr_result, vid_w, vid_h, main_y_pct = await c.run_stage(
                         asyncio.to_thread(
                             perform_video_ocr,
-                            str(v_path),
-                            target_lang=effective_cfg.get("target_lang", "vi"),
+                            str(c.v_path),
+                            target_lang=c.effective_cfg.get("target_lang", "vi"),
                             sample_rate=1.0,
                             api_key=gemini_key,
                             srt_segments=ocr_input,
                             ocr_strategy=ocr_strat,
                             adaptive=False,
-                            geometry_report_path=str(out_dir / 'ocr_geometry_report.json'),
+                            geometry_report_path=str(c.out_dir / 'ocr_geometry_report.json'),
                             strict_geometry=True,
-                            visual_sub_to_speech=visual_sub_to_speech,
-                            _source_duration=video_dur_s,
+                            visual_sub_to_speech=c.visual_sub_to_speech,
+                            _source_duration=c.video_dur_s,
                         ),
                         timeout=t_out
                     )
                 from v1_ocr_geometry import OCR_GEOMETRY_VERSION
 
-                if visual_sub_to_speech and asr_was_empty and ocr_result:
+                if c.visual_sub_to_speech and asr_was_empty and ocr_result:
                     srt_segments = ocr_result
                     floating_segments = []
                     from ai.transcription import save_srt
                     save_srt(srt_segments, str(srt_original))
                 else:
                     floating_segments = ocr_result
-                save_payload(out_dir / "ocr.json", geometry_version=OCR_GEOMETRY_VERSION, segments=srt_segments,
+                save_payload(c.out_dir / "ocr.json", geometry_version=OCR_GEOMETRY_VERSION, segments=srt_segments,
                              floating_segments=floating_segments, width=vid_w, height=vid_h, main_y_pct=main_y_pct,
-                             visual_asr_reuse=bool(visual_sub_to_speech and asr_was_empty),
+                             visual_asr_reuse=bool(c.visual_sub_to_speech and asr_was_empty),
                              asr_was_empty=asr_was_empty)
-                self.manifest_manager.record_stage_complete(job_id, stage_id, {"ocr_data": str(out_dir / "ocr.json")})
+                self.manifest_manager.record_stage_complete(c.job_id, stage_id, {"ocr_data": str(c.out_dir / "ocr.json")})
             except Exception as exc:
-                self.manifest_manager.record_stage_failure(job_id, stage_id, str(exc))
+                self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))
                 raise
             finally:
                 if "release_ocr_reader" in locals():
                     release_ocr_reader()
+                elif c.ocr_reader_releaser is not None:
+                    c.ocr_reader_releaser()
         else:
-            saved = load_payload(out_dir / "ocr.json")
+            saved = load_payload(c.out_dir / "ocr.json")
             srt_segments, floating_segments = saved["segments"], saved["floating_segments"]
             vid_w, vid_h, main_y_pct = saved["width"], saved["height"], saved["main_y_pct"]
 
-        # Căn chỉnh timestamp phụ đề chống lệch
-        import datetime
-        for i in range(len(srt_segments) - 1):
-            if srt_segments[i].end > srt_segments[i + 1].start:
-                new_end = srt_segments[i + 1].start - datetime.timedelta(seconds=0.05)
-                if new_end > srt_segments[i].start:
-                    srt_segments[i].end = new_end
-                else:
-                    srt_segments[i].end = srt_segments[i].start + datetime.timedelta(seconds=0.1)
-        for i, seg in enumerate(srt_segments, 1):
-            seg.index = i
+        self._align_source_subtitles(srt_segments)
+        return srt_segments, floating_segments, vid_w, vid_h, main_y_pct
 
+    async def _stage_translate(self, c, srt_segments):
         # ==================== STAGE 5: AI TRANSLATION ====================
         stage_id = "ai_translation"
-        srt_translated = out_dir / "translated.srt"
-        check_stop()
-        await pause_checkpoint()
+        srt_translated = c.out_dir / "translated.srt"
+        c.check_stop()
+        await c.pause_checkpoint()
 
-        should_run = not (can_resume and stage_id in verified_stages)
+        should_run = not (c.can_resume and stage_id in c.verified_stages)
         translated_segments = []
-        v1_script_mode = effective_cfg.get("script_mode") or overrides.get("script_mode") or os.getenv("SCRIPT_MODE", "default")
+        v1_script_mode = c.effective_cfg.get("script_mode") or c.overrides.get("script_mode") or os.getenv("SCRIPT_MODE", "default")
         if should_run:
             configured_gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.7-flash").strip() or "gemini-3.7-flash"
             try:
@@ -810,21 +816,21 @@ class V1Orchestrator:
             except Exception:
                 pass
             script_badge = " (Kịch bản: Hài hước)" if str(v1_script_mode).lower() in ("humorous", "hai_huoc", "haihuoc", "comedy") else ""
-            await notify(stage_id, 5, 65.0, f"🌐 Bước 5/8: Dịch phụ đề chuẩn ngữ cảnh bằng {configured_gemini_model}{script_badge} ({len(srt_segments)} câu)...", {"gemini_model": configured_gemini_model, "script_mode": v1_script_mode})
-            self.manifest_manager.record_stage_start(job_id, stage_id)
-            t_out = self._calculate_stage_timeout(stage_id, video_dur_s, resolved_mode)
+            await c.notify(stage_id, 5, 65.0, f"🌐 Bước 5/8: Dịch phụ đề chuẩn ngữ cảnh bằng {configured_gemini_model}{script_badge} ({len(srt_segments)} câu)...", {"gemini_model": configured_gemini_model, "script_mode": v1_script_mode})
+            self.manifest_manager.record_stage_start(c.job_id, stage_id)
+            t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
                 from ai.translation import translate_subtitles
                 from ai.transcription import save_srt
-                gemini_key = overrides.get("api_key") or ""
-                check_stop()
-                translated_segments = await run_stage(
+                gemini_key = c.overrides.get("api_key") or ""
+                c.check_stop()
+                translated_segments = await c.run_stage(
                     asyncio.to_thread(
                         translate_subtitles,
                         srt_segments,
-                        effective_cfg.get("target_lang", "vi"),
+                        c.effective_cfg.get("target_lang", "vi"),
                         api_key=gemini_key,
-                        video_path=str(v_path),
+                        video_path=str(c.v_path),
                         strict=True,
                         script_mode=v1_script_mode,
                     ),
@@ -838,30 +844,32 @@ class V1Orchestrator:
                     job_tracker.record_active_translation_model(actual_model)
                 except Exception:
                     pass
-                save_payload(out_dir / "translation.json", segments=translated_segments)
-                self.manifest_manager.record_stage_complete(job_id, stage_id, {"srt_translated": str(srt_translated), "translation_data": str(out_dir / "translation.json")})
+                save_payload(c.out_dir / "translation.json", segments=translated_segments)
+                self.manifest_manager.record_stage_complete(c.job_id, stage_id, {"srt_translated": str(srt_translated), "translation_data": str(c.out_dir / "translation.json")})
             except Exception as exc:
-                self.manifest_manager.record_stage_failure(job_id, stage_id, str(exc))
+                self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))
                 raise
         else:
             import srt
             logger.info("[RESUME] Tải lại srt_translated đã cache.")
-            translated_segments = load_payload(out_dir / "translation.json")["segments"]
-        artifacts_acc["srt_translated"] = str(srt_translated)
+            translated_segments = load_payload(c.out_dir / "translation.json")["segments"]
+        c.artifacts_acc["srt_translated"] = str(srt_translated)
+        return translated_segments, v1_script_mode
 
+    async def _stage_tts(self, c, original_audio, vocals_audio, srt_segments, translated_segments, floating_segments, vid_w, vid_h, main_y_pct, v1_script_mode):
         # ==================== STAGE 6: AI TTS & DUBBING ====================
         stage_id = "ai_tts"
-        dubbing_dir = out_dir / "dubbing"
-        ass_path = out_dir / "final.ass"
-        check_stop()
-        await pause_checkpoint()
+        dubbing_dir = c.out_dir / "dubbing"
+        ass_path = c.out_dir / "final.ass"
+        c.check_stop()
+        await c.pause_checkpoint()
 
-        should_run = not (can_resume and stage_id in verified_stages)
+        should_run = not (c.can_resume and stage_id in c.verified_stages)
         dubbing_audio_files = []
         if should_run:
-            await notify(stage_id, 6, 75.0, "Dang long tieng (TTS)...")
-            self.manifest_manager.record_stage_start(job_id, stage_id)
-            t_out = self._calculate_stage_timeout(stage_id, video_dur_s, resolved_mode)
+            await c.notify(stage_id, 6, 75.0, "Dang long tieng (TTS)...")
+            self.manifest_manager.record_stage_start(c.job_id, stage_id)
+            t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
                 from ai.v1_auto_voice import decide_video_voice
                 from ai.v1_voice_isolated import generate_dubbing_audio_isolated as generate_dubbing_audio
@@ -873,36 +881,36 @@ class V1Orchestrator:
                 # Khóa giọng đọc
                 voice_lock_info = await asyncio.to_thread(
                     decide_video_voice,
-                    out_dir=str(out_dir),
+                    out_dir=str(c.out_dir),
                     srt_segments=srt_segments,
                     vocals_path=str(vocals_audio),
                     original_audio_path=str(original_audio),
-                    video_path=str(v_path),
-                    voice_mode=effective_cfg.get("voice_mode"),
+                    video_path=str(c.v_path),
+                    voice_mode=c.effective_cfg.get("voice_mode"),
                     workspace=str(self.workspace),
-                    voice_config=effective_cfg["voice_config"], job_id=job_id,
-                    visual_sub_to_speech=visual_sub_to_speech,
+                    voice_config=c.effective_cfg["voice_config"], job_id=c.job_id,
+                    visual_sub_to_speech=c.visual_sub_to_speech,
                 )
                 v_source = voice_lock_info["voice_source"]
                 v_param = voice_lock_info["voice_param"]
                 v_label = voice_lock_info["voice_label"]
                 seg_voices = voice_lock_info.get("segment_voices")
 
-                await notify(stage_id, 6, 75.0, f"🗣️ Bước 6/8: Lồng tiếng AI CapCut ({v_label}, 6 luồng)...", {"voice": v_label})
-                check_stop()
+                await c.notify(stage_id, 6, 75.0, f"🗣️ Bước 6/8: Lồng tiếng AI CapCut ({v_label}, 6 luồng)...", {"voice": v_label})
+                c.check_stop()
 
-                gemini_key = overrides.get("api_key") or os.getenv("GEMINI_API_KEY", "")
-                dubbing_audio_files = await run_stage(
+                gemini_key = c.overrides.get("api_key") or os.getenv("GEMINI_API_KEY", "")
+                dubbing_audio_files = await c.run_stage(
                     generate_dubbing_audio(
                         translated_segments,
                         str(dubbing_dir),
                         voice_source=v_source,
                         voice_param=v_param,
                         api_key=gemini_key,
-                        video_duration=video_dur_s,
+                        video_duration=c.video_dur_s,
                         segment_voices=seg_voices,
-                        tts_workers=effective_cfg["feature_flags"]["V1_TTS_WORKERS"],
-                        max_natural_speed=effective_cfg["feature_flags"]["V1_MAX_NATURAL_SPEED"],
+                        tts_workers=c.effective_cfg["feature_flags"]["V1_TTS_WORKERS"],
+                        max_natural_speed=c.effective_cfg["feature_flags"]["V1_MAX_NATURAL_SPEED"],
                         timeout_s=t_out,
                         script_mode=v1_script_mode,
                     ),
@@ -921,7 +929,7 @@ class V1Orchestrator:
                 # Ghi nhận các segment TTS đã hoàn thành vào manifest
                 for d in dubbing_audio_files:
                     if d and "index" in d:
-                        self.manifest_manager.record_tts_segment_done(job_id, int(d["index"]))
+                        self.manifest_manager.record_tts_segment_done(c.job_id, int(d["index"]))
 
                 # Đồng bộ timing và chống đè câu
                 translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
@@ -935,55 +943,57 @@ class V1Orchestrator:
                     play_res_x=vid_w,
                     play_res_y=vid_h,
                     main_y_pct=main_y_pct,
-                    font_name=effective_cfg.get("font_name", "Arial"),
-                    font_color=effective_cfg.get("font_color", "&H00000000"),
-                    font_weight=effective_cfg.get("font_weight", 2),
+                    font_name=c.effective_cfg.get("font_name", "Arial"),
+                    font_color=c.effective_cfg.get("font_color", "&H00000000"),
+                    font_weight=c.effective_cfg.get("font_weight", 2),
                 )
 
-                save_payload(out_dir / "tts.json", segments=translated_segments, dubs=dubbing_audio_files)
-                tts_artifacts = {"tts_data": str(out_dir / "tts.json"), "ass_path": str(ass_path),
-                                 "voice_lock": str(out_dir / "voice_lock.json")}
+                save_payload(c.out_dir / "tts.json", segments=translated_segments, dubs=dubbing_audio_files)
+                tts_artifacts = {"tts_data": str(c.out_dir / "tts.json"), "ass_path": str(ass_path),
+                                 "voice_lock": str(c.out_dir / "voice_lock.json")}
                 for i, dub in enumerate(dubbing_audio_files):
                     tts_artifacts[f"audio_{i}"] = dub["path"]
-                self.manifest_manager.record_stage_complete(job_id, stage_id, tts_artifacts)
-                current = self.manifest_manager.load_manifest(job_id)
+                self.manifest_manager.record_stage_complete(c.job_id, stage_id, tts_artifacts)
+                current = self.manifest_manager.load_manifest(c.job_id)
                 current.effective_config["speech_timing_version"] = 3
                 self.manifest_manager.save_manifest(current)
             except Exception as exc:
-                self.manifest_manager.record_stage_failure(job_id, stage_id, str(exc))
+                self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))
                 raise
         else:
-            saved = load_payload(out_dir / "tts.json")
+            saved = load_payload(c.out_dir / "tts.json")
             translated_segments, dubbing_audio_files = saved["segments"], saved["dubs"]
-        artifacts_acc["dubbing_dir"] = str(dubbing_dir)
-        artifacts_acc["ass_path"] = str(ass_path)
+        c.artifacts_acc["dubbing_dir"] = str(dubbing_dir)
+        c.artifacts_acc["ass_path"] = str(ass_path)
+        return translated_segments, dubbing_audio_files, ass_path
 
+    async def _stage_mix(self, c, original_audio, no_vocals_audio, asr_was_empty, dubbing_audio_files):
         # ==================== STAGE 7: AUDIO MIXING ====================
         stage_id = "audio_mixing"
-        mixed_audio = out_dir / "mixed.wav"
-        check_stop()
-        await pause_checkpoint()
+        mixed_audio = c.out_dir / "mixed.wav"
+        c.check_stop()
+        await c.pause_checkpoint()
 
-        should_run = not (can_resume and stage_id in verified_stages)
+        should_run = not (c.can_resume and stage_id in c.verified_stages)
         if should_run:
-            await notify(stage_id, 7, 85.0, "🎛️ Bước 7/8: Trộn nhạc nền & giọng đọc (Hierarchical Adaptive Mixer)...")
-            self.manifest_manager.record_stage_start(job_id, stage_id)
-            t_out = self._calculate_stage_timeout(stage_id, video_dur_s, resolved_mode)
+            await c.notify(stage_id, 7, 85.0, "🎛️ Bước 7/8: Trộn nhạc nền & giọng đọc (Hierarchical Adaptive Mixer)...")
+            self.manifest_manager.record_stage_start(c.job_id, stage_id)
+            t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
                 from video_utils import mix_audio_pydub
-                bgm_vol = effective_cfg.get("bgm_volume_db", -2.0)
-                dub_vol = effective_cfg.get("dubbing_volume_db", 1.0)
-                duck_mode = effective_cfg.get("ducking_mode", "soft")
-                mixer_mode = planned.get("mixer_mode", "direct")
+                bgm_vol = c.effective_cfg.get("bgm_volume_db", -2.0)
+                dub_vol = c.effective_cfg.get("dubbing_volume_db", 1.0)
+                duck_mode = c.effective_cfg.get("ducking_mode", "soft")
+                mixer_mode = c.planned.get("mixer_mode", "direct")
                 # Silent-source visual mode: the separated "no_vocals" stem would
                 # drop the BGM that is the only original audio, so keep original.wav.
-                bgm_source = original_audio if (visual_sub_to_speech and asr_was_empty) else no_vocals_audio
+                bgm_source = original_audio if (c.visual_sub_to_speech and asr_was_empty) else no_vocals_audio
 
-                check_stop()
-                if mixer_mode == "hierarchical" or resolved_mode in ("LONG", "MEDIUM") or len(dubbing_audio_files) > 100:
+                c.check_stop()
+                if mixer_mode == "hierarchical" or c.resolved_mode in ("LONG", "MEDIUM") or len(dubbing_audio_files) > 100:
                     try:
                         from v1_hierarchical_mixer import mix_hierarchical_audio
-                        await run_stage(
+                        await c.run_stage(
                             asyncio.to_thread(
                                 mix_hierarchical_audio,
                                 str(bgm_source),
@@ -999,7 +1009,7 @@ class V1Orchestrator:
                         # Do not allocate the entire long video after a bounded mixer failure.
                         raise
                 else:
-                    await run_stage(
+                    await c.run_stage(
                         asyncio.to_thread(
                             mix_audio_pydub,
                             str(bgm_source),
@@ -1014,36 +1024,38 @@ class V1Orchestrator:
                     )
                 if not mixed_audio.is_file() or mixed_audio.stat().st_size < 1000:
                     raise RuntimeError("Trộn âm thanh thất bại hoặc file mixed.wav rỗng.")
-                self.manifest_manager.record_stage_complete(job_id, stage_id, {"mixed_audio": str(mixed_audio)})
+                self.manifest_manager.record_stage_complete(c.job_id, stage_id, {"mixed_audio": str(mixed_audio)})
             except Exception as exc:
-                self.manifest_manager.record_stage_failure(job_id, stage_id, str(exc))
+                self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))
                 raise
         else:
             logger.info("[RESUME] Bỏ qua stage 7 (audio_mixing).")
-        artifacts_acc["mixed_audio"] = str(mixed_audio)
+        c.artifacts_acc["mixed_audio"] = str(mixed_audio)
+        return mixed_audio
 
+    async def _stage_render(self, c, ass_path, mixed_audio, main_y_pct):
         # ==================== STAGE 8: VIDEO RENDERING ====================
         stage_id = "video_rendering"
-        final_video = out_dir / f"final_{base_name}.mp4"
-        temp_render_video = out_dir / f"final_{base_name}.tmp.mp4"
-        check_stop()
-        await pause_checkpoint()
+        final_video = c.out_dir / f"final_{c.base_name}.mp4"
+        temp_render_video = c.out_dir / f"final_{c.base_name}.tmp.mp4"
+        c.check_stop()
+        await c.pause_checkpoint()
 
-        should_run = not (can_resume and stage_id in verified_stages)
+        should_run = not (c.can_resume and stage_id in c.verified_stages)
         if should_run:
-            await notify(stage_id, 8, 92.0, "🎬 Bước 8/8: Render video thành phẩm bằng NVENC GPU...")
-            self.manifest_manager.record_stage_start(job_id, stage_id)
-            t_out = self._calculate_stage_timeout(stage_id, video_dur_s, resolved_mode)
+            await c.notify(stage_id, 8, 92.0, "🎬 Bước 8/8: Render video thành phẩm bằng NVENC GPU...")
+            self.manifest_manager.record_stage_start(c.job_id, stage_id)
+            t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
                 self._check_gpu_guard(stage_id)
                 from video_utils import process_video
                 from v1_gpu_gatekeeper import async_gpu_gatekeeper
-                check_stop()
+                c.check_stop()
                 async with async_gpu_gatekeeper("video_rendering", timeout_seconds=t_out):
-                    rendered = await run_stage(
+                    rendered = await c.run_stage(
                         asyncio.to_thread(
                             process_video,
-                            str(v_path),
+                            str(c.v_path),
                             str(ass_path),
                             str(mixed_audio),
                             str(temp_render_video),
@@ -1055,17 +1067,19 @@ class V1Orchestrator:
                 if not rendered or not temp_render_video.is_file() or temp_render_video.stat().st_size < 10240:
 
                     raise RuntimeError("Render video NVENC thất bại hoặc file xuất xưởng bị lỗi.")
-                self.manifest_manager.record_stage_complete(job_id, stage_id, {"temp_render": str(temp_render_video)})
+                self.manifest_manager.record_stage_complete(c.job_id, stage_id, {"temp_render": str(temp_render_video)})
             except Exception as exc:
-                self.manifest_manager.record_stage_failure(job_id, stage_id, str(exc))
+                self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))
                 raise
         else:
             logger.info("[RESUME] Bỏ qua stage 8 (video_rendering).")
-            temp_render_video = Path(manifest.stages[stage_id]["artifacts"]["temp_render"]["path"])
+            temp_render_video = Path(c.manifest.stages[stage_id]["artifacts"]["temp_render"]["path"])
+        return final_video, temp_render_video
 
+    async def _stage_qc_and_deliver(self, c, final_video, temp_render_video, translated_segments, dubbing_audio_files, mixed_audio, ass_path):
         # ==================== STAGE 9: QUALITY GATE & PUBLISH ====================
         qc_target = temp_render_video if temp_render_video.is_file() else final_video
-        qc_policy = resolve_qc_policy(effective_cfg, overrides, self.workspace)
+        qc_policy = resolve_qc_policy(c.effective_cfg, c.overrides, self.workspace)
         logger.info("[QUALITY_GATE] Đang thực hiện kiểm tra chất lượng tự động 8 nhóm (policy=%s)...", qc_policy)
 
         try:
@@ -1075,9 +1089,9 @@ class V1Orchestrator:
             from v1_quality_gate import run_quality_gate
 
             qc_report = await asyncio.to_thread(run_quality_gate,
-                job_id=job_id,
+                job_id=c.job_id,
                 final_video_path=qc_target,
-                original_video_path=v_path,
+                original_video_path=c.v_path,
                 translated_subtitles=translated_segments,
                 dubbing_audio_files=dubbing_audio_files,
                 mixed_audio_path=mixed_audio,
@@ -1086,22 +1100,22 @@ class V1Orchestrator:
                 workspace_path=self.workspace,
             )
         except Exception as exc:
-            self.manifest_manager.record_stage_failure(job_id, "quality_gate", str(exc))
+            self.manifest_manager.record_stage_failure(c.job_id, "quality_gate", str(exc))
             raise
 
-        check_stop()
+        c.check_stop()
         # Xuất bản nguyên tử (Atomic Replace)
         if temp_render_video.is_file() and temp_render_video != final_video:
             os.replace(str(temp_render_video), str(final_video))
-            self.manifest_manager.record_stage_complete(job_id, "video_rendering", {"temp_render": str(final_video)})
+            self.manifest_manager.record_stage_complete(c.job_id, "video_rendering", {"temp_render": str(final_video)})
 
         # Phân phối tới thư mục đích nếu có (mặc định D:\banve từ AUTODUB_OUTPUT_DIR)
         published_path = str(final_video)
-        effective_delivery = delivery_path
+        effective_delivery = c.delivery_path
         if not effective_delivery:
             default_out_dir = os.getenv("AUTODUB_OUTPUT_DIR", "D:\\banve")
             if default_out_dir and os.path.isdir(default_out_dir):
-                effective_delivery = Path(default_out_dir) / f"Dubbed_{base_name}.mp4"
+                effective_delivery = Path(default_out_dir) / f"Dubbed_{c.base_name}.mp4"
 
         if effective_delivery:
             del_p = Path(effective_delivery)
@@ -1115,56 +1129,134 @@ class V1Orchestrator:
         delivered_check = await asyncio.to_thread(media_status, published_path)
         if delivered_check["status"] != "valid":
             message = "Khong xac minh duoc thanh pham: " + delivered_check["reason"]
-            self.manifest_manager.record_stage_failure(job_id, "delivery", message)
+            self.manifest_manager.record_stage_failure(c.job_id, "delivery", message)
             raise RuntimeError(message)
 
         # Ghi nhận thời gian render/edit vào render_history và job_tracker vĩnh viễn
-        job_duration_s = round(time.time() - t_job_start, 1)
+        job_duration_s = round(time.time() - c.t_job_start, 1)
         try:
             from render_history import record_render_duration
             record_render_duration(published_path, job_duration_s)
             record_render_duration(Path(published_path).name, job_duration_s)
-            record_render_duration(v_path.name, job_duration_s)
-            if delivery_path:
-                record_render_duration(str(delivery_path), job_duration_s)
-                record_render_duration(Path(delivery_path).name, job_duration_s)
+            record_render_duration(c.v_path.name, job_duration_s)
+            if c.delivery_path:
+                record_render_duration(str(c.delivery_path), job_duration_s)
+                record_render_duration(Path(c.delivery_path).name, job_duration_s)
         except Exception as rh_err:
             logger.warning("Không thể ghi nhận render_history: %s", rh_err)
 
         tracker_finalized = False
         try:
             import job_tracker
-            job_tracker.finish_video(v_path.name, output_path=published_path, duration_seconds=job_duration_s)
+            job_tracker.finish_video(c.v_path.name, output_path=published_path, duration_seconds=job_duration_s)
             tracker_finalized = True
         except Exception as tracker_err:
             logger.warning("Không thể ghi nhận hoàn tất job: %s", tracker_err)
 
-        manifest = self.manifest_manager.load_manifest(job_id)
-        if not manifest:
-            raise RuntimeError(f"Missing manifest at publish: {job_id}")
-        manifest.status = "completed"
-        manifest.output_video_path = published_path
-        self.manifest_manager.save_manifest(manifest)
+        c.manifest = self.manifest_manager.load_manifest(c.job_id)
+        if not c.manifest:
+            raise RuntimeError(f"Missing manifest at publish: {c.job_id}")
+        c.manifest.status = "completed"
+        c.manifest.output_video_path = published_path
+        self.manifest_manager.save_manifest(c.manifest)
 
         try:
             from workspace_cleaner import clean_completed_job_intermediate_files, clean_stale_downloads
-            await asyncio.to_thread(clean_completed_job_intermediate_files, job_id, self.workspace, out_dir)
+            await asyncio.to_thread(clean_completed_job_intermediate_files, c.job_id, self.workspace, c.out_dir)
             await asyncio.to_thread(clean_stale_downloads, Path(self.workspace) / "downloads")
         except Exception as cl_err:
-            logger.warning("[CLEANUP] Lỗi dọn tệp trung gian job %s: %s", job_id, cl_err)
+            logger.warning("[CLEANUP] Lỗi dọn tệp trung gian job %s: %s", c.job_id, cl_err)
 
-        await notify("publish", 8, 100.0, f"✅ Hoàn tất xuất xưởng video thành phẩm: {Path(published_path).name}", {
+        await c.notify("publish", 8, 100.0, f"✅ Hoàn tất xuất xưởng video thành phẩm: {Path(published_path).name}", {
             "published_path": published_path,
             "qc_status": qc_report.overall_status,
         })
 
         return {
             "status": "success",
-            "job_id": job_id,
-            "video_mode": resolved_mode,
+            "job_id": c.job_id,
+            "video_mode": c.resolved_mode,
             "final_video": published_path,
-            "manifest_file": str(self.manifest_manager._manifest_file(job_id)),
+            "manifest_file": str(self.manifest_manager._manifest_file(c.job_id)),
             "qc_status": qc_report.overall_status,
             "qc_report": qc_report.to_dict(),
             "tracker_finalized": tracker_finalized,
         }
+
+    async def _stage_visual_transcript(self, c, srt_segments, asr_was_empty, srt_original, async_gpu_gatekeeper):
+        stage_id = "speech_asr"
+        visual_ocr_cached = False
+        asr_cue_count = len(srt_segments)
+        await c.notify(
+            stage_id, 3, 40.0,
+            "Đang quét phụ đề tiếng Trung trên màn hình (Chế độ Video không lời thoại)...",
+        )
+        from ocr_utils import perform_video_ocr, release_ocr_reader
+        c.ocr_reader_releaser = release_ocr_reader
+        from v1_ocr_geometry import OCR_GEOMETRY_VERSION
+        from ai.transcription import save_srt
+        t_ocr = self._calculate_stage_timeout("visual_ocr", c.video_dur_s, c.resolved_mode)
+        c.check_stop()
+        try:
+            async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=t_ocr):
+                visual_segments, vid_w_src, vid_h_src, main_y_src = await c.run_stage(
+                    asyncio.to_thread(
+                        perform_video_ocr,
+                        str(c.v_path),
+                        target_lang=c.effective_cfg.get("target_lang", "vi"),
+                        sample_rate=1.0,
+                        api_key=c.overrides.get("api_key") or os.getenv("GEMINI_API_KEY", ""),
+                        srt_segments=[],
+                        strict_geometry=True,
+                        visual_sub_to_speech=True,
+                        _source_duration=c.video_dur_s,
+                    ),
+                    timeout=t_ocr
+                )
+        finally:
+            release_ocr_reader()
+        if _visual_ocr_transcript_usable(visual_segments, c.video_dur_s):
+            srt_segments = visual_segments
+            for idx, seg in enumerate(srt_segments, start=1):
+                seg.index = idx
+            save_srt(srt_segments, str(srt_original))
+            save_payload(
+                c.out_dir / "ocr.json",
+                geometry_version=OCR_GEOMETRY_VERSION,
+                segments=srt_segments,
+                floating_segments=[],
+                width=vid_w_src,
+                height=vid_h_src,
+                main_y_pct=main_y_src,
+                visual_asr_reuse=True,
+                asr_was_empty=asr_was_empty,
+            )
+            visual_ocr_cached = True
+            logger.info(
+                "🎬 Visual OCR-to-TTS: dùng %d câu phụ đề trên hình thay cho ASR (%s)",
+                len(srt_segments),
+                "ASR rỗng" if asr_was_empty else f"ASR {asr_cue_count} câu",
+            )
+        elif asr_was_empty:
+            raise RuntimeError(
+                "Video không có lời thoại và cũng không phát hiện được phụ đề tiếng Trung trên màn hình."
+            )
+        else:
+            logger.info(
+                "Visual OCR-to-TTS: không đủ phụ đề trên hình, giữ ASR %d câu",
+                len(srt_segments),
+            )
+        return srt_segments, visual_ocr_cached
+
+    def _align_source_subtitles(self, srt_segments):
+        # Căn chỉnh timestamp phụ đề chống lệch
+        import datetime
+        for i in range(len(srt_segments) - 1):
+            if srt_segments[i].end > srt_segments[i + 1].start:
+                new_end = srt_segments[i + 1].start - datetime.timedelta(seconds=0.05)
+                if new_end > srt_segments[i].start:
+                    srt_segments[i].end = new_end
+                else:
+                    srt_segments[i].end = srt_segments[i].start + datetime.timedelta(seconds=0.1)
+        for i, seg in enumerate(srt_segments, 1):
+            seg.index = i

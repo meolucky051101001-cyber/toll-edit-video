@@ -1,0 +1,48 @@
+# Phase 7 — tách hàm, giữ nguyên hành vi
+
+Nhánh `codex/phase-7-function-refactor`, bắt đầu từ `3ce63b9`. Baseline:
+1136 passed / 0 failed / 79 skipped (Python 3.10 có 213 subtests passed).
+Không đổi model, thứ tự pipeline, voice, mixer, style ASS, QC hoặc retry.
+Không restart dịch vụ, cutover/rollback hay dùng video production để render.
+
+## execute_job
+
+Tách orchestration thành context riêng cho mỗi lần gọi và các method stage.
+Kết quả audio/subtitle của stage truyền qua tham số/return; không lưu trạng
+thái đang chạy trên instance dùng chung. Context chứa các cấu hình đã đóng
+băng, đường dẫn, callback, thời lượng và thông tin checkpoint của đúng job.
+
+- execute_job: 903 → 75 dòng. Helper dài nhất 110 dòng, đều dưới 150 dòng.
+- Giữ extract → separate → ASR → OCR → translate → TTS/ASS → mix → render →
+  QC/deliver. Input đã tải trước khi vào execute_job; không thêm stage download.
+- Giữ vị trí check stop/pause, GPU gate, timeout, ghi start/complete/failure,
+  artifact sidecar và kiểm tra version khi resume.
+- Nhánh visual OCR thay ASR được tách riêng; OCR reader releaser từ nhánh đó
+  vẫn khả dụng nếu việc import ở stage OCR tiếp theo thất bại.
+- Đối chiếu AST của 9 block stage sau khi inline helper và quy đổi context:
+  các phép tính, call, điều kiện, nhánh except/raise/return cũ khớp. Phần giữ
+  binding OCR reader giữa hai scope được kiểm tra riêng.
+- Ba golden contract đã có giữ fixture byte-identical. Bổ sung visual OCR
+  reuse/BGM gốc và cancellation từ progress callback. Cả 5 contract pass trên
+  code gốc `3ce63b9` và code refactor trong process test cô lập.
+- Test AST strict OCR/dịch được cập nhật để duyệt các helper reachable từ
+  execute_job; giữ nguyên assertion strict_geometry=True và strict=True.
+
+Fixture `tests/fixtures/phase7/execute_job.json` giữ nguyên SHA256:
+`ee4e5a27365ebb2cded35198a545b1661248026ac1529729dda2ef283eb9bb57`.
+
+## Nghiệm thu từng bước
+
+| Hàm vừa tách | Full pytest Python 3.10 | Golden Python 3.12 |
+| --- | --- | --- |
+| execute_job | 1138 passed / 0 failed / 79 skipped / 213 subtests; 126,93 giây | 5 passed; đối chứng code gốc cũng 5 passed |
+
+Kết quả các bước tiếp theo được ghi sau khi hoàn tất từng hàm.
+Log/bằng chứng tạm nằm dưới `scratch/phase7`, không commit dữ liệu runtime.
+
+## Nghiệm thu video thật
+
+Sau khi refactor hoàn tất, người dùng cần tự bấm chạy một video dưới 30 giây
+trên dashboard để đối chiếu voice, timing, che phụ đề, BGM và QC với bản trước.
+Golden và stage mock không chứng minh chất lượng audio/video thật. Lượt này
+không tự restart dịch vụ để nạp code mới hoặc chọn video trong thư mục đầu vào.

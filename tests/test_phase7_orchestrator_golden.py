@@ -1,5 +1,6 @@
 """Frozen contract of the unrefactored execute_job; all heavy engines are mocked."""
 import copy
+import asyncio
 import importlib
 import json
 import os
@@ -70,7 +71,7 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
         flags["V1_SMART_SKIP_OCR"] = False
         config = {
             "policy_version": 2, "voice_mode": "manual", "voice_config": {"enabled": False},
-            "feature_flags": flags, "visual_sub_to_speech": False, "script_mode": "default",
+            "feature_flags": flags, "visual_sub_to_speech": getattr(self, "visual_mode", False), "script_mode": "default",
             "target_lang": "vi", "font_name": "Arial", "font_color": "&H00000000", "font_weight": 2,
             "planned_pipeline": {"asr_model": "whisper_turbo", "asr_chunking": False,
                                  "asr_chunk_size_s": 240, "asr_overlap_s": 2,
@@ -240,4 +241,58 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.delivery.read_bytes(), b"existing published video")
         self.assertNotIn("deliver", self.events)
         self.assertNotIn("publish", self.events)
+        self.assertNotEqual(self.orchestrator.manifest_manager.load_manifest("golden_fixture").status, "completed")
+
+    async def test_visual_transcript_reuses_ocr_from_asr_and_keeps_original_bgm(self):
+        import srt
+        import ocr_utils
+        import video_utils
+        from backend.ai import v1_asr_isolated
+
+        self.visual_mode = True
+        self.harness()
+
+        def empty_asr(source, output, **kwargs):
+            self.events.append("asr")
+            Path(output).write_text("", encoding="utf-8")
+            return []
+
+        def visual_ocr(source, **kwargs):
+            self.events.append("ocr")
+            self.assertEqual(kwargs["srt_segments"], [])
+            segments = [srt.Subtitle(i, timedelta(seconds=a), timedelta(seconds=b), text)
+                        for i, a, b, text in [(1, .2, 1.7, "今天我们学习做饭"), (2, 1.8, 3.8, "现在开始准备材料")]]
+            for segment in segments:
+                segment.visual_sub_to_speech = True
+                segment.ocr_mask_status = "no_caption_evidence"
+                segment.tracking_blocks = []
+                segment.best_block = None
+            return segments, 1080, 1920, .88
+
+        real_mix = video_utils.mix_audio_pydub
+        with patch.object(v1_asr_isolated, "extract_subtitles_isolated", empty_asr), \
+             patch.object(ocr_utils, "perform_video_ocr", side_effect=visual_ocr) as ocr, \
+             patch.object(ocr_utils, "release_ocr_reader") as release, \
+             patch.object(video_utils, "mix_audio_pydub", side_effect=real_mix) as mix:
+            result = await self.execute()
+        self.assertEqual(result["status"], "success")
+        ocr.assert_called_once()
+        release.assert_called_once()
+        self.assertEqual(Path(mix.call_args.args[0]), self.output / "original.wav")
+        self.assertEqual(self.events.count("ocr"), 1)
+        self.assertIn("今天我们学习做饭", (self.output / "original.srt").read_text(encoding="utf-8"))
+
+    async def test_progress_cancellation_stops_before_first_heavy_stage(self):
+        self.harness()
+
+        async def cancel(*args):
+            raise asyncio.CancelledError()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await self.orchestrator.execute_job(
+                self.source, "golden_fixture", output_dir=self.output, delivery_path=self.delivery,
+                progress_callback=cancel, stop_checker=lambda: False,
+            )
+        self.assertEqual(self.events, [])
+        self.assertFalse(self.delivery.exists())
         self.assertNotEqual(self.orchestrator.manifest_manager.load_manifest("golden_fixture").status, "completed")

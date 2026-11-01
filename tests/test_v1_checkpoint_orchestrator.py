@@ -137,9 +137,24 @@ class CheckpointOrchestratorTests(unittest.TestCase):
             self.assertEqual(next_bad, "extract_audio")
 
     def test_main_pipeline_enables_strict_ocr_and_translation(self):
-        tree = ast.parse(textwrap.dedent(inspect.getsource(V1Orchestrator.execute_job)))
+        # Follow extracted helpers so strictness is checked on the execution path.
+        pending = ["execute_job"]
+        visited = set()
+        nodes = []
+        while pending:
+            name = pending.pop()
+            if name in visited:
+                continue
+            visited.add(name)
+            tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(V1Orchestrator, name))))
+            nodes.extend(ast.walk(tree))
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name) and node.func.value.id == "self"
+                        and callable(getattr(V1Orchestrator, node.func.attr, None))):
+                    pending.append(node.func.attr)
         calls = {"perform_video_ocr": [], "translate_subtitles": []}
-        for node in ast.walk(tree):
+        for node in nodes:
             if not isinstance(node, ast.Call) or not node.args:
                 continue
             target = node.args[0]
