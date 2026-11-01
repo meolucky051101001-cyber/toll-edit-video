@@ -19,7 +19,6 @@ import sys
 os.environ['AUTODUB_DISABLE_STOP_CHECK'] = '1'
 import re
 import uuid
-import time
 import shutil
 import asyncio
 import logging
@@ -94,7 +93,7 @@ def _load_bot_token() -> str:
 
 BOT_TOKEN = _load_bot_token()
 
-from telegram import Update, InputMediaPhoto
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,

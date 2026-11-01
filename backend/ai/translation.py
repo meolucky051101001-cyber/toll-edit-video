@@ -404,14 +404,6 @@ def mark_gemini_unhealthy(cooldown_seconds: float = 30.0) -> None:
     logger.warning("Gemini marked unhealthy; cooling down for %g seconds", cooldown_seconds)
 
 
-def _gemini_transient_failure():
-    global _gemini_transient_failures
-    _gemini_transient_failures += 1
-    if _gemini_transient_failures >= 2:
-        mark_gemini_unhealthy(15.0)
-        _gemini_transient_failures = 0
-
-
 def translate_with_gemini(
     texts,
     target_lang="vi",
@@ -423,7 +415,6 @@ def translate_with_gemini(
     timeout=None,
     **kwargs
 ):
-    global _gemini_transient_failures
     api_key = api_key or os.getenv("GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEYS", "")
     if not api_key or not texts:
         return None
@@ -482,8 +473,6 @@ def translate_with_gemini(
                 }
             })
         candidate_models = resolve_gemini_models("translation", DEFAULT_TRANSLATION_MODELS)
-        models_to_try = list(candidate_models)
-        response = None
         account = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
         try:
             from .v1_translation_cache import cache_key, read_cache, write_cache
@@ -492,8 +481,6 @@ def translate_with_gemini(
             if cached:
                 m_cache = cached.get("model", "gemini-cached")
                 logger.info("Sử dụng bản dịch từ cache (model=%s)", m_cache)
-                with _gemini_health_lock:
-                    _gemini_last_good[account] = cached["model"]
                 try:
                     import job_tracker
                     job_tracker.record_translation_model(m_cache)
