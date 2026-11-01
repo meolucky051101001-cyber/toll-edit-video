@@ -58,8 +58,8 @@ class TestConcatIntegration(unittest.TestCase):
             self.assertEqual(res.status_code, 200)
             body = res.json()
             self.assertEqual(body["pid"], 4321)
-            # stem được chuẩn hóa + project dir nằm trong workspace
-            self.assertIn("vid_123", body["project_dir"])
+            # project dir dùng đúng thư mục job chung (stem thô, khớp pipeline)
+            self.assertEqual(Path(body["project_dir"]), self.workspace / "vid 123")
             self.assertEqual(launched[0][0], str(fake_exe))
             self.assertEqual(launched[0][1], "--project")
 

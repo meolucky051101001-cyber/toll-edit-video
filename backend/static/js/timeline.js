@@ -69,7 +69,7 @@
       timelineProjectDirty = true;
     }
 
-    async function saveTimelineProjectNow(silent = true) {
+    async function saveTimelineProjectNow(silent = true, useKeepalive = false) {
       try {
         if (!currentVideo || !currentVideo.stem || !videoClipsState.length) return false;
         const payload = { stem: currentVideo.stem, project: getTimelineProjectSnapshot() };
@@ -81,7 +81,7 @@
             'X-Dashboard-Input': '1'
           },
           body: JSON.stringify(payload),
-          keepalive: true
+          keepalive: useKeepalive
         });
         if (res.ok) {
           timelineProjectDirty = false;
@@ -101,7 +101,7 @@
       }, 10000);
       // Rời tab / tắt trang: cố gắng lưu nốt những thay đổi chưa ghi (best-effort)
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'hidden' && timelineProjectDirty) saveTimelineProjectNow(true);
+        if (document.visibilityState === 'hidden' && timelineProjectDirty) saveTimelineProjectNow(true, true);
       });
     }
 
@@ -1811,6 +1811,18 @@
         timelineUndoStack = [];
         timelineRedoStack = [];
         if (opts && opts.saveFresh) {
+          // Chữ/logo/nhạc vừa được "nướng" vào video thành phẩm → xoá clip gốc để render lần sau không chồng lặp
+          const textTrack = getTextTrack();
+          const overlayTrack = getOverlayTrack();
+          const musicTrack = getMusicTrack();
+          if (textTrack) textTrack.clips = [];
+          if (overlayTrack) overlayTrack.clips = [];
+          if (musicTrack) musicTrack.clips = [];
+          selectedTextClipId = null;
+          renderTextOverlayTrack();
+          renderTextOverlayPreview();
+          renderMusicTrack();
+          updateTextPropsPanel();
           // Sau apply-edits: video thành phẩm mới → project.json cũ lỗi thời, ghi đè bằng trạng thái hiện tại
           timelineProjectDirty = true;
           saveTimelineProjectNow(true);
@@ -2582,7 +2594,13 @@
       };
     }
 
-    function handleApplyEditsSuccess(data) {
+    function handleApplyEditsSuccess(data, submittedStem) {
+      // Render nền chạy tiếp khi người dùng đã chọn video khác → không được đè player/project hiện tại
+      if (submittedStem && (!currentVideo || currentVideo.stem !== submittedStem)) {
+        showToast(`🎉 Đã render xong cho "${submittedStem}" — video này đang không mở nên không tự cập nhật trình xem.`);
+        renderMediaList();
+        return;
+      }
       showToast(`🎉 ${data.message || 'Đã ghép video thành công!'}`);
       // Reload player with newly concatenated video
       if (data.video_url && mainPlayer) {
@@ -2605,6 +2623,8 @@
         updateSubtitlesOverlay();
       }
       setTimeout(() => {
+        // Trong 800ms chờ player load, người dùng có thể đã chọn video khác
+        if (submittedStem && (!currentVideo || currentVideo.stem !== submittedStem)) return;
         initVideoClipsForCurrentVideo(true, { saveFresh: true }); // P6.1: ghi đè project.json bằng video thành phẩm mới
         renderMediaList();
       }, 800);
@@ -2618,7 +2638,7 @@
       });
       const data = await res.json();
       if (res.ok && (data.status === 'ok' || data.success)) {
-        handleApplyEditsSuccess(data);
+        handleApplyEditsSuccess(data, payload.stem);
       } else {
         showToast(`❌ Lỗi cắt ghép video: ${data.detail || 'Thất bại'}`);
       }
@@ -2684,7 +2704,7 @@
           if (btn) btn.innerText = `⏳ ${st.progress || 0}% — ${st.stage || 'Đang xử lý'} (bấm để huỷ)`;
           if (st.status === 'done') {
             _activeRenderJobId = null;
-            handleApplyEditsSuccess(st.result || {});
+            handleApplyEditsSuccess(st.result || {}, payload.stem);
             break;
           }
           if (st.status === 'error') {
@@ -2836,9 +2856,7 @@
           showToast('✅ Video có nhịp thoại liên tục, không có khoảng lặng dài (> 0.65s) cần cắt!');
           return;
         }
-        if (typeof pushTimelineUndoState === 'function') {
-          pushTimelineUndoState();
-        }
+        pushTimelineHistory('Tự động cắt khoảng lặng');
         videoClipsState = data.active_clips;
         if (videoClipsState.length > 0) {
           setSingleSelection(videoClipsState[0].id);

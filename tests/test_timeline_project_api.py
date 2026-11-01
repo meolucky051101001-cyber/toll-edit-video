@@ -49,17 +49,35 @@ class TestTimelineProjectApi(unittest.TestCase):
         body = res.json()
         self.assertTrue(body["saved"])
         self.assertTrue(body["saved_at"])
-        self.assertNotIn(" ", body["path"])
+        self.assertEqual(Path(body["path"]), self.workspace / "vid one" / "project.json")
 
-        saved = json.loads((self.workspace / "vid_one" / "project.json").read_text(encoding="utf-8"))
+        saved = json.loads((self.workspace / "vid one" / "project.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["tracks"][0]["clips"][0]["speed"], 2)
-        self.assertEqual(saved["stem"], "vid_one")
+        self.assertEqual(saved["stem"], "vid one")
 
         res2 = self.client.get("/api/workflow/timeline/project", params={"stem": "vid one"})
         self.assertEqual(res2.status_code, 200)
         data = res2.json()
         self.assertEqual(data["exists"], True)
         self.assertEqual(data["project"]["tracks"][0]["clips"][0]["id"], "c1")
+
+    def test_legacy_clean_dir_still_readable_and_writable(self):
+        # Studio cũ chỉ tạo workspace/<artifact_stem>; chưa có thư mục pipeline
+        legacy_dir = self.workspace / "vid_one"
+        legacy_dir.mkdir()
+        legacy_project = {"version": 1, "tracks": [{"id": "v1", "type": "video", "clips": [{"id": "old", "start": 0, "end": 2}]}]}
+        (legacy_dir / "project.json").write_text(json.dumps(legacy_project), encoding="utf-8")
+
+        res = self.client.get("/api/workflow/timeline/project", params={"stem": "vid one"})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["project"]["tracks"][0]["clips"][0]["id"], "old")
+
+        project = {"version": 1, "tracks": [{"id": "v1", "type": "video", "clips": [{"id": "c9", "start": 0, "end": 3}]}]}
+        res2 = self.client.post("/api/workflow/timeline/project", json={"stem": "vid one", "project": project})
+        self.assertEqual(res2.status_code, 200)
+        saved = json.loads((legacy_dir / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["tracks"][0]["clips"][0]["id"], "c9")
+        self.assertFalse((self.workspace / "vid one").exists())
 
     def test_save_and_get_reject_traversal_stem(self):
         project = {"version": 1, "tracks": [{"id": "v1", "clips": [{"id": "c1", "start": 0, "end": 1}]}]}

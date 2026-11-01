@@ -95,6 +95,20 @@ def artifact_stem(stem: str, max_len: Optional[int] = None) -> str:
     return cleaned or "video"
 
 
+def resolve_job_dir(stem: str) -> Path:
+    """Thư mục job chung của pipeline và Studio.
+
+    Pipeline ghi workspace/<stem thô> (giữ space/Unicode); bản Studio cũ ghi
+    workspace/<artifact_stem>. Ưu tiên thư mục pipeline, fallback thư mục cũ.
+    """
+    raw_stem = safe_stem(stem)
+    raw_dir = WORKSPACE / raw_stem
+    clean_dir = WORKSPACE / artifact_stem(raw_stem)
+    if raw_dir == clean_dir or raw_dir.is_dir() or not clean_dir.is_dir():
+        return raw_dir
+    return clean_dir
+
+
 def safe_version(value: Any, field: str = "phiên bản video") -> str:
     version = str(value or "").strip().lower()
     if version not in ("final", "raw"):
@@ -578,7 +592,7 @@ def safe_check_job_artifacts(stem: str, defer_media=False) -> Dict[str, bool]:
         "step6": False,
     }
     try:
-        job_dir = WORKSPACE / stem
+        job_dir = resolve_job_dir(stem)
         if job_dir.is_dir():
             res["step1"] = _valid_audio(job_dir / "original.wav")
             res["step2"] = any(_valid_audio(p) for pattern in ("no_vocals.wav", "*_(Instrumental)_*.wav")
@@ -715,13 +729,14 @@ def _backup_srt_before_render(path: Path) -> None:
         logger.warning(f"Không sao lưu được {path.name} trước khi retime: {e}")
 
 
-def _payload_video_version(payload: Dict[str, Any], job_dir: Path, clean_stem: str) -> str:
+def _payload_video_version(payload: Dict[str, Any], job_dir: Path, stem: str) -> str:
     """'raw' khi timeline phụ đề bám video gốc; 'final' khi bám bản đã render."""
     ver = str(payload.get("video_version") or "").strip().lower()
     if ver in ("raw", "input", "final"):
         return "raw" if ver in ("raw", "input") else "final"
     try:
-        if (job_dir / f"final_{clean_stem}.mp4").is_file():
+        final_names = (f"final_{stem}.mp4", f"final_{artifact_stem(stem)}.mp4")
+        if any((job_dir / name).is_file() for name in final_names):
             return "final"
     except OSError as _phase6_exc:
         logger.debug('Suppressed error in workflow_api._payload_video_version (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
@@ -1004,7 +1019,7 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
     cùng phụ đề, âm thanh và thông tin 6 bước chi tiết.
     """
     stem = safe_stem(stem)
-    job_dir = WORKSPACE / stem
+    job_dir = resolve_job_dir(stem)
 
     # 1. Tìm video phôi/download gốc (raw_video)
     raw_video_url = ""
@@ -1692,7 +1707,7 @@ def _find_video_for_stem(stem: str) -> Optional[Path]:
     """Tìm đường dẫn tệp video cho stem đã chọn."""
     stem = safe_stem(stem)
     clean_stem = artifact_stem(stem)
-    job_dir = WORKSPACE / clean_stem
+    job_dir = resolve_job_dir(stem)
     cand_phoi = INPUT_DIR / f"{stem}.mp4"
     cand_dl = DOWNLOADS_DIR / f"{stem}.mp4"
     cand_banve = OUTPUT_DIR / f"Dubbed_{stem}.mp4"
@@ -1718,7 +1733,7 @@ def _ensure_thumbnail_file(stem: str) -> Path:
     if thumb_file.is_file() and thumb_file.stat().st_size > 500:
         return thumb_file
 
-    job_dir = WORKSPACE / clean_stem
+    job_dir = resolve_job_dir(stem)
     if job_dir.is_dir() and (job_dir / "thumbnail.jpg").is_file():
         try:
             shutil.copy2(job_dir / "thumbnail.jpg", thumb_file)
@@ -1773,7 +1788,7 @@ def _capture_thumbnail_sync(stem: str, timestamp_s: float) -> Dict[str, Any]:
         ]
         res = subprocess.run(cmd, capture_output=True, timeout=12)
         if res.returncode == 0 and thumb_file.is_file() and thumb_file.stat().st_size > 500:
-            job_dir = WORKSPACE / clean_stem
+            job_dir = resolve_job_dir(stem)
             if job_dir.is_dir():
                 try:
                     shutil.copy2(thumb_file, job_dir / "thumbnail.jpg")
@@ -1822,7 +1837,7 @@ async def api_upload_thumbnail(stem: str = Form(...), file: UploadFile = File(..
         
     thumb_file.write_bytes(content)
     
-    job_dir = WORKSPACE / clean_stem
+    job_dir = resolve_job_dir(stem)
     if job_dir.is_dir():
         try:
             (job_dir / "thumbnail.jpg").write_bytes(content)
@@ -1958,7 +1973,7 @@ def _prepend_thumbnail_sync(stem: str, duration_s: float) -> Dict[str, Any]:
 
     # 1. Tìm thumbnail
     thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
-    job_dir = WORKSPACE / clean_stem
+    job_dir = resolve_job_dir(stem)
     if not thumb_file.is_file() and job_dir.is_dir() and (job_dir / "thumbnail.jpg").is_file():
         thumb_file = job_dir / "thumbnail.jpg"
 
@@ -2619,6 +2634,16 @@ def _build_music_filter_lines(
     return {"lines": lines, "used_split": used_split}
 
 
+def _build_tts_mix_filter_lines(audio_tag: str, tts_idx: int) -> str:
+    """Trộn track lồng tiếng AI lên audio gốc; audio_tag là stream specifier như "0:a?"."""
+    base_tag = audio_tag.replace("?", "")
+    return (
+        f"[{base_tag}]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.0[expbase];"
+        f"[{tts_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[exptts];"
+        f"[expbase][exptts]amix=inputs=2:normalize=0:duration=first[expaout]"
+    )
+
+
 def _retime_subtitles_to_timeline(
     trans_subs: List[Dict[str, Any]],
     orig_subs: List[Dict[str, Any]],
@@ -2757,7 +2782,7 @@ def _apply_timeline_edits_file(
     # Lọc danh sách clips hợp lệ (giữ nguyên thuộc tính hiệu ứng P2/P3/P4/P5 client gửi kèm)
     _effect_keys = ("at", "speed", "volume", "muted", "keepPitch", "fadeIn", "fadeOut",
                     "crop", "rotate", "flipH", "flipV", "reverse", "freeze", "detachAudio",
-                    "trans", "fx")
+                    "trans", "fx", "vocal_mode")
     valid_clips = []
     for c in clips:
         try:
@@ -3035,7 +3060,7 @@ def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, An
     if not clips or not isinstance(clips, list):
         raise HTTPException(status_code=400, detail="Danh sách phân đoạn clip không hợp lệ")
 
-    job_dir = WORKSPACE / clean_stem
+    job_dir = resolve_job_dir(stem)
     cand_phoi = INPUT_DIR / f"{stem}.mp4"
     cand_dl = DOWNLOADS_DIR / f"{stem}.mp4"
 
@@ -3168,7 +3193,7 @@ async def api_get_timeline_project(stem: str = Query(...)):
     """
     stem = safe_stem(stem)
     clean_stem = artifact_stem(stem)
-    project_file = WORKSPACE / clean_stem / "project.json"
+    project_file = resolve_job_dir(stem) / "project.json"
     if not project_file.is_file():
         return {"exists": False}
     try:
@@ -3195,11 +3220,10 @@ async def api_save_timeline_project(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=400, detail="Project không hợp lệ (thiếu tracks)")
 
     stem = safe_stem(stem)
-    clean_stem = artifact_stem(stem)
-    job_dir = WORKSPACE / clean_stem
+    job_dir = resolve_job_dir(stem)
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    project = {**project, "stem": clean_stem, "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    project = {**project, "stem": stem, "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
     target = job_dir / "project.json"
     tmp = job_dir / "project.json.tmp"
     tmp.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
@@ -3218,7 +3242,7 @@ def _build_waveform_sync(stem: str, version: str, buckets: int) -> Dict[str, Any
     clean_stem = artifact_stem(stem)
     n_buckets = max(200, min(4000, int(buckets or 1600)))
 
-    job_dir = WORKSPACE / clean_stem
+    job_dir = resolve_job_dir(stem)
     src_file = None
     if version != "raw":
         cand_final = job_dir / f"final_{stem}.mp4"
@@ -3296,8 +3320,7 @@ def _run_vocal_separation_worker(stem: str) -> None:
     if not task:
         return
     stem = safe_stem(stem)
-    clean_stem = artifact_stem(stem)
-    job_dir = WORKSPACE / clean_stem
+    job_dir = resolve_job_dir(stem)
     job_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -3353,8 +3376,7 @@ def _run_vocal_separation_worker(stem: str) -> None:
 @router.get("/api/workflow/audio/vocal-status")
 async def api_get_vocal_status(stem: str = Query(...)):
     stem = safe_stem(stem)
-    clean_stem = artifact_stem(stem)
-    job_dir = WORKSPACE / clean_stem
+    job_dir = resolve_job_dir(stem)
     inst_f, voc_f = _find_vocal_files(job_dir) if job_dir.is_dir() else (None, None)
 
     task = _vocal_separation_tasks.get(stem)
@@ -3387,8 +3409,7 @@ async def api_get_vocal_status(stem: str = Query(...)):
 @router.post("/api/workflow/audio/separate-vocals")
 async def api_trigger_separate_vocals(payload: Dict[str, Any] = Body(...)):
     stem = safe_stem(payload.get("stem"))
-    clean_stem = artifact_stem(stem)
-    job_dir = WORKSPACE / clean_stem
+    job_dir = resolve_job_dir(stem)
 
     inst_f, voc_f = _find_vocal_files(job_dir) if job_dir.is_dir() else (None, None)
     if inst_f and voc_f and inst_f.is_file() and voc_f.is_file():
@@ -3429,8 +3450,7 @@ async def api_trigger_separate_vocals(payload: Dict[str, Any] = Body(...)):
 @router.get("/api/workflow/audio/separate-status")
 async def api_get_separate_status(stem: str = Query(...)):
     stem = safe_stem(stem)
-    clean_stem = artifact_stem(stem)
-    job_dir = WORKSPACE / clean_stem
+    job_dir = resolve_job_dir(stem)
     inst_f, voc_f = _find_vocal_files(job_dir) if job_dir.is_dir() else (None, None)
     if inst_f and voc_f and inst_f.is_file() and voc_f.is_file():
         return {
@@ -3560,11 +3580,11 @@ async def api_concat_open(payload: Dict[str, Any] = Body(...)):
     P7: mở Concat với thư mục project của video (tiến trình ngoài, detached).
     AGPL: chỉ thực thi nhị phân, không nhúng/sao chép mã nguồn Concat.
     """
-    stem = artifact_stem(safe_stem(payload.get("stem")))
+    stem = safe_stem(payload.get("stem"))
     exe = _find_concat_exe()
     if not exe:
         raise HTTPException(status_code=404, detail="Không tìm thấy concat.exe (bin/concat/app/PFiles64/Concat/concat.exe)")
-    job_dir = WORKSPACE / stem
+    job_dir = resolve_job_dir(stem)
     job_dir.mkdir(parents=True, exist_ok=True)
     try:
         proc = subprocess.Popen(
@@ -3610,8 +3630,7 @@ def _resolve_timeline_source_video(stem: str, version: str) -> Optional[Path]:
     """Chọn file nguồn theo phiên bản: final (mặc định) hoặc raw (phôi)."""
     stem = safe_stem(stem, field="stem")
     version = safe_version(version)
-    clean_stem = artifact_stem(stem)
-    job_dir = WORKSPACE / clean_stem
+    job_dir = resolve_job_dir(stem)
     if version != "raw":
         cand_final = job_dir / f"final_{stem}.mp4"
         if cand_final.is_file() and _valid_final_video(cand_final):
@@ -3627,7 +3646,7 @@ def _resolve_timeline_source_video(stem: str, version: str) -> Optional[Path]:
 
 
 def _proxy_path_for(stem: str, version: str) -> Path:
-    return WORKSPACE / artifact_stem(safe_stem(stem, field="stem")) / f"proxy_{safe_version(version)}.mp4"
+    return resolve_job_dir(stem) / f"proxy_{safe_version(version)}.mp4"
 
 
 def _proxy_is_fresh(proxy_path: Path, src_path: Path) -> bool:
@@ -3991,7 +4010,7 @@ async def api_manual_generate_cn(payload: Dict[str, Any] = Body(...)):
             if not _wait_pipeline_free(job_id):
                 raise PipelineStateError("Hết thời gian chờ pipeline rảnh; chưa chạy tác vụ.")
             if True:
-                job_dir = WORKSPACE / artifact_stem(stem)
+                job_dir = resolve_job_dir(stem)
                 job_dir.mkdir(parents=True, exist_ok=True)
                 wav = job_dir / "original.wav"
                 job.update({"progress": 10, "stage": "Tách audio 16kHz..."})
@@ -4028,8 +4047,7 @@ async def api_manual_translate(payload: Dict[str, Any] = Body(...)):
     """
     stem = safe_stem(payload.get("stem"))
     target_lang = (payload.get("target_lang") or "vi").strip()
-    clean = artifact_stem(stem)
-    job_dir = WORKSPACE / clean
+    job_dir = resolve_job_dir(stem)
     srt_original = job_dir / "original.srt"
     if not srt_original.is_file():
         raise HTTPException(status_code=400, detail="Chưa có sub Trung gốc — bấm 'Sub Trung' trước đã!")
@@ -4119,8 +4137,7 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
     voice_id: tùy chọn — id giọng trong voice catalog; mặc định dùng giọng đang chọn của tool.
     """
     stem = safe_stem(payload.get("stem"))
-    clean = artifact_stem(stem)
-    job_dir = WORKSPACE / clean
+    job_dir = resolve_job_dir(stem)
     job_dir.mkdir(parents=True, exist_ok=True)
     srt_translated = job_dir / "translated.srt"
 
@@ -4137,7 +4154,7 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
             srt_blocks.append(f"{idx}\n{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}\n{text}\n")
         if srt_blocks:
             atomic_write_text(srt_translated, "\n".join(srt_blocks))
-            if _payload_video_version(payload, job_dir, clean) == "raw":
+            if _payload_video_version(payload, job_dir, stem) == "raw":
                 _snapshot_srt_source(srt_translated)
             else:
                 _sync_srt_source_text(srt_translated)
@@ -4146,7 +4163,7 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
         single_text = (payload.get("text") or "").strip()
         if single_text:
             atomic_write_text(srt_translated, f"1\n00:00:00,000 --> 00:00:10,000\n{single_text}\n")
-            if _payload_video_version(payload, job_dir, clean) == "raw":
+            if _payload_video_version(payload, job_dir, stem) == "raw":
                 _snapshot_srt_source(srt_translated)
         elif (job_dir / "chinese.srt").is_file() or (job_dir / "raw.srt").is_file():
             raise HTTPException(status_code=400, detail="Đã có phụ đề gốc nhưng chưa dịch — bấm nút 'Dịch Ngay' trên timeline trước khi tạo giọng!")
@@ -4334,7 +4351,7 @@ async def api_download_srt(stem: str = Query(...), type: str = Query("translated
     stem = safe_stem(stem)
     if type not in ("translated", "vietnamese", "chinese", "original", "bilingual"):
         raise HTTPException(status_code=400, detail="Loại phụ đề không hợp lệ")
-    job_dir = WORKSPACE / stem
+    job_dir = resolve_job_dir(stem)
     if not job_dir.is_dir():
         raise HTTPException(status_code=404, detail="Không tìm thấy thư mục công việc của video")
 
@@ -4409,8 +4426,7 @@ async def api_save_workflow_subtitles(payload: Dict[str, Any] = Body(...)):
     """Lưu phụ đề đã chỉnh sửa từ giao diện trực tiếp vào tệp translated.srt."""
     stem = safe_stem(payload.get("stem"), field="stem video")
     subs = payload.get("subtitles", [])
-    clean = artifact_stem(stem)
-    job_dir = WORKSPACE / clean
+    job_dir = resolve_job_dir(stem)
     if not job_dir.is_dir():
         job_dir.mkdir(parents=True, exist_ok=True)
 
@@ -4424,7 +4440,7 @@ async def api_save_workflow_subtitles(payload: Dict[str, Any] = Body(...)):
     trans_srt = job_dir / "translated.srt"
     atomic_write_text(trans_srt, "\n".join(srt_blocks))
     if srt_blocks:
-        if _payload_video_version(payload, job_dir, clean) == "raw":
+        if _payload_video_version(payload, job_dir, stem) == "raw":
             _snapshot_srt_source(trans_srt)
         else:
             _sync_srt_source_text(trans_srt)
@@ -4587,7 +4603,7 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
 
     out_dir = resolve_output_dir(payload.get("output_folder", ""), OUTPUT_DIR)
 
-    job_dir = WORKSPACE / stem
+    job_dir = resolve_job_dir(stem)
     cand_phoi = INPUT_DIR / f"{stem}.mp4"
     cand_dl = DOWNLOADS_DIR / f"{stem}.mp4"
 
@@ -4852,12 +4868,7 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
             tts_idx = cmd_inputs.count("-i")
             cmd_inputs.extend(["-i", str(tts_wav)])
             if map_audio:
-                base_tag = map_audio.replace("?", "")
-                fc += (
-                    f";{base_tag}aformat=sample_rates=44100:channel_layouts=stereo,volume=1.0[expbase];"
-                    f"[{tts_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[exptts];"
-                    f"[expbase][exptts]amix=inputs=2:normalize=0:duration=first[expaout]"
-                )
+                fc += ";" + _build_tts_mix_filter_lines(map_audio, tts_idx)
                 map_audio = "[expaout]"
             else:
                 fc += f";[{tts_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[expaout]"
