@@ -8,7 +8,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 from .artifact_store import hash_file
 from .manifest import ManifestStore
-from .models import FingerprintSet, JobManifest, fingerprint_json
+from .models import FingerprintSet, fingerprint_json
 from .stage_status import StageStatus
 
 

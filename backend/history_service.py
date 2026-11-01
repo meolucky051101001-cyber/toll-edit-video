@@ -4,8 +4,6 @@ history_service.py - Task history provider aggregating render histories and comp
 from __future__ import annotations
 
 import datetime
-import json
-import os
 from pathlib import Path
 from typing import Any, Dict, List
 

@@ -1,16 +1,32 @@
+import os
+import sys
+from pathlib import Path
+import logging
+
+logger = logging.getLogger("main_api")
+
+if __name__ == "__main__":
+    # Duplicate-launch guard before heavy imports: a healthy 8088 instance means this spawn is redundant.
+    import urllib.request
+    _guard_port = int(os.getenv("AUTODUB_PORT", "8088"))
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{_guard_port}/api/status", timeout=2.5) as _response:
+            if 200 <= _response.status < 300:
+                print(f"Dashboard đã chạy sẵn trên cổng {_guard_port} — thoát để tránh khởi động trùng.", file=sys.stderr, flush=True)
+                sys.exit(0)
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in main.module (urllib.request.urlopen): %s', type(_phase6_exc).__name__, exc_info=False)
+
 from fastapi import FastAPI, Form, Body, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-import os
-import sys
 import asyncio
 import datetime
-import logging
+from logging.handlers import RotatingFileHandler
 import mimetypes
 import uuid
 import json
 from urllib.parse import unquote
-from pathlib import Path
 from dashboard_media import media_status, paginate_listing, paginate_output
 from typing import Optional
 
@@ -30,23 +46,55 @@ from environment import load_environment
 
 BASE_DIR = Path(__file__).resolve().parent
 load_environment(BASE_DIR)
-from config.paths import AppPaths
+from config.paths import AppPaths, is_downloader_save_dir
+from core.logging_setup import RedactingFormatter
 
 PATHS = AppPaths.from_environment(BASE_DIR.parent)
 
-from ai.transcription import extract_subtitles_whisper, save_srt
+from ai.transcription import save_srt
 from ai.v1_asr_isolated import extract_subtitles_isolated
 from ai.translation import translate_subtitles
-from ai.voice_cloning import generate_dubbing_audio
 from ai.v1_voice_isolated import generate_dubbing_audio_isolated
 from video_utils import extract_audio_from_video, mix_audio_pydub, process_video, separate_vocals_demucs
 from pipeline_v2.config import PipelineMode, PipelineSettings
 import shared_state
 import job_tracker
 
-logger = logging.getLogger("main_api")
+
+
+def _configure_dashboard_logging() -> None:
+    """Keep a rotating trail for console-launched dashboards, which otherwise log only to stdout."""
+    root_logger = logging.getLogger()
+    if any(getattr(handler, "_autodub_dashboard", False) for handler in root_logger.handlers):
+        return
+    log_dir = BASE_DIR / "logs"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(log_dir / "dashboard.log", maxBytes=10_000_000, backupCount=5, encoding="utf-8")
+    except OSError:
+        return
+    handler.setFormatter(RedactingFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    handler._autodub_dashboard = True
+    root_logger.addHandler(handler)
+    if root_logger.level == logging.NOTSET or root_logger.level > logging.INFO:
+        root_logger.setLevel(logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+if __name__ == "__main__":
+    # Importing this module (tests, E2E scripts) must not attach a second writer to the live log file.
+    _configure_dashboard_logging()
 
 app = FastAPI()
+
+
+@app.exception_handler(Exception)
+async def _log_unhandled_exception(request: Request, exc: Exception):
+    logger.error("Lỗi không xử lý tại %s %s", request.method, request.url.path, exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": "Lỗi máy chủ nội bộ — xem backend/logs/dashboard.log để biết chi tiết."})
+
+
 app.state.pipeline_runtime = sys.modules[__name__]
 
 ALLOWED_CORS_ORIGINS = [
@@ -73,9 +121,15 @@ def _load_or_create_local_token() -> str:
     env_token = os.getenv("AUTODUB_LOCAL_TOKEN", "").strip()
     if env_token:
         return env_token
+    workspace_root = Path(
+        os.getenv(
+            "AUTODUB_WORKSPACE",
+            str(Path(__file__).resolve().parent.parent / "workspace"),
+        )
+    )
     candidate_paths = [
-        Path(__file__).resolve().parent.parent / "workspace" / "bot_system" / ".dashboard_control_token",
-        Path(__file__).resolve().parent.parent / "workspace" / ".dashboard_control_token",
+        workspace_root / "bot_system" / ".dashboard_control_token",
+        workspace_root / ".dashboard_control_token",
         Path(__file__).resolve().parent.parent / "workspace_backup_safety" / ".dashboard_control_token",
         Path(__file__).resolve().parent / ".dashboard_control_token",
     ]
@@ -85,15 +139,15 @@ def _load_or_create_local_token() -> str:
                 tok = p.read_text(encoding="utf-8").strip()
                 if len(tok) >= 16:
                     return tok
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main._load_or_create_local_token (p.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
     new_token = secrets.token_urlsafe(32)
     for p in candidate_paths[:2]:
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(new_token, encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main._load_or_create_local_token (p.parent.mkdir): %s', type(_phase6_exc).__name__, exc_info=False)
     return new_token
 
 LOCAL_TOKEN = _load_or_create_local_token()
@@ -126,17 +180,16 @@ async def security_middleware(request: Request, call_next):
     path = request.url.path
     method = request.method.upper()
     if method in ("POST", "PUT", "DELETE", "PATCH") and (path.startswith("/api/") or path.startswith("/a2ui/")):
-        if not path.startswith("/api/script/") and not path.startswith("/api/workflow/thumbnail/") and path != "/api/voice-preview":
-            token = request.headers.get("X-Local-Control-Token", "")
-            if not token or not secrets.compare_digest(str(token), str(LOCAL_TOKEN)):
-                # Dự phòng cho các nút điều khiển nội bộ từ dashboard UI hợp lệ
-                is_dashboard_internal = (
-                    request.headers.get("X-Dashboard-Input") == "1"
-                    and request.headers.get("origin") in (None, "http://127.0.0.1:8088", "http://localhost:8088", "http://127.0.0.1:5173", "http://localhost:5173")
-                    and path in ("/api/stop-batch", "/api/pause-video", "/api/resume-video", "/api/audio-settings", "/api/worker-settings")
-                )
-                if not is_dashboard_internal:
-                    return JSONResponse(status_code=403, content={"detail": "Yêu cầu thiếu hoặc sai X-Local-Control-Token"})
+        token = request.headers.get("X-Local-Control-Token", "")
+        if not token or not secrets.compare_digest(str(token), str(LOCAL_TOKEN)):
+            # Dự phòng cho các nút điều khiển nội bộ từ dashboard UI hợp lệ
+            is_dashboard_internal = (
+                request.headers.get("X-Dashboard-Input") == "1"
+                and request.headers.get("origin") in (None, "http://127.0.0.1:8088", "http://localhost:8088", "http://127.0.0.1:5173", "http://localhost:5173")
+                and path in ("/api/stop-batch", "/api/pause-video", "/api/resume-video", "/api/audio-settings", "/api/worker-settings")
+            )
+            if not is_dashboard_internal:
+                return JSONResponse(status_code=403, content={"detail": "Yêu cầu thiếu hoặc sai X-Local-Control-Token"})
 
 
     return await call_next(request)
@@ -187,14 +240,19 @@ def _install_asyncio_quiet_disconnect_handler() -> None:
                 loop_obj.default_exception_handler(context)
 
         loop.set_exception_handler(_custom_exception_handler)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in main._install_asyncio_quiet_disconnect_handler (asyncio.get_running_loop): %s', type(_phase6_exc).__name__, exc_info=False)
 
 
 @app.on_event("startup")
 async def on_startup():
     _install_asyncio_quiet_disconnect_handler()
     ensure_tool_control()
+    try:
+        if job_tracker.clear_stale_stop_request():
+            logger.info("Đã dọn cờ dừng còn sót từ job trước đó.")
+    except Exception as e:
+        logger.warning("Không thể dọn cờ dừng cũ: %s", e)
     try:
         asyncio.create_task(_night_batch_watcher())
     except Exception as e:
@@ -229,9 +287,15 @@ except Exception as _te:
 def get_input_dir() -> Path:
     saved = _get_system_path("dashboard_input.json")
     if saved.exists():
-        return Path(json.loads(saved.read_text(encoding="utf-8"))["path"])
+        saved_path = Path(json.loads(saved.read_text(encoding="utf-8"))["path"])
+        if not is_downloader_save_dir(saved_path):
+            return saved_path
+        logger.warning(
+            "Bỏ qua thư mục nguồn %s: đây là nơi bot tải video lưu về, chỉ tải không edit.",
+            saved_path,
+        )
     env_dir = os.getenv("AUTODUB_INPUT_DIR")
-    if env_dir and os.path.exists(env_dir):
+    if env_dir and os.path.exists(env_dir) and not is_downloader_save_dir(env_dir):
         return Path(env_dir)
     for cand in [Path(r"D:\video phôi"), Path(r"D:\video phoi"), Path(r"D:\video_input")]:
         if cand.exists():
@@ -258,7 +322,6 @@ BATCH_TASK: Optional[asyncio.Task] = None
 
 def _validate_input_path(video_path: str) -> Path:
     from fastapi import HTTPException
-    import os
     from pathlib import Path
     
     clean_path = video_path.strip()
@@ -347,6 +410,49 @@ async def locate_v1_subtitles(video_path, segments):
         release_ocr_reader()
 
 
+def _audio_duration_seconds(path):
+    try:
+        import soundfile as sf
+        return float(sf.info(str(path)).duration)
+    except Exception:
+        return 0.0
+
+
+async def _apply_visual_sub_to_speech(
+    video_path, srt_original, srt_segments, visual_sub_to_speech,
+    source_duration, target_lang="vi",
+):
+    """Recover burned-in captions when the opt-in visual mode is on."""
+    from v1_job_policy import looks_like_bgm_hallucination, visual_ocr_transcript_usable
+    asr_was_empty = not srt_segments
+    if (visual_sub_to_speech and not asr_was_empty and source_duration > 0
+            and looks_like_bgm_hallucination(srt_segments, source_duration)):
+        logger.info("Visual mode: bỏ %d câu ASR nghi ảo giác nhạc nền", len(srt_segments))
+        srt_segments = []
+        asr_was_empty = True
+    if not visual_sub_to_speech:
+        return srt_segments, None, asr_was_empty
+
+    from ocr_utils import perform_video_ocr, release_ocr_reader
+    try:
+        segments, width, height, main_y = await asyncio.to_thread(
+            perform_video_ocr, video_path, target_lang=target_lang, sample_rate=1.0,
+            api_key=GEMINI_API_KEY, srt_segments=[], visual_sub_to_speech=True,
+            _source_duration=source_duration,
+        )
+    finally:
+        release_ocr_reader()
+    if not visual_ocr_transcript_usable(segments, source_duration):
+        if asr_was_empty:
+            raise RuntimeError("Không tìm thấy phụ đề động trên hình để lồng tiếng.")
+        logger.info("Visual OCR-to-TTS: không đủ phụ đề trên hình, giữ ASR %d câu", len(srt_segments))
+        return srt_segments, None, asr_was_empty
+    for idx, seg in enumerate(segments, start=1):
+        seg.index = idx
+    await asyncio.to_thread(save_srt, segments, srt_original)
+    return segments, (width, height, main_y), asr_was_empty
+
+
 async def run_api_pipeline_v2(
     video_path,
     out_dir,
@@ -366,26 +472,10 @@ async def run_api_pipeline_v2(
     if settings.mode is not PipelineMode.V2:
         return None
 
-    from pipeline_v2.stage_validation import is_real_rvc_model
-    from pipeline_v2.video_pipeline import (
-        VideoPipelineRequest,
-        VideoPipelineRunner,
-        discover_rvc_model,
-    )
+    from disk_guard import ensure_free_space
+    ensure_free_space(WORKSPACE, out_dir, published_video, purpose=f"xử lý {Path(video_path).name}")
 
-    rvc_model = None
-    selected_voice_param = voice_param
-    if voice_source == "rvc":
-        candidate = Path(voice_param)
-        if is_real_rvc_model(candidate):
-            rvc_model = candidate
-        else:
-            rvc_model = discover_rvc_model(Path(WORKSPACE))
-        if rvc_model is None:
-            raise RuntimeError(
-                "RVC was requested but no real .pth model is available"
-            )
-        selected_voice_param = str(rvc_model)
+    from pipeline_v2.video_pipeline import VideoPipelineRequest, VideoPipelineRunner
 
     request = VideoPipelineRequest(
         video_path=Path(video_path),
@@ -397,8 +487,7 @@ async def run_api_pipeline_v2(
         tts_api_key=(api_key if voice_source == "fpt" else ""),
         target_lang=target_lang,
         voice_source=voice_source,
-        voice_param=selected_voice_param,
-        rvc_model_path=rvc_model,
+        voice_param=voice_param,
         font_name=font_name,
         font_color=font_color,
         font_weight=font_weight,
@@ -598,6 +687,8 @@ async def api_process_video(
             }
         )
         frozen_eff = frozen_job.get("effective_config", {}) if frozen_job else {}
+        from v1_job_policy import resolve_visual_sub_to_speech
+        visual_sub_to_speech = resolve_visual_sub_to_speech(frozen_eff, WORKSPACE)
         job_bgm_vol = frozen_eff.get("bgm_volume_db", cur_audio_settings.get("bgm_volume_db", -2.0))
         job_dub_vol = frozen_eff.get("dubbing_volume_db", cur_audio_settings.get("dubbing_volume_db", 1.0))
         job_sep_mode = frozen_eff.get("separation_mode", cur_audio_settings.get("separation_mode", "roformer"))
@@ -617,7 +708,15 @@ async def api_process_video(
 
         # 2. Transcribe
         srt_segments = await asyncio.to_thread(extract_subtitles_isolated, vocals_audio, srt_original)
-        vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
+        source_duration = _audio_duration_seconds(original_audio)
+        srt_segments, visual_geometry, asr_was_empty = await _apply_visual_sub_to_speech(
+            video_path, srt_original, srt_segments, visual_sub_to_speech,
+            source_duration, target_lang,
+        )
+        if visual_geometry is not None:
+            vid_w, vid_h, main_y = visual_geometry
+        else:
+            vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
 
         # 3. Translate
         translated_segments = await asyncio.to_thread(translate_subtitles, 
@@ -641,6 +740,7 @@ async def api_process_video(
             video_path=video_path,
             voice_mode=api_voice_mode,
             workspace=WORKSPACE,
+            visual_sub_to_speech=visual_sub_to_speech,
         )
         effective_source = voice_lock_info["voice_source"]
         effective_param = voice_lock_info["voice_param"]
@@ -648,8 +748,8 @@ async def api_process_video(
         try:
             from pydub import AudioSegment
             vid_duration = len(AudioSegment.from_file(original_audio)) / 1000.0
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main.api_process_video (len): %s', type(_phase6_exc).__name__, exc_info=False)
 
         dubbing_audio_files = await generate_dubbing_audio_isolated(
             translated_segments, dubbing_dir,
@@ -666,9 +766,10 @@ async def api_process_video(
         translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
 
         # 5. Mix audio (clean instrumental BGM + dubbing)
+        bgm_audio = original_audio if (visual_sub_to_speech and asr_was_empty) else no_vocals_audio
         await asyncio.to_thread(
             mix_audio_pydub,
-            no_vocals_audio,
+            bgm_audio,
             dubbing_audio_files,
             mixed_audio,
             original_volume_db=job_bgm_vol,
@@ -879,6 +980,8 @@ async def api_process_url(
             }
         )
         frozen_eff = frozen_job.get("effective_config", {}) if frozen_job else {}
+        from v1_job_policy import resolve_visual_sub_to_speech
+        visual_sub_to_speech = resolve_visual_sub_to_speech(frozen_eff, WORKSPACE)
         job_bgm_vol = frozen_eff.get("bgm_volume_db", cur_audio_settings.get("bgm_volume_db", -2.0))
         job_dub_vol = frozen_eff.get("dubbing_volume_db", cur_audio_settings.get("dubbing_volume_db", 1.0))
         job_sep_mode = frozen_eff.get("separation_mode", cur_audio_settings.get("separation_mode", "roformer"))
@@ -898,7 +1001,15 @@ async def api_process_url(
 
         # Transcribe
         srt_segments = await asyncio.to_thread(extract_subtitles_isolated, vocals_audio, srt_original)
-        vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
+        source_duration = _audio_duration_seconds(original_audio)
+        srt_segments, visual_geometry, asr_was_empty = await _apply_visual_sub_to_speech(
+            video_path, srt_original, srt_segments, visual_sub_to_speech,
+            source_duration, target_lang,
+        )
+        if visual_geometry is not None:
+            vid_w, vid_h, main_y = visual_geometry
+        else:
+            vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
 
         # Translate
         translated_segments = await asyncio.to_thread(translate_subtitles, 
@@ -932,6 +1043,7 @@ async def api_process_url(
             video_path=None,
             voice_mode=api_voice_mode,
             workspace=WORKSPACE,
+            visual_sub_to_speech=visual_sub_to_speech,
         )
         effective_source = voice_lock_info["voice_source"]
         effective_param = voice_lock_info["voice_param"]
@@ -939,8 +1051,8 @@ async def api_process_url(
         try:
             from pydub import AudioSegment
             vid_duration = len(AudioSegment.from_file(original_audio)) / 1000.0
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main.api_process_url (len): %s', type(_phase6_exc).__name__, exc_info=False)
 
         dubbing_audio_files = await generate_dubbing_audio_isolated(
             translated_segments, dubbing_dir,
@@ -957,9 +1069,10 @@ async def api_process_url(
         translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
 
         # Mix audio (clean instrumental BGM + dubbing)
+        bgm_audio = original_audio if (visual_sub_to_speech and asr_was_empty) else no_vocals_audio
         await asyncio.to_thread(
             mix_audio_pydub,
-            no_vocals_audio,
+            bgm_audio,
             dubbing_audio_files,
             mixed_audio,
             original_volume_db=job_bgm_vol,
@@ -1022,12 +1135,6 @@ async def serve_dashboard():
     return HTMLResponse("<h2>Dashboard template not found.</h2>", status_code=404)
 
 
-@app.get("/api/auth-token")
-async def api_get_auth_token():
-    """Trả về control token hợp lệ cho giao diện nội bộ localhost."""
-    return {"token": LOCAL_TOKEN}
-
-
 @app.get("/api/status")
 async def api_get_status():
     """Trả về trạng thái tiến độ thời gian thực của tác vụ hiện tại."""
@@ -1070,18 +1177,28 @@ async def api_get_status():
                         "asr_model": dec.planned_pipeline.get("asr_model", "whisper_turbo"),
                     }
                     status["video_mode"] = res_m
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in main.api_get_status (Path): %s', type(_phase6_exc).__name__, exc_info=False)
     try:
         from v1_vram_monitor import get_vram_stats
         status["vram"] = get_vram_stats()
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in main.api_get_status (get_vram_stats): %s', type(_phase6_exc).__name__, exc_info=False)
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        status["ram"] = {
+            "percent": mem.percent,
+            "used_gb": round(mem.used / (1024 ** 3), 2),
+            "total_gb": round(mem.total / (1024 ** 3), 2),
+        }
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in main.api_get_status (psutil.virtual_memory): %s', type(_phase6_exc).__name__, exc_info=False)
     try:
         from worker_settings import get_worker_settings
         status["worker_settings"] = get_worker_settings()
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in main.api_get_status (get_worker_settings): %s', type(_phase6_exc).__name__, exc_info=False)
     return status
 
 
@@ -1095,6 +1212,17 @@ async def api_get_queue():
     try:
         data = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8-sig"))
         alive = job_tracker._pid_is_running(int(data.get("pid") or 0))
+        if not alive:
+            # The snapshot pid is only rewritten on the next queue event; scan for a live bot instead.
+            try:
+                import psutil
+                for proc in psutil.process_iter(["cmdline"]):
+                    cmdline = proc.info.get("cmdline") or []
+                    if any("telegram_bot.py" in str(arg) for arg in cmdline):
+                        alive = True
+                        break
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in main.api_get_queue (psutil.process_iter): %s', type(_phase6_exc).__name__, exc_info=False)
         # Bổ sung thông tin router cho từng video trong hàng chờ
         try:
             from v1_video_router import route_video
@@ -1113,8 +1241,8 @@ async def api_get_queue():
                         "router_label": lbl,
                         "duration_s": dec.metadata.duration_s,
                     }
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main.api_get_queue (data.get): %s', type(_phase6_exc).__name__, exc_info=False)
         return {**data, "available": alive, "message": "" if alive else "Bot đã dừng; danh sách là bản ghi cuối cùng."}
     except (OSError, ValueError, TypeError):
         raise HTTPException(503, "Không đọc được hàng đợi Telegram")
@@ -1138,8 +1266,8 @@ async def api_process_queue(request: Request):
         pause_flag = _get_system_path("control") / "v1.pause"
         try:
             pause_flag.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main.api_process_queue (pause_flag.unlink): %s', type(_phase6_exc).__name__, exc_info=False)
 
         # 2. Ghi cờ kích hoạt để bot đang chạy nhặt việc ngay lập tức
         trigger_flag = _get_system_path("telegram_queue_trigger.flag")
@@ -1158,8 +1286,8 @@ async def api_process_queue(request: Request):
                     if any('telegram_bot.py' in str(arg) for arg in cmdline):
                         alive = True
                         break
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
+                except (psutil.NoSuchProcess, psutil.AccessDenied) as _phase6_exc:
+                    logger.debug('Suppressed error in main.api_process_queue (p.info.get): %s', type(_phase6_exc).__name__, exc_info=False)
 
         if not alive:
             python = BASE_DIR / "venv" / "Scripts" / "python.exe"
@@ -1218,7 +1346,7 @@ async def api_move_queue_item(request: Request):
         raise HTTPException(400, "Dữ liệu JSON không hợp lệ")
 
     index = payload.get("index")
-    action = payload.get("action", "up")  # 'up', 'down', 'top'
+    action = payload.get("action", "up")  # 'up', 'down', 'top', 'position' (kèm 'to')
 
     if index is None or not isinstance(index, int):
         raise HTTPException(400, "Vị trí index không hợp lệ")
@@ -1246,6 +1374,13 @@ async def api_move_queue_item(request: Request):
             target = items.pop(index)
             items.insert(0, target)
             msg = f"Đã đưa video lên đầu hàng chờ (#1)!"
+        elif action == "position" and isinstance(payload.get("to"), int):
+            to = max(0, min(int(payload["to"]), n - 1))
+            if to == index:
+                return {"status": "unchanged", "items": items, "message": "Vị trí không đổi"}
+            target = items.pop(index)
+            items.insert(to, target)
+            msg = f"Đã chuyển video #{index + 1} đến vị trí #{to + 1}!"
         elif action == "down" and index < n - 1:
             items[index], items[index + 1] = items[index + 1], items[index]
             msg = f"Đã chuyển video #{index + 1} xuống vị trí #{index + 2}!"
@@ -1371,6 +1506,11 @@ async def api_input_folder(request: Request):
         path = path.resolve()
         if path == get_output_dir().resolve():
             raise HTTPException(400, "Hãy chọn thư mục nguồn khác thư mục video hoàn thành.")
+        if is_downloader_save_dir(path):
+            raise HTTPException(
+                400,
+                "Thư mục này là nơi bot Douyin/XHS lưu video tải về (chỉ tải, không edit). Hãy chọn thư mục khác.",
+            )
         dest = Path(WORKSPACE) / "dashboard_input.json"
         tmp = dest.with_suffix(".tmp")
         tmp.write_text(json.dumps({"path": str(path)}), encoding="utf-8")
@@ -1406,7 +1546,21 @@ async def api_input_video(request: Request):
             if target.exists():
                 target = root / (Path(name).stem + "_" + uuid.uuid4().hex[:8] + Path(name).suffix)
             tmp.rename(target)
-            return {"name": target.name, "size": total}
+            # F10 — cảnh báo trùng nội dung ngay khi tải lên + đăng ký fingerprint
+            dup_info = None
+            try:
+                from duplicate_guard import check_path as _dup_check, register as _dup_register
+                dup_info = await asyncio.to_thread(_dup_check, target)
+                await asyncio.to_thread(_dup_register, "upload", target.name, target)
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in main.api_input_video (asyncio.to_thread): %s', type(_phase6_exc).__name__, exc_info=False)
+            resp = {"name": target.name, "size": total}
+            if dup_info:
+                resp["duplicate_warning"] = (
+                    f"Nội dung trùng với '{dup_info.get('name')}' "
+                    f"({'thành phẩm đã xuất' if dup_info.get('kind') == 'output' else 'file đã tải lên trước đây'})!"
+                )
+            return resp
         finally:
             tmp.unlink(missing_ok=True)
 
@@ -1509,8 +1663,8 @@ def _list_banve(limit=None, offset=0, search="", status="all"):
         if v2_workspace_history.exists():
             try:
                 v2_names = set(json.loads(v2_workspace_history.read_text(encoding="utf-8")).keys())
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in main._list_banve (set): %s', type(_phase6_exc).__name__, exc_info=False)
 
         for f in sorted(os.listdir(output_dir), reverse=True):
             if f.startswith("Dubbed_queue_") or f in v2_names:
@@ -1580,8 +1734,8 @@ async def api_run_batch(request: Request = None, video_mode: str = "auto"):
                 body = await request.json()
                 if isinstance(body, dict) and body.get("video_mode"):
                     selected_mode = str(body["video_mode"]).strip()
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main.api_run_batch (request.headers.get): %s', type(_phase6_exc).__name__, exc_info=False)
 
     status = job_tracker.get_status()
     if UNIFIED_PIPELINE_LOCK.locked():
@@ -1593,7 +1747,7 @@ async def api_run_batch(request: Request = None, video_mode: str = "auto"):
                 "message": "Pipeline đang bận xử lý video khác.",
             },
         )
-    if Path(r"C:\tool v1\workspace\control\v1.pause").exists():
+    if (_get_system_path("control") / "v1.pause").exists():
         raise HTTPException(409, "Tool đang tắt, không nhận batch mới.")
     status = job_tracker.get_status()
     if (BATCH_TASK is not None and not BATCH_TASK.done()) or status.get("active"):
@@ -1749,21 +1903,21 @@ async def api_retry_video(request: Request):
                 "message": "Hiện đang có tiến trình video đang xử lý, vui lòng đợi!",
             },
         )
-    if Path(r"C:\tool v1\workspace\control\v1.pause").exists():
+    if (_get_system_path("control") / "v1.pause").exists():
         raise HTTPException(409, "Tool đang tắt, không nhận xử lý video mới.")
 
     filename = ""
     try:
         data = await request.json()
         filename = data.get("filename", "").strip()
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in main.api_retry_video (request.json): %s', type(_phase6_exc).__name__, exc_info=False)
     if not filename:
         try:
             form = await request.form()
             filename = form.get("filename", "").strip()
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main.api_retry_video (request.form): %s', type(_phase6_exc).__name__, exc_info=False)
 
     if not filename:
         raise HTTPException(status_code=400, detail="Thiếu tên video cần chạy lại (filename).")
@@ -1960,8 +2114,8 @@ async def api_cancel_schedule():
     f = _schedule_file()
     try:
         await asyncio.to_thread(f.unlink)
-    except FileNotFoundError:
-        pass
+    except FileNotFoundError as _phase6_exc:
+        logger.debug('Suppressed error in main.api_cancel_schedule (asyncio.to_thread): %s', type(_phase6_exc).__name__, exc_info=False)
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"Không hủy được lịch: {e}")
     return {"active": False}
@@ -2011,14 +2165,323 @@ async def _night_batch_watcher():
             await asyncio.sleep(10)
 
 
+# ===== GĐ3: F7 GLOSSARY LEARNING · F10 DUPLICATE GUARD · F12 WORKSPACE · F14 DISK =====
+
+
+@app.get("/api/glossary/suggestions")
+async def api_get_glossary_suggestions(min_count: int = 3):
+    """F7 — các cặp sửa tay lặp lại >= min_count lần, chờ người dùng duyệt vào Glossary."""
+    from glossary_learning_service import get_suggestions
+
+    return {"items": await asyncio.to_thread(get_suggestions, min_count)}
+
+
+@app.post("/api/glossary/suggestions/accept")
+async def api_accept_glossary_suggestion(payload: dict = Body(...)):
+    from glossary_learning_service import accept_suggestion
+
+    try:
+        res = await asyncio.to_thread(
+            accept_suggestion, payload.get("before", ""), payload.get("after", "")
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return res
+
+
+@app.post("/api/glossary/suggestions/dismiss")
+async def api_dismiss_glossary_suggestion(payload: dict = Body(...)):
+    from glossary_learning_service import dismiss_suggestion
+
+    return await asyncio.to_thread(
+        dismiss_suggestion, payload.get("before", ""), payload.get("after", "")
+    )
+
+
+@app.get("/api/phoi/duplicate-check")
+async def api_phoi_duplicate_check(filename: str):
+    """F10 — kiểm tra video phôi có trùng nội dung với video đã xử lý/tải lên trước đây."""
+    from duplicate_guard import check_path
+
+    clean = filename.strip()
+    if not clean or clean in (".", "..") or clean != Path(clean).name:
+        raise HTTPException(status_code=400, detail="Tên file không hợp lệ")
+    target = get_input_dir() / clean
+    if not target.is_file():
+        return {"duplicate": False}
+    hit = await asyncio.to_thread(check_path, target)
+    return {"duplicate": bool(hit), "info": hit}
+
+
+@app.get("/api/workspace/usage")
+async def api_workspace_usage():
+    """F12 — dung lượng từng job trong workspace (chạy quét nặng trong thread)."""
+    from workspace_usage_service import list_job_usage
+
+    return await asyncio.to_thread(list_job_usage)
+
+
+@app.post("/api/workspace/cleanup")
+async def api_workspace_cleanup(payload: dict = Body(...)):
+    """F12 — dọn stems (giữ SRT/dubbing để còn sửa câu) hoặc xóa cả job dir."""
+    from workspace_usage_service import cleanup_jobs
+
+    names = payload.get("jobs")
+    mode = str(payload.get("mode") or "stems")
+    if mode not in ("stems", "full"):
+        raise HTTPException(status_code=400, detail="Chế độ dọn không hợp lệ (stems | full)")
+    if not isinstance(names, list) or not names:
+        raise HTTPException(status_code=400, detail="Danh sách job cần dọn đang rỗng")
+    active: list = []
+    try:
+        st = job_tracker.get_status(strict=True)
+        active = job_tracker.active_job_names(st)
+    except Exception as _phase6_exc:
+        logger.warning('Suppressed error in main.api_workspace_cleanup (job_tracker.get_status): %s', type(_phase6_exc).__name__, exc_info=False)
+        raise HTTPException(status_code=503, detail="Không xác minh được job đang chạy; chưa thực hiện dọn workspace.") from None
+    return await asyncio.to_thread(cleanup_jobs, names, mode, active)
+
+
+@app.get("/api/disk-usage")
+async def api_disk_usage():
+    """F14 — dung lượng còn trống của các ổ chứa input/workspace/output."""
+    import shutil as _shutil
+
+    def _probe(label: str, p) -> dict:
+        try:
+            u = _shutil.disk_usage(str(p))
+            return {"label": label, "path": str(p), "free_gb": round(u.free / 2**30, 1), "total_gb": round(u.total / 2**30, 1)}
+        except Exception:
+            return {"label": label, "path": str(p), "free_gb": None, "total_gb": None}
+
+    def _all():
+        return [
+            _probe("input", get_input_dir()),
+            _probe("workspace", Path(WORKSPACE)),
+            _probe("output", get_output_dir()),
+        ]
+
+    return {"drives": await asyncio.to_thread(_all)}
+
+
+# ===== GĐ4: F16 TÌM KIẾM TOÀN CỤC · F18 XUẤT/NHẬP CẤU HÌNH =====
+
+
+@app.get("/api/search")
+async def api_global_search(q: str = ""):
+    """F16 — tìm kiếm toàn cục: video phôi, thành phẩm, preset, glossary, lịch sử (fold tiếng Việt)."""
+    import unicodedata
+
+    query = q.strip()
+    if len(query) < 2:
+        return {"groups": []}
+
+    def _fold(s) -> str:
+        return "".join(
+            c for c in unicodedata.normalize("NFD", str(s).lower().replace("đ", "d"))
+            if unicodedata.category(c) != "Mn"
+        )
+
+    needle = _fold(query)
+
+    def _match(name) -> bool:
+        return needle in _fold(name)
+
+    def _run() -> list:
+        groups = []
+        try:
+            root = get_input_dir()
+            files = [e.name for e in root.iterdir() if e.is_file()] if root.is_dir() else []
+            hits = [n for n in files if _match(n)][:5]
+            if hits:
+                groups.append({"id": "phoi", "label": "Video Phôi", "items": [{"title": n} for n in hits]})
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main._run (get_input_dir): %s', type(_phase6_exc).__name__, exc_info=False)
+        try:
+            root = get_output_dir()
+            files = [e.name for e in root.iterdir() if e.is_file()] if root.is_dir() else []
+            hits = [n for n in files if _match(n)][:5]
+            if hits:
+                groups.append({"id": "banve", "label": "Thành phẩm", "items": [{"title": n} for n in hits]})
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main._run (get_output_dir): %s', type(_phase6_exc).__name__, exc_info=False)
+        try:
+            from preset_service import list_presets
+
+            hits = [p.get("name", "?") for p in list_presets(tool="v1") if _match(p.get("name", ""))][:5]
+            if hits:
+                groups.append({"id": "preset", "label": "Preset cấu hình", "items": [{"title": n} for n in hits]})
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main._run (p.get): %s', type(_phase6_exc).__name__, exc_info=False)
+        try:
+            from ai.translation import load_custom_glossary
+
+            gl = load_custom_glossary(WORKSPACE)
+            hits = [f"{k} → {v}" for k, v in gl.items() if _match(k) or _match(v)][:5]
+            if hits:
+                groups.append({"id": "glossary", "label": "Glossary", "items": [{"title": n} for n in hits]})
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main._run (load_custom_glossary): %s', type(_phase6_exc).__name__, exc_info=False)
+        try:
+            hist = job_tracker.get_status().get("history", [])
+            hits = [h.get("video_name", "?") for h in hist if _match(h.get("video_name", ""))][:5]
+            if hits:
+                groups.append({"id": "history", "label": "Lịch sử đã xử lý", "items": [{"title": n} for n in hits]})
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in main._run (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
+        return groups
+
+    return {"groups": await asyncio.to_thread(_run)}
+
+
+@app.get("/api/config/export")
+async def api_export_dashboard_config():
+    """F18 — xuất toàn bộ cấu hình Dashboard ra 1 file JSON (presets, drafts, glossary, mixer, worker, voice, flags)."""
+    import time as _time
+
+    def _collect() -> dict:
+        out = {"format": "toolv1-dashboard-config", "version": 1, "exported_at": _time.time()}
+        sections = {
+            "presets": lambda: __import__("preset_service").list_presets(tool="v1"),
+            "video_drafts": lambda: __import__("job_config_service").list_all_drafts(),
+            "glossary": lambda: __import__("ai.translation", fromlist=["x"]).load_custom_glossary(WORKSPACE),
+            "audio_settings": get_audio_settings,
+            "worker_settings": get_worker_settings,
+            "voice_auto": lambda: {
+                "config": __import__("ai.v1_auto_voice", fromlist=["x"]).get_auto_voice_config(WORKSPACE),
+                "enabled": __import__("ai.v1_auto_voice", fromlist=["x"]).get_auto_voice_enabled(WORKSPACE),
+            },
+            "feature_flags": lambda: __import__("v1_feature_flags").get_feature_flags(WORKSPACE),
+        }
+        for key, fn in sections.items():
+            try:
+                out[key] = fn()
+            except Exception:
+                continue
+        return out
+
+    return await asyncio.to_thread(_collect)
+
+
+@app.post("/api/config/import")
+async def api_import_dashboard_config(payload: dict = Body(...)):
+    """F18 — phục hồi cấu hình từ file JSON đã xuất. Chỉ nhận file đúng định dạng, áp dụng qua các hàm ghi chuẩn."""
+    data = payload.get("data")
+    if not isinstance(data, dict) or data.get("format") != "toolv1-dashboard-config":
+        raise HTTPException(status_code=400, detail="File cấu hình không hợp lệ (không phải bản xuất của Tool V1 Dashboard).")
+
+    def _apply() -> dict:
+        applied, skipped = [], []
+
+        presets = data.get("presets")
+        if isinstance(presets, list) and presets:
+            try:
+                from preset_service import create_preset
+
+                cnt = 0
+                for p in presets:
+                    if isinstance(p, dict):
+                        try:
+                            create_preset(p)
+                            cnt += 1
+                        except Exception:
+                            continue
+                applied.append(f"presets ({cnt} mục)")
+            except Exception:
+                skipped.append("presets")
+
+        drafts = data.get("video_drafts")
+        if isinstance(drafts, dict) and drafts:
+            try:
+                import job_config_service as jcs
+
+                cnt = 0
+                for name, d in drafts.items():
+                    if isinstance(d, dict):
+                        try:
+                            jcs.save_video_draft(str(name), d)
+                            cnt += 1
+                        except Exception:
+                            continue
+                applied.append(f"bản nháp video ({cnt} mục)")
+            except Exception:
+                skipped.append("video_drafts")
+
+        gl = data.get("glossary")
+        if isinstance(gl, dict) and gl:
+            try:
+                from ai.translation import save_custom_glossary
+
+                save_custom_glossary(entries=gl, merge=True, workspace=WORKSPACE)
+                applied.append(f"glossary ({len(gl)} mục)")
+            except Exception:
+                skipped.append("glossary")
+
+        aud = data.get("audio_settings")
+        if isinstance(aud, dict) and aud:
+            try:
+                save_audio_settings(
+                    aud.get("bgm_volume_db", -2.0),
+                    aud.get("dubbing_volume_db", 1.0),
+                    separation_mode=aud.get("separation_mode"),
+                    ducking_mode=aud.get("ducking_mode"),
+                    script_mode=aud.get("script_mode"),
+                )
+                applied.append("mixer âm thanh")
+            except Exception:
+                skipped.append("audio_settings")
+
+        ws = data.get("worker_settings")
+        if isinstance(ws, dict) and ws:
+            try:
+                save_worker_settings(
+                    int(ws.get("concurrency", 1)),
+                    bool(ws.get("auto_vram_guard", True)),
+                    float(ws.get("max_vram_percent_threshold", 85.0)),
+                    float(ws.get("min_free_vram_mb", 1500.0)),
+                )
+                applied.append("worker/VRAM")
+            except Exception:
+                skipped.append("worker_settings")
+
+        va = data.get("voice_auto")
+        if isinstance(va, dict) and isinstance(va.get("config"), dict):
+            try:
+                from ai.v1_auto_voice import set_auto_voice_config
+
+                cfg = va["config"]
+                set_auto_voice_config(
+                    enabled=va.get("enabled") if va.get("enabled") is not None else cfg.get("enabled"),
+                    female_voice_id=cfg.get("female_voice_id"),
+                    male_voice_id=cfg.get("male_voice_id"),
+                    dual_voice=cfg.get("dual_voice"),
+                    updated_by="config-import",
+                    workspace=WORKSPACE,
+                )
+                applied.append("auto voice")
+            except Exception:
+                skipped.append("voice_auto")
+
+        flags = data.get("feature_flags")
+        if isinstance(flags, dict) and flags:
+            try:
+                from v1_feature_flags import set_feature_flags
+
+                set_feature_flags(flags, workspace_path=WORKSPACE)
+                applied.append("feature flags")
+            except Exception:
+                skipped.append("feature_flags")
+
+        return {"status": "ok", "applied": applied, "skipped": skipped}
+
+    return await asyncio.to_thread(_apply)
+
+
 
 # ===== AUTO VOICE MODE (CODEX PLAN - SINGLE VOICE PER VIDEO) =====
 from ai.v1_auto_voice import (
     get_auto_voice_config,
     set_auto_voice_config,
-    get_auto_voice_enabled,
-    set_auto_voice_enabled,
-    get_auto_voice_mode,
     get_manual_voice_info,
     VOICE_FEMALE_ID,
     VOICE_MALE_ID,
@@ -2203,14 +2666,6 @@ async def api_get_feature_flags():
         from v1_feature_flags import get_feature_flags
         flags = get_feature_flags(WORKSPACE)
         try:
-            from ai.v1_qwen_asr_adapter import check_qwen_readiness
-            ready, reason = check_qwen_readiness(ignore_flag=True)
-            flags["QWEN_ASR_READY"] = bool(ready)
-            flags["QWEN_ASR_READINESS_REASON"] = reason
-        except Exception as readiness_error:
-            flags["QWEN_ASR_READY"] = False
-            flags["QWEN_ASR_READINESS_REASON"] = str(readiness_error)
-        try:
             from ai.v1_sensevoice_adapter import check_sensevoice_readiness
             sv_ready, sv_reason = check_sensevoice_readiness(ignore_flag=True)
             flags["SENSEVOICE_ASR_READY"] = bool(sv_ready)
@@ -2222,10 +2677,9 @@ async def api_get_feature_flags():
     except Exception:
         from v1_speech_guard import natural_speed_limit
         return {
-            "ENABLE_QWEN_ASR": os.getenv("ENABLE_QWEN_ASR", "false").lower() in ("true", "1", "yes"),
             "V1_ASR_CHUNKING": os.getenv("V1_ASR_CHUNKING", "true").lower() in ("true", "1", "yes"),
             "V1_SMART_SKIP_OCR": os.getenv("V1_SMART_SKIP_OCR", "true").lower() in ("true", "1", "yes"),
-            "V1_QC_POLICY": os.getenv("V1_QC_POLICY", "REPORT_ONLY"),
+            "V1_QC_POLICY": os.getenv("V1_QC_POLICY", "BLOCK"),
             "V1_MAX_NATURAL_SPEED": natural_speed_limit(),
             "V1_TTS_WORKERS": int(os.getenv("V1_TTS_WORKERS", "6")),
             "V1_USE_ORCHESTRATOR": True,
@@ -2236,23 +2690,16 @@ async def api_get_feature_flags():
 async def api_set_feature_flags(payload: dict = Body(...)):
     """Cập nhật trạng thái các cờ tính năng nâng cấp (lưu vào biến môi trường & file cấu hình)."""
     try:
-        requested_model = str(payload.get("V1_ASR_MODEL", "")).strip().lower()
-        wants_qwen = (payload.get("ENABLE_QWEN_ASR") is True
-                      or requested_model in ("qwen3_asr", "qwen", "qwen3")
-                      or payload.get("V1_SHORT_ASR_MODEL") == "qwen3_asr"
-                      or payload.get("V1_LONG_ASR_MODEL") == "qwen3_asr")
-        if wants_qwen:
-            from ai.v1_qwen_asr_adapter import check_qwen_readiness
-            ready, reason = check_qwen_readiness(ignore_flag=True)
-            if not ready:
-                return JSONResponse(
-                    status_code=409,
-                    content={
-                        "status": "error",
-                        "code": "QWEN_NOT_READY",
-                        "message": reason,
-                    },
-                )
+        from v1_feature_flags import (
+            LEGACY_ASR_FLAG_KEYS,
+            migrate_legacy_asr_model,
+            set_feature_flags,
+        )
+        requested_model = migrate_legacy_asr_model(
+            str(payload.get("V1_ASR_MODEL", "")).strip().lower(), "dashboard settings"
+        )
+        if any(payload.get(key) is True for key in LEGACY_ASR_FLAG_KEYS):
+            requested_model = "whisper_sensevoice"
         wants_sensevoice = (
             requested_model in ("whisper_sensevoice", "whisper_sensevoice_hybrid", "hybrid", "sensevoice_small", "sensevoice")
             or payload.get("V1_SHORT_ASR_MODEL") in ("whisper_sensevoice", "sensevoice_small")
@@ -2270,7 +2717,6 @@ async def api_set_feature_flags(payload: dict = Body(...)):
                         "message": sv_reason,
                     },
                 )
-        from v1_feature_flags import set_feature_flags
         updated = set_feature_flags(payload, WORKSPACE)
         return {"status": "ok", "flags": updated}
     except ValueError as exc:
@@ -2334,17 +2780,39 @@ async def api_voice_preview_video(voice_id: str):
 @app.get("/api/voice-preview-audio/{voice_id}")
 async def api_voice_preview_audio(voice_id: str):
     clean_voice_id = _safe_preview_name(voice_id)
-    for ext, media in ((".mp3", "audio/mpeg"), (".wav", "audio/wav")):
-        filename = f"{clean_voice_id}{ext}"
-        candidates = [
-            Path(WORKSPACE) / "bot_system" / "control" / "voice_checks" / filename,
-            Path(WORKSPACE) / "control" / "voice_checks" / filename,
-            Path(r"C:\tool v1\workspace\control\voice_checks") / filename,
-            Path(r"C:\tool v1\workspace\bot_system\control\voice_checks") / filename,
-        ]
-        for p in candidates:
-            if p.is_file():
-                return FileResponse(p, media_type=media)
+    candidates_names = [clean_voice_id]
+    try:
+        import voice_selection
+        alias = voice_selection.ALIASES.get(clean_voice_id)
+        if alias and alias not in candidates_names:
+            candidates_names.append(alias)
+        for v in voice_selection.catalog():
+            if v.get("id") == clean_voice_id:
+                p = v.get("param")
+                if p:
+                    if not str(p).startswith("capcut-"):
+                        candidates_names.append(f"capcut-{p}")
+                    candidates_names.append(str(p))
+                break
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in main.api_voice_preview_audio (voice_selection.ALIASES.get): %s', type(_phase6_exc).__name__, exc_info=False)
+
+    for name in candidates_names:
+        try:
+            safe_name = _safe_preview_name(name)
+        except Exception:
+            continue
+        for ext, media in ((".mp3", "audio/mpeg"), (".wav", "audio/wav")):
+            filename = f"{safe_name}{ext}"
+            candidates = [
+                Path(WORKSPACE) / "bot_system" / "control" / "voice_checks" / filename,
+                Path(WORKSPACE) / "control" / "voice_checks" / filename,
+                Path(r"C:\tool v1\workspace\control\voice_checks") / filename,
+                Path(r"C:\tool v1\workspace\bot_system\control\voice_checks") / filename,
+            ]
+            for p in candidates:
+                if p.is_file():
+                    return FileResponse(p, media_type=media)
     raise HTTPException(status_code=404, detail="Không tìm thấy audio mẫu cho giọng này.")
 
 
@@ -2490,9 +2958,22 @@ async def api_v1_save_glossary(payload: dict = Body(...)):
 
 
 
+def _dashboard_already_serving(port: int) -> bool:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=2.5) as response:
+            return 200 <= response.status < 300
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
     import uvicorn, time
     port = int(os.getenv("AUTODUB_PORT", "8088"))
+    # A healthy instance already owns the port: exit cleanly instead of fighting it and crash-looping under the supervisor.
+    if _dashboard_already_serving(port):
+        logger.warning("Dashboard đã chạy sẵn trên cổng %s — thoát để tránh khởi động trùng.", port)
+        sys.exit(0)
     for attempt in range(15):
         try:
             uvicorn.run(app, host="127.0.0.1", port=port)
@@ -2502,3 +2983,6 @@ if __name__ == "__main__":
                 time.sleep(2)
                 continue
             raise
+    else:
+        logger.error("Không thể bind cổng %s sau 15 lần thử — kiểm tra tiến trình đang giữ cổng.", port)
+        sys.exit(3)

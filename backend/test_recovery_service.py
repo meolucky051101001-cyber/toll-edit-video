@@ -1,13 +1,11 @@
-import os
 import shutil
 import tempfile
-import time
 import pytest
 from pathlib import Path
 from fastapi.testclient import TestClient
 
 from main import app
-from recovery_service import RecoveryService, _ACTIVE_PLAN_TOKENS
+from recovery_service import RecoveryService
 
 client = TestClient(app)
 

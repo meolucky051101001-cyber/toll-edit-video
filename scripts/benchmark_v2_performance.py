@@ -310,7 +310,6 @@ async def run_single_benchmark(
     work_dir: Path,
     enable_gpu_isolation: bool = True,
     simulate: bool = False,
-    rvc_model_path: Optional[Path] = None,
 ) -> BenchmarkResult:
     """Execute a single benchmark run (cold or warm)."""
     from pipeline_v2.config import PipelineMode, PipelineSettings
@@ -339,7 +338,6 @@ async def run_single_benchmark(
         enable_timing_solver=True,
         enable_ffmpeg_mix_v2=True,
         enable_adaptive_ocr=True,
-        enable_rvc=(rvc_model_path is not None),
     )
 
     live_durations: Dict[str, float] = {}
@@ -363,8 +361,8 @@ async def run_single_benchmark(
         output_path=output_video,
         settings=settings,
         target_lang="vi",
-        voice_source="rvc" if rvc_model_path else "edge",
-        rvc_model_path=rvc_model_path,
+        voice_source="capcut",
+        voice_param="BV562_streaming",
         api_key=os.getenv("GEMINI_API_KEY", ""),
         progress=on_progress,
     )
@@ -384,7 +382,6 @@ async def run_single_benchmark(
                 StageTiming("translate", 0.00, "completed [reused from cache]"),
                 StageTiming("timing", 0.00, "completed [reused from cache]"),
                 StageTiming("tts", 0.00, "completed [reused from cache]"),
-                StageTiming("rvc", 0.00, "completed [reused from cache]") if rvc_model_path else None,
                 StageTiming("subtitles", 0.00, "completed [reused from cache]"),
                 StageTiming("mix_v2", 0.00, "completed [reused from cache]"),
                 StageTiming("render", 0.00, "completed [reused from cache]"),
@@ -401,7 +398,6 @@ async def run_single_benchmark(
                 StageTiming("translate", round(duration_minutes * 0.4, 2), "completed"),
                 StageTiming("timing", round(duration_minutes * 0.2, 2), "completed"),
                 StageTiming("tts", round(duration_minutes * 1.0, 2), "completed"),
-                StageTiming("rvc", round(duration_minutes * 1.2, 2), "completed") if rvc_model_path else None,
                 StageTiming("subtitles", round(duration_minutes * 0.3, 2), "completed"),
                 StageTiming("mix_v2", round(duration_minutes * 0.4, 2), "completed"),
                 StageTiming("render", round(duration_minutes * 2.0, 2), "completed"),
@@ -427,7 +423,7 @@ async def run_single_benchmark(
             status="SUCCESS (SIMULATED)",
             video_source=str(video_path),
             stages=fake_stages,
-            metadata={"simulated": True, "rvc_enabled": rvc_model_path is not None},
+            metadata={"simulated": True},
         )
 
     monitor = ResourceMonitor(interval_seconds=0.25)
@@ -484,8 +480,7 @@ async def run_single_benchmark(
         status=status,
         video_source=str(video_path),
         stages=stages,
-        metadata={"rvc_enabled": rvc_model_path is not None,
-                  "simulated": False, "job_directory": str(job_dir),
+        metadata={"simulated": False, "job_directory": str(job_dir),
                   "resource_measurement": asdict(res_stats),
                   "configured_settings": settings.cache_payload()},
     )
@@ -541,18 +536,6 @@ async def main_async(args: argparse.Namespace) -> int:
     output_report = Path(args.output_report)
     output_report.parent.mkdir(parents=True, exist_ok=True)
 
-    # Resolve RVC model path if requested
-    rvc_model_path: Optional[Path] = None
-    if args.rvc:
-        p = Path(args.rvc_model)
-        if not p.is_absolute():
-            p = (PROJECT_ROOT / p).resolve()
-        if p.is_file():
-            rvc_model_path = p
-            logger.info("RVC enabled for benchmark using model: %s", rvc_model_path)
-        else:
-            raise FileNotFoundError("Requested RVC model is missing")
-
     results: List[BenchmarkResult] = []
     work_dir = PROJECT_ROOT / "workspace" / "benchmark_runs" / datetime.now(timezone.utc).strftime("run-%Y%m%d-%H%M%S-%f")
     work_dir.mkdir(parents=True, exist_ok=False)
@@ -605,11 +588,10 @@ async def main_async(args: argparse.Namespace) -> int:
                     if mode == "warm" and results and not results[-1].status.startswith("SUCCESS"):
                         break
                     logger.info(
-                        "Running benchmark: %s, %.1f minutes, %s mode (RVC: %s)...",
+                        "Running benchmark: %s, %.1f minutes, %s mode...",
                         clip_path.name,
                         dur,
                         mode,
-                        rvc_model_path is not None,
                     )
                     res = await run_single_benchmark(
                         video_path=Path(clip_path),
@@ -618,7 +600,6 @@ async def main_async(args: argparse.Namespace) -> int:
                         work_dir=work_dir,
                         enable_gpu_isolation=not args.no_gpu_isolation,
                         simulate=args.simulate,
-                        rvc_model_path=rvc_model_path,
                     )
                     results.append(res)
                     output_report.write_text(json.dumps({"status": "IN_PROGRESS",
@@ -671,8 +652,6 @@ async def main_async(args: argparse.Namespace) -> int:
                 "configured_separator": policy.separator_backend,
                 "configured_demucs_model": policy.demucs_primary_model,
                 "encoder_note": "Inspect retained render artifacts/logs for actual selected encoder",
-                "rvc_enabled": rvc_model_path is not None,
-                "rvc_model": str(rvc_model_path) if rvc_model_path else None,
                 "cache_policy": "per-stage content hash (warm runs reuse cached artifacts)",
                 "vram_reporting": "peak_vram_mb is total GPU VRAM used; delta_vram_mb is pipeline net delta (empirical approximation on Windows WDDM)",
                 "realtime_ratio_definition": "total_time_seconds / actual_duration_seconds (<1.0x is faster than realtime)",
@@ -710,17 +689,6 @@ def main() -> None:
         type=str,
         default=None,
         help="Optional real video path or comma-separated paths/globs to benchmark",
-    )
-    parser.add_argument(
-        "--rvc",
-        action="store_true",
-        help="Enable RVC stage in pipeline benchmark using specified or default voice model",
-    )
-    parser.add_argument(
-        "--rvc-model",
-        type=str,
-        default="MyVoiceModel_v2/mi-giong_cua_toi_v2.pth",
-        help="Path to RVC .pth model file (default: MyVoiceModel_v2/mi-giong_cua_toi_v2.pth)",
     )
     parser.add_argument(
         "--output-report",

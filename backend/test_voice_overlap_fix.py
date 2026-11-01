@@ -1,7 +1,6 @@
 import asyncio
 import os
 import sys
-import math
 import srt
 import datetime
 from pathlib import Path
@@ -11,9 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ai.voice_cloning import (
     calculate_reading_windows,
-    trim_audio_silence,
     fit_audio_file,
-    MAX_NATURAL_SPEED,
 )
 from ai.translation import condense_vietnamese_subtitles_batch
 from ai.v1_voice_cache import voice_cache_key, read_voice_cache, write_voice_cache, CACHE_KEY_VERSION

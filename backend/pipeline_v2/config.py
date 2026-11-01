@@ -58,7 +58,6 @@ class PipelineSettings:
     enable_timing_solver: bool = True
     enable_ffmpeg_mix_v2: bool = False
     enable_legacy_mix_ab: bool = False
-    enable_rvc: bool = True
     enable_auto_gender: bool = False
     atempo_min: float = 1.00
     atempo_max: float = 1.50
@@ -71,7 +70,6 @@ class PipelineSettings:
     translation_batch_characters: int = 12000
     ocr_batch_segments: int = 80
     tts_batch_segments: int = 64
-    rvc_batch_segments: int = 64
     mixer_chunk_seconds: float = 300.0
     mixer_max_inputs_per_pass: int = 64
 
@@ -89,7 +87,6 @@ class PipelineSettings:
             self.translation_batch_characters,
             self.ocr_batch_segments,
             self.tts_batch_segments,
-            self.rvc_batch_segments,
             self.mixer_max_inputs_per_pass,
         )
         if any(value <= 0 for value in integer_limits):
@@ -135,7 +132,6 @@ class PipelineSettings:
             enable_timing_solver=_env_bool(env, "ENABLE_TIMING_SOLVER", True),
             enable_ffmpeg_mix_v2=_env_bool(env, "ENABLE_FFMPEG_MIX_V2", False),
             enable_legacy_mix_ab=_env_bool(env, "ENABLE_LEGACY_MIX_AB", False),
-            enable_rvc=_env_bool(env, "ENABLE_RVC", True),
             enable_auto_gender=_env_bool(env, "ENABLE_AUTO_GENDER", False),
             atempo_min=_env_float(env, "ATEMPO_MIN", 1.00),
             atempo_max=_env_float(env, "ATEMPO_MAX", 1.50),
@@ -154,7 +150,6 @@ class PipelineSettings:
             ),
             ocr_batch_segments=_env_int(env, "OCR_BATCH_SEGMENTS", 80),
             tts_batch_segments=_env_int(env, "TTS_BATCH_SEGMENTS", 64),
-            rvc_batch_segments=_env_int(env, "RVC_BATCH_SEGMENTS", 64),
             mixer_chunk_seconds=_env_float(env, "MIXER_CHUNK_SECONDS", 300.0),
             mixer_max_inputs_per_pass=_env_int(
                 env, "MIXER_MAX_INPUTS_PER_PASS", 64

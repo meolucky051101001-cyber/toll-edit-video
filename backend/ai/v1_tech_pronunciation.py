@@ -9,9 +9,11 @@ import json
 import logging
 from pathlib import Path
 
+from config.paths import repo_root
+
 logger = logging.getLogger(__name__)
 
-GLOSSARY_FILE = Path(os.getenv("AUTODUB_WORKSPACE", r"C:\tool v1\workspace")) / "bot_system" / "tech_glossary.json"
+GLOSSARY_FILE = Path(os.getenv("AUTODUB_WORKSPACE", str(repo_root() / "workspace"))) / "bot_system" / "tech_glossary.json"
 
 DEFAULT_CUSTOM_REPLACEMENTS = {
     "VRAM": "vram",

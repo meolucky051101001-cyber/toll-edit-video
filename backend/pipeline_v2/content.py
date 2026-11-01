@@ -2,16 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Iterable, List, Optional, Sequence
-
-try:
-    from backend.config.paths import AppPaths
-except ImportError:
-    from config.paths import AppPaths
+from typing import Any, Iterable, List, Sequence
 
 from .segments import RuntimeSegment, segment_from_dict, segment_to_dict
-from .stage_validation import is_real_rvc_model
 
 
 def format_srt_timestamp(seconds: float) -> str:
@@ -93,25 +86,3 @@ def merge_ocr_geometry(
 
 
 merge_runtime_segments = merge_ocr_geometry
-
-
-def discover_rvc_model(workspace: Path) -> Optional[Path]:
-    workspace_path = Path(workspace).resolve()
-    repo_root = Path(__file__).resolve().parents[2]
-    paths = AppPaths.from_environment(repo_root)
-    search_dirs = [
-        repo_root / "MyVoiceModel_v2",
-        paths.shared_assets_dir / "MyVoiceModel_v2",
-        workspace_path.parent / "MyVoiceModel_v2",
-        workspace_path / "MyVoiceModel_v2",
-        paths.model_cache / "rvc",
-        workspace_path.parent / "models" / "rvc",
-        workspace_path / "models" / "rvc",
-    ]
-    for model_directory in search_dirs:
-        if not model_directory.is_dir():
-            continue
-        for candidate in sorted(model_directory.glob("*.pth")):
-            if is_real_rvc_model(candidate):
-                return candidate
-    return None

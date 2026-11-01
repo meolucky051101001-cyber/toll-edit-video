@@ -30,8 +30,7 @@ class PipelineConfigurationTests(unittest.TestCase):
         policy = RuntimeModelPolicy.from_env({})
 
         self.assertEqual(policy.separator_model, "model_bs_roformer_ep_317_sdr_12.9755.ckpt")
-        self.assertEqual(policy.qwen_asr_model, "Qwen/Qwen3-ASR-0.6B")
-        self.assertEqual(policy.qwen_aligner_model, "Qwen/Qwen3-ForcedAligner-0.6B")
+        self.assertEqual(policy.asr_backend, "auto")
         self.assertEqual(policy.whisper_model, "large-v3")
         self.assertEqual(policy.paddle_ocr_version, "PP-OCRv6")
         self.assertEqual(policy.gemini_model, "gemini-3.8-flash")

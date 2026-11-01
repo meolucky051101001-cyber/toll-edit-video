@@ -11,24 +11,27 @@ import re
 import time
 import threading
 import subprocess
+import shutil
 import hashlib
 import html
+import math
+import job_tracker
+from v1_integrity_errors import PipelineStateError
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import cv2
 import numpy as np
 import asyncio
-from urllib.parse import unquote
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote, unquote, urlencode
 from fastapi import APIRouter, HTTPException, Query, Body, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from dashboard_media import media_status
+from pipeline_v2.atomic_io import atomic_copy_file, atomic_replace_file, atomic_write_text
 
 from canvas_settings import (
     get_canvas_settings,
-    save_canvas_settings,
-    get_available_motion_backgrounds,
     resolve_motion_bg_path,
-    get_available_image_backgrounds,
     resolve_image_bg_path
 )
 
@@ -47,6 +50,114 @@ PATHS = AppPaths.from_environment(
 )
 
 router = APIRouter()
+
+_STEM_FORBIDDEN_CHARS = frozenset('<>:"/\\|?*')
+_STEM_MAX_LEN = 180
+_HEX_COLOR_RE = re.compile(r"^#?(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$")
+
+# Chỉ nhận các transition xfade do FFmpeg hỗ trợ (chặn chuỗi lạ chèn vào filter_complex).
+XFADE_TRANSITIONS = frozenset({
+    "fade", "fadeblack", "fadewhite", "fadegrays", "dissolve", "pixelize",
+    "wipeleft", "wiperight", "wipeup", "wipedown", "wipetl", "wipetr", "wipebl", "wipebr",
+    "slideleft", "slideright", "slideup", "slidedown",
+    "smoothleft", "smoothright", "smoothup", "smoothdown",
+    "circleopen", "circleclose", "circlecrop", "rectcrop",
+    "vertopen", "vertclose", "horzopen", "horzclose",
+    "radial", "distance", "diagtl", "diagtr", "diagbl", "diagbr",
+    "hlslice", "hrslice", "vuslice", "vdslice", "hblur",
+    "squeezeh", "squeezev", "zoomin",
+})
+
+
+def safe_stem(value: Any, field: str = "mã nhận diện video (stem)") -> str:
+    """Kiểm tra tên video/job trước khi ghép vào đường dẫn.
+
+    Giữ nguyên khoảng trắng và Unicode (tên tệp thật), nhưng chặn dấu phân cách,
+    ký tự điều khiển, tên rỗng và '.', '..' để không thể thoát khỏi thư mục gốc.
+    """
+    stem = str(value or "").strip()
+    if not stem:
+        raise HTTPException(status_code=400, detail=f"Thiếu {field}")
+    if len(stem) > _STEM_MAX_LEN:
+        raise HTTPException(status_code=400, detail=f"{field} quá dài (tối đa {_STEM_MAX_LEN} ký tự)")
+    if stem in (".", "..") or any(ch in _STEM_FORBIDDEN_CHARS or ord(ch) < 32 for ch in stem):
+        raise HTTPException(status_code=400, detail=f"{field} chứa ký tự không hợp lệ")
+    if Path(stem).name != stem or Path(stem).drive:
+        raise HTTPException(status_code=400, detail=f"{field} không được chứa đường dẫn")
+    return stem
+
+
+def artifact_stem(stem: str, max_len: Optional[int] = None) -> str:
+    """Tên rút gọn an toàn cho thumbnail/tên file xuất (space và ký tự lạ → '_')."""
+    cleaned = re.sub(r"[^\w\-_.]", "_", stem or "").strip("._")
+    if max_len:
+        cleaned = cleaned[:max_len].strip("._")
+    return cleaned or "video"
+
+
+def resolve_job_dir(stem: str) -> Path:
+    """Thư mục job chung của pipeline và Studio.
+
+    Pipeline ghi workspace/<stem thô> (giữ space/Unicode); bản Studio cũ ghi
+    workspace/<artifact_stem>. Ưu tiên thư mục pipeline, fallback thư mục cũ.
+    """
+    raw_stem = safe_stem(stem)
+    raw_dir = WORKSPACE / raw_stem
+    clean_dir = WORKSPACE / artifact_stem(raw_stem)
+    if raw_dir == clean_dir or raw_dir.is_dir() or not clean_dir.is_dir():
+        return raw_dir
+    return clean_dir
+
+
+def safe_version(value: Any, field: str = "phiên bản video") -> str:
+    version = str(value or "").strip().lower()
+    if version not in ("final", "raw"):
+        raise HTTPException(status_code=400, detail=f"{field} không hợp lệ (chỉ nhận final/raw)")
+    return version
+
+
+def stream_file_url(path: Path | str, cache_bust: bool = False) -> str:
+    """URL /stream-file có encode query — tên tệp chứa &, #, +, khoảng trắng vẫn đúng."""
+    params: Dict[str, Any] = {"path": str(path)}
+    if cache_bust:
+        params["t"] = str(time.time_ns())
+    return "/api/workflow/stream-file?" + urlencode(params)
+
+
+def safe_hex_color(value: Any, fallback: str) -> str:
+    text = str(value or "").strip()
+    if _HEX_COLOR_RE.fullmatch(text):
+        digits = text.lstrip("#")
+        if len(digits) == 3:
+            digits = "".join(ch * 2 for ch in digits)
+        return "#" + digits.lower()
+    return fallback
+
+
+def safe_font_name(value: Any, fallback: str = "Arial") -> str:
+    name = str(value or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._\-]{0,63}", name):
+        return name
+    return fallback
+
+
+def resolve_output_dir(value: Any, fallback: Path) -> Path:
+    """Validate thư mục xuất: tuyệt đối, không phải tệp, tạo được và trả về đường dẫn resolve."""
+    raw = str(value or "").strip().strip('"').strip("'")
+    target = Path(raw).expanduser() if raw else Path(fallback)
+    if not target.is_absolute():
+        raise HTTPException(status_code=400, detail="Thư mục xuất phải là đường dẫn tuyệt đối")
+    try:
+        if target.exists() and not target.is_dir():
+            raise HTTPException(status_code=400, detail="Đường dẫn xuất đang trỏ tới một tệp, không phải thư mục")
+        target = target.resolve(strict=False)
+        target.mkdir(parents=True, exist_ok=True)
+    except HTTPException:
+        raise
+    except (OSError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Thư mục xuất không hợp lệ: {e}")
+    return target
+
 
 def detect_letterbox_crop(video_path: str, padding: int = 0) -> Optional[Dict[str, int]]:
     """
@@ -140,8 +251,8 @@ def probe_stream_durations(file_path: str) -> Dict[str, Optional[float]]:
                 if ctype in ("video", "audio") and sdur:
                     try:
                         durations[ctype] = float(sdur)
-                    except ValueError:
-                        pass
+                    except ValueError as _phase6_exc:
+                        logger.debug('Suppressed error in workflow_api.probe_stream_durations (float): %s', type(_phase6_exc).__name__, exc_info=False)
     except Exception as e:
         logger.warning(f"Lỗi khi probe stream durations cho {file_path}: {e}")
     return durations
@@ -268,13 +379,13 @@ def build_custom_ass_file(job_dir: Path, cfg: Dict[str, Any], tw: int = 1080, th
 
     try:
         ass_text = orig_ass.read_text(encoding="utf-8", errors="replace")
-        font_name = str(cfg.get("sub_font_name", "Arial")).strip() or "Arial"
+        font_name = safe_font_name(cfg.get("sub_font_name", "Arial"))
         raw_size = int(cfg.get("sub_font_size", 18))
         font_size = int(raw_size * 2.1) if raw_size <= 24 else raw_size
         bold_val = -1 if cfg.get("sub_font_bold", True) else 0
 
-        font_color_hex = str(cfg.get("sub_font_color", "#000000"))
-        bg_color_hex = str(cfg.get("sub_bg_color", "#ffffff"))
+        font_color_hex = safe_hex_color(cfg.get("sub_font_color", "#000000"), "#000000")
+        bg_color_hex = safe_hex_color(cfg.get("sub_bg_color", "#ffffff"), "#ffffff")
         bg_opacity = float(cfg.get("sub_bg_opacity", 1.0))
 
         def hex_to_ass_color(hex_str: str, default_hex: str = "000000", alpha: float = 1.0) -> str:
@@ -291,7 +402,7 @@ def build_custom_ass_file(job_dir: Path, cfg: Dict[str, Any], tw: int = 1080, th
         bg_color_ass = hex_to_ass_color(bg_color_hex, default_hex="ffffff", alpha=bg_opacity)
 
         stroke_width = int(cfg.get("sub_stroke_width", 0))
-        stroke_color_hex = str(cfg.get("sub_stroke_color", "#000000"))
+        stroke_color_hex = safe_hex_color(cfg.get("sub_stroke_color", "#000000"), "#000000")
         shadow_enabled = bool(cfg.get("sub_shadow", False))
         stroke_color_ass = hex_to_ass_color(stroke_color_hex, default_hex="000000", alpha=1.0)
         shadow_val = 2 if shadow_enabled else 0
@@ -331,7 +442,7 @@ def build_custom_ass_file(job_dir: Path, cfg: Dict[str, Any], tw: int = 1080, th
 
 def build_ass_force_style(cfg: Dict[str, Any], default_font_size: int = 18) -> str:
     """Xây dựng chuỗi force_style cho bộ lọc subtitles của FFmpeg từ cấu hình canvas_settings."""
-    font_name = str(cfg.get("sub_font_name", "Arial")).strip() or "Arial"
+    font_name = safe_font_name(cfg.get("sub_font_name", "Arial"))
     font_size = int(cfg.get("sub_font_size", default_font_size))
     bold_val = -1 if cfg.get("sub_font_bold", True) else 0
 
@@ -345,13 +456,13 @@ def build_ass_force_style(cfg: Dict[str, Any], default_font_size: int = 18) -> s
         a_int = max(0, min(255, int((1.0 - alpha) * 255)))
         return f"&H{a_int:02X}{b}{g}{r}"
 
-    font_color_hex = str(cfg.get("sub_font_color", "#000000"))
-    bg_color_hex = str(cfg.get("sub_bg_color", "#ffffff"))
+    font_color_hex = safe_hex_color(cfg.get("sub_font_color", "#000000"), "#000000")
+    bg_color_hex = safe_hex_color(cfg.get("sub_bg_color", "#ffffff"), "#ffffff")
     bg_opacity = float(cfg.get("sub_bg_opacity", 1.0))
     padding_y = int(cfg.get("sub_box_padding_y", 8))
 
     stroke_width = int(cfg.get("sub_stroke_width", 0))
-    stroke_color_hex = str(cfg.get("sub_stroke_color", "#000000"))
+    stroke_color_hex = safe_hex_color(cfg.get("sub_stroke_color", "#000000"), "#000000")
     shadow_enabled = bool(cfg.get("sub_shadow", False))
     outline_color_ass = hex_to_ass(stroke_color_hex, default_hex="000000", alpha=1.0)
     shadow_val = 2 if shadow_enabled else 0
@@ -415,21 +526,58 @@ def _valid_final_video(path: Path, defer=False) -> bool:
     return media_status(path, defer=defer)["status"] == "valid"
 
 
+_artifact_cache_lock = threading.Lock()
+_audio_valid_cache: Dict[tuple, bool] = {}
+_srt_valid_cache: Dict[tuple, bool] = {}
+
+
+def _artifact_cache_get(cache: Dict[tuple, bool], key: tuple) -> Optional[bool]:
+    with _artifact_cache_lock:
+        return cache.get(key)
+
+
+def _artifact_cache_put(cache: Dict[tuple, bool], key: tuple, value: bool) -> None:
+    with _artifact_cache_lock:
+        cache[key] = value
+        while len(cache) > 4096:
+            cache.pop(next(iter(cache)))
+
+
 def _valid_audio(path: Path) -> bool:
+    try:
+        stat = path.stat()
+        key = (str(path), stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        return False
+    cached = _artifact_cache_get(_audio_valid_cache, key)
+    if cached is not None:
+        return cached
     try:
         import soundfile as sf
         info = sf.info(str(path))
-        return info.frames > 0 and info.samplerate > 0 and info.channels > 0
+        valid = info.frames > 0 and info.samplerate > 0 and info.channels > 0
     except (OSError, RuntimeError, ValueError):
-        return False
+        valid = False
+    _artifact_cache_put(_audio_valid_cache, key, valid)
+    return valid
 
 
 def _valid_srt(path: Path) -> bool:
     try:
-        segments = parse_srt(path.read_text(encoding="utf-8-sig"))
-        return bool(segments) and all(s["end"] > s["start"] >= 0 and s["text"] for s in segments)
-    except (OSError, UnicodeError):
+        stat = path.stat()
+        key = (str(path), stat.st_size, stat.st_mtime_ns)
+    except OSError:
         return False
+    cached = _artifact_cache_get(_srt_valid_cache, key)
+    if cached is not None:
+        return cached
+    try:
+        segments = parse_srt(path.read_text(encoding="utf-8-sig"))
+        valid = bool(segments) and all(s["end"] > s["start"] >= 0 and s["text"] for s in segments)
+    except (OSError, UnicodeError):
+        valid = False
+    _artifact_cache_put(_srt_valid_cache, key, valid)
+    return valid
 
 
 def safe_check_job_artifacts(stem: str, defer_media=False) -> Dict[str, bool]:
@@ -444,7 +592,7 @@ def safe_check_job_artifacts(stem: str, defer_media=False) -> Dict[str, bool]:
         "step6": False,
     }
     try:
-        job_dir = WORKSPACE / stem
+        job_dir = resolve_job_dir(stem)
         if job_dir.is_dir():
             res["step1"] = _valid_audio(job_dir / "original.wav")
             res["step2"] = any(_valid_audio(p) for pattern in ("no_vocals.wav", "*_(Instrumental)_*.wav")
@@ -458,18 +606,18 @@ def safe_check_job_artifacts(stem: str, defer_media=False) -> Dict[str, bool]:
                     if item.name == f"final_{stem}.mp4" and _valid_final_video(item, defer=defer_media):
                         res["step6"] = True
                         break
-            except OSError:
-                pass
-    except OSError:
-        pass
+            except OSError as _phase6_exc:
+                logger.debug('Suppressed error in workflow_api.safe_check_job_artifacts (job_dir.iterdir): %s', type(_phase6_exc).__name__, exc_info=False)
+    except OSError as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.safe_check_job_artifacts (job_dir.is_dir): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # Kiểm tra thêm trong banve
     try:
         banve_cand = OUTPUT_DIR / f"Dubbed_{stem}.mp4"
         if banve_cand.is_file() and _valid_final_video(banve_cand, defer=defer_media):
             res["step6"] = True
-    except OSError:
-        pass
+    except OSError as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.safe_check_job_artifacts (banve_cand.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
 
     return res
 
@@ -477,7 +625,11 @@ def safe_check_job_artifacts(stem: str, defer_media=False) -> Dict[str, bool]:
 def parse_srt(srt_text: str) -> List[Dict[str, Any]]:
     """Phân tích nội dung tệp phụ đề SRT thành danh sách timestamp và text."""
     subtitles = []
-    blocks = re.split(r'\n\s*\n', srt_text.strip())
+    srt_text = srt_text.replace("\r\n", "\n").replace("\r", "\n")  # chuẩn hóa CRLF
+    blocks = re.split(r"\n\s*\n", srt_text.strip())
+    # P9: file không có dòng trống giữa các câu → tách theo mẫu "số thứ tự + dòng timestamp" đứng trước
+    if len(blocks) == 1 and srt_text.count("-->") > 1:
+        blocks = re.split(r"\n(?=\s*\d+\s*\n\d{2}:)", srt_text.strip())
     
     for block in blocks:
         lines = [l.strip() for l in block.split('\n') if l.strip()]
@@ -517,14 +669,88 @@ def parse_srt(srt_text: str) -> List[Dict[str, Any]]:
     return subtitles
 
 
+def _srt_source_copy(path: Path) -> Path:
+    """Bản SRT chuẩn theo timeline video gốc (raw), tách khỏi bản đã retime theo timeline xuất."""
+    return path.with_name(f"{path.stem}.source{path.suffix}")
+
+
+def _srt_prev_copy(path: Path) -> Path:
+    """Trạng thái SRT ngay trước lần retime gần nhất (để khôi phục nếu render sai)."""
+    return path.with_name(f"{path.stem}.prev{path.suffix}")
+
+
+def _snapshot_srt_source(path: Path) -> None:
+    if not path.is_file() or path.stat().st_size <= 0:
+        return
+    try:
+        atomic_copy_file(path, _srt_source_copy(path))
+    except Exception as e:
+        logger.warning(f"Không lưu được bản SRT gốc cho {path.name}: {e}")
+
+
+def _sync_srt_source_text(path: Path) -> None:
+    """Giữ timestamp gốc nhưng cập nhật nội dung câu người dùng đã sửa ở timeline xuất."""
+    source = _srt_source_copy(path)
+    if not path.is_file() or not source.is_file():
+        return
+    try:
+        src_subs = parse_srt(source.read_text(encoding="utf-8", errors="replace"))
+        cur_subs = parse_srt(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return
+    if not src_subs or len(src_subs) != len(cur_subs):
+        return
+    if not any((s.get("text") or "").strip() != (c.get("text") or "").strip()
+               for s, c in zip(src_subs, cur_subs)):
+        return
+    blocks = [
+        f"{s['index']}\n{s['start_str']} --> {s['end_str']}\n{(c.get('text') or '').strip()}\n"
+        for s, c in zip(src_subs, cur_subs)
+    ]
+    try:
+        atomic_write_text(source, "\n".join(blocks))
+    except Exception as e:
+        logger.warning(f"Không đồng bộ được nội dung SRT gốc cho {path.name}: {e}")
+
+
+def _sync_or_snapshot_srt_source(path: Path) -> None:
+    if _srt_source_copy(path).is_file():
+        _sync_srt_source_text(path)
+    else:
+        _snapshot_srt_source(path)
+
+
+def _backup_srt_before_render(path: Path) -> None:
+    if not path.is_file() or path.stat().st_size <= 0:
+        return
+    try:
+        atomic_copy_file(path, _srt_prev_copy(path))
+    except Exception as e:
+        logger.warning(f"Không sao lưu được {path.name} trước khi retime: {e}")
+
+
+def _payload_video_version(payload: Dict[str, Any], job_dir: Path, stem: str) -> str:
+    """'raw' khi timeline phụ đề bám video gốc; 'final' khi bám bản đã render."""
+    ver = str(payload.get("video_version") or "").strip().lower()
+    if ver in ("raw", "input", "final"):
+        return "raw" if ver in ("raw", "input") else "final"
+    try:
+        final_names = (f"final_{stem}.mp4", f"final_{artifact_stem(stem)}.mp4")
+        if any((job_dir / name).is_file() for name in final_names):
+            return "final"
+    except OSError as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api._payload_video_version (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
+    return "raw"
+
+
 def get_current_control_token() -> str:
     """Lấy token xác thực từ file workspace để bypass xác thực cục bộ."""
     token_path = WORKSPACE / ".dashboard_control_token"
     if token_path.is_file():
         try:
             return token_path.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api.get_current_control_token (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
     return ""
 
 
@@ -576,8 +802,8 @@ async def api_get_canvas_settings():
     import importlib, canvas_settings
     try:
         importlib.reload(canvas_settings)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_get_canvas_settings (importlib.reload): %s', type(_phase6_exc).__name__, exc_info=False)
     cfg = canvas_settings.get_canvas_settings()
     cfg["motion_backgrounds"] = canvas_settings.get_available_motion_backgrounds()
     cfg["image_backgrounds"] = canvas_settings.get_available_image_backgrounds()
@@ -590,8 +816,8 @@ async def api_save_canvas_settings(payload: Dict[str, Any] = Body(...)):
     import importlib, canvas_settings
     try:
         importlib.reload(canvas_settings)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_save_canvas_settings (importlib.reload): %s', type(_phase6_exc).__name__, exc_info=False)
     return canvas_settings.save_canvas_settings(payload)
 
 
@@ -601,8 +827,8 @@ async def api_get_motion_backgrounds():
     import importlib, canvas_settings
     try:
         importlib.reload(canvas_settings)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_get_motion_backgrounds (importlib.reload): %s', type(_phase6_exc).__name__, exc_info=False)
     return {"motion_backgrounds": canvas_settings.get_available_motion_backgrounds()}
 
 
@@ -612,9 +838,20 @@ async def api_get_image_backgrounds():
     import importlib, canvas_settings
     try:
         importlib.reload(canvas_settings)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_get_image_backgrounds (importlib.reload): %s', type(_phase6_exc).__name__, exc_info=False)
     return {"image_backgrounds": canvas_settings.get_available_image_backgrounds()}
+
+
+def _detect_crop_sync(clean_p: str, padding: int) -> Dict[str, Any]:
+    crop_info = detect_letterbox_crop(clean_p, padding=padding)
+    thumb_info = generate_smart_thumb_mask(clean_p, tw=1080, th=1920, padding=padding)
+    return {
+        "status": "ok",
+        "has_letterbox": crop_info is not None,
+        "crop_box": crop_info,
+        "thumb_info": thumb_info
+    }
 
 
 @router.get("/api/workflow/detect-crop")
@@ -623,14 +860,7 @@ async def api_detect_crop(path: str = Query(...), padding: int = Query(0)):
     clean_p = unquote(path).strip().strip('"').strip("'")
     if not clean_p or not os.path.isfile(clean_p):
         return JSONResponse({"status": "error", "message": "Tệp không tồn tại"}, status_code=404)
-    crop_info = detect_letterbox_crop(clean_p, padding=padding)
-    thumb_info = generate_smart_thumb_mask(clean_p, tw=1080, th=1920, padding=padding)
-    return JSONResponse({
-        "status": "ok",
-        "has_letterbox": crop_info is not None,
-        "crop_box": crop_info,
-        "thumb_info": thumb_info
-    })
+    return JSONResponse(await asyncio.to_thread(_detect_crop_sync, clean_p, padding))
 
 FOLDER_PICKER_LOCK = asyncio.Lock()
 
@@ -654,8 +884,8 @@ async def api_choose_workflow_folder(
                 dialog_title = body.get("title") or dialog_title
                 if "must_exist" in body:
                     need_exist = bool(body["must_exist"])
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api.api_choose_workflow_folder (request.json): %s', type(_phase6_exc).__name__, exc_info=False)
 
     initial = str(initial).strip().strip('"').strip("'")
     if not initial or not Path(initial).is_dir():
@@ -694,62 +924,92 @@ async def api_choose_workflow_folder(
 @router.get("/api/workflow/videos")
 async def api_get_workflow_videos():
     """Liệt kê danh sách video trong phôi, downloads và banve kèm tình trạng 6 bước."""
-    items = []
+    items = await asyncio.to_thread(_collect_workflow_videos)
+    return {"videos": items}
+
+
+_video_scan_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="workflow-videos")
+
+
+def _workflow_video_entry(path: Path, source: str) -> Optional[Dict[str, Any]]:
+    try:
+        stat = path.stat()
+        return {
+            "stem": path.stem,
+            "filename": path.name,
+            "source": source,
+            "size_mb": round(stat.st_size / (1024 * 1024), 2),
+            "created_at": stat.st_mtime,
+            "steps": safe_check_job_artifacts(path.stem, defer_media=True),
+            "thumbnail_url": f"/api/workflow/thumbnail/{quote(path.stem, safe='')}",
+        }
+    except OSError:
+        return None
+
+
+def _collect_workflow_videos() -> List[Dict[str, Any]]:
+    candidates: List[Tuple[Path, str]] = []
     seen_stems = set()
-
-    # 1. Quét video phôi
-    if INPUT_DIR.exists():
+    for directory, source in ((INPUT_DIR, "phoi"), (DOWNLOADS_DIR, "downloads")):
+        if not directory.exists():
+            continue
         try:
-            for p in INPUT_DIR.glob("*.mp4"):
-                try:
-                    stem = p.stem
-                    seen_stems.add(stem)
-                    steps = safe_check_job_artifacts(stem, defer_media=True)
-                    size_mb = round(p.stat().st_size / (1024 * 1024), 2)
-                    mtime = p.stat().st_mtime
-                    items.append({
-                        "stem": stem,
-                        "filename": p.name,
-                        "source": "phoi",
-                        "size_mb": size_mb,
-                        "created_at": mtime,
-                        "steps": steps,
-                        "thumbnail_url": f"/api/workflow/thumbnail/{stem}"
-                    })
-                except OSError:
-                    continue
-        except OSError:
-            pass
-
-    # 2. Quét video downloads từ XHS / Telegram
-    if DOWNLOADS_DIR.exists():
-        try:
-            for dl in DOWNLOADS_DIR.glob("*.mp4"):
-                try:
-                    stem = dl.stem
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if not entry.is_file() or not entry.name.lower().endswith(".mp4"):
+                        continue
+                    stem = Path(entry.name).stem
                     if stem in seen_stems:
                         continue
                     seen_stems.add(stem)
-                    steps = safe_check_job_artifacts(stem, defer_media=True)
-                    size_mb = round(dl.stat().st_size / (1024 * 1024), 2)
-                    mtime = dl.stat().st_mtime
-                    items.append({
-                        "stem": stem,
-                        "filename": dl.name,
-                        "source": "downloads",
-                        "size_mb": size_mb,
-                        "created_at": mtime,
-                        "steps": steps,
-                        "thumbnail_url": f"/api/workflow/thumbnail/{stem}"
-                    })
-                except OSError:
-                    continue
-        except OSError:
-            pass
+                    candidates.append((Path(entry.path), source))
+        except OSError as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api._collect_workflow_videos (os.scandir): %s', type(_phase6_exc).__name__, exc_info=False)
 
-    # Sắp xếp mới nhất lên đầu
-    items.sort(key=lambda x: x.get("created_at", 0), reverse=True)
-    return {"videos": items}
+    if not candidates:
+        return []
+    items = [item for item in _video_scan_pool.map(
+        lambda candidate: _workflow_video_entry(*candidate), candidates
+    ) if item]
+    items.sort(key=lambda item: item.get("created_at", 0), reverse=True)
+    return items
+
+
+def _find_vocal_files(job_dir: Optional[Path]) -> Tuple[Optional[Path], Optional[Path]]:
+    """
+    Tìm file nhạc nền đã tách (instrumental / no_vocals) và file giọng nói đã tách (vocals).
+    Ưu tiên thư mục bs_roformer (BS-RoFormer SDR 12.97dB), sau đó đến htdemucs và thư mục gốc.
+    """
+    if not job_dir or not isinstance(job_dir, Path) or not job_dir.is_dir():
+        return None, None
+    inst_path = None
+    voc_path = None
+
+    # 1. Kiểm tra thư mục bs_roformer
+    bs_dir = job_dir / "bs_roformer"
+    if bs_dir.is_dir():
+        for f in bs_dir.iterdir():
+            fn = f.name.lower()
+            if fn.endswith(".wav"):
+                if "instrumental" in fn and not inst_path:
+                    inst_path = f
+                elif "vocals" in fn and not voc_path:
+                    voc_path = f
+
+    # 2. Kiểm tra thư mục htdemucs hoặc quét toàn bộ job_dir
+    if not (inst_path and voc_path):
+        for root, dirs, files in os.walk(job_dir):
+            for fname in files:
+                fl = fname.lower()
+                if fl.endswith(".wav"):
+                    if (fl == "no_vocals.wav" or "instrumental" in fl or fl == "bgm.wav") and not inst_path:
+                        inst_path = Path(root) / fname
+                    elif (fl == "vocals.wav" or ("vocals" in fl and "no_vocals" not in fl)) and not voc_path:
+                        voc_path = Path(root) / fname
+            if inst_path and voc_path:
+                break
+
+    return inst_path, voc_path
 
 
 @router.get("/api/workflow/video-data")
@@ -758,21 +1018,22 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
     Trả về dữ liệu video hoàn tất (lồng tiếng + che sub) vs video gốc,
     cùng phụ đề, âm thanh và thông tin 6 bước chi tiết.
     """
-    job_dir = WORKSPACE / stem
-    
+    stem = safe_stem(stem)
+    job_dir = resolve_job_dir(stem)
+
     # 1. Tìm video phôi/download gốc (raw_video)
     raw_video_url = ""
     cand_phoi = INPUT_DIR / f"{stem}.mp4"
     cand_dl = DOWNLOADS_DIR / f"{stem}.mp4"
     try:
         if cand_phoi.is_file():
-            raw_video_url = f"/api/workflow/stream-file?path={cand_phoi}"
+            raw_video_url = stream_file_url(cand_phoi)
         elif cand_dl.is_file():
-            raw_video_url = f"/api/workflow/stream-file?path={cand_dl}"
+            raw_video_url = stream_file_url(cand_dl)
         elif job_dir.is_dir() and (job_dir / "step1_extracted.mp4").is_file():
-            raw_video_url = f"/api/workflow/stream-file?path={job_dir / 'step1_extracted.mp4'}"
-    except OSError:
-        pass
+            raw_video_url = stream_file_url(job_dir / "step1_extracted.mp4")
+    except OSError as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_get_workflow_video_data (cand_phoi.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # 2. Tìm video thành phẩm hoàn tất (final_video - ĐÃ LỒNG TIẾNG & CHE SUB)
     final_video_url = ""
@@ -780,14 +1041,14 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
         if job_dir.is_dir():
             for item in job_dir.iterdir():
                 if item.name == f"final_{stem}.mp4" and _valid_final_video(item):
-                    final_video_url = f"/api/workflow/stream-file?path={item}"
+                    final_video_url = stream_file_url(item)
                     break
         if not final_video_url and OUTPUT_DIR.exists():
             banve_cand = OUTPUT_DIR / f"Dubbed_{stem}.mp4"
             if banve_cand.is_file() and _valid_final_video(banve_cand):
-                final_video_url = f"/api/workflow/stream-file?path={banve_cand}"
-    except OSError:
-        pass
+                final_video_url = stream_file_url(banve_cand)
+    except OSError as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_get_workflow_video_data (job_dir.is_dir): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # Mặc định: Nếu đã có bản hoàn tất, phát bản hoàn tất (đầy đủ âm thanh lồng tiếng & che sub)
     # Nếu chưa hoàn tất, phát bản gốc
@@ -811,8 +1072,8 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
                     trans_subtitles = parse_srt(trans_srt_file.read_text(encoding="utf-8", errors="replace"))
                 except Exception as e:
                     logger.warning(f"Error parsing translated.srt: {e}")
-    except OSError:
-        pass
+    except OSError as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_get_workflow_video_data (job_dir.is_dir): %s', type(_phase6_exc).__name__, exc_info=False)
 
     combined_subs = []
     if trans_subtitles:
@@ -845,22 +1106,27 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
     try:
         if job_dir.is_dir():
             if (job_dir / "original.wav").is_file():
-                step1_audio = f"/api/workflow/stream-file?path={job_dir / 'original.wav'}"
+                step1_audio = stream_file_url(job_dir / "original.wav")
             if (job_dir / "mixed.wav").is_file():
-                step5_audio = f"/api/workflow/stream-file?path={job_dir / 'mixed.wav'}"
-    except OSError:
-        pass
+                step5_audio = stream_file_url(job_dir / "mixed.wav")
+    except OSError as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_get_workflow_video_data (job_dir.is_dir): %s', type(_phase6_exc).__name__, exc_info=False)
 
     has_demucs = False
     try:
-        if job_dir.is_dir() and (job_dir / "htdemucs").is_dir():
+        if job_dir.is_dir() and ((job_dir / "htdemucs").is_dir() or (job_dir / "bs_roformer").is_dir()):
             has_demucs = True
-    except OSError:
-        pass
+    except OSError as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api.api_get_workflow_video_data (job_dir.is_dir): %s', type(_phase6_exc).__name__, exc_info=False)
+
+    inst_file, voc_file = _find_vocal_files(job_dir) if job_dir.is_dir() else (None, None)
+    has_vocal_sep = bool(inst_file and voc_file and inst_file.is_file() and voc_file.is_file())
+    inst_url = stream_file_url(inst_file) if (inst_file and inst_file.is_file()) else ""
+    voc_url = stream_file_url(voc_file) if (voc_file and voc_file.is_file()) else ""
 
     return {
         "stem": stem,
-        "thumbnail_url": f"/api/workflow/thumbnail/{stem}",
+        "thumbnail_url": f"/api/workflow/thumbnail/{quote(stem, safe='')}",
         "video_url": active_video_url,
         "final_video_url": final_video_url,
         "raw_video_url": raw_video_url,
@@ -870,13 +1136,24 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
         "chinese_subtitles": orig_subtitles,
         "vietnamese_subtitles": trans_subtitles,
         "subtitles": combined_subs,
+        "vocal_separation": {
+            "has_separated": has_vocal_sep,
+            "instrumental_url": inst_url,
+            "vocals_url": voc_url,
+            "status": "completed" if has_vocal_sep else "none"
+        },
         "steps": {
             "step1": {"ready": bool(step1_audio), "audio_url": step1_audio, "title": "Trích xuất âm thanh (original.wav)"},
-            "step2": {"ready": has_demucs, "title": "Tách âm nền Demucs (htdemucs)"},
+            "step2": {
+                "ready": has_demucs or has_vocal_sep,
+                "title": "Tách âm nền BS-RoFormer / Demucs (bs_roformer)",
+                "instrumental_url": inst_url,
+                "vocals_url": voc_url,
+            },
             "step3": {"ready": bool(orig_subtitles), "count": len(orig_subtitles), "title": "Nhận diện giọng Faster-Whisper (original.srt)"},
             "step3_5": {"ready": bool(orig_subtitles), "title": "Quét chữ & che phụ đề cũ (OCR Subtitle Band)"},
             "step4": {"ready": bool(trans_subtitles), "count": len(trans_subtitles), "title": "Dịch phụ đề Gemini AI (translated.srt)"},
-            "step5": {"ready": bool(step5_audio), "audio_url": step5_audio, "title": "Lồng tiếng AI RVC / TTS (mixed.wav)"},
+            "step5": {"ready": bool(step5_audio), "audio_url": step5_audio, "title": "Lồng tiếng AI TTS (mixed.wav)"},
             "step6": {"ready": bool(final_video_url), "video_url": final_video_url, "title": "Xuất bản video NVENC GPU (final.mp4)"}
         }
     }
@@ -896,8 +1173,8 @@ def is_safe_stream_path(target_path: Path) -> bool:
         if fld:
             try:
                 allowed_roots.append(Path(fld).resolve())
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in workflow_api.is_safe_stream_path (allowed_roots.append): %s', type(_phase6_exc).__name__, exc_info=False)
 
     resolved = target_path.resolve()
     for root in allowed_roots:
@@ -908,8 +1185,8 @@ def is_safe_stream_path(target_path: Path) -> bool:
             try:
                 resolved.relative_to(root)
                 return True
-            except ValueError:
-                pass
+            except ValueError as _phase6_exc:
+                logger.debug('Suppressed error in workflow_api.is_safe_stream_path (resolved.relative_to): %s', type(_phase6_exc).__name__, exc_info=False)
     return False
 
 
@@ -1005,13 +1282,7 @@ def build_watermark_filter(cfg: Dict[str, Any], tw: int, th: int) -> str:
     font_size = max(12, int(base_font_size * scale_factor))
 
     # Màu chữ watermark
-    raw_color = str(cfg.get("watermark_color", "#ffffff")).strip()
-    if raw_color.startswith("#"):
-        color_hex = "0x" + raw_color[1:]
-    elif raw_color.startswith("0x"):
-        color_hex = raw_color
-    else:
-        color_hex = "white"
+    color_hex = "0x" + safe_hex_color(cfg.get("watermark_color", "#ffffff"), "#ffffff")[1:]
 
     pos = str(cfg.get("watermark_position", "top-right")).lower()
     try:
@@ -1050,8 +1321,7 @@ def build_watermark_filter(cfg: Dict[str, Any], tw: int, th: int) -> str:
     # Tùy chọn khung huy hiệu mờ bo quanh chữ
     box_filter = ""
     if cfg.get("watermark_bg_enabled", False):
-        raw_bg_color = str(cfg.get("watermark_bg_color", "#000000")).strip()
-        bg_hex = ("0x" + raw_bg_color[1:]) if raw_bg_color.startswith("#") else (raw_bg_color if raw_bg_color.startswith("0x") else "black")
+        bg_hex = "0x" + safe_hex_color(cfg.get("watermark_bg_color", "#000000"), "#000000")[1:]
         try:
             bg_op = float(cfg.get("watermark_bg_opacity", 0.40))
         except (ValueError, TypeError):
@@ -1208,7 +1478,7 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
                         f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
                     )
                 else:
-                    safe_color = cfg.get("bg_color", "#f59e0b").replace("#", "0x")
+                    safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
                     extra_inputs = ["-loop", "1", "-i", mask_file]
                     fc = (
                         f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
@@ -1228,7 +1498,7 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
                     f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
                 )
             else:
-                safe_color = cfg.get("bg_color", "#f59e0b").replace("#", "0x")
+                safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
                 extra_inputs = ["-loop", "1", "-i", mask_file]
                 fc = (
                     f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
@@ -1272,7 +1542,7 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
                         f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
                     )
                 else:
-                    safe_color = cfg.get("bg_color", "#f59e0b").replace("#", "0x")
+                    safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
                     fc = (
                         f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
                         f"[0:v]{scale_fg}[fg];"
@@ -1286,7 +1556,7 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
                     f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
                 )
             else:
-                safe_color = cfg.get("bg_color", "#f59e0b").replace("#", "0x")
+                safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
                 fc = (
                     f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
                     f"[0:v]{scale_fg}[fg];"
@@ -1329,7 +1599,7 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
             # Fallback x264
             cmd_cpu = [
                 "ffmpeg", "-y",
-                "-i", str(v_file)
+                "-i", str(input_v)
             ] + extra_inputs + [
                 "-filter_complex", fc,
                 "-map", "[outv]",
@@ -1357,7 +1627,7 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
                 "name": out_name,
                 "path": clean_out_str,
                 "size_mb": round(out_path.stat().st_size / (1024 * 1024), 2),
-                "url": f"/api/workflow/stream-file?path={clean_out_str}"
+                "url": stream_file_url(out_path)
             })
         else:
             batch_framing_state["error_files"].append(v_file.name)
@@ -1388,6 +1658,8 @@ async def api_start_batch_framing(payload: Dict[str, Any] = Body(...)):
     output_dir = Path(output_folder)
     if not input_dir.is_dir():
         raise HTTPException(status_code=404, detail="Thư mục đầu vào không tồn tại")
+    if output_dir.exists() and not output_dir.is_dir():
+        raise HTTPException(status_code=400, detail="Thư mục xuất đang trỏ tới một tệp, không phải thư mục")
 
     batch_framing_state.update({
         "status": "starting",
@@ -1433,8 +1705,9 @@ THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
 
 def _find_video_for_stem(stem: str) -> Optional[Path]:
     """Tìm đường dẫn tệp video cho stem đã chọn."""
-    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
-    job_dir = WORKSPACE / clean_stem
+    stem = safe_stem(stem)
+    clean_stem = artifact_stem(stem)
+    job_dir = resolve_job_dir(stem)
     cand_phoi = INPUT_DIR / f"{stem}.mp4"
     cand_dl = DOWNLOADS_DIR / f"{stem}.mp4"
     cand_banve = OUTPUT_DIR / f"Dubbed_{stem}.mp4"
@@ -1451,23 +1724,22 @@ def _find_video_for_stem(stem: str) -> Optional[Path]:
                     return f
     return None
 
-@router.get("/api/workflow/thumbnail/{stem}")
-async def api_get_video_thumbnail(stem: str):
-    """Lấy ảnh thumbnail của video theo stem. Nếu chưa có, tự động trích xuất frame tại 1.0s."""
-    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+def _ensure_thumbnail_file(stem: str) -> Path:
+    """Trả về file thumbnail, tự trích xuất frame tại 1.0s nếu chưa có."""
+    stem = safe_stem(stem)
+    clean_stem = artifact_stem(stem)
     thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
-    
+
     if thumb_file.is_file() and thumb_file.stat().st_size > 500:
-        return FileResponse(thumb_file, media_type="image/jpeg")
-        
-    job_dir = WORKSPACE / clean_stem
+        return thumb_file
+
+    job_dir = resolve_job_dir(stem)
     if job_dir.is_dir() and (job_dir / "thumbnail.jpg").is_file():
         try:
-            import shutil
             shutil.copy2(job_dir / "thumbnail.jpg", thumb_file)
-            return FileResponse(thumb_file, media_type="image/jpeg")
-        except Exception:
-            pass
+            return thumb_file
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api._ensure_thumbnail_file (shutil.copy2): %s', type(_phase6_exc).__name__, exc_info=False)
 
     video_source = _find_video_for_stem(stem)
     if video_source:
@@ -1482,34 +1754,29 @@ async def api_get_video_thumbnail(stem: str):
             ]
             res = subprocess.run(cmd, capture_output=True, timeout=12)
             if res.returncode == 0 and thumb_file.is_file() and thumb_file.stat().st_size > 500:
-                return FileResponse(thumb_file, media_type="image/jpeg")
+                return thumb_file
         except Exception as e:
             logger.warning(f"Lỗi tự động trích xuất thumbnail cho {stem}: {e}")
 
     raise HTTPException(status_code=404, detail="Thumbnail not found")
 
 
-@router.post("/api/workflow/thumbnail/capture")
-async def api_capture_thumbnail(payload: Dict[str, Any] = Body(...)):
-    """Chụp khung hình tại giây chỉ định của video làm Thumbnail."""
-    stem = payload.get("stem", "").strip()
-    if not stem:
-        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
-    
-    try:
-        timestamp_s = float(payload.get("timestamp_s", 1.0))
-    except (ValueError, TypeError):
-        timestamp_s = 1.0
-    if timestamp_s < 0:
-        timestamp_s = 0.0
-        
-    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+@router.get("/api/workflow/thumbnail/{stem}")
+async def api_get_video_thumbnail(stem: str):
+    """Lấy ảnh thumbnail của video theo stem. Nếu chưa có, tự động trích xuất frame tại 1.0s."""
+    thumb_file = await asyncio.to_thread(_ensure_thumbnail_file, stem)
+    return FileResponse(thumb_file, media_type="image/jpeg")
+
+
+def _capture_thumbnail_sync(stem: str, timestamp_s: float) -> Dict[str, Any]:
+    stem = safe_stem(stem)
+    clean_stem = artifact_stem(stem)
     thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
-    
+
     video_source = _find_video_for_stem(stem)
     if not video_source:
         raise HTTPException(status_code=404, detail="Không tìm thấy tệp video để chụp thumbnail")
-        
+
     try:
         cmd = [
             "ffmpeg", "-y",
@@ -1521,33 +1788,47 @@ async def api_capture_thumbnail(payload: Dict[str, Any] = Body(...)):
         ]
         res = subprocess.run(cmd, capture_output=True, timeout=12)
         if res.returncode == 0 and thumb_file.is_file() and thumb_file.stat().st_size > 500:
-            job_dir = WORKSPACE / clean_stem
+            job_dir = resolve_job_dir(stem)
             if job_dir.is_dir():
                 try:
-                    import shutil
                     shutil.copy2(thumb_file, job_dir / "thumbnail.jpg")
-                except Exception:
-                    pass
+                except Exception as _phase6_exc:
+                    logger.debug('Suppressed error in workflow_api._capture_thumbnail_sync (shutil.copy2): %s', type(_phase6_exc).__name__, exc_info=False)
             return {
                 "status": "ok",
                 "success": True,
                 "message": f"Đã chụp khung hình tại {timestamp_s:.2f}s làm Thumbnail thành công!",
-                "thumbnail_url": f"/api/workflow/thumbnail/{clean_stem}?t={time.time()}",
+                "thumbnail_url": f"/api/workflow/thumbnail/{quote(clean_stem, safe='')}?t={time.time_ns()}",
                 "timestamp_s": timestamp_s
             }
-        else:
-            raise RuntimeError(f"FFmpeg capture thất bại: {res.stderr.decode('utf-8', 'ignore')}")
+        raise RuntimeError(f"FFmpeg capture thất bại: {res.stderr.decode('utf-8', 'ignore')}")
     except Exception as e:
         logger.error(f"Lỗi chụp thumbnail cho {stem}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/api/workflow/thumbnail/capture")
+async def api_capture_thumbnail(payload: Dict[str, Any] = Body(...)):
+    """Chụp khung hình tại giây chỉ định của video làm Thumbnail."""
+    stem = payload.get("stem", "").strip()
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+
+    try:
+        timestamp_s = float(payload.get("timestamp_s", 1.0))
+    except (ValueError, TypeError):
+        timestamp_s = 1.0
+    if timestamp_s < 0:
+        timestamp_s = 0.0
+
+    return await asyncio.to_thread(_capture_thumbnail_sync, stem, timestamp_s)
+
+
 @router.post("/api/workflow/thumbnail/upload")
 async def api_upload_thumbnail(stem: str = Form(...), file: UploadFile = File(...)):
     """Tải tệp ảnh từ máy tính lên để làm Thumbnail cho video."""
-    if not stem:
-        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
-    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    stem = safe_stem(stem)
+    clean_stem = artifact_stem(stem)
     thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
     
     content = await file.read()
@@ -1556,32 +1837,34 @@ async def api_upload_thumbnail(stem: str = Form(...), file: UploadFile = File(..
         
     thumb_file.write_bytes(content)
     
-    job_dir = WORKSPACE / clean_stem
+    job_dir = resolve_job_dir(stem)
     if job_dir.is_dir():
         try:
             (job_dir / "thumbnail.jpg").write_bytes(content)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api.api_upload_thumbnail (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
             
     return {
         "status": "ok",
         "success": True,
         "message": f"Đã tải lên Thumbnail cho video thành công!",
-        "thumbnail_url": f"/api/workflow/thumbnail/{clean_stem}?t={time.time()}"
+        "thumbnail_url": f"/api/workflow/thumbnail/{quote(clean_stem, safe='')}?t={time.time_ns()}"
     }
 
 
 @router.get("/api/workflow/thumbnail/download/{stem}")
 async def api_download_thumbnail(stem: str):
     """Tải tệp thumbnail về máy tính."""
-    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    stem = safe_stem(stem)
+    clean_stem = artifact_stem(stem)
     thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
     if thumb_file.is_file():
         return FileResponse(thumb_file, filename=f"thumbnail_{clean_stem}.jpg", media_type="image/jpeg")
     raise HTTPException(status_code=404, detail="Chưa có thumbnail cho video này")
 
 
-def _prepend_thumbnail_file(video_path: Path, thumb_path: Path, duration_s: float = 0.8) -> bool:
+def _prepend_thumbnail_file(video_path: Path, thumb_path: Path, duration_s: float = 0.8,
+                            job_ctl: Optional[Dict[str, Any]] = None) -> bool:
     """Ghép ảnh thumbnail vào đầu video_path bằng FFmpeg NVENC (fallback CPU)."""
     if not video_path.is_file() or not thumb_path.is_file():
         return False
@@ -1595,8 +1878,8 @@ def _prepend_thumbnail_file(video_path: Path, thumb_path: Path, duration_s: floa
     streams = []
     try:
         streams = json.loads(p_res.stdout).get("streams", [])
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api._prepend_thumbnail_file (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
     v_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
     a_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
@@ -1639,14 +1922,16 @@ def _prepend_thumbnail_file(video_path: Path, thumb_path: Path, duration_s: floa
     ]
 
     success = False
+    if job_ctl and job_ctl.get("cancelled"):
+        return False
     try:
-        res = subprocess.run(cmd_nvenc, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        res = _run_ffmpeg_ctl(cmd_nvenc, job_ctl, timeout=300)
         if res.returncode == 0 and temp_out.is_file() and temp_out.stat().st_size > 1000:
             success = True
     except Exception as e:
         logger.warning(f"Prepend NVENC failed: {e}")
 
-    if not success:
+    if not success and not (job_ctl and job_ctl.get("cancelled")):
         cmd_cpu = [
             "ffmpeg", "-y",
             "-loop", "1", "-t", str(duration_s), "-i", str(thumb_path),
@@ -1658,39 +1943,37 @@ def _prepend_thumbnail_file(video_path: Path, thumb_path: Path, duration_s: floa
             "-shortest", "-movflags", "+faststart",
             str(temp_out)
         ]
-        res2 = subprocess.run(cmd_cpu, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        res2 = _run_ffmpeg_ctl(cmd_cpu, job_ctl, timeout=300)
         if res2.returncode == 0 and temp_out.is_file() and temp_out.stat().st_size > 1000:
             success = True
 
     if success:
         try:
-            video_path.unlink(missing_ok=True)
-            temp_out.rename(video_path)
+            atomic_replace_file(temp_out, video_path)
             return True
-        except Exception:
-            import shutil
+        except Exception as e:
+            logger.warning(f"Atomic replace thumbnail video thất bại, thử copy đè: {e}")
+        try:
             shutil.copy2(temp_out, video_path)
             temp_out.unlink(missing_ok=True)
             return True
+        except Exception as e:
+            logger.error(f"Error publishing thumbnail-prepended video: {e}")
+            return False
     else:
         if temp_out.is_file():
             temp_out.unlink(missing_ok=True)
         return False
 
 
-@router.post("/api/workflow/thumbnail/prepend")
-async def api_prepend_thumbnail_to_video(payload: Dict[str, Any] = Body(...)):
-    """Ghép ảnh Thumbnail (đã chèn chữ) vào đầu video trong khoảng thời lượng duration_s (mặc định 0.8s)."""
-    stem = payload.get("stem", "").strip()
-    if not stem:
-        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
-    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
-    duration_s = float(payload.get("duration_s", 0.8))
+def _prepend_thumbnail_sync(stem: str, duration_s: float) -> Dict[str, Any]:
+    stem = safe_stem(stem)
+    clean_stem = artifact_stem(stem)
     duration_s = max(0.2, min(5.0, duration_s))
 
     # 1. Tìm thumbnail
     thumb_file = THUMBNAILS_DIR / f"{clean_stem}.jpg"
-    job_dir = WORKSPACE / clean_stem
+    job_dir = resolve_job_dir(stem)
     if not thumb_file.is_file() and job_dir.is_dir() and (job_dir / "thumbnail.jpg").is_file():
         thumb_file = job_dir / "thumbnail.jpg"
 
@@ -1740,7 +2023,6 @@ async def api_prepend_thumbnail_to_video(payload: Dict[str, Any] = Body(...)):
 
     # Nếu target_video khác dest_final (ví dụ đang dùng source_video hoặc cand_banve), tạo bản sao sang dest_final trước
     if str(target_video.resolve()) != str(dest_final.resolve()):
-        import shutil
         shutil.copy2(target_video, dest_final)
         target_video = dest_final
 
@@ -1748,7 +2030,7 @@ async def api_prepend_thumbnail_to_video(payload: Dict[str, Any] = Body(...)):
     if not ok:
         raise HTTPException(status_code=500, detail="Không thể ghép thumbnail vào đầu video bằng FFmpeg")
 
-    stream_url = f"/api/workflow/stream-file?path={dest_final}&t={time.time()}"
+    stream_url = stream_file_url(dest_final, cache_bust=True)
     return {
         "status": "ok",
         "success": True,
@@ -1757,6 +2039,16 @@ async def api_prepend_thumbnail_to_video(payload: Dict[str, Any] = Body(...)):
         "final_video_url": stream_url,
         "has_final": True
     }
+
+
+@router.post("/api/workflow/thumbnail/prepend")
+async def api_prepend_thumbnail_to_video(payload: Dict[str, Any] = Body(...)):
+    """Ghép ảnh Thumbnail (đã chèn chữ) vào đầu video trong khoảng thời lượng duration_s (mặc định 0.8s)."""
+    stem = payload.get("stem", "").strip()
+    if not stem:
+        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    duration_s = float(payload.get("duration_s", 0.8))
+    return await asyncio.to_thread(_prepend_thumbnail_sync, stem, duration_s)
 
 
 # =========================================================================
@@ -1858,6 +2150,7 @@ def _build_timeline_filter_graph(
     has_audio: bool,
     src_w: int = 0,
     src_h: int = 0,
+    audio_src_idx: int = 0,
 ) -> Dict[str, Any]:
     """
     Sinh filter_complex hoàn chỉnh cho timeline CapCut (P2) — HÀM THUẦN để unit test.
@@ -1985,7 +2278,11 @@ def _build_timeline_filter_graph(
                 achain.append(f"afade=t=in:st=0:d={eff['fade_in']:.3f}")
             if eff["fade_out"] > 0:
                 achain.append(f"afade=t=out:st={max(0.0, a_dur - eff['fade_out']):.3f}:d={eff['fade_out']:.3f}")
-            filter_lines.append("[0:a]" + ",".join(achain) + f"[{a_tag}]")
+            c_vocal_mode = str(c.get("vocal_mode") or "").strip().lower()
+            if c_vocal_mode == "mute":
+                achain.append("volume=0")
+            a_in_tag = f"[{audio_src_idx}:a]"
+            filter_lines.append(a_in_tag + ",".join(achain) + f"[{a_tag}]")
             a_parts.append(f"[{a_tag}]")
 
     n = len(clips)
@@ -1997,7 +2294,7 @@ def _build_timeline_filter_graph(
         if not traw:
             continue
         ttype = str(traw.get("type") or "").strip().lower()
-        if not ttype:
+        if not ttype or ttype not in XFADE_TRANSITIONS:
             continue
         tdur = max(0.0, min(1.0, float(traw.get("dur", 0.5) or 0.5)))
         tdur = min(tdur, 0.9 * min(seg_durs[i], seg_durs[i + 1]))
@@ -2337,6 +2634,16 @@ def _build_music_filter_lines(
     return {"lines": lines, "used_split": used_split}
 
 
+def _build_tts_mix_filter_lines(audio_tag: str, tts_idx: int) -> str:
+    """Trộn track lồng tiếng AI lên audio gốc; audio_tag là stream specifier như "0:a?"."""
+    base_tag = audio_tag.replace("?", "")
+    return (
+        f"[{base_tag}]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.0[expbase];"
+        f"[{tts_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[exptts];"
+        f"[expbase][exptts]amix=inputs=2:normalize=0:duration=first[expaout]"
+    )
+
+
 def _retime_subtitles_to_timeline(
     trans_subs: List[Dict[str, Any]],
     orig_subs: List[Dict[str, Any]],
@@ -2416,14 +2723,14 @@ def _run_ffmpeg_ctl(cmd: List[str], job_ctl: Optional[Dict[str, Any]] = None, ti
                     secs = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
                     try:
                         cb(min(1.0, secs / total))
-                    except Exception:
-                        pass
+                    except Exception as _phase6_exc:
+                        logger.debug('Suppressed error in workflow_api._run_ffmpeg_ctl (cb): %s', type(_phase6_exc).__name__, exc_info=False)
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
             proc.kill()
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api._run_ffmpeg_ctl (proc.kill): %s', type(_phase6_exc).__name__, exc_info=False)
     rc = 99 if job_ctl.get("cancelled") else proc.returncode
     return subprocess.CompletedProcess(cmd, rc, "", "".join(err_tail))
 
@@ -2438,6 +2745,7 @@ def _apply_timeline_edits_file(
     workspace_dir: Optional[Path] = None,
     job_ctl: Optional[Dict[str, Any]] = None,
     export_frame: Optional[Dict[str, int]] = None,
+    vocal_mode: str = "full",
 ) -> bool:
     """
     Cắt, ghép nối và nhân bản các đoạn video theo danh sách clips:
@@ -2463,8 +2771,8 @@ def _apply_timeline_edits_file(
     streams = []
     try:
         streams = json.loads(p_res.stdout).get("streams", [])
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api._apply_timeline_edits_file (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
     v_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
     a_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
@@ -2474,24 +2782,45 @@ def _apply_timeline_edits_file(
     # Lọc danh sách clips hợp lệ (giữ nguyên thuộc tính hiệu ứng P2/P3/P4/P5 client gửi kèm)
     _effect_keys = ("at", "speed", "volume", "muted", "keepPitch", "fadeIn", "fadeOut",
                     "crop", "rotate", "flipH", "flipV", "reverse", "freeze", "detachAudio",
-                    "trans", "fx")
+                    "trans", "fx", "vocal_mode")
     valid_clips = []
     for c in clips:
         try:
-            st = max(0.0, float(c.get("start", 0.0)))
-            en = max(st + 0.05, float(c.get("end", st + 1.0)))
+            start_value = float(c.get("start", 0.0))
+            end_value = float(c.get("end", start_value + 1.0))
+            if not math.isfinite(start_value) or not math.isfinite(end_value):
+                raise ValueError("Non-finite clip time")
+            st = max(0.0, start_value)
+            en = max(st + 0.05, end_value)
             entry = {"start": st, "end": en}
             for k in _effect_keys:
                 if k in c:
                     entry[k] = c[k]
             valid_clips.append(entry)
-        except Exception:
-            pass
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("Clip timeline không hợp lệ; chưa render video.") from exc
 
     if not valid_clips:
         return False
 
-    graph = _build_timeline_filter_graph(valid_clips, bool(a_stream), src_w, src_h)
+    vocal_mode_norm = str(vocal_mode or "full").strip().lower()
+    alt_audio_path = None
+    if workspace_dir and vocal_mode_norm in ("no_vocals", "vocals"):
+        inst_f, voc_f = _find_vocal_files(Path(workspace_dir))
+        if vocal_mode_norm == "no_vocals" and inst_f and inst_f.is_file():
+            alt_audio_path = inst_f
+        elif vocal_mode_norm == "vocals" and voc_f and voc_f.is_file():
+            alt_audio_path = voc_f
+
+    extra_audio_inputs: List[str] = [str(alt_audio_path)] if (alt_audio_path and alt_audio_path.is_file()) else []
+    audio_src_idx = 1 if extra_audio_inputs else 0
+    audio_offset = len(extra_audio_inputs)
+
+    if vocal_mode_norm == "mute":
+        for c in valid_clips:
+            c["muted"] = True
+
+    graph = _build_timeline_filter_graph(valid_clips, bool(a_stream), src_w, src_h, audio_src_idx=audio_src_idx)
     if not graph or not graph.get("filter_lines"):
         return False
 
@@ -2537,7 +2866,7 @@ def _apply_timeline_edits_file(
                 py = min(1.0, max(0.0, float(pos.get("y", 0.85))))
                 scale = min(3.0, max(0.05, float(oc.get("scale", 1.0) or 1.0)))
                 opacity = min(1.0, max(0.0, float(oc.get("opacity", 1.0) or 1.0)))
-                img_idx = 1 + len(overlay_inputs)
+                img_idx = 1 + audio_offset + len(overlay_inputs)
                 overlay_inputs.append(str(asset))
                 pre = ["format=rgba"]
                 if opacity < 0.999:
@@ -2567,6 +2896,9 @@ def _apply_timeline_edits_file(
             except ValueError:
                 ass_ref = str(ass_path).replace("\\", "/").replace(":", "\\:")
             graph["filter_lines"].append(f"{cur}subtitles='{ass_ref}'[outv]")
+        else:
+            # Chỉ có overlay (không có text): nối chuỗi overlay vào [outv], tránh sinh [basev]null[outv]
+            graph["filter_lines"].append(f"{cur}null[outv]")
 
     if needs_audio_post:
         # P5: nhạc/SFX trộn lên audio nền có sẵn; vị trí map qua timeline→output (gap-aware)
@@ -2582,7 +2914,7 @@ def _apply_timeline_edits_file(
             end_out = _timeline_to_output_t(valid_clips, graph, at_tl + dur_tl)
             music_inputs.append(str(asset))
             music_meta.append({
-                "a_idx": 1 + len(overlay_inputs) + len(music_inputs) - 1,
+                "a_idx": 1 + audio_offset + len(overlay_inputs) + len(music_inputs) - 1,
                 "at_out": at_out,
                 "dur_out": max(0.1, end_out - at_out),
                 "volume": min(2.0, max(0.0, float(ac.get("volume", 1.0) or 1.0))),
@@ -2626,11 +2958,12 @@ def _apply_timeline_edits_file(
     cmd_nvenc = [
         "ffmpeg", "-y",
         "-i", str(video_path),
-    ] + [x for p in (overlay_inputs + music_inputs) for x in ("-i", p)] + [
+    ] + [x for p in (extra_audio_inputs + overlay_inputs + music_inputs) for x in ("-i", p)] + [
         "-filter_complex", filter_complex,
         "-map", "[outv]"
     ] + audio_maps + [
         "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "4500k",
+        "-shortest",
         "-movflags", "+faststart",
         str(temp_out)
     ]
@@ -2653,11 +2986,12 @@ def _apply_timeline_edits_file(
         cmd_cpu = [
             "ffmpeg", "-y",
             "-i", str(video_path),
-        ] + [x for p in (overlay_inputs + music_inputs) for x in ("-i", p)] + [
+        ] + [x for p in (extra_audio_inputs + overlay_inputs + music_inputs) for x in ("-i", p)] + [
             "-filter_complex", filter_complex,
             "-map", "[outv]"
         ] + audio_maps + [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-shortest",
             "-movflags", "+faststart",
             str(temp_out)
         ]
@@ -2670,12 +3004,19 @@ def _apply_timeline_edits_file(
             success = True
 
     if success:
+        # Không unlink bản cũ trước khi rename: nếu rename lỗi (file đang bị player giữ),
+        # bản final cũ vẫn còn nguyên và file _temp_edit_* vẫn giữ để khôi phục.
         try:
-            out_path.unlink(missing_ok=True)
-            temp_out.rename(out_path)
+            atomic_replace_file(temp_out, out_path)
             return True
         except Exception as e:
-            logger.error(f"Error renaming edited video file: {e}")
+            logger.warning(f"Atomic replace video thất bại, thử copy đè: {e}")
+        try:
+            shutil.copy2(temp_out, out_path)
+            temp_out.unlink(missing_ok=True)
+            return True
+        except Exception as e:
+            logger.error(f"Error publishing edited video file: {e}")
             return False
     return False
 
@@ -2683,7 +3024,7 @@ def _apply_timeline_edits_file(
 @router.post("/api/workflow/timeline/apply-edits")
 async def api_apply_timeline_edits(payload: Dict[str, Any] = Body(...)):
     """Render đồng bộ (giữ tương thích client cũ; client mới dùng /apply-edits-async P6.3)."""
-    return _execute_apply_edits(payload)
+    return await asyncio.to_thread(_execute_apply_edits, payload)
 
 
 def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2709,19 +3050,17 @@ def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, An
             if cb:
                 try:
                     cb(pct, msg)
-                except Exception:
-                    pass
+                except Exception as _phase6_exc:
+                    logger.debug('Suppressed error in workflow_api._prog (cb): %s', type(_phase6_exc).__name__, exc_info=False)
 
-    stem = payload.get("stem", "").strip()
-    if not stem:
-        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
-    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
+    stem = safe_stem(payload.get("stem"))
+    clean_stem = artifact_stem(stem)
 
     clips = payload.get("clips", [])
     if not clips or not isinstance(clips, list):
         raise HTTPException(status_code=400, detail="Danh sách phân đoạn clip không hợp lệ")
 
-    job_dir = WORKSPACE / clean_stem
+    job_dir = resolve_job_dir(stem)
     cand_phoi = INPUT_DIR / f"{stem}.mp4"
     cand_dl = DOWNLOADS_DIR / f"{stem}.mp4"
 
@@ -2751,6 +3090,7 @@ def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, An
     overlay_clips_in = payload.get("overlay_clips") if isinstance(payload.get("overlay_clips"), list) else []
     audio_clips_in = payload.get("audio_clips") if isinstance(payload.get("audio_clips"), list) else []
     export_frame_in = payload.get("export_frame") if isinstance(payload.get("export_frame"), dict) else None
+    vocal_mode_in = str(payload.get("vocal_mode", "full")).strip().lower()
     _prog(20, "Bắt đầu render FFmpeg (GPU)...")
     ok = _apply_timeline_edits_file(
         input_video, clips, dest_final,
@@ -2760,6 +3100,7 @@ def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, An
         workspace_dir=job_dir,
         job_ctl=job_ctl,
         export_frame=export_frame_in,
+        vocal_mode=vocal_mode_in,
     )
     if not ok:
         raise HTTPException(status_code=500, detail="Lỗi khi cắt ghép video bằng FFmpeg")
@@ -2774,8 +3115,23 @@ def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, An
     orig_srt_file = job_dir / "original.srt"
     if trans_srt_file.is_file():
         try:
-            old_trans_subs = parse_srt(trans_srt_file.read_text(encoding="utf-8", errors="replace"))
-            old_orig_subs = parse_srt(orig_srt_file.read_text(encoding="utf-8", errors="replace")) if orig_srt_file.is_file() else []
+            # Render từ phôi gốc (raw) phải đọc bản SRT chuẩn theo timeline gốc, không đọc bản
+            # đã retime của lần xuất trước — tránh retime chồng retime và làm hỏng bản chuẩn.
+            trans_srt_source = _srt_source_copy(trans_srt_file)
+            orig_srt_source = _srt_source_copy(orig_srt_file)
+            rendering_from_final = bool(final_video and input_video == final_video)
+            if not trans_srt_source.is_file():
+                _snapshot_srt_source(trans_srt_file)
+            if orig_srt_file.is_file() and not orig_srt_source.is_file():
+                _snapshot_srt_source(orig_srt_file)
+
+            read_trans = trans_srt_source if (not rendering_from_final and trans_srt_source.is_file()) else trans_srt_file
+            read_orig = orig_srt_source if (not rendering_from_final and orig_srt_source.is_file()) else orig_srt_file
+            old_trans_subs = parse_srt(read_trans.read_text(encoding="utf-8", errors="replace"))
+            old_orig_subs = parse_srt(read_orig.read_text(encoding="utf-8", errors="replace")) if read_orig.is_file() else []
+
+            _backup_srt_before_render(trans_srt_file)
+            _backup_srt_before_render(orig_srt_file)
 
             updated_subs = _retime_subtitles_to_timeline(old_trans_subs, old_orig_subs, clips)
             new_trans_srt_blocks = []
@@ -2786,9 +3142,13 @@ def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, An
                     new_orig_srt_blocks.append(f"{u['index']}\n{u['start_str']} --> {u['end_str']}\n{u['original_text']}\n")
 
             if new_trans_srt_blocks:
-                trans_srt_file.write_text("\n".join(new_trans_srt_blocks), encoding="utf-8")
+                atomic_write_text(trans_srt_file, "\n".join(new_trans_srt_blocks))
+                if rendering_from_final:
+                    _sync_srt_source_text(trans_srt_file)
             if new_orig_srt_blocks and orig_srt_file.is_file():
-                orig_srt_file.write_text("\n".join(new_orig_srt_blocks), encoding="utf-8")
+                atomic_write_text(orig_srt_file, "\n".join(new_orig_srt_blocks))
+                if rendering_from_final:
+                    _sync_srt_source_text(orig_srt_file)
         except Exception as e:
             logger.warning(f"Error re-timing subtitles on timeline edit: {e}")
     _prog(93, "Đang cập nhật thumbnail...")
@@ -2805,10 +3165,10 @@ def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, An
         subprocess.run(cmd_th, capture_output=True, timeout=15)
         if job_dir.is_dir() and thumb_file.is_file():
             shutil.copy2(thumb_file, job_dir / "thumbnail.jpg")
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api._execute_apply_edits (str): %s', type(_phase6_exc).__name__, exc_info=False)
 
-    stream_url = f"/api/workflow/stream-file?path={dest_final}&t={time.time()}"
+    stream_url = stream_file_url(dest_final, cache_bust=True)
     return {
         "status": "ok",
         "success": True,
@@ -2831,10 +3191,9 @@ async def api_get_timeline_project(stem: str = Query(...)):
     Đọc project JSON đã autosave của một video (P6.1).
     Trả {exists: False} nếu chưa có hoặc file hỏng — client tự dùng timeline mặc định.
     """
-    clean_stem = re.sub(r'[^\w\-_.]', '_', (stem or "").strip())
-    if not clean_stem:
-        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
-    project_file = WORKSPACE / clean_stem / "project.json"
+    stem = safe_stem(stem)
+    clean_stem = artifact_stem(stem)
+    project_file = resolve_job_dir(stem) / "project.json"
     if not project_file.is_file():
         return {"exists": False}
     try:
@@ -2860,11 +3219,11 @@ async def api_save_timeline_project(payload: Dict[str, Any] = Body(...)):
     if not isinstance(project, dict) or not isinstance(project.get("tracks"), list) or not project["tracks"]:
         raise HTTPException(status_code=400, detail="Project không hợp lệ (thiếu tracks)")
 
-    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
-    job_dir = WORKSPACE / clean_stem
+    stem = safe_stem(stem)
+    job_dir = resolve_job_dir(stem)
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    project = {**project, "stem": clean_stem, "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    project = {**project, "stem": stem, "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
     target = job_dir / "project.json"
     tmp = job_dir / "project.json.tmp"
     tmp.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
@@ -2872,19 +3231,18 @@ async def api_save_timeline_project(payload: Dict[str, Any] = Body(...)):
     return {"status": "ok", "saved": True, "path": str(target), "saved_at": project["saved_at"]}
 
 
-@router.get("/api/workflow/audio/waveform")
-async def api_audio_waveform(stem: str = Query(...), version: str = Query("final"), buckets: int = Query(1600)):
+def _build_waveform_sync(stem: str, version: str, buckets: int) -> Dict[str, Any]:
     """
     P5: dải biên độ (waveform peaks) của audio video cho track timeline.
     Bóc PCM 8kHz mono bằng ffmpeg, lấy max theo bucket, cache tại
     workspace/<stem>/waveform_<version>.json (theo mtime + size file nguồn).
     """
-    clean_stem = re.sub(r'[^\w\-_.]', '_', (stem or "").strip())
-    if not clean_stem:
-        raise HTTPException(status_code=400, detail="Thiếu stem")
+    stem = safe_stem(stem, field="stem")
+    version = safe_version(version)
+    clean_stem = artifact_stem(stem)
     n_buckets = max(200, min(4000, int(buckets or 1600)))
 
-    job_dir = WORKSPACE / clean_stem
+    job_dir = resolve_job_dir(stem)
     src_file = None
     if version != "raw":
         cand_final = job_dir / f"final_{stem}.mp4"
@@ -2903,12 +3261,13 @@ async def api_audio_waveform(stem: str = Query(...), version: str = Query("final
     if cache_file.is_file():
         try:
             cached = json.loads(cache_file.read_text(encoding="utf-8"))
+            requested = cached.get("requested_buckets", cached.get("buckets"))
             if (cached.get("mtime") == st.st_mtime and cached.get("size") == st.st_size
-                    and cached.get("buckets") == n_buckets and isinstance(cached.get("peaks"), list)):
+                    and requested == n_buckets and isinstance(cached.get("peaks"), list)):
                 return {"exists": True, "cached": True, "duration": cached.get("duration"),
                         "peaks": cached.get("peaks"), "buckets": n_buckets}
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api._build_waveform_sync (json.loads): %s', type(_phase6_exc).__name__, exc_info=False)
 
     cmd = ["ffmpeg", "-v", "error", "-i", str(src_file), "-map", "0:a:0",
            "-ac", "1", "-ar", "8000", "-f", "s16le", "-"]
@@ -2934,12 +3293,178 @@ async def api_audio_waveform(stem: str = Query(...), version: str = Query("final
     peaks = (peaks / (mx if mx > 0 else 1.0)).round(4).tolist()
 
     payload = {"mtime": st.st_mtime, "size": st.st_size, "buckets": n,
+               "requested_buckets": n_buckets,
                "duration": round(duration, 3), "peaks": peaks}
     try:
-        cache_file.write_text(json.dumps(payload), encoding="utf-8")
-    except Exception:
-        pass
+        atomic_write_text(cache_file, json.dumps(payload))
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in workflow_api._build_waveform_sync (atomic_write_text): %s', type(_phase6_exc).__name__, exc_info=False)
     return {"exists": True, "cached": False, "duration": round(duration, 3), "peaks": peaks, "buckets": n}
+
+
+@router.get("/api/workflow/audio/waveform")
+async def api_audio_waveform(stem: str = Query(...), version: str = Query("final"), buckets: int = Query(1600)):
+    """Trả waveform peaks; phần ffmpeg/numpy chạy trong thread để không chặn HTTP."""
+    return await asyncio.to_thread(_build_waveform_sync, stem, version, buckets)
+
+
+# =========================================================================
+# FEATURE: LỌC ÂM THANH NHÂN VẬT GỐC CHUẨN CAPCUT (BS-ROFORMER / DEMUCS)
+# =========================================================================
+_vocal_separation_tasks: Dict[str, Dict[str, Any]] = {}
+_vocal_separation_lock = threading.Lock()
+
+
+def _run_vocal_separation_worker(stem: str) -> None:
+    task = _vocal_separation_tasks.get(stem)
+    if not task:
+        return
+    stem = safe_stem(stem)
+    job_dir = resolve_job_dir(stem)
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        task["status"] = "running"
+        task["progress"] = 15
+        task["message"] = "Đang kiểm tra âm thanh gốc..."
+
+        # 1. Tìm hoặc trích xuất original.wav chất lượng cao
+        orig_wav = job_dir / "original.wav"
+        if not orig_wav.is_file():
+            raw_v = _manual_resolve_raw_video(stem, job_dir)
+            if not raw_v or not raw_v.is_file():
+                task["status"] = "error"
+                task["message"] = "Không tìm thấy video gốc để trích xuất âm thanh"
+                return
+            task["message"] = "Đang trích xuất âm thanh chất lượng cao từ video..."
+            try:
+                from video_utils import extract_audio_from_video
+                ok_ext = extract_audio_from_video(str(raw_v), str(orig_wav))
+            except Exception as e_ext:
+                logger.warning(f"Lỗi extract_audio_from_video: {e_ext}")
+                ok_ext = False
+            if not ok_ext or not orig_wav.is_file():
+                task["status"] = "error"
+                task["message"] = "Trích xuất âm thanh từ video thất bại"
+                return
+
+        task["progress"] = 35
+        task["message"] = "Đang lọc âm thanh bằng BS-RoFormer AI (SDR 12.97dB)..."
+
+        from video_utils import separate_vocals_demucs
+        v_path, bg_path = separate_vocals_demucs(str(orig_wav), str(job_dir))
+
+        inst_f, voc_f = _find_vocal_files(job_dir)
+        if inst_f and voc_f and inst_f.is_file() and voc_f.is_file():
+            task["status"] = "completed"
+            task["progress"] = 100
+            task["message"] = "Tách âm thanh hoàn tất!"
+            task["instrumental_url"] = stream_file_url(inst_f, cache_bust=True)
+            task["vocals_url"] = stream_file_url(voc_f, cache_bust=True)
+            task["instrumental_path"] = str(inst_f)
+            task["vocals_path"] = str(voc_f)
+            logger.info(f"Vocal separation completed for {stem}: inst={inst_f.name}, voc={voc_f.name}")
+        else:
+            task["status"] = "error"
+            task["message"] = "Không tìm thấy file kết quả sau khi tách âm"
+    except Exception as e:
+        logger.exception(f"Lỗi khi tách âm thanh AI cho {stem}: {e}")
+        task["status"] = "error"
+        task["message"] = f"Lỗi tách âm: {str(e)}"
+
+
+@router.get("/api/workflow/audio/vocal-status")
+async def api_get_vocal_status(stem: str = Query(...)):
+    stem = safe_stem(stem)
+    job_dir = resolve_job_dir(stem)
+    inst_f, voc_f = _find_vocal_files(job_dir) if job_dir.is_dir() else (None, None)
+
+    task = _vocal_separation_tasks.get(stem)
+    if inst_f and voc_f and inst_f.is_file() and voc_f.is_file():
+        return {
+            "has_separated": True,
+            "instrumental_url": stream_file_url(inst_f, cache_bust=True),
+            "vocals_url": stream_file_url(voc_f, cache_bust=True),
+            "status": "completed",
+            "progress": 100,
+            "message": "Đã có sẵn file tách âm BS-RoFormer"
+        }
+    if task:
+        return {
+            "has_separated": False,
+            "status": task.get("status", "running"),
+            "progress": task.get("progress", 0),
+            "message": task.get("message", ""),
+            "instrumental_url": task.get("instrumental_url", ""),
+            "vocals_url": task.get("vocals_url", "")
+        }
+    return {
+        "has_separated": False,
+        "status": "none",
+        "progress": 0,
+        "message": "Chưa tách âm thanh"
+    }
+
+
+@router.post("/api/workflow/audio/separate-vocals")
+async def api_trigger_separate_vocals(payload: Dict[str, Any] = Body(...)):
+    stem = safe_stem(payload.get("stem"))
+    job_dir = resolve_job_dir(stem)
+
+    inst_f, voc_f = _find_vocal_files(job_dir) if job_dir.is_dir() else (None, None)
+    if inst_f and voc_f and inst_f.is_file() and voc_f.is_file():
+        return {
+            "status": "completed",
+            "progress": 100,
+            "has_separated": True,
+            "message": "Đã có sẵn file tách âm",
+            "instrumental_url": stream_file_url(inst_f, cache_bust=True),
+            "vocals_url": stream_file_url(voc_f, cache_bust=True)
+        }
+
+    with _vocal_separation_lock:
+        existing = _vocal_separation_tasks.get(stem)
+        if existing and existing.get("status") == "running":
+            return {
+                "status": "running",
+                "progress": existing.get("progress", 20),
+                "message": existing.get("message", "Đang tách...")
+            }
+
+        _vocal_separation_tasks[stem] = {
+            "status": "running",
+            "progress": 10,
+            "message": "Bắt đầu tiến trình tách âm...",
+            "started_at": time.time()
+        }
+        t = threading.Thread(target=_run_vocal_separation_worker, args=(stem,), daemon=True)
+        t.start()
+
+    return {
+        "status": "started",
+        "progress": 10,
+        "message": "Đã khởi động tiến trình tách âm BS-RoFormer AI trên GPU"
+    }
+
+
+@router.get("/api/workflow/audio/separate-status")
+async def api_get_separate_status(stem: str = Query(...)):
+    stem = safe_stem(stem)
+    job_dir = resolve_job_dir(stem)
+    inst_f, voc_f = _find_vocal_files(job_dir) if job_dir.is_dir() else (None, None)
+    if inst_f and voc_f and inst_f.is_file() and voc_f.is_file():
+        return {
+            "status": "completed",
+            "progress": 100,
+            "has_separated": True,
+            "instrumental_url": stream_file_url(inst_f, cache_bust=True),
+            "vocals_url": stream_file_url(voc_f, cache_bust=True),
+            "message": "Tách âm hoàn tất!"
+        }
+    task = _vocal_separation_tasks.get(stem)
+    if task:
+        return task
+    return {"status": "none", "progress": 0, "message": "Không có tác vụ nào"}
 
 
 # =========================================================================
@@ -2984,9 +3509,9 @@ def _timeline_render_worker(job_id: str, payload: Dict[str, Any]) -> None:
 @router.post("/api/workflow/timeline/apply-edits-async")
 async def api_apply_timeline_edits_async(payload: Dict[str, Any] = Body(...)):
     """P6.3: tạo job render nền (hàng đợi GPU 1 luồng), trả job_id ngay để client poll tiến độ."""
-    stem = (payload.get("stem") or "").strip()
-    if not stem or not isinstance(payload.get("clips"), list) or not payload.get("clips"):
-        raise HTTPException(status_code=400, detail="Payload render nền không hợp lệ (thiếu stem/clips)")
+    stem = safe_stem(payload.get("stem"))
+    if not isinstance(payload.get("clips"), list) or not payload.get("clips"):
+        raise HTTPException(status_code=400, detail="Payload render nền không hợp lệ (thiếu clips)")
     import uuid as _uuid
 
     job_id = _uuid.uuid4().hex[:12]
@@ -3026,8 +3551,8 @@ async def api_timeline_render_cancel(payload: Dict[str, Any] = Body(...)):
     if proc is not None:
         try:
             proc.kill()
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api.api_timeline_render_cancel (proc.kill): %s', type(_phase6_exc).__name__, exc_info=False)
     if job.get("status") in ("queued", "running"):
         job.update({"status": "cancelled", "stage": "Đã huỷ bởi người dùng", "progress": 0})
     return {"status": "ok", "cancelled": True}
@@ -3055,13 +3580,11 @@ async def api_concat_open(payload: Dict[str, Any] = Body(...)):
     P7: mở Concat với thư mục project của video (tiến trình ngoài, detached).
     AGPL: chỉ thực thi nhị phân, không nhúng/sao chép mã nguồn Concat.
     """
-    stem = re.sub(r'[^\w\-_.]', '_', (payload.get("stem") or "").strip())
-    if not stem:
-        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    stem = safe_stem(payload.get("stem"))
     exe = _find_concat_exe()
     if not exe:
         raise HTTPException(status_code=404, detail="Không tìm thấy concat.exe (bin/concat/app/PFiles64/Concat/concat.exe)")
-    job_dir = WORKSPACE / stem
+    job_dir = resolve_job_dir(stem)
     job_dir.mkdir(parents=True, exist_ok=True)
     try:
         proc = subprocess.Popen(
@@ -3081,9 +3604,7 @@ async def api_concat_import(stem: str = Form(...), file: UploadFile = File(...))
     P7: nhập file video xuất từ Concat vào THƯ VIỆN (INPUT_DIR) như một video phôi mới,
     để chạy lại pipeline / chỉnh sửa tiếp trong Studio.
     """
-    stem_clean = re.sub(r'[^\w\-_.]', '_', (stem or "").strip())
-    if not stem_clean:
-        raise HTTPException(status_code=400, detail="Thiếu stem")
+    stem_clean = artifact_stem(safe_stem(stem, field="stem"))
     data = await file.read()
     if len(data) < 100_000:
         raise HTTPException(status_code=400, detail="File quá nhỏ — có thể không phải video")
@@ -3107,8 +3628,9 @@ _PROXY_GENERATING: set = set()
 
 def _resolve_timeline_source_video(stem: str, version: str) -> Optional[Path]:
     """Chọn file nguồn theo phiên bản: final (mặc định) hoặc raw (phôi)."""
-    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
-    job_dir = WORKSPACE / clean_stem
+    stem = safe_stem(stem, field="stem")
+    version = safe_version(version)
+    job_dir = resolve_job_dir(stem)
     if version != "raw":
         cand_final = job_dir / f"final_{stem}.mp4"
         if cand_final.is_file() and _valid_final_video(cand_final):
@@ -3124,7 +3646,7 @@ def _resolve_timeline_source_video(stem: str, version: str) -> Optional[Path]:
 
 
 def _proxy_path_for(stem: str, version: str) -> Path:
-    return WORKSPACE / re.sub(r'[^\w\-_.]', '_', stem) / f"proxy_{version}.mp4"
+    return resolve_job_dir(stem) / f"proxy_{safe_version(version)}.mp4"
 
 
 def _proxy_is_fresh(proxy_path: Path, src_path: Path) -> bool:
@@ -3172,15 +3694,13 @@ async def api_proxy_generate(payload: Dict[str, Any] = Body(...)):
     Trả {ready: true, url} nếu proxy đã có và mới hơn nguồn; ngược lại khởi tạo
     thread generate và trả {ready: false, started: true}.
     """
-    stem = (payload.get("stem") or "").strip()
-    version = payload.get("version") or "final"
-    if not stem:
-        raise HTTPException(status_code=400, detail="Thiếu stem")
+    stem = safe_stem(payload.get("stem"), field="stem")
+    version = safe_version(payload.get("version") or "final")
     src = _resolve_timeline_source_video(stem, version)
     if not src:
         raise HTTPException(status_code=404, detail="Không tìm thấy video nguồn")
     proxy_path = _proxy_path_for(stem, version)
-    url = f"/api/workflow/stream-file?path={proxy_path}&t={time.time()}"
+    url = stream_file_url(proxy_path, cache_bust=True)
     if _proxy_is_fresh(proxy_path, src):
         return {"ready": True, "url": url}
     key = f"{stem}|{version}"
@@ -3193,13 +3713,15 @@ async def api_proxy_generate(payload: Dict[str, Any] = Body(...)):
 
 @router.get("/api/workflow/proxy/status")
 async def api_proxy_status(stem: str = Query(...), version: str = Query("final")):
+    stem = safe_stem(stem, field="stem")
+    version = safe_version(version)
     src = _resolve_timeline_source_video(stem, version)
     if not src:
         return {"ready": False, "exists": False}
     proxy_path = _proxy_path_for(stem, version)
     if _proxy_is_fresh(proxy_path, src):
         return {"ready": True, "exists": True,
-                "url": f"/api/workflow/stream-file?path={proxy_path}&t={time.time()}"}
+                "url": stream_file_url(proxy_path, cache_bust=True)}
     return {"ready": False, "exists": proxy_path.is_file(), "generating": f"{stem}|{version}" in _PROXY_GENERATING}
 
 
@@ -3209,14 +3731,12 @@ async def api_timeline_detect_silences(payload: Dict[str, Any] = Body(...)):
     Phát hiện các khoảng lặng trong video bằng FFmpeg silencedetect để tự động cắt bỏ khoảng trống (Auto-Cut Silence).
     Trả về danh sách silences và danh sách active_clips (đã loại bỏ khoảng lặng, ghép liền mạch trên timeline).
     """
-    stem = str(payload.get("stem") or "").strip()
-    version = str(payload.get("version") or "final").strip()
+    stem = safe_stem(payload.get("stem"), field="stem video")
+    version = safe_version(payload.get("version") or "final")
     min_silence_sec = max(0.25, min(5.0, float(payload.get("min_silence_sec", 0.65))))
     noise_db = max(-60.0, min(-15.0, float(payload.get("noise_db", -35.0))))
     padding_sec = max(0.0, min(0.3, float(payload.get("padding_sec", 0.08))))
 
-    if not stem:
-        raise HTTPException(status_code=400, detail="Thiếu stem video")
     src = _resolve_timeline_source_video(stem, version)
     if not src or not src.is_file():
         raise HTTPException(status_code=404, detail="Không tìm thấy video nguồn để phân tích khoảng lặng")
@@ -3231,8 +3751,8 @@ async def api_timeline_detect_silences(payload: Dict[str, Any] = Body(...)):
             )
             if pr.returncode == 0 and pr.stdout.strip():
                 total_dur = float(pr.stdout.strip())
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api._run_silence_detect (subprocess.run): %s', type(_phase6_exc).__name__, exc_info=False)
 
         cmd = [
             "ffmpeg", "-hide_banner", "-nostats", "-i", str(src),
@@ -3313,7 +3833,8 @@ async def api_static_js(fname: str):
     p = Path(__file__).resolve().parent / "static" / "js" / fname
     if not p.is_file():
         raise HTTPException(status_code=404, detail="Không tìm thấy file JS")
-    return FileResponse(p, media_type="application/javascript")
+    # no-cache: browser luôn revalidate (etag) — chỉnh sửa module có hiệu lực ngay sau reload
+    return FileResponse(p, media_type="application/javascript", headers={"Cache-Control": "no-cache"})
 
 
 # =========================================================================
@@ -3323,39 +3844,139 @@ _MANUAL_JOBS: Dict[str, Dict[str, Any]] = {}
 
 
 class _ManualSegment:
-    """Shim segment cho translate_subtitles: chỉ cần index/start(timedelta)/end/content."""
+    """Shim segment cho translate_subtitles: index/start(timedelta)/end/content.
+    Copy attribute từ srt.Subtitle để tương thích mọi nhánh dịch (to_srt, compose...)."""
 
     def __init__(self, index: int, start_td, end_td, content: str):
+        try:
+            import srt as _srt_lib
+
+            base = _srt_lib.Subtitle(index=index, start=start_td, end=end_td, content=content, proprietary=())
+            self.__dict__.update(base.__dict__)
+        except ImportError as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api.__init__ (_srt_lib.Subtitle): %s', type(_phase6_exc).__name__, exc_info=False)
         self.index = index
         self.start = start_td
         self.end = end_td
         self.content = content
 
+    def to_srt(self, **kwargs) -> str:
+        start_s = format_srt_timestamp(self.start.total_seconds())
+        end_s = format_srt_timestamp(self.end.total_seconds())
+        return f"{self.index}" + chr(10) + f"{start_s} --> {end_s}" + chr(10) + self.content + chr(10)
 
-def _manual_resolve_raw_video(stem: str) -> Optional[Path]:
-    # 1. khớp chính xác <stem>.mp4
-    for d in (INPUT_DIR, DOWNLOADS_DIR):
-        p = d / f"{stem}.mp4"
-        if p.is_file():
-            return p
-    # 2. khớp tiền tố — file thật thường có đuôi tiêu đề: <stem>_<título>.mp4
-    for d in (INPUT_DIR, DOWNLOADS_DIR):
-        if d.is_dir():
-            for p in sorted(d.glob(f"{glob_escape(stem)}*.mp4")):
+def _manual_resolve_raw_video(stem: str, job_dir: Optional[Path] = None) -> Optional[Path]:
+    stem = safe_stem(stem)
+    clean = artifact_stem(stem)
+    candidate_dirs = [
+        INPUT_DIR,
+        DOWNLOADS_DIR,
+        Path("D:/workspace/downloads"),
+        Path("C:/tool v1/workspace/downloads"),
+        WORKSPACE / "downloads",
+        WORKSPACE / clean,
+        WORKSPACE / stem,
+        Path("D:/workspace") / clean,
+        Path("D:/workspace") / stem,
+        OUTPUT_DIR,
+        Path("D:/banve"),
+    ]
+    seen = set()
+    dirs = []
+    for d in candidate_dirs:
+        try:
+            resolved = d.resolve()
+            if resolved not in seen and d.is_dir():
+                seen.add(resolved)
+                dirs.append(d)
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api._manual_resolve_raw_video (d.resolve): %s', type(_phase6_exc).__name__, exc_info=False)
+
+    # 1. Khớp chính xác <stem>.<ext> hoặc <clean>.<ext>
+    for d in dirs:
+        for ext in (".mp4", ".mov", ".mkv", ".webm", ".avi"):
+            p = d / f"{stem}{ext}"
+            if p.is_file():
+                return p
+            p_clean = d / f"{clean}{ext}"
+            if p_clean.is_file():
+                return p_clean
+
+    # 2. Khớp tiền tố — file thật thường có đuôi tiêu đề: <stem>_<tiêu_đề>.mp4
+    for d in dirs:
+        for p in sorted(d.glob(f"{glob_escape(stem)}*.mp4")):
+            if p.is_file():
+                return p
+        if clean != stem:
+            for p in sorted(d.glob(f"{glob_escape(clean)}*.mp4")):
                 if p.is_file():
                     return p
-    # 3. file trong workspace job dir
-    clean = re.sub(r'[^\w\-_.]', '_', stem)
-    jd = WORKSPACE / clean
-    for name in (f"{stem}.mp4", "step1_extracted.mp4"):
-        p = jd / name
-        if p.is_file():
-            return p
+
+    # 3. File trong job dir (cả C: lẫn D:)
+    job_dirs = [WORKSPACE / clean, WORKSPACE / stem, Path("D:/workspace") / clean, Path("D:/workspace") / stem]
+    if job_dir is not None:
+        job_dirs.insert(0, Path(job_dir))
+    for d in job_dirs:
+        if d.is_dir():
+            for name in (f"{stem}.mp4", f"{clean}.mp4", "step1_extracted.mp4", f"final_{stem}.mp4", f"final_{clean}.mp4"):
+                p = d / name
+                if p.is_file():
+                    return p
+            for p in sorted(d.glob("*.mp4")):
+                if p.is_file():
+                    return p
+
+    # 4. File thành phẩm trong banve
+    for out_d in (OUTPUT_DIR, Path("D:/banve")):
+        if out_d.is_dir():
+            for name in (f"Dubbed_{stem}.mp4", f"Dubbed_{clean}.mp4"):
+                p = out_d / name
+                if p.is_file():
+                    return p
+
     return None
 
 
 def glob_escape(s: str) -> str:
     return s.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
+
+
+def _wait_pipeline_free(job_id: str, max_wait_s: int = 1800) -> bool:
+    """
+    P9: asyncio.Lock của pipeline không dùng được `with` từ thread nền —
+    chờ bằng polling: pipeline lock + batch active + job_tracker state.
+    Trả False nếu hết thời gian chờ.
+    """
+    import main as main_module
+    import stop_service
+    import shared_state
+
+    deadline = time.monotonic() + max_wait_s
+    while time.monotonic() < deadline:
+        try:
+            locked = main_module.UNIFIED_PIPELINE_LOCK.locked()
+            state = job_tracker.get_status(strict=True)
+            active = state["active"] or any(w["active"] for w in state.get("workers", {}).values())
+        except Exception as exc:
+            logger.warning("workflow_api._wait_pipeline_free: cannot verify state (%s)", type(exc).__name__, exc_info=False)
+            raise PipelineStateError("Không xác minh được khóa/trạng thái pipeline; chưa chạy tác vụ.") from exc
+        if locked or active:
+            _manual_job_set(job_id, stage="Pipeline đang chạy — chờ tài nguyên rảnh...")
+            time.sleep(min(3, max(0, deadline - time.monotonic())))
+            continue
+        # Only clear stale stop state after both sources prove that no job is active.
+        try:
+            if stop_service.is_stop_requested(WORKSPACE) or shared_state.stop_requested:
+                stop_service.clear_stop(WORKSPACE, source="workflow_api", reason="idle manual job starts")
+                shared_state.stop_requested = False
+                if stop_service.is_stop_requested(WORKSPACE):
+                    raise PipelineStateError("Không xóa được cờ dừng cũ; chưa chạy tác vụ.")
+        except Exception as exc:
+            raise PipelineStateError("Không xác minh được cờ dừng; chưa chạy tác vụ.") from exc
+        from disk_guard import ensure_free_space
+        ensure_free_space(WORKSPACE, purpose="tạo phụ đề trong Studio")
+        return True
+    return False
 
 
 def _manual_job_set(job_id: str, **kw) -> None:
@@ -3371,9 +3992,7 @@ async def api_manual_generate_cn(payload: Dict[str, Any] = Body(...)):
     KHÔNG dịch — người dùng xem/sửa sub gốc trước rồi mới gọi /manual/translate.
     Chạy nền (GPU Whisper), trả job_id để poll /manual/job-status.
     """
-    stem = (payload.get("stem") or "").strip()
-    if not stem:
-        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    stem = safe_stem(payload.get("stem"))
     video_path = _manual_resolve_raw_video(stem)
     if not video_path:
         raise HTTPException(status_code=404, detail="Không tìm thấy video thô cho stem này (INPUT_DIR/DOWNLOADS)")
@@ -3386,12 +4005,12 @@ async def api_manual_generate_cn(payload: Dict[str, Any] = Body(...)):
         job = _MANUAL_JOBS[job_id]
         try:
             # Dùng chung GPU Whisper với pipeline — chờ pipeline chính rảnh
-            import main as main_module
-
             job.update({"status": "running", "stage": "Chờ pipeline rảnh..."})
-            with main_module.UNIFIED_PIPELINE_LOCK:
-                clean = re.sub(r'[^\w\-_.]', '_', stem)
-                job_dir = WORKSPACE / clean
+            # asyncio.Lock KHÔNG dùng được `with` đồng bộ từ thread — chờ bằng polling
+            if not _wait_pipeline_free(job_id):
+                raise PipelineStateError("Hết thời gian chờ pipeline rảnh; chưa chạy tác vụ.")
+            if True:
+                job_dir = resolve_job_dir(stem)
                 job_dir.mkdir(parents=True, exist_ok=True)
                 wav = job_dir / "original.wav"
                 job.update({"progress": 10, "stage": "Tách audio 16kHz..."})
@@ -3405,6 +4024,7 @@ async def api_manual_generate_cn(payload: Dict[str, Any] = Body(...)):
 
                 srt_path = job_dir / "original.srt"
                 segments = extract_subtitles_isolated(wav, srt_path)
+                _snapshot_srt_source(srt_path)
                 job.update({
                     "status": "done", "progress": 100,
                     "stage": f"Đã tạo {len(segments)} câu sub tiếng Trung — bấm câu trên timeline để xem/sửa",
@@ -3425,12 +4045,9 @@ async def api_manual_translate(payload: Dict[str, Any] = Body(...)):
     dịch bằng LLM (Gemini→OpenAI→DeepSeek→fallback), ghi translated.srt và trả
     danh sách phụ đề để Studio hiển thị ngay trên timeline.
     """
-    stem = (payload.get("stem") or "").strip()
+    stem = safe_stem(payload.get("stem"))
     target_lang = (payload.get("target_lang") or "vi").strip()
-    if not stem:
-        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
-    clean = re.sub(r'[^\w\-_.]', '_', stem)
-    job_dir = WORKSPACE / clean
+    job_dir = resolve_job_dir(stem)
     srt_original = job_dir / "original.srt"
     if not srt_original.is_file():
         raise HTTPException(status_code=400, detail="Chưa có sub Trung gốc — bấm 'Sub Trung' trước đã!")
@@ -3443,14 +4060,15 @@ async def api_manual_translate(payload: Dict[str, Any] = Body(...)):
     def worker():
         job = _MANUAL_JOBS[job_id]
         try:
-            import main as main_module
             from datetime import timedelta
 
             job.update({"status": "running", "stage": "Chờ pipeline rảnh..."})
-            with main_module.UNIFIED_PIPELINE_LOCK:
+            # asyncio.Lock KHÔNG dùng được `with` đồng bộ từ thread — chờ bằng polling
+            if not _wait_pipeline_free(job_id):
+                raise PipelineStateError("Hết thời gian chờ pipeline rảnh; chưa chạy tác vụ.")
+            if True:
                 job.update({"progress": 15, "stage": "Đọc sub Trung đã sửa..."})
                 from ai.translation import translate_subtitles
-                from ai.transcription import save_srt
 
                 raw_blocks = parse_srt(srt_original.read_text(encoding="utf-8", errors="replace"))
                 if not raw_blocks:
@@ -3464,10 +4082,15 @@ async def api_manual_translate(payload: Dict[str, Any] = Body(...)):
                         content=(b.get("text") or "").strip(),
                     ))
                 job.update({"progress": 30, "stage": f"Đang dịch {len(segments)} câu bằng LLM..."})
-                translate_subtitles(segments, target_lang, api_key=os.getenv("GEMINI_API_KEY", ""), video_path=None)
+                translate_subtitles(segments, target_lang, api_key=os.getenv("GEMINI_API_KEY", ""), video_path=None,
+                                    stop_checker=lambda: False)  # job thủ công không dính cờ stop của batch
                 job.update({"progress": 80, "stage": "Đang ghi translated.srt..."})
                 srt_translated = job_dir / "translated.srt"
-                save_srt(segments, srt_translated)
+                atomic_write_text(srt_translated, "\n".join(seg.to_srt() for seg in segments))
+                # Bản .source giữ timestamp gốc — chỉ đồng bộ nội dung nếu đã có (tránh ghi đè
+                # timestamp raw bằng timestamp đã retime của bản final).
+                _sync_or_snapshot_srt_source(srt_original)
+                _sync_or_snapshot_srt_source(srt_translated)
 
                 subtitles = []
                 for seg in segments:
@@ -3493,6 +4116,8 @@ async def api_manual_translate(payload: Dict[str, Any] = Body(...)):
     return {"status": "ok", "job_id": job_id}
 
 
+
+
 @router.get("/api/workflow/manual/job-status")
 async def api_manual_job_status(job_id: str = Query(...)):
     job = _MANUAL_JOBS.get(job_id)
@@ -3502,12 +4127,231 @@ async def api_manual_job_status(job_id: str = Query(...)):
             "stage": job.get("stage", ""), "kind": job.get("kind", ""), "result": job.get("result")}
 
 
+@router.post("/api/workflow/manual/generate-tts")
+async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
+    """
+    P9 bước 3: tạo giọng đọc tiếng Việt NGAY TRONG Studio — đọc từng câu đã dịch trong
+    translated.srt bằng ĐÚNG các API TTS pipeline đang dùng (CapCut TTS / Vie-TTS / FPT / Edge,
+    qua generate_single_tts), speed-fit theo khoảng trống từng câu, lắp thành bản lồng
+    manual_tts_track.wav phủ full video. Trả job_id để poll /manual/job-status.
+    voice_id: tùy chọn — id giọng trong voice catalog; mặc định dùng giọng đang chọn của tool.
+    """
+    stem = safe_stem(payload.get("stem"))
+    job_dir = resolve_job_dir(stem)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    srt_translated = job_dir / "translated.srt"
+
+    # P9: Nhận phụ đề trực tiếp từ payload nếu người dùng tự gõ/sửa trong Studio
+    payload_subs = payload.get("subtitles") or []
+    if payload_subs and isinstance(payload_subs, list):
+        srt_blocks = []
+        for idx, s in enumerate(payload_subs, 1):
+            text = (s.get("text") or "").strip()
+            if not text:
+                continue
+            start = float(s.get("start", 0.0))
+            end = float(s.get("end", start + 2.0))
+            srt_blocks.append(f"{idx}\n{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}\n{text}\n")
+        if srt_blocks:
+            atomic_write_text(srt_translated, "\n".join(srt_blocks))
+            if _payload_video_version(payload, job_dir, stem) == "raw":
+                _snapshot_srt_source(srt_translated)
+            else:
+                _sync_srt_source_text(srt_translated)
+
+    if not srt_translated.is_file() or not srt_translated.read_text(encoding="utf-8", errors="replace").strip():
+        single_text = (payload.get("text") or "").strip()
+        if single_text:
+            atomic_write_text(srt_translated, f"1\n00:00:00,000 --> 00:00:10,000\n{single_text}\n")
+            if _payload_video_version(payload, job_dir, stem) == "raw":
+                _snapshot_srt_source(srt_translated)
+        elif (job_dir / "chinese.srt").is_file() or (job_dir / "raw.srt").is_file():
+            raise HTTPException(status_code=400, detail="Đã có phụ đề gốc nhưng chưa dịch — bấm nút 'Dịch Ngay' trên timeline trước khi tạo giọng!")
+        else:
+            raise HTTPException(status_code=400, detail="Chưa có phụ đề Việt — vui lòng gõ phụ đề vào ô chữ hoặc bấm 'Sub Trung ➔ Dịch Ngay' trước khi tạo giọng!")
+
+    # Xác định giọng: payload.voice_id > giọng đang chọn của tool (voice_selection.selected)
+    voice_id = (payload.get("voice_id") or "").strip()
+    try:
+        import voice_selection
+        voice_entry = None
+        if voice_id:
+            voice_entry = next((v for v in voice_selection.catalog() if v["id"] == voice_id), None)
+            if not voice_entry:
+                raise HTTPException(status_code=400, detail=f"Giọng '{voice_id}' không có trong catalog")
+        else:
+            voice_entry = voice_selection.selected()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi đọc catalog giọng: {e}")
+    if not voice_entry:
+        raise HTTPException(status_code=400, detail="Không xác định được giọng đọc")
+
+    video_path = _manual_resolve_raw_video(stem)
+    video_dur = 0.0
+    if video_path:
+        # Thời lượng video để phủ bed audio
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(video_path)],
+                capture_output=True, text=True, timeout=30)
+            video_dur = float(json.loads(probe.stdout)["format"]["duration"])
+        except Exception:
+            video_dur = 0.0
+
+    if video_dur <= 0.0:
+        # Fallback 1: lấy từ payload frontend (mainPlayer.duration)
+        try:
+            video_dur = float(payload.get("duration") or 0.0)
+        except (TypeError, ValueError):
+            video_dur = 0.0
+
+    import uuid as _uuid
+
+    job_id = _uuid.uuid4().hex[:12]
+    _MANUAL_JOBS[job_id] = {"status": "queued", "progress": 0, "stage": "Trong hàng đợi...", "kind": "tts", "created_at": time.time()}
+
+    def worker():
+        job = _MANUAL_JOBS[job_id]
+        try:
+            import asyncio
+            from datetime import timedelta
+
+            voice_source = str(voice_entry.get("source") or "capcut")
+            voice_param = str(voice_entry.get("param") or "")
+            provider_label = str(voice_entry.get("label") or voice_source)
+
+            job.update({"status": "running", "progress": 5, "stage": f"Chuẩn bị giọng: {provider_label}..."})
+
+            from disk_guard import ensure_free_space
+            ensure_free_space(WORKSPACE, purpose="tạo giọng đọc trong Studio")
+
+            tts_dir = job_dir / "manual_tts"
+            tts_dir.mkdir(parents=True, exist_ok=True)
+            for old in tts_dir.glob("*.mp3"):
+                old.unlink(missing_ok=True)
+
+            raw_blocks = parse_srt(srt_translated.read_text(encoding="utf-8", errors="replace"))
+            if not raw_blocks:
+                raise RuntimeError("translated.srt trống")
+            cues = []
+            for i, b in enumerate(raw_blocks):
+                cues.append(_ManualSegment(
+                    index=i + 1,
+                    start_td=timedelta(seconds=float(b.get("start", 0.0))),
+                    end_td=timedelta(seconds=float(b.get("end", 0.0))),
+                    content=(b.get("text") or "").strip(),
+                ))
+
+            from ai.voice_cloning import generate_single_tts
+
+            # P9: xóa stop flag stale (batch đã xong nhưng cờ stop chưa reset)
+            try:
+                import shared_state
+                if shared_state.stop_requested and not job_tracker.get_status().get("active"):
+                    shared_state.stop_requested = False
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in workflow_api.worker (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
+
+            def _stop_requested() -> bool:
+                try:
+                    import shared_state
+                    return bool(shared_state.stop_requested)
+                except Exception:
+                    return False
+
+            async def run_all():
+                failed = []
+                total = len(cues)
+                for cue in cues:
+                    if _stop_requested():
+                        return failed, True
+                    cue_dur = max(0.5, (cue.end - cue.start).total_seconds())
+                    _manual_job_set(job_id, progress=10 + int(80 * (cue.index - 1) / max(1, total)),
+                                    stage=f"Đang đọc câu {cue.index}/{total} ({provider_label})...")
+                    try:
+                        await generate_single_tts(cue, str(tts_dir), voice_source, voice_param,
+                                                  api_key=os.getenv("GEMINI_API_KEY", ""),
+                                                  target_max_duration=cue_dur)
+                    except Exception as cue_err:
+                        if _stop_requested():
+                            return failed, True
+                        logger.warning(f"Manual TTS câu {cue.index} lỗi: {cue_err}")
+                        failed.append(cue.index)
+                return failed, False
+
+            failed_idx, was_cancelled = asyncio.run(run_all())
+            if was_cancelled:
+                done_so_far = len([c for c in cues if (tts_dir / f"{c.index}.mp3").is_file()])
+                _manual_job_set(
+                    job_id, status="cancelled",
+                    stage=f"Đã hủy tạo giọng theo lệnh dừng — {done_so_far}/{len(cues)} câu đã tạo (không phải lỗi TTS)",
+                )
+                return
+
+            ok_cues = [c for c in cues if (tts_dir / f"{c.index}.mp3").is_file()]
+            if not ok_cues:
+                raise RuntimeError(
+                    f"Không tạo được file giọng nào — API TTS không trả về audio "
+                    f"({len(failed_idx)}/{len(cues)} câu lỗi, xem log 'Manual TTS câu ... lỗi')"
+                )
+
+            # Lắp bản lồng: bed im lặng full video + từng câu đặt đúng vị trí
+            job.update({"progress": 92, "stage": "Lắp ráp bản lồng hoàn chỉnh..."})
+            max_cue_end = max([c.end.total_seconds() for c in cues] + [0.0]) if cues else 0.0
+            dur = max(video_dur, max_cue_end, 1.0)
+            inputs = ["ffmpeg", "-y", "-v", "error",
+                      "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo:d={dur:.3f}"]
+            fc_parts = ["[0:a]aformat=sample_rates=44100:channel_layouts=stereo,atrim=0:" + f"{dur:.3f}[bed]"]
+            amix_in = "[bed]"
+            k = 0
+            for cue in ok_cues:
+                idx_in = 1 + k
+                ms = int(round((cue.start.total_seconds()) * 1000))
+                fc_parts.append(
+                    f"[{idx_in}:a]aformat=sample_rates=44100:channel_layouts=stereo,"
+                    f"adelay={ms}:all=1[c{k}]"
+                )
+                amix_in += f"[c{k}]"
+                k += 1
+            fc_parts.append(f"{amix_in}amix=inputs={k + 1}:normalize=0:duration=first[outa]")
+            cmd = inputs[:]
+            for cue in ok_cues:
+                cmd.extend(["-i", str(tts_dir / f"{cue.index}.mp3")])
+            cmd.extend(["-filter_complex", ";".join(fc_parts), "-map", "[outa]",
+                        "-c:a", "pcm_s16le", str(job_dir / "manual_tts_track.wav")])
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if res.returncode != 0 or not (job_dir / "manual_tts_track.wav").is_file():
+                raise RuntimeError("FFmpeg lắp bản lồng thất bại: " + (res.stderr or "")[-200:])
+
+            job.update({
+                "status": "done", "progress": 100,
+                "stage": f"Đã tạo giọng đọc {len(ok_cues)}/{len(cues)} câu bằng {provider_label}"
+                         + (f" — {len(failed_idx)} câu lỗi" if failed_idx else ""),
+                "result": {
+                    "count": len(ok_cues), "failed": failed_idx,
+                    "track_url": stream_file_url(job_dir / "manual_tts_track.wav", cache_bust=True),
+                    "voice": provider_label,
+                },
+            })
+        except Exception as e:
+            logger.exception("Manual generate-tts job lỗi")
+            _manual_job_set(job_id, status="error", stage=str(e)[:220])
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {"status": "ok", "job_id": job_id}
+
+
 @router.get("/api/workflow/download-srt")
 async def api_download_srt(stem: str = Query(...), type: str = Query("translated")):
     """
     Tải tệp phụ đề .SRT (tiếng Việt, tiếng Trung, hoặc song ngữ).
     """
-    job_dir = WORKSPACE / stem
+    stem = safe_stem(stem)
+    if type not in ("translated", "vietnamese", "chinese", "original", "bilingual"):
+        raise HTTPException(status_code=400, detail="Loại phụ đề không hợp lệ")
+    job_dir = resolve_job_dir(stem)
     if not job_dir.is_dir():
         raise HTTPException(status_code=404, detail="Không tìm thấy thư mục công việc của video")
 
@@ -3580,11 +4424,9 @@ def format_srt_timestamp(seconds: float) -> str:
 @router.post("/api/workflow/save-subtitles")
 async def api_save_workflow_subtitles(payload: Dict[str, Any] = Body(...)):
     """Lưu phụ đề đã chỉnh sửa từ giao diện trực tiếp vào tệp translated.srt."""
-    stem = payload.get("stem")
+    stem = safe_stem(payload.get("stem"), field="stem video")
     subs = payload.get("subtitles", [])
-    if not stem:
-        raise HTTPException(status_code=400, detail="Thiếu stem video")
-    job_dir = WORKSPACE / stem
+    job_dir = resolve_job_dir(stem)
     if not job_dir.is_dir():
         job_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3596,36 +4438,172 @@ async def api_save_workflow_subtitles(payload: Dict[str, Any] = Body(...)):
         srt_blocks.append(f"{idx}\n{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}\n{text}\n")
 
     trans_srt = job_dir / "translated.srt"
-    trans_srt.write_text("\n".join(srt_blocks), encoding="utf-8")
+    atomic_write_text(trans_srt, "\n".join(srt_blocks))
+    if srt_blocks:
+        if _payload_video_version(payload, job_dir, stem) == "raw":
+            _snapshot_srt_source(trans_srt)
+        else:
+            _sync_srt_source_text(trans_srt)
     return {"status": "ok", "saved_count": len(subs)}
+
+
+# =========================================================================
+# P9.1: EXPORT NỀN — job + tiến độ + huỷ, dùng chung hàng đợi GPU với render
+# =========================================================================
+_EXPORT_JOBS: Dict[str, Dict[str, Any]] = {}
+_EXPORT_JOBS_LOCK = threading.Lock()
+_EXPORT_JOB_TTL = 7200
+
+
+def _export_stage(job_ctl: Optional[Dict[str, Any]], pct: int, message: str) -> None:
+    if not job_ctl:
+        return
+    cb = job_ctl.get("stage_cb")
+    if cb:
+        try:
+            cb(pct, message)
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api._export_stage (cb): %s', type(_phase6_exc).__name__, exc_info=False)
+
+
+def _check_export_cancelled(job_ctl: Optional[Dict[str, Any]]) -> None:
+    if job_ctl and job_ctl.get("cancelled"):
+        raise HTTPException(status_code=499, detail="Đã huỷ xuất video")
+
+
+def _export_job_worker(job_id: str, payload: Dict[str, Any]) -> None:
+    job = _EXPORT_JOBS.get(job_id)
+    if job is None:
+        return
+    job_ctl: Dict[str, Any] = {
+        "cancelled": bool(job.get("cancel_requested")),
+        "proc": None,
+        "total_dur": 0.0,
+        "job_id": job_id,
+        "stage_cb": lambda pct, msg: job.update({"progress": int(pct), "stage": msg}),
+        "progress": lambda frac: job.update({
+            "progress": max(job.get("progress", 0), 15 + int(max(0.0, min(1.0, frac)) * 70)),
+        }),
+    }
+    job["job_ctl"] = job_ctl
+    if job_ctl["cancelled"]:
+        job.update({"status": "cancelled", "stage": "Đã huỷ", "progress": 0})
+        return
+    with _TIMELINE_RENDER_SEM:
+        if job_ctl["cancelled"]:
+            job.update({"status": "cancelled", "stage": "Đã huỷ", "progress": 0})
+            return
+        job.update({"status": "running", "progress": 3, "stage": "Đang chuẩn bị xuất video..."})
+        try:
+            result = _execute_custom_export(payload, job_ctl=job_ctl)
+            if job_ctl.get("cancelled"):
+                raise HTTPException(status_code=499, detail="Đã huỷ xuất video")
+            job.update({"status": "done", "progress": 100, "stage": "Hoàn tất", "result": result})
+        except HTTPException as e:
+            cancelled = bool(job_ctl.get("cancelled"))
+            job.update({
+                "status": "cancelled" if cancelled else "error",
+                "stage": "Đã huỷ" if cancelled else str(e.detail)[:200],
+                "error": str(e.detail),
+            })
+        except Exception as e:
+            logger.exception("Export job lỗi")
+            job.update({"status": "error", "stage": str(e)[:200], "error": str(e)})
 
 
 @router.post("/api/workflow/export-custom")
 async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
+    """Tạo job xuất video nền; trả job_id để client poll /export-status."""
+    stem = safe_stem(payload.get("stem"))
+    import uuid as _uuid
+
+    job_id = _uuid.uuid4().hex[:12]
+    job: Dict[str, Any] = {
+        "status": "queued",
+        "progress": 0,
+        "stage": "Trong hàng đợi GPU...",
+        "created_at": time.time(),
+        "cancel_requested": False,
+    }
+    with _EXPORT_JOBS_LOCK:
+        for k in [k for k, v in _EXPORT_JOBS.items() if time.time() - v.get("created_at", 0) > _EXPORT_JOB_TTL]:
+            _EXPORT_JOBS.pop(k, None)
+        _EXPORT_JOBS[job_id] = job
+    threading.Thread(target=_export_job_worker, args=(job_id, payload), daemon=True).start()
+    return {"status": "ok", "job_id": job_id, "queued": True}
+
+
+@router.get("/api/workflow/export-status")
+async def api_export_status(job_id: str = Query(...)):
+    job = _EXPORT_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job xuất video")
+    return {
+        "status": job.get("status"),
+        "progress": job.get("progress", 0),
+        "stage": job.get("stage", ""),
+        "result": job.get("result"),
+        "error": job.get("error"),
+    }
+
+
+@router.post("/api/workflow/export-cancel")
+async def api_export_cancel(payload: Dict[str, Any] = Body(...)):
+    """Huỷ job xuất video — kill tiến trình ffmpeg đang chạy."""
+    job_id = str((payload or {}).get("job_id") or "")
+    job = _EXPORT_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job xuất video")
+    job["cancel_requested"] = True
+    ctl = job.get("job_ctl") or {}
+    ctl["cancelled"] = True
+    proc = ctl.get("proc")
+    if proc is not None:
+        try:
+            proc.kill()
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api.api_export_cancel (proc.kill): %s', type(_phase6_exc).__name__, exc_info=False)
+    if job.get("status") in ("queued", "running"):
+        job.update({"status": "cancelled", "stage": "Đã huỷ bởi người dùng", "progress": 0})
+    return {"status": "ok", "cancelled": True}
+
+
+def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Xuất video chuẩn CapCut: Tùy chọn độ phân giải, bitrate (kbps), FPS, định dạng,
     xuất kèm file .SRT và áp dụng tùy chọn chống re-up.
     """
-    stem = payload.get("stem", "").strip()
-    if not stem:
-        raise HTTPException(status_code=400, detail="Thiếu mã nhận diện video (stem)")
+    _check_export_cancelled(job_ctl)
+    _export_stage(job_ctl, 4, "Đang kiểm tra nguồn video...")
+    stem = safe_stem(payload.get("stem"))
 
     resolution = str(payload.get("resolution", "1080p")).lower()
-    bitrate_kbps = int(payload.get("bitrate_kbps", 8000))
+    if resolution not in ("720p", "1080p", "2k", "1440p", "4k"):
+        raise HTTPException(status_code=400, detail="Độ phân giải xuất không hợp lệ")
+    try:
+        bitrate_kbps = int(payload.get("bitrate_kbps", 8000))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Bitrate xuất không hợp lệ")
+    if not 100 <= bitrate_kbps <= 100000:
+        raise HTTPException(status_code=400, detail="Bitrate phải trong khoảng 100 - 100.000 kbps")
     fps = str(payload.get("fps", "30")).lower()
+    if fps not in ("24", "30", "60", "original"):
+        fps = "original"
     export_format = str(payload.get("format", "mp4")).lower()
+    if export_format not in ("mp4", "mov"):
+        raise HTTPException(status_code=400, detail="Định dạng xuất chỉ hỗ trợ MP4 hoặc MOV")
     export_srt = bool(payload.get("export_srt", True))
     srt_type = str(payload.get("srt_type", "translated")).lower()
-    output_folder = payload.get("output_folder", "").strip()
+    if srt_type not in ("translated", "vietnamese", "chinese", "original", "bilingual"):
+        srt_type = "translated"
     use_anti_reup = bool(payload.get("use_anti_reup", False))
     cfg = payload.get("canvas_settings") or get_canvas_settings()
+    if not isinstance(cfg, dict):
+        cfg = get_canvas_settings()
 
-    if not output_folder:
-        output_folder = str(OUTPUT_DIR)
-    out_dir = Path(output_folder)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = resolve_output_dir(payload.get("output_folder", ""), OUTPUT_DIR)
 
-    job_dir = WORKSPACE / stem
+    job_dir = resolve_job_dir(stem)
     cand_phoi = INPUT_DIR / f"{stem}.mp4"
     cand_dl = DOWNLOADS_DIR / f"{stem}.mp4"
 
@@ -3653,6 +4631,9 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
     if not source_video and not final_video:
         raise HTTPException(status_code=404, detail="Không tìm thấy tệp video nguồn")
 
+    _check_export_cancelled(job_ctl)
+    _export_stage(job_ctl, 7, "Đang phân tích khung hình và bộ lọc...")
+
     # Xác định kích thước đích (tw, th)
     aspect = str(cfg.get("aspect_ratio", "9:16")).lower()
     res_table = {
@@ -3666,9 +4647,10 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
     tw, th = res_table.get(resolution, res_table["1080p"]).get(ratio_key, (1080, 1920))
 
     # Tên file xuất
-    clean_stem = re.sub(r'[^\w\-_.]', '_', stem)[:40]
+    clean_stem = artifact_stem(stem, 40)
     out_filename = f"CapCut_{clean_stem}_{resolution}_{bitrate_kbps}k.{export_format}"
     out_path = out_dir / out_filename
+    temp_out = out_dir / f".{out_path.stem}.{os.getpid()}.{time.time_ns()}{out_path.suffix}"
 
     # Chuẩn bị file phụ đề nếu có
     srt_file = job_dir / "translated.srt" if (job_dir / "translated.srt").is_file() else None
@@ -3688,12 +4670,22 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
     bg_image_file = str(cfg.get("bg_image_file", "tia_sang_vang_ngoi_sao.jpg"))
     auto_crop_black_bars = bool(cfg.get("auto_crop_black_bars", True))
 
-    # Audio input
-    audio_source = final_video if final_video else source_video
-    if job_dir.is_dir() and (job_dir / "mixed.wav").is_file():
-        audio_input_path = job_dir / "mixed.wav"
+    # Audio input & vocal isolation mode
+    vocal_mode = str(payload.get("vocal_mode", "full")).strip().lower()
+    inst_path, voc_path = _find_vocal_files(job_dir) if job_dir.is_dir() else (None, None)
+
+    if vocal_mode == "no_vocals" and inst_path and inst_path.is_file():
+        audio_input_path = inst_path
+    elif vocal_mode == "vocals" and voc_path and voc_path.is_file():
+        audio_input_path = voc_path
+    elif vocal_mode == "mute":
+        audio_input_path = None
     else:
-        audio_input_path = audio_source
+        audio_source = final_video if final_video else source_video
+        if job_dir.is_dir() and (job_dir / "mixed.wav").is_file():
+            audio_input_path = job_dir / "mixed.wav"
+        else:
+            audio_input_path = audio_source
 
     v_input_path = source_video if source_video else final_video
 
@@ -3753,7 +4745,7 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
                         f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
                     )
                 else:
-                    safe_color = cfg.get("bg_color", "#f59e0b").replace("#", "0x")
+                    safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
                     extra_inputs = ["-loop", "1", "-i", mask_file]
                     fc = (
                         f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
@@ -3773,7 +4765,7 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
                     f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
                 )
             else:
-                safe_color = cfg.get("bg_color", "#f59e0b").replace("#", "0x")
+                safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
                 extra_inputs = ["-loop", "1", "-i", mask_file]
                 fc = (
                     f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
@@ -3816,7 +4808,7 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
                         f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
                     )
                 else:
-                    safe_color = cfg.get("bg_color", "#f59e0b").replace("#", "0x")
+                    safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
                     fc = (
                         f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
                         f"[0:v]{scale_fg}[fg];"
@@ -3830,7 +4822,7 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
                     f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
                 )
             else:
-                safe_color = cfg.get("bg_color", "#f59e0b").replace("#", "0x")
+                safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
                 fc = (
                     f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
                     f"[0:v]{scale_fg}[fg];"
@@ -3862,18 +4854,44 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
 
     # Thêm audio input nếu khác video input
     map_audio = "0:a?"
-    if str(audio_input_path) != str(v_input_path):
+    if audio_input_path is None:
+        map_audio = ""
+    elif str(audio_input_path) != str(v_input_path):
         audio_idx = cmd_inputs.count("-i")
         cmd_inputs.extend(["-i", str(audio_input_path)])
         map_audio = f"{audio_idx}:a?"
 
+    # P9: trộn bản lồng tiếng AI (manual_tts_track.wav) lên audio xuất — flag từ modal
+    if payload.get("tts_mix"):
+        tts_wav = job_dir / "manual_tts_track.wav"
+        if tts_wav.is_file():
+            tts_idx = cmd_inputs.count("-i")
+            cmd_inputs.extend(["-i", str(tts_wav)])
+            if map_audio:
+                fc += ";" + _build_tts_mix_filter_lines(map_audio, tts_idx)
+                map_audio = "[expaout]"
+            else:
+                fc += f";[{tts_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[expaout]"
+                map_audio = "[expaout]"
+        else:
+            logger.warning("Export tts_mix bật nhưng thiếu manual_tts_track.wav — bỏ qua trộn")
+
     fps_args = ["-r", fps] if fps in ("24", "30", "60") else []
+
+    if job_ctl is not None:
+        try:
+            job_ctl["total_dur"] = float(v_dur or a_dur or 0.0)
+        except (TypeError, ValueError):
+            job_ctl["total_dur"] = 0.0
+
+    _check_export_cancelled(job_ctl)
+    _export_stage(job_ctl, 12, "Đang mã hóa video bằng GPU NVENC...")
 
     # NVENC command
     cmd_nvenc = cmd_inputs + [
         "-filter_complex", fc,
         "-map", "[outv]",
-        "-map", map_audio,
+    ] + (["-map", map_audio] if map_audio else ["-an"]) + [
         "-c:v", "h264_nvenc",
         "-preset", "p4",
         "-b:v", f"{bitrate_kbps}k",
@@ -3885,55 +4903,75 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
         "-movflags", "+faststart",
         "-shortest",
     ] + duration_args + [
-        str(out_path)
+        str(temp_out)
     ]
 
-    success = False
     try:
-        res = subprocess.run(cmd_nvenc, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
-        if res.returncode == 0 and _valid_final_video(out_path):
-            success = True
-    except Exception as e:
-        logger.warning(f"NVENC custom export failed: {e}")
+        success = False
+        try:
+            res = _run_ffmpeg_ctl(cmd_nvenc, job_ctl, timeout=600)
+            if res.returncode == 0 and _valid_final_video(temp_out):
+                success = True
+        except Exception as e:
+            logger.warning(f"NVENC custom export failed: {e}")
+        _check_export_cancelled(job_ctl)
 
-    if not success:
-        # Fallback CPU x264
-        cmd_cpu = cmd_inputs + [
-            "-filter_complex", fc,
-            "-map", "[outv]",
-            "-map", map_audio,
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-b:v", f"{bitrate_kbps}k",
-            "-maxrate", f"{int(bitrate_kbps * 1.5)}k",
-            "-bufsize", f"{bitrate_kbps * 2}k"
-        ] + fps_args + [
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-movflags", "+faststart",
-            "-shortest",
-        ] + duration_args + [
-            str(out_path)
-        ]
-        res_cpu = subprocess.run(cmd_cpu, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
-        if res_cpu.returncode == 0 and _valid_final_video(out_path):
-            success = True
+        if not success:
+            # Fallback CPU x264
+            _export_stage(job_ctl, 15, "GPU lỗi — chuyển mã hóa CPU (libx264)...")
+            cmd_cpu = cmd_inputs + [
+                "-filter_complex", fc,
+                "-map", "[outv]",
+            ] + (["-map", map_audio] if map_audio else ["-an"]) + [
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-b:v", f"{bitrate_kbps}k",
+                "-maxrate", f"{int(bitrate_kbps * 1.5)}k",
+                "-bufsize", f"{bitrate_kbps * 2}k"
+            ] + fps_args + [
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-movflags", "+faststart",
+                "-shortest",
+            ] + duration_args + [
+                str(temp_out)
+            ]
+            res_cpu = _run_ffmpeg_ctl(cmd_cpu, job_ctl, timeout=900)
+            if res_cpu.returncode == 0 and _valid_final_video(temp_out):
+                success = True
+            _check_export_cancelled(job_ctl)
 
-    if not success:
-        raise HTTPException(status_code=500, detail="Không thể xuất video bằng FFmpeg")
+        if not success:
+            raise HTTPException(status_code=500, detail="Không thể xuất video bằng FFmpeg")
 
-    # Gắn Thumbnail vào đầu video nếu người dùng yêu cầu
-    prepend_thumb = bool(payload.get("prepend_thumbnail", False))
-    if prepend_thumb:
-        clean_stem = re.sub(r'[^\w\-_.]', '_', stem)
-        thumb_f = THUMBNAILS_DIR / f"{clean_stem}.jpg"
-        if not thumb_f.is_file() and job_dir.is_dir() and (job_dir / "thumbnail.jpg").is_file():
-            thumb_f = job_dir / "thumbnail.jpg"
-        if thumb_f.is_file():
-            try:
-                _prepend_thumbnail_file(out_path, thumb_f, float(payload.get("thumbnail_duration_s", 0.8)))
-            except Exception as e_prep:
-                logger.warning(f"Không thể ghép thumbnail vào video xuất {out_path}: {e_prep}")
+        # Gắn Thumbnail vào đầu video nếu người dùng yêu cầu
+        prepend_thumb = bool(payload.get("prepend_thumbnail", False))
+        if prepend_thumb:
+            clean_stem = artifact_stem(stem)
+            thumb_f = THUMBNAILS_DIR / f"{clean_stem}.jpg"
+            if not thumb_f.is_file() and job_dir.is_dir() and (job_dir / "thumbnail.jpg").is_file():
+                thumb_f = job_dir / "thumbnail.jpg"
+            if thumb_f.is_file():
+                try:
+                    _export_stage(job_ctl, 86, "Đang ghép thumbnail vào đầu video...")
+                    _prepend_thumbnail_file(
+                        temp_out, thumb_f,
+                        float(payload.get("thumbnail_duration_s", 0.8)),
+                        job_ctl=job_ctl,
+                    )
+                except Exception as e_prep:
+                    logger.warning(f"Không thể ghép thumbnail vào video xuất {out_path}: {e_prep}")
+                _check_export_cancelled(job_ctl)
+
+        _export_stage(job_ctl, 96, "Đang hoàn tất file xuất...")
+        atomic_replace_file(temp_out, out_path)
+    except BaseException:
+        try:
+            if temp_out.is_file():
+                temp_out.unlink()
+        except OSError as _phase6_exc:
+            logger.debug('Suppressed error in workflow_api._execute_custom_export (temp_out.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
+        raise
 
     # Xuất kèm file SRT nếu người dùng yêu cầu
     exported_srt_path = ""
@@ -3943,7 +4981,7 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
         trans_srt_f = job_dir / "translated.srt"
 
         if srt_type == "chinese" and orig_srt_f.is_file():
-            srt_target.write_text(orig_srt_f.read_text(encoding="utf-8", errors="replace"), encoding="utf-8-sig")
+            atomic_write_text(srt_target, orig_srt_f.read_text(encoding="utf-8", errors="replace"), encoding="utf-8-sig")
             exported_srt_path = str(srt_target)
         elif srt_type == "bilingual" and (trans_srt_f.is_file() or orig_srt_f.is_file()):
             orig_s = parse_srt(orig_srt_f.read_text(encoding="utf-8", errors="replace")) if orig_srt_f.is_file() else []
@@ -3959,10 +4997,10 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
                 if ts: blines.append(ts["text"])
                 if os_s: blines.append(os_s["text"])
                 blines.append("")
-            srt_target.write_text("\n".join(blines), encoding="utf-8-sig")
+            atomic_write_text(srt_target, "\n".join(blines), encoding="utf-8-sig")
             exported_srt_path = str(srt_target)
         elif trans_srt_f.is_file():
-            srt_target.write_text(trans_srt_f.read_text(encoding="utf-8", errors="replace"), encoding="utf-8-sig")
+            atomic_write_text(srt_target, trans_srt_f.read_text(encoding="utf-8", errors="replace"), encoding="utf-8-sig")
             exported_srt_path = str(srt_target)
 
     size_mb = round(out_path.stat().st_size / (1024 * 1024), 2)
@@ -3973,5 +5011,5 @@ async def api_export_custom_video(payload: Dict[str, Any] = Body(...)):
         "filename": out_path.name,
         "size_mb": size_mb,
         "exported_srt": exported_srt_path.replace("\\", "/") if exported_srt_path else "",
-        "stream_url": f"/api/workflow/stream-file?path={out_path}"
+        "stream_url": stream_file_url(out_path)
     }

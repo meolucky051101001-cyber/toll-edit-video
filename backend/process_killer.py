@@ -12,7 +12,6 @@ logger = logging.getLogger("process_killer")
 PROTECTED_SCRIPTS = {
     "main.py",
     "telegram_bot.py",
-    "dashboard_monitor.py",
     "background_service.py",
 }
 
@@ -26,7 +25,6 @@ WORKER_SCRIPT_KEYWORDS = [
     "separator_worker",
     "v1_separator_worker",
     "demucs",
-    "v1_qwen_asr",
     "model_workers",
     "bs_roformer",
 ]

@@ -11,7 +11,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Iterable, List, Mapping, Optional, Sequence, Union
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ def plan_actual_timing_rewrites(
     audio_infos: Iterable[Mapping[str, Any]],
     safety_margin: float = 0.95,
 ) -> List[RewriteRequest]:
-    """Create rewrite requests from measured TTS/RVC durations, not estimates."""
+    """Create rewrite requests from measured TTS durations, not estimates."""
 
     if not 0.5 <= safety_margin <= 1.0:
         raise ValueError("safety_margin must be between 0.5 and 1.0")
@@ -392,7 +392,7 @@ def solve_segment_timing(
     expanded = []
     for segment in working:
         # Sentence changes are display cues in the ASS renderer. Keeping a
-        # fitting speech window together avoids extra TTS/RVC requests and
+        # fitting speech window together avoids extra TTS requests and
         # artificial pauses without combining sentences on the subtitle card.
         if plan_segment(segment, config).fits:
             expanded.append(segment)

@@ -79,12 +79,6 @@ def get_worker_settings() -> Dict[str, Any]:
     return fallback
 
 
-def get_effective_concurrency() -> int:
-    """Trả về số luồng hiệu lực thực tế (1 hoặc 2)."""
-    cfg = get_worker_settings()
-    return cfg.get("effective_concurrency", 1)
-
-
 def save_worker_settings(
     concurrency: int,
     auto_vram_guard: bool = True,

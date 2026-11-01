@@ -15,8 +15,8 @@ class ModelPolicyTests(unittest.TestCase):
         policy = RuntimeModelPolicy.from_env({}, project_root=Path("C:/missing"))
         self.assertEqual(policy.separator_model, "model_bs_roformer_ep_317_sdr_12.9755.ckpt")
         self.assertEqual(policy.demucs_primary_model, "htdemucs_ft")
-        self.assertEqual(policy.qwen_asr_model, "Qwen/Qwen3-ASR-0.6B")
-        self.assertEqual(policy.qwen_aligner_model, "Qwen/Qwen3-ForcedAligner-0.6B")
+        self.assertEqual(policy.asr_backend, "auto")
+        self.assertEqual(policy.whisper_model, "large-v3")
         self.assertEqual(policy.paddle_ocr_version, "PP-OCRv6")
         self.assertEqual(policy.gemini_model, "gemini-3.8-flash")
         self.assertEqual(policy.gemini_candidates[0], "gemini-3.8-flash")
@@ -38,13 +38,13 @@ class ModelPolicyTests(unittest.TestCase):
         self.assertEqual(policy.demucs_fallback_model, "htdemucs_ft")
         self.assertEqual(policy.paddle_ocr_version, "PP-OCRv6")
         self.assertNotEqual(policy.fingerprint_payload(), RuntimeModelPolicy.from_env({}).fingerprint_payload())
-        override = RuntimeModelPolicy.from_env({"MODEL_SPEED_PROFILE": "fast", "ASR_BACKEND": "qwen3"})
-        self.assertEqual(override.asr_backend, "qwen3")
+        legacy_backend = RuntimeModelPolicy.from_env({"MODEL_SPEED_PROFILE": "fast", "ASR_BACKEND": "qwen3"})
+        self.assertEqual(legacy_backend.asr_backend, "whisper")
         with self.assertRaises(ValueError):
             RuntimeModelPolicy.from_env({"MODEL_SPEED_PROFILE": "typo"})
 
 
-class QwenAlignmentTests(unittest.TestCase):
+class ForcedAlignmentSegmentTests(unittest.TestCase):
     def test_chinese_units_join_without_spaces_and_split_on_punctuation(self):
         grouped = _aligned_units_to_segments(
             [

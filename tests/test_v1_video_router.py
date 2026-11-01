@@ -24,18 +24,18 @@ class VideoRouterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             whisper_workspace = root / "whisper"
-            qwen_workspace = root / "qwen"
-            with mock.patch.dict(os.environ, {"ENABLE_QWEN_ASR": "false", "V1_ASR_MODEL": "whisper_turbo"}, clear=False), \
+            sensevoice_workspace = root / "sensevoice"
+            with mock.patch.dict(os.environ, {"V1_ASR_MODEL": "whisper_turbo"}, clear=False), \
                  mock.patch("backend.v1_video_router.extract_media_metadata") as mock_extract:
                 mock_extract.return_value = VideoMetadata(duration_s=30.0, width=1080, height=1920, fps=30.0)
                 set_feature_flags({"V1_ASR_MODEL": "whisper_turbo"}, whisper_workspace)
-                set_feature_flags({"V1_ASR_MODEL": "qwen3_asr"}, qwen_workspace)
+                set_feature_flags({"V1_ASR_MODEL": "sensevoice_small"}, sensevoice_workspace)
 
                 whisper = route_video("sample.mp4", workspace_path=whisper_workspace)
-                qwen = route_video("sample.mp4", workspace_path=qwen_workspace)
+                sensevoice = route_video("sample.mp4", workspace_path=sensevoice_workspace)
 
             self.assertEqual(whisper.planned_pipeline["asr_model"], "whisper_turbo")
-            self.assertEqual(qwen.planned_pipeline["asr_model"], "qwen3_asr")
+            self.assertEqual(sensevoice.planned_pipeline["asr_model"], "sensevoice_small")
 
     def test_thresholds_configuration(self):
         # Default thresholds: <= 7m (420s) is SHORT, > 7m is LONG

@@ -9,6 +9,9 @@ title Bot Tai Video Douyin va Xiaohongshu (Doc Lap)
 set "PROJECT_DIR=%~dp0"
 set "PYTHON_EXE=%PROJECT_DIR%backend\venv\Scripts\python.exe"
 
+:: Xóa cờ dừng tay để watchdog không coi bot là đã tắt
+del /q "%PROJECT_DIR%workspace\control\downloader.disabled" 2>nul
+
 if not exist "%PYTHON_EXE%" (
     echo [ERROR] Khong tim thay Python tai backend\venv\Scripts\python.exe
     pause
@@ -16,13 +19,11 @@ if not exist "%PYTHON_EXE%" (
 )
 
 echo =========================================================================
-echo   DANG KHOI DONG BOT TAI VIDEO DOUYIN ^& XIAOHONGSHU
-echo   Bot Username: @douxiao_bot
-echo   Trang thai: Doc lap hoan toan voi Tool V1
+echo   BOT TAI VIDEO DOUYIN ^& XIAOHONGSHU (@douxiao_bot)
+echo   Che do: Tu dong chay khi bat may (Scheduled Task: AutoDubV1-telebot-downloader)
+echo   Thu muc luu video: D:\vid chua edit
 echo =========================================================================
 echo.
 
-cd /d "%PROJECT_DIR%"
-"%PYTHON_EXE%" telebot_video_downloader.py
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$running = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*telebot_video_downloader*' -and $_.ProcessId -ne $PID }; if (-not $running) { Start-ScheduledTask -TaskName 'AutoDubV1-telebot-downloader' -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2; Write-Host 'Da kich hoat bot tai video thanh cong!' -ForegroundColor Green } else { Write-Host 'Bot da dang chay ngam san sang!' -ForegroundColor Green }; Write-Host '--- LOG HOAT DONG REALTIME (Nhan Ctrl+C de thoat xem log, bot van chay ngam) ---' -ForegroundColor Cyan; Get-Content '%PROJECT_DIR%telebot_downloader.log' -Tail 15 -Wait"
 
-pause

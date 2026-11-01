@@ -22,7 +22,8 @@ if os.path.exists(env_file):
                 os.environ[k.strip()] = v.strip().strip('"').strip("'")
 
 from pipeline_v2.config import PipelineSettings
-from pipeline_v2.video_pipeline import VideoPipelineRequest, VideoPipelineRunner, discover_rvc_model
+from pipeline_v2.video_pipeline import VideoPipelineRequest, VideoPipelineRunner
+from voice_selection import resolve_voice
 
 async def run():
     video_path = Path(r"D:\1788274800377_video.mp4")
@@ -39,12 +40,12 @@ async def run():
     final_dest = output_dir / "Dubbed_1788274800377_video.mp4"
     
     settings = PipelineSettings.from_env()
-    rvc_model = discover_rvc_model(workspace_dir)
+    voice_source, voice_param, voice_label = resolve_voice("capcut", "BV562_streaming")
     api_key = os.getenv("GEMINI_API_KEY", "")
     
     start_time = time.time()
     print(f"🎬 Bắt đầu render video cục bộ {video_path} (21 phút 10 giây) bằng Tool V2...", flush=True)
-    print(f"🎤 RVC Voice Model: {rvc_model}", flush=True)
+    print(f"TTS Voice: {voice_label}", flush=True)
     print(f"💾 File xuất: {final_dest}", flush=True)
     
     async def progress(stage, state):
@@ -57,9 +58,8 @@ async def run():
         output_path=final_dest,
         settings=settings,
         api_key=api_key,
-        voice_source="rvc" if rvc_model else "edge",
-        voice_param=str(rvc_model) if rvc_model else "vi-VN-HoaiMyNeural",
-        rvc_model_path=rvc_model,
+        voice_source=voice_source,
+        voice_param=voice_param,
         progress=progress,
     )
     

@@ -118,7 +118,7 @@ class TestSenseVoiceHybridASR(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             updated = set_feature_flags({"V1_ASR_MODEL": "whisper_sensevoice"}, tmp)
             self.assertEqual(updated["V1_ASR_MODEL"], "whisper_sensevoice")
-            self.assertFalse(updated["ENABLE_QWEN_ASR"])
+            self.assertNotIn("ENABLE_QWEN_ASR", updated)
 
             meta = VideoMetadata(duration_s=45.0, width=1080, height=1920, fps=30.0)
             pipe = resolve_planned_pipeline(VideoMode.SHORT, meta, workspace_path=tmp)

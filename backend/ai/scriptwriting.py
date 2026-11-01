@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 import time
 import cv2
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 

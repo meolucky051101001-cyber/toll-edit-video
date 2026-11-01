@@ -75,7 +75,7 @@ class TestA2UIProtocol(unittest.TestCase):
         # 4. Action RPC endpoint
         res_act = self.client.post("/api/a2ui/action", json={
             "name": "apply_dual_voices",
-            "parameters": {"male": "rvc-1", "female": "edge-1"},
+            "parameters": {"male": "capcut-BV075_streaming", "female": "capcut-BV562_streaming"},
             "functionCallId": "test-call-123"
         })
         self.assertEqual(res_act.status_code, 200)

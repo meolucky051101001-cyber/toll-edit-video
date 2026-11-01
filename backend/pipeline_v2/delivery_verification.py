@@ -13,12 +13,12 @@ import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Union
 
 from .artifact_store import hash_file
 from .config import QCGatePolicy
 from .models import FingerprintSet, JobManifest
-from .qc import QCGateDecision, evaluate_qc_gate
+from .qc import evaluate_qc_gate
 from .stage_status import StageStatus
 
 logger = logging.getLogger(__name__)

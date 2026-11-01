@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -579,7 +579,7 @@ def build_domain_tracks(
                 gender=gender,
                 start_time=st,
                 end_time=et,
-                artifact_key=f"rvc/{idx}.wav",
+                artifact_key=f"tts/{idx}.mp3",
                 is_silent_placeholder=False,
             )
         )

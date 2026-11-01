@@ -1,4 +1,4 @@
-"""Keep RVC native allocations out of the long-lived Telegram process."""
+"""Run V1 voice generation in an isolated worker process."""
 import asyncio
 import json
 import os

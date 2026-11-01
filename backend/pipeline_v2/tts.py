@@ -1,4 +1,4 @@
-"""Pipeline-v2 TTS generation without in-process RVC model loading."""
+"""Pipeline-v2 TTS generation."""
 
 from __future__ import annotations
 
@@ -30,11 +30,9 @@ def _prepare_legacy_imports() -> None:
 
 def resolve_mapped_voice(voice_source, speaker_voice_map, speaker_id, gender,
                          enable_auto_gender=False):
-    """Resolve an explicit mapping from speaker_voice_map across providers.
+    """Resolve an explicit mapping from speaker_voice_map across providers."""
 
-    Fixed RVC keeps its configured base voice unless auto gender / dual voice is explicitly enabled.
-    """
-    if not speaker_voice_map or (voice_source == "rvc" and not enable_auto_gender):
+    if not speaker_voice_map:
         return None
     candidate = speaker_voice_map.get(speaker_id, speaker_voice_map.get(gender))
     voice = str(candidate or "").strip()
@@ -171,17 +169,6 @@ async def generate_tts_audio_v2(
                     is_silent_fallback = await _synthesize_edge_with_rescue(
                         "vi-VN-HoaiMyNeural", edge_rate="+5%", allow_capcut_rescue=False
                     )
-            elif voice_source == "rvc":
-                rvc_voice = "BV075_streaming" if (enable_auto_gender and seg_gender == "male") else "BV562_streaming"
-                try:
-                    await asyncio.to_thread(
-                        _run_capcut_tts, text, str(raw), rvc_voice
-                    )
-                except Exception as cap_err:
-                    logger.warning("CapCut base TTS failed for %r: %s -> using Edge TTS", text, cap_err)
-                    is_silent_fallback = await _synthesize_edge_with_rescue(
-                        "vi-VN-HoaiMyNeural", edge_rate="+0%", allow_capcut_rescue=False
-                    )
             elif voice_source in ("vieneu", "vie-tts"):
                 try:
                     from ai.vieneu_tts_service import generate_tts_vieneu
@@ -191,10 +178,8 @@ async def generate_tts_audio_v2(
                     fallback_v = "BV075_streaming" if (enable_auto_gender and seg_gender == "male") else "BV562_streaming"
                     await asyncio.to_thread(_run_capcut_tts, text, str(raw), fallback_v)
             else:
-                pitch = "+15Hz" if voice_param == "vi-VN-HoaiMyNeural" else "+0Hz"
-                rate = "+15%" if voice_param == "vi-VN-HoaiMyNeural" else "+5%"
-                is_silent_fallback = await _synthesize_edge_with_rescue(
-                    voice_param, edge_pitch=pitch, edge_rate=rate
+                raise ValueError(
+                    "Unsupported TTS provider: {!r}".format(voice_source)
                 )
             if not raw.is_file() or raw.stat().st_size == 0:
                 is_silent_fallback = True

@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import math
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 import cv2
 import numpy as np
@@ -1105,7 +1105,6 @@ def _compose_wallet_squeeze_scene(
     - Ví tiền ở trung tâm bị ép chặt, các đồng xu $ và tờ tiền có cánh bay ra ngoài
     - Khi phase_progress > 0: Ví tiền co bóp theo nhịp, đồng xu và tờ tiền bay tỏa ra xa!
     """
-    from ai.doodle_engine import fetch_vector_icon
 
     p = max(0.0, min(1.0, phase_progress))
     cx, cy = width // 2, height // 2 + 25

@@ -11,14 +11,12 @@ Tích hợp bộ diễn hoạt bảng trắng vẽ tay siêu thực từ letuand
 from __future__ import annotations
 
 import logging
-import math
 import os
-import shutil
 import subprocess
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont

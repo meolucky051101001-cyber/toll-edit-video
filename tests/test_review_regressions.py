@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from backend.environment import read_environment, load_environment
-from backend.model_workers.model_runtime_worker import _run_qwen_asr
+from backend.ai.v1_asr_chunking import deduplicate_boundary_segments
 from backend.pipeline_v2.config import PipelineSettings
 from backend.pipeline_v2.content import merge_ocr_geometry
 from backend.pipeline_v2.resume import find_resumable_jobs, resume_video_job
@@ -256,32 +256,26 @@ class EnvironmentTests(unittest.TestCase):
                 self.assertEqual(os.environ["PIPELINE_MODE"], "v2")
 
 
-class QwenOverlapTests(unittest.TestCase):
+class ChunkBoundaryOverlapTests(unittest.TestCase):
     def test_overlap_words_belong_to_one_chunk_without_clipping(self):
-        class Audio:
-            def __init__(self, length): self.length = length
-            def __len__(self): return self.length
-            def __getitem__(self, item): return Audio(item.stop - item.start)
+        previous = [{"start": 239.4, "end": 239.9, "text": "before"}]
+        next_chunk = [
+            {"start": 239.4, "end": 239.9, "text": "before"},
+            {"start": 239.7, "end": 240.4, "text": "after"},
+        ]
+        kept = deduplicate_boundary_segments(previous, next_chunk, overlap_point=239.25)
+        self.assertEqual([item["text"] for item in kept], ["after"])
+        self.assertEqual(previous[-1]["end"], 239.9)
 
-        class Model:
-            calls = 0
-            def transcribe(self, **kwargs):
-                offset = 0 if self.calls == 0 else 239.25
-                self.calls += 1
-                words = [(239.4, 239.6, "before"), (239.7, 239.9, "after")]
-                return [SimpleNamespace(language="Chinese", time_stamps=[
-                    {"start_time": start - offset, "end_time": end - offset, "text": text}
-                    for start, end, text in words])]
-
-        modules = {
-            "librosa": SimpleNamespace(load=lambda *args, **kwargs: (Audio(241 * 16000), 16000)),
-            "torch": SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False), float32="float32"),
-            "qwen_asr": SimpleNamespace(Qwen3ASRModel=SimpleNamespace(from_pretrained=lambda *args, **kwargs: Model())),
-        }
-        with mock.patch.dict(sys.modules, modules):
-            result = _run_qwen_asr({"input_audio": "stub.wav", "model_name": "stub", "aligner_name": "stub"})
-        self.assertEqual([item["text"] for item in result["timestamps"]], ["before", "after"])
-        self.assertEqual([(item["start"], item["end"]) for item in result["timestamps"]], [(239.4, 239.6), (239.7, 239.9)])
+        merged = [{"start": 480.0, "end": 481.0, "text": "你好世界"}]
+        extended = deduplicate_boundary_segments(
+            merged,
+            [{"start": 480.8, "end": 482.2, "text": "你好世界再见"}],
+            overlap_point=480.5,
+        )
+        self.assertEqual(extended, [])
+        self.assertEqual(merged[-1]["text"], "你好世界再见")
+        self.assertEqual(merged[-1]["end"], 482.2)
 
 
 class ApiStyleTests(unittest.IsolatedAsyncioTestCase):

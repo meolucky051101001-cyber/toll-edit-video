@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -97,7 +96,6 @@ def verify_stages_freshness(
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Tool V2 production smoke test")
-    parser.add_argument("--with-rvc", action="store_true", help="Enable RVC voice cloning in smoke test")
     parser.add_argument("--video", type=str, default="", help="Specific video path or filename pattern")
     return parser.parse_args()
 
@@ -135,23 +133,10 @@ async def run_smoke_test(args: Optional[argparse.Namespace] = None):
 
     print(f"Using source video: {source_video.name}")
 
-    with_rvc = args.with_rvc or os.getenv("ENABLE_RVC", "0").lower() in {"1", "true"}
-    rvc_model = None
-    if with_rvc:
-        rvc_model = ROOT / "MyVoiceModel_v2" / "mi-giong_cua_toi_v2.pth"
-        if not rvc_model.is_file():
-            print(f"FAIL: RVC model not found at {rvc_model}")
-            return 1
-        settings = replace(settings, enable_rvc=True)
-        voice_source = "rvc"
-        voice_param = str(rvc_model)
-        print(f"RVC voice conversion ENABLED with model: {rvc_model.name}")
-    else:
-        voice_source = "edge"
-        voice_param = "vi-VN-HoaiMyNeural"
-        print(f"Using voice source: {voice_source} ({voice_param})")
+    voice_source = "capcut"
+    voice_param = "BV562_streaming"
+    print(f"Using voice source: {voice_source} ({voice_param})")
 
-    settings = replace(settings, enable_rvc=with_rvc)
     work_dir = ROOT / "workspace" / "smoke_test_run" / datetime.now(timezone.utc).strftime("run-%Y%m%d-%H%M%S-%f")
     enforce_clean_smoke_directory(work_dir)
     out_video = work_dir / "Dubbed_smoke_test.mp4"
@@ -164,7 +149,6 @@ async def run_smoke_test(args: Optional[argparse.Namespace] = None):
         api_key=env.get("GEMINI_API_KEY", ""),
         voice_source=voice_source,
         voice_param=voice_param,
-        rvc_model_path=rvc_model,
         progress=lambda stage, state: print(f"Stage {stage}: {state}", flush=True),
     )
 
@@ -290,14 +274,6 @@ async def run_smoke_test(args: Optional[argparse.Namespace] = None):
         print(f"FAIL: Cold smoke test assertion failed! Stale cached stages detected: {stale_stages}")
         return 1
 
-    if with_rvc:
-        rvc_stage = manifest.stages.get("rvc")
-        if not rvc_stage or rvc_stage.status.value != "completed":
-            rvc_status = rvc_stage.status.value if rvc_stage else "missing"
-            print(f"FAIL: RVC was enabled but stage status is '{rvc_status}', expected 'completed'")
-            return 1
-        print(f"SUCCESS: RVC stage completed verified: {rvc_stage.started_at} -> {rvc_stage.finished_at}")
-
     completed_count = len([s for s in manifest.stages.values() if s.status.value == "completed"])
     print(
         f"SUCCESS: All {completed_count} completed stages programmatically verified fresh "
@@ -309,7 +285,6 @@ async def run_smoke_test(args: Optional[argparse.Namespace] = None):
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "run_start_utc": run_start_iso,
         "cold_verified": True,
-        "rvc_enabled": with_rvc,
         "voice_source": voice_source,
         "source_video": source_video.name,
         "status": "PASS",

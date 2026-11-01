@@ -26,7 +26,8 @@ except ImportError:
 PATHS = AppPaths.from_environment(Path(BASE_DIR).parent)
 
 from pipeline_v2.config import PipelineSettings
-from pipeline_v2.video_pipeline import VideoPipelineRequest, VideoPipelineRunner, discover_rvc_model
+from pipeline_v2.video_pipeline import VideoPipelineRequest, VideoPipelineRunner
+from voice_selection import resolve_voice
 
 async def process_video(video_path: Path):
     file_name = video_path.name
@@ -41,12 +42,12 @@ async def process_video(video_path: Path):
     final_dest = output_dir / f"Dubbed_{base_name}.mp4"
     
     settings = PipelineSettings.from_env()
-    rvc_model = discover_rvc_model(workspace_dir)
+    voice_source, voice_param, voice_label = resolve_voice("capcut", "BV562_streaming")
     api_key = os.getenv("GEMINI_API_KEY", "")
     
     start_time = time.time()
     print(f"\n🎬 [Tool V2] Bắt đầu xử lý: {file_name}", flush=True)
-    print(f"🎤 RVC Voice Model: {rvc_model}", flush=True)
+    print(f"TTS Voice: {voice_label}", flush=True)
     print(f"💾 File xuất: {final_dest}", flush=True)
     
     async def progress(stage, state):
@@ -59,9 +60,8 @@ async def process_video(video_path: Path):
         output_path=final_dest,
         settings=settings,
         api_key=api_key,
-        voice_source="rvc" if rvc_model else "edge",
-        voice_param=str(rvc_model) if rvc_model else "vi-VN-HoaiMyNeural",
-        rvc_model_path=rvc_model,
+        voice_source=voice_source,
+        voice_param=voice_param,
         progress=progress,
     )
     

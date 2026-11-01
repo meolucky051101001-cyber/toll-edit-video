@@ -11,6 +11,13 @@ class OCRFailureTests(unittest.TestCase):
             self.assertIsInstance(handler.body[-1], ast.Raise)
             self.assertIsNotNone(handler.body[-1].cause)
 
+    def test_ocr_geometry_error_is_not_retried(self):
+        from v1_ocr_geometry import OCRGeometryError
+        from v1_retry_policy import should_retry_job
+        self.assertFalse(
+            should_retry_job(OCRGeometryError("OCR mask coordinates unresolved"))
+        )
+
     def test_worker_rejects_cpu_only_session(self):
         import importlib.util
         from unittest.mock import patch

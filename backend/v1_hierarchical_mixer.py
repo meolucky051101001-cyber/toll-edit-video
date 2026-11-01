@@ -7,17 +7,14 @@ Hỗ trợ EBU R128 Loudness Normalization và Localized Soft Peak Limiter.
 
 from __future__ import annotations
 
-import os
-import sys
 import math
 import shutil
 import logging
 import tempfile
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Sequence
 
-from pydub import AudioSegment
 import soundfile as sf
 from batch_control import run
 

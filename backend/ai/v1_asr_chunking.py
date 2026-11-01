@@ -7,12 +7,10 @@ Khử trùng lặp từ ở ranh giới chunk, offset timestamp mượt mà, b�
 from __future__ import annotations
 
 import os
-import sys
 import math
 import logging
-import tempfile
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 

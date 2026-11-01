@@ -9,10 +9,8 @@ Bảo toàn 100% tính năng Checkpoint cũ, đồng thời bổ sung:
 from __future__ import annotations
 
 import os
-import sys
 import json
 import time
-import uuid
 import hashlib
 import tempfile
 import logging

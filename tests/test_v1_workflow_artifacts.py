@@ -1,5 +1,7 @@
 import base64
+import asyncio
 import importlib
+import os
 import subprocess
 import tempfile
 import unittest
@@ -105,3 +107,40 @@ class WorkflowArtifactTests(unittest.TestCase):
         self.assertTrue(workflow.safe_check_job_artifacts("input")["step2"])
         instrumental.write_bytes(b"corrupt stem")
         self.assertFalse(workflow.safe_check_job_artifacts("input")["step2"])
+
+
+class WorkflowVideoListTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.input_dir = self.root / "phoi"
+        self.downloads_dir = self.root / "downloads"
+        self.output_dir = self.root / "delivery"
+        for directory in (self.input_dir, self.downloads_dir, self.output_dir):
+            directory.mkdir()
+        for key, value in (
+            ("INPUT_DIR", self.input_dir),
+            ("DOWNLOADS_DIR", self.downloads_dir),
+            ("WORKSPACE", self.root / "workspace"),
+            ("OUTPUT_DIR", self.output_dir),
+        ):
+            p = patch.object(workflow, key, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_listing_dedupes_stems_and_sorts_newest_first(self):
+        (self.input_dir / "alpha.mp4").write_bytes(b"a" * 100)
+        (self.downloads_dir / "alpha.mp4").write_bytes(b"a" * 100)
+        (self.downloads_dir / "beta.mp4").write_bytes(b"b" * 200)
+        (self.downloads_dir / "ignore.txt").write_text("x", encoding="utf-8")
+        os.utime(self.input_dir / "alpha.mp4", (100, 100))
+        os.utime(self.downloads_dir / "beta.mp4", (200, 200))
+
+        videos = asyncio.run(workflow.api_get_workflow_videos())["videos"]
+
+        self.assertEqual([item["stem"] for item in videos], ["beta", "alpha"])
+        self.assertEqual(videos[0]["source"], "downloads")
+        self.assertEqual(videos[1]["source"], "phoi")
+        self.assertEqual(videos[1]["size_mb"], round(100 / (1024 * 1024), 2))
+        self.assertTrue(all(item["steps"] for item in videos))

@@ -1,10 +1,21 @@
-"""Local control plane for the two fixed AutoDub installations."""
+"""Local control plane for the Tool V1 AutoDub installation."""
 import sys
 from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
 
 _backend_dir = Path(__file__).resolve().parent
 _site_packages = _backend_dir / "venv" / "Lib" / "site-packages"
-if _site_packages.is_dir() and str(_site_packages) not in sys.path:
+# Control plane chay bang Python base (khong phai venv) nen can tro thang vao site-packages
+# cua venv song. Neu dang chay trong mot venv khac (vd venv_py312), chen duong nay se nap
+# binary cp310 vao tien trinh 3.12 va lam hong import (onnxruntime, soxr...).
+_running_inside_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+if (
+    not _running_inside_venv
+    and _site_packages.is_dir()
+    and str(_site_packages) not in sys.path
+):
     sys.path.insert(0, str(_site_packages))
 if str(_backend_dir) not in sys.path:
     sys.path.insert(0, str(_backend_dir))
@@ -73,7 +84,7 @@ def processes(key):
                 continue
 
             is_match = False
-            if root_str in cmd_str or (key == "v1" and r"c:\tool v1" in cmd_str) or (key == "v2" and r"c:\tool v2" in cmd_str):
+            if root_str in cmd_str or (key == "v1" and r"c:\tool v1" in cmd_str):
                 is_match = True
             if not is_match:
                 for arg in cmd[1:]:
@@ -81,8 +92,8 @@ def processes(key):
                     if not candidate.is_absolute():
                         try:
                             candidate = Path(p.cwd()) / candidate
-                        except (psutil.Error, OSError):
-                            pass
+                        except (psutil.Error, OSError) as _phase6_exc:
+                            logger.debug('Suppressed error in tool_control.processes (Path): %s', type(_phase6_exc).__name__, exc_info=False)
                     if str(candidate).lower() in scripts:
                         is_match = True
                         break
@@ -108,8 +119,8 @@ def read_telemetry(key):
                 if at > best_at:
                     best_at = at
                     best = data
-            except (OSError, ValueError):
-                pass
+            except (OSError, ValueError) as _phase6_exc:
+                logger.debug('Suppressed error in tool_control.read_telemetry (json.loads): %s', type(_phase6_exc).__name__, exc_info=False)
     return best
 
 def status(key):
@@ -122,8 +133,8 @@ def status(key):
     try:
         with urllib.request.urlopen('http://127.0.0.1:%s/api/status' % PORTS[key], timeout=2.0) as response:
             dashboard = response.status == 200
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in tool_control.status (urllib.request.urlopen): %s', type(_phase6_exc).__name__, exc_info=False)
 
     if paused:
         state = 'stopped'
@@ -159,8 +170,8 @@ def _get_dashboard_token(key='v1'):
         try:
             if token_file.is_file():
                 return token_file.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in tool_control._get_dashboard_token (token_file.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
     root = ROOTS.get(key)
     if not root:
         return ""
@@ -168,8 +179,8 @@ def _get_dashboard_token(key='v1'):
     try:
         if token_file.is_file():
             return token_file.read_text(encoding="utf-8").strip()
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in tool_control._get_dashboard_token (token_file.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
     return ""
 
 def stop_and_release(key):
@@ -182,8 +193,8 @@ def stop_and_release(key):
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text('paused', encoding='utf-8')
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in tool_control.stop_and_release (p.parent.mkdir): %s', type(_phase6_exc).__name__, exc_info=False)
 
     root = ROOTS[key]
     root_str = str(root.parent).lower()
@@ -199,8 +210,8 @@ def stop_and_release(key):
                         headers['X-Local-Control-Token'] = token
                     req = urllib.request.Request('http://127.0.0.1:8088/api/stop-batch', data=b'{}', headers=headers)
                     urllib.request.urlopen(req, timeout=1.5)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in tool_control.stop_and_release (urllib.request.urlopen): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # 3. Thu thập TOÀN BỘ tiến trình thuộc về Tool (kể cả supervisor, worker, render...)
     targets = {}
@@ -212,8 +223,8 @@ def stop_and_release(key):
             cmd = [str(c).lower() for c in (p.cmdline() or [])]
             cmd_str = ' '.join(cmd)
 
-            # Bảo vệ bộ điều khiển trung tâm 8090, dashboard web servers và các test runner
-            if any(k in cmd_str for k in ('tool_control.py', 'test_', 'unittest', 'pytest', 'main.py', '--service dashboard')):
+            # Bảo vệ bộ điều khiển trung tâm 8090, dashboard web servers, watchdog và các test runner
+            if any(k in cmd_str for k in ('tool_control.py', 'test_', 'unittest', 'pytest', 'main.py', '--service dashboard', 'ops_watchdog.py')):
                 continue
 
             is_tool_proc = False
@@ -225,11 +236,11 @@ def stop_and_release(key):
                 try:
                     for child in p.children(recursive=True):
                         ch_cmd = ' '.join([str(c).lower() for c in (child.cmdline() or [])])
-                        if not any(k in ch_cmd for k in ('tool_control.py', 'test_', 'unittest', 'pytest', 'main.py', '--service dashboard')):
+                        if not any(k in ch_cmd for k in ('tool_control.py', 'test_', 'unittest', 'pytest', 'main.py', '--service dashboard', 'ops_watchdog.py')):
                             targets[child.pid] = child
 
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
+                except (psutil.NoSuchProcess, psutil.AccessDenied) as _phase6_exc:
+                    logger.debug('Suppressed error in tool_control.stop_and_release (p.children): %s', type(_phase6_exc).__name__, exc_info=False)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
 
@@ -237,8 +248,8 @@ def stop_and_release(key):
     for pid, p in list(targets.items()):
         try:
             p.terminate()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
+        except (psutil.NoSuchProcess, psutil.AccessDenied) as _phase6_exc:
+            logger.debug('Suppressed error in tool_control.stop_and_release (p.terminate): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # Chờ tiến trình thoát
     gone, alive = psutil.wait_procs(list(targets.values()), timeout=2.0)
@@ -248,12 +259,12 @@ def stop_and_release(key):
         for p in alive:
             try:
                 p.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+            except (psutil.NoSuchProcess, psutil.AccessDenied) as _phase6_exc:
+                logger.debug('Suppressed error in tool_control.stop_and_release (p.kill): %s', type(_phase6_exc).__name__, exc_info=False)
             try:
                 os.system(f"taskkill /F /T /PID {p.pid} >nul 2>&1")
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in tool_control.stop_and_release (os.system): %s', type(_phase6_exc).__name__, exc_info=False)
         psutil.wait_procs(alive, timeout=1.0)
 
     # 6. Ghi đè telemetry thành đã dừng
@@ -269,16 +280,16 @@ def stop_and_release(key):
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(json.dumps(telemetry), encoding='utf-8')
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in tool_control.stop_and_release (p.parent.mkdir): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # 7. Xóa các file tạm
     for d in CONTROL_DIRS:
         for tmp in d.glob(key + '.*.tmp'):
             try:
                 tmp.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in tool_control.stop_and_release (tmp.unlink): %s', type(_phase6_exc).__name__, exc_info=False)
 
     return True
 
@@ -303,19 +314,19 @@ def change(key, action):
         for p in get_control_paths(key, key + '.pause'):
             try:
                 p.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in tool_control.change (p.unlink): %s', type(_phase6_exc).__name__, exc_info=False)
         try:
             (Path(r"C:\tool v1\workspace\control") / "video.pause").unlink(missing_ok=True)
             (Path(r"C:\tool v1\workspace\control") / "video.pause.ack").unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in tool_control.change (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
         procs_found = processes(key)
         names = [name for _, name in procs_found]
 
         # Đảm bảo dashboard đang hoạt động
-        if not any(n in names for n in ('main.py', 'dashboard_monitor.py')):
+        if not any(n == 'main.py' for n in names):
             launch(key, 'dashboard')
 
         # Đảm bảo telegram bot đang hoạt động
@@ -325,7 +336,7 @@ def change(key, action):
         if not fresh and bots:
             for b in bots:
                 try: b.kill()
-                except psutil.NoSuchProcess: pass
+                except psutil.NoSuchProcess as _phase6_exc: logger.debug('Suppressed error in tool_control.change (b.kill): %s', type(_phase6_exc).__name__, exc_info=False)
         if 'telegram_bot.py' not in names or not fresh:
             launch(key, 'telegram')
 
@@ -349,24 +360,24 @@ def apply_boot_defaults():
         # Mở khóa Tool V1
         for p in get_control_paths('v1', 'v1.pause'):
             try: p.unlink(missing_ok=True)
-            except Exception: pass
+            except Exception as _phase6_exc: logger.debug('Suppressed error in tool_control.apply_boot_defaults (p.unlink): %s', type(_phase6_exc).__name__, exc_info=False)
         try:
             (Path(r"C:\tool v1\workspace\control") / "video.pause").unlink(missing_ok=True)
             (Path(r"C:\tool v1\workspace\control") / "video.pause.ack").unlink(missing_ok=True)
-        except Exception: pass
+        except Exception as _phase6_exc: logger.debug('Suppressed error in tool_control.apply_boot_defaults (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
         # Khởi chạy dịch vụ Tool V1
         procs = processes('v1')
         names = [name for _, name in procs]
-        if not any(n in names for n in ('main.py', 'dashboard_monitor.py')):
+        if 'main.py' not in names:
             launch('v1', 'dashboard')
         data = read_telemetry('v1')
         bots = [p for p, name in procs if name == 'telegram_bot.py']
         fresh = any(data.get('pid') == p.pid for p in bots) and (time.time() - data.get('at', 0) < 8)
         if 'telegram_bot.py' not in names or not fresh:
             launch('v1', 'telegram')
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in tool_control.apply_boot_defaults (get_control_paths): %s', type(_phase6_exc).__name__, exc_info=False)
 
 def change_voice(voice_id):
     for key in ROOTS:
@@ -1282,11 +1293,11 @@ async function loadVoices() {
     cachedVoices = d.voices;
     const select = document.getElementById('voice');
     select.replaceChildren();
-    for (const source of ['vieneu', 'rvc', 'edge', 'capcut']) {
+    for (const source of ['vieneu', 'vie-tts', 'edge', 'capcut']) {
       const group = document.createElement('optgroup');
       group.label = {
-        vieneu: '🔥 VieNeu-TTS (48kHz Tự Nhiên Cao Cấp)',
-        rvc: 'Giọng mặc định · RVC',
+        vieneu: 'VieNeu-TTS (48kHz Tự Nhiên Cao Cấp)',
+        'vie-tts': 'VieNeu-TTS',
         edge: 'Microsoft TTS',
         capcut: 'CapCut TTS'
       }[source] || source;
@@ -1417,8 +1428,8 @@ class Handler(BaseHTTPRequestHandler):
                     chunk = f.read(65536)
                     if not chunk: break
                     self.wfile.write(chunk)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in tool_control.send_file (open): %s', type(_phase6_exc).__name__, exc_info=False)
 
     def trusted(self):
         return self.headers.get('Host') in ('127.0.0.1:8090', 'localhost:8090')
@@ -1493,10 +1504,10 @@ def ensure_single_controller():
                         with urllib.request.urlopen('http://127.0.0.1:8090/status', timeout=2) as resp:
                             if resp.status == 200:
                                 return 'already_running'
-                    except Exception:
-                        pass
-    except Exception:
-        pass
+                    except Exception as _phase6_exc:
+                        logger.debug('Suppressed error in tool_control.ensure_single_controller (urllib.request.urlopen): %s', type(_phase6_exc).__name__, exc_info=False)
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in tool_control.ensure_single_controller (socket.socket): %s', type(_phase6_exc).__name__, exc_info=False)
 
     killed = False
     try:
@@ -1509,8 +1520,8 @@ def ensure_single_controller():
                         if "tool_control.py" in cmdline:
                             proc.kill()
                             killed = True
-                    except (psutil.Error, OSError): pass
-    except (psutil.Error, OSError): pass
+                    except (psutil.Error, OSError) as _phase6_exc: logger.debug('Suppressed error in tool_control.ensure_single_controller (psutil.Process): %s', type(_phase6_exc).__name__, exc_info=False)
+    except (psutil.Error, OSError) as _phase6_exc: logger.debug('Suppressed error in tool_control.ensure_single_controller (psutil.net_connections): %s', type(_phase6_exc).__name__, exc_info=False)
     if killed:
         time.sleep(1)
     return 'proceed'

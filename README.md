@@ -102,3 +102,13 @@ Tại thư mục gốc:
 - **Không commit secrets:** `backend/.env` (`BOT_TOKEN`, `GEMINI_API_KEY`, cookie, API keys) tuyệt đối không đẩy lên Git.
 - **Dữ liệu runtime** (`workspace/`, video, cache âm thanh, log) đã loại trừ trong `.gitignore`.
 - **Model nặng & môi trường ảo** (`backend/venv/`, `backend/model_venv_separator/`) lưu cục bộ, không đẩy lên Git.
+
+## 8. Môi trường Python 3.12 song song
+
+Xem [hướng dẫn Phase 5](docs/phase5_python312.md) cho dependency, file chuẩn
+`requirements.lock.txt`, giới hạn wheel CapCut local và quy trình cutover/rollback
+thủ công. `requirements.lock` include file chuẩn để giữ tương thích lệnh cũ.
+Không chạy script chuyển môi trường khi dịch vụ Tool V1 còn hoạt động.
+
+Bản sửa tồn đọng sau Phase 6 và golden baseline trước refactor được ghi trong
+[báo cáo chuẩn bị Phase 7](docs/pre_phase7_hardening.md).

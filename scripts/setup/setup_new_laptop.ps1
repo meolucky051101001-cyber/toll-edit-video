@@ -59,7 +59,6 @@ Write-Host "[2/7] Checking tool files..." -ForegroundColor Yellow
 $checks = @(
     @{ Path = "$backendDir\telegram_bot.py"; Name = "Source code" },
     @{ Path = "$backendDir\.env"; Name = ".env config" },
-    @{ Path = "$toolDir\MyVoiceModel_v2\mi-giong_cua_toi_v2.pth"; Name = "RVC voice model" },
     @{ Path = "$toolDir\models\v1\faster_whisper\model.bin"; Name = "Whisper model" }
 )
 
@@ -120,8 +119,8 @@ Write-Host "[5/7] Installing project requirements..." -ForegroundColor Yellow
 
 # ===== INSTALL EXTRA PACKAGES =====
 Write-Host ""
-Write-Host "[6/7] Installing extra packages (RVC, torchcrepe, psutil)..." -ForegroundColor Yellow
-& .\venv\Scripts\pip.exe install rvc-python torchcrepe psutil
+Write-Host "[6/7] Installing process monitoring support (psutil)..." -ForegroundColor Yellow
+& .\venv\Scripts\pip.exe install psutil
 
 # ===== VERIFY =====
 Write-Host ""

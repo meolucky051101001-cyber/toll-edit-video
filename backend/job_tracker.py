@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+import math
 import threading
 import uuid
 import copy
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 from pipeline_v2.atomic_io import atomic_write_json
+from v1_integrity_errors import JobStateReadError
+import stop_service
 
 BASE_DIR = Path(__file__).resolve().parent
 WORKSPACE = Path(os.getenv("AUTODUB_WORKSPACE", str(BASE_DIR.parent / "workspace")))
@@ -44,7 +47,7 @@ STEP_PERCENT_MAP = {
     3.5: 55,   # Tương thích ngược OCR
     4.0: 55,   # Quét phụ đề chữ cứng (OCR)
     5.0: 65,   # Dịch phụ đề chuẩn ngữ cảnh (Gemini AI)
-    6.0: 75,   # Lồng tiếng AI (TTS → RVC Voice)
+    6.0: 75,   # Lồng tiếng AI (TTS)
     7.0: 85,   # Trộn nhạc nền & giọng đọc (Adaptive Mixer)
     8.0: 95,   # Render video thành phẩm bằng NVENC GPU
 }
@@ -80,15 +83,15 @@ def _get_worker_id(explicit_id: Optional[int] = None) -> int:
             val = int(explicit_id)
             if val in (1, 2):
                 return val
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as _phase6_exc:
+            logger.debug('Suppressed error in job_tracker._get_worker_id (int): %s', type(_phase6_exc).__name__, exc_info=False)
     try:
         from telegram_progress import current_worker_id
         val = current_worker_id.get()
         if val in (1, 2):
             return int(val)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in job_tracker._get_worker_id (current_worker_id.get): %s', type(_phase6_exc).__name__, exc_info=False)
     try:
         from v1_gpu_gatekeeper import get_gpu_context_id
         cid = str(get_gpu_context_id() or "")
@@ -96,8 +99,8 @@ def _get_worker_id(explicit_id: Optional[int] = None) -> int:
             return 2
         elif "worker_1" in cid:
             return 1
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in job_tracker._get_worker_id (str): %s', type(_phase6_exc).__name__, exc_info=False)
     return 1
 
 
@@ -172,8 +175,8 @@ def _process_guard():
 def _ensure_dir():
     try:
         WORKSPACE.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.warning('Suppressed error in job_tracker._ensure_dir (WORKSPACE.mkdir): %s', type(_phase6_exc).__name__, exc_info=False)
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -242,16 +245,16 @@ def _claim_batch_lock_guarded(job_id: str) -> None:
                         from worker_settings import get_worker_settings
                         if get_worker_settings().get("concurrency", 1) > 1:
                             return
-                    except Exception:
-                        pass
+                    except Exception as _phase6_exc:
+                        logger.warning('Suppressed error in job_tracker._claim_batch_lock_guarded (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
                 raise JobAlreadyRunningError(
                     "Một batch khác đang chạy (PID {}).".format(owner_pid)
                 )
 
             try:
                 BATCH_LOCK_FILE.unlink()
-            except FileNotFoundError:
-                pass
+            except FileNotFoundError as _phase6_exc:
+                logger.warning('Suppressed error in job_tracker._claim_batch_lock_guarded (BATCH_LOCK_FILE.unlink): %s', type(_phase6_exc).__name__, exc_info=False)
             continue
         try:
             os.write(descriptor, payload)
@@ -271,27 +274,51 @@ def _release_batch_lock_guarded(job_id: Optional[str]) -> None:
     owner = _read_batch_lock_unlocked()
     if not job_id or not owner or owner.get("job_id") != job_id or owner.get("pid") != os.getpid():
         return
-    try:
-        BATCH_LOCK_FILE.unlink()
-    except FileNotFoundError:
-        pass
+    for attempt in range(5):
+        try:
+            BATCH_LOCK_FILE.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            # Windows rejects the delete while another process briefly has the
+            # lock file open for reading; a failed release used to leave a
+            # stale lock that blocked (and crashed) the queue worker.
+            if attempt == 4:
+                logger.error("Không xoá được batch.lock sau 5 lần thử: %s", BATCH_LOCK_FILE)
+                return
+            time.sleep(0.1)
 
 
-def _read_state_from_disk_unlocked() -> Optional[Dict[str, Any]]:
+def _read_state_from_disk_unlocked(strict: bool = False) -> Optional[Dict[str, Any]]:
     """Read the newest complete state written by this or another process."""
     if not STATUS_FILE.exists():
         return None
     try:
         with open(STATUS_FILE, "r", encoding="utf-8") as f:
             state = json.load(f)
-        return state if isinstance(state, dict) else None
+        if not isinstance(state, dict):
+            if strict:
+                raise JobStateReadError("Trạng thái job không hợp lệ; chưa thể xác minh job đang chạy.")
+            return None
+        if strict:
+            try:
+                timestamp = float(state["updated_at"])
+                valid = isinstance(state.get("active"), bool) and math.isfinite(timestamp) and timestamp >= 0
+            except (KeyError, TypeError, ValueError):
+                valid = False
+            if not valid:
+                raise JobStateReadError("Trạng thái job không đầy đủ; chưa thể xác minh job đang chạy.")
+        return state
     except (OSError, json.JSONDecodeError) as exc:
+        if strict:
+            raise JobStateReadError("Không đọc được trạng thái job; thao tác đã được chặn.") from exc
         logger.warning("Không thể đọc trạng thái job: %s", exc)
         return None
 
 
-def _sync_from_disk_unlocked() -> None:
-    disk_state = _read_state_from_disk_unlocked()
+def _sync_from_disk_unlocked(strict: bool = False) -> None:
+    disk_state = _read_state_from_disk_unlocked(strict=strict)
     if not disk_state:
         return
     disk_updated = float(disk_state.get("updated_at") or 0)
@@ -334,15 +361,31 @@ def _freeze_progress_unlocked(now=None):
             w["eta_seconds"] = None
 
 
-def get_status() -> Dict[str, Any]:
+def get_status(strict: bool = False) -> Dict[str, Any]:
     """Lấy trạng thái hiện tại (kèm cập nhật elapsed_seconds nếu đang chạy)."""
     with _LOCK:
         # Batch CLI, Dashboard và Telegram có thể chạy ở các process khác nhau.
         # Luôn nhận bản mới hơn từ đĩa, kể cả khi state trong RAM đang active.
-        _sync_from_disk_unlocked()
+        _sync_from_disk_unlocked(strict=strict)
 
         state = copy.deepcopy(_CURRENT_STATE)
         owner = _read_batch_lock_unlocked()
+        if strict:
+            if not isinstance(state.get("active"), bool) or not isinstance(state.get("workers", {}), dict):
+                raise JobStateReadError("Không xác minh được trạng thái worker; thao tác đã được chặn.")
+            if any(not isinstance(w, dict) or not isinstance(w.get("active"), bool)
+                   for w in state.get("workers", {}).values()):
+                raise JobStateReadError("Trạng thái worker không hợp lệ; thao tác đã được chặn.")
+            if BATCH_LOCK_FILE.exists():
+                try:
+                    checked_owner = json.loads(BATCH_LOCK_FILE.read_text(encoding="utf-8"))
+                    if (not isinstance(checked_owner, dict)
+                            or type(checked_owner.get("pid")) is not int or checked_owner["pid"] <= 0):
+                        raise ValueError("Invalid lock owner")
+                except (OSError, ValueError, TypeError) as exc:
+                    raise JobStateReadError("Không xác minh được khóa batch; thao tác đã được chặn.") from exc
+                if not state["active"] and _pid_is_running(checked_owner["pid"]):
+                    raise JobStateReadError("Khóa batch còn hoạt động; chưa thể xác minh trạng thái job.")
         if state.get("active") and owner and not _pid_is_running(int(owner.get("pid") or 0)):
             state.update(active=False, status="interrupted", video_status="interrupted",
                          elapsed_seconds=max(0, int((state.get("updated_at") or time.time()) - (state.get("start_time") or time.time()))),
@@ -444,6 +487,27 @@ def get_status() -> Dict[str, Any]:
         return state
 
 
+def active_job_names(state: Dict[str, Any]) -> list[str]:
+    """Require identifiable active jobs before destructive/edit operations."""
+    if not isinstance(state, dict) or not isinstance(state.get("active"), bool):
+        raise JobStateReadError("Chưa xác minh được danh sách job đang chạy.")
+    workers = state.get("workers", {})
+    if not isinstance(workers, dict):
+        raise JobStateReadError("Danh sách worker không hợp lệ.")
+    names = []
+    for item in [state, *workers.values()]:
+        if not isinstance(item, dict) or not isinstance(item.get("active"), bool):
+            raise JobStateReadError("Trạng thái worker không hợp lệ.")
+        if item["active"]:
+            name = item.get("video_name")
+            if not isinstance(name, str) or not name.strip():
+                raise JobStateReadError("Job đang chạy chưa có định danh; tạm chặn thao tác.")
+            names.append(name)
+            if item.get("job_id"):
+                names.append(str(item["job_id"]))
+    return names
+
+
 def start_batch(
     total_videos: int,
     input_dir: str = "",
@@ -458,14 +522,9 @@ def start_batch(
         reserved = owner.get("job_id") == job_id and owner.get("pid") == os.getpid()
         if not reserved:
             _claim_batch_lock_unlocked(job_id)
-            try:
-                (WORKSPACE / "control" / "video.stop").unlink(missing_ok=True)
-            except Exception:
-                pass
-            try:
-                STATUS_FILE.with_name("stop_request.json").unlink(missing_ok=True)
-            except Exception:
-                pass
+            stop_service.clear_stop(
+                WORKSPACE, status_file=STATUS_FILE, source="job_tracker", reason="new batch starts"
+            )
         now = time.time()
         _CURRENT_STATE.update({
             "schema_version": 2,
@@ -715,6 +774,18 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
         message = "Chưa xác nhận thành phẩm: " + check["reason"]
         set_error(video_name, message, fatal=True, worker_id=worker_id)
         raise RuntimeError(message)
+    try:
+        import delivery_ledger
+        delivery_ledger.record(
+            "output_verified",
+            path=output_path,
+            job_id=_CURRENT_STATE.get("job_id"),
+            workspace=WORKSPACE,
+            status_file=STATUS_FILE,
+            extra={"video_name": video_name, "duration_seconds": duration_seconds},
+        )
+    except Exception as _phase6_exc:
+        logger.warning('Suppressed error in job_tracker.finish_video (delivery_ledger.record): %s', type(_phase6_exc).__name__, exc_info=False)
     with _LOCK:
         _sync_from_disk_unlocked()
         now = time.time()
@@ -777,8 +848,8 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
         try:
             from render_history import record_render_duration
             record_render_duration(output_path or video_name, duration_seconds)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in job_tracker.finish_video (record_render_duration): %s', type(_phase6_exc).__name__, exc_info=False)
 
         # F1 — ghi 1 dòng thống kê; F13 — thông báo hoàn tất (không phát sinh khi chạy pytest)
         if not os.environ.get("PYTEST_CURRENT_TEST"):
@@ -792,13 +863,19 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
                     mode=_CURRENT_STATE.get("video_mode") or "",
                     ok=True,
                 )
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in job_tracker.finish_video (append_video_stats): %s', type(_phase6_exc).__name__, exc_info=False)
             try:
                 from notification_service import push
                 push("success", "Hoàn tất video", f"{video_name} · mất {int(duration_seconds)}s", "pipeline")
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in job_tracker.finish_video (push): %s', type(_phase6_exc).__name__, exc_info=False)
+            try:
+                from duplicate_guard import register as _dup_register
+                if output_path and Path(output_path).is_file():
+                    _dup_register("output", video_name, Path(output_path))
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in job_tracker.finish_video (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
 
 def finish_batch():
@@ -837,8 +914,8 @@ def finish_batch():
             from notification_service import push
             total = _CURRENT_STATE.get("queue_total", 0)
             push("info", "Kết thúc hàng đợi", f"Đã chạy xong toàn bộ {total} video trong hàng chờ.", "pipeline")
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in job_tracker.finish_batch (_CURRENT_STATE.get): %s', type(_phase6_exc).__name__, exc_info=False)
 
 
 def release_batch(job_id: str) -> None:
@@ -885,23 +962,21 @@ def set_error(video_name: str, error_msg: str, fatal: bool = True, worker_id: Op
         try:
             from notification_service import push
             push("error", "Video xử lý lỗi", f"{video_name}: {error_msg}", "pipeline")
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in job_tracker.set_error (push): %s', type(_phase6_exc).__name__, exc_info=False)
 
 
 def request_stop():
     """Gửi yêu cầu dừng batch (hỗ trợ đa tiến trình: main.py, telegram_bot.py, v1/v2)."""
     with _LOCK:
         _sync_from_disk_unlocked()
-        control_dir = WORKSPACE / "control"
-        control_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            (control_dir / "video.stop").write_text(str(time.time()), encoding="utf-8")
-        except Exception:
-            pass
-
-        atomic_write_json(STATUS_FILE.with_name("stop_request.json"),
-                          {"job_id": _CURRENT_STATE.get("job_id"), "requested_at": time.time()})
+        stop_service.request_stop(
+            WORKSPACE,
+            status_file=STATUS_FILE,
+            source="job_tracker",
+            reason="batch stop requested",
+            job_id=_CURRENT_STATE.get("job_id"),
+        )
         _freeze_progress_unlocked()
         now = time.time()
         if "workers" in _CURRENT_STATE and isinstance(_CURRENT_STATE["workers"], dict):
@@ -929,27 +1004,25 @@ def request_stop():
 def clear_stop_request():
     """Xóa các cờ dừng khi bắt đầu một batch hoặc video mới."""
     with _LOCK:
-        control_stop = WORKSPACE / "control" / "video.stop"
-        try:
-            control_stop.unlink(missing_ok=True)
-        except Exception:
-            pass
-        try:
-            STATUS_FILE.with_name("stop_request.json").unlink(missing_ok=True)
-        except Exception:
-            pass
+        stop_service.clear_stop(WORKSPACE, status_file=STATUS_FILE, source="job_tracker")
         _CURRENT_STATE["stop_requested"] = False
         _save_state_to_disk()
 
 
+def clear_stale_stop_request() -> bool:
+    """Xóa cờ dừng còn sót lại từ job đã kết thúc, không đụng job đang chạy."""
+    try:
+        if get_status().get("active"):
+            return False
+    except Exception:
+        return False
+    clear_stop_request()
+    return True
+
+
 def is_stop_requested() -> bool:
     """Kiểm tra cờ dừng xuyên tiến trình."""
-    control_stop = WORKSPACE / "control" / "video.stop"
-    if control_stop.exists():
-        return True
-
-    stop_req_file = STATUS_FILE.with_name("stop_request.json")
-    if stop_req_file.exists():
+    if stop_service.is_stop_requested(WORKSPACE, status_file=STATUS_FILE):
         return True
 
     with _LOCK:
@@ -984,6 +1057,32 @@ def mark_stopped(message: str = "Đã dừng theo yêu cầu") -> None:
                 })
         _save_state_to_disk()
         _release_batch_lock_unlocked(_CURRENT_STATE.get("job_id"))
+
+
+def mark_retry_waiting(job_id: str, message: str = "Đang chờ mạng; video đã được lên lịch thử lại.") -> None:
+    """Record a scheduled retry without completion or failure; the worker releases the lock."""
+    with _LOCK:
+        _sync_from_disk_unlocked()
+        if _CURRENT_STATE.get("job_id") != job_id:
+            return
+        _freeze_progress_unlocked()
+        waiting = {
+            "active": False,
+            "status": "waiting",
+            "video_status": "waiting",
+            "step_name": message,
+            "start_time": None,
+            "eta_seconds": None,
+            "last_error": None,
+            "updated_at": time.time(),
+        }
+        _CURRENT_STATE.update(waiting)
+        _CURRENT_STATE["percent"] = min(99, max(0, _CURRENT_STATE.get("percent", 0)))
+        for worker in (_CURRENT_STATE.get("workers") or {}).values():
+            if worker.get("active") or worker.get("video_status") == "running":
+                worker.update(waiting)
+                worker["percent"] = min(99, max(0, worker.get("percent", 0)))
+        _save_state_to_disk()
 
 
 def fail_batch(

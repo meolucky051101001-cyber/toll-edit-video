@@ -1,4 +1,3 @@
-import asyncio
 import importlib
 import sys
 import tempfile
@@ -11,10 +10,7 @@ from backend.pipeline_v2 import gpu_worker
 from backend.pipeline_v2.config import PipelineMode, PipelineSettings
 from backend.pipeline_v2.resume import ResumableVideoJob, resume_video_job
 from backend.pipeline_v2.segments import RuntimeSegment
-from backend.pipeline_v2.stage_validation import (
-    is_real_rvc_model,
-    validate_demucs_outputs,
-)
+from backend.pipeline_v2.stage_validation import validate_demucs_outputs
 
 
 class MediaStageValidationTests(unittest.TestCase):
@@ -42,56 +38,6 @@ class MediaStageValidationTests(unittest.TestCase):
                             "output_directory": directory,
                         }
                     )
-
-    def test_rvc_worker_requires_strict_transform(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / "source.mp3"
-            output = root / "output.wav"
-            source.write_bytes(b"source-audio")
-            observed = {}
-
-            async def fake_apply(input_path, output_path, model_path, strict=False):
-                observed["strict"] = strict
-                Path(output_path).write_bytes(b"converted-audio")
-
-            ai_package = ModuleType("ai")
-            ai_package.__path__ = []
-            voice_module = ModuleType("ai.voice_cloning")
-            voice_module.apply_rvc_clone = fake_apply
-            with mock.patch.dict(
-                sys.modules,
-                {"ai": ai_package, "ai.voice_cloning": voice_module},
-            ):
-                result = asyncio.run(
-                    gpu_worker._rvc_batch(
-                        {
-                            "model_path": str(root / "model.pth"),
-                            "items": [
-                                {
-                                    "index": 1,
-                                    "input_path": str(source),
-                                    "output_path": str(output),
-                                }
-                            ],
-                        }
-                    )
-                )
-            self.assertTrue(observed["strict"])
-            self.assertEqual(result["items"][0]["output_path"], str(output))
-
-    def test_rvc_model_discovery_rejects_git_lfs_pointer(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            pointer = root / "pointer.pth"
-            pointer.write_bytes(
-                b"version https://git-lfs.github.com/spec/v1\n" + b"x" * 2048
-            )
-            model = root / "model.pth"
-            model.write_bytes(b"real-model-data" * 100)
-            self.assertFalse(is_real_rvc_model(pointer))
-            self.assertTrue(is_real_rvc_model(model))
-
 
 class TranslationFailureTests(unittest.TestCase):
     def _load_translation_with_failing_google(self):
@@ -184,10 +130,72 @@ class TranslationFailureTests(unittest.TestCase):
             )
         self.assertEqual(result[0].content, "Xin chào")
 
+    def test_fallback_source_language_detects_english_and_chinese(self):
+        translation = self._load_translation_with_failing_google()
+
+        self.assertEqual(
+            translation._fallback_source_language("One minute makeup tutorial"),
+            "en",
+        )
+        self.assertEqual(translation._fallback_source_language("你好，世界"), "zh-CN")
+        self.assertIsNone(translation._fallback_source_language("123 456"))
+        self.assertIsNone(translation._fallback_source_language(""))
+        self.assertIsNone(
+            translation._fallback_source_language("Xin chào các bạn")
+        )
+
+    def test_legacy_fallback_translates_english_source(self):
+        translation = self._load_translation_with_failing_google()
+        seen = {}
+
+        class RecordingGoogleTranslator:
+            def __init__(self, source=None, target=None):
+                seen["source"] = source
+                seen["target"] = target
+
+            def translate(self, text):
+                return "Hướng dẫn trang điểm một phút"
+
+        segment = SimpleNamespace(index=4, content="One minute makeup tutorial")
+        with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
+            translation, "translate_with_gemini", return_value=None
+        ), mock.patch.object(
+            translation, "GoogleTranslator", RecordingGoogleTranslator
+        ):
+            result = translation.translate_subtitles(
+                [segment], strict=False, enable_g4f=False
+            )
+        self.assertEqual(result[0].content, "Hướng dẫn trang điểm một phút")
+        self.assertEqual(seen["source"], "en")
+        self.assertEqual(seen["target"], "vi")
+
+    def test_legacy_fallback_keeps_chinese_source_language(self):
+        translation = self._load_translation_with_failing_google()
+        seen = {}
+
+        class RecordingGoogleTranslator:
+            def __init__(self, source=None, target=None):
+                seen["source"] = source
+
+            def translate(self, text):
+                return "Xin chào"
+
+        segment = SimpleNamespace(index=5, content="你好")
+        with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
+            translation, "translate_with_gemini", return_value=None
+        ), mock.patch.object(
+            translation, "GoogleTranslator", RecordingGoogleTranslator
+        ):
+            result = translation.translate_subtitles(
+                [segment], strict=False, enable_g4f=False
+            )
+        self.assertEqual(result[0].content, "Xin chào")
+        self.assertEqual(seen["source"], "zh-CN")
+
 
 class ResumeVoiceConsistencyTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
-    def _job(root, voice_source="edge", rvc_model_path=None):
+    def _job(root, voice_source="edge"):
         return ResumableVideoJob(
             job_id="job",
             manifest_path=root / "job" / "pipeline_v2" / "job_manifest.json",
@@ -198,17 +206,14 @@ class ResumeVoiceConsistencyTests(unittest.IsolatedAsyncioTestCase):
             target_lang="vi",
             voice_source=voice_source,
             voice_param="vi-VN-HoaiMyNeural",
-            rvc_model_path=rvc_model_path,
             clean_audio_hint=None,
             delogo=False,
             next_stage="tts",
         )
 
-    async def test_edge_resume_does_not_switch_to_discovered_rvc(self):
+    async def test_resume_preserves_voice_provider(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            discovered_model = root / "voice.pth"
-            discovered_model.write_bytes(b"model" * 400)
             observed = {}
 
             class FakeRunner:
@@ -219,9 +224,6 @@ class ResumeVoiceConsistencyTests(unittest.IsolatedAsyncioTestCase):
                     return "done"
 
             with mock.patch(
-                "backend.pipeline_v2.resume.discover_rvc_model",
-                return_value=discovered_model,
-            ), mock.patch(
                 "backend.pipeline_v2.resume.VideoPipelineRunner", FakeRunner
             ):
                 result = await resume_video_job(
@@ -231,23 +233,6 @@ class ResumeVoiceConsistencyTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(result, "done")
             self.assertEqual(observed["request"].voice_source, "edge")
-            self.assertIsNone(observed["request"].rvc_model_path)
-
-    async def test_rvc_resume_fails_when_model_cannot_be_restored(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            with mock.patch(
-                "backend.pipeline_v2.resume.discover_rvc_model", return_value=None
-            ):
-                with self.assertRaisesRegex(RuntimeError, "Cannot resume RVC job"):
-                    await resume_video_job(
-                        self._job(
-                            root,
-                            voice_source="rvc",
-                            rvc_model_path=root / "missing.pth",
-                        ),
-                        PipelineSettings(mode=PipelineMode.V2),
-                    )
 
 
 class TTSFailureSemanticsTests(unittest.IsolatedAsyncioTestCase):

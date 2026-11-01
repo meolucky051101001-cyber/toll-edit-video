@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import logging
 import os
 import re
@@ -17,6 +18,10 @@ import shutil
 import subprocess
 import time
 import uuid
+import tempfile
+from copy import deepcopy
+from pipeline_v2.atomic_io import atomic_copy_file
+from v1_integrity_errors import AudioDurationError, FrozenConfigError, SegmentCommitError
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -33,7 +38,7 @@ PATHS = AppPaths.from_environment(Path(__file__).resolve().parents[1])
 _segment_lock = asyncio.Lock()
 
 # Cache for idempotency keys (TTL: 5 minutes)
-_IDEMPOTENCY_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_IDEMPOTENCY_CACHE: Dict[Tuple[str, str], Tuple[float, Tuple[int, Tuple[str, ...]], Dict[str, Any]]] = {}
 
 
 def resolve_workspace_dir() -> Path:
@@ -184,15 +189,15 @@ _AUDIO_DURATION_CACHE: Dict[str, tuple] = {}
 
 
 def get_audio_duration_seconds(file_path: Path) -> float:
-    """Đo thời lượng audio bằng ffprobe; cache theo (mtime, size) để không gọi ffprobe lặp lại từng câu."""
+    """Measure with ffprobe/audio decoder; never infer duration from byte size."""
     cache_key = str(file_path)
     try:
         st = file_path.stat()
         cached = _AUDIO_DURATION_CACHE.get(cache_key)
         if cached and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
             return cached[2]
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in segment_editor_service.get_audio_duration_seconds (file_path.stat): %s', type(_phase6_exc).__name__, exc_info=False)
 
     duration = 0.0
     try:
@@ -208,20 +213,28 @@ def get_audio_duration_seconds(file_path: Path) -> float:
         ]
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         if res.returncode == 0 and res.stdout.strip():
-            duration = round(float(res.stdout.strip()), 2)
-    except Exception:
-        pass
-    if duration <= 0.0:
+            duration = float(res.stdout.strip())
+            if not math.isfinite(duration) or duration <= 0:
+                raise ValueError("Invalid probed duration")
+    except Exception as _phase6_exc:
+        logger.warning('Suppressed error in segment_editor_service.get_audio_duration_seconds (str): %s', type(_phase6_exc).__name__, exc_info=False)
+    if not math.isfinite(duration) or duration <= 0.0:
         try:
-            duration = round(file_path.stat().st_size / 16000.0, 2)
-        except Exception:
-            return 0.0
+            import soundfile as sf
+            duration = float(sf.info(str(file_path)).duration)
+        except Exception as exc:
+            raise AudioDurationError("Không đo được thời lượng audio bằng decoder; chưa thể sửa tốc độ câu.") from exc
+    if not math.isfinite(duration) or duration <= 0:
+        raise AudioDurationError("Thời lượng audio không hợp lệ; chưa thể sửa tốc độ câu.")
+    duration = round(duration, 3)
+    if duration <= 0:
+        raise AudioDurationError("Audio quá ngắn để xác minh thời lượng.")
 
     try:
         st = file_path.stat()
         _AUDIO_DURATION_CACHE[cache_key] = (st.st_mtime_ns, st.st_size, duration)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in segment_editor_service.get_audio_duration_seconds (file_path.stat): %s', type(_phase6_exc).__name__, exc_info=False)
     return duration
 
 
@@ -243,16 +256,14 @@ def resolve_job_voice(job_id_or_name: str, job_folder: Optional[Path] = None) ->
                     if v_id:
                         lbl = data.get("voice_label") or v_id
                         return v_id, lbl
-                except Exception:
-                    pass
+                except Exception as _phase6_exc:
+                    logger.debug('Suppressed error in segment_editor_service.resolve_job_voice (json.loads): %s', type(_phase6_exc).__name__, exc_info=False)
 
         for mf in list(job_folder.rglob("job_manifest.json")) + list(job_folder.glob("job_manifest.json")):
             if mf.is_file():
                 try:
                     m = json.loads(mf.read_text(encoding="utf-8"))
                     req = m.get("metadata", {}).get("request", {})
-                    if req.get("voice_source") == "rvc" or "pth" in str(req.get("rvc_model_path", "")).lower():
-                        return "capcut-BV562_streaming", "CapCut · Mai (mặc định)"
                     if req.get("voice_id"):
                         return req["voice_id"], req.get("voice_label", req["voice_id"])
                     param = str(req.get("voice_param", ""))
@@ -264,8 +275,8 @@ def resolve_job_voice(job_id_or_name: str, job_folder: Optional[Path] = None) ->
                         return "microsoft-hoaimy", "Microsoft · Hoài My (nữ)"
                     if "NamMinh" in param:
                         return "microsoft-namminh", "Microsoft · Nam Minh (nam)"
-                except Exception:
-                    pass
+                except Exception as _phase6_exc:
+                    logger.debug('Suppressed error in segment_editor_service.resolve_job_voice (json.loads): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # 2. Tìm kiếm trong các thư mục workspace theo clean_id hoặc prefix
     roots = _workspace_roots()
@@ -280,19 +291,17 @@ def resolve_job_voice(job_id_or_name: str, job_folder: Optional[Path] = None) ->
                             data = json.loads(vl.read_text(encoding="utf-8"))
                             if data.get("voice_id"):
                                 return data["voice_id"], data.get("voice_label") or data["voice_id"]
-                        except Exception:
-                            pass
+                        except Exception as _phase6_exc:
+                            logger.debug('Suppressed error in segment_editor_service.resolve_job_voice (json.loads): %s', type(_phase6_exc).__name__, exc_info=False)
                 for mf in child.rglob("job_manifest.json"):
                     if mf.is_file():
                         try:
                             m = json.loads(mf.read_text(encoding="utf-8"))
                             req = m.get("metadata", {}).get("request", {})
-                            if req.get("voice_source") == "rvc" or "pth" in str(req.get("rvc_model_path", "")).lower():
-                                return "capcut-BV562_streaming", "CapCut · Mai (mặc định)"
                             if req.get("voice_id"):
                                 return req["voice_id"], req.get("voice_label", req["voice_id"])
-                        except Exception:
-                            pass
+                        except Exception as _phase6_exc:
+                            logger.debug('Suppressed error in segment_editor_service.resolve_job_voice (json.loads): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # 3. Tra cứu từ JobConfigService (Frozen snapshot hoặc Video Drafts)
     try:
@@ -305,8 +314,10 @@ def resolve_job_voice(job_id_or_name: str, job_folder: Optional[Path] = None) ->
         if draft and draft.get("overrides", {}).get("voice_id"):
             v_id = draft["overrides"]["voice_id"]
             return v_id, draft["overrides"].get("voice_label", v_id)
-    except Exception:
-        pass
+    except FrozenConfigError:
+        raise
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in segment_editor_service.resolve_job_voice (job_config_service.get_frozen_config): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # 4. Tra cứu từ voice_selection (giọng đang được chọn trên Dashboard)
     try:
@@ -314,8 +325,8 @@ def resolve_job_voice(job_id_or_name: str, job_folder: Optional[Path] = None) ->
         sel = voice_selection.selected()
         if sel and sel.get("id"):
             return sel["id"], sel.get("label", sel["id"])
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.debug('Suppressed error in segment_editor_service.resolve_job_voice (voice_selection.selected): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # 5. Fallback thông minh
     return "capcut-BV562_streaming", "CapCut · Mai (mặc định)"
@@ -401,8 +412,8 @@ def get_job_segments(job_id_or_name: str) -> Dict[str, Any]:
                     try:
                         with open(draft_path, "w", encoding="utf-8") as fw:
                             json.dump(data, fw, ensure_ascii=False, indent=2)
-                    except Exception:
-                        pass
+                    except Exception as _phase6_exc:
+                        logger.debug('Suppressed error in segment_editor_service.get_job_segments (open): %s', type(_phase6_exc).__name__, exc_info=False)
                 return data
         except Exception as e:
             logger.warning("Không thể đọc draft %s: %s", draft_path, e)
@@ -462,8 +473,8 @@ def get_job_segments(job_id_or_name: str) -> Dict[str, Any]:
                             a_dur = float(meta_seg["actual_audio_duration"])
                             if a_dur > 0 and s_dur > 0:
                                 meta_speed = s_dur / a_dur
-                        except (ValueError, TypeError, ZeroDivisionError):
-                            pass
+                        except (ValueError, TypeError, ZeroDivisionError) as _phase6_exc:
+                            logger.debug('Suppressed error in segment_editor_service.get_job_segments (float): %s', type(_phase6_exc).__name__, exc_info=False)
 
                     seg_speed = estimate_segment_speed(trans, audio_dur, dur, meta_speed=meta_speed)
 
@@ -483,6 +494,8 @@ def get_job_segments(job_id_or_name: str) -> Dict[str, Any]:
                         "fits_window": fits,
                         "status": "synced",
                     })
+        except AudioDurationError:
+            raise
         except Exception as e:
             logger.warning("Lỗi đọc V2 segments.json: %s", e)
 
@@ -504,8 +517,8 @@ def get_job_segments(job_id_or_name: str) -> Dict[str, Any]:
             try:
                 for s in parse_srt(orig_srt.read_text(encoding="utf-8", errors="replace")):
                     orig_segments_map[s["index"]] = s.get("content", "")
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.debug('Suppressed error in segment_editor_service.get_job_segments (parse_srt): %s', type(_phase6_exc).__name__, exc_info=False)
 
         if trans_srt:
             try:
@@ -550,8 +563,8 @@ def get_job_segments(job_id_or_name: str) -> Dict[str, Any]:
                         "fits_window": fits,
                         "status": "synced",
                     })
-            except Exception as e:
-                logger.warning("Lỗi đọc V1 SRT files: %s", e)
+            except AudioDurationError:
+                raise
             except Exception as e:
                 logger.warning("Lỗi đọc V1 SRT files: %s", e)
 
@@ -575,8 +588,8 @@ def get_job_segments(job_id_or_name: str) -> Dict[str, Any]:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
             os.replace(tmp, draft_path)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.debug('Suppressed error in segment_editor_service.get_job_segments (draft_path.with_suffix): %s', type(_phase6_exc).__name__, exc_info=False)
 
     return result
 
@@ -617,6 +630,13 @@ def save_segment_draft(
                     f"Câu {sid} không được để trống văn bản — hãy nhập nội dung trước khi lưu."
                 )
             text_changed = new_text != s.get("translated_text", "")
+            if text_changed and not os.environ.get("PYTEST_CURRENT_TEST"):
+                # F7 — học từ sửa tay: diff ngắn mức từ sẽ thành gợi ý Glossary khi lặp lại
+                try:
+                    from glossary_learning_service import record_edit
+                    record_edit(s.get("translated_text", ""), new_text, clean_id)
+                except Exception as _phase6_exc:
+                    logger.debug('Suppressed error in segment_editor_service.save_segment_draft (record_edit): %s', type(_phase6_exc).__name__, exc_info=False)
             s["translated_text"] = new_text
             if "voice_id" in upd:
                 s["voice_id"] = upd["voice_id"]
@@ -650,171 +670,121 @@ async def regenerate_segments(
     expected_revision: int = 1,
     idempotency_key: str = "",
 ) -> Dict[str, Any]:
-    """
-    Tạo lại âm thanh TTS cho đúng các câu được chọn.
-    Áp dụng atempo để vừa slot thời gian, sao lưu file cũ và cập nhật bản nháp.
-    """
+    """Prepare audio/SRT/draft together and publish the revision only after all writes succeed."""
+    from segment_artifacts import commit_segment_files
+
     clean_id = sanitize_job_id(job_id_or_name)
-
-    # 1. Idempotency check
-    now = time.time()
-    if idempotency_key and idempotency_key in _IDEMPOTENCY_CACHE:
-        cached_time, cached_res = _IDEMPOTENCY_CACHE[idempotency_key]
-        if (now - cached_time) < 300:
-            return cached_res
-
+    cache_key = (clean_id, idempotency_key)
+    request_key = (expected_revision, tuple(sorted(segment_ids)))
     async with _segment_lock:
-        current_data = get_job_segments(job_id_or_name)
+        now = time.time()
+        if idempotency_key and cache_key in _IDEMPOTENCY_CACHE:
+            cached_time, cached_request, cached_res = _IDEMPOTENCY_CACHE[cache_key]
+            if now - cached_time < 300:
+                if cached_request != request_key:
+                    raise ValueError("Idempotency key đã dùng cho yêu cầu tạo lại câu khác.")
+                return cached_res
+        current_data = deepcopy(get_job_segments(job_id_or_name))
         current_rev = current_data.get("revision", 1)
-
         if expected_revision != current_rev:
-            raise ValueError(
-                f"Xung đột phiên bản: Dữ liệu hiện tại là rev {current_rev}, "
-                f"client gửi rev {expected_revision}."
-            )
-
+            raise ValueError(f"Xung đột phiên bản: hiện tại rev {current_rev}, client gửi rev {expected_revision}.")
         job_folder = find_job_workspace(job_id_or_name)
         if not job_folder:
-            raise RuntimeError(f"Không tìm thấy thư mục làm việc của job {clean_id}")
-
-        # Locate dubbing/tts output dir
-        dub_dir_candidates = [
-            job_folder / "dubbing",
-            job_folder / "pipeline_v2" / "artifacts" / "tts",
-            job_folder / "tts",
-        ]
+            raise RuntimeError("Không tìm thấy thư mục làm việc của job.")
+        dub_dir_candidates = [job_folder / "dubbing", job_folder / "pipeline_v2" / "artifacts" / "tts", job_folder / "tts"]
         dub_dir = next((d for d in dub_dir_candidates if d.is_dir()), job_folder / "dubbing")
         dub_dir.mkdir(parents=True, exist_ok=True)
-
-        from voice_preview_service import synthesize_voice_preview
-
-        target_ids = set(segment_ids)
-        regen_results = []
         segments = current_data.get("segments", [])
+        target_ids = set(segment_ids)
+        selected = [s for s in segments if s.get("segment_id") in target_ids]
+        if not target_ids or {s.get("segment_id") for s in selected} != target_ids:
+            raise ValueError("Danh sách câu không tồn tại đầy đủ trong revision hiện tại.")
+        indices = [s.get("index") for s in selected]
+        if any(not isinstance(i, int) or isinstance(i, bool) or i <= 0 for i in indices) or len(set(indices)) != len(indices):
+            raise ValueError("Chỉ số audio segment không hợp lệ hoặc bị trùng.")
+        if any(not (s.get("translated_text") or "").strip() for s in selected):
+            raise ValueError("Câu đang để trống văn bản; chưa thể tạo âm thanh.")
 
-        empty_ids = [
-            s.get("segment_id")
-            for s in segments
-            if s.get("segment_id") in target_ids and not (s.get("translated_text") or "").strip()
-        ]
-        if empty_ids:
-            raise ValueError(
-                "Các câu đang để trống văn bản, không thể tạo lại âm thanh: " + ", ".join(map(str, empty_ids))
-            )
-
-        for s in segments:
-            sid = s.get("segment_id")
-            if sid not in target_ids:
-                continue
-
-            idx = s.get("index", 1)
-            text = (s.get("translated_text") or "").strip()
-            voice_id = s.get("voice_id") or current_data.get("detected_voice_id") or "capcut-BV562_streaming"
-            speed = float(s.get("speed") or 1.0)
-            window_dur = float(s.get("duration") or 2.0)
-
-            dest_audio = dub_dir / f"{idx}.mp3"
-            backup_audio = dub_dir / f"{idx}.mp3.bak"
-
-            # Backup old audio
-            if dest_audio.is_file() and not backup_audio.is_file():
+        # Required backups are completed before any synthesis or replacement.
+        for s in selected:
+            destination = dub_dir / f"{s['index']}.mp3"
+            backup = destination.with_suffix(".mp3.bak")
+            if backup.exists() and (not backup.is_file() or backup.stat().st_size <= 0):
+                raise SegmentCommitError("Bản backup audio cũ không hợp lệ; chưa tạo lại câu.")
+            if destination.is_file() and not backup.exists():
                 try:
-                    shutil.copy2(dest_audio, backup_audio)
-                except OSError:
-                    pass
+                    atomic_copy_file(destination, backup)
+                except Exception as exc:
+                    raise SegmentCommitError("Không sao lưu được audio cũ; chưa tạo lại câu.") from exc
 
-            # Synthesize fresh audio via voice_preview_service
-            synth_res = await synthesize_voice_preview(
-                voice_id=voice_id,
-                text=text,
-                speed=speed,
-            )
+        stage = Path(tempfile.mkdtemp(prefix=".segment-regenerate-", dir=job_folder))
+        keep_recovery = False
+        try:
+            from voice_preview_service import synthesize_voice_preview, get_preview_audio_path
 
-            # Copy generated audio into target segment file
-            from voice_preview_service import get_preview_audio_path
-            src_audio = get_preview_audio_path(synth_res["preview_id"])
-
-            if not src_audio or not src_audio.is_file():
-                raise RuntimeError(f"Không thể tạo âm thanh cho câu {idx}")
-
-            raw_dur = synth_res.get("duration") or get_audio_duration_seconds(src_audio)
-
-            # Check if duration fits within slot (tolerance 0.25s)
-            applied_atempo = 1.0
-            fits = True
-            warning = None
-
-            if raw_dur > (window_dur + 0.25) and window_dur > 0.5:
-                # Needs atempo compression to fit
-                factor = min(2.0, max(0.5, raw_dur / window_dur))
-                applied_atempo = round(factor, 2)
-                fits = False
-                warning = f"Câu dài hơn khung thời gian ({raw_dur}s > {window_dur}s). Đã nén tốc độ {applied_atempo}x."
-
-                temp_fitted = dub_dir / f"temp_{uuid.uuid4().hex}.mp3"
-                cmd = ["ffmpeg", "-y", "-i", str(src_audio), "-filter:a", f"atempo={applied_atempo:.2f}", str(temp_fitted)]
-                p = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
-                if p.returncode == 0 and temp_fitted.is_file():
-                    shutil.move(str(temp_fitted), str(dest_audio))
+            prepared = {}
+            regen_results = []
+            for s in selected:
+                sid, idx = s["segment_id"], s["index"]
+                voice_id = s.get("voice_id") or current_data.get("detected_voice_id") or "capcut-BV562_streaming"
+                speed = float(s.get("speed") or 1.0)
+                window_dur = float(s.get("duration") or 2.0)
+                if not math.isfinite(speed) or speed <= 0 or not math.isfinite(window_dur) or window_dur <= 0:
+                    raise ValueError("Tốc độ/khung thời gian segment không hợp lệ.")
+                synth_res = await synthesize_voice_preview(voice_id=voice_id, text=s["translated_text"].strip(), speed=speed)
+                source = get_preview_audio_path(synth_res["preview_id"])
+                if not source or not source.is_file():
+                    raise RuntimeError("Không tạo được audio preview cho câu.")
+                raw_dur = get_audio_duration_seconds(source)
+                staged_audio = stage / f"audio-{idx}.mp3"
+                applied_atempo, fits, warning = 1.0, True, None
+                if raw_dur > window_dur + 0.25 and window_dur > 0.5:
+                    applied_atempo = round(min(2.0, max(0.5, raw_dur / window_dur)), 2)
+                    fits = False
+                    warning = f"Câu dài hơn khung thời gian ({raw_dur}s > {window_dur}s). Đã nén tốc độ {applied_atempo}x."
+                    result = await asyncio.to_thread(subprocess.run, [
+                        "ffmpeg", "-y", "-i", str(source), "-filter:a", f"atempo={applied_atempo:.2f}", str(staged_audio)
+                    ], capture_output=True, text=True)
+                    if result.returncode != 0 or not staged_audio.is_file():
+                        raise RuntimeError("Nén audio theo khung thời gian thất bại; chưa ghi revision mới.")
                 else:
-                    shutil.copy2(src_audio, dest_audio)
-            else:
-                shutil.copy2(src_audio, dest_audio)
+                    shutil.copy2(source, staged_audio)
+                final_dur = get_audio_duration_seconds(staged_audio)
+                destination = dub_dir / f"{idx}.mp3"
+                prepared[destination] = staged_audio
+                s.update(audio_path=str(destination), audio_duration=final_dur, fits_window=fits, status="regenerated")
+                regen_results.append({"segment_id": sid, "index": idx, "new_duration": final_dur,
+                                      "fits_window": fits, "applied_atempo": applied_atempo, "warning": warning})
 
-            final_dur = get_audio_duration_seconds(dest_audio)
+            new_srt_content = format_srt(segments)
+            srt_stage = stage / "translated.srt"
+            srt_stage.write_text(new_srt_content, encoding="utf-8")
+            for destination in [job_folder / "translated.srt", job_folder / "pipeline_v2" / "artifacts" / "translation" / "translated.srt"]:
+                if destination.parent.is_dir():
+                    prepared[destination] = srt_stage
+            new_rev = current_rev + 1
+            current_data.update(revision=new_rev, segments=segments, updated_at=time.time())
+            draft_path = get_segment_drafts_dir() / f"{clean_id}.json"
+            draft_stage = stage / "draft.json"
+            draft_stage.write_text(json.dumps(current_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            prepared[draft_path] = draft_stage
+            commit_segment_files(prepared, stage / "rollback")
 
-            s["audio_path"] = str(dest_audio)
-            s["audio_duration"] = final_dur
-            s["fits_window"] = fits
-            s["status"] = "regenerated"
-
-            regen_results.append({
-                "segment_id": sid,
-                "index": idx,
-                "new_duration": final_dur,
-                "fits_window": fits,
-                "applied_atempo": applied_atempo,
-                "warning": warning,
-            })
-
-        # Update translated.srt
-        new_srt_content = format_srt(segments)
-        srt_candidates = [
-            job_folder / "translated.srt",
-            job_folder / "pipeline_v2" / "artifacts" / "translation" / "translated.srt",
-        ]
-        for srt_f in srt_candidates:
-            if srt_f.parent.is_dir():
+            result = {"status": "success", "job_id": clean_id, "revision": new_rev,
+                      "regenerated_count": len(regen_results), "results": regen_results, "segments": segments}
+            if idempotency_key:
+                _IDEMPOTENCY_CACHE[cache_key] = (time.time(), request_key, result)
+            return result
+        except SegmentCommitError as exc:
+            keep_recovery = bool(getattr(exc, "recovery_dir", None))
+            raise
+        finally:
+            if not keep_recovery:
                 try:
-                    srt_f.write_text(new_srt_content, encoding="utf-8")
-                except Exception:
-                    pass
+                    shutil.rmtree(stage)
+                except OSError as exc:
+                    logger.warning("Cannot clean segment staging directory: %s", type(exc).__name__, exc_info=False)
 
-        # Increment revision and save draft
-        new_rev = current_rev + 1
-        current_data["revision"] = new_rev
-        current_data["segments"] = segments
-        current_data["updated_at"] = time.time()
-
-        draft_path = get_segment_drafts_dir() / f"{clean_id}.json"
-        tmp = draft_path.with_suffix(f".tmp{os.getpid()}")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(current_data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, draft_path)
-
-        res = {
-            "status": "success",
-            "job_id": clean_id,
-            "revision": new_rev,
-            "regenerated_count": len(regen_results),
-            "results": regen_results,
-            "segments": segments,
-        }
-
-        if idempotency_key:
-            _IDEMPOTENCY_CACHE[idempotency_key] = (now, res)
-
-        return res
 
 
 async def publish_revised_video(
@@ -1003,14 +973,14 @@ async def publish_revised_video(
             try:
                 if tmp_f.is_file():
                     tmp_f.unlink()
-            except OSError:
-                pass
+            except OSError as _phase6_exc:
+                logger.debug('Suppressed error in segment_editor_service.publish_revised_video (tmp_f.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
         # Dọn file staging mồ côi từ các lần xuất bản đổ vỡ trước đó
         try:
             for stale in out_dir.glob(rev_filename + ".part*"):
                 stale.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as _phase6_exc:
+            logger.debug('Suppressed error in segment_editor_service.publish_revised_video (out_dir.glob): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # Tăng revision draft sau khi xuất bản thành công để lần xuất sau tạo file _rev(N+1) riêng
     published_rev = current_rev + 1

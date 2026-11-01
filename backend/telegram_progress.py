@@ -28,7 +28,7 @@ def _report(text, worker_id=None):
         (4, ("bước 4/8", "ocr", "quét vị trí phụ đề", "quét vùng phụ đề", "phụ đề chữ cứng", "bước 3.5/6")),
         (3, ("bước 3/8", "whisper", "nhận dạng từ vocal", "nhận dạng giọng nói", "bước 3/6")),
         (5, ("bước 5/8", "đang dịch", "dịch phụ đề", "gemini ai để dịch", "dịch chuẩn ngữ cảnh", "bước 4/6")),
-        (6, ("bước 6/8", "đang lồng tiếng", "lồng tiếng ai", "tts", "rvc", "bước 5/6")),
+        (6, ("bước 6/8", "đang lồng tiếng", "lồng tiếng ai", "tts", "bước 5/6")),
         (7, ("bước 7/8", "trộn nhạc nền", "trộn âm", "hòa âm", "adaptive mixer")),
         (8, ("bước 8/8", "đang render", "render video", "nvenc", "xuất video", "bước 6/6")),
         (1, ("bước 1/8", "trích xuất âm thanh", "tách âm thanh gốc", "bước 1/6", "bước 2/6:")),

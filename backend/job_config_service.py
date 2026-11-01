@@ -6,7 +6,6 @@ Lưu trữ:
 """
 
 import os
-import sys
 import json
 import time
 import uuid
@@ -16,6 +15,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+from v1_integrity_errors import FrozenConfigError
 
 ROOT_DIR = Path(__file__).resolve().parent
 WORKSPACE_DIR = Path(os.getenv("AUTODUB_WORKSPACE", str(ROOT_DIR.parent / "workspace")))
@@ -25,6 +25,29 @@ DRAFTS_FILE = CONTROL_DIR / "video_draft_configs.json"
 FROZEN_FILE = CONTROL_DIR / "job_frozen_configs.json"
 
 _IDEMPOTENCY_TTL_SEC = 300.0  # 5 minutes
+
+
+def _migrate_snapshot_asr(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Rewrite retired ASR model ids inside a frozen snapshot in place."""
+    try:
+        from v1_feature_flags import migrate_legacy_asr_model
+    except ImportError:
+        from backend.v1_feature_flags import migrate_legacy_asr_model
+
+    def _migrate_plan(plan: Any) -> None:
+        if isinstance(plan, dict) and "asr_model" in plan:
+            plan["asr_model"] = migrate_legacy_asr_model(plan["asr_model"], "frozen snapshot")
+
+    effective = snapshot.get("effective_config")
+    if isinstance(effective, dict):
+        if "asr_model" in effective:
+            effective["asr_model"] = migrate_legacy_asr_model(effective["asr_model"], "frozen snapshot")
+        _migrate_plan(effective.get("planned_pipeline"))
+    _migrate_plan(snapshot.get("routing", {}).get("planned_pipeline") if isinstance(snapshot.get("routing"), dict) else None)
+    overrides = snapshot.get("overrides")
+    if isinstance(overrides, dict) and "asr_model" in overrides:
+        overrides["asr_model"] = migrate_legacy_asr_model(overrides["asr_model"], "frozen snapshot")
+    return snapshot
 
 
 def check_idempotency(key: str) -> Optional[Dict[str, Any]]:
@@ -59,9 +82,14 @@ def idempotency_lock(key: str):
 
 
 try:
-    from preset_service import resolve_effective_config, get_preset
+    from preset_service import resolve_effective_config, get_preset  # noqa: F401 (patched by tests)
 except ImportError:
-    from .preset_service import resolve_effective_config, get_preset
+    from .preset_service import resolve_effective_config, get_preset  # noqa: F401 (patched by tests)
+
+try:
+    from v1_feature_flags import migrate_legacy_asr_model
+except ImportError:
+    from .v1_feature_flags import migrate_legacy_asr_model
 
 
 def _atomic_write_json(file_path: Path, data: Any):
@@ -110,7 +138,7 @@ def _frozen_files_for_lookup(
     if candidate_path.is_absolute():
         for parent in candidate_path.parents:
             scoped_file = parent / "control" / "job_frozen_configs.json"
-            if scoped_file.is_file() and scoped_file not in candidates:
+            if scoped_file.exists() and scoped_file not in candidates:
                 candidates.append(scoped_file)
     if FROZEN_FILE not in candidates:
         candidates.append(FROZEN_FILE)
@@ -124,6 +152,23 @@ def _read_json_safe(file_path: Path, default_val: Any) -> Any:
         return json.loads(file_path.read_text(encoding="utf-8"))
     except Exception:
         return default_val
+
+
+def _read_frozen_store(file_path: Path) -> Dict[str, Any]:
+    """A missing store is optional; an unreadable existing store is not empty."""
+    try:
+        data = json.loads(file_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise FrozenConfigError("Không đọc được snapshot cấu hình; dừng để bảo toàn lựa chọn của job.") from exc
+    if not isinstance(data, dict) or any(
+        not isinstance(snapshot, dict)
+        or not isinstance(snapshot.get("effective_config", {}), dict)
+        for snapshot in data.values()
+    ):
+        raise FrozenConfigError("Snapshot cấu hình không hợp lệ; chưa thể chạy job.")
+    return data
 
 
 # ===== DRAFTS (Bản nháp cấu hình riêng trước khi chạy) =====
@@ -162,7 +207,7 @@ def delete_video_draft(video_name: str) -> bool:
 
 def list_frozen_configs(workspace_path: Optional[str | Path] = None) -> Dict[str, Any]:
     """Danh sách các snapshot cấu hình đóng băng."""
-    return _read_json_safe(_frozen_file_for_workspace(workspace_path), {})
+    return _read_frozen_store(_frozen_file_for_workspace(workspace_path))
 
 
 def freeze_job_config(
@@ -198,7 +243,7 @@ def freeze_job_config(
     # without persisting credentials or relying on later global settings.
     for key in ("video_mode", "voice_mode", "voice_config", "feature_flags",
                 "planned_pipeline", "planned_models", "policy_version", "qc_policy",
-                "asr_model", "separation_mode", "script_mode"):
+                "asr_model", "separation_mode", "script_mode", "visual_sub_to_speech"):
         if key in overrides:
             effective[key] = overrides[key]
     # Keep job-scoped settings tied to the workspace that owns the job.
@@ -228,14 +273,14 @@ def freeze_job_config(
     if not planned_asr_model:
         asr_spec = planned_models.get("asr") or {}
         model_id = asr_spec.get("model_id") if isinstance(asr_spec, dict) else None
-        if model_id == "qwen3_asr_preview":
-            planned_asr_model = "qwen3_asr"
-        elif model_id == "whisper_large_v3_turbo":
+        if model_id == "whisper_large_v3_turbo":
             planned_asr_model = "whisper_turbo"
         elif model_id == "whisper_sensevoice_hybrid":
             planned_asr_model = "whisper_sensevoice"
         elif model_id == "sensevoice_small":
             planned_asr_model = "sensevoice_small"
+        elif model_id:
+            planned_asr_model = migrate_legacy_asr_model(model_id, "frozen snapshot")
     try:
         try:
             from v1_feature_flags import get_feature_flags
@@ -245,8 +290,6 @@ def freeze_job_config(
         if "asr_model" not in effective:
             if planned_asr_model:
                 effective["asr_model"] = planned_asr_model
-            elif flags.get("ENABLE_QWEN_ASR") or flags.get("V1_ASR_MODEL") == "qwen3_asr":
-                effective["asr_model"] = "qwen3_asr"
             elif flags.get("V1_ASR_MODEL") == "whisper_turbo":
                 effective["asr_model"] = "whisper_turbo"
             elif flags.get("V1_ASR_MODEL") == "sensevoice_small":
@@ -292,6 +335,9 @@ def freeze_job_config(
 
     snapshot_id = job_id or f"snap-{uuid.uuid4().hex[:8]}"
     now = time.time()
+    _migrate_snapshot_asr(
+        {"effective_config": effective, "overrides": overrides, "routing": router_snapshot}
+    )
 
     snapshot = {
         "snapshot_id": snapshot_id,
@@ -349,12 +395,14 @@ def resolve_job_frozen_config(
             candidates.add(f"{stripped_stem}{ext}")
 
     for file_path in _frozen_files_for_lookup(path_or_key, workspace_path):
-        frozen = _read_json_safe(file_path, {})
+        frozen = _read_frozen_store(file_path)
         if path_or_key in frozen:
-            return frozen[path_or_key]
+            snap = frozen[path_or_key]
+            return _migrate_snapshot_asr(snap) if isinstance(snap, dict) else snap
         for cand in candidates:
             if cand in frozen:
-                return frozen[cand]
+                snap = frozen[cand]
+                return _migrate_snapshot_asr(snap) if isinstance(snap, dict) else snap
             for snap in frozen.values():
                 if not isinstance(snap, dict):
                     continue
@@ -363,7 +411,7 @@ def resolve_job_frozen_config(
                 s_id = snap.get("snapshot_id", "")
                 v_stem = os.path.splitext(v_name)[0] if v_name else ""
                 if cand in (v_name, j_id, s_id, v_stem):
-                    return snap
+                    return _migrate_snapshot_asr(snap)
 
     return None
 

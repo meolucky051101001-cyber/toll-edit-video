@@ -37,5 +37,7 @@ if errorlevel 1 (
 
 :: Khởi động Telegram Bot Tool V1
 echo [Tool V1] Dang khoi dong Telegram Bot...
+:: Xóa cờ dừng tay để watchdog không coi bot là đã tắt
+del /q "%PROJECT_DIR%workspace\control\telegram.disabled" 2>nul
 start /b "" "%PYTHON_EXE%" telegram_bot.py
 echo [Tool V1] Khoi dong thanh cong! Dashboard dang chay tai http://127.0.0.1:8088

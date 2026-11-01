@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 FastAPI Routes for Phase C: Segment Editing, Selective Regeneration & Revised Video Publishing.
-Mountable on both Tool V1 (main.py) and Tool V2 (dashboard_monitor.py).
+Mounted on the Tool V1 dashboard (main.py).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -31,11 +30,12 @@ router = APIRouter(tags=["Segment Editor (Phase C)"])
 def _job_is_being_processed(job_id: str) -> bool:
     """True nếu video này đang được worker chính xử lý — chặn sửa câu song song gây đụng file giữa chừng."""
     try:
-        from job_tracker import get_status
+        from job_tracker import get_status, active_job_names
         from segment_editor_service import sanitize_job_id as _sanitize
 
-        state = get_status()
-        if not state or not state.get("active"):
+        state = get_status(strict=True)
+        protected = active_job_names(state)
+        if not protected:
             return False
         try:
             target = _sanitize(job_id)
@@ -43,10 +43,7 @@ def _job_is_being_processed(job_id: str) -> bool:
             target = str(job_id or "")
         if not target:
             return False
-        active_names = [state.get("video_name") or ""]
-        for w in (state.get("workers") or {}).values():
-            if isinstance(w, dict):
-                active_names.append(w.get("video_name") or "")
+        active_names = protected
         for name in active_names:
             if not name:
                 continue
@@ -57,7 +54,7 @@ def _job_is_being_processed(job_id: str) -> bool:
             if target == name_clean or target in name_clean or name_clean in target:
                 return True
     except Exception:
-        return False
+        raise HTTPException(status_code=503, detail="Không xác minh được job đang chạy; chưa cho phép sửa/xuất bản.") from None
     return False
 
 

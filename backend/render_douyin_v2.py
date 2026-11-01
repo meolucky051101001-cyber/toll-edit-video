@@ -26,7 +26,8 @@ except ImportError:
 PATHS = AppPaths.from_environment(Path(BASE_DIR).parent)
 
 from pipeline_v2.config import PipelineSettings
-from pipeline_v2.video_pipeline import VideoPipelineRequest, VideoPipelineRunner, discover_rvc_model
+from pipeline_v2.video_pipeline import VideoPipelineRequest, VideoPipelineRunner
+from voice_selection import resolve_voice
 
 async def main(video_path: Path):
     if not video_path.exists():
@@ -52,9 +53,7 @@ async def main(video_path: Path):
         delivery_dest = delivery_dir / final_dest.name
 
     settings = PipelineSettings.from_env()
-    rvc_model = discover_rvc_model(Path(BASE_DIR) / "MyVoiceModel_v2")
-    if not rvc_model:
-        rvc_model = discover_rvc_model(workspace_dir)
+    voice_source, voice_param, voice_label = resolve_voice("capcut", "BV562_streaming")
 
     api_key = os.getenv("GEMINI_API_KEY", "")
 
@@ -63,7 +62,7 @@ async def main(video_path: Path):
     print("🚀 BẮT ĐẦU XỬ LÝ VIDEO DÀI 13.3 PHÚT BẰNG PIPELINE TOOL V2", flush=True)
     print("=" * 70, flush=True)
     print(f"🎬 Video nguồn: {video_path} ({video_path.stat().st_size / (1024*1024):.1f} MB)", flush=True)
-    print(f"🎤 Model Giọng RVC: {rvc_model}", flush=True)
+    print(f"Giọng TTS: {voice_label}", flush=True)
     print(f"📁 Thư mục xuất chính: {final_dest}", flush=True)
     if delivery_dest:
         print(f"📁 Thư mục giao nhận: {delivery_dest}", flush=True)
@@ -92,9 +91,8 @@ async def main(video_path: Path):
         delivery_copy_path=delivery_dest,
         settings=settings,
         api_key=api_key,
-        voice_source="rvc" if rvc_model else "edge",
-        voice_param=str(rvc_model) if rvc_model else "vi-VN-HoaiMyNeural",
-        rvc_model_path=rvc_model,
+        voice_source=voice_source,
+        voice_param=voice_param,
         progress=async_progress,
     )
 

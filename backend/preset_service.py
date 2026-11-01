@@ -14,12 +14,12 @@ import time
 import uuid
 import copy
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 
 try:
-    from backend.config.paths import AppPaths
+    pass
 except ImportError:
-    from config.paths import AppPaths
+    pass
 
 ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:

@@ -73,12 +73,12 @@ class TestSegmentEditGuards(unittest.TestCase):
             self.assertFalse(phase_c_routes._job_is_being_processed("telegram_abc"))
 
     def test_blocked_when_same_video_running(self):
-        st = self._fake_status(True, "telegram_abc_视频.mp4", {"1": {"video_name": "telegram_abc_视频.mp4"}})
+        st = self._fake_status(True, "telegram_abc_视频.mp4", {"1": {"active": True, "video_name": "telegram_abc_视频.mp4"}})
         with patch.object(job_tracker, "get_status", return_value=st):
             self.assertTrue(phase_c_routes._job_is_being_processed("telegram_abc_视频"))
 
     def test_not_blocked_when_other_video_running(self):
-        st = self._fake_status(True, "telegram_other_123.mp4", {"1": {"video_name": "telegram_other_123.mp4"}})
+        st = self._fake_status(True, "telegram_other_123.mp4", {"1": {"active": True, "video_name": "telegram_other_123.mp4"}})
         with patch.object(job_tracker, "get_status", return_value=st):
             self.assertFalse(phase_c_routes._job_is_being_processed("telegram_abc"))
 

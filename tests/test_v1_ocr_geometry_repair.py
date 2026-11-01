@@ -191,6 +191,33 @@ class GeometryTests(unittest.TestCase):
     def test_unmatched_caption_evidence_is_not_silent_success(self):
         band=self.select([block()],{1:'这是当时导致伤口感染'})
         self.assertTrue(geo.has_caption_evidence([block('不同字幕',sid=2)],2,band))
+    def test_drifting_watermark_without_band_is_not_caption_evidence(self):
+        band=self.select([],{1:'字幕'})
+        marks=[block('大宝爱画画（小红书）',sid=i,t=float(i),y=y,bottom=y+.04)
+               for i,y in ((1,.08),(2,.72),(3,.93))]
+        self.assertFalse(geo.has_caption_evidence(marks,1,band))
+    def test_text_repeated_in_two_segments_still_ambiguous(self):
+        band=self.select([],{1:'字幕'})
+        marks=[block('大宝爱画画（小红书）',sid=i,t=float(i),y=y,bottom=y+.04)
+               for i,y in ((1,.08),(2,.72))]
+        self.assertTrue(geo.has_caption_evidence(marks,1,band))
+    def test_watermark_ocr_variants_not_caption_evidence(self):
+        band=self.select([],{1:'字幕'})
+        marks=[block('大宝爱画画（小红书)',sid=1,y=.80,bottom=.83),
+               block('大宝爱画画(小红书)',sid=2,y=.12,bottom=.15),
+               block('大宝爱画画（小红书》',sid=3,y=.90,bottom=.93),
+               block('大宝愛画画(小红书)',sid=4,y=.14,bottom=.17)]
+        self.assertFalse(geo.has_caption_evidence(marks,1,band))
+    def test_latin_row_on_english_band_is_caption_evidence(self):
+        band=locator.SubtitleBandSelection(
+            top=.73,bottom=.79,mode='english_match',support=4,
+            selected_by_segment={},candidate_count=4)
+        row=block('Blend everything with a sponge',sid=2,y=.73,bottom=.79)
+        self.assertTrue(geo.has_caption_evidence([row],2,band))
+        chinese_band=locator.SubtitleBandSelection(
+            top=.73,bottom=.79,mode='visual_match',support=4,
+            selected_by_segment={},candidate_count=4)
+        self.assertFalse(geo.has_caption_evidence([row],2,chinese_band))
 
 
 class PipelineTests(unittest.TestCase):
@@ -232,6 +259,12 @@ class PipelineTests(unittest.TestCase):
         segs=[segment()]
         self.run_ocr(segs,lambda frames:[[] for _ in frames])
         self.assertEqual(segs[0].ocr_mask_status,'no_caption_evidence')
+    def test_unmatched_caption_without_band_fails_closed(self):
+        def unmatched(frames):
+            return [[([[100, 100], [600, 100], [600, 150], [100, 150]], '完全不同字幕', .95)]
+                    for _ in frames]
+        with self.assertRaises(geo.OCRGeometryError):
+            self.run_ocr([segment()], unmatched)
     def test_all_decode_failures_not_silent_success(self):
         with self.assertRaisesRegex(RuntimeError, 'decode'):
             self.run_ocr([segment()],lambda frames:[[] for _ in frames],capture_args={'readable':False})
@@ -249,6 +282,37 @@ class PipelineTests(unittest.TestCase):
                 self.run_ocr([segment(),segment(2)],recognize,geometry_report_path=str(report))
             counts=json.loads(report.read_text(encoding='utf-8'))['geometry']['counts']
             self.assertEqual(counts['unresolved'],1)
+    def test_mostly_subtitle_free_video_relaxes_unsampled_cue_without_mask(self):
+        segs=[segment(i) for i in range(1,5)]
+        unsampled=segment(5)
+        unsampled.end=unsampled.start
+        segs.append(unsampled)
+        with tempfile.TemporaryDirectory() as tmp:
+            report=Path(tmp)/'audit.json'
+            output=Path(tmp)/'safe.ass'
+            self.run_ocr(segs,lambda frames:[[] for _ in frames],geometry_report_path=str(report))
+            self.assertTrue(all(s.ocr_mask_status=='no_caption_evidence' for s in segs))
+            self.assertTrue(all(s.best_block is None and not s.tracking_blocks for s in segs))
+            relaxation=json.loads(report.read_text(encoding='utf-8'))['geometry']['subtitle_free_relaxation']
+            self.assertEqual(relaxation['reason'],'at_least_80_percent_no_caption_evidence_and_no_unresolved_cjk')
+            self.assertEqual(relaxation['converted_indices'],[5])
+            ass.generate_ass_file(segs,[],output)
+            self.assertIn(segs[0].content,output.read_text(encoding='utf-8-sig'))
+    def test_mostly_subtitle_free_video_with_real_cjk_still_fails_closed(self):
+        def recognize(frames):
+            results=[[] for _ in frames]
+            results[-1]=[([[100,1152],[600,1152],[600,1240],[100,1240]],'完全不同字幕',.95)]
+            return results
+        segs=[segment(i) for i in range(1,6)]
+        with tempfile.TemporaryDirectory() as tmp:
+            report=Path(tmp)/'audit.json'
+            with self.assertRaises(geo.OCRGeometryError):
+                self.run_ocr(segs,recognize,geometry_report_path=str(report))
+            geometry=json.loads(report.read_text(encoding='utf-8'))['geometry']
+            self.assertEqual(geometry['counts']['no_caption_evidence'],4)
+            self.assertEqual(geometry['counts']['unresolved'],1)
+            self.assertNotIn('subtitle_free_relaxation',geometry)
+            self.assertEqual(segs[-1].ocr_mask_status,'unresolved')
     def test_gpu_failure_propagated(self):
         with self.assertRaisesRegex(RuntimeError,'GPU unavailable'):
             self.run_ocr([segment()],lambda _:(_ for _ in ()).throw(RuntimeError('GPU unavailable')))

@@ -2,7 +2,6 @@
 """Unit & Integration tests for Phase B: Voice Preview Service."""
 
 import asyncio
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -13,8 +12,6 @@ if str(backend_dir) not in sys.path:
 
 from voice_preview_service import (
     SAMPLE_TEXTS,
-    clean_cache,
-    get_preview_audio_path,
     get_voice_catalog,
     synthesize_voice_preview,
 )

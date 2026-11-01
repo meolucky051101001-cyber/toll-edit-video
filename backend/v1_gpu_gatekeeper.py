@@ -11,10 +11,8 @@ from __future__ import annotations
 
 import contextvars
 import gc
-import json
 import logging
 import os
-import sys
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager

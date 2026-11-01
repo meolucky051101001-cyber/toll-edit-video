@@ -35,7 +35,7 @@ def get_scenario_multivoice() -> List[Dict[str, Any]]:
                     "component": "VoiceSelectorCard",
                     "selectedVoice": { "$bind": "/voice/male_id" },
                     "options": [
-                        {"id": "rvc-chimai", "name": "Giọng Chí Mai (RVC Trầm Ấm)", "type": "rvc", "recommended": True},
+                        {"id": "capcut-BV075_streaming", "name": "CapCut Thanh Niên Tự Tin", "type": "capcut", "recommended": True},
                         {"id": "edge-nam", "name": "Nam Thần (Edge TTS)", "type": "edge", "recommended": False},
                     ],
                     "speed": 1.0,
@@ -47,7 +47,7 @@ def get_scenario_multivoice() -> List[Dict[str, Any]]:
                     "selectedVoice": { "$bind": "/voice/female_id" },
                     "options": [
                         {"id": "edge-hoaimy", "name": "Hoài My (Edge TTS Nữ Tự Nhiên)", "type": "edge", "recommended": True},
-                        {"id": "rvc-nu-tre", "name": "Nữ Dễ Thương (RVC Clone)", "type": "rvc", "recommended": False},
+                        {"id": "capcut-BV562_streaming", "name": "CapCut Mai", "type": "capcut", "recommended": False},
                     ],
                     "speed": 1.0,
                     "pitch": 0
@@ -91,7 +91,7 @@ def get_scenario_multivoice() -> List[Dict[str, Any]]:
             surfaceId=surface_id,
             path="/voice",
             value={
-                "male_id": "rvc-chimai",
+                "male_id": "capcut-BV075_streaming",
                 "female_id": "edge-hoaimy"
             }
         )).to_dict()

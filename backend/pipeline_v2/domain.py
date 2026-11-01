@@ -9,14 +9,13 @@ This module establishes three independent, stable entities with clear provenance
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 logger = logging.getLogger("pipeline_v2.domain")
 

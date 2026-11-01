@@ -1,5 +1,6 @@
 import json
 import asyncio
+import os
 import sys
 import tempfile
 import time
@@ -58,6 +59,34 @@ class TestDashboardHardening(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertIn("X-Local-Control-Token", response.json()["detail"])
 
+    def test_script_route_requires_token(self):
+        unauth_client = TestClient(main.app)
+        response = unauth_client.post("/api/script/preview-tts", json={})
+        self.assertEqual(response.status_code, 403)
+        authorized = self.client.post("/api/script/preview-tts", json={})
+        self.assertEqual(authorized.status_code, 422)
+
+    def test_thumbnail_route_requires_token(self):
+        unauth_client = TestClient(main.app)
+        response = unauth_client.post(
+            "/api/workflow/thumbnail/capture", json={"stem": "sample"}
+        )
+        self.assertEqual(response.status_code, 403)
+        authorized = self.client.post(
+            "/api/workflow/thumbnail/capture", json={"stem": ""}
+        )
+        self.assertEqual(authorized.status_code, 400)
+
+    def test_auth_token_endpoint_removed(self):
+        response = TestClient(main.app).get("/api/auth-token")
+        self.assertEqual(response.status_code, 404)
+
+    def test_script_studio_page_receives_control_token(self):
+        response = TestClient(main.app).get("/kich-ban")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(main.LOCAL_TOKEN, response.text)
+        self.assertNotIn("__REPLACE_TOKEN__", response.text)
+
     def tearDown(self):
         self.input_patch.stop()
         self.output_patch.stop()
@@ -92,6 +121,24 @@ class TestDashboardHardening(unittest.TestCase):
         with self.assertRaises(job_tracker.JobAlreadyRunningError):
             job_tracker.start_batch(1)
 
+    def test_release_retries_transient_permission_error(self):
+        job_tracker.start_batch(1)
+        target = job_tracker.BATCH_LOCK_FILE
+        real_unlink = Path.unlink
+        calls = []
+
+        def flaky_unlink(self, *args, **kwargs):
+            if self == target:
+                calls.append(1)
+                if len(calls) == 1:
+                    raise PermissionError(13, "busy")
+            return real_unlink(self, *args, **kwargs)
+
+        with patch.object(Path, "unlink", flaky_unlink):
+            job_tracker.finish_batch()
+        self.assertFalse(target.exists())
+        self.assertEqual(len(calls), 2)
+
     def test_mark_stopped_releases_batch_lock(self):
         job_tracker.start_batch(1)
         self.assertTrue(job_tracker.BATCH_LOCK_FILE.exists())
@@ -106,6 +153,18 @@ class TestDashboardHardening(unittest.TestCase):
             "/api/open-folder", data={"folder": "not-allowed"}
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_input_folder_rejects_downloader_save_dir(self):
+        download_dir = self.root / "vid_chua_edit"
+        download_dir.mkdir()
+        with patch.dict(os.environ, {"SAVE_DIRECTORY": str(download_dir)}):
+            response = self.client.post(
+                "/api/input-folder",
+                json={"path": str(download_dir)},
+                headers={"X-Dashboard-Input": "1"},
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("chỉ tải", response.json()["detail"])
 
     def test_open_folder_uses_windows_shell(self):
         with patch.object(main.os, "startfile") as launch:
@@ -173,6 +232,55 @@ class TestDashboardHardening(unittest.TestCase):
             str(self.input_dir), str(self.output_dir), job_id=job_id))
         self.assertFalse(job_tracker.BATCH_LOCK_FILE.exists())
         self.assertFalse(job_tracker.get_status()["active"])
+
+
+class TestDownloaderFolderGuard(unittest.TestCase):
+    def test_saved_input_dir_skips_downloader_folder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            download_dir = root / "vid_chua_edit"
+            fallback_dir = root / "phoi"
+            download_dir.mkdir()
+            fallback_dir.mkdir()
+            (root / "dashboard_input.json").write_text(
+                json.dumps({"path": str(download_dir)}), encoding="utf-8"
+            )
+            env = {
+                "SAVE_DIRECTORY": str(download_dir),
+                "AUTODUB_INPUT_DIR": str(fallback_dir),
+            }
+            with patch.object(main, "WORKSPACE", str(root)), patch.dict(os.environ, env):
+                self.assertEqual(main.get_input_dir(), fallback_dir)
+
+    def test_batch_refuses_downloader_folder(self):
+        import batch_processor
+
+        with tempfile.TemporaryDirectory() as temporary:
+            download_dir = Path(temporary) / "vid_chua_edit"
+            output_dir = Path(temporary) / "out"
+            download_dir.mkdir()
+            output_dir.mkdir()
+            (download_dir / "clip.mp4").write_bytes(b"input")
+            messages = []
+
+            async def collect(message):
+                messages.append(message)
+
+            with patch.dict(os.environ, {"SAVE_DIRECTORY": str(download_dir)}):
+                asyncio.run(batch_processor.process_batch_folder(
+                    str(download_dir), str(output_dir), collect))
+            self.assertTrue(any("chỉ tải" in message for message in messages))
+            self.assertTrue((download_dir / "clip.mp4").exists())
+
+    def test_downloader_folder_helper_matches_default_and_env(self):
+        from config.paths import is_downloader_save_dir
+
+        with tempfile.TemporaryDirectory() as temporary:
+            custom = Path(temporary).resolve()
+            with patch.dict(os.environ, {"SAVE_DIRECTORY": str(custom)}):
+                self.assertTrue(is_downloader_save_dir(custom))
+        self.assertTrue(is_downloader_save_dir(r"D:\vid chưa edit"))
+        self.assertFalse(is_downloader_save_dir(tempfile.gettempdir()))
 
 
 if __name__ == "__main__":

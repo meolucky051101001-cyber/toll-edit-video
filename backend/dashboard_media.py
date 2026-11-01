@@ -12,7 +12,6 @@ from pathlib import Path
 
 _lock = threading.RLock()
 _cache = OrderedDict()
-_delivery_cache = OrderedDict()
 _pending = {}
 _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dashboard-media")
 
@@ -90,84 +89,6 @@ def media_status(path, defer=False):
         while len(_cache) > 2048:
             _cache.popitem(last=False)
     return dict(result)
-
-
-def _verify_dashboard_delivery(path, expected_source_path=None):
-    """Use the existing QC/manifest gate plus cached media verification, never fail open."""
-    from pipeline_v2.delivery_verification import verify_delivered_product
-    result = verify_delivered_product(path, expected_source_path=expected_source_path,
-                                      check_sha256=False, verify_media_streams=False)
-    if not result.is_valid:
-        return {"valid": False, "pending": False, "reason": result.reason}
-    if expected_source_path:
-        source = result.manifest.metadata.get("source_path")
-        if not source or os.path.normcase(str(Path(source).resolve())) != os.path.normcase(str(Path(expected_source_path).resolve())):
-            return {"valid": False, "pending": False, "reason": "Manifest thuộc video nguồn khác; chưa đối chiếu SHA-256."}
-        try:
-            manifest_path = Path(path)
-            if manifest_path.is_dir():
-                manifest_path = manifest_path / "job_manifest.json"
-                if not manifest_path.exists():
-                    manifest_path = Path(path) / "pipeline_v2" / "job_manifest.json"
-            if Path(expected_source_path).stat().st_mtime_ns > manifest_path.stat().st_mtime_ns:
-                return {"valid": False, "pending": False, "reason": "Video nguồn đã thay đổi sau lần xử lý được ghi nhận."}
-        except OSError:
-            return {"valid": False, "pending": False, "reason": "Không đọc được video nguồn hoặc manifest."}
-    checked_media = False
-    for item in result.published_outputs:
-        p = Path(item["path"])
-        if p.suffix.lower() not in {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}:
-            continue
-        checked_media = True
-        check = media_status(p)
-        if check["status"] != "valid":
-            return {"valid": False, "pending": check["status"] == "unverified", "reason": check["reason"]}
-    if not checked_media:
-        return {"valid": False, "pending": False, "reason": "Không có video thành phẩm trong danh sách xuất bản."}
-    return {"valid": True, "pending": False, "reason": result.reason}
-
-
-def _file_stamp(path):
-    try:
-        s = Path(path).stat()
-        return (s.st_size, s.st_mtime_ns)
-    except OSError:
-        return None
-
-
-def verify_dashboard_delivery(path, expected_source_path=None):
-    manifest = Path(path)
-    if manifest.is_dir():
-        manifest = manifest / "job_manifest.json"
-        if not manifest.is_file():
-            manifest = Path(path) / "pipeline_v2" / "job_manifest.json"
-    key = (os.path.normcase(str(manifest.resolve())), str(expected_source_path or ""))
-    with _lock:
-        entry = _delivery_cache.get(key)
-        if entry and time.monotonic() - entry[0] < (1 if entry[3].get("pending") else 10):
-            if tuple(_file_stamp(p) for p in entry[1]) == entry[2]:
-                _delivery_cache.move_to_end(key)
-                return dict(entry[3])
-    paths = [manifest, manifest.parent / "artifacts" / "qc" / "qc_report.json"]
-    if expected_source_path:
-        paths.append(Path(expected_source_path))
-    try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-        meta = data.get("stages", {}).get("deliver", {}).get("metadata", {})
-        for item in (meta.get("published_outputs") or [meta.get("published_output")]):
-            if isinstance(item, dict) and item.get("path"):
-                paths.append(Path(item["path"]))
-    except (OSError, ValueError, TypeError, AttributeError):
-        pass
-    before = tuple(_file_stamp(p) for p in paths)
-    result = _verify_dashboard_delivery(path, expected_source_path)
-    # A concurrent publish must not stamp an earlier result with newer file metadata.
-    if before == tuple(_file_stamp(p) for p in paths):
-        with _lock:
-            _delivery_cache[key] = (time.monotonic(), paths, before, dict(result))
-            while len(_delivery_cache) > 1024:
-                _delivery_cache.popitem(last=False)
-    return result
 
 
 def paginate_listing(data, limit=None, offset=0, search="", status="all"):

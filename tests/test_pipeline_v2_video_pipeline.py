@@ -140,39 +140,15 @@ class FakeVideoPipelineRunner(VideoPipelineRunner):
 
 
 class VideoPipelineEndToEndTests(unittest.IsolatedAsyncioTestCase):
-    async def test_rvc_index_and_adaptive_hint_participate_in_cache_identity(self):
+    async def test_adaptive_hint_participates_in_cache_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.mp4"
             source.write_bytes(b"source-video")
-            model = root / "voice.pth"
-            index = root / "voice.index"
-            model.write_bytes(b"model" * 400)
-            index.write_bytes(b"index-a" * 200)
             settings = PipelineSettings(
                 mode=PipelineMode.V2,
                 enable_stage_cache=True,
             )
-            request = VideoPipelineRequest(
-                video_path=source,
-                job_directory=root / "job",
-                output_path=root / "delivered.mp4",
-                settings=settings,
-                voice_source="rvc",
-                voice_param=str(model),
-                rvc_model_path=model,
-                clean_audio_hint=True,
-            )
-            first = VideoPipelineRunner(request)._load_or_create_manifest()
-            first_index_hash = first.fingerprints.model_sha256["rvc_index"]
-
-            index.write_bytes(b"index-b" * 200)
-            second = VideoPipelineRunner(request)._load_or_create_manifest()
-            self.assertNotEqual(
-                first_index_hash,
-                second.fingerprints.model_sha256["rvc_index"],
-            )
-
             changed_hint = VideoPipelineRequest(
                 video_path=source,
                 job_directory=root / "hint-job",
@@ -650,7 +626,7 @@ class VideoPipelineEndToEndTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(runner.manifest.metadata["progress_warnings"]), 50)
             self.assertEqual(runner.manifest.metadata["progress_warning_count"], 75)
 
-    async def test_runner_rejects_destructive_output_and_invalid_rvc(self):
+    async def test_runner_rejects_destructive_output_and_invalid_provider_inputs(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.mp4"
@@ -662,18 +638,6 @@ class VideoPipelineEndToEndTests(unittest.IsolatedAsyncioTestCase):
                         job_directory=root / "job-a",
                         output_path=source,
                         settings=PipelineSettings(mode=PipelineMode.V2),
-                    )
-                )
-            with self.assertRaisesRegex(ValueError, "real .pth"):
-                VideoPipelineRunner(
-                    VideoPipelineRequest(
-                        video_path=source,
-                        job_directory=root / "job-b",
-                        output_path=root / "out.mp4",
-                        settings=PipelineSettings(mode=PipelineMode.V2),
-                        voice_source="rvc",
-                        voice_param=str(root / "missing.pth"),
-                        rvc_model_path=root / "missing.pth",
                     )
                 )
             with self.assertRaisesRegex(ValueError, "FPT voice requires"):

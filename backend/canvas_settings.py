@@ -3,10 +3,10 @@ Quản lý cấu hình tỷ lệ khung hình và background chống re-up cho vi
 Được áp dụng khi render hàng loạt để né các thuật toán phát hiện bản quyền trên TikTok, Facebook, YouTube.
 """
 import json
-import os
 import logging
 from pathlib import Path
 from typing import Dict, Any, List
+from urllib.parse import urlencode
 
 try:
     from backend.config.paths import AppPaths
@@ -29,6 +29,10 @@ SETTINGS_FILE = _resolve_settings_file()
 MOTION_BG_DIR = WORKSPACE / "motion_backgrounds"
 IMAGE_BG_DIR = WORKSPACE / "background_images"
 
+
+def _stream_url(path: str) -> str:
+    return "/api/workflow/stream-file?" + urlencode({"path": path})
+
 DEFAULT_CANVAS_SETTINGS: Dict[str, Any] = {
     "anti_reup_enabled": True,   # Bật chế độ chống re-up an toàn theo yêu cầu
     "aspect_ratio": "9:16",      # "original", "9:16", "16:9", "1:1"
@@ -38,10 +42,10 @@ DEFAULT_CANVAS_SETTINGS: Dict[str, Any] = {
     "bg_image_file": "tia_sang_vang_ngoi_sao.jpg", # Tên tệp ảnh nền vàng tia sáng ngôi sao
     "auto_crop_black_bars": True, # Tự động phát hiện và cắt bỏ 2 viền đen trên/dưới của video phôi
     "crop_padding": 0,           # Bù lề an toàn viền đen (-30px đến +30px, 0 là chuẩn xác, <0 mở rộng video, >0 gọt nhẹ)
-    "show_safe_guides": True,    # Hiển thị thước đo an toàn viền đen trên Canvas
+    "show_safe_guides": False,    # Hiển thị thước đo an toàn viền đen trên Canvas
     "bg_motion_file": "song_bien.mp4", # Tên video nền chuyển động sóng biển
     "motion_bg_enabled": False,  # Bật/tắt background sóng biển tùy ý (Mặc định: TẮT để dùng nền vàng của người dùng)
-    "protect_top_thumb": True,   # Tự động phát hiện và bảo vệ thẻ chữ thumb trắng ở phía trên
+    "protect_top_thumb": False,   # Tự động phát hiện và bảo vệ thẻ chữ thumb trắng ở phía trên
     "video_scale": 1.0,          # 1.0 = KHỚP 100% CHIỀU NGANG, SÁT 2 BÊN MÉP (KHÔNG THU NHỎ THƯỚC PHIM)
     "border_radius": 0,          # Bo góc video chính: 0px để sát mép vuông vắn, không bo góc cắt xén video
     "drop_shadow": False,        # Đổ bóng viền video (tắt khi 100% full width để sát mép)
@@ -135,7 +139,7 @@ def get_available_motion_backgrounds() -> List[Dict[str, Any]]:
                 "icon": meta["icon"],
                 "category": meta["category"],
                 "path": clean_path,
-                "url": f"/api/workflow/stream-file?path={clean_path}"
+                "url": _stream_url(clean_path)
             })
 
     # Thêm các video mp4 khác do người dùng thêm vào thư mục motion_backgrounds
@@ -151,7 +155,7 @@ def get_available_motion_backgrounds() -> List[Dict[str, Any]]:
                 "icon": "🎬",
                 "category": "custom",
                 "path": clean_path,
-                "url": f"/api/workflow/stream-file?path={clean_path}"
+                "url": _stream_url(clean_path)
             })
 
     return results
@@ -299,7 +303,7 @@ def get_available_image_backgrounds() -> List[Dict[str, Any]]:
                 "icon": meta["icon"],
                 "category": meta["category"],
                 "path": clean_path,
-                "url": f"/api/workflow/stream-file?path={clean_path}"
+                "url": _stream_url(clean_path)
             })
 
     # Thêm các ảnh khác do người dùng tải vào thư mục background_images
@@ -315,7 +319,7 @@ def get_available_image_backgrounds() -> List[Dict[str, Any]]:
                 "icon": "🖼️",
                 "category": "custom",
                 "path": clean_path,
-                "url": f"/api/workflow/stream-file?path={clean_path}"
+                "url": _stream_url(clean_path)
             })
 
     return results

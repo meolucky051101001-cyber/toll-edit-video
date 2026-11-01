@@ -11,12 +11,13 @@ import sys
 import time
 import asyncio
 import logging
+from v1_integrity_errors import FrozenConfigError
 import gc
 import shutil
 import uuid
 import hashlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Optional
 import json
 
 # Cấu hình UTF-8 cho console Windows
@@ -34,9 +35,14 @@ from environment import load_environment
 
 load_environment(Path(__file__).resolve().parent)
 try:
-    from config.paths import AppPaths
+    from config.paths import AppPaths, is_downloader_save_dir
 except ImportError:
-    from backend.config.paths import AppPaths
+    from backend.config.paths import AppPaths, is_downloader_save_dir
+
+try:
+    from v1_feature_flags import migrate_legacy_asr_model
+except ImportError:
+    from backend.v1_feature_flags import migrate_legacy_asr_model
 
 PATHS = AppPaths.from_environment(Path(BASE_DIR).parent)
 
@@ -67,14 +73,13 @@ logger.setLevel(logging.INFO)
 try:
     from social_downloader import SensitiveUrlFilter
     logger.addFilter(SensitiveUrlFilter())
-except Exception:
-    pass
+except Exception as _phase6_exc:
+    logger.debug('Suppressed error in batch_processor.module (logger.addFilter): %s', type(_phase6_exc).__name__, exc_info=False)
 
 # Import các module AI
 from ai.transcription import extract_subtitles_whisper, save_srt
 from ai.translation import translate_subtitles
 from ai.v1_voice_isolated import generate_dubbing_audio_isolated
-from ai.voice_cloning import rvc_runtime_available
 from video_utils import extract_audio_from_video, mix_audio_pydub, process_video, separate_vocals_demucs
 from ass_utils import generate_ass_file
 from ocr_utils import perform_video_ocr, release_ocr_reader
@@ -181,8 +186,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         if progress_callback:
             try:
                 await progress_callback(msg)
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in batch_processor.notify (progress_callback): %s', type(_phase6_exc).__name__, exc_info=False)
 
     from pipeline_v2.config import PipelineMode, PipelineSettings
     from pipeline_v2.delivery_verification import verify_delivered_product
@@ -192,7 +197,6 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             from pipeline_v2.video_pipeline import (
                 VideoPipelineRequest,
                 VideoPipelineRunner,
-                discover_rvc_model,
             )
 
             async def v2_progress(stage: str, state: str):
@@ -212,10 +216,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 if not existing_ver.is_valid:
                     final_dest = os.path.join(output_dir, f"Dubbed_{base_name}_{source_hash_short[:6]}.mp4")
 
-            rvc_model = discover_rvc_model(Path(WORKSPACE))
             from voice_selection import resolve_voice
-            from dataclasses import replace
-            selected_source, selected_param, selected_label = resolve_voice("rvc" if rvc_model else "edge", rvc_model)
+            selected_source, selected_param, selected_label = resolve_voice("capcut", "BV562_streaming")
             request = VideoPipelineRequest(
                 video_path=Path(video_path),
                 job_directory=Path(out_dir),
@@ -224,7 +226,6 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 api_key=GEMINI_API_KEY,
                 voice_source=selected_source,
                 voice_param=selected_param,
-                rvc_model_path=rvc_model,
                 progress=v2_progress,
             )
             await VideoPipelineRunner(request).run()
@@ -333,6 +334,14 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             }
         )
         frozen_eff = frozen_job_entry.get("effective_config", {}) if frozen_job_entry else {}
+        from v1_job_policy import (
+            looks_like_bgm_hallucination,
+            resolve_visual_sub_to_speech,
+            visual_ocr_transcript_usable,
+        )
+        visual_sub_to_speech = resolve_visual_sub_to_speech(frozen_eff, WORKSPACE)
+        asr_was_empty = False
+        visual_geometry = None
 
         await pause_checkpoint()
         _raise_if_stopped()
@@ -344,6 +353,12 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 file_name, "Không thể trích xuất âm thanh", fatal=False
             )
             return False
+        source_duration = 0.0
+        try:
+            import soundfile as sf
+            source_duration = float(sf.info(original_audio).duration)
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in batch_processor.process_single_local_video (float): %s', type(_phase6_exc).__name__, exc_info=False)
 
         await pause_checkpoint()
         _raise_if_stopped()
@@ -357,10 +372,10 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
 
         await pause_checkpoint()
         _raise_if_stopped()
-        batch_asr_model = str(frozen_eff.get("asr_model", "whisper_turbo"))
-        if "qwen" in batch_asr_model.lower():
-            batch_asr_display = "Qwen3-ASR 0.6B (GPU CUDA)"
-        elif batch_asr_model.lower() in ("whisper_sensevoice", "whisper_sensevoice_hybrid", "hybrid"):
+        batch_asr_model = migrate_legacy_asr_model(
+            str(frozen_eff.get("asr_model", "whisper_turbo")), "batch processor"
+        )
+        if batch_asr_model.lower() in ("whisper_sensevoice", "whisper_sensevoice_hybrid", "hybrid"):
             batch_asr_display = "Hybrid: Faster-Whisper Turbo + SenseVoice-Small (CTC 60ms)"
         elif "sensevoice" in batch_asr_model.lower():
             batch_asr_display = "SenseVoice-Small (ONNX INT8 Siêu Tốc)"
@@ -375,6 +390,48 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 lambda: asyncio.to_thread(extract_subtitles_whisper, vocals_audio, srt_original, original_audio_path=original_audio, asr_model=batch_asr_model),
                 srt_original)
         if not srt_segments:
+            asr_was_empty = True
+        elif (visual_sub_to_speech and source_duration > 0
+              and looks_like_bgm_hallucination(srt_segments, source_duration)):
+            logger.info(
+                "Visual mode: bỏ %d câu ASR nghi ảo giác nhạc nền (video không lời thoại)",
+                len(srt_segments),
+            )
+            srt_segments = []
+            asr_was_empty = True
+
+        if visual_sub_to_speech:
+            await pause_checkpoint()
+            _raise_if_stopped()
+            await notify("👀 Đang quét phụ đề tiếng Trung trên hình (Visual OCR-to-TTS)...")
+            job_tracker.update_step(3.5, "Bước 3.5/6: Quét phụ đề trên hình (Visual OCR-to-TTS)...", percent=55)
+            try:
+                async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=900.0):
+                    visual_segments, vid_w, vid_h, main_y_pct = await asyncio.to_thread(
+                        perform_video_ocr, video_path, target_lang="vi", sample_rate=1.0,
+                        api_key=GEMINI_API_KEY, srt_segments=[], visual_sub_to_speech=True,
+                        _source_duration=source_duration,
+                    )
+            finally:
+                release_ocr_reader()
+            if visual_ocr_transcript_usable(visual_segments, source_duration):
+                srt_segments = visual_segments
+                for idx, seg in enumerate(srt_segments, start=1):
+                    seg.index = idx
+                await asyncio.to_thread(save_srt, srt_segments, srt_original)
+                visual_geometry = (vid_w, vid_h, main_y_pct)
+            elif asr_was_empty:
+                await notify("⚠️ Không tìm thấy phụ đề động trên hình để lồng tiếng!")
+                job_tracker.set_error(
+                    file_name, "Không tìm thấy phụ đề động trên hình", fatal=False
+                )
+                return False
+            else:
+                logger.info(
+                    "Visual OCR-to-TTS: không đủ phụ đề trên hình, giữ ASR %d câu",
+                    len(srt_segments),
+                )
+        elif asr_was_empty:
             await notify("⚠️ Video không có giọng nói để dịch!")
             job_tracker.set_error(
                 file_name, "Video không có giọng nói để dịch", fatal=False
@@ -383,18 +440,25 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
 
         await pause_checkpoint()
         _raise_if_stopped()
-        await notify("👀 Bước 3.5/6: Đang quét vị trí phụ đề gốc...")
-        job_tracker.update_step(3.5, "Bước 3.5/6: Quét vị trí phụ đề gốc (PP-OCRv6)...", percent=55)
-        try:
-            async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=900.0):
-                _, vid_w, vid_h, main_y_pct = await asyncio.to_thread(
-                    perform_video_ocr, video_path, target_lang="vi", sample_rate=1.0, api_key=GEMINI_API_KEY, srt_segments=srt_segments
-                )
-        except Exception as e:
-            logger.warning(f"OCR Warning: {e}")
-            vid_w, vid_h, main_y_pct = 1080, 1920, 0.88
-        finally:
-            release_ocr_reader()
+        if visual_geometry is not None:
+            vid_w, vid_h, main_y_pct = visual_geometry
+            await notify("👀 Bước 3.5/6: Đã dùng kết quả quét phụ đề từ bước 3.")
+        else:
+            await notify("👀 Bước 3.5/6: Đang quét vị trí phụ đề gốc...")
+            job_tracker.update_step(3.5, "Bước 3.5/6: Quét vị trí phụ đề gốc (PP-OCRv6)...", percent=55)
+            try:
+                async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=900.0):
+                    _, vid_w, vid_h, main_y_pct = await asyncio.to_thread(
+                        perform_video_ocr, video_path, target_lang="vi", sample_rate=1.0,
+                        api_key=GEMINI_API_KEY, srt_segments=srt_segments,
+                        visual_sub_to_speech=visual_sub_to_speech,
+                        _source_duration=source_duration,
+                    )
+            except Exception as e:
+                logger.warning(f"OCR Warning: {e}")
+                vid_w, vid_h, main_y_pct = 1080, 1920, 0.88
+            finally:
+                release_ocr_reader()
 
         # XỬ LÝ THỜI GIAN CHUẨN KHI LÀM SUB & LỒNG TIẾNG (Chống lệch giọng)
         import datetime
@@ -430,8 +494,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             job_tracker.record_active_translation_model(used_model)
             logger.info(f"Hoàn tất Bước 5/8 dịch phụ đề ({len(translated_segments)} câu) bằng model: {used_model}")
             await notify(f"🌐 Bước 5/8: Đã dịch xong {len(translated_segments)} câu bằng model {used_model}")
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in batch_processor.process_single_local_video (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
         if not frozen_job_entry:
             try:
@@ -439,8 +503,9 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 frozen_job_entry = get_frozen_config(file_name, workspace_path=WORKSPACE)
                 if frozen_job_entry:
                     frozen_eff = frozen_job_entry.get("effective_config", {})
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in batch_processor.process_single_local_video (get_frozen_config): %s', type(_phase6_exc).__name__, exc_info=False)
+                raise FrozenConfigError("Không xác minh được snapshot giọng đọc; chưa tạo âm thanh.") from _phase6_exc
 
         sources = frozen_job_entry.get("sources", {}) if frozen_job_entry else {}
         is_user_chosen = (
@@ -491,6 +556,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 video_path=video_path,
                 voice_mode=batch_voice_mode,
                 workspace=WORKSPACE,
+                visual_sub_to_speech=visual_sub_to_speech,
             )
             v_source = voice_lock_info["voice_source"]
             v_param = voice_lock_info["voice_param"]
@@ -504,8 +570,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         try:
             from pydub import AudioSegment
             vid_duration = len(AudioSegment.from_file(original_audio)) / 1000.0
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in batch_processor.process_single_local_video (len): %s', type(_phase6_exc).__name__, exc_info=False)
 
         seg_voices = voice_lock_info.get("segment_voices") if 'voice_lock_info' in locals() and voice_lock_info else None
         dubbing_audio_files = await generate_dubbing_audio_isolated(
@@ -524,9 +590,11 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         v1_bgm_vol = frozen_eff.get("bgm_volume_db", -2.0)
         v1_dub_vol = frozen_eff.get("dubbing_volume_db", 1.0)
         v1_duck_mode = frozen_eff.get("ducking_mode", "soft")
+        # Music-only source: no_vocals would strip the only original audio.
+        bgm_audio = original_audio if (visual_sub_to_speech and asr_was_empty) else no_vocals_audio
         await asyncio.to_thread(
             mix_audio_pydub,
-            no_vocals_audio,
+            bgm_audio,
             dubbing_audio_files,
             mixed_audio,
             original_volume_db=v1_bgm_vol,
@@ -564,6 +632,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
             "voice_id": v_id,
             "voice_source": v_source,
             "voice_mode": voice_lock_info.get("voice_mode", batch_voice_mode),
+            "visual_sub_to_speech": visual_sub_to_speech,
             "pipeline_version": "v1_codex_voice_snapshot_2.0",
             "input_sha256": fingerprint(video_path),
             "output_sha256": fingerprint(final_dest),
@@ -623,8 +692,8 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
                 torch.cuda.empty_cache()
                 if hasattr(torch.cuda, "ipc_collect"):
                     torch.cuda.ipc_collect()
-        except:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in batch_processor.process_single_local_video (torch.cuda.is_available): %s', type(_phase6_exc).__name__, exc_info=False)
 
 async def process_batch_folder(
     input_dir: str = DEFAULT_INPUT_DIR,
@@ -651,8 +720,8 @@ async def process_batch_folder(
             worker.cancel()
         try:
             await asyncio.wait({worker}, timeout=2.0)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in batch_processor.process_batch_folder (asyncio.wait): %s', type(_phase6_exc).__name__, exc_info=False)
         raise
     except job_tracker.JobAlreadyRunningError:
         raise
@@ -675,6 +744,15 @@ async def _process_batch_folder(
     """
     from batch_control import stop_check
     stop_check.set(_stop_requested)
+    if is_downloader_save_dir(input_dir):
+        msg = (
+            f"⛔ Thư mục `{input_dir}` là nơi bot tải video lưu về (chỉ tải, không edit). "
+            "Hãy chọn thư mục nguồn khác."
+        )
+        logger.warning(msg)
+        if progress_callback:
+            await progress_callback(msg)
+        return
     if not os.path.exists(input_dir):
         os.makedirs(input_dir, exist_ok=True)
         msg = f"📁 Đã tạo thư mục đầu vào: `{input_dir}`. Bạn hãy thả các video cần edit vào đây nhé!"
@@ -734,8 +812,8 @@ async def _process_batch_folder(
                         "target_archive": dest_archive,
                         "marked_at": time.time(),
                     }, f, indent=2)
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in batch_processor._safe_archive_source (os.path.join): %s', type(_phase6_exc).__name__, exc_info=False)
         return False
 
     from pipeline_v2.artifact_store import hash_file
@@ -756,10 +834,10 @@ async def _process_batch_folder(
                     if _safe_archive_source(pending_file, p_stem, os.path.basename(pending_file), p_job_dir):
                         try:
                             os.remove(marker)
-                        except Exception:
-                            pass
-        except Exception:
-            pass
+                        except Exception as _phase6_exc:
+                            logger.warning('Suppressed error in batch_processor._process_batch_folder (os.remove): %s', type(_phase6_exc).__name__, exc_info=False)
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in batch_processor._process_batch_folder (hash_file): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # Làm mới danh sách video cần xử lý sau khi hoàn tất các pending archive
     video_files = [
@@ -819,8 +897,8 @@ async def _process_batch_folder(
                 await progress_callback(skip_msg)
             try:
                 _archive_source(vpath, processed_archive)
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in batch_processor._process_batch_folder (_archive_source): %s', type(_phase6_exc).__name__, exc_info=False)
             continue
 
         if os.path.exists(expected_render):

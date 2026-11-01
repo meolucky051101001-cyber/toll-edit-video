@@ -3,8 +3,8 @@ import sys
 import subprocess
 from batch_control import run as run_batch_subprocess
 import time
-import uuid
 import logging
+from v1_integrity_errors import FrozenConfigError
 try:
     from .v1_stage_metrics import stage
 except ImportError:
@@ -13,10 +13,10 @@ logger = logging.getLogger(__name__)
 import io
 if isinstance(sys.stdout, io.TextIOWrapper):
     try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-    except: pass
+    except Exception as _phase6_exc: logger.debug('Suppressed error in video_utils.module (sys.stdout.reconfigure): %s', type(_phase6_exc).__name__, exc_info=False)
 if isinstance(sys.stderr, io.TextIOWrapper):
     try: sys.stderr.reconfigure(encoding='utf-8', errors='replace')
-    except: pass
+    except Exception as _phase6_exc: logger.debug('Suppressed error in video_utils.module (sys.stderr.reconfigure): %s', type(_phase6_exc).__name__, exc_info=False)
 
 # Windows flag to hide terminal windows
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
@@ -85,8 +85,9 @@ def separate_vocals_demucs(
             frozen = get_frozen_config(input_audio_path) or get_frozen_config(output_dir)
             if frozen and "separation_mode" in frozen.get("effective_config", {}):
                 sep_mode = frozen["effective_config"]["separation_mode"]
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in video_utils.separate_vocals_demucs (get_frozen_config): %s', type(_phase6_exc).__name__, exc_info=False)
+            raise FrozenConfigError("Không xác minh được snapshot tách âm; chưa chạy job.") from _phase6_exc
 
         env_sep = os.getenv("V1_SEPARATOR_BACKEND", "").strip().lower()
         if env_sep:
@@ -101,8 +102,8 @@ def separate_vocals_demucs(
                 "model": "none",
                 "status": "bypassed",
             })
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in video_utils.separate_vocals_demucs (record_separator_info): %s', type(_phase6_exc).__name__, exc_info=False)
         return input_audio_path, input_audio_path
 
     import shared_state
@@ -115,8 +116,8 @@ def separate_vocals_demucs(
         _info = _sf.info(input_audio_path)
         if _info.duration > 0:
             total_timeout = max(total_timeout, float(_info.duration) * 2.5 + 120.0)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.warning('Suppressed error in video_utils.separate_vocals_demucs (_sf.info): %s', type(_phase6_exc).__name__, exc_info=False)
 
     policy = current_v1_model_policy()
     from v1_separator_lock import separator_gpu_lock
@@ -143,8 +144,8 @@ def separate_vocals_demucs(
                 for line in iter(pipe.readline, ''):
                     collector.append(line)
                 pipe.close()
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in video_utils._drain (iter): %s', type(_phase6_exc).__name__, exc_info=False)
 
         t_out = threading.Thread(target=_drain, args=(proc.stdout, stdout_chunks), daemon=True)
         t_err = threading.Thread(target=_drain, args=(proc.stderr, stderr_chunks), daemon=True)
@@ -159,8 +160,8 @@ def separate_vocals_demucs(
                 except Exception:
                     try:
                         proc.kill()
-                    except Exception:
-                        pass
+                    except Exception as _phase6_exc:
+                        logger.warning('Suppressed error in video_utils._run_cancellable_proc (proc.kill): %s', type(_phase6_exc).__name__, exc_info=False)
                 raise RuntimeError("Tiến trình tách âm đã bị dừng theo yêu cầu (/stop).")
 
             ret = proc.poll()
@@ -176,8 +177,8 @@ def separate_vocals_demucs(
                 except Exception:
                     try:
                         proc.kill()
-                    except Exception:
-                        pass
+                    except Exception as _phase6_exc:
+                        logger.warning('Suppressed error in video_utils._run_cancellable_proc (proc.kill): %s', type(_phase6_exc).__name__, exc_info=False)
                 raise TimeoutError(f"Tiến trình tách âm timeout sau {t_limit:.1f}s.")
 
             time.sleep(0.3)
@@ -252,11 +253,11 @@ def separate_vocals_demucs(
                                                 "bgm_path": bg_path,
                                                 "cache_hit": False,
                                             })
-                                        except Exception:
-                                            pass
+                                        except Exception as _phase6_exc:
+                                            logger.warning('Suppressed error in video_utils.separate_vocals_demucs (record_separator_info): %s', type(_phase6_exc).__name__, exc_info=False)
                                         return v_path, bg_path
-                            except json.JSONDecodeError:
-                                pass
+                            except json.JSONDecodeError as _phase6_exc:
+                                logger.warning('Suppressed error in video_utils.separate_vocals_demucs (json.loads): %s', type(_phase6_exc).__name__, exc_info=False)
                 err_detail = stderr_str.strip() or f"exit code {ret_code}"
                 if sep_mode == "roformer":
                     raise RuntimeError(f"BS-RoFormer worker thất bại: {err_detail}")
@@ -315,8 +316,8 @@ def separate_vocals_demucs(
         try:
             if os.path.isfile(old_f):
                 os.remove(old_f)
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in video_utils.separate_vocals_demucs (os.path.isfile): %s', type(_phase6_exc).__name__, exc_info=False)
 
     demucs_start_epoch = time.time()
     with separator_gpu_lock(timeout_seconds=total_timeout):
@@ -341,8 +342,8 @@ def separate_vocals_demucs(
                     "bgm_path": no_vocals_path,
                     "cache_hit": False,
                 })
-            except Exception:
-                pass
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in video_utils.separate_vocals_demucs (record_separator_info): %s', type(_phase6_exc).__name__, exc_info=False)
             return vocals_path, no_vocals_path
 
     # Fallback kiểm tra trong output_dir nhưng bắt buộc file phải tạo sau demucs_start_epoch
@@ -363,21 +364,12 @@ def separate_vocals_demucs(
                         "bgm_path": nv_p,
                         "cache_hit": False,
                     })
-                except Exception:
-                    pass
+                except Exception as _phase6_exc:
+                    logger.warning('Suppressed error in video_utils.separate_vocals_demucs (record_separator_info): %s', type(_phase6_exc).__name__, exc_info=False)
                 return v_p, nv_p
 
     raise RuntimeError(f"Demucs chạy xong nhưng không tìm thấy file output mới tại {demucs_out_dir}")
 
-def merge_audio_files_with_delay(video_path, original_audio_path, dubbing_audio_files, output_video_path, original_volume=0.1, dub_volume=1.0):
-    """
-    Ghép các file âm thanh lồng tiếng lại theo đúng mốc thời gian, trộn với âm thanh gốc đã giảm âm lượng,
-    sau đó ghép vào video đã được làm mờ/chèn sub (đầu vào là video câm hoặc video gốc tuỳ cấu hình).
-    """
-    # Create a complex filter for ffmpeg to mix all audio
-    # This is a basic implementation. A more robust way is using PyDub to generate a single mixed audio track first.
-    pass
-    
 def mix_audio_pydub(
     original_audio_path,
     dubbing_audio_files,
@@ -416,8 +408,9 @@ def mix_audio_pydub(
             frozen = get_frozen_config(output_mixed_audio_path) or get_frozen_config(original_audio_path)
             if frozen and "ducking_mode" in frozen.get("effective_config", {}):
                 ducking_mode = frozen["effective_config"]["ducking_mode"]
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in video_utils.mix_audio_pydub (get_frozen_config): %s', type(_phase6_exc).__name__, exc_info=False)
+            raise FrozenConfigError("Không xác minh được snapshot mixer; chưa hòa âm.") from _phase6_exc
 
     print(f"Mixing audio tracks using adaptive pydub (BGM={original_volume_db}dB, Dubbing={dubbing_volume_db}dB, Ducking={ducking_mode})...")
     original_popen = None
@@ -448,8 +441,8 @@ def mix_audio_pydub(
                 "bgm_volume_db": original_volume_db,
                 "dubbing_volume_db": dubbing_volume_db,
             })
-        except Exception:
-            pass
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in video_utils.mix_audio_pydub (record_mixer_info): %s', type(_phase6_exc).__name__, exc_info=False)
         return result
     except Exception as e:
         # A background-only file must never masquerade as a successful dub.
@@ -479,10 +472,10 @@ def clean_stale_temp_files(max_age_hours: float = 24.0) -> int:
                         if (now - os.path.getmtime(item_path)) > max_age_sec:
                             os.remove(item_path)
                             cleaned += 1
-                    except OSError:
-                        pass
-        except Exception:
-            pass
+                    except OSError as _phase6_exc:
+                        logger.warning('Suppressed error in video_utils.clean_stale_temp_files (os.path.getmtime): %s', type(_phase6_exc).__name__, exc_info=False)
+        except Exception as _phase6_exc:
+            logger.warning('Suppressed error in video_utils.clean_stale_temp_files (os.listdir): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # 2. Quét dọn .v1_ocr_cache trong các ổ đĩa và workspace phổ biến
     candidate_cache_dirs = [
@@ -500,10 +493,10 @@ def clean_stale_temp_files(max_age_hours: float = 24.0) -> int:
                             if (now - os.path.getmtime(item_path)) > max_age_sec:
                                 os.remove(item_path)
                                 cleaned += 1
-                        except OSError:
-                            pass
-            except Exception:
-                pass
+                        except OSError as _phase6_exc:
+                            logger.warning('Suppressed error in video_utils.clean_stale_temp_files (os.path.getmtime): %s', type(_phase6_exc).__name__, exc_info=False)
+            except Exception as _phase6_exc:
+                logger.warning('Suppressed error in video_utils.clean_stale_temp_files (os.listdir): %s', type(_phase6_exc).__name__, exc_info=False)
 
     if cleaned > 0:
         logger.info(f"[CLEANUP] Đã dọn dẹp {cleaned} tệp tạm cũ (> {max_age_hours}h).")
@@ -549,8 +542,8 @@ def process_video(
     # Tự động dọn dẹp các tệp tạm cũ trước khi xử lý
     try:
         clean_stale_temp_files(max_age_hours=24.0)
-    except Exception:
-        pass
+    except Exception as _phase6_exc:
+        logger.warning('Suppressed error in video_utils.process_video (clean_stale_temp_files): %s', type(_phase6_exc).__name__, exc_info=False)
 
     # Tạo bản copy an toàn ASCII ở thư mục temp_subs để FFmpeg filter subtitles không bị dính ký tự Unicode
     import shutil
@@ -822,4 +815,4 @@ def process_video(
     finally:
         if os.path.exists(safe_sub_path):
             try: os.remove(safe_sub_path)
-            except: pass
+            except Exception as _phase6_exc: logger.warning('Suppressed error in video_utils.process_video (os.remove): %s', type(_phase6_exc).__name__, exc_info=False)

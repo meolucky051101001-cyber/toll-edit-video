@@ -13,13 +13,6 @@ from .stage_status import StageStatus, require_transition
 
 MANIFEST_SCHEMA_VERSION = 1
 
-from .domain import (
-    DubUtterance,
-    JobTranslationOverride,
-    JobTranslationOverrideStore,
-    SourceTextTrack,
-    VietnameseSubtitle,
-)
 
 DEFAULT_STAGE_ORDER = (
     "input",
@@ -32,7 +25,6 @@ DEFAULT_STAGE_ORDER = (
     "reconcile",
     "timing",
     "tts",
-    "rvc",
     "mix",
     "subtitles",
     "render",

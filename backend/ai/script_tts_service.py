@@ -394,7 +394,13 @@ def render_full_script_tts(
     """
     job_id = f"script_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     if workspace_dir is None:
-        workspace_dir = Path(__file__).resolve().parents[2] / "workspace" / job_id
+        base_workspace = Path(
+            os.getenv(
+                "AUTODUB_WORKSPACE",
+                str(Path(__file__).resolve().parents[2] / "workspace"),
+            )
+        )
+        workspace_dir = base_workspace / job_id
     else:
         workspace_dir = Path(workspace_dir) / job_id
     workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -613,33 +619,6 @@ def render_full_script_tts(
         "srt_content": srt_content,
         "scenes": processed_scenes,
     }
-
-
-def mix_voice_with_bgm(
-    voice_audio_path: str | Path,
-    bgm_audio_path: str | Path,
-    output_path: str | Path,
-    bgm_volume_db: float = -18.0,
-    ducking_db: float = -12.0
-) -> str:
-    """Trộn track lồng tiếng với nhạc nền BGM tự động ducking (hạ âm lượng BGM khi có thoại)."""
-    voice = AudioSegment.from_file(str(voice_audio_path))
-    bgm = AudioSegment.from_file(str(bgm_audio_path))
-
-    # Hạ âm lượng BGM cơ bản + ducking
-    bgm_ducked = bgm + (bgm_volume_db + ducking_db)
-
-    # Lặp BGM nếu ngắn hơn voice
-    if len(bgm_ducked) < len(voice):
-        loops = int(math.ceil(len(voice) / len(bgm_ducked)))
-        bgm_ducked = bgm_ducked * loops
-    bgm_ducked = bgm_ducked[:len(voice)]
-
-    mixed = bgm_ducked.overlay(voice)
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    mixed.export(str(out), format="mp3")
-    return str(out)
 
 
 def get_media_duration(file_path: str | Path) -> float:

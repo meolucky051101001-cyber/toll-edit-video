@@ -1,7 +1,7 @@
 """Subprocess bridge for optional Tool V1 models.
 
 PP-OCR is kept outside the main bot process so its ONNX/Paddle dependencies do
-not conflict with Torch, Demucs or RVC.  Missing runtime packages are reported
+not conflict with Torch or Demucs.  Missing runtime packages are reported
 as a normal fallback condition to ``ocr_utils``.
 """
 

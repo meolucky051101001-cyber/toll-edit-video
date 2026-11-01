@@ -1,106 +1,99 @@
 """
-tests/test_v1_asr_mutual_exclusion.py - Kiểm thử lựa chọn loại trừ lẫn nhau giữa Faster-Whisper và Qwen3-ASR.
+tests/test_v1_asr_mutual_exclusion.py - Kiểm thử lựa chọn ASR của Tool V1.
 Đảm bảo:
-1. Mặc định luôn là Faster-Whisper Large-v3 Turbo (siêu nhanh, tiết kiệm VRAM).
-2. Khi chọn Qwen3-ASR: Tự động tắt Faster-Whisper, chuyển cờ ENABLE_QWEN_ASR = True và V1_ASR_MODEL = qwen3_asr.
-3. Khi chọn Faster-Whisper: Tự động tắt Qwen3-ASR, chuyển cờ ENABLE_QWEN_ASR = False và V1_ASR_MODEL = whisper_turbo.
-4. Model Registry giải quyết đúng mô hình ASR hiệu lực tương ứng.
-5. Job Config Service và Video Router đóng băng đúng asr_model vào snapshot.
+1. Mặc định là Hybrid Faster-Whisper + SenseVoice.
+2. Chọn whisper_turbo / whisper_sensevoice / sensevoice_small lưu đúng vào feature flags.
+3. Model Registry giải quyết đúng mô hình ASR hiệu lực.
+4. Video Router ghi nhận đúng asr_model vào planned_pipeline.
+5. Giá trị Qwen3-ASR cũ được migrate sang whisper_sensevoice thay vì raise.
 """
 
-import os
+import json
+import tempfile
 import unittest
-from unittest import mock
-import srt
-from datetime import timedelta
+from pathlib import Path
 
-import pytest
-
-from backend.v1_feature_flags import get_feature_flags, set_feature_flags, DEFAULT_FLAGS
-from backend.ai.v1_qwen_asr_adapter import is_qwen_asr_enabled, check_qwen_readiness, group_aligned_words
+from backend.v1_feature_flags import (
+    get_feature_flags,
+    migrate_legacy_asr_model,
+    set_feature_flags,
+)
 from backend.v1_model_registry import resolve_effective_model, ModelStage
 from backend.v1_video_router import resolve_planned_pipeline, VideoMode, VideoMetadata
-from backend import job_config_service
 
 
-class TestAsrMutualExclusion(unittest.TestCase):
+class TestAsrSelection(unittest.TestCase):
 
     def setUp(self):
-        # Reset về mặc định
-        set_feature_flags({"ENABLE_QWEN_ASR": False, "V1_ASR_MODEL": "whisper_sensevoice"})
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
 
     def tearDown(self):
-        set_feature_flags({"ENABLE_QWEN_ASR": False, "V1_ASR_MODEL": "whisper_sensevoice"})
+        self._tmp.cleanup()
 
     def test_default_is_whisper_sensevoice(self):
-        """Kiểm tra mặc định luôn là Hybrid Faster-Whisper + SenseVoice."""
-        flags = get_feature_flags()
-        self.assertFalse(flags.get("ENABLE_QWEN_ASR", False))
+        """Mặc định luôn là Hybrid Faster-Whisper + SenseVoice."""
+        flags = get_feature_flags(self.workspace)
+        self.assertNotIn("ENABLE_QWEN_ASR", flags)
         self.assertEqual(flags.get("V1_ASR_MODEL"), "whisper_sensevoice")
-        self.assertFalse(is_qwen_asr_enabled())
 
-        eff_model = resolve_effective_model(ModelStage.ASR)
-        self.assertEqual(eff_model.model_id, "whisper_sensevoice_hybrid")
+    def test_explicit_model_overrides_resolve_to_registry_specs(self):
+        """User override chọn đúng model registry cho từng lựa chọn ASR."""
+        cases = {
+            "whisper_turbo": "whisper_large_v3_turbo",
+            "whisper_sensevoice": "whisper_sensevoice_hybrid",
+            "hybrid": "whisper_sensevoice_hybrid",
+            "sensevoice_small": "sensevoice_small",
+        }
+        for override, expected in cases.items():
+            with self.subTest(override=override):
+                eff_model = resolve_effective_model(ModelStage.ASR, user_override=override)
+                self.assertEqual(eff_model.model_id, expected)
 
-    def test_selecting_qwen_disables_whisper(self):
-        """Khi chọn Qwen3-ASR: Bật Qwen, tắt Whisper."""
-        updated = set_feature_flags({"V1_ASR_MODEL": "qwen3_asr"})
-        self.assertTrue(updated["ENABLE_QWEN_ASR"])
-        self.assertEqual(updated["V1_ASR_MODEL"], "qwen3_asr")
-        self.assertTrue(is_qwen_asr_enabled())
-
-        eff_model = resolve_effective_model(ModelStage.ASR)
-        self.assertEqual(eff_model.model_id, "qwen3_asr_preview")
-
-    def test_selecting_whisper_disables_qwen(self):
-        """Khi chuyển lại về Whisper Turbo: Tắt Qwen."""
-        # Đầu tiên bật Qwen
-        set_feature_flags({"V1_ASR_MODEL": "qwen3_asr"})
-        self.assertTrue(is_qwen_asr_enabled())
-
-        # Sau đó chọn lại Whisper Turbo
-        updated = set_feature_flags({"V1_ASR_MODEL": "whisper_turbo"})
-        self.assertFalse(updated["ENABLE_QWEN_ASR"])
+    def test_selected_model_is_persisted_in_workspace_flags(self):
+        """Feature flags lưu đúng lựa chọn và không còn cờ Qwen cũ."""
+        updated = set_feature_flags({"V1_ASR_MODEL": "whisper_turbo"}, self.workspace)
         self.assertEqual(updated["V1_ASR_MODEL"], "whisper_turbo")
-        self.assertFalse(is_qwen_asr_enabled())
+        self.assertNotIn("ENABLE_QWEN_ASR", updated)
+        self.assertEqual(get_feature_flags(self.workspace)["V1_ASR_MODEL"], "whisper_turbo")
 
-        eff_model = resolve_effective_model(ModelStage.ASR)
-        self.assertEqual(eff_model.model_id, "whisper_large_v3_turbo")
+        updated = set_feature_flags({"V1_ASR_MODEL": "sensevoice_small"}, self.workspace)
+        self.assertEqual(updated["V1_ASR_MODEL"], "sensevoice_small")
 
     def test_video_router_planned_pipeline_contains_asr_model(self):
         """Video Router ghi nhận đúng asr_model vào planned_pipeline."""
-        # 1. Khi đang dùng mặc định Hybrid Whisper + SenseVoice
-        set_feature_flags({"V1_ASR_MODEL": "whisper_sensevoice"})
-        pipe_hybrid = resolve_planned_pipeline(VideoMode.SHORT, VideoMetadata(duration_s=120))
+        set_feature_flags({"V1_ASR_MODEL": "whisper_sensevoice"}, self.workspace)
+        pipe_hybrid = resolve_planned_pipeline(
+            VideoMode.SHORT, VideoMetadata(duration_s=120), workspace_path=self.workspace
+        )
         self.assertEqual(pipe_hybrid.get("asr_model"), "whisper_sensevoice")
 
-        # 2. Khi chọn Qwen
-        set_feature_flags({"V1_ASR_MODEL": "qwen3_asr"})
-        pipe_qwen = resolve_planned_pipeline(VideoMode.SHORT, VideoMetadata(duration_s=120))
-        self.assertEqual(pipe_qwen.get("asr_model"), "qwen3_asr")
+        set_feature_flags({"V1_ASR_MODEL": "whisper_turbo"}, self.workspace)
+        pipe_turbo = resolve_planned_pipeline(
+            VideoMode.SHORT, VideoMetadata(duration_s=120), workspace_path=self.workspace
+        )
+        self.assertEqual(pipe_turbo.get("asr_model"), "whisper_turbo")
 
-    def test_group_aligned_words_into_subtitles(self):
-        """Kiểm tra thuật toán gom nhóm từ có timestamp thành câu phụ đề chuẩn."""
-        class MockWord:
-            def __init__(self, text, start, end):
-                self.text = text
-                self.start_time = start
-                self.end_time = end
+    def test_legacy_qwen_setting_is_migrated_instead_of_raising(self):
+        """Cấu hình cũ gửi qwen3_asr được map sang whisper_sensevoice, không lỗi."""
+        updated = set_feature_flags({"V1_ASR_MODEL": "qwen3_asr"}, self.workspace)
+        self.assertEqual(updated["V1_ASR_MODEL"], "whisper_sensevoice")
 
-        words = [
-            MockWord("Xin", 0.0, 0.2),
-            MockWord("chào", 0.25, 0.5),
-            MockWord("các", 0.55, 0.8),
-            MockWord("bạn,", 0.85, 1.1),
-            MockWord("hôm", 2.0, 2.3),
-            MockWord("nay", 2.35, 2.6),
-            MockWord("video", 2.65, 3.0),
-            MockWord("rất", 3.05, 3.3),
-            MockWord("hay.", 3.35, 3.7),
-        ]
-        segments = group_aligned_words(words, max_chars=30, max_gap=0.8)
-        self.assertEqual(len(segments), 2)
-        self.assertEqual(segments[0]["text"], "Xin chào các bạn,")
-        self.assertAlmostEqual(segments[0]["start"], 0.0)
-        self.assertEqual(segments[1]["text"], "hôm nay video rất hay.")
-        self.assertAlmostEqual(segments[1]["start"], 2.0)
+        flags_file = self.workspace / "bot_system" / "v1_feature_flags.json"
+        flags_file.write_text(
+            json.dumps({"ENABLE_QWEN_ASR": True, "V1_ASR_MODEL": "qwen3_asr"}),
+            encoding="utf-8",
+        )
+        flags = get_feature_flags(self.workspace)
+        self.assertNotIn("ENABLE_QWEN_ASR", flags)
+        self.assertEqual(flags["V1_ASR_MODEL"], "whisper_sensevoice")
+
+    def test_migration_helper_leaves_current_models_untouched(self):
+        for value in ("whisper_turbo", "whisper_sensevoice", "sensevoice_small"):
+            self.assertEqual(migrate_legacy_asr_model(value), value)
+        self.assertEqual(migrate_legacy_asr_model("qwen3_asr"), "whisper_sensevoice")
+        self.assertEqual(migrate_legacy_asr_model("qwen3_asr_preview"), "whisper_sensevoice")
+
+
+if __name__ == "__main__":
+    unittest.main()

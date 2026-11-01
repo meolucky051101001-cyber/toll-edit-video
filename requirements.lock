@@ -1,0 +1,3 @@
+# Compatibility entry point. Canonical Python 3.12 freeze: requirements.lock.txt
+# See docs/phase5_python312.md for CUDA wheels and the local CapCut package.
+-r requirements.lock.txt
