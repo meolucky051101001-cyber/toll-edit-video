@@ -61,6 +61,7 @@ jobs:
           tests/test_recovery_service.py
           tests/test_release_regressions.py
           tests/test_gemini_model_order.py
+          tests/test_v1_asr_pyav_compat.py
           tests/test_runtime_health.py
 
   v1-node-checks:
