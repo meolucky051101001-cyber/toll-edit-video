@@ -155,3 +155,23 @@ vẫn HTTP 200 và PID lắng nghe 8088/8090 không đổi tại lúc kiểm tra
 Log kiểm thử, JSON preflight và bằng chứng chi tiết ở `scratch/phase5` (được
 ignore, không commit dữ liệu runtime). Phase 5 dừng ở chuẩn bị môi trường song
 song; chưa đổi tên venv, chưa restart dịch vụ, chưa chuyển sang Phase 6.
+
+## Cutover thực tế — 01/11/2026
+
+Sau khi người dùng yêu cầu rõ chuyển Python 3.12 và restart, đã dùng script
+switch hiện có: `backend/venv` hiện là Python 3.12.14, môi trường 3.10.11 được
+giữ tại `backend/venv_py310`. Không cài/nâng/hạ package, không xóa môi trường cũ.
+Hai thư mục staging/backup `venv_py312`/`venv_py310` được ignore trong Git.
+
+Đã restart control, dashboard, Telegram dubbing, script bot và bot tải độc lập
+vì chúng dùng chung venv. Các Scheduled Task được khôi phục đúng trạng thái
+enabled/running ban đầu; watchdog trở lại Ready theo lịch cũ. Xác nhận phiên
+bản executable các dịch vụ là 3.12.14; control báo running, heartbeat/polling
+true, busy=false, queue=0; dashboard idle/active=false.
+
+`python -m pip check` sạch; health check đầy đủ PASS, preflight ready=true
+25/25. Ngay sau restart, probe import cold vượt 5 giây; chạy lại với
+`--timeout 30` đạt PASS trong 8,61 giây. Lượt này không render video mẫu.
+Các kiểm thử mã trước cutover: full Python 3.12/3.10 đều 1178 passed,
+0 failed, 79 skipped; Node 11 passed. Log vận hành nằm trong
+`scratch/stages-abcd` của worktree updates (ignore); không commit log/secret.

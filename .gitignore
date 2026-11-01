@@ -25,6 +25,8 @@ backend/*.log
 .venv/
 venv/
 backend/venv/
+backend/venv_py310/
+backend/venv_py312/
 model_venv/
 backend/model_venv/
 model_venv_separator/
