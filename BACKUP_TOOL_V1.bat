@@ -49,8 +49,8 @@ echo SAO LUU HOAN TAT!
 echo   - Git Branch : %BRANCH_NAME%
 echo   - Thu muc luu: %BACKUP_DIR%
 echo.
-echo Khi can khoi phuc, ban chi can chay file: RESTORE_VOICE_LOCK_BACKUP.bat
-echo hoac dung lenh Git: git checkout %BRANCH_NAME%
+echo Khi can khoi phuc, hay kiem tra git status va su dung git revert hoac khoi phuc theo nhanh %BRANCH_NAME%
+echo (Luu y: script cu RESTORE_VOICE_LOCK_BACKUP.bat da retired de tranh ghi de source moi).
 echo ======================================================================
 echo.
 pause

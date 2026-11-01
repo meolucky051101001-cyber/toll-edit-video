@@ -1,13 +1,5 @@
 @echo off
-chcp 65001 >nul
-echo ========================================================
-echo   KHÔI PHỤC NGUYÊN TRẠNG TOOL V1
-echo ========================================================
-
-cd /d "C:\tool v1"
-git checkout -- .
-
-echo ========================================================
-echo   ĐÃ KHÔI PHỤC NGUYÊN TRẠNG TOOL V1 HOÀN TOÀN!
-echo ========================================================
-pause
+setlocal
+echo [RETIRED] fixes_for_v1\rollback_tool_v1.bat da ngung su dung de tranh xoa mat thay doi chua commit.
+echo Hay su dung git status / git diff va git revert theo tung commit cu the.
+exit /b 1
