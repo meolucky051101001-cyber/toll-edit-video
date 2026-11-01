@@ -27,3 +27,20 @@ các stage B–D là commit tiếp theo trên nhánh chính.
 Log nghiệm thu tại `scratch/stages-abcd/a-*` trong worktree phụ (ignore).
 Các nhánh tạm chỉ xóa bằng `git branch -d` sau khi xác minh ancestor; không
 force-delete. Mốc commit và các stage tiếp theo được cập nhật sau nghiệm thu.
+
+## Stage B — giữ nguyên nhân lỗi dịch để retry Telegram
+
+Lỗi strict khi không provider nào trả bản dịch nối `__cause__` cuối cùng;
+lỗi quality gate vẫn không nối nguyên nhân mạng cũ. OpenAI/DeepSeek lưu lỗi
+transport và HTTP có response để phân biệt 401 với 429/5xx, không log response
+body. Bộ phân loại nhận quota/deadline và lỗi Gemini upstream tạm thời;
+nguyên nhân permanent trong toàn chuỗi luôn được ưu tiên fail-fast.
+
+Năm test mới gồm bốn ca nghiệm thu và ma trận OpenAI/DeepSeek, không gọi API
+thật. Ca 503 chạy qua dịch strict và luồng Telegram, kiểm tra backoff 60/300/900
+giây cùng giới hạn retry. Ca quality dùng bản dịch CJK và nguyên nhân 503 cũ
+để bảo đảm không đưa lỗi nội dung vào hàng retry.
+
+Nghiệm thu: focused 23 passed; full Python 3.10: 1160 passed / 0 failed /
+79 skipped / 3 warnings / 224 subtests (174,37 giây); Python 3.12: 1160 passed /
+0 failed / 79 skipped / 6 warnings (137,87 giây). Log `scratch/stages-abcd/b-*`.

@@ -620,11 +620,16 @@ def translate_with_openai(
                         if split_res:
                             return split_res
                 else:
-                    logger.warning(f"Lỗi OpenAI ({om}) HTTP {resp.status_code}: {resp.text[:200]}")
+                    kwargs.get("failure_causes", []).append(
+                        requests.HTTPError(f"OpenAI HTTP {resp.status_code}", response=resp)
+                    )
+                    logger.warning("Lỗi OpenAI (%s) HTTP %s", om, resp.status_code)
             except Exception as o_err:
-                logger.warning(f"Lỗi gọi OpenAI ({om}): {o_err}")
+                kwargs.get("failure_causes", []).append(o_err)
+                logger.warning("Lỗi gọi OpenAI (%s): %s", om, type(o_err).__name__)
     except Exception as e:
-        logger.warning(f"Lỗi dịch OpenAI: {e}")
+        kwargs.get("failure_causes", []).append(e)
+        logger.warning("Lỗi dịch OpenAI: %s", type(e).__name__)
     return None
 
 def translate_with_deepseek(
@@ -684,11 +689,16 @@ def translate_with_deepseek(
                         if split_res:
                             return split_res
                 else:
-                    logger.warning(f"Lỗi DeepSeek ({dm}) HTTP {resp.status_code}: {resp.text[:200]}")
+                    kwargs.get("failure_causes", []).append(
+                        requests.HTTPError(f"DeepSeek HTTP {resp.status_code}", response=resp)
+                    )
+                    logger.warning("Lỗi DeepSeek (%s) HTTP %s", dm, resp.status_code)
             except Exception as d_err:
-                logger.warning(f"Lỗi gọi DeepSeek ({dm}): {d_err}")
+                kwargs.get("failure_causes", []).append(d_err)
+                logger.warning("Lỗi gọi DeepSeek (%s): %s", dm, type(d_err).__name__)
     except Exception as e:
-        logger.warning(f"Lỗi dịch DeepSeek: {e}")
+        kwargs.get("failure_causes", []).append(e)
+        logger.warning("Lỗi dịch DeepSeek: %s", type(e).__name__)
     return None
 
 def translate_with_g4f(texts, target_lang="vi", script_mode="default"):
@@ -1142,7 +1152,9 @@ def translate_subtitles(
     if strict:
         allow_fallback = os.getenv("V1_ALLOW_TRANSLATION_FALLBACK", "false").lower() in ("true", "1", "yes")
         if not allow_fallback:
-            raise RuntimeError("Strict translation mode requires a complete LLM translation without machine fallback")
+            raise RuntimeError(
+                "Strict translation mode requires a complete LLM translation without machine fallback"
+            ) from (failure_causes[-1] if failure_causes else None)
         logger.warning("Strict translation mode: LLM translation unavailable after retries. Falling back to machine translation to prevent job failure...")
 
     logger.info("Falling back to Google Translate...")

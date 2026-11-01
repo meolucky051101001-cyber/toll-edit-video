@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import datetime
 import json
 import tempfile
 import time
@@ -9,6 +10,8 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import requests
+import srt
 
 from backend import telegram_bot as bot
 from backend import telegram_queue_monitor as monitor
@@ -17,6 +20,101 @@ from backend.v1_retry_policy import is_transient_network_error
 
 
 class TelegramNetworkRetryTests(unittest.IsolatedAsyncioTestCase):
+    def _strict_translation_error(self, provider_error=None, bad_quality=False):
+        from backend.ai import translation
+
+        def bad_response(*args, **kwargs):
+            kwargs["failure_causes"].append(provider_error)
+            return ["你好"]
+
+        provider = patch.object(translation, "translate_with_gemini", side_effect=bad_response) if bad_quality else patch(
+            "backend.ai.v1_gemini_dispatcher.call_gemini_api", side_effect=provider_error
+        )
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "fixture-key", "LLM_PROVIDER": "gemini"}, clear=True), \
+             patch.object(translation, "load_custom_glossary", return_value={}), \
+             patch.object(translation, "extract_video_frames_base64", return_value=[]), \
+             patch.object(translation, "mark_gemini_unhealthy"), \
+             patch("backend.ai.v1_translation_cache.read_cache", return_value=None), \
+             patch("backend.ai.v1_translation_cache.write_cache"), provider:
+            with self.assertRaises(RuntimeError) as caught:
+                translation.translate_subtitles(
+                    [srt.Subtitle(1, datetime.timedelta(), datetime.timedelta(seconds=2), "你好")],
+                    strict=True, enable_g4f=False, stop_checker=lambda: False,
+                )
+        return caught.exception
+
+    async def test_strict_gemini_503_preserves_cause_and_telegram_backoff(self):
+        from backend.ai.v1_gemini_dispatcher import GeminiAllModelsFailedError
+
+        cause = GeminiAllModelsFailedError("All candidate models failed status=503")
+        error = self._strict_translation_error(cause)
+        self.assertIs(error.__cause__, cause)
+        self.assertTrue(is_transient_network_error(error))
+        for attempt, delay in enumerate((60, 300, 900), 1):
+            result, set_error, _ = await self._run_failing_pipeline(error)
+            self.assertEqual(result["status"], "retry_scheduled")
+            set_error.assert_not_called()
+            record = self._retry_state()["jobs"][self.job["job_id"]]
+            self.assertEqual((record["attempt"], record["delay_seconds"]), (attempt, delay))
+            self._make_due()
+            self.assertEqual(await bot.process_due_network_retries(), 1)
+            self.job = await bot.global_queue.get()
+            bot.global_queue.task_done()
+        result, set_error, _ = await self._run_failing_pipeline(error)
+        self.assertEqual(result["status"], "failed")
+        set_error.assert_called_once()
+
+    def test_strict_gemini_quota_and_deadline_are_transient(self):
+        from backend.ai.v1_gemini_dispatcher import GeminiQuotaExhaustedError, GeminiDeadlineError
+
+        for cause in (GeminiQuotaExhaustedError("HTTP 429"), GeminiDeadlineError("Overall deadline")):
+            with self.subTest(cause=type(cause).__name__):
+                error = self._strict_translation_error(cause)
+                self.assertIs(error.__cause__, cause)
+                self.assertTrue(is_transient_network_error(error))
+
+    async def test_strict_quality_gate_fails_fast_even_after_503(self):
+        from backend.ai.v1_gemini_dispatcher import GeminiAllModelsFailedError
+
+        error = self._strict_translation_error(GeminiAllModelsFailedError("status=503"), bad_quality=True)
+        self.assertIn("conforming to quality rules", str(error))
+        self.assertIsNone(error.__cause__)
+        self.assertFalse(is_transient_network_error(error))
+        result, set_error, _ = await self._run_failing_pipeline(error)
+        self.assertEqual(result["status"], "failed")
+        set_error.assert_called_once()
+        self.assertFalse(bot.network_retry_state_path().exists())
+
+    def test_strict_gemini_auth_request_and_config_fail_fast(self):
+        from backend.ai.v1_gemini_dispatcher import GeminiAuthError, GeminiRequestError, GeminiConfigError
+
+        for cls in (GeminiAuthError, GeminiRequestError, GeminiConfigError):
+            with self.subTest(cause=cls.__name__):
+                cause = cls("fixture permanent failure")
+                error = self._strict_translation_error(cause)
+                self.assertIs(error.__cause__, cause)
+                self.assertFalse(is_transient_network_error(error))
+
+    def test_openai_deepseek_preserve_transport_and_http_failures(self):
+        from backend.ai import translation
+
+        for provider in (translation.translate_with_openai, translation.translate_with_deepseek):
+            for status in (401, 429, 503):
+                with self.subTest(provider=provider.__name__, status=status):
+                    response = requests.Response()
+                    response.status_code = status
+                    failures = []
+                    with patch.object(translation.requests, "post", return_value=response):
+                        self.assertIsNone(provider(["你好"], api_key="fixture", failure_causes=failures))
+                    self.assertTrue(failures)
+                    self.assertEqual(failures[-1].response.status_code, status)
+                    self.assertEqual(is_transient_network_error(failures[-1]), status != 401)
+            failures = []
+            with patch.object(translation.requests, "post", side_effect=requests.ConnectionError("connection failed")):
+                self.assertIsNone(provider(["你好"], api_key="fixture", failure_causes=failures))
+            self.assertIsInstance(failures[-1], requests.ConnectionError)
+            self.assertTrue(is_transient_network_error(failures[-1]))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

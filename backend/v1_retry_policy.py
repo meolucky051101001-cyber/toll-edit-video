@@ -1,5 +1,6 @@
 """Bounded job retries only for recognizably transient failures (no AI imports)."""
 import asyncio
+import re
 
 
 PERMANENT_ERROR_NAMES = {
@@ -80,6 +81,7 @@ NETWORK_ERROR_MARKERS = (
 )
 
 PERMANENT_ERROR_MARKERS = (
+    "strict translation mode requires a complete llm translation conforming to quality rules",
     "unsupported filter",
     "unsupported resolution",
     "không được hỗ trợ",
@@ -103,6 +105,29 @@ PERMANENT_ERROR_MARKERS = (
     "content-range",
 )
 
+TRANSIENT_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
+GEMINI_TRANSIENT_MARKERS = (
+    "timeout", "timed out", "connection", "overloaded", "unavailable",
+    "resource_exhausted", "resource exhausted",
+)
+
+
+def _http_status(error):
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def _gemini_permanent_reason(error):
+    if type(error).__name__ != "GeminiAllModelsFailedError":
+        return False
+    message = str(error).lower()
+    return bool(re.search(r"\b(?:http|status|code)\s*[=:]?\s*(?:400|401|403|404|422)\b", message)) or any(
+        marker in message for marker in (
+            "unauthenticated", "permission_denied", "invalid_argument",
+            "invalid api key", "bad request",
+        )
+    )
+
 
 def _exception_chain(error):
     chain, seen = [], set()
@@ -115,6 +140,11 @@ def _exception_chain(error):
 
 def _is_permanent_exception(exc):
     if isinstance(exc, (asyncio.CancelledError, SyntaxError, ImportError, FileNotFoundError)):
+        return True
+    status = _http_status(exc)
+    if status is not None and 400 <= status < 500 and status not in TRANSIENT_HTTP_STATUSES:
+        return True
+    if _gemini_permanent_reason(exc):
         return True
     message = str(exc).lower()
     if "stop requested" in message or "operation cancelled" in message or "bị hủy" in message or "batchstoprequested" in message:
@@ -131,11 +161,22 @@ def should_retry_job(error, attempt=0, stopped=False, max_retries=2):
 
 
 def is_transient_network_error(error):
-    """True only for connection/DNS/timeout failures, never for content failures."""
+    """Retry transport/upstream outages; permanent causes always take precedence."""
     chain = _exception_chain(error)
     if any(_is_permanent_exception(exc) for exc in chain):
         return False
     for exc in chain:
+        name = type(exc).__name__
+        if name in {"GeminiQuotaExhaustedError", "GeminiDeadlineError"}:
+            return True
+        if _http_status(exc) in TRANSIENT_HTTP_STATUSES:
+            return True
+        if name == "GeminiAllModelsFailedError":
+            message = str(exc).lower()
+            if re.search(r"(?<!\d)(?:429|500|502|503|504)(?!\d)", message) or any(
+                marker in message for marker in GEMINI_TRANSIENT_MARKERS
+            ):
+                return True
         if type(exc).__name__ in NETWORK_ERROR_NAMES:
             return True
         message = str(exc).lower()
