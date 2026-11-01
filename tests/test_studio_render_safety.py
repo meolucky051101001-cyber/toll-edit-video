@@ -144,6 +144,37 @@ class TestOverlayOnlyChain(unittest.TestCase):
                 self.assertIn("-shortest", cmd)
 
 
+class TestClipVocalModeWhitelist(unittest.TestCase):
+    def test_clip_vocal_mode_mute_reaches_filter_graph(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            video = base / "in.mp4"
+            video.write_bytes(b"x" * 2048)
+            probe = subprocess.CompletedProcess([], 0, json.dumps({"streams": [
+                {"codec_type": "video", "width": 1080, "height": 1920},
+                {"codec_type": "audio", "sample_rate": "44100", "channels": 2, "channel_layout": "stereo"},
+            ]}), "")
+            cmds = []
+
+            def fake_ffmpeg(cmd, *args, **kwargs):
+                cmds.append(cmd)
+                return subprocess.CompletedProcess(cmd, 1, "", "")
+
+            with patch.object(wf.subprocess, "run", return_value=probe), \
+                 patch.object(wf, "_run_ffmpeg_ctl", side_effect=fake_ffmpeg):
+                ok = wf._apply_timeline_edits_file(
+                    video,
+                    [{"start": 0.0, "end": 2.0, "vocal_mode": "mute"}],
+                    base / "out.mp4",
+                )
+
+            self.assertFalse(ok)
+            nvenc = next(c for c in cmds if "h264_nvenc" in c)
+            fc = nvenc[nvenc.index("-filter_complex") + 1]
+            audio_line = next(ln for ln in fc.split(";") if ln.startswith("[0:a]"))
+            self.assertIn("volume=0", audio_line)
+
+
 class TestBatchCpuFallbackSource(unittest.TestCase):
     def test_cpu_fallback_uses_raw_source_when_mirror_with_srt(self):
         with tempfile.TemporaryDirectory() as td:

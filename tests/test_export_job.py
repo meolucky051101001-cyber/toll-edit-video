@@ -29,6 +29,14 @@ def _make_tiny_video(path: Path) -> None:
     ], check=True)
 
 
+def _make_tiny_wav(path: Path) -> None:
+    subprocess.run([
+        "ffmpeg", "-y", "-v", "error",
+        "-f", "lavfi", "-i", "sine=frequency=660:duration=0.3",
+        "-c:a", "pcm_s16le", str(path),
+    ], check=True)
+
+
 def _wait_status(client, job_id, timeout=30.0):
     deadline = time.time() + timeout
     last = None
@@ -113,6 +121,52 @@ class ExportJobApiTests(ExportJobTestBase):
         self.assertGreater(out_file.stat().st_size, 1000)
         self.assertEqual(result["filename"], out_file.name)
         self.assertGreater(result["size_mb"], 0)
+
+    def test_export_tts_mix_keeps_base_audio(self):
+        _make_tiny_video(self.input_dir / "vid.mp4")
+        job_dir = self.workspace / "vid"
+        job_dir.mkdir(parents=True, exist_ok=True)
+        _make_tiny_wav(job_dir / "manual_tts_track.wav")
+
+        res = self.client.post("/api/workflow/export-custom", json=self._payload(tts_mix=True))
+        self.assertEqual(res.status_code, 200, res.text)
+        final = _wait_status(self.client, res.json()["job_id"])
+        self.assertEqual(final["status"], "done", final)
+
+        out_file = Path(final["result"]["output_file"])
+        self.assertTrue(out_file.is_file())
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(out_file)],
+            capture_output=True, text=True,
+        )
+        self.assertTrue(probe.stdout.strip(), "Video xuất phải giữ luồng audio gốc khi trộn TTS")
+
+    def test_export_tts_mix_graph_mixes_base_audio(self):
+        (self.input_dir / "vid.mp4").write_bytes(b"fake source")
+        job_dir = self.workspace / "vid"
+        job_dir.mkdir()
+        tts_wav = job_dir / "manual_tts_track.wav"
+        tts_wav.write_bytes(b"RIFFfake")
+        cmds = []
+
+        def failing_run(cmd, job_ctl=None, timeout=900):
+            cmds.append(cmd)
+            return subprocess.CompletedProcess(cmd, 1, "", "stop")
+
+        with patch.object(workflow_api, "_run_ffmpeg_ctl", side_effect=failing_run), \
+                patch.object(workflow_api, "probe_stream_durations",
+                             return_value={"video": 1.0, "audio": 1.0}):
+            with self.assertRaises(workflow_api.HTTPException):
+                workflow_api._execute_custom_export(self._payload(tts_mix=True))
+
+        self.assertEqual(len(cmds), 2)
+        for cmd in cmds:
+            self.assertIn(str(tts_wav), cmd)
+            fc = cmd[cmd.index("-filter_complex") + 1]
+            self.assertIn("[0:a]aformat=", fc)
+            self.assertNotIn("0:aaformat", fc)
+            self.assertIn("[expaout]", cmd)
 
     def test_cancel_queued_or_running_job(self):
         started = threading.Event()

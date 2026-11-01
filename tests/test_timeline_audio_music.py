@@ -8,7 +8,11 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent / "backend"
 sys.path.insert(0, str(BASE_DIR))
 
-from workflow_api import _build_music_filter_lines, _decode_audio_assets  # noqa: E402
+from workflow_api import (  # noqa: E402
+    _build_music_filter_lines,
+    _build_tts_mix_filter_lines,
+    _decode_audio_assets,
+)
 
 # WAV 16-bit PCM mono tối thiểu (header 44 bytes + 4 sample bytes)
 _WAV_BYTES = (
@@ -37,6 +41,21 @@ class TestDecodeAudioAssets(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             paths = _decode_audio_assets([{"id": "x", "src": "data:image/png;base64,AAAA"}], Path(td))
             self.assertEqual(paths, [None])
+
+
+class TestTtsMixFilterLines(unittest.TestCase):
+    def test_base_audio_uses_bracketed_stream_label(self):
+        chain = _build_tts_mix_filter_lines("0:a?", 1)
+        lines = chain.split(";")
+        self.assertTrue(lines[0].startswith("[0:a]aformat="), lines[0])
+        self.assertNotIn("0:aaformat", chain)
+        self.assertTrue(lines[1].startswith("[1:a]aformat="), lines[1])
+        self.assertTrue(lines[2].endswith("[expaout]"), lines[2])
+
+    def test_extra_audio_input_index_is_preserved(self):
+        chain = _build_tts_mix_filter_lines("2:a?", 3)
+        self.assertTrue(chain.startswith("[2:a]aformat="))
+        self.assertIn("[3:a]aformat=", chain)
 
 
 class TestMusicFilterLines(unittest.TestCase):
