@@ -1,9 +1,9 @@
 # AutoDub Video Tools (Tool V1 Production)
 
 > [!IMPORTANT]
-> **THÔNG BÁO VỀ TRẠNG THÁI HỆ THỐNG (Cập nhật 10/2026):**
+> **THÔNG BÁO VỀ TRẠNG THÁI HỆ THỐNG (Cập nhật 02/11/2026):**
 > - **Tool V2 ĐÃ NGỪNG SỬ DỤNG (DEPRECATED & RETIRED):** Toàn bộ runtime, database, background service và thư mục của Tool V2 đã được dọn sạch khỏi môi trường sản xuất.
-> - **Tool V1 là hệ thống DUY NHẤT được duy trì chính thức (OFFICIAL PRODUCTION):** Đây là công cụ ổn định, hoàn chỉnh, tích hợp đầy đủ quy trình tự động 8 bước lồng tiếng/dịch thuật AI trên card NVIDIA GPU và phục vụ sản xuất thực tế qua Telegram Bot và Dashboard Monitor.
+> - **Tool V1 là hệ thống DUY NHẤT được duy trì chính thức (OFFICIAL PRODUCTION):** Chạy trên **Python 3.12.14** (`backend/venv`, dự phòng rollback Python 3.10.11 tại `backend/venv_py310`), tích hợp đầy đủ quy trình tự động 8 bước lồng tiếng/dịch thuật AI trên card NVIDIA GPU và đã hoàn tất đợt gia cố an toàn & dọn dẹp mã thừa C0–C9 (`1217 passed, 0 failed`).
 
 ---
 
@@ -160,3 +160,7 @@ Bản sửa tồn đọng sau Phase 6 và golden baseline trước refactor đư
 Phần tách bốn hàm lớn và bằng chứng giữ nguyên hành vi được ghi trong
 [báo cáo Phase 7](docs/phase7_function_refactor.md), gồm bước nghiệm thu video
 ngắn do người dùng chạy trên dashboard sau khi chủ động nạp code mới.
+
+Báo cáo trạng thái hiện hành của toàn bộ codebase và kết quả đợt dọn dẹp an toàn
+C0–C9 (02/11/2026) được ghi tại [docs/PROJECT_STATE.md](docs/PROJECT_STATE.md)
+và [docs/cleanup_tool_v1_20261102.md](docs/cleanup_tool_v1_20261102.md).
