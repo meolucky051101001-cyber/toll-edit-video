@@ -1,86 +1,65 @@
 """Safely stop Tool V1 Telegram bot without touching Tool V2 or other python processes."""
-import json
-import os
+from __future__ import annotations
+
+import argparse
 from pathlib import Path
+from typing import Sequence
 
 try:
-    import psutil
+    from backend.v1_shutdown import EXIT_OK, ShutdownResult, execute_shutdown, main as _shutdown_main
 except ImportError:
-    psutil = None
+    from v1_shutdown import EXIT_OK, ShutdownResult, execute_shutdown, main as _shutdown_main
 
-def stop_v1_bot():
-    backend = Path(__file__).resolve().parent
-    v1_root = backend.parent
-    bs_control = v1_root / "workspace" / "bot_system" / "control"
-    control_dir = bs_control if bs_control.is_dir() else (v1_root / "workspace" / "control")
-    v1_json = control_dir / "v1.json"
 
-    # Ghi ý định dừng để watchdog không tự khởi động lại bot vừa được dừng tay.
-    try:
-        control_dir.mkdir(parents=True, exist_ok=True)
-        (control_dir / "telegram.disabled").write_text("paused", encoding="utf-8")
-    except OSError:
-        pass
-
-    target_pid = None
-    if v1_json.is_file():
-        try:
-            data = json.loads(v1_json.read_text(encoding="utf-8"))
-            target_pid = data.get("pid")
-        except Exception:
-            pass
-
-    stopped = False
-    if psutil is not None:
-        target_procs = []
-        script_path = str(backend / "telegram_bot.py").lower()
-        for p in psutil.process_iter(["name", "cmdline"]):
-            try:
-                name = (p.info["name"] or "").lower()
-                if not name.startswith("python"):
-                    continue
-                cmdline = [str(arg).lower() for arg in (p.cmdline() or [])]
-                if script_path in cmdline or any("telegram_bot.py" in arg and str(backend).lower() in " ".join(cmdline) for arg in cmdline):
-                    target_procs.append(p)
-                elif target_pid and p.pid == target_pid:
-                    target_procs.append(p)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-
-        for p in target_procs:
-            try:
-                p.terminate()
-                stopped = True
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-        if target_procs:
-            _, alive = psutil.wait_procs(target_procs, timeout=3.0)
-            for p in alive:
-                try:
-                    p.kill()
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-    elif target_pid:
-        try:
-            os.system(f"taskkill /PID {target_pid} /F >nul 2>&1")
-            stopped = True
-        except Exception:
-            pass
-
-    try:
-        if v1_json.is_file():
-            data = json.loads(v1_json.read_text(encoding="utf-8"))
-            data["pid"] = None
-            data["polling"] = False
-            data["busy"] = False
-            v1_json.write_text(json.dumps(data), encoding="utf-8")
-    except Exception:
-        pass
-
-    if stopped:
+def stop_v1_bot(
+    *,
+    project_root: Path | None = None,
+    workspace: Path | None = None,
+    preview: bool = False,
+    force: bool = False,
+    mode: str = "stop",
+    **kwargs,
+) -> ShutdownResult:
+    """Stop only the verified Tool V1 Telegram bot and its dedicated supervisor."""
+    root = (Path(project_root) if project_root else Path(__file__).resolve().parents[1]).resolve()
+    result = execute_shutdown(
+        project_root=root,
+        workspace=workspace,
+        scope="telegram",
+        mode=mode,
+        preview=preview,
+        force=force,
+        include_downloader=False,
+        **kwargs,
+    )
+    if result.preview:
+        print(result.message)
+    elif result.exit_code == EXIT_OK and result.terminated_pids:
         print("[Tool V1] Telegram bot has been stopped successfully.")
-    else:
+    elif result.exit_code == EXIT_OK:
         print("[Tool V1] No active Tool V1 Telegram bot process was found.")
+    else:
+        print(f"[Tool V1] {result.message}")
+    return result
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--project-root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--workspace", type=Path, default=None)
+    parser.add_argument("--preview", "--whatif", "-WhatIf", dest="preview", action="store_true")
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--mode", choices=("stop", "restart"), default="stop")
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    res = stop_v1_bot(
+        project_root=args.project_root,
+        workspace=args.workspace,
+        preview=args.preview,
+        force=args.force,
+        mode=args.mode,
+    )
+    return res.exit_code
+
 
 if __name__ == "__main__":
-    stop_v1_bot()
+    raise SystemExit(main())
