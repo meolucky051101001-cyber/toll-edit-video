@@ -87,10 +87,11 @@
 
 Nếu phát sinh vấn đề ở bất kỳ thành phần nào, có thể hoàn tác an toàn:
 
-- **Hoàn tác toàn bộ nhánh cleanup về baseline ban đầu:**
-  ```powershell
-  git -C "C:\tool_v1_updates" reset --hard v1-pre-cleanup-20261101
-  ```
+- **Trước khi hoàn tác:** kiểm tra `git status`, bảo toàn thay đổi chưa commit
+  và ghi checkpoint. Tạo commit revert cho đúng gói cần sửa, kiểm thử lại trước
+  khi đồng bộ production. Không dùng reset/clean hoặc force-push để rollback.
+- Không chạy rollback trực tiếp trên dịch vụ đang xử lý job. Việc đồng bộ và
+  restart cần bước vận hành riêng khi idle và được cho phép.
 - **Hoàn tác từng commit riêng lẻ bằng `git revert`:**
   - `de29f17` — Phục hồi lại 69 file debug/test lịch sử.
   - `362597f` — Phục hồi cấu hình CI và tài liệu cũ.
@@ -98,5 +99,5 @@ Nếu phát sinh vấn đề ở bất kỳ thành phần nào, có thể hoàn 
   - `a6b62e0` — Phục hồi cây thư mục lồng nhau của Whiteboard Animator.
   - `236cb18` — Phục hồi vị trí test cũ của RecoveryService.
   - `0c468a4` — Phục hồi mã EasyOCR và biến trong module dịch thuật.
-  - `c08357b` — Phục hồi nội dung các script bảo trì cũ.
-  - `32f3fe3` — Phục hồi cơ chế dừng tiến trình cũ.
+  - Với `c08357b` và `32f3fe3`, ưu tiên fix-forward; không bật lại script ghi đè
+    dữ liệu hoặc cách kill rộng chỉ để quay về code cũ.

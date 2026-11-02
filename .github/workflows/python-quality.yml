@@ -56,10 +56,12 @@ jobs:
           tests/test_studio_render_safety.py
           tests/test_stop_flag_hygiene.py
           tests/test_v1_shutdown_scope.py
+          tests/test_shutdown_review_regressions.py
           tests/test_v1_retired_entrypoints.py
           tests/test_v1_c3_cleanup_contracts.py
           tests/test_recovery_service.py
           tests/test_release_regressions.py
+          tests/test_release_review_regressions.py
           tests/test_gemini_model_order.py
           tests/test_v1_asr_pyav_compat.py
           tests/test_runtime_health.py

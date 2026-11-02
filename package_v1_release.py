@@ -181,6 +181,8 @@ REQUIRED_RELEASE_FILES = [
     "backend/main.py",
     "backend/job_tracker.py",
     "backend/v1_shutdown.py",
+    "backend/service_control.py",
+    "backend/ai/pyav_compat.py",
     "backend/templates/dashboard.html",
     "scripts/verify_runtime_health.py",
     "scripts/cutover_py312.bat",
@@ -280,7 +282,7 @@ def _git_tracked_files(root_dir: Path) -> Set[str] | None:
         return None
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root_dir), "ls-files", "-z"],
+            ["git", "-c", f"safe.directory={root_dir.resolve().as_posix()}", "-C", str(root_dir), "ls-files", "-z"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -288,11 +290,11 @@ def _git_tracked_files(root_dir: Path) -> Set[str] | None:
             timeout=15,
             check=False,
         )
-        if proc.returncode != 0 or not proc.stdout:
-            return None
+        if proc.returncode != 0:
+            raise RuntimeError("Cannot read Git release inventory; refusing filesystem fallback")
         return {entry.replace("\\", "/") for entry in proc.stdout.split("\0") if entry}
-    except Exception:
-        return None
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError("Cannot read Git release inventory; refusing filesystem fallback") from error
 
 
 def iter_release_files(root_dir: Path = ROOT_DIR) -> List[Path]:
@@ -362,6 +364,38 @@ def verify_required_files(
             raise RuntimeError(f"Missing required file in release: {req}")
 
 
+SENSITIVE_PATTERNS = (
+    re.compile(r"""(?:bot_token|api_key|secret|password)\s*=\s*['\"][A-Za-z0-9_\-:]{20,}['\"]""", re.IGNORECASE),
+    re.compile(r"AIzaSy[A-Za-z0-9_\-]{33}"),
+    re.compile(r"[0-9]{8,11}:[A-Za-z0-9_\-]{34,36}"),
+)
+
+
+def check_secrets_hygiene(root: Path, files: Iterable[Path]) -> list[tuple[Path, str]]:
+    """One validator for ZIP and manifest. Never report credential values."""
+    configured = _load_configured_secrets(root)
+    violations = []
+    for rel in files:
+        try:
+            raw = (root / rel).read_bytes()
+        except OSError as error:
+            raise RuntimeError(f"Cannot inspect release file: {rel}") from error
+        if any(secret in raw for secret in configured):
+            violations.append((rel, "Configured credential copy"))
+            continue
+        content = raw.decode("utf-8", errors="ignore")
+        for pattern in SENSITIVE_PATTERNS:
+            match = pattern.search(content)
+            if not match:
+                continue
+            if "test" in str(rel).lower() and any(marker in match[0].lower() for marker in (
+                "dummy", "mock", "example", "test", "synthetic", "secret_", "fake",
+            )):
+                continue
+            violations.append((rel, "Credential literal pattern"))
+    return violations
+
+
 def create_release_zip(
     root_dir: Path = ROOT_DIR,
     output_zip: Path = OUTPUT_ZIP,
@@ -373,7 +407,9 @@ def create_release_zip(
         raise FileExistsError(f"Refusing to overwrite existing release: {output_zip}")
 
     files = iter_release_files(root_dir)
-    configured_secrets = _load_configured_secrets(root_dir)
+    violations = check_secrets_hygiene(root_dir, files)
+    if violations:
+        raise RuntimeError("Credential validation failed for release files: " + ", ".join(str(path) for path, _ in violations))
 
     total_uncompressed_bytes = 0
     normalized_names: List[str] = []
@@ -381,8 +417,6 @@ def create_release_zip(
         full_path = root_dir / rel_path
         rel_str = str(rel_path).replace("\\", "/")
         raw_bytes = full_path.read_bytes()
-        if any(secret in raw_bytes for secret in configured_secrets):
-            raise RuntimeError(f"Credential copy detected; refusing release: {rel_str}")
         total_uncompressed_bytes += len(raw_bytes)
         normalized_names.append(rel_str)
 

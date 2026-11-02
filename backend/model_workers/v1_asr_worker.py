@@ -6,17 +6,9 @@ import logging
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# Tương thích PyAV 18+ / 19+ với faster-whisper (faster-whisper truyền metadata_errors='ignore' mà PyAV 18+ đã bỏ)
-try:
-    import av
-    if hasattr(av, "open"):
-        _orig_av_open = av.open
-        def _compat_av_open(*args, **kwargs):
-            kwargs.pop("metadata_errors", None)
-            return _orig_av_open(*args, **kwargs)
-        av.open = _compat_av_open
-except Exception:
-    pass
+from ai.pyav_compat import install_pyav_compat
+
+install_pyav_compat()
 
 from ai.transcription import extract_subtitles_whisper
 

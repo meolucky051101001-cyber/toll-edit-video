@@ -1,49 +1,50 @@
-"""Test PyAV 18+ / 19+ compatibility with faster-whisper audio decoding."""
-import sys
-import unittest
-from pathlib import Path
+"""Exercise the real production adapter against strict fake PyAV APIs, including clean CI."""
+import importlib
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-BACKEND_DIR = Path(__file__).resolve().parent.parent / "backend"
-if str(BACKEND_DIR) not in sys.path:
-    sys.path.insert(0, str(BACKEND_DIR))
+import pytest
+
+from backend.ai import pyav_compat
 
 
-class TestPyAVFasterWhisperCompat(unittest.TestCase):
-    def test_av_open_strips_metadata_errors_transparently(self):
-        import av
-
-        mock_container = Mock()
-        with patch.object(av, "open", wraps=av.open) as wrapped_open:
-            # Import transcription to ensure compatibility shim is applied
-            from ai import transcription
-
-            # Calling av.open with metadata_errors must not raise TypeError
-            try:
-                # If av has open, invoke through the compatibility wrapper
-                res = av.open.__code__
-                self.assertIsNotNone(res)
-            except AttributeError:
-                pass
-
-    def test_compat_av_open_handles_extra_metadata_errors_kwarg(self):
-        import av
-
-        call_kwargs = {}
-
-        def dummy_open(file, mode="r", **kwargs):
-            call_kwargs.update(kwargs)
-            return "dummy_container"
-
-        # Simulate the wrapper logic directly
-        def _compat_av_open(*args, **kwargs):
-            kwargs.pop("metadata_errors", None)
-            return dummy_open(*args, **kwargs)
-
-        res = _compat_av_open("sample.wav", mode="r", metadata_errors="ignore")
-        self.assertEqual(res, "dummy_container")
-        self.assertNotIn("metadata_errors", call_kwargs)
+def test_av_open_strips_metadata_errors_transparently():
+    # This signature deliberately rejects the removed PyAV keyword.
+    container = object()
+    calls = []
+    def opener(file, mode="r", *, format=None):
+        calls.append((file, mode, format))
+        return container
+    av = SimpleNamespace(open=opener)
+    assert pyav_compat.install_pyav_compat(av)
+    assert av.open("sample.wav", "r", metadata_errors="ignore", format="wav") is container
+    assert calls == [("sample.wav", "r", "wav")]
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_compat_av_open_handles_extra_metadata_errors_kwarg():
+    original = Mock(return_value="container")
+    av = SimpleNamespace(open=original)
+    assert pyav_compat.install_pyav_compat(av)
+    assert av.open("sample.wav", metadata_errors="ignore", options={"threads": "1"}) == "container"
+    original.assert_called_once_with("sample.wav", options={"threads": "1"})
+
+
+def test_adapter_is_idempotent_across_module_reload_and_preserves_errors():
+    original = Mock(side_effect=ValueError("decode failure"))
+    av = SimpleNamespace(open=original)
+    assert pyav_compat.install_pyav_compat(av)
+    wrapper = av.open
+    importlib.reload(pyav_compat)
+    assert pyav_compat.install_pyav_compat(av)
+    assert av.open is wrapper
+    with pytest.raises(ValueError, match="decode failure"):
+        av.open("bad.wav", metadata_errors="ignore")
+    original.assert_called_once_with("bad.wav")
+
+
+def test_normal_install_path_uses_injected_av_module_without_dependency():
+    av = SimpleNamespace(open=Mock(return_value="container"))
+    with patch.dict("sys.modules", {"av": av}):
+        assert pyav_compat.install_pyav_compat()
+        assert av.open("sample.wav", metadata_errors="ignore") == "container"
+    av.open.__wrapped__.assert_called_once_with("sample.wav")

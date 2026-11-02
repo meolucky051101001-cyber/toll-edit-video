@@ -16,7 +16,7 @@ import re
 import shutil
 import sys
 import tempfile
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -30,11 +30,9 @@ from package_v1_release import (  # noqa: E402
     should_include,
 )
 
-SENSITIVE_PATTERNS = [
-    re.compile(r"""(?:bot_token|api_key|secret|password)\s*=\s*['\"][A-Za-z0-9_\-:]{20,}['\"]""", re.IGNORECASE),
-    re.compile(r"""AIzaSy[A-Za-z0-9_\-]{33}"""),
-    re.compile(r"""[0-9]{8,11}:[A-Za-z0-9_\-]{34,36}"""),
-]
+# Public compatibility aliases; ZIP and manifest use the same validator.
+from package_v1_release import SENSITIVE_PATTERNS, check_secrets_hygiene
+
 
 
 def hash_file_sha256(path: Path) -> str:
@@ -61,36 +59,6 @@ def collect_release_files(root: Path, target_subdirs: List[str] | None = None) -
         if len(parts) == 1 or parts[0] in allowed_roots:
             filtered.append(rel)
     return sorted(filtered, key=lambda p: str(p).replace("\\", "/"))
-
-
-def check_secrets_hygiene(root: Path, files: List[Path]) -> List[Tuple[Path, str]]:
-    from package_v1_release import _load_configured_secrets
-
-    configured_secrets = _load_configured_secrets(root)
-    violations = []
-    for rel in files:
-        full_path = root / rel
-        try:
-            raw_bytes = full_path.read_bytes()
-            content = raw_bytes.decode("utf-8", errors="ignore")
-        except Exception:
-            continue
-
-        if any(secret in raw_bytes for secret in configured_secrets):
-            violations.append((rel, "Found configured .env credential value"))
-            continue
-
-        for pat in SENSITIVE_PATTERNS:
-            match = pat.search(content)
-            if match:
-                matched_str = match.group(0)
-                if "test" in str(rel).lower() and any(
-                    marker in matched_str.lower()
-                    for marker in ("dummy", "mock", "example", "test", "synthetic", "secret_", "fake")
-                ):
-                    continue
-                violations.append((rel, f"Found pattern match: {matched_str[:8]}..."))
-    return violations
 
 
 def create_backup(root: Path, files: List[Path], timestamp: str) -> Path:

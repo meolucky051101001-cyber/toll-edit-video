@@ -2,6 +2,11 @@
 
 *Cập nhật: 02/11/2026. Đã hoàn thành đợt cleanup an toàn Tool V1 (C0–C9), cắt chuyển Python 3.12.14, thu hẹp lệnh dừng theo scope và dọn dẹp mã nguồn lịch sử.*
 
+Hậu kiểm đã phát hiện và sửa thêm các ca biên shutdown/release/CLI/CI trong
+[báo cáo sửa review](review_followup_20261102.md). Bộ kiểm thử sau sửa đạt
+1255 passed trên cả Python 3.12 và Python 3.10; mốc cleanup ban đầu là 1217.
+Việc sửa mã không đồng nghĩa đã chạy stop/restart hoặc nghiệm thu video thật.
+
 ---
 
 ## 1. TỔNG QUAN HỆ THỐNG
@@ -89,17 +94,17 @@ RVC và giọng `chi-mai` đã bị gỡ; mã cũ được tự động ánh x�
 Hệ thống kiểm thử bao phủ toàn diện:
 
 - **Bộ kiểm thử đầy đủ (Full Suite):**
-  - Python 3.12.14: **1217 passed, 0 failed, 79 skipped**.
-  - Python 3.10.11: **1217 passed, 0 failed, 79 skipped** (261 subtests passed).
+  - Python 3.12.14: **1255 passed, 0 failed, 79 skipped**, 4 warnings.
+  - Python 3.10.11: **1255 passed, 0 failed, 79 skipped**, 1 warning (261 subtests passed).
   - Node tests: **11 passed, 0 failed** (`node --test tests/js/*.test.js`).
   - AST Audits & Golden Cases: 100% PASS (72/72 ASS visual matches).
 - **Bộ kiểm thử tất định trong CI (`.github/workflows/python-quality.yml`):**
-  - Chạy ma trận song song Python 3.12 (chính) và Python 3.10 (dự phòng) qua 17 file kiểm thử tất định (174 tests).
+  - Cấu hình ma trận Python 3.12 (chính) và Python 3.10 (dự phòng) qua 19 file kiểm thử tất định (210 tests được collect tại máy local; chưa chạy GitHub Actions trong lượt sửa này).
   - Job Node 20 kiểm thử giao diện & subtitle renderer.
 - **Kiểm tra sức khỏe runtime chỉ đọc:**
   - `python scripts/verify_runtime_health.py --timeout 30` xác minh 25/25 tiêu chí preflight, pip dependencies và kết nối dịch vụ.
 - **Đóng gói phát hành:**
-  - `package_v1_release.py --dry-run` và `scripts/generate_release_manifest.py --dry-run` đồng bộ 561 file chuẩn.
+  - `package_v1_release.py --dry-run` và `scripts/generate_release_manifest.py --dry-run` dùng chung inventory và validator secret; mốc C7 ban đầu là 561 file. Xem số liệu hậu kiểm trong báo cáo sửa review.
 
 ---
 

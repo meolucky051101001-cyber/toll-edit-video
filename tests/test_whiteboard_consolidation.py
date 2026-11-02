@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import inspect
+import subprocess
+import sys
+from pathlib import Path
 from contextlib import contextmanager
 from unittest.mock import patch
+import pytest
 
 import numpy as np
 
@@ -26,6 +30,16 @@ from backend.whiteboard_animator.whiteboard_animator.video_encoding import (
     ffmpeg_cmd as nested_ffmpeg_cmd,
     ffmpeg_cmd_tpad as nested_ffmpeg_cmd_tpad,
 )
+
+
+@pytest.mark.parametrize("arguments,expected", [(["--help"], 0), (["--unsupported-review-option"], 2)])
+def test_nested_cli_forwards_help_and_argument_errors(arguments, expected):
+    root = Path(__file__).resolve().parents[1]
+    for module in ("backend.whiteboard_animator.cli", "backend.whiteboard_animator.whiteboard_animator.cli"):
+        result = subprocess.run([sys.executable, "-B", "-m", module, *arguments], cwd=root,
+                                capture_output=True, text=True, timeout=20)
+        assert result.returncode == expected
+        assert "usage:" in (result.stdout + result.stderr).lower()
 
 
 def test_canonical_and_nested_shim_resolve_to_single_implementation():
