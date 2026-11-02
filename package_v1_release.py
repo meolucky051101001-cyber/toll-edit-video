@@ -158,10 +158,7 @@ ALLOWED_TOP_FILES = [
     "requirements.lock",
     "requirements.lock.txt",
     "requirements.txt",
-    "RESTORE_SAFE_BASELINE.bat",
-    "RESTORE_VOICE_LOCK_BACKUP.bat",
     "rollback_to_safe_state.ps1",
-    "ROLLBACK_TRANSLATION_FIX.bat",
     "run_batch_edit.bat",
     "setup_new_laptop.ps1",
     "setup_v1.ps1",
@@ -169,7 +166,6 @@ ALLOWED_TOP_FILES = [
     "start_telebot_downloader.bat",
     "stop_bot.bat",
     "stop_telebot_downloader.bat",
-    "TatHoanToan.bat",
     "telebot_video_downloader.py",
     "TOOL_V2_FULL_GUIDE.md",
     "urls.example.txt",
@@ -197,7 +193,7 @@ REQUIRED_RELEASE_FILES = [
     "README_FIRST.md",
     "start_bot.bat",
     "stop_bot.bat",
-    "TatHoanToan.bat",
+    "scripts/windows/TatHoanToan.bat",
 ]
 
 

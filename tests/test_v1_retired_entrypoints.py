@@ -17,9 +17,9 @@ RETIRED_PY_MODULES = (
 )
 
 RETIRED_LAUNCHERS = (
-    PROJECT_ROOT / "RESTORE_SAFE_BASELINE.bat",
-    PROJECT_ROOT / "ROLLBACK_TRANSLATION_FIX.bat",
-    PROJECT_ROOT / "RESTORE_VOICE_LOCK_BACKUP.bat",
+    PROJECT_ROOT / "scripts" / "windows" / "RESTORE_SAFE_BASELINE.bat",
+    PROJECT_ROOT / "scripts" / "windows" / "ROLLBACK_TRANSLATION_FIX.bat",
+    PROJECT_ROOT / "scripts" / "windows" / "RESTORE_VOICE_LOCK_BACKUP.bat",
     PROJECT_ROOT / "rollback_to_safe_state.ps1",
     PROJECT_ROOT / "fixes_for_v1" / "apply_fix_to_v1.bat",
     PROJECT_ROOT / "fixes_for_v1" / "rollback_tool_v1.bat",
@@ -134,6 +134,7 @@ def test_retired_bat_and_ps1_launchers_contain_no_destructive_commands_and_exit_
 
     rel = launcher_path.relative_to(PROJECT_ROOT)
     temp_launcher = temp_repo / rel
+    temp_launcher.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(launcher_path, temp_launcher)
 
     if temp_launcher.suffix.lower() == ".ps1":
