@@ -79,7 +79,7 @@ Tại thư mục gốc của Tool V1:
   Chạy `start_bot.bat`.
 - **Dừng dịch vụ an toàn theo đúng scope (`backend/v1_shutdown.py`):**
   Các script dừng hiện tại chỉ tác động tới các tiến trình đã xác minh thuộc project root của Tool V1 (không kill mù quáng theo tên `python.exe`/`ffmpeg.exe` toàn máy và không tin PID cũ nếu không khớp script + creation time). Mặc định nếu có job đang xử lý, lệnh sẽ báo busy (exit code `2`) trừ khi truyền `--force`:
-  - `TatHoanToan.bat`: Dừng toàn bộ hệ thống Tool V1 (`--scope all`: supervisor/watchdog, control, dashboard, Telegram bot và worker con). Hỗ trợ xem trước không gây tác động qua `TatHoanToan.bat --preview` (hoặc `-WhatIf`).
+  - `scripts\windows\TatHoanToan.bat`: Dừng toàn bộ hệ thống Tool V1 (`--scope all`: supervisor/watchdog, control, dashboard, Telegram bot và worker con). Hỗ trợ xem trước không gây tác động qua `scripts\windows\TatHoanToan.bat --preview` (hoặc `-WhatIf`).
   - `stop_bot.bat`: Chỉ dừng đúng phạm vi Telegram dubbing bot (`--scope telegram`), không tắt nhầm downloader độc lập hay ứng dụng khác. Hỗ trợ `stop_bot.bat --preview`.
   - `stop_telebot_downloader.bat`: Chỉ dừng riêng bot tải video độc lập (`--scope downloader`). Hỗ trợ `stop_telebot_downloader.bat --preview`.
 

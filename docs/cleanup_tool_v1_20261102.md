@@ -10,7 +10,7 @@
 
 ## 1. MỤC TIÊU VÀ KẾT QUẢ ĐẠT ĐƯỢC
 
-1. **Thu hẹp phạm vi dừng dịch vụ (`F01` - C1):** Các lệnh dừng (`TatHoanToan.bat`, `stop_bot.bat`, `stop_telebot_downloader.bat`) chuyển sang sử dụng bộ điều phối chung `backend/v1_shutdown.py`. Chỉ tác động đúng tiến trình thuộc thư mục dự án, kiểm tra khớp file thực thi, script và thời gian khởi tạo; loại bỏ việc tin PID cũ và loại bỏ việc kill theo tên tiến trình trên toàn hệ thống. Hỗ trợ cờ `--preview` và chặn dừng khi hệ thống đang bận (`busy`).
+1. **Thu hẹp phạm vi dừng dịch vụ (`F01` - C1):** Các lệnh dừng (`scripts/windows/TatHoanToan.bat`, `stop_bot.bat`, `stop_telebot_downloader.bat`) chuyển sang sử dụng bộ điều phối chung `backend/v1_shutdown.py`. Chỉ tác động đúng tiến trình thuộc thư mục dự án, kiểm tra khớp file thực thi, script và thời gian khởi tạo; loại bỏ việc tin PID cũ và loại bỏ việc kill theo tên tiến trình trên toàn hệ thống. Hỗ trợ cờ `--preview` và chặn dừng khi hệ thống đang bận (`busy`).
 2. **Vô hiệu hóa công cụ lịch sử có side effect (`F02`, `F03` - C2):** 9 script bảo trì/rollback cũ được thay thế tại chỗ bằng stub an toàn trả mã lỗi `1`, ngăn chặn việc vô tình ghi đè queue, config hoặc mã nguồn khi chạy nhầm hoặc import.
 3. **Loại bỏ mã chết và trạng thái thừa (`F08` - C3):** Dọn dẹp nhánh EasyOCR không thể chạm tới trong `backend/ocr_utils.py` và các biến lỗi thời trong `backend/ai/translation.py`; giữ nguyên 3 module HOLD (`v1_free_gpt.py`, `v1_telegram_errors.py`, `qc_service.py`) để bảo toàn hợp đồng hệ thống.
 4. **Hợp nhất Whiteboard Animator (`F04` - C5):** Chuẩn hóa `backend/whiteboard_animator/` làm bản thực thi duy nhất (bảo toàn cải tiến NVENC, extra frames, timing fit); chuyển 11 file con lồng nhau thành shim re-export mỏng để giữ tương thích ngược.

@@ -10,7 +10,7 @@ Tài liệu được phân loại theo mục đích tra cứu: hướng dẫn v�
 - [README_FIRST](../README_FIRST.md) — Lối vào nhanh, checklist khởi động và kiểm tra sức khỏe.
 - [Báo cáo trạng thái Tool V1](PROJECT_STATE.md) — Hiện trạng hệ thống, môi trường runtime Python 3.12, quy trình 8 bước và nguyên tắc an toàn.
 - [Báo cáo Dọn dẹp an toàn C0–C9 (02/11/2026)](cleanup_tool_v1_20261102.md) — Chi tiết 8 gói commit dọn dẹp, kiểm thử đối chiếu và manifest xử lý file.
-- [Bản đồ phiên bản](../VERSIONS.md) — Phân định nhánh GitHub và cổng dịch vụ.
+- [Bản đồ phiên bản](../releases/VERSIONS.md) — Phân định nhánh GitHub và cổng dịch vụ.
 - [Bàn giao Dashboard Monitor](DASHBOARD_MONITOR_HANDOVER.md) — Cơ chế giám sát tiến độ và giao diện A2UI Studio.
 - [Tài liệu giám sát & A2UI](DOCS_HE_THONG_GIAM_SAT_VA_A2UI.md) — Hướng dẫn chi tiết hệ thống giám sát.
 - [Đánh giá & nghiệm thu Tool V1](REVIEW_TOOL_V1_2026-10-15.md) — Kết quả kiểm định độ ổn định, bộ giới hạn tốc độ 1.45x và sửa lỗi phụ đề.

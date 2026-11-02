@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT), str(ROOT / "backend")]
+sys.path[:0] = [str(ROOT), str(ROOT / "backend"), str(ROOT / "scripts" / "packaging")]  # root is canonical; nested path retains a compatibility shim
 import package_v1_release as package
 import job_tracker
 import render_history

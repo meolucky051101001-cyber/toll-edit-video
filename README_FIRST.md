@@ -15,7 +15,7 @@ Tài liệu hướng dẫn nhanh cho người vận hành hệ thống lồng ti
 - **Chạy trực tiếp có console:**
   Chạy `start_bot.bat` để xem log trực tiếp trên màn hình.
 - **Dừng dịch vụ theo đúng phạm vi (Scoped Shutdown):**
-  - `TatHoanToan.bat`: Dừng toàn bộ hệ thống Tool V1 (`--scope all`), bảo vệ job đang chạy (báo busy nếu chưa truyền `--force`) và hỗ trợ xem trước qua `TatHoanToan.bat --preview`.
+  - `scripts\windows\TatHoanToan.bat`: Dừng toàn bộ hệ thống Tool V1 (`--scope all`), bảo vệ job đang chạy (báo busy nếu chưa truyền `--force`) và hỗ trợ xem trước qua `scripts\windows\TatHoanToan.bat --preview`.
   - `stop_bot.bat`: Chỉ dừng riêng Telegram dubbing bot (`--scope telegram`). Hỗ trợ `stop_bot.bat --preview`.
   - `stop_telebot_downloader.bat`: Chỉ dừng riêng bot tải video độc lập (`--scope downloader`). Hỗ trợ `stop_telebot_downloader.bat --preview`.
 

@@ -31,7 +31,7 @@ Khởi động / dừng:
 - Khởi động toàn bộ: `KhoiDongAn.vbs` (hoặc `start_bot.bat` để thấy console).
 - Chỉ mở giao diện quan sát: `Giao_Dien_Quan_Sat_Tool.bat`.
 - Dừng an toàn theo phạm vi (`backend/v1_shutdown.py`):
-  - `TatHoanToan.bat`: Dừng toàn bộ hệ thống Tool V1 (`--scope all`), hỗ trợ `--preview` để kiểm tra trước và chặn dừng khi có job đang chạy (báo busy, cần `--force` nếu cố ý dừng).
+  - `scripts/windows/TatHoanToan.bat`: Dừng toàn bộ hệ thống Tool V1 (`--scope all`), hỗ trợ `--preview` để kiểm tra trước và chặn dừng khi có job đang chạy (báo busy, cần `--force` nếu cố ý dừng).
   - `stop_bot.bat`: Chỉ dừng Telegram dubbing bot (`--scope telegram`), không tác động downloader độc lập hay tiến trình khác.
   - `stop_telebot_downloader.bat`: Chỉ dừng bot tải video độc lập (`--scope downloader`).
 
