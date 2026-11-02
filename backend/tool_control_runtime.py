@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from telegram import Update
 from telegram.ext import TypeHandler, ApplicationHandlerStop
+from service_control import service_paused
 
 FLAGS = Path(os.getenv(
     "TOOL_V1_CONTROL_DIR",
@@ -35,7 +36,7 @@ def is_allowed_command_during_pause(cmd_text: str) -> bool:
 def install(application, namespace, key):
     flag=FLAGS/(key+'.pause')
     async def gate(update, context):
-        if flag.exists():
+        if flag.exists() or service_paused(Path(__file__).resolve().parent.parent):
             if isinstance(update, Update) and update.message and update.message.text:
                 if is_allowed_command_during_pause(update.message.text):
                     return

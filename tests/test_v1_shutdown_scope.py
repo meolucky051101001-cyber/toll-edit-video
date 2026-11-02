@@ -25,6 +25,12 @@ from backend.v1_shutdown import (
 from backend.v1_stop_bot import stop_v1_bot
 
 
+@pytest.fixture(autouse=True)
+def isolated_task_inventory(monkeypatch):
+    # Legacy scope tests model processes, never the machine's real Task Scheduler.
+    monkeypatch.setattr("backend.v1_shutdown.enumerate_scheduled_tasks", lambda: [])
+
+
 def _fixture_processes(project_root: Path) -> list[ProcessRecord]:
     root_str = str(project_root)
     backend_str = str(project_root / "backend")
@@ -354,7 +360,8 @@ def test_process_terminator_handles_nosuchprocess_access_denied_and_pid_reuse():
         reason="test",
     )
     rec_denied = SelectedTarget(
-        record=ProcessRecord(pid=2002, ppid=1, name="python.exe", create_time=100.0),
+        record=ProcessRecord(pid=2002, ppid=1, name="python.exe", exe=r"C:\Python\python.exe",
+                             cmdline=(r"C:\Python\python.exe", "worker.py"), create_time=100.0),
         role="worker",
         reason="test",
     )
@@ -371,6 +378,8 @@ def test_process_terminator_handles_nosuchprocess_access_denied_and_pid_reuse():
         proc.pid = pid
         if pid == 2002:
             proc.create_time.return_value = 100.0
+            proc.exe.return_value = rec_denied.record.exe
+            proc.cmdline.return_value = rec_denied.record.cmdline
             proc.terminate.side_effect = psutil.AccessDenied(pid)
         elif pid == 2003:
             # Creation time changed -> PID was reused by OS!

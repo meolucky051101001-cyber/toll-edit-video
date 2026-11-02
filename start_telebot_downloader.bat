@@ -19,6 +19,9 @@ if not exist "%PYTHON_EXE%" (
 )
 
 echo =========================================================================
+"%PYTHON_EXE%" -B "%PROJECT_DIR%backend\v1_shutdown.py" --scope downloader --resume
+if errorlevel 1 exit /b 1
+
 echo   BOT TAI VIDEO DOUYIN ^& XIAOHONGSHU (@douxiao_bot)
 echo   Che do: Tu dong chay khi bat may (Scheduled Task: AutoDubV1-telebot-downloader)
 echo   Thu muc luu video: D:\vid chua edit

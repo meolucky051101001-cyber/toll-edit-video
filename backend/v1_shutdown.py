@@ -18,6 +18,11 @@ import time
 from typing import Any, Callable, Iterable, Sequence
 
 try:
+    from .service_control import control_directories, intent_names, resume_services, service_workspace
+except ImportError:
+    from service_control import control_directories, intent_names, resume_services, service_workspace
+
+try:
     import psutil
 except ImportError:  # pragma: no cover - fallback when psutil is absent
     psutil = None
@@ -106,6 +111,35 @@ class ProcessRecord:
     cmdline: tuple[str, ...] = ()
     cwd: str = ""
     create_time: float = 0.0
+
+
+@dataclass(frozen=True)
+class TaskAction:
+    executable: str
+    arguments: str = ""
+    working_directory: str = ""
+
+
+@dataclass(frozen=True)
+class TaskRecord:
+    name: str
+    actions: tuple[TaskAction, ...]
+    running: bool = True
+
+
+class TaskVerificationError(RuntimeError):
+    pass
+
+
+@dataclass
+class TerminationResult:
+    terminated: list[int] = field(default_factory=list)
+    killed: list[int] = field(default_factory=list)
+    denied: list[int] = field(default_factory=list)
+    identity_mismatches: list[int] = field(default_factory=list)
+
+    def __iter__(self):
+        return iter((self.terminated, self.killed, self.denied))
 
 
 @dataclass
@@ -212,7 +246,7 @@ def _norm_case_path(value: str | Path) -> str:
     raw = str(value).strip().strip('"').strip("'")
     if not raw:
         return ""
-    normalized = os.path.normpath(raw.replace("/", "\\"))
+    normalized = str(Path(raw).resolve()).replace("/", "\\")
     return os.path.normcase(normalized)
 
 
@@ -267,8 +301,9 @@ def _extract_python_invocation(
         script_arg = tok.strip('"').strip("'")
         script_path = Path(script_arg)
         if not script_path.is_absolute():
-            base = Path(cwd) if cwd else (project_root / "backend")
-            script_path = base / script_path
+            if not cwd or not Path(cwd).is_absolute():
+                return None, None, []
+            script_path = Path(cwd) / script_path
         return _norm_case_path(script_path), None, tokens[idx + 1 :]
     return None, None, []
 
@@ -282,7 +317,8 @@ def _classify_project_process(
     backend_root = project_root / "backend"
     allowed_roots = [project_root, *extra_roots]
 
-    if not _is_python_process_name(record.name):
+    if (not _is_python_process_name(record.name) or not record.exe
+            or not Path(record.exe).is_absolute() or record.create_time <= 0):
         return None, "", False
 
     argv = split_windows_command_line(record.cmdline)
@@ -301,7 +337,7 @@ def _classify_project_process(
             return None, "", False
         script_basename = Path(script_norm).name.lower()
 
-        if script_basename == "background_service.py":
+        if script_norm == _norm_case_path(backend_root / "background_service.py"):
             svc_target = "supervisor"
             for idx, tok in enumerate(rem_args):
                 if tok == "--service" and idx + 1 < len(rem_args):
@@ -312,16 +348,18 @@ def _classify_project_process(
         for role, names in SERVICE_SCRIPTS.items():
             if script_basename in names:
                 expected_dir = project_root if role == "downloader" else backend_root
-                if _is_within_root(script_norm, expected_dir) or _is_within_root(
-                    script_norm, project_root
-                ):
+                if script_norm == _norm_case_path(expected_dir / script_basename):
                     return (
                         role,
                         f"script={script_basename}",
                         role in SUPERVISOR_SERVICES,
                     )
 
-        if script_basename in WORKER_SCRIPT_NAMES:
+        if script_basename in WORKER_SCRIPT_NAMES and script_norm in {
+            _norm_case_path(backend_root / script_basename),
+            _norm_case_path(backend_root / "model_workers" / script_basename),
+            _norm_case_path(backend_root / "pipeline_v2" / script_basename),
+        }:
             return "worker", f"worker_script={script_basename}", False
 
     if module_name:
@@ -634,13 +672,13 @@ def resolve_control_dir(workspace: Path) -> Path:
     return workspace / "control"
 
 
-def read_telegram_telemetry(workspace: Path) -> dict[str, Any]:
+def read_telegram_telemetry(workspace: Path, project_root: Path | None = None) -> dict[str, Any]:
     best: dict[str, Any] = {}
     best_at = -1.0
-    for candidate in (
-        workspace / "bot_system" / "control" / "v1.json",
-        workspace / "control" / "v1.json",
-    ):
+    directories = control_directories(project_root, workspace) if project_root else [
+        workspace / "bot_system" / "control", workspace / "control"
+    ]
+    for candidate in (directory / "v1.json" for directory in directories):
         data = _load_json_file(candidate)
         try:
             at = float(data.get("at") or 0.0)
@@ -668,6 +706,8 @@ def check_busy_state(
             workspace / "job_status.json",
         ):
             status_data = _load_json_file(status_path)
+            if status_path.exists() and not status_data:
+                reasons.append("dashboard_status_unreadable")
             if status_data.get("active") is True:
                 video_name = status_data.get("video_name") or status_data.get("job_id") or "batch"
                 reasons.append(f"dashboard_job_active:{video_name}")
@@ -689,7 +729,7 @@ def check_busy_state(
                         pass
 
     if scope in ("telegram", "all", "cutover"):
-        telemetry = read_telegram_telemetry(workspace)
+        telemetry = read_telegram_telemetry(workspace, project_root)
         try:
             at = float(telemetry.get("at") or 0.0)
         except (TypeError, ValueError):
@@ -711,14 +751,78 @@ def default_port_checker(ports: Sequence[int]) -> list[int]:
     return listening
 
 
+def enumerate_scheduled_tasks() -> list[TaskRecord]:
+    """Read action metadata only; errors are never treated as an empty inventory."""
+    if os.name != "nt":
+        return []
+    names = list(dict.fromkeys(name for group in SCHEDULED_TASKS_BY_SCOPE.values() for name in group))
+    command = r"""$ErrorActionPreference='Stop'
+$names=ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd())
+$rows=@(Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -in $names } | ForEach-Object {
+  $t=$_
+  @{ name=($t.TaskPath + $t.TaskName); running=([string]$t.State -eq 'Running'); actions=@($t.Actions | ForEach-Object {
+    @{ executable=$_.Execute; arguments=$_.Arguments; working_directory=$_.WorkingDirectory }
+  }) }
+})
+ConvertTo-Json -InputObject $rows -Depth 5 -Compress
+"""
+    result = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        input=json.dumps(names), capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=20, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode:
+        raise PermissionError("Cannot inspect Scheduled Task actions; no tasks were stopped")
+    try:
+        rows = json.loads(result.stdout)
+        if not isinstance(rows, list):
+            raise ValueError("Expected task inventory")
+        return [TaskRecord(row["name"], tuple(TaskAction(**action) for action in row["actions"]), row["running"]) for row in rows]
+    except (KeyError, TypeError, ValueError) as error:
+        raise TaskVerificationError("Incomplete Scheduled Task action inventory") from error
+
+
+def verified_task_names(names: Sequence[str], records: Sequence[TaskRecord], project_root: Path) -> list[str]:
+    expected = {
+        "AutoDub-control": {"control"}, "AutoDubV1-ops-watchdog": {"watchdog"},
+        "AutoDubV1-dashboard": {"dashboard", "supervisor:dashboard"},
+        "AutoDubV1-telegram": {"telegram", "supervisor:telegram"},
+        "AutoDubV1-scriptbot": {"scriptbot", "supervisor:scriptbot"},
+        "AutoDubV1-telebot-downloader": {"downloader"},
+    }
+    verified = []
+    for name in names:
+        matches = [record for record in records if record.name.lstrip("\\") == name]
+        if not matches:
+            continue  # A complete inventory proves that this optional task is absent.
+        if len(matches) != 1 or len(matches[0].actions) != 1:
+            raise TaskVerificationError(f"Ambiguous Scheduled Task actions: {name}")
+        action = matches[0].actions[0]
+        executable = action.executable.strip('"')
+        allowed = {_norm_case_path(project_root / "backend" / "venv" / "Scripts" / filename)
+                   for filename in ("python.exe", "pythonw.exe")}
+        argv = [executable, *split_windows_command_line(action.arguments)]
+        record = ProcessRecord(-1, -1, Path(executable).name, executable, tuple(argv), action.working_directory, 1.0)
+        role, _, _ = _classify_project_process(record, project_root)
+        if _norm_case_path(executable) not in allowed or role not in expected.get(name, set()):
+            raise TaskVerificationError(f"Scheduled Task belongs to a different root or service: {name}")
+        if matches[0].running:
+            verified.append(matches[0].name)
+    return verified
+
+
 def default_task_Controller(
     task_names: Sequence[str],
     *,
     mode: str,
+    project_root: Path,
+    task_enumerator: Callable[[], Sequence[TaskRecord]] | None = None,
 ) -> list[str]:
     """Stop Scheduled Tasks without losing their Enabled configuration."""
     if os.name != "nt" or not task_names:
         return []
+    task_enumerator = task_enumerator or enumerate_scheduled_tasks
+    task_names = verified_task_names([name.lstrip("\\") for name in task_names], task_enumerator(), project_root)
     stopped: list[str] = []
     schtasks = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "schtasks.exe"
     for name in task_names:
@@ -732,8 +836,14 @@ def default_task_Controller(
             )
             if res.returncode == 0:
                 stopped.append(name)
-        except Exception:
-            continue
+            else:
+                # It may have exited between inspection and /End. Confirm that
+                # race through a new inventory; never turn permission errors into success.
+                remaining = verified_task_names([name.lstrip("\\")], task_enumerator(), project_root)
+                if remaining:
+                    raise PermissionError(f"Cannot stop verified Scheduled Task: {name}")
+        except (OSError, subprocess.SubprocessError) as error:
+            raise PermissionError(f"Cannot stop verified Scheduled Task: {name}") from error
     return stopped
 
 
@@ -747,11 +857,12 @@ def default_process_terminator(
     Returns (terminated_pids, killed_pids, access_denied_pids).
     """
     if psutil is None:
-        return [], [], []
+        raise PermissionError("psutil is required for verified process shutdown")
 
     terminated: list[int] = []
     killed: list[int] = []
     access_denied: list[int] = []
+    identity_mismatches: list[int] = []
 
     supervisors = [t for t in targets if t.is_supervisor]
     non_supervisors = [t for t in targets if not t.is_supervisor]
@@ -764,11 +875,15 @@ def default_process_terminator(
             pid = item.record.pid
             try:
                 proc = psutil.Process(pid)
-                if item.record.create_time > 0:
-                    live_ctime = float(proc.create_time() or 0.0)
-                    if abs(live_ctime - item.record.create_time) > 2.0:
-                        logger.warning("Skipping PID %s due to creation time mismatch (PID reuse)", pid)
-                        continue
+                snapshot = item.record
+                live_ctime = float(proc.create_time() or 0.0)
+                if (snapshot.create_time <= 0 or abs(live_ctime - snapshot.create_time) > 1e-6
+                        or not snapshot.exe or not snapshot.cmdline
+                        or _norm_case_path(proc.exe()) != _norm_case_path(snapshot.exe)
+                        or tuple(proc.cmdline()) != tuple(snapshot.cmdline)):
+                    identity_mismatches.append(pid)
+                    logger.warning("Skipping PID %s: process identity changed or is incomplete", pid)
+                    continue
                 proc.terminate()
                 terminated.append(pid)
                 live_procs.append(proc)
@@ -796,7 +911,7 @@ def default_process_terminator(
             if alive:
                 psutil.wait_procs(alive, timeout=1.0)
 
-    return terminated, killed, access_denied
+    return TerminationResult(terminated, killed, access_denied, identity_mismatches)
 
 
 def _write_stop_intent_flags(
@@ -805,47 +920,28 @@ def _write_stop_intent_flags(
     scope: str,
     mode: str,
     include_downloader: bool,
+    project_root: Path | None = None,
 ) -> list[str]:
     """Write pause/disabled flags for intentional stops so watchdog/supervisors do not auto-restart."""
     if mode == "restart" or scope == "workers":
         return []
     written: list[str] = []
-    control_dirs = [workspace / "control"]
-    if (workspace / "bot_system").is_dir() or (workspace / "bot_system" / "control").is_dir():
-        control_dirs.insert(0, workspace / "bot_system" / "control")
-
-    flag_names: list[str] = []
-    if scope == "telegram":
-        flag_names.append("telegram.disabled")
-    elif scope == "downloader":
-        flag_names.append("downloader.disabled")
-    elif scope in ("all", "cutover"):
-        flag_names.extend(["v1.pause", "ops.pause", "telegram.disabled", "scriptbot.disabled"])
-        if include_downloader or scope == "cutover":
-            flag_names.append("downloader.disabled")
+    control_dirs = control_directories(project_root or workspace.parent, workspace)
+    flag_names = intent_names(scope, include_downloader)
 
     for cdir in control_dirs:
-        try:
-            cdir.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            continue
+        cdir.mkdir(parents=True, exist_ok=True)
         for fname in flag_names:
             fpath = cdir / fname
-            try:
-                fpath.write_text("paused", encoding="utf-8")
-                written.append(str(fpath))
-            except OSError:
-                continue
+            fpath.write_text("paused", encoding="utf-8")
+            written.append(str(fpath))
     return written
 
 
-def _update_stopped_telemetry(workspace: Path, scope: str) -> None:
+def _update_stopped_telemetry(workspace: Path, scope: str, project_root: Path) -> None:
     if scope not in ("telegram", "all", "cutover"):
         return
-    for candidate in (
-        workspace / "bot_system" / "control" / "v1.json",
-        workspace / "control" / "v1.json",
-    ):
+    for candidate in (directory / "v1.json" for directory in control_directories(project_root, workspace)):
         if candidate.is_file():
             try:
                 data = json.loads(candidate.read_text(encoding="utf-8-sig"))
@@ -874,22 +970,20 @@ def execute_shutdown(
     process_enumerator: Callable[[], Sequence[ProcessRecord]] = enumerate_live_processes,
     process_terminator: Callable[..., tuple[list[int], list[int], list[int]]] = default_process_terminator,
     task_controller: Callable[..., list[str]] = default_task_Controller,
+    task_enumerator: Callable[[], Sequence[TaskRecord]] | None = None,
     port_checker: Callable[[Sequence[int]], list[int]] = default_port_checker,
 ) -> ShutdownResult:
     """Unified shutdown flow: inventory -> select targets -> preview/busy check -> execute -> verify."""
     root = (Path(project_root) if project_root else Path(__file__).resolve().parents[1]).resolve()
-    ws = (
-        Path(workspace).resolve()
-        if workspace
-        else Path(os.getenv("AUTODUB_WORKSPACE", str(root / "workspace"))).resolve()
-    )
+    task_enumerator = task_enumerator or enumerate_scheduled_tasks
+    ws = service_workspace(root, workspace)
     ws_roots = [ws]
     default_ws = (root / "workspace").resolve()
     if default_ws not in ws_roots:
         ws_roots.append(default_ws)
 
     records = list(process_enumerator())
-    telemetry = read_telegram_telemetry(ws) if scope in ("telegram", "all", "cutover") else None
+    telemetry = read_telegram_telemetry(ws, root) if scope in ("telegram", "all", "cutover") else None
 
     selected, telemetry_rejected = select_shutdown_targets(
         records,
@@ -937,29 +1031,42 @@ def execute_shutdown(
         result.message = f"Refusing unverified telemetry PID ({telemetry_rejected})."
         return result
 
-    # 1. Record stop intent flags BEFORE stopping tasks/supervisors so watchdogs do not respawn
-    result.flags_written = _write_stop_intent_flags(
-        ws,
-        scope=scope,
-        mode=mode,
-        include_downloader=include_downloader,
-    )
-
-    # 2. Stop relevant Scheduled Tasks (preserving Enabled state)
     task_names = list(SCHEDULED_TASKS_BY_SCOPE.get(scope, ()))
-    if scope == "all" and include_downloader and "AutoDubV1-telebot-downloader" not in task_names:
+    if scope == "all" and include_downloader:
         task_names.append("AutoDubV1-telebot-downloader")
-    if task_names:
-        result.tasks_stopped = task_controller(task_names, mode=mode)
+    try:
+        task_names = verified_task_names(task_names, list(task_enumerator()), root) if task_names else []
+    except (TaskVerificationError, PermissionError, OSError, subprocess.SubprocessError) as error:
+        result.exit_code = EXIT_ACCESS_DENIED if isinstance(error, PermissionError) else EXIT_AMBIGUOUS
+        result.message = str(error)
+        return result
+
+    # 1. Record stop intent flags BEFORE stopping tasks/supervisors so watchdogs do not respawn
+    try:
+        result.flags_written = _write_stop_intent_flags(
+            ws, scope=scope, mode=mode, include_downloader=include_downloader, project_root=root,
+        )
+        if task_names:
+            result.tasks_stopped = task_controller(
+                task_names, mode=mode, project_root=root, task_enumerator=task_enumerator,
+            )
+    except (TaskVerificationError, OSError, subprocess.SubprocessError) as error:
+        result.exit_code = EXIT_AMBIGUOUS if isinstance(error, TaskVerificationError) else EXIT_ACCESS_DENIED
+        result.message = str(error)
+        return result
 
     # 3. Terminate selected processes (supervisors first, then workers)
-    terminated, killed, access_denied = process_terminator(selected)
+    outcome = process_terminator(selected)
+    terminated, killed, access_denied = outcome
     result.terminated_pids = terminated
     result.killed_pids = killed
     result.access_denied_pids = access_denied
 
-    # 4. Update telemetry snapshot
-    _update_stopped_telemetry(ws, scope)
+    mismatches = getattr(outcome, "identity_mismatches", [])
+    if mismatches:
+        result.exit_code = EXIT_AMBIGUOUS
+        result.message = f"Process identity changed; these PIDs were not stopped: {mismatches}."
+        return result
 
     if access_denied:
         result.exit_code = EXIT_ACCESS_DENIED
@@ -993,6 +1100,7 @@ def execute_shutdown(
         return result
 
     result.exit_code = EXIT_OK
+    _update_stopped_telemetry(ws, scope, root)
     result.message = (
         f"Stopped {len(terminated)} verified process(es) for scope={scope}."
         if terminated
@@ -1022,6 +1130,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=Path(__file__).resolve().parents[1],
     )
     parser.add_argument("--workspace", type=Path, default=None)
+    parser.add_argument("--resume", action="store_true", help="Clear the selected start intents without starting/stopping processes")
     parser.add_argument(
         "--preview",
         "--whatif",
@@ -1046,6 +1155,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Print structured JSON summary.",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.resume:
+        if args.preview or args.force or args.mode != "stop":
+            parser.error("--resume cannot be combined with preview, force or restart mode")
+        resume_services(args.project_root, workspace=args.workspace, scope=args.scope,
+                        include_downloader=args.include_downloader)
+        print(f"Cleared start intents for scope={args.scope}; no processes were started or stopped.")
+        return EXIT_OK
 
     res = execute_shutdown(
         project_root=args.project_root,
