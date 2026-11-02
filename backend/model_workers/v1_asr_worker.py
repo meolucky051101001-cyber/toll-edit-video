@@ -5,6 +5,11 @@ import json
 import logging
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from ai.pyav_compat import install_pyav_compat
+
+install_pyav_compat()
+
 from ai.transcription import extract_subtitles_whisper
 
 if __name__ == '__main__':

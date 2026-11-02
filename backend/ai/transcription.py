@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 from .v1_model_policy import current_v1_model_policy
 import time
 
+from .pyav_compat import install_pyav_compat
+
+install_pyav_compat()
+
 try:
     from faster_whisper import WhisperModel
 except ImportError:

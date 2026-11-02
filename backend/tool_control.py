@@ -34,6 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import psutil
 import voice_selection
+from service_control import resume_services
 
 ROOTS = {"v1": Path(r"C:\tool v1\backend")}
 PORTS = {"v1": 8088}
@@ -310,6 +311,7 @@ def change(key, action):
         return f'Đã tắt Tool {key.upper()} và giải phóng toàn bộ RAM & VRAM.'
 
     if action == 'on':
+        resume_services(ROOTS[key].parent, scope="all")
         # Xóa cờ pause của tool được kích hoạt
         for p in get_control_paths(key, key + '.pause'):
             try:
@@ -358,6 +360,7 @@ def apply_boot_defaults():
     """
     try:
         # Mở khóa Tool V1
+        resume_services(ROOTS['v1'].parent, scope="all")
         for p in get_control_paths('v1', 'v1.pause'):
             try: p.unlink(missing_ok=True)
             except Exception as _phase6_exc: logger.debug('Suppressed error in tool_control.apply_boot_defaults (p.unlink): %s', type(_phase6_exc).__name__, exc_info=False)

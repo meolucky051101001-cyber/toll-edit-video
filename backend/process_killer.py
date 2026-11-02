@@ -3,16 +3,37 @@ Process killer utility for Antigravity Video Dubbing Tool.
 Safely terminates heavy background worker subprocesses (ffmpeg, ffprobe, yt-dlp, model workers)
 without killing the host servers (main.py, telegram_bot.py, background_service.py).
 """
-import os
+from __future__ import annotations
+
 import logging
-import psutil
+import os
+from pathlib import Path
+from typing import Callable, Sequence
+
+try:
+    from backend.v1_shutdown import (
+        ProcessRecord,
+        default_process_terminator,
+        enumerate_live_processes,
+        select_shutdown_targets,
+    )
+except ImportError:
+    from v1_shutdown import (
+        ProcessRecord,
+        default_process_terminator,
+        enumerate_live_processes,
+        select_shutdown_targets,
+    )
 
 logger = logging.getLogger("process_killer")
 
 PROTECTED_SCRIPTS = {
     "main.py",
     "telegram_bot.py",
+    "telegram_script_bot.py",
     "background_service.py",
+    "tool_control.py",
+    "ops_watchdog.py",
 }
 
 WORKER_PROCESS_NAMES = {
@@ -27,68 +48,53 @@ WORKER_SCRIPT_KEYWORDS = [
     "demucs",
     "model_workers",
     "bs_roformer",
+    "v1_ocr_worker",
 ]
 
-def terminate_worker_processes() -> list:
+
+def terminate_worker_processes(
+    *,
+    project_root: Path | None = None,
+    workspace_roots: Sequence[Path] = (),
+    caller_pid: int | None = None,
+    preview: bool = False,
+    process_enumerator: Callable[[], Sequence[ProcessRecord]] = enumerate_live_processes,
+    process_terminator: Callable[..., tuple[list[int], list[int], list[int]]] = default_process_terminator,
+) -> list[int]:
+    """Terminate verified worker subprocesses across Tool V1 without substring collateral damage.
+
+    Returns list of terminated (or preview-selected) PIDs.
     """
-    Terminates worker subprocesses across the tool.
-    Returns list of terminated PIDs.
-    """
-    killed = []
-    current_pid = os.getpid()
+    root = (Path(project_root) if project_root else Path(__file__).resolve().parents[1]).resolve()
+    ws_roots = [Path(w).resolve() for w in workspace_roots] if workspace_roots else []
+    env_ws = os.getenv("AUTODUB_WORKSPACE")
+    if env_ws:
+        env_ws_path = Path(env_ws).resolve()
+        if env_ws_path not in ws_roots:
+            ws_roots.append(env_ws_path)
+    default_ws = (root / "workspace").resolve()
+    if default_ws not in ws_roots:
+        ws_roots.append(default_ws)
 
-    # 1. Kill all direct descendants of current process
-    try:
-        current_proc = psutil.Process(current_pid)
-        for child in current_proc.children(recursive=True):
-            try:
-                child.kill()
-                killed.append(child.pid)
-            except Exception:
-                pass
-    except Exception:
-        pass
+    current_pid = os.getpid() if caller_pid is None else int(caller_pid)
+    records = list(process_enumerator())
+    selected, _ = select_shutdown_targets(
+        records,
+        project_root=root,
+        workspace_roots=ws_roots,
+        scope="workers",
+        caller_pid=current_pid,
+        include_caller_children=True,
+    )
+    if preview:
+        return [item.record.pid for item in selected]
 
-    # 2. Scan system processes for orphan/sibling worker processes
-    for p in psutil.process_iter(['pid', 'name', 'cmdline']):
-        try:
-            pid = p.info['pid']
-            if pid == current_pid or pid in killed:
-                continue
+    terminated, killed, _ = process_terminator(selected, timeout=1.5)
+    all_stopped = list(dict.fromkeys([*terminated, *killed]))
+    for pid in all_stopped:
+        logger.info("Terminated verified worker process (PID: %s)", pid)
+    return all_stopped
 
-            name = (p.info['name'] or '').lower()
-            cmdline_list = p.info['cmdline'] or []
-            cmdline = ' '.join(cmdline_list).lower()
-
-            # Skip protected server processes
-            if any(prot in cmdline for prot in PROTECTED_SCRIPTS):
-                continue
-
-            # Kill ffmpeg / ffprobe / yt-dlp associated with tool
-            if name in WORKER_PROCESS_NAMES:
-                if any(w in cmdline for w in ['tool v1', 'tool v2', 'workspace', 'banve', 'v1-ocr', 'bs_roformer', 'temp']):
-                    try:
-                        p.kill()
-                        killed.append(pid)
-                        logger.info(f"Terminated worker process {name} (PID: {pid})")
-                    except Exception:
-                        pass
-
-            # Kill python model workers
-            elif 'python' in name:
-                if any(kw in cmdline for kw in WORKER_SCRIPT_KEYWORDS):
-                    try:
-                        p.kill()
-                        killed.append(pid)
-                        logger.info(f"Terminated python worker (PID: {pid}): {cmdline[:80]}")
-                    except Exception:
-                        pass
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            pass
-        except Exception as e:
-            logger.debug(f"Error checking process {p}: {e}")
-
-    return killed
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

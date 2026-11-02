@@ -23,6 +23,9 @@ if errorlevel 1 (
 )
 
 :: Đảm bảo Dashboard Tool V1 (cổng 8088) đang chạy
+"%PYTHON_EXE%" -B v1_shutdown.py --project-root "%ROOT_DIR%" --scope all --resume
+if errorlevel 1 exit /b 1
+
 netstat -ano | findstr ":8088" >nul
 if errorlevel 1 (
   echo [Tool V1] Dang khoi dong Dashboard tren cong 8088...

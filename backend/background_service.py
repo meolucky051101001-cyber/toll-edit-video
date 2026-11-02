@@ -10,6 +10,7 @@ import time
 import urllib.request
 
 from core.logging_setup import RedactingFormatter
+from service_control import service_paused
 
 ROOT = Path(__file__).resolve().parent
 WORKSPACE = Path(os.getenv("AUTODUB_WORKSPACE", str(ROOT.parent / "workspace")))
@@ -85,12 +86,9 @@ def main():
     except Exception:
         pass
 
-    bs_control = WORKSPACE / "bot_system" / "control"
-    control_dir = bs_control if bs_control.is_dir() else (WORKSPACE / "control")
-    control_pause = control_dir / "v1.pause"
     delay = 5
     while True:
-        if service != "dashboard" and control_pause.exists():
+        if service != "dashboard" and service_paused(ROOT.parent, service=service):
             time.sleep(2)
             continue
         if service == "dashboard":

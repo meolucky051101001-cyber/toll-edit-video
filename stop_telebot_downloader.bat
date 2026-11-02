@@ -1,15 +1,11 @@
 @echo off
-chcp 65001 >nul
+setlocal
 set "PROJECT_DIR=%~dp0"
-:: =========================================================================
-:: DỪNG TELEGRAM BOT TẢI VIDEO DOUYIN & XIAOHONGSHU
-:: Chỉ dừng tiến trình telebot_video_downloader.py, không ảnh hưởng Tool V1
-:: =========================================================================
+if "%PROJECT_DIR:~-1%"=="\" set "PROJECT_DIR=%PROJECT_DIR:~0,-1%"
+set "PYTHON_EXE=%PROJECT_DIR%\backend\venv\Scripts\python.exe"
+if not exist "%PYTHON_EXE%" set "PYTHON_EXE=python"
 
+rem Stop only verified telebot_video_downloader.py process without touching Tool V1 services
 echo Dang tim va tat tien trinh telebot_video_downloader.py...
-if not exist "%PROJECT_DIR%workspace\control" mkdir "%PROJECT_DIR%workspace\control" >nul 2>&1
-echo paused>"%PROJECT_DIR%workspace\control\downloader.disabled"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Stop-ScheduledTask -TaskName 'AutoDubV1-telebot-downloader' -ErrorAction SilentlyContinue; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*telebot_video_downloader*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
-
-echo Da tat bot tai video thanh cong!
-timeout /t 2 /nobreak >nul
+"%PYTHON_EXE%" -B "%PROJECT_DIR%\backend\v1_shutdown.py" --scope downloader --project-root "%PROJECT_DIR%" %*
+exit /b %ERRORLEVEL%

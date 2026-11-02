@@ -195,17 +195,6 @@ def _recognize_batch(frames):
             logger.error("PP-OCRv6 GPU failed; CPU fallback disabled: %s", exc)
 
     raise RuntimeError("V1 GPU OCR unavailable; CPU EasyOCR fallback disabled")
-    easy_reader = get_ocr_reader()
-    return [
-        easy_reader.readtext(
-            frame,
-            detail=1,
-            paragraph=False,
-            mag_ratio=1.0,
-            width_ths=0.7,
-        )
-        for frame in frames
-    ]
 
 
 def extract_silent_subtitles_from_gaps(gap_segments, target_lang="vi", api_key=None):
@@ -372,30 +361,6 @@ def _visual_grid_times(segments, duration, step=0.35):
         logger.warning("Visual OCR grid capped at %d/%d samples", max_samples, len(times))
         times = times[:max_samples]
     return times
-
-
-def _best_cluster_samples(cluster):
-    by_time = {}
-    for block in cluster:
-        try:
-            sample_time = round(float(_ocr_field(block, "sample_time", 0.0) or 0.0), 4)
-        except (TypeError, ValueError):
-            sample_time = 0.0
-        previous = by_time.get(sample_time)
-        if previous is None:
-            by_time[sample_time] = block
-            continue
-        score = (
-            float(_ocr_field(block, "prob", 0.0) or 0.0),
-            len(str(_ocr_field(block, "text", "") or "")),
-        )
-        previous_score = (
-            float(_ocr_field(previous, "prob", 0.0) or 0.0),
-            len(str(_ocr_field(previous, "text", "") or "")),
-        )
-        if score > previous_score:
-            by_time[sample_time] = block
-    return [by_time[key] for key in sorted(by_time)]
 
 
 def _tracking_blocks_for_cluster(cluster, start_t, end_t, band, visual_mode):

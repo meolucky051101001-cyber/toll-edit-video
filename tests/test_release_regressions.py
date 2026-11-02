@@ -45,12 +45,87 @@ class ReleaseRegressions(unittest.TestCase):
         self.assertEqual(test_evidence(None)['status'], 'NOT_RUN')
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / 'tests.log'
-            for text in ('', 'Ran 300 tests in 1.0s\nFAILED (failures=1)\n', 'still running'):
+            for text in (
+                '',
+                'Ran 300 tests in 1.0s\nFAILED (failures=1)\n',
+                '1 failed, 1200 passed, 79 skipped in 90.0s\n',
+                'still running',
+            ):
                 log.write_text(text, encoding='utf-8')
                 with self.assertRaises(ValueError):
                     test_evidence(log)
             log.write_text('Ran 8 tests in 1.234s\n\nOK\n', encoding='utf-8')
             self.assertEqual(test_evidence(log)['status'], '8/8 PASS')
+            log.write_text('1216 passed, 79 skipped, 4 warnings in 118.66s (0:01:58)\n', encoding='utf-8')
+            pytest_ev = test_evidence(log)
+            self.assertEqual(pytest_ev['runner'], 'pytest')
+            self.assertEqual(pytest_ev['passed'], 1216)
+            self.assertEqual(pytest_ev['skipped'], 79)
+            self.assertEqual(pytest_ev['status'], '1216 passed, 79 skipped')
+
+    def test_release_zip_and_manifest_share_unified_inventory_and_staging_safety(self):
+        import zipfile
+        import package_v1_release as pkg
+        from scripts.generate_release_manifest import collect_release_files, generate_manifest
+
+        repo_root = Path(__file__).resolve().parents[1]
+        for forbidden in (
+            'backend/.env',
+            'backend/.ENV.local',
+            'backend/gdrive_token.json',
+            'v1_code_changes_only.patch',
+            'backend/model_venv/x.py',
+            '../backend/main.py',
+            'backend/client.key',
+            'tools/render_node/node_modules/pkg/index.js',
+            'scratch/phase7/run_suite.py',
+            'backend/scripts_and_tests/test_ocr.py',
+        ):
+            self.assertFalse(pkg.should_include(forbidden), forbidden)
+        for allowed in (
+            'backend/main.py',
+            'backend/.env.example',
+            'tests/test_rc3_safety.py',
+            'scripts/verify_runtime_health.py',
+            'tools/render_node/package.json',
+            'tools/render_node/package-lock.json',
+            'requirements.lock',
+        ):
+            self.assertTrue(pkg.should_include(allowed), allowed)
+
+        zip_inventory = [str(p).replace('\\', '/') for p in pkg.iter_release_files(repo_root)]
+        manifest_inventory = [str(p).replace('\\', '/') for p in collect_release_files(repo_root)]
+        self.assertEqual(zip_inventory, manifest_inventory)
+        self.assertNotIn('CHATGPT_REVIEW_GUIDE.md', pkg.REQUIRED_RELEASE_FILES)
+        self.assertIn('scripts/verify_runtime_health.py', zip_inventory)
+        self.assertIn('tools/render_node/package.json', zip_inventory)
+        self.assertIn('tools/render_node/package-lock.json', zip_inventory)
+        self.assertIn('requirements.lock', zip_inventory)
+        self.assertFalse(any('node_modules' in item for item in zip_inventory))
+        self.assertFalse(any(item.startswith('scratch/') for item in zip_inventory))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            out_zip = temp_root / 'test_release.zip'
+            dry = pkg.create_release_zip(root_dir=repo_root, output_zip=out_zip, dry_run=True)
+            self.assertTrue(dry['dry_run'])
+            self.assertFalse(out_zip.exists())
+
+            sha, size_mb = pkg.create_release_zip(root_dir=repo_root, output_zip=out_zip, dry_run=False)
+            self.assertEqual(len(sha), 64)
+            self.assertGreater(size_mb, 0.1)
+            with zipfile.ZipFile(out_zip, 'r') as zf:
+                self.assertEqual(sorted(zf.namelist()), sorted(zip_inventory))
+
+            meta = generate_manifest(
+                repo_root,
+                create_backup_flag=False,
+                output_dir=temp_root,
+                dry_run=False,
+            )
+            self.assertEqual(meta['file_count'], len(zip_inventory))
+            self.assertTrue((temp_root / 'RELEASE_MANIFEST.sha256').is_file())
+            self.assertTrue((temp_root / 'RELEASE_METADATA.json').is_file())
 
     def test_overlapping_asr_windows_do_not_turn_a_real_caption_into_packaging(self):
         from backend.ocr_subtitle_locator import select_chinese_subtitle_band

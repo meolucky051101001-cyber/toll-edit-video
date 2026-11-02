@@ -1,7 +1,6 @@
 """Native grid routing extracted from srt-whiteboard; see vendor license."""
 from __future__ import annotations
 from typing import Sequence
-import math
 import cv2
 import numpy as np
 

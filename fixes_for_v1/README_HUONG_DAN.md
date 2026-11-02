@@ -1,6 +1,6 @@
 # HƯỚNG DẪN ÁP DỤNG BẢN SỬA LỖI DỊCH THUẬT & LỒNG TIẾNG
 
-> **Lưu ý**: Hiện tại Tool V1 vẫn được giữ nguyên 100% nguyên trạng (`c822af9`). Gói sửa lỗi này được lưu độc lập tại thư mục `C:\tool v2\fixes_for_v1\` để bạn có thể sử dụng bất cứ lúc nào trong tương lai.
+> **Lưu ý (Cập nhật 11/2026)**: Gói sửa lỗi lịch sử này (`c822af9`) đã **ngưng sử dụng (RETIRED)** vì các bản sửa mã hóa, cache và Gemini circuit breaker đã được tích hợp trực tiếp vào codebase Tool V1 hiện hành. Các script `apply_fix_to_v1.bat` và `rollback_tool_v1.bat` đã được khóa an toàn (trả mã lỗi `1`) để không ghi đè `backend\.env` hoặc chạy `git checkout -- .`.
 
 ---
 
