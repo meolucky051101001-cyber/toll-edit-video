@@ -2924,6 +2924,13 @@ try:
 except Exception as _pde:
     logger.warning("Failed to mount phase_d_router: %s", _pde)
 
+try:
+    from handoff_api import router as handoff_router
+    app.include_router(handoff_router)
+    logger.info("Mounted SubExtract handoff_router successfully.")
+except Exception as _hoe:
+    logger.warning("Failed to mount handoff_router: %s", _hoe)
+
 
 @app.get("/api/v1/gemini-health")
 async def api_v1_gemini_health():
