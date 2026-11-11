@@ -188,15 +188,16 @@ class XiaohongshuProvider(SearchProvider):
         filters: SearchFilters,
         on_batch: Callable[[list[VideoResult]], Awaitable[None]] | None = None,
     ) -> list[VideoResult]:
-        if hasattr(self.browser, "release_blocked_page"):
-            await self.browser.release_blocked_page()
-        # Searches always run headless, even when auto-elevation is enabled for
-        # challenges: drop any visible window before acquiring the lock.
-        if hasattr(self.browser, "ensure_headless_session"):
-            await self.browser.ensure_headless_session()
-        elif hasattr(self.browser, "reset_headful_session"):
-            self.browser.reset_headful_session()
         async with self.browser.lock:
+            if hasattr(self.browser, "release_blocked_page"):
+                await self.browser.release_blocked_page()
+            # Searches always run headless, even when auto-elevation is enabled
+            # for challenges: drop any visible window while holding the lock so
+            # no concurrent caller touches the session mid-close.
+            if hasattr(self.browser, "ensure_headless_session"):
+                await self.browser.ensure_headless_session()
+            elif hasattr(self.browser, "reset_headful_session"):
+                self.browser.reset_headful_session()
             results: list[VideoResult] = []
             try:
                 base = getattr(self.browser, "base_url", "https://www.rednote.com")

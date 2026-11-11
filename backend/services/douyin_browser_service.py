@@ -13,6 +13,7 @@ from playwright.async_api import TimeoutError as BrowserTimeout
 from backend.core.config import ROOT, settings
 from backend.providers.base import ProviderUnavailableError
 from backend.providers.douyin.parser import classify_page
+from backend.services.browser_lock import OwnedLock
 from backend.services.browser_session import (
     checkpoint_has_session_cookie,
     cleanup_stale_profile_locks,
@@ -76,7 +77,7 @@ class DouyinBrowserService:
         self.page: Page | None = None
         self.search_page: Page | None = None
         self.blocked_page: Page | None = None
-        self.lock = asyncio.Lock()
+        self.lock = OwnedLock()
         self.state = "closed"
         self.base_url = DOUYIN_HOME
         self.diagnostics: dict = {}
@@ -135,31 +136,33 @@ class DouyinBrowserService:
         # manually opened window. The open context is checkpointed by _close, so
         # the solved session survives and the search relaunches headless. The
         # persisted prefer_headful file is left alone for manual windows.
-        self.reset_headful_session(force=True)
-        if getattr(self, "is_currently_headless", True) is False and self.context:
-            await self._close()
+        async with self.lock.serialized():
+            self.reset_headful_session(force=True)
+            if getattr(self, "is_currently_headless", True) is False and self.context:
+                await self._close()
 
     async def elevate_to_headful(self, persist: bool = True) -> Page:
-        self.force_headful_session = True
-        self.hybrid_headless = False
-        if persist:
-            self.sticky_headful = True
-            save_headful_preference(self.profile)
-        if not getattr(self, "is_currently_headless", False):
+        async with self.lock.serialized():
+            self.force_headful_session = True
+            self.hybrid_headless = False
+            if persist:
+                self.sticky_headful = True
+                save_headful_preference(self.profile)
+            if not getattr(self, "is_currently_headless", False):
+                try:
+                    return self.get_active_page()
+                except ProviderUnavailableError:
+                    return await self._ensure_open_unlocked(headless_override=False)
             try:
-                return self.get_active_page()
+                active = self.get_active_page()
+                current_url = platform_navigation_url(active.url, ("douyin.com",))
             except ProviderUnavailableError:
-                return await self._ensure_open_unlocked(headless_override=False)
-        try:
-            active = self.get_active_page()
-            current_url = platform_navigation_url(active.url, ("douyin.com",))
-        except ProviderUnavailableError:
-            current_url = None
-        await self._close()
-        # Navigate directly to the blocked route, never via the home feed.
-        page = await self._ensure_open_unlocked(headless_override=False, initial_url=current_url)
-        await self.inspect(page)
-        return page
+                current_url = None
+            await self._close()
+            # Navigate directly to the blocked route, never via the home feed.
+            page = await self._ensure_open_unlocked(headless_override=False, initial_url=current_url)
+            await self.inspect(page)
+            return page
 
     def get_active_page(self) -> Page:
         if self.blocked_page and not self.blocked_page.is_closed():
@@ -209,12 +212,12 @@ class DouyinBrowserService:
     ) -> Page:
         """Open the browser, serialized by self.lock.
 
-        Callers that already hold self.lock (providers inside a search) skip
+        Callers that already OWN self.lock (providers inside a search) skip
         the re-acquire: asyncio.Lock is not reentrant and a nested acquire
-        would deadlock. Mutual exclusion makes locked() == True proof that the
-        CURRENT caller owns the lock.
+        would deadlock. locked() alone is not proof of ownership — another
+        task may hold the lock, and this caller must then wait for it.
         """
-        if self.lock.locked():
+        if self.lock.owned_by_current_task():
             return await self._ensure_open_unlocked(
                 headless_override=headless_override, initial_url=initial_url
             )

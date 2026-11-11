@@ -12,8 +12,10 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
 
+import psutil
 from playwright.async_api import BrowserContext, Error, Page
 
+from backend.providers.base import ProviderUnavailableError
 from backend.services.cookie_service import persist_auth_cookies
 
 #: Cookie names that prove a real login session exists. A checkpoint holding
@@ -65,6 +67,49 @@ STALE_LOCK_NAMES = frozenset({
     "DevToolsActivePort",
 })
 
+#: Process names (without .exe) of the Chromium family that may hold a profile.
+BROWSER_PROCESS_NAMES = frozenset({
+    "chrome",
+    "chrome-headless-shell",
+    "chromium",
+    "chromium-browser",
+    "headless_shell",
+    "msedge",
+})
+
+
+def profile_in_use(profile: Path) -> bool:
+    """True when a live browser process was launched with this profile directory.
+
+    Both sides are resolved before comparing: Chrome may be handed a relative
+    or differently-cased --user-data-dir, and Windows paths are case-insensitive.
+    """
+    try:
+        target = profile.resolve()
+    except OSError:
+        return False
+    for proc in psutil.process_iter(["name", "cmdline"]):
+        try:
+            name = (proc.info.get("name") or "").lower()
+            if name.endswith(".exe"):
+                name = name[:-4]
+            if name not in BROWSER_PROCESS_NAMES:
+                continue
+            for arg in proc.info.get("cmdline") or []:
+                if not isinstance(arg, str) or not arg.startswith("--user-data-dir="):
+                    continue
+                raw = arg.split("=", 1)[1].strip().strip('"')
+                if not raw:
+                    continue
+                try:
+                    if Path(raw).resolve() == target:
+                        return True
+                except OSError:
+                    continue
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return False
+
 
 def cleanup_stale_profile_locks(profile: Path) -> list[str]:
     """Remove Chromium single-instance locks and pending-delete leftovers.
@@ -74,7 +119,15 @@ def cleanup_stale_profile_locks(profile: Path) -> list[str]:
     dies with Access denied while Chrome tries to rename them. Only lock
     artifacts at the profile root are removed; Default/, Local State,
     cookies and auth_state.json are never touched. Returns removed names.
+
+    Raises ProviderUnavailableError when a live browser still holds the
+    profile: deleting its Singleton locks would corrupt the running session.
     """
+    if profile_in_use(profile):
+        raise ProviderUnavailableError(
+            "Hồ sơ trình duyệt đang được một cửa sổ khác sử dụng. "
+            "Hãy đóng cửa sổ trình duyệt đang mở profile này rồi thử lại."
+        )
     removed: list[str] = []
     try:
         entries = list(profile.iterdir())

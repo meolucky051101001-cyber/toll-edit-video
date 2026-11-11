@@ -1,15 +1,19 @@
 import asyncio
 import json
+import os
 import time
 from unittest.mock import AsyncMock, Mock
 
+import psutil
 import pytest
 from playwright.async_api import async_playwright
 
 from backend.core.config import settings
+from backend.providers.base import ProviderUnavailableError
 from backend.services.browser_service import BrowserService
 from backend.services.browser_session import (
     cleanup_stale_profile_locks,
+    profile_in_use,
     restore_missing_cookies,
     save_headful_preference,
     save_session_checkpoint,
@@ -299,6 +303,89 @@ def test_cleanup_stale_profile_locks_reports_only_actual_removals(tmp_path, monk
     monkeypatch.setattr("backend.services.browser_session.shutil.rmtree", lambda *args, **kwargs: None)
     assert cleanup_stale_profile_locks(profile) == []
     assert locked.exists()
+
+
+class _FakeProcess:
+    def __init__(self, name, cmdline):
+        self.info = {"name": name, "cmdline": cmdline}
+
+
+def _fake_process_iter(processes):
+    return lambda attrs=None: processes
+
+
+@pytest.mark.parametrize(
+    "process_name",
+    ["chrome.exe", "msedge.exe", "headless_shell.exe", "chrome-headless-shell.exe"],
+)
+def test_cleanup_refuses_when_a_live_browser_holds_the_profile(tmp_path, monkeypatch, process_name):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    lock = profile / "SingletonLock"
+    lock.write_text("live", encoding="utf-8")
+    monkeypatch.setattr(
+        "backend.services.browser_session.psutil.process_iter",
+        _fake_process_iter([_FakeProcess(process_name, ["browser", f"--user-data-dir={profile}"])]),
+    )
+    with pytest.raises(ProviderUnavailableError, match="Hãy đóng cửa sổ trình duyệt đang mở profile này"):
+        cleanup_stale_profile_locks(profile)
+    assert lock.exists(), "lock of a live profile must not be deleted"
+
+
+def test_cleanup_ignores_other_profiles_and_non_browser_processes(tmp_path, monkeypatch):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "SingletonLock").write_text("stale", encoding="utf-8")
+    other = tmp_path / "other"
+    monkeypatch.setattr(
+        "backend.services.browser_session.psutil.process_iter",
+        _fake_process_iter([
+            _FakeProcess("chrome.exe", ["chrome", f"--user-data-dir={other}"]),
+            _FakeProcess("notepad.exe", ["notepad", f"--user-data-dir={profile}"]),
+            _FakeProcess("msedge.exe", None),
+        ]),
+    )
+    assert cleanup_stale_profile_locks(profile) == ["SingletonLock"]
+
+
+def test_cleanup_matches_relative_user_data_dir(tmp_path, monkeypatch):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "SingletonLock").write_text("live", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "backend.services.browser_session.psutil.process_iter",
+        _fake_process_iter([_FakeProcess("chrome.exe", ["chrome", "--user-data-dir=profile"])]),
+    )
+    with pytest.raises(ProviderUnavailableError):
+        cleanup_stale_profile_locks(profile)
+    assert (profile / "SingletonLock").exists()
+
+
+def test_profile_in_use_skips_processes_it_cannot_read(tmp_path, monkeypatch):
+    class Denied:
+        @property
+        def info(self):
+            raise psutil.AccessDenied(pid=123)
+
+    monkeypatch.setattr(
+        "backend.services.browser_session.psutil.process_iter",
+        _fake_process_iter([Denied()]),
+    )
+    assert profile_in_use(tmp_path / "profile") is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows paths compare case-insensitively")
+def test_profile_in_use_matches_user_data_dir_case_insensitively(tmp_path, monkeypatch):
+    profile = tmp_path / "Profile"
+    profile.mkdir()
+    monkeypatch.setattr(
+        "backend.services.browser_session.psutil.process_iter",
+        _fake_process_iter([
+            _FakeProcess("chrome.exe", ["chrome", f"--user-data-dir={str(profile).lower()}"]),
+        ]),
+    )
+    assert profile_in_use(profile) is True
 
 
 @pytest.mark.anyio
