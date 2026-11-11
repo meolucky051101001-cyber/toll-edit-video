@@ -129,6 +129,45 @@ async def test_douyin_inspect_recognizes_session_cookies(tmp_path: Path):
 
 
 @pytest.mark.anyio
+async def test_douyin_inspect_guest_cookies_are_not_login(tmp_path: Path):
+    """L1: anonymous/tracking cookies must not count as a login session."""
+    svc = DouyinBrowserService(profile=tmp_path)
+    mock_context = MagicMock()
+    mock_context.cookies = AsyncMock(return_value=[
+        {"name": "passport_csrf_token", "value": "guest", "domain": ".douyin.com"},
+        {"name": "uid_tt", "value": "guest", "domain": ".douyin.com"},
+        {"name": "uid_tt_ss", "value": "guest", "domain": ".douyin.com"},
+    ])
+    mock_context.storage_state = AsyncMock()
+    svc.context = mock_context
+
+    mock_page = MagicMock()
+    mock_page.is_closed.return_value = False
+    mock_page.url = "https://www.douyin.com/search/test"
+    mock_page.title = AsyncMock(return_value="Douyin")
+
+    def locator_router(sel, *args, **kwargs):
+        if "avatar" in sel:
+            m = MagicMock()
+            m.count = AsyncMock(return_value=1)
+            return m
+        dummy = MagicMock()
+        dummy.inner_text = AsyncMock(return_value="Search results")
+        dummy.count = AsyncMock(return_value=0)
+        dummy.all = AsyncMock(return_value=[])
+        dummy.first = dummy
+        return dummy
+
+    mock_page.locator.side_effect = locator_router
+
+    state = await svc.inspect(mock_page)
+
+    assert state != "authenticated"
+    assert svc.diagnostics["has_session_cookie"] is False
+    assert svc.diagnostics["is_authenticated"] is False
+
+
+@pytest.mark.anyio
 async def test_douyin_inspect_auto_dismisses_login_panel(tmp_path: Path):
     svc = DouyinBrowserService(profile=tmp_path)
     mock_context = MagicMock()

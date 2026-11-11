@@ -420,3 +420,213 @@ async def test_graceful_shutdown_marks_unfinished_jobs(queue_test_env):
         assert rec1.error_code == "server_shutdown"
         assert rec2.status == "interrupted"
         assert rec2.error_code == "server_shutdown"
+
+
+class PerVideoAdapter(BaseDownloadAdapter):
+    """Resolves each video to a distinct media URL keyed by its platform id."""
+
+    @property
+    def name(self) -> str:
+        return "PerVideoAdapter"
+
+    @property
+    def version(self) -> str:
+        return "pv:1.0"
+
+    async def health_check(self) -> bool:
+        return True
+
+    async def resolve(self, video: Video) -> ResolvedMedia:
+        return ResolvedMedia(
+            platform=video.platform,  # type: ignore[arg-type]
+            video_id=video.platform_video_id or "vid",
+            media_url=f"https://sns-video-bd.xhscdn.com/stream/{video.platform_video_id}.mp4",
+            headers={"User-Agent": "TestUA"},
+            format="mp4",
+            adapter_name=self.name,
+            adapter_version=self.version,
+        )
+
+
+@pytest.mark.anyio
+async def test_retry_backoff_releases_platform_semaphore(tmp_path, monkeypatch):
+    """M5: a job in retry backoff must not hold the platform semaphore.
+
+    With per-platform concurrency = 1, job B must be able to finish while job A
+    is still sleeping in retry_wait. If the backoff sleep kept the semaphore,
+    B could only run after A's retry completed.
+    """
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine, expire_on_commit=False)
+    dl_dir = tmp_path / "downloads"
+    dl_dir.mkdir(parents=True, exist_ok=True)
+    adapter = PerVideoAdapter()
+    service = DownloadService(
+        sessions,
+        xhs_adapter=adapter,
+        douyin_adapter=adapter,
+        download_dir=dl_dir,
+        queue_capacity=5,
+        worker_count=2,
+        max_retries=2,
+        retry_base_delay=2.0,
+    )
+    tiny_mp4 = Path("tests/fixtures/tiny_valid.mp4").read_bytes()
+    a_attempts = 0
+
+    class Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            nonlocal a_attempts
+            if request.url.path.endswith("aaa.mp4"):
+                a_attempts += 1
+                if a_attempts == 1:
+                    return httpx.Response(503, content=b"overloaded")
+            return httpx.Response(
+                200,
+                headers={"Content-Length": str(len(tiny_mp4)), "Content-Type": "video/mp4"},
+                content=tiny_mp4,
+            )
+
+    monkeypatch.setattr(
+        "backend.services.download.service.create_safe_async_client",
+        lambda timeout: httpx.AsyncClient(transport=Transport(), timeout=timeout),
+    )
+
+    with sessions() as db:
+        for vid, pid in [("vidA", "aaa"), ("vidB", "bbb")]:
+            db.add(
+                Video(
+                    id=vid,
+                    platform="xiaohongshu",
+                    platform_video_id=pid,
+                    url=f"https://www.xiaohongshu.com/explore/{pid}",
+                    canonical_url=f"https://www.xiaohongshu.com/explore/{pid}",
+                    fingerprint=f"fp-{pid}",
+                    search_query="test",
+                    search_job_id="job1",
+                    is_mock=False,
+                )
+            )
+        db.commit()
+
+    job_a = service.request_download("vidA")
+    await service.start()
+    try:
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            if service.get_job_by_id(job_a.id).status == "retry_wait":
+                break
+        assert service.get_job_by_id(job_a.id).status == "retry_wait"
+
+        job_b = service.request_download("vidB")
+        a_status_when_b_done = None
+        for _ in range(200):
+            await asyncio.sleep(0.02)
+            out_b = service.get_job_by_id(job_b.id)
+            if out_b and out_b.status == "completed":
+                a_status_when_b_done = service.get_job_by_id(job_a.id).status
+                break
+
+        assert a_status_when_b_done == "retry_wait", (
+            "B must complete while A is still backing off (semaphore released)"
+        )
+
+        for _ in range(300):
+            await asyncio.sleep(0.02)
+            if service.get_job_by_id(job_a.id).status in ("completed", "failed"):
+                break
+    finally:
+        await service.shutdown()
+
+    out_a = service.get_job_by_id(job_a.id)
+    assert out_a.status == "completed"
+    assert out_a.retry_count == 1
+    assert a_attempts == 2
+
+
+@pytest.mark.anyio
+async def test_range_resume_mismatch_restarts_without_corruption(queue_test_env, monkeypatch):
+    """L2: a 206 whose Content-Range start != .part size must not be appended.
+
+    The partial is dropped and the job restarts from zero, so the final file is
+    exactly the source media rather than a corrupt concatenation.
+    """
+    sessions, service, dl_dir = queue_test_env
+    full_mp4 = Path("tests/fixtures/tiny_valid.mp4").read_bytes()
+    total_len = len(full_mp4)
+    first_chunk_len = len(full_mp4) // 2
+
+    with sessions() as db:
+        v = Video(
+            id="vid-range-bad",
+            platform="xiaohongshu",
+            platform_video_id="range_bad",
+            url="https://www.xiaohongshu.com/explore/rangebad",
+            canonical_url="https://www.xiaohongshu.com/explore/rangebad",
+            fingerprint="fp-range-bad",
+            search_query="test",
+            search_job_id="job1",
+            is_mock=False,
+        )
+        db.add(v)
+        db.commit()
+
+    job = service.request_download("vid-range-bad")
+    part_file = service.temp_dir / f"{job.id}.part"
+    part_file.write_bytes(full_mp4[:first_chunk_len])
+
+    class MismatchThenFullTransport(httpx.AsyncBaseTransport):
+        def __init__(self):
+            self.calls = 0
+            self.range_headers: list[str | None] = []
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            self.calls += 1
+            self.range_headers.append(request.headers.get("Range"))
+            if self.calls == 1:
+                # Wrong start offset (0) versus our .part size first_chunk_len.
+                return httpx.Response(
+                    206,
+                    headers={
+                        "Content-Range": f"bytes 0-{total_len - 1}/{total_len}",
+                        "Content-Length": str(total_len),
+                        "Content-Type": "video/mp4",
+                    },
+                    content=full_mp4,
+                )
+            return httpx.Response(
+                200,
+                headers={"Content-Length": str(total_len), "Content-Type": "video/mp4"},
+                content=full_mp4,
+            )
+
+    transport = MismatchThenFullTransport()
+    monkeypatch.setattr(
+        "backend.services.download.service.create_safe_async_client",
+        lambda timeout: httpx.AsyncClient(transport=transport, timeout=timeout),
+    )
+
+    await service.start()
+    try:
+        for _ in range(200):
+            await asyncio.sleep(0.05)
+            out = service.get_job_by_id(job.id)
+            if out and out.status in ("completed", "failed", "cancelled"):
+                break
+    finally:
+        await service.shutdown()
+
+    out = service.get_job_by_id(job.id)
+    assert out.status == "completed"
+    assert out.file_size == total_len
+    assert out.retry_count == 1
+    assert transport.calls == 2
+    assert transport.range_headers[0] == f"bytes={first_chunk_len}-"
+    assert transport.range_headers[1] is None, "restart must drop the Range header"
+
+    with sessions() as db:
+        db_job = db.get(DownloadJob, job.id)
+        assert db_job is not None and db_job.relative_path is not None
+        final_file = dl_dir / db_job.relative_path
+        assert final_file.read_bytes() == full_mp4, "mismatched range must not corrupt the file"

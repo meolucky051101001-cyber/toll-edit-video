@@ -15,6 +15,7 @@ from backend.providers.base import ProviderUnavailableError
 from backend.providers.douyin.parser import classify_page
 from backend.services.browser_lock import OwnedLock
 from backend.services.browser_session import (
+    SESSION_COOKIE_NAMES,
     checkpoint_has_session_cookie,
     cleanup_stale_profile_locks,
     load_headful_preference,
@@ -450,9 +451,7 @@ class DouyinBrowserService:
                         for c in c_list
                         if (name := c.get("name")) is not None
                     }
-                    has_session_cookie = bool(
-                        c_names & {"sessionid", "sessionid_ss", "sid_guard", "passport_csrf_token", "uid_tt", "uid_tt_ss"}
-                    )
+                    has_session_cookie = bool(c_names & SESSION_COOKIE_NAMES)
                 except Exception:
                     pass
 

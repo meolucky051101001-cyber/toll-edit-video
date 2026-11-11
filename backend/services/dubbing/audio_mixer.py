@@ -3,7 +3,7 @@ import logging
 import os
 import shutil
 
-from backend.core.config import ROOT
+from backend.core.config import ROOT, settings
 
 logger = logging.getLogger("dubbing.mixer")
 
@@ -24,6 +24,28 @@ class AudioMixer:
 
     def __init__(self, ffmpeg_bin: str | None = None):
         self.ffmpeg = resolve_ffmpeg_binary(ffmpeg_bin)
+
+    async def _run_ffmpeg(self, cmd: list[str]) -> tuple[int, bytes]:
+        """Runs ffmpeg with a hard timeout; never leaves an orphan process.
+
+        On timeout or cancellation the child is killed and reaped before the
+        exception propagates (the caller falls back to an audio-only asset).
+        """
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=settings.ffmpeg_timeout_seconds
+            )
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+        assert proc.returncode is not None
+        return proc.returncode, stderr
 
     async def mix(
         self,
@@ -77,14 +99,9 @@ class AudioMixer:
                 output_video_path,
             ]
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
+            returncode, stderr = await self._run_ffmpeg(cmd)
 
-            if proc.returncode != 0 and "matches no streams" in stderr.decode(errors="ignore"):
+            if returncode != 0 and "matches no streams" in stderr.decode(errors="ignore"):
                 logger.info("Source video has no audio stream; falling back to direct mux without ducking filter")
                 cmd_fallback = [
                     self.ffmpeg,
@@ -99,18 +116,13 @@ class AudioMixer:
                     "-shortest",
                     output_video_path,
                 ]
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd_fallback,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await proc.communicate()
+                returncode, stderr = await self._run_ffmpeg(cmd_fallback)
 
-            if proc.returncode == 0 and os.path.isfile(output_video_path):
+            if returncode == 0 and os.path.isfile(output_video_path):
                 logger.info("Successfully mixed dubbed video: %s", output_video_path)
                 return voiceover_audio_path, output_video_path
             else:
-                logger.warning("ffmpeg mix failed (code %d): %s; returning audio only", proc.returncode, stderr.decode(errors="ignore"))
+                logger.warning("ffmpeg mix failed (code %d): %s; returning audio only", returncode, stderr.decode(errors="ignore"))
                 return voiceover_audio_path, None
         except Exception as exc:
             logger.warning("Audio mixing exception: %s; returning audio only", exc)

@@ -114,6 +114,7 @@ class DownloadService:
         self.cancelled_jobs: set[str] = set()
         self.active_tasks: dict[str, asyncio.Task[None]] = {}
         self.job_retry_counts: dict[str, int] = {}
+        self._retry_delays: dict[str, float] = {}
 
         self.queue_manager = DownloadQueueManager(
             handler=self.process_download,
@@ -417,6 +418,12 @@ class DownloadService:
         return current_attempts < self.max_retries
 
     async def _handle_retry_wait(self, download_id: str, code: str, message: str) -> bool:
+        """Marks a job for retry and records its backoff delay.
+
+        The delay is slept at the top of the worker loop, outside the download
+        semaphores, so a backing-off job never blocks other downloads on the
+        same platform.
+        """
         if download_id in self.cancelled_jobs:
             return False
         current_attempts = self.job_retry_counts.get(download_id, 0)
@@ -445,20 +452,26 @@ class DownloadService:
             message,
         )
 
-        try:
-            await asyncio.sleep(delay)
-        except asyncio.CancelledError:
-            return False
-
-        if download_id in self.cancelled_jobs:
-            return False
-
+        self._retry_delays[download_id] = delay
         return True
 
     async def _process_download_job(self, download_id: str) -> None:
         while True:
             if download_id in self.cancelled_jobs:
                 return
+
+            # Backoff sleep happens here, before re-acquiring the semaphores,
+            # so a retrying job releases its platform + global slots while it
+            # waits and other downloads can proceed.
+            delay = self._retry_delays.pop(download_id, None)
+            if delay is not None:
+                try:
+                    await asyncio.sleep(delay)
+                except asyncio.CancelledError:
+                    self._handle_cancel(download_id)
+                    return
+                if download_id in self.cancelled_jobs:
+                    return
 
             with self.sessions() as db:
                 job = db.get(DownloadJob, download_id)
@@ -851,6 +864,26 @@ class DownloadService:
                                 "Phản hồi 206 thiếu tiêu đề Content-Range hợp lệ.",
                             )
                             return "failed"
+                        start_match = re.search(r"bytes\s+(\d+)-", content_range, re.IGNORECASE)
+                        range_start = int(start_match.group(1)) if start_match else None
+                        if range_start != existing_bytes:
+                            # Server resumed from an offset different from our
+                            # .part size; appending would corrupt the file. Drop
+                            # the partial so the next attempt restarts from 0.
+                            part_path.unlink(missing_ok=True)
+                            if self._should_retry("content_range_mismatch", download_id):
+                                if await self._handle_retry_wait(
+                                    download_id,
+                                    "content_range_mismatch",
+                                    "Máy chủ trả điểm bắt đầu Range khác kích thước tệp tạm.",
+                                ):
+                                    return "retry"
+                            self._fail_job(
+                                download_id,
+                                "content_range_mismatch",
+                                "Không thể tiếp tục tải do máy chủ trả sai điểm bắt đầu.",
+                            )
+                            return "failed"
                         match = re.search(r"/(\d+)$", content_range)
                         if match:
                             total_size = int(match.group(1))
@@ -1078,6 +1111,7 @@ class DownloadService:
                     self.event_bus.publish_nowait("download:update", self._to_event_payload(job))
 
     def _handle_cancel(self, download_id: str) -> None:
+        self._retry_delays.pop(download_id, None)
         with self.sessions() as db:
             job = db.get(DownloadJob, download_id)
             if job and job.status not in ("completed", "failed"):

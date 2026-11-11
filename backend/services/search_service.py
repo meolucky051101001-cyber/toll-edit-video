@@ -284,9 +284,11 @@ class SearchService:
     ) -> bool:
         """Replays a recent identical completed job instead of re-crawling.
 
-        Matching keys: query, platform set, mock flag, filters dict, AI flag and
-        per-query list (when both plans pin explicit queries). The source job
-        must be completed, within TTL, and hold at least `requested_limit`
+        Matching keys: query, platform set, mock flag, filters dict, AI flag,
+        per-query list (when both plans pin explicit queries) and the job-level
+        relevance threshold (min_relevance, which the API defaults to 40 for
+        real searches independently of filters.minimum_relevance). The source
+        job must be completed, within TTL, and hold at least `requested_limit`
         videos. Returns True when the new job was served from cache.
         """
         key_filters = (plan.filters if plan and plan.filters else {}) or {}
@@ -295,6 +297,8 @@ class SearchService:
         cutoff = utcnow() - timedelta(seconds=settings.search_cache_ttl_seconds)
 
         with self.sessions() as db:
+            new_job = db.get(SearchJob, job_id)
+            assert new_job is not None
             candidates = db.scalars(
                 select(SearchJob)
                 .where(
@@ -312,6 +316,8 @@ class SearchService:
                 if sorted(candidate.platforms or []) != sorted(platforms):
                     continue
                 if (candidate.original_query or "").strip() != (original_query or "").strip():
+                    continue
+                if candidate.min_relevance != new_job.min_relevance:
                     continue
                 candidate_plan = db.get(SearchPlan, candidate.id)
                 candidate_filters = (candidate_plan.filters if candidate_plan else {}) or {}
@@ -339,8 +345,6 @@ class SearchService:
                     .limit(requested_limit)
                 )
             )
-            new_job = db.get(SearchJob, job_id)
-            assert new_job is not None
             for link in links:
                 db.add(
                     JobVideo(
@@ -370,10 +374,14 @@ class SearchService:
                 },
             }
             if plan and source_plan is not None:
-                plan.queries = list(source_plan.queries or [])
-                plan.source = source_plan.source
-                plan.warning = source_plan.warning
-                plan.expansion = source_plan.expansion
+                # The plan passed in was loaded in a closed session; mutate a
+                # session-bound copy so the copied queries/source actually persist.
+                new_plan = db.get(SearchPlan, job_id)
+                if new_plan is not None:
+                    new_plan.queries = list(source_plan.queries or [])
+                    new_plan.source = source_plan.source
+                    new_plan.warning = source_plan.warning
+                    new_plan.expansion = source_plan.expansion
             db.commit()
         logger.info(
             "job=%s cache_hit source=%s videos=%d", job_id, source.id, len(links)

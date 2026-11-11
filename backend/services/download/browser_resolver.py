@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from backend.models.video import Video
@@ -9,6 +10,8 @@ from backend.schemas.downloads import ResolvedMedia
 from backend.services.download.base import DownloadAdapterError
 
 logger = logging.getLogger("download.browser_resolver")
+
+BROWSER_LOCK_TIMEOUT_SECONDS = 60.0
 
 XHS_RESOLVE_SCRIPT = """
 async (args) => {
@@ -197,6 +200,30 @@ class BrowserMediaResolver:
         else:
             raise DownloadAdapterError("unsupported_platform", f"Nền tảng '{platform}' không hỗ trợ phân giải trình duyệt.")
 
+    async def _run_under_browser_lock(
+        self, browser: Any, factory: Callable[[], Awaitable[Any]]
+    ) -> Any:
+        """Runs factory() holding the browser lock, failing fast when busy.
+
+        A search can hold the lock for minutes; without a timeout the resolver
+        would stall the download behind it. On timeout we raise a retryable
+        browser_busy error instead of waiting indefinitely.
+        """
+        lock = getattr(browser, "lock", None)
+        if not lock:
+            return await factory()
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=BROWSER_LOCK_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            raise DownloadAdapterError(
+                "browser_busy",
+                "Trình duyệt đang bận (có lượt tìm kiếm đang dùng). Vui lòng thử lại sau.",
+            ) from None
+        try:
+            return await factory()
+        finally:
+            lock.release()
+
     async def resolve_xiaohongshu(self, video: Video) -> ResolvedMedia:
         browser = self.xhs_browser
         if browser is None:
@@ -233,11 +260,7 @@ class BrowserMediaResolver:
             except Exception as e:
                 raise DownloadAdapterError("browser_evaluate_failed", f"Lỗi thực thi trong trang Xiaohongshu: {e}")
 
-        if hasattr(browser, "lock") and browser.lock:
-            async with browser.lock:
-                result = await _eval_xhs()
-        else:
-            result = await _eval_xhs()
+        result = await self._run_under_browser_lock(browser, _eval_xhs)
 
         if not result or not isinstance(result, dict) or not result.get("mediaUrl"):
             js_error = result.get("error") if isinstance(result, dict) else None
@@ -344,11 +367,7 @@ class BrowserMediaResolver:
                 logger.warning("Douyin in-page fallback evaluate error for %s: %s", aweme_id, e)
                 return None
 
-        if hasattr(browser, "lock") and browser.lock:
-            async with browser.lock:
-                result = await _resolve_internal()
-        else:
-            result = await _resolve_internal()
+        result = await self._run_under_browser_lock(browser, _resolve_internal)
 
         if not result or not isinstance(result, dict) or not result.get("mediaUrl"):
             js_error = result.get("error") if isinstance(result, dict) else None

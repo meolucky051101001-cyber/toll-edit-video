@@ -298,3 +298,146 @@ async def test_result_cache_miss_after_ttl(sessions, monkeypatch):
     await asyncio.wait_for(service.pipeline("new_job3"), timeout=30)
 
     assert calls, "expired cache entry must fall through to a real crawl"
+
+
+def _seed_cache_pair(
+    db,
+    suffix: str,
+    *,
+    source_min_relevance: float | None,
+    new_min_relevance: float | None,
+    source_plan_extra: dict | None = None,
+) -> None:
+    src, new = f"src_job{suffix}", f"new_job{suffix}"
+    _add_video(db, f"dy_cache_{suffix}", src)
+    db.add(
+        SearchJob(
+            id=src,
+            original_query="decor bàn học",
+            status="completed",
+            platforms=["douyin"],
+            requested_limit=3,
+            is_mock=False,
+            processed_count=3,
+            found_count=5,
+            min_relevance=source_min_relevance,
+            created_at=utcnow(),
+        )
+    )
+    plan_kwargs: dict = {"queries": ["书桌布置"], "use_ai": False, "filters": dict(_FILTERS)}
+    plan_kwargs.update(source_plan_extra or {})
+    db.add(SearchPlan(job_id=src, **plan_kwargs))
+    db.add(
+        SearchJob(
+            id=new,
+            original_query="decor bàn học",
+            status="pending",
+            platforms=["douyin"],
+            requested_limit=3,
+            is_mock=False,
+            min_relevance=new_min_relevance,
+            created_at=utcnow(),
+        )
+    )
+    db.add(SearchPlan(job_id=new, queries=[], use_ai=False, filters=dict(_FILTERS)))
+    db.flush()
+    db.add(
+        JobVideo(
+            job_id=src,
+            video_id=f"v_dy_cache_{suffix}",
+            relevance_score=80.0,
+            quality_score=70.0,
+            final_score=75.0,
+        )
+    )
+    db.commit()
+
+
+@pytest.mark.anyio
+async def test_result_cache_miss_on_relevance_threshold(sessions, monkeypatch):
+    """M1: the job-level precision gate (min_relevance) is part of the key.
+
+    The API defaults it to 40 for real searches independently of
+    filters.minimum_relevance, so two jobs with identical filters can still
+    have different thresholds — a strict job must not replay a loose cache.
+    """
+    monkeypatch.setattr(settings, "search_cache_ttl_seconds", 3600)
+    with sessions() as db:
+        _seed_cache_pair(db, "4", source_min_relevance=40.0, new_min_relevance=80.0)
+
+    calls: list[str] = []
+
+    class EmptyProvider:
+        capture_origin = "untrusted"
+
+        async def search(self, term, limit, filters, on_batch=None):
+            return []
+
+    def factory(platform, mock):
+        calls.append(platform)
+        return EmptyProvider()
+
+    service = SearchService(sessions=sessions, factory=factory)
+    await asyncio.wait_for(service.pipeline("new_job4"), timeout=30)
+
+    assert calls, "threshold mismatch must fall through to a real crawl"
+    with sessions() as db:
+        job = db.get(SearchJob, "new_job4")
+        assert job.status == "completed"
+        assert "cache_hit" not in (job.diagnostics or {})
+
+
+@pytest.mark.anyio
+async def test_result_cache_hit_on_same_relevance_threshold(sessions, monkeypatch):
+    monkeypatch.setattr(settings, "search_cache_ttl_seconds", 3600)
+    with sessions() as db:
+        _seed_cache_pair(db, "5", source_min_relevance=80.0, new_min_relevance=80.0)
+
+    def factory_must_not_run(platform, mock):
+        raise AssertionError("cache hit must not create providers")
+
+    service = SearchService(sessions=sessions, factory=factory_must_not_run)
+    await asyncio.wait_for(service.pipeline("new_job5"), timeout=10)
+
+    with sessions() as db:
+        job = db.get(SearchJob, "new_job5")
+        assert job.status == "completed"
+        assert job.diagnostics["cache_hit"]["source_job_id"] == "src_job5"
+
+
+@pytest.mark.anyio
+async def test_result_cache_hit_persists_plan_fields(sessions, monkeypatch):
+    """M2: the copied plan fields must survive in a fresh session.
+
+    The pipeline loads the plan in a session that closes before the cache
+    replay, so mutating that detached object silently lost the write.
+    """
+    monkeypatch.setattr(settings, "search_cache_ttl_seconds", 3600)
+    extra = {
+        "source": "ai",
+        "warning": "AI mở rộng truy vấn có thể lệch chủ đề",
+        "expansion": {"seed": "decor bàn học", "variants": 2},
+    }
+    with sessions() as db:
+        _seed_cache_pair(
+            db,
+            "6",
+            source_min_relevance=None,
+            new_min_relevance=None,
+            source_plan_extra={"queries": ["书桌布置", "bàn học tối giản"], **extra},
+        )
+
+    def factory_must_not_run(platform, mock):
+        raise AssertionError("cache hit must not create providers")
+
+    service = SearchService(sessions=sessions, factory=factory_must_not_run)
+    await asyncio.wait_for(service.pipeline("new_job6"), timeout=10)
+
+    with sessions() as db:
+        job = db.get(SearchJob, "new_job6")
+        assert job.diagnostics["cache_hit"]["source_job_id"] == "src_job6"
+        plan = db.get(SearchPlan, "new_job6")
+        assert plan.queries == ["书桌布置", "bàn học tối giản"]
+        assert plan.source == "ai"
+        assert plan.warning == extra["warning"]
+        assert plan.expansion == extra["expansion"]

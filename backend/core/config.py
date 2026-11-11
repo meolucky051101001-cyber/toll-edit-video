@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     search_cache_ttl_seconds: int = Field(3600, ge=0, le=86400)
     download_dir: Path = ROOT / "data" / "downloads"
     dubbing_dir: Path = ROOT / "data" / "dubbing"
+    ffmpeg_timeout_seconds: int = Field(300, ge=10, le=3600)
     max_concurrent_downloads: int = Field(2, ge=1, le=10)
     max_concurrent_per_platform: int = Field(1, ge=1, le=5)
     download_timeout_seconds: int = Field(120, ge=10, le=600)

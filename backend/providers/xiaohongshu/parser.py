@@ -191,11 +191,12 @@ def parse_count_text(txt: str | None) -> int | None:
     }:
         return None
     try:
-        if txt.endswith("万") or txt.endswith("w") or txt.endswith("W"):
-            return int(float(txt[:-1]) * 10000)
-        if txt.endswith("k") or txt.endswith("K"):
-            return int(float(txt[:-1]) * 1000)
-        return int(txt)
+        clean = txt.replace(",", "")
+        if clean.endswith("万") or clean.endswith("w") or clean.endswith("W"):
+            return int(float(clean[:-1]) * 10000)
+        if clean.endswith("k") or clean.endswith("K"):
+            return int(float(clean[:-1]) * 1000)
+        return int(clean)
     except (ValueError, TypeError):
         return None
 

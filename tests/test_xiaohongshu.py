@@ -10,6 +10,7 @@ from backend.providers.base import SearchProvider, UserActionRequired
 from backend.providers.xiaohongshu.parser import (
     classify_page,
     note_url,
+    parse_count_text,
     parse_detail,
     resolve_xhs_urls,
 )
@@ -602,6 +603,30 @@ def test_video_result_frozen_and_platform_url_policy():
             title="Mock with evil url",
             is_mock=True,
         )
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("1,234", 1234),
+        ("12,345", 12345),
+        ("1,234,567", 1234567),
+        ("320", 320),
+        ("0", 0),
+        ("1.2万", 12000),
+        ("1.5w", 15000),
+        ("10k", 10000),
+        ("2.3W", 23000),
+        ("1,2万", 120000),
+        ("赞", None),
+        ("like", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_xhs_parse_count_text_strips_commas(raw, expected):
+    """L4: thousands separators must not turn a valid count into None."""
+    assert parse_count_text(raw) == expected
 
 
 
