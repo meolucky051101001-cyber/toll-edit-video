@@ -26,7 +26,9 @@ class XhsDownloadAdapter(BaseDownloadAdapter):
 
     async def health_check(self) -> bool:
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            # Local sidecar: bypass environment proxy settings so localhost
+            # calls are never routed through the user's Internet proxy.
+            async with httpx.AsyncClient(timeout=3.0, trust_env=False) as client:
                 res = await client.get(f"{self.base_url}/")
                 return res.status_code in (200, 307, 308)
         except Exception:
@@ -62,7 +64,7 @@ class XhsDownloadAdapter(BaseDownloadAdapter):
             payload["cookie"] = cookie
         endpoint = f"{self.base_url}/xhs/detail"
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
                 res = await client.post(endpoint, json=payload)
         except (httpx.ConnectError, httpx.ConnectTimeout):
             raise DownloadAdapterError(

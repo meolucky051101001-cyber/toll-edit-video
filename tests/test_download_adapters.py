@@ -377,6 +377,66 @@ def test_xhs_adapter_rejects_missing_id(monkeypatch):
     assert exc_info.value.code == "invalid_response"
 
 
+def test_sidecar_clients_bypass_environment_proxy(monkeypatch):
+    """L7: every localhost sidecar client must set trust_env=False so the
+    user's Internet proxy env vars never intercept local service calls."""
+    captured: list[dict] = []
+    original_init = httpx.AsyncClient.__init__
+
+    def spy_init(self, *args, **kwargs):
+        captured.append(kwargs)
+        original_init(self, *args, **kwargs)
+
+    async def mock_get(self, url, **kwargs):
+        return httpx.Response(200, json={})
+
+    async def mock_post(self, url, **kwargs):
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", spy_init)
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+
+    douyin = DouyinDownloadAdapter("http://127.0.0.1:5555")
+    xhs = XhsDownloadAdapter("http://127.0.0.1:5556")
+
+    assert asyncio.run(douyin.health_check()) is True
+    assert asyncio.run(xhs.health_check()) is True
+
+    video_dy = Video(
+        id="vid-2",
+        platform="douyin",
+        platform_video_id="7123456789012345678",
+        url="https://www.douyin.com/video/7123456789012345678",
+        canonical_url="https://www.douyin.com/video/7123456789012345678",
+        fingerprint="fp2",
+        search_query="test",
+        search_job_id="job1",
+    )
+    video_xhs = Video(
+        id="vid-1",
+        platform="xiaohongshu",
+        platform_video_id="66d3cb2b00000000200399e3",
+        url="https://www.xiaohongshu.com/explore/66d3cb2b00000000200399e3",
+        canonical_url="https://www.xiaohongshu.com/explore/66d3cb2b00000000200399e3",
+        fingerprint="fp1",
+        search_query="test",
+        search_job_id="job1",
+    )
+    # resolve() rejects the empty mock payload, but the client is constructed
+    # first — which is exactly what we assert on.
+    for adapter, video in ((douyin, video_dy), (xhs, video_xhs)):
+        with pytest.raises(DownloadAdapterError):
+            asyncio.run(adapter.resolve(video))
+
+    from backend.api.settings import sync_douyin_upstream_cookie
+
+    assert asyncio.run(sync_douyin_upstream_cookie("cookie", "http://127.0.0.1:5555")) is True
+
+    assert len(captured) == 5
+    assert all(kwargs.get("trust_env") is False for kwargs in captured)
+
+
 def test_xhs_adapter_rejects_missing_type(monkeypatch):
     adapter = XhsDownloadAdapter("http://127.0.0.1:5556")
     nid = "66d3cb2b00000000200399e3"

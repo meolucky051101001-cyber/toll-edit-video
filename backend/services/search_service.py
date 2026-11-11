@@ -29,9 +29,8 @@ from backend.services.ai_service import AIService
 from backend.services.dedup_service import (
     build_dedup_index,
     canonical_url,
-    fingerprint,
-    find_existing,
     find_existing_preloaded,
+    fingerprint,
 )
 from backend.services.identity_policy import (
     is_xhs_short_link,

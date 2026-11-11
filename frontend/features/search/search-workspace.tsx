@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowUpRight,
@@ -215,10 +215,13 @@ function SearchSession({
   const [jobId, setJobId] = useState<string | null>(initialJob);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  // Poll the job every second while it runs; once it reaches a terminal state
-  // stop the timer entirely (interval 0) instead of hammering a finished job.
-  const [jobPollMs, setJobPollMs] = useState(1000);
-  const job = useResource<Job>(jobId ? `/search/jobs/${jobId}` : null, jobPollMs);
+  // Poll the job every second while it runs; useResource stops rescheduling
+  // once the job reaches a terminal state instead of hammering a finished job.
+  const job = useResource<Job>(
+    jobId ? `/search/jobs/${jobId}` : null,
+    1000,
+    (data) => terminal.includes(data.status),
+  );
   const stats = useResource<{
     total: number;
     saved: number;
@@ -226,16 +229,6 @@ function SearchSession({
     jobs: number;
   }>("/stats", 5000);
   const recent = useResource<Page<Job>>("/search/jobs", 5000);
-
-  useEffect(() => {
-    setJobPollMs(1000);
-  }, [jobId]);
-
-  useEffect(() => {
-    if (job.data && terminal.includes(job.data.status)) {
-      setJobPollMs(0);
-    }
-  }, [job.data?.status]);
 
   useSSEListener("search:update", (data: { job_id?: string; status?: string }) => {
     if (jobId && data?.job_id === jobId) {

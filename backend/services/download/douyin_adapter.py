@@ -27,7 +27,9 @@ class DouyinDownloadAdapter(BaseDownloadAdapter):
 
     async def health_check(self) -> bool:
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            # Local sidecar: bypass environment proxy settings so localhost
+            # calls are never routed through the user's Internet proxy.
+            async with httpx.AsyncClient(timeout=3.0, trust_env=False) as client:
                 res = await client.get(f"{self.base_url}/docs")
                 return res.status_code == 200
         except Exception:
@@ -64,7 +66,7 @@ class DouyinDownloadAdapter(BaseDownloadAdapter):
 
         params = {"url": target_url, "minimal": "true"}
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
                 res = await client.get(endpoint, params=params)
         except (httpx.ConnectError, httpx.ConnectTimeout):
             raise DownloadAdapterError(

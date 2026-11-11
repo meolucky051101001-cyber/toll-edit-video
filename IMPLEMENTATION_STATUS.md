@@ -1,5 +1,5 @@
 # IMPLEMENTATION STATUS: AI Video Research Tool v3.0
-Last Updated: 2026-10-24 (Review round 1 hardening: SSE event forwarding, API token auth, event-loop offloading, browser lock fixes, dubbing recovery, honest release gate)
+Last Updated: 2026-11-12 (Review round 2 — Phase 4: ruff/ESLint/type gates clean, sidecar proxy immunity (L7), offline release gate re-verified GREEN; authoritative snapshot in §0)
 
 > **Cách đọc tài liệu này:** trạng thái bên dưới phản ánh kết quả chạy thực tế gần nhất
 > (suite pytest + release gate). Đừng cập nhật tay con số "X/Y Green" — hãy chạy
@@ -8,12 +8,16 @@ Last Updated: 2026-10-24 (Review round 1 hardening: SSE event forwarding, API to
 > không chứng minh DOM/API của Douyin/Xiaohongshu còn tương thích — dùng
 > `scripts\smoke_live.bat` để xác thực live.
 
-## 0. CURRENT VERIFICATION SNAPSHOT (2026-10-24)
+## 0. CURRENT VERIFICATION SNAPSHOT (2026-11-12)
 
-- **Backend pytest:** 572 passed, 3 skipped (live network probes), 0 failed — full suite ~155s
-- **Frontend typecheck:** `npx tsc --noEmit` — 0 errors
-- **Frontend Playwright E2E:** chạy bằng `release_gate.py` Stage 10; verdict cuối cùng lấy từ `release_gate_report.json`
-- **Live validation:** 3 live probes tự skip nếu không đặt `LIVE_CRAWL_ENABLED=1`; dùng `scripts\smoke_live.py` để kiểm tra nhanh 1 lượt tìm thật
+Nguồn sự thật: `release_gate_report.json` — gate offline chạy lúc **2026-11-11T18:34:18Z**, 242.9s, 11 stage.
+
+- **Release gate (offline):** **APPROVED (OFFLINE FIXTURES) - PENDING LIVE CRAWL** — 10/10 stage thực thi PASS, stage 11 (live) SKIPPED có chủ đích.
+- **Backend pytest:** 695 passed, 3 skipped (live network probes), 0 failed — 698 collected, 75 test files, ~174s; 2 RuntimeWarning tồn dư (AsyncMock `Event.wait` trong `test_empty_results_login_route`, không liên quan round 2).
+- **Backend Ruff:** 0 errors (`backend/ tests/ scripts/`). **Mypy:** 0 errors / 79 source files.
+- **Frontend ESLint:** 0 errors, 0 warnings. **Typecheck (`tsc --noEmit`):** 0 errors. **Production build:** thành công (9 routes).
+- **Frontend Playwright E2E:** 29 passed / 8 specs (~36s), chạy bằng gate Stage 10.
+- **Live validation:** CHƯA chạy lại trong round 2. Mục `strict_live_run` trong report là bản cũ **2026-10-05** (exit 2, BLOCKED) — KHÔNG phải bằng chứng mới. Cần quét QR + `scripts/smoke_live.py` hoặc gate `--live --require-live` để xác thực lời hứa captcha-free (xem Phase 5).
 
 ---
 
@@ -35,73 +39,102 @@ Last Updated: 2026-10-24 (Review round 1 hardening: SSE event forwarding, API to
 ## 2. BASELINE TESTS & VERIFICATION
 
 ### 2.1 Backend Pytest Suite
-- **Total Tests Collected:** 348 items
-- **Passed:** 348 (100%)
+- **Total Tests Collected:** 698 items (75 test files)
+- **Passed:** 695
+- **Skipped:** 3 (live network probes — require `LIVE_CRAWL_ENABLED=1`)
 - **Failed:** 0
-- **Warnings:** 0 (All deprecation warnings suppressed via pyproject filterwarnings)
-- **Duration:** ~125s
-- **Module Breakdown:**
-  - `test_adaptive_search.py`: 4 passed
-  - `test_ai.py`: 14 passed
-  - `test_api.py`: 4 passed
-  - `test_auto_dubbing.py`: 6 passed *(Phase 8: TTS synthesis, audio ducking mixer, dubbing service, REST API)*
-  - `test_batch_downloads.py`: 3 passed
-  - `test_compound_intent.py`: 7 passed
-  - `test_cookies.py`: 8 passed
-  - `test_douyin.py`: 7 passed
-  - `test_douyin_improvements.py`: 5 passed
-  - `test_download_adapters.py`: 12 passed
-  - `test_download_api.py`: 2 passed
-  - `test_download_queue.py`: 9 passed
-  - `test_download_service.py`: 16 passed
-  - `test_evaluation_benchmark.py`: 2 passed (60 queries across 5 domains, 100% Precision@10)
-  - `test_event_stream.py`: 8 passed
-  - `test_extension_inspired_improvements.py`: 6 passed
-  - `test_hybrid_headless.py`: 18 passed
-  - `test_imports.py`: 12 passed
-  - `test_keyword_accuracy.py`: 30 passed
-  - `test_login_persistence.py`: 5 passed
-  - `test_media_parser.py`: 20 passed
-  - `test_metric_snapshots.py`: 8 passed
-  - `test_observability_and_release_gate.py`: 5 passed *(Phase 11: telemetry p50/p95/p99, metrics API, readiness gate)*
-  - `test_original_intent_ranking.py`: 10 passed
-  - `test_original_intent_ranking_v2.py`: 5 passed
-  - `test_pipeline.py`: 18 passed
-  - `test_platform_architecture.py`: 5 passed *(Phase 9: capabilities matrix, TikTok & YouTube Shorts providers)*
-  - `test_precision_gate.py`: 4 passed
-  - `test_regression_probes.py`: 18 passed
-  - `test_relevance_phase_c.py`: 7 passed
-  - `test_resilient_operations_phase_d.py`: 3 passed
-  - `test_round2_codex_fixes.py`: 6 passed
-  - `test_round3_codex_fixes.py`: 9 passed
-  - `test_scale_infrastructure.py`: 5 passed *(Phase 10: priority queue, bounded capacity, DLQ, worker pool)*
-  - `test_script_analysis.py`: 4 passed
-  - `test_script_analysis_v2.py`: 4 passed
-  - `test_search_page_guard.py`: 5 passed
-  - `test_silent_headless_search.py`: 4 passed
-  - `test_virality_engine.py`: 6 passed
-  - `test_xiaohongshu.py`: 17 passed
+- **Warnings:** 2 (pre-existing AsyncMock `Event.wait` RuntimeWarning in `test_empty_results_login_route`; unrelated to round 2)
+- **Duration:** ~174s
+- **Module Breakdown (collected items per file via `pytest --collect-only -q`):**
+  - `test_adaptive_search.py`: 5
+  - `test_ai.py`: 14
+  - `test_api.py`: 6
+  - `test_api_token_auth.py`: 9
+  - `test_audio_mixer_timeout.py`: 4
+  - `test_auto_dubbing.py`: 8
+  - `test_batch_downloads.py`: 3
+  - `test_browser_authenticated_snapshot.py`: 4
+  - `test_browser_lock_ownership.py`: 16
+  - `test_browser_qr_response.py`: 5
+  - `test_browser_resolver_lock_timeout.py`: 5
+  - `test_browser_service.py`: 10
+  - `test_browser_session_checkpoint.py`: 39
+  - `test_compound_intent.py`: 8
+  - `test_compound_intent_distractors.py`: 14
+  - `test_cookies.py`: 11
+  - `test_douyin.py`: 10
+  - `test_douyin_carousel.py`: 3
+  - `test_douyin_challenge_detection.py`: 5
+  - `test_douyin_hybrid_search.py`: 10
+  - `test_douyin_improvements.py`: 8
+  - `test_douyin_limit_pagination.py`: 10
+  - `test_download_adapters.py`: 13
+  - `test_download_api.py`: 2
+  - `test_download_queue.py`: 11
+  - `test_download_service.py`: 17
+  - `test_dubbing_voice_validation.py`: 13
+  - `test_empty_results_login_route.py`: 4
+  - `test_ensure_api_token.py`: 4
+  - `test_evaluation_benchmark.py`: 5
+  - `test_event_stream.py`: 8
+  - `test_extension_inspired_improvements.py`: 6
+  - `test_hashtag_precision.py`: 17
+  - `test_hybrid_headless.py`: 29
+  - `test_imports.py`: 12
+  - `test_keyword_accuracy.py`: 30
+  - `test_live_gate_config.py`: 3
+  - `test_login_persistence.py`: 7
+  - `test_media_cookie_allowlist.py`: 31
+  - `test_media_parser.py`: 20
+  - `test_metric_snapshots.py`: 8
+  - `test_observability_and_release_gate.py`: 8
+  - `test_original_intent_ranking.py`: 11
+  - `test_original_intent_ranking_v2.py`: 6
+  - `test_phase1_improvements.py`: 2
+  - `test_phase2_improvements.py`: 4
+  - `test_phase3_improvements.py`: 4
+  - `test_pipeline.py`: 18
+  - `test_platform_architecture.py`: 5
+  - `test_platform_slot_gate.py`: 3
+  - `test_precision_gate.py`: 1
+  - `test_provenance_audit.py`: 17
+  - `test_quality_threshold_filters.py`: 5
+  - `test_query_precision_evaluation.py`: 6
+  - `test_real_crawl_acceptance.py`: 6
+  - `test_regression_probes.py`: 18
+  - `test_release_gate_capture_audit.py`: 3
+  - `test_relevance_phase_c.py`: 7
+  - `test_resilient_operations_phase_d.py`: 4
+  - `test_round2_codex_fixes.py`: 6
+  - `test_round3_codex_fixes.py`: 9
+  - `test_scale_infrastructure.py`: 7
+  - `test_script_analysis.py`: 4
+  - `test_script_analysis_v2.py`: 4
+  - `test_search_candidate_budget.py`: 2
+  - `test_search_page_guard.py`: 5
+  - `test_search_parallel_and_cache.py`: 7
+  - `test_search_service_resume.py`: 13
+  - `test_session_keeper_heartbeat.py`: 5
+  - `test_silent_headless_search.py`: 6
+  - `test_sticker_tool_intent.py`: 9
+  - `test_virality_engine.py`: 8
+  - `test_xhs_limit_pagination.py`: 1
+  - `test_xhs_session_navigation.py`: 5
+  - `test_xiaohongshu.py`: 32
 
 ### 2.2 Frontend Playwright E2E Suite
-- **Total Tests Collected:** 21 items across 6 spec files
-- **Passed:** 21 (100%)
+- **Passed:** 29 across 8 spec files (gate Stage 10)
 - **Failed:** 0
-- **Duration:** ~27s
-- **Specs Breakdown:**
-  - `cookies.spec.ts`: 1 passed
-  - `downloads.spec.ts`: 4 passed
-  - `imports.spec.ts`: 1 passed
-  - `research-default.spec.ts`: 1 passed
-  - `search.spec.ts`: 3 passed
-  - `xiaohongshu.spec.ts`: 11 passed
+- **Duration:** ~36s
+- **Spec files (8):** `cookies.spec.ts`, `downloads.spec.ts`, `health.spec.ts`, `imports.spec.ts`, `research-default.spec.ts`, `search.spec.ts`, `verification-controls.spec.ts`, `xiaohongshu.spec.ts`
 
 ### 2.3 Frontend & Backend Quality Gates
-- **Backend Ruff Linter (`ruff check`):** 0 errors
-- **Backend Mypy Static Types (`mypy backend`):** 0 errors across 75 source files
+- **Backend Ruff Linter (`ruff check backend tests scripts`):** 0 errors
+- **Backend Mypy Static Types (`mypy backend`):** 0 errors across 79 source files
 - **Frontend ESLint (`npm run lint`):** 0 errors, 0 warnings
 - **Frontend TypeScript Typecheck (`tsc --noEmit`):** Clean, 0 errors
-- **Frontend Production Build (`npm run build`):** Successful compilation, all routes static/dynamic
-- **Automated Release Gate (`scripts/release_gate.py`):** 9/9 Stages APPROVED (GREEN) in 153s
+- **Frontend Production Build (`npm run build`):** Successful compilation. Current routes (9): `/`, `/_not-found`, `/collections`, `/health`, `/history`, `/imports`, `/imports/[id]` (dynamic), `/library`, `/settings`.
+- **Automated Release Gate (`scripts/release_gate.py`, offline):** APPROVED (OFFLINE FIXTURES) - PENDING LIVE CRAWL — 10/10 executed stages PASS, live stage skipped, 242.9s (2026-11-11T18:34:18Z).
 
 ---
 
@@ -113,7 +146,9 @@ Last Updated: 2026-10-24 (Review round 1 hardening: SSE event forwarding, API to
 - **MISSING_FIXTURE:** 0
 - **FLAKY:** 0
 
-All 278 automated tests (258 backend + 20 frontend E2E) are currently 100% green.
+All 724 automated tests (695 backend passed + 29 frontend E2E) are green offline; 3 backend live probes skipped (require `LIVE_CRAWL_ENABLED=1`). Live network retrieval NOT re-verified in round 2 — see §0 and Phase 5.
+
+> **Note:** §4–§17 below are historical phase logs (counts as-of-then, kept for provenance). The authoritative current verification snapshot is §0 and §2.
 
 ---
 

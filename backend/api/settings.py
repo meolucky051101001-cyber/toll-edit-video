@@ -129,7 +129,8 @@ async def sync_douyin_upstream_cookie(cookie: str, base_url: str) -> bool:
     try:
         import httpx
 
-        async with httpx.AsyncClient(timeout=4.0) as client:
+        # Local sidecar: bypass environment proxy settings (trust_env=False).
+        async with httpx.AsyncClient(timeout=4.0, trust_env=False) as client:
             res = await client.post(endpoint, json=payload)
             return res.status_code == 200
     except Exception:

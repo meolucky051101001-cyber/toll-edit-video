@@ -3,13 +3,23 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 
 type Snapshot<T> = { path: string | null; data: T | null; error: string };
-export function useResource<T>(path: string | null, interval = 0) {
+export function useResource<T>(
+  path: string | null,
+  interval = 0,
+  stopWhen?: (data: T) => boolean,
+) {
   const [snapshot, setSnapshot] = useState<Snapshot<T>>({
     path: null,
     data: null,
     error: "",
   });
   const [revision, setRevision] = useState(0);
+  // Keep the latest predicate in a ref so callers can pass an inline function
+  // without it restarting the poll loop on every render.
+  const stopWhenRef = useRef(stopWhen);
+  useEffect(() => {
+    stopWhenRef.current = stopWhen;
+  }, [stopWhen]);
   useEffect(() => {
     if (!path) return;
     let active = true;
@@ -22,6 +32,7 @@ export function useResource<T>(path: string | null, interval = 0) {
         if (active && interval) timer = setTimeout(run, interval);
         return;
       }
+      let stop = false;
       try {
         const result = await api<T>(path!, {
           signal: AbortSignal.any([
@@ -30,6 +41,7 @@ export function useResource<T>(path: string | null, interval = 0) {
           ]),
         });
         if (active) setSnapshot({ path, data: result, error: "" });
+        stop = stopWhenRef.current?.(result) ?? false;
       } catch (error) {
         if (active)
           setSnapshot((previous) => ({
@@ -38,7 +50,9 @@ export function useResource<T>(path: string | null, interval = 0) {
             error: (error as Error).message,
           }));
       } finally {
-        if (active && interval) timer = setTimeout(run, interval);
+        // Once the predicate is satisfied (e.g. a job reached a terminal
+        // state) stop rescheduling instead of hammering a finished resource.
+        if (active && interval && !stop) timer = setTimeout(run, interval);
       }
     }
     void run();
@@ -61,10 +75,8 @@ export function useResource<T>(path: string | null, interval = 0) {
 /** Returns `value` delayed by `delayMs`; resets the timer on every change. */
 export function useDebouncedValue<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
-  const latest = useRef(value);
-  latest.current = value;
   useEffect(() => {
-    const timer = setTimeout(() => setDebounced(latest.current), delayMs);
+    const timer = setTimeout(() => setDebounced(value), delayMs);
     return () => clearTimeout(timer);
   }, [value, delayMs]);
   return debounced;
