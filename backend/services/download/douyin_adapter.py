@@ -6,6 +6,7 @@ from backend.core.config import settings
 from backend.models.video import Video
 from backend.schemas.downloads import ResolvedMedia
 from backend.services.download.base import BaseDownloadAdapter, DownloadAdapterError
+from backend.services.download.media_hosts import cookie_allowed
 
 DEFAULT_DOUYIN_URL = "http://127.0.0.1:5555"
 DOUYIN_COMMIT = "42784ffc83a72a516bfe952153ad7e2a3998d16c"
@@ -219,7 +220,7 @@ class DouyinDownloadAdapter(BaseDownloadAdapter):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": "https://www.douyin.com/",
         }
-        if cookie:
+        if cookie and cookie_allowed("douyin", str(media_url)):
             headers["Cookie"] = cookie
 
         return ResolvedMedia(

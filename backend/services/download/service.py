@@ -20,6 +20,7 @@ from backend.models.video import Video
 from backend.schemas.downloads import DownloadJobOut, ResolvedMedia
 from backend.services.download.base import BaseDownloadAdapter, DownloadAdapterError
 from backend.services.download.douyin_adapter import DouyinDownloadAdapter
+from backend.services.download.media_hosts import cookie_allowed
 from backend.services.download.network import (
     create_safe_async_client,
     is_safe_media_url_async,
@@ -751,6 +752,11 @@ class DownloadService:
         total_size: int | None = None
 
         resume_headers: dict[str, str] = dict(resolved.headers)
+        if not cookie_allowed(resolved.platform, resolved.media_url):
+            # Defense in depth: adapters already gate cookies, but a resolved
+            # URL pointing off-platform must never carry credentials.
+            resume_headers.pop("Cookie", None)
+            resume_headers.pop("Authorization", None)
 
         # Check existing partial bytes for HTTP Range request
         existing_bytes = 0

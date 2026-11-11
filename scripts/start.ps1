@@ -47,6 +47,10 @@ try {
         }
     }
     foreach ($folder in @('data', 'logs')) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
+    # An empty API_TOKEN leaves the API open: generate one before the Node
+    # process reads .env below.
+    & $pythonExe (Join-Path $PSScriptRoot 'ensure_api_token.py')
+    if ($LASTEXITCODE -ne 0) { throw 'Could not ensure the local API token.' }
     # Propagate the shared API token (if configured in .env) so the Next.js
     # middleware injects it into proxied /api requests. The backend reads .env
     # itself; only the Node process needs the explicit environment variable.

@@ -13,13 +13,16 @@ from backend.core.events import EventBus, get_event_bus
 from backend.models.download_job import DownloadJob
 from backend.models.dubbing_job import DubbingJob
 from backend.models.video import Video
-from backend.schemas.dubbing import DubbingJobOut, DubbingRequest, VoiceOption
-from backend.services.dubbing.audio_mixer import AudioMixer
-from backend.services.dubbing.tts_adapter import (
+from backend.schemas.dubbing import (
     AVAILABLE_VOICES,
-    BaseTTSAdapter,
-    get_tts_adapter,
+    DEFAULT_VOICE_ID,
+    VOICE_IDS,
+    DubbingJobOut,
+    DubbingRequest,
+    VoiceOption,
 )
+from backend.services.dubbing.audio_mixer import AudioMixer
+from backend.services.dubbing.tts_adapter import BaseTTSAdapter, get_tts_adapter
 
 logger = logging.getLogger("dubbing.service")
 
@@ -190,6 +193,13 @@ class DubbingService:
 
                 script_text = job.script_text
                 voice_id = job.voice_id
+                if voice_id not in VOICE_IDS:
+                    # Rows created before the voice allowlist may carry arbitrary
+                    # voice ids; never interpolate them into an output path.
+                    logger.warning(
+                        "Dubbing job %s has unknown voice_id %r; falling back to default", job_id, voice_id
+                    )
+                    voice_id = DEFAULT_VOICE_ID
                 speed = job.speed
                 pitch = job.pitch
                 bgm_vol = job.bgm_volume_percent

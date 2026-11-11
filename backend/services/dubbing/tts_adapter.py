@@ -5,28 +5,9 @@ import struct
 import wave
 from abc import ABC, abstractmethod
 
-from backend.schemas.dubbing import VoiceOption
+from backend.schemas.dubbing import VOICE_IDS
 
 logger = logging.getLogger("dubbing")
-
-AVAILABLE_VOICES: list[VoiceOption] = [
-    VoiceOption(
-        id="vi-VN-HoaiMyNeural",
-        name="Hoài My",
-        gender="female",
-        accent="northern",
-        provider="edge-tts",
-        description="Nữ miền Bắc truyền cảm, tự nhiên, phù hợp review & vlog",
-    ),
-    VoiceOption(
-        id="vi-VN-NamMinhNeural",
-        name="Nam Minh",
-        gender="male",
-        accent="northern",
-        provider="edge-tts",
-        description="Nam miền Bắc ấm áp, tin cậy, phù hợp tin tức & hướng dẫn",
-    ),
-]
 
 
 class BaseTTSAdapter(ABC):
@@ -57,6 +38,9 @@ class OfflineFallbackTTSAdapter(BaseTTSAdapter):
         pitch: float = 1.0,
         output_path: str = "",
     ) -> tuple[str, float]:
+        if voice_id not in VOICE_IDS:
+            raise ValueError(f"voice_id không nằm trong danh sách giọng hỗ trợ: {voice_id!r}")
+
         words = len(text.split())
         # Estimate ~2.5 words per second scaled by speed
         duration = max(1.0, round((words / (2.5 * max(speed, 0.5))), 2))
@@ -105,6 +89,9 @@ class EdgeTTSAdapter(BaseTTSAdapter):
         pitch: float = 1.0,
         output_path: str = "",
     ) -> tuple[str, float]:
+        if voice_id not in VOICE_IDS:
+            raise ValueError(f"voice_id không nằm trong danh sách giọng hỗ trợ: {voice_id!r}")
+
         if not output_path:
             output_path = f"data/dubbing/speech_{voice_id}.mp3"
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)

@@ -67,17 +67,14 @@ def cookie_dict_to_str(cookies: dict[str, str]) -> str:
 
 
 def mask_cookie_preview(cookie_str: str) -> str:
-    """Provide a safe preview of cookie tokens without leaking secrets."""
+    """Preview listing cookie names only; values are secrets and never shown."""
     tokens = parse_cookie_str(cookie_str)
     if not tokens:
         return "Chưa cấu hình"
-    items = []
-    for k, v in list(tokens.items())[:3]:
-        masked_val = f"{v[:4]}...{v[-3:]}" if len(v) > 8 else "***"
-        items.append(f"{k}={masked_val}")
-    preview = "; ".join(items)
-    if len(tokens) > 3:
-        preview += f" (+{len(tokens) - 3} cookies)"
+    names = list(tokens.keys())
+    preview = ", ".join(names[:3])
+    if len(names) > 3:
+        preview += f" (+{len(names) - 3} cookies)"
     return preview
 
 

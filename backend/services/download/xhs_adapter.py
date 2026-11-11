@@ -5,6 +5,7 @@ from backend.models.video import Video
 from backend.providers.xiaohongshu.parser import has_xhs_token, note_url
 from backend.schemas.downloads import ResolvedMedia
 from backend.services.download.base import BaseDownloadAdapter, DownloadAdapterError
+from backend.services.download.media_hosts import cookie_allowed
 
 DEFAULT_XHS_URL = "http://127.0.0.1:5556"
 XHS_COMMIT = "cc7c78088afc09082f54ea6263a9fd07c2fa510f"
@@ -187,7 +188,7 @@ class XhsDownloadAdapter(BaseDownloadAdapter):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": "https://www.xiaohongshu.com/",
         }
-        if cookie:
+        if cookie and cookie_allowed("xiaohongshu", media_url):
             headers["Cookie"] = cookie
 
         return ResolvedMedia(

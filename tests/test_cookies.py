@@ -31,8 +31,17 @@ def test_parse_cookie_str():
 def test_mask_cookie_preview():
     raw = "a1=18f0a2bc1234567; web_session=040069abc; webId=998877; foo=bar"
     preview = mask_cookie_preview(raw)
-    assert "..." in preview
+    assert "a1" in preview
+    assert "web_session" in preview
+    assert "webId" in preview
     assert "+1 cookies" in preview
+    # Cookie values must never appear in the preview.
+    assert "18f0a2bc" not in preview
+    assert "040069" not in preview
+    assert "998877" not in preview
+    assert "bar" not in preview
+    assert "foo" not in preview
+    assert mask_cookie_preview("") == "Chưa cấu hình"
 
 
 def test_inspect_cookie_tokens():

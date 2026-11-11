@@ -25,6 +25,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from dotenv import dotenv_values
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
@@ -530,12 +532,19 @@ def main() -> int:
     e2e_code = 1
     e2e_out = ""
     try:
+        # The E2E servers bypass start.ps1, so the Node process would miss the
+        # API token that the backend reads from .env itself.
+        e2e_env = os.environ.copy()
+        configured_token = (dotenv_values(ROOT_DIR / ".env").get("API_TOKEN") or "").strip()
+        if configured_token:
+            e2e_env["API_TOKEN"] = configured_token
         if not is_port_ready("http://127.0.0.1:8010/api/health"):
             backend_proc = subprocess.Popen(
                 [python_bin, "-m", "uvicorn", "backend.app.main:app", "--host", "127.0.0.1", "--port", "8010"],
                 cwd=ROOT_DIR,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=e2e_env,
             )
 
         if not is_port_ready("http://127.0.0.1:3000"):
@@ -544,6 +553,7 @@ def main() -> int:
                 cwd=ROOT_DIR / "frontend",
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=e2e_env,
             )
 
         t_wait_start = time.time()

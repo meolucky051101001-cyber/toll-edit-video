@@ -51,6 +51,8 @@ try {
         New-Item -ItemType Directory -Path (Join-Path $projectRoot $folder) -Force | Out-Null
     }
     if (-not (Test-Path -LiteralPath '.env')) { Copy-Item -LiteralPath '.env.example' -Destination '.env' }
+    & (Join-Path $projectRoot '.venv\Scripts\python.exe') (Join-Path $PSScriptRoot 'ensure_api_token.py')
+    Check-Exit 'Ensure local API token'
     # The default XHS_BROWSER_CHANNEL=chrome requires a Chrome install that
     # Playwright's bundled Chromium cannot replace. Warn early instead of
     # failing at the first search.

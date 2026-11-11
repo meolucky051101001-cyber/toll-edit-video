@@ -333,7 +333,7 @@ export function CookieSettings() {
 
           <div className="cookie-preview-box">
             <div className="preview-label-row">
-              <span>Giá trị hiện tại:</span>
+              <span>Tên cookie hiện tại:</span>
               <span className="token-count">{xhs?.token_count ?? 0} cookies</span>
             </div>
             <code className="cookie-masked-code">{xhs?.preview || "Chưa có"}</code>
@@ -448,7 +448,7 @@ export function CookieSettings() {
 
           <div className="cookie-preview-box">
             <div className="preview-label-row">
-              <span>Giá trị hiện tại:</span>
+              <span>Tên cookie hiện tại:</span>
               <span className="token-count">{douyin?.token_count ?? 0} cookies</span>
             </div>
             <code className="cookie-masked-code">{douyin?.preview || "Chưa có"}</code>

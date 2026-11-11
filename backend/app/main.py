@@ -248,25 +248,16 @@ async def local_origin(request: Request, call_next):
     return await call_next(request)
 
 
-# Paths that must stay reachable without the shared token: health probe, the
-# SSE stream (EventSource cannot send custom headers) and browser screenshots
-# rendered through <img> tags. Everything else requires X-API-Token when
-# API_TOKEN is configured; an empty token disables authentication entirely.
-_TOKEN_EXEMPT_SUFFIXES = ("/screenshot",)
-
-
+# Only the health probe stays reachable without the shared token. SSE and
+# screenshots go through the Next.js proxy, which injects X-API-Token
+# server-side, so they need no exemption. Everything else requires the header
+# when API_TOKEN is configured; an empty token disables authentication
+# entirely (dev/tests only — start.ps1 generates one for real runs).
 @app.middleware("http")
 async def api_token_auth(request: Request, call_next):
     token = config.api_token.get_secret_value()
     if token:
-        path = request.url.path
-        exempt = (
-            request.method == "OPTIONS"
-            or path == "/api/health"
-            or path.startswith("/api/events")
-            or path.startswith("/api/observability")
-            or path.endswith(_TOKEN_EXEMPT_SUFFIXES)
-        )
+        exempt = request.method == "OPTIONS" or request.url.path == "/api/health"
         if not exempt:
             provided = request.headers.get("x-api-token", "")
             if not hmac.compare_digest(provided, token):

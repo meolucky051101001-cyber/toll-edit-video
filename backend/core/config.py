@@ -15,10 +15,11 @@ class Settings(BaseSettings):
     ai_free_tier_confirmed: bool = False
     ai_timeout: float = Field(20, ge=1, le=30)
     ai_min_interval: float = Field(6, ge=0, le=60)
-    # Optional shared-secret for the local API. Empty = auth disabled (default,
-    # keeps the localhost UX unchanged). When set, every request except the
-    # allowlisted health/events/screenshot paths must carry a matching
-    # X-API-Token header (injected server-side by the Next.js proxy).
+    # Shared secret for the local API. start.ps1/setup.ps1 generate one into
+    # .env on first run (scripts/ensure_api_token.py); an empty value disables
+    # auth and is only meant for dev/tests. When set, every request except
+    # /api/health must carry a matching X-API-Token header (injected
+    # server-side by the Next.js proxy).
     api_token: SecretStr = SecretStr("")
     xhs_browser_channel: Literal["chrome", "msedge", "chromium"] = "chrome"
     # Empty = inherit xhs_browser_channel (preserves existing profiles).

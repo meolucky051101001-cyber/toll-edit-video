@@ -14,13 +14,9 @@ from backend.core.config import settings
 from backend.core.database import Base
 from backend.models import Video
 from backend.models.download_job import DownloadJob
-from backend.schemas.dubbing import DubbingRequest
+from backend.schemas.dubbing import AVAILABLE_VOICES, DubbingRequest
 from backend.services.dubbing.service import DubbingService
-from backend.services.dubbing.tts_adapter import (
-    AVAILABLE_VOICES,
-    EdgeTTSAdapter,
-    OfflineFallbackTTSAdapter,
-)
+from backend.services.dubbing.tts_adapter import EdgeTTSAdapter, OfflineFallbackTTSAdapter
 
 
 @pytest.fixture
