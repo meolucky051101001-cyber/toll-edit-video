@@ -1,8 +1,11 @@
 # BÁO CÁO TỔNG QUAN TOÀN DIỆN HỆ THỐNG: AI VIDEO RESEARCH TOOL
 **Dành cho:** Nhà phát triển & GPT Review / Architectural Assessment  
-**Ngày lập:** 17/09/2026  
-**Phiên bản hệ thống:** v2.4 (Production-Ready)  
-**Trạng thái kiểm thử:** 247/247 Pytest Passed (100%) | 20/20 Playwright E2E Passed (100%)
+**Ngày lập:** 17/09/2026 · **Hiệu đính bằng chứng:** 12/11/2026 (review round 2)  
+**Phiên bản hệ thống:** nhãn nội bộ v3.0 (theo `IMPLEMENTATION_STATUS.md`); chưa có semver thống nhất — `frontend/package.json` = 0.1.0, `pyproject.toml` không khai báo version.  
+**Trạng thái phát hành:** APPROVED (OFFLINE FIXTURES) — PENDING LIVE CRAWL. Gate offline chứng minh logic nội bộ, CHƯA xác nhận DOM/API Douyin/Xiaohongshu còn tương thích khi chạy live.  
+**Trạng thái kiểm thử (gate 11 stage, 11/11/2026):** Backend 695 passed / 3 skipped / 0 failed (698 collected) · Frontend Playwright E2E 29 passed / 8 specs · Ruff 0 · Mypy 0 · ESLint 0 · tsc 0 · build OK. Nguồn: `release_gate_report.json`.
+
+> **Ghi chú hiệu đính 12/11/2026:** Bản gốc 17/09 ghi "v2.4 Production-Ready · 247/247 pytest · 20/20 E2E · Next.js 14+ · hybrid headless chạy ngầm 100% (kể cả `restricted`)". Các số liệu này đã lỗi thời so với gate thực chạy và mã nguồn hiện tại; đã sửa bên dưới bằng bằng chứng (`release_gate_report.json`, mã `backend/providers/*/provider.py`, `frontend/package-lock.json`, COUNT trực tiếp `data/app.db`). Tuyên bố phụ thuộc live (tỷ lệ giải captcha, "Production-Ready", truy vấn live, ước lượng RAM/CPU) được đánh dấu CHƯA KIỂM CHỨNG.
 
 ---
 
@@ -20,7 +23,7 @@
 - **Backend Core:** Python 3.12, FastAPI, Uvicorn, SQLite 3, SQLAlchemy 2.0.
 - **Trình duyệt Tự Động:** Playwright (Chromium Engine) với kiến trúc Hybrid Headless & Chống quét Bot.
 - **Trí Tuệ Nhân Tạo (AI):** Google Gemini SDK (`gemini-3.8-flash`, `gemini-3.1-flash-lite`) với cơ chế Fallback Generator ngoại tuyến khi mất mạng hoặc không có API key.
-- **Frontend:** Next.js 14+ (App Router), TypeScript, Tailwind CSS, Lucide Icons, Sonner Notifications.
+- **Frontend:** Next.js 16.3.4 (App Router), TypeScript, Tailwind CSS, Lucide Icons, Sonner Notifications.
 - **Kiểm thử Toàn diện:** Pytest, AnyIO, Playwright E2E Runner.
 
 ---
@@ -38,10 +41,12 @@
 
 ### 2.2 Giai Đoạn 2: Chế Độ Trình Duyệt Ngầm Thông Minh (Hybrid Headless Engine & Auto-Elevation)
 - **Mặc định Chạy Ẩn Danh (Headless by Default):**
-  - Cả Xiaohongshu và Douyin đều chạy ngầm 100% trong tiến trình nền khi tìm kiếm, tiết kiệm >50% RAM/CPU và không làm nhảy cửa sổ trình duyệt lên màn hình làm phiền người dùng.
-- **Tự Động Nâng Cấp Khi Gặp Captcha (Auto-Elevation):**
-  - Khi phát hiện trạng thái cần can thiệp (`verification_required`, `login_required`, `restricted`), engine lập tức đóng phiên ngầm và bật cửa sổ Chromium thật lên màn hình đúng tọa độ URL để người dùng thao tác kéo thanh trượt / giải captcha.
-  - Sau khi xong, bấm *"Tiếp tục lượt tìm"* trên giao diện web, engine tự động tiếp tục cào mượt mà.
+  - Cả Xiaohongshu và Douyin mặc định chạy ngầm (headless) trong tiến trình nền khi tìm kiếm, không làm nhảy cửa sổ trình duyệt lên màn hình. (Con số "tiết kiệm >50% RAM/CPU" là ước lượng chưa đo kiểm — CHƯA KIỂM CHỨNG.)
+- **Tự Động Nâng Cấp Khi Gặp Captcha (Auto-Elevation) — hành vi thực tế theo mã (`backend/providers/douyin/provider.py:103-114`, `backend/providers/xiaohongshu/provider.py:167-180`):**
+  - Chỉ `login_required` và `verification_required` mới kích hoạt nâng cấp headful, và chỉ khi `auto_elevate=True` + phiên đang headless (`elevate_to_headful(persist=False)`).
+  - `restricted` KHÔNG bật cửa sổ headful: job tạm dừng và raise `UserActionRequired("waiting_for_user", ...)`; riêng `login_required` dùng trạng thái `waiting_for_login`.
+  - Sau khi người dùng thao tác xong, bấm *"Tiếp tục lượt tìm"* trên giao diện web (`POST /api/search/jobs/{id}/resume`), engine tiếp tục cào.
+  - Tỷ lệ giải captcha thành công / tần suất gặp slider trên live: CHƯA KIỂM CHỨNG (cần nghiệm thu live).
 
 ### 2.3 Giai Đoạn 3: AI Bóc Tách Kịch Bản & Gợi Ý Hook (AI Script Deconstruction)
 - **Mô Hình Dữ Liệu (`ScriptAnalysisOut`):**
@@ -81,51 +86,30 @@
 
 ## 3. THÔNG SỐ DỮ LIỆU THỰC TẾ TRONG HỆ THỐNG (DATABASE METRICS)
 
-Cơ sở dữ liệu SQLite tại `data/app.db` ghi nhận các số liệu hoạt động thực tế:
-- **Tổng số video đã nghiên cứu & lưu trữ (`videos`):** **469 video**
-- **Tổng số lượt tìm kiếm đã thực hiện (`search_jobs`):** **215 jobs**
-- **Tổng số từ khóa truy vấn AI mở rộng (`search_queries`):** **399 queries**
-- **Liên kết video với lượt tìm kiếm (`job_videos`):** **2,292 records**
-- **Kế hoạch tìm kiếm AI (`search_plans`):** **211 plans**
-- **Tiến trình tải video đã thực hiện (`download_jobs`):** **42 jobs**
+Số liệu tức thời từ `data/app.db` (COUNT trực tiếp, ảnh chụp 12/11/2026 — thay đổi theo mỗi lượt chạy, không phải bất biến kiểm thử):
+- **Tổng số video đã nghiên cứu & lưu trữ (`videos`):** **791** (bản 17/09: 469)
+- **Tổng số lượt tìm kiếm đã thực hiện (`search_jobs`):** **838** (bản 17/09: 215)
+- **Tổng số từ khóa truy vấn AI mở rộng (`search_queries`):** **1,065** (bản 17/09: 399)
+- **Liên kết video với lượt tìm kiếm (`job_videos`):** **5,288** (bản 17/09: 2,292)
+- **Kế hoạch tìm kiếm AI (`search_plans`):** **504** (bản 17/09: 211)
+- **Tiến trình tải video đã thực hiện (`download_jobs`):** **44** (bản 17/09: 42)
 
 ---
 
 ## 4. KẾT QUẢ KIỂM THỬ TOÀN DIỆN (TESTING & VERIFICATION)
 
-### 4.1 Backend Pytest (247 / 247 Tests Passed - 100%)
-- `test_adaptive_search.py`: 4 passed
-- `test_ai.py`: 14 passed
-- `test_api.py`: 4 passed
-- `test_batch_downloads.py`: 3 passed
-- `test_cookies.py`: 7 passed
-- `test_douyin.py`: 7 passed
-- `test_download_adapters.py`: 12 passed
-- `test_download_api.py`: 2 passed
-- `test_download_service.py`: 16 passed
-- `test_extension_inspired_improvements.py`: 6 passed
-- `test_hybrid_headless.py`: 8 passed
-- `test_imports.py`: 12 passed
-- `test_keyword_accuracy.py`: 30 passed
-- `test_login_persistence.py`: 5 passed
-- `test_media_parser.py`: 20 passed
-- `test_original_intent_ranking.py`: 10 passed
-- `test_pipeline.py`: 18 passed
-- `test_regression_probes.py`: 18 passed
-- `test_relevance_phase_c.py`: 7 passed
-- `test_resilient_operations_phase_d.py`: 3 passed
-- `test_round2_codex_fixes.py`: 6 passed
-- `test_round3_codex_fixes.py`: 9 passed
-- `test_script_analysis.py`: 4 passed
-- `test_search_page_guard.py`: 5 passed
-- `test_xiaohongshu.py`: 17 passed
+### 4.1 Backend Pytest — 695 passed / 3 skipped / 0 failed (698 collected)
+- Nguồn bằng chứng: `release_gate_report.json` (stage 8, gate 11/11/2026, ~174s); breakdown đầy đủ 75 file trong `IMPLEMENTATION_STATUS.md` §2.1.
+- 3 test skipped là live-network probe (tự skip khi `LIVE_CRAWL_ENABLED≠1`) — không phải lỗi.
+- Bản gốc 17/09 liệt kê 247 test theo 25 file — đã lỗi thời (suite hiện ~698 item / 75 file). Không sao chép lại danh sách cũ để tránh trùng lặp nguồn sự thật.
 
-### 4.2 Frontend Playwright E2E (20 / 20 Tests Passed - 100%)
-- Giao diện quản lý Cookie & Anti-bot: 1 passed
-- Điều khiển & Tải video: 4 passed
-- Preview nhập liệu & Provenance: 1 passed
-- Tìm kiếm giả lập, lưu trữ, bộ lọc & thư viện: 3 passed
-- Tìm kiếm thực tế Xiaohongshu & Douyin: 11 passed
+### 4.2 Frontend Playwright E2E — 29 passed / 8 specs
+- Nguồn: `release_gate_report.json` (stage 10, ~36s). 8 spec trong `frontend/tests/`: `cookies`, `downloads`, `health`, `imports`, `research-default`, `search`, `verification-controls`, `xiaohongshu`.
+- Bản gốc 17/09 ghi 20/20 theo 5 nhóm — đã lỗi thời.
+
+### 4.3 Quality gates khác & nghiệm thu live (gate 11/11/2026)
+- Ruff (backend/tests/scripts): 0 lỗi · Mypy (backend, 79 file): 0 lỗi · ESLint: 0 lỗi/0 warning · `tsc --noEmit`: 0 lỗi · `npm run build`: OK (9 route).
+- **Stage 11 (Live Crawl): SKIPPED** khi chạy offline. Verdict chung: **APPROVED (OFFLINE FIXTURES) — PENDING LIVE CRAWL**. Nghiệm thu live (quét QR Douyin/XHS + `scripts/smoke_live.py` + gate `--live --require-live`) CHƯA thực hiện — xem mục 5.4 kế hoạch round 2.
 
 ---
 
@@ -136,7 +120,7 @@ Cơ sở dữ liệu SQLite tại `data/app.db` ghi nhận các số liệu ho�
    - `backend/core/config.py`: Cấu hình môi trường Pydantic Settings.
 2. **Quản lý Cookie & Trình duyệt:**
    - `backend/services/cookie_service.py`: Động cơ gia hạn hạn dùng cookie 365 ngày, parse token an toàn.
-   - `backend/services/douyin_browser_service.py`: Trình điều khiển Playwright Douyin với tài khoản "aaa".
+   - `backend/services/douyin_browser_service.py`: Trình điều khiển Playwright Douyin (tài khoản đã đăng nhập; định danh không ghi trong hồ sơ vì lý do bảo mật).
    - `backend/services/browser_service.py`: Trình điều khiển Playwright Xiaohongshu.
 3. **Phân Tích Kịch Bản & Xếp Hạng AI:**
    - `backend/services/ai_service.py`: Tích hợp Gemini + Fallback Generator.
