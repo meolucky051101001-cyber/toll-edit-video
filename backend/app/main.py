@@ -34,6 +34,7 @@ from backend.core.config import settings as config
 from backend.core.database import Base, SessionLocal, engine, get_db
 from backend.core.events import event_bus
 from backend.core.logging import configure_logging
+from backend.core.proxy_env import sanitize_no_proxy_env
 from backend.models import SearchJob, Video
 from backend.models.dubbing_job import DubbingJob
 from backend.providers.registry import get_provider
@@ -54,6 +55,12 @@ logger = logging.getLogger("app.main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
+    dropped_proxy_entries = sanitize_no_proxy_env()
+    if dropped_proxy_entries:
+        logger.warning(
+            "Dropped NO_PROXY entries httpx cannot parse: %s",
+            ", ".join(dropped_proxy_entries),
+        )
     Base.metadata.create_all(bind=engine)
     try:
         with engine.connect() as conn:
