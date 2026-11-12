@@ -3,7 +3,7 @@
 **Ngày lập:** 17/09/2026 · **Hiệu đính bằng chứng:** 12/11/2026 (review round 2)  
 **Phiên bản hệ thống:** nhãn nội bộ v3.0 (theo `IMPLEMENTATION_STATUS.md`); chưa có semver thống nhất — `frontend/package.json` = 0.1.0, `pyproject.toml` không khai báo version.  
 **Trạng thái phát hành:** APPROVED (OFFLINE FIXTURES) — PENDING LIVE CRAWL. Gate offline chứng minh logic nội bộ, CHƯA xác nhận DOM/API Douyin/Xiaohongshu còn tương thích khi chạy live.  
-**Trạng thái kiểm thử (gate 11 stage, 11/11/2026):** Backend 695 passed / 3 skipped / 0 failed (698 collected) · Frontend Playwright E2E 29 passed / 8 specs · Ruff 0 · Mypy 0 · ESLint 0 · tsc 0 · build OK. Nguồn: `release_gate_report.json`.
+**Trạng thái kiểm thử (gate 11 stage, 12/11/2026):** Backend 695 passed / 3 skipped / 0 failed (698 collected) · Frontend Playwright E2E 29 passed / 8 specs · Ruff 0 · Mypy 0 · ESLint 0 · tsc 0 · build OK. Nguồn: `release_gate_report.json`.
 
 > **Ghi chú hiệu đính 12/11/2026:** Bản gốc 17/09 ghi "v2.4 Production-Ready · 247/247 pytest · 20/20 E2E · Next.js 14+ · hybrid headless chạy ngầm 100% (kể cả `restricted`)". Các số liệu này đã lỗi thời so với gate thực chạy và mã nguồn hiện tại; đã sửa bên dưới bằng bằng chứng (`release_gate_report.json`, mã `backend/providers/*/provider.py`, `frontend/package-lock.json`, COUNT trực tiếp `data/app.db`). Tuyên bố phụ thuộc live (tỷ lệ giải captcha, "Production-Ready", truy vấn live, ước lượng RAM/CPU) được đánh dấu CHƯA KIỂM CHỨNG.
 
@@ -99,15 +99,15 @@ Số liệu tức thời từ `data/app.db` (COUNT trực tiếp, ảnh chụp 1
 ## 4. KẾT QUẢ KIỂM THỬ TOÀN DIỆN (TESTING & VERIFICATION)
 
 ### 4.1 Backend Pytest — 695 passed / 3 skipped / 0 failed (698 collected)
-- Nguồn bằng chứng: `release_gate_report.json` (stage 8, gate 11/11/2026, ~174s); breakdown đầy đủ 75 file trong `IMPLEMENTATION_STATUS.md` §2.1.
+- Nguồn bằng chứng: `release_gate_report.json` (stage 8, gate 12/11/2026, ~186s); breakdown đầy đủ 75 file trong `IMPLEMENTATION_STATUS.md` §2.1.
 - 3 test skipped là live-network probe (tự skip khi `LIVE_CRAWL_ENABLED≠1`) — không phải lỗi.
 - Bản gốc 17/09 liệt kê 247 test theo 25 file — đã lỗi thời (suite hiện ~698 item / 75 file). Không sao chép lại danh sách cũ để tránh trùng lặp nguồn sự thật.
 
 ### 4.2 Frontend Playwright E2E — 29 passed / 8 specs
-- Nguồn: `release_gate_report.json` (stage 10, ~36s). 8 spec trong `frontend/tests/`: `cookies`, `downloads`, `health`, `imports`, `research-default`, `search`, `verification-controls`, `xiaohongshu`.
+- Nguồn: `release_gate_report.json` (stage 10, ~38s). 8 spec trong `frontend/tests/`: `cookies`, `downloads`, `health`, `imports`, `research-default`, `search`, `verification-controls`, `xiaohongshu`.
 - Bản gốc 17/09 ghi 20/20 theo 5 nhóm — đã lỗi thời.
 
-### 4.3 Quality gates khác & nghiệm thu live (gate 11/11/2026)
+### 4.3 Quality gates khác & nghiệm thu live (gate 12/11/2026)
 - Ruff (backend/tests/scripts): 0 lỗi · Mypy (backend, 79 file): 0 lỗi · ESLint: 0 lỗi/0 warning · `tsc --noEmit`: 0 lỗi · `npm run build`: OK (9 route).
 - **Stage 11 (Live Crawl): SKIPPED** khi chạy offline. Verdict chung: **APPROVED (OFFLINE FIXTURES) — PENDING LIVE CRAWL**. Nghiệm thu live (quét QR Douyin/XHS + `scripts/smoke_live.py` + gate `--live --require-live`) CHƯA thực hiện — xem mục 5.4 kế hoạch round 2.
 

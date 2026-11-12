@@ -1,5 +1,5 @@
 # IMPLEMENTATION STATUS: AI Video Research Tool v3.0
-Last Updated: 2026-11-12 (Review round 2 — Phase 4: ruff/ESLint/type gates clean, sidecar proxy immunity (L7), offline release gate re-verified GREEN; authoritative snapshot in §0)
+Last Updated: 2026-11-12 (Review round 2 — Phase 5 + pre-push acceptance: handover doc corrected, gate re-verified GREEN 12/11, pre-push cleanup; authoritative snapshot in §0)
 
 > **Cách đọc tài liệu này:** trạng thái bên dưới phản ánh kết quả chạy thực tế gần nhất
 > (suite pytest + release gate). Đừng cập nhật tay con số "X/Y Green" — hãy chạy
@@ -10,13 +10,13 @@ Last Updated: 2026-11-12 (Review round 2 — Phase 4: ruff/ESLint/type gates cle
 
 ## 0. CURRENT VERIFICATION SNAPSHOT (2026-11-12)
 
-Nguồn sự thật: `release_gate_report.json` — gate offline chạy lúc **2026-11-11T18:34:18Z**, 242.9s, 11 stage.
+Nguồn sự thật: `release_gate_report.json` — gate offline chạy lúc **2026-11-12T03:59:45Z**, 287.3s, 11 stage (pre-push acceptance).
 
 - **Release gate (offline):** **APPROVED (OFFLINE FIXTURES) - PENDING LIVE CRAWL** — 10/10 stage thực thi PASS, stage 11 (live) SKIPPED có chủ đích.
-- **Backend pytest:** 695 passed, 3 skipped (live network probes), 0 failed — 698 collected, 75 test files, ~174s; 2 RuntimeWarning tồn dư (AsyncMock `Event.wait` trong `test_empty_results_login_route`, không liên quan round 2).
+- **Backend pytest:** 695 passed, 3 skipped (live network probes), 0 failed — 698 collected, 75 test files, ~186s; 2 RuntimeWarning tồn dư (AsyncMock `Event.wait` trong `test_empty_results_login_route`, không liên quan round 2).
 - **Backend Ruff:** 0 errors (`backend/ tests/ scripts/`). **Mypy:** 0 errors / 79 source files.
 - **Frontend ESLint:** 0 errors, 0 warnings. **Typecheck (`tsc --noEmit`):** 0 errors. **Production build:** thành công (9 routes).
-- **Frontend Playwright E2E:** 29 passed / 8 specs (~36s), chạy bằng gate Stage 10.
+- **Frontend Playwright E2E:** 29 passed / 8 specs (~38s), chạy bằng gate Stage 10.
 - **Live validation:** CHƯA chạy lại trong round 2. Mục `strict_live_run` trong report là bản cũ **2026-10-05** (exit 2, BLOCKED) — KHÔNG phải bằng chứng mới. Cần quét QR + `scripts/smoke_live.py` hoặc gate `--live --require-live` để xác thực lời hứa captcha-free (xem Phase 5).
 
 ---
@@ -28,7 +28,7 @@ Nguồn sự thật: `release_gate_report.json` — gate offline chạy lúc **2
 - **Web Framework:** FastAPI 0.115+ / Uvicorn (Listening on `http://127.0.0.1:8010`)
 - **Database:** SQLite 3 (`data/app.db`) via SQLAlchemy 2.0 with automatic table creation & migrations
 - **Browser Automation:** Playwright (Chromium persistent contexts, silent headless background by default)
-- **AI & Speech Services:** Google Gemini SDK (`gemini-2.5-flash`), Microsoft Neural TTS (`edge-tts` with offline PCM fallback)
+- **AI & Speech Services:** Google Gemini SDK (default `gemini-3.1-flash-lite`; also `gemini-3.8-flash`), Microsoft Neural TTS (`edge-tts` with offline PCM fallback)
 - **Frontend Runtime:** Node.js v20+ / Next.js 16 App Router / React 19 / TypeScript / Tailwind CSS (Port 3000)
 - **Scale & Queue:** In-memory priority queue (`BaseJobQueue`), bounded worker pool (`AdaptiveWorkerPool`), Dead Letter Queue (DLQ)
 - **Observability:** `TelemetryService` (p50/p95/p99 histograms), `/api/system/metrics`, `/api/system/release-readiness`
@@ -44,7 +44,7 @@ Nguồn sự thật: `release_gate_report.json` — gate offline chạy lúc **2
 - **Skipped:** 3 (live network probes — require `LIVE_CRAWL_ENABLED=1`)
 - **Failed:** 0
 - **Warnings:** 2 (pre-existing AsyncMock `Event.wait` RuntimeWarning in `test_empty_results_login_route`; unrelated to round 2)
-- **Duration:** ~174s
+- **Duration:** ~186s
 - **Module Breakdown (collected items per file via `pytest --collect-only -q`):**
   - `test_adaptive_search.py`: 5
   - `test_ai.py`: 14
@@ -125,7 +125,7 @@ Nguồn sự thật: `release_gate_report.json` — gate offline chạy lúc **2
 ### 2.2 Frontend Playwright E2E Suite
 - **Passed:** 29 across 8 spec files (gate Stage 10)
 - **Failed:** 0
-- **Duration:** ~36s
+- **Duration:** ~38s
 - **Spec files (8):** `cookies.spec.ts`, `downloads.spec.ts`, `health.spec.ts`, `imports.spec.ts`, `research-default.spec.ts`, `search.spec.ts`, `verification-controls.spec.ts`, `xiaohongshu.spec.ts`
 
 ### 2.3 Frontend & Backend Quality Gates
@@ -134,7 +134,7 @@ Nguồn sự thật: `release_gate_report.json` — gate offline chạy lúc **2
 - **Frontend ESLint (`npm run lint`):** 0 errors, 0 warnings
 - **Frontend TypeScript Typecheck (`tsc --noEmit`):** Clean, 0 errors
 - **Frontend Production Build (`npm run build`):** Successful compilation. Current routes (9): `/`, `/_not-found`, `/collections`, `/health`, `/history`, `/imports`, `/imports/[id]` (dynamic), `/library`, `/settings`.
-- **Automated Release Gate (`scripts/release_gate.py`, offline):** APPROVED (OFFLINE FIXTURES) - PENDING LIVE CRAWL — 10/10 executed stages PASS, live stage skipped, 242.9s (2026-11-11T18:34:18Z).
+- **Automated Release Gate (`scripts/release_gate.py`, offline):** APPROVED (OFFLINE FIXTURES) - PENDING LIVE CRAWL — 10/10 executed stages PASS, live stage skipped, 287.3s (2026-11-12T03:59:45Z).
 
 ---
 
