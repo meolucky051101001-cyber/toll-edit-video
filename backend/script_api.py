@@ -275,7 +275,8 @@ def page_script_studio(request: Request):
         raise HTTPException(status_code=404, detail="Không tìm thấy file template script_studio.html")
     with open(template_path, "r", encoding="utf-8") as f:
         html_content = f.read()
-    token = get_current_control_token()
+    runtime = getattr(request.app.state, "pipeline_runtime", None)
+    token = getattr(runtime, "LOCAL_TOKEN", None) or get_current_control_token()
     html_content = html_content.replace("__REPLACE_TOKEN__", token)
     return HTMLResponse(content=html_content)
 

@@ -30,9 +30,9 @@ except ImportError:
     from ai.v1_model_runtime import V1ModelRuntimeError, run_v1_ocr, runtime_module_available
 
 try:
-    from .ocr_subtitle_locator import select_chinese_subtitle_band
+    from .ocr_subtitle_locator import select_chinese_subtitle_band, detect_static_watermarks
 except ImportError:
-    from ocr_subtitle_locator import select_chinese_subtitle_band
+    from ocr_subtitle_locator import select_chinese_subtitle_band, detect_static_watermarks
 
 try:
     from .v1_ocr_geometry import (value, sample_times, rescue_times, has_caption_evidence,
@@ -247,6 +247,8 @@ class OCRBlock:
         is_static=None,
         in_subtitle_band=None,
         type=None,
+        bg_color_ass=None,
+        text_contrast_color_ass=None,
     ):
         self.text = text
         self.start = start
@@ -263,6 +265,57 @@ class OCRBlock:
         self.is_static = is_static
         self.in_subtitle_band = in_subtitle_band
         self.type = type
+        self.bg_color_ass = bg_color_ass
+        self.text_contrast_color_ass = text_contrast_color_ass
+
+
+def _sample_box_bg_colors(frame_bgr, scale_ratio, crop_offset, full_w, full_h, x_pct, max_x_pct, y_pct, max_y_pct):
+    """Lấy mẫu màu nền viền ngoài bbox OCR từ frame ảnh gốc -> (bg_color_ass, contrast_text_ass)."""
+    if frame_bgr is None or not hasattr(frame_bgr, "shape") or len(frame_bgr.shape) < 3:
+        return None, None
+    try:
+        fh, fw = int(frame_bgr.shape[0]), int(frame_bgr.shape[1])
+        if fh < 4 or fw < 4 or scale_ratio <= 0:
+            return None, None
+        px1 = max(0, min(fw - 1, int(round(float(x_pct) * float(full_w) * float(scale_ratio)))))
+        px2 = max(px1 + 1, min(fw, int(round(float(max_x_pct) * float(full_w) * float(scale_ratio)))))
+        py1 = max(0, min(fh - 1, int(round((float(y_pct) * float(full_h) - float(crop_offset)) * float(scale_ratio)))))
+        py2 = max(py1 + 1, min(fh, int(round((float(max_y_pct) * float(full_h) - float(crop_offset)) * float(scale_ratio)))))
+
+        pad = max(3, min(10, int(round((py2 - py1) * 0.25))))
+        strips = []
+        if py1 >= 2:
+            top_s = frame_bgr[max(0, py1 - pad):py1, px1:px2]
+            if top_s.size:
+                strips.append(top_s.reshape(-1, 3))
+        if py2 + 2 <= fh:
+            bot_s = frame_bgr[py2:min(fh, py2 + pad), px1:px2]
+            if bot_s.size:
+                strips.append(bot_s.reshape(-1, 3))
+        if px1 >= 2:
+            left_s = frame_bgr[py1:py2, max(0, px1 - pad):px1]
+            if left_s.size:
+                strips.append(left_s.reshape(-1, 3))
+        if px2 + 2 <= fw:
+            right_s = frame_bgr[py1:py2, px2:min(fw, px2 + pad)]
+            if right_s.size:
+                strips.append(right_s.reshape(-1, 3))
+
+        if not strips:
+            center_crop = frame_bgr[py1:py2, px1:px2]
+            if center_crop.size:
+                strips.append(center_crop.reshape(-1, 3))
+        if not strips:
+            return None, None
+
+        samples = np.concatenate(strips, axis=0)
+        b, g, r = [max(0, min(255, int(round(float(v))))) for v in np.median(samples, axis=0)]
+        luma = 0.299 * r + 0.587 * g + 0.114 * b
+        bg_ass = f"&H00{b:02X}{g:02X}{r:02X}"
+        fg_ass = "&H00FFFFFF" if luma < 128.0 else "&H00000000"
+        return bg_ass, fg_ass
+    except Exception:
+        return None, None
 
 
 def _ocr_field(block, name, default=None):
@@ -467,6 +520,8 @@ def _tracking_ocr_block(source, start_t, end_t, default_block):
         is_packaging=False,
         is_static=False,
         type="subtitle",
+        bg_color_ass=_ocr_field(source, "bg_color_ass") or _ocr_field(default_block, "bg_color_ass"),
+        text_contrast_color_ass=_ocr_field(source, "text_contrast_color_ass") or _ocr_field(default_block, "text_contrast_color_ass"),
     )
 
 
@@ -580,14 +635,20 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
     roi_y0, roi_y1 = int(0.35 * height), int(0.95 * height)
     roi_x0, roi_x1 = int(0.08 * width), int(0.92 * width)
 
-    def append_rows(rows, sample_time, scale_ratio, crop_offset):
+    def append_rows(rows, sample_time, scale_ratio, crop_offset, orig_frame=None):
         for mapped in normalized_rows(rows, scale_ratio, crop_offset, width, height):
+            bg_ass, fg_ass = _sample_box_bg_colors(
+                orig_frame, 1.0, 0, width, height,
+                mapped["x_pct"], mapped["max_x_pct"], mapped["y_pct"], mapped["max_y_pct"],
+            )
             block = OCRBlock(
                 **mapped,
                 start=sample_time - 1.2,
                 end=sample_time + 1.2,
                 sample_segment_id=0,
                 sample_time=sample_time,
+                bg_color_ass=bg_ass,
+                text_contrast_color_ass=fg_ass,
             )
             block.sample_in_cue = True
             all_blocks.append(block)
@@ -621,7 +682,7 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         if can_reuse:
             mad = float(np.mean(cv2.absdiff(roi_small, previous_roi)))
             if mad < 1.8:
-                append_rows(previous_rows, current_time, previous_scale, previous_offset)
+                append_rows(previous_rows, current_time, previous_scale, previous_offset, orig_frame=frame)
                 metrics["visual_roi_reused"] = metrics.get("visual_roi_reused", 0) + 1
                 previous_time = current_time
                 previous_roi = roi_small
@@ -645,7 +706,7 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         previous_offset = 0
         previous_roi = roi_small
         metrics["visual_ocr_calls"] = metrics.get("visual_ocr_calls", 0) + 1
-        append_rows(rows, current_time, scale_ratio, 0)
+        append_rows(rows, current_time, scale_ratio, 0, orig_frame=frame)
         if (position + 1) % 100 == 0:
             logger.info(
                 "Visual OCR progress: %d/%d samples, GPU calls=%d, reused=%d",
@@ -662,6 +723,12 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         frame_height=height,
         allow_visual_only=True,
         duration=duration,
+    )
+    metrics["detected_watermarks"] = detect_static_watermarks(
+        all_blocks,
+        duration=duration,
+        subtitle_top=getattr(band, "top", None),
+        subtitle_bottom=getattr(band, "bottom", None),
     )
     if getattr(band, "support", 0) <= 0 or getattr(band, "mode", "") == "default":
         logger.info("Visual OCR-to-TTS: no dynamic Chinese subtitle band found")
@@ -812,6 +879,7 @@ class _OcrFrameBatch:
     early_band_checked: bool = False
     early_band_locked: bool = False
     sampled_seg_indices: set = field(default_factory=set)
+    block_colors: dict = field(default_factory=dict)
 
     def __post_init__(self):
         self.crop_y_end = self.height
@@ -825,7 +893,26 @@ class _OcrFrameBatch:
         if len(results) != len(self.captured_frames):
             raise RuntimeError("OCR returned incomplete frame results")
         for item, rows in zip(self.captured_frames, results):
-            current_time, scale_ratio, _, target_seg, seg_idx, crop_offset = item
+            current_time, scale_ratio, proc_frame, target_seg, seg_idx, crop_offset = item
+            try:
+                sample_id = _ocr_segment_id(target_seg, seg_idx)
+                for row_pos, mb in enumerate(normalized_rows(rows, scale_ratio, crop_offset, self.width, self.height)):
+                    bg_ass, fg_ass = _sample_box_bg_colors(
+                        proc_frame,
+                        scale_ratio,
+                        crop_offset,
+                        self.width,
+                        self.height,
+                        mb["x_pct"],
+                        mb["max_x_pct"],
+                        mb["y_pct"],
+                        mb["max_y_pct"],
+                    )
+                    if bg_ass:
+                        self.block_colors[(round(float(current_time), 4), sample_id, row_pos)] = (bg_ass, fg_ass)
+                        self.block_colors[(round(float(current_time), 4), sample_id, str(mb.get("text", "")))] = (bg_ass, fg_ass)
+            except Exception:
+                pass
             self.recognized_samples.append((current_time, scale_ratio, target_seg, seg_idx, rows, crop_offset))
         self.captured_frames.clear()
 
@@ -900,9 +987,10 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
 
     if visual_mode:
         logger.info("Visual OCR-to-TTS mode active: no speech or speech coverage %.2f%%", 100 * speech_coverage / timeline_duration if timeline_duration else 0.0)
+        v_metrics = kwargs.setdefault('metrics', {})
         try:
             visual_segments, visual_main_y = _perform_visual_subtitle_ocr(
-                cap, width, height, timeline_duration, srt_segments, _ocr_stopped, metrics=kwargs.get('metrics')
+                cap, width, height, timeline_duration, srt_segments, _ocr_stopped, metrics=v_metrics
             )
         finally:
             cap.release()
@@ -922,11 +1010,12 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
     if sampling is None:
         return [], width, height, 0.85
     target_timestamps, is_adaptive, metrics = sampling
+    metrics["duration"] = float(duration or 0.0)
     segment_texts = _ocr_segment_texts(srt_segments)
     batch = _OcrFrameBatch(width, height, srt_segments, segment_texts, is_adaptive,
                            ocr_strategy, fps, duration, metrics)
     _collect_ocr_samples(cap, batch, target_timestamps)
-    _append_ocr_recognized(batch.recognized_samples, all_blocks, batch.width, batch.height)
+    _append_ocr_recognized(batch.recognized_samples, all_blocks, batch.width, batch.height, block_colors=batch.block_colors)
     observation_times = {}
     for item in batch.recognized_samples:
         observation_times.setdefault(_ocr_segment_id(item[2], item[3]), set()).add(item[0])
@@ -1083,6 +1172,9 @@ def _ocr_target_timestamps(cap, srt_segments, duration, kwargs, ocr_strategy):
                 count = min(max_samples_per_cue, max(1, math.ceil(cue_dur / 1.2)))
             else:
                 count = min(max_samples_per_cue, max(3, math.ceil(cue_dur / interval)))
+            if not is_adaptive:
+                # Explicit coarse mode keeps a bounded scan per speech cue.
+                count = min(count, 4)
             for t in sample_times(s, e, count):
                 target_timestamps.append((t, seg, seg_idx))
         if ocr_strategy == 'smart_skip':
@@ -1175,14 +1267,22 @@ def _collect_ocr_samples(cap, batch, target_timestamps):
         raise RuntimeError("Could not decode any video frames for OCR verification")
 
 
-def _append_ocr_recognized(samples, all_blocks, width, height):
+def _append_ocr_recognized(samples, all_blocks, width, height, block_colors=None):
+    color_lookup = block_colors if isinstance(block_colors, dict) else {}
     for current_time, scale_ratio, target_seg, seg_idx, results, crop_offset in samples:
         sample_id = _ocr_segment_id(target_seg, seg_idx)
-        for mb in normalized_rows(results, scale_ratio, crop_offset, width, height):
+        t_key = round(float(current_time), 4)
+        for row_pos, mb in enumerate(normalized_rows(results, scale_ratio, crop_offset, width, height)):
+            bg_ass, fg_ass = color_lookup.get(
+                (t_key, sample_id, row_pos),
+                color_lookup.get((t_key, sample_id, str(mb.get("text", ""))), (None, None)),
+            )
             block = OCRBlock(**mb, start=current_time - 1.2,
                              end=current_time + 1.2,
                              sample_segment_id=sample_id,
-                             sample_time=current_time)
+                             sample_time=current_time,
+                             bg_color_ass=bg_ass,
+                             text_contrast_color_ass=fg_ass)
             block.sample_in_cue = (target_seg.start.total_seconds() <= current_time
                                    < target_seg.end.total_seconds())
             all_blocks.append(block)
@@ -1239,7 +1339,7 @@ def _rescue_ocr_coordinates(video_path, batch, band, all_blocks, observation_tim
         for item in batch.recognized_samples:
             observation_times.setdefault(_ocr_segment_id(item[2], item[3]), set()).add(item[0])
         sampled_ids.update(observation_times)
-        _append_ocr_recognized(batch.recognized_samples, all_blocks, batch.width, batch.height)
+        _append_ocr_recognized(batch.recognized_samples, all_blocks, batch.width, batch.height, block_colors=batch.block_colors)
         band = select_chinese_subtitle_band(all_blocks, batch.segment_texts, batch.width, batch.height)
     return band
 
@@ -1305,6 +1405,8 @@ def _apply_ocr_subtitle_band(batch, band, observation_times, all_blocks):
                                 sample_segment_id=s_key, sample_time=row["sample_time"],
                                 is_subtitle=True, in_subtitle_band=True,
                                 is_packaging=False, type='subtitle',
+                                bg_color_ass=row.get("bg_color_ass"),
+                                text_contrast_color_ass=row.get("text_contrast_color_ass"),
                             ))
                     seg.tracking_blocks = tracking
 
@@ -1319,6 +1421,8 @@ def _apply_ocr_subtitle_band(batch, band, observation_times, all_blocks):
                         prob=b.get("prob", 1.0),
                         is_subtitle=True, in_subtitle_band=True,
                         is_packaging=False, type='subtitle',
+                        bg_color_ass=b.get("bg_color_ass"),
+                        text_contrast_color_ass=b.get("text_contrast_color_ass"),
                     )
                     seg.is_subtitle = True
                     seg.in_subtitle_band = True
@@ -1395,6 +1499,16 @@ def _report_ocr_geometry(srt_segments, all_blocks, band, kwargs, metrics):
     if relaxation:
         report['subtitle_free_relaxation'] = relaxation
         logger.info('OCR subtitle-free relaxation: %s', relaxation)
+    detected_watermarks = detect_static_watermarks(
+        all_blocks,
+        duration=float(metrics.get("duration", 0.0) or 0.0) if isinstance(metrics, dict) else 0.0,
+        subtitle_top=getattr(band, "top", None),
+        subtitle_bottom=getattr(band, "bottom", None),
+    )
+    if isinstance(metrics, dict):
+        metrics["detected_watermarks"] = detected_watermarks
+    if detected_watermarks:
+        logger.info("OCR static watermark candidates (%d): %s", len(detected_watermarks), [w.get("text") for w in detected_watermarks])
     logger.info('OCR geometry audit: %s', report)
     if kwargs.get('geometry_report_path'):
         try:
@@ -1404,7 +1518,13 @@ def _report_ocr_geometry(srt_segments, all_blocks, band, kwargs, metrics):
         details = {}
         if kwargs.get('include_observations'):
             details['observations'] = [vars(block) for block in all_blocks]
-        save_payload(kwargs['geometry_report_path'], geometry=report, sampling=metrics, **details)
+        save_payload(
+            kwargs['geometry_report_path'],
+            geometry=report,
+            sampling=metrics,
+            watermarks=detected_watermarks,
+            **details,
+        )
     validate_mask_geometry(srt_segments, strict=kwargs.get('strict_geometry'))
 
 

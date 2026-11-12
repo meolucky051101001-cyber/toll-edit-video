@@ -42,11 +42,17 @@ from v1_video_router import VideoMetadata, VideoMode, resolve_planned_pipeline
 class TestSenseVoiceHybridASR(unittest.TestCase):
     def test_sensevoice_readiness_and_real_onnx_inference(self):
         """Kiểm tra readiness và chạy suy luận thực tế trên zh.wav bằng SenseVoice ONNX INT8."""
-        ready, reason = check_sensevoice_readiness(ignore_flag=True)
+        import ai.v1_sensevoice_adapter as adapter
+        model_dir = Path(os.getenv('V1_TEST_ASSETS_ROOT', str(ROOT))) / 'models' / 'v1' / 'sensevoice_small'
+        with mock.patch.object(adapter, 'DEFAULT_SENSEVOICE_DIR', model_dir):
+            ready, reason = check_sensevoice_readiness(ignore_flag=True)
         self.assertTrue(ready, f"SenseVoice phải sẵn sàng: {reason}")
 
-        sample_wav = DEFAULT_SENSEVOICE_DIR / "test_wavs" / "zh.wav"
-        if sample_wav.is_file():
+        sample_wav = model_dir / "test_wavs" / "zh.wav"
+        self.assertTrue(sample_wav.is_file(), f'Missing real inference fixture: {sample_wav}')
+        engine = adapter.SenseVoiceEngine.get_cached(model_dir)
+        with mock.patch.object(adapter, 'DEFAULT_SENSEVOICE_DIR', model_dir), \
+             mock.patch.object(adapter.SenseVoiceEngine, 'get_cached', return_value=engine):
             analysis = analyze_audio_sensevoice(sample_wav)
             self.assertGreater(len(analysis["tokens"]), 5)
             self.assertEqual(analysis["windows"][0]["lang_tag"], "<|zh|>")

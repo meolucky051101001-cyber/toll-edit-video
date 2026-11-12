@@ -307,9 +307,20 @@ def get_input_dir() -> Path:
     return Path(r"D:\video phôi")
 
 def get_output_dir() -> Path:
+    saved = _get_system_path("dashboard_output.json")
+    if saved.exists():
+        try:
+            saved_path = Path(json.loads(saved.read_text(encoding="utf-8"))["path"])
+            if not is_downloader_save_dir(saved_path):
+                saved_path.mkdir(parents=True, exist_ok=True)
+                return saved_path
+        except Exception as _e:
+            logger.debug("Lỗi đọc dashboard_output.json: %s", _e)
     env_dir = os.getenv("AUTODUB_OUTPUT_DIR")
-    if env_dir:
-        return Path(env_dir)
+    if env_dir and not is_downloader_save_dir(env_dir):
+        p = Path(env_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
     return Path(OUTPUT_DIR)
 
 # The desktop/API surface can receive concurrent requests, while the media
@@ -1413,57 +1424,47 @@ async def api_move_queue_item(request: Request):
 
 @app.post("/api/queue/delete")
 async def api_delete_queue_item(request: Request):
-    """Xóa một video khỏi hàng chờ Telegram theo index."""
+    from queue_control_service import identity, submit_delete
     try:
         payload = await request.json()
-    except Exception:
-        raise HTTPException(400, "Dữ liệu JSON không hợp lệ")
+        index = payload.get("index")
+        if type(index) is not int or index < 0:
+            raise HTTPException(400, "Vị trí không hợp lệ")
+        snapshot = _get_system_path("telegram_queue.json")
+        data = json.loads(await asyncio.to_thread(snapshot.read_text, encoding="utf-8-sig"))
+        items = data.get("items") or []
+        if index >= len(items):
+            raise HTTPException(409, "Hàng chờ đã thay đổi; hãy làm mới danh sách.")
+        item = items[index]
+        target = identity(item)
+        if payload.get("job_id") and payload["job_id"] != target:
+            raise HTTPException(409, "Hàng chờ đã thay đổi; hãy làm mới danh sách.")
+        if sum(identity(j) == target for j in items) != 1:
+            raise HTTPException(409, "Không phân biệt được các job cũ trùng nhau; hãy làm mới danh sách.")
+        operation = await asyncio.to_thread(submit_delete, snapshot, item)
+        return {"status": "pending", **operation, "message": "Đã nhận yêu cầu xóa; chờ bot xác nhận."}
+    except HTTPException:
+        raise
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(400, "Dữ liệu không hợp lệ")
+    except OSError:
+        raise HTTPException(503, "Không đọc/ghi được hàng chờ")
 
-    index = payload.get("index")
-    if index is None or not isinstance(index, int):
-        raise HTTPException(400, "Vị trí index không hợp lệ")
 
-    queue_file = _get_system_path("telegram_queue.json")
-    if not queue_file.is_file():
-        raise HTTPException(404, "Hàng chờ video không tồn tại")
-
+@app.get("/api/queue/operations/{operation_id}")
+async def api_queue_operation(operation_id: str):
+    import re
+    from queue_control_service import commands
+    if not re.fullmatch(r"[a-f0-9]{32}", operation_id):
+        raise HTTPException(400, "Mã thao tác không hợp lệ")
+    path = commands(_get_system_path("telegram_queue.json")) / (operation_id + ".json")
     try:
-        import json, time
-        data = json.loads(await asyncio.to_thread(queue_file.read_text, encoding="utf-8-sig"))
-        items = data.get("items", [])
-        n = len(items)
-        if index < 0 or index >= n:
-            return {"status": "unchanged", "items": items, "message": "Không tìm thấy video cần xóa"}
+        return json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
+    except FileNotFoundError:
+        raise HTTPException(404, "Không tìm thấy thao tác")
+    except (OSError, ValueError):
+        raise HTTPException(503, "Bản ghi thao tác bị lỗi; cần kiểm tra nhật ký bot.")
 
-        removed = items.pop(index)
-        removed_name = removed.get("name", "video")
-        if len(removed_name) > 35:
-            removed_name = removed_name[:35] + "..."
-
-        # Cập nhật lại chỉ số position cho từng video
-        for i, item in enumerate(items, 1):
-            item["position"] = i
-
-        data["items"] = items
-        data["updated_at"] = time.time()
-
-        # Thêm key của item bị xóa vào danh sách deleted_keys để bot loại bỏ khỏi bộ nhớ
-        del_key = str(removed.get("url") or removed.get("filename") or removed.get("file_id") or removed.get("name") or "").strip()
-        deleted_list = data.get("deleted_keys", [])
-        if del_key and del_key not in deleted_list:
-            deleted_list.append(del_key)
-        data["deleted_keys"] = deleted_list
-
-        await asyncio.to_thread(queue_file.write_text, json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        # Ghi cờ tín hiệu để telegram_bot.py đang chạy đồng bộ lại bộ nhớ ngay lập tức
-        reorder_flag = _get_system_path("telegram_queue_reorder.flag")
-        reorder_flag.write_text(str(time.time()), encoding="utf-8")
-
-        return {"status": "success", "items": items, "message": f'Đã xóa video "{removed_name}" khỏi hàng chờ!'}
-    except Exception as e:
-        logger.exception("Lỗi api_delete_queue_item")
-        raise HTTPException(500, f"Lỗi xóa video: {str(e)}")
 
 def _check_input_request(request):
     if request.headers.get("X-Dashboard-Input") != "1" or request.headers.get("origin") not in (None, "http://127.0.0.1:8088", "http://localhost:8088"):
@@ -1515,7 +1516,59 @@ async def api_input_folder(request: Request):
                 400,
                 "Thư mục này là nơi bot Douyin/XHS lưu video tải về (chỉ tải, không edit). Hãy chọn thư mục khác.",
             )
-        dest = Path(WORKSPACE) / "dashboard_input.json"
+        # Keep this aligned with get_input_dir(), which reads through _get_system_path().
+        dest = _get_system_path("dashboard_input.json")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"path": str(path)}), encoding="utf-8")
+        os.replace(tmp, dest)
+        return {"path": str(path)}
+
+
+@app.post("/api/choose-output-folder")
+async def api_choose_output_folder(request: Request):
+    _check_input_request(request)
+    if FOLDER_PICKER_LOCK.locked():
+        raise HTTPException(409, "Hộp chọn thư mục đang mở. Hãy chọn hoặc bấm Hủy trong cửa sổ đó.")
+    async with FOLDER_PICKER_LOCK:
+        import sys, subprocess
+        cur = str(get_output_dir())
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, str(BASE_DIR / "choose_video_folder.py"), cur, "Chọn thư mục lưu video thành phẩm", "true",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
+            if process.returncode:
+                raise HTTPException(503, "Không mở được hộp chọn thư mục Windows. Hãy kiểm tra phiên desktop đang đăng nhập.")
+            return json.loads(stdout.decode("utf-8"))
+        except asyncio.TimeoutError:
+            raise HTTPException(408, "Hết thời gian chọn thư mục. Bấm Chọn thư mục để thử lại.")
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.communicate()
+
+
+@app.post("/api/output-folder")
+async def api_output_folder(request: Request):
+    async with BATCH_INPUT_LOCK:
+        _check_input_request(request)
+        data = await request.json()
+        value = data.get("path", "") if isinstance(data, dict) else ""
+        if not isinstance(value, str) or not value.strip():
+            raise HTTPException(400, "Nhập đường dẫn thư mục xuất video.")
+        path = Path(value.strip().strip('"'))
+        if not path.is_absolute():
+            raise HTTPException(400, "Hãy nhập đường dẫn thư mục đầy đủ (ví dụ D:\\banve).")
+        path.mkdir(parents=True, exist_ok=True)
+        path = path.resolve()
+        if path == get_input_dir().resolve():
+            raise HTTPException(400, "Thư mục xuất thành phẩm không nên trùng với thư mục video nguồn.")
+        if is_downloader_save_dir(path):
+            raise HTTPException(400, "Thư mục này là nơi bot tải video lưu về. Hãy chọn thư mục khác.")
+        dest = _get_system_path("dashboard_output.json")
+        dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(".tmp")
         tmp.write_text(json.dumps({"path": str(path)}), encoding="utf-8")
         os.replace(tmp, dest)
@@ -1595,13 +1648,22 @@ def _list_phoi(limit=None, offset=0, search="", status="all"):
     files_data = []
     total_size = 0
     try:
+        is_same_as_output = False
+        try:
+            is_same_as_output = input_dir.resolve() == output_dir.resolve()
+        except Exception:
+            pass
+
         for f in sorted(os.listdir(input_dir)):
             full_path = input_dir / f
-            if full_path.is_file() and f.lower().endswith(SUPPORTED_EXTENSIONS) and not f.startswith("Dubbed_"):
+            if is_same_as_output and f.startswith("Dubbed_"):
+                continue
+            if full_path.is_file() and f.lower().endswith(SUPPORTED_EXTENSIONS):
                 size_b = full_path.stat().st_size
                 total_size += size_b
                 mtime_str = datetime.datetime.fromtimestamp(full_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
                 stem = full_path.stem
+                clean_stem = stem[7:] if stem.startswith("Dubbed_") else stem
 
                 if f == active_video and current_status.get("active"):
                     v_status = "running"
@@ -1609,8 +1671,9 @@ def _list_phoi(limit=None, offset=0, search="", status="all"):
                 elif f == active_video and current_status.get("status") in ("error", "stopped", "interrupted"):
                     v_status = "error" if current_status.get("status") == "error" else "waiting"
                     v_status_label = "Xử lý lỗi" if v_status == "error" else "Đã dừng; có thể chạy lại"
-                elif f"Dubbed_{stem}.mp4" in output_files:
-                    candidate = output_dir / f"Dubbed_{stem}.mp4"
+                elif f"Dubbed_{stem}.mp4" in output_files or f"Dubbed_{clean_stem}.mp4" in output_files:
+                    target_name = f"Dubbed_{stem}.mp4" if f"Dubbed_{stem}.mp4" in output_files else f"Dubbed_{clean_stem}.mp4"
+                    candidate = output_dir / target_name
                     check = media_status(candidate, defer=True)
                     v_status = "invalid" if check["status"] == "invalid" else "unverified"
                     v_status_label = "Đầu ra không hợp lệ" if v_status == "invalid" else "Có đầu ra; chưa đối chiếu nguồn"
@@ -2082,102 +2145,72 @@ def _schedule_file() -> Path:
     return Path(WORKSPACE) / "control" / "schedule.json"
 
 
+def _schedule_store():
+    from night_schedule_service import ScheduleStore
+    return ScheduleStore(_schedule_file())
+
+
 @app.get("/api/schedule")
 async def api_get_schedule():
-    """F9 — đọc lịch chạy đêm hiện tại."""
-    f = _schedule_file()
-    if not f.is_file():
-        return {"active": False}
     try:
-        data = json.loads(await asyncio.to_thread(f.read_text, encoding="utf-8"))
-        data["active"] = True
-        return data
-    except Exception:
-        return {"active": False}
+        return await asyncio.to_thread(_schedule_store().get)
+    except (ValueError, KeyError, TypeError, OSError):
+        raise HTTPException(503, "Lịch không đọc được; cần kiểm tra trước khi chạy.")
 
 
 @app.post("/api/schedule")
 async def api_schedule_night_batch(payload: dict = Body(...)):
-    """F9 — lên lịch tự động chạy hàng đợi vào giờ HH:MM (một lần)."""
     import re
-    import time
-
-    t = str(payload.get("time") or "02:00").strip()
-    if not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", t):
-        raise HTTPException(status_code=400, detail="Giờ lên lịch không hợp lệ (định dạng HH:MM, ví dụ 02:00).")
+    hhmm = str(payload.get("time") or "02:00").strip()
+    if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", hhmm):
+        raise HTTPException(400, "Giờ không hợp lệ; dùng HH:MM.")
     mode = str(payload.get("video_mode") or "AUTO").upper()
-    data = {"time": t, "video_mode": mode, "created_at": time.time(), "last_fired_date": ""}
-    f = _schedule_file()
-    f.parent.mkdir(parents=True, exist_ok=True)
-    await asyncio.to_thread(f.write_text, json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    return {"active": True, **data}
+    try:
+        return await asyncio.to_thread(_schedule_store().create, hhmm, mode)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
 
 
 @app.delete("/api/schedule")
 async def api_cancel_schedule():
-    f = _schedule_file()
     try:
-        await asyncio.to_thread(f.unlink)
-    except FileNotFoundError as _phase6_exc:
-        logger.debug('Suppressed error in main.api_cancel_schedule (asyncio.to_thread): %s', type(_phase6_exc).__name__, exc_info=False)
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=f"Không hủy được lịch: {e}")
+        await asyncio.to_thread(_schedule_store().cancel)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
+    except OSError:
+        raise HTTPException(503, "Không hủy được lịch")
     return {"active": False}
 
 
 async def _night_batch_watcher():
-    """F9 — theo dõi schedule.json; đến giờ thì kích hoạt batch (một lần, tự hủy nếu trễ > 30 phút)."""
-    from datetime import datetime
-
+    from night_schedule_service import dispatch_due
     while True:
         try:
             await asyncio.sleep(30)
-            f = _schedule_file()
-            if not f.is_file():
-                continue
-            data = json.loads(await asyncio.to_thread(f.read_text, encoding="utf-8"))
-            hh, mm = str(data.get("time") or "02:00").split(":")[:2]
-            now = datetime.now()
-            target = now.replace(hour=int(hh) % 24, minute=int(mm) % 60, second=0, microsecond=0)
-            today = now.strftime("%Y-%m-%d")
-            if data.get("last_fired_date") == today:
-                continue
-            if now < target:
-                continue
-            from notification_service import push
-
-            if (now - target).total_seconds() > 1800:
-                # Máy ngủ/tắt quá 30 phút — hủy lịch thay vì chạy đột ngột giữa ngày
-                await asyncio.to_thread(f.unlink)
-                await asyncio.to_thread(
-                    push, "warning", "Đã lỡ lịch chạy đêm",
-                    f"Quá giờ {data.get('time')} hơn 30 phút, lịch đã tự hủy để chạy an toàn.", "schedule",
-                )
-                continue
-            if not job_tracker.get_status().get("active"):
-                await asyncio.to_thread(
-                    push, "info", "Kích hoạt lịch chạy đêm",
-                    f"Đến giờ {data.get('time')} — bắt đầu xử lý hàng đợi.", "schedule",
-                )
-                await api_run_batch(None, video_mode=data.get("video_mode") or "AUTO")
-                data["last_fired_date"] = today
-                await asyncio.to_thread(f.write_text, json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            outcome = await dispatch_due(_schedule_store(), api_run_batch)
+            if outcome == "accepted":
+                from notification_service import push
+                await asyncio.to_thread(push, "info", "Đã kích hoạt lịch chạy đêm",
+                                        "Batch đã được tiếp nhận. Lịch một lần đã hoàn tất.", "schedule")
+            elif outcome in ("expired", "unknown", "needs_review"):
+                from notification_service import push
+                await asyncio.to_thread(push, "warning", "Lịch chạy đêm cần kiểm tra",
+                                        "Lịch đã quá hạn hoặc chưa xác minh được bàn giao batch. Hãy kiểm tra trước khi đặt lại.", "schedule")
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            logger.debug("Lỗi trong night batch watcher: %s", exc)
-            await asyncio.sleep(10)
+        except Exception:
+            logger.exception("Không xử lý được lịch chạy đêm")
 
 
 # ===== GĐ3: F7 GLOSSARY LEARNING · F10 DUPLICATE GUARD · F12 WORKSPACE · F14 DISK =====
 
 
 @app.get("/api/glossary/suggestions")
-async def api_get_glossary_suggestions(min_count: int = 3):
+async def api_get_glossary_suggestions(min_count: int = 3, scope: Optional[str] = None):
     """F7 — các cặp sửa tay lặp lại >= min_count lần, chờ người dùng duyệt vào Glossary."""
     from glossary_learning_service import get_suggestions
 
-    return {"items": await asyncio.to_thread(get_suggestions, min_count)}
+    return {"items": await asyncio.to_thread(get_suggestions, min_count, scope)}
 
 
 @app.post("/api/glossary/suggestions/accept")
@@ -2186,7 +2219,11 @@ async def api_accept_glossary_suggestion(payload: dict = Body(...)):
 
     try:
         res = await asyncio.to_thread(
-            accept_suggestion, payload.get("before", ""), payload.get("after", "")
+            accept_suggestion,
+            payload.get("before", ""),
+            payload.get("after", ""),
+            payload.get("scope"),
+            payload.get("target_scope"),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -2198,7 +2235,10 @@ async def api_dismiss_glossary_suggestion(payload: dict = Body(...)):
     from glossary_learning_service import dismiss_suggestion
 
     return await asyncio.to_thread(
-        dismiss_suggestion, payload.get("before", ""), payload.get("after", "")
+        dismiss_suggestion,
+        payload.get("before", ""),
+        payload.get("after", ""),
+        payload.get("scope"),
     )
 
 
@@ -2940,30 +2980,60 @@ async def api_v1_gemini_health():
 
 
 @app.get("/api/v1/glossary")
-async def api_v1_get_glossary():
-    """Trả về từ điển thuật ngữ tùy chỉnh (Custom Glossary) và danh sách preset chuyên ngành."""
-    from ai.translation import BUILTIN_GLOSSARY_PRESETS, load_custom_glossary
+async def api_v1_get_glossary(scope: Optional[str] = None):
+    """Trả về từ điển thuật ngữ tùy chỉnh (Global hoặc theo Scope thư mục/chủ đề)."""
+    from ai.translation import (
+        BUILTIN_GLOSSARY_PRESETS,
+        list_glossary_scopes,
+        load_custom_glossary,
+        normalize_folder_scope,
+        normalize_glossary_scope,
+    )
+    active_dir = get_input_dir()
+    active_folder_scope = normalize_folder_scope(str(active_dir))
+    norm_scope = normalize_glossary_scope(scope)
     return {
         "status": "ok",
-        "entries": load_custom_glossary(WORKSPACE),
+        "scope": norm_scope,
+        "active_folder_dir": str(active_dir),
+        "active_folder_scope": active_folder_scope,
+        "entries": load_custom_glossary(WORKSPACE, scope=norm_scope),
+        "scopes": list_glossary_scopes(WORKSPACE),
         "presets": BUILTIN_GLOSSARY_PRESETS,
     }
 
 
 @app.post("/api/v1/glossary")
 async def api_v1_save_glossary(payload: dict = Body(...)):
-    """Lưu hoặc cập nhật từ điển thuật ngữ tùy chỉnh (Custom Glossary) theo chủ đề."""
-    from ai.translation import BUILTIN_GLOSSARY_PRESETS, save_custom_glossary
+    """Lưu hoặc cập nhật từ điển thuật ngữ tùy chỉnh (Custom Glossary) toàn cục hoặc theo thư mục/chủ đề."""
+    from ai.translation import (
+        BUILTIN_GLOSSARY_PRESETS,
+        list_glossary_scopes,
+        normalize_glossary_scope,
+        save_custom_glossary,
+    )
     entries = payload.get("entries") if isinstance(payload.get("entries"), dict) else {}
     preset = payload.get("preset")
+    scope = payload.get("scope")
+    delete_keys = payload.get("delete_keys") if isinstance(payload.get("delete_keys"), list) else None
     merge = bool(payload.get("merge", True))
     if preset and preset not in BUILTIN_GLOSSARY_PRESETS:
         raise HTTPException(status_code=400, detail=f"Preset '{preset}' không tồn tại.")
-    updated = save_custom_glossary(entries=entries, preset=preset, merge=merge, workspace=WORKSPACE)
+    norm_scope = normalize_glossary_scope(scope)
+    updated = save_custom_glossary(
+        entries=entries,
+        preset=preset,
+        merge=merge,
+        workspace=WORKSPACE,
+        scope=norm_scope,
+        delete_keys=delete_keys,
+    )
     return {
         "status": "ok",
+        "scope": norm_scope,
         "count": len(updated),
         "entries": updated,
+        "scopes": list_glossary_scopes(WORKSPACE),
     }
 
 

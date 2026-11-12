@@ -87,6 +87,17 @@ class TestDashboardHardening(unittest.TestCase):
         self.assertIn(main.LOCAL_TOKEN, response.text)
         self.assertNotIn("__REPLACE_TOKEN__", response.text)
 
+    def test_studios_use_server_token_over_stale_file(self):
+        import script_api
+        import workflow_api
+        with patch.object(script_api, 'get_current_control_token', return_value='stale'), \
+             patch.object(workflow_api, 'get_current_control_token', return_value='stale'):
+            for route in ('/kich-ban', '/quy-trinh'):
+                response = self.client.get(route)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(main.LOCAL_TOKEN, response.text)
+                self.assertNotIn('__REPLACE_TOKEN__', response.text)
+
     def tearDown(self):
         self.input_patch.stop()
         self.output_patch.stop()

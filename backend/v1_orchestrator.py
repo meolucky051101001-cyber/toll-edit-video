@@ -361,7 +361,8 @@ class V1Orchestrator:
         srt_original, srt_segments, asr_was_empty = await self._stage_asr(c, vocals_audio, original_audio)
         srt_segments, floating_segments, vid_w, vid_h, main_y_pct = await self._stage_ocr(
             c, srt_original, srt_segments, asr_was_empty)
-        translated_segments, v1_script_mode = await self._stage_translate(c, srt_segments)
+        translated_segments, v1_script_mode = await self._stage_translate(
+            c, srt_segments, original_audio=original_audio, vocals_audio=vocals_audio)
         translated_segments, dubbing_audio_files, ass_path = await self._stage_tts(
             c, original_audio, vocals_audio, srt_segments, translated_segments,
             floating_segments, vid_w, vid_h, main_y_pct, v1_script_mode)
@@ -747,6 +748,7 @@ class V1Orchestrator:
                 from v1_gpu_gatekeeper import async_gpu_gatekeeper
                 c.check_stop()
                 gemini_key = c.overrides.get("api_key") or os.getenv("GEMINI_API_KEY", "")
+                ocr_metrics = {}
                 # Crash between stages 3/4: re-scan from an empty timeline so the
                 # cached visual cues are not appended to themselves.
                 ocr_input = [] if (c.visual_sub_to_speech and asr_was_empty) else srt_segments
@@ -765,6 +767,7 @@ class V1Orchestrator:
                             strict_geometry=True,
                             visual_sub_to_speech=c.visual_sub_to_speech,
                             _source_duration=c.video_dur_s,
+                            metrics=ocr_metrics,
                         ),
                         timeout=t_out
                     )
@@ -780,7 +783,8 @@ class V1Orchestrator:
                 save_payload(c.out_dir / "ocr.json", geometry_version=OCR_GEOMETRY_VERSION, segments=srt_segments,
                              floating_segments=floating_segments, width=vid_w, height=vid_h, main_y_pct=main_y_pct,
                              visual_asr_reuse=bool(c.visual_sub_to_speech and asr_was_empty),
-                             asr_was_empty=asr_was_empty)
+                             asr_was_empty=asr_was_empty,
+                             detected_watermarks=ocr_metrics.get("detected_watermarks", []))
                 self.manifest_manager.record_stage_complete(c.job_id, stage_id, {"ocr_data": str(c.out_dir / "ocr.json")})
             except Exception as exc:
                 self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))
@@ -798,7 +802,7 @@ class V1Orchestrator:
         self._align_source_subtitles(srt_segments)
         return srt_segments, floating_segments, vid_w, vid_h, main_y_pct
 
-    async def _stage_translate(self, c, srt_segments):
+    async def _stage_translate(self, c, srt_segments, original_audio=None, vocals_audio=None):
         # ==================== STAGE 5: AI TRANSLATION ====================
         stage_id = "ai_translation"
         srt_translated = c.out_dir / "translated.srt"
@@ -822,6 +826,66 @@ class V1Orchestrator:
             try:
                 from ai.translation import translate_subtitles
                 from ai.transcription import save_srt
+
+                # Early Voice Lock trước bước dịch (chỉ chạy khi bật tự động nhận diện giọng)
+                voice_lock_info = None
+                v_mode = str(c.effective_cfg.get("voice_mode") or "").strip().lower()
+                v_cfg = c.effective_cfg.get("voice_config") or {}
+                run_early_voice_lock = bool(
+                    srt_segments
+                    and (vocals_audio or original_audio)
+                    and not c.visual_sub_to_speech
+                    and v_mode != "manual"
+                    and (v_cfg.get("enabled") or v_mode in ("auto", "dialogue", "smart_dialogue", "dual"))
+                )
+                if run_early_voice_lock:
+                    try:
+                        from ai.v1_auto_voice import decide_video_voice
+                        voice_lock_info = await asyncio.to_thread(
+                            decide_video_voice,
+                            out_dir=str(c.out_dir),
+                            srt_segments=srt_segments,
+                            vocals_path=str(vocals_audio) if vocals_audio else None,
+                            original_audio_path=str(original_audio) if original_audio else None,
+                            video_path=str(c.v_path),
+                            voice_mode=c.effective_cfg.get("voice_mode"),
+                            workspace=str(self.workspace),
+                            voice_config=c.effective_cfg["voice_config"],
+                            job_id=c.job_id,
+                            visual_sub_to_speech=c.visual_sub_to_speech,
+                        )
+                    except Exception as vl_exc:
+                        logger.warning("[TRANSLATE] Early voice lock fallback sang speaker='unknown': %s", vl_exc)
+
+                # Chuẩn bị siêu dữ liệu từng câu ({id, speaker, max_words, ocr_hint}) khớp 1-1 với texts
+                cue_meta = []
+                if srt_segments:
+                    try:
+                        from v1_timing_solver import calculate_timing_windows
+                        windows = calculate_timing_windows(srt_segments, total_audio_duration=c.video_dur_s)
+                    except Exception:
+                        windows = {}
+                    seg_voices = (voice_lock_info or {}).get("segment_voices") or {}
+                    top_gender = str((voice_lock_info or {}).get("detected_gender") or "unknown").lower()
+                    non_empty_segs = [s for s in srt_segments if getattr(s, "content", None)]
+                    for pos, seg in enumerate(non_empty_segs):
+                        seg_idx = int(getattr(seg, "index", pos + 1))
+                        sv = seg_voices.get(str(seg_idx)) or seg_voices.get(seg_idx) or {}
+                        g = str(sv.get("gender") or ("unknown" if top_gender in ("dual", "manual", "") else top_gender)).lower()
+                        speaker = g if g in ("male", "female") else "unknown"
+                        win_s = float(windows.get(seg_idx, 2.0) or 2.0)
+                        max_words = max(3, int(round(max(0.6, win_s - 0.05) * 3.6 * 1.15)))
+                        bb = getattr(seg, "best_block", None)
+                        bb_text = (bb.get("text") if isinstance(bb, dict) else getattr(bb, "text", "")) if bb else ""
+                        cue_meta.append({
+                            "id": pos + 1,
+                            "index": seg_idx,
+                            "speaker": speaker,
+                            "max_sec": round(win_s, 2),
+                            "max_words": max_words,
+                            "ocr_hint": str(bb_text or "").strip()[:80],
+                        })
+
                 gemini_key = c.overrides.get("api_key") or ""
                 c.check_stop()
                 translated_segments = await c.run_stage(
@@ -833,6 +897,8 @@ class V1Orchestrator:
                         video_path=str(c.v_path),
                         strict=True,
                         script_mode=v1_script_mode,
+                        cue_meta=cue_meta or None,
+                        folder_scope=str(c.v_path.parent),
                     ),
                     timeout=t_out
                 )
@@ -935,6 +1001,17 @@ class V1Orchestrator:
                 translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
 
                 # Tạo file phụ đề ASS chuẩn theo kích thước video nguồn để khớp 100% tọa độ OCR
+                sub_cover_style = (
+                    c.effective_cfg.get("sub_cover_style")
+                    or c.overrides.get("sub_cover_style")
+                    or os.getenv("V1_SUBTITLE_COVER_STYLE", "")
+                ).strip().lower()
+                if not sub_cover_style:
+                    try:
+                        import canvas_settings
+                        sub_cover_style = str(canvas_settings.get_canvas_settings().get("sub_cover_style", "solid_box")).strip().lower()
+                    except Exception:
+                        sub_cover_style = "solid_box"
                 await asyncio.to_thread(
                     generate_ass_file,
                     translated_segments,
@@ -946,6 +1023,7 @@ class V1Orchestrator:
                     font_name=c.effective_cfg.get("font_name", "Arial"),
                     font_color=c.effective_cfg.get("font_color", "&H00000000"),
                     font_weight=c.effective_cfg.get("font_weight", 2),
+                    cover_style=sub_cover_style,
                 )
 
                 save_payload(c.out_dir / "tts.json", segments=translated_segments, dubs=dubbing_audio_files)
@@ -1051,6 +1129,65 @@ class V1Orchestrator:
                 from video_utils import process_video
                 from v1_gpu_gatekeeper import async_gpu_gatekeeper
                 c.check_stop()
+                canvas_cfg = {}
+                try:
+                    import canvas_settings
+                    canvas_cfg = canvas_settings.get_canvas_settings() or {}
+                except Exception:
+                    canvas_cfg = {}
+                sub_cover_style = str(
+                    c.effective_cfg.get("sub_cover_style")
+                    or c.overrides.get("sub_cover_style")
+                    or os.getenv("V1_SUBTITLE_COVER_STYLE")
+                    or canvas_cfg.get("sub_cover_style")
+                    or "solid_box"
+                ).strip().lower()
+                delogo_mode = str(
+                    c.effective_cfg.get("delogo_mode")
+                    or c.overrides.get("delogo_mode")
+                    or os.getenv("V1_DELOGO_MODE")
+                    or canvas_cfg.get("delogo_mode")
+                    or "off"
+                ).strip().lower()
+                delogo_boxes = []
+                if delogo_mode == "smart":
+                    try:
+                        ocr_sidecar = c.out_dir / "ocr.json"
+                        if ocr_sidecar.is_file():
+                            ocr_saved = load_payload(ocr_sidecar)
+                            if isinstance(ocr_saved, dict):
+                                delogo_boxes = ocr_saved.get("detected_watermarks") or []
+                        if not delogo_boxes:
+                            geo_rep = c.out_dir / "ocr_geometry_report.json"
+                            if geo_rep.is_file():
+                                geo_saved = load_payload(geo_rep)
+                                if isinstance(geo_saved, dict):
+                                    delogo_boxes = geo_saved.get("watermarks") or (geo_saved.get("sampling") or {}).get("detected_watermarks") or []
+                    except Exception:
+                        delogo_boxes = []
+                localized_blur_boxes = []
+                if sub_cover_style == "localized_blur":
+                    try:
+                        tts_sidecar = c.out_dir / "tts.json"
+                        if tts_sidecar.is_file():
+                            tts_saved = load_payload(tts_sidecar)
+                            for seg in (tts_saved.get("segments") if isinstance(tts_saved, dict) else []):
+                                s_t = seg.start.total_seconds() if hasattr(seg, "start") else float((seg or {}).get("start", 0.0) or 0.0)
+                                e_t = seg.end.total_seconds() if hasattr(seg, "end") else float((seg or {}).get("end", 0.0) or 0.0)
+                                blocks = list(getattr(seg, "tracking_blocks", None) or [])
+                                if not blocks and getattr(seg, "best_block", None) is not None:
+                                    blocks = [seg.best_block]
+                                for blk in blocks:
+                                    localized_blur_boxes.append({
+                                        "x_pct": getattr(blk, "x_pct", None) if not isinstance(blk, dict) else blk.get("x_pct"),
+                                        "max_x_pct": getattr(blk, "max_x_pct", None) if not isinstance(blk, dict) else blk.get("max_x_pct"),
+                                        "y_pct": getattr(blk, "y_pct", None) if not isinstance(blk, dict) else blk.get("y_pct"),
+                                        "max_y_pct": getattr(blk, "max_y_pct", None) if not isinstance(blk, dict) else blk.get("max_y_pct"),
+                                        "start": float(getattr(blk, "start", s_t) if not isinstance(blk, dict) else blk.get("start", s_t)),
+                                        "end": float(getattr(blk, "end", e_t) if not isinstance(blk, dict) else blk.get("end", e_t)),
+                                    })
+                    except Exception:
+                        localized_blur_boxes = []
                 async with async_gpu_gatekeeper("video_rendering", timeout_seconds=t_out):
                     rendered = await c.run_stage(
                         asyncio.to_thread(
@@ -1060,7 +1197,11 @@ class V1Orchestrator:
                             str(mixed_audio),
                             str(temp_render_video),
                             main_y_pct=main_y_pct,
-                            delogo=False,
+                            delogo=delogo_mode if delogo_mode != "off" else False,
+                            delogo_mode=delogo_mode,
+                            delogo_boxes=delogo_boxes,
+                            subtitle_cover_style=sub_cover_style,
+                            localized_blur_boxes=localized_blur_boxes,
                         ),
                         timeout=t_out
                     )
@@ -1088,6 +1229,13 @@ class V1Orchestrator:
             importlib.reload(v1_quality_gate)
             from v1_quality_gate import run_quality_gate
 
+            flags_cfg = c.effective_cfg.get("feature_flags") or {}
+            if "V1_QC_VISUAL_PIXEL_CHECK" in flags_cfg:
+                qc_pixel_enabled = bool(flags_cfg.get("V1_QC_VISUAL_PIXEL_CHECK"))
+            else:
+                from v1_feature_flags import get_feature_flags
+                qc_pixel_enabled = bool(get_feature_flags(self.workspace).get("V1_QC_VISUAL_PIXEL_CHECK", True))
+
             qc_report = await asyncio.to_thread(run_quality_gate,
                 job_id=c.job_id,
                 final_video_path=qc_target,
@@ -1098,6 +1246,7 @@ class V1Orchestrator:
                 ass_subtitle_path=ass_path,
                 policy=qc_policy,
                 workspace_path=self.workspace,
+                enable_visual_pixel_qc=qc_pixel_enabled,
             )
         except Exception as exc:
             self.manifest_manager.record_stage_failure(c.job_id, "quality_gate", str(exc))

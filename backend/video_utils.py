@@ -503,6 +503,26 @@ def clean_stale_temp_files(max_age_hours: float = 24.0) -> int:
     return cleaned
 
 
+def _srt_style(font_name, font_color, font_weight):
+    """Use an opaque contrasting outline without changing the chosen text color."""
+    import re
+    color = str(font_color or '').strip()
+    if re.fullmatch(r'#[0-9a-fA-F]{6}', color):
+        color = '&H00' + color[5:7] + color[3:5] + color[1:3]
+    match = re.fullmatch(r'&H([0-9a-fA-F]{6}|[0-9a-fA-F]{8})&?', color, re.I)
+    value = match.group(1).zfill(8).upper() if match else '00000000'
+    blue, green, red = (int(value[i:i + 2], 16) / 255 for i in (2, 4, 6))
+    def linear(c):
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    luminance = .2126 * linear(red) + .7152 * linear(green) + .0722 * linear(blue)
+    outline = '&H00000000' if luminance > .179 else '&H00FFFFFF'
+    name = re.sub(r"[,:'\\\[\]\r\n]", ' ', str(font_name or 'Arial'))
+    bold = -1 if font_weight > 1 else 0
+    return (f'FontName={name},FontSize=14,PrimaryColour=&H{value},'
+            f'OutlineColour={outline},BackColour=&H80000000,Bold={bold},'
+            'Outline=0.7,Shadow=0.3,MarginV=40,BorderStyle=1')
+
+
 @stage("render")
 def process_video(
     video_path,
@@ -566,8 +586,7 @@ def process_video(
         
     srt_escaped = srt_to_use.replace('\\', '/').replace(':', '\\:')
     
-    bold_val = -1 if font_weight > 1 else 0
-    style_str = f"FontName={font_name},FontSize=14,PrimaryColour={font_color},Bold={bold_val},Outline=2,Shadow=1,MarginV=40,BorderStyle=1"
+    style_str = _srt_style(font_name, font_color, font_weight)
         
     try:
         filter_parts = []
@@ -592,7 +611,7 @@ def process_video(
         orig_w, orig_h = w, h
         is_already_9_16 = abs((orig_w / orig_h) - (9.0 / 16.0)) <= 0.035
 
-        # Chuẩn bị subtitle filter (hỗ trợ tùy chọn Frosted Blur cho dải phụ đề)
+        # Chuẩn bị subtitle filter (hỗ trợ solid_box, adaptive_box, localized_blur và frosted_blur)
         cover_style = str(kwargs.get("subtitle_cover_style") or os.getenv("V1_SUBTITLE_COVER_STYLE", "")).strip().lower()
         if not cover_style:
             try:
@@ -600,24 +619,160 @@ def process_video(
                 cover_style = str(canvas_settings.get_canvas_settings().get("sub_cover_style", "solid_box")).strip().lower()
             except Exception:
                 cover_style = "solid_box"
+        if cover_style not in ("solid_box", "frosted_blur", "adaptive_box", "localized_blur"):
+            cover_style = "solid_box"
 
-        if is_ass:
-            sub_filter = f"subtitles='{srt_escaped}'"
-        else:
-            sub_filter = f"subtitles='{srt_escaped}':force_style='{style_str}'"
+        base_sub_filter = f"subtitles='{srt_escaped}'" if is_ass else f"subtitles='{srt_escaped}':force_style='{style_str}'"
 
-        if cover_style == "frosted_blur" and 0.15 <= float(main_y_pct or 0.75) <= 0.96:
-            band_y = max(0, int(orig_h * max(0.0, float(main_y_pct) - 0.04)) // 2 * 2)
-            band_h = max(24, min(orig_h - band_y, int(orig_h * 0.14)) // 2 * 2)
-            sub_filter = (
-                f"split[sub_main][sub_band];"
-                f"[sub_band]crop={orig_w}:{band_h}:0:{band_y},boxblur=16:3[sub_blurred];"
-                f"[sub_main][sub_blurred]overlay=0:{band_y},{sub_filter}"
-            )
+        def _merge_localized_blur_regions(fw: int, fh: int):
+            raw_boxes = kwargs.get("localized_blur_boxes") or []
+            regions = []
+            for box in raw_boxes:
+                if not isinstance(box, dict):
+                    continue
+                try:
+                    x1 = float(box.get("x_pct", 0.0))
+                    x2 = float(box.get("max_x_pct", 0.0))
+                    y1 = float(box.get("y_pct", 0.0))
+                    y2 = float(box.get("max_y_pct", 0.0))
+                    st = max(0.0, float(box.get("start", 0.0) or 0.0))
+                    et = max(st, float(box.get("end", 0.0) or 0.0))
+                except (TypeError, ValueError):
+                    continue
+                if not (0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0) or et <= st:
+                    continue
+                # Nới nhẹ quanh chữ gốc để boxblur phủ kín nét chữ & viền
+                px1 = max(0, int((x1 - 0.015) * fw) // 2 * 2)
+                px2 = min(fw, (int((x2 + 0.015) * fw) + 1) // 2 * 2)
+                py1 = max(0, int((y1 - 0.008) * fh) // 2 * 2)
+                py2 = min(fh, (int((y2 + 0.008) * fh) + 1) // 2 * 2)
+                bw = max(24, min(fw - px1, px2 - px1) // 2 * 2)
+                bh = max(20, min(fh - py1, py2 - py1) // 2 * 2)
+                if bw < 16 or bh < 16:
+                    continue
+                px2 = px1 + bw
+                py2 = py1 + bh
+
+                matched = None
+                for reg in regions:
+                    if (
+                        abs(((px1 + px2) * 0.5) - reg["cx"]) <= fw * 0.08
+                        and abs(((py1 + py2) * 0.5) - reg["cy"]) <= fh * 0.04
+                    ):
+                        matched = reg
+                        break
+                if matched is not None:
+                    matched["x1"] = min(matched["x1"], px1)
+                    matched["y1"] = min(matched["y1"], py1)
+                    matched["x2"] = max(matched["x2"], px2)
+                    matched["y2"] = max(matched["y2"], py2)
+                    matched["cx"] = (matched["x1"] + matched["x2"]) * 0.5
+                    matched["cy"] = (matched["y1"] + matched["y2"]) * 0.5
+                    matched["intervals"].append((st, et))
+                else:
+                    regions.append({
+                        "x1": px1, "y1": py1, "x2": px2, "y2": py2,
+                        "cx": (px1 + px2) * 0.5, "cy": (py1 + py2) * 0.5,
+                        "intervals": [(st, et)],
+                    })
+
+            # Giới hạn tối đa 4 cụm vùng làm mờ để filtergraph gọn và ổn định
+            while len(regions) > 4:
+                regions.sort(key=lambda r: (r["cy"], r["cx"]))
+                a, b = regions.pop(0), regions.pop(0)
+                regions.append({
+                    "x1": min(a["x1"], b["x1"]),
+                    "y1": min(a["y1"], b["y1"]),
+                    "x2": max(a["x2"], b["x2"]),
+                    "y2": max(a["y2"], b["y2"]),
+                    "cx": (min(a["x1"], b["x1"]) + max(a["x2"], b["x2"])) * 0.5,
+                    "cy": (min(a["y1"], b["y1"]) + max(a["y2"], b["y2"])) * 0.5,
+                    "intervals": a["intervals"] + b["intervals"],
+                })
+
+            built = []
+            for reg in regions:
+                bx = max(0, int(reg["x1"]) // 2 * 2)
+                by = max(0, int(reg["y1"]) // 2 * 2)
+                bw = max(16, min(fw - bx, (int(reg["x2"]) - bx + 1) // 2 * 2))
+                bh = max(16, min(fh - by, (int(reg["y2"]) - by + 1) // 2 * 2))
+                ivs = sorted(reg["intervals"])
+                merged_ivs = []
+                for st, et in ivs:
+                    if merged_ivs and st - merged_ivs[-1][1] <= 0.35:
+                        merged_ivs[-1] = (merged_ivs[-1][0], max(merged_ivs[-1][1], et))
+                    else:
+                        merged_ivs.append((st, et))
+                while len(merged_ivs) > 18:
+                    # Gộp 2 khoảng gần nhau nhất để biểu thức enable không quá dài
+                    best_i = min(range(len(merged_ivs) - 1), key=lambda idx: merged_ivs[idx + 1][0] - merged_ivs[idx][1])
+                    merged_ivs[best_i] = (merged_ivs[best_i][0], max(merged_ivs[best_i][1], merged_ivs[best_i + 1][1]))
+                    merged_ivs.pop(best_i + 1)
+                enable_expr = "+".join(f"between(t,{s:.2f},{e:.2f})" for s, e in merged_ivs)
+                built.append((bx, by, bw, bh, enable_expr))
+            return built
+
+        def _build_sub_filter(fw: int, fh: int) -> str:
+            if cover_style == "localized_blur":
+                regions = _merge_localized_blur_regions(fw, fh)
+                if regions:
+                    parts = []
+                    for k, (bx, by, bw, bh, enable_expr) in enumerate(regions):
+                        prefix = "" if k == 0 else ","
+                        parts.append(
+                            f"{prefix}split[lm{k}][lc{k}];"
+                            f"[lc{k}]crop={bw}:{bh}:{bx}:{by},boxblur=16:3[lb{k}];"
+                            f"[lm{k}][lb{k}]overlay={bx}:{by}:enable='{enable_expr}'"
+                        )
+                    return "".join(parts) + f",{base_sub_filter}"
+                if 0.15 <= float(main_y_pct or 0.75) <= 0.96:
+                    band_y = max(0, int(fh * max(0.0, float(main_y_pct) - 0.04)) // 2 * 2)
+                    band_h = max(24, min(fh - band_y, int(fh * 0.14)) // 2 * 2)
+                    band_x = max(0, int(fw * 0.08) // 2 * 2)
+                    band_w = max(24, min(fw - band_x, int(fw * 0.84) // 2 * 2))
+                    return (
+                        f"split[sub_main][sub_band];"
+                        f"[sub_band]crop={band_w}:{band_h}:{band_x}:{band_y},boxblur=16:3[sub_blurred];"
+                        f"[sub_main][sub_blurred]overlay={band_x}:{band_y},{base_sub_filter}"
+                    )
+            elif cover_style == "frosted_blur" and 0.15 <= float(main_y_pct or 0.75) <= 0.96:
+                band_y = max(0, int(fh * max(0.0, float(main_y_pct) - 0.04)) // 2 * 2)
+                band_h = max(24, min(fh - band_y, int(fh * 0.14)) // 2 * 2)
+                return (
+                    f"split[sub_main][sub_band];"
+                    f"[sub_band]crop={fw}:{band_h}:0:{band_y},boxblur=16:3[sub_blurred];"
+                    f"[sub_main][sub_blurred]overlay=0:{band_y},{base_sub_filter}"
+                )
+            return base_sub_filter
 
         def _build_delogo_filters(dw: int, dh: int):
-            if not delogo or dw <= 0 or dh <= 0:
+            raw_delogo = kwargs.get("delogo_mode", delogo)
+            if raw_delogo is False or raw_delogo is None:
+                delogo_mode = "off"
+            elif raw_delogo is True:
+                delogo_mode = "corners"
+            else:
+                mode_s = str(raw_delogo).strip().lower()
+                delogo_mode = mode_s if mode_s in ("off", "smart", "corners") else ("corners" if mode_s in ("1", "true", "on") else "off")
+            if delogo_mode == "off" or dw <= 0 or dh <= 0:
                 return []
+            if delogo_mode == "smart":
+                smart_filters = []
+                for box in (kwargs.get("delogo_boxes") or [])[:4]:
+                    if not isinstance(box, dict):
+                        continue
+                    try:
+                        bx1 = max(2, min(dw - 12, int(round(float(box["x_pct"]) * dw)) - 2))
+                        by1 = max(2, min(dh - 12, int(round(float(box["y_pct"]) * dh)) - 2))
+                        bx2 = max(bx1 + 10, min(dw - 2, int(round(float(box["max_x_pct"]) * dw)) + 2))
+                        by2 = max(by1 + 10, min(dh - 2, int(round(float(box["max_y_pct"]) * dh)) + 2))
+                        bw = bx2 - bx1
+                        bh = by2 - by1
+                        if bw >= 8 and bh >= 8 and bx1 + bw <= dw - 1 and by1 + bh <= dh - 1:
+                            smart_filters.append(f"delogo=x={bx1}:y={by1}:w={bw}:h={bh}")
+                    except (TypeError, ValueError, KeyError):
+                        continue
+                return smart_filters
             try:
                 br_w = max(int(dw * 0.19), 10)
                 br_h = max(int(dh * 0.065), 10)
@@ -652,6 +807,7 @@ def process_video(
         if not is_already_9_16:
             delogo_filters = _build_delogo_filters(orig_w, orig_h)
             pre_split = ",".join(["format=yuv420p"] + delogo_filters) + ","
+            sub_filter = _build_sub_filter(orig_w, orig_h)
             blur_bg_filter = (
                 f"{pre_split}split[v1][v2];"
                 # Bắt buộc ép format=yuv420p trước khi split/crop/boxblur vì NVDEC (-hwaccel cuda)
@@ -692,6 +848,9 @@ def process_video(
             if delogo_filters:
                 filter_parts.extend(delogo_filters)
 
+            sub_filter = _build_sub_filter(w, h)
+            if "split[" in sub_filter and "format=yuv420p" not in filter_parts:
+                filter_parts.append("format=yuv420p")
             filter_parts.append(sub_filter)
             filter_parts.append("format=yuv420p")
 

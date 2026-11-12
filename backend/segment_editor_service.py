@@ -332,6 +332,160 @@ def resolve_job_voice(job_id_or_name: str, job_folder: Optional[Path] = None) ->
     return "capcut-BV562_streaming", "CapCut · Mai (mặc định)"
 
 
+def _load_voice_lock_details(job_folder: Optional[Path]) -> Dict[str, Any]:
+    """Đọc chi tiết voice_lock.json (segment_voices, unresolved_segment_indices, requires_voice_review)."""
+    if not job_folder or not job_folder.is_dir():
+        return {}
+    candidates = list(job_folder.glob("voice_lock.json")) + list(job_folder.rglob("voice_lock.json"))
+    seen = set()
+    for vl in candidates:
+        if vl in seen or not vl.is_file():
+            continue
+        seen.add(vl)
+        try:
+            data = json.loads(vl.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception as exc:
+            logger.debug("Không đọc được voice_lock.json %s: %s", vl, exc)
+    return {}
+
+
+def _infer_job_folder_scope(clean_id: str, job_folder: Optional[Path]) -> Optional[str]:
+    """Suy ra scope từ điển theo thư mục nguồn video (ví dụ 'folder:banve') nếu có thông tin."""
+    try:
+        from ai.translation import normalize_folder_scope
+    except ImportError:
+        try:
+            from backend.ai.translation import normalize_folder_scope
+        except ImportError:
+            normalize_folder_scope = None
+
+    video_candidates: List[str] = []
+    search_manifests: List[Path] = []
+    if job_folder and job_folder.is_dir():
+        search_manifests.extend([
+            job_folder / "job_manifest.json",
+            job_folder / "pipeline_v2" / "job_manifest.json",
+        ])
+    for root in _workspace_roots():
+        search_manifests.append(root / "manifests" / f"{clean_id}.manifest.json")
+
+    for mf in search_manifests:
+        if not mf.is_file():
+            continue
+        try:
+            m = json.loads(mf.read_text(encoding="utf-8"))
+            if isinstance(m, dict):
+                for val in (
+                    m.get("video_path"),
+                    m.get("effective_config", {}).get("input_video") if isinstance(m.get("effective_config"), dict) else None,
+                    m.get("metadata", {}).get("request", {}).get("video_path") if isinstance(m.get("metadata"), dict) else None,
+                ):
+                    if val:
+                        video_candidates.append(str(val))
+        except Exception:
+            pass
+
+    if not video_candidates:
+        try:
+            import job_config_service
+            prefix_id = clean_id[:18] if len(clean_id) >= 18 else clean_id
+            frozen = job_config_service.get_frozen_config(clean_id) or job_config_service.get_frozen_config(prefix_id)
+            if isinstance(frozen, dict):
+                eff = frozen.get("effective_config") or {}
+                for k in ("input_video", "source_dir", "input_dir"):
+                    if eff.get(k):
+                        video_candidates.append(str(eff[k]))
+        except Exception:
+            pass
+
+    for raw in video_candidates:
+        p = Path(raw)
+        folder_target = p.parent if p.suffix else p
+        if str(folder_target) and str(folder_target) != ".":
+            if normalize_folder_scope:
+                scope = normalize_folder_scope(str(folder_target))
+                if scope:
+                    return scope
+            name = folder_target.name.strip().lower()
+            if name:
+                return f"folder:{name}"
+    return None
+
+
+def _apply_voice_lock_metadata(
+    data: Dict[str, Any],
+    segments: List[Dict[str, Any]],
+    clean_id: str,
+    job_folder: Optional[Path],
+    detected_voice_id: str,
+    allow_voice_backfill: bool = True,
+) -> bool:
+    """Bổ sung detected_gender, needs_voice_review, voice_id từng câu và original_audio_url."""
+    changed = False
+    vl = _load_voice_lock_details(job_folder)
+    seg_voices = vl.get("segment_voices") if isinstance(vl.get("segment_voices"), dict) else {}
+    unresolved_set = {
+        int(x) for x in (vl.get("unresolved_segment_indices") or [])
+        if str(x).isdigit()
+    }
+    dual_voice = bool(vl.get("dual_voice", False))
+    top_gender = str(vl.get("detected_gender") or "unknown").lower()
+    top_conf = float(vl.get("confidence", 0.0) or 0.0)
+    top_req_review = bool(vl.get("requires_voice_review", False))
+
+    for seg in segments:
+        idx = seg.get("index", 1)
+        sid = seg.get("segment_id") or f"seg_{idx}"
+        orig_url = f"/api/jobs/{clean_id}/segments/{sid}/original-audio"
+        if seg.get("original_audio_url") != orig_url:
+            seg["original_audio_url"] = orig_url
+            changed = True
+
+        v_entry = seg_voices.get(str(idx)) if isinstance(seg_voices.get(str(idx)), dict) else {}
+        v_id_from_lock = v_entry.get("id")
+        if allow_voice_backfill and v_id_from_lock and seg.get("status", "synced") == "synced":
+            cur_v = seg.get("voice_id")
+            if cur_v in (None, "", "microsoft-hoaimy", detected_voice_id) and cur_v != v_id_from_lock:
+                seg["voice_id"] = v_id_from_lock
+                changed = True
+
+        seg_gender = str(v_entry.get("gender") or (top_gender if top_gender != "dual" else "unknown") or "unknown").lower()
+        seg_conf = round(float(v_entry.get("confidence", top_conf) or 0.0), 3)
+        seg_reason = str(v_entry.get("reason") or vl.get("reason") or "")
+        needs_review = (
+            (idx in unresolved_set)
+            or (str(v_entry.get("gender", "")).lower() == "unknown")
+            or (top_req_review and not seg_voices and top_gender == "unknown")
+        )
+        if seg.get("detected_gender") != seg_gender:
+            seg["detected_gender"] = seg_gender
+            changed = True
+        if seg.get("voice_confidence") != seg_conf:
+            seg["voice_confidence"] = seg_conf
+            changed = True
+        if seg.get("voice_reason") != seg_reason:
+            seg["voice_reason"] = seg_reason
+            changed = True
+        if seg.get("needs_voice_review") != bool(needs_review):
+            seg["needs_voice_review"] = bool(needs_review)
+            changed = True
+
+    unresolved_count = sum(1 for s in segments if s.get("needs_voice_review"))
+    final_requires = bool(top_req_review or unresolved_count > 0)
+    if data.get("requires_voice_review") != final_requires:
+        data["requires_voice_review"] = final_requires
+        changed = True
+    if data.get("unresolved_count") != unresolved_count:
+        data["unresolved_count"] = unresolved_count
+        changed = True
+    if data.get("dual_voice") != dual_voice:
+        data["dual_voice"] = dual_voice
+        changed = True
+    return changed
+
+
 def estimate_segment_speed(
     text: str,
     audio_dur: float,
@@ -407,6 +561,19 @@ def get_job_segments(job_id_or_name: str) -> Dict[str, Any]:
                         if real_spd != float(s.get("speed") or 1.0):
                             s["speed"] = real_spd
                             draft_changed = True
+
+                if _apply_voice_lock_metadata(
+                    data,
+                    segs,
+                    clean_id,
+                    job_folder,
+                    detected_voice_id,
+                    allow_voice_backfill=(data.get("revision", 1) <= 1),
+                ):
+                    draft_changed = True
+                if "job_folder_scope" not in data:
+                    data["job_folder_scope"] = _infer_job_folder_scope(clean_id, job_folder)
+                    draft_changed = True
 
                 if draft_changed:
                     try:
@@ -572,14 +739,23 @@ def get_job_segments(job_id_or_name: str) -> Dict[str, Any]:
         "job_id": clean_id,
         "revision": 1,
         "job_folder": str(job_folder),
+        "job_folder_scope": _infer_job_folder_scope(clean_id, job_folder),
         "total_segments": len(segments),
         "detected_voice_id": detected_voice_id,
         "detected_voice_label": detected_voice_label,
         "segments": segments,
-        "original_snapshot": [dict(s) for s in segments],
         "created_at": time.time(),
         "updated_at": time.time(),
     }
+    _apply_voice_lock_metadata(
+        result,
+        segments,
+        clean_id,
+        job_folder,
+        detected_voice_id,
+        allow_voice_backfill=True,
+    )
+    result["original_snapshot"] = [dict(s) for s in segments]
 
     # Save initial snapshot draft
     if segments:
@@ -619,6 +795,7 @@ def save_segment_draft(
     # Update segments in current data
     seg_map = {s["segment_id"]: s for s in updated_segments}
     final_segments = []
+    job_scope = current_data.get("job_folder_scope") or _infer_job_folder_scope(clean_id, find_job_workspace(job_id_or_name))
 
     for s in current_data.get("segments", []):
         sid = s["segment_id"]
@@ -634,7 +811,7 @@ def save_segment_draft(
                 # F7 — học từ sửa tay: diff ngắn mức từ sẽ thành gợi ý Glossary khi lặp lại
                 try:
                     from glossary_learning_service import record_edit
-                    record_edit(s.get("translated_text", ""), new_text, clean_id)
+                    record_edit(s.get("translated_text", ""), new_text, clean_id, scope=job_scope)
                 except Exception as _phase6_exc:
                     logger.debug('Suppressed error in segment_editor_service.save_segment_draft (record_edit): %s', type(_phase6_exc).__name__, exc_info=False)
             s["translated_text"] = new_text
@@ -1038,5 +1215,73 @@ def get_segment_audio_path(job_id_or_name: str, segment_id: str) -> Optional[Pat
     for cand in job_folder.rglob(f"{idx}.wav"):
         if cand.is_file() and cand.stat().st_size > 64:
             return cand
+
+    return None
+
+
+def read_segment_original_audio_wav(job_id_or_name: str, segment_id: str) -> Optional[bytes]:
+    """
+    Cắt trực tiếp đoạn [start-0.12s, end+0.12s] từ vocals.wav (hoặc original.wav nếu không có vocals)
+    của video gốc để người dùng nghe đối chiếu giọng gốc trong Modal Sửa câu.
+    """
+    import io
+    import soundfile as sf
+
+    clean_id = sanitize_job_id(job_id_or_name)
+    job_folder = find_job_workspace(job_id_or_name)
+    if not job_folder or not job_folder.is_dir():
+        return None
+
+    m = re.search(r"\d+", str(segment_id))
+    idx = int(m.group(0)) if m else 1
+
+    data_resp = get_job_segments(clean_id)
+    target_seg = None
+    for seg in data_resp.get("segments", []):
+        if seg.get("segment_id") == segment_id or seg.get("index") == idx:
+            target_seg = seg
+            break
+    if not target_seg:
+        return None
+
+    start_s = float(target_seg.get("start") or 0.0)
+    end_s = float(target_seg.get("end") or 0.0)
+    if not math.isfinite(start_s) or not math.isfinite(end_s) or end_s <= start_s:
+        return None
+
+    raw_candidates = [
+        job_folder / "vocals.wav",
+        job_folder / "original.wav",
+        *list(job_folder.rglob("vocals.wav")),
+        *list(job_folder.rglob("original.wav")),
+    ]
+    candidates: List[Path] = []
+    seen = set()
+    for p in raw_candidates:
+        if p not in seen and p.is_file() and p.stat().st_size > 1024:
+            seen.add(p)
+            candidates.append(p)
+
+    for audio_src in candidates:
+        try:
+            with sf.SoundFile(str(audio_src), "r") as f:
+                sr = int(f.samplerate or 16000)
+                total_frames = int(len(f))
+                if total_frames <= 0 or sr <= 0:
+                    continue
+                s_pad = max(0.0, start_s - 0.12)
+                e_pad = min(total_frames / float(sr), end_s + 0.12)
+                start_frame = max(0, min(total_frames - 1, int(round(s_pad * sr))))
+                end_frame = max(start_frame + 1, min(total_frames, int(round(e_pad * sr))))
+                f.seek(start_frame)
+                samples = f.read(end_frame - start_frame, dtype="int16")
+            if getattr(samples, "size", len(samples)) <= 0:
+                continue
+            buf = io.BytesIO()
+            sf.write(buf, samples, sr, format="WAV", subtype="PCM_16")
+            return buf.getvalue()
+        except Exception as exc:
+            logger.debug("Lỗi đọc audio gốc %s cho %s/%s: %s", audio_src, clean_id, segment_id, exc)
+            continue
 
     return None

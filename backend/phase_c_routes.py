@@ -10,7 +10,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from segment_editor_service import (
@@ -18,6 +18,7 @@ from segment_editor_service import (
     get_job_segments,
     get_segment_audio_path,
     publish_revised_video,
+    read_segment_original_audio_wav,
     regenerate_segments,
     save_segment_draft,
 )
@@ -195,6 +196,32 @@ async def api_get_segment_audio(job_id: str, segment_id: str):
         media_type="audio/mpeg",
         headers={
             "Accept-Ranges": "bytes",
+            "Cache-Control": "public, max-age=86400",
+        },
+    )
+
+
+@router.get("/api/jobs/{job_id}/segments/{segment_id}/original-audio")
+async def api_get_segment_original_audio(job_id: str, segment_id: str):
+    """
+    Cắt trực tiếp đoạn audio thoại gốc [start, end] từ vocals.wav/original.wav
+    để người dùng nghe đối chiếu giới tính/người nói ngay trong Modal Sửa câu.
+    """
+    try:
+        wav_bytes = await asyncio.to_thread(
+            read_segment_original_audio_wav,
+            job_id.strip(),
+            segment_id.strip(),
+        )
+    except InvalidJobIdentifier as bad_id:
+        raise HTTPException(status_code=400, detail=str(bad_id))
+    if not wav_bytes:
+        raise HTTPException(status_code=404, detail="Không tìm thấy âm thanh gốc của phân đoạn này.")
+
+    return Response(
+        content=wav_bytes,
+        media_type="audio/wav",
+        headers={
             "Cache-Control": "public, max-age=86400",
         },
     )

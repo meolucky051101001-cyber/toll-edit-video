@@ -115,10 +115,18 @@ class AcceptanceTests(unittest.TestCase):
 
     def test_gemini_bad_json_can_try_second_model(self):
         from backend.ai import translation as tr
+        from backend.ai import v1_gemini_dispatcher as dispatcher
         bad = Mock(status_code=200)
         bad.json.side_effect = ValueError("bad")
         good = Mock(status_code=200)
         good.json.return_value = {"candidates": [{"content": {"parts": [{"text": '["Xin chào"]'}]}}]}
-        with patch.object(tr, "_gemini_unhealthy_until", 0), patch.object(tr, "_gemini_transient_failures", 0), patch.object(tr, "current_model_policy", return_value=SimpleNamespace(gemini_candidates=["one", "two"])), patch.object(tr.requests, "post", side_effect=[bad, good]):
-            self.assertEqual(tr.translate_with_gemini(["你好"], api_key="dummy_key"), ["Xin chào"])
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(dispatcher, "circuit_breaker", dispatcher.GeminiCircuitBreaker(Path(directory) / 'circuit.db')), \
+             patch.object(tr, "resolve_gemini_models", return_value=["one", "two"]), \
+             patch.object(tr, "extract_video_frames_base64", return_value=[]), \
+             patch('backend.ai.v1_translation_cache.read_cache', return_value=None), \
+             patch('backend.ai.v1_translation_cache.write_cache'), \
+             patch.object(tr.requests, "post", side_effect=[bad, good]) as post:
+            self.assertEqual(tr.translate_with_gemini(["你好"], api_key="fixture-dummy-key"), ["Xin chào"])
+            self.assertEqual(post.call_count, 2)
             self.assertEqual(tr._gemini_transient_failures, 0)

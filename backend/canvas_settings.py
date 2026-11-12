@@ -61,7 +61,8 @@ DEFAULT_CANVAS_SETTINGS: Dict[str, Any] = {
     "sub_stroke_width": 0,       # Độ dày viền chữ (0 - 6px)
     "sub_shadow": False,         # Đổ bóng chữ
     "sub_preset": "custom",      # Preset phong cách chữ nhanh
-    "sub_cover_style": "solid_box", # "solid_box" (hộp nền đặc mặc định) hoặc "frosted_blur" (kính mờ thẩm mỹ)
+    "sub_cover_style": "solid_box", # "solid_box" (hộp nền trắng mặc định), "adaptive_box" (thích ứng màu nền), "localized_blur" (làm mờ cục bộ đúng hộp chữ), hoặc "frosted_blur" (kính mờ cả băng)
+    "delogo_mode": "off",        # "off" (tắt mặc định), "smart" (delogo đúng vùng logo tĩnh PP-OCRv6 phát hiện), hoặc "corners" (4 góc cố định)
     "sub_bg_color": "#ffffff",   # Màu khung nền (Mặc định: Trắng #ffffff)
     "sub_bg_opacity": 1.0,       # Độ mờ đục khung nền (0.1 - 1.0)
     "sub_box_padding_x": 16,     # Độ rộng lề ngang khung nền (px)
@@ -337,6 +338,18 @@ def resolve_image_bg_path(filename_or_path: str) -> str:
             return str(candidate).replace("\\", "/")
     return ""
 
+def _normalize_cover_and_delogo(cfg: Dict[str, Any]) -> None:
+    cover = str(cfg.get("sub_cover_style", "solid_box")).strip().lower()
+    if cover not in ("solid_box", "frosted_blur", "adaptive_box", "localized_blur"):
+        cover = "solid_box"
+    cfg["sub_cover_style"] = cover
+
+    delogo = str(cfg.get("delogo_mode", "off")).strip().lower()
+    if delogo not in ("off", "smart", "corners"):
+        delogo = "off"
+    cfg["delogo_mode"] = delogo
+
+
 def get_canvas_settings() -> Dict[str, Any]:
     """Đọc cấu hình tỷ lệ và background từ tệp JSON."""
     try:
@@ -384,6 +397,7 @@ def get_canvas_settings() -> Dict[str, Any]:
             merged["watermark_bg_opacity"] = round(max(0.0, min(1.0, float(merged.get("watermark_bg_opacity", 0.40)))), 2)
             merged["watermark_pos_x_pct"] = round(max(0.02, min(0.98, float(merged.get("watermark_pos_x_pct", 0.85)))), 4)
             merged["watermark_pos_y_pct"] = round(max(0.02, min(0.98, float(merged.get("watermark_pos_y_pct", 0.05)))), 4)
+            _normalize_cover_and_delogo(merged)
             return merged
     except Exception as e:
         logger.warning(f"Lỗi khi đọc canvas_settings.json: {e}")
@@ -434,6 +448,7 @@ def save_canvas_settings(new_settings: Dict[str, Any]) -> Dict[str, Any]:
         current["sub_stroke_width"] = max(0, min(10, int(current.get("sub_stroke_width", 0))))
         current["sub_shadow"] = bool(current.get("sub_shadow", False))
         current["sub_preset"] = str(current.get("sub_preset", "custom"))
+        _normalize_cover_and_delogo(current)
         current["sub_bg_color"] = str(current.get("sub_bg_color", "#ffffff"))
         current["sub_bg_opacity"] = round(max(0.0, min(1.0, float(current.get("sub_bg_opacity", 1.0)))), 2)
         current["sub_box_padding_x"] = max(0, min(60, int(current.get("sub_box_padding_x", 16))))

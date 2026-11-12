@@ -1455,7 +1455,10 @@ async def enqueue_pending_queue_jobs(application=None):
         active = data.get("active_job")
         if active and not any(active.get("job_id") and active["job_id"] == it.get("job_id") for it in items):
             items.insert(0, active)
+        from queue_control_service import filter_restored
+        items = filter_restored(queue_file, items, active)
         if not items:
+            global_queue.publish()
             return 0
 
         def identity(item):
@@ -1497,7 +1500,7 @@ async def enqueue_pending_queue_jobs(application=None):
         return restored
     except Exception as e:
         logger.warning(f"Lỗi khi nạp hàng chờ từ telegram_queue.json: {e}")
-        return 0
+        raise
 
 async def queue_signal_watcher(application=None):
     """Lắng nghe tín hiệu kích hoạt xử lý hàng chờ hoặc xóa hàng chờ từ Dashboard."""
@@ -1510,6 +1513,9 @@ async def queue_signal_watcher(application=None):
 
     while True:
         try:
+            from queue_control_service import apply_deletions
+            from telegram_queue_monitor import SNAPSHOT
+            apply_deletions(global_queue, SNAPSHOT)
             if clear_flag.exists():
                 try: clear_flag.unlink(missing_ok=True)
                 except Exception: pass
@@ -1528,7 +1534,7 @@ async def queue_signal_watcher(application=None):
                         import json
                         qdata = json.loads(queue_file.read_text(encoding="utf-8-sig"))
                         desired_items = qdata.get("items", [])
-                        if desired_items and not global_queue.empty():
+                        if not global_queue.empty():
                             current_jobs = list(global_queue._queue)
 
                             def _job_key(j):
@@ -1557,6 +1563,9 @@ async def queue_signal_watcher(application=None):
                                     if k not in deleted_keys:
                                         new_jobs.append(j)
 
+                            removed_count = len(current_jobs) - len(new_jobs)
+                            for _ in range(removed_count):
+                                asyncio.Queue.task_done(global_queue)
                             global_queue._queue.clear()
                             for pos, j in enumerate(new_jobs, 1):
                                 if isinstance(j, dict):

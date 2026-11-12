@@ -95,6 +95,241 @@ def _check_cjk(text: str) -> bool:
 
 
 
+def _qc_ts_seconds(value: Any) -> float:
+    if value is None:
+        return 0.0
+    if hasattr(value, "total_seconds"):
+        return float(value.total_seconds())
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _map_normalized_box_to_frame(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    out_w: int,
+    out_h: int,
+    source_size: Optional[tuple[int, int]] = None,
+) -> tuple[int, int, int, int]:
+    """Ánh xạ bbox chuẩn hóa (0..1) từ video gốc sang tọa độ pixel trên video thành phẩm."""
+    if source_size and source_size[0] > 0 and source_size[1] > 0:
+        src_w, src_h = source_size
+        src_ar = src_w / src_h
+        out_ar = out_w / max(1, out_h)
+        if abs(src_ar - out_ar) >= 0.03:
+            scale = min(out_w / src_w, out_h / src_h)
+            pad_x = (out_w - src_w * scale) * 0.5
+            pad_y = (out_h - src_h * scale) * 0.5
+            px0 = pad_x + x0 * src_w * scale
+            py0 = pad_y + y0 * src_h * scale
+            px1 = pad_x + x1 * src_w * scale
+            py1 = pad_y + y1 * src_h * scale
+        else:
+            px0, py0, px1, py1 = x0 * out_w, y0 * out_h, x1 * out_w, y1 * out_h
+    else:
+        px0, py0, px1, py1 = x0 * out_w, y0 * out_h, x1 * out_w, y1 * out_h
+
+    pad_px = max(24, int(round(out_w * 0.05)))
+    pad_py = max(20, int(round(out_h * 0.04)))
+    rx0 = max(0, min(out_w - 2, int(round(px0)) - pad_px))
+    ry0 = max(0, min(out_h - 2, int(round(py0)) - pad_py))
+    rx1 = max(rx0 + 2, min(out_w, int(round(px1)) + pad_px))
+    ry1 = max(ry0 + 2, min(out_h, int(round(py1)) + pad_py))
+    return rx0, ry0, rx1, ry1
+
+
+def check_rendered_pixel_coverage(
+    final_video_path: str | Path,
+    translated_subtitles: Optional[Sequence[Any]] = None,
+    ass_subtitle_path: Optional[str | Path] = None,
+    source_size: Optional[tuple[int, int]] = None,
+    max_samples: int = 4,
+    enabled: bool = True,
+) -> QCCheckItem:
+    """
+    Hậu kiểm pixel thực tế sau render trên tối đa 4 khung hình mẫu:
+    cắt vùng OCR phụ đề gốc từ video xuất xưởng và quét lại bằng PP-OCRv6.
+    Chỉ trả PASS / WARN / UNKNOWN (không bao giờ trả FAIL để tránh chặn nhầm job).
+    """
+    if not enabled:
+        return QCCheckItem(
+            QCCategory.SUBTITLE_STYLING.value,
+            "visual_pixel_coverage",
+            "UNKNOWN",
+            "Kiểm tra pixel sau render đang tắt (V1_QC_VISUAL_PIXEL_CHECK=False)",
+        )
+    v_path = Path(final_video_path)
+    if not v_path.is_file():
+        return QCCheckItem(
+            QCCategory.SUBTITLE_STYLING.value,
+            "visual_pixel_coverage",
+            "UNKNOWN",
+            "Không tìm thấy tệp video xuất xưởng để quét pixel",
+        )
+
+    candidates = []
+    for i, seg in enumerate(translated_subtitles or []):
+        if _seg_val(seg, "ocr_mask_status") != "located":
+            continue
+        bb = _seg_val(seg, "best_block")
+        if bb is None:
+            continue
+        if _seg_val(bb, "is_static") is True or _seg_val(bb, "is_packaging") is True:
+            continue
+        try:
+            x0 = float(_seg_val(bb, "x_pct", 0.0))
+            x1 = float(_seg_val(bb, "max_x_pct", 0.0))
+            y0 = float(_seg_val(bb, "y_pct", 0.0))
+            y1 = float(_seg_val(bb, "max_y_pct", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if not (0.0 <= x0 < x1 <= 1.0 and 0.0 <= y0 < y1 <= 1.0):
+            continue
+        start_s = _qc_ts_seconds(_seg_val(seg, "start", 0.0))
+        end_s = _qc_ts_seconds(_seg_val(seg, "end", 0.0))
+        if (end_s - start_s) < 0.40:
+            continue
+        candidates.append({
+            "index": _seg_val(seg, "index", i + 1),
+            "mid_s": round((start_s + end_s) * 0.5, 3),
+            "box": (x0, y0, x1, y1),
+        })
+
+    if not candidates:
+        return QCCheckItem(
+            QCCategory.SUBTITLE_STYLING.value,
+            "visual_pixel_coverage",
+            "UNKNOWN",
+            "Chưa đủ mẫu câu có tọa độ OCR hợp lệ (>= 0.4s) để hậu kiểm pixel",
+        )
+
+    if len(candidates) <= max_samples:
+        sampled = candidates
+    else:
+        pick = sorted({round(i * (len(candidates) - 1) / (max_samples - 1)) for i in range(max_samples)})
+        sampled = [candidates[idx] for idx in pick]
+
+    try:
+        import cv2
+    except Exception as exc:
+        return QCCheckItem(
+            QCCategory.SUBTITLE_STYLING.value,
+            "visual_pixel_coverage",
+            "UNKNOWN",
+            f"Bỏ qua hậu kiểm pixel do thiếu OpenCV ({exc})",
+        )
+
+    crops = []
+    crop_meta = []
+    cap = cv2.VideoCapture(str(v_path))
+    try:
+        if not cap.isOpened():
+            return QCCheckItem(
+                QCCategory.SUBTITLE_STYLING.value,
+                "visual_pixel_coverage",
+                "UNKNOWN",
+                "Không mở được video xuất xưởng bằng OpenCV để hậu kiểm pixel",
+            )
+        for item in sampled:
+            cap.set(cv2.CAP_PROP_POS_MSEC, item["mid_s"] * 1000.0)
+            ok, frame = cap.read()
+            if not ok or frame is None or not hasattr(frame, "shape") or getattr(frame, "ndim", 0) < 2:
+                continue
+            fh, fw = frame.shape[:2]
+            if fw < 32 or fh < 32:
+                continue
+            x0, y0, x1, y1 = item["box"]
+            rx0, ry0, rx1, ry1 = _map_normalized_box_to_frame(x0, y0, x1, y1, fw, fh, source_size)
+            crop = frame[ry0:ry1, rx0:rx1]
+            if crop is None or crop.size == 0 or crop.shape[0] < 16 or crop.shape[1] < 16:
+                continue
+            crops.append(crop.copy())
+            crop_meta.append({
+                "index": item["index"],
+                "time_s": item["mid_s"],
+                "roi": [rx0, ry0, rx1, ry1],
+            })
+    finally:
+        cap.release()
+
+    if not crops:
+        return QCCheckItem(
+            QCCategory.SUBTITLE_STYLING.value,
+            "visual_pixel_coverage",
+            "UNKNOWN",
+            "Không trích được khung hình hợp lệ từ video xuất xưởng để hậu kiểm pixel",
+        )
+
+    try:
+        from contextlib import nullcontext
+        from ocr_utils import _readtext_batch, release_ocr_reader, _visual_chinese_count
+        try:
+            from v1_gpu_gatekeeper import gpu_gatekeeper
+            gate_ctx = gpu_gatekeeper("visual_ocr", timeout_seconds=120.0, min_free_mb=1000.0)
+        except Exception:
+            gate_ctx = nullcontext()
+
+        with gate_ctx:
+            try:
+                batch_rows = _readtext_batch(crops)
+            finally:
+                release_ocr_reader()
+    except Exception as exc:
+        return QCCheckItem(
+            QCCategory.SUBTITLE_STYLING.value,
+            "visual_pixel_coverage",
+            "UNKNOWN",
+            f"Không thể chạy PP-OCRv6 hậu kiểm pixel ({exc})",
+        )
+
+    leaks = []
+    for meta, rows in zip(crop_meta, batch_rows or []):
+        for row in rows or []:
+            if not isinstance(row, (list, tuple)) or len(row) < 2:
+                continue
+            text = str(row[1] or "").strip()
+            prob = float(row[2]) if len(row) >= 3 and row[2] is not None else 1.0
+            cjk_cnt = _visual_chinese_count(text)
+            if cjk_cnt >= 2 and prob >= 0.60:
+                leaks.append({
+                    "index": meta["index"],
+                    "time_s": meta["time_s"],
+                    "roi": meta["roi"],
+                    "detected_text": text[:40],
+                    "cjk_chars": cjk_cnt,
+                    "confidence": round(prob, 3),
+                })
+
+    if leaks:
+        times_str = ", ".join(f"{lk['time_s']:.1f}s" for lk in leaks[:3])
+        return QCCheckItem(
+            QCCategory.SUBTITLE_STYLING.value,
+            "visual_pixel_coverage",
+            "WARN",
+            f"Phát hiện khả năng còn chữ Hán chưa che hết ở khung hình {times_str} — kiểm tra lại video",
+            details={
+                "sampled_frames": len(crops),
+                "leaks": leaks[:5],
+                "ass_subtitle_path": str(ass_subtitle_path) if ass_subtitle_path else None,
+            },
+        )
+
+    return QCCheckItem(
+        QCCategory.SUBTITLE_STYLING.value,
+        "visual_pixel_coverage",
+        "PASS",
+        f"Đã quét pixel thực tế {len(crops)} khung hình xuất xưởng: không phát hiện chữ gốc lòi ra",
+        details={
+            "sampled_frames": len(crops),
+            "sample_times_s": [m["time_s"] for m in crop_meta],
+        },
+    )
+
+
 def run_quality_gate(
     job_id: str,
     final_video_path: str | Path,
@@ -105,6 +340,7 @@ def run_quality_gate(
     ass_subtitle_path: Optional[str | Path] = None,
     policy: Optional[str] = None,
     workspace_path: Optional[str | Path] = None,
+    enable_visual_pixel_qc: Optional[bool] = None,
 ) -> QCReport:
     """
     Chạy 8 nhóm kiểm tra tự động cho video thành phẩm và xuất báo cáo JSON.
@@ -336,6 +572,32 @@ def run_quality_gate(
         checks.append(QCCheckItem(QCCategory.SUBTITLE_STYLING.value,
             'ocr_coordinate_coverage', geometry_status,
             'OCR coordinate audit (not a guarantee of pixel-level coverage)', geometry))
+
+    # 5b. POST-RENDER VISUAL PIXEL QC (cảnh báo WARN nếu sót chữ Hán gốc sau render, không chặn BLOCK)
+    if enable_visual_pixel_qc is None:
+        try:
+            from v1_feature_flags import get_feature_flags
+            enable_visual_pixel_qc = bool(get_feature_flags(workspace_path).get("V1_QC_VISUAL_PIXEL_CHECK", True))
+        except Exception:
+            enable_visual_pixel_qc = True
+
+    if enable_visual_pixel_qc:
+        src_geom_size = (
+            (source.width, source.height)
+            if ("source" in locals() and source is not None and source.width > 0 and source.height > 0)
+            else None
+        )
+        pixel_check = check_rendered_pixel_coverage(
+            final_video_path=v_path,
+            translated_subtitles=translated_subtitles,
+            ass_subtitle_path=ass_subtitle_path,
+            source_size=src_geom_size,
+            enabled=True,
+        )
+        if pixel_check.status in ("PASS", "WARN"):
+            checks.append(pixel_check)
+        else:
+            logger.info("[QUALITY_GATE] Bỏ qua visual_pixel_coverage (%s): %s", pixel_check.status, pixel_check.message)
 
     # 6. TTS TIMING FIT: compare the actual files, not cached duration labels.
     measured_dubs = []

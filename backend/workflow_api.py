@@ -757,13 +757,14 @@ def get_current_control_token() -> str:
 # ===== ROUTES =====
 
 @router.get("/quy-trinh", response_class=HTMLResponse)
-async def serve_workflow_page():
+async def serve_workflow_page(request: Request):
     """Phục vụ trang giao diện Studio Quy trình & Chống Re-up."""
     TEMPLATES_DIR = ROOT / "templates"
     template_path = TEMPLATES_DIR / "workflow.html"
     if template_path.exists():
         content = template_path.read_text(encoding="utf-8")
-        token = get_current_control_token()
+        runtime = getattr(request.app.state, "pipeline_runtime", None)
+        token = getattr(runtime, "LOCAL_TOKEN", None) or get_current_control_token()
         content = content.replace("__REPLACE_TOKEN__", token)
         content = content.replace("CONTROL_PLANE_TOKEN_PLACEHOLDER", token)
         curr_paths = AppPaths.from_environment(_BACKEND_ROOT.parent, read_environment(_BACKEND_ROOT))

@@ -84,12 +84,32 @@ def _is_visual_segment(segment):
     )
 
 
+def _copy_visual_colors(dst: dict, *sources) -> dict:
+    """Giữ lại thông tin màu nền/chữ thích ứng (nếu có) khi dựng lại block phủ ASS."""
+    for field in ("bg_color_ass", "text_contrast_color_ass"):
+        if dst.get(field):
+            continue
+        for src in sources:
+            val = _block_value(src, field, None)
+            if val:
+                dst[field] = val
+                break
+    return dst
+
+
 def _transition_cover_blocks(blocks):
     """Cover sampling uncertainty at contiguous, nearby caption transitions."""
     keys = ('start', 'end', 'x_pct', 'max_x_pct', 'y_pct', 'max_y_pct')
-    originals = [dict({key: _block_value(b, key, 0.) for key in keys},
-                      geometry_verified=True) if _block_value(b, "geometry_verified", False)
-                 else {key: _block_value(b, key, 0.) for key in keys} for b in blocks]
+    originals = [
+        _copy_visual_colors(
+            dict(
+                {key: _block_value(b, key, 0.) for key in keys},
+                **({'geometry_verified': True} if _block_value(b, "geometry_verified", False) else {}),
+            ),
+            b,
+        )
+        for b in blocks
+    ]
     result = [dict(b) for b in originals]
     for i, a in enumerate(originals[:-1]):
         b = originals[i+1]
@@ -130,7 +150,7 @@ def _held_tracking_blocks(segments, video_duration=None):
             for block in blocks:
                 values = tuple(float(_block_value(block, k, 0)) for k in keys)
                 if not _excluded_source(block) and values[1] > values[0]:
-                    unique[values] = dict(zip(keys, values), geometry_verified=True)
+                    unique[values] = _copy_visual_colors(dict(zip(keys, values), geometry_verified=True), block)
             continue
         if not blocks and getattr(seg, 'best_block', None):
             best = getattr(seg, 'best_block')
@@ -141,7 +161,7 @@ def _held_tracking_blocks(segments, video_duration=None):
         # but never union a genuine move across the screen into a huge card.
         bands = []
         for block in sorted(blocks, key=lambda b: _block_value(b, 'start', 0)):
-            values = {k: float(_block_value(block, k, 0)) for k in keys}
+            values = _copy_visual_colors({k: float(_block_value(block, k, 0)) for k in keys}, block)
             if values['end'] <= values['start']:
                 continue
             if bands:
@@ -164,7 +184,7 @@ def _held_tracking_blocks(segments, video_duration=None):
         for block in stable_blocks:
             values = tuple(float(_block_value(block, k, 0)) for k in keys)
             if values[1] > values[0]:
-                unique[values] = dict(zip(keys, values))
+                unique[values] = _copy_visual_colors(dict(zip(keys, values)), block)
     blocks = sorted(unique.values(), key=lambda b: (b['start'], b['end']))
     held = []
     for block in blocks:
@@ -285,6 +305,7 @@ class _AssLayout:
     main_y_pct: object
     watermark_box: object
     wrap_text: object
+    cover_style: str = "solid_box"
 
 
 @dataclass(frozen=True)
@@ -326,6 +347,7 @@ def generate_ass_file(
     font_weight=2,
     video_duration=None,
     watermark_box=None,
+    cover_style=None,
 ):
     """Generate an ASS subtitle file.
     
@@ -399,9 +421,28 @@ def generate_ass_file(
         chars = max(1, int(max_w / (font_size * 0.55)))
         return textwrap.wrap(text, width=chars) or [text]
 
-    text_outline = 0
-    cover_style = str(os.getenv("V1_SUBTITLE_COVER_STYLE", "solid_box")).strip().lower()
-    bg_color_ass = "&H50FFFFFF" if cover_style == "frosted_blur" else "&H00FFFFFF"
+    active_cover_style = str(cover_style or os.getenv("V1_SUBTITLE_COVER_STYLE", "")).strip().lower()
+    if not active_cover_style:
+        try:
+            import canvas_settings as _cs
+            active_cover_style = str(_cs.get_canvas_settings().get("sub_cover_style", "solid_box")).strip().lower()
+        except Exception:
+            active_cover_style = "solid_box"
+    if active_cover_style not in ("solid_box", "frosted_blur", "adaptive_box", "localized_blur"):
+        active_cover_style = "solid_box"
+
+    text_outline = 1 if active_cover_style == "localized_blur" else 0
+    if active_cover_style == "frosted_blur":
+        bg_color_ass = "&H50FFFFFF"
+    elif active_cover_style == "localized_blur":
+        bg_color_ass = "&H78141418"
+    else:
+        bg_color_ass = "&H00FFFFFF"
+    style_text_color = (
+        "&H00FFFFFF"
+        if (active_cover_style == "localized_blur" and font_color == "&H00000000")
+        else font_color
+    )
 
     ass_content = f"""[Script Info]
 ScriptType: v4.00+
@@ -413,7 +454,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: BgStyle,Arial,{font_size},{bg_color_ass},{bg_color_ass},{bg_color_ass},{bg_color_ass},0,0,0,0,100,100,0,0,1,{outline},0,5,0,0,0,1
-Style: TextStyle,{font_name},{font_size},{font_color},&H000000FF,&H00000000,&H00000000,{bold},0,0,0,100,100,0,0,1,{text_outline},0,5,10,10,10,1
+Style: TextStyle,{font_name},{font_size},{style_text_color},&H000000FF,&H00000000,&H00000000,{bold},0,0,0,100,100,0,0,1,{text_outline},0,5,10,10,10,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -437,6 +478,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         main_y_pct=main_y_pct,
         watermark_box=watermark_box,
         wrap_text=_wrap_text,
+        cover_style=active_cover_style,
     )
     if dialogue_segments:
         dialogue_segments, held_tracks = _align_ass_source_pages(dialogue_segments, video_duration)
@@ -769,12 +811,12 @@ def _ass_segment_events(seg, held_tracks, seg_s, seg_e, c):
                         )
                         ref_cy = (float(_block_value(best_sb, "y_pct", 0.0)) + float(_block_value(best_sb, "max_y_pct", 0.0))) * 0.5
                     active = [min(active, key=lambda b: abs((float(_block_value(b, "y_pct", 0.0)) + float(_block_value(b, "max_y_pct", 0.0))) * 0.5 - ref_cy))]
-                blocks.append(dict(start=left, end=right,
+                blocks.append(_copy_visual_colors(dict(start=left, end=right,
                     x_pct=min(float(_block_value(b, 'x_pct', 0.0)) for b in active),
                     max_x_pct=max(float(_block_value(b, 'max_x_pct', 0.0)) for b in active),
                     y_pct=min(float(_block_value(b, 'y_pct', 0.0)) for b in active),
                     max_y_pct=max(float(_block_value(b, 'max_y_pct', 0.0)) for b in active),
-                    **({'geometry_verified': True} if verified or all(_block_value(b, 'geometry_verified', False) for b in active) else {})))
+                    **({'geometry_verified': True} if verified or all(_block_value(b, 'geometry_verified', False) for b in active) else {})), *active))
     blocks = _transition_cover_blocks(blocks)
     if not verified and blocks:
         if seg_s < float(_block_value(blocks[0], "start", seg_s)):
@@ -844,7 +886,16 @@ def _format_ass_event_text(text, is_near_bottom, c):
     return _AssText(num_lines, formatted_text, actual_text_w, required_text_h)
 
 
-def _source_ass_sticker(c, band_layout, times, bounds, metrics, is_near_bottom):
+def _source_ass_sticker(
+    c,
+    band_layout,
+    times,
+    bounds,
+    metrics,
+    is_near_bottom,
+    bg_override=None,
+    fg_override=None,
+):
     ass_content = ""
     start_str, end_str = times
     raw_y_pct, raw_max_y_pct, source_left_pct, source_right_pct = bounds
@@ -919,14 +970,17 @@ def _source_ass_sticker(c, band_layout, times, bounds, metrics, is_near_bottom):
     draw_x = max(0, draw_x)
     draw_y = max(0, min(draw_y, c.canvas_y - draw_h - (c.outline * 2)))
 
-    draw_cmd = "{\\p1}" + _rounded_box(draw_w, draw_h, radius=0 if (edge_source or (draw_x == 0 and draw_w == c.canvas_x)) else 12) + "{\\p0}"
-    bg_line = f"{{\\an7\\pos({draw_x:g},{draw_y})}}{draw_cmd}"
+    bg_color_tag = f"\\1c{bg_override}\\3c{bg_override}" if bg_override else ""
+    fg_color_tag = f"\\1c{fg_override}" if fg_override else ""
+    box_radius = 0 if (edge_source or (draw_x == 0 and draw_w == c.canvas_x)) else 12
+    draw_cmd = "{\\p1}" + _rounded_box(draw_w, draw_h, radius=box_radius) + "{\\p0}"
+    bg_line = f"{{\\an7\\pos({draw_x:g},{draw_y}){bg_color_tag}}}{draw_cmd}"
     ass_content += f"Dialogue: 0,{start_str},{end_str},BgStyle,,0,0,0,,{bg_line}\n"
 
     text_cx = max(min_margin + metrics.actual_text_w / 2.0, min(
         draw_x + (draw_w / 2.0), c.canvas_x - min_margin - metrics.actual_text_w / 2.0))
     text_cy = draw_y + max(0, (draw_h - metrics.required_text_h) // 2)
-    text_line = f"{{\\an8\\pos({text_cx:g},{text_cy})}}{metrics.formatted_text}"
+    text_line = f"{{\\an8\\pos({text_cx:g},{text_cy}){fg_color_tag}}}{metrics.formatted_text}"
     ass_content += f"Dialogue: 1,{start_str},{end_str},TextStyle,,0,0,0,,{text_line}\n"
     return ass_content
 
@@ -1004,8 +1058,25 @@ def _render_ass_event(event, text, c, band_layout, verified, seg_is_visual):
 
     metrics = _format_ass_event_text(text, is_near_bottom, c)
     if has_source:
-        return _source_ass_sticker(c, band_layout, (start_str, end_str),
-            (raw_y_pct, raw_max_y_pct, source_left_pct, source_right_pct), metrics, is_near_bottom)
+        bg_override = None
+        fg_override = None
+        if c.cover_style == "adaptive_box" and b:
+            raw_bg = _block_value(b, "bg_color_ass")
+            raw_fg = _block_value(b, "text_contrast_color_ass")
+            if raw_bg and re.fullmatch(r"&H[0-9A-Fa-f]{8}", str(raw_bg).strip()):
+                bg_override = str(raw_bg).strip()
+            if raw_fg and re.fullmatch(r"&H[0-9A-Fa-f]{8}", str(raw_fg).strip()):
+                fg_override = str(raw_fg).strip()
+        return _source_ass_sticker(
+            c,
+            band_layout,
+            (start_str, end_str),
+            (raw_y_pct, raw_max_y_pct, source_left_pct, source_right_pct),
+            metrics,
+            is_near_bottom,
+            bg_override=bg_override,
+            fg_override=fg_override,
+        )
     return _fallback_ass_sticker(c, band_layout, (start_str, end_str), metrics, verified, seg_is_visual)
 
 

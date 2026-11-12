@@ -24,6 +24,8 @@ class MonitoredQueue(asyncio.Queue):
         # Importing the bot in a spawned worker must not erase the real queue.
 
     def publish(self):
+        if getattr(self, 'recovery_pending', False):
+            return
         if multiprocessing.current_process().name != "MainProcess":
             return
         try:
@@ -77,7 +79,27 @@ class MonitoredQueue(asyncio.Queue):
         super().put_nowait(item)
         self.publish()
 
+    def remove_pending(self, target):
+        from queue_control_service import identity
+        retained = [j for j in self._queue if identity(j) != target]
+        count = len(self._queue) - len(retained)
+        self._queue.clear()
+        self._queue.extend(retained)
+        for _ in range(count):
+            super().task_done()
+        return count
+
+    async def get(self):
+        while True:
+            try:
+                return await super().get()
+            except asyncio.QueueEmpty:
+                # A delete may remove the last item immediately before claim.
+                continue
+
     def get_nowait(self):
+        from queue_control_service import apply_deletions
+        apply_deletions(self, SNAPSHOT)
         item = super().get_nowait()
         self.active_job = item
         self.publish()

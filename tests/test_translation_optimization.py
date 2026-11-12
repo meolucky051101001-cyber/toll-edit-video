@@ -6,18 +6,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 from ai import translation as tr
 from ai import v1_translation_cache as cache
+from ai import v1_gemini_dispatcher as dispatcher
 
 class OptimizationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.env = patch.dict('os.environ', {'AUTODUB_WORKSPACE': self.tmp.name})
         self.env.start()
+        self.dispatcher_patch = patch.object(dispatcher, 'circuit_breaker',
+            dispatcher.GeminiCircuitBreaker(Path(self.tmp.name) / 'circuit.db'))
+        self.dispatcher_patch.start()
         tr._gemini_cooldown.clear()
         tr._gemini_last_good.clear()
         self.frames = patch.object(tr, 'extract_video_frames_base64', return_value=[])
         self.frames.start()
 
     def tearDown(self):
+        self.dispatcher_patch.stop()
         self.frames.stop()
         self.env.stop()
         self.tmp.cleanup()
@@ -45,8 +50,8 @@ class OptimizationTests(unittest.TestCase):
 
     def test_cache_reuses_success_not_network(self):
         with patch.object(tr.requests, 'post', return_value=self.success()) as post:
-            tr.translate_with_gemini(['你好'], api_key='test-key')
-            self.assertEqual(tr.translate_with_gemini(['你好'], api_key='test-key'), ['Xin chào'])
+            tr.translate_with_gemini(['你好'], api_key='fixture-test-key')
+            self.assertEqual(tr.translate_with_gemini(['你好'], api_key='fixture-test-key'), ['Xin chào'])
             self.assertEqual(post.call_count, 1)
 
     def test_all_failed_fail_fast_during_cooldown(self):
@@ -57,9 +62,9 @@ class OptimizationTests(unittest.TestCase):
 
     def test_context_and_account_invalidate_cache(self):
         with patch.object(tr.requests, 'post', return_value=self.success()) as post:
-            tr.translate_with_gemini(['你好'], api_key='test-key')
-            tr.translate_with_gemini(['你好'], api_key='other-key')
-            tr.translate_with_gemini(['你好'], api_key='test-key', prior_context=['different scene'])
+            tr.translate_with_gemini(['你好'], api_key='fixture-test-key')
+            tr.translate_with_gemini(['你好'], api_key='fixture-other-key')
+            tr.translate_with_gemini(['你好'], api_key='fixture-test-key', prior_context=['different scene'])
             self.assertEqual(post.call_count, 3)
 
     def test_invalid_cache_rejected(self):

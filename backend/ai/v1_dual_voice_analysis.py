@@ -3,7 +3,7 @@ from pathlib import Path
 import math
 import numpy as np
 
-ANALYSIS_VERSION = 'dual_voice_evidence_1'
+ANALYSIS_VERSION = 'dual_voice_evidence_2'
 
 
 def _unknown(reason, **extra):

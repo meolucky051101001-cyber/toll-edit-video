@@ -32,7 +32,8 @@ from ai.voice_cloning import generate_dubbing_audio, TTSIncompleteError
 class TestV1AutoVoice(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.voice_checks_dir = V1_ROOT / "workspace_backup_safety" / "control" / "voice_checks"
+        assets_root = Path(os.getenv('V1_TEST_ASSETS_ROOT', str(V1_ROOT)))
+        cls.voice_checks_dir = assets_root / "workspace_backup_safety" / "control" / "voice_checks"
         cls.real_male_sample = cls.voice_checks_dir / "capcut-BV075_streaming.mp3"
         cls.real_namminh_sample = cls.voice_checks_dir / "microsoft-namminh.mp3"
         cls.real_female_sample = cls.voice_checks_dir / "capcut-BV562_streaming.mp3"
