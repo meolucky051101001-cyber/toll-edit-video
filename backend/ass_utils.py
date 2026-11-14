@@ -1,4 +1,5 @@
 import codecs
+from difflib import SequenceMatcher
 import math
 import os
 import re
@@ -6,6 +7,94 @@ import textwrap
 import copy
 from dataclasses import dataclass
 from datetime import timedelta
+
+_TRAILING_PUNCT_RE = re.compile(r"[.。!！?？,，;；:：]+$")
+
+
+def _strip_terminal_punct(text):
+    raw = str(text or "").strip()
+    cleaned = _TRAILING_PUNCT_RE.sub("", raw).strip()
+    return cleaned or raw
+
+
+def _cjk_text(text):
+    return "".join(ch for ch in str(text or "") if "\u3400" <= ch <= "\u9fff")
+
+
+def _merge_contiguous_tracking_blocks(blocks, seg_s=None, seg_e=None):
+    """Clamp optional segment bounds and merge contiguous tracking blocks with matching text or geometry."""
+    if not blocks:
+        return []
+    prepared = []
+    for block in blocks:
+        b = copy.copy(block)
+        b_s = float(_block_value(b, "start", 0.0))
+        b_e = float(_block_value(b, "end", 0.0))
+        if seg_s is not None:
+            b_s = max(float(seg_s), b_s)
+        if seg_e is not None:
+            b_e = min(float(seg_e), b_e)
+        if b_e <= b_s + 1e-4:
+            continue
+        _set_block_value(b, "start", b_s)
+        _set_block_value(b, "end", b_e)
+        prepared.append(b)
+    prepared.sort(key=lambda item: (float(_block_value(item, "start", 0.0)), float(_block_value(item, "end", 0.0))))
+
+    merged = []
+    for curr in prepared:
+        if not merged:
+            merged.append(curr)
+            continue
+        prev = merged[-1]
+        p_end = float(_block_value(prev, "end", 0.0))
+        c_start = float(_block_value(curr, "start", 0.0))
+        if c_start - p_end > 0.25:
+            merged.append(curr)
+            continue
+        p_y1 = float(_block_value(prev, "y_pct", 0.0))
+        p_y2 = float(_block_value(prev, "max_y_pct", 0.0))
+        c_y1 = float(_block_value(curr, "y_pct", 0.0))
+        c_y2 = float(_block_value(curr, "max_y_pct", 0.0))
+        if abs((p_y1 + p_y2) * 0.5 - (c_y1 + c_y2) * 0.5) > 0.08:
+            merged.append(curr)
+            continue
+
+        p_cjk = _cjk_text(_block_value(prev, "text", ""))
+        c_cjk = _cjk_text(_block_value(curr, "text", ""))
+        if p_cjk and c_cjk:
+            should_merge = (
+                p_cjk == c_cjk
+                or SequenceMatcher(None, p_cjk, c_cjk).ratio() >= 0.80
+            )
+        else:
+            p_x1 = float(_block_value(prev, "x_pct", 0.0))
+            p_x2 = float(_block_value(prev, "max_x_pct", 0.0))
+            c_x1 = float(_block_value(curr, "x_pct", 0.0))
+            c_x2 = float(_block_value(curr, "max_x_pct", 0.0))
+            should_merge = (
+                abs(p_x1 - c_x1) <= 0.035
+                and abs(p_x2 - c_x2) <= 0.035
+                and abs(p_y1 - c_y1) <= 0.025
+                and abs(p_y2 - c_y2) <= 0.025
+            )
+        if not should_merge:
+            merged.append(curr)
+            continue
+
+        _set_block_value(prev, "end", max(p_end, float(_block_value(curr, "end", 0.0))))
+        _set_block_value(prev, "x_pct", min(float(_block_value(prev, "x_pct", 0.0)), float(_block_value(curr, "x_pct", 0.0))))
+        _set_block_value(prev, "max_x_pct", max(float(_block_value(prev, "max_x_pct", 0.0)), float(_block_value(curr, "max_x_pct", 0.0))))
+        _set_block_value(prev, "y_pct", min(p_y1, c_y1))
+        _set_block_value(prev, "max_y_pct", max(p_y2, c_y2))
+        prev_txt = str(_block_value(prev, "text", "") or "")
+        curr_txt = str(_block_value(curr, "text", "") or "")
+        if len(curr_txt) > len(prev_txt):
+            _set_block_value(prev, "text", curr_txt)
+        elif len(curr_txt) == len(prev_txt) and float(_block_value(curr, "prob", 0.0) or 0.0) > float(_block_value(prev, "prob", 0.0) or 0.0):
+            _set_block_value(prev, "text", curr_txt)
+            _set_block_value(prev, "prob", float(_block_value(curr, "prob", 0.0) or 0.0))
+    return merged
 
 try:
     from .subtitle_layout import subtitle_measure, wrap_subtitle_text
@@ -267,7 +356,13 @@ def sync_and_clamp_subtitles(translated_segments, dubbing_audio_files=None):
                 seg_e = seg.end.total_seconds()
                 t_blocks = getattr(seg, "tracking_blocks", None) or []
             valid_tb = [b for b in t_blocks if not _excluded_source(b)]
-            valid_tb.sort(key=lambda b: float(_block_value(b, "start", 0.0)))
+            valid_tb = _merge_contiguous_tracking_blocks(valid_tb, seg_s=seg_s, seg_e=seg_e)
+            if isinstance(seg, dict):
+                if valid_tb:
+                    seg["tracking_blocks"] = valid_tb
+            else:
+                if valid_tb:
+                    seg.tracking_blocks = valid_tb
             if valid_tb:
                 if float(_block_value(valid_tb[0], "start", seg_s)) > seg_s:
                     _set_block_value(valid_tb[0], "start", seg_s)
@@ -306,6 +401,7 @@ class _AssLayout:
     watermark_box: object
     wrap_text: object
     cover_style: str = "solid_box"
+    strip_terminal_punctuation: bool = False
 
 
 @dataclass(frozen=True)
@@ -348,6 +444,7 @@ def generate_ass_file(
     video_duration=None,
     watermark_box=None,
     cover_style=None,
+    strip_terminal_punctuation=False,
 ):
     """Generate an ASS subtitle file.
     
@@ -479,6 +576,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         watermark_box=watermark_box,
         wrap_text=_wrap_text,
         cover_style=active_cover_style,
+        strip_terminal_punctuation=bool(strip_terminal_punctuation),
     )
     if dialogue_segments:
         dialogue_segments, held_tracks = _align_ass_source_pages(dialogue_segments, video_duration)
@@ -659,7 +757,26 @@ def _paginate_ass_dialogue(dialogue_segments, c):
                             _, a, b = min(choices)
                             sentence_parts[-2:] = [a, b]
                     parts.extend(sentence_parts)
-                processed_segments.extend(split_segment_text(seg, parts))
+                if getattr(c, "strip_terminal_punctuation", False):
+                    parts = [_strip_terminal_punct(part) for part in parts]
+                pages = split_segment_text(seg, parts)
+                if len(pages) == 2:
+                    raw_tracks = [b for b in (getattr(seg, "tracking_blocks", None) or []) if not _excluded_source(b)]
+                    merged_tracks = _merge_contiguous_tracking_blocks(raw_tracks)
+                    if len(merged_tracks) == 2:
+                        t_split = float(_block_value(merged_tracks[0], "end", 0.0))
+                        seg_s = seg.start.total_seconds()
+                        seg_e = seg.end.total_seconds()
+                        if seg_s + 0.30 <= t_split <= seg_e - 0.30:
+                            pages[0].start = timedelta(seconds=seg_s)
+                            pages[0].end = timedelta(seconds=t_split)
+                            pages[1].start = timedelta(seconds=t_split)
+                            pages[1].end = timedelta(seconds=seg_e)
+                            pages[0].tracking_blocks = [copy.copy(merged_tracks[0])]
+                            pages[0].best_block = copy.copy(merged_tracks[0])
+                            pages[1].tracking_blocks = [copy.copy(merged_tracks[1])]
+                            pages[1].best_block = copy.copy(merged_tracks[1])
+                processed_segments.extend(pages)
         except Exception:
             processed_segments = list(dialogue_segments)
     else:
@@ -698,7 +815,7 @@ def _lock_ass_band(processed_segments, dialogue_segments, c):
         else:
             med_center_pct = (sorted_centers[n_centers // 2 - 1] + sorted_centers[n_centers // 2]) * 0.5
             med_h_pct = (sorted_heights[len(sorted_heights) // 2 - 1] + sorted_heights[len(sorted_heights) // 2]) * 0.5
-        locked_center_y = int(med_center_pct * c.canvas_y)
+        locked_center_y = round(med_center_pct * c.canvas_y)
         locked_track_h = max(c.line_h, int(med_h_pct * c.canvas_y))
         locked_band_tops = []
         locked_band_bottoms = []
@@ -863,6 +980,8 @@ def _ass_segment_events(seg, held_tracks, seg_s, seg_e, c):
 
 
 def _format_ass_event_text(text, is_near_bottom, c):
+    if getattr(c, "strip_terminal_punctuation", False):
+        text = " ".join(_strip_terminal_punct(part) for part in str(text or "").split(r"\N") if part.strip()) or str(text or "")
     effective_text_w = c.safe_bottom_text_max_w if is_near_bottom else c.text_max_w
     lines = c.wrap_text(text, effective_text_w)
     if len(lines) > 2:
@@ -907,20 +1026,23 @@ def _source_ass_sticker(
         and band_layout.locked_band_min_y is not None
         and band_layout.locked_band_max_y is not None
     )
+    pad_x = max(10, int(c.canvas_x * 0.015))
+    pad_y = max(4, int(c.canvas_y * 0.005))
+
     if is_in_locked_band:
         chinese_center_y = band_layout.locked_center_y
-        src_top = max(0, min(int(band_layout.locked_band_min_y * c.canvas_y), int(raw_y_pct * c.canvas_y)))
-        src_bottom = min(c.canvas_y, max(math.ceil(band_layout.locked_band_max_y * c.canvas_y), math.ceil(raw_max_y_pct * c.canvas_y)))
+        src_top = max(0, min(int(band_layout.locked_band_min_y * c.canvas_y), int(raw_y_pct * c.canvas_y)) - pad_y)
+        src_bottom = min(c.canvas_y, max(math.ceil(band_layout.locked_band_max_y * c.canvas_y), math.ceil(raw_max_y_pct * c.canvas_y)) + pad_y)
     else:
-        chinese_center_y = int(raw_cy_pct * c.canvas_y)
-        src_top = max(0, int(raw_y_pct * c.canvas_y))
-        src_bottom = min(c.canvas_y, math.ceil(raw_max_y_pct * c.canvas_y))
+        chinese_center_y = round(raw_cy_pct * c.canvas_y)
+        src_top = max(0, int(raw_y_pct * c.canvas_y) - pad_y)
+        src_bottom = min(c.canvas_y, math.ceil(raw_max_y_pct * c.canvas_y) + pad_y)
 
     edge_source = (source_left_pct == 0 or source_right_pct == 1
                    or raw_y_pct == 0 or raw_max_y_pct == 1)
 
-    source_box_x1 = max(0, math.floor(source_left_pct * c.canvas_x))
-    source_box_x2 = min(c.canvas_x, math.ceil(source_right_pct * c.canvas_x))
+    source_box_x1 = max(0, math.floor(source_left_pct * c.canvas_x) - pad_x)
+    source_box_x2 = min(c.canvas_x, math.ceil(source_right_pct * c.canvas_x) + pad_x)
     source_box_w = max(0, source_box_x2 - source_box_x1)
     source_box_h = max(0, src_bottom - src_top)
 
@@ -934,12 +1056,13 @@ def _source_ass_sticker(
         source_symmetric_w = 2.0 * max(dist_left, dist_right)
         target_visible_w = max(text_cover_w, source_symmetric_w)
     else:
+        source_symmetric_w = 0.0
         target_visible_w = text_cover_w
 
     min_margin = math.ceil(c.canvas_x * 0.05)
-    # When text/source reaches screen borders or covers > 95% of canvas,
-    # span cleanly as a full-width ribbon across the screen.
-    if edge_source or target_visible_w >= (c.canvas_x - (min_margin * 2)):
+    # Span full-width ribbon ONLY when the source OCR box itself touches screen edges
+    # or spans >= 90% of canvas width; wide Vietnamese translations remain rounded cards.
+    if edge_source or (source_box_w > 0 and source_symmetric_w >= (c.canvas_x - (min_margin * 2))):
         draw_w = c.canvas_x
         draw_x = 0
     else:
@@ -1010,10 +1133,9 @@ def _fallback_ass_sticker(c, band_layout, times, metrics, verified, seg_is_visua
     text_cy = draw_y + max(0, (draw_h - metrics.required_text_h) // 2)
     text_cx = draw_x + (draw_w / 2.0)
 
-    if not verified or not band_layout.video_has_source or seg_is_visual:
-        draw_cmd = "{\\p1}" + _rounded_box(draw_w, draw_h, radius=12) + "{\\p0}"
-        bg_line = f"{{\\an7\\pos({draw_x:g},{draw_y})}}{draw_cmd}"
-        ass_content += f"Dialogue: 0,{start_str},{end_str},BgStyle,,0,0,0,,{bg_line}\n"
+    draw_cmd = "{\\p1}" + _rounded_box(draw_w, draw_h, radius=12) + "{\\p0}"
+    bg_line = f"{{\\an7\\pos({draw_x:g},{draw_y})}}{draw_cmd}"
+    ass_content += f"Dialogue: 0,{start_str},{end_str},BgStyle,,0,0,0,,{bg_line}\n"
 
     text_line = f"{{\\an8\\pos({text_cx:g},{text_cy})}}{metrics.formatted_text}"
     ass_content += f"Dialogue: 1,{start_str},{end_str},TextStyle,,0,0,0,,{text_line}\n"

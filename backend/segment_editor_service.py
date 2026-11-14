@@ -453,9 +453,12 @@ def _apply_voice_lock_metadata(
 
         seg_gender = str(v_entry.get("gender") or (top_gender if top_gender != "dual" else "unknown") or "unknown").lower()
         seg_conf = round(float(v_entry.get("confidence", top_conf) or 0.0), 3)
-        seg_reason = str(v_entry.get("reason") or vl.get("reason") or "")
+        seg_reason = str(v_entry.get("voice_review_reason") or v_entry.get("reason") or vl.get("reason") or "")
+        if seg_reason == "dual_voice_single_detected_role":
+            seg_reason = "Đã bật hai giọng nhưng chỉ nhận ra một vai; cần nghe lại giọng gốc"
         needs_review = (
             (idx in unresolved_set)
+            or bool(v_entry.get("needs_voice_review", False))
             or (str(v_entry.get("gender", "")).lower() == "unknown")
             or (top_req_review and not seg_voices and top_gender == "unknown")
         )

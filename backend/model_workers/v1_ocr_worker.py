@@ -30,9 +30,14 @@ def _configure_cuda():
     import onnxruntime as ort
     if _ort_guard_installed:
         return
-    dll_path = Path(__file__).resolve().parents[1] / "venv" / "Lib" / "site-packages" / "torch" / "lib"
-    if dll_path.is_dir():
-        ort.preload_dlls(directory=str(dll_path))
+    for dll_path in (
+        Path(__file__).resolve().parents[1] / "venv" / "Lib" / "site-packages" / "torch" / "lib",
+        Path(__file__).resolve().parents[1] / "model_venv" / "Lib" / "site-packages" / "torch" / "lib",
+        Path(r"C:\tool v1\backend\venv\Lib\site-packages\torch\lib"),
+    ):
+        if dll_path.is_dir():
+            ort.preload_dlls(directory=str(dll_path))
+            break
     original = ort.InferenceSession
     class CudaSession(original):
         def __init__(self, *args, **kwargs):
