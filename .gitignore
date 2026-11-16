@@ -84,3 +84,10 @@ temp_dir/
 # Log xoay vong (app.log.1, ...) - khong commit
 app.log.*
 backend/app.log.*
+
+# Cloud runtime artifacts and local SQLite state (never commit)
+/backend/cloud/results/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
