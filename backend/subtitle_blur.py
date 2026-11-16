@@ -9,7 +9,7 @@ import json
 import math
 from collections import defaultdict
 
-BLUR_RENDER_VERSION = 2
+BLUR_RENDER_VERSION = 3
 ASS_BLUR_MARKER = "; ToolV1BlurData: "
 BLUR_DEFAULTS = {"sub_blur_radius": 16, "sub_blur_padding_x": 0.015,
                  "sub_blur_padding_y": 0.008}
@@ -155,7 +155,13 @@ def build_localized_blur_filter(boxes, width, height, settings=None, prefix="cap
     """Unlabelled one-input/output filter chain; caller appends crisp subtitles."""
     settings = resolve_blur_settings(settings)
     regions = blur_regions(boxes, width, height, settings)
-    parts = []
+    if not regions:
+        return ""
+    # Split the untouched source once. Repeated split/overlay diamonds make
+    # FFmpeg negotiate the same upstream graph exponentially as regions grow.
+    # Each crop also needs original pixels, not a previous region's blurred output.
+    parts = [f"format=yuv420p,split={len(regions) + 1}[{prefix}main0]" +
+             "".join(f"[{prefix}{index}crop]" for index in range(len(regions))) + ";"]
     for index, (x, y, w, h, intervals) in enumerate(regions):
         # Chroma planes are half-size in yuv420p; clamp their radius separately.
         # FFmpeg requires 2*radius+1 to fit the plane, including even-sized
@@ -164,9 +170,9 @@ def build_localized_blur_filter(boxes, width, height, settings=None, prefix="cap
         chroma = min(luma, max(0, (min(w, h) // 2 - 1) // 2))
         enable = "+".join(f"gte(t,{start:.6f})*lt(t,{end:.6f})" for start, end in intervals)
         label = f"{prefix}{index}"
-        parts.append(("," if index else "format=yuv420p,") +
-            f"split[{label}main][{label}crop];"
+        output = f"[{prefix}main{index + 1}];" if index + 1 < len(regions) else ""
+        parts.append(
             f"[{label}crop]crop={w}:{h}:{x}:{y},"
-            f"boxblur=luma_radius={luma}:luma_power=3:chroma_radius={chroma}:chroma_power=3[{label}blur];"
-            f"[{label}main][{label}blur]overlay={x}:{y}:enable='{enable}'")
+            f"boxblur=luma_radius={luma}:luma_power=3:chroma_radius={chroma}:chroma_power=3:enable='{enable}'[{label}blur];"
+            f"[{prefix}main{index}][{label}blur]overlay={x}:{y}:enable='{enable}'{output}")
     return "".join(parts)

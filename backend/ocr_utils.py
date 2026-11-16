@@ -627,13 +627,11 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         return [], 0.85
 
     all_blocks = []
-    previous_roi = None
+    previous_frame = None
     previous_rows = None
     previous_time = None
     previous_scale = 1.0
     previous_offset = 0
-    roi_y0, roi_y1 = int(0.35 * height), int(0.95 * height)
-    roi_x0, roi_x1 = int(0.08 * width), int(0.92 * width)
 
     def append_rows(rows, sample_time, scale_ratio, crop_offset, orig_frame=None):
         for mapped in normalized_rows(rows, scale_ratio, crop_offset, width, height):
@@ -666,26 +664,20 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             logger.warning("Could not decode visual OCR frame at %.2fs", current_time)
             continue
 
-        roi = frame[roi_y0:roi_y1, roi_x0:roi_x1]
-        roi_small = None
-        if roi.size:
-            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-            roi_small = cv2.resize(gray, (160, 90), interpolation=cv2.INTER_AREA)
-
         can_reuse = (
             previous_rows is not None
-            and previous_roi is not None
-            and roi_small is not None
+            and previous_frame is not None
             and previous_time is not None
             and 0.0 <= current_time - previous_time <= 1.0
         )
         if can_reuse:
-            mad = float(np.mean(cv2.absdiff(roi_small, previous_roi)))
-            if mad < 1.8:
+            # A small caption can change while the average scene difference
+            # stays near zero. Reuse OCR only for identical inference input.
+            if np.array_equal(frame, previous_frame):
                 append_rows(previous_rows, current_time, previous_scale, previous_offset, orig_frame=frame)
                 metrics["visual_roi_reused"] = metrics.get("visual_roi_reused", 0) + 1
                 previous_time = current_time
-                previous_roi = roi_small
+                previous_frame = frame.copy()
                 continue
 
         scale_ratio = min(1.0, 960.0 / max(width, 1))
@@ -704,7 +696,7 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         previous_time = current_time
         previous_scale = scale_ratio
         previous_offset = 0
-        previous_roi = roi_small
+        previous_frame = frame.copy()
         metrics["visual_ocr_calls"] = metrics.get("visual_ocr_calls", 0) + 1
         append_rows(rows, current_time, scale_ratio, 0, orig_frame=frame)
         if (position + 1) % 100 == 0:

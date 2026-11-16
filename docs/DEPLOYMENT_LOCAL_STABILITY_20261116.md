@@ -51,3 +51,8 @@ Node chạy bằng `node --test` cho toàn bộ `tests/js/*.test.js`.
 
 Nghiệm thu video thật, đồng bộ âm thanh/hình, RAM/VRAM và NVENC là bước riêng.
 Không suy ra kết quả GPU/provider từ kiểm thử CPU hoặc mock ở trên.
+
+Sau bước triển khai, người dùng cung cấp video để test. Kết quả local, hai sửa
+bổ sung và lỗi biên thời gian còn lại được ghi trong
+[báo cáo kiểm thử video](VIDEO_BLUR_CHECK_20261116.md). Blur chưa đạt nghiệm thu
+hình ảnh để trở thành mặc định.

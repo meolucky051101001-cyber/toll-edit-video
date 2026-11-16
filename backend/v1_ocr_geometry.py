@@ -3,7 +3,7 @@ import math
 from collections import Counter
 from difflib import SequenceMatcher
 
-OCR_GEOMETRY_VERSION = 6
+OCR_GEOMETRY_VERSION = 7
 
 
 class OCRGeometryError(RuntimeError):
