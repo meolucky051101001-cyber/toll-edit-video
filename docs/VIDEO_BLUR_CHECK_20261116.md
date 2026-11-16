@@ -1,5 +1,8 @@
 # Kiểm thử video thực tế sau triển khai — 16/11/2026
 
+> Cập nhật: sau xác nhận của người dùng, đã chạy đủ Gemini và CapCut. Kết quả
+> toàn pipeline ở cuối tài liệu; phần đầu ghi lại lượt test local trước đó.
+
 ## Phạm vi và kết luận
 
 Đã tải video người dùng chỉ định, kiểm tra giải mã đầy đủ và chạy OCR GPU local
@@ -49,5 +52,45 @@ Thư mục: `scratch/xhs-3MrohcSsCYV-20261116/` (không đưa media/log vào Git
 - `offline-v2/visual-qa.json`: ghi nhận nghiệm thu hình ảnh chưa đạt.
 - `scratch/deployment-tests/video-fixes-final.xml`: kết quả 127 test.
 
-Thời gian trên là quan sát một lần trên máy này, không phải benchmark tổng
-pipeline. Chưa đo mức RAM/VRAM cực đại và chưa nghiệm thu đồng bộ giọng dịch.
+Thời gian trên là quan sát một lần của lượt local, không phải benchmark tổng
+pipeline. Lượt này chưa đo RAM/VRAM cực đại hoặc nghiệm thu đồng bộ giọng dịch.
+
+## Lượt toàn pipeline sau xác nhận Gemini và CapCut
+
+Người dùng đã xác nhận cho phép gửi văn bản/khung hình tới Gemini và lời dịch
+tới CapCut, sử dụng API đã cấu hình. Lượt chạy dùng mã commit `b53b3d5`, thư mục
+test riêng và `localized_blur`; không bật dịch vụ production hoặc cloud GPU.
+Các fallback LLM ngoài phạm vi xác nhận bị tắt trong runner của lượt test.
+
+- Toàn pipeline hoàn tất trong **124,62 giây**, gồm tách nhạc BS-RoFormer,
+  ASR hybrid, OCR, Gemini, CapCut, trộn âm, NVENC và QC.
+- Dùng 18 cue OCR sau đối chiếu với ASR; Gemini dịch đủ 18 câu.
+- CapCut Mai (`BV562_streaming`) tạo đủ 18 audio, QC không phát hiện đè câu.
+- NVENC render trong **6,05 giây**. Đầu ra 720×1280, 30 fps, H.264/AAC,
+  26,17 giây, 11.150.639 byte. Giải mã toàn bộ file không có lỗi.
+- QC tự động: **15 PASS, 0 warning, 0 failure**, policy `BLOCK`.
+- Quan sát tài nguyên: RSS cộng dồn cây tiến trình cao nhất **2.705,6 MB**
+  theo sampler mỗi giây; bộ nhớ GPU toàn hệ thống cao nhất **3.095 MiB**
+  theo mẫu mỗi ba giây. Đây không phải RAM riêng biệt hay VRAM riêng của job;
+  phép lấy mẫu có thể bỏ lỡ đỉnh ngắn.
+
+**Nghiệm thu hình ảnh vẫn chưa đạt:** ở 13,00 giây còn hở chữ nguồn hai bên
+vùng blur. QC pixel chỉ lấy mẫu tại 0,607 / 8,561 / 15,403 / 24,930 giây nên
+bỏ sót điểm này. PASS tự động không thay thế việc kiểm tra biên chuyển câu.
+Chưa xác minh lip-sync bằng nghe/xem toàn bộ; QC chỉ kiểm tra thời lượng và
+va chạm giữa các câu. Không đổi blur thành mặc định.
+
+Bằng chứng trong cùng thư mục test:
+
+- `acceptance.json`: kết quả tổng pipeline và 15 kiểm tra QC.
+- `output/localized_blur.mp4`: bản tiếng Việt có giọng CapCut và phụ đề.
+- `output/validation.json`: probe, giải mã toàn file, SHA256 và mẫu tài nguyên.
+- `output/comparison.png`: so sánh hình nguồn và thành phẩm tại 1/7/13/20 giây.
+- `output/visual-qa.json`: ghi nhận lỗi còn lại dù QC tự động PASS.
+- `workspace/acceptance_job/translated.srt`: phụ đề tiếng Việt.
+- `workspace/acceptance_job/voice_lock.json`: giọng khóa theo job.
+
+SHA256 đầu ra:
+`de70d991765e143314f6ea3ae7142cf56328c3f4bebe2356ff12c453574b74e0`.
+Sau test, các worker đã thoát; giữ nguyên downloader độc lập và trạng thái
+dịch vụ Tool V1 đang dừng.
