@@ -7,6 +7,10 @@ khung hình tại **16,167 giây**. Bản lồng tiếng mới đã qua QC tự 
 giải mã toàn file và đối chiếu hình ảnh tại hai điểm này. Đây là nghiệm thu
 video mẫu 720×1280, 30 fps; chưa chuyển `localized_blur` thành mặc định chung.
 
+Sau khi xem thành phẩm, người dùng xác nhận chất lượng đạt và yêu cầu cập nhật
+Tool V1. Đã bật `localized_blur` và `V1_VISUAL_SUB_TO_SPEECH` cho các job mới
+trên máy local; xem [cấu hình triển khai và khôi phục](DEPLOYMENT_LOCAL_STABILITY_20261116.md).
+
 ## Thay đổi
 
 - OCR vẫn lấy mẫu ban đầu mỗi 0,35 giây. Khi chữ hoặc vị trí chữ khác nhau ở
