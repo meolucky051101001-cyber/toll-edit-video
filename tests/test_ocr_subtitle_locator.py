@@ -194,6 +194,17 @@ class ChineseSubtitleLocatorTests(unittest.TestCase):
         self.assertEqual(selected.mode, "asr_match")
         self.assertIn(1, selected.selected_by_segment)
 
+    def test_boundary_first_cue_requires_two_independent_anchors(self):
+        speech = {1: "完全不一样的识别错误文本", 2: "谁敢想这个现在才一米一个呢"}
+        detections = [
+            block(1, "屏幕上的中文字幕第一句", 0.25, 0.75, 0.81, 0.84, 0.95),
+            block(2, "谁敢想这个现在才一米一个呢", 0.20, 0.80, 0.81, 0.84, 0.99),
+        ]
+        selected = select_chinese_subtitle_band(detections, speech, 2160, 3840)
+        self.assertEqual(selected.mode, "asr_match")
+        self.assertNotIn(1, selected.selected_by_segment)
+        self.assertIn(2, selected.selected_by_segment)
+
     def test_non_chinese_transcript_finds_dynamic_bottom_captions(self):
         # English ASR over burnt-in Chinese captions: no text match is possible,
         # but real speech exists so the band must be detected visually.

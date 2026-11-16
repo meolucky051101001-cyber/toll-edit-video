@@ -67,3 +67,13 @@ def test_empty_git_inventory_stays_empty(tmp_path):
 def test_source_export_without_git_remains_supported(tmp_path):
     files = source(tmp_path, "# exported source\n")
     assert pkg.iter_release_files(tmp_path) == files
+
+
+def test_cloud_release_requires_the_pinned_wheel_and_standalone_runner():
+    config = "backend/cloud/cloud_config.py"
+    assert all(pkg.should_include(name) for name in pkg.CLOUD_RELEASE_FILES)
+    assert not pkg.should_include("backend/cloud/gpu_scripts/unpinned.whl")
+    assert not pkg.should_include("backend/cloud/results/job/output_manifest.json")
+    with pytest.raises(RuntimeError, match="capcut_tts_api"):
+        pkg.verify_required_files([config], required_files=())
+    pkg.verify_required_files([config, *pkg.CLOUD_RELEASE_FILES], required_files=())

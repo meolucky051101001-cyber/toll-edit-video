@@ -1599,7 +1599,8 @@ def _apply_ocr_subtitle_band(batch, band, observation_times, all_blocks):
 
                     seg.y_pct = global_med_top
                     seg.max_y_pct = global_med_bottom
-                    if band_hits:
+                    can_auto_repair = getattr(band, 'support', 0) >= 2 or len(batch.srt_segments) > 2
+                    if can_auto_repair and band_hits:
                         sorted_hits = sorted(band_hits, key=lambda item: float(getattr(item, 'sample_time', 0.0) or 0.0))
                         hx1 = min(blk.x_pct for blk in sorted_hits)
                         hx2 = max(blk.max_x_pct for blk in sorted_hits)
@@ -1656,8 +1657,9 @@ def _apply_ocr_subtitle_band(batch, band, observation_times, all_blocks):
                         seg.in_subtitle_band = False
                         seg.is_packaging = False
                         seg.geometry_verified = False
-                        seg.ocr_mask_status = 'no_caption_evidence'
-                        logger.info(f"No centered caption evidence in subtitle band for cue #{s_key}; keeping clean ({seg.ocr_mask_status})")
+                        if getattr(seg, 'ocr_mask_status', None) != 'unresolved':
+                            seg.ocr_mask_status = 'no_caption_evidence'
+                        logger.info(f"No centered caption evidence in subtitle band for cue #{s_key}; keeping status ({seg.ocr_mask_status})")
 
         # BỔ SUNG CÂU THOẠI TỪ OCR (Nếu ASR bị nhạc to át mất câu)
         try:

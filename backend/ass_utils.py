@@ -1133,9 +1133,10 @@ def _fallback_ass_sticker(c, band_layout, times, metrics, verified, seg_is_visua
     text_cy = draw_y + max(0, (draw_h - metrics.required_text_h) // 2)
     text_cx = draw_x + (draw_w / 2.0)
 
-    draw_cmd = "{\\p1}" + _rounded_box(draw_w, draw_h, radius=12) + "{\\p0}"
-    bg_line = f"{{\\an7\\pos({draw_x:g},{draw_y})}}{draw_cmd}"
-    ass_content += f"Dialogue: 0,{start_str},{end_str},BgStyle,,0,0,0,,{bg_line}\n"
+    if not verified or not band_layout.video_has_source or seg_is_visual:
+        draw_cmd = "{\\p1}" + _rounded_box(draw_w, draw_h, radius=12) + "{\\p0}"
+        bg_line = f"{{\\an7\\pos({draw_x:g},{draw_y})}}{draw_cmd}"
+        ass_content += f"Dialogue: 0,{start_str},{end_str},BgStyle,,0,0,0,,{bg_line}\n"
 
     text_line = f"{{\\an8\\pos({text_cx:g},{text_cy})}}{metrics.formatted_text}"
     ass_content += f"Dialogue: 1,{start_str},{end_str},TextStyle,,0,0,0,,{text_line}\n"

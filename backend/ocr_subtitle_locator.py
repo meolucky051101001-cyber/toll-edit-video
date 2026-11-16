@@ -785,25 +785,24 @@ def select_chinese_subtitle_band(
     if mode == "asr_match":
         # A corrupt recognition may still locate a row precisely. Rescue short or
         # homophone-corrupted cues inside the confirmed subtitle band using neighbouring anchors.
-        text_segments = {}
-        for item in candidates:
-            if not item.composite:
-                cjk_key = _chinese_text(item.block["text"])
-                if cjk_key:
-                    text_segments.setdefault(cjk_key, set()).add(item.segment_id)
+        initial_anchors = dict(strong_by_segment)
 
         def _rescue_segment(position, segment_id):
             existing = list(strong_by_segment.get(segment_id, []))
-            previous = strong_by_segment.get(speech_ids[position - 1], []) if position > 0 else []
-            following = strong_by_segment.get(speech_ids[position + 1], []) if position + 1 < len(speech_ids) else []
-            if not existing and not previous and not following:
-                return
-            if not existing and (not previous or not following) and len(strong_by_segment) < 2:
+            # At the boundary, use the two nearest independently matched cues on the same side.
+            if not existing and position == 0:
+                neighbor_ids = speech_ids[1:3]
+            elif not existing and position == len(speech_ids) - 1:
+                neighbor_ids = speech_ids[max(0, position - 2):position]
+            else:
+                neighbor_ids = speech_ids[max(0, position - 1):position] + speech_ids[position + 1:position + 2]
+            neighbors = [initial_anchors[sid] for sid in neighbor_ids if sid in initial_anchors]
+            if not existing and len(neighbors) < 2:
                 return
             anchors = [
                 item for item in existing
                 if abs((item.block["x_pct"] + item.block["max_x_pct"]) * 0.5 - 0.5) <= 0.18
-            ] + previous + following
+            ] + [item for neighbor in neighbors for item in neighbor]
             if not anchors:
                 return
             anchor_center = median(item.center_y for item in anchors)
@@ -817,18 +816,13 @@ def select_chinese_subtitle_band(
                     continue
                 if item.block.get("sample_in_cue") is False:
                     continue
+                if not reliable(item):
+                    continue
                 cjk = _chinese_text(item.block["text"])
                 prob = float(item.block.get("prob", 0.0) or 0.0)
                 min_len = 1 if prob >= 0.90 else 2
                 if len(cjk) < min_len:
                     continue
-                if not reliable(item):
-                    if prob < 0.50:
-                        continue
-                    if _has_watermark_tokens(item.block["text"]):
-                        continue
-                    if len(text_segments.get(cjk, ())) >= 4:
-                        continue
                 w = item.block["max_x_pct"] - item.block["x_pct"]
                 h = item.block["max_y_pct"] - item.block["y_pct"]
                 cx = (item.block["x_pct"] + item.block["max_x_pct"]) * 0.5
@@ -841,11 +835,6 @@ def select_chinese_subtitle_band(
                 ):
                     observed.append(item)
             combined = existing + observed
-            if any(abs((item.block["x_pct"] + item.block["max_x_pct"]) * 0.5 - 0.5) <= 0.18 for item in combined):
-                combined = [
-                    item for item in combined
-                    if abs((item.block["x_pct"] + item.block["max_x_pct"]) * 0.5 - 0.5) <= 0.20
-                ]
             if any(item.block.get("sample_in_cue") is not False for item in combined):
                 combined = [
                     item for item in combined
@@ -856,8 +845,6 @@ def select_chinese_subtitle_band(
 
         for position, segment_id in enumerate(speech_ids):
             _rescue_segment(position, segment_id)
-        for position in range(len(speech_ids) - 1, -1, -1):
-            _rescue_segment(position, speech_ids[position])
     for segment_id in segment_texts:
         # Use only validated matches, including genuine vertical motion.
         local = strong_by_segment.get(segment_id, [])

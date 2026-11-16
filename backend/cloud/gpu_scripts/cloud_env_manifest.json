@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "python_min_version": "3.10",
+  "isolated_runtime": {
+    "python_version": "3.12.12",
+    "uv_version": "0.9.10",
+    "numpy_version": "1.26.4",
+    "torch_index_url": "https://download.pytorch.org/whl/cu121",
+    "torch_packages": {"torch": "2.5.1", "torchaudio": "2.5.1", "torchvision": "0.20.1"}
+  },
+  "requirements_file": "requirements_cloud.txt",
+  "min_free_disk_mb": 4096,
+  "pinned_packages": [
+    {"package": "torch", "version": "2.5.1", "import_name": "torch"},
+    {"package": "torchaudio", "version": "2.5.1", "import_name": "torchaudio"},
+    {"package": "torchvision", "version": "0.20.1", "import_name": "torchvision"},
+    {"package": "numpy", "version": "1.26.4", "import_name": "numpy"},
+    {"package": "scipy", "version": "1.17.1", "import_name": "scipy"},
+    {"package": "soundfile", "version": "0.14.0", "import_name": "soundfile"},
+    {"package": "pydub", "version": "0.25.1", "import_name": "pydub"},
+    {"package": "requests", "version": "2.34.2", "import_name": "requests"},
+    {"package": "tqdm", "version": "4.70.1", "import_name": "tqdm"},
+    {"package": "srt", "version": "3.5.3", "import_name": "srt"},
+    {"package": "Pillow", "version": "12.3.0", "import_name": "PIL"},
+    {"package": "opencv-python-headless", "version": "4.10.0.84", "import_name": "cv2"},
+    {"package": "edge-tts", "version": "7.3.1", "import_name": "edge_tts"},
+    {"package": "google-genai", "version": "2.23.0", "import_name": "google.genai"},
+    {"package": "yt-dlp", "version": "2026.10.26", "import_name": "yt_dlp"},
+    {"package": "demucs", "version": "4.1.0", "import_name": "demucs"},
+    {"package": "easyocr", "version": "1.7.2", "import_name": "easyocr"},
+    {"package": "openai-whisper", "version": "20240930", "import_name": "whisper"},
+    {"package": "faster-whisper", "version": "1.2.1", "import_name": "faster_whisper"},
+    {"package": "ctranslate2", "version": "4.8.4", "import_name": "ctranslate2"},
+    {"package": "onnxruntime", "version": "1.20.1", "import_name": "onnxruntime"}
+  ],
+  "wheels": [
+    {
+      "filename": "capcut_tts_api-1.0.0-py3-none-any.whl",
+      "package": "capcut-tts-api",
+      "version": "1.0.0",
+      "import_name": "capcut_tts_api",
+      "sha256": "a7b42630773a6aa44a2a076283ef315f43bd25ac1bbb193618d949163e3e2024"
+    }
+  ],
+  "required_binaries": ["ffmpeg", "ffprobe"],
+  "required_v1_modules": [
+    "ass_utils.py",
+    "subtitle_layout.py",
+    "subtitle_text.py",
+    "v1_ocr_geometry.py",
+    "ocr_subtitle_locator.py",
+    "v1_timing_solver.py",
+    "v1_speech_guard.py",
+    "mixer.py",
+    "full_pipeline.py",
+    "asr_segmentation.py",
+    "subtitle_timing.py",
+    "translation_guards.py",
+    "caption_reviewer.py",
+    "visual_caption_repair.py",
+    "setup_env.py",
+    "bootstrap_runtime.py"
+  ],
+  "models": {
+    "speech_activity": {
+      "model_id": "faster_whisper/assets/silero_vad_v6.onnx",
+      "revision": "bundled-faster-whisper-1.2.1"
+    },
+    "whisper": {
+      "model_id": "large-v3-turbo",
+      "revision": "pinned-openai-whisper-20240930"
+    },
+    "demucs": {
+      "model_id": "htdemucs",
+      "revision": "pinned-demucs-4.1.0"
+    },
+    "easyocr": {
+      "languages": ["ch_sim", "en"],
+      "revision": "pinned-easyocr-1.7.2"
+    },
+    "gemini_translation": {
+      "models": ["gemini-3-flash-preview", "gemini-3.6-flash", "gemini-3.5-flash-lite"],
+      "requires_env": "GEMINI_API_KEY"
+    },
+    "tts": {
+      "primary": "capcut_tts_api==1.0.0",
+      "fallback": null
+    }
+  },
+  "gpu_family_patterns": {
+    "T4": ["t4"],
+    "L4": ["l4"],
+    "A100": ["a100"],
+    "H100": ["h100"],
+    "G4": ["g4"],
+    "V5E1": ["v5e", "tpu"],
+    "V6E1": ["v6e", "tpu"],
+    "CPU": ["cpu"]
+  }
+}
