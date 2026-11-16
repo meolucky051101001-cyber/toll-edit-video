@@ -2965,6 +2965,13 @@ except Exception as _pde:
     logger.warning("Failed to mount phase_d_router: %s", _pde)
 
 try:
+    from cloud.cloud_routes import router as cloud_router
+    app.include_router(cloud_router)
+    logger.info("Mounted Cloud GPU Processing router successfully.")
+except Exception as _cle:
+    logger.warning("Failed to mount cloud_router: %s", _cle)
+
+try:
     from handoff_api import router as handoff_router
     app.include_router(handoff_router)
     logger.info("Mounted SubExtract handoff_router successfully.")

@@ -36,6 +36,8 @@ DEFAULT_FLAGS: Dict[str, Any] = {
     "V1_LONG_ASR_MODEL": "inherit",
     "V1_VISUAL_SUB_TO_SPEECH": False,
     "V1_QC_VISUAL_PIXEL_CHECK": True,
+    "V1_CLOUD_MODE": False,
+    "V1_CLOUD_GPU": "T4",
 }
 
 
@@ -145,6 +147,7 @@ def set_feature_flags(new_flags: Dict[str, Any], workspace_path: Optional[str | 
         "V1_SHORT_SEPARATOR": {"roformer", "demucs"},
         "V1_LONG_SEPARATOR": {"roformer", "demucs"},
         "V1_QC_POLICY": {"REPORT_ONLY", "WARN", "BLOCK"},
+        "V1_CLOUD_GPU": {"T4", "L4", "A100", "H100", "G4", "V5E1", "V6E1", "CPU"},
     }
     for key, allowed in choices.items():
         if key in updates and updates[key] not in allowed:
