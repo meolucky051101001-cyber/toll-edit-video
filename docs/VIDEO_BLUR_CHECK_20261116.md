@@ -1,5 +1,9 @@
 # Kiểm thử video thực tế sau triển khai — 16/11/2026
 
+> Kết quả mới nhất: lỗi chuyển câu đã được sửa và video mẫu chạy lại đạt QC
+> 143 khung hình. Xem [báo cáo sửa biên caption](CAPTION_BOUNDARY_FIX_20261116.md).
+> Các kết quả chưa đạt bên dưới là bằng chứng của các lượt trước khi sửa.
+
 > Cập nhật: sau xác nhận của người dùng, đã chạy đủ Gemini và CapCut. Kết quả
 > toàn pipeline ở cuối tài liệu; phần đầu ghi lại lượt test local trước đó.
 

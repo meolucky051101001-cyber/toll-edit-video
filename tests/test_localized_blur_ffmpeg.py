@@ -54,7 +54,8 @@ def test_real_filter_changes_only_active_source_rectangles(tmp_path, width, heig
         assert np.all(raw[width*height:] == 128), 'chroma must stay neutral'
 
 
-def test_many_moving_regions_render_with_bounded_filter_setup(tmp_path):
+@pytest.mark.parametrize('fps', [10, 30])
+def test_many_moving_regions_render_with_bounded_filter_setup(tmp_path, fps):
     """A real clip yielded 29 rectangles; cascaded splits stalled even frame one."""
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
@@ -65,7 +66,7 @@ def test_many_moving_regions_render_with_bounded_filter_setup(tmp_path):
     frame = luma.tobytes() + bytes([128]) * (width * height // 2)
     source = tmp_path / 'source.yuv'
     source.write_bytes(frame * 30)
-    boxes = [dict(start=i / 10, end=(i + 1) / 10,
+    boxes = [dict(start=i / fps, end=(i + 1) / fps,
                   x_pct=(i % 15) * .06, max_x_pct=(i % 15) * .06 + .04,
                   y_pct=.1 + (i // 15) * .5, max_y_pct=.25 + (i // 15) * .5)
              for i in range(30)]
@@ -74,7 +75,7 @@ def test_many_moving_regions_render_with_bounded_filter_setup(tmp_path):
     output = tmp_path / 'moving.yuv'
     result = subprocess.run([ffmpeg, '-v', 'error', '-nostdin', '-y', '-threads', '1',
         '-filter_threads', '1', '-f', 'rawvideo', '-pix_fmt', 'yuv420p',
-        '-s', f'{width}x{height}', '-r', '10', '-i', str(source),
+        '-s', f'{width}x{height}', '-r', str(fps), '-i', str(source),
         '-filter_script:v', str(script), '-frames:v', '30', '-c:v', 'rawvideo',
         '-threads', '1', '-pix_fmt', 'yuv420p', '-f', 'rawvideo', str(output)],
         capture_output=True, timeout=20)
@@ -84,7 +85,7 @@ def test_many_moving_regions_render_with_bounded_filter_setup(tmp_path):
         rendered = raw[:width * height].reshape(height, width)
         active = np.zeros((height, width), dtype=bool)
         for x, y, w, h, times in blur_regions(boxes, width, height):
-            if any(start <= i / 10 < end for start, end in times):
+            if any(start <= i / fps < end for start, end in times):
                 active[y:y+h, x:x+w] = True
         assert np.array_equal(rendered[~active], luma[~active]), i
         assert np.mean(np.abs(rendered[active].astype(float) - luma[active])) > 40, i

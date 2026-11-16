@@ -466,8 +466,8 @@ def _tracking_blocks_for_cluster(cluster, start_t, end_t, band, visual_mode):
                 y_pct, max_y_pct = default_top, default_bottom
             block = OCRBlock(
                 text=str(_ocr_field(sample, "text", "") or ""),
-                start=left,
-                end=right,
+                start=max(start_t, number("visual_interval_start", left)),
+                end=min(end_t, number("visual_interval_end", right)),
                 x_pct=x_pct,
                 max_x_pct=max_x_pct,
                 y_pct=y_pct,
@@ -627,6 +627,11 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         return [], 0.85
 
     all_blocks = []
+    observations = {}
+    fps = float(getattr(cap, "get", lambda *_: 0)(cv2.CAP_PROP_FPS) or 30.0)
+    if not math.isfinite(fps) or fps <= 0:
+        raise RuntimeError("Cannot refine captions without valid source FPS")
+    frame_count = max(1, int(math.ceil(duration * fps - 1e-6)))
     previous_frame = None
     previous_rows = None
     previous_time = None
@@ -634,6 +639,9 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
     previous_offset = 0
 
     def append_rows(rows, sample_time, scale_ratio, crop_offset, orig_frame=None):
+        frame_index = max(0, min(frame_count - 1, round(sample_time * fps)))
+        sample_time = frame_index / fps
+        frame_blocks = []
         for mapped in normalized_rows(rows, scale_ratio, crop_offset, width, height):
             bg_ass, fg_ass = _sample_box_bg_colors(
                 orig_frame, 1.0, 0, width, height,
@@ -650,6 +658,8 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             )
             block.sample_in_cue = True
             all_blocks.append(block)
+            frame_blocks.append(block)
+        observations[frame_index] = frame_blocks
 
     logger.info("Visual OCR-to-TTS: scanning %d dense timeline samples (step=0.35s)", len(times))
     for position, current_time in enumerate(times):
@@ -663,6 +673,10 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         if not ok:
             logger.warning("Could not decode visual OCR frame at %.2fs", current_time)
             continue
+        # OpenCV reports the timestamp of the frame actually returned by seek.
+        actual_time = float(getattr(cap, "get", lambda *_: 0)(cv2.CAP_PROP_POS_MSEC) or 0) / 1000
+        if actual_time > 0 or current_time == 0:
+            current_time = actual_time
 
         can_reuse = (
             previous_rows is not None
@@ -725,6 +739,47 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
     if getattr(band, "support", 0) <= 0 or getattr(band, "mode", "") == "default":
         logger.info("Visual OCR-to-TTS: no dynamic Chinese subtitle band found")
         return [], 0.85
+
+    try:
+        from .visual_caption_timing import refine_observations, observation_intervals
+    except ImportError:
+        from visual_caption_timing import refine_observations, observation_intervals
+
+    def caption_signature(blocks):
+        rows = []
+        for block in blocks:
+            if (block.max_y_pct < band.top - .035 or block.y_pct > band.bottom + .035
+                    or block.prob < .60 or _visual_chinese_count(block.text) < 2
+                    or _visual_watermark_text(block.text)):
+                continue
+            if block.max_x_pct - block.x_pct < .14 and abs((block.x_pct + block.max_x_pct) / 2 - .5) > .15:
+                continue
+            # Ignore subpixel OCR jitter; a visible caption move still refines.
+            rows.append((_visual_caption_key(block.text),
+                         round(block.x_pct * width / 8), round(block.max_x_pct * width / 8),
+                         round(block.y_pct * height / 8), round(block.max_y_pct * height / 8)))
+        return tuple(sorted(rows))
+
+    def observe_frame(index):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, index)
+        ok, frame = cap.read()
+        if not ok:
+            raise RuntimeError(f"Cannot decode caption transition frame {index}")
+        scale = min(1., 960. / max(width, 1))
+        image = cv2.resize(frame, (round(width * scale), round(height * scale)),
+                           interpolation=cv2.INTER_AREA) if scale < 1 else frame
+        recognized = _readtext_batch([image])
+        append_rows(recognized[0] if recognized else [], index / fps, scale, 0, orig_frame=frame)
+        return observations[index]
+
+    refined, extra = refine_observations(observations, frame_count, observe_frame,
+                                         caption_signature, stopped)
+    metrics["visual_boundary_frames"] = extra
+    for blocks, left, right in observation_intervals(refined, fps, duration):
+        for block in blocks:
+            block.visual_interval_start = left
+            block.visual_interval_end = right
+    all_blocks = [block for blocks in refined.values() for block in blocks]
 
     recovered = recover_missing_subtitles_from_ocr(
         all_blocks=all_blocks,
@@ -1923,8 +1978,10 @@ def _recover_missing_subtitles_visual(all_blocks, srt_segments, band, duration=N
             )
             continue
         times = [group["time"] for group in cluster]
-        start_t = max(0.0, min(times) - 0.12)
-        end_t = max(times) + 0.15
+        start_t = min(float(_ocr_field(b, "visual_interval_start", max(0., get_st(b) - .12)))
+                      for b in cluster_blocks)
+        end_t = max(float(_ocr_field(b, "visual_interval_end", get_st(b) + .15))
+                    for b in cluster_blocks)
         if duration and duration > 0:
             end_t = min(end_t, duration)
         if end_t <= start_t:

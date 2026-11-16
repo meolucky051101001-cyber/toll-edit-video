@@ -9,7 +9,7 @@ import json
 import math
 from collections import defaultdict
 
-BLUR_RENDER_VERSION = 3
+BLUR_RENDER_VERSION = 4
 ASS_BLUR_MARKER = "; ToolV1BlurData: "
 BLUR_DEFAULTS = {"sub_blur_radius": 16, "sub_blur_padding_x": 0.015,
                  "sub_blur_padding_y": 0.008}
@@ -168,7 +168,12 @@ def build_localized_blur_filter(boxes, width, height, settings=None, prefix="cap
         # crops. Half the size itself is already one pixel too large.
         luma = min(settings["sub_blur_radius"], (min(w, h) - 1) // 2)
         chroma = min(luma, max(0, (min(w, h) // 2 - 1) // 2))
-        enable = "+".join(f"gte(t,{start:.6f})*lt(t,{end:.6f})" for start, end in intervals)
+        # Rounding a 30-fps boundary such as 5/30 upward to .166667 makes
+        # the first new frame keep the old mask. Quantize both half-open
+        # boundaries downward by <1 microsecond, never into the next frame.
+        def timestamp(seconds):
+            return f"{math.floor(seconds * 1_000_000) / 1_000_000:.6f}"
+        enable = "+".join(f"gte(t,{timestamp(start)})*lt(t,{timestamp(end)})" for start, end in intervals)
         label = f"{prefix}{index}"
         output = f"[{prefix}main{index + 1}];" if index + 1 < len(regions) else ""
         parts.append(

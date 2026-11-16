@@ -273,7 +273,7 @@ class TestDot2CoverBlurDelogoAndPixelQC(unittest.TestCase):
             vf = cmd0[cmd0.index(vf_flag) + 1]
             self.assertIn("delogo=x=", vf)
             self.assertIn("format=yuv420p", vf)
-            self.assertIn("split[", vf)
+            self.assertIn("split=2[", vf)
             self.assertIn("enable='gte(t,0.500000)*lt(t,2.000000)'", vf)
 
             captured_cmds.clear()
@@ -329,6 +329,10 @@ class TestDot2CoverBlurDelogoAndPixelQC(unittest.TestCase):
             cap = MagicMock()
             cap.isOpened.return_value = True
             cap.read.return_value = (True, fake_frame)
+            import cv2
+            cap.get.side_effect = lambda prop: {cv2.CAP_PROP_FPS: 30., cv2.CAP_PROP_FRAME_COUNT: 120,
+                                                cv2.CAP_PROP_FRAME_WIDTH: 720,
+                                                cv2.CAP_PROP_FRAME_HEIGHT: 1280}.get(prop, 0)
 
             with patch("cv2.VideoCapture", return_value=cap), \
                  patch.object(ocr_utils, "_readtext_batch", return_value=[[[[[0, 0], [10, 0], [10, 10], [0, 10]], "你好世界", 0.92]]]), \
