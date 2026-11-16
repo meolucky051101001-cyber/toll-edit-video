@@ -990,24 +990,42 @@ header {
   <style id="dashboard-balanced-layout">
     .dashboard-input-panel .empty-state { padding:12px 8px; }
     .dashboard-input-panel .empty-icon { margin-bottom:6px; }
+    .dashboard-balanced > .dashboard-input-panel .folder-config-box { padding:9px 12px; }
+    .dashboard-balanced > .dashboard-input-panel .folder-path-row { margin:6px 0 8px; }
+    .dashboard-balanced > .dashboard-input-panel .dropzone { padding:9px 12px; }
+    .dashboard-balanced > .dashboard-input-panel .dropzone-desc { margin-top:2px; }
+    .dashboard-input-panel .input-folder-edit-summary { display:flex; flex-direction:column; gap:2px; margin-top:6px; padding:6px 8px; border:1px solid rgba(56,189,248,.22); border-radius:6px; background:rgba(56,189,248,.055); font-size:11px; line-height:1.4; }
+    .dashboard-input-panel .input-folder-edit-summary[data-active="true"] { border-color:rgba(52,211,153,.35); background:rgba(16,185,129,.07); }
+    .input-folder-edit-heading { display:flex; align-items:baseline; gap:6px; color:var(--text-muted); }
+    .input-folder-edit-heading strong { min-width:0; color:#dbeafe; font-family:ui-monospace,"Consolas",monospace; font-weight:600; overflow-wrap:anywhere; }
+    .input-folder-edit-detail { color:var(--text-muted); overflow-wrap:anywhere; }
+    .dashboard-input-panel .phoi-row-active { background:rgba(16,185,129,.075); }
+    .dashboard-input-panel .phoi-row-active td { border-bottom-color:rgba(52,211,153,.18); }
+    .dashboard-input-panel .phoi-order { width:54px; text-align:center; color:#a7c4d5; font-weight:700; white-space:nowrap; }
 
     .dashboard-settings-panel .v1-feature-flags-grid { grid-template-columns:repeat(3,minmax(0,1fr)) !important; }
     .dashboard-settings-panel .v1-feature-flags-grid > div { min-width:0; }
     @media(max-width:600px) { .dashboard-settings-panel .v1-feature-flags-grid { grid-template-columns:minmax(0,1fr) !important; } }
 
     /* Shared working area: paired rows, equal widths and bounded scrolling. */
-    .main-grid.dashboard-balanced { --work-row-height:480px; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); align-items:stretch; gap:16px; }
+    .main-grid.dashboard-balanced { --work-row-height:480px; --output-row-height:550px; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); align-items:stretch; gap:16px; }
     .dashboard-balanced > .panel { min-width:0; margin:0; border-radius:8px; }
     .dashboard-balanced > .dashboard-input-panel:not(.phoi-panel-maximized),
-    .dashboard-balanced > .queue-panel,
+    .dashboard-balanced > .queue-panel { height:var(--work-row-height); min-height:0; }
     .dashboard-balanced > .dashboard-output-panel:not(.output-panel-maximized),
-    .dashboard-balanced > #logPanelWrapper:not(.log-panel-maximized) { height:var(--work-row-height); min-height:0; }
+    .dashboard-balanced > #logPanelWrapper:not(.log-panel-maximized) { height:var(--output-row-height, 550px); min-height:480px; }
     .dashboard-balanced > .panel > .panel-header { flex-shrink:0; gap:8px; flex-wrap:wrap; }
     .dashboard-balanced .folder-config-box { flex-shrink:0; padding:12px 14px; }
     .dashboard-balanced .dropzone { min-height:80px; padding:12px; margin-top:9px; }
-    .dashboard-input-panel > .panel-body,
-    .dashboard-output-panel > .panel-body { flex:1 1 0; min-height:0; max-height:none !important; overflow:hidden; }
-    #phoiTableContainer, #banveTableContainer { flex:1 1 0; min-height:0; overflow:auto; scrollbar-gutter:stable; overscroll-behavior:contain; }
+    .dashboard-input-panel > .panel-body { flex:1 1 0; min-height:0; max-height:none !important; overflow:hidden; padding:8px 12px; }
+    .dashboard-output-panel > .panel-body { flex:1 1 0; min-height:0; max-height:none !important; overflow:hidden; padding:8px 12px; display:flex; flex-direction:column; }
+    .dashboard-output-panel .folder-config-box { padding:7px 12px; }
+    .dashboard-output-panel .folder-path-row { margin:4px 0 2px; }
+    .dashboard-output-panel .dashboard-pager { padding:6px 12px; font-size:11.5px; flex-shrink:0; }
+    .dashboard-output-panel .data-table th { padding:7px 9px; font-size:11px; }
+    .dashboard-output-panel .data-table td { padding:6px 9px; font-size:11.5px; line-height:1.35; }
+    #phoiTableContainer { flex:1 1 0; min-height:0; overflow:auto; scrollbar-gutter:stable; overscroll-behavior:contain; }
+    #banveTableContainer { flex:1 1 0; min-height:280px; overflow:auto; scrollbar-gutter:stable; overscroll-behavior:contain; }
     .dashboard-input-panel #phoiBulkActionBar { flex-shrink:0; flex-wrap:wrap; gap:8px; }
     .dashboard-input-panel #phoiBulkActionBar > div:last-child { flex-wrap:wrap; }
     .dashboard-input-panel .data-table thead th,
@@ -1057,13 +1075,13 @@ header {
     .dashboard-settings-panel.mixer-panel .mixer-control-group { min-width:0; margin:0 !important; }
     .dashboard-settings-panel.mixer-panel .form-select { min-width:0; min-height:36px; }
     .dashboard-settings-panel .v1-mode-grid { grid-template-columns:repeat(4,minmax(0,1fr)); }
-    .dashboard-compact .main-grid.dashboard-balanced { --work-row-height:360px; gap:12px; }
+    .dashboard-compact .main-grid.dashboard-balanced { --work-row-height:360px; --output-row-height:480px; gap:12px; }
     @media(max-width:1050px) {
       .main-grid.dashboard-balanced { grid-template-columns:minmax(0,1fr); }
       .dashboard-balanced > .dashboard-input-panel { height:400px; }
       .dashboard-balanced > .queue-panel { height:280px; }
-      .dashboard-balanced > .dashboard-output-panel { height:360px; }
-      .dashboard-balanced > #logPanelWrapper:not(.log-panel-maximized) { height:360px; }
+      .dashboard-balanced > .dashboard-output-panel { height:520px; }
+      .dashboard-balanced > #logPanelWrapper:not(.log-panel-maximized) { height:420px; }
     }
     @media(max-width:600px) {
       .dashboard-input-panel .data-table { min-width:640px; }
@@ -1690,9 +1708,9 @@ header {
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
                 Phóng to
               </button>
-              <button class="btn btn-primary" style="font-size: 11px; padding: 3px 10px;" onclick="startBatch()">
+              <button class="btn btn-primary" id="btnStartPhoi" style="font-size: 11px; padding: 3px 10px;" onclick="startBatch()">
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                Bắt đầu xử lý
+                <span id="btnStartPhoiText">Bắt đầu xử lý</span>
               </button>
             </div>
           </div>
@@ -1707,18 +1725,22 @@ header {
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
                 Đổi Thư Mục
               </button>
-            </div>
-            <div id="videoDropZone" class="dropzone">
-              <div style="display:flex; justify-content:center; margin-bottom: 4px;">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" style="color: var(--text-muted);"><path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/><path d="M12 12v9"/><path d="m16 16-4-4-4 4"/></svg>
-              </div>
-              Kéo thả video vào đây hoặc <button class="btn btn-outline" style="font-size: 11px; padding: 2px 7px; margin-left: 4px;" onclick="document.getElementById('inputVideos').click()">Chọn file</button>
-              <div class="dropzone-desc">Hỗ trợ MP4, MKV, MOV, WebM. Tối đa 4 GB/file. File gốc được giữ nguyên.</div>
               <input type="file" id="inputVideos" multiple accept=".mp4,.mkv,.mov,.avi,.webm,.flv,.m4v" hidden onchange="uploadInputVideos(this.files);this.value=''">
+              <button class="btn btn-outline" type="button" id="btnUploadVideos" style="font-size: 11px; padding: 5px 10px; color: #38bdf8; border-color: rgba(56,189,248,0.4);" onclick="document.getElementById('inputVideos').click()" title="Chọn một hoặc nhiều file video để thêm vào thư mục nguồn này">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                Thêm Video
+              </button>
             </div>
             <div id="inputFeedback" role="status" style="margin-top:6px;font-size:11.5px;color:#38bdf8"></div>
+            <div id="inputFolderEditSummary" class="input-folder-edit-summary" data-active="false" role="status" aria-live="polite">
+              <div class="input-folder-edit-heading">
+                <span id="inputFolderEditLabel">Thư mục sẽ edit:</span>
+                <strong id="inputFolderEditFolder">Đang đọc...</strong>
+              </div>
+              <div id="inputFolderEditDetail" class="input-folder-edit-detail">Đang đọc danh sách video…</div>
+            </div>
           </div>
-          <div class="panel-body" style="max-height: 280px;">
+          <div class="panel-body">
             <span id="phoiFilterCount" hidden aria-hidden="true"></span>
                         <!-- BULK ACTIONS BAR (PHASE A3) -->
             <div id="phoiBulkActionBar" style="display:none; align-items:center; justify-content:space-between; background:rgba(14,165,233,0.12); border:1px solid #0284c7; border-radius:6px; padding:6px 12px; margin-bottom:8px; font-size:12px;">
@@ -1738,6 +1760,7 @@ header {
                 <thead>
                   <tr>
                     <th style="width:36px; text-align:center;"><input type="checkbox" id="phoiSelectAll" aria-label="Chọn tất cả" onchange="toggleSelectAllPhoi(this.checked)"></th>
+                    <th style="width:54px;text-align:center;" title="STT danh sách theo tên A–Z">Thứ tự</th>
                     <th>Tên Video</th>
                     <th>Dung lượng</th>
                     <th>Trạng thái</th>
@@ -1803,6 +1826,20 @@ header {
                 Phóng to
               </button>
             </div>
+          </div>
+          <div class="folder-config-box" style="padding: 9px 12px; border-bottom: 1px solid var(--border); background: rgba(16, 185, 129, 0.03);">
+            <label for="outputFolderPath" style="font-size: 11.5px; font-weight: 500; color: #cbd5e1; display: flex; align-items: center; gap: 6px;">
+              Thư mục lưu video thành phẩm
+            </label>
+            <div class="folder-path-row" style="margin: 6px 0 2px;">
+              <input id="outputFolderPath" class="folder-path-input" readonly placeholder="Chọn thư mục xuất...">
+              <button class="btn btn-outline" type="button" id="btnCopyOutputFolder" title="Sao chép đường dẫn thư mục thành phẩm">Sao chép</button>
+              <button class="btn btn-outline" id="chooseOutputFolder" style="font-size: 11px; padding: 5px 10px;" onclick="chooseOutputFolder()">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+                Đổi Thư Mục Xuất
+              </button>
+            </div>
+            <div id="outputFeedback" role="status" style="margin-top:4px;font-size:11.5px;color:#10b981"></div>
           </div>
           <div class="panel-body">
             <div class="table-quick-tools" role="search" aria-label="Tìm video thành phẩm">
@@ -2208,6 +2245,46 @@ header {
                 <input type="checkbox" id="flagVisualSubToSpeech" onchange="toggleFeatureFlag('V1_VISUAL_SUB_TO_SPEECH', this.checked)" style="cursor: pointer; width: 16px; height: 16px; accent-color: #a855f7;">
               </div>
 
+              <div style="padding: 8px 12px; background: rgba(255, 255, 255, 0.02); border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.06); display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                  <div style="font-weight: 600; color: #34d399;">🔍 Hậu kiểm Pixel QC sau render</div>
+                  <div style="font-size: 10.5px; color: var(--text-muted);">Quét lại mẫu video xuất xưởng bằng PP-OCRv6, cảnh báo WARN nếu sót chữ gốc</div>
+                </div>
+                <input type="checkbox" id="flagQcVisualPixelCheck" onchange="toggleFeatureFlag('V1_QC_VISUAL_PIXEL_CHECK', this.checked)" checked style="cursor: pointer; width: 16px; height: 16px; accent-color: #34d399;">
+              </div>
+
+              <div style="padding: 8px 12px; background: rgba(255, 255, 255, 0.02); border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.06); display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+                <div>
+                  <div style="font-weight: 600; color: #e2e8f0;">🎨 Kiểu che chữ gốc</div>
+                  <div style="font-size: 10.5px; color: var(--text-muted);">Cách che phụ đề tiếng Trung trên khung hình</div>
+                </div>
+                <select id="selectSubCoverStyle" onchange="saveVisualCoverSettings()" style="background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; font-size: 11px;">
+                  <option value="solid_box">Hộp đặc (Mặc định)</option>
+                  <option value="adaptive_box">Hộp thích ứng màu nền</option>
+                  <option value="localized_blur">Làm mờ vùng phụ đề gốc</option>
+                  <option value="frosted_blur">Băng mờ toàn ngang</option>
+                </select>
+              </div>
+
+              <div style="padding: 8px 12px; background: rgba(255, 255, 255, 0.02); border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.06); display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+                <div>
+                  <div style="font-weight: 600; color: #e2e8f0;">🧹 Xóa Watermark</div>
+                  <div style="font-size: 10.5px; color: var(--text-muted);">Lọc logo tĩnh Douyin/TikTok trên khung hình</div>
+                </div>
+                <select id="selectDelogoMode" onchange="saveVisualCoverSettings()" style="background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; font-size: 11px;">
+                  <option value="off">Tắt (Mặc định)</option>
+                  <option value="smart">Thông minh theo OCR tĩnh</option>
+                  <option value="corners">4 góc cố định (Cũ)</option>
+                </select>
+              </div>
+
+              <div style="grid-column: 1 / -1; padding: 8px 12px; color: var(--text-main);">
+                <label>Mức làm mờ <input id="subBlurRadius" type="number" min="2" max="32" value="16" onchange="saveVisualCoverSettings()" style="width: 55px;"></label>
+                <label style="margin-left: 10px;">Nới ngang (%) <input id="subBlurPaddingX" type="number" min="0" max="5" step="0.1" value="1.5" onchange="saveVisualCoverSettings()" style="width: 55px;"></label>
+                <label style="margin-left: 10px;">Nới dọc (%) <input id="subBlurPaddingY" type="number" min="0" max="5" step="0.1" value="0.8" onchange="saveVisualCoverSettings()" style="width: 55px;"></label>
+                <div style="font-size: 10.5px; color: var(--text-muted); margin-top: 5px;">Áp dụng cho video mới. Video đã có hộp trắng cần xuất lại từ nguồn; đổi cài đặt không thay video cũ.</div>
+              </div>
+
               <!-- TÙY CHỌN MÔ HÌNH ASR: Hybrid (Whisper + SenseVoice) vs Faster-Whisper vs SenseVoice-Small -->
               <div style="grid-column: 1 / -1; padding: 12px 14px; background: rgba(255, 255, 255, 0.02); border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.08); display: flex; flex-direction: column; gap: 8px;">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
@@ -2287,8 +2364,29 @@ header {
         </div>
 
         <details id="glossaryPanel" style="margin-top:10px; border:1px solid var(--border); border-radius:8px; background:var(--bg-card, #111116);">
-          <summary style="cursor:pointer; font-weight:600; font-size:12.5px; padding:10px 16px; color:#f1f5f9;">📖 Từ điển thuật ngữ &amp; Gợi ý thông minh <span class="badge badge-gpu" id="glossarySuggestBadge" style="display:none; margin-left:6px; font-size:10px;">0 gợi ý</span></summary>
+          <summary style="cursor:pointer; font-weight:600; font-size:12.5px; padding:10px 16px; color:#f1f5f9;">📖 Từ điển thuật ngữ theo Thư mục / Kênh &amp; Gợi ý thông minh <span class="badge badge-gpu" id="glossarySuggestBadge" style="display:none; margin-left:6px; font-size:10px;">0 gợi ý</span></summary>
           <div style="padding:12px 16px 16px;">
+            <div style="display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:10px; padding:8px 10px; border:1px solid var(--border); border-radius:6px; background:rgba(255,255,255,0.02);">
+              <label style="font-size:11.5px; color:#a1a1aa; font-weight:600;">Phạm vi (Scope):</label>
+              <select id="glossaryScopeSelect" onchange="onGlossaryScopeChange()" style="background:#09090b; border:1px solid #3f3f46; border-radius:4px; padding:4px 8px; font-size:11.5px; color:#f1f5f9; min-width:210px;">
+                <option value="global">🌐 Toàn cục (áp dụng mọi thư mục)</option>
+              </select>
+              <select id="glossaryPresetSelect" style="background:#09090b; border:1px solid #3f3f46; border-radius:4px; padding:4px 8px; font-size:11.5px; color:#e4e4e7;">
+                <option value="">-- Nạp bộ mẫu nhanh --</option>
+              </select>
+              <button type="button" class="btn btn-outline" style="font-size:11px; padding:4px 9px;" onclick="applyGlossaryPresetToScope()">Nạp mẫu</button>
+              <span id="glossaryScopeHint" style="font-size:11px; color:#38bdf8; margin-left:auto;"></span>
+            </div>
+
+            <div style="display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-bottom:10px;">
+              <input type="text" id="glossaryTermSrc" placeholder="Từ nguồn (Hán/Anh/tên riêng)..." style="flex:1; min-width:150px; background:#09090b; border:1px solid #3f3f46; border-radius:4px; padding:5px 8px; font-size:11.5px; color:#fff;">
+              <span style="color:#71717a;">→</span>
+              <input type="text" id="glossaryTermDst" placeholder="Dịch cố định thành tiếng Việt..." style="flex:1; min-width:160px; background:#09090b; border:1px solid #3f3f46; border-radius:4px; padding:5px 8px; font-size:11.5px; color:#fff;">
+              <button type="button" class="btn btn-outline" style="font-size:11px; padding:5px 10px; color:#34d399; border-color:rgba(52,211,153,0.4);" onclick="addGlossaryTermToScope()">+ Lưu vào phạm vi</button>
+            </div>
+
+            <div id="glossaryTermsList" style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px;"></div>
+
             <div id="glossarySummaryRow" style="font-size:11.5px; color:var(--text-muted); margin-bottom:8px;"></div>
             <div id="glossarySuggestList"></div>
           </div>
@@ -2583,9 +2681,15 @@ header {
               <span>Chỉ hiện câu đã sửa</span>
             </label>
             <span style="color: var(--border);">|</span>
+            <label style="display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; cursor: pointer; color: #fbbf24;" title="Lọc các câu AI nhận diện giọng chưa chắc chắn (unknown)">
+              <input type="checkbox" id="filterReviewOnlyCheckbox" onchange="toggleFilterReviewOnly(this.checked)">
+              <span>⚠️ Cần rà giọng (<span id="segmentReviewCountNum">0</span>)</span>
+            </label>
+            <span style="color: var(--border);">|</span>
             <span id="segmentCountInfo" style="font-size: 11.5px; color: #38bdf8; font-weight: 500;">0 câu</span>
             <span style="color: var(--border);">|</span>
             <span id="segmentDetectedVoiceBadge" style="font-size: 11.5px; color: #a78bfa; background: rgba(167, 139, 250, 0.12); padding: 2px 8px; border-radius: 4px; border: 1px solid rgba(167, 139, 250, 0.3);">🎙️ Giọng video: Đang nhận diện...</span>
+            <span id="segmentVoiceReviewBadge" style="display:none; font-size: 11.5px; color: #fbbf24; background: rgba(245, 158, 11, 0.14); padding: 2px 8px; border-radius: 4px; border: 1px solid rgba(245, 158, 11, 0.4);">⚠️ Có câu chưa rõ giới tính</span>
           </div>
           <div style="display: flex; align-items: center; gap: 8px;">
             <button type="button" class="btn btn-outline" style="font-size: 11px; padding: 4px 10px; color: #a78bfa; border-color: rgba(167, 139, 250, 0.4); display: inline-flex; align-items: center; gap: 4px;" onclick="syncAllSegmentsToDetectedVoice()" title="Đổi tất cả các câu về giọng gốc của video">
@@ -2622,7 +2726,7 @@ header {
                 <th style="min-width: 380px;">Bản dịch (cho phép sửa)</th>
                 <th style="width: 175px;">Giọng / Tốc độ</th>
                 <th style="width: 125px; text-align: center;">Khớp Audio</th>
-                <th style="width: 60px; text-align: center;">Nghe</th>
+                <th style="width: 108px; text-align: center;" title="Phát bản lồng tiếng (▶) hoặc nghe thoại gốc (🎧)">Nghe</th>
               </tr>
             </thead>
             <tbody id="segmentEditorTableBody">
@@ -2938,6 +3042,7 @@ header {
     let displayedVideoKey = '';
     const DASHBOARD_TOOL = 'V1';
     let dashboardActive = false, dashboardOutputPath = '', dashboardInputPath = '';
+    let dashboardPhoiTotalCount = 0;
     const dashboardLists = Object.fromEntries(['phoi', 'banve'].map(scope => [scope, {
       offset: 0, limit: 100, pending: false, dirty: false, queryKey: '', fingerprint: '', timer: null, data: null
     }]));
@@ -2995,6 +3100,8 @@ header {
     function setDashboardOutputPath(path) {
       if (!path) return;
       dashboardOutputPath = String(path);
+      const outInput = document.getElementById('outputFolderPath');
+      if (outInput) { outInput.value = dashboardOutputPath; outInput.dataset.saved = dashboardOutputPath; }
       const footer = document.getElementById('dashboardOutputDir');
       const dualFooter = document.getElementById('dualDashboardOutputDir');
       const title = document.getElementById('dashboardOutputTitle');
@@ -3004,6 +3111,69 @@ header {
       const summary = document.getElementById('summaryOutputDir');
       if (summary) summary.textContent = dashboardOutputPath;
     }
+    function isDashboardEditActive(state = lastStatusData) {
+      if (!state || !state.active) return false;
+      return !['error', 'stopped', 'interrupted', 'completed', 'recorded', 'idle'].includes(String(state.status || '').toLowerCase());
+    }
+
+    function getActiveInputEditEntries(state = lastStatusData) {
+      if (!isDashboardEditActive(state)) return [];
+      const workers = state.workers && typeof state.workers === 'object' ? state.workers : {};
+      const entries = Object.entries(workers)
+        .filter(([, worker]) => worker && worker.active && worker.video_name)
+        .map(([workerId, worker]) => ({
+          worker: String(worker.worker_id || workerId || ''),
+          name: String(worker.video_name),
+          index: Number(worker.queue_index) || Number(state.queue_index) || 0,
+          total: Number(worker.queue_total) || Number(state.queue_total) || dashboardPhoiTotalCount || 0
+        }));
+      if (entries.length) return entries;
+      if (state.video_name) return [{
+        worker: '',
+        name: String(state.video_name),
+        index: Number(state.queue_index) || 0,
+        total: Number(state.queue_total) || dashboardPhoiTotalCount || 0
+      }];
+      return [];
+    }
+
+    function updateInputFolderEditSummary() {
+      const pathInput = document.getElementById('inputFolderPath');
+      const summary = document.getElementById('inputFolderEditSummary');
+      const label = document.getElementById('inputFolderEditLabel');
+      const folder = document.getElementById('inputFolderEditFolder');
+      const detail = document.getElementById('inputFolderEditDetail');
+      if (!pathInput || !summary || !label || !folder || !detail) return;
+
+      const state = lastStatusData || {};
+      const active = isDashboardEditActive(state);
+      const selectedPath = String(pathInput.dataset.saved || dashboardInputPath || pathInput.value || '').trim();
+      const activePath = String(state.input_dir || '').trim();
+      const displayPath = active && activePath ? activePath : selectedPath;
+      summary.dataset.active = active ? 'true' : 'false';
+      label.textContent = active ? 'Thư mục đang edit:' : 'Thư mục sẽ edit:';
+      folder.textContent = displayPath || 'Chưa chọn thư mục nguồn';
+      folder.title = displayPath || '';
+
+      const activeEntries = getActiveInputEditEntries(state);
+      if (active && activeEntries.length) {
+        detail.textContent = activeEntries.map(entry =>
+          (entry.worker ? 'Luồng ' + entry.worker + ' · ' : '') + 'video ' + (entry.index || '?') + ' / ' + (entry.total || '?') + ' · ' + entry.name
+        ).join('  |  ');
+      } else if (active) {
+        detail.textContent = 'Đang chuẩn bị hàng đợi · ' + (Number(state.queue_total) || dashboardPhoiTotalCount || 0) + ' video';
+      } else if (dashboardPhoiTotalCount) {
+        detail.textContent = dashboardPhoiTotalCount + ' video · STT trong bảng theo tên A–Z.';
+      } else {
+        detail.textContent = 'Chưa có video trong thư mục đã chọn.';
+      }
+
+      const listPath = String(dashboardInputPath || selectedPath).trim();
+      if (active && activePath && listPath && activePath.toLowerCase() !== listPath.toLowerCase()) {
+        detail.textContent += ' · Danh sách dưới đây: ' + listPath;
+      }
+    }
+
     function initializeDashboardLists() {
       for (const scope of ['phoi', 'banve']) {
         const tbody = document.getElementById(scope + 'TableBody');
@@ -3585,8 +3755,31 @@ header {
       const isPausing = pauseState === 'pausing';
       const isPaused = !terminal && !['idle', 'completed', 'recorded'].includes(status) && (isTrulyPaused || isPausing);
       dashboardActive = Boolean(state.active) && !terminal;
+      if (state.input_dir) {
+        const pathInput = document.getElementById('inputFolderPath');
+        if (pathInput && (!pathInput.value || !pathInput.dataset.saved)) {
+          pathInput.value = state.input_dir;
+          pathInput.dataset.saved = state.input_dir;
+        }
+      }
+      updateInputFolderEditSummary();
       setDashboardOutputPath(state.output_dir);
       updateStepModelsUI(state);
+
+      const btnStartPhoi = document.getElementById('btnStartPhoi');
+      const btnStartPhoiText = document.getElementById('btnStartPhoiText');
+      if (btnStartPhoi) {
+        btnStartPhoi.disabled = Boolean(state.active);
+        if (state.active) {
+          btnStartPhoi.style.opacity = '0.6';
+          btnStartPhoi.style.cursor = 'not-allowed';
+          if (btnStartPhoiText) btnStartPhoiText.textContent = 'Đang xử lý...';
+        } else {
+          btnStartPhoi.style.opacity = '1';
+          btnStartPhoi.style.cursor = 'pointer';
+          if (btnStartPhoiText) btnStartPhoiText.textContent = 'Bắt đầu xử lý';
+        }
+      }
 
       const videoDone = !failed && !interrupted && state.video_status === 'completed';
       const isRunning = dashboardActive;
@@ -3711,6 +3904,53 @@ let inputUploading=false;
       const feedback=document.getElementById('inputFeedback');
       try{const r=await fetch('/api/input-folder',{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Input':'1'},body:JSON.stringify({path:document.getElementById('inputFolderPath').value})});const d=await r.json();if(!r.ok)throw Error(d.detail||'Không đổi được thư mục');feedback.textContent='Đang dùng: '+d.path;document.getElementById('inputFolderPath').value=d.path;await fetchPhoi();}catch(e){feedback.textContent=e.message;}
     }
+
+    async function chooseOutputFolder(){
+      const button = document.getElementById('chooseOutputFolder');
+      const feedback = document.getElementById('outputFeedback');
+      if (button) button.disabled = true;
+      if (feedback) feedback.textContent = 'Hãy chọn thư mục trong cửa sổ Windows vừa mở…';
+      try {
+        const r = await fetch('/api/choose-output-folder', {method: 'POST', headers: {'X-Dashboard-Input': '1'}});
+        const d = await r.json();
+        if (!r.ok) throw Error(d.detail || 'Không mở được hộp chọn thư mục');
+        if (!d.path) {
+          if (feedback) feedback.textContent = 'Đã hủy chọn. Giữ nguyên thư mục hiện tại.';
+          return;
+        }
+        const outInput = document.getElementById('outputFolderPath');
+        if (outInput) outInput.value = d.path;
+        await changeOutputFolder(d.path);
+      } catch(e) {
+        if (feedback) feedback.textContent = e.message;
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
+
+    async function changeOutputFolder(newPath){
+      const feedback = document.getElementById('outputFeedback');
+      const pathVal = newPath || document.getElementById('outputFolderPath')?.value;
+      if (!pathVal) return;
+      try {
+        const r = await fetch('/api/output-folder', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json', 'X-Dashboard-Input': '1'},
+          body: JSON.stringify({path: pathVal})
+        });
+        const d = await r.json();
+        if (!r.ok) throw Error(d.detail || 'Không đổi được thư mục xuất');
+        if (feedback) feedback.textContent = 'Đang dùng: ' + d.path;
+        const outInput = document.getElementById('outputFolderPath');
+        if (outInput) outInput.value = d.path;
+        setDashboardOutputPath(d.path);
+        await fetchBanve();
+        showToast('Đã đổi thư mục xuất thành: ' + d.path, 'success');
+      } catch(e) {
+        if (feedback) feedback.textContent = e.message;
+        showToast(e.message, 'error');
+      }
+    }
     let dashboardUploadTasks = [], dashboardUploadCurrent = null;
     function renderUploadTasks() {
       let panel = document.getElementById('dashboardUploadQueue');
@@ -3824,18 +4064,22 @@ let inputUploading=false;
     }
 
     document.addEventListener('DOMContentLoaded', () => {
-      const zone = document.getElementById('videoDropZone');
-      ['dragenter', 'dragover'].forEach(ev => {
-        zone.addEventListener(ev, e => {
-          e.preventDefault();
-          zone.classList.add('dragover');
+      const dropZones = [document.getElementById('videoDropZone'), document.getElementById('phoiTableContainer')].filter(Boolean);
+      dropZones.forEach(zone => {
+        ['dragenter', 'dragover'].forEach(ev => {
+          zone.addEventListener(ev, e => {
+            e.preventDefault();
+            zone.classList.add('dragover');
+          });
         });
-      });
-      ['dragleave', 'drop'].forEach(ev => {
-        zone.addEventListener(ev, e => {
-          e.preventDefault();
-          zone.classList.remove('dragover');
-          if (ev === 'drop') uploadInputVideos(e.dataTransfer.files);
+        ['dragleave', 'drop'].forEach(ev => {
+          zone.addEventListener(ev, e => {
+            e.preventDefault();
+            zone.classList.remove('dragover');
+            if (ev === 'drop' && e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+              uploadInputVideos(e.dataTransfer.files);
+            }
+          });
         });
       });
     });
@@ -3850,43 +4094,54 @@ let inputUploading=false;
         if (dashboardInputPath && dashboardInputPath !== data.path) { selectedPhoiFiles.clear(); dashboardLists.phoi.fingerprint = ''; dashboardLists.phoi.offset = 0; dashboardLists.phoi.dirty = true; updatePhoiBulkBar(); }
         dashboardInputPath = data.path;
         const pathInput=document.getElementById('inputFolderPath'); if(!pathInput.dataset.saved || pathInput.value===pathInput.dataset.saved)pathInput.value=data.path;pathInput.dataset.saved=data.path;
+        dashboardPhoiTotalCount = Number(data.total_count) || 0;
         document.getElementById('phoiBadgeCount').textContent = `${data.total_count} video (${data.total_size_mb} MB)`;
+        updateInputFolderEditSummary();
         const tbody = document.getElementById('phoiTableBody');
         
         if (!data.files || data.files.length === 0) {
           dashboardLists.phoi.fingerprint = '';
           updatePhoiBulkBar();
-          tbody.innerHTML = `<tr><td colspan="5" class="empty-state"><div class="empty-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2Z"/></svg></div>Chưa có video trong thư mục đã chọn.</td></tr>`;
+          tbody.innerHTML = `<tr><td colspan="6" class="empty-state"><div class="empty-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2Z"/></svg></div>Chưa có video trong thư mục đã chọn.</td></tr>`;
           return;
         }
 
-        const fingerprint = JSON.stringify([data.path, data.files, Array.from(selectedPhoiFiles), videoDraftsCache]);
+        const activeEditEntries = getActiveInputEditEntries();
+        const activeEditByName = new Map(activeEditEntries.map(entry => [entry.name, entry]));
+        const editFingerprint = activeEditEntries.map(entry => [entry.name, entry.index, entry.total, entry.worker]);
+        const fingerprint = JSON.stringify([data.path, data.files, Array.from(selectedPhoiFiles), videoDraftsCache, editFingerprint]);
         if (dashboardLists.phoi.fingerprint === fingerprint) return;
         dashboardLists.phoi.fingerprint = fingerprint;
-        tbody.innerHTML = data.files.map(f => {
-          let badgeClass = 'status-waiting';
-          if (f.status === 'running') badgeClass = 'status-running';
+        tbody.innerHTML = data.files.map((f, index) => {
+          const activeEdit = activeEditByName.get(String(f.name));
+          const isCurrentlyEditing = Boolean(activeEdit) || f.status === 'running';
+          let badgeClass = isCurrentlyEditing ? 'status-running' : 'status-waiting';
           if (f.status === 'completed') badgeClass = 'status-completed';
           if (['error','invalid','unverified'].includes(f.status)) badgeClass = 'status-' + f.status;
           const safeName = escapeHtml(String(f.name));
           const encodedName = encodeURIComponent(String(f.name)).replace(/'/g, '%27');
+          const sequenceNumber = Number(f.sequence) || index + 1;
+          const rowStatusLabel = activeEdit
+            ? 'Đang edit · video ' + (activeEdit.index || '?') + ' / ' + (activeEdit.total || '?') + (activeEdit.worker ? ' · luồng ' + activeEdit.worker : '')
+            : f.status_label;
 
           const isChecked = selectedPhoiFiles.has(String(f.name));
           const draftObj = videoDraftsCache[String(f.name)];
           const hasCustomDraft = draftObj && ((draftObj.overrides && Object.keys(draftObj.overrides).length > 0) || draftObj.preset_id);
           const isHumorous = draftObj && draftObj.overrides && draftObj.overrides.script_mode === 'humorous';
           return `
-            <tr>
+            <tr class="${isCurrentlyEditing ? 'phoi-row-active' : ''}">
               <td style="text-align:center;">
                 <input type="checkbox" class="phoi-row-select" data-filename="${safeName}" onchange="toggleSelectPhoi(decodeURIComponent('${encodedName}'), this.checked)" ${isChecked ? 'checked' : ''} aria-label="Chọn video ${safeName}">
               </td>
+              <td class="phoi-order" title="STT trong danh sách theo tên A–Z">${sequenceNumber}</td>
               <td style="font-weight: 500; color: #fff; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${safeName}">
                 <span style="display:inline-flex;align-items:center;gap:6px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="15" x="2" y="5" rx="2"/><polyline points="10 9 14 12 10 15"/></svg>${safeName}</span>
                 ${hasCustomDraft ? '<span class="badge" style="background:#0284c7; color:#fff; font-size:9.5px; margin-left:6px; padding:1px 5px; border-radius:3px;">Cấu hình riêng</span>' : ''}
                 ${isHumorous ? '<span class="badge" style="background:#e11d48; color:#fff; font-size:9.5px; margin-left:4px; padding:1px 5px; border-radius:3px;">🤣 Hài hước</span>' : ''}
               </td>
               <td style="font-variant-numeric: tabular-nums;">${f.size_mb} MB</td>
-              <td><span class="status-badge ${badgeClass}">${escapeHtml(f.status_label)}</span></td>
+              <td><span class="status-badge ${badgeClass}">${escapeHtml(rowStatusLabel)}</span></td>
               <td>
                 <button class="btn btn-outline" style="padding: 2px 7px; font-size: 11px; display:inline-flex; align-items:center; gap:4px;" onclick="previewVideo('phoi', '${encodedName}')"><svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Xem</button>
                 <button class="btn btn-outline" style="padding: 2px 7px; font-size: 11px; display:inline-flex; align-items:center; gap:4px; margin-left: 4px;" onclick="openVideoConfigModal('${encodedName}')" title="Cấu hình riêng cho video này">⚙️ Cấu hình</button>
@@ -4484,8 +4739,33 @@ let inputUploading=false;
     }
 
     async function startBatch() {
-      if(inputUploading){alert('Chờ tải video lên hoàn tất.');return;}
-      if (!confirm('Bắt đầu xử lý video trong thư mục: '+document.getElementById('inputFolderPath').dataset.saved+'?')) return;
+      if (inputUploading) {
+        showToast('Vui lòng chờ tải video lên hoàn tất.', 'warning');
+        return;
+      }
+      if (lastStatusData && lastStatusData.active) {
+        showToast('Hệ thống đang xử lý video khác, vui lòng đợi!', 'warning');
+        return;
+      }
+      const pathInput = document.getElementById('inputFolderPath');
+      const targetFolder = (pathInput?.dataset?.saved || dashboardInputPath || pathInput?.value || '').trim();
+      if (!targetFolder) {
+        showToast('Chưa có thư mục video nguồn. Hãy chọn thư mục trước khi bắt đầu.', 'error');
+        return;
+      }
+      const count = dashboardPhoiTotalCount || 0;
+      const countStr = count > 0 ? ` (${count} video)` : '';
+      if (!confirm(`Bắt đầu xử lý toàn bộ video trong thư mục:\n${targetFolder}${countStr}?\n\nNhấn OK để bắt đầu.`)) {
+        return;
+      }
+
+      const btnStartPhoi = document.getElementById('btnStartPhoi');
+      const btnStartPhoiText = document.getElementById('btnStartPhoiText');
+      if (btnStartPhoi) {
+        btnStartPhoi.disabled = true;
+        if (btnStartPhoiText) btnStartPhoiText.textContent = 'Đang khởi chạy...';
+      }
+
       try {
         const modeToSend = (typeof currentV1Mode !== 'undefined' ? currentV1Mode : 'AUTO');
         const res = await fetch('/api/run-batch', {
@@ -4494,13 +4774,22 @@ let inputUploading=false;
             'Content-Type': 'application/json',
             'X-Video-Mode': modeToSend
           },
-          body: JSON.stringify({ video_mode: modeToSend })
+          body: JSON.stringify({ video_mode: modeToSend, input_dir: targetFolder })
         });
         const data = await res.json();
-        alert(data.message);
-        refreshAll();
+        if (res.ok && (data.status === 'started' || res.status === 202)) {
+          showToast(data.message || 'Đã bắt đầu xử lý batch!', 'success');
+          await fetchStatus();
+          await fetchPhoi();
+        } else {
+          showToast(data.message || 'Không thể bắt đầu: ' + (data.detail || res.statusText), 'error');
+          if (btnStartPhoi) btnStartPhoi.disabled = false;
+          if (btnStartPhoiText) btnStartPhoiText.textContent = 'Bắt đầu xử lý';
+        }
       } catch (err) {
-        alert('Lỗi kích hoạt batch: ' + err.message);
+        showToast('Lỗi kích hoạt batch: ' + err.message, 'error');
+        if (btnStartPhoi) btnStartPhoi.disabled = false;
+        if (btnStartPhoiText) btnStartPhoiText.textContent = 'Bắt đầu xử lý';
       }
     }
 
@@ -4640,6 +4929,7 @@ let inputUploading=false;
     let isSubmittingBatch = false;
 
     function renderQueueTable(items) {
+      window.queueDeleteIds = (items || []).map(item => item.job_id || null);
       const tbody = document.getElementById('queueTableBody');
       if (!tbody) return;
       if (!items || items.length === 0) {
@@ -4729,11 +5019,21 @@ let inputUploading=false;
         const res = await fetch('/api/queue/delete', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ index: index })
+          body: JSON.stringify({ index: index, job_id: (window.queueDeleteIds || [])[index] })
         });
         const data = await res.json();
-        if (res.ok && data.status === 'success') {
-          showToast(data.message || 'Đã xóa video khỏi hàng chờ!', 'success');
+        if (res.ok && data.status === 'pending') {
+          showToast(data.message, 'info');
+          let state = 'pending';
+          for (let attempt = 0; attempt < 8 && state === 'pending'; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+            const ack = await fetch('/api/queue/operations/' + data.operation_id);
+            if (!ack.ok) break;
+            state = (await ack.json()).state;
+          }
+          if (state === 'applied' || state === 'already_absent') showToast('Video đã được loại khỏi hàng chờ.', 'success');
+          else if (state === 'too_late') showToast('Video đã bắt đầu xử lý; yêu cầu xóa không được áp dụng.', 'error');
+          else showToast('Yêu cầu đang chờ bot xác nhận.', 'info');
           if (Array.isArray(data.items)) {
             renderQueueTable(data.items);
             document.getElementById('queueBadge').textContent = data.items.length + ' video';
@@ -5467,9 +5767,56 @@ let inputUploading=false;
 
           const qcSelect = document.getElementById('selectQcPolicy');
           if (qcSelect && flags.V1_QC_POLICY) qcSelect.value = flags.V1_QC_POLICY;
+
+          const qcPixelEl = document.getElementById('flagQcVisualPixelCheck');
+          if (qcPixelEl) qcPixelEl.checked = flags.V1_QC_VISUAL_PIXEL_CHECK !== false;
         }
       } catch (e) {
         console.warn('Lỗi đọc feature flags:', e);
+      }
+      await loadVisualCoverSettings();
+    }
+
+    async function loadVisualCoverSettings() {
+      try {
+        const res = await fetch('/api/canvas-settings', {cache: 'no-store'});
+        if (!res.ok) return;
+        const cfg = await res.json();
+        const coverEl = document.getElementById('selectSubCoverStyle');
+        const delogoEl = document.getElementById('selectDelogoMode');
+        if (coverEl && cfg.sub_cover_style) coverEl.value = cfg.sub_cover_style;
+        if (delogoEl && cfg.delogo_mode) delogoEl.value = cfg.delogo_mode;
+        document.getElementById('subBlurRadius').value = cfg.sub_blur_radius ?? 16;
+        document.getElementById('subBlurPaddingX').value = (cfg.sub_blur_padding_x ?? 0.015) * 100;
+        document.getElementById('subBlurPaddingY').value = (cfg.sub_blur_padding_y ?? 0.008) * 100;
+      } catch (e) {
+        console.warn('Lỗi đọc cấu hình che chữ / delogo:', e);
+      }
+    }
+
+    async function saveVisualCoverSettings() {
+      const coverEl = document.getElementById('selectSubCoverStyle');
+      const delogoEl = document.getElementById('selectDelogoMode');
+      const payload = {};
+      if (coverEl) payload.sub_cover_style = coverEl.value;
+      if (delogoEl) payload.delogo_mode = delogoEl.value;
+      payload.sub_blur_radius = Number(document.getElementById('subBlurRadius').value);
+      payload.sub_blur_padding_x = Number(document.getElementById('subBlurPaddingX').value) / 100;
+      payload.sub_blur_padding_y = Number(document.getElementById('subBlurPaddingY').value) / 100;
+      try {
+        const res = await fetch('/api/canvas-settings', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.status === 'error') {
+          throw new Error(data.detail || data.message || ('HTTP ' + res.status));
+        }
+        showToast('Đã lưu cấu hình che chữ & xóa watermark', 'success');
+      } catch (e) {
+        showToast('Lỗi lưu cấu hình che chữ: ' + e.message, 'error');
+        await loadVisualCoverSettings();
       }
     }
 
@@ -5675,7 +6022,36 @@ let inputUploading=false;
       }
     }
 
+    async function copyOutputFolderPath() {
+      const pathInput = document.getElementById('outputFolderPath');
+      const pathValue = pathInput && pathInput.value ? pathInput.value.trim() : '';
+      if (!pathValue) {
+        showToast('Chưa có đường dẫn thư mục thành phẩm.', 'info');
+        return;
+      }
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(pathValue);
+        } else {
+          const helper = document.createElement('textarea');
+          helper.value = pathValue;
+          helper.setAttribute('readonly', '');
+          helper.style.position = 'fixed';
+          helper.style.opacity = '0';
+          document.body.appendChild(helper);
+          helper.select();
+          const copied = document.execCommand('copy');
+          helper.remove();
+          if (!copied) throw new Error('Không thể sao chép trong trình duyệt này.');
+        }
+        showToast('Đã sao chép đường dẫn thư mục thành phẩm.', 'success');
+      } catch (error) {
+        showToast(error.message || 'Không sao chép được đường dẫn.', 'error');
+      }
+    }
+
     document.getElementById('btnCopyInputFolder')?.addEventListener('click', copyInputFolderPath);
+    document.getElementById('btnCopyOutputFolder')?.addEventListener('click', copyOutputFolderPath);
     initializeDashboardQuickTools();
     initializeCompactMode();
 
@@ -7011,6 +7387,7 @@ let inputUploading=false;
     let currentSegmentJobId = null;
     let currentSegmentData = null; // { job_id, revision, segments: [] }
     let activePlayingSegmentId = null;
+    let activePlayingKind = 'dub'; // 'dub' | 'orig'
 
     function formatSegmentTime(sec) {
       if (sec === undefined || sec === null || isNaN(sec)) return '00:00';
@@ -7048,6 +7425,10 @@ let inputUploading=false;
       const modal = document.getElementById('segmentEditorModal');
       const badge = document.getElementById('segmentVideoNameBadge');
       const voiceBadge = document.getElementById('segmentDetectedVoiceBadge');
+      const reviewBadge = document.getElementById('segmentVoiceReviewBadge');
+      const filterReviewCb = document.getElementById('filterReviewOnlyCheckbox');
+      if (filterReviewCb) filterReviewCb.checked = false;
+      if (reviewBadge) reviewBadge.style.display = 'none';
       const status = document.getElementById('segmentEditorStatus');
       const tbody = document.getElementById('segmentEditorTableBody');
       const countInfo = document.getElementById('segmentCountInfo');
@@ -7081,6 +7462,17 @@ let inputUploading=false;
         if (voiceBadge) {
           voiceBadge.textContent = `🎙️ Giọng video: ${detVoiceLbl}`;
           voiceBadge.title = `Giọng video gốc: ${detVoiceLbl} (${detVoiceId})`;
+        }
+        if (reviewBadge) {
+          const unres = Number(currentSegmentData.unresolved_count || 0);
+          const reqRev = Boolean(currentSegmentData.requires_voice_review || unres > 0);
+          if (reqRev) {
+            reviewBadge.style.display = 'inline-block';
+            reviewBadge.textContent = unres > 0 ? `⚠️ ${unres} câu cần rà giọng` : '⚠️ Có câu chưa rõ giới tính';
+            reviewBadge.title = 'Nhấn vào ô lọc "Cần rà giọng" và bấm nút 🎧 Gốc để nghe đối chiếu người nói';
+          } else {
+            reviewBadge.style.display = 'none';
+          }
         }
         // Ensure detected voice is in SEGMENT_VOICES list
         if (!SEGMENT_VOICES.some(v => v.id === detVoiceId)) {
@@ -7117,6 +7509,7 @@ let inputUploading=false;
       const revBadge = document.getElementById('segmentRevisionBadge');
       const countInfo = document.getElementById('segmentCountInfo');
       const filterModified = document.getElementById('filterModifiedOnlyCheckbox')?.checked || false;
+      const filterReview = document.getElementById('filterReviewOnlyCheckbox')?.checked || false;
 
       if (revBadge) {
         revBadge.textContent = `Bản rev ${currentSegmentData.revision || 0}`;
@@ -7125,16 +7518,21 @@ let inputUploading=false;
 
       const segments = currentSegmentData.segments;
       const detectedVoiceId = currentSegmentData.detected_voice_id || 'capcut-BV562_streaming';
+      const isDualVoice = Boolean(currentSegmentData.dual_voice);
       let modifiedCount = 0;
       let selectedCount = 0;
+      let reviewCount = 0;
 
       let html = '';
       segments.forEach((seg, idx) => {
         const segId = seg.segment_id || seg.id || `seg_${idx+1}`;
         const isModified = Boolean(seg.is_modified || seg.status === 'modified' || seg.status === 'regenerated');
+        const needsReview = Boolean(seg.needs_voice_review);
         if (isModified) modifiedCount++;
         if (seg.is_selected) selectedCount++;
+        if (needsReview) reviewCount++;
         if (filterModified && !isModified) return;
+        if (filterReview && !needsReview) return;
 
         const durVal = typeof seg.duration === 'number' ? seg.duration : (typeof seg.duration_seconds === 'number' ? seg.duration_seconds : 0);
         const durText = `${durVal.toFixed(2)}s`;
@@ -7150,19 +7548,30 @@ let inputUploading=false;
           }
         }
 
-        const isPlaying = activePlayingSegmentId === segId;
-        const playBtnText = isPlaying ? '⏹' : '▶';
-        const playBtnColor = isPlaying ? '#ef4444' : '#38bdf8';
+        const isPlayingDub = activePlayingSegmentId === segId && activePlayingKind === 'dub';
+        const isPlayingOrig = activePlayingSegmentId === segId && activePlayingKind === 'orig';
+        const playBtnText = isPlayingDub ? '⏹' : '▶';
+        const playBtnColor = isPlayingDub ? '#ef4444' : '#38bdf8';
+        const origBtnText = isPlayingOrig ? '⏹' : '🎧';
+        const origBtnColor = isPlayingOrig ? '#ef4444' : '#fbbf24';
         const currentVoice = seg.voice_id || detectedVoiceId;
         const extraOption = !SEGMENT_VOICES.some(v => v.id === currentVoice) ? `<option value="${currentVoice}" selected>${escapeHtml(currentVoice)}</option>` : '';
         const voiceOptions = SEGMENT_VOICES.map(v => `<option value="${v.id}" ${currentVoice === v.id ? 'selected' : ''}>${escapeHtml(v.name)}</option>`).join('');
 
+        let genderPillHtml = '';
+        if (needsReview) {
+          genderPillHtml = `<div style="margin-top:4px;"><span style="display:inline-block; background:rgba(245,158,11,0.18); color:#fbbf24; border:1px solid rgba(245,158,11,0.45); border-radius:4px; padding:1px 5px; font-size:9.5px; font-weight:600; white-space:nowrap;" title="Chưa rõ giới tính người nói (${escapeHtml(seg.voice_reason || 'unknown')}) — bấm 🎧 để nghe gốc rồi chọn lại giọng">⚠️ Rà giọng</span></div>`;
+        } else if (isDualVoice && (seg.detected_gender === 'male' || seg.detected_gender === 'female')) {
+          const isMale = seg.detected_gender === 'male';
+          genderPillHtml = `<div style="margin-top:4px;"><span style="display:inline-block; background:${isMale ? 'rgba(56,189,248,0.12)' : 'rgba(244,114,182,0.12)'}; color:${isMale ? '#7dd3fc' : '#f9a8d4'}; border:1px solid ${isMale ? 'rgba(56,189,248,0.3)' : 'rgba(244,114,182,0.3)'}; border-radius:4px; padding:1px 5px; font-size:9.5px; white-space:nowrap;">${isMale ? '👨 Nam' : '👩 Nữ'}</span></div>`;
+        }
+
         html += `
-          <tr class="segment-row ${isModified ? 'segment-modified' : ''}" id="seg-row-${segId}">
+          <tr class="segment-row ${isModified ? 'segment-modified' : ''}" id="seg-row-${segId}" style="${needsReview ? 'background: rgba(245, 158, 11, 0.05);' : ''}">
             <td style="text-align: center;">
               <input type="checkbox" class="seg-checkbox" data-seg-id="${segId}" ${seg.is_selected ? 'checked' : ''} onchange="onSegmentSelectChange('${segId}', this.checked)">
             </td>
-            <td style="text-align: center; color: #a1a1aa; font-weight: 500;">#${seg.index || (idx + 1)}</td>
+            <td style="text-align: center; color: #a1a1aa; font-weight: 500;">#${seg.index || (idx + 1)}${genderPillHtml}</td>
             <td>
               <div class="segment-time-badge" title="${startStr} -> ${endStr}">
                 <span>${startStr}</span> → <span>${endStr}</span>
@@ -7192,9 +7601,14 @@ let inputUploading=false;
               <div id="seg-fit-badge-${segId}">${fitBadgeHtml}</div>
             </td>
             <td style="text-align: center;">
-              <button type="button" class="btn btn-outline" id="seg-play-btn-${segId}" style="padding: 4px 9px; font-size: 12px; color: ${playBtnColor};" onclick="togglePlaySegmentAudio('${segId}')" title="Nghe thử audio câu này">
-                ${playBtnText}
-              </button>
+              <div style="display:inline-flex; gap:4px; align-items:center; justify-content:center;">
+                <button type="button" class="btn btn-outline" id="seg-play-btn-${segId}" style="padding: 4px 8px; font-size: 12px; color: ${playBtnColor};" onclick="togglePlaySegmentAudio('${segId}')" title="Nghe thử bản lồng tiếng tiếng Việt">
+                  ${playBtnText}
+                </button>
+                <button type="button" class="btn btn-outline" id="seg-orig-play-btn-${segId}" style="padding: 4px 7px; font-size: 12px; color: ${origBtnColor}; border-color: rgba(245, 158, 11, 0.35);" onclick="togglePlayOriginalSegmentAudio('${segId}')" title="Nghe lại giọng gốc từ video (vocals.wav)">
+                  ${origBtnText}
+                </button>
+              </div>
             </td>
           </tr>
         `;
@@ -7204,6 +7618,9 @@ let inputUploading=false;
         html = '<tr><td colspan="8" style="text-align:center; padding:20px; color:#71717a;">Không có câu nào phù hợp với bộ lọc.</td></tr>';
       }
       tbody.innerHTML = html;
+
+      const revCountEl = document.getElementById('segmentReviewCountNum');
+      if (revCountEl) revCountEl.textContent = String(reviewCount);
 
       if (countInfo) {
         countInfo.textContent = `${segments.length} câu | ${modifiedCount} đã sửa | ${selectedCount} đã chọn`;
@@ -7226,6 +7643,10 @@ let inputUploading=false;
     }
 
     function toggleFilterModifiedOnly(checked) {
+      renderSegmentEditorTable();
+    }
+
+    function toggleFilterReviewOnly(checked) {
       renderSegmentEditorTable();
     }
 
@@ -7292,11 +7713,11 @@ let inputUploading=false;
       }
     }
 
-    async function togglePlaySegmentAudio(segId) {
+    async function _startSegmentAudioPlayback(segId, kind, url, notFoundMsg) {
       const audio = document.getElementById('segmentAudioPlayer');
       if (!audio) return;
 
-      if (activePlayingSegmentId === segId) {
+      if (activePlayingSegmentId === segId && activePlayingKind === kind) {
         stopSegmentAudio();
         return;
       }
@@ -7304,24 +7725,20 @@ let inputUploading=false;
       // Dừng audio cũ trước và dọn sạch toàn bộ listener
       stopSegmentAudio();
       activePlayingSegmentId = segId;
-      updatePlayButtonState(segId, true);
+      activePlayingKind = kind;
+      updatePlayButtonState(segId, true, kind);
 
-      const seg = currentSegmentData?.segments?.find(s => String(s.segment_id || s.id) === String(segId));
-      const url = seg?.audio_url || `/api/jobs/${encodeURIComponent(currentSegmentJobId)}/segments/${segId}/audio?t=${Date.now()}`;
-
-      // Gắn sự kiện kết thúc
       audio.onended = () => {
         stopSegmentAudio();
       };
 
-      // Xử lý lỗi an toàn: Gỡ bỏ handler ngay lập tức để không bao giờ bị đệ quy khi dừng
       audio.onerror = (e) => {
-        if (activePlayingSegmentId !== segId) return;
-        console.warn('Audio not available for segment', segId, e);
+        if (activePlayingSegmentId !== segId || activePlayingKind !== kind) return;
+        console.warn('Audio not available for segment', segId, kind, e);
         audio.onended = null;
         audio.onerror = null;
         stopSegmentAudio();
-        showToast('Chưa có file âm thanh cho câu này hoặc đã bị xóa.', 'warning');
+        showToast(notFoundMsg, 'warning');
       };
 
       try {
@@ -7336,6 +7753,28 @@ let inputUploading=false;
         audio.onerror = null;
         stopSegmentAudio();
       }
+    }
+
+    async function togglePlaySegmentAudio(segId) {
+      const seg = currentSegmentData?.segments?.find(s => String(s.segment_id || s.id) === String(segId));
+      const url = seg?.audio_url || `/api/jobs/${encodeURIComponent(currentSegmentJobId)}/segments/${segId}/audio?t=${Date.now()}`;
+      return _startSegmentAudioPlayback(
+        segId,
+        'dub',
+        url,
+        'Chưa có file âm thanh lồng tiếng cho câu này hoặc đã bị xóa.',
+      );
+    }
+
+    async function togglePlayOriginalSegmentAudio(segId) {
+      const seg = currentSegmentData?.segments?.find(s => String(s.segment_id || s.id) === String(segId));
+      const url = seg?.original_audio_url || `/api/jobs/${encodeURIComponent(currentSegmentJobId)}/segments/${segId}/original-audio`;
+      return _startSegmentAudioPlayback(
+        segId,
+        'orig',
+        url,
+        'Không tìm thấy file thoại gốc (vocals.wav / original.wav) của video này.',
+      );
     }
 
     function stopSegmentAudio() {
@@ -7356,16 +7795,23 @@ let inputUploading=false;
         } catch (_) {}
       }
       if (activePlayingSegmentId !== null) {
-        updatePlayButtonState(activePlayingSegmentId, false);
+        updatePlayButtonState(activePlayingSegmentId, false, activePlayingKind);
         activePlayingSegmentId = null;
       }
     }
 
-    function updatePlayButtonState(segId, isPlaying) {
-      const btn = document.getElementById(`seg-play-btn-${segId}`);
-      if (btn) {
-        btn.textContent = isPlaying ? '⏹' : '▶';
-        btn.style.color = isPlaying ? '#ef4444' : '#38bdf8';
+    function updatePlayButtonState(segId, isPlaying, kind = 'dub') {
+      const dubBtn = document.getElementById(`seg-play-btn-${segId}`);
+      if (dubBtn) {
+        const activeDub = isPlaying && kind === 'dub';
+        dubBtn.textContent = activeDub ? '⏹' : '▶';
+        dubBtn.style.color = activeDub ? '#ef4444' : '#38bdf8';
+      }
+      const origBtn = document.getElementById(`seg-orig-play-btn-${segId}`);
+      if (origBtn) {
+        const activeOrig = isPlaying && kind === 'orig';
+        origBtn.textContent = activeOrig ? '⏹' : '🎧';
+        origBtn.style.color = activeOrig ? '#ef4444' : '#fbbf24';
       }
     }
 
@@ -7772,16 +8218,21 @@ let inputUploading=false;
     function renderScheduleChip(d) {
       const chip = document.getElementById('scheduleChip');
       if (!chip) return;
-      if (!d || !d.active) { chip.style.display = 'none'; return; }
+      if (!d || !d.active) {
+        if (d && d.state && d.state !== 'fired') {
+          chip.style.display = 'flex';
+          chip.textContent = d.state === 'expired' ? 'Lịch đã quá hạn — hãy đặt lại.' : 'Lịch cần kiểm tra trước khi chạy.';
+        } else chip.style.display = 'none';
+        return;
+      }
       const hhmm = d.time || '02:00';
       const parts = hhmm.split(':').map(Number);
       const now = new Date();
-      const target = new Date(now); target.setHours(parts[0] || 0, parts[1] || 0, 0, 0);
-      if (target <= now) target.setDate(target.getDate() + 1);
+      const target = new Date(d.run_at * 1000);
       const mins = Math.max(0, Math.round((target - now) / 60000));
       const wait = mins >= 60 ? Math.floor(mins / 60) + 'h' + String(mins % 60).padStart(2, '0') : mins + ' phút';
       chip.style.display = 'flex';
-      chip.innerHTML = `<span>🌙 Đã lên lịch xử lý hàng đợi lúc <strong>${escapeHtml(hhmm)}</strong> (còn ~${wait})</span>
+      chip.innerHTML = `<span>🌙 Đã lên lịch xử lý hàng đợi lúc <strong>${escapeHtml(target.toLocaleString())}</strong> — một lần (còn ~${wait})</span>
         <button type="button" class="btn btn-outline" style="font-size:10.5px; padding:2px 8px; color:#f87171; border-color:rgba(239,68,68,0.3);" onclick="cancelNightBatch()">Hủy</button>`;
     }
 
@@ -7844,7 +8295,12 @@ let inputUploading=false;
         el.textContent = '🟢 QC đạt';
         el.style.color = '#34d399';
       }
-      el.title = `Báo cáo kiểm định: ${overall} · pass ${passes} / warn ${warns} / fail ${fails}`;
+      const alertMsgs = (Array.isArray(report.checks) ? report.checks : [])
+        .filter(c => c && (c.status === 'FAIL' || c.status === 'WARN'))
+        .map(c => c.message)
+        .filter(Boolean);
+      const baseTitle = `Báo cáo kiểm định: ${overall} · pass ${passes} / warn ${warns} / fail ${fails}`;
+      el.title = alertMsgs.length ? `${baseTitle}\n• ${alertMsgs.slice(0, 4).join('\n• ')}` : baseTitle;
       el.style.cursor = 'help';
     }
 
@@ -7881,19 +8337,158 @@ let inputUploading=false;
       await Promise.all(Array.from({length: Math.min(6, pending.length)}, qcWorker));
     }
 
-    // ===== F7: GỢI Ý GLOSSARY TỪ CÁC LẦN SỬA TAY =====
+    // ===== F7: GỢI Ý GLOSSARY TỪ CÁC LẦN SỬA TAY & TỪ ĐIỂN THEO SCOPE =====
     let lastGlossarySuggestions = [];
+    let currentGlossaryScope = 'global';
+    let lastGlossaryMeta = { active_folder_scope: null, scopes: {}, presets: {}, entries: {} };
+
+    function _formatScopeLabel(scopeName) {
+      if (!scopeName || scopeName === 'global') return '🌐 Toàn cục (mọi thư mục)';
+      if (scopeName.startsWith('folder:')) return `📁 Thư mục: ${scopeName.slice(7)}`;
+      if (scopeName.startsWith('domain:')) return `🏷️ Chủ đề: ${scopeName.slice(7)}`;
+      return scopeName;
+    }
 
     async function fetchGlossaryUI(force) {
       const panel = document.getElementById('glossaryPanel');
       if (!panel) return;
       if (!force && !panel.open) return;
       try {
-        const res = await fetch('/api/glossary/suggestions', {cache:'no-store', signal: AbortSignal.timeout(8000)});
-        if (!res.ok) return;
-        const data = await res.json();
-        renderGlossarySuggestions(data.items || []);
+        const [sugRes, dictRes] = await Promise.all([
+          fetch('/api/glossary/suggestions', {cache:'no-store', signal: AbortSignal.timeout(8000)}),
+          fetch(`/api/v1/glossary?scope=${encodeURIComponent(currentGlossaryScope)}`, {cache:'no-store', signal: AbortSignal.timeout(8000)}),
+        ]);
+        if (dictRes.ok) {
+          const dictData = await dictRes.json();
+          lastGlossaryMeta = dictData || lastGlossaryMeta;
+          renderGlossaryScopeToolbar(dictData);
+          renderGlossaryTermsList(dictData.entries || {}, dictData.scope || currentGlossaryScope);
+        }
+        if (sugRes.ok) {
+          const data = await sugRes.json();
+          renderGlossarySuggestions(data.items || []);
+        }
       } catch (e) { /* gợi ý là bổ trợ */ }
+    }
+
+    function renderGlossaryScopeToolbar(dictData) {
+      const sel = document.getElementById('glossaryScopeSelect');
+      const presetSel = document.getElementById('glossaryPresetSelect');
+      const hint = document.getElementById('glossaryScopeHint');
+      if (sel) {
+        const activeFolderScope = dictData.active_folder_scope;
+        const knownScopes = dictData.scopes || {};
+        const optList = [
+          { val: 'global', label: '🌐 Toàn cục (mọi thư mục)' },
+        ];
+        if (activeFolderScope) {
+          optList.push({
+            val: activeFolderScope,
+            label: `📁 Thư mục đang chọn (${activeFolderScope.replace(/^folder:/, '')})`,
+          });
+        }
+        const builtinDomains = ['domain:craft', 'domain:tech_pc', 'domain:food_life', 'domain:review', 'domain:drama'];
+        builtinDomains.forEach(d => {
+          optList.push({ val: d, label: _formatScopeLabel(d) });
+        });
+        Object.keys(knownScopes).forEach(s => {
+          if (!optList.some(o => o.val === s)) {
+            optList.push({ val: s, label: _formatScopeLabel(s) });
+          }
+        });
+        if (!optList.some(o => o.val === currentGlossaryScope)) {
+          optList.push({ val: currentGlossaryScope, label: _formatScopeLabel(currentGlossaryScope) });
+        }
+        sel.innerHTML = optList.map(o => {
+          const cnt = o.val === 'global' ? null : Object.keys(knownScopes[o.val] || {}).length;
+          const cntSuffix = cnt ? ` (${cnt})` : '';
+          return `<option value="${escapeHtml(o.val)}" ${o.val === currentGlossaryScope ? 'selected' : ''}>${escapeHtml(o.label + cntSuffix)}</option>`;
+        }).join('');
+      }
+      if (presetSel && presetSel.options.length <= 1 && dictData.presets) {
+        Object.keys(dictData.presets).forEach(pKey => {
+          const opt = document.createElement('option');
+          opt.value = pKey;
+          opt.textContent = pKey;
+          presetSel.appendChild(opt);
+        });
+      }
+      if (hint) {
+        const cnt = Object.keys(dictData.entries || {}).length;
+        hint.textContent = `${_formatScopeLabel(currentGlossaryScope)}: ${cnt} thuật ngữ`;
+      }
+    }
+
+    function renderGlossaryTermsList(entries, scopeName) {
+      const box = document.getElementById('glossaryTermsList');
+      if (!box) return;
+      const keys = Object.keys(entries || {});
+      if (!keys.length) {
+        box.innerHTML = `<div style="font-size:11px; color:#71717a; padding:2px 0;">Chưa có thuật ngữ nào trong "${escapeHtml(_formatScopeLabel(scopeName))}". Thêm bên trên hoặc nạp preset.</div>`;
+        return;
+      }
+      box.innerHTML = keys.map(k => `
+        <span style="display:inline-flex; align-items:center; gap:6px; padding:3px 8px; border-radius:999px; border:1px solid #3f3f46; background:#18181b; font-size:11px; color:#e4e4e7;">
+          <span style="color:#93c5fd;">${escapeHtml(k)}</span>
+          <span style="color:#71717a;">→</span>
+          <span style="color:#6ee7b7; font-weight:600;">${escapeHtml(entries[k])}</span>
+          <button type="button" style="background:none; border:none; color:#f87171; cursor:pointer; font-size:11px; padding:0 2px;" title="Xóa thuật ngữ này" onclick="deleteGlossaryTerm('${encodeURIComponent(k)}')">✕</button>
+        </span>
+      `).join('');
+    }
+
+    function onGlossaryScopeChange() {
+      const sel = document.getElementById('glossaryScopeSelect');
+      currentGlossaryScope = (sel && sel.value) || 'global';
+      fetchGlossaryUI(true);
+    }
+
+    async function addGlossaryTermToScope() {
+      const srcEl = document.getElementById('glossaryTermSrc');
+      const dstEl = document.getElementById('glossaryTermDst');
+      const src = (srcEl?.value || '').trim();
+      const dst = (dstEl?.value || '').trim();
+      if (!src || !dst) {
+        showToast('Nhập cả từ nguồn và nghĩa tiếng Việt trước khi lưu.', 'warning');
+        return;
+      }
+      try {
+        const res = await fetch('/api/v1/glossary', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ scope: currentGlossaryScope, merge: true, entries: { [src]: dst } })
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        if (srcEl) srcEl.value = '';
+        if (dstEl) dstEl.value = '';
+        showToast(`Đã lưu "${src}" → "${dst}" vào ${_formatScopeLabel(currentGlossaryScope)}.`, 'success');
+        fetchGlossaryUI(true);
+      } catch (e) { showToast('Lỗi lưu từ điển: ' + e.message, 'error'); }
+    }
+
+    async function deleteGlossaryTerm(encodedKey) {
+      const key = decodeURIComponent(encodedKey);
+      try {
+        const res = await fetch('/api/v1/glossary', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ scope: currentGlossaryScope, merge: true, delete_keys: [key] })
+        });
+        if (res.ok) fetchGlossaryUI(true);
+      } catch (e) { showToast('Lỗi xóa thuật ngữ: ' + e.message, 'error'); }
+    }
+
+    async function applyGlossaryPresetToScope() {
+      const preset = document.getElementById('glossaryPresetSelect')?.value;
+      if (!preset) { showToast('Chọn một bộ mẫu trước khi nạp.', 'info'); return; }
+      try {
+        const res = await fetch('/api/v1/glossary', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ scope: currentGlossaryScope, preset, merge: true })
+        });
+        if (res.ok) {
+          showToast(`Đã nạp bộ "${preset}" vào ${_formatScopeLabel(currentGlossaryScope)}.`, 'success');
+          fetchGlossaryUI(true);
+        }
+      } catch (e) { showToast('Lỗi nạp bộ mẫu: ' + e.message, 'error'); }
     }
 
     function renderGlossarySuggestions(items) {
@@ -7907,36 +8502,47 @@ let inputUploading=false;
       if (!list) return;
       lastGlossarySuggestions = items;
       if (!items.length) {
-        list.innerHTML = '<div style="color:var(--text-muted); font-size:11.5px; padding:8px 0;">Chưa có gợi ý. Hệ thống học từ các lần bạn sửa câu trong Segment Editor — một cách diễn đạt bị sửa giống nhau ≥ 3 lần sẽ xuất hiện ở đây để thêm vào từ điển một chạm.</div>';
+        list.innerHTML = '<div style="color:var(--text-muted); font-size:11.5px; padding:4px 0;">Chưa có gợi ý. Một cụm từ được bạn sửa lặp ≥ 3 lần trong Sửa câu sẽ hiện ở đây để lưu nhanh theo Thư mục hoặc Toàn cục.</div>';
         if (row) row.textContent = '';
         return;
       }
-      if (row) row.textContent = 'Các cặp bị sửa lặp lại nhiều lần — bấm "Thêm" để Glossary ép dùng thống nhất từ batch sau:';
-      list.innerHTML = items.map((x, i) => `
+      if (row) row.textContent = 'Các cặp bị sửa lặp lại nhiều lần — chọn lưu theo Thư mục hoặc Toàn cục:';
+      const activeFolder = lastGlossaryMeta?.active_folder_scope;
+      list.innerHTML = items.map((x, i) => {
+        const itemScope = x.scope || 'global';
+        const scopePill = `<span style="font-size:10px; padding:1px 6px; border-radius:4px; border:1px solid #3f3f46; color:#93c5fd; margin-left:6px;">${escapeHtml(_formatScopeLabel(itemScope))}</span>`;
+        const folderTarget = itemScope !== 'global' ? itemScope : (activeFolder || null);
+        const folderBtn = folderTarget
+          ? `<button type="button" class="btn btn-outline" style="font-size:10.5px; padding:3px 8px; color:#38bdf8; border-color:rgba(56,189,248,0.35);" onclick="acceptGlossarySuggestion(${i}, '${escapeHtml(folderTarget)}')" title="Lưu riêng cho ${escapeHtml(_formatScopeLabel(folderTarget))}">📁 Lưu Thư mục</button>`
+          : '';
+        return `
         <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:7px 10px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; background:rgba(255,255,255,0.02);">
           <div style="font-size:12px; color:#e4e4e7; word-break:break-word; min-width:0;">
             <span style="color:#f87171; text-decoration:line-through;">${escapeHtml(x.before || '')}</span>
             <span style="margin:0 6px;">→</span>
             <span style="color:#34d399; font-weight:600;">${escapeHtml(x.after || '')}</span>
             <span style="color:#71717a; font-size:10.5px; margin-left:8px; white-space:nowrap;">lặp ${x.count} lần</span>
+            ${scopePill}
           </div>
           <div style="display:flex; gap:6px; flex-shrink:0;">
-            <button type="button" class="btn btn-outline" style="font-size:10.5px; padding:3px 8px; color:#34d399; border-color:rgba(52,211,153,0.3);" onclick="acceptGlossarySuggestion(${i})">➕ Thêm</button>
+            ${folderBtn}
+            <button type="button" class="btn btn-outline" style="font-size:10.5px; padding:3px 8px; color:#34d399; border-color:rgba(52,211,153,0.3);" onclick="acceptGlossarySuggestion(${i}, 'global')">🌐 Toàn cục</button>
             <button type="button" class="btn btn-outline" style="font-size:10.5px; padding:3px 8px; color:#71717a;" onclick="dismissGlossarySuggestion(${i})">✕ Bỏ qua</button>
           </div>
-        </div>`).join('');
+        </div>`;
+      }).join('');
     }
 
-    async function acceptGlossarySuggestion(idx) {
+    async function acceptGlossarySuggestion(idx, targetScope = 'global') {
       const x = lastGlossarySuggestions[idx];
       if (!x) return;
       try {
         const res = await fetch('/api/glossary/suggestions/accept', {
           method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({before: x.before, after: x.after})
+          body: JSON.stringify({before: x.before, after: x.after, scope: x.scope, target_scope: targetScope})
         });
         if (res.ok) {
-          showToast(`Đã thêm "${x.before}" → "${x.after}" vào Custom Glossary.`, 'success');
+          showToast(`Đã thêm "${x.before}" → "${x.after}" vào ${_formatScopeLabel(targetScope)}.`, 'success');
           fetchGlossaryUI(true);
         } else showToast('Không thêm được vào từ điển.', 'error');
       } catch (e) { showToast('Lỗi kết nối: ' + e.message, 'error'); }
@@ -7948,7 +8554,7 @@ let inputUploading=false;
       try {
         await fetch('/api/glossary/suggestions/dismiss', {
           method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({before: x.before, after: x.after})
+          body: JSON.stringify({before: x.before, after: x.after, scope: x.scope})
         });
         fetchGlossaryUI(true);
       } catch (e) { /* bỏ qua im lặng */ }

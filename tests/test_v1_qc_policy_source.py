@@ -10,6 +10,19 @@ from backend.v1_video_router import VideoMetadata
 
 
 class QCPolicySourceTests(unittest.TestCase):
+    def test_pixel_check_toggle_persists_and_preserves_other_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIs(get_feature_flags(tmp)["V1_QC_VISUAL_PIXEL_CHECK"], True)
+            set_feature_flags({"V1_QC_POLICY": "WARN"}, tmp)
+            for enabled in (False, True):
+                set_feature_flags({"V1_QC_VISUAL_PIXEL_CHECK": enabled}, tmp)
+                saved = get_feature_flags(tmp)
+                self.assertIs(saved["V1_QC_VISUAL_PIXEL_CHECK"], enabled)
+                self.assertEqual(saved["V1_QC_POLICY"], "WARN")
+            with self.assertRaises(ValueError):
+                set_feature_flags({"V1_QC_VISUAL_PIXEL_CHECK": "false"}, tmp)
+            self.assertIs(get_feature_flags(tmp)["V1_QC_VISUAL_PIXEL_CHECK"], True)
+
     def test_default_is_block_and_persisted_setting_wins(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(get_feature_flags(tmp)["V1_QC_POLICY"], "BLOCK")

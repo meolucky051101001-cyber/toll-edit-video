@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from config.paths import repo_root
+from .v1_dual_voice_analysis import ANALYSIS_VERSION
 
 logger = logging.getLogger("v1_auto_voice")
 
@@ -678,6 +679,7 @@ def get_locked_voice(
     expected_dual_voice: Optional[bool] = None,
     expected_job_id: Optional[str] = None,
     expected_config_hash: Optional[str] = None,
+    expected_cue_hash: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Kiem tra va doc voice_lock.json neu da ton tai trong thu muc job va hop le."""
     lock_file = Path(out_dir) / VOICE_LOCK_FILENAME
@@ -709,6 +711,15 @@ def get_locked_voice(
             if expected_dual_voice is not None and bool(data.get("dual_voice", False)) != expected_dual_voice:
                 logger.info("Chế độ Dual Voice đổi từ %s sang %s; bỏ qua snapshot cũ.", data.get("dual_voice", False), expected_dual_voice)
                 return None
+
+            if expected_cue_hash:
+                saved_hash = data.get("cue_hash")
+                if saved_hash and saved_hash != expected_cue_hash:
+                    return None
+                # Preserve frozen legacy jobs on resume; a fresh selection uses
+                # the new evidence policy and records the cue fingerprint.
+                if not saved_hash and not expected_job_id:
+                    return None
 
             if data.get("voice_source") == "vieneu":
                 logger.info("Voice source 'vieneu' không khả dụng trong Tool V1; bỏ qua snapshot cũ để chọn lại giọng hợp lệ.")
@@ -762,6 +773,14 @@ def decide_video_voice(
         "manual_voice": auto_cfg.get("manual_voice"),
         "dialogue_mode": dialogue_mode_requested,
     }
+    cue_hash = None
+    if is_dual and actual_mode != "manual":
+        snapshot_cfg["analysis_version"] = ANALYSIS_VERSION
+        cues = [(_get_index(seg, pos), _get_start_sec(seg), _get_end_sec(seg), _get_content(seg))
+                for pos, seg in enumerate(srt_segments, 1)]
+        if len({cue[0] for cue in cues}) != len(cues):
+            raise ValueError("Duplicate subtitle cue IDs; cannot route voices safely")
+        cue_hash = hashlib.sha256(json.dumps(cues, ensure_ascii=False).encode("utf-8")).hexdigest()
     if visual_sub_to_speech:
         snapshot_cfg["visual_sub_to_speech"] = True
     config_hash = hashlib.sha256(json.dumps(
@@ -785,6 +804,7 @@ def decide_video_voice(
             expected_dual_voice=is_dual if actual_mode != "manual" else False,
             expected_job_id=job_id,
             expected_config_hash=config_hash,
+            expected_cue_hash=cue_hash,
         )
         if existing:
             logger.info(
@@ -834,43 +854,8 @@ def decide_video_voice(
                 return_details=True,
             )
         gender_map = {i: evidence["gender"] for i, evidence in gender_evidence.items()}
-        # Smart Dialogue Hysteresis Smoothing: neu cau ngan/cam than bi unknown nhung nam giua
-        # hoac ngay sau cau da xac dinh gioi tinh do tin cay cao (>= 0.80, cach nhau <= 2.5s),
-        # ke thua gioi tinh nguoi dang noi de tranh nhay sang giong thu 3 giua hoi thoai.
-        if dialogue_mode_requested or bool(auto_cfg.get("smart_dialogue_smoothing", False)):
-            ordered_indices = [_get_index(s, idx + 1) for idx, s in enumerate(srt_segments)]
-            for pos, s_idx in enumerate(ordered_indices):
-                if gender_map.get(s_idx) != "unknown":
-                    continue
-                prev_idx = ordered_indices[pos - 1] if pos > 0 else None
-                next_idx = ordered_indices[pos + 1] if pos + 1 < len(ordered_indices) else None
-                prev_g = gender_map.get(prev_idx, "unknown") if prev_idx is not None else "unknown"
-                next_g = gender_map.get(next_idx, "unknown") if next_idx is not None else "unknown"
-                prev_conf = float(gender_evidence.get(prev_idx, {}).get("confidence", 0.0)) if prev_idx is not None else 0.0
-                next_conf = float(gender_evidence.get(next_idx, {}).get("confidence", 0.0)) if next_idx is not None else 0.0
-                if prev_g in ("male", "female") and prev_g == next_g and max(prev_conf, next_conf) >= 0.80:
-                    gender_map[s_idx] = prev_g
-                    if s_idx in gender_evidence and isinstance(gender_evidence[s_idx], dict):
-                        gender_evidence[s_idx] = dict(
-                            gender_evidence[s_idx],
-                            gender=prev_g,
-                            confidence=round(min(prev_conf, next_conf) * 0.9, 3),
-                            reason="hysteresis_sandwiched_speaker",
-                        )
-                elif prev_g in ("male", "female") and prev_conf >= 0.82:
-                    cur_seg = srt_segments[pos]
-                    prev_seg = srt_segments[pos - 1]
-                    gap_s = max(0.0, _get_start_sec(cur_seg) - _get_end_sec(prev_seg))
-                    dur_s = max(0.0, _get_end_sec(cur_seg) - _get_start_sec(cur_seg))
-                    if gap_s <= 2.0 and dur_s <= 1.8:
-                        gender_map[s_idx] = prev_g
-                        if s_idx in gender_evidence and isinstance(gender_evidence[s_idx], dict):
-                            gender_evidence[s_idx] = dict(
-                                gender_evidence[s_idx],
-                                gender=prev_g,
-                                confidence=round(prev_conf * 0.85, 3),
-                                reason="hysteresis_short_continuation",
-                            )
+        # A short reply may be the other speaker. Temporal neighbours alone
+        # cannot resolve unknown, conflicting or mixed acoustic evidence.
         dual_context_reason = ""
         if visual_sub_to_speech and not any(
             gender in ("male", "female") for gender in gender_map.values()
@@ -968,8 +953,19 @@ def decide_video_voice(
             )
         fallback_voice_info = None
         segment_voices = {}
-        for seg in srt_segments:
-            seg_idx = _get_index(seg, 1)
+        # Pitch alone can assign a high male voice (or low female voice) to
+        # the same role as the other speaker. Surface that ambiguity without
+        # inventing a second speaker or changing frozen voice assignments.
+        known_roles = {g for g in gender_map.values() if g in ("male", "female")}
+        single_detected_role = (
+            len(gender_map) >= 2 and len(known_roles) == 1
+            and not visual_only_transcript and not dual_context_reason
+        )
+        review_indices = [
+            i for i, g in gender_map.items() if g == "unknown" or single_detected_role
+        ]
+        for position, seg in enumerate(srt_segments, 1):
+            seg_idx = _get_index(seg, position)
             g = gender_map.get(seg_idx, "unknown")
             if g == "female":
                 chosen_v = female_voice_info
@@ -1008,6 +1004,12 @@ def decide_video_voice(
                 "label": chosen_v.get("voice_label", ""),
                 "confidence": gender_evidence.get(seg_idx, {}).get("confidence", 0.0),
                 "reason": gender_evidence.get(seg_idx, {}).get("reason", "missing_cue"),
+                "needs_voice_review": seg_idx in review_indices,
+                "voice_review_reason": (
+                    "dual_voice_single_detected_role" if single_detected_role and g != "unknown"
+                    else gender_evidence.get(seg_idx, {}).get("reason", "missing_cue")
+                    if g == "unknown" else ""
+                ),
             }
 
         female_cnt = sum(1 for g in gender_map.values() if g == "female")
@@ -1034,7 +1036,10 @@ def decide_video_voice(
             "segment_voices": segment_voices,
             "gender_evidence": {str(i): evidence for i, evidence in gender_evidence.items()},
             "unresolved_segment_indices": [i for i, gender in gender_map.items() if gender == "unknown"],
-            "analysis_version": "dual_voice_evidence_1",
+            "analysis_version": ANALYSIS_VERSION,
+            "requires_voice_review": bool(review_indices),
+            "review_segment_indices": review_indices,
+            "voice_review_policy": "single_role_review_1",
             "same_voice_for_both_roles": same_voice_for_both_roles,
         }
         if dual_context_reason:
@@ -1081,6 +1086,8 @@ def decide_video_voice(
             locked["reason"] = context_reason
 
     # 3. Gắn metadata snapshot đầy đủ
+    if cue_hash is not None:
+        locked["cue_hash"] = cue_hash
     locked["job_id"] = resolved_job_id
     locked["video_hash"] = content_hash
     locked["voice_mode"] = actual_mode

@@ -222,6 +222,8 @@ def _as_mapping(block: Any) -> Dict[str, Any]:
         "sample_segment_id": _value(block, "sample_segment_id"),
         "sample_time": float(_value(block, "sample_time", 0.0) or 0.0),
         "sample_in_cue": bool(_value(block, "sample_in_cue", True)),
+        "bg_color_ass": _value(block, "bg_color_ass"),
+        "text_contrast_color_ass": _value(block, "text_contrast_color_ass"),
     }
 
 
@@ -238,6 +240,8 @@ def _combined_block(first: _Candidate, second: _Candidate) -> Dict[str, Any]:
         "prob": max(float(a["prob"]), float(b["prob"])),
         "sample_segment_id": a.get("sample_segment_id"),
         "sample_time": a.get("sample_time", 0.0),
+        "bg_color_ass": a.get("bg_color_ass") or b.get("bg_color_ass"),
+        "text_contrast_color_ass": a.get("text_contrast_color_ass") or b.get("text_contrast_color_ass"),
     }
 
 
@@ -779,29 +783,72 @@ def select_chinese_subtitle_band(
         for item in strong_candidates:
             strong_by_segment.setdefault(item.segment_id, []).append(item)
     if mode == "asr_match":
-        # A corrupt recognition may still locate a row precisely. Require both
-        # neighbouring cues to confirm this track before reusing observed bounds.
-        for position, segment_id in enumerate(speech_ids):
-            if strong_by_segment.get(segment_id):
-                continue
+        # A corrupt recognition may still locate a row precisely. Rescue short or
+        # homophone-corrupted cues inside the confirmed subtitle band using neighbouring anchors.
+        def _rescue_segment(position, segment_id):
+            existing = list(strong_by_segment.get(segment_id, []))
             previous = strong_by_segment.get(speech_ids[position - 1], []) if position > 0 else []
             following = strong_by_segment.get(speech_ids[position + 1], []) if position + 1 < len(speech_ids) else []
-            if not previous and not following:
-                continue
-            if (not previous or not following) and len(strong_by_segment) < 2:
-                continue
-            anchors = previous + following
+            if not existing and not previous and not following:
+                return
+            if not existing and (not previous or not following) and len(strong_by_segment) < 2:
+                return
+            anchors = [
+                item for item in existing
+                if abs((item.block["x_pct"] + item.block["max_x_pct"]) * 0.5 - 0.5) <= 0.18
+            ] + previous + following
+            if not anchors:
+                return
             anchor_center = median(item.center_y for item in anchors)
             anchor_height = median(item.block["max_y_pct"] - item.block["y_pct"] for item in anchors)
-            observed = [item for item in candidates if not item.composite
-                        and item.segment_id == segment_id and reliable(item)
-                        and len(_chinese_text(item.block["text"])) >= 4
-                        and abs(item.center_y - anchor_center) <= 0.025
-                        and abs(anchor_center - center) <= 0.035
-                        and item.block["max_x_pct"] - item.block["x_pct"] >= 0.25
-                        and 0.7 * anchor_height <= item.block["max_y_pct"] - item.block["y_pct"] <= 1.5 * anchor_height]
-            if observed:
-                strong_by_segment[segment_id] = observed
+            existing_times = {round(float(item.block.get("sample_time", -1.0)), 3) for item in existing}
+            observed = []
+            for item in candidates:
+                if item.composite or item.segment_id != segment_id:
+                    continue
+                if round(float(item.block.get("sample_time", -1.0)), 3) in existing_times:
+                    continue
+                if item.block.get("sample_in_cue") is False:
+                    continue
+                cjk = _chinese_text(item.block["text"])
+                prob = float(item.block.get("prob", 0.0) or 0.0)
+                min_len = 1 if prob >= 0.90 else 2
+                if len(cjk) < min_len:
+                    continue
+                if not reliable(item):
+                    # Neighbouring captions locate the band; they cannot redeem
+                    # a repeated label that failed the scene-text classifier.
+                    continue
+                w = item.block["max_x_pct"] - item.block["x_pct"]
+                h = item.block["max_y_pct"] - item.block["y_pct"]
+                cx = (item.block["x_pct"] + item.block["max_x_pct"]) * 0.5
+                if (
+                    w >= 0.05
+                    and abs(cx - 0.5) <= 0.15
+                    and abs(item.center_y - anchor_center) <= 0.028
+                    and abs(item.center_y - center) <= 0.032
+                    and 0.65 * anchor_height <= h <= 1.6 * anchor_height
+                ):
+                    observed.append(item)
+            combined = existing + observed
+            if any(abs((item.block["x_pct"] + item.block["max_x_pct"]) * 0.5 - 0.5) <= 0.18 for item in combined):
+                combined = [
+                    item for item in combined
+                    if item.strong_text_match
+                    or abs((item.block["x_pct"] + item.block["max_x_pct"]) * 0.5 - 0.5) <= 0.20
+                ]
+            if any(item.block.get("sample_in_cue") is not False for item in combined):
+                combined = [
+                    item for item in combined
+                    if item.block.get("sample_in_cue") is not False
+                ]
+            if combined:
+                strong_by_segment[segment_id] = combined
+
+        for position, segment_id in enumerate(speech_ids):
+            _rescue_segment(position, segment_id)
+        for position in range(len(speech_ids) - 1, -1, -1):
+            _rescue_segment(position, speech_ids[position])
     for segment_id in segment_texts:
         # Use only validated matches, including genuine vertical motion.
         local = strong_by_segment.get(segment_id, [])
@@ -814,6 +861,7 @@ def select_chinese_subtitle_band(
         expanded = []
         for anchor in selected:
             merged = dict(anchor.block)
+            anchor_cx = (float(anchor.block['x_pct']) + float(anchor.block['max_x_pct'])) * 0.5
             members = [anchor]
             pool = [item for item in grouped.get(anchor.sample_key, [])
                     if reliable(item)]
@@ -835,6 +883,9 @@ def select_chinese_subtitle_band(
                     # OCR glyph margins intentionally overlap at word seams.
                     # Reject deep containment, not a few padded pixels.
                     if overlap > .06 and not item.strong_text_match:
+                        continue
+                    merged_cx = (min(float(a['x_pct']), float(b['x_pct'])) + max(float(a['max_x_pct']), float(b['max_x_pct']))) * 0.5
+                    if abs(anchor_cx - 0.5) <= 0.10 and abs(merged_cx - 0.5) > max(0.10, abs(anchor_cx - 0.5) + 0.03):
                         continue
                     members.append(item)
                     merged.update(x_pct=min(a['x_pct'], b['x_pct']),
@@ -869,3 +920,103 @@ def select_chinese_subtitle_band(
         candidate_count=len(candidates),
         selected_by_sample=selected_by_sample,
     )
+
+
+def detect_static_watermarks(
+    blocks: Sequence[Any],
+    duration: float = 0.0,
+    subtitle_top: Optional[float] = None,
+    subtitle_bottom: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """Phát hiện các cụm chữ tĩnh/logo ở rìa khung hình để delogo thông minh thay vì xóa mù 4 góc."""
+    if not blocks:
+        return []
+
+    parsed: List[Dict[str, Any]] = []
+    for blk in blocks:
+        try:
+            x1 = float(_value(blk, "x_pct", 0.0))
+            x2 = float(_value(blk, "max_x_pct", 0.0))
+            y1 = float(_value(blk, "y_pct", 0.0))
+            y2 = float(_value(blk, "max_y_pct", 0.0))
+            t = float(_value(blk, "sample_time", 0.0) or 0.0)
+            txt = str(_value(blk, "text", "") or "").strip()
+            prob = float(_value(blk, "prob", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if not txt or not (0.0 <= x1 < x2 <= 1.0) or not (0.0 <= y1 < y2 <= 1.0):
+            continue
+        w_pct = x2 - x1
+        h_pct = y2 - y1
+        if w_pct > 0.50 or h_pct > 0.20 or w_pct < 0.02 or h_pct < 0.012:
+            continue
+        cx = (x1 + x2) * 0.5
+        cy = (y1 + y2) * 0.5
+        in_edge = (cy <= 0.24) or (cy >= 0.78) or (cx <= 0.24) or (cx >= 0.76)
+        if not in_edge:
+            continue
+        # Tuyệt đối không gắn cờ nhầm dải phụ đề chính giữa màn hình
+        if subtitle_top is not None and subtitle_bottom is not None:
+            overlaps_sub_y = not (y2 < float(subtitle_top) - 0.02 or y1 > float(subtitle_bottom) + 0.02)
+            if overlaps_sub_y and 0.24 <= cx <= 0.76 and not _has_watermark_tokens(txt):
+                continue
+        parsed.append({
+            "x1": x1, "x2": x2, "y1": y1, "y2": y2,
+            "cx": cx, "cy": cy, "t": t,
+            "text": txt, "norm": _normalized_text(txt), "prob": prob,
+        })
+
+    if not parsed:
+        return []
+
+    clusters: List[List[Dict[str, Any]]] = []
+    for item in parsed:
+        matched_cluster = None
+        for cl in clusters:
+            ref_cx = median(p["cx"] for p in cl)
+            ref_cy = median(p["cy"] for p in cl)
+            if abs(item["cx"] - ref_cx) <= 0.06 and abs(item["cy"] - ref_cy) <= 0.035:
+                matched_cluster = cl
+                break
+        if matched_cluster is not None:
+            matched_cluster.append(item)
+        else:
+            clusters.append([item])
+
+    results: List[Dict[str, Any]] = []
+    for cl in clusters:
+        distinct_times = {round(p["t"], 1) for p in cl}
+        token_hits = sum(1 for p in cl if _has_watermark_tokens(p["text"]))
+        if len(distinct_times) < 2 and token_hits == 0:
+            continue
+        texts: List[str] = []
+        for p in cl:
+            nt = p["norm"]
+            if nt and not any(SequenceMatcher(None, ex, nt, autojunk=False).ratio() >= 0.72 for ex in texts):
+                texts.append(nt)
+        if len(texts) > 2 and token_hits == 0:
+            continue
+        span = max(p["t"] for p in cl) - min(p["t"] for p in cl)
+        if token_hits == 0 and duration >= 12.0 and span < max(4.0, duration * 0.20) and len(distinct_times) < 3:
+            continue
+
+        x_pct = max(0.0, min(p["x1"] for p in cl) - 0.008)
+        max_x_pct = min(1.0, max(p["x2"] for p in cl) + 0.008)
+        y_pct = max(0.0, min(p["y1"] for p in cl) - 0.005)
+        max_y_pct = min(1.0, max(p["y2"] for p in cl) + 0.005)
+        if (max_x_pct - x_pct) > 0.48 or (max_y_pct - y_pct) > 0.18:
+            continue
+
+        top_text = Counter(p["text"] for p in cl).most_common(1)[0][0]
+        results.append({
+            "x_pct": round(x_pct, 4),
+            "max_x_pct": round(max_x_pct, 4),
+            "y_pct": round(y_pct, 4),
+            "max_y_pct": round(max_y_pct, 4),
+            "text": top_text,
+            "hits": len(cl),
+            "token_match": token_hits > 0,
+        })
+
+    results.sort(key=lambda r: (-int(r["token_match"]), -int(r["hits"])))
+    return results[:4]

@@ -16,15 +16,21 @@ class TestToolV1Upgrades(unittest.TestCase):
         v1_model_policy._SEPARATOR_RUNTIME_CACHE.clear()
         v1_model_runtime._RUNTIME_MODULE_CACHE.clear()
 
-        p1 = v1_model_policy.current_v1_model_policy()
-        with patch("subprocess.run") as mock_sub:
-            p2 = v1_model_policy.current_v1_model_policy()
+        with tempfile.TemporaryDirectory() as directory, patch("subprocess.run") as mock_sub:
+            runtime = Path(directory) / 'Scripts' / 'python.exe'
+            runtime.parent.mkdir()
+            runtime.touch()
+            p2 = v1_model_policy.V1ModelPolicy(runtime_python=str(runtime))
+            mock_sub.return_value.returncode = 0
             avail = v1_model_runtime.runtime_module_available("paddleocr", p2)
             avail2 = v1_model_runtime.runtime_module_available("paddleocr", p2)
-            self.assertEqual(p1.separator_runtime_python, p2.separator_runtime_python)
+            self.assertTrue(avail)
             self.assertEqual(avail, avail2)
-            # When site-packages/paddleocr exists or is cached, subprocess.run is not called on repeat
-            self.assertEqual(mock_sub.call_count, 0)
+            self.assertEqual(mock_sub.call_count, 1)
+            package = runtime.parent.parent / 'Lib' / 'site-packages' / 'another_module'
+            package.mkdir(parents=True)
+            self.assertTrue(v1_model_runtime.runtime_module_available('another_module', p2))
+            self.assertEqual(mock_sub.call_count, 1)
 
     def test_02_ocr_worker_batch_predict_and_fallback(self):
         """Ensure v1_ocr_worker._run passes resolved_paths list to ocr.predict in a single batch call."""
@@ -180,8 +186,8 @@ class TestToolV1Upgrades(unittest.TestCase):
             self.assertEqual(rep.warning_count, 0)
             self.assertEqual(rep.failure_count, 0)
 
-    def test_05_smart_dialogue_hysteresis_smoothing(self):
-        """In dialogue mode, an unknown short cue sandwiched between high-confidence male cues inherits male voice."""
+    def test_05_smart_dialogue_does_not_guess_short_reply(self):
+        """A short unknown reply can belong to the other speaker; preserve uncertainty."""
         from backend.ai.v1_auto_voice import decide_video_voice, VOICE_MALE_ID
 
         segs = [
@@ -203,8 +209,9 @@ class TestToolV1Upgrades(unittest.TestCase):
                     workspace=tmp,
                 )
             self.assertTrue(locked["dual_voice"])
-            self.assertEqual(locked["segment_voices"]["2"]["gender"], "male")
-            self.assertEqual(locked["segment_voices"]["2"]["id"], VOICE_MALE_ID)
+            self.assertEqual(locked["segment_voices"]["2"]["gender"], "unknown")
+            self.assertTrue(locked["requires_voice_review"])
+            self.assertIn(2, locked["unresolved_segment_indices"])
 
     def test_06_custom_glossary_and_frosted_blur_ass(self):
         """Verify custom glossary injection and frosted_blur ASS cover generation."""

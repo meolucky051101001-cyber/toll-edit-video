@@ -335,7 +335,8 @@ async def _run_orchestrated_local_video(c):
         from v1_orchestrator import V1Orchestrator
         orch = V1Orchestrator(WORKSPACE)
         c.job_id = c.job_id or f"batch_{c.base_name}_{int(time.time())}"
-        final_dest = os.path.join(c.output_dir, f"Dubbed_{c.base_name}.mp4")
+        clean_base = c.base_name[7:] if str(c.base_name).startswith("Dubbed_") else c.base_name
+        final_dest = os.path.join(c.output_dir, f"Dubbed_{clean_base}.mp4")
         frozen_plan = get_frozen_config(c.file_name, workspace_path=WORKSPACE) or {}
         frozen_effective = {**frozen_plan.get("effective_config", {}), **(c.overrides or {})}
         planned_mode = frozen_effective.get("video_mode") or c.video_mode or "auto"
@@ -869,9 +870,16 @@ async def _process_batch_folder(
         return
 
     os.makedirs(output_dir, exist_ok=True)
+    is_same_as_output = False
+    try:
+        is_same_as_output = Path(input_dir).resolve() == Path(output_dir).resolve()
+    except Exception:
+        pass
+
     video_files = sorted([
         os.path.join(input_dir, f) for f in os.listdir(input_dir)
-        if f.lower().endswith(SUPPORTED_EXTENSIONS) and not f.startswith("Dubbed_")
+        if f.lower().endswith(SUPPORTED_EXTENSIONS)
+        and (not is_same_as_output or not f.startswith("Dubbed_"))
         and os.path.isfile(os.path.join(input_dir, f))
     ])
 
@@ -949,7 +957,9 @@ async def _process_batch_folder(
     # Làm mới danh sách video cần xử lý sau khi hoàn tất các pending archive
     video_files = [
         os.path.join(input_dir, f) for f in os.listdir(input_dir)
-        if f.lower().endswith(SUPPORTED_EXTENSIONS) and not f.startswith("Dubbed_") and os.path.isfile(os.path.join(input_dir, f))
+        if f.lower().endswith(SUPPORTED_EXTENSIONS)
+        and (not is_same_as_output or not f.startswith("Dubbed_"))
+        and os.path.isfile(os.path.join(input_dir, f))
     ]
     total = len(video_files)
     if total == 0:
@@ -968,7 +978,10 @@ async def _process_batch_folder(
         base_stem = os.path.splitext(vname)[0]
 
         # Kiểm tra nếu video này đã được render thành phẩm trong output_dir thì bỏ qua
-        expected_render = os.path.join(output_dir, f"Dubbed_{base_stem}.mp4")
+        clean_stem = base_stem[7:] if base_stem.startswith("Dubbed_") else base_stem
+        expected_render = os.path.join(output_dir, f"Dubbed_{clean_stem}.mp4")
+        if not os.path.isfile(expected_render):
+            expected_render = os.path.join(output_dir, f"Dubbed_{base_stem}.mp4")
         verified = os.path.isfile(expected_render) and await asyncio.to_thread(_verified_output, vpath, expected_render)
         if verified:
             receipt_file = _receipt_path(expected_render)

@@ -140,6 +140,28 @@ class SourceMaskAuditTests(unittest.TestCase):
         self.assertEqual(len(texts), 1)
         self.assertIn('0:00:01.00,0:00:02.00', texts[0])
 
+    def test_verified_gap_between_cues_is_not_bridged(self):
+        segments = [NS(index=i, start=timedelta(seconds=start), end=timedelta(seconds=end),
+                       content='Ban dich', geometry_verified=True, ocr_mask_status='located',
+                       best_block=track(start, end), tracking_blocks=[track(start, end)])
+                    for i, start, end in [(1, 0, 1), (2, 1.4, 2)]]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)/'gap.ass'
+            generate_ass_file(segments, [], output, video_duration=2)
+            content = output.read_text(encoding='utf-8-sig')
+        covers, _, _ = parse_ass_covers(content)
+        self.assertEqual([(a, b) for a, b, *_ in covers], [(0, 1), (1.4, 2)])
+        self.assertIn('Dialogue: 1,0:00:00.00,0:00:01.00', content)
+
+    def test_audio_sync_does_not_stretch_verified_source_tracks(self):
+        from backend.ass_utils import sync_and_clamp_subtitles
+        segment = NS(index=1, start=timedelta(), end=timedelta(seconds=1),
+                     content='Ban dich', geometry_verified=True,
+                     tracking_blocks=[track(.2, .5), track(.7, .9)])
+        sync_and_clamp_subtitles([segment], [{"index": 1, "actual_audio_duration": 2}])
+        self.assertEqual(segment.end.total_seconds(), 2)
+        self.assertEqual([(b.start, b.end) for b in segment.tracking_blocks], [(.2, .5), (.7, .9)])
+
     def test_verified_geometry_classification_survives_serialization(self):
         from backend.pipeline_v2.segments import segment_to_dict, segment_from_dict
         segment = NS(index=1, start=timedelta(), end=timedelta(seconds=2),

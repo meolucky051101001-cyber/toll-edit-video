@@ -28,6 +28,7 @@ from package_v1_release import (  # noqa: E402
     EXCLUDE_FILES as EXCLUDE_FILENAMES,
     iter_release_files,
     should_include,
+    verify_required_files,
 )
 
 # Public compatibility aliases; ZIP and manifest use the same validator.
@@ -169,6 +170,11 @@ def generate_manifest(
         raise ValueError("Release manifest aborted due to sensitive data check failure!")
     else:
         print("Security hygiene check: PASS (No tokens or API keys found in release files)")
+
+    # A complete manifest must obey the same startup requirements as the ZIP.
+    # Subdirectory inventories remain useful for explicitly scoped audits.
+    if not target_subdirs:
+        verify_required_files(files)
 
     manifest_entries: List[str] = []
     manifest_dict: Dict[str, str] = {}

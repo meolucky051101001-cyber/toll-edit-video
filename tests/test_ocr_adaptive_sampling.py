@@ -75,6 +75,46 @@ def recognize(images):
 
 
 class AdaptiveSamplingTests(unittest.TestCase):
+    def test_visual_ocr_does_not_reuse_rows_when_only_small_caption_changes(self):
+        from types import SimpleNamespace
+        module = importlib.import_module("backend.ocr_utils")
+        original = np.zeros((640, 360, 3), dtype=np.uint8)
+        changed = original.copy()
+        changed[530:532, 150:152] = 255
+        frames = iter([original, changed, changed.copy()])
+        capture = SimpleNamespace(set=lambda *a: None, read=lambda: (True, next(frames)))
+        rows = [([[100, 530], [250, 530], [250, 550], [100, 550]], TEXT, .95)]
+        metrics = {}
+        with patch.object(module, "_visual_grid_times", return_value=[0, .35, .7]), \
+             patch.object(module, "_readtext_batch", return_value=[rows]) as inference, \
+             patch.object(module, "select_chinese_subtitle_band", return_value=SimpleNamespace(support=0)), \
+             patch.object(module, "detect_static_watermarks", return_value=[]):
+            module._perform_visual_subtitle_ocr(capture, 360, 640, 1, [], lambda: False, metrics)
+        self.assertEqual(inference.call_count, 2)
+        self.assertEqual(metrics["visual_roi_reused"], 1)
+
+    def test_close_ocr_correction_preserves_subtitle_tracking(self):
+        module = importlib.import_module("backend.ocr_utils")
+        cases = [
+            ("今天我们学习做反", TEXT, TEXT),
+        ]
+        for asr_text, visible_text, expected in cases:
+            with self.subTest(asr=asr_text, ocr=visible_text):
+                segments = [cue(1, 0, 3)]
+                segments[0].content = asr_text
+                cap = TimedCapture(3, lambda t: 480)
+
+                def recognize_caption(images):
+                    return [[(box, visible_text, prob) for box, _, prob in rows]
+                            for rows in recognize(images)]
+
+                with patch.object(module.cv2, "VideoCapture", return_value=cap), patch.object(
+                        module, "_readtext_batch", side_effect=recognize_caption):
+                    inspect.unwrap(module.perform_video_ocr)(
+                        "fixture.mp4", srt_segments=segments, adaptive=True)
+                self.assertEqual(segments[0].content, expected)
+                self.assertTrue(segments[0].tracking_blocks)
+
     def acquire(self, duration, state, segments=None, inference=recognize, stopped=lambda: False):
         cap = TimedCapture(duration, state)
         metrics = {}

@@ -21,8 +21,20 @@ def is_mojibake(text: str) -> bool:
     return bool(MOJIBAKE_PATTERNS.search(text))
 
 
-def cache_key(parts, models, account, script_mode="default"):
-    data = json.dumps([2, str(script_mode or "default").lower(), parts, models, account], ensure_ascii=False, sort_keys=True)
+def cache_key(parts, models, account, script_mode="default", domain="general", folder_scope=None):
+    data = json.dumps(
+        [
+            3,
+            str(script_mode or "default").lower(),
+            str(domain or "general").lower(),
+            str(folder_scope or ""),
+            parts,
+            models,
+            account,
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 

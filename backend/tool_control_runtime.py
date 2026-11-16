@@ -80,13 +80,20 @@ def install(application, namespace, key):
                     # A missing heartbeat is shown as unknown, never healthy.
                     pass
                 await asyncio.sleep(2)
+        enqueue_pending_fn = namespace.get('enqueue_pending_queue_jobs')
+        if enqueue_pending_fn:
+            # No watcher may publish from empty memory before recovery finishes.
+            queue = namespace.get('global_queue')
+            if queue is not None:
+                queue.recovery_pending = True
+            await enqueue_pending_fn(app)
+            if queue is not None:
+                queue.recovery_pending = False
+                queue.publish()
         app.bot_data['_control_heartbeat']=asyncio.create_task(heartbeat())
         queue_watcher_fn = namespace.get('queue_signal_watcher')
         if queue_watcher_fn:
             app.bot_data['_queue_watcher'] = asyncio.create_task(queue_watcher_fn(app))
-        enqueue_pending_fn = namespace.get('enqueue_pending_queue_jobs')
-        if enqueue_pending_fn:
-            asyncio.create_task(enqueue_pending_fn(app))
         enqueue_v2_fn = namespace.get('enqueue_interrupted_v2_jobs')
         if enqueue_v2_fn:
             asyncio.create_task(enqueue_v2_fn(app))

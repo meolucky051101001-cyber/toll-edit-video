@@ -85,14 +85,19 @@ async def await_stage(awaitable, timeout, check_stop=None):
         return task.result()
     except BaseException:
         stopped.set()
-        if not task.done():
-            task.cancel()
-        drain_deadline = asyncio.get_running_loop().time() + 2.0
-        while not task.done() and asyncio.get_running_loop().time() < drain_deadline:
+        # Cancelling a task wrapping to_thread only hides its result; the native
+        # worker can still write artifacts/use GPU. Signal cooperative stop and
+        # retain admission/GPU ownership until the worker actually returns.
+        # Provider/subprocess adapters own their bounded I/O deadlines.
+        while not task.done():
             try:
-                await asyncio.wait({task}, timeout=0.25)
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
             except BaseException:
                 break
+        if task.done() and not task.cancelled():
+            task.exception()  # Retrieve a worker error while preserving the initiating error.
         raise
     finally:
         stop_check.reset(token)

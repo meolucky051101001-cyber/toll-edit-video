@@ -438,6 +438,41 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(translation.condense_vietnamese_subtitles_batch(items, api_key="synthetic"), {})
         fake_cache.write_condense_cache.assert_not_called()
 
+    def test_mixed_condensation_keeps_only_valid_dialogue(self):
+        fake_cache = types.SimpleNamespace(read_condense_cache=lambda *a, **k: None, write_condense_cache=Mock())
+        items = [
+            {"index": 1, "text": "Tôi không có 5 nghìn", "target_words": 5},
+            {"index": 2, "text": "Xin chào bạn", "target_words": 2},
+            {"index": 3, "text": "Hãy mang quyển sách đến nhà tôi", "target_words": 2},
+        ]
+        output = {"1": "Tôi có tiền", "2": "Chào bạn", "3": "Mang sách đến nhà tôi"}
+        with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_translation_cache": fake_cache}), patch.object(
+                translation, "call_gemini_api", return_value=(reply(output), "high")):
+            self.assertEqual(translation.condense_vietnamese_subtitles_batch(items), {2: "Chào bạn"})
+        fake_cache.write_condense_cache.assert_called_once()
+        self.assertEqual(fake_cache.write_condense_cache.call_args.args[3], "Chào bạn")
+
+    def test_invalid_cached_condensation_is_revalidated(self):
+        fake_cache = types.SimpleNamespace(read_condense_cache=lambda *a, **k: "Tôi có tiền", write_condense_cache=Mock())
+        items = [{"index": 1, "text": "Tôi không có 5 nghìn", "target_words": 5}]
+        with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_translation_cache": fake_cache}), patch.object(
+                translation, "call_gemini_api", return_value=(reply({"1": "Không có 5 nghìn"}), "high")) as dispatch:
+            self.assertEqual(translation.condense_vietnamese_subtitles_batch(items), {1: "Không có 5 nghìn"})
+        dispatch.assert_called_once()
+        fake_cache.write_condense_cache.assert_called_once()
+
+    def test_condensation_preserves_polarity_numbers_and_complete_sentence(self):
+        for original, shortened in [
+            ("Không, hãy chờ tôi", "Hãy chờ tôi"),
+            ("Tôi không mua vì chưa có tiền", "Tôi mua"),
+            ("Tôi mua 1.5 lít và 2 chai", "Mua 1.2 lít và 5 chai"),
+        ]:
+            with self.subTest(original=original):
+                self.assertFalse(translation.validate_condensed_text(original, shortened, 20))
+        original = "Mang sách đến nhà tôi"
+        self.assertEqual(translation.trim_to_target_words(original, 2), original)
+        self.assertFalse(translation.validate_condensed_text(original, original, 2))
+
 
 class MixerIntegrationTests(unittest.TestCase):
     def setUp(self):

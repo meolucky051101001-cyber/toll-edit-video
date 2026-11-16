@@ -1,0 +1,943 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<script>
+window.LOCAL_TOKEN = "__REPLACE_TOKEN__";
+const originalFetch = window.fetch;
+window.fetch = async function() {
+    let [resource, config] = arguments;
+    if (resource && typeof resource === 'string' && resource.startsWith('/api/')) {
+        if (!config) config = {};
+        if (!config.headers) config.headers = {};
+        if (config.headers instanceof Headers) {
+            config.headers.set('X-Local-Control-Token', window.LOCAL_TOKEN || '');
+        } else {
+            config.headers['X-Local-Control-Token'] = window.LOCAL_TOKEN || '';
+        }
+    }
+    let res;
+    try {
+        res = await originalFetch(resource, config);
+    } catch (netErr) {
+        if (resource && typeof resource === 'string' && resource.startsWith('/api/')) {
+            await new Promise(r => setTimeout(r, 600));
+            try {
+                res = await originalFetch(resource, config);
+            } catch (_) {
+                throw netErr;
+            }
+        } else {
+            throw netErr;
+        }
+    }
+    return res;
+};
+</script>
+
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tool V1 — Cloud GPU Dashboard</title>
+  <style>
+    :root {
+      --bg-dark: #09090b;
+      --bg-card: #121215;
+      --bg-card-hover: #17171c;
+      --bg-header: #131316;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-hover: rgba(255, 255, 255, 0.15);
+      --border-focus: #38bdf8;
+      --primary: #ffffff;
+      --primary-text: #09090b;
+      --primary-hover: #e4e4e7;
+      --accent: #38bdf8;
+      --accent-dim: rgba(56, 189, 248, 0.12);
+      --success: #10b981;
+      --success-text: #34d399;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --danger-hover: #dc2626;
+      --text: #f4f4f5;
+      --text-muted: #71717a;
+      --text-sub: #a1a1aa;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    body { background-color: var(--bg-dark); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; -webkit-font-smoothing: antialiased; }
+
+    /* Scrollbars */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.22); }
+
+    /* Header */
+    header { background: var(--bg-header); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; backdrop-filter: blur(8px); }
+    .logo-area { display: flex; align-items: center; gap: 12px; }
+    .logo-badge { background: rgba(56, 189, 248, 0.1); color: var(--accent); border: 1px solid rgba(56, 189, 248, 0.25); padding: 5px 10px; border-radius: 6px; font-weight: 700; font-size: 11px; letter-spacing: 0.8px; font-family: ui-monospace, monospace; }
+    .app-title { font-size: 16px; font-weight: 600; color: #fff; letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; }
+    .app-subtitle { font-size: 12px; color: var(--text-muted); margin-top: 1px; }
+
+    .hw-status { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap; }
+    .badge { padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+    .badge-gpu { background: rgba(255, 255, 255, 0.04); color: var(--text-sub); border: 1px solid var(--border); }
+    .badge-online { background: rgba(56, 189, 248, 0.08); color: #93c5fd; border: 1px solid rgba(56, 189, 248, 0.2); }
+    .badge-cu { background: rgba(16, 185, 129, 0.1); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.25); }
+    .badge-warn { background: rgba(245, 158, 11, 0.1); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.25); }
+    .badge-danger { background: rgba(239, 68, 68, 0.12); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+
+    .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+    .dot-green { background: #10b981; box-shadow: 0 0 8px rgba(16, 185, 129, 0.5); }
+    .dot-blue { background: #38bdf8; box-shadow: 0 0 8px rgba(56, 189, 248, 0.5); }
+    .dot-yellow { background: #f59e0b; box-shadow: 0 0 8px rgba(245, 158, 11, 0.5); animation: pulse 1.5s infinite; }
+    .dot-red { background: #ef4444; box-shadow: 0 0 8px rgba(239, 68, 68, 0.5); }
+    @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(0.9); } }
+
+    /* Buttons */
+    .btn { padding: 6px 14px; border-radius: 6px; border: 1px solid transparent; font-size: 12px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: all 0.15s ease; text-decoration: none; user-select: none; line-height: 1.4; }
+    .btn-primary { background: var(--primary); color: var(--primary-text); font-weight: 600; }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-accent { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border-color: rgba(56, 189, 248, 0.35); }
+    .btn-accent:hover { background: rgba(56, 189, 248, 0.25); border-color: rgba(56, 189, 248, 0.5); }
+    .btn-danger { background: rgba(239, 68, 68, 0.12); color: #f87171; border-color: rgba(239, 68, 68, 0.25); }
+    .btn-danger:hover { background: rgba(239, 68, 68, 0.22); border-color: rgba(239, 68, 68, 0.45); }
+    .btn-outline { background: rgba(255, 255, 255, 0.03); border-color: var(--border); color: var(--text-sub); }
+    .btn-outline:hover { background: rgba(255, 255, 255, 0.07); border-color: var(--border-hover); color: #fff; }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    /* Layout */
+    .container { max-width: 1540px; margin: 0 auto; padding: 20px 24px; width: 100%; flex: 1; display: flex; flex-direction: column; gap: 18px; }
+
+    /* Hero Active Job Card */
+    .hero-card {
+      background: linear-gradient(135deg, rgba(18, 18, 21, 0.95), rgba(24, 24, 30, 0.85));
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px 22px;
+      position: relative;
+      overflow: hidden;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    }
+    .hero-card.active-running {
+      border-color: rgba(56, 189, 248, 0.35);
+      box-shadow: 0 4px 30px rgba(56, 189, 248, 0.12);
+    }
+    .hero-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 10px; }
+    .hero-title { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; color: #fff; }
+    .hero-meta { display: flex; gap: 12px; font-size: 12px; color: var(--text-sub); align-items: center; }
+
+    /* Pipeline Step Tracker */
+    .pipeline-steps {
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      gap: 6px;
+      margin: 14px 0 16px 0;
+    }
+    @media (max-width: 1024px) {
+      .pipeline-steps { grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    }
+    @media (max-width: 640px) {
+      .pipeline-steps { grid-template-columns: repeat(2, 1fr); }
+    }
+    .step-box {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 8px 6px;
+      text-align: center;
+      transition: all 0.2s ease;
+    }
+    .step-num { font-size: 10px; font-weight: 700; color: var(--text-muted); font-family: ui-monospace, monospace; }
+    .step-name { font-size: 11px; font-weight: 500; color: var(--text-sub); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .step-box.step-completed {
+      background: rgba(16, 185, 129, 0.08);
+      border-color: rgba(16, 185, 129, 0.25);
+    }
+    .step-box.step-completed .step-name { color: #34d399; }
+    .step-box.step-completed .step-num { color: #10b981; }
+    .step-box.step-current {
+      background: rgba(56, 189, 248, 0.12);
+      border-color: var(--accent);
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.25);
+    }
+    .step-box.step-current .step-name { color: #fff; font-weight: 600; }
+    .step-box.step-current .step-num { color: var(--accent); }
+
+    /* Big Progress Bar */
+    .progress-track {
+      width: 100%;
+      height: 8px;
+      background: rgba(255, 255, 255, 0.06);
+      border-radius: 999px;
+      overflow: hidden;
+      position: relative;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #0284c7, #38bdf8);
+      border-radius: 999px;
+      transition: width 0.4s ease;
+      box-shadow: 0 0 10px rgba(56, 189, 248, 0.5);
+    }
+
+    /* Grid Layout */
+    .main-grid {
+      display: grid;
+      grid-template-columns: 420px 1fr;
+      gap: 18px;
+    }
+    @media (max-width: 1100px) {
+      .main-grid { grid-template-columns: 1fr; }
+    }
+
+    /* Card */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 12px;
+    }
+    .card-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Forms */
+    .form-group { display: flex; flex-direction: column; gap: 6px; }
+    label { font-size: 11px; font-weight: 600; color: var(--text-sub); text-transform: uppercase; letter-spacing: 0.5px; }
+    input[type="text"], select {
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 9px 12px;
+      font-size: 12px;
+      color: #fff;
+      outline: none;
+      transition: all 0.15s;
+    }
+    input[type="text"]:focus, select:focus {
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.15);
+    }
+
+    /* Spec Pill */
+    .spec-box {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-size: 11px;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+    .spec-tag {
+      background: rgba(56, 189, 248, 0.08);
+      color: #7dd3fc;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-weight: 600;
+      font-family: ui-monospace, monospace;
+      font-size: 10px;
+      margin-right: 4px;
+    }
+
+    /* Table */
+    table { width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; }
+    th {
+      background: rgba(255, 255, 255, 0.02);
+      padding: 10px 12px;
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 11px;
+      border-bottom: 1px solid var(--border);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    td {
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      vertical-align: middle;
+    }
+    tr:hover td { background: var(--bg-card-hover); }
+
+    /* State Badges */
+    .st-queued { background: rgba(255, 255, 255, 0.05); color: var(--text-muted); border: 1px solid var(--border); }
+    .st-creating { background: rgba(245, 158, 11, 0.12); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+    .st-processing { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
+    .st-downloading { background: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
+    .st-completed { background: rgba(16, 185, 129, 0.12); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .st-error { background: rgba(239, 68, 68, 0.12); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+    .st-stopped { background: rgba(249, 115, 22, 0.12); color: #fb923c; border: 1px solid rgba(249, 115, 22, 0.3); }
+
+    /* Session Alert Box */
+    .session-alert-box {
+      background: rgba(239, 68, 68, 0.08);
+      border: 1px solid rgba(239, 68, 68, 0.25);
+      border-radius: 8px;
+      padding: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header>
+    <div class="logo-area">
+      <div class="logo-badge" style="background: rgba(56, 189, 248, 0.12); color: #38bdf8; border-color: rgba(56, 189, 248, 0.35);">TOOL V1 // CLOUD [TẠM THỜI]</div>
+      <div>
+        <div class="app-title">
+          Cloud GPU On-Demand Node
+          <span class="badge badge-warn" style="font-size: 10px; padding: 2px 7px;"><span class="dot dot-yellow"></span>Chế độ phụ tạm thời</span>
+        </div>
+        <div class="app-subtitle">Hoàn toàn tách biệt với luồng Local RTX 4050 — Tận dụng Colab T4/L4 khi cần cày video nặng</div>
+      </div>
+    </div>
+
+    <div class="hw-status">
+      <div class="badge badge-cu" title="Số dư Compute Units thực tế trên tài khoản Colab">
+        <span class="dot dot-green"></span>
+        Số dư: <b id="header-cu-balance">--</b>
+      </div>
+      <div class="badge badge-online" id="header-budget-badge" title="Hạn mức tiêu thụ CU trong ngày">
+        🛡️ Hôm nay: <b id="header-cu-budget">0.00 / 10.0 CU</b>
+      </div>
+      <div class="badge badge-gpu" title="Tốc độ tiêu thụ CU hiện thời">
+        Tải: <b id="header-cu-rate">0.00 CU/h</b>
+      </div>
+      <div class="badge badge-gpu" id="header-session-badge" title="Số máy ảo Colab đang chạy">
+        <span class="dot dot-blue"></span>
+        Máy ảo: <b id="header-session-count">0</b>
+      </div>
+      <div class="badge badge-gpu" id="header-worker-badge" title="Background Worker tự động lấy job">
+        Worker: <b id="header-worker-text">Đang chạy</b>
+      </div>
+      <a href="http://127.0.0.1:8088/" class="btn btn-outline" style="margin-left: 6px;" title="Quay lại giao diện Tool V1 Local chính thức">💻 Về Local (8088)</a>
+    </div>
+  </header>
+
+  <div class="container">
+
+    <!-- Active Job Hero Card (Dynamic) -->
+    <div class="hero-card" id="hero-card">
+      <div class="hero-top">
+        <div class="hero-title">
+          <span class="dot dot-green" id="hero-status-dot"></span>
+          <span id="hero-status-heading">Trạng Thái Hệ Thống: Sẵn sàng</span>
+        </div>
+        <div class="hero-meta">
+          <span id="hero-job-id">ID: --</span>
+          <span id="hero-gpu-tag" class="badge badge-gpu">GPU: --</span>
+          <span id="hero-voice-tag" class="badge badge-gpu">Giọng: --</span>
+          <button class="btn btn-danger" id="hero-btn-stop" style="display: none;" onclick="cancelActiveJob()">🛑 Huỷ Job</button>
+        </div>
+      </div>
+
+      <!-- 8-Step Visual Pipeline Tracker -->
+      <div class="pipeline-steps" id="hero-step-tracker">
+        <div class="step-box" id="step-1"><div class="step-num">01</div><div class="step-name">Trích Audio</div></div>
+        <div class="step-box" id="step-2"><div class="step-num">02</div><div class="step-name">Demucs Tách Âm</div></div>
+        <div class="step-box" id="step-3"><div class="step-num">03</div><div class="step-name">Whisper Large-v3</div></div>
+        <div class="step-box" id="step-4"><div class="step-num">04</div><div class="step-name">Dịch Gemini AI</div></div>
+        <div class="step-box" id="step-5"><div class="step-num">05</div><div class="step-name">TTS CapCut Mai</div></div>
+        <div class="step-box" id="step-6"><div class="step-num">06</div><div class="step-name">EBU R128 Ducking</div></div>
+        <div class="step-box" id="step-7"><div class="step-num">07</div><div class="step-name">Render Video</div></div>
+        <div class="step-box" id="step-8"><div class="step-num">08</div><div class="step-name">Nghiệm Thu</div></div>
+      </div>
+
+      <!-- Progress bar & details -->
+      <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px;">
+        <span id="hero-step-desc" style="color: var(--text-sub);">Hàng đợi trống. Máy ảo Colab đang ở trạng thái ngủ (0.00 CU/h).</span>
+        <b id="hero-percent-text" style="color: var(--accent); font-family: ui-monospace, monospace;">0%</b>
+      </div>
+      <div class="progress-track">
+        <div class="progress-fill" id="hero-progress-fill" style="width: 0%;"></div>
+      </div>
+    </div>
+
+    <!-- Active Sessions Safety Alert (If dangling sessions exist) -->
+    <div id="session-alert-container" style="display: none;"></div>
+
+    <!-- Main Grid -->
+    <div class="main-grid">
+
+      <!-- Left Panel: Enqueue & Controls -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">⚡ Khởi Tạo Job Cloud (Tạm Thời)</div>
+          <span class="badge badge-warn" style="font-size: 10px;">Colab T4/L4</span>
+        </div>
+
+        <form id="form-enqueue" style="display: flex; flex-direction: column; gap: 12px;">
+          <div class="form-group">
+            <label>Link Video (URL) hoặc Đường Dẫn File:</label>
+            <input type="text" id="input-video-path" placeholder="Dán link TikTok, Douyin, YouTube, Facebook... hoặc D:\video\sample.mp4" required autocomplete="off">
+            <div style="font-size: 11px; color: #38bdf8; margin-top: 2px;">⚡ Hỗ trợ dán thẳng link video. Máy ảo Colab sẽ tự tải trực tiếp siêu tốc bằng mạng 1Gbps!</div>
+          </div>
+
+          <div style="display: flex; flex-direction: column; gap: 10px;">
+            <div class="form-group">
+              <label>Bộ Tăng Tốc (GPU / TPU / CPU):</label>
+              <select id="select-gpu">
+                <optgroup label="GPU Khuyên Dùng (Tối Ưu Nhất Cho Video)">
+                  <option value="T4" selected>NVIDIA T4 (16GB · 1.15 CU/h - Tiết kiệm)</option>
+                  <option value="L4">NVIDIA L4 (24GB · 1.94 CU/h - Siêu tốc)</option>
+                </optgroup>
+                <optgroup label="GPU Cao Cấp (Khi Có Sẵn / Giờ Thấp Điểm)">
+                  <option value="A100">NVIDIA A100 (40GB · ~3.85 CU/h)</option>
+                  <option value="H100">NVIDIA H100 (80GB · ~8.00 CU/h - Pro+)</option>
+                </optgroup>
+                <optgroup label="Google TPU (Tensor Processing Unit)">
+                  <option value="V5E1">Google TPU v5e (v5e1 · ~2.00 CU/h)</option>
+                  <option value="V6E1">Google TPU v6e Trillium (v6e1 · ~3.50 CU/h)</option>
+                </optgroup>
+                <optgroup label="CPU Runtimes">
+                  <option value="CPU">CPU High-RAM (~0.10 CU/h - Tiết kiệm CU)</option>
+                </optgroup>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label>Giọng Đọc AI (TTS):</label>
+              <select id="select-voice">
+                <option value="BV562_streaming" selected>CapCut · Mai (Nữ Chuẩn V1)</option>
+                <option value="BV075_streaming">CapCut · Thanh Niên Tự Tin (Nam)</option>
+                <option value="BV421_vivn_streaming">CapCut · Cô Gái Tươi Vui</option>
+                <option value="vi-VN-HoaiMyNeural">Edge · Hoài My (Nữ)</option>
+                <option value="vi-VN-NamMinhNeural">Edge · Nam Minh (Nam)</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Specs Info Box -->
+          <div class="spec-box">
+            <div style="font-weight: 600; color: #fff; margin-bottom: 4px;">Quy trình 8 bước tự động:</div>
+            <div>
+              <span class="spec-tag">Demucs v4</span> Tách sạch vocal gốc & BGM<br>
+              <span class="spec-tag">Whisper v3</span> ASR trên vocal track không tạp âm<br>
+              <span class="spec-tag">Gemini Flash</span> Dịch thuật tự nhiên<br>
+              <span class="spec-tag">EBU R128</span> Sidechain Ducking hạ nhạc khi có tiếng nói
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-primary" id="btn-submit-enqueue" style="padding: 10px; justify-content: center; font-size: 13px;">
+            🚀 ĐẨY LINK / VIDEO LÊN CLOUD GPU
+          </button>
+        </form>
+
+        <!-- CU Budget Limit Card -->
+        <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 8px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="font-size: 11px; font-weight: 600; color: #fff; text-transform: uppercase;">🛡️ Hạn Mức Sử Dụng CU Hôm Nay:</div>
+            <span id="budget-percent-tag" class="badge badge-cu" style="font-size: 10px;">0%</span>
+          </div>
+
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <input type="number" id="input-cu-budget" min="0.5" max="200" step="0.5" style="width: 90px; padding: 6px 8px; font-size: 12px;" value="10.0">
+            <span style="font-size: 12px; color: var(--text-sub);">CU / ngày</span>
+            <button type="button" class="btn btn-outline" onclick="saveCuBudget()" style="margin-left: auto; padding: 6px 12px;">💾 Lưu Hạn Mức</button>
+          </div>
+
+          <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-sub); margin-top: 2px;">
+            <span>Đã dùng: <b id="budget-spent-text" style="color: #fff;">0.00 CU</b></span>
+            <span>Còn lại: <b id="budget-remaining-text" style="color: #34d399;">10.00 CU</b></span>
+          </div>
+          <div class="progress-track" style="height: 5px; margin-top: 2px;">
+            <div class="progress-fill" id="budget-progress-fill" style="width: 0%; background: #10b981;"></div>
+          </div>
+          <div style="font-size: 10px; color: var(--text-muted);">
+            Hệ thống tự động ngắt nhận video khi chạm ngưỡng hạn mức để bảo vệ 100% số dư Colab.
+          </div>
+        </div>
+
+        <!-- System Controls Box -->
+        <div style="border-top: 1px solid var(--border); padding-top: 14px; display: flex; flex-direction: column; gap: 8px;">
+          <div style="font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase;">Quản Lý Hệ Thống & Bảo Vệ CU:</div>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn btn-outline" id="btn-toggle-worker" onclick="toggleWorker()" style="flex: 1; justify-content: center;">
+              Tạm Dừng Worker
+            </button>
+            <button class="btn btn-danger" onclick="emergencyStopAll()" style="flex: 1; justify-content: center;">
+              🛑 Thu Hồi Mọi Máy Colab
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Panel: Queue & History -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            📋 Hàng Đợi Cloud (Độc Lập Với Hàng Đợi Local)
+            <span class="badge badge-gpu" id="jobs-count-badge">0 jobs</span>
+          </div>
+          <div style="display: flex; gap: 6px;">
+            <button class="btn btn-outline" onclick="manualRefresh()" title="Làm mới ngay">🔄 Làm mới</button>
+          </div>
+        </div>
+
+        <div style="overflow-x: auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Video & Job ID</th>
+                <th>Cấu Hình</th>
+                <th>Trạng Thái</th>
+                <th>Tiến Độ & Bước</th>
+                <th>Tiêu Thụ</th>
+                <th>Thời Gian</th>
+                <th style="text-align: right;">Thao Tác</th>
+              </tr>
+            </thead>
+            <tbody id="table-jobs-body">
+              <tr>
+                <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 24px;">
+                  Đang tải danh sách công việc...
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    let workerActive = true;
+    let currentActiveJobId = null;
+
+    // Helper map state class
+    function getStateBadge(state) {
+      const map = {
+        'queued': { label: 'Chờ chạy', cls: 'st-queued' },
+        'creating_session': { label: 'Tạo máy ảo', cls: 'st-creating' },
+        'uploading': { label: 'Đang upload', cls: 'st-processing' },
+        'processing': { label: 'Đang xử lý', cls: 'st-processing' },
+        'downloading': { label: 'Đang tải về', cls: 'st-downloading' },
+        'completed': { label: 'Hoàn tất', cls: 'st-completed' },
+        'error': { label: 'Lỗi', cls: 'st-error' },
+        'stopped': { label: 'Đã dừng', cls: 'st-stopped' }
+      };
+      const info = map[state] || { label: state, cls: 'st-queued' };
+      return `<span class="badge ${info.cls}">${info.label}</span>`;
+    }
+
+    // Helper highlight pipeline steps
+    function updatePipelineTracker(percent, stepName) {
+      const steps = [
+        { id: 'step-1', min: 10 },
+        { id: 'step-2', min: 25 },
+        { id: 'step-3', min: 40 },
+        { id: 'step-4', min: 55 },
+        { id: 'step-5', min: 70 },
+        { id: 'step-6', min: 82 },
+        { id: 'step-7', min: 92 },
+        { id: 'step-8', min: 100 },
+      ];
+
+      // Reset all
+      steps.forEach(s => {
+        const el = document.getElementById(s.id);
+        if (el) el.className = 'step-box';
+      });
+
+      if (!percent || percent <= 0) return;
+
+      let currentAssigned = false;
+      for (let i = steps.length - 1; i >= 0; i--) {
+        const el = document.getElementById(steps[i].id);
+        if (!el) continue;
+        if (percent >= steps[i].min) {
+          if (!currentAssigned && percent < 100) {
+            el.className = 'step-box step-current';
+            currentAssigned = true;
+          } else {
+            el.className = 'step-box step-completed';
+          }
+        }
+      }
+      if (percent >= 100) {
+        const lastEl = document.getElementById('step-8');
+        if (lastEl) lastEl.className = 'step-box step-completed';
+      }
+    }
+
+    // Fetch Status
+    async function loadStatus() {
+      try {
+        const res = await fetch('/api/cloud/status');
+        const data = await res.json();
+        if (data.status !== 'ok') return;
+
+        // Balance & Quota
+        const balance = (data.usage?.balance ?? 0).toFixed(2);
+        const rate = (data.usage?.usage_rate ?? 0).toFixed(2);
+        const activeCount = data.usage?.active_assignments ?? 0;
+
+        document.getElementById('header-cu-balance').innerText = balance + ' CU';
+        document.getElementById('header-cu-rate').innerText = rate + ' CU/h';
+        document.getElementById('header-session-count').innerText = activeCount;
+
+        // Budget & Quota Limit
+        if (data.budget) {
+          updateBudgetUI(data.budget);
+        }
+
+        // Session count badge styling
+        const sBadge = document.getElementById('header-session-badge');
+        if (activeCount > 0) {
+          sBadge.className = 'badge badge-warn';
+        } else {
+          sBadge.className = 'badge badge-gpu';
+        }
+
+        // Worker status
+        workerActive = data.worker_running;
+        const wText = document.getElementById('header-worker-text');
+        const wBadge = document.getElementById('header-worker-badge');
+        const toggleBtn = document.getElementById('btn-toggle-worker');
+        if (workerActive) {
+          wText.innerText = 'Đang chạy';
+          wBadge.className = 'badge badge-cu';
+          toggleBtn.innerText = 'Tạm Dừng Worker';
+          toggleBtn.className = 'btn btn-outline';
+        } else {
+          wText.innerText = 'Đã dừng';
+          wBadge.className = 'badge badge-danger';
+          toggleBtn.innerText = 'Bật Worker';
+          toggleBtn.className = 'btn btn-accent';
+        }
+
+        // Dangling Sessions Alert Check (chỉ cảnh báo khi có máy mở mà KHÔNG CÓ JOB NÀO đang chạy)
+        const sessions = data.sessions || [];
+        const alertBox = document.getElementById('session-alert-container');
+        const hasActiveJob = !!data.active_job;
+
+        if (sessions.length > 0 && !hasActiveJob) {
+          alertBox.style.display = 'block';
+          alertBox.innerHTML = `
+            <div class="session-alert-box">
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <span class="dot dot-yellow"></span>
+                <span style="font-weight: 600; color: #f87171;">CẢNH BÁO: Có ${sessions.length} máy ảo Colab đang mở nhưng không có job nào chạy (${sessions.map(s => s.name || s.id).join(', ')}).</span>
+                <span style="font-size: 11px; color: var(--text-muted);">(Hao phí ~${(sessions.length * 1.15).toFixed(2)} CU/h nếu để quên)</span>
+              </div>
+              <button class="btn btn-danger" onclick="emergencyStopAll()">🛑 Dừng Ngay Tất Cả</button>
+            </div>
+          `;
+        } else {
+          alertBox.style.display = 'none';
+        }
+
+        // Active Job Hero Card
+        const job = data.active_job;
+        const heroCard = document.getElementById('hero-card');
+        const stopBtn = document.getElementById('hero-btn-stop');
+
+        if (job) {
+          currentActiveJobId = job.job_id;
+          heroCard.className = 'hero-card active-running';
+          document.getElementById('hero-status-heading').innerText = `Đang Xử Lý: ${job.video_name}`;
+          document.getElementById('hero-job-id').innerText = `ID: ${job.job_id.slice(-8)}`;
+          document.getElementById('hero-gpu-tag').innerText = `GPU: ${job.gpu_type}`;
+          document.getElementById('hero-voice-tag').innerText = `Giọng: ${job.voice || 'Mai'}`;
+          document.getElementById('hero-step-desc').innerText = job.step_name || 'Đang thực thi...';
+          document.getElementById('hero-percent-text').innerText = (job.percent || 0) + '%';
+          document.getElementById('hero-progress-fill').style.width = (job.percent || 0) + '%';
+          stopBtn.style.display = 'inline-flex';
+          updatePipelineTracker(job.percent || 0, job.step_name || '');
+        } else {
+          currentActiveJobId = null;
+          heroCard.className = 'hero-card';
+          document.getElementById('hero-status-heading').innerText = 'Trạng Thái Hệ Thống: Sẵn sàng';
+          document.getElementById('hero-job-id').innerText = 'ID: --';
+          document.getElementById('hero-gpu-tag').innerText = 'GPU: --';
+          document.getElementById('hero-voice-tag').innerText = 'Giọng: --';
+          document.getElementById('hero-step-desc').innerText = 'Hàng đợi trống. Máy ảo Colab đang ở trạng thái ngủ (0.00 CU/h), sẵn sàng nhận video mới.';
+          document.getElementById('hero-percent-text').innerText = '0%';
+          document.getElementById('hero-progress-fill').style.width = '0%';
+          stopBtn.style.display = 'none';
+          updatePipelineTracker(0, '');
+        }
+
+      } catch (err) {
+        console.error('Error fetching cloud status:', err);
+      }
+    }
+
+    // Fetch Jobs List
+    async function loadJobs() {
+      try {
+        const res = await fetch('/api/cloud/jobs?limit=25');
+        const data = await res.json();
+        if (data.status !== 'ok') return;
+
+        const jobs = data.jobs || [];
+        document.getElementById('jobs-count-badge').innerText = `${jobs.length} jobs`;
+
+        const tbody = document.getElementById('table-jobs-body');
+        if (jobs.length === 0) {
+          tbody.innerHTML = `
+            <tr>
+              <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 24px;">
+                Chưa có công việc nào trong hàng đợi. Nhập đường dẫn video bên trái để bắt đầu!
+              </td>
+            </tr>
+          `;
+          return;
+        }
+
+        tbody.innerHTML = jobs.map(j => {
+          const timeStr = j.created_at ? new Date(j.created_at * 1000).toLocaleTimeString('vi-VN') : '--';
+          const cuStr = j.cu_actual ? `${j.cu_actual.toFixed(3)} CU` : (j.cu_estimated ? `~${j.cu_estimated.toFixed(2)} CU` : '--');
+          const isRunning = ['queued', 'creating_session', 'uploading', 'processing', 'downloading'].includes(j.state);
+
+          let actionHtml = '';
+          if (isRunning) {
+            actionHtml = `<button class="btn btn-danger" style="padding: 3px 8px; font-size: 11px;" onclick="cancelJob('${j.job_id}')">Huỷ</button>`;
+          } else {
+            actionHtml = `<button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px;" onclick="deleteJob('${j.job_id}')">Xoá</button>`;
+          }
+
+          return `
+            <tr>
+              <td>
+                <div style="font-weight: 600; color: #fff;">${escapeHtml(j.video_name)}</div>
+                <div style="font-size: 10px; color: var(--text-muted); font-family: ui-monospace, monospace;">${j.job_id}</div>
+              </td>
+              <td>
+                <span class="badge badge-gpu" style="font-weight: 600;">${j.gpu_type}</span>
+                <div style="font-size: 10px; color: var(--text-sub); margin-top: 2px;">${escapeHtml(j.voice || 'Mai')}</div>
+              </td>
+              <td>${getStateBadge(j.state)}</td>
+              <td style="min-width: 150px;">
+                <div style="font-size: 11px; margin-bottom: 4px; display: flex; justify-content: space-between;">
+                  <span>${escapeHtml(j.step_name || '')}</span>
+                  <b style="color: var(--accent); font-family: ui-monospace, monospace;">${j.percent || 0}%</b>
+                </div>
+                <div class="progress-track" style="height: 4px;">
+                  <div class="progress-fill" style="width: ${j.percent || 0}%;"></div>
+                </div>
+              </td>
+              <td style="font-family: ui-monospace, monospace; font-size: 11px;">${cuStr}</td>
+              <td style="color: var(--text-sub); font-size: 11px;">${timeStr}</td>
+              <td style="text-align: right;">${actionHtml}</td>
+            </tr>
+          `;
+        }).join('');
+
+      } catch (err) {
+        console.error('Error fetching jobs:', err);
+      }
+    }
+
+    function escapeHtml(text) {
+      if (!text) return '';
+      return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // Submit Enqueue
+    document.getElementById('form-enqueue').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const pathInput = document.getElementById('input-video-path');
+      const videoPath = pathInput.value.trim();
+      const gpuType = document.getElementById('select-gpu').value;
+      const voice = document.getElementById('select-voice').value;
+
+      if (!videoPath) return;
+
+      const btn = document.getElementById('btn-submit-enqueue');
+      btn.disabled = true;
+      btn.innerText = 'Đang gửi lên Cloud...';
+
+      try {
+        const res = await fetch('/api/cloud/enqueue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            video_path: videoPath,
+            gpu_type: gpuType,
+            voice: voice,
+            task_type: 'full_pipeline'
+          })
+        });
+        const data = await res.json();
+        if (data.status === 'ok') {
+          pathInput.value = '';
+          await loadJobs();
+          await loadStatus();
+        } else {
+          alert('Không thể tạo job: ' + (data.detail || data.message || 'Lỗi không xác định'));
+        }
+      } catch (err) {
+        alert('Lỗi kết nối: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerText = '🚀 ĐẨY LINK / VIDEO LÊN CLOUD GPU';
+      }
+    });
+
+    // Toggle Worker
+    async function toggleWorker() {
+      const endpoint = workerActive ? '/api/cloud/worker/stop' : '/api/cloud/worker/start';
+      try {
+        await fetch(endpoint, { method: 'POST' });
+        await loadStatus();
+      } catch (err) {
+        alert('Lỗi thao tác worker: ' + err.message);
+      }
+    }
+
+    // Emergency Stop All
+    async function emergencyStopAll() {
+      if (!confirm('XÁC NHẬN: Bạn có chắc chắn muốn DỪNG KHẨN CẤP mọi máy ảo Colab đang chạy để bảo toàn Compute Units?')) return;
+      try {
+        const res = await fetch('/api/cloud/stop', { method: 'POST' });
+        const data = await res.json();
+        alert(data.message || 'Đã gửi lệnh thu hồi máy ảo Colab.');
+        await loadStatus();
+        await loadJobs();
+      } catch (err) {
+        alert('Lỗi: ' + err.message);
+      }
+    }
+
+    // Save CU Budget Limit
+    async function saveCuBudget() {
+      const input = document.getElementById('input-cu-budget');
+      const val = parseFloat(input.value);
+      if (isNaN(val) || val <= 0) {
+        alert('Vui lòng nhập số CU hợp lệ (> 0).');
+        return;
+      }
+      try {
+        const res = await fetch('/api/cloud/budget', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ budget_daily: val })
+        });
+        const data = await res.json();
+        if (data.status === 'ok') {
+          updateBudgetUI(data.budget);
+          alert('Đã cập nhật hạn mức CU thành công: ' + val + ' CU/ngày');
+        } else {
+          alert('Lỗi: ' + (data.detail || data.message));
+        }
+      } catch (e) {
+        alert('Lỗi kết nối khi lưu hạn mức: ' + e.message);
+      }
+    }
+
+    function updateBudgetUI(b) {
+      if (!b) return;
+      const spent = (b.spent_today || 0).toFixed(2);
+      const budget = (b.budget_daily || 10).toFixed(1);
+      const remaining = (b.remaining_today || 0).toFixed(2);
+      const pct = b.percent_used || 0;
+
+      const headEl = document.getElementById('header-cu-budget');
+      if (headEl) headEl.innerText = `${spent} / ${budget} CU`;
+      const spentEl = document.getElementById('budget-spent-text');
+      if (spentEl) spentEl.innerText = `${spent} CU`;
+      const remEl = document.getElementById('budget-remaining-text');
+      if (remEl) remEl.innerText = `${remaining} CU`;
+      const pctEl = document.getElementById('budget-percent-tag');
+      if (pctEl) pctEl.innerText = `${pct}%`;
+
+      const fill = document.getElementById('budget-progress-fill');
+      if (fill) {
+        fill.style.width = Math.min(100, pct) + '%';
+        if (pct >= 90) {
+          fill.style.background = '#ef4444';
+          if (pctEl) pctEl.className = 'badge badge-danger';
+        } else if (pct >= 70) {
+          fill.style.background = '#f59e0b';
+          if (pctEl) pctEl.className = 'badge badge-warn';
+        } else {
+          fill.style.background = '#10b981';
+          if (pctEl) pctEl.className = 'badge badge-cu';
+        }
+      }
+
+      const input = document.getElementById('input-cu-budget');
+      if (input && document.activeElement !== input) {
+        input.value = budget;
+      }
+    }
+
+    // Cancel Active Job
+    async function cancelActiveJob() {
+      if (!currentActiveJobId) return;
+      if (!confirm(`Xác nhận huỷ job ${currentActiveJobId} và thu hồi máy ảo?`)) return;
+      await cancelJob(currentActiveJobId);
+    }
+
+    // Cancel specific job
+    async function cancelJob(jobId) {
+      try {
+        const res = await fetch('/api/cloud/job/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: jobId })
+        });
+        const data = await res.json();
+        if (data.status === 'ok') {
+          await loadStatus();
+          await loadJobs();
+        } else {
+          alert('Lỗi: ' + (data.detail || data.message));
+        }
+      } catch (err) {
+        alert('Lỗi: ' + err.message);
+      }
+    }
+
+    // Delete job from history
+    async function deleteJob(jobId) {
+      if (!confirm('Xoá bản ghi job này khỏi nhật ký?')) return;
+      try {
+        const res = await fetch('/api/cloud/job/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: jobId })
+        });
+        const data = await res.json();
+        if (data.status === 'ok') {
+          await loadJobs();
+        }
+      } catch (err) {
+        alert('Lỗi: ' + err.message);
+      }
+    }
+
+    function manualRefresh() {
+      loadStatus();
+      loadJobs();
+    }
+
+    // Auto Refresh Loop (Every 3 seconds)
+    loadStatus();
+    loadJobs();
+    setInterval(() => {
+      loadStatus();
+      loadJobs();
+    }, 3000);
+  </script>
+</body>
+</html>

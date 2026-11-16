@@ -217,15 +217,15 @@ def _read_batch_lock_unlocked() -> Dict[str, Any]:
         return {}
 
 
-def _claim_batch_lock_unlocked(job_id: str) -> None:
+def _claim_batch_lock_unlocked(job_id: str, *, exclusive: bool = False) -> None:
     with _process_guard():
-        _claim_batch_lock_guarded(job_id)
+        _claim_batch_lock_guarded(job_id, exclusive=exclusive)
 
 
-def _claim_batch_lock_guarded(job_id: str) -> None:
+def _claim_batch_lock_guarded(job_id: str, *, exclusive: bool = False) -> None:
     _ensure_dir()
     payload = json.dumps(
-        {"job_id": job_id, "pid": os.getpid(), "created_at": time.time()},
+        {"job_id": job_id, "pid": os.getpid(), "created_at": time.time(), "exclusive": exclusive},
         ensure_ascii=False,
     ).encode("utf-8")
     for _attempt in range(2):
@@ -240,13 +240,9 @@ def _claim_batch_lock_guarded(job_id: str) -> None:
                 raise JobAlreadyRunningError("Batch lock is being written or is unreadable.")
             owner_pid = int(owner.get("pid") or 0)
             if owner_pid and _pid_is_running(owner_pid):
-                if owner_pid == os.getpid():
-                    try:
-                        from worker_settings import get_worker_settings
-                        if get_worker_settings().get("concurrency", 1) > 1:
-                            return
-                    except Exception as _phase6_exc:
-                        logger.warning('Suppressed error in job_tracker._claim_batch_lock_guarded (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
+                # A configured worker count is not a second execution lease.
+                # Threads in this process must respect the same ownership as
+                # the API, bot and external batch process.
                 raise JobAlreadyRunningError(
                     "Một batch khác đang chạy (PID {}).".format(owner_pid)
                 )
@@ -513,6 +509,8 @@ def start_batch(
     input_dir: str = "",
     output_dir: str = "",
     job_id: Optional[str] = None,
+    *,
+    exclusive: bool = False,
 ) -> str:
     """Đăng ký bắt đầu một hàng đợi batch."""
     with _LOCK:
@@ -521,7 +519,10 @@ def start_batch(
         owner = _read_batch_lock_unlocked()
         reserved = owner.get("job_id") == job_id and owner.get("pid") == os.getpid()
         if not reserved:
-            _claim_batch_lock_unlocked(job_id)
+            if exclusive:
+                _claim_batch_lock_unlocked(job_id, exclusive=True)
+            else:
+                _claim_batch_lock_unlocked(job_id)
             stop_service.clear_stop(
                 WORKSPACE, status_file=STATUS_FILE, source="job_tracker", reason="new batch starts"
             )
@@ -966,7 +967,7 @@ def set_error(video_name: str, error_msg: str, fatal: bool = True, worker_id: Op
             logger.warning('Suppressed error in job_tracker.set_error (push): %s', type(_phase6_exc).__name__, exc_info=False)
 
 
-def request_stop():
+def request_stop(*, wait_for_completion: bool = False):
     """Gửi yêu cầu dừng batch (hỗ trợ đa tiến trình: main.py, telegram_bot.py, v1/v2)."""
     with _LOCK:
         _sync_from_disk_unlocked()
@@ -982,17 +983,17 @@ def request_stop():
         if "workers" in _CURRENT_STATE and isinstance(_CURRENT_STATE["workers"], dict):
             for wid_k, w in _CURRENT_STATE["workers"].items():
                 w.update({
-                    "active": False,
-                    "status": "stopped",
-                    "video_status": "stopped",
-                    "step_name": "Đã dừng theo yêu cầu",
+                    "active": bool(w.get("active")) if wait_for_completion else False,
+                    "status": "stopping" if wait_for_completion and w.get("active") else "stopped",
+                    "video_status": "stopping" if wait_for_completion and w.get("active") else "stopped",
+                    "step_name": "Đang chờ tác vụ kết thúc" if wait_for_completion else "Đã dừng theo yêu cầu",
                     "percent": min(99, max(0, w.get("percent", 0))),
                     "updated_at": now,
                 })
         _CURRENT_STATE.update({
-            "active": False,
-            "status": "stopped",
-            "video_status": "stopped",
+            "active": bool(_CURRENT_STATE.get("active")) if wait_for_completion else False,
+            "status": "stopping" if wait_for_completion else "stopped",
+            "video_status": "stopping" if wait_for_completion else "stopped",
             "percent": min(99, max(0, _CURRENT_STATE.get("percent", 0))),
             "stop_requested": True,
             "step_name": "Đang dừng tiến trình theo yêu cầu...",

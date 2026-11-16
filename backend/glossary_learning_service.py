@@ -32,8 +32,21 @@ def _tokenize(text: str) -> List[str]:
     return re.findall(r"\S+", str(text or "").strip())
 
 
-def _key(before: str, after: str) -> str:
-    return f"{str(before).strip().lower()}|{str(after).strip().lower()}"
+def _norm_scope(scope: Optional[str]) -> str:
+    raw = str(scope or "").strip()
+    if not raw or raw.lower() == "global":
+        return "global"
+    try:
+        from ai.translation import normalize_glossary_scope
+        return normalize_glossary_scope(raw)
+    except Exception:
+        return raw.lower()
+
+
+def _key(before: str, after: str, scope: Optional[str] = None) -> str:
+    norm = _norm_scope(scope)
+    base = f"{str(before).strip().lower()}|{str(after).strip().lower()}"
+    return base if norm == "global" else f"{norm}::{base}"
 
 
 def extract_edit_pair(before: str, after: str) -> Optional[Dict[str, str]]:
@@ -83,20 +96,44 @@ def _save(data: Dict[str, Any]) -> None:
         logger.error("Không thể ghi glossary_suggestions.json: %s", exc)
 
 
-def record_edit(before_text: str, after_text: str, video_name: str = "") -> Optional[Dict[str, Any]]:
+def _find_suggestion_key(sugg: Dict[str, Any], before: str, after: str, scope: Optional[str] = None) -> Optional[str]:
+    if scope is not None:
+        exact = _key(before, after, scope)
+        if exact in sugg:
+            return exact
+    legacy = _key(before, after, "global")
+    if legacy in sugg:
+        return legacy
+    b_low = str(before).strip().lower()
+    a_low = str(after).strip().lower()
+    for k, item in sugg.items():
+        if str(item.get("before", "")).strip().lower() == b_low and str(item.get("after", "")).strip().lower() == a_low:
+            return k
+    return None
+
+
+def record_edit(
+    before_text: str,
+    after_text: str,
+    video_name: str = "",
+    scope: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     pair = extract_edit_pair(before_text, after_text)
     if not pair:
         return None
-    key = _key(pair["before"], pair["after"])
+    norm_scope = _norm_scope(scope)
+    key = _key(pair["before"], pair["after"], norm_scope)
     data = _load()
     sugg: Dict[str, Any] = data["suggestions"]
     item = sugg.get(key) or {
         "before": pair["before"],
         "after": pair["after"],
+        "scope": norm_scope,
         "count": 0,
         "samples": [],
         "first_seen": time.time(),
     }
+    item["scope"] = norm_scope
     item["count"] = int(item.get("count", 0)) + 1
     item["last_seen"] = time.time()
     if video_name and video_name not in item.get("samples", []):
@@ -109,39 +146,61 @@ def record_edit(before_text: str, after_text: str, video_name: str = "") -> Opti
     return item
 
 
-def get_suggestions(min_count: int = MIN_COUNT) -> List[Dict[str, Any]]:
+def get_suggestions(min_count: int = MIN_COUNT, scope: Optional[str] = None) -> List[Dict[str, Any]]:
     data = _load()
     dismissed = data.get("dismissed", {})
-    items = [
-        dict(v, id=k)
-        for k, v in data["suggestions"].items()
-        if int(v.get("count", 0)) >= max(1, min_count) and k not in dismissed
-    ]
+    filter_scope = _norm_scope(scope) if (scope and str(scope).strip().lower() != "all") else None
+    items = []
+    for k, v in data["suggestions"].items():
+        if int(v.get("count", 0)) < max(1, min_count) or k in dismissed:
+            continue
+        item_scope = _norm_scope(v.get("scope"))
+        if filter_scope is not None and item_scope != filter_scope:
+            continue
+        row = dict(v, id=k)
+        row["scope"] = item_scope
+        items.append(row)
     items.sort(key=lambda x: (-int(x.get("count", 0)), -float(x.get("last_seen") or 0)))
     return items[:50]
 
 
-def accept_suggestion(before: str, after: str) -> Dict[str, Any]:
-    """Thêm cặp vào Custom Glossary (qua ai.translation.save_custom_glossary) và gỡ khỏi gợi ý."""
+def accept_suggestion(
+    before: str,
+    after: str,
+    scope: Optional[str] = None,
+    target_scope: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Thêm cặp vào Custom Glossary (global hoặc theo scope) và gỡ khỏi gợi ý."""
     from ai.translation import save_custom_glossary
 
     before_c = str(before or "").strip()
     after_c = str(after or "").strip()
     if not before_c or not after_c:
         raise ValueError("Cặp thuật ngữ không hợp lệ")
-    save_custom_glossary(entries={before_c: after_c}, merge=True, workspace=WORKSPACE)
     data = _load()
-    key = _key(before_c, after_c)
-    data["suggestions"].pop(key, None)
-    data.setdefault("dismissed", {})[key] = time.time()
+    sugg = data["suggestions"]
+    matched_key = _find_suggestion_key(sugg, before_c, after_c, scope=scope)
+    source_scope = _norm_scope((sugg.get(matched_key) or {}).get("scope") if matched_key else scope)
+    save_scope = _norm_scope(target_scope if target_scope is not None else source_scope)
+    save_custom_glossary(
+        entries={before_c: after_c},
+        merge=True,
+        workspace=WORKSPACE,
+        scope=save_scope,
+    )
+    pop_key = matched_key or _key(before_c, after_c, source_scope)
+    sugg.pop(pop_key, None)
+    data.setdefault("dismissed", {})[pop_key] = time.time()
     _save(data)
-    return {"added": True, "before": before_c, "after": after_c}
+    return {"added": True, "before": before_c, "after": after_c, "scope": save_scope}
 
 
-def dismiss_suggestion(before: str, after: str) -> Dict[str, Any]:
+def dismiss_suggestion(before: str, after: str, scope: Optional[str] = None) -> Dict[str, Any]:
     data = _load()
-    key = _key(str(before or ""), str(after or ""))
-    data["suggestions"].pop(key, None)
+    sugg = data["suggestions"]
+    matched_key = _find_suggestion_key(sugg, str(before or ""), str(after or ""), scope=scope)
+    key = matched_key or _key(str(before or ""), str(after or ""), scope)
+    sugg.pop(key, None)
     data.setdefault("dismissed", {})[key] = time.time()
     _save(data)
     return {"dismissed": True}

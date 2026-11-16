@@ -48,7 +48,8 @@ def renderer(runner):
     scope = {"__file__": str(Path(SCRATCH.name) / "isolated_video_utils.py"), "__name__": "isolated_render", "__package__": "",
              "os": os, "time": time, "subprocess": subprocess, "logger": logging.getLogger("test.render"),
              "run_batch_subprocess": runner, "CREATE_NO_WINDOW": 0, "print": lambda *args, **kwargs: None}
-    exec(compile(ast.Module(body=[function], type_ignores=[]), "isolated-render", "exec"), scope)
+    helpers = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_srt_style']
+    exec(compile(ast.Module(body=helpers + [function], type_ignores=[]), "isolated-render", "exec"), scope)
     return scope["process_video"]
 
 

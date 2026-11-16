@@ -4,7 +4,7 @@ Covers:
 1. Host Header Validation against DNS Rebinding (reject evil.example:8088, accept 127.0.0.1, localhost, [::1])
 2. Concurrency & Unified Pipeline Lock Lifecycle (batch holds lock for entire run, generate_subtitles rejected with 409 if locked)
 3. Subprocess Voice Isolation with API Keys & CJK Fail-Closed (generate_dubbing_audio_isolated calls child process with env vars; raises on CJK)
-4. Controller Authenticated Graceful Stop (tool_control.py sends X-Local-Control-Token read from .dashboard_control_token)
+4. Controller uses verified scoped shutdown and refuses to interrupt an active job
 """
 import asyncio
 import json
@@ -26,8 +26,9 @@ from fastapi.testclient import TestClient
 class TestPhase91FinalGate(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        os.environ["AUTODUB_WORKSPACE"] = str(Path(tempfile.gettempdir()) / "autodub_p91_test")
-        Path(os.environ["AUTODUB_WORKSPACE"]).mkdir(parents=True, exist_ok=True)
+        cls.workspace_dir = tempfile.TemporaryDirectory(prefix="autodub_p91_test_")
+        cls.previous_workspace = os.environ.get("AUTODUB_WORKSPACE")
+        os.environ["AUTODUB_WORKSPACE"] = cls.workspace_dir.name
         import main
         cls.main = main
         cls.client = TestClient(cls.main.app)
@@ -179,56 +180,29 @@ class TestPhase91FinalGate(unittest.TestCase):
     # ----------------------------------------------------------------------
     # GATE 4: CONTROLLER AUTHENTICATED GRACEFUL STOP
     # ----------------------------------------------------------------------
-    def test_gate4_controller_reads_and_sends_dashboard_token(self):
-        """tool_control.stop_and_release must read .dashboard_control_token and pass X-Local-Control-Token."""
+    def test_gate4_controller_refuses_busy_without_http_stop(self):
+        """UI stop respects the shared busy gate and never force-stops an active job."""
         import tool_control
+        from v1_shutdown import ShutdownResult, EXIT_BUSY
 
-        workspace = Path(os.environ["AUTODUB_WORKSPACE"])
-        token_path = workspace / ".dashboard_control_token"
-        token_path.write_text("test_secret_runtime_token_12345", encoding="utf-8")
-
-        with patch.dict(tool_control.ROOTS, {"v1": workspace / "dummy_backend"}):
-            (workspace / "dummy_backend").mkdir(parents=True, exist_ok=True)
-            read_token = tool_control._get_dashboard_token("v1")
-            self.assertEqual(read_token, "test_secret_runtime_token_12345")
-
-        captured_request = None
-        def fake_urlopen(req, *args, **kwargs):
-            nonlocal captured_request
-            if isinstance(req, str) and "status" in req:
-                resp = MagicMock()
-                resp.status = 200
-                resp.read.return_value = json.dumps({"active": True}).encode("utf-8")
-                resp.__enter__.return_value = resp
-                return resp
-            if hasattr(req, "get_full_url") and "stop-batch" in req.get_full_url():
-                captured_request = req
-                resp = MagicMock()
-                resp.status = 200
-                resp.__enter__.return_value = resp
-                return resp
-            resp = MagicMock()
-            resp.status = 200
-            resp.read.return_value = b"{}"
-            resp.__enter__.return_value = resp
-            return resp
-
-        with patch("tool_control.FLAGS", workspace / "control"), \
-             patch("urllib.request.urlopen", side_effect=fake_urlopen), \
-             patch("psutil.process_iter", return_value=[]), \
-             patch("tool_control._get_dashboard_token", return_value="test_secret_runtime_token_12345"):
-            tool_control.stop_and_release("v1")
-
-            self.assertIsNotNone(captured_request, "POST /api/stop-batch should have been called")
-            self.assertEqual(
-                captured_request.headers.get("X-local-control-token"),
-                "test_secret_runtime_token_12345",
-                "Request must include valid X-Local-Control-Token"
-            )
+        result = ShutdownResult(EXIT_BUSY, "processing", "stop", False,
+                                busy_reasons=["dashboard_job_active:fixture"])
+        with patch.object(tool_control.shutdown, "execute_shutdown", return_value=result) as stop, \
+             patch.object(tool_control.urllib.request, "urlopen") as request:
+            with self.assertRaises(tool_control.ControlShutdownError):
+                tool_control.stop_and_release("v1")
+        self.assertEqual(stop.call_args.kwargs["scope"], "processing")
+        self.assertFalse(stop.call_args.kwargs["force"])
+        request.assert_not_called()
 
     @classmethod
     def tearDownClass(cls):
-        Path(r"C:\tool v1\workspace\control\v1.pause").unlink(missing_ok=True)
+        cls.client.close()
+        if cls.previous_workspace is None:
+            os.environ.pop("AUTODUB_WORKSPACE", None)
+        else:
+            os.environ["AUTODUB_WORKSPACE"] = cls.previous_workspace
+        cls.workspace_dir.cleanup()
 
 
 if __name__ == "__main__":
