@@ -179,6 +179,7 @@ REQUIRED_RELEASE_FILES = [
     "backend/v1_shutdown.py",
     "backend/service_control.py",
     "backend/ai/pyav_compat.py",
+    "backend/ai/v1_caption_evidence.py",
     "backend/templates/dashboard.html",
     "scripts/verify_runtime_health.py",
     "scripts/cutover_py312.bat",

@@ -20,17 +20,15 @@ def validate_tts_source(source):
 
 def _resolve_control_dir() -> Path:
     ws_env = os.getenv("AUTODUB_WORKSPACE")
-    candidates = []
-    if ws_env:
-        candidates.extend([Path(ws_env) / "bot_system" / "control", Path(ws_env) / "control"])
-    candidates.extend([Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")])
+    workspace = Path(ws_env) if ws_env else Path(__file__).resolve().parents[1] / "workspace"
+    candidates = [workspace / "bot_system" / "control", workspace / "control"]
     for c in candidates:
         if (c / "voice_catalog.json").is_file():
             return c
     for c in candidates:
         if c.is_dir():
             return c
-    return Path(r"C:\tool v1\workspace\control")
+    return candidates[0]
 
 BASE = _resolve_control_dir()
 ALIASES = {

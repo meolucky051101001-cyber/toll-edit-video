@@ -63,3 +63,29 @@ def test_duplicate_cues_rejected_before_reusing_snapshot(tmp_path):
     segments[1]['index']=1
     with pytest.raises(ValueError,match='Duplicate'):
         decide(tmp_path/'job',segments)
+
+
+@pytest.mark.parametrize('role', ['male', 'female'])
+def test_dual_voice_with_only_one_detected_role_requests_review(tmp_path, role):
+    from backend.segment_editor_service import _apply_voice_lock_metadata
+
+    classified = {i: dict(gender=role, confidence=.98, reason='sources_agree')
+                  for i in range(1, 4)}
+    folder = tmp_path / 'job'
+    with patch.object(voice, 'classify_all_segments_gender', return_value=classified) as classify:
+        locked = decide(folder, cues())
+        resumed = decide(folder, cues())
+    assert classify.call_count == 1
+    assert resumed == locked
+    assert locked['requires_voice_review']
+    assert locked['review_segment_indices'] == [1, 2, 3]
+    assert locked['unresolved_segment_indices'] == []
+    assert all(v['gender'] == role for v in locked['segment_voices'].values())
+    assert all(v['needs_voice_review'] for v in locked['segment_voices'].values())
+    data, segments = {}, cues()
+    _apply_voice_lock_metadata(data, segments, 'test-job', folder, locked['voice_id'])
+    assert data['requires_voice_review']
+    assert data['unresolved_count'] == 3
+    assert all(s['needs_voice_review'] for s in segments)
+    assert all(s['voice_reason'] == 'Đã bật hai giọng nhưng chỉ nhận ra một vai; cần nghe lại giọng gốc'
+               for s in segments)

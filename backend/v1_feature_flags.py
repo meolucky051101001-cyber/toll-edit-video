@@ -26,6 +26,7 @@ DEFAULT_FLAGS: Dict[str, Any] = {
     "V1_ASR_CHUNKING": True,
     "V1_SMART_SKIP_OCR": True,
     "V1_QC_POLICY": "BLOCK",
+    "V1_QC_VISUAL_PIXEL_CHECK": True,
     "V1_MAX_NATURAL_SPEED": 1.50,
     "V1_TTS_WORKERS": 6,
     "V1_USE_ORCHESTRATOR": True,
@@ -35,7 +36,8 @@ DEFAULT_FLAGS: Dict[str, Any] = {
     "V1_SHORT_ASR_MODEL": "inherit",
     "V1_LONG_ASR_MODEL": "inherit",
     "V1_VISUAL_SUB_TO_SPEECH": False,
-    "V1_QC_VISUAL_PIXEL_CHECK": True,
+    "V1_CLOUD_MODE": False,
+    "V1_CLOUD_GPU": "T4",
 }
 
 

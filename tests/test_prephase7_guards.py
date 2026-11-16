@@ -121,7 +121,7 @@ class WorkflowGuardTests(unittest.TestCase):
         clear.assert_not_called()
         disk.assert_not_called()
 
-    def test_verified_idle_can_clear_stale_stop_and_start(self):
+    def test_idle_poll_does_not_clear_stop_before_ownership(self):
         import sys
         from backend import workflow_api as workflow
         import stop_service
@@ -135,11 +135,11 @@ class WorkflowGuardTests(unittest.TestCase):
              patch.object(stop_service, "clear_stop") as clear, \
              patch.object(disk_guard, "ensure_free_space") as disk:
             self.assertTrue(workflow._wait_pipeline_free("fixture"))
-        self.assertFalse(state.stop_requested)
-        clear.assert_called_once()
-        disk.assert_called_once()
+        self.assertTrue(state.stop_requested)
+        clear.assert_not_called()
+        disk.assert_not_called()
 
-    def test_unremovable_stop_flag_blocks_manual_job(self):
+    def test_idle_poll_defers_stop_validation_to_owned_scope(self):
         import sys
         from backend import workflow_api as workflow
         from backend.v1_integrity_errors import PipelineStateError
@@ -152,8 +152,7 @@ class WorkflowGuardTests(unittest.TestCase):
              patch.object(stop_service, "is_stop_requested", return_value=True), \
              patch.object(stop_service, "clear_stop"), \
              patch.object(disk_guard, "ensure_free_space") as disk:
-            with self.assertRaises(PipelineStateError):
-                workflow._wait_pipeline_free("fixture")
+            self.assertTrue(workflow._wait_pipeline_free("fixture"))
         disk.assert_not_called()
 
     def test_manual_cn_honors_timeout_before_extracting_audio(self):

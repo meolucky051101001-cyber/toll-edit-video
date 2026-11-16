@@ -212,7 +212,8 @@ class TestDot2CoverBlurDelogoAndPixelQC(unittest.TestCase):
             ass_blur = Path(tmp_dir) / "blur.ass"
             ass_utils.generate_ass_file([seg], [], str(ass_blur), 720, 1280, cover_style="localized_blur")
             txt_blur = ass_blur.read_text(encoding="utf-8-sig")
-            self.assertIn("Style: BgStyle,Arial,38,&H78141418", txt_blur)
+            self.assertNotIn("Dialogue: 0,", txt_blur)
+            self.assertIn("ToolV1BlurData:", txt_blur)
             self.assertIn("Style: TextStyle,Arial,38,&H00FFFFFF", txt_blur)
             self.assertNotIn(f"\\1c{bg_dark}", txt_blur)
 
@@ -273,7 +274,7 @@ class TestDot2CoverBlurDelogoAndPixelQC(unittest.TestCase):
             self.assertIn("delogo=x=", vf)
             self.assertIn("format=yuv420p", vf)
             self.assertIn("split[", vf)
-            self.assertIn("enable='between(t,0.50,2.00)'", vf)
+            self.assertIn("enable='gte(t,0.500000)*lt(t,2.000000)'", vf)
 
             captured_cmds.clear()
             with patch.object(v1_media_streams, "probe_main_video", return_value=MainVideo(0, 720, 1280, 30.0, 4.0, 1, 1, False)), \

@@ -1,0 +1,14 @@
+openai-whisper
+edge-tts
+google-genai
+pydub
+requests
+tqdm
+demucs
+soundfile
+scipy
+yt-dlp
+easyocr
+Pillow
+srt
+opencv-python-headless

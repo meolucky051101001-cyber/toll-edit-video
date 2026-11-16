@@ -1291,19 +1291,11 @@ def _append_ocr_recognized(samples, all_blocks, width, height, block_colors=None
 def _rescue_ocr_coordinates(video_path, batch, band, all_blocks, observation_times, sampled_ids):
     # Rescue only missing coordinates: two in-cue samples, higher resolution,
     # established subtitle ROI (or full frame if no reliable track exists).
-    # Nếu dải phụ đề cố định đã khớp rất chắc chắn (asr_match, support >= 15, độ dày dải <= 10%)
-    # và số câu khuyết ít (<= 25%), bỏ qua bước tua video cắt frame cứu hộ vì Global Subtitle Band
-    # ở bước kế tiếp sẽ tự động gán chính xác tọa độ dải phụ đề chung cho các câu này.
     missing = [(i, seg) for i, seg in enumerate(batch.srt_segments)
                if _ocr_segment_id(seg, i) not in band.selected_by_segment]
-    high_conf_band_locked = (
-        getattr(band, "mode", "") == "asr_match"
-        and getattr(band, "support", 0) >= 15
-        and (float(getattr(band, "bottom", 1.0)) - float(getattr(band, "top", 0.0))) <= 0.10
-        and len(batch.srt_segments) >= 12
-        and len(missing) <= max(3, int(len(batch.srt_segments) * 0.25))
-    )
-    if missing and not high_conf_band_locked and not (batch.ocr_strategy == "full" and band.support == 0 and len(batch.srt_segments) >= 3):
+    # A stable band narrows the rescue ROI; it does not prove the missing cue's
+    # coordinates. Keep the in-cue rescue even when neighbouring cues are clear.
+    if missing and not (batch.ocr_strategy == "full" and band.support == 0 and len(batch.srt_segments) >= 3):
         logger.info('OCR geometry rescue: %d/%d cues, GPU only', len(missing), len(batch.srt_segments))
         rescue_cap = cv2.VideoCapture(video_path)
         if not rescue_cap.isOpened():
@@ -1362,6 +1354,144 @@ def _apply_ocr_subtitle_band(batch, band, observation_times, all_blocks):
         logger.info(f"🎯 Global Subtitle Band detected ({band.mode}, support={band.support}): Top={global_med_top:.3f}, Bottom={global_med_bottom:.3f}")
 
         if batch.srt_segments:
+            import re as _re
+            from difflib import SequenceMatcher as _SequenceMatcher
+
+            def _cjk_only(text):
+                return "".join(_re.findall(r"[\u4e00-\u9fff\u3400-\u4dbf]", str(text or "")))
+
+            def _maybe_correct_asr_from_ocr(seg_obj, selected_rows, best_row, seg_start=None, seg_end=None, prev_asr="", next_asr=""):
+                asr_text = str(getattr(seg_obj, "content", "") or "").strip()
+                asr_cjk = _cjk_only(asr_text)
+                if len(asr_cjk) < 2:
+                    return
+                rows = list(selected_rows or [])
+
+                def record_review(status, reason, candidate="", evidence=()):
+                    seg_obj.ocr_text_review = {
+                        "status": status, "reason": reason, "asr_text": asr_text,
+                        "caption_text": candidate,
+                        "sample_times": sorted(set(float(r["sample_time"]) for r in evidence)),
+                    }
+
+                # A best box can represent a different time in the same subtitle
+                # band. Never revive it after all observations were out of cue.
+                if not rows and best_row:
+                    rows = [best_row]
+                if seg_start is not None and seg_end is not None:
+                    in_cue = [
+                        r for r in rows
+                        if r.get("sample_time") is not None
+                        and (seg_start + 0.04) <= float(r["sample_time"]) <= (seg_end - 0.04)
+                    ]
+                    if not in_cue:
+                        in_cue = [
+                            r for r in rows
+                            if r.get("sample_time") is not None
+                            and seg_start <= float(r["sample_time"]) <= seg_end
+                        ]
+                    rows = in_cue
+                    if not rows:
+                        record_review("kept_asr", "no_in_cue_caption")
+                        return
+                prev_cjk_seg = _cjk_only(prev_asr)
+                next_cjk_seg = _cjk_only(next_asr)
+                ordered_texts = []
+                ordered_probs = []
+                for row in rows:
+                    prob = float(row.get("prob", 0.0) or 0.0)
+                    txt = str(row.get("text", "") or "").strip()
+                    txt_cjk = _cjk_only(txt)
+                    if prob < 0.80 or len(txt_cjk) < 2:
+                        continue
+                    if len(rows) > 1:
+                        adj_match = (
+                            (prev_cjk_seg and _SequenceMatcher(None, txt_cjk, prev_cjk_seg).ratio() >= 0.65)
+                            or (next_cjk_seg and _SequenceMatcher(None, txt_cjk, next_cjk_seg).ratio() >= 0.65)
+                        )
+                        own_match = _SequenceMatcher(None, txt_cjk, asr_cjk).ratio()
+                        if adj_match and own_match < 0.65:
+                            continue
+                    if not ordered_texts:
+                        ordered_texts.append(txt)
+                        ordered_probs.append(prob)
+                    else:
+                        prev_cjk = _cjk_only(ordered_texts[-1])
+                        if txt_cjk == prev_cjk:
+                            ordered_probs[-1] = max(ordered_probs[-1], prob)
+                            continue
+                        if prev_cjk in txt_cjk:
+                            ordered_texts[-1] = txt
+                            ordered_probs[-1] = max(ordered_probs[-1], prob)
+                        elif txt_cjk in prev_cjk:
+                            ordered_probs[-1] = max(ordered_probs[-1], prob)
+                            continue
+                        elif _SequenceMatcher(None, txt_cjk, prev_cjk).ratio() >= 0.75:
+                            if prob > ordered_probs[-1]:
+                                ordered_texts[-1] = txt
+                                ordered_probs[-1] = prob
+                            continue
+                        else:
+                            ordered_texts.append(txt)
+                            ordered_probs.append(prob)
+                if not ordered_texts:
+                    return
+                avg_prob = sum(ordered_probs) / len(ordered_probs)
+                if avg_prob < 0.85:
+                    return
+                combined_ocr = "，".join(ordered_texts)
+                ocr_cjk = _cjk_only(combined_ocr)
+                if not ocr_cjk or ocr_cjk == asr_cjk:
+                    return
+                if len(ocr_cjk) > len(asr_cjk) * 1.35 + 1:
+                    record_review("kept_asr", "caption_exceeds_speech", combined_ocr)
+                    return
+                # Never truncate a longer ASR sentence with a partial OCR fragment
+                if ocr_cjk in asr_cjk and len(ocr_cjk) < len(asr_cjk):
+                    return
+                if len(ocr_cjk) < len(asr_cjk) * 0.72 and asr_cjk not in ocr_cjk:
+                    return
+                it = iter(asr_cjk)
+                if len(ocr_cjk) <= len(asr_cjk) and all(ch in it for ch in ocr_cjk):
+                    return
+                sim = _SequenceMatcher(None, asr_cjk, ocr_cjk).ratio()
+                # Similarity of CJK alone hides OCR damage to numbers and Latin
+                # (90 -> 9日, 尺 -> R). Apply substitutions to the ASR string,
+                # preserving its punctuation, prefix/suffix and every non-CJK
+                # token. Insertions/deletions need a separate content review.
+                if min(len(asr_cjk), len(ocr_cjk)) >= 4 and 0.80 <= sim < 0.99:
+                    token_pattern = r"[\w]"
+                    asr_matches = list(_re.finditer(token_pattern, asr_text))
+                    asr_tokens = [m.group() for m in asr_matches]
+                    ocr_tokens = _re.findall(token_pattern, combined_ocr)
+                    if len(asr_tokens) != len(ocr_tokens):
+                        record_review("kept_asr", "caption_changes_token_count", combined_ocr)
+                        return
+                    changes = [(i, before, after) for i, (before, after) in
+                               enumerate(zip(asr_tokens, ocr_tokens)) if before != after]
+                    if any(not _cjk_only(before) or not _cjk_only(after)
+                           for _, before, after in changes):
+                        record_review("kept_asr", "caption_changes_non_cjk", combined_ocr)
+                        return
+                    # More than one glyph can be OCR corruption rather than a
+                    # homophone. Require the same caption at independent times;
+                    # repeated boxes from one image do not establish consensus.
+                    evidence = [r for r in rows
+                                if float(r.get("prob", 0.0) or 0.0) >= 0.85
+                                and r.get("sample_time") is not None
+                                and _re.findall(token_pattern, str(r.get("text", ""))) == ocr_tokens]
+                    times = sorted(set(round(float(r["sample_time"]), 3) for r in evidence))
+                    if len(changes) > 1 and (len(times) < 2 or times[-1] - times[0] < 0.25):
+                        record_review("kept_asr", "multiple_glyphs_without_consensus", combined_ocr, evidence)
+                        return
+                    repaired = list(asr_text)
+                    for i, _, after in changes:
+                        repaired[asr_matches[i].start()] = after
+                    repaired = "".join(repaired)
+                    record_review("corrected", "cjk_substitution", combined_ocr, evidence)
+                    logger.info(f"OCR Homophone Auto-Correct: '{asr_text}' -> '{repaired}' (sim={sim:.2f}, prob={avg_prob:.2f})")
+                    seg_obj.content = repaired
+
             for idx, seg in enumerate(batch.srt_segments):
                 s_id = getattr(seg, 'index', None)
                 s_key = s_id if s_id is not None else idx
@@ -1410,12 +1540,14 @@ def _apply_ocr_subtitle_band(batch, band, observation_times, all_blocks):
                             ))
                     seg.tracking_blocks = tracking
 
+                    box_x1 = min([float(b["x_pct"])] + [float(r["x_pct"]) for r in selected]) if selected else float(b["x_pct"])
+                    box_x2 = max([float(b["max_x_pct"])] + [float(r["max_x_pct"]) for r in selected]) if selected else float(b["max_x_pct"])
                     seg.best_block = OCRBlock(
                         text=b["text"],
                         start=seg_s,
                         end=seg_e,
-                        x_pct=b["x_pct"],
-                        max_x_pct=b["max_x_pct"],
+                        x_pct=box_x1,
+                        max_x_pct=box_x2,
                         y_pct=b["y_pct"],
                         max_y_pct=b["max_y_pct"],
                         prob=b.get("prob", 1.0),
@@ -1432,31 +1564,33 @@ def _apply_ocr_subtitle_band(batch, band, observation_times, all_blocks):
                         track.geometry_verified = batch.is_adaptive
                     seg.y_pct = b["y_pct"]
                     seg.max_y_pct = b["max_y_pct"]
+                    seg.ocr_mask_status = 'located'
+                    prev_asr_txt = str(getattr(batch.srt_segments[idx - 1], 'content', '') or '') if idx > 0 else ''
+                    next_asr_txt = str(getattr(batch.srt_segments[idx + 1], 'content', '') or '') if idx + 1 < len(batch.srt_segments) else ''
+                    _maybe_correct_asr_from_ocr(
+                        seg,
+                        selected,
+                        b,
+                        seg_start=seg.start.total_seconds(),
+                        seg_end=seg.end.total_seconds(),
+                        prev_asr=prev_asr_txt,
+                        next_asr=next_asr_txt,
+                    )
                     logger.info(f"Sync (Subtitle Band): '{str(getattr(seg, 'content', ''))[:15]}' -> Y: {seg.y_pct:.3f} - {seg.max_y_pct:.3f}")
                 else:
+                    # Selection already attempted spatial rescue. An unselected
+                    # row is still ambiguous; proximity to the band cannot turn
+                    # it into verified caption evidence or erase an unresolved cue.
+                    seg.best_block = None
+                    seg.tracking_blocks = []
                     seg.y_pct = global_med_top
                     seg.max_y_pct = global_med_bottom
-                    if getattr(band, 'support', 0) >= 2 or len(batch.srt_segments) > 2:
-                        seg.best_block = OCRBlock(
-                            text=getattr(seg, 'content', ''),
-                            start=seg_s,
-                            end=seg_e,
-                            x_pct=0.05,
-                            max_x_pct=0.95,
-                            y_pct=global_med_top,
-                            max_y_pct=global_med_bottom,
-                            prob=0.85,
-                            is_subtitle=True,
-                            in_subtitle_band=True,
-                            is_packaging=False,
-                            type='subtitle',
-                        )
-                        seg.is_subtitle = True
-                        seg.in_subtitle_band = True
-                        seg.is_packaging = False
-                        seg.geometry_verified = False
-                        seg.ocr_mask_status = 'located'
-                        logger.info(f"Auto-repair (Global Subtitle Band fallback): cue #{s_key} -> located at Y: {seg.y_pct:.3f} - {seg.max_y_pct:.3f}")
+                    seg.is_subtitle = True
+                    seg.in_subtitle_band = False
+                    seg.is_packaging = False
+                    seg.geometry_verified = False
+                    logger.info("No validated caption track for cue #%s (%s)",
+                                s_key, seg.ocr_mask_status)
 
         # BỔ SUNG CÂU THOẠI TỪ OCR (Nếu ASR bị nhạc to át mất câu)
         try:

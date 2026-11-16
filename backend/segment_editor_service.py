@@ -453,9 +453,12 @@ def _apply_voice_lock_metadata(
 
         seg_gender = str(v_entry.get("gender") or (top_gender if top_gender != "dual" else "unknown") or "unknown").lower()
         seg_conf = round(float(v_entry.get("confidence", top_conf) or 0.0), 3)
-        seg_reason = str(v_entry.get("reason") or vl.get("reason") or "")
+        seg_reason = str(v_entry.get("voice_review_reason") or v_entry.get("reason") or vl.get("reason") or "")
+        if seg_reason == "dual_voice_single_detected_role":
+            seg_reason = "Đã bật hai giọng nhưng chỉ nhận ra một vai; cần nghe lại giọng gốc"
         needs_review = (
             (idx in unresolved_set)
+            or bool(v_entry.get("needs_voice_review", False))
             or (str(v_entry.get("gender", "")).lower() == "unknown")
             or (top_req_review and not seg_voices and top_gender == "unknown")
         )
@@ -1022,6 +1025,15 @@ async def publish_revised_video(
 
     if not source_video:
         raise RuntimeError(f"Không tìm thấy video gốc để xuất bản sửa cho {clean_id}")
+
+    # This path remuxes audio and keeps the existing video pixels. Do not
+    # represent a global cover-style change as a visual conversion of that file.
+    import canvas_settings
+    if canvas_settings.get_canvas_settings().get("sub_cover_style") == "localized_blur":
+        from subtitle_blur import read_ass_blur_metadata
+        ass_file = job_folder / "final.ass"
+        if not ass_file.is_file() or read_ass_blur_metadata(ass_file.read_text(encoding="utf-8-sig")) is None:
+            raise ValueError("Bản sửa âm thanh không đổi được hộp trắng đã nướng; hãy xuất lại từ video nguồn trong Studio để làm mờ")
 
     # Output file name: Dubbed_{clean_id}_rev{current_rev}.mp4
     rev_filename = f"Dubbed_{clean_id}_rev{current_rev}.mp4"

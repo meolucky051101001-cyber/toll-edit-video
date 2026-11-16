@@ -15,6 +15,18 @@ backend_dir = root / "backend"
 # mọi module đọc AUTODUB_WORKSPACE lúc import và mọi subprocess đều thấy thư mục tạm.
 _TEST_WORKSPACE = Path(tempfile.mkdtemp(prefix="autodub_test_ws_"))
 os.environ["AUTODUB_WORKSPACE"] = str(_TEST_WORKSPACE)
+for _name, _relative in {
+    "AUTODUB_DATA_DIR": "data",
+    "AUTODUB_INPUT_DIR": "input",
+    "AUTODUB_OUTPUT_DIR": "output",
+    "AUTODUB_SHARED_WORKSPACE_DIR": "shared",
+    "AUTODUB_DELIVERY_DIR": "delivery",
+    "SAVE_DIRECTORY": "downloads",
+    "TOOL_V1_CONTROL_DIR": "control",
+    "AUTODUB_CONTROL_DIR": "control",
+    "TOOL_V2_RENDER_HISTORY": "bot_system/.render_history_v2.json",
+}.items():
+    os.environ[_name] = str(_TEST_WORKSPACE / _relative)
 atexit.register(shutil.rmtree, _TEST_WORKSPACE, True)
 if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
@@ -23,6 +35,40 @@ if str(root) not in sys.path:
 
 import pytest
 from unittest.mock import patch
+
+
+def pytest_collection_finish(session):
+    if Path(os.environ.get("AUTODUB_WORKSPACE", "")).resolve() != _TEST_WORKSPACE.resolve():
+        raise pytest.UsageError("Imports changed AUTODUB_WORKSPACE; refusing tests against a live workspace")
+
+
+# Catch accidental hardcoded paths and late overrides too. This is installed
+# before test collection, so even import-time writes through the workspace
+# junction cannot touch production data. Normal temporary fixture paths work.
+_LIVE_WORKSPACES = tuple({(root / "workspace").resolve(), Path("D:/workspace").resolve()})
+
+
+def _reject_live_write(path):
+    if not isinstance(path, (str, bytes, os.PathLike)):
+        return
+    candidate = Path(os.fsdecode(path)).resolve()
+    if any(candidate == live or candidate.is_relative_to(live) for live in _LIVE_WORKSPACES):
+        raise PermissionError("Tests must not modify the live workspace")
+
+
+def _test_file_audit(event, args):
+    if event == "open":
+        path, mode, flags = args
+        if (mode and any(c in mode for c in "wax+")) or flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
+            _reject_live_write(path)
+    elif event in {"os.remove", "os.rmdir", "os.mkdir", "os.chmod", "os.utime", "os.truncate"}:
+        _reject_live_write(args[0])
+    elif event in {"os.rename", "os.link", "os.symlink"}:
+        _reject_live_write(args[0])
+        _reject_live_write(args[1])
+
+
+sys.addaudithook(_test_file_audit)
 
 
 class _BackendAliasLoader(importlib.abc.Loader):

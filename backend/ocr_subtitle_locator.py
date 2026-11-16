@@ -783,29 +783,72 @@ def select_chinese_subtitle_band(
         for item in strong_candidates:
             strong_by_segment.setdefault(item.segment_id, []).append(item)
     if mode == "asr_match":
-        # A corrupt recognition may still locate a row precisely. Require both
-        # neighbouring cues to confirm this track before reusing observed bounds.
-        for position, segment_id in enumerate(speech_ids):
-            if strong_by_segment.get(segment_id):
-                continue
+        # A corrupt recognition may still locate a row precisely. Rescue short or
+        # homophone-corrupted cues inside the confirmed subtitle band using neighbouring anchors.
+        def _rescue_segment(position, segment_id):
+            existing = list(strong_by_segment.get(segment_id, []))
             previous = strong_by_segment.get(speech_ids[position - 1], []) if position > 0 else []
             following = strong_by_segment.get(speech_ids[position + 1], []) if position + 1 < len(speech_ids) else []
-            if not previous and not following:
-                continue
-            if (not previous or not following) and len(strong_by_segment) < 2:
-                continue
-            anchors = previous + following
+            if not existing and not previous and not following:
+                return
+            if not existing and (not previous or not following) and len(strong_by_segment) < 2:
+                return
+            anchors = [
+                item for item in existing
+                if abs((item.block["x_pct"] + item.block["max_x_pct"]) * 0.5 - 0.5) <= 0.18
+            ] + previous + following
+            if not anchors:
+                return
             anchor_center = median(item.center_y for item in anchors)
             anchor_height = median(item.block["max_y_pct"] - item.block["y_pct"] for item in anchors)
-            observed = [item for item in candidates if not item.composite
-                        and item.segment_id == segment_id and reliable(item)
-                        and len(_chinese_text(item.block["text"])) >= 4
-                        and abs(item.center_y - anchor_center) <= 0.025
-                        and abs(anchor_center - center) <= 0.035
-                        and item.block["max_x_pct"] - item.block["x_pct"] >= 0.25
-                        and 0.7 * anchor_height <= item.block["max_y_pct"] - item.block["y_pct"] <= 1.5 * anchor_height]
-            if observed:
-                strong_by_segment[segment_id] = observed
+            existing_times = {round(float(item.block.get("sample_time", -1.0)), 3) for item in existing}
+            observed = []
+            for item in candidates:
+                if item.composite or item.segment_id != segment_id:
+                    continue
+                if round(float(item.block.get("sample_time", -1.0)), 3) in existing_times:
+                    continue
+                if item.block.get("sample_in_cue") is False:
+                    continue
+                cjk = _chinese_text(item.block["text"])
+                prob = float(item.block.get("prob", 0.0) or 0.0)
+                min_len = 1 if prob >= 0.90 else 2
+                if len(cjk) < min_len:
+                    continue
+                if not reliable(item):
+                    # Neighbouring captions locate the band; they cannot redeem
+                    # a repeated label that failed the scene-text classifier.
+                    continue
+                w = item.block["max_x_pct"] - item.block["x_pct"]
+                h = item.block["max_y_pct"] - item.block["y_pct"]
+                cx = (item.block["x_pct"] + item.block["max_x_pct"]) * 0.5
+                if (
+                    w >= 0.05
+                    and abs(cx - 0.5) <= 0.15
+                    and abs(item.center_y - anchor_center) <= 0.028
+                    and abs(item.center_y - center) <= 0.032
+                    and 0.65 * anchor_height <= h <= 1.6 * anchor_height
+                ):
+                    observed.append(item)
+            combined = existing + observed
+            if any(abs((item.block["x_pct"] + item.block["max_x_pct"]) * 0.5 - 0.5) <= 0.18 for item in combined):
+                combined = [
+                    item for item in combined
+                    if item.strong_text_match
+                    or abs((item.block["x_pct"] + item.block["max_x_pct"]) * 0.5 - 0.5) <= 0.20
+                ]
+            if any(item.block.get("sample_in_cue") is not False for item in combined):
+                combined = [
+                    item for item in combined
+                    if item.block.get("sample_in_cue") is not False
+                ]
+            if combined:
+                strong_by_segment[segment_id] = combined
+
+        for position, segment_id in enumerate(speech_ids):
+            _rescue_segment(position, segment_id)
+        for position in range(len(speech_ids) - 1, -1, -1):
+            _rescue_segment(position, speech_ids[position])
     for segment_id in segment_texts:
         # Use only validated matches, including genuine vertical motion.
         local = strong_by_segment.get(segment_id, [])
@@ -818,6 +861,7 @@ def select_chinese_subtitle_band(
         expanded = []
         for anchor in selected:
             merged = dict(anchor.block)
+            anchor_cx = (float(anchor.block['x_pct']) + float(anchor.block['max_x_pct'])) * 0.5
             members = [anchor]
             pool = [item for item in grouped.get(anchor.sample_key, [])
                     if reliable(item)]
@@ -839,6 +883,9 @@ def select_chinese_subtitle_band(
                     # OCR glyph margins intentionally overlap at word seams.
                     # Reject deep containment, not a few padded pixels.
                     if overlap > .06 and not item.strong_text_match:
+                        continue
+                    merged_cx = (min(float(a['x_pct']), float(b['x_pct'])) + max(float(a['max_x_pct']), float(b['max_x_pct']))) * 0.5
+                    if abs(anchor_cx - 0.5) <= 0.10 and abs(merged_cx - 0.5) > max(0.10, abs(anchor_cx - 0.5) + 0.03):
                         continue
                     members.append(item)
                     merged.update(x_pct=min(a['x_pct'], b['x_pct']),

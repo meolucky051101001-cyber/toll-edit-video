@@ -4,6 +4,13 @@ from pathlib import Path
 import logging
 from contextlib import asynccontextmanager
 
+from environment import load_environment
+
+BASE_DIR = Path(__file__).resolve().parent
+# Resolve defaults before importing modules that bind workspace paths. Explicit
+# process variables (including an isolated test/canary workspace) take priority.
+load_environment(BASE_DIR)
+
 logger = logging.getLogger("main_api")
 
 if __name__ == "__main__":
@@ -31,22 +38,9 @@ from urllib.parse import unquote
 from dashboard_media import media_status, paginate_listing, paginate_output
 from typing import Optional
 
-# Load .env local file
-env_file = Path(__file__).resolve().parent / ".env"
-if env_file.exists():
-    with open(env_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if "=" in line and not line.strip().startswith("#"):
-                k, v = line.strip().split("=", 1)
-                os.environ[k.strip()] = v.strip().strip('"').strip("'")
-
 # The API in this worktree is Tool V1 only, regardless of inherited variables.
 os.environ["PIPELINE_MODE"] = "legacy"
 
-from environment import load_environment
-
-BASE_DIR = Path(__file__).resolve().parent
-load_environment(BASE_DIR)
 from config.paths import AppPaths, is_downloader_save_dir
 from core.logging_setup import RedactingFormatter
 
@@ -60,6 +54,7 @@ from video_utils import extract_audio_from_video, mix_audio_pydub, process_video
 from pipeline_v2.config import PipelineMode, PipelineSettings
 import shared_state
 import job_tracker
+from api_pipeline_guard import guarded_media_api, has_active_media_tasks
 
 
 
@@ -94,6 +89,28 @@ async def _app_lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=_app_lifespan)
+
+REQUIRED_ROUTER_PATHS = {
+    "workflow": "/quy-trinh",
+    "script": "/kich-ban",
+    "presets": "/api/presets",
+    "voice_preview": "/api/voice-preview/catalog",
+    "segments": "/api/jobs/{job_id}/segments",
+    "recovery": "/api/jobs/{job_id}/resume-plan",
+    "handoff": "/api/handoff/info",
+}
+
+
+def component_health():
+    paths = {getattr(route, "path", "") for route in app.routes}
+    components = {name: path in paths for name, path in REQUIRED_ROUTER_PATHS.items()}
+    return {"ready": all(components.values()), "components": components}
+
+
+@app.get("/api/health")
+async def api_component_health():
+    health = component_health()
+    return JSONResponse(health, status_code=200 if health["ready"] else 503)
 
 
 @app.exception_handler(Exception)
@@ -524,9 +541,10 @@ async def api_get_logs():
 # ===== API: Tạo phụ đề (Transcribe + Translate) =====
 @app.post("/api/generate_subtitles")
 @app.post("/api/generate-subtitles")
+@guarded_media_api
 async def api_generate_subtitles(video_path: str = Form(...), target_lang: str = Form("vi")):
     """Nhận đường dẫn file video trên máy, tạo phụ đề gốc và dịch."""
-    if UNIFIED_PIPELINE_LOCK.locked() or job_tracker.get_status().get("active"):
+    if UNIFIED_PIPELINE_LOCK.locked():
         raise HTTPException(status_code=409, detail="Pipeline đang bận xử lý video khác. Vui lòng đợi hoàn thành!")
     await UNIFIED_PIPELINE_LOCK.acquire()
     try:
@@ -542,9 +560,13 @@ async def api_generate_subtitles(video_path: str = Form(...), target_lang: str =
 
         # 1. Extract audio
         await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
+        if job_tracker.is_stop_requested():
+            raise RuntimeError("Đã yêu cầu dừng tác vụ API")
 
         # 2. Transcribe with Whisper
         srt_segments = await asyncio.to_thread(extract_subtitles_isolated, original_audio, srt_original)
+        if job_tracker.is_stop_requested():
+            raise RuntimeError("Đã yêu cầu dừng tác vụ API")
 
         # 3. Translate
         translated_segments = await asyncio.to_thread(translate_subtitles, 
@@ -553,6 +575,8 @@ async def api_generate_subtitles(video_path: str = Form(...), target_lang: str =
             api_key=GEMINI_API_KEY,
             video_path=video_path,
         )
+        if job_tracker.is_stop_requested():
+            raise RuntimeError("Đã yêu cầu dừng tác vụ API")
         await asyncio.to_thread(save_srt, translated_segments, srt_translated)
 
         # Prepare response data
@@ -583,6 +607,7 @@ async def api_generate_subtitles(video_path: str = Form(...), target_lang: str =
 # ===== API: Xử lý full (Lồng tiếng + Xuất video) =====
 @app.post("/api/process_video")
 @app.post("/api/process-video")
+@guarded_media_api
 async def api_process_video(
     video_path: str = Form(...),
     target_lang: str = Form("vi"),
@@ -595,7 +620,7 @@ async def api_process_video(
     video_mode: str = Form("auto")
 ):
     """Xử lý full: Transcribe → Dịch → TTS → Mix Audio → Blur + Sub → Xuất video."""
-    if UNIFIED_PIPELINE_LOCK.locked() or job_tracker.get_status().get("active"):
+    if UNIFIED_PIPELINE_LOCK.locked():
         raise HTTPException(status_code=409, detail="Đang có tiến trình Batch xử lý video. Vui lòng đợi hoàn thành!")
     await API_PROCESS_LOCK.acquire()
     try:
@@ -702,6 +727,8 @@ async def api_process_video(
             }
         )
         frozen_eff = frozen_job.get("effective_config", {}) if frozen_job else {}
+        from subtitle_blur import freeze_subtitle_settings
+        subtitle_settings = freeze_subtitle_settings(frozen_eff)
         from v1_job_policy import resolve_visual_sub_to_speech
         visual_sub_to_speech = resolve_visual_sub_to_speech(frozen_eff, WORKSPACE)
         job_bgm_vol = frozen_eff.get("bgm_volume_db", cur_audio_settings.get("bgm_volume_db", -2.0))
@@ -732,6 +759,8 @@ async def api_process_video(
             vid_w, vid_h, main_y = visual_geometry
         else:
             vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
+        import copy
+        source_segments = copy.deepcopy(srt_segments)
 
         # 3. Translate
         translated_segments = await asyncio.to_thread(translate_subtitles, 
@@ -801,6 +830,8 @@ async def api_process_video(
             generate_ass_file, translated_segments, [], ass_path,
             play_res_x=vid_w, play_res_y=vid_h, main_y_pct=main_y,
             font_name=font_name, font_color=font_color, font_weight=font_weight,
+            cover_style=subtitle_settings["sub_cover_style"],
+            blur_settings=subtitle_settings, source_segments=source_segments,
         )
         rendered = await asyncio.to_thread(process_video, 
             video_path,
@@ -810,6 +841,8 @@ async def api_process_video(
             font_name=font_name,
             font_color=font_color,
             font_weight=font_weight,
+            subtitle_cover_style=subtitle_settings["sub_cover_style"],
+            subtitle_blur_settings=subtitle_settings,
         )
         if not rendered:
             raise RuntimeError("Final video render failed")
@@ -852,6 +885,7 @@ async def download_video(filename: str):
 # ===== API: Tải video từ URL + Xử lý tự động =====
 @app.post("/api/process_url")
 @app.post("/api/process-url")
+@guarded_media_api
 async def api_process_url(
     url: str = Form(...),
     target_lang: str = Form("vi"),
@@ -864,7 +898,7 @@ async def api_process_url(
     video_mode: str = Form("auto")
 ):
     """Tải video từ URL (Xiaohongshu, TikTok, YouTube...) rồi xử lý toàn bộ."""
-    if UNIFIED_PIPELINE_LOCK.locked() or job_tracker.get_status().get("active"):
+    if UNIFIED_PIPELINE_LOCK.locked():
         raise HTTPException(status_code=409, detail="Pipeline đang bận xử lý video khác. Vui lòng đợi hoàn thành!")
     await API_PROCESS_LOCK.acquire()
     try:
@@ -995,6 +1029,8 @@ async def api_process_url(
             }
         )
         frozen_eff = frozen_job.get("effective_config", {}) if frozen_job else {}
+        from subtitle_blur import freeze_subtitle_settings
+        subtitle_settings = freeze_subtitle_settings(frozen_eff)
         from v1_job_policy import resolve_visual_sub_to_speech
         visual_sub_to_speech = resolve_visual_sub_to_speech(frozen_eff, WORKSPACE)
         job_bgm_vol = frozen_eff.get("bgm_volume_db", cur_audio_settings.get("bgm_volume_db", -2.0))
@@ -1025,6 +1061,8 @@ async def api_process_url(
             vid_w, vid_h, main_y = visual_geometry
         else:
             vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
+        import copy
+        source_segments = copy.deepcopy(srt_segments)
 
         # Translate
         translated_segments = await asyncio.to_thread(translate_subtitles, 
@@ -1104,6 +1142,8 @@ async def api_process_url(
             generate_ass_file, translated_segments, [], ass_path,
             play_res_x=vid_w, play_res_y=vid_h, main_y_pct=main_y,
             font_name=font_name, font_color=font_color, font_weight=font_weight,
+            cover_style=subtitle_settings["sub_cover_style"],
+            blur_settings=subtitle_settings, source_segments=source_segments,
         )
         rendered = await asyncio.to_thread(process_video, 
             video_path,
@@ -1113,6 +1153,8 @@ async def api_process_url(
             font_name=font_name,
             font_color=font_color,
             font_weight=font_weight,
+            subtitle_cover_style=subtitle_settings["sub_cover_style"],
+            subtitle_blur_settings=subtitle_settings,
         )
         if not rendered:
             raise RuntimeError("Final video render failed")
@@ -1155,6 +1197,7 @@ async def api_get_status():
     """Trả về trạng thái tiến độ thời gian thực của tác vụ hiện tại."""
     # get_status có thể chạy ffprobe xác minh thành phẩm — đẩy sang thread để không block event loop
     status = await asyncio.to_thread(job_tracker.get_status)
+    status["service_health"] = component_health()
     import video_pause
     status["pause_state"] = video_pause.state()
     status["stop_requested"] = bool(
@@ -1876,7 +1919,16 @@ async def api_stop_batch():
     shared_state.stop_requested = True
 
     # 1. Ghi nhận dừng vào job_tracker & tạo file cờ stop
-    job_tracker.request_stop()
+    direct_api_active = has_active_media_tasks()
+    job_tracker.request_stop(wait_for_completion=True) if direct_api_active else job_tracker.request_stop()
+
+    # Direct API work is shielded from HTTP disconnects and may still have a
+    # blocking stage in a thread. Keep its lease until that stage returns and
+    # the owning guard finishes; announcing stopped here would admit another job.
+    if direct_api_active:
+        return {"status": "stopping",
+                "message": "Đã yêu cầu dừng; đang chờ bước API hiện tại kết thúc.",
+                "killed_processes": 0}
 
     # 2. Hủy asyncio task trong main.py nếu có
     global BATCH_TASK
