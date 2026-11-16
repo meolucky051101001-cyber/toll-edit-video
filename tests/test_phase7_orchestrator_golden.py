@@ -278,7 +278,8 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "success")
         ocr.assert_called_once()
         release.assert_called_once()
-        self.assertEqual(Path(mix.call_args.args[0]), self.output / "original.wav")
+        # Windows runners can spell TEMP with an 8.3 alias (RUNNER~1).
+        self.assertEqual(Path(mix.call_args.args[0]).resolve(), (self.output / "original.wav").resolve())
         self.assertEqual(self.events.count("ocr"), 1)
         self.assertIn("今天我们学习做饭", (self.output / "original.srt").read_text(encoding="utf-8"))
 
