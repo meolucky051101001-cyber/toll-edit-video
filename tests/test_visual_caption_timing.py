@@ -375,3 +375,68 @@ def test_pixel_qc_checks_short_cues_and_distinguishes_packaging(tmp_path, recogn
     assert result.status == status
     if status == 'PASS':
         assert result.details['transition_samples'] > 0
+
+
+def test_coalesce_stationary_tracks_merges_jitter_without_bridging_gaps_or_changes():
+    from backend import ocr_utils as ocr
+
+    def trk(text, start, end, left=.2, right=.8, top=.68, bottom=.74, prob=.97):
+        return SimpleNamespace(text=text, start=start, end=end, x_pct=left, max_x_pct=right,
+                               y_pct=top, max_y_pct=bottom, prob=prob)
+
+    tracks = [
+        # 1. Stationary caption with subpixel box jitter and 1-char homophone flicker
+        trk('这种鱼咬人疼吗？', 0.0, 0.1, left=.215, right=.748, top=.685, bottom=.753, prob=.96),
+        trk('这种鱼岐人疼吗？', 0.1, 0.3, left=.217, right=.747, top=.686, bottom=.752, prob=.90),
+        trk('这种鱼咬人疼吗？', 0.3, 0.6, left=.215, right=.749, top=.685, bottom=.753, prob=.98),
+        # 2. Real empty gap (0.6..0.75) MUST NOT be bridged
+        # 3. Same-slice co-linear horizontal fragments + stacked second line
+        trk('疼不疼把手放进去试试就知', 0.75, 0.9, left=.094, right=.500, top=.671, bottom=.729),
+        trk('道了？', 0.75, 0.9, left=.502, right=.900, top=.671, bottom=.729),
+        trk('第二行', 0.75, 0.9, left=.408, right=.582, top=.707, bottom=.768, prob=.98),
+        trk('第二付', 0.9, 1.2, left=.409, right=.580, top=.706, bottom=.769, prob=.90),
+        # 4. Distinct caption immediately following must NOT merge with prior line
+        trk('前面的字幕', 1.2, 1.4, left=.2, right=.8, top=.68, bottom=.75, prob=.99),
+        trk('后面的字幕', 1.4, 1.6, left=.2, right=.8, top=.68, bottom=.75, prob=.99),
+    ]
+
+    merged = ocr._coalesce_stationary_source_tracks(tracks)
+
+    assert [(b.start, b.end, b.text) for b in merged] == [
+        (0.0, 0.6, '这种鱼咬人疼吗？'),
+        (0.75, 0.9, '疼不疼把手放进去试试就知道了？'),
+        (0.75, 1.2, '第二行'),
+        (1.2, 1.4, '前面的字幕'),
+        (1.4, 1.6, '后面的字幕'),
+    ]
+    assert merged[1].x_pct == pytest.approx(.094)
+    assert merged[1].max_x_pct == pytest.approx(.900)
+
+
+def test_silent_gap_packaging_motion_is_not_attached_to_distant_speech_cue():
+    from datetime import timedelta
+    from backend import ocr_utils as ocr
+
+    cue7 = SimpleNamespace(index=7, start=timedelta(seconds=24.66), end=timedelta(seconds=25.72), content='趁机是开箱')
+    cue8 = SimpleNamespace(index=8, start=timedelta(seconds=38.14), end=timedelta(seconds=38.92), content='四个小袋子')
+
+    def trk(text, start, end, left=.34, right=.67, top=.68, bottom=.74, prob=.99):
+        return SimpleNamespace(text=text, start=start, end=end, x_pct=left, max_x_pct=right,
+                               y_pct=top, max_y_pct=bottom, prob=prob)
+
+    tracks = [
+        trk('沉浸式开箱', 24.66, 25.80),
+        # Handheld packaging moving across the band 5-6s into a 12.4s silent unboxing shot
+        trk('無印良品', 30.80, 31.15, left=.40, right=.65),
+        trk('求方卜本儿', 31.15, 31.50, left=.42, right=.68),
+        trk('四个小袋子', 38.10, 38.95, left=.35, right=.68),
+    ]
+
+    ocr._attach_source_caption_tracks([cue7, cue8], tracks)
+
+    assert cue7.ocr_mask_status == 'located'
+    assert cue8.ocr_mask_status == 'located'
+    assert all(b.end <= 26.0 for b in cue7.tracking_blocks)
+    assert all(b.start >= 38.0 for b in cue8.tracking_blocks)
+
+

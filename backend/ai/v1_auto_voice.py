@@ -492,6 +492,9 @@ def get_manual_voice_info(workspace: Optional[str] = None) -> Dict[str, Any]:
 
 
 
+_FILE_SHA256_CACHE: Dict[Tuple[str, int, int, int], str] = {}
+
+
 def compute_file_sha256(file_path: Optional[str | Path], max_bytes: int = 16 * 1024 * 1024) -> str:
     """Tính SHA-256 nội dung file nhanh và chính xác làm fingerprint gắn với snapshot."""
     if not file_path:
@@ -500,7 +503,12 @@ def compute_file_sha256(file_path: Optional[str | Path], max_bytes: int = 16 * 1
     if not p.is_file():
         return ""
     try:
-        size = p.stat().st_size
+        st = p.stat()
+        size = int(st.st_size)
+        cache_key = (str(p.resolve()), int(st.st_mtime_ns), size, int(max_bytes))
+        cached = _FILE_SHA256_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
         hasher = hashlib.sha256()
         hasher.update(str(size).encode("utf-8"))
         with open(p, "rb") as f:
@@ -511,7 +519,11 @@ def compute_file_sha256(file_path: Optional[str | Path], max_bytes: int = 16 * 1
                 hasher.update(f.read(half))
                 f.seek(max(0, size - half))
                 hasher.update(f.read(half))
-        return hasher.hexdigest()
+        digest = hasher.hexdigest()
+        while len(_FILE_SHA256_CACHE) >= 32:
+            _FILE_SHA256_CACHE.pop(next(iter(_FILE_SHA256_CACHE)))
+        _FILE_SHA256_CACHE[cache_key] = digest
+        return digest
     except Exception as e:
         logger.warning("Không thể tính hash file %s: %s", p, e)
         return ""

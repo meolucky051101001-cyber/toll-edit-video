@@ -788,11 +788,25 @@ def process_video(
             filter_complex = ",".join(filter_parts)
         
         video_bitrate_kbps = 8000
+        maxrate_kbps = 12000
+        bufsize_kbps = 16000
+        try:
+            src_dur = float(getattr(source_video, "duration", 0.0) or 0.0)
+            if os.path.isfile(video_path) and os.path.getsize(video_path) > 100000 and src_dur > 1.0:
+                src_kbps = int((os.path.getsize(video_path) * 8.0 / 1000.0) / src_dur)
+                video_bitrate_kbps = min(8000, max(2500, int(src_kbps * 1.25)))
+                maxrate_kbps = min(12000, max(4000, int(video_bitrate_kbps * 1.5)))
+                bufsize_kbps = maxrate_kbps * 2
+        except OSError:
+            pass
         b_v = f"{video_bitrate_kbps}k"
-        
+        max_v = f"{maxrate_kbps}k"
+        buf_v = f"{bufsize_kbps}k"
+        filter_threads = '4' if (w * h <= 1920 * 1080) else '2'
+
         # NVIDIA encoding only. No MediaFoundation/software CPU fallback.
         encoders_to_try = [
-            ['h264_nvenc', '-preset', 'p4', '-tune', 'hq', '-rc', 'vbr', '-cq', '20', '-b:v', b_v, '-maxrate', '12000k', '-bufsize', '16000k', '-spatial-aq', '1'],
+            ['h264_nvenc', '-preset', 'p4', '-tune', 'hq', '-rc', 'vbr', '-cq', '20', '-b:v', b_v, '-maxrate', max_v, '-bufsize', buf_v, '-spatial-aq', '1'],
             ['h264_nvenc', '-preset', 'fast', '-b:v', b_v],
         ]
         
@@ -820,7 +834,7 @@ def process_video(
                 # Bound 4K decoder/filter frame pools: auto threading can
                 # allocate >10 GB and push a 16 GB machine into paging.
                 '-threads', '4',
-                '-filter_threads', '2',
+                '-filter_threads', filter_threads,
                 '-i', video_path,
                 '-i', mixed_audio_path,
             ] + filter_args + [

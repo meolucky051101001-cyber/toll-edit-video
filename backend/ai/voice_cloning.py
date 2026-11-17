@@ -298,14 +298,24 @@ async def fit_audio_file(audio_input_path: str, target_max_duration: float, outp
     import shutil
     output_path = output_path or audio_input_path
     from v1_speech_guard import load_audio, SpeechTimingError, natural_speed_limit
-    audio = load_audio(audio_input_path)
-    orig_dur = len(audio) / 1000.0
-    original_duration = orig_dur
     if target_max_duration is not None:
         import math
         if not math.isfinite(float(target_max_duration)) or target_max_duration <= 0:
-            from v1_speech_guard import SpeechTimingError
             raise SpeechTimingError("Reading window must be positive and finite")
+
+    audio = None
+    orig_dur = None
+    try:
+        import soundfile as sf
+        probed_dur = float(sf.info(str(audio_input_path)).duration)
+        if probed_dur > 0:
+            orig_dur = probed_dur
+    except Exception:
+        orig_dur = None
+    if orig_dur is None:
+        audio = load_audio(audio_input_path)
+        orig_dur = len(audio) / 1000.0
+    original_duration = orig_dur
 
     # 1. Nếu audio đã vừa khung đọc -> Giữ nguyên vẹn 100% file gốc CapCut (160kbps), KHÔNG nén lại
     if target_max_duration is None or target_max_duration <= 0 or orig_dur <= target_max_duration:
@@ -314,6 +324,8 @@ async def fit_audio_file(audio_input_path: str, target_max_duration: float, outp
         return output_path, orig_dur, 1.0
 
     # Trim safe silence before computing speed; even small overflow must be fit.
+    if audio is None:
+        audio = load_audio(audio_input_path)
     audio = trim_audio_silence(audio)
     orig_dur = len(audio) / 1000.0
     ratio = orig_dur / max(0.001, target_max_duration - 0.015)

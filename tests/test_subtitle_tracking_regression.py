@@ -167,7 +167,10 @@ class SubtitleRegressionTests(unittest.TestCase):
             self.assertLess(sum(calls),38 * 30)
             self.assertLessEqual(max(calls),12)
             for item in segments:
-                self.assertGreaterEqual(len(item.tracking_blocks),10)
+                self.assertGreaterEqual(len(item.tracking_blocks), 1)
+                self.assertLessEqual(len(item.tracking_blocks), 6)
+                self.assertTrue(all(b.start <= a.end + 1e-4
+                                    for a, b in zip(item.tracking_blocks, item.tracking_blocks[1:])))
                 self.assertTrue(all(b.text=="今天我们学习做饭" for b in item.tracking_blocks))
                 self.assertAlmostEqual(item.tracking_blocks[0].start,item.start.total_seconds(),delta=.1)
                 self.assertAlmostEqual(item.tracking_blocks[-1].end,item.end.total_seconds(),delta=.1)

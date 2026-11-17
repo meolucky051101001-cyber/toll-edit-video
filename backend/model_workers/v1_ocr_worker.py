@@ -102,6 +102,8 @@ def _model(detection_model, recognition_model, engine):
         use_textline_orientation=False,
         text_det_thresh=0.20,
         text_det_box_thresh=0.40,
+        text_det_limit_type="max",
+        text_det_limit_side_len=960,
         engine=engine,
     )
 
