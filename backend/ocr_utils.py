@@ -2,13 +2,14 @@ import cv2
 import logging
 import os
 import tempfile
-import hashlib
 import copy
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import timedelta
-from collections import OrderedDict
+from bisect import bisect_left
 from difflib import SequenceMatcher
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -19,8 +20,12 @@ except ImportError:
     from v1_ocr_proxy import ocr_proxy
 try:
     from .v1_stage_metrics import stage
+    from .ocr_observation_ledger import (OCRObservationLedger, active_ledger, current_occurrences,
+                                         observation_occurrences, video_observations)
 except ImportError:
     from v1_stage_metrics import stage
+    from ocr_observation_ledger import (OCRObservationLedger, active_ledger, current_occurrences,
+                                       observation_occurrences, video_observations)
 
 try:
     from .ai.v1_model_policy import current_v1_model_policy
@@ -45,7 +50,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 reader = None
 _paddle_failed = False
-_frame_cache = OrderedDict()
 
 def get_ocr_reader():
     global reader
@@ -78,7 +82,9 @@ def release_ocr_reader(force_close_session: bool = False):
     global reader, _paddle_failed
     was_failed = _paddle_failed
     _paddle_failed = False
-    _frame_cache.clear()
+    ledger = active_ledger()
+    if ledger is not None:
+        ledger.clear()
     keep_warm = os.getenv("V1_OCR_KEEP_WARM", "1").strip().lower() not in ("0", "false", "no")
     if force_close_session or was_failed or not keep_warm:
         _close_ocr_session()
@@ -107,27 +113,20 @@ def _has_chinese_overlap(candidate_text: str, segment_text: str) -> bool:
 
 
 def _readtext_batch(frames):
-    # Reuse only pixel-identical frames, never merely similar subtitle regions:
-    # no risk of missing a changed Chinese glyph or motion.
-    if not all(hasattr(frame, "tobytes") for frame in frames):
+    if not all(hasattr(frame, "tobytes") and hasattr(frame, "dtype") for frame in frames):
         return _recognize_batch(frames)
-    keys = [hashlib.sha256(str(frame.shape).encode() + frame.tobytes()).digest()
-            for frame in frames]
-    pending = {}
-    for key, frame in zip(keys, frames):
-        if key not in _frame_cache:
-            pending.setdefault(key, frame)
-    if pending:
-        rows = _recognize_batch(list(pending.values()))
-        if len(rows) != len(pending):
-            raise RuntimeError("OCR returned incomplete unique frames")
-        for key, row in zip(pending, rows):
-            _frame_cache[key] = copy.deepcopy(row)
-    result = [copy.deepcopy(_frame_cache[key]) for key in keys]
-    while len(_frame_cache) > 64:
-        _frame_cache.popitem(last=False)
+    policy = current_v1_model_policy()
+    policy_key = tuple(str(getattr(policy, name, "")) for name in (
+        "ocr_backend", "paddle_detection_model", "paddle_recognition_model", "paddle_engine",
+        "runtime_python", "model_cache_directory")) + ("bgr-native-v1",)
+    # Unscoped consumers (including rendered-pixel QC) only deduplicate within
+    # this batch. They can never inherit recognition evidence from source OCR.
+    ledger = active_ledger() or OCRObservationLedger("batch")
+    before = ledger.metrics.get("ocr_unique_inputs", 0)
+    result = ledger.recognize(frames, _recognize_batch, policy_key, current_occurrences())
+    unique = ledger.metrics.get("ocr_unique_inputs", 0) - before
     logger.info("V1 OCR frames=%d unique_work=%d reused=%d",
-                len(frames), len(pending), len(frames)-len(pending))
+                len(frames), unique, len(frames) - unique)
     return result
 
 
@@ -143,6 +142,7 @@ def _recognize_batch(frames):
     ):
         try:
             with tempfile.TemporaryDirectory(prefix="autodub-v1-ocr-frames-") as temporary:
+                started = time.monotonic()
                 paths = []
                 png_params = [int(getattr(cv2, "IMWRITE_PNG_COMPRESSION", 16)), 1]
                 for index, frame in enumerate(frames):
@@ -150,6 +150,11 @@ def _recognize_batch(frames):
                     if not cv2.imwrite(str(path), frame, png_params):
                         raise OSError("Could not write OCR frame {}".format(path))
                     paths.append(str(path))
+
+                ledger = active_ledger()
+                if ledger is not None:
+                    ledger._add("ocr_png_write_seconds", time.monotonic() - started)
+                started = time.monotonic()
 
                 result = run_v1_ocr(
                     {
@@ -163,6 +168,9 @@ def _recognize_batch(frames):
                     ),
                     policy=policy,
                 )
+                if ledger is not None:
+                    ledger._add("ocr_runtime_seconds", time.monotonic() - started)
+                started = time.monotonic()
                 by_path = {
                     str(item.get("path")): item.get("rows", [])
                     for item in result.get("images", [])
@@ -181,6 +189,8 @@ def _recognize_batch(frames):
                     output.append(rows)
                 if len(output) != len(frames):
                     raise RuntimeError("PP-OCRv6 returned an incomplete frame batch")
+                if ledger is not None:
+                    ledger._add("ocr_postprocess_seconds", time.monotonic() - started)
                 logger.info(
                     "PP-OCRv6 Tiny completed %d sampled frames via %s",
                     len(frames),
@@ -411,8 +421,7 @@ def _visual_grid_times(segments, duration, step=0.35):
             current += step
     max_samples = max(100, int(os.getenv("V1_VISUAL_OCR_MAX_SAMPLES", "20000")))
     if len(times) > max_samples:
-        logger.warning("Visual OCR grid capped at %d/%d samples", max_samples, len(times))
-        times = times[:max_samples]
+        raise RuntimeError(f"Caption scan requires {len(times)} samples, exceeding budget {max_samples}")
     return times
 
 
@@ -618,11 +627,13 @@ def _legacy_subtitle_from_recovery(rec, index):
     return new_seg
 
 
-def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments, stopped, metrics=None):
+def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments, stopped, metrics=None,
+                                 *, source_band=None, source_segments=None):
     """Recover burned-in captions without relying on an ASR transcript."""
     if metrics is None:
         metrics = {}
-    times = _visual_grid_times(existing_segments, duration, step=0.35)
+    source_only = source_band is not None
+    times = _visual_grid_times([] if source_only else existing_segments, duration, step=0.35)
     if not times:
         return [], 0.85
 
@@ -652,6 +663,8 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             raise RuntimeError("Decoded caption frame lies outside the source frame count")
         if expected_index is not None and frame_index != expected_index:
             raise RuntimeError(f"Caption seek returned frame {frame_index}, expected {expected_index}")
+        if frame_index == 0 and -.1 <= sample_time < 0:
+            sample_time = 0.
         if (not math.isfinite(sample_time) or not 0 <= sample_time < duration
                 or (frame_index > 0 and sample_time == 0)):
             raise RuntimeError("Decoder did not report a valid caption frame timestamp")
@@ -688,7 +701,11 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             raise RuntimeError("OCR stop requested")
         images = [cv2.resize(frame, scaled_size, interpolation=cv2.INTER_AREA) if scale < 1 else frame
                   for _, _, frame in samples]
-        recognized = _readtext_batch(images)
+        with observation_occurrences([(0, index, pts, "full", scaled_size)
+                                      for index, pts, _ in samples]):
+            recognized = _readtext_batch(images)
+        metrics["visual_ocr_calls"] = metrics.get("visual_ocr_calls", 0) + 1
+        metrics["visual_requested_frames"] = metrics.get("visual_requested_frames", 0) + len(samples)
         if len(recognized or []) != len(samples):
             raise RuntimeError("OCR returned incomplete source caption observations")
         for (index, pts, frame), rows in zip(samples, recognized):
@@ -705,13 +722,33 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, current_time - 0.2) * 1000)
             ok, frame = cap.read()
         if not ok:
-            raise RuntimeError(f"Could not decode source caption frame at {current_time:.3f}s")
-        frame_index, current_time = decoded_position()
+            # Older OpenCV/FFmpeg builds can fail a valid time seek near a
+            # VFR tail. Recover through the real decoded clock, never FPS.
+            target_time = current_time
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            chosen = None
+            for _ in range(frame_count):
+                if stopped():
+                    raise RuntimeError("OCR stop requested")
+                decoded, image = cap.read()
+                if not decoded:
+                    raise RuntimeError(f"Could not decode source caption frame at {target_time:.3f}s")
+                index, pts = decoded_position()
+                if pts > target_time:
+                    if chosen is None:
+                        chosen = (index, pts, image)
+                    break
+                chosen = (index, pts, image)
+            if chosen is None:
+                raise RuntimeError(f"Could not decode source caption frame at {target_time:.3f}s")
+            frame_index, current_time, frame = chosen
+            metrics["visual_seek_fallbacks"] = metrics.get("visual_seek_fallbacks", 0) + 1
+        else:
+            frame_index, current_time = decoded_position()
         samples.append((frame_index, current_time, frame))
         if len(samples) == batch_size or position + 1 == len(times):
             recognize_samples(samples)
             samples.clear()
-            metrics["visual_ocr_calls"] = metrics.get("visual_ocr_calls", 0) + 1
         if (position + 1) % 100 == 0:
             logger.info(
                 "Visual OCR progress: %d/%d decoded samples, OCR batches=%d",
@@ -720,7 +757,7 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
 
     if not all_blocks:
         return [], 0.85
-    band = select_chinese_subtitle_band(
+    band = source_band if source_only else select_chinese_subtitle_band(
         blocks=all_blocks,
         segment_texts={},
         frame_width=width,
@@ -743,15 +780,64 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
     except ImportError:
         from visual_caption_timing import refine_observations, observation_intervals
 
-    def caption_signature(blocks):
-        rows = []
+    speech_keys = {_visual_caption_key(seg.content) for seg in source_segments or []}
+    speech_keys.discard('')
+
+    @lru_cache(maxsize=4096)
+    def speech_similarity(text):
+        key = _visual_caption_key(text)
+        if key in speech_keys:
+            return 1.0
+        return max((SequenceMatcher(None, key, speech, autojunk=False).ratio()
+                    for speech in speech_keys
+                    if 2 * min(len(key), len(speech)) >= .65 * (len(key) + len(speech))),
+                   default=0.0)
+
+    # Use individual speech-matching OCR rows, not an expanded/composite band
+    # that may also enclose a creator watermark or nearby packaging labels.
+    source_seeds = []
+    if source_only:
+        clusters = []
+        for block in all_blocks:
+            if _visual_chinese_count(block.text) < 4:
+                continue
+            if speech_similarity(block.text) < .65:
+                continue
+            center = (block.y_pct + block.max_y_pct) / 2
+            group = next((g for g in clusters if abs(center - g[0]) < .025), None)
+            if group is None:
+                group = [center, []]
+                clusters.append(group)
+            group[1].append(block)
+        support = max((len(g[1]) for g in clusters),default=0)
+        source_seeds = [b for _, group in clusters if len(group) >= max(1,support*.25) for b in group]
+
+    def caption_blocks(blocks):
+        selected = []
         for block in blocks:
-            if (block.max_y_pct < band.top - .035 or block.y_pct > band.bottom + .035
-                    or block.prob < .60 or _visual_chinese_count(block.text) < 2
+            matches_speech = (source_only and _visual_chinese_count(block.text) >= 6
+                              and speech_similarity(block.text) >= .8)
+            in_band = block.max_y_pct >= band.top - .035 and block.y_pct <= band.bottom + .035
+            if source_only and source_seeds:
+                center = (block.y_pct + block.max_y_pct) / 2
+                in_band = any(abs(center - (seed.y_pct + seed.max_y_pct) / 2) <=
+                              max(block.max_y_pct-block.y_pct, seed.max_y_pct-seed.y_pct)*.55 + .004
+                              for seed in source_seeds)
+            english = getattr(band, 'mode', '') == 'english_match'
+            readable = (_visual_chinese_count(block.text) >= 2 or
+                        (english and sum(c.isascii() and c.isalpha() for c in block.text) >= 4))
+            if (not (in_band or matches_speech) or block.prob < .60 or not readable
                     or _visual_watermark_text(block.text)):
                 continue
-            if block.max_x_pct - block.x_pct < .14 and abs((block.x_pct + block.max_x_pct) / 2 - .5) > .15:
+            if (not matches_speech and block.max_x_pct - block.x_pct < .25
+                    and abs((block.x_pct + block.max_x_pct) / 2 - .5) > .15):
                 continue
+            selected.append(block)
+        return selected
+
+    def caption_signature(blocks):
+        rows = []
+        for block in caption_blocks(blocks):
             # Ignore subpixel OCR jitter; a visible caption move still refines.
             rows.append((_visual_caption_key(block.text),
                          round(block.x_pct * width / 8), round(block.max_x_pct * width / 8),
@@ -781,15 +867,27 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
 
     refined, extra = refine_observations(observations, frame_count, None,
                                          caption_signature, stopped,
-                                         max_extra_frames=4000,
+                                         max_extra_frames=frame_count if source_only else 4000,
+                                         max_stable_gap_frames=3 if source_only else None,
                                          observe_batch=observe_frames)
     metrics["visual_boundary_frames"] = extra
-    for blocks, left, right in observation_intervals(
-            refined, None, duration, frame_times=frame_times):
+    for blocks, left, right in observation_intervals(refined, None, duration, frame_times=frame_times):
         for block in blocks:
             block.visual_interval_start = left
             block.visual_interval_end = right
     all_blocks = [block for blocks in refined.values() for block in blocks]
+
+    if source_only:
+        tracks = []
+        for blocks, left, right in observation_intervals(refined, None, duration, frame_times=frame_times):
+            for block in caption_blocks(blocks):
+                track = _tracking_ocr_block(block, left, right, block)
+                track.geometry_verified = True
+                track.visual_locked = True
+                tracks.append(track)
+        metrics['source_timeline'] = dict(observed_frames=len(refined), track_count=len(tracks),
+                                          duration=duration, max_stable_gap_frames=3)
+        return tracks, float(band.top)
 
     recovered = recover_missing_subtitles_from_ocr(
         all_blocks=all_blocks,
@@ -902,6 +1000,18 @@ def _ocr_segment_id(seg, ordinal):
     sid = getattr(seg, 'index', None)
     return sid if sid is not None else ordinal
 
+
+def _decoded_occurrence(cap, crop_offset, scale):
+    # Metadata is diagnostic only; exact input equality decides every reuse.
+    try:
+        index = float(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+        pts = float(cap.get(cv2.CAP_PROP_POS_MSEC)) / 1000.
+        if not math.isfinite(index) or index < 0 or not math.isfinite(pts) or pts < 0:
+            return (0, None, None, crop_offset, scale)
+        return (0, index, pts, crop_offset, scale)
+    except (KeyError, TypeError, ValueError):
+        return (0, None, None, crop_offset, scale)
+
 def _ocr_stopped():
     try:
         from . import shared_state
@@ -932,6 +1042,7 @@ class _OcrFrameBatch:
     crop_y_start: int = 0
     crop_y_end: int = 0
     captured_frames: list = field(default_factory=list)
+    captured_occurrences: list = field(default_factory=list)
     recognized_samples: list = field(default_factory=list)
     early_band_checked: bool = False
     early_band_locked: bool = False
@@ -946,7 +1057,8 @@ class _OcrFrameBatch:
             return
         if _ocr_stopped():
             raise RuntimeError('OCR stop requested')
-        results = _readtext_batch([item[2] for item in self.captured_frames])
+        with observation_occurrences(self.captured_occurrences):
+            results = _readtext_batch([item[2] for item in self.captured_frames])
         if len(results) != len(self.captured_frames):
             raise RuntimeError("OCR returned incomplete frame results")
         for item, rows in zip(self.captured_frames, results):
@@ -972,6 +1084,7 @@ class _OcrFrameBatch:
                 pass
             self.recognized_samples.append((current_time, scale_ratio, target_seg, seg_idx, rows, crop_offset))
         self.captured_frames.clear()
+        self.captured_occurrences.clear()
 
         # Early Subtitle Band Lock: khi video có >= 16 câu thoại ở chế độ 'full'
         # và sau 24 frame đầu tiên đã xác lập được dải phụ đề cố định độ tin cậy cao,
@@ -1031,37 +1144,30 @@ class _OcrFrameBatch:
 
 @stage("ocr", cleanup=release_ocr_reader)
 @ocr_proxy
+@video_observations
 def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=None, srt_segments=None, visual_sub_to_speech=False, **kwargs):
     logger.info(f"Bắt đầu OCR toàn diện trên video {video_path}")
 
     cap, fps, width, height, duration = _open_ocr_video(video_path, kwargs)
     all_blocks = []
-    speech_coverage, timeline_duration = _ocr_speech_coverage(cap, fps, duration, srt_segments)
-    visual_mode = (
-        bool(visual_sub_to_speech)
-        and (not srt_segments or len(srt_segments) == 0 or (timeline_duration > 0 and speech_coverage < 0.25 * timeline_duration))
-    )
-
-    if visual_mode:
-        logger.info("Visual OCR-to-TTS mode active: no speech or speech coverage %.2f%%", 100 * speech_coverage / timeline_duration if timeline_duration else 0.0)
+    if visual_sub_to_speech and not srt_segments:
+        logger.info("Visual OCR-to-TTS mode active: no speech transcript")
         v_metrics = kwargs.setdefault('metrics', {})
         try:
             visual_segments, visual_main_y = _perform_visual_subtitle_ocr(
-                cap, width, height, timeline_duration, srt_segments, _ocr_stopped, metrics=v_metrics
+                cap, width, height, duration, [], _ocr_stopped, metrics=v_metrics
             )
         finally:
             cap.release()
         if not visual_segments:
             logger.warning("Visual OCR-to-TTS completed but found zero dynamic captions")
             return [], width, height, 0.85
-        combined = list(srt_segments or []) + visual_segments
-        combined.sort(key=lambda item: item.start)
-        normalize_visual_speech_timing(combined, duration=timeline_duration)
-        combined.sort(key=lambda item: item.start)
-        for idx, seg in enumerate(combined, start=1):
+        normalize_visual_speech_timing(visual_segments, duration=duration)
+        visual_segments.sort(key=lambda item: item.start)
+        for idx, seg in enumerate(visual_segments, start=1):
             seg.index = idx
         logger.info("Visual OCR-to-TTS pipeline complete: %d cues recovered", len(visual_segments))
-        return combined, width, height, visual_main_y
+        return visual_segments, width, height, visual_main_y
     ocr_strategy = _choose_ocr_strategy(video_path, duration, srt_segments, kwargs)
     sampling = _ocr_target_timestamps(cap, srt_segments, duration, kwargs, ocr_strategy)
     if sampling is None:
@@ -1090,8 +1196,83 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
     band = _rescue_ocr_coordinates(video_path, batch, band, all_blocks, observation_times, sampled_ids)
     _initialize_ocr_geometry(batch, band, sampled_ids, all_blocks)
     main_y_pct = _apply_ocr_subtitle_band(batch, band, observation_times, all_blocks)
+    # Save unresolved evidence before attempting lifetime acquisition.
     _report_ocr_geometry(srt_segments, all_blocks, band, kwargs, metrics)
+    # Keep smart-skip's bounded per-cue workload for long videos.
+    if (ocr_strategy != 'smart_skip' and srt_segments
+            and getattr(band, 'support', 0) > 0 and getattr(band, 'mode', '') != 'default'):
+        source_cap, _, _, _, _ = _open_ocr_video(video_path, kwargs)
+        try:
+            source_tracks, _ = _perform_visual_subtitle_ocr(
+                source_cap, width, height, duration, [], _ocr_stopped, metrics=metrics,
+                source_band=band, source_segments=srt_segments)
+        finally:
+            source_cap.release()
+        _attach_source_caption_tracks(srt_segments, source_tracks)
+        _report_ocr_geometry(srt_segments, all_blocks, band, kwargs, metrics)
     return [], width, height, main_y_pct
+
+
+def _attach_source_caption_tracks(segments, tracks):
+    """Keep the source display clock independent of speech and TTS timings."""
+    if not tracks:
+        raise RuntimeError('Source caption lifetime could not be verified for the located subtitle band')
+    grouped = {id(seg): [] for seg in segments}
+    for track in _bridge_source_caption_gaps(tracks):
+        middle = (track.start + track.end) / 2
+        def score(seg):
+            start, end = seg.start.total_seconds(), seg.end.total_seconds()
+            overlap = max(0., min(end, track.end) - max(start, track.start))
+            distance = max(start - middle, middle - end, 0.)
+            return overlap, -distance
+        owner = max(segments, key=score)
+        grouped[id(owner)].append(track)
+    for seg in segments:
+        observed = sorted(grouped[id(seg)], key=lambda b: (b.start, b.y_pct, b.x_pct))
+        seg.tracking_blocks = observed
+        seg.source_caption_timing_verified = True
+        seg.geometry_verified = bool(observed)
+        if observed:
+            seg.best_block = max(observed, key=lambda b: (b.end - b.start, b.prob))
+            seg.ocr_mask_status = 'located'
+            seg.y_pct, seg.max_y_pct = seg.best_block.y_pct, seg.best_block.max_y_pct
+        else:
+            seg.best_block = None
+            seg.ocr_mask_status = 'no_caption_evidence'
+
+
+def _bridge_source_caption_gaps(tracks):
+    """Cover brief OCR dropouts between observations of the same stationary row."""
+    ordered = sorted(tracks, key=lambda block: block.start)
+    starts = [block.start for block in ordered]
+    recent = {}
+    bridges = []
+
+    def nearby(first, second):
+        return max(abs(getattr(first, field) - getattr(second, field)) for field in
+                   ('x_pct', 'max_x_pct', 'y_pct', 'max_y_pct')) <= .025
+
+    for block in ordered:
+        text = _visual_caption_key(block.text)
+        chinese = ''.join(char for char in text if '\u3400' <= char <= '\u9fff')
+        key = chinese or text
+        if len(key) < 4:
+            continue
+        previous = recent.get(key)
+        recent[key] = block
+        if previous is None or not 0 < block.start - previous.end <= .25 or not nearby(previous, block):
+            continue
+        intervening = ordered[bisect_left(starts, previous.end):bisect_left(starts, block.start)]
+        if any(nearby(previous, other) for other in intervening):
+            continue
+        bridge = copy.copy(block)
+        bridge.start, bridge.end = previous.end, block.start
+        bridge.x_pct = min(previous.x_pct, block.x_pct)
+        bridge.y_pct = min(previous.y_pct, block.y_pct)
+        bridge.max_x_pct = max(previous.max_x_pct, block.max_x_pct)
+        bridge.max_y_pct = max(previous.max_y_pct, block.max_y_pct)
+        bridges.append(bridge)
+    return ordered + bridges
 
 
 def _open_ocr_video(video_path, kwargs):
@@ -1113,35 +1294,6 @@ def _open_ocr_video(video_path, kwargs):
         cap.release()
         raise ValueError("Video has invalid dimensions")
     return cap, fps, width, height, duration
-
-
-def _ocr_speech_coverage(cap, fps, duration, srt_segments):
-    speech_coverage = 0.0
-    timeline_duration = float(duration)
-    if not timeline_duration:
-        try:
-            timeline_duration = max(
-                seg.end.total_seconds() for seg in srt_segments or []
-            )
-        except Exception:
-            pass
-        if not timeline_duration:
-            try:
-                frame_count_key = getattr(cv2, "CAP_PROP_FRAME_COUNT", None)
-                if frame_count_key is not None:
-                    timeline_duration = cap.get(frame_count_key) / fps
-            except Exception:
-                pass
-    if srt_segments:
-        for seg in srt_segments:
-            try:
-                seg_start = seg.start.total_seconds()
-                seg_end = min(timeline_duration, seg.end.total_seconds()) if timeline_duration else seg.end.total_seconds()
-                if seg_end > seg_start:
-                    speech_coverage += max(0.0, seg_end - seg_start)
-            except Exception:
-                continue
-    return speech_coverage, timeline_duration
 
 
 def _choose_ocr_strategy(video_path, duration, srt_segments, kwargs):
@@ -1314,6 +1466,7 @@ def _collect_ocr_samples(cap, batch, target_timestamps):
                 proc_frame = cropped_frame
 
             batch.captured_frames.append((current_time, scale_ratio, proc_frame, target_seg, seg_idx, batch.crop_y_start))
+            batch.captured_occurrences.append(_decoded_occurrence(cap, batch.crop_y_start, scale_ratio))
             if len(batch.captured_frames) >= 12:
                 batch.flush_frames()
 
@@ -1380,6 +1533,7 @@ def _rescue_ocr_coordinates(video_path, batch, band, all_blocks, observation_tim
                     scale_ratio = min(1., 1280. / batch.width)
                     proc = cv2.resize(crop, (round(batch.width * scale_ratio), max(1, round((roi_end-roi_start) * scale_ratio))), interpolation=cv2.INTER_AREA) if scale_ratio < 1 else crop
                     batch.captured_frames.append((current_time, scale_ratio, proc, target_seg, seg_idx, roi_start))
+                    batch.captured_occurrences.append(_decoded_occurrence(rescue_cap, roi_start, scale_ratio))
                     if len(batch.captured_frames) >= 12:
                         batch.flush_frames()
             batch.flush_frames()

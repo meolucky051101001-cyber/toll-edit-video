@@ -72,10 +72,17 @@ def refine_observations(observations, frame_count, observe, signature, stopped=l
     return samples, extra
 
 
-def observation_intervals(samples, fps, duration, frame_times=None):
-    """Zero-order hold between verified observations, with half-open times."""
-    if frame_times is None and (not math.isfinite(fps) or fps <= 0):
-        raise ValueError("Caption timing requires valid FPS")
+def observation_intervals(samples, fps, duration, *, frame_times=None):
+    """Hold observations until the next decoded PTS, including VFR sources.
+
+    The FPS fallback is for callers with an explicitly constant frame clock.
+    Video acquisition supplies real timestamps; average FPS cannot map VFR
+    frame numbers to time.
+    """
+    if frame_times is None and (fps is None or not math.isfinite(fps) or fps <= 0):
+        raise ValueError("Caption timing requires valid FPS or decoded timestamps")
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError("Caption timing requires a positive duration")
     ordered = sorted(samples)
     try:
         times = [float(frame_times[index]) if frame_times is not None else index / fps

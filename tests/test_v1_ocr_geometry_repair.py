@@ -41,12 +41,19 @@ class Capture:
     def __init__(self, width=720, height=1280, duration=600., readable=True):
         self.width, self.height, self.duration, self.readable = width, height, duration, readable
         self.timestamps, self.released = [], False
+        self.index = 0
     def isOpened(self): return True
     def get(self, key):
         return {cv2.CAP_PROP_FRAME_WIDTH:self.width, cv2.CAP_PROP_FRAME_HEIGHT:self.height,
-                cv2.CAP_PROP_FPS:30., cv2.CAP_PROP_FRAME_COUNT:self.duration*30}.get(key, 0)
-    def set(self, key, value): self.timestamps.append(value/1000.)
-    def read(self): return (True, np.zeros((self.height,self.width,3),np.uint8)) if self.readable else (False,None)
+                cv2.CAP_PROP_FPS:30., cv2.CAP_PROP_FRAME_COUNT:self.duration*30,
+                cv2.CAP_PROP_POS_FRAMES:self.index,
+                cv2.CAP_PROP_POS_MSEC:max(0,self.index-1)*1000/30}.get(key, 0)
+    def set(self, key, value):
+        self.index = round(value*30/1000) if key == cv2.CAP_PROP_POS_MSEC else int(value)
+        self.timestamps.append(self.index/30)
+    def read(self):
+        self.index += 1
+        return (True, np.zeros((self.height,self.width,3),np.uint8)) if self.readable else (False,None)
     def release(self): self.released=True
 
 
@@ -231,6 +238,7 @@ class PipelineTests(unittest.TestCase):
     def run_ocr(self, segments, recognize, **kwargs):
         captures=[]
         capture_args = kwargs.pop('capture_args',{})
+        capture_args.setdefault('duration',max(s.end.total_seconds() for s in segments))
         def capture(_):
             c=Capture(**capture_args);captures.append(c);return c
         with patch.object(ocr.cv2,'VideoCapture',side_effect=capture), patch.object(ocr,'_readtext_batch',side_effect=recognize):
@@ -242,7 +250,9 @@ class PipelineTests(unittest.TestCase):
         return [[([[100,1152],[600,1152],[600,1240],[100,1240]],'这是当时导致伤口感染',.95)] for f in frames]
     def test_smart_mode_samples_every_cue(self):
         segs=[segment(i) for i in range(1,20)]
-        _,caps=self.run_ocr(segs,self.rows)
+        with patch.dict(os.environ, {'V1_SHORT_MAX_SECONDS': '0'}):
+            _,caps=self.run_ocr(segs,self.rows)
+        self.assertEqual(len(caps),1)
         self.assertEqual(len(caps[0].timestamps),19)
         self.assertTrue(all(s.ocr_mask_status=='located' for s in segs))
     def test_batches_bounded_to_twelve(self):
@@ -256,10 +266,13 @@ class PipelineTests(unittest.TestCase):
             calls.append(len(frames))
             if len(calls)==1:return [self.rows([frames[0]])[0],[]]
             # Rescue is cropped: convert original Y back to crop-local pixels.
-            return [[([[100,100],[600,100],[600,150],[100,150]],'这是当时导致伤口感染',.95)] for _ in frames]
+            if len(calls) == 2:
+                return [[([[100,100],[600,100],[600,150],[100,150]],'这是当时导致伤口感染',.95)] for _ in frames]
+            return self.rows(frames)
         segs=[segment(1),segment(2)]
-        _,caps=self.run_ocr(segs,recognize)
-        self.assertEqual(calls,[2,2])
+        with patch.dict(os.environ, {'V1_SHORT_MAX_SECONDS': '0'}):
+            _,caps=self.run_ocr(segs,recognize)
+        self.assertEqual(calls[:2],[2,2])
         self.assertEqual(len(caps[1].timestamps),2)
         self.assertTrue(all(s.ocr_mask_status=='located' for s in segs))
     def test_no_caption_video_not_failed(self):
@@ -285,7 +298,7 @@ class PipelineTests(unittest.TestCase):
             return [[([[100,100],[600,100],[600,150],[100,150]],'完全不同字幕',.95)] for _ in frames]
         with tempfile.TemporaryDirectory() as tmp:
             report=Path(tmp)/'audit.json'
-            with self.assertRaises(geo.OCRGeometryError):
+            with patch.dict(os.environ, {'V1_SHORT_MAX_SECONDS': '0'}), self.assertRaises(geo.OCRGeometryError):
                 self.run_ocr([segment(),segment(2)],recognize,geometry_report_path=str(report))
             counts=json.loads(report.read_text(encoding='utf-8'))['geometry']['counts']
             self.assertEqual(counts['unresolved'],1)
@@ -325,12 +338,13 @@ class PipelineTests(unittest.TestCase):
             self.run_ocr([segment()],lambda _:(_ for _ in ()).throw(RuntimeError('GPU unavailable')))
     def test_short_full_mode_kept(self):
         calls=[]
+        metrics={}
         def recognize(frames):calls.append(len(frames));return self.rows(frames)
-        self.run_ocr([segment()],recognize,capture_args={'duration':20.})
-        # A fully matched short cue needs exactly the two initial observations;
-        # geometry rescue is intentionally skipped when those already locate it.
-        self.assertEqual(calls,[2])
-        self.assertTrue(all(1 <= size <= 8 for size in calls))
+        self.run_ocr([segment()],recognize,capture_args={'duration':20.},metrics=metrics)
+        self.assertEqual(calls[0],2)
+        self.assertTrue(all(1 <= size <= 8 for size in calls[1:]))
+        self.assertGreaterEqual(sum(calls[1:]), 20 / .35)
+        self.assertEqual(metrics['source_timeline']['duration'], 20.)
 
 
 if __name__=='__main__':unittest.main(verbosity=2)
