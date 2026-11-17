@@ -292,7 +292,7 @@ def resolve_effective_config(
                     effective[k] = v
                     sources[k] = f"preset ({preset_name})"
         else:
-            warnings.append(f"Preset '{preset_id}' không tồn tại; đã dùng mặc định hệ thống.")
+            raise ValueError(f"Preset '{preset_id}' không tồn tại.")
 
     # Áp dụng Cấu hình riêng video (Overrides) nếu có
     if video_overrides:
@@ -302,6 +302,11 @@ def resolve_effective_config(
                 if k in ("speed", "bgm_volume_db", "dubbing_volume_db"):
                     try:
                         v = float(v)
+                        import math
+                        bounds = {"speed": (0.5, 2.0), "bgm_volume_db": (-40, 10), "dubbing_volume_db": (-20, 15)}
+                        lo, hi = bounds[k]
+                        if not math.isfinite(v) or not lo <= v <= hi:
+                            raise ValueError(f"{k} phải là số hữu hạn trong [{lo}, {hi}].")
                         if k == "speed":
                             v = max(0.5, min(2.0, v))
                         elif k == "bgm_volume_db":
@@ -309,8 +314,7 @@ def resolve_effective_config(
                         elif k == "dubbing_volume_db":
                             v = round(max(-20.0, min(15.0, v)), 1)
                     except (ValueError, TypeError):
-                        warnings.append(f"Giá trị '{v}' cho '{k}' không hợp lệ; bỏ qua ghi đè.")
-                        continue
+                        raise ValueError(f"Giá trị '{v}' cho '{k}' không hợp lệ.")
                 effective[k] = v
                 sources[k] = "video_override"
 

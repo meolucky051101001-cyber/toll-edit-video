@@ -9,6 +9,7 @@ import json
 import os
 import time
 from pathlib import Path
+from service_control import control_directories, write_intent
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_WORKSPACE = Path(os.getenv("AUTODUB_WORKSPACE", str(BASE_DIR.parent / "workspace")))
@@ -74,20 +75,12 @@ def request_stop(
 ) -> None:
     ws = _workspace(workspace)
     now = time.time()
-    control = ws / "control" / "video.stop"
-    try:
-        control.parent.mkdir(parents=True, exist_ok=True)
-        control.write_text(str(now), encoding="utf-8")
-    except OSError:
-        pass
-
-    try:
-        _atomic_write_json(
-            _status_dir(ws, status_file) / "stop_request.json",
-            {"job_id": job_id, "requested_at": now, "source": source, "reason": reason},
-        )
-    except OSError:
-        pass
+    _atomic_write_json(
+        _status_dir(ws, status_file) / "stop_request.json",
+        {"job_id": job_id, "requested_at": now, "source": source, "reason": reason},
+    )
+    for directory in control_directories(BASE_DIR.parent, ws):
+        write_intent(directory / "video.stop", str(now))
 
     _audit(ws, status_file, "request", source, reason, job_id)
 
@@ -100,14 +93,9 @@ def clear_stop(
     reason: str = "",
 ) -> None:
     ws = _workspace(workspace)
-    try:
-        (ws / "control" / "video.stop").unlink(missing_ok=True)
-    except OSError:
-        pass
-    try:
-        (_status_dir(ws, status_file) / "stop_request.json").unlink(missing_ok=True)
-    except OSError:
-        pass
+    for directory in control_directories(BASE_DIR.parent, ws):
+        (directory / "video.stop").unlink(missing_ok=True)
+    (_status_dir(ws, status_file) / "stop_request.json").unlink(missing_ok=True)
     _audit(ws, status_file, "clear", source, reason, None)
 
 
@@ -117,7 +105,7 @@ def is_stop_requested(
     status_file: str | Path | None = None,
 ) -> bool:
     ws = _workspace(workspace)
-    if (ws / "control" / "video.stop").exists():
+    if any((p / "video.stop").exists() for p in control_directories(BASE_DIR.parent, ws)):
         return True
     return (_status_dir(ws, status_file) / "stop_request.json").exists()
 

@@ -53,6 +53,33 @@ class TestDashboardHardening(unittest.TestCase):
         main.BATCH_TASK = None
         self.client = TestClient(main.app, headers={"X-Local-Control-Token": main.LOCAL_TOKEN})
 
+    def test_output_verification_can_run_with_a_full_listing_probe_queue(self):
+        from collections import OrderedDict
+        from concurrent.futures import Future
+        import dashboard_media
+
+        clips = [self.output_dir / f'clip-{index}.mp4' for index in range(65)]
+        for clip in clips:
+            clip.write_bytes(b'fixture')
+        verified = {'status': 'valid', 'reason': 'probe fixture'}
+        with (
+            patch.object(dashboard_media, '_cache', OrderedDict()),
+            patch.object(dashboard_media, '_pending', {}),
+            patch.object(dashboard_media, '_pool') as pool,
+            patch.object(dashboard_media, '_probe', return_value=verified) as probe,
+        ):
+            pool.submit.side_effect = lambda *args: Future()
+            for clip in clips:
+                self.assertEqual(dashboard_media.media_status(clip, defer=True)['status'], 'unverified')
+            self.assertEqual(pool.submit.call_count, 64)
+
+            # The new output never made it onto the listing queue. An output
+            # already queued must also be independently verifiable.
+            for clip in (clips[-1], clips[0]):
+                self.assertEqual(dashboard_media.media_status(clip), verified)
+                self.assertEqual(dashboard_media.media_status(clip, defer=True), verified)
+            self.assertEqual([call.args for call in probe.call_args_list], [(clips[-1],), (clips[0],)])
+
     def test_missing_token_returns_403(self):
         unauth_client = TestClient(main.app)
         response = unauth_client.post("/api/run-batch")

@@ -3,7 +3,10 @@ import asyncio
 import functools
 import logging
 import uuid
+from pathlib import Path
 import job_tracker
+from service_control import service_paused
+from batch_control import stop_check, drain_task
 from v1_resource_control import begin_video, end_video
 from fastapi import HTTPException
 
@@ -14,20 +17,38 @@ def guarded_media_api(function):
     async def wrapper(*args, **kwargs):
         async def run():
             lease = uuid.uuid4().hex
+            if service_paused(Path(__file__).resolve().parent.parent, workspace=job_tracker.WORKSPACE,
+                              service="processing"):
+                raise HTTPException(409, "Tool đang tắt; chưa nhận xử lý video mới.")
             try:
-                with job_tracker._LOCK:
-                    job_tracker._claim_batch_lock_unlocked(lease)
+                job_tracker.start_batch(1, job_id=lease)
             except job_tracker.JobAlreadyRunningError:
                 raise HTTPException(409, "Pipeline đang được bot hoặc batch khác sử dụng.")
+            execution_token = job_tracker.current_execution.set(lease)
+            stop_token = stop_check.set(job_tracker.is_stop_requested)
             try:
                 begin_video(lease)
-                return await function(*args, **kwargs)
+                result = await function(*args, **kwargs)
+                if job_tracker.is_stop_requested():
+                    job_tracker.mark_stopped()
+                else:
+                    job_tracker.finish_batch()
+                return result
+            except asyncio.CancelledError:
+                job_tracker.request_stop()
+                job_tracker.mark_stopped()
+                raise
+            except Exception as error:
+                job_tracker.fail_batch(str(error), job_id=lease)
+                raise
             finally:
                 try:
                     summary = end_video()
                     logging.getLogger('v1.performance').info('API resource_summary=%s', summary)
                 finally:
                     job_tracker.release_batch(lease)
+                    stop_check.reset(stop_token)
+                    job_tracker.current_execution.reset(execution_token)
         task = asyncio.create_task(run())
         _tasks.add(task)
         def done(completed):

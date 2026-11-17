@@ -1,4 +1,5 @@
 import atexit
+import copy
 import importlib
 import importlib.abc
 import importlib.util
@@ -15,6 +16,9 @@ backend_dir = root / "backend"
 # mọi module đọc AUTODUB_WORKSPACE lúc import và mọi subprocess đều thấy thư mục tạm.
 _TEST_WORKSPACE = Path(tempfile.mkdtemp(prefix="autodub_test_ws_"))
 os.environ["AUTODUB_WORKSPACE"] = str(_TEST_WORKSPACE)
+os.environ["AUTODUB_INPUT_DIR"] = str(_TEST_WORKSPACE / "input")
+os.environ["AUTODUB_OUTPUT_DIR"] = str(_TEST_WORKSPACE / "output")
+os.environ["AUTODUB_TESTING"] = "1"
 atexit.register(shutil.rmtree, _TEST_WORKSPACE, True)
 if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
@@ -69,7 +73,7 @@ if not any(getattr(finder, "_backend_alias_marker", False) for finder in sys.met
 
 
 @pytest.fixture(autouse=True)
-def _isolate_shared_stop_state(tmp_path):
+def _isolate_shared_stop_state(tmp_path, monkeypatch):
     """Keep stop flags and tracker files out of the live workspace while tests run."""
     import job_tracker
     import shared_state
@@ -78,13 +82,42 @@ def _isolate_shared_stop_state(tmp_path):
     (workspace / "control").mkdir(parents=True)
     (workspace / "bot_system").mkdir(parents=True)
 
+    # Legacy fallback searches must not write/clear control files in this checkout.
+    # Keep explicit fixture roots intact so service-path tests still exercise the
+    # real compatibility rules; only replace the actual repository fallback.
+    import service_control
+    original_controls = service_control.control_directories
+    fixture_workspace = workspace
+    monkeypatch.setenv("AUTODUB_CONTROL_DIR", str(workspace / "control"))
+    monkeypatch.setenv("TOOL_V1_CONTROL_DIR", str(workspace / "control"))
+
+    def fixture_controls(project_root, workspace=None, environment=None):
+        project_root = Path(project_root)
+        if project_root.resolve() == root.resolve():
+            project_root = tmp_path / "fixture_project"
+            workspace = workspace or fixture_workspace
+        return original_controls(project_root, workspace, environment)
+
+    for name in ("service_control", "stop_service", "video_pause", "tool_control", "v1_shutdown"):
+        for qualified in (name, "backend." + name):
+            module = sys.modules.get(qualified)
+            if module is not None and hasattr(module, "control_directories"):
+                monkeypatch.setattr(module, "control_directories", fixture_controls)
+    import video_pause
+    monkeypatch.setattr(video_pause, "FLAG", workspace / "control" / "video.pause")
+    monkeypatch.setattr(video_pause, "ACK", workspace / "control" / "video.pause.ack")
+
     # Một số test thay sys.modules bằng stub; khi đó không có gì để cách ly.
     old_paths = None
+    old_tracker_state = None
     if hasattr(job_tracker, "WORKSPACE"):
         old_paths = (job_tracker.WORKSPACE, job_tracker.STATUS_FILE, job_tracker.BATCH_LOCK_FILE)
         job_tracker.WORKSPACE = workspace
         job_tracker.STATUS_FILE = workspace / "bot_system" / "job_status.json"
         job_tracker.BATCH_LOCK_FILE = workspace / "bot_system" / "batch.lock"
+    if hasattr(job_tracker, "_DEFAULT_STATE") and hasattr(job_tracker, "_CURRENT_STATE"):
+        old_tracker_state = job_tracker._CURRENT_STATE
+        job_tracker._CURRENT_STATE = copy.deepcopy(job_tracker._DEFAULT_STATE)
 
     fget = getattr(getattr(type(shared_state), "stop_requested", None), "fget", None)
     old_local_stop = getattr(shared_state, "_local_stop", False)
@@ -101,6 +134,8 @@ def _isolate_shared_stop_state(tmp_path):
             shared_state._local_stop = old_local_stop
         if old_paths is not None:
             job_tracker.WORKSPACE, job_tracker.STATUS_FILE, job_tracker.BATCH_LOCK_FILE = old_paths
+        if old_tracker_state is not None:
+            job_tracker._CURRENT_STATE = old_tracker_state
 
 
 def pytest_sessionfinish(session, exitstatus):

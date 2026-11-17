@@ -2,12 +2,65 @@
 import asyncio
 import contextvars
 import logging
+import math
 import os
 import threading
 import time
 
 log = logging.getLogger('v1.performance')
 video_context = contextvars.ContextVar('v1_video_metrics', default=None)
+
+
+def execution_admission(settings=None, memory=None, vram=None):
+    """Return a new-work ceiling, without interrupting executions already admitted.
+
+    Telemetry may be injected for deterministic tests. The one-worker ceiling
+    remains available when a second execution cannot be measured safely.
+    """
+    from worker_settings import experimental_dual_workers_enabled, get_worker_settings
+    result = {"capacity": 1, "reason": "single_worker", "telemetry_available": False}
+    if not experimental_dual_workers_enabled():
+        result["reason"] = "experimental_dual_workers_disabled"
+        return result
+    try:
+        settings = dict(settings if settings is not None else get_worker_settings())
+        requested = settings.get("effective_concurrency", settings.get("concurrency", 1))
+        if type(requested) is not int or requested not in (1, 2):
+            raise ValueError("Invalid worker capacity")
+        if requested < 2 or settings.get("auto_throttled"):
+            result["reason"] = settings.get("throttle_reason") or "single_worker_requested"
+            return result
+        minimum_vram = float(settings.get("min_free_vram_mb", 1500.0))
+        maximum_percent = float(settings.get("max_vram_percent_threshold", 85.0))
+        if not math.isfinite(minimum_vram) or minimum_vram < 0 or not math.isfinite(maximum_percent) or not 0 < maximum_percent <= 100:
+            raise ValueError("Invalid resource thresholds")
+        memory = memory_snapshot() if memory is None else memory
+        if vram is None:
+            from v1_vram_monitor import get_vram_stats
+            vram = get_vram_stats(force_refresh=True)
+        if not isinstance(memory, dict) or not isinstance(vram, dict):
+            raise ValueError("Invalid resource telemetry")
+        available = memory.get("available_mb")
+        numbers = (available, vram.get("free_mb"), vram.get("total_mb"), vram.get("percent"), vram.get("timestamp"))
+        if (not vram.get("available") or any(type(value) not in (int, float) or not math.isfinite(value) for value in numbers)
+                or not 0 <= vram["free_mb"] <= vram["total_mb"] or vram["total_mb"] <= 0
+                or not 0 <= vram["percent"] <= 100 or not -1 <= time.time() - vram["timestamp"] <= 5):
+            result["reason"] = "resource_telemetry_unavailable"
+            return result
+        result["telemetry_available"] = True
+        if available < 4096:
+            result["reason"] = "ram_below_second_worker_reserve"
+        elif vram["free_mb"] < max(1500.0, minimum_vram):
+            result["reason"] = "vram_below_second_worker_reserve"
+        elif vram["percent"] >= min(85.0, maximum_percent):
+            result["reason"] = "vram_pressure"
+        elif vram.get("auto_throttled"):
+            result["reason"] = "vram_throttled"
+        else:
+            result.update(capacity=2, reason="resources_available")
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError, ImportError):
+        result["reason"] = "resource_telemetry_unavailable"
+    return result
 
 
 def memory_snapshot():

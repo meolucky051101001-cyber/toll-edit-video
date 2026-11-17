@@ -271,7 +271,7 @@ class ManifestManager:
             manifest.tts_completed_segments.append(seg_index)
             self.save_manifest(manifest)
 
-    def verify_manifest_resumability(self, job_id: str) -> Tuple[bool, str, Dict[str, Any]]:
+    def verify_manifest_resumability(self, job_id: str, *, source_path=None, work_dir=None) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Kiểm tra xem job có thể resume từ stage nào mà không phải chạy lại từ đầu:
         - Kiểm tra fingerprint file video nguồn (nếu file đã bị sửa đổi -> không thể resume an toàn).
@@ -286,7 +286,7 @@ class ManifestManager:
             return False, "completed", {"reason": "Job đã hoàn tất toàn bộ"}
 
         # 1. Kiểm tra video nguồn
-        source_p = Path(manifest.video_path)
+        source_p = Path(source_path or manifest.video_path)
         if not source_p.is_file():
             return False, STAGES_ORDER[0], {"reason": f"Không tìm thấy video nguồn tại: {source_p}"}
 
@@ -298,6 +298,7 @@ class ManifestManager:
         resume_stage = STAGES_ORDER[0]
         verified_stages = []
 
+        work_root = Path(work_dir).resolve() if work_dir is not None else None
         for s_id in STAGES_ORDER:
             st = manifest.stages.get(s_id, {})
             if st.get("status") != "completed":
@@ -316,7 +317,10 @@ class ManifestManager:
             if s_id in required and not required[s_id].issubset(artifacts):
                 stage_valid = False
             for art_k, art_info in artifacts.items():
-                art_p = Path(art_info.get("path", ""))
+                art_p = Path(art_info.get("path", "")).resolve()
+                if work_root is not None and not art_p.is_relative_to(work_root):
+                    stage_valid = False
+                    break
                 if not art_p.is_file() or art_p.stat().st_size == 0:
                     stage_valid = False
                     break

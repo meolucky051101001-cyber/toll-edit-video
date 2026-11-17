@@ -19,8 +19,6 @@ if (
     sys.path.insert(0, str(_site_packages))
 if str(_backend_dir) not in sys.path:
     sys.path.insert(0, str(_backend_dir))
-if str(Path(r"C:\tool v1\backend")) not in sys.path:
-    sys.path.insert(0, r"C:\tool v1\backend")
 
 import json
 import os
@@ -34,80 +32,35 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import psutil
 import voice_selection
-from service_control import resume_services
+from service_control import resume_services, control_directories, control_directory, service_workspace, request_service_stop
 
-ROOTS = {"v1": Path(r"C:\tool v1\backend")}
+ROOTS = {"v1": _backend_dir}
 PORTS = {"v1": 8088}
 TOKEN = secrets.token_urlsafe(32)
 LOCK = threading.Lock()
-FLAGS = Path(r"C:\tool v1\workspace\control")
-FLAGS.mkdir(parents=True, exist_ok=True)
+_STOP_OPERATIONS = {}
+_STOP_OPERATIONS_LOCK = threading.Lock()
+FLAGS = control_directory(_backend_dir.parent)
+CONTROL_DIRS = control_directories(_backend_dir.parent)
 
-CONTROL_DIRS = [
-    Path(r"C:\tool v1\workspace\control"),
-]
-for _cd in CONTROL_DIRS:
-    _cd.mkdir(parents=True, exist_ok=True)
 
 def get_control_paths(key, filename):
-    own = ROOTS[key].parent / "workspace" / "control" / filename
-    paths = [own]
-    for d in CONTROL_DIRS:
-        p = d / filename
-        if p not in paths:
-            paths.append(p)
-    return paths
+    return [directory / filename for directory in control_directories(ROOTS[key].parent)]
 
 def processes(key):
-    root = ROOTS[key]
-    root_str = str(root.parent).lower()
-    scripts = {
-        str(root / name).lower()
-        for name in (
-            "background_service.py",
-            "main.py",
-            "telegram_bot.py",
-            "batch_processor.py",
-            "gpu_worker.py",
-            "model_runner.py",
-            "model_runtime_runner.py",
-        )
-    }
-    found = []
-    for p in psutil.process_iter(["name"]):
+    from v1_shutdown import enumerate_live_processes, select_shutdown_targets
+    root = ROOTS[key].parent
+    targets, _ = select_shutdown_targets(enumerate_live_processes(), project_root=root,
+        workspace_roots=[service_workspace(root)], scope="all", caller_pid=os.getpid())
+    names = {"dashboard": "main.py", "telegram": "telegram_bot.py", "control": "tool_control.py"}
+    result = []
+    for target in targets:
         try:
-            name = (p.info["name"] or "").lower()
-            if not (name.startswith("python") or name.startswith("ffmpeg") or name.startswith("ffprobe")):
-                continue
-            cmd = [str(c).lower() for c in (p.cmdline() or [])]
-            cmd_str = " ".join(cmd)
-            if "tool_control.py" in cmd_str:
-                continue
-
-            is_match = False
-            if root_str in cmd_str or (key == "v1" and r"c:\tool v1" in cmd_str):
-                is_match = True
-            if not is_match:
-                for arg in cmd[1:]:
-                    candidate = Path(arg)
-                    if not candidate.is_absolute():
-                        try:
-                            candidate = Path(p.cwd()) / candidate
-                        except (psutil.Error, OSError) as _phase6_exc:
-                            logger.debug('Suppressed error in tool_control.processes (Path): %s', type(_phase6_exc).__name__, exc_info=False)
-                    if str(candidate).lower() in scripts:
-                        is_match = True
-                        break
-            if is_match:
-                script_name = "worker"
-                for s in ("main.py", "telegram_bot.py", "background_service.py", "batch_processor.py", "gpu_worker.py", "model_runner.py", "model_runtime_runner.py"):
-                    if s in cmd_str:
-                        script_name = s
-                        break
-                found.append((p, script_name))
-        except (psutil.Error, OSError):
+            name = names.get(target.role, "background_service.py" if target.role.startswith("supervisor") else "worker")
+            result.append((psutil.Process(target.record.pid), name))
+        except psutil.NoSuchProcess:
             continue
-    return found
+    return result
 
 def read_telemetry(key):
     best = {}
@@ -125,6 +78,12 @@ def read_telemetry(key):
     return best
 
 def status(key):
+    with _STOP_OPERATIONS_LOCK:
+        operation = dict(_STOP_OPERATIONS.get(key, {}))
+    if operation.get("state") == "stopping":
+        return dict(key=key, state="stopping", dashboard=None, bot=None,
+                    heartbeat=None, polling=None, busy=None, queue=None,
+                    paused=True, operation=operation)
     paused = any(p.exists() for p in get_control_paths(key, key + '.pause'))
     procs = processes(key)
     bots = [p.pid for p, name in procs if name == 'telegram_bot.py']
@@ -146,11 +105,13 @@ def status(key):
     else:
         state = 'partial'
 
+    if operation.get("state") == "error":
+        state = "error"
     return dict(key=key, state=state, dashboard=dashboard, bot=bool(bots),
                 heartbeat=bool(fresh), polling=bool(fresh and data.get('polling')),
                 busy=bool(data.get('busy')) if fresh else None,
                 queue=data.get('queue', 0) if fresh else None,
-                paused=paused)
+                paused=paused, operation=operation)
 
 def launch(key, service):
     root = ROOTS[key]
@@ -164,140 +125,85 @@ def launch(key, service):
                      cwd=str(root), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      creationflags=subprocess.CREATE_NO_WINDOW)
 
-def _get_dashboard_token(key='v1'):
-    ws = os.getenv("AUTODUB_WORKSPACE")
-    if ws and key == 'v1':
-        token_file = Path(ws) / ".dashboard_control_token"
-        try:
-            if token_file.is_file():
-                return token_file.read_text(encoding="utf-8").strip()
-        except Exception as _phase6_exc:
-            logger.debug('Suppressed error in tool_control._get_dashboard_token (token_file.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
+def _get_dashboard_token(key="v1"):
+    explicit = os.getenv("AUTODUB_LOCAL_TOKEN", "").strip()
+    if explicit:
+        return explicit
     root = ROOTS.get(key)
-    if not root:
+    if root is None:
         return ""
-    token_file = root.parent / "workspace" / ".dashboard_control_token"
-    try:
-        if token_file.is_file():
-            return token_file.read_text(encoding="utf-8").strip()
-    except Exception as _phase6_exc:
-        logger.debug('Suppressed error in tool_control._get_dashboard_token (token_file.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
+    ws = service_workspace(root.parent)
+    for path in (ws / "bot_system" / ".dashboard_control_token", ws / ".dashboard_control_token"):
+        if path.is_file():
+            return path.read_text(encoding="utf-8").strip()
     return ""
 
 def stop_and_release(key):
-    """
-    Dừng triệt để toàn bộ bot, dashboard, batch processor, worker và giải phóng toàn bộ RAM & VRAM.
-    Được gọi khi người dùng chủ động tắt tool hoặc khi chuyển đổi giữa các tool.
-    """
-    # 1. Đặt cờ pause ngay lập tức trên tất cả thư mục điều khiển
-    for p in get_control_paths(key, key + '.pause'):
-        try:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text('paused', encoding='utf-8')
-        except Exception as _phase6_exc:
-            logger.debug('Suppressed error in tool_control.stop_and_release (p.parent.mkdir): %s', type(_phase6_exc).__name__, exc_info=False)
-
-    root = ROOTS[key]
-    root_str = str(root.parent).lower()
-
-    # 2. Dừng batch đang xử lý (nếu có)
-    if key == 'v1':
-        try:
-            with urllib.request.urlopen('http://127.0.0.1:8088/api/status', timeout=1.0) as r:
-                if json.load(r).get('active'):
-                    token = _get_dashboard_token('v1')
-                    headers = {'Content-Type': 'application/json', 'X-Dashboard-Input': '1'}
-                    if token:
-                        headers['X-Local-Control-Token'] = token
-                    req = urllib.request.Request('http://127.0.0.1:8088/api/stop-batch', data=b'{}', headers=headers)
-                    urllib.request.urlopen(req, timeout=1.5)
-        except Exception as _phase6_exc:
-            logger.debug('Suppressed error in tool_control.stop_and_release (urllib.request.urlopen): %s', type(_phase6_exc).__name__, exc_info=False)
-
-    # 3. Thu thập TOÀN BỘ tiến trình thuộc về Tool (kể cả supervisor, worker, render...)
-    targets = {}
-    for p in psutil.process_iter(['name']):
-        try:
-            name = (p.info['name'] or '').lower()
-            if not (name.startswith('python') or name.startswith('ffmpeg') or name.startswith('ffprobe')):
-                continue
-            cmd = [str(c).lower() for c in (p.cmdline() or [])]
-            cmd_str = ' '.join(cmd)
-
-            # Bảo vệ bộ điều khiển trung tâm 8090, dashboard web servers, watchdog và các test runner
-            if any(k in cmd_str for k in ('tool_control.py', 'test_', 'unittest', 'pytest', 'main.py', '--service dashboard', 'ops_watchdog.py')):
-                continue
-
-            is_tool_proc = False
-            if root_str in cmd_str or (key == 'v1' and r'c:\tool v1' in cmd_str):
-                is_tool_proc = True
-
-            if is_tool_proc:
-                targets[p.pid] = p
-                try:
-                    for child in p.children(recursive=True):
-                        ch_cmd = ' '.join([str(c).lower() for c in (child.cmdline() or [])])
-                        if not any(k in ch_cmd for k in ('tool_control.py', 'test_', 'unittest', 'pytest', 'main.py', '--service dashboard', 'ops_watchdog.py')):
-                            targets[child.pid] = child
-
-                except (psutil.NoSuchProcess, psutil.AccessDenied) as _phase6_exc:
-                    logger.debug('Suppressed error in tool_control.stop_and_release (p.children): %s', type(_phase6_exc).__name__, exc_info=False)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-
-    # 4. Gửi tín hiệu terminate tới các tiến trình
-    for pid, p in list(targets.items()):
-        try:
-            p.terminate()
-        except (psutil.NoSuchProcess, psutil.AccessDenied) as _phase6_exc:
-            logger.debug('Suppressed error in tool_control.stop_and_release (p.terminate): %s', type(_phase6_exc).__name__, exc_info=False)
-
-    # Chờ tiến trình thoát
-    gone, alive = psutil.wait_procs(list(targets.values()), timeout=2.0)
-
-    # 5. Cưỡng chế kill dứt điểm các tiến trình còn lại (kể cả worker GPU/CUDA)
-    if alive:
-        for p in alive:
-            try:
-                p.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied) as _phase6_exc:
-                logger.debug('Suppressed error in tool_control.stop_and_release (p.kill): %s', type(_phase6_exc).__name__, exc_info=False)
-            try:
-                os.system(f"taskkill /F /T /PID {p.pid} >nul 2>&1")
-            except Exception as _phase6_exc:
-                logger.debug('Suppressed error in tool_control.stop_and_release (os.system): %s', type(_phase6_exc).__name__, exc_info=False)
-        psutil.wait_procs(alive, timeout=1.0)
-
-    # 6. Ghi đè telemetry thành đã dừng
-    telemetry = {
-        'pid': None,
-        'at': time.time(),
-        'busy': False,
-        'queue': 0,
-        'paused': True,
-        'polling': False
-    }
-    for p in get_control_paths(key, key + '.json'):
-        try:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(telemetry), encoding='utf-8')
-        except Exception as _phase6_exc:
-            logger.debug('Suppressed error in tool_control.stop_and_release (p.parent.mkdir): %s', type(_phase6_exc).__name__, exc_info=False)
-
-    # 7. Xóa các file tạm
-    for d in CONTROL_DIRS:
-        for tmp in d.glob(key + '.*.tmp'):
-            try:
-                tmp.unlink(missing_ok=True)
-            except Exception as _phase6_exc:
-                logger.debug('Suppressed error in tool_control.stop_and_release (tmp.unlink): %s', type(_phase6_exc).__name__, exc_info=False)
-
-    return True
+    """Disable admission, request drain, then stop verified processing services."""
+    from v1_shutdown import execute_shutdown, EXIT_OK
+    root = ROOTS[key].parent
+    request_service_stop(root, scope="processing")
+    base = "http://127.0.0.1:%s" % PORTS[key]
+    try:
+        with urllib.request.urlopen(base + "/api/status", timeout=2) as response:
+            state = json.load(response)
+    except (OSError, ValueError) as error:
+        raise OSError("Không xác minh được trạng thái xử lý; chưa dừng tiến trình: " + str(error)) from error
+    if state.get("active") or state.get("occupies_slot"):
+        headers = {"Content-Type": "application/json", "X-Local-Control-Token": _get_dashboard_token(key)}
+        request = urllib.request.Request(base + "/api/stop-batch", data=b"{}", headers=headers)
+        with urllib.request.urlopen(request, timeout=3):
+            pass
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            with urllib.request.urlopen(base + "/api/status", timeout=2) as response:
+                state = json.load(response)
+            if not state.get("active") and not state.get("occupies_slot"):
+                break
+            time.sleep(.25)
+        else:
+            raise OSError("Đã yêu cầu dừng; công việc vẫn đang dọn dẹp. Chưa xác nhận dừng hoàn tất.")
+    result = execute_shutdown(project_root=root, workspace=service_workspace(root), scope="processing")
+    if result.exit_code != EXIT_OK:
+        raise OSError("Dừng chưa hoàn tất: " + result.message)
+    return result.to_dict()
 
 def stop_all_tools():
-    """Tắt Tool V1 và giải phóng 100% RAM & GPU VRAM."""
-    stop_and_release('v1')
-    return 'Đã tắt Tool V1 và giải phóng toàn bộ RAM & VRAM.'
+    stop_and_release("v1")
+    return "Đã dừng các dịch vụ xử lý Tool V1; dashboard vẫn hoạt động."
+
+
+def begin_stop(key):
+    """Persist admission stop, then transfer the held command lock to cleanup."""
+    if key not in ROOTS:
+        raise ValueError('Yêu cầu không hợp lệ.')
+    request_service_stop(ROOTS[key].parent, scope="processing")
+    operation = {"operation_id": "stop-" + secrets.token_hex(8), "state": "stopping",
+                 "message": "Đã nhận yêu cầu dừng; đang chờ xử lý và dọn dẹp kết thúc."}
+    with _STOP_OPERATIONS_LOCK:
+        _STOP_OPERATIONS[key] = operation
+    acknowledgement = dict(operation)
+
+    def finish_stop():
+        state, message = "error", "Dừng chưa hoàn tất; hãy kiểm tra trạng thái."
+        try:
+            stop_and_release(key)
+            state, message = "completed", f"Đã dừng các dịch vụ xử lý Tool {key.upper()}; dashboard vẫn hoạt động."
+        except Exception as error:
+            logger.exception("Không hoàn tất yêu cầu dừng Tool %s", key)
+            state, message = "error", str(error)
+        finally:
+            with _STOP_OPERATIONS_LOCK:
+                operation.update(state=state, message=message)
+            LOCK.release()
+
+    try:
+        threading.Thread(target=finish_stop, name="tool-stop-" + key, daemon=True).start()
+    except Exception:
+        with _STOP_OPERATIONS_LOCK:
+            _STOP_OPERATIONS.pop(key, None)
+        raise
+    return acknowledgement
 
 def change(key, action):
     if action == 'off_all':
@@ -308,9 +214,13 @@ def change(key, action):
 
     if action == 'off':
         stop_and_release(key)
-        return f'Đã tắt Tool {key.upper()} và giải phóng toàn bộ RAM & VRAM.'
+        return f'Đã dừng các dịch vụ xử lý Tool {key.upper()}.'
 
     if action == 'on':
+        with _STOP_OPERATIONS_LOCK:
+            if _STOP_OPERATIONS.get(key, {}).get("state") in ("stopping", "error"):
+                raise OSError('Chưa xác nhận dừng hoàn tất; hãy yêu cầu dừng lại trước khi bật Tool.')
+            _STOP_OPERATIONS.pop(key, None)
         resume_services(ROOTS[key].parent, scope="all")
         # Xóa cờ pause của tool được kích hoạt
         for p in get_control_paths(key, key + '.pause'):
@@ -319,8 +229,8 @@ def change(key, action):
             except Exception as _phase6_exc:
                 logger.debug('Suppressed error in tool_control.change (p.unlink): %s', type(_phase6_exc).__name__, exc_info=False)
         try:
-            (Path(r"C:\tool v1\workspace\control") / "video.pause").unlink(missing_ok=True)
-            (Path(r"C:\tool v1\workspace\control") / "video.pause.ack").unlink(missing_ok=True)
+            __import__("video_pause").resume()
+            pass
         except Exception as _phase6_exc:
             logger.debug('Suppressed error in tool_control.change (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
@@ -351,6 +261,9 @@ def change(key, action):
             if check_bots and (check_data.get('pid') in check_bots) and check_data.get('polling'):
                 break
 
+        check = status(key)
+        if check['state'] != 'running':
+            raise OSError('Chưa sẵn sàng: dashboard hoặc heartbeat bot chưa đạt kiểm tra. Hãy xem trạng thái/nhật ký.')
         return f'Đã bật Tool {key.upper()} thành công.'
 
 def apply_boot_defaults():
@@ -365,8 +278,8 @@ def apply_boot_defaults():
             try: p.unlink(missing_ok=True)
             except Exception as _phase6_exc: logger.debug('Suppressed error in tool_control.apply_boot_defaults (p.unlink): %s', type(_phase6_exc).__name__, exc_info=False)
         try:
-            (Path(r"C:\tool v1\workspace\control") / "video.pause").unlink(missing_ok=True)
-            (Path(r"C:\tool v1\workspace\control") / "video.pause.ack").unlink(missing_ok=True)
+            __import__("video_pause").resume()
+            pass
         except Exception as _phase6_exc: logger.debug('Suppressed error in tool_control.apply_boot_defaults (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
         # Khởi chạy dịch vụ Tool V1
@@ -1005,21 +918,25 @@ let states = [];
 function renderTools() {
   const container = document.getElementById('tools');
   const btnOffAll = document.getElementById('btn-off-all');
-  if (btnOffAll) btnOffAll.disabled = pending;
+  const cleanupPending = states.some(s => s.state === 'stopping');
+  if (btnOffAll) btnOffAll.disabled = pending || cleanupPending;
 
   if (!container || !states.length) return;
 
   container.innerHTML = states.map(s => {
-    const isThisPending = pending && (pendingTarget === s.key || pendingTarget === 'all');
+    const isThisPending = s.state === 'stopping' || (pending && (pendingTarget === s.key || pendingTarget === 'all'));
     const isRunning = (s.state === 'running');
     const isPartial = (s.state === 'partial');
-    const isActive = isRunning || isPartial || s.bot || (!s.paused);
+    const isActive = isRunning || isPartial || s.state === 'stopping' || s.state === 'error' || s.bot || (!s.paused);
 
     let badgeClass = 'stopped';
     let badgeText = 'Đã tắt';
     if (isThisPending) {
       badgeClass = 'pending';
-      badgeText = 'Đang xử lý…';
+      badgeText = s.state === 'stopping' ? 'Đang dừng…' : 'Đang xử lý…';
+    } else if (s.state === 'error') {
+      badgeClass = 'pending';
+      badgeText = 'Chưa dừng hoàn tất';
     } else if (isRunning) {
       badgeClass = 'running';
       badgeText = 'Đang bật';
@@ -1028,9 +945,9 @@ function renderTools() {
       badgeText = 'Đang khởi động';
     }
 
-    const botStatus = s.polling ? 'Bot: Polling ✓' : (s.bot ? 'Bot: Khởi động' : 'Bot: Tắt');
+    const botStatus = s.state === 'stopping' ? 'Bot: Đang dừng' : s.polling ? 'Bot: Polling ✓' : (s.bot ? 'Bot: Khởi động' : 'Bot: Tắt');
     const queueStatus = s.busy ? ' (Đang xử lý)' : (s.queue ? ` (${s.queue} video chờ)` : '');
-    const dashStatus = s.dashboard ? 'Dashboard: Online' : 'Dashboard: Offline';
+    const dashStatus = s.dashboard == null ? 'Dashboard: Đang kiểm tra' : s.dashboard ? 'Dashboard: Online' : 'Dashboard: Offline';
     const switchClass = isThisPending ? 'is-pending' : (isActive ? 'is-active' : '');
     const switchLabel = isThisPending ? 'Chờ…' : (isActive ? 'BẬT' : 'TẮT');
     const switchLabelClass = isThisPending ? 'pending' : (isActive ? 'on' : 'off');
@@ -1056,7 +973,7 @@ function renderTools() {
             aria-checked="${isActive}"
             aria-label="Bật hoặc tắt Tool ${s.key.toUpperCase()}"
             title="${isActive ? 'Bấm để TẮT Tool ' + s.key.toUpperCase() + ' và giải phóng tài nguyên' : 'Bấm để BẬT Tool ' + s.key.toUpperCase()}"
-            ${pending ? 'disabled' : ''}
+            ${pending || cleanupPending ? 'disabled' : ''}
             onclick="toggleTool('${s.key}', ${isActive})">
             <span class="switch-track" aria-hidden="true">
               <span class="switch-thumb"></span>
@@ -1076,7 +993,17 @@ async function refresh() {
     const r = await fetch('/status', { signal: AbortSignal.timeout(5000) });
     if (!r.ok) throw Error();
     states = await r.json();
-    if (!pending) renderTools();
+    if (!pending) {
+      renderTools();
+      const operation = states.find(s => s.operation?.operation_id)?.operation;
+      if (operation) {
+        const msg = document.getElementById('message');
+        if (msg) {
+          msg.className = operation.state === 'error' ? 'error' : operation.state === 'completed' ? 'success' : '';
+          msg.textContent = operation.message;
+        }
+      }
+    }
   } catch(e) {
     if (!pending) {
       const msg = document.getElementById('message');
@@ -1086,7 +1013,7 @@ async function refresh() {
 }
 
 async function toggleTool(key, currentlyActive) {
-  if (pending) return;
+  if (pending || states.some(s => s.state === 'stopping')) return;
   const action = currentlyActive ? 'off' : 'on';
 
   pending = true;
@@ -1096,7 +1023,7 @@ async function toggleTool(key, currentlyActive) {
   const msgElem = document.getElementById('message');
   msgElem.className = '';
   if (action === 'off') {
-    msgElem.textContent = `⏳ Đang tắt Tool ${key.toUpperCase()} và giải phóng toàn bộ RAM & VRAM...`;
+    msgElem.textContent = `⏳ Đang gửi yêu cầu dừng Tool ${key.toUpperCase()}...`;
   } else {
     msgElem.textContent = `⏳ Đang khởi động Tool ${key.toUpperCase()} & Telegram Bot...`;
   }
@@ -1109,7 +1036,9 @@ async function toggleTool(key, currentlyActive) {
       signal: AbortSignal.timeout(20000)
     });
     const d = await r.json();
-    if (r.ok) {
+    if (r.status === 202 && d.status === 'stopping') {
+      msgElem.textContent = d.message;
+    } else if (r.ok) {
       msgElem.className = 'success';
       msgElem.textContent = '✅ ' + (d.message || 'Thao tác hoàn tất.');
     } else {
@@ -1128,14 +1057,14 @@ async function toggleTool(key, currentlyActive) {
 }
 
 async function stopAll() {
-  if (pending) return;
+  if (pending || states.some(s => s.state === 'stopping')) return;
   pending = true;
   pendingTarget = 'all';
   renderTools();
 
   const msgElem = document.getElementById('message');
   msgElem.className = '';
-  msgElem.textContent = '⏳ Đang tắt cả 2 Tool và giải phóng 100% RAM & GPU VRAM...';
+  msgElem.textContent = '⏳ Đang gửi yêu cầu dừng các dịch vụ xử lý...';
 
   try {
     const r = await fetch('/control', {
@@ -1145,7 +1074,9 @@ async function stopAll() {
       signal: AbortSignal.timeout(20000)
     });
     const d = await r.json();
-    if (r.ok) {
+    if (r.status === 202 && d.status === 'stopping') {
+      msgElem.textContent = d.message;
+    } else if (r.ok) {
       msgElem.className = 'success';
       msgElem.textContent = '✅ ' + (d.message || 'Đã tắt cả hai Tool.');
     } else {
@@ -1473,19 +1404,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.trusted() or self.path not in ('/control', '/voices') or not secrets.compare_digest(self.headers.get('X-Control-Token', ''), TOKEN):
             return self.send(403, {'message': 'Unauthorized'})
-        # Chờ tối đa 15s để xử lý tuần tự, tránh trả về 409 khi đang dọn dẹp
-        if not LOCK.acquire(timeout=15): return self.send(409, {'message': 'Đang thực hiện lệnh khác, vui lòng thử lại sau giây lát.'})
+        if not LOCK.acquire(blocking=False): return self.send(409, {'message': 'Đang thực hiện lệnh khác; hãy chờ dọn dẹp hoàn tất.'})
+        handed_off = False
         try:
             size = int(self.headers.get('Content-Length', '0'))
             if not 0 < size < 512: raise ValueError('Invalid request')
             data = json.loads(self.rfile.read(size))
             if not isinstance(data, dict): raise ValueError('Invalid request')
+            if self.path == '/control' and data.get('action') in ('off', 'off_all'):
+                result = begin_stop('v1' if data.get('action') == 'off_all' else data.get('key'))
+                handed_off = True
+                return self.send(202, {'status': 'stopping', **result})
             message = change_voice(data.get('id')) if self.path == '/voices' else change(data.get('key'), data.get('action'))
             self.send(200, {'message': message})
         except (ValueError, OSError, psutil.Error) as e:
             self.send(409, {'message': str(e)})
         finally:
-            LOCK.release()
+            if not handed_off:
+                LOCK.release()
 
 def ensure_single_controller():
     current_pid = os.getpid()

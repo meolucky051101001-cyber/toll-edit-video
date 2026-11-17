@@ -401,6 +401,8 @@ def _media_worker_belongs_to_project(
 
 
 def _scope_matches_role(scope: str, role: str, include_downloader: bool = False) -> bool:
+    if scope == "processing":
+        return role in {"telegram", "scriptbot", "worker", "supervisor:telegram", "supervisor:scriptbot"}
     if scope == "telegram":
         return role in ("telegram", "supervisor:telegram")
     if scope == "downloader":
@@ -899,6 +901,12 @@ def default_process_terminator(
             _, alive = psutil.wait_procs(live_procs, timeout=timeout)
             for proc in alive:
                 try:
+                    original = next(t.record for t in group if t.record.pid == proc.pid)
+                    if (abs(float(proc.create_time() or 0) - original.create_time) > 1e-6
+                            or _norm_case_path(proc.exe()) != _norm_case_path(original.exe)
+                            or tuple(proc.cmdline()) != tuple(original.cmdline)):
+                        identity_mismatches.append(proc.pid)
+                        continue
                     proc.kill()
                     killed.append(proc.pid)
                 except psutil.NoSuchProcess:

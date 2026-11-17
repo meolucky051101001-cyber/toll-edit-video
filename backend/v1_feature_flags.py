@@ -11,6 +11,7 @@ import json
 import logging
 import uuid
 import math
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -26,6 +27,7 @@ DEFAULT_FLAGS: Dict[str, Any] = {
     "V1_ASR_CHUNKING": True,
     "V1_SMART_SKIP_OCR": True,
     "V1_QC_POLICY": "BLOCK",
+    "V1_QC_VISUAL_PIXEL_CHECK": True,
     "V1_MAX_NATURAL_SPEED": 1.50,
     "V1_TTS_WORKERS": 6,
     "V1_USE_ORCHESTRATOR": True,
@@ -35,7 +37,8 @@ DEFAULT_FLAGS: Dict[str, Any] = {
     "V1_SHORT_ASR_MODEL": "inherit",
     "V1_LONG_ASR_MODEL": "inherit",
     "V1_VISUAL_SUB_TO_SPEECH": False,
-    "V1_QC_VISUAL_PIXEL_CHECK": True,
+    "V1_CLOUD_MODE": False,
+    "V1_CLOUD_GPU": "T4",
 }
 
 
@@ -49,6 +52,7 @@ LEGACY_ASR_MODEL_ALIASES = {
 }
 LEGACY_ASR_FLAG_KEYS = ("ENABLE_QWEN_ASR",)
 _legacy_asr_warned = False
+_FLAGS_LOCK = threading.Lock()
 
 
 def _warn_legacy_asr(source: str, legacy_value: str, replacement: str) -> None:
@@ -113,7 +117,7 @@ def get_feature_flags(workspace_path: Optional[str | Path] = None) -> Dict[str, 
     return flags
 
 
-def set_feature_flags(new_flags: Dict[str, Any], workspace_path: Optional[str | Path] = None) -> Dict[str, Any]:
+def _set_feature_flags_unlocked(new_flags: Dict[str, Any], workspace_path: Optional[str | Path] = None) -> Dict[str, Any]:
     """Validate and atomically persist settings for new jobs, not active jobs."""
     target = _get_flags_file(workspace_path)
     current = get_feature_flags(workspace_path)
@@ -177,6 +181,20 @@ def set_feature_flags(new_flags: Dict[str, Any], workspace_path: Optional[str | 
 
     # Active jobs consume snapshots; a settings change applies only to new jobs.
     return current
+
+
+def set_feature_flags(new_flags: Dict[str, Any], workspace_path: Optional[str | Path] = None) -> Dict[str, Any]:
+    """Serialize read-merge-write updates across dashboard and bot workers."""
+    try:
+        from .pipeline_v2.interprocess_lock import CrossProcessLock
+    except ImportError:
+        from pipeline_v2.interprocess_lock import CrossProcessLock
+
+    with _FLAGS_LOCK:
+        target = _get_flags_file(workspace_path)
+        lock_path = target.with_name(target.name + ".lock")
+        with CrossProcessLock(lock_path, name="V1FeatureFlagsLock", timeout_seconds=5, poll_interval=0.05):
+            return _set_feature_flags_unlocked(new_flags, workspace_path)
 
 
 def sync_env_from_flags(workspace_path: Optional[str | Path] = None) -> Dict[str, Any]:

@@ -13,26 +13,72 @@ import threading
 import uuid
 import copy
 from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
 from typing import Optional, Dict, Any
 
 from pipeline_v2.atomic_io import atomic_write_json
-from v1_integrity_errors import JobStateReadError
+from v1_integrity_errors import JobStateReadError, StaleExecutionError, OutputVerificationError
 import stop_service
 
 BASE_DIR = Path(__file__).resolve().parent
 WORKSPACE = Path(os.getenv("AUTODUB_WORKSPACE", str(BASE_DIR.parent / "workspace")))
 def _resolve_bot_system_file(filename: str) -> Path:
-    bot_system = WORKSPACE / "bot_system"
-    target = bot_system / filename
-    if target.exists() or bot_system.is_dir():
-        return target
-    return WORKSPACE / filename
+    """Bind both tracker files once, independent of later control directories."""
+    from pipeline_v2.interprocess_lock import CrossProcessLock
+
+    binding = WORKSPACE / ".tracker-location.json"
+    with CrossProcessLock(WORKSPACE / ".tracker-location.lock", timeout_seconds=5):
+        try:
+            record = json.loads(binding.read_text(encoding="utf-8-sig"))
+        except FileNotFoundError:
+            # Keep existing state and live leases in place during an upgrade.
+            legacy = any((WORKSPACE / name).exists() for name in ("job_status.json", "batch.lock"))
+            record = {"schema_version": 1, "directory": "." if legacy else "bot_system"}
+            atomic_write_json(binding, record)
+        except (OSError, ValueError) as exc:
+            raise JobStateReadError("Không đọc được vị trí tracker; cần kiểm tra trước khi chạy.") from exc
+        if (not isinstance(record, dict) or record.get("schema_version") != 1
+                or record.get("directory") not in (".", "bot_system")):
+            raise JobStateReadError("Vị trí tracker không hợp lệ; giữ nguyên trạng thái hiện có.")
+        directory = WORKSPACE / record["directory"]
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory / filename
 
 STATUS_FILE = _resolve_bot_system_file("job_status.json")
 BATCH_LOCK_FILE = _resolve_bot_system_file("batch.lock")
 
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
+current_execution = ContextVar("tracker_execution", default=None)
+_GUARD_LOCAL = threading.local()
+
+
+@contextmanager
+def state_transaction():
+    """Serialize tracker snapshots and lease changes using the same OS guard."""
+    with _LOCK, _process_guard():
+        _sync_from_disk_unlocked(strict=True, authoritative=True)
+        yield
+
+
+def _fenced(function):
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        with state_transaction():
+            execution = current_execution.get()
+            if execution is not None and execution != _CURRENT_STATE.get("execution_id"):
+                if function.__name__ == "_finish_video_verified":
+                    raise StaleExecutionError("Execution đã đổi; không xác nhận thành phẩm của callback cũ.")
+                return None
+            owner = _read_batch_lock_unlocked()
+            if ((execution is not None and (not owner or owner.get("job_id") != execution))
+                    or (owner and owner.get("pid") != os.getpid())):
+                if function.__name__ == "_finish_video_verified":
+                    raise StaleExecutionError("Execution không còn giữ lease của tiến trình này.")
+                return None
+            return function(*args, **kwargs)
+    return guarded
 logger = logging.getLogger(__name__)
 
 
@@ -149,7 +195,16 @@ _CURRENT_STATE: Dict[str, Any] = copy.deepcopy(_DEFAULT_STATE)
 @contextmanager
 def _process_guard():
     """Serialize ownership changes; the OS releases the guard on process exit."""
+    depth = getattr(_GUARD_LOCAL, "depth", 0)
+    if depth:
+        _GUARD_LOCAL.depth = depth + 1
+        try:
+            yield
+        finally:
+            _GUARD_LOCAL.depth = depth
+        return
     WORKSPACE.mkdir(parents=True, exist_ok=True)
+    BATCH_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(BATCH_LOCK_FILE.with_suffix(".guard"), "a+b") as handle:
         handle.seek(0, 2)
         if handle.tell() == 0:
@@ -158,13 +213,23 @@ def _process_guard():
         handle.seek(0)
         if os.name == "nt":
             import msvcrt
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise JobStateReadError("Tracker đang bận; không lấy được khóa trạng thái.")
+                    time.sleep(.01)
         else:
             import fcntl
             fcntl.flock(handle, fcntl.LOCK_EX)
+        _GUARD_LOCAL.depth = 1
         try:
             yield
         finally:
+            _GUARD_LOCAL.depth = 0
             handle.seek(0)
             if os.name == "nt":
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
@@ -208,6 +273,23 @@ def _pid_is_running(pid: int) -> bool:
         return False
 
 
+def _owner_is_running(owner: Dict[str, Any]) -> bool:
+    """A recycled PID must never retain another execution's lease."""
+    pid = int(owner.get("pid") or 0)
+    if not _pid_is_running(pid):
+        return False
+    expected = owner.get("owner_create_time")
+    if expected is None:
+        return True  # A live legacy PID is conservatively retained.
+    try:
+        import psutil
+        if type(expected) not in (int, float) or not math.isfinite(expected) or expected <= 0:
+            return True
+        return abs(psutil.Process(pid).create_time() - expected) < 0.01
+    except Exception:
+        return True  # Unknown identity cannot justify reclaiming a live lease.
+
+
 def _read_batch_lock_unlocked() -> Dict[str, Any]:
     try:
         with open(BATCH_LOCK_FILE, "r", encoding="utf-8") as handle:
@@ -224,8 +306,35 @@ def _claim_batch_lock_unlocked(job_id: str) -> None:
 
 def _claim_batch_lock_guarded(job_id: str) -> None:
     _ensure_dir()
+    # Registry experiments and the legacy dispatcher share this OS guard.
+    # Neither admission path may overlap the other's live or unreadable lease.
+    from execution_registry import ExecutionRegistry, RegistryStateError
+    try:
+        if ExecutionRegistry(WORKSPACE, BATCH_LOCK_FILE).has_occupied_unlocked():
+            raise JobAlreadyRunningError("Execution registry đang giữ quyền xử lý.")
+    except RegistryStateError as exc:
+        raise JobAlreadyRunningError("Execution registry chưa xác minh được; chưa nhận batch mới.") from exc
+    # A legacy service may still own the other layout during an upgrade.
+    # Retain its lease and refuse admission until that owner has stopped.
+    for candidate in (WORKSPACE / "batch.lock", WORKSPACE / "bot_system" / "batch.lock"):
+        if candidate.resolve() == BATCH_LOCK_FILE.resolve():
+            continue
+        try:
+            owner = json.loads(candidate.read_text(encoding="utf-8-sig"))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            raise JobAlreadyRunningError("Khóa tracker tại vị trí cũ chưa đọc được.") from exc
+        try:
+            if (not isinstance(owner, dict) or type(owner.get("pid")) is not int
+                    or owner["pid"] <= 0 or _owner_is_running(owner)):
+                raise JobAlreadyRunningError("Một execution đang giữ khóa tracker tại vị trí khác.")
+        except (TypeError, ValueError) as exc:
+            raise JobAlreadyRunningError("Khóa tracker tại vị trí cũ chưa xác minh được.") from exc
+    import psutil
     payload = json.dumps(
-        {"job_id": job_id, "pid": os.getpid(), "created_at": time.time()},
+        {"job_id": job_id, "pid": os.getpid(), "created_at": time.time(),
+         "owner_create_time": psutil.Process().create_time()},
         ensure_ascii=False,
     ).encode("utf-8")
     for _attempt in range(2):
@@ -238,15 +347,10 @@ def _claim_batch_lock_guarded(job_id: str) -> None:
             owner = _read_batch_lock_unlocked()
             if not owner:
                 raise JobAlreadyRunningError("Batch lock is being written or is unreadable.")
-            owner_pid = int(owner.get("pid") or 0)
-            if owner_pid and _pid_is_running(owner_pid):
-                if owner_pid == os.getpid():
-                    try:
-                        from worker_settings import get_worker_settings
-                        if get_worker_settings().get("concurrency", 1) > 1:
-                            return
-                    except Exception as _phase6_exc:
-                        logger.warning('Suppressed error in job_tracker._claim_batch_lock_guarded (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
+            owner_pid = owner.get("pid")
+            if type(owner_pid) is not int or owner_pid <= 0:
+                raise JobAlreadyRunningError("Batch lock owner cannot be verified.")
+            if owner_pid and _owner_is_running(owner):
                 raise JobAlreadyRunningError(
                     "Một batch khác đang chạy (PID {}).".format(owner_pid)
                 )
@@ -317,13 +421,13 @@ def _read_state_from_disk_unlocked(strict: bool = False) -> Optional[Dict[str, A
         return None
 
 
-def _sync_from_disk_unlocked(strict: bool = False) -> None:
+def _sync_from_disk_unlocked(strict: bool = False, authoritative: bool = False) -> None:
     disk_state = _read_state_from_disk_unlocked(strict=strict)
     if not disk_state:
         return
     disk_updated = float(disk_state.get("updated_at") or 0)
     memory_updated = float(_CURRENT_STATE.get("updated_at") or 0)
-    if disk_updated > memory_updated:
+    if authoritative or disk_updated > memory_updated:
         _CURRENT_STATE.update(disk_state)
 
 
@@ -332,8 +436,8 @@ def _save_state_to_disk():
     try:
         atomic_write_json(STATUS_FILE, _CURRENT_STATE)
     except OSError as exc:
-        # Trạng thái trong bộ nhớ vẫn dùng được; ghi log để lỗi đĩa không bị che giấu.
         logger.warning("Không thể ghi trạng thái job: %s", exc)
+        raise JobStateReadError("Không lưu được trạng thái job; giữ lease để đối soát.") from exc
 
 
 def _freeze_progress_unlocked(now=None):
@@ -366,32 +470,36 @@ def get_status(strict: bool = False) -> Dict[str, Any]:
     with _LOCK:
         # Batch CLI, Dashboard và Telegram có thể chạy ở các process khác nhau.
         # Luôn nhận bản mới hơn từ đĩa, kể cả khi state trong RAM đang active.
-        _sync_from_disk_unlocked(strict=strict)
-
-        state = copy.deepcopy(_CURRENT_STATE)
-        owner = _read_batch_lock_unlocked()
+        with _process_guard():
+            _sync_from_disk_unlocked(strict=strict, authoritative=True)
+            state = copy.deepcopy(_CURRENT_STATE)
+            owner = _read_batch_lock_unlocked()
+            lease_exists = BATCH_LOCK_FILE.exists()
+        state["occupies_slot"] = bool(owner and _owner_is_running(owner)) or (lease_exists and not owner)
+        if state.get("occupies_slot") and state.get("stop_requested"):
+            state.update(active=True, status="stopping", video_status="stopping", eta_seconds=None)
         if strict:
             if not isinstance(state.get("active"), bool) or not isinstance(state.get("workers", {}), dict):
                 raise JobStateReadError("Không xác minh được trạng thái worker; thao tác đã được chặn.")
             if any(not isinstance(w, dict) or not isinstance(w.get("active"), bool)
                    for w in state.get("workers", {}).values()):
                 raise JobStateReadError("Trạng thái worker không hợp lệ; thao tác đã được chặn.")
-            if BATCH_LOCK_FILE.exists():
+            if lease_exists:
                 try:
-                    checked_owner = json.loads(BATCH_LOCK_FILE.read_text(encoding="utf-8"))
+                    checked_owner = owner
                     if (not isinstance(checked_owner, dict)
                             or type(checked_owner.get("pid")) is not int or checked_owner["pid"] <= 0):
                         raise ValueError("Invalid lock owner")
                 except (OSError, ValueError, TypeError) as exc:
                     raise JobStateReadError("Không xác minh được khóa batch; thao tác đã được chặn.") from exc
-                if not state["active"] and _pid_is_running(checked_owner["pid"]):
+                if not state["active"] and _owner_is_running(checked_owner):
                     raise JobStateReadError("Khóa batch còn hoạt động; chưa thể xác minh trạng thái job.")
-        if state.get("active") and owner and not _pid_is_running(int(owner.get("pid") or 0)):
+        if state.get("active") and owner and not _owner_is_running(owner):
             state.update(active=False, status="interrupted", video_status="interrupted",
                          elapsed_seconds=max(0, int((state.get("updated_at") or time.time()) - (state.get("start_time") or time.time()))),
                          step_name="Tiến trình đã thoát. Có thể chạy lại để tiếp tục.",
                          eta_seconds=None)
-        if state.get("active") and state.get("start_time"):
+        if state.get("active") and state.get("start_time") and state.get("status") != "stopping":
             elapsed = int(time.time() - state["start_time"])
             state["elapsed_seconds"] = elapsed
             # Tính thời gian thực tế của bước đang chạy
@@ -515,8 +623,7 @@ def start_batch(
     job_id: Optional[str] = None,
 ) -> str:
     """Đăng ký bắt đầu một hàng đợi batch."""
-    with _LOCK:
-        _sync_from_disk_unlocked()
+    with state_transaction():
         job_id = job_id or uuid.uuid4().hex
         owner = _read_batch_lock_unlocked()
         reserved = owner.get("job_id") == job_id and owner.get("pid") == os.getpid()
@@ -529,6 +636,9 @@ def start_batch(
         _CURRENT_STATE.update({
             "schema_version": 2,
             "job_id": job_id,
+            "execution_id": job_id,
+            "generation": _CURRENT_STATE.get("generation", 0) if reserved else _CURRENT_STATE.get("generation", 0) + 1,
+            "occupies_slot": True,
             "active": True,
             "status": "running",
             "video_name": "",
@@ -552,6 +662,7 @@ def start_batch(
         return job_id
 
 
+@_fenced
 def start_video(video_name: str, index: int = 1, total: int = 1, worker_id: Optional[int] = None):
     """Bắt đầu xử lý một video cụ thể (hỗ trợ phân biệt worker_id 1 hoặc 2)."""
     with _LOCK:
@@ -616,6 +727,7 @@ def start_video(video_name: str, index: int = 1, total: int = 1, worker_id: Opti
         _save_state_to_disk()
 
 
+@_fenced
 def record_router_info(info: Dict[str, Any], identity: Optional[Any] = None, worker_id: Optional[int] = None):
     """Ghi nhận thông tin bộ điều phối video (SML Router: SHORT, MEDIUM, LONG, AUTO)."""
     if not info:
@@ -638,6 +750,7 @@ def record_router_info(info: Dict[str, Any], identity: Optional[Any] = None, wor
         logger.info("Đã ghi nhận bộ điều phối video [Worker %s]: %s (mode=%s)", wid, info.get("router_label") or info.get("resolved_mode"), info.get("resolved_mode"))
 
 
+@_fenced
 def record_active_translation_model(model: str, identity: Optional[Any] = None):
     """Ghi nhận model Gemini đang chạy inference dịch thuật theo thời gian thực."""
     if not model:
@@ -653,6 +766,7 @@ def record_active_translation_model(model: str, identity: Optional[Any] = None):
         logger.info("Đang dịch thuật với model Gemini: %s", model)
 
 
+@_fenced
 def record_translation_model(model: str, identity: Optional[Any] = None):
     """Ghi nhận model AI thực tế đã dịch video này."""
     if not model:
@@ -672,6 +786,7 @@ def record_translation_model(model: str, identity: Optional[Any] = None):
         logger.info("Đã ghi nhận model dịch thuật: %s", model)
 
 
+@_fenced
 def record_separator_info(info: Dict[str, Any], identity: Optional[Any] = None):
     """Ghi nhận thông tin mô hình tách âm (BS-RoFormer / Demucs / Bypass)."""
     if not info:
@@ -687,6 +802,7 @@ def record_separator_info(info: Dict[str, Any], identity: Optional[Any] = None):
         logger.info("Đã ghi nhận thông tin tách âm: %s", info.get("engine") or info.get("model"))
 
 
+@_fenced
 def record_mixer_info(info: Dict[str, Any], identity: Optional[Any] = None):
     """Ghi nhận thông tin hòa âm và adaptive ducking."""
     if not info:
@@ -702,6 +818,7 @@ def record_mixer_info(info: Dict[str, Any], identity: Optional[Any] = None):
         logger.info("Đã ghi nhận thông tin hòa âm: %s", info.get("ducking_mode"))
 
 
+@_fenced
 def update_step(step: float, step_name: str, percent: Optional[int] = None, details: str = "", worker_id: Optional[int] = None):
     """Cập nhật bước xử lý và tiến độ % (hỗ trợ phân biệt worker_id)."""
     with _LOCK:
@@ -768,12 +885,32 @@ def update_step(step: float, step_name: str, percent: Optional[int] = None, deta
 
 def finish_video(video_name: str, output_path: str = "", duration_seconds: float = 0, worker_id: Optional[int] = None):
     """Record completion only after the output can be read as video with audio."""
+    with state_transaction():
+        expected = (_CURRENT_STATE.get("execution_id"), _CURRENT_STATE.get("generation"))
+        if current_execution.get() is not None and current_execution.get() != expected[0]:
+            raise StaleExecutionError("Execution đã đổi; không xác nhận callback cũ.")
     from dashboard_media import media_status
     check = media_status(output_path) if output_path else {"status": "unverified", "reason": "Không có đường dẫn thành phẩm."}
     if check["status"] != "valid":
         message = "Chưa xác nhận thành phẩm: " + check["reason"]
-        set_error(video_name, message, fatal=True, worker_id=worker_id)
-        raise RuntimeError(message)
+        with state_transaction():
+            if expected != (_CURRENT_STATE.get("execution_id"), _CURRENT_STATE.get("generation")):
+                raise StaleExecutionError("Execution đã đổi trong lúc kiểm tra thành phẩm.")
+            set_error(video_name, message, fatal=True, worker_id=worker_id)
+        raise OutputVerificationError(message)
+    return _finish_video_verified(video_name, output_path, duration_seconds, worker_id, expected)
+
+
+@_fenced
+def _finish_video_verified(video_name, output_path, duration_seconds, worker_id, expected):
+    if expected != (_CURRENT_STATE.get("execution_id"), _CURRENT_STATE.get("generation")):
+        raise StaleExecutionError("Execution đã đổi trong lúc kiểm tra thành phẩm.")
+    if _CURRENT_STATE.get("stop_requested") or stop_service.is_stop_requested(WORKSPACE, status_file=STATUS_FILE):
+        raise StaleExecutionError("Execution đã nhận yêu cầu dừng; không xác nhận thành công.")
+    last = _CURRENT_STATE.get("last_completed") or {}
+    if (_CURRENT_STATE.get("video_status") == "completed" and last.get("execution_id") == expected[0]
+            and last.get("generation") == expected[1] and last.get("output_path") == output_path):
+        return copy.deepcopy(last)
     try:
         import delivery_ledger
         delivery_ledger.record(
@@ -811,6 +948,8 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
 
         models = list(_CURRENT_STATE.get("translation_models", []))
         record = {
+            "execution_id": _CURRENT_STATE.get("execution_id"),
+            "generation": _CURRENT_STATE.get("generation"),
             "video_name": video_name,
             "output_path": output_path,
             "output_verified": True,
@@ -876,8 +1015,10 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
                     _dup_register("output", video_name, Path(output_path))
             except Exception as _phase6_exc:
                 logger.warning('Suppressed error in job_tracker.finish_video (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
+        return copy.deepcopy(record)
 
 
+@_fenced
 def finish_batch():
     """Ghi nhận hoàn thành toàn bộ hàng đợi."""
     with _LOCK:
@@ -907,7 +1048,8 @@ def finish_batch():
                     "updated_at": time.time(),
                 })
         _save_state_to_disk()
-        _release_batch_lock_unlocked(_CURRENT_STATE.get("job_id"))
+        if current_execution.get() is None:
+            release_batch(_CURRENT_STATE.get("job_id"))
 
     if not os.environ.get("PYTEST_CURRENT_TEST"):
         try:
@@ -919,10 +1061,28 @@ def finish_batch():
 
 
 def release_batch(job_id: str) -> None:
-    with _LOCK:
-        _release_batch_lock_unlocked(job_id)
+    with state_transaction():
+        owner = _read_batch_lock_unlocked()
+        if (not job_id or _CURRENT_STATE.get("job_id") != job_id
+                or not owner or owner.get("job_id") != job_id or owner.get("pid") != os.getpid()):
+            return
+        # Persist before release; no writes by this execution after the guard opens.
+        if _CURRENT_STATE.get("active") and _CURRENT_STATE.get("status") != "stop_incomplete":
+            _freeze_progress_unlocked()
+            _CURRENT_STATE.update(active=False, status="interrupted", video_status="interrupted")
+        _CURRENT_STATE.update(occupies_slot=False, updated_at=time.time())
+        _save_state_to_disk()
+        import video_pause
+        video_pause.clear_execution_pause(job_id, _CURRENT_STATE.get("generation"))
+        _release_batch_lock_guarded(job_id)
+        if BATCH_LOCK_FILE.exists():
+            _CURRENT_STATE.update(occupies_slot=True, status="stop_incomplete", active=True,
+                                  last_error="Không nhả được khóa execution; cần kiểm tra quyền ghi.",
+                                  updated_at=time.time())
+            _save_state_to_disk()
 
 
+@_fenced
 def set_error(video_name: str, error_msg: str, fatal: bool = True, worker_id: Optional[int] = None):
     """Ghi nhận lỗi khi xử lý."""
     with _LOCK:
@@ -968,8 +1128,7 @@ def set_error(video_name: str, error_msg: str, fatal: bool = True, worker_id: Op
 
 def request_stop():
     """Gửi yêu cầu dừng batch (hỗ trợ đa tiến trình: main.py, telegram_bot.py, v1/v2)."""
-    with _LOCK:
-        _sync_from_disk_unlocked()
+    with state_transaction():
         stop_service.request_stop(
             WORKSPACE,
             status_file=STATUS_FILE,
@@ -982,17 +1141,18 @@ def request_stop():
         if "workers" in _CURRENT_STATE and isinstance(_CURRENT_STATE["workers"], dict):
             for wid_k, w in _CURRENT_STATE["workers"].items():
                 w.update({
-                    "active": False,
-                    "status": "stopped",
-                    "video_status": "stopped",
-                    "step_name": "Đã dừng theo yêu cầu",
+                    "active": bool(w.get("active")),
+                    "status": "stopping" if w.get("active") else w.get("status", "idle"),
+                    "video_status": "stopping" if w.get("active") else w.get("video_status", "idle"),
+                    "step_name": "Đang chờ công việc kết thúc",
                     "percent": min(99, max(0, w.get("percent", 0))),
                     "updated_at": now,
                 })
         _CURRENT_STATE.update({
-            "active": False,
-            "status": "stopped",
-            "video_status": "stopped",
+            "active": True,
+            "occupies_slot": True,
+            "status": "stopping",
+            "video_status": "stopping",
             "percent": min(99, max(0, _CURRENT_STATE.get("percent", 0))),
             "stop_requested": True,
             "step_name": "Đang dừng tiến trình theo yêu cầu...",
@@ -1003,7 +1163,7 @@ def request_stop():
 
 def clear_stop_request():
     """Xóa các cờ dừng khi bắt đầu một batch hoặc video mới."""
-    with _LOCK:
+    with state_transaction():
         stop_service.clear_stop(WORKSPACE, status_file=STATUS_FILE, source="job_tracker")
         _CURRENT_STATE["stop_requested"] = False
         _save_state_to_disk()
@@ -1030,6 +1190,7 @@ def is_stop_requested() -> bool:
         return bool(_CURRENT_STATE.get("stop_requested"))
 
 
+@_fenced
 def mark_stopped(message: str = "Đã dừng theo yêu cầu") -> None:
     with _LOCK:
         _sync_from_disk_unlocked()
@@ -1056,9 +1217,11 @@ def mark_stopped(message: str = "Đã dừng theo yêu cầu") -> None:
                     "updated_at": time.time(),
                 })
         _save_state_to_disk()
-        _release_batch_lock_unlocked(_CURRENT_STATE.get("job_id"))
+        if current_execution.get() is None:
+            release_batch(_CURRENT_STATE.get("job_id"))
 
 
+@_fenced
 def mark_retry_waiting(job_id: str, message: str = "Đang chờ mạng; video đã được lên lịch thử lại.") -> None:
     """Record a scheduled retry without completion or failure; the worker releases the lock."""
     with _LOCK:
@@ -1085,6 +1248,7 @@ def mark_retry_waiting(job_id: str, message: str = "Đang chờ mạng; video đ
         _save_state_to_disk()
 
 
+@_fenced
 def fail_batch(
     error_msg: str,
     video_name: str = "batch",
@@ -1128,5 +1292,6 @@ def fail_batch(
                         "updated_at": now,
                     })
         _save_state_to_disk()
-        _release_batch_lock_unlocked(job_id or current_job_id)
+        if current_execution.get() is None:
+            release_batch(job_id or current_job_id)
 

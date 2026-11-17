@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Mapping
+import os
+import uuid
 
 try:
     from .environment import read_environment
@@ -37,7 +39,7 @@ def intent_names(scope: str, include_downloader: bool = False) -> tuple[str, ...
         return ("telegram.disabled",)
     if scope == "downloader":
         return ("downloader.disabled",)
-    if scope in ("all", "cutover"):
+    if scope in ("all", "cutover", "processing"):
         names = ("v1.pause", "ops.pause", "telegram.disabled", "scriptbot.disabled")
         return names + (("downloader.disabled",) if include_downloader or scope == "cutover" else ())
     return ()
@@ -60,7 +62,39 @@ def resume_services(project_root: Path, *, workspace: Path | None = None,
 
 
 def service_paused(project_root: Path, *, workspace: Path | None = None,
-                   service: str = "telegram") -> bool:
+                   service: str = "telegram", environment: Mapping[str, str] | None = None) -> bool:
     names = ("v1.pause", f"{service}.disabled")
     return any((directory / name).exists()
-               for directory in control_directories(project_root, workspace) for name in names)
+               for directory in control_directories(project_root, workspace, environment) for name in names)
+
+
+def control_directory(project_root: Path, workspace: Path | None = None,
+                      environment: Mapping[str, str] | None = None) -> Path:
+    """Canonical path is independent of which directories already exist."""
+    root = Path(project_root).resolve()
+    env = service_environment(root, environment)
+    configured = env.get("TOOL_V1_CONTROL_DIR") or env.get("AUTODUB_CONTROL_DIR")
+    return (Path(configured) if configured else service_workspace(root, workspace, env) / "bot_system" / "control").resolve()
+
+
+def write_intent(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        temporary.write_text(value, encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def request_service_stop(project_root: Path, *, workspace: Path | None = None,
+                         scope: str = "processing", include_downloader: bool = False,
+                         environment: Mapping[str, str] | None = None) -> list[str]:
+    """Mirror intents for older services; never report success on a write error."""
+    written = []
+    for directory in control_directories(project_root, workspace, environment):
+        for name in intent_names(scope, include_downloader):
+            path = directory / name
+            write_intent(path, "paused")
+            written.append(str(path))
+    return written

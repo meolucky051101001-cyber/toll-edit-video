@@ -17,6 +17,7 @@ import time
 import math
 import logging
 import asyncio
+from batch_control import to_thread_drained
 from v1_stage_runtime import save_payload, load_payload, await_stage
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -152,6 +153,8 @@ class V1Orchestrator:
         job_id: str,
         user_mode: str = "auto",
         overrides: Optional[Dict[str, Any]] = None,
+        *,
+        require_existing_manifest: bool = False,
     ) -> Dict[str, Any]:
         """
         Lập kế hoạch thực thi bất biến cho job trước khi chạy:
@@ -167,6 +170,8 @@ class V1Orchestrator:
         existing = self.manifest_manager.load_manifest(job_id)
         if existing and path.is_file() and existing.video_fingerprint == fingerprint(path):
             return self._plan_info_from_manifest(existing)
+        if require_existing_manifest:
+            raise ValueError("Nguồn hoặc manifest đã thay đổi trước khi khôi phục.")
 
         from v1_job_policy import apply_job_policy
         from job_config_service import freeze_job_config
@@ -305,6 +310,7 @@ class V1Orchestrator:
         progress_callback: Optional[Callable[[str, int, int, float, str, Dict[str, Any]], Any]] = None,
         resume_if_possible: bool = True,
         stop_checker: Optional[Callable[[], bool]] = None,
+        require_existing_manifest: bool = False,
     ) -> Dict[str, Any]:
         """
         THỰC THI TRỌN VẸN PIPELINE LỒNG TIẾNG CHO TOOL V1:
@@ -315,7 +321,9 @@ class V1Orchestrator:
         5. Xuất bản (Publish/Replace) nguyên tử và gửi thông báo.
         """
         c = self._prepare_execution(
-            video_path, job_id, output_dir, delivery_path, user_mode, overrides, resume_if_possible)
+            video_path, job_id, output_dir, delivery_path, user_mode, overrides, resume_if_possible,
+            require_existing_manifest=require_existing_manifest,
+        )
         if isinstance(c, dict):
             return c
         job_id, resolved_mode = c.job_id, c.resolved_mode
@@ -337,7 +345,7 @@ class V1Orchestrator:
                     logger.warning("Progress notification failed; keep processing job %s", job_id, exc_info=True)
 
         def check_stop():
-            from batch_processor import BatchStopRequested
+            from batch_control import BatchStopRequested
             import job_tracker
             import stop_service
             if (stop_checker and stop_checker()) or job_tracker.is_stop_requested() or stop_service.is_stop_requested(self.workspace):
@@ -371,7 +379,8 @@ class V1Orchestrator:
         return await self._stage_qc_and_deliver(
             c, final_video, temp_render_video, translated_segments, dubbing_audio_files, mixed_audio, ass_path)
 
-    def _prepare_execution(self, video_path, job_id, output_dir, delivery_path, user_mode, overrides, resume_if_possible):
+    def _prepare_execution(self, video_path, job_id, output_dir, delivery_path, user_mode, overrides, resume_if_possible,
+                           *, require_existing_manifest=False):
         v_path = Path(video_path).resolve()
         if not v_path.is_file():
             raise FileNotFoundError(f"Video đầu vào không tồn tại: {v_path}")
@@ -389,7 +398,7 @@ class V1Orchestrator:
         requested_out_dir = Path(str(raw_out).rstrip(". ")).resolve()
         # The same input may be retried with a fresh queue ID. Reuse only a
         # non-completed manifest with verified source and the same working folder.
-        if resume_if_possible and not self.manifest_manager.load_manifest(job_id):
+        if resume_if_possible and not require_existing_manifest and not self.manifest_manager.load_manifest(job_id):
             candidates = sorted(self.manifest_manager.manifest_dir.glob("*.manifest.json"),
                                 key=lambda p: p.stat().st_mtime, reverse=True)
             for candidate in candidates:
@@ -400,7 +409,7 @@ class V1Orchestrator:
                         and old.video_fingerprint == fingerprint(v_path)):
                     job_id = old.job_id
                     break
-        plan_info = self.plan_job(v_path, job_id, user_mode, overrides)
+        self.plan_job(v_path, job_id, user_mode, overrides, require_existing_manifest=require_existing_manifest)
         manifest = self.manifest_manager.load_manifest(job_id)
         if not manifest:
             raise RuntimeError(f"Không thể khởi tạo manifest cho job: {job_id}")
@@ -510,7 +519,9 @@ class V1Orchestrator:
         resume_stage = STAGES_ORDER[0]
         c.verified_stages = []
         if resume_if_possible:
-            c.can_resume, resume_stage, resume_details = self.manifest_manager.verify_manifest_resumability(c.job_id)
+            c.can_resume, resume_stage, resume_details = self.manifest_manager.verify_manifest_resumability(
+                c.job_id, source_path=c.v_path, work_dir=c.out_dir,
+            )
             c.verified_stages = resume_details.get("verified_stages", [])
             if c.effective_cfg.get("speech_timing_version") != 3:
                 tts_pos = STAGES_ORDER.index("ai_tts")
@@ -544,7 +555,7 @@ class V1Orchestrator:
                 from video_utils import extract_audio_from_video
                 c.check_stop()
                 ok = await c.run_stage(
-                    asyncio.to_thread(extract_audio_from_video, str(c.v_path), str(original_audio)),
+                    to_thread_drained(extract_audio_from_video, str(c.v_path), str(original_audio)),
                     timeout=t_out
                 )
                 if not ok or not original_audio.is_file() or original_audio.stat().st_size < 1000:
@@ -593,7 +604,7 @@ class V1Orchestrator:
                 c.check_stop()
                 async with async_gpu_gatekeeper("vocal_separation", timeout_seconds=t_out):
                     v_res, nv_res = await c.run_stage(
-                        asyncio.to_thread(
+                        to_thread_drained(
                             separate_vocals_demucs,
                             str(original_audio),
                             str(c.out_dir),
@@ -651,7 +662,7 @@ class V1Orchestrator:
                 # extract_subtitles_whisper tự động điều phối Hybrid/SenseVoice hoặc Faster-Whisper + Chunking
                 async with async_gpu_gatekeeper("speech_asr", timeout_seconds=t_out):
                     srt_segments = await c.run_stage(
-                        asyncio.to_thread(
+                        to_thread_drained(
                             extract_subtitles_whisper,
                             str(vocals_audio),
                             str(srt_original),
@@ -754,7 +765,7 @@ class V1Orchestrator:
                 ocr_input = [] if (c.visual_sub_to_speech and asr_was_empty) else srt_segments
                 async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=t_out):
                     ocr_result, vid_w, vid_h, main_y_pct = await c.run_stage(
-                        asyncio.to_thread(
+                        to_thread_drained(
                             perform_video_ocr,
                             str(c.v_path),
                             target_lang=c.effective_cfg.get("target_lang", "vi"),
@@ -841,7 +852,7 @@ class V1Orchestrator:
                 if run_early_voice_lock:
                     try:
                         from ai.v1_auto_voice import decide_video_voice
-                        voice_lock_info = await asyncio.to_thread(
+                        voice_lock_info = await to_thread_drained(
                             decide_video_voice,
                             out_dir=str(c.out_dir),
                             srt_segments=srt_segments,
@@ -889,7 +900,7 @@ class V1Orchestrator:
                 gemini_key = c.overrides.get("api_key") or ""
                 c.check_stop()
                 translated_segments = await c.run_stage(
-                    asyncio.to_thread(
+                    to_thread_drained(
                         translate_subtitles,
                         srt_segments,
                         c.effective_cfg.get("target_lang", "vi"),
@@ -945,7 +956,7 @@ class V1Orchestrator:
                 from ass_utils import sync_and_clamp_subtitles, generate_ass_file
 
                 # Khóa giọng đọc
-                voice_lock_info = await asyncio.to_thread(
+                voice_lock_info = await to_thread_drained(
                     decide_video_voice,
                     out_dir=str(c.out_dir),
                     srt_segments=srt_segments,
@@ -1012,7 +1023,7 @@ class V1Orchestrator:
                         sub_cover_style = str(canvas_settings.get_canvas_settings().get("sub_cover_style", "solid_box")).strip().lower()
                     except Exception:
                         sub_cover_style = "solid_box"
-                await asyncio.to_thread(
+                await to_thread_drained(
                     generate_ass_file,
                     translated_segments,
                     floating_segments,
@@ -1072,7 +1083,7 @@ class V1Orchestrator:
                     try:
                         from v1_hierarchical_mixer import mix_hierarchical_audio
                         await c.run_stage(
-                            asyncio.to_thread(
+                            to_thread_drained(
                                 mix_hierarchical_audio,
                                 str(bgm_source),
                                 dubbing_audio_files,
@@ -1088,7 +1099,7 @@ class V1Orchestrator:
                         raise
                 else:
                     await c.run_stage(
-                        asyncio.to_thread(
+                        to_thread_drained(
                             mix_audio_pydub,
                             str(bgm_source),
                             dubbing_audio_files,
@@ -1190,7 +1201,7 @@ class V1Orchestrator:
                         localized_blur_boxes = []
                 async with async_gpu_gatekeeper("video_rendering", timeout_seconds=t_out):
                     rendered = await c.run_stage(
-                        asyncio.to_thread(
+                        to_thread_drained(
                             process_video,
                             str(c.v_path),
                             str(ass_path),
@@ -1236,7 +1247,7 @@ class V1Orchestrator:
                 from v1_feature_flags import get_feature_flags
                 qc_pixel_enabled = bool(get_feature_flags(self.workspace).get("V1_QC_VISUAL_PIXEL_CHECK", True))
 
-            qc_report = await asyncio.to_thread(run_quality_gate,
+            qc_report = await to_thread_drained(run_quality_gate,
                 job_id=c.job_id,
                 final_video_path=qc_target,
                 original_video_path=c.v_path,
@@ -1270,12 +1281,12 @@ class V1Orchestrator:
             del_p = Path(effective_delivery)
             from pipeline_v2.atomic_io import atomic_copy_file
             if del_p.resolve() != final_video.resolve():
-                await asyncio.to_thread(atomic_copy_file, final_video, del_p)
+                await to_thread_drained(atomic_copy_file, final_video, del_p)
             published_path = str(del_p)
             logger.info("[DELIVERY_GUARD] Da tu dong luu video hoan tat toi: %s", published_path)
 
         from dashboard_media import media_status
-        delivered_check = await asyncio.to_thread(media_status, published_path)
+        delivered_check = await to_thread_drained(media_status, published_path)
         if delivered_check["status"] != "valid":
             message = "Khong xac minh duoc thanh pham: " + delivered_check["reason"]
             self.manifest_manager.record_stage_failure(c.job_id, "delivery", message)
@@ -1311,8 +1322,8 @@ class V1Orchestrator:
 
         try:
             from workspace_cleaner import clean_completed_job_intermediate_files, clean_stale_downloads
-            await asyncio.to_thread(clean_completed_job_intermediate_files, c.job_id, self.workspace, c.out_dir)
-            await asyncio.to_thread(clean_stale_downloads, Path(self.workspace) / "downloads")
+            await to_thread_drained(clean_completed_job_intermediate_files, c.job_id, self.workspace, c.out_dir)
+            await to_thread_drained(clean_stale_downloads, Path(self.workspace) / "downloads")
         except Exception as cl_err:
             logger.warning("[CLEANUP] Lỗi dọn tệp trung gian job %s: %s", c.job_id, cl_err)
 
@@ -1349,7 +1360,7 @@ class V1Orchestrator:
         try:
             async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=t_ocr):
                 visual_segments, vid_w_src, vid_h_src, main_y_src = await c.run_stage(
-                    asyncio.to_thread(
+                    to_thread_drained(
                         perform_video_ocr,
                         str(c.v_path),
                         target_lang=c.effective_cfg.get("target_lang", "vi"),

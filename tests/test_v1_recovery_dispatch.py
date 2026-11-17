@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 from backend import phase_d_routes as routes
-from backend.recovery_service import RecoveryService, _ACTIVE_PLAN_TOKENS, compute_file_fingerprint
+from backend.recovery_service import RecoveryService
 
 
 class RecoveryDispatchTests(unittest.IsolatedAsyncioTestCase):
@@ -65,8 +65,58 @@ class RecoveryDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls[0][1]["recovery_mode"], "restart")
 
 
+class RecoveryRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_import_failure_releases_reserved_slot_and_lock(self):
+        import builtins
+        import main as api
+        lock = asyncio.Lock()
+        await lock.acquire()
+        tracker = Mock()
+        tracker.current_execution = api.job_tracker.current_execution
+        original_import = builtins.__import__
+
+        def fail_pipeline_import(name, *args, **kwargs):
+            if name == "batch_processor":
+                raise ImportError("render dependency unavailable")
+            return original_import(name, *args, **kwargs)
+
+        with patch.object(api, "UNIFIED_PIPELINE_LOCK", lock), \
+             patch.object(api, "job_tracker", tracker), \
+             patch("builtins.__import__", side_effect=fail_pipeline_import):
+            await api.single_video_runner("source.mp4", "output", "reserved", pipeline_lock_held=True)
+        self.assertFalse(lock.locked())
+        tracker.fail_batch.assert_called_once_with("render dependency unavailable", job_id="reserved")
+        tracker.release_batch.assert_called_once_with("reserved")
+        self.assertIsNone(tracker.current_execution.get())
+
+    async def test_cancellation_records_stopped_before_releasing_slot(self):
+        import sys
+        import main as api
+        lock = asyncio.Lock()
+        await lock.acquire()
+        tracker = Mock()
+        tracker.current_execution = api.job_tracker.current_execution
+
+        async def canceled(*args, **kwargs):
+            self.assertEqual(tracker.current_execution.get(), "reserved")
+            raise asyncio.CancelledError
+
+        fake_processor = SimpleNamespace(process_single_local_video=canceled)
+        with patch.object(api, "UNIFIED_PIPELINE_LOCK", lock), \
+             patch.object(api, "job_tracker", tracker), \
+             patch.dict(sys.modules, {"batch_processor": fake_processor}):
+            with self.assertRaises(asyncio.CancelledError):
+                await api.single_video_runner("source.mp4", "output", "reserved", pipeline_lock_held=True)
+        self.assertFalse(lock.locked())
+        tracker.mark_stopped.assert_called_once()
+        tracker.release_batch.assert_called_once_with("reserved")
+        self.assertIsNone(tracker.current_execution.get())
+        calls = [call[0] for call in tracker.mock_calls]
+        self.assertLess(calls.index("mark_stopped"), calls.index("release_batch"))
+
+
 class RecoveryArtifactTests(unittest.TestCase):
-    def test_render_recovery_preserves_valid_mix(self):
+    def test_changed_manifest_invalidates_plan_without_touching_artifacts(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             source = root / "source.mp4"
@@ -76,17 +126,12 @@ class RecoveryArtifactTests(unittest.TestCase):
             (job / "mixed.wav").write_bytes(b"valid mix")
             (job / "final_source.mp4").write_bytes(b"invalid render")
             service = RecoveryService(str(root / "workspace"))
-            token = "audit-render-token"
-            _ACTIVE_PLAN_TOKENS[token] = {
-                "job_id": "source", "created_at": __import__("time").time(),
-                "plan": {"source_file": {"fingerprint": compute_file_fingerprint(source)},
-                         "summary": {"first_rerun_stage": "render", "reusable_stages": ["mix"]}},
-            }
-            try:
-                with patch.object(service, "find_source_video", return_value=source):
-                    result = service.execute_resume_action("source", "recover", plan_token=token)
-                self.assertTrue((job / "mixed.wav").is_file())
-                self.assertFalse((job / "final_source.mp4").exists())
-                self.assertEqual(result["work_dir"], str(job.resolve()))
-            finally:
-                _ACTIVE_PLAN_TOKENS.pop(token, None)
+            manifest = service.manifests.get_or_create_manifest("source-id", source, effective_config={"output_dir": str(job)})
+            plan = service.build_resume_plan("source-id", root, root / "output")
+            manifest.status = "failed"
+            service.manifests.save_manifest(manifest)
+            with self.assertRaisesRegex(RuntimeError, "đã thay đổi"):
+                service.execute_resume_action("source-id", "restart", plan["plan_token"],
+                                              input_dir=root, output_dir=root / "output")
+            self.assertEqual((job / "mixed.wav").read_bytes(), b"valid mix")
+            self.assertEqual((job / "final_source.mp4").read_bytes(), b"invalid render")

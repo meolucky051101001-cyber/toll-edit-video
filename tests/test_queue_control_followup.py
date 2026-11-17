@@ -22,8 +22,7 @@ def test_startup_watcher_preserves_snapshot_before_restore(tmp_path, monkeypatch
     monkeypatch.setattr(monitor, 'SNAPSHOT', snapshot)
     monkeypatch.setattr(bot, 'WORKSPACE', str(tmp_path))
     monkeypatch.setattr(bot, 'global_queue', monitor.MonitoredQueue())
-    submit_delete(snapshot, target)
-    # Match tool_control_runtime.initialized: watcher is scheduled before restoration.
+    # Even if the watcher is called early, it must preserve the snapshot.
     async def end_iteration(*args):
         raise asyncio.CancelledError
     monkeypatch.setattr(bot.asyncio, 'sleep', end_iteration)
@@ -46,6 +45,24 @@ def test_invalid_old_operation_does_not_kill_consumer(tmp_path, monkeypatch):
     assert queue.get_nowait()['job_id'] == 'valid_job'
 
 
+def test_legacy_timestamp_does_not_block_valid_command(tmp_path, monkeypatch):
+    from queue_control_service import read_operations
+    snapshot = tmp_path / 'telegram_queue.json'
+    monkeypatch.setattr(monitor, 'SNAPSHOT', snapshot)
+    queue = monitor.MonitoredQueue()
+    job = {'job_id': 'delete_me'}
+    queue.put_nowait(job)
+    queue.put_nowait({'job_id': 'keep_me'})
+    command = submit_delete(snapshot, job)
+    legacy = commands(snapshot) / 'legacy.json'
+    legacy.write_text(json.dumps({'operation_id': 'legacy', 'state': 'pending',
+                                 'created_at': '2026-11-15T00:00:00Z'}))
+    assert {op['operation_id'] for _, op in read_operations(snapshot)} == {'legacy', command['operation_id']}
+    apply_deletions(queue, snapshot)
+    assert queue.get_nowait()['job_id'] == 'keep_me'
+    assert json.loads(legacy.read_text())['state'] == 'needs_review'
+
+
 def test_cancel_corrupt_schedule_allows_recovery(tmp_path):
     store = ScheduleStore(tmp_path / 'schedule.json')
     store.path.write_text('{')
@@ -58,7 +75,7 @@ def test_cancel_corrupt_schedule_allows_recovery(tmp_path):
 def test_replace_corrupt_schedule_preserves_original(tmp_path, raw):
     store = ScheduleStore(tmp_path / 'schedule.json')
     store.path.write_text(raw)
-    assert store.create('02:00', 'AUTO')['active'] is True
+    assert store.create('02:00', 'AUTO', target_kind='local', batch_id='batch')['active'] is True
     assert [p.read_text() for p in tmp_path.glob('*.bak')] == [raw]
 
 
@@ -70,7 +87,7 @@ def test_failed_backup_does_not_overwrite_corrupt_schedule(tmp_path, monkeypatch
         raise OSError('disk full')
     monkeypatch.setattr(module, 'atomic_write_bytes', fail)
     with pytest.raises(OSError):
-        store.create('02:00', 'AUTO')
+        store.create('02:00', 'AUTO', target_kind='local', batch_id='batch')
     assert store.path.read_bytes() == b'{'
 
 
@@ -103,10 +120,10 @@ def test_real_post_init_awaits_recovery_before_watcher(tmp_path, monkeypatch, fa
     async def restore(app):
         assert q.recovery_pending
         events.append('restore')
-        q.put_nowait({'job_id': 'keep_me'})
         assert snapshot.read_text() == original
         if fail_recovery:
             raise ValueError('invalid snapshot')
+        q.restore()
     async def watch(app):
         assert not q.recovery_pending
         events.append('watch')

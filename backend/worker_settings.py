@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from pathlib import Path
@@ -31,6 +32,28 @@ def _resolve_settings_file() -> Path:
     return WORKSPACE / "worker_settings.json"
 
 SETTINGS_FILE = _resolve_settings_file()
+
+# Increase only after the dispatcher and readiness checks support real workers.
+MAX_SUPPORTED_WORKERS = 1
+
+
+def experimental_dual_workers_enabled() -> bool:
+    """Explicit opt-in; old saved concurrency preferences never enable it."""
+    return os.getenv("AUTODUB_EXPERIMENTAL_DUAL_WORKERS", "").strip().lower() in ("1", "true", "yes")
+
+
+def _capabilities(settings: Dict[str, Any]) -> Dict[str, Any]:
+    requested = int(settings.get("concurrency", 1))
+    # The opt-in enables foundation experiments only. The dispatcher still
+    # owns one tracker/stop context, so it must never advertise two live jobs.
+    supported = MAX_SUPPORTED_WORKERS
+    settings.update(requested_concurrency=requested,
+                    experimental_dual_workers=False,
+                    experimental_dual_workers_requested=experimental_dual_workers_enabled(),
+                    max_supported_workers=supported,
+                    effective_concurrency=min(supported, 1 if settings.get("auto_throttled") else requested))
+    settings["capability_reason"] = "Hai worker chưa được bật cho đến khi dispatcher đa execution đạt nghiệm thu W9."
+    return settings
 
 DEFAULT_WORKER_SETTINGS: Dict[str, Any] = {
     "concurrency": 1,               # 1 hoặc 2 (cấu hình người dùng mong muốn)
@@ -61,7 +84,7 @@ def get_worker_settings() -> Dict[str, Any]:
             # Số luồng hiệu lực thực tế đang chạy
             effective = 1 if (throttled or concurrency == 1) else 2
 
-            return {
+            return _capabilities({
                 "concurrency": concurrency,
                 "effective_concurrency": effective,
                 "auto_vram_guard": auto_guard,
@@ -70,13 +93,13 @@ def get_worker_settings() -> Dict[str, Any]:
                 "auto_throttled": throttled,
                 "throttle_reason": reason,
                 "throttled_at": t_at,
-            }
+            })
     except Exception as e:
         logger.warning("Không thể đọc worker_settings.json: %s. Dùng mặc định.", e)
 
     fallback = dict(DEFAULT_WORKER_SETTINGS)
     fallback["effective_concurrency"] = 1
-    return fallback
+    return _capabilities(fallback)
 
 
 def save_worker_settings(
@@ -93,6 +116,10 @@ def save_worker_settings(
             "Trên card RTX 4050 6GB chỉ hỗ trợ 1 luồng hoặc 2 luồng so le an toàn."
         )
 
+    if not math.isfinite(float(max_vram_percent_threshold)) or not 1 <= float(max_vram_percent_threshold) <= 100:
+        raise ValueError("Ngưỡng VRAM phải là số hữu hạn từ 1 đến 100.")
+    if not math.isfinite(float(min_free_vram_mb)) or float(min_free_vram_mb) < 0:
+        raise ValueError("VRAM trống tối thiểu phải là số hữu hạn không âm.")
     clean_cfg = {
         "concurrency": int(concurrency),
         "auto_vram_guard": bool(auto_vram_guard),
@@ -114,7 +141,7 @@ def save_worker_settings(
         raise
 
     clean_cfg["effective_concurrency"] = 1 if clean_cfg["auto_throttled"] else clean_cfg["concurrency"]
-    return clean_cfg
+    return _capabilities(clean_cfg)
 
 
 def trigger_vram_emergency_downgrade(reason: str) -> bool:

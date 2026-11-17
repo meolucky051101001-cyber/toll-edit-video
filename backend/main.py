@@ -22,7 +22,9 @@ from fastapi import FastAPI, Form, Body, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import asyncio
+from batch_control import to_thread_drained
 import datetime
+import time
 from logging.handlers import RotatingFileHandler
 import mimetypes
 import uuid
@@ -31,14 +33,7 @@ from urllib.parse import unquote
 from dashboard_media import media_status, paginate_listing, paginate_output
 from typing import Optional
 
-# Load .env local file
-env_file = Path(__file__).resolve().parent / ".env"
-if env_file.exists():
-    with open(env_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if "=" in line and not line.strip().startswith("#"):
-                k, v = line.strip().split("=", 1)
-                os.environ[k.strip()] = v.strip().strip('"').strip("'")
+# Process environment has precedence over .env (also protects isolated tests).
 
 # The API in this worktree is Tool V1 only, regardless of inherited variables.
 os.environ["PIPELINE_MODE"] = "legacy"
@@ -60,6 +55,7 @@ from video_utils import extract_audio_from_video, mix_audio_pydub, process_video
 from pipeline_v2.config import PipelineMode, PipelineSettings
 import shared_state
 import job_tracker
+from api_pipeline_guard import guarded_media_api
 
 
 
@@ -245,6 +241,13 @@ def _install_asyncio_quiet_disconnect_handler() -> None:
 
 
 async def _startup_background_tasks():
+    if os.getenv("AUTODUB_TESTING") == "1":
+        return
+    from batch_plan_service import BatchPlanStore
+    plan_store = BatchPlanStore(WORKSPACE)
+    if plan_store.path.exists():
+        state = job_tracker.get_status(strict=True)
+        await asyncio.to_thread(plan_store.reconcile_interrupted, state.get("execution_id") if state.get("occupies_slot") else None)
     _install_asyncio_quiet_disconnect_handler()
     ensure_tool_control()
     try:
@@ -272,6 +275,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 os.makedirs(WORKSPACE, exist_ok=True)
 
 def _get_system_path(rel_path: str) -> Path:
+    if rel_path == "telegram_queue.json":
+        from queue_control_service import snapshot_path
+        return snapshot_path(WORKSPACE)
     bot_system = Path(WORKSPACE) / "bot_system"
     target = bot_system / rel_path
     if target.exists() or bot_system.is_dir():
@@ -332,28 +338,34 @@ API_PROCESS_LOCK = UNIFIED_PIPELINE_LOCK
 BATCH_TASK_LOCK = UNIFIED_PIPELINE_LOCK
 BATCH_INPUT_LOCK = asyncio.Lock()
 BATCH_TASK: Optional[asyncio.Task] = None
+BATCH_ADMISSION_LOCK = asyncio.Lock()
+
+
+def _processing_disabled():
+    from service_control import service_paused
+    return service_paused(BASE_DIR.parent, workspace=Path(WORKSPACE), service="processing")
 
 
 
 def _validate_input_path(video_path: str) -> Path:
     from fastapi import HTTPException
     from pathlib import Path
-    
+
     clean_path = video_path.strip()
     if not clean_path:
         raise HTTPException(status_code=400, detail="Invalid path")
-    
+
     candidate = Path(clean_path).resolve()
     allowed_root = get_input_dir().resolve()
-    
+
     try:
         candidate.relative_to(allowed_root)
     except ValueError:
         raise HTTPException(status_code=400, detail="Path must be within allowed input directory")
-        
+
     if not candidate.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-        
+
     return candidate
 
 def _folder_by_key(folder: str) -> Path:
@@ -417,7 +429,7 @@ def _read_log_tail(max_lines: int = 500) -> str:
 async def locate_v1_subtitles(video_path, segments):
     from ocr_utils import perform_video_ocr, release_ocr_reader
     try:
-        _, width, height, main_y = await asyncio.to_thread(
+        _, width, height, main_y = await to_thread_drained(
             perform_video_ocr, video_path, srt_segments=segments
         )
         return width, height, main_y
@@ -450,7 +462,7 @@ async def _apply_visual_sub_to_speech(
 
     from ocr_utils import perform_video_ocr, release_ocr_reader
     try:
-        segments, width, height, main_y = await asyncio.to_thread(
+        segments, width, height, main_y = await to_thread_drained(
             perform_video_ocr, video_path, target_lang=target_lang, sample_rate=1.0,
             api_key=GEMINI_API_KEY, srt_segments=[], visual_sub_to_speech=True,
             _source_duration=source_duration,
@@ -464,7 +476,7 @@ async def _apply_visual_sub_to_speech(
         return srt_segments, None, asr_was_empty
     for idx, seg in enumerate(segments, start=1):
         seg.index = idx
-    await asyncio.to_thread(save_srt, segments, srt_original)
+    await to_thread_drained(save_srt, segments, srt_original)
     return segments, (width, height, main_y), asr_was_empty
 
 
@@ -513,7 +525,7 @@ async def run_api_pipeline_v2(
 async def api_get_logs():
     """Trả về 100 dòng log mới nhất của bot."""
     try:
-        return {"logs": await asyncio.to_thread(_read_log_tail)}
+        return {"logs": await to_thread_drained(_read_log_tail)}
     except Exception as e:
         logger.warning("Lỗi khi đọc log: %s", e)
         return JSONResponse(
@@ -524,9 +536,12 @@ async def api_get_logs():
 # ===== API: Tạo phụ đề (Transcribe + Translate) =====
 @app.post("/api/generate_subtitles")
 @app.post("/api/generate-subtitles")
+@guarded_media_api
 async def api_generate_subtitles(video_path: str = Form(...), target_lang: str = Form("vi")):
     """Nhận đường dẫn file video trên máy, tạo phụ đề gốc và dịch."""
-    if UNIFIED_PIPELINE_LOCK.locked() or job_tracker.get_status().get("active"):
+    if _processing_disabled():
+        raise HTTPException(409, {"code": "service_disabled"})
+    if UNIFIED_PIPELINE_LOCK.locked():
         raise HTTPException(status_code=409, detail="Pipeline đang bận xử lý video khác. Vui lòng đợi hoàn thành!")
     await UNIFIED_PIPELINE_LOCK.acquire()
     try:
@@ -541,19 +556,19 @@ async def api_generate_subtitles(video_path: str = Form(...), target_lang: str =
         srt_translated = os.path.join(out_dir, "translated.srt")
 
         # 1. Extract audio
-        await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
+        await to_thread_drained(extract_audio_from_video, video_path, original_audio)
 
         # 2. Transcribe with Whisper
-        srt_segments = await asyncio.to_thread(extract_subtitles_isolated, original_audio, srt_original)
+        srt_segments = await to_thread_drained(extract_subtitles_isolated, original_audio, srt_original)
 
         # 3. Translate
-        translated_segments = await asyncio.to_thread(translate_subtitles, 
+        translated_segments = await to_thread_drained(translate_subtitles,
             srt_segments,
             target_lang,
             api_key=GEMINI_API_KEY,
             video_path=video_path,
         )
-        await asyncio.to_thread(save_srt, translated_segments, srt_translated)
+        await to_thread_drained(save_srt, translated_segments, srt_translated)
 
         # Prepare response data
         subtitles = []
@@ -583,6 +598,7 @@ async def api_generate_subtitles(video_path: str = Form(...), target_lang: str =
 # ===== API: Xử lý full (Lồng tiếng + Xuất video) =====
 @app.post("/api/process_video")
 @app.post("/api/process-video")
+@guarded_media_api
 async def api_process_video(
     video_path: str = Form(...),
     target_lang: str = Form("vi"),
@@ -595,7 +611,9 @@ async def api_process_video(
     video_mode: str = Form("auto")
 ):
     """Xử lý full: Transcribe → Dịch → TTS → Mix Audio → Blur + Sub → Xuất video."""
-    if UNIFIED_PIPELINE_LOCK.locked() or job_tracker.get_status().get("active"):
+    if _processing_disabled():
+        raise HTTPException(409, {"code": "service_disabled"})
+    if UNIFIED_PIPELINE_LOCK.locked():
         raise HTTPException(status_code=409, detail="Đang có tiến trình Batch xử lý video. Vui lòng đợi hoàn thành!")
     await API_PROCESS_LOCK.acquire()
     try:
@@ -711,10 +729,10 @@ async def api_process_video(
         job_script_mode = frozen_eff.get("script_mode", cur_audio_settings.get("script_mode", "default"))
 
         # 1. Extract audio
-        await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
+        await to_thread_drained(extract_audio_from_video, video_path, original_audio)
 
         # 1.5. Separate vocals & background music (BS-RoFormer GPU / Demucs / Bypass)
-        vocals_audio, no_vocals_audio = await asyncio.to_thread(
+        vocals_audio, no_vocals_audio = await to_thread_drained(
             separate_vocals_demucs,
             original_audio,
             out_dir,
@@ -722,7 +740,7 @@ async def api_process_video(
         )
 
         # 2. Transcribe
-        srt_segments = await asyncio.to_thread(extract_subtitles_isolated, vocals_audio, srt_original)
+        srt_segments = await to_thread_drained(extract_subtitles_isolated, vocals_audio, srt_original)
         source_duration = _audio_duration_seconds(original_audio)
         srt_segments, visual_geometry, asr_was_empty = await _apply_visual_sub_to_speech(
             video_path, srt_original, srt_segments, visual_sub_to_speech,
@@ -734,19 +752,19 @@ async def api_process_video(
             vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
 
         # 3. Translate
-        translated_segments = await asyncio.to_thread(translate_subtitles, 
+        translated_segments = await to_thread_drained(translate_subtitles,
             srt_segments,
             target_lang,
             api_key=GEMINI_API_KEY,
             video_path=video_path,
             script_mode=job_script_mode,
         )
-        await asyncio.to_thread(save_srt, translated_segments, srt_translated)
+        await to_thread_drained(save_srt, translated_segments, srt_translated)
 
         # 4. Quyết định giọng theo chế độ Auto/Manual (Codex Plan) & Tạo TTS dubbing
         from ai.v1_auto_voice import decide_video_voice, get_auto_voice_mode
         api_voice_mode = get_auto_voice_mode(WORKSPACE)
-        voice_lock_info = await asyncio.to_thread(
+        voice_lock_info = await to_thread_drained(
             decide_video_voice,
             out_dir=out_dir,
             srt_segments=srt_segments,
@@ -782,7 +800,7 @@ async def api_process_video(
 
         # 5. Mix audio (clean instrumental BGM + dubbing)
         bgm_audio = original_audio if (visual_sub_to_speech and asr_was_empty) else no_vocals_audio
-        await asyncio.to_thread(
+        await to_thread_drained(
             mix_audio_pydub,
             bgm_audio,
             dubbing_audio_files,
@@ -796,13 +814,13 @@ async def api_process_video(
         # 6. Final render: Blur + Subtitles + Audio → Output video
         from ass_utils import generate_ass_file
         ass_path = os.path.join(out_dir, "final.ass")
-        
-        await asyncio.to_thread(
+
+        await to_thread_drained(
             generate_ass_file, translated_segments, [], ass_path,
             play_res_x=vid_w, play_res_y=vid_h, main_y_pct=main_y,
             font_name=font_name, font_color=font_color, font_weight=font_weight,
         )
-        rendered = await asyncio.to_thread(process_video, 
+        rendered = await to_thread_drained(process_video,
             video_path,
             ass_path,
             mixed_audio,
@@ -852,6 +870,7 @@ async def download_video(filename: str):
 # ===== API: Tải video từ URL + Xử lý tự động =====
 @app.post("/api/process_url")
 @app.post("/api/process-url")
+@guarded_media_api
 async def api_process_url(
     url: str = Form(...),
     target_lang: str = Form("vi"),
@@ -864,7 +883,9 @@ async def api_process_url(
     video_mode: str = Form("auto")
 ):
     """Tải video từ URL (Xiaohongshu, TikTok, YouTube...) rồi xử lý toàn bộ."""
-    if UNIFIED_PIPELINE_LOCK.locked() or job_tracker.get_status().get("active"):
+    if _processing_disabled():
+        raise HTTPException(409, {"code": "service_disabled"})
+    if UNIFIED_PIPELINE_LOCK.locked():
         raise HTTPException(status_code=409, detail="Pipeline đang bận xử lý video khác. Vui lòng đợi hoàn thành!")
     await API_PROCESS_LOCK.acquire()
     try:
@@ -881,7 +902,7 @@ async def api_process_url(
         importlib.reload(social_downloader)
         from social_downloader import download_social_video
 
-        success, video_path, _title, download_error = await asyncio.to_thread(
+        success, video_path, _title, download_error = await to_thread_drained(
             download_social_video, url, download_dir, timestamp
         )
         if not success:
@@ -1004,10 +1025,10 @@ async def api_process_url(
         job_script_mode = frozen_eff.get("script_mode", cur_audio_settings.get("script_mode", "default"))
 
         # Extract audio
-        await asyncio.to_thread(extract_audio_from_video, video_path, original_audio)
+        await to_thread_drained(extract_audio_from_video, video_path, original_audio)
 
         # Separate vocals & background music (BS-RoFormer GPU / Demucs / Bypass)
-        vocals_audio, no_vocals_audio = await asyncio.to_thread(
+        vocals_audio, no_vocals_audio = await to_thread_drained(
             separate_vocals_demucs,
             original_audio,
             out_dir,
@@ -1015,7 +1036,7 @@ async def api_process_url(
         )
 
         # Transcribe
-        srt_segments = await asyncio.to_thread(extract_subtitles_isolated, vocals_audio, srt_original)
+        srt_segments = await to_thread_drained(extract_subtitles_isolated, vocals_audio, srt_original)
         source_duration = _audio_duration_seconds(original_audio)
         srt_segments, visual_geometry, asr_was_empty = await _apply_visual_sub_to_speech(
             video_path, srt_original, srt_segments, visual_sub_to_speech,
@@ -1027,14 +1048,14 @@ async def api_process_url(
             vid_w, vid_h, main_y = await locate_v1_subtitles(video_path, srt_segments)
 
         # Translate
-        translated_segments = await asyncio.to_thread(translate_subtitles, 
+        translated_segments = await to_thread_drained(translate_subtitles,
             srt_segments,
             target_lang,
             api_key=GEMINI_API_KEY,
             video_path=video_path,
             script_mode=job_script_mode,
         )
-        await asyncio.to_thread(save_srt, translated_segments, srt_translated)
+        await to_thread_drained(save_srt, translated_segments, srt_translated)
 
         # Subtitles for response
         subtitles = []
@@ -1049,7 +1070,7 @@ async def api_process_url(
         # TTS: Quyết định giọng theo chế độ Auto/Manual (Codex Plan)
         from ai.v1_auto_voice import decide_video_voice, get_auto_voice_mode
         api_voice_mode = get_auto_voice_mode(WORKSPACE)
-        voice_lock_info = await asyncio.to_thread(
+        voice_lock_info = await to_thread_drained(
             decide_video_voice,
             out_dir=out_dir,
             srt_segments=srt_segments,
@@ -1085,7 +1106,7 @@ async def api_process_url(
 
         # Mix audio (clean instrumental BGM + dubbing)
         bgm_audio = original_audio if (visual_sub_to_speech and asr_was_empty) else no_vocals_audio
-        await asyncio.to_thread(
+        await to_thread_drained(
             mix_audio_pydub,
             bgm_audio,
             dubbing_audio_files,
@@ -1099,13 +1120,13 @@ async def api_process_url(
         # Final render
         from ass_utils import generate_ass_file
         ass_path = os.path.join(out_dir, "final.ass")
-        
-        await asyncio.to_thread(
+
+        await to_thread_drained(
             generate_ass_file, translated_segments, [], ass_path,
             play_res_x=vid_w, play_res_y=vid_h, main_y_pct=main_y,
             font_name=font_name, font_color=font_color, font_weight=font_weight,
         )
-        rendered = await asyncio.to_thread(process_video, 
+        rendered = await to_thread_drained(process_video,
             video_path,
             ass_path,
             mixed_audio,
@@ -1146,6 +1167,8 @@ async def serve_dashboard():
     if template_path.exists():
         with open(template_path, "r", encoding="utf-8") as f:
             html = f.read().replace("__REPLACE_TOKEN__", LOCAL_TOKEN)
+            if os.getenv("AUTODUB_TESTING") == "1":
+                html = html.replace('src="http://127.0.0.1:8090/"', 'src="about:blank"')
             return HTMLResponse(content=html, headers={"Cache-Control": "no-store"})
     return HTMLResponse("<h2>Dashboard template not found.</h2>", status_code=404)
 
@@ -1156,44 +1179,13 @@ async def api_get_status():
     # get_status có thể chạy ffprobe xác minh thành phẩm — đẩy sang thread để không block event loop
     status = await asyncio.to_thread(job_tracker.get_status)
     import video_pause
-    status["pause_state"] = video_pause.state()
+    status["pause_state"] = (await asyncio.to_thread(video_pause.state, status.get("execution_id"), status.get("generation"))
+                             if status.get("execution_id") and (status.get("active") or status.get("occupies_slot")) else "running")
     status["stop_requested"] = bool(
         status.get("stop_requested")
         or getattr(shared_state, "stop_requested", False)
     )
-    if status.get("active") and not status.get("router_info"):
-        vname = status.get("video_name", "")
-        if vname:
-            try:
-                from v1_video_router import route_video
-                candidates = [
-                    Path(WORKSPACE) / "downloads" / vname,
-                    Path(r"D:\workspace\downloads") / vname,
-                    Path(WORKSPACE) / vname,
-                ]
-                vpath = next((p for p in candidates if p.is_file()), None)
-                if vpath:
-                    dec = await asyncio.to_thread(route_video, vpath, requested_mode=status.get("video_mode") or "AUTO")
-                    req_m = str(dec.requested_mode).upper()
-                    res_m = dec.resolved_mode.value
-                    lbl = f"AUTO · {res_m}" if req_m == "AUTO" else f"Thủ công · {res_m}"
-                    if res_m == "SHORT": lbl += " (≤ 7m)"
-                    elif res_m == "LONG": lbl += " (> 7m)"
-                    elif res_m == "MEDIUM": lbl += " (Chuyển tiếp)"
-
-                    status["router_info"] = {
-                        "resolved_mode": res_m,
-                        "requested_mode": req_m,
-                        "is_escalated": dec.is_escalated,
-                        "escalation_reasons": dec.escalation_reasons,
-                        "duration_s": dec.metadata.duration_s,
-                        "router_label": lbl,
-                        "separation_model": dec.planned_pipeline.get("separation_model", "roformer"),
-                        "asr_model": dec.planned_pipeline.get("asr_model", "whisper_turbo"),
-                    }
-                    status["video_mode"] = res_m
-            except Exception as _phase6_exc:
-                logger.debug('Suppressed error in main.api_get_status (Path): %s', type(_phase6_exc).__name__, exc_info=False)
+    # Routing metadata is published by the execution; never rediscover a source during polling.
     try:
         from v1_vram_monitor import get_vram_stats
         status["vram"] = get_vram_stats()
@@ -1214,7 +1206,43 @@ async def api_get_status():
         status["worker_settings"] = get_worker_settings()
     except Exception as _phase6_exc:
         logger.debug('Suppressed error in main.api_get_status (get_worker_settings): %s', type(_phase6_exc).__name__, exc_info=False)
+    occupied = status.get("occupies_slot") or status.get("active") or UNIFIED_PIPELINE_LOCK.locked()
+    stopping = status.get("status") == "stopping"
+    disabled = _processing_disabled()
+    pause_state = status.get("pause_state")
+    pause_requested = pause_state in ("pausing", "paused") if isinstance(pause_state, str) else bool((pause_state or {}).get("requested"))
+    status["capabilities"] = {"can_start": not occupied and not disabled,
+                              "can_pause": bool(occupied and not stopping and not pause_requested),
+                              "can_resume": bool(occupied and not stopping and not disabled and pause_requested)}
+    status["service_disabled"] = disabled
+    status["counters"] = {"total": 0, "pending": 0, "running": int(bool(occupied)), "completed": 0, "failed": 0, "canceled": 0}
+    try:
+        from batch_plan_service import BatchPlanStore, public_plan
+        store = BatchPlanStore(WORKSPACE)
+        if store.path.exists() and status.get("execution_id"):
+            plan = await asyncio.to_thread(store.for_execution, status["execution_id"])
+            if plan:
+                status["batch_id"] = plan["batch_id"]
+                status["counters"] = {"total": len(plan["items"]), **public_plan(plan)["counters"]}
+    except (OSError, ValueError) as exc:
+        status["counters_error"] = str(exc)
     return status
+
+
+@app.get("/health/live")
+async def api_health_live():
+    return {"alive": True, "pid": os.getpid(), "version": "dashboard-stability-20261115"}
+
+
+@app.get("/health/ready")
+async def api_health_ready():
+    from dashboard_health import health_snapshot
+    try:
+        status = await asyncio.to_thread(job_tracker.get_status, strict=True)
+    except Exception as exc:
+        return JSONResponse(status_code=503, content={"ready": False, "status": "degraded", "reasons": ["tracker_unreadable:" + type(exc).__name__]})
+    data = await asyncio.to_thread(health_snapshot, WORKSPACE, _get_system_path("telegram_queue.json"), status, _processing_disabled())
+    return JSONResponse(status_code=200 if data["ready"] else 503, content=data)
 
 
 
@@ -1225,245 +1253,106 @@ async def api_get_queue():
     if not path.is_file():
         return {"items": [], "available": False, "message": "Chưa kết nối hàng đợi Telegram. Cần khởi động lại bot để bật tính năng."}
     try:
-        data = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8-sig"))
-        alive = job_tracker._pid_is_running(int(data.get("pid") or 0))
-        if not alive:
-            # The snapshot pid is only rewritten on the next queue event; scan for a live bot instead.
-            try:
-                import psutil
-                for proc in psutil.process_iter(["cmdline"]):
-                    cmdline = proc.info.get("cmdline") or []
-                    if any("telegram_bot.py" in str(arg) for arg in cmdline):
-                        alive = True
-                        break
-            except Exception as _phase6_exc:
-                logger.debug('Suppressed error in main.api_get_queue (psutil.process_iter): %s', type(_phase6_exc).__name__, exc_info=False)
-        # Bổ sung thông tin router cho từng video trong hàng chờ
-        try:
-            from v1_video_router import route_video
-            for item in data.get("items", []):
-                rs_vp = item.get("resume_state", {}).get("video_path")
-                if rs_vp and Path(rs_vp).is_file():
-                    dec = await asyncio.to_thread(route_video, rs_vp, requested_mode=item.get("video_mode") or "AUTO")
-                    req_m = str(dec.requested_mode).upper()
-                    res_m = dec.resolved_mode.value
-                    lbl = f"AUTO · {res_m}" if req_m == "AUTO" else f"Thủ công · {res_m}"
-                    if res_m == "SHORT": lbl += " (≤ 7m)"
-                    elif res_m == "LONG": lbl += " (> 7m)"
-                    item["router_info"] = {
-                        "resolved_mode": res_m,
-                        "requested_mode": req_m,
-                        "router_label": lbl,
-                        "duration_s": dec.metadata.duration_s,
-                    }
-        except Exception as _phase6_exc:
-            logger.debug('Suppressed error in main.api_get_queue (data.get): %s', type(_phase6_exc).__name__, exc_info=False)
-        return {**data, "available": alive, "message": "" if alive else "Bot đã dừng; danh sách là bản ghi cuối cùng."}
+        from queue_control_service import read_snapshot
+        data = await asyncio.to_thread(read_snapshot, path)
+        owner = data.get("owner") or {}
+        alive = bool(owner.get("pid") and owner.get("create_time") and job_tracker._owner_is_running(
+            {"pid": owner["pid"], "owner_create_time": owner["create_time"]}))
+        recent = time.time() - float(data.get("updated_at") or 0) <= 15
+        recovered = data["recovery_state"] == "ready"
+        # Queue metadata comes from its frozen owner snapshot; polling never
+        # reopens every source video or scans unrelated installation processes.
+        for item in data.get("items", []):
+            frozen = item.get("job_overrides") or {}
+            item.setdefault("router_info", frozen.get("router_info") or frozen.get("routing_snapshot"))
+        active = data.get("active_jobs") or ([data["active_job"]] if data.get("active_job") else [])
+        data["counters"] = {"pending": len(data.get("items", [])), "running": len(active),
+                            "total": len(data.get("items", [])) + len(active),
+                            "completed": 0, "failed": 0, "canceled": 0}
+        if not recovered:
+            message = "Hàng đợi Telegram cần đối soát trước khi tiếp tục."
+        elif not alive or not recent:
+            message = "Chưa xác nhận được kết nối bot. Đang hiển thị bản ghi cuối cùng."
+        else:
+            message = ""
+        return {**data, "available": alive and recent and recovered, "message": message}
     except (OSError, ValueError, TypeError):
         raise HTTPException(503, "Không đọc được hàng đợi Telegram")
 
 
+def _queue_command_error(exc):
+    from queue_control_service import QueueStateError
+    if isinstance(exc, QueueStateError):
+        raise HTTPException(503, {"code": "queue_recovery_required", "message": str(exc)})
+    if isinstance(exc, (ValueError, RuntimeError)):
+        raise HTTPException(409, {"code": "queue_conflict", "message": str(exc)})
+    raise HTTPException(503, {"code": "queue_unavailable", "message": str(exc)})
+
+
+async def _submit_queue_command(request, kind):
+    from queue_control_service import submit_command
+    try:
+        payload = await request.json()
+    except (ValueError, UnicodeError):
+        payload = None
+    if not isinstance(payload, dict) or not isinstance(payload.get("payload", {}), dict):
+        raise HTTPException(422, {"code": "invalid_queue_request", "message": "Nội dung lệnh queue không hợp lệ."})
+    targets = payload.get("target_job_ids")
+    if targets is None and payload.get("job_id"):
+        targets = [payload["job_id"]]
+    if not isinstance(targets, list) or not targets or not all(isinstance(j, str) and j for j in targets):
+        raise HTTPException(422, {"code": "job_ids_required", "message": "Hãy làm mới danh sách và gửi ID của các job đã chọn."})
+    revision = payload.get("expected_revision")
+    if type(revision) is not int or revision < 0:
+        raise HTTPException(422, {"code": "revision_required", "message": "Thiếu revision hàng chờ."})
+    command_payload = dict(payload.get("payload") or {})
+    if kind == "reorder":
+        command_payload.update({key: payload[key] for key in ("action", "to", "ordered_job_ids") if key in payload})
+    try:
+        operation = await asyncio.to_thread(submit_command, _get_system_path("telegram_queue.json"),
+            kind, targets, expected_revision=revision, payload=command_payload, operation_id=payload.get("operation_id"))
+        return JSONResponse(status_code=202, content={"status": "pending", **operation,
+            "message": "Đã lưu yêu cầu; đang chờ queue owner xác nhận."})
+    except (ValueError, OSError, RuntimeError) as exc:
+        _queue_command_error(exc)
+
+
 @app.post("/api/queue/process")
 async def api_process_queue(request: Request):
-    """Kích hoạt xử lý lại danh sách video đang đợi trong hàng chờ Telegram."""
-    queue_file = _get_system_path("telegram_queue.json")
-    if not queue_file.is_file():
-        return {"status": "empty", "message": "Không tìm thấy hàng chờ video."}
-
-    try:
-        import json, time
-        data = json.loads(await asyncio.to_thread(queue_file.read_text, encoding="utf-8-sig"))
-        items = data.get("items", [])
-        if not items:
-            return {"status": "empty", "message": "Hàng chờ hiện đang trống."}
-
-        # 1. Gỡ cờ pause nếu Tool V1 đang bị tạm dừng
-        pause_flag = _get_system_path("control") / "v1.pause"
-        try:
-            pause_flag.unlink(missing_ok=True)
-        except Exception as _phase6_exc:
-            logger.debug('Suppressed error in main.api_process_queue (pause_flag.unlink): %s', type(_phase6_exc).__name__, exc_info=False)
-
-        # 2. Ghi cờ kích hoạt để bot đang chạy nhặt việc ngay lập tức
-        trigger_flag = _get_system_path("telegram_queue_trigger.flag")
-        trigger_flag.write_text(str(time.time()), encoding="utf-8")
-
-        # 3. Kiểm tra xem telegram_bot.py có đang chạy không. Nếu chưa chạy thì khởi động
-        alive = False
-        pid = data.get("pid")
-        if pid and job_tracker._pid_is_running(int(pid)):
-            alive = True
-        else:
-            import psutil
-            for p in psutil.process_iter(['pid', 'cmdline']):
-                try:
-                    cmdline = p.info.get('cmdline') or []
-                    if any('telegram_bot.py' in str(arg) for arg in cmdline):
-                        alive = True
-                        break
-                except (psutil.NoSuchProcess, psutil.AccessDenied) as _phase6_exc:
-                    logger.debug('Suppressed error in main.api_process_queue (p.info.get): %s', type(_phase6_exc).__name__, exc_info=False)
-
-        if not alive:
-            python = BASE_DIR / "venv" / "Scripts" / "python.exe"
-            if not python.exists():
-                python = Path(sys.executable)
-            import subprocess
-            subprocess.Popen(
-                [str(python), str(BASE_DIR / "background_service.py"), "--service", "telegram"],
-                cwd=str(BASE_DIR),
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            return {
-                "status": "started",
-                "count": len(items),
-                "message": f"Đã khởi động Bot và kích hoạt xử lý {len(items)} video trong hàng chờ!"
-            }
-
-        return {
-            "status": "processing",
-            "count": len(items),
-            "message": f"Đã gửi lệnh xử lý {len(items)} video trong hàng chờ!"
-        }
-    except Exception as e:
-        logger.exception("Lỗi api_process_queue")
-        raise HTTPException(500, f"Lỗi kích hoạt hàng chờ: {str(e)}")
+    if not _get_system_path("telegram_queue.json").is_file():
+        return {"status": "empty", "message": "Chưa có hàng chờ."}
+    if _processing_disabled():
+        raise HTTPException(409, {"code": "service_disabled", "message": "Tool đang tắt; hãy bật dịch vụ trước."})
+    return await _submit_queue_command(request, "release_manual")
 
 
 @app.post("/api/queue/clear")
 async def api_clear_queue(request: Request):
-    """Xóa sạch các video đang đợi trong hàng chờ Telegram."""
-    queue_file = _get_system_path("telegram_queue.json")
-    clear_flag = _get_system_path("telegram_queue_clear.flag")
-    try:
-        import json, time
-        # Ghi cờ xóa cho bot đang chạy
-        clear_flag.write_text(str(time.time()), encoding="utf-8")
-        # Đồng thời cập nhật file snapshot json ngay lập tức
-        if queue_file.is_file():
-            payload = {"items": [], "updated_at": time.time(), "pid": 0}
-            queue_file.write_text(json.dumps(payload), encoding="utf-8")
-        return {"status": "cleared", "message": "Đã xóa toàn bộ video trong hàng chờ."}
-    except Exception as e:
-        logger.exception("Lỗi api_clear_queue")
-        raise HTTPException(500, f"Lỗi xóa hàng chờ: {str(e)}")
+    return await _submit_queue_command(request, "clear_pending")
 
 
 @app.post("/api/queue/move")
 async def api_move_queue_item(request: Request):
-    """Thay đổi thứ tự ưu tiên của video trong hàng chờ Telegram (đẩy lên / xuống / lên đầu)."""
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(400, "Dữ liệu JSON không hợp lệ")
-
-    index = payload.get("index")
-    action = payload.get("action", "up")  # 'up', 'down', 'top', 'position' (kèm 'to')
-
-    if index is None or not isinstance(index, int):
-        raise HTTPException(400, "Vị trí index không hợp lệ")
-
-    queue_file = _get_system_path("telegram_queue.json")
-    if not queue_file.is_file():
-        raise HTTPException(404, "Hàng chờ video không tồn tại")
-
-    try:
-        import json, time
-        data = json.loads(await asyncio.to_thread(queue_file.read_text, encoding="utf-8-sig"))
-        items = data.get("items", [])
-        n = len(items)
-        if n <= 1 or index < 0 or index >= n:
-            return {"status": "unchanged", "items": items, "message": "Không thể thay đổi vị trí"}
-
-        moved_name = items[index].get("name", "video")
-        if len(moved_name) > 35:
-            moved_name = moved_name[:35] + "..."
-
-        if action == "up" and index > 0:
-            items[index - 1], items[index] = items[index], items[index - 1]
-            msg = f"Đã đẩy video #{index + 1} lên vị trí #{index}!"
-        elif action == "top" and index > 0:
-            target = items.pop(index)
-            items.insert(0, target)
-            msg = f"Đã đưa video lên đầu hàng chờ (#1)!"
-        elif action == "position" and isinstance(payload.get("to"), int):
-            to = max(0, min(int(payload["to"]), n - 1))
-            if to == index:
-                return {"status": "unchanged", "items": items, "message": "Vị trí không đổi"}
-            target = items.pop(index)
-            items.insert(to, target)
-            msg = f"Đã chuyển video #{index + 1} đến vị trí #{to + 1}!"
-        elif action == "down" and index < n - 1:
-            items[index], items[index + 1] = items[index + 1], items[index]
-            msg = f"Đã chuyển video #{index + 1} xuống vị trí #{index + 2}!"
-        else:
-            return {"status": "unchanged", "items": items, "message": "Vị trí đã ở giới hạn"}
-
-        # Cập nhật lại chỉ số position cho từng video
-        for i, item in enumerate(items, 1):
-            item["position"] = i
-
-        data["items"] = items
-        data["updated_at"] = time.time()
-
-        # Lưu lại file json snapshot
-        await asyncio.to_thread(queue_file.write_text, json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        # Ghi cờ tín hiệu để telegram_bot.py đang chạy đồng bộ lại bộ nhớ ngay lập tức
-        reorder_flag = _get_system_path("telegram_queue_reorder.flag")
-        reorder_flag.write_text(str(time.time()), encoding="utf-8")
-
-        return {"status": "success", "items": items, "message": msg}
-    except Exception as e:
-        logger.exception("Lỗi api_move_queue_item")
-        raise HTTPException(500, f"Lỗi di chuyển video: {str(e)}")
+    return await _submit_queue_command(request, "reorder")
 
 
 @app.post("/api/queue/delete")
 async def api_delete_queue_item(request: Request):
-    from queue_control_service import identity, submit_delete
-    try:
-        payload = await request.json()
-        index = payload.get("index")
-        if type(index) is not int or index < 0:
-            raise HTTPException(400, "Vị trí không hợp lệ")
-        snapshot = _get_system_path("telegram_queue.json")
-        data = json.loads(await asyncio.to_thread(snapshot.read_text, encoding="utf-8-sig"))
-        items = data.get("items") or []
-        if index >= len(items):
-            raise HTTPException(409, "Hàng chờ đã thay đổi; hãy làm mới danh sách.")
-        item = items[index]
-        target = identity(item)
-        if payload.get("job_id") and payload["job_id"] != target:
-            raise HTTPException(409, "Hàng chờ đã thay đổi; hãy làm mới danh sách.")
-        if sum(identity(j) == target for j in items) != 1:
-            raise HTTPException(409, "Không phân biệt được các job cũ trùng nhau; hãy làm mới danh sách.")
-        operation = await asyncio.to_thread(submit_delete, snapshot, item)
-        return {"status": "pending", **operation, "message": "Đã nhận yêu cầu xóa; chờ bot xác nhận."}
-    except HTTPException:
-        raise
-    except (ValueError, TypeError, AttributeError):
-        raise HTTPException(400, "Dữ liệu không hợp lệ")
-    except OSError:
-        raise HTTPException(503, "Không đọc/ghi được hàng chờ")
+    return await _submit_queue_command(request, "delete")
 
 
 @app.get("/api/queue/operations/{operation_id}")
 async def api_queue_operation(operation_id: str):
-    import re
-    from queue_control_service import commands
-    if not re.fullmatch(r"[a-f0-9]{32}", operation_id):
-        raise HTTPException(400, "Mã thao tác không hợp lệ")
-    path = commands(_get_system_path("telegram_queue.json")) / (operation_id + ".json")
+    from queue_control_service import read_operation
     try:
-        return json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
+        operation = await asyncio.to_thread(read_operation, _get_system_path("telegram_queue.json"), operation_id)
+        if operation is None:
+            raise HTTPException(404, "Không tìm thấy thao tác.")
+        return operation
     except FileNotFoundError:
-        raise HTTPException(404, "Không tìm thấy thao tác")
-    except (OSError, ValueError):
-        raise HTTPException(503, "Bản ghi thao tác bị lỗi; cần kiểm tra nhật ký bot.")
+        raise HTTPException(404, "Không tìm thấy thao tác.")
+    except (OSError, ValueError) as exc:
+        _queue_command_error(exc)
 
 
 def _check_input_request(request):
@@ -1767,7 +1656,7 @@ def _list_banve(limit=None, offset=0, search="", status="all"):
     return paginate_output(result, output_dir, limit, offset, search, status)
 
 
-async def batch_runner(input_dir: str = "", output_dir: str = "", job_id: str = "", video_mode: str = "auto"):
+async def batch_runner(input_dir: str = "", output_dir: str = "", job_id: str = "", video_mode: str = "auto", batch_plan=None):
     if not input_dir:
         input_dir = str(get_input_dir())
     if not output_dir:
@@ -1778,13 +1667,147 @@ async def batch_runner(input_dir: str = "", output_dir: str = "", job_id: str = 
     async with UNIFIED_PIPELINE_LOCK:
         try:
             await process_batch_folder(
-                input_dir, output_dir, job_id=job_id, video_mode=video_mode
+                input_dir, output_dir, job_id=job_id, video_mode=video_mode, batch_plan=batch_plan
             )
         except job_tracker.JobAlreadyRunningError as e:
             logger.warning("Từ chối batch trùng: %s", e)
         except Exception as e:
             logger.error("Lỗi chạy batch qua API: %s", e, exc_info=True)
             job_tracker.fail_batch(str(e), job_id=job_id)
+
+
+def _batch_lifecycle():
+    from batch_lifecycle_service import BatchLifecycle
+    return BatchLifecycle(WORKSPACE, _schedule_store())
+
+
+def _reserve_batch_plan(batch_id, schedule, manual_release, expected, task_busy):
+    """Synchronous reservation: no OS guard survives an await or media work."""
+    from batch_plan_service import public_plan
+    lifecycle = _batch_lifecycle()
+    store = lifecycle.plans
+    with lifecycle.guard():
+        plan = store.get(batch_id)
+        scheduled = lifecycle.schedules.get()
+        if schedule is not None:
+            identity = (schedule.get('schedule_id'), schedule.get('generation'))
+            if (identity != (plan.get('schedule_id'), plan.get('schedule_generation'))
+                    or identity != (scheduled.get('schedule_id'), scheduled.get('generation'))
+                    or scheduled.get('state') not in {'dispatching', 'fired'}
+                    or (plan['state'] in {'prepared', 'scheduled'} and scheduled.get('state') != 'dispatching')
+                    or not scheduled.get('binding_confirmed', True)):
+                return 409, {'status': 'held', 'code': 'stale_schedule', 'batch_id': batch_id}, None
+        if plan['state'] not in {'prepared', 'scheduled'}:
+            return 200, lifecycle.describe(plan), None
+        if expected is not None:
+            lifecycle.expected(plan, expected)
+        if schedule is None and plan['state'] == 'scheduled':
+            if not manual_release or 'start' not in lifecycle.describe(plan)['actions']:
+                return 409, {'status': 'held', 'code': 'schedule_reconciliation_required', 'batch_id': batch_id}, None
+        conflict = store.conflicting_reservation(plan)
+        if conflict:
+            return 409, {'status': 'busy', 'code': 'target_reserved', 'batch_id': batch_id, 'reserved_by': conflict}, None
+        status = job_tracker.get_status()
+        if _processing_disabled():
+            return 409, {'status': 'blocked', 'code': 'service_disabled', 'batch_id': batch_id}, None
+        if task_busy or status.get('active') or status.get('occupies_slot'):
+            return 409, {'status': 'busy', 'code': 'pipeline_busy', 'batch_id': batch_id}, None
+        execution_id = uuid.uuid4().hex
+        try:
+            job_tracker.start_batch(len(plan['items']), plan['input_root'], plan['output_root'], job_id=execution_id)
+        except job_tracker.JobAlreadyRunningError:
+            return 409, {'status': 'busy', 'code': 'pipeline_busy', 'batch_id': batch_id}, None
+        try:
+            import time
+            plan = store.update(batch_id, expected_revision=plan['revision'], expected_state=plan['state'],
+                                state='accepted', execution_id=execution_id, accepted_at=time.time())
+        except BaseException:
+            job_tracker.fail_batch('Không thể tiếp nhận batch', job_id=execution_id)
+            job_tracker.release_batch(execution_id)
+            raise
+        return 202, {**public_plan(plan), 'job_id': execution_id,
+                     'message': 'Đã tiếp nhận đúng tập video và cấu hình đã xác nhận.'}, plan
+
+
+async def admit_batch_plan(batch_id: str, schedule=None, manual_release=False, expected=None):
+    """Reserve ownership before acknowledging dispatch; replay never starts twice."""
+    global BATCH_TASK
+    from batch_plan_service import PlanConflict
+    async with BATCH_ADMISSION_LOCK:
+        cancellation = None
+        reservation = asyncio.create_task(asyncio.to_thread(_reserve_batch_plan, batch_id, schedule, manual_release, expected,
+            UNIFIED_PIPELINE_LOCK.locked() or (BATCH_TASK is not None and not BATCH_TASK.done())))
+        try:
+            while True:
+                try:
+                    code, content, plan = await asyncio.shield(reservation)
+                    break
+                except asyncio.CancelledError as exc:
+                    if reservation.cancelled():
+                        raise
+                    # A disconnected caller cannot orphan an acceptance that the
+                    # synchronous reservation may already have committed.
+                    cancellation = exc
+        except PlanConflict as exc:
+            if cancellation is not None:
+                raise cancellation
+            return JSONResponse(status_code=409, content={'code': 'stale_state', 'message': str(exc), 'batch_id': batch_id})
+        if plan is not None:
+            execution_id = plan['execution_id']
+            try:
+                shared_state.stop_requested = False
+                BATCH_TASK = asyncio.create_task(batch_runner(plan['input_root'], plan['output_root'], execution_id,
+                    video_mode=plan['video_mode'], batch_plan=plan), name=f'autodub-batch-{execution_id}')
+            except BaseException:
+                _batch_lifecycle().plans.update(batch_id, state='recovery_required', error='Runner handoff failed')
+                job_tracker.fail_batch('Không thể bàn giao batch', job_id=execution_id)
+                job_tracker.release_batch(execution_id)
+                raise
+        if cancellation is not None:
+            raise cancellation
+        return JSONResponse(status_code=code, content=content)
+
+
+@app.get('/api/batches')
+async def api_list_recoverable_batches(recoverable: bool = True):
+    plans = await asyncio.to_thread(_batch_lifecycle().recoverable)
+    return {'items': [{key: value for key, value in plan.items() if key not in {'items'}} |
+                      {'filenames': [item['filename'] for item in plan['items']]} for plan in plans]}
+
+
+@app.get("/api/batches/{batch_id}")
+async def api_get_batch_plan(batch_id: str):
+    try:
+        return await asyncio.to_thread(_batch_lifecycle().get, batch_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Không tìm thấy batch.")
+
+
+@app.post("/api/batches/{batch_id}/start")
+async def api_start_prepared_batch(batch_id: str, payload: dict = Body(default={})):
+    try:
+        return await admit_batch_plan(batch_id, manual_release=True, expected=payload)
+    except FileNotFoundError:
+        raise HTTPException(404, "Không tìm thấy batch.")
+
+
+@app.post('/api/batches/{batch_id}/abandon')
+async def api_abandon_batch(batch_id: str, payload: dict = Body(...)):
+    from batch_plan_service import PlanConflict
+    try:
+        return await asyncio.to_thread(_batch_lifecycle().abandon, batch_id, payload)
+    except FileNotFoundError:
+        raise HTTPException(404, 'Không tìm thấy batch.')
+    except PlanConflict as exc:
+        raise HTTPException(409, {'code': 'stale_state', 'message': str(exc)})
+
+
+@app.get("/api/batch-operations/{operation_id}")
+async def api_get_batch_operation(operation_id: str):
+    try:
+        return await asyncio.to_thread(_batch_lifecycle().get, operation_id=operation_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Chưa có bản ghi tiếp nhận thao tác này.")
 
 
 @app.post("/api/run-batch")
@@ -1804,103 +1827,86 @@ async def api_run_batch(request: Request = None, video_mode: str = "auto"):
         except Exception as _phase6_exc:
             logger.debug('Suppressed error in main.api_run_batch (request.headers.get): %s', type(_phase6_exc).__name__, exc_info=False)
 
+    from batch_plan_service import BatchPlanStore, VIDEO_EXTENSIONS
+    import job_config_service
+    batch_payload = body if request is not None and 'body' in locals() and isinstance(body, dict) else {}
+    if batch_payload.get("batch_id"):
+        return await admit_batch_plan(batch_payload["batch_id"])
     status = job_tracker.get_status()
-    if UNIFIED_PIPELINE_LOCK.locked():
-        return JSONResponse(
-            status_code=409,
-            content={
-                "status": "busy",
-                "job_id": status.get("job_id"),
-                "message": "Pipeline đang bận xử lý video khác.",
-            },
-        )
-    if (_get_system_path("control") / "v1.pause").exists():
-        raise HTTPException(409, "Tool đang tắt, không nhận batch mới.")
-    status = job_tracker.get_status()
-    if (BATCH_TASK is not None and not BATCH_TASK.done()) or status.get("active"):
-        return JSONResponse(
-            status_code=409,
-            content={
-                "status": "busy",
-                "job_id": status.get("job_id"),
-                "message": "Hiện đang có tiến trình video đang xử lý, vui lòng đợi!",
-            },
-        )
-
-    shared_state.stop_requested = False
-    input_dir = str(get_input_dir())
-    output_dir = str(get_output_dir())
-    job_id = uuid.uuid4().hex
-    try:
-        job_tracker.start_batch(0, input_dir, output_dir, job_id=job_id)
-    except job_tracker.JobAlreadyRunningError:
-        return JSONResponse(status_code=409, content={
-            "status": "busy", "message": "Một batch khác đang chạy."})
-
-    BATCH_TASK = asyncio.create_task(
-        batch_runner(input_dir, output_dir, job_id, video_mode=selected_mode), name=f"autodub-batch-{job_id}"
-    )
-
-    return JSONResponse(
-        status_code=202,
-        content={
-            "status": "started",
-            "job_id": job_id,
-            "message": "Đã bắt đầu xử lý video trong thư mục đã chọn!",
-        },
-    )
+    if _processing_disabled():
+        return JSONResponse(status_code=409, content={"status": "blocked", "code": "service_disabled"})
+    if UNIFIED_PIPELINE_LOCK.locked() or (BATCH_TASK is not None and not BATCH_TASK.done()) or status.get("active") or status.get("occupies_slot"):
+        return JSONResponse(status_code=409, content={"status": "busy", "code": "pipeline_busy", "job_id": status.get("job_id")})
+    input_root = get_input_dir()
+    items = [{"filename": p.name} for p in sorted(input_root.iterdir()) if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+             and not (input_root.resolve() == get_output_dir().resolve() and p.name.startswith("Dubbed_"))] if input_root.is_dir() else []
+    if not items:
+        raise HTTPException(422, {"code": "empty_batch", "message": "Thư mục nguồn không có video."})
+    payload = {"items": items, "video_mode": selected_mode, "trigger": True,
+               "idempotency_key": batch_payload.get("idempotency_key") or uuid.uuid4().hex}
+    plan = await asyncio.to_thread(BatchPlanStore(WORKSPACE).prepare, payload, input_root, get_output_dir(), job_config_service.freeze_job_config)
+    return await admit_batch_plan(plan["batch_id"])
 
 
 @app.post("/api/pause-video")
 async def api_pause_video(request: Request):
     if request.headers.get("X-Dashboard-Input") != "1" or request.headers.get("origin") not in (None,"http://127.0.0.1:8088","http://localhost:8088"):
         raise HTTPException(403, "Yêu cầu không hợp lệ")
-    import video_pause
-    if not job_tracker.get_status().get("active"):
-        raise HTTPException(409, "Không có video đang xử lý.")
-    video_pause.request_pause()
+    await _change_execution_pause(request, resume=False)
     return {"message": "Sẽ tạm dừng sau bước đang chạy."}
 
 @app.post("/api/resume-video")
 async def api_resume_video(request: Request):
     if request.headers.get("X-Dashboard-Input") != "1" or request.headers.get("origin") not in (None,"http://127.0.0.1:8088","http://localhost:8088"):
         raise HTTPException(403, "Yêu cầu không hợp lệ")
-    import video_pause
-    video_pause.resume()
+    await _change_execution_pause(request, resume=True)
     return {"message": "Đã tiếp tục xử lý video."}
+
+
+async def _change_execution_pause(request: Request, *, resume: bool):
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(422, "Cần execution_id và generation của video đang xem.")
+    if (not isinstance(payload, dict) or not isinstance(payload.get("execution_id"), str)
+            or type(payload.get("generation")) is not int):
+        raise HTTPException(422, "Cần execution_id và generation của video đang xem.")
+    def change():
+        import video_pause
+        with job_tracker.state_transaction():
+            status = job_tracker.get_status(strict=True)
+            if ((status.get("execution_id"), status.get("generation")) != (payload["execution_id"], payload["generation"])
+                    or not (status.get("active") or status.get("occupies_slot")) or status.get("stop_requested")):
+                raise HTTPException(409, {"code": "stale_execution", "message": "Execution đã đổi; hãy làm mới trạng thái."})
+            if resume:
+                video_pause.resume(payload["execution_id"], payload["generation"])
+            else:
+                video_pause.request_pause(payload["execution_id"], payload["generation"])
+    try:
+        await asyncio.to_thread(change)
+    except ValueError as exc:
+        raise HTTPException(409, {"code": "stale_execution", "message": str(exc)}) from exc
 
 @app.post("/api/stop-batch")
 async def api_stop_batch():
-    """Yêu cầu dừng tiến trình batch đang chạy (Áp dụng tức thì cho cả Dashboard và Telegram)."""
-    import shared_state
-    shared_state.stop_requested = True
+    """Acknowledge the stop intent; the owner confirms cleanup asynchronously."""
+    def persist_stop():
+        with job_tracker.state_transaction():
+            status = job_tracker.get_status()
+            if not status.get("active") and not status.get("occupies_slot"):
+                return status, False
+            shared_state.stop_requested = True
+            job_tracker.request_stop()
+            return status, True
 
-    # 1. Ghi nhận dừng vào job_tracker & tạo file cờ stop
-    job_tracker.request_stop()
-
-    # 2. Hủy asyncio task trong main.py nếu có
-    global BATCH_TASK
-    if BATCH_TASK and not BATCH_TASK.done():
-        BATCH_TASK.cancel()
-
-    # 3. Tiêu diệt tất cả subprocess nặng (ffmpeg, demucs, separator_worker)
-    killed_count = 0
-    try:
-        from process_killer import terminate_worker_processes
-        killed = terminate_worker_processes()
-        killed_count = len(killed)
-        logger.info(f"Đã dừng batch và tiêu diệt các tiến trình con: {killed}")
-    except Exception as e:
-        logger.warning(f"Lỗi khi dọn tiến trình con: {e}")
-
-    # 4. Đánh dấu dừng hoàn tất trong job_tracker
-    job_tracker.mark_stopped("Đã dừng tiến trình theo yêu cầu từ Dashboard!")
-
-    return {
-        "status": "stopped",
-        "message": "Đã dừng tiến trình thành công! Đã dọn dẹp các tác vụ ngầm.",
-        "killed_processes": killed_count,
-    }
+    status, requested = await asyncio.to_thread(persist_stop)
+    if not requested:
+        return {"status": status.get("status", "idle"), "message": "Không có execution đang chạy."}
+    operation_id = "stop-" + str(status.get("execution_id") or status.get("job_id"))
+    return JSONResponse(status_code=202, content={
+        "status": "stopping", "operation_id": operation_id, "job_id": status.get("job_id"),
+        "occupies_slot": True, "message": "Đã nhận yêu cầu dừng; đang chờ công việc và tiến trình con kết thúc."
+    })
 
 
 @app.get("/api/preflight")
@@ -1929,24 +1935,37 @@ async def api_task_history():
 
 async def single_video_runner(video_path: str, output_dir: str, job_id: str, *,
                               recovery_mode: str = "recover", config_overrides=None,
-                              work_dir=None, pipeline_lock_held: bool = False):
-    from batch_processor import process_single_local_video
+                              work_dir=None, pipeline_lock_held: bool = False,
+                              pipeline_job_id=None, source_sha256=None):
     async def execute():
+        execution_token = job_tracker.current_execution.set(job_id)
         try:
             job_tracker.start_batch(1, str(Path(video_path).parent), output_dir, job_id=job_id)
+            from batch_processor import process_single_local_video
+            if source_sha256:
+                from batch_plan_service import fingerprint
+                if (await to_thread_drained(fingerprint, video_path))["sha256"] != source_sha256:
+                    raise ValueError("Video nguồn đã thay đổi trước khi khôi phục.")
             ok = await process_single_local_video(
-                video_path, output_dir, job_id=job_id, overrides=config_overrides,
+                video_path, output_dir, job_id=pipeline_job_id or job_id, overrides=config_overrides,
                 resume_if_possible=recovery_mode != "restart", work_dir=work_dir,
+                verified_v1_recovery=bool(pipeline_job_id and recovery_mode == "recover"),
             )
-            if ok:
+            if shared_state.stop_requested:
+                job_tracker.mark_stopped()
+            elif ok:
                 job_tracker.finish_batch()
             else:
                 job_tracker.fail_batch("Video processing failed", job_id=job_id)
+        except asyncio.CancelledError:
+            job_tracker.mark_stopped()
+            raise
         except Exception as e:
             logger.error(f"Lỗi chạy retry video qua API: {e}", exc_info=True)
             job_tracker.fail_batch(str(e), job_id=job_id)
         finally:
             job_tracker.release_batch(job_id)
+            job_tracker.current_execution.reset(execution_token)
     if pipeline_lock_held:
         try:
             await execute()
@@ -1960,23 +1979,18 @@ async def single_video_runner(video_path: str, output_dir: str, job_id: str, *,
 @app.post("/api/retry-video")
 async def api_retry_video(request: Request):
     global BATCH_TASK
-    status = job_tracker.get_status()
-    if UNIFIED_PIPELINE_LOCK.locked() or (BATCH_TASK is not None and not BATCH_TASK.done()) or status.get("active"):
-        return JSONResponse(
-            status_code=409,
-            content={
-                "status": "busy",
-                "job_id": status.get("job_id"),
-                "message": "Hiện đang có tiến trình video đang xử lý, vui lòng đợi!",
-            },
-        )
-    if (_get_system_path("control") / "v1.pause").exists():
+    if _processing_disabled():
         raise HTTPException(409, "Tool đang tắt, không nhận xử lý video mới.")
 
     filename = ""
+    data = {}
     try:
         data = await request.json()
+        if not isinstance(data, dict):
+            raise HTTPException(422, "Yêu cầu phải là object JSON.")
         filename = data.get("filename", "").strip()
+    except HTTPException:
+        raise
     except Exception as _phase6_exc:
         logger.debug('Suppressed error in main.api_retry_video (request.json): %s', type(_phase6_exc).__name__, exc_info=False)
     if not filename:
@@ -1989,38 +2003,40 @@ async def api_retry_video(request: Request):
     if not filename:
         raise HTTPException(status_code=400, detail="Thiếu tên video cần chạy lại (filename).")
 
-    input_dir = get_input_dir()
-    video_path = input_dir / filename
+    from batch_plan_service import bare_name
+    try:
+        filename = bare_name(filename)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
 
-    if not video_path.is_file():
-        processed_file = input_dir / "processed" / filename
-        if processed_file.is_file():
-            try:
-                import shutil
-                shutil.copy2(processed_file, video_path)
-            except Exception:
-                video_path = processed_file
+    from batch_plan_service import BatchPlanStore, PlanConflict
+    operation_id = data.get("operation_id") or data.get("idempotency_key")
+    if operation_id:
+        try:
+            previous = await asyncio.to_thread(BatchPlanStore(WORKSPACE).get, operation_id=operation_id)
+        except FileNotFoundError:
+            pass
         else:
-            raise HTTPException(status_code=404, detail=f"Không tìm thấy file video {filename} trong thư mục phôi.")
-
-    shared_state.stop_requested = False
-    output_dir = str(get_output_dir())
-    job_id = uuid.uuid4().hex
-
-    BATCH_TASK = asyncio.create_task(
-        single_video_runner(str(video_path), output_dir, job_id),
-        name=f"autodub-retry-{job_id}"
-    )
-
-    return JSONResponse(
-        status_code=200,
-        content={
-            "status": "started",
-            "job_id": job_id,
-            "video": filename,
-            "message": f"Đã bắt đầu xử lý lại video '{filename}'!",
-        },
-    )
+            if previous.get("operation_kind") != "retry" or [i["filename"] for i in previous["items"]] != [filename]:
+                raise HTTPException(409, {"code": "operation_payload_conflict"})
+            return await admit_batch_plan(previous["batch_id"])
+    input_dir = get_input_dir()
+    source_root = input_dir if (input_dir / filename).is_file() else input_dir / "processed"
+    if not (source_root / filename).is_file():
+        raise HTTPException(404, "Không tìm thấy đúng video nguồn cần chạy lại.")
+    import job_config_service
+    payload = {"items": [{"filename": filename}], "trigger": True,
+               "operation_kind": "retry",
+               "archive_source": source_root == input_dir,
+               "idempotency_key": operation_id or uuid.uuid4().hex}
+    try:
+        plan = await asyncio.to_thread(BatchPlanStore(WORKSPACE).prepare, payload, source_root,
+                                      get_output_dir(), job_config_service.freeze_job_config)
+        return await admit_batch_plan(plan["batch_id"])
+    except PlanConflict as exc:
+        raise HTTPException(409, {"code": "retry_conflict", "message": str(exc)})
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
 
 
 @app.post("/api/open-folder")
@@ -2046,9 +2062,49 @@ async def api_open_folder(folder: str = Form(...)):
 async def api_stream_video(folder: str, filename: str):
     """Stream video để xem trước trực tiếp trên Dashboard."""
     from urllib.parse import unquote
-    file_path = _safe_media_path(folder, unquote(filename))
+    try:
+        file_path = _safe_media_path(folder, filename)
+    except HTTPException as exc:
+        if exc.status_code != 404 or unquote(filename) == filename:
+            raise
+        file_path = _safe_media_path(folder, unquote(filename))
     media_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
     return FileResponse(str(file_path), media_type=media_type)
+
+
+@app.get("/api/media/compare")
+async def api_media_compare(filename: str):
+    from dashboard_compare_service import compare_response
+    try:
+        return await asyncio.to_thread(compare_response, get_input_dir(), get_output_dir(), filename)
+    except FileNotFoundError:
+        raise HTTPException(404, "Không tìm thấy thành phẩm.")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.get("/api/media/compare-original")
+async def api_media_compare_original(filename: str):
+    from dashboard_compare_service import resolve_compare
+    try:
+        _, original, reason = await asyncio.to_thread(resolve_compare, get_input_dir(), get_output_dir(), filename)
+        if original is None:
+            raise HTTPException(404, reason)
+        return FileResponse(str(original), media_type=mimetypes.guess_type(original.name)[0] or "application/octet-stream")
+    except FileNotFoundError:
+        raise HTTPException(404, "Không tìm thấy nguồn/thành phẩm.")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.get("/api/media/compare-dubbed")
+async def api_media_compare_dubbed(filename: str):
+    from batch_plan_service import bare_name
+    try:
+        path = _safe_media_path("banve", bare_name(filename))
+        return FileResponse(str(path), media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
 
 
 # ===== AUDIO SETTINGS (MIXER GAIN CONTROLS) =====
@@ -2097,7 +2153,11 @@ async def api_save_worker_settings(payload: dict = Body(...)):
     auto_guard = bool(payload.get("auto_vram_guard", current.get("auto_vram_guard", True)))
     max_thresh = float(payload.get("max_vram_percent_threshold", current.get("max_vram_percent_threshold", 85.0)))
     min_free = float(payload.get("min_free_vram_mb", current.get("min_free_vram_mb", 1500.0)))
-    return save_worker_settings(concurrency, auto_guard, max_thresh, min_free)
+    result = save_worker_settings(concurrency, auto_guard, max_thresh, min_free)
+    result["effective_concurrency"] = 1
+    result["max_supported_workers"] = 1
+    result["capability_reason"] = "Hai worker chưa được bật cho đến khi dispatcher đa execution đạt nghiệm thu W9."
+    return result
 
 
 # ===== F13: TRUNG TÂM THÔNG BÁO · F1: THỐNG KÊ HIỆU SUẤT · F9: LỊCH CHẠY ĐÊM =====
@@ -2147,7 +2207,7 @@ def _schedule_file() -> Path:
 
 def _schedule_store():
     from night_schedule_service import ScheduleStore
-    return ScheduleStore(_schedule_file())
+    return ScheduleStore(_schedule_file(), queue_snapshot=_get_system_path("telegram_queue.json"))
 
 
 @app.get("/api/schedule")
@@ -2160,34 +2220,62 @@ async def api_get_schedule():
 
 @app.post("/api/schedule")
 async def api_schedule_night_batch(payload: dict = Body(...)):
-    import re
-    hhmm = str(payload.get("time") or "02:00").strip()
-    if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", hhmm):
-        raise HTTPException(400, "Giờ không hợp lệ; dùng HH:MM.")
-    mode = str(payload.get("video_mode") or "AUTO").upper()
+    # Scheduling and immediate admission share the same barrier. A request cannot
+    # reserve a plan halfway through another request accepting it for execution.
+    async with BATCH_ADMISSION_LOCK:
+        return await _create_bound_schedule(payload)
+
+
+async def _create_bound_schedule(payload):
+    return await asyncio.to_thread(_persist_bound_schedule, payload)
+
+
+def _persist_bound_schedule(payload):
+    from batch_plan_service import PlanConflict
     try:
-        return await asyncio.to_thread(_schedule_store().create, hhmm, mode)
-    except RuntimeError as exc:
+        return _batch_lifecycle().create_schedule(payload)
+    except (RuntimeError, PlanConflict) as exc:
         raise HTTPException(409, str(exc))
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(422, str(exc))
+    except OSError:
+        raise HTTPException(503, 'Chưa xác minh được lịch; thử lại cùng mã thao tác.')
+
+
+@app.get('/api/schedule-operations/{operation_id}')
+async def api_get_schedule_operation(operation_id: str):
+    try:
+        return await asyncio.to_thread(_schedule_store().operation, operation_id)
+    except FileNotFoundError:
+        raise HTTPException(404, 'Chưa có bản ghi thao tác lịch.')
+    except (ValueError, OSError):
+        raise HTTPException(503, 'Không đọc được bản ghi lịch; cần đối soát.')
 
 
 @app.delete("/api/schedule")
-async def api_cancel_schedule():
+async def api_cancel_schedule(payload: dict = Body(...)):
     try:
-        await asyncio.to_thread(_schedule_store().cancel)
+        from queue_control_service import valid_id
+        if not valid_id(payload.get('schedule_id')) or not valid_id(payload.get('operation_id')) or type(payload.get('generation')) is not int:
+            raise HTTPException(422, 'Cần schedule_id, generation và operation_id của lịch đang hiển thị.')
+        return await asyncio.to_thread(_schedule_store().cancel, schedule_id=payload['schedule_id'],
+                                       generation=payload['generation'], operation_id=payload['operation_id'])
     except RuntimeError as exc:
         raise HTTPException(409, str(exc))
     except OSError:
         raise HTTPException(503, "Không hủy được lịch")
-    return {"active": False}
 
 
 async def _night_batch_watcher():
     from night_schedule_service import dispatch_due
+    async def dispatch_local(schedule):
+        if schedule.get("target_kind") != "local" or not schedule.get("batch_id"):
+            return {"status": "unknown", "code": "missing_schedule_target"}
+        return await admit_batch_plan(schedule["batch_id"], schedule=schedule)
     while True:
         try:
             await asyncio.sleep(30)
-            outcome = await dispatch_due(_schedule_store(), api_run_batch)
+            outcome = await dispatch_due(_schedule_store(), dispatch_local, admission_allowed=lambda: not _processing_disabled())
             if outcome == "accepted":
                 from notification_service import push
                 await asyncio.to_thread(push, "info", "Đã kích hoạt lịch chạy đêm",
@@ -2704,7 +2792,7 @@ async def api_get_router_modes():
 
 
 @app.get("/api/v1/feature-flags")
-async def api_get_feature_flags():
+def api_get_feature_flags():
     """Lấy trạng thái các cờ tính năng nâng cấp."""
     try:
         from v1_feature_flags import get_feature_flags
@@ -2731,7 +2819,7 @@ async def api_get_feature_flags():
 
 
 @app.post("/api/v1/feature-flags")
-async def api_set_feature_flags(payload: dict = Body(...)):
+def api_set_feature_flags(payload: dict = Body(...)):
     """Cập nhật trạng thái các cờ tính năng nâng cấp (lưu vào biến môi trường & file cấu hình)."""
     try:
         from v1_feature_flags import (

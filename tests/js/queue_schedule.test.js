@@ -1,45 +1,72 @@
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const html = fs.readFileSync(path.join(__dirname, '../../backend/templates/dashboard.html'), 'utf8');
+const { fixture, slice } = require('./dashboard_fixture.cjs');
 
-test('delete waits for acknowledgement and sends stable identity', async () => {
-  const start = html.indexOf('async function deleteQueueItem(index)');
-  const end = html.indexOf('async function fetchQueue()', start);
-  const calls = [], toasts = [];
-  const context = {
-    window: { queueDeleteIds: ['job-one'] }, queueMoving: false,
-    confirm: () => true, setTimeout: resolve => resolve(),
-    showToast: (...args) => toasts.push(args), fetchQueue: async () => {},
+test('delete waits for the owner and sends a stable ID and queue revision', async () => {
+  const calls = [];
+  const notices = [];
+  const app = fixture({
+    confirm: () => true,
+    queueDeleteIds: ['job-one'],
+    queueMoving: false,
+    newOperationId: () => 'queue-one',
+    showToast: (...args) => notices.push(args),
+    fetchQueue: async () => {},
+    setTimeout: resolve => resolve(),
     fetch: async (url, config) => {
       calls.push({url, config});
-      return {ok: true, json: async () => calls.length === 1
-        ? {status: 'pending', operation_id: 'one', message: 'Waiting'} : {state: 'applied'}};
-    }
-  };
-  vm.createContext(context);
-  vm.runInContext(html.slice(start, end), context);
-  await context.deleteQueueItem(0);
-  assert.equal(JSON.parse(calls[0].config.body).job_id, 'job-one');
-  assert.equal(calls[1].url, '/api/queue/operations/one');
-  assert.equal(toasts[0][1], 'info');
-  assert.equal(toasts[1][1], 'success');
+      if (calls.length === 1) assert.equal(notices.length, 0);
+      return {ok: true, json: async () => ({state: calls.length === 1 ? 'pending' : 'applied'})};
+    },
+  });
+  app.run(slice('let queueSnapshot = null;', 'async function fetchQueue()'));
+  app.run('queueSnapshot = {revision: 12}');
+  await app.context.deleteQueueItem(0);
+  assert.deepEqual(JSON.parse(calls[0].config.body), {
+    target_job_ids: ['job-one'], expected_revision: 12, operation_id: 'queue-one',
+  });
+  assert.equal(calls[1].url, '/api/queue/operations/queue-one');
+  assert.deepEqual(notices.map(([, type]) => type), ['success']);
 });
 
-test('schedule chip displays server date and marks expired schedule', () => {
-  const start = html.indexOf('function renderScheduleChip(d)');
-  const end = html.indexOf('async function scheduleNightBatch(', start);
-  const chip = {style: {}};
-  const context = {document: {getElementById: () => chip}, escapeHtml: x => x};
-  vm.createContext(context);
-  vm.runInContext(html.slice(start, end), context);
-  const runAt = new Date('2026-11-03T02:00:00+07:00').getTime() / 1000;
-  context.renderScheduleChip({active: true, time: '02:00', run_at: runAt});
-  assert.ok(chip.innerHTML.includes(new Date(runAt * 1000).toLocaleString()));
-  context.renderScheduleChip({active: false, state: 'expired'});
-  assert.match(chip.textContent, /quá hạn/);
-  context.renderScheduleChip({active: false, state: 'fired'});
+test('schedule chip renders the hold, server time, expiry, and handoff', () => {
+  const app = fixture({escapeHtml: value => String(value)});
+  app.run(slice('function renderScheduleChip(data)', 'function matchingSchedule('));
+  const runAt = Date.parse('2026-11-03T02:00:00+07:00') / 1000;
+  const chip = app.element('scheduleChip');
+  app.context.renderScheduleChip({state: 'holding', target_kind: 'telegram', run_at: runAt, timezone: 'Asia/Bangkok'});
+  assert.match(chip.innerHTML, /Đang giữ các video/);
+  assert.match(chip.innerHTML, /Asia\/Bangkok/);
+  assert.ok(chip.innerHTML.includes(new Date(runAt * 1000).toLocaleString('vi-VN', {timeZone: 'Asia/Bangkok'})));
+  app.context.renderScheduleChip({state: 'expired'});
+  assert.match(chip.innerHTML, /quá hạn/);
+  app.context.renderScheduleChip({state: 'fired'});
+  assert.match(chip.innerHTML, /Đã bàn giao/);
+  app.context.renderScheduleChip({active: false});
   assert.equal(chip.style.display, 'none');
+});
+
+test('explicit retry reuses a queue operation ID after a lost request', async () => {
+  const sent = [];
+  const app = fixture({
+    queueMoving: false, queueDeleteIds: ['job-one'], confirm: () => true,
+    newOperationId: () => 'same-queue-operation', showToast: () => {}, fetchQueue: async () => {},
+    setTimeout: fn => fn(),
+    fetch: async (url, config) => {
+      if (config.method === 'POST') {
+        sent.push(config.body);
+        if (sent.length === 1) throw new Error('offline');
+        return {ok: true, json: async () => ({state: 'pending'})};
+      }
+      if (sent.length === 1) return {status: 404};
+      return {ok: true, json: async () => ({state: 'applied'})};
+    },
+  });
+  app.run(slice('let queueSnapshot = null;', 'async function fetchQueue()'));
+  app.run('queueSnapshot = {revision: 18}');
+  await app.context.deleteQueueItem(0);
+  await app.context.deleteQueueItem(0);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0], sent[1]);
+  assert.equal(app.context.sessionStorage.getItem('dashboardQueueOperation'), null);
 });

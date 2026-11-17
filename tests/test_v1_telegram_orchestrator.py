@@ -1,3 +1,4 @@
+import asyncio
 import json
 import importlib
 import tempfile
@@ -29,6 +30,9 @@ class TelegramV1Tests(unittest.IsolatedAsyncioTestCase):
                               "feature_flags": {"V1_VIDEO_MODE": "SHORT"}, "bgm_volume_db": -17},
             "resume_state": {"source_path": str(self.source), "source_sha256": "source-hash"},
         }
+        p = patch.object(monitor, "SNAPSHOT", self.root / "telegram_queue.json")
+        p.start()
+        self.addCleanup(p.stop)
         for target, value in [
             ("WORKSPACE", str(self.root)), ("OUTPUT_DIR", str(self.root / "delivery")),
             ("global_queue", monitor.MonitoredQueue()),
@@ -36,9 +40,6 @@ class TelegramV1Tests(unittest.IsolatedAsyncioTestCase):
             p = patch.object(bot, target, value)
             p.start()
             self.addCleanup(p.stop)
-        p = patch.object(monitor, "SNAPSHOT", self.root / "telegram_queue.json")
-        p.start()
-        self.addCleanup(p.stop)
         state = SimpleNamespace(stop_requested=False)
         p = patch.object(bot, "shared_state", state)
         p.start()
@@ -90,7 +91,7 @@ class TelegramV1Tests(unittest.IsolatedAsyncioTestCase):
              patch.object(bot.job_tracker, "set_error"), \
              patch.object(bot, "safe_edit_status", new_callable=AsyncMock):
             await bot._process_telegram_job(self.job)
-        retry = await bot.global_queue.get()
+        retry = await asyncio.wait_for(bot.global_queue.get(), timeout=2)
         self.assertEqual(retry["job_id"], self.job["job_id"])
         self.assertEqual(retry["resume_state"], self.job["resume_state"])
         self.assertEqual(retry["job_overrides"], self.job["job_overrides"])
@@ -134,12 +135,13 @@ class TelegramV1Tests(unittest.IsolatedAsyncioTestCase):
         with patch.object(bot, "global_queue", restored), \
              patch.object(bot, "worker_task", SimpleNamespace(done=lambda: False)):
             count = await bot.enqueue_pending_queue_jobs()
-        self.assertEqual(count, 1)
-        job = await restored.get()
+        self.assertEqual(count, 0)
+        self.assertEqual(restored.recovery_state, "needs_review")
+        job = restored.active_job
         self.assertEqual(job["resume_state"], self.job["resume_state"])
         self.assertEqual(job["job_overrides"], self.job["job_overrides"])
         self.assertEqual(job["retry_count"], 1)
-        restored.task_done()
+        self.assertEqual(restored.qsize(), 0)
 
     async def test_pending_clear_preserves_active_job_and_queue_accounting(self):
         await bot.global_queue.put(self.job)

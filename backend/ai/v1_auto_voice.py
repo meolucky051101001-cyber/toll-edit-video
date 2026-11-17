@@ -953,6 +953,17 @@ def decide_video_voice(
             )
         fallback_voice_info = None
         segment_voices = {}
+        # Pitch alone can assign a high male voice (or low female voice) to
+        # the same role as the other speaker. Surface that ambiguity without
+        # inventing a second speaker or changing frozen voice assignments.
+        known_roles = {g for g in gender_map.values() if g in ("male", "female")}
+        single_detected_role = (
+            len(gender_map) >= 2 and len(known_roles) == 1
+            and not visual_only_transcript and not dual_context_reason
+        )
+        review_indices = [
+            i for i, g in gender_map.items() if g == "unknown" or single_detected_role
+        ]
         for position, seg in enumerate(srt_segments, 1):
             seg_idx = _get_index(seg, position)
             g = gender_map.get(seg_idx, "unknown")
@@ -993,6 +1004,12 @@ def decide_video_voice(
                 "label": chosen_v.get("voice_label", ""),
                 "confidence": gender_evidence.get(seg_idx, {}).get("confidence", 0.0),
                 "reason": gender_evidence.get(seg_idx, {}).get("reason", "missing_cue"),
+                "needs_voice_review": seg_idx in review_indices,
+                "voice_review_reason": (
+                    "dual_voice_single_detected_role" if single_detected_role and g != "unknown"
+                    else gender_evidence.get(seg_idx, {}).get("reason", "missing_cue")
+                    if g == "unknown" else ""
+                ),
             }
 
         female_cnt = sum(1 for g in gender_map.values() if g == "female")
@@ -1020,7 +1037,9 @@ def decide_video_voice(
             "gender_evidence": {str(i): evidence for i, evidence in gender_evidence.items()},
             "unresolved_segment_indices": [i for i, gender in gender_map.items() if gender == "unknown"],
             "analysis_version": ANALYSIS_VERSION,
-            "requires_voice_review": any(g == "unknown" for g in gender_map.values()),
+            "requires_voice_review": bool(review_indices),
+            "review_segment_indices": review_indices,
+            "voice_review_policy": "single_role_review_1",
             "same_voice_for_both_roles": same_voice_for_both_roles,
         }
         if dual_context_reason:

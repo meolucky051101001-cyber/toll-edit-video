@@ -130,6 +130,9 @@ class TelegramNetworkRetryTests(unittest.IsolatedAsyncioTestCase):
                               "feature_flags": {"V1_VIDEO_MODE": "SHORT"}, "bgm_volume_db": -17},
             "resume_state": {"source_path": str(self.source), "source_sha256": "source-hash"},
         }
+        p = patch.object(monitor, "SNAPSHOT", self.root / "telegram_queue.json")
+        p.start()
+        self.addCleanup(p.stop)
         for target, value in [
             ("WORKSPACE", str(self.root)), ("OUTPUT_DIR", str(self.root / "delivery")),
             ("global_queue", monitor.MonitoredQueue()), ("_network_retry_task", None),
@@ -140,9 +143,6 @@ class TelegramNetworkRetryTests(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(p.stop)
         bot._network_retry_jobs.clear()
         self.addCleanup(bot._network_retry_jobs.clear)
-        p = patch.object(monitor, "SNAPSHOT", self.root / "telegram_queue.json")
-        p.start()
-        self.addCleanup(p.stop)
         state = SimpleNamespace(stop_requested=False)
         p = patch.object(bot, "shared_state", state)
         p.start()
@@ -291,7 +291,7 @@ class TelegramNetworkRetryTests(unittest.IsolatedAsyncioTestCase):
                     consumed.set()
                     await keep_running.wait()
 
-                queue_file = self.root / "bot_system" / "telegram_queue.json"
+                queue_file = bot.global_queue.snapshot
                 queue_file.write_text(json.dumps({"items": [], "active_job": None}), encoding="utf-8")
                 bot.schedule_network_retry(copy.deepcopy(self.job))
                 bot._network_retry_jobs.clear()

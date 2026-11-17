@@ -83,13 +83,7 @@ def install(application, namespace, key):
         enqueue_pending_fn = namespace.get('enqueue_pending_queue_jobs')
         if enqueue_pending_fn:
             # No watcher may publish from empty memory before recovery finishes.
-            queue = namespace.get('global_queue')
-            if queue is not None:
-                queue.recovery_pending = True
             await enqueue_pending_fn(app)
-            if queue is not None:
-                queue.recovery_pending = False
-                queue.publish()
         app.bot_data['_control_heartbeat']=asyncio.create_task(heartbeat())
         queue_watcher_fn = namespace.get('queue_signal_watcher')
         if queue_watcher_fn:
@@ -104,5 +98,8 @@ def install(application, namespace, key):
         if task: task.cancel()
         q_watcher = app.bot_data.pop('_queue_watcher', None)
         if q_watcher: q_watcher.cancel()
+        close_queue_workers = namespace.get('shutdown_queue_workers')
+        if close_queue_workers:
+            await close_queue_workers()
         if previous_shutdown: await previous_shutdown(app)
     application.post_shutdown=shutdown

@@ -218,6 +218,7 @@ def freeze_job_config(
     batch_id: Optional[str] = None,
     workspace_path: Optional[str | Path] = None,
     routing_snapshot: Optional[Dict[str, Any]] = None,
+    source_path: Optional[str | Path] = None,
 ) -> Dict[str, Any]:
     """
     Tạo snapshot đóng băng cấu hình thực tế cho video/job.
@@ -312,9 +313,9 @@ def freeze_job_config(
                     from .v1_video_router import is_router_enabled, create_router_snapshot
             if is_router_enabled():
                 req_mode = effective.get("video_mode") or overrides.get("video_mode", "auto")
-                cand_path = video_name
+                cand_path = str(source_path or video_name)
                 if not os.path.isabs(str(cand_path)) and not os.path.exists(str(cand_path)):
-                    for base in [config_workspace, Path(r"D:\workspace"), Path(r"D:\banve")]:
+                    for base in [config_workspace]:
                         p = base / video_name
                         if p.exists():
                             cand_path = str(p)
@@ -342,6 +343,7 @@ def freeze_job_config(
     snapshot = {
         "snapshot_id": snapshot_id,
         "video_name": video_name,
+        "source_path": str(Path(source_path).resolve()) if source_path is not None else None,
         "job_id": job_id,
         "batch_id": batch_id,
         "preset_id": preset_id,

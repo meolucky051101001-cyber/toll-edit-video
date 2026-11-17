@@ -19,7 +19,7 @@ _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dashboard-media")
 def _signature(path):
     p = Path(path)
     s = p.stat()
-    return (os.path.normcase(str(p.resolve())), s.st_size, s.st_mtime_ns)
+    return (os.path.normcase(str(p.resolve())), s.st_size, s.st_mtime_ns, s.st_ctime_ns)
 
 
 def _probe(path):
@@ -62,7 +62,10 @@ def media_status(path, defer=False):
             return dict(entry[1])
         future = _pending.get(key)
         if future and future.done():
-            result = future.result()
+            try:
+                result = future.result()
+            except Exception:
+                result = {"status": "unverified", "reason": "Chưa xác minh: tác vụ kiểm tra media thất bại."}
             _pending.pop(key, None)
             _cache[key] = (time.monotonic(), result)
             while len(_cache) > 2048:
@@ -72,19 +75,27 @@ def media_status(path, defer=False):
             # Bound queued work; next polling pass can enqueue remaining files.
             for old_key, task in list(_pending.items()):
                 if task.done():
-                    _cache[old_key] = (time.monotonic(), task.result())
+                    try:
+                        result = task.result()
+                    except Exception:
+                        result = {"status": "unverified", "reason": "Chưa xác minh: tác vụ kiểm tra media thất bại."}
+                    _cache[old_key] = (time.monotonic(), result)
                     _pending.pop(old_key, None)
             while len(_cache) > 2048:
                 _cache.popitem(last=False)
             if key not in _pending and len(_pending) < 64:
                 _pending[key] = _pool.submit(_probe, Path(path))
             return {"status": "unverified", "reason": "Đang chờ xác minh media."}
+    # Required verification has its own bounded ffprobe call. A full listing
+    # queue must not decide whether a newly rendered output can be finalized.
     try:
-        result = future.result(timeout=6) if future else _probe(Path(path))
-    except TimeoutError:
-        return {"status": "unverified", "reason": "Đang chờ xác minh media."}
+        result = _probe(Path(path))
+    except Exception:
+        result = {"status": "unverified", "reason": "Chưa xác minh: tác vụ kiểm tra media thất bại."}
     with _lock:
-        _pending.pop(key, None)
+        background = _pending.pop(key, None)
+        if background is not None:
+            background.cancel()
         _cache[key] = (time.monotonic(), result)
         while len(_cache) > 2048:
             _cache.popitem(last=False)

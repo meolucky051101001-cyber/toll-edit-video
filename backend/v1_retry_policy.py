@@ -24,6 +24,9 @@ PERMANENT_ERROR_NAMES = {
     "SegmentCommitError",
     "JobStateReadError",
     "PipelineStateError",
+    "OutputVerificationError",
+    "StaleExecutionError",
+    "CloudRecoveryRequired",
 }
 
 NETWORK_ERROR_NAMES = {

@@ -15,22 +15,22 @@ window.fetch = async function() {
             config.headers['X-Local-Control-Token'] = window.LOCAL_TOKEN || '';
         }
     }
-    let res;
+    const method = String(config?.method || resource?.method || 'GET').toUpperCase();
+    const readable = ['GET', 'HEAD'].includes(method);
+    const localApi = typeof resource === 'string' && resource.startsWith('/api/');
+    // A lost write response does not mean the command failed. The caller must
+    // reconcile its operation ID; silently replaying a mutation is unsafe.
+    const options = {...config};
+    if (!options.signal && localApi && typeof AbortSignal !== 'undefined' && AbortSignal.timeout) options.signal = AbortSignal.timeout(readable ? 12000 : 30000);
     try {
-        res = await originalFetch(resource, config);
-    } catch (netErr) {
-        if (resource && typeof resource === 'string' && resource.startsWith('/api/')) {
-            await new Promise(r => setTimeout(r, 600));
-            try {
-                res = await originalFetch(resource, config);
-            } catch (_) {
-                throw netErr;
-            }
-        } else {
-            throw netErr;
-        }
+        const res = await originalFetch(resource, options);
+        if (!readable || !localApi || ![502, 503, 504].includes(res.status) || options.signal?.aborted) return res;
+    } catch (error) {
+        if (!readable || !localApi || options.signal?.aborted || error.name === 'AbortError' || error.name === 'TimeoutError') throw error;
     }
-    return res;
+    await new Promise(resolve => setTimeout(resolve, 500));
+    if (options.signal?.aborted) throw options.signal.reason || new Error('Yêu cầu đã hết thời gian chờ');
+    return originalFetch(resource, options);
 };
 </script>
 
@@ -1311,7 +1311,7 @@ header {
             <span>1 Luồng (Ổn định)</span>
           </label>
           <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer; margin: 0; color: var(--text);">
-            <input type="radio" name="workerConcurrency" value="2" id="workerMode2" onchange="changeWorkerConcurrency(2)">
+            <input type="radio" name="workerConcurrency" value="2" id="workerMode2" onchange="changeWorkerConcurrency(2)" disabled title="Bản hiện tại hỗ trợ một worker đã xác minh">
             <span>⚡ 2 Luồng (So le GPU)</span>
           </label>
           <span id="vramThrottleChip" style="display: none; font-size: 11px; padding: 2px 7px; border-radius: 6px; background: rgba(245,158,11,0.15); color: #f59e0b; border: 1px solid rgba(245,158,11,0.4); font-weight: 500;">⚠️ Tự hạ 1 luồng</span>
@@ -1797,6 +1797,7 @@ header {
           </div>
           <div id="queueMessage" role="status" style="padding:8px 18px;color:var(--text-muted);font-size:11.5px">Đang kết nối hàng đợi…</div>
           <div id="scheduleChip" style="display:none; margin:0 18px 6px; padding:6px 10px; border-radius:6px; background:rgba(56,189,248,0.1); border:1px solid rgba(56,189,248,0.3); color:#7dd3fc; font-size:11.5px; align-items:center; justify-content:space-between; gap:8px;"></div>
+          <div id="recoverableBatches" style="display:none; margin:8px 18px; padding:10px; border:1px solid #52525b; border-radius:6px; font-size:12px;"></div>
           <div class="table-quick-tools queue-quick-tools" role="search" aria-label="Tìm trong hàng chờ">
             <input class="table-quick-search" type="search" data-dashboard-search="queue" aria-label="Tìm video trong hàng chờ" aria-controls="queueTableBody" placeholder="Tìm link hoặc tên video trong hàng chờ...">
             <span class="table-filter-count" id="queueFilterCount" aria-live="polite"></span>
@@ -2520,14 +2521,16 @@ header {
                 <span style="color:#a1a1aa;">Nhạc nền (BGM):</span>
                 <span id="videoConfigBgmVal" style="color:#38bdf8;">--</span>
               </div>
-              <input type="range" id="videoConfigBgm" min="-24" max="6" step="0.5" value="-2" style="width:100%;" oninput="updateVideoConfigLiveDisplay()">
+              <label><input type="checkbox" id="overrideBgm" onchange="refreshVideoConfigResolved()"> Ghi đè riêng</label>
+              <input type="range" id="videoConfigBgm" min="-40" max="10" step="0.5" value="-2" style="width:100%;" oninput="updateVideoConfigLiveDisplay()">
             </div>
             <div>
               <div style="display:flex; justify-content:space-between; font-size:11px; margin-bottom:3px;">
                 <span style="color:#a1a1aa;">Giọng đọc (Dub):</span>
                 <span id="videoConfigDubVal" style="color:#38bdf8;">--</span>
               </div>
-              <input type="range" id="videoConfigDub" min="-10" max="10" step="0.5" value="1" style="width:100%;" oninput="updateVideoConfigLiveDisplay()">
+              <label><input type="checkbox" id="overrideDub" onchange="refreshVideoConfigResolved()"> Ghi đè riêng</label>
+              <input type="range" id="videoConfigDub" min="-20" max="15" step="0.5" value="1" style="width:100%;" oninput="updateVideoConfigLiveDisplay()">
             </div>
           </div>
 
@@ -2536,12 +2539,14 @@ header {
               <span style="color:#a1a1aa;">Tốc độ đọc:</span>
               <span id="videoConfigSpeedVal" style="color:#38bdf8;">--</span>
             </div>
+            <label><input type="checkbox" id="overrideSpeed" onchange="refreshVideoConfigResolved()"> Ghi đè riêng</label>
             <input type="range" id="videoConfigSpeed" min="0.5" max="2.0" step="0.05" value="1.0" style="width:100%;" oninput="updateVideoConfigLiveDisplay()">
           </div>
 
           <div style="margin-top:10px;">
             <label style="font-size:11px; color:#a1a1aa; display:block; margin-bottom:3px;">Kịch bản video:</label>
             <select id="videoConfigScriptMode" style="width:100%; padding:5px 8px; background:#18181b; border:1px solid #3f3f46; border-radius:4px; color:#fff; font-size:12px;">
+              <option value="">Theo Preset / Mặc định hệ thống</option>
               <option value="default">✨ Mặc định (Tự nhiên, chuẩn ngữ cảnh)</option>
               <option value="humorous">🤣 Hài hước (Dí dỏm, tấu hài, bắt trend)</option>
             </select>
@@ -2580,7 +2585,8 @@ header {
           <button type="button" class="btn btn-outline" style="font-size:11px; padding:4px 10px; color:#ef4444; border-color:rgba(239,68,68,0.3);" onclick="resetVideoConfigToPreset()">Khôi phục theo Preset</button>
           <div style="display:flex; gap:8px;">
             <button type="button" class="btn btn-outline" style="font-size:11px; padding:4px 10px;" onclick="closeVideoConfigModal()">Hủy</button>
-            <button type="button" class="btn btn-primary" style="font-size:11px; padding:4px 14px;" onclick="saveVideoConfigDraft()">Lưu Cấu Hình</button>
+            <span id="videoConfigResolveStatus" role="status" style="font-size:11px;"></span>
+            <button type="button" class="btn btn-primary" id="btnSaveVideoConfig" style="font-size:11px; padding:4px 14px;" onclick="saveVideoConfigDraft()">Lưu Cấu Hình</button>
           </div>
         </div>
       </div>
@@ -2636,11 +2642,12 @@ header {
         </div>
 
         <div style="display:flex; justify-content:flex-end; gap:8px;">
-          <button type="button" class="btn btn-outline" style="font-size:12px; padding:6px 12px;" onclick="scheduleNightBatchFromSummary()" title="Đưa các video đã chọn vào hàng chờ và tự động chạy vào lúc 02:00 đêm">🌙 Lên lịch chạy đêm</button>
+          <span id="summarySubmitStatus" role="status" style="font-size:12px;"></span>
+          <button type="button" class="btn btn-outline" id="btnScheduleBulk" style="font-size:12px; padding:6px 12px;" onclick="scheduleNightBatchFromSummary()" title="Lưu đúng các video đã chọn và chạy vào giờ đã hẹn">🌙 Lên lịch các video đã chọn</button>
           <button type="button" class="btn btn-outline" style="font-size:12px; padding:6px 12px;" onclick="closePreRunSummaryModal()">Quay lại chỉnh sửa</button>
           <button type="button" class="btn btn-primary" id="btnConfirmBulkEnqueue" style="font-size:12px; padding:6px 18px; display:inline-flex; align-items:center; gap:6px;" onclick="confirmBulkEnqueue()">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-            Xác nhận Đưa vào Hàng Chờ
+            Chạy các video đã chọn ngay
           </button>
         </div>
       </div>
@@ -2776,6 +2783,7 @@ header {
           </div>
           <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; font-size: 12px; color: var(--text-muted);">
             <div>📁 Video nguồn: <span id="recoverySourceInfo" style="color: #cbd5e1; font-weight: 500;">--</span></div>
+            <div>Đích xuất video <span id="recoveryOutputPath" style="color: #cbd5e1;">--</span></div>
             <div>⚡ Kế hoạch: <span id="recoverySummaryText" style="color: #38bdf8; font-weight: 600;">--</span></div>
             <div>🔒 Token kế hoạch: <span id="recoveryTokenBadge" style="font-family: ui-monospace, monospace; color: #a1a1aa;">--</span></div>
           </div>
@@ -2839,7 +2847,7 @@ header {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
                 3. Chạy lại từ đầu
               </span>
-              <span style="font-size: 11px; color: var(--text-muted); line-height: 1.3;">Xóa toàn bộ checkpoint cũ, reset số lần thử và chạy mới.</span>
+              <span style="font-size: 11px; color: var(--text-muted); line-height: 1.3;">Chạy trong thư mục mới và giữ các checkpoint cũ.</span>
             </button>
           </div>
 
@@ -3037,7 +3045,7 @@ header {
     let dashboardActive = false, dashboardOutputPath = '', dashboardInputPath = '';
     let dashboardPhoiTotalCount = 0;
     const dashboardLists = Object.fromEntries(['phoi', 'banve'].map(scope => [scope, {
-      offset: 0, limit: 100, pending: false, dirty: false, queryKey: '', fingerprint: '', timer: null, data: null
+      offset: 0, limit: 20, pending: false, dirty: false, queryKey: '', fingerprint: '', timer: null, data: null
     }]));
 
     function dashboardListKey(scope) {
@@ -3050,7 +3058,6 @@ header {
       list.pending = true;
       list.queryKey = dashboardListKey(scope);
       const filter = dashboardQuickFilterState[scope];
-      if (scope === 'phoi') return '/api/phoi';
       const params = new URLSearchParams({limit: list.limit, offset: list.offset, search: filter.query, status: filter.status || 'all'});
       return '/api/' + scope + '?' + params;
     }
@@ -3172,14 +3179,6 @@ header {
         const tbody = document.getElementById(scope + 'TableBody');
         const container = tbody?.closest('.panel-body') || tbody?.parentElement?.parentElement;
         if (!container) continue;
-        if (scope === 'phoi') {
-          const notice = document.createElement('div');
-          notice.id = 'phoiListNotice';
-          notice.className = 'dashboard-list-notice';
-          notice.setAttribute('role', 'status');
-          container.insertAdjacentElement('afterend', notice);
-          continue;
-        }
         const pager = document.createElement('div');
         pager.id = scope + 'Pager';
         pager.className = 'dashboard-pager';
@@ -3204,34 +3203,72 @@ header {
       }
     }
 
-    // One scheduler. Background tabs stop polling; idle dashboards poll less often.
-    let dashboardPollTimer = null, dashboardPollBusy = false;
-    const dashboardNextPoll = {status: 0, phoi: 0, banve: 0, queue: 0, logs: 0, notif: 0, schedule: 0, stats: 0, glossary: 0};
-    async function pollDashboard() {
-      clearTimeout(dashboardPollTimer);
-      if (document.hidden || dashboardPollBusy) return;
-      dashboardPollBusy = true;
-      const now = Date.now();
-      const intervals = dashboardActive
-        ? {status:1500, phoi:10000, banve:10000, queue:4000, logs:4000, notif:10000, schedule:15000, stats:60000, glossary:30000}
-        : {status:5000, phoi:30000, banve:30000, queue:10000, logs:10000, notif:30000, schedule:60000, stats:300000, glossary:120000};
-      const callbacks = {status:fetchStatus, phoi:fetchPhoi, banve:fetchBanve, queue:fetchQueue, logs:fetchLogs, notif:fetchNotifications, schedule:fetchScheduleUI, stats:fetchStatsUI, glossary:fetchGlossaryUI};
-      await Promise.allSettled(Object.entries(callbacks).filter(([key]) => now >= dashboardNextPoll[key]).map(([key, fn]) => {
-        dashboardNextPoll[key] = now + intervals[key];
-        return fn();
-      }));
-      dashboardPollBusy = false;
-      if (!document.hidden) dashboardPollTimer = setTimeout(pollDashboard, 1000);
+    // Every endpoint has its own clock. A slow directory scan cannot hold the
+    // status/control heartbeat, and a job never schedules over its own request.
+    const dashboardReadState = {};
+    const dashboardPollJobs = {};
+    function markDashboardRead(key, error = null) {
+      const old = dashboardReadState[key] || {failures:0, lastSuccess:0};
+      dashboardReadState[key] = {...old, failures:error ? old.failures + 1 : 0,
+        lastSuccess:error ? old.lastSuccess : Date.now(), error:error ? String(error.message || error) : ''};
+      const row = document.getElementById(key + 'Freshness');
+      if (row) {
+        const state = dashboardReadState[key];
+        row.textContent = error
+          ? 'Chưa cập nhật được. ' + (state.lastSuccess ? 'Dữ liệu cuối lúc ' + new Date(state.lastSuccess).toLocaleTimeString('vi-VN') + '. ' : '') + state.error
+          : 'Cập nhật lúc ' + new Date(state.lastSuccess).toLocaleTimeString('vi-VN');
+        row.dataset.state = error ? 'stale' : 'fresh';
+      }
+    }
+    function scheduleDashboardPoll(key, delay) {
+      const job = dashboardPollJobs[key];
+      if (!job) return;
+      clearTimeout(job.timer);
+      if (document.hidden || job.pending) return;
+      job.timer = setTimeout(async () => {
+        if (document.hidden || job.pending) return;
+        job.pending = true;
+        try { await job.callback(); }
+        catch (error) { markDashboardRead(key, error); }
+        finally {
+          job.pending = false;
+          const failures = dashboardReadState[key]?.failures || 0;
+          const base = dashboardActive ? job.activeInterval : job.idleInterval;
+          scheduleDashboardPoll(key, Math.min(Math.max(base, 60000), base * Math.pow(2, Math.min(failures, 3))));
+        }
+      }, delay);
+    }
+    function pollDashboard() {
+      const specs = {
+        status:[fetchStatus,1500,5000], phoi:[fetchPhoi,10000,30000], banve:[fetchBanve,10000,30000],
+        queue:[fetchQueue,4000,10000], logs:[fetchLogs,4000,10000], notif:[fetchNotifications,10000,30000],
+        schedule:[fetchScheduleUI,15000,60000], stats:[fetchStatsUI,60000,300000], glossary:[fetchGlossaryUI,30000,120000]
+      };
+      Object.entries(specs).forEach(([key, [callback,activeInterval,idleInterval]], index) => {
+        dashboardPollJobs[key] ||= {callback,activeInterval,idleInterval,pending:false,timer:null};
+        scheduleDashboardPoll(key, index * 180);
+      });
     }
     document.addEventListener('visibilitychange', () => {
-      clearTimeout(dashboardPollTimer);
-      if (!document.hidden) {
-        Object.keys(dashboardNextPoll).forEach(key => dashboardNextPoll[key] = 0);
-        pollDashboard();
-      }
+      Object.values(dashboardPollJobs).forEach(job => clearTimeout(job.timer));
+      if (!document.hidden) pollDashboard();
     });
     document.addEventListener('DOMContentLoaded', () => {
       initializeDashboardLists();
+      document.getElementById('statusTitle').textContent = 'ĐANG KẾT NỐI HỆ THỐNG';
+      document.getElementById('btnRunHero').disabled = true;
+      document.getElementById('btnStartPhoi').disabled = true;
+      for (const [key, target] of Object.entries({status:'statusTitle', phoi:'phoiTableContainer',banve:'banveTableBody',queue:'queueMessage',logs:'logSummaryBadge'})) {
+        const anchor = document.getElementById(target);
+        if (!anchor) continue;
+        const wrapper = document.createElement('div');
+        wrapper.style.cssText = 'font-size:11px;color:var(--text-muted);padding:4px 0';
+        const label = document.createElement('span'); label.id = key + 'Freshness'; label.textContent = 'Đang kết nối…';
+        wrapper.appendChild(label);
+        const retry = document.createElement('button'); retry.className = 'btn btn-outline'; retry.textContent = 'Thử lại'; retry.style.cssText = 'font-size:10px;margin-left:8px;padding:2px 6px';
+        retry.addEventListener('click', () => scheduleDashboardPoll(key, 0)); wrapper.appendChild(retry);
+        (anchor.tagName === 'TBODY' ? anchor.closest('table') : anchor).insertAdjacentElement('afterend', wrapper);
+      }
       if (DASHBOARD_TOOL === 'V1') loadV1UpgradeSettings();
       loadVoiceAutoSettings(); loadMixerSettings(); applyLogZoom(); loadPresets(); loadVideoDrafts();
       pollDashboard();
@@ -3244,13 +3281,18 @@ header {
         const res = await fetch('/api/status', {cache: 'no-store', signal: AbortSignal.timeout(8000)});
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
+          markDashboardRead('status');
           renderStatus(data);
           observeProgressLog(data);
       } catch (err) {
-        console.error('Error fetching status:', err);
+        markDashboardRead('status', err);
         document.getElementById('statusTitle').innerHTML = '<span class="dot dot-yellow"></span> MẤT KẾT NỐI GIÁM SÁT';
         document.getElementById('stepDescription').textContent = 'Trạng thái đang hiển thị có thể đã cũ. Đang thử kết nối lại…';
         document.getElementById('btnRunHero').disabled = true;
+        document.getElementById('btnStartPhoi').disabled = true;
+        document.getElementById('btnPauseVideo').disabled = true;
+        document.getElementById('btnResumeVideo').disabled = true;
+        updateBatchEta();
       } finally {
         statusRequestPending = false;
       }
@@ -3412,7 +3454,7 @@ header {
     }
 
     function updateRamUI(ram) {
-      if (!ram) return;
+      if (!ram) { const text = document.getElementById('ramText'); if (text) text.textContent = 'Chưa có dữ liệu RAM'; return; }
       const pct = Math.min(100, Math.max(0, Number(ram.percent) || 0));
       const barEl = document.getElementById('ramProgressBar');
       if (barEl) {
@@ -3428,7 +3470,19 @@ header {
     }
 
     function updateVramUI(vram, workerSettings) {
-      if (!vram) return;
+      const maxSupported = Number(workerSettings?.max_supported_workers) || 1;
+      const actualConcurrency = Math.min(maxSupported, Number(workerSettings?.effective_concurrency) || 1);
+      const secondMode = document.getElementById('workerMode2');
+      if (secondMode) {
+        secondMode.disabled = maxSupported < 2;
+        secondMode.title = maxSupported < 2 ? 'Bản hiện tại hỗ trợ 1 worker. Ưu tiên 2 worker đã lưu chưa được kích hoạt.' : '';
+      }
+      applyWorkerConcurrencyUI(actualConcurrency);
+      if (!vram) {
+        const text = document.getElementById('vramText'); if (text) text.textContent = 'Chưa có dữ liệu VRAM';
+        const badge = document.getElementById('vramStatusBadge'); if (badge) badge.textContent = 'Chưa xác minh GPU';
+        return;
+      }
       const isThrottled = Boolean(vram.auto_throttled || (workerSettings && workerSettings.auto_throttled));
       const reason = vram.throttle_reason || (workerSettings && workerSettings.throttle_reason) || '';
 
@@ -3487,7 +3541,7 @@ header {
           c2.checked = false;
           applyWorkerConcurrencyUI(1);
         } else if (workerSettings && workerSettings.concurrency) {
-          const conc = Number(workerSettings.concurrency) || 1;
+          const conc = actualConcurrency;
           c1.checked = (conc === 1);
           c2.checked = (conc === 2);
           applyWorkerConcurrencyUI(conc);
@@ -3511,6 +3565,8 @@ header {
     }
 
     async function changeWorkerConcurrency(val) {
+      const maxSupported = Number(lastStatusData?.worker_settings?.max_supported_workers) || 1;
+      if (Number(val) > maxSupported) { showToast('Bản hiện tại chỉ hỗ trợ 1 worker đã xác minh.', 'info'); return; }
       currentConcurrencyMode = Number(val) || 1;
       const c1 = document.getElementById('workerMode1');
       const c2 = document.getElementById('workerMode2');
@@ -3536,15 +3592,18 @@ header {
             min_free_vram_mb: wsSettings.min_free_vram_mb !== undefined ? wsSettings.min_free_vram_mb : 1500.0
           })
         });
+        if (!res.ok) throw new Error((await res.json()).detail || 'Không lưu được cấu hình worker');
         if (res.ok) {
           const saved = await res.json();
           if (lastStatusData && lastStatusData.worker_settings) {
             lastStatusData.worker_settings.concurrency = saved.concurrency || currentConcurrencyMode;
           }
-          showToast(currentConcurrencyMode === 2 ? '⚡ Đã bật chế độ 2 luồng (So le GPU an toàn)!' : '🟢 Đã chuyển về 1 luồng xử lý (An toàn tuyệt đối)!', 'success');
+          applyWorkerConcurrencyUI(saved.effective_concurrency || 1);
+          showToast('Đã lưu. Số worker hiệu lực: ' + (saved.effective_concurrency || 1), 'success');
         }
       } catch (e) {
         showToast('Lỗi lưu số luồng: ' + e.message, 'error');
+        await fetchStatus();
       }
     }
 
@@ -3567,7 +3626,7 @@ header {
 
       let currentStep = Number(data.step) || 0;
       if (currentStep === 3.5) currentStep = 4;
-      if (data.total_steps === 6 && currentStep >= 4) {
+      else if (data.total_steps === 6 && currentStep >= 4) {
         if (currentStep === 4) currentStep = 5;
         else if (currentStep === 5) currentStep = 6;
         else if (currentStep === 6) currentStep = 8;
@@ -3733,11 +3792,20 @@ header {
     }
 
     let lastStatusData = null;
+    let stopRequestPending = false;
+    let stopPendingExecution = null;
     function renderStatus(state) {
       lastStatusData = state;
       updateVramUI(state.vram, state.worker_settings);
       updateRamUI(state.ram);
       const status = String(state.status || 'idle');
+      const execution = state.execution_id || state.job_id;
+      if (!stopRequestPending && (execution !== stopPendingExecution || (!state.active && !state.occupies_slot))) {
+        stopPendingExecution = null;
+      }
+      const stopping = status === 'stopping' || state.stop_state === 'stopping' || stopRequestPending
+        || Boolean(stopPendingExecution && execution === stopPendingExecution);
+      const controls = state.capabilities || state;
 
       const failed = status === 'error' || state.video_status === 'error';
       const interrupted = status === 'interrupted';
@@ -3762,7 +3830,7 @@ header {
       const btnStartPhoi = document.getElementById('btnStartPhoi');
       const btnStartPhoiText = document.getElementById('btnStartPhoiText');
       if (btnStartPhoi) {
-        btnStartPhoi.disabled = Boolean(state.active);
+        btnStartPhoi.disabled = controls.can_start !== true;
         if (state.active) {
           btnStartPhoi.style.opacity = '0.6';
           btnStartPhoi.style.cursor = 'not-allowed';
@@ -3780,7 +3848,7 @@ header {
       const currentVideoName = document.getElementById('currentVideoName');
       const btnStop = document.getElementById('btnStop');
       const btnRunHero = document.getElementById('btnRunHero');
-      btnRunHero.disabled = Boolean(state.active);
+      btnRunHero.disabled = controls.can_start !== true;
 
       // Buttons control
       if (terminal && !videoDone) {
@@ -3794,8 +3862,10 @@ header {
         btnRunHero.style.display = 'inline-flex';
       }
 
-      document.getElementById('btnPauseVideo').disabled = !isRunning || pauseState !== 'running';
-      document.getElementById('btnResumeVideo').disabled = !isPaused;
+      document.getElementById('btnPauseVideo').disabled = controls.can_pause !== true;
+      document.getElementById('btnResumeVideo').disabled = controls.can_resume !== true;
+      btnStop.disabled = stopping || controls.can_stop === false;
+      btnStop.innerHTML = stopping ? '⏳ Đang dừng...' : '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg> Dừng Xử Lý';
 
       // Check worker concurrency mode
       const isDual = currentConcurrencyMode === 2;
@@ -3884,6 +3954,14 @@ header {
         document.getElementById('valEta').textContent = state.eta_seconds ? `~${formatTime(state.eta_seconds)}` : '--';
         document.getElementById('valQueue').textContent = `${state.queue_index || 0} / ${state.queue_total || 0}`;
       }
+      if (stopping) {
+        statusTitle.textContent = 'ĐANG DỪNG · CHỜ TIẾN TRÌNH KẾT THÚC';
+        btnStop.style.display = 'inline-flex'; btnStop.disabled = true;
+        btnRunHero.disabled = true;
+        document.getElementById('btnPauseVideo').disabled = true;
+        document.getElementById('btnResumeVideo').disabled = true;
+      }
+      updateBatchEta();
     }
 
 let inputUploading=false;
@@ -4084,6 +4162,7 @@ let inputUploading=false;
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         if (!acceptDashboardList('phoi', data)) return;
+        markDashboardRead('phoi');
         if (dashboardInputPath && dashboardInputPath !== data.path) { selectedPhoiFiles.clear(); dashboardLists.phoi.fingerprint = ''; dashboardLists.phoi.offset = 0; dashboardLists.phoi.dirty = true; updatePhoiBulkBar(); }
         dashboardInputPath = data.path;
         const pathInput=document.getElementById('inputFolderPath'); if(!pathInput.dataset.saved || pathInput.value===pathInput.dataset.saved)pathInput.value=data.path;pathInput.dataset.saved=data.path;
@@ -4113,7 +4192,7 @@ let inputUploading=false;
           if (['error','invalid','unverified'].includes(f.status)) badgeClass = 'status-' + f.status;
           const safeName = escapeHtml(String(f.name));
           const encodedName = encodeURIComponent(String(f.name)).replace(/'/g, '%27');
-          const sequenceNumber = Number(f.sequence) || index + 1;
+          const sequenceNumber = Number(f.sequence) || (Number(data.offset) || 0) + index + 1;
           const rowStatusLabel = activeEdit
             ? 'Đang edit · video ' + (activeEdit.index || '?') + ' / ' + (activeEdit.total || '?') + (activeEdit.worker ? ' · luồng ' + activeEdit.worker : '')
             : f.status_label;
@@ -4145,7 +4224,7 @@ let inputUploading=false;
         }).join('');
 
       } catch (err) {
-        console.error('Error fetching phoi:', err);
+        markDashboardRead('phoi', err);
         showDashboardListError('phoi', err);
       } finally {
         endDashboardList('phoi');
@@ -4161,6 +4240,7 @@ let inputUploading=false;
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         if (!acceptDashboardList('banve', data)) return;
+        markDashboardRead('banve');
         
         setDashboardOutputPath(data.path);
         const countText = `${data.total_count} video ${DASHBOARD_TOOL} (${data.total_size_mb} MB)`;
@@ -4209,7 +4289,7 @@ let inputUploading=false;
         decorateBanveQcBadges(sliceFiles);
 
       } catch (err) {
-        console.error('Error fetching banve:', err);
+        markDashboardRead('banve', err);
         showDashboardListError('banve', err);
       } finally {
         endDashboardList('banve');
@@ -4714,9 +4794,11 @@ let inputUploading=false;
           if (typeof data.logs !== 'string') throw new Error('Dữ liệu log không hợp lệ');
           if (data.logs !== logText || !logText || logDisconnected) { logText = data.logs; renderLogs(); }
           logDisconnected = false;
+          markDashboardRead('logs');
           document.getElementById('logDot').title = 'Kết nối nhật ký đang hoạt động';
         } catch (err) {
           logDisconnected = true;
+          markDashboardRead('logs', err);
           document.getElementById('logSummaryBadge').textContent = 'Không tải được nhật ký. Đang giữ dữ liệu cũ; sẽ tự thử lại.';
         } finally { logPending = false; }
       }
@@ -4736,6 +4818,7 @@ let inputUploading=false;
         showToast('Vui lòng chờ tải video lên hoàn tất.', 'warning');
         return;
       }
+      if (selectedPhoiFiles.size) return openPreRunSummaryModal();
       if (lastStatusData && lastStatusData.active) {
         showToast('Hệ thống đang xử lý video khác, vui lòng đợi!', 'warning');
         return;
@@ -4760,6 +4843,7 @@ let inputUploading=false;
       }
 
       try {
+        await waitForV1Settings();
         const modeToSend = (typeof currentV1Mode !== 'undefined' ? currentV1Mode : 'AUTO');
         const res = await fetch('/api/run-batch', {
           method: 'POST',
@@ -4787,10 +4871,19 @@ let inputUploading=false;
     }
 
     async function controlVideo(action){
-      try{const r=await fetch('/api/'+action+'-video',{method:'POST',headers:{'X-Dashboard-Input':'1'}});const d=await r.json();if(!r.ok)throw Error(d.detail||'Không gửi được lệnh');document.getElementById('stepDescription').textContent=d.message;}catch(e){alert(e.message);}
+      try {
+        if (!['pause','resume'].includes(action)) return;
+        const identity = {execution_id:lastStatusData?.execution_id, generation:lastStatusData?.generation};
+        if (!identity.execution_id || !Number.isInteger(identity.generation)) throw Error('Chưa xác minh được tiến trình đang hiển thị. Hãy tải lại trạng thái.');
+        const r=await fetch('/api/'+action+'-video',{method:'POST',headers:{'X-Dashboard-Input':'1','Content-Type':'application/json'},body:JSON.stringify(identity)});
+        const d=await r.json(); if(!r.ok) throw Error(apiErrorMessage(d,'Tiến trình đã thay đổi; hãy tải lại trạng thái.'));
+        document.getElementById('stepDescription').textContent=d.message;
+      } catch(e) { alert(e.message); }
     }
     async function stopBatch() {
-      if (!confirm('Bạn có chắc chắn muốn dừng tiến trình xử lý hiện tại không?')) return;
+      if (stopRequestPending) return;
+      stopRequestPending = true;
+      stopPendingExecution = lastStatusData?.execution_id || lastStatusData?.job_id || null;
       const btnStop = document.getElementById('btnStop');
       const statusTitle = document.getElementById('statusTitle');
       const stepDescription = document.getElementById('stepDescription');
@@ -4802,22 +4895,27 @@ let inputUploading=false;
         statusTitle.innerHTML = '<span class="dot dot-yellow"></span> ĐANG DỪNG TIẾN TRÌNH...';
       }
       if (stepDescription) {
-        stepDescription.textContent = 'Đang dừng và dọn dẹp các tiến trình ngầm...';
+        stepDescription.textContent = 'Đang gửi yêu cầu dừng...';
       }
       try {
-        const res = await fetch('/api/stop-batch', { method: 'POST' });
+        const res = await fetch('/api/stop-batch', { method: 'POST', signal: AbortSignal.timeout(10000) });
         const data = await res.json();
+        if (!res.ok) throw new Error(apiErrorMessage(data, 'Máy chủ chưa nhận yêu cầu dừng.'));
+        if (data.status !== 'stopping') stopPendingExecution = null;
         if (stepDescription && data.message) {
           stepDescription.textContent = data.message;
         }
-        await fetchStatus();
       } catch (err) {
-        alert('Lỗi dừng batch: ' + err.message);
+        stopPendingExecution = null;
+        if (stepDescription) stepDescription.textContent = 'Chưa xác nhận được yêu cầu dừng. Hãy kiểm tra trạng thái và thử lại.';
+        showToast('Chưa xác nhận dừng: ' + err.message, 'error');
       } finally {
-        if (btnStop) {
+        stopRequestPending = false;
+        if (btnStop && !stopPendingExecution) {
           btnStop.disabled = false;
           btnStop.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg> Dừng Xử Lý';
         }
+        fetchStatus();
         refreshAll();
       }
     }
@@ -4946,6 +5044,8 @@ let inputUploading=false;
         }
         const isFirst = index === 0;
         const isLast = index === n - 1;
+        const holdLabel = item.hold?.kind === 'scheduled' ? 'Đang giữ theo lịch'
+          : item.hold?.kind === 'manual' ? 'Chờ lệnh chạy' : '';
         const posText = String(item.position || (index + 1));
         const posBadge = isFirst
           ? '<span style="display:inline-block;padding:1px 6px;border-radius:4px;background:rgba(34,197,94,0.15);border:1px solid rgba(34,197,94,0.35);font-weight:700;font-size:11px;font-family:ui-monospace,monospace;color:#4ade80;" title="Sẽ xử lý ngay tiếp theo">#' + escapeHtml(posText) + '</span>'
@@ -4953,7 +5053,9 @@ let inputUploading=false;
 
         return '<tr draggable="true" ondragstart="onQueueDragStart(event, ' + index + ')" ondragover="onQueueDragOver(event)" ondrop="onQueueDrop(event, ' + index + ')" ondragend="onQueueDragEnd(event)" style="cursor:grab;">' +
           '<td style="font-variant-numeric: tabular-nums;">' + posBadge + '</td>' +
-          '<td style="font-weight:500;max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(item.name) + '">' + escapeHtml(item.name) + '</td>' +
+          '<td style="font-weight:500;max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(item.name) + '">' + escapeHtml(item.name) +
+            (holdLabel ? ' <span class="badge">' + holdLabel + '</span>' : '') +
+            (item.hold?.message ? '<div style="white-space:normal;color:#fbbf24">' + escapeHtml(item.hold.message) + '</div>' : '') + '</td>' +
           '<td class="queue-source-cell"><div class="queue-source-labels">' +
             '<span class="badge" style="' + badgeStyle + 'font-size:10.5px;padding:1px 6px;border-radius:4px;">' + platform + '</span>' +
             (item.router_info ? '<span class="badge queue-router-badge" style="font-size:10px;padding:1px 6px;border-radius:4px;margin-left:4px;background:rgba(168,85,247,0.18);color:#c084fc;border:1px solid rgba(168,85,247,0.35);font-weight:600;" title="Bộ điều phối dự kiến: ' + escapeHtml(item.router_info.router_label) + '">' + escapeHtml(item.router_info.router_label) + '</span>' : '') +
@@ -4978,69 +5080,76 @@ let inputUploading=false;
       }).join('');
     }
 
-    async function moveQueueItem(index, action) {
-      if (queueMoving) return;
-      queueMoving = true;
-      try {
-        const res = await fetch('/api/queue/move', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ index: index, action: action })
-        });
-        const data = await res.json();
-        if (res.ok && data.status === 'success') {
-          showToast(data.message || 'Đã thay đổi thứ tự hàng chờ!', 'success');
-          if (Array.isArray(data.items)) {
-            renderQueueTable(data.items);
-            document.getElementById('queueBadge').textContent = data.items.length + ' video';
-          }
-        } else if (data.message && data.status !== 'unchanged') {
-          showToast(data.message, 'info');
-        }
-      } catch (err) {
-        showToast('Lỗi khi đổi thứ tự: ' + err.message, 'error');
-      } finally {
-        queueMoving = false;
-      }
+    let queueSnapshot = null;
+    let pendingQueueOperation = null;
+    try { pendingQueueOperation = JSON.parse(sessionStorage.getItem('dashboardQueueOperation') || 'null'); } catch (_) {}
+    function storeQueueOperation(operation) {
+      pendingQueueOperation = operation;
+      try { if (operation) sessionStorage.setItem('dashboardQueueOperation', JSON.stringify(operation)); else sessionStorage.removeItem('dashboardQueueOperation'); } catch (_) {}
     }
-
-    async function deleteQueueItem(index) {
-      if (!confirm('Bạn có chắc muốn xóa video này khỏi hàng chờ không?')) return;
+    function queueOperationNotice(text, error = false) {
+      const el = document.getElementById('queueMessage');
+      if (el) { el.textContent = text; el.style.color = error ? '#f87171' : 'var(--text-muted)'; }
+    }
+    async function reconcileQueueOperation() {
+      if (!pendingQueueOperation) return true;
+      const op = pendingQueueOperation;
+      const res = await fetch('/api/queue/operations/' + encodeURIComponent(op.operation_id), {cache:'no-store',signal:AbortSignal.timeout(8000)});
+      if (res.status === 404) { queueOperationNotice('Chưa tìm thấy yêu cầu. Bấm lại cùng thao tác để gửi lại.'); return 'missing'; }
+      const data = await res.json();
+      if (!res.ok) throw new Error(apiErrorMessage(data, 'Không đối soát được yêu cầu'));
+      if (['applied','already_absent'].includes(data.state)) {
+        storeQueueOperation(null); showToast('Queue owner đã xác nhận thao tác.', 'success'); return true;
+      }
+      if (['too_late','conflict','needs_review','expired','failed','rejected'].includes(data.state)) {
+        storeQueueOperation(null);
+        queueOperationNotice(data.message || 'Yêu cầu chưa được áp dụng: ' + data.state, true);
+        showToast('Yêu cầu chưa được áp dụng: ' + data.state, 'error'); return true;
+      }
+      queueOperationNotice('Đang chờ queue owner xác nhận; chưa thay đổi danh sách.'); return false;
+    }
+    async function submitQueueOperation(endpoint, targetIds, extra = {}) {
       if (queueMoving) return;
+      if (!queueSnapshot || !Number.isInteger(queueSnapshot.revision) || !targetIds.length || targetIds.some(id => !id)) {
+        showToast('Cần tải lại hàng chờ trước khi thao tác.', 'error'); return;
+      }
       queueMoving = true;
       try {
-        const res = await fetch('/api/queue/delete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ index: index, job_id: (window.queueDeleteIds || [])[index] })
-        });
-        const data = await res.json();
-        if (res.ok && data.status === 'pending') {
-          showToast(data.message, 'info');
-          let state = 'pending';
-          for (let attempt = 0; attempt < 8 && state === 'pending'; attempt++) {
-            await new Promise(resolve => setTimeout(resolve, 500));
-            const ack = await fetch('/api/queue/operations/' + data.operation_id);
-            if (!ack.ok) break;
-            state = (await ack.json()).state;
-          }
-          if (state === 'applied' || state === 'already_absent') showToast('Video đã được loại khỏi hàng chờ.', 'success');
-          else if (state === 'too_late') showToast('Video đã bắt đầu xử lý; yêu cầu xóa không được áp dụng.', 'error');
-          else showToast('Yêu cầu đang chờ bot xác nhận.', 'info');
-          if (Array.isArray(data.items)) {
-            renderQueueTable(data.items);
-            document.getElementById('queueBadge').textContent = data.items.length + ' video';
-          } else {
-            await fetchQueue();
-          }
+        if (pendingQueueOperation) {
+          const previous = pendingQueueOperation;
+          if (await reconcileQueueOperation() !== 'missing') return;
+          if (previous.endpoint !== endpoint || JSON.stringify(previous.payload.target_job_ids) !== JSON.stringify(targetIds)) return;
         } else {
-          showToast('Lỗi khi xóa: ' + (data.detail || data.message || 'Không thể xóa'), 'error');
+          const payload = {target_job_ids:targetIds,expected_revision:queueSnapshot.revision,operation_id:newOperationId('queue'),...extra};
+          storeQueueOperation({endpoint,payload,operation_id:payload.operation_id});
         }
-      } catch (err) {
-        showToast('Lỗi kết nối: ' + err.message, 'error');
-      } finally {
-        queueMoving = false;
-      }
+        const payload = pendingQueueOperation.payload;
+        queueOperationNotice('Đang gửi yêu cầu; chờ xác nhận…');
+        const res = await fetch('/api/queue/' + endpoint, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+        const data = await res.json();
+        if (!res.ok) { if (res.status < 500) storeQueueOperation(null); throw new Error(apiErrorMessage(data, 'Không tiếp nhận được yêu cầu')); }
+        queueOperationNotice('Đã lưu yêu cầu; đang chờ queue owner xác nhận.');
+        for (let attempt = 0; attempt < 8 && pendingQueueOperation; attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          if (await reconcileQueueOperation()) break;
+        }
+      } catch (error) {
+        queueOperationNotice('Chưa xác nhận kết quả: ' + error.message, true);
+        if (pendingQueueOperation) { try { await reconcileQueueOperation(); } catch (_) {} }
+      } finally { queueMoving = false; await fetchQueue(); }
+    }
+    async function moveQueueItem(index, action) {
+      const ids = (window.queueDeleteIds || []).slice();
+      if (index < 0 || index >= ids.length) return;
+      const to = action === 'top' ? 0 : action === 'up' ? index - 1 : index + 1;
+      if (to < 0 || to >= ids.length) return;
+      const [moved] = ids.splice(index,1); ids.splice(to,0,moved);
+      return submitQueueOperation('move', ids, {ordered_job_ids:ids});
+    }
+    async function deleteQueueItem(index) {
+      if (!confirm('Xóa video này khỏi hàng chờ? Video đang xử lý sẽ không bị xóa.')) return;
+      const id = (window.queueDeleteIds || [])[index];
+      return submitQueueOperation('delete', [id]);
     }
 
     async function fetchQueue() {
@@ -5050,85 +5159,33 @@ let inputUploading=false;
         const response = await fetch('/api/queue', {cache:'no-store', signal:AbortSignal.timeout(8000)});
         if (!response.ok) throw new Error('Queue unavailable');
         const data = await response.json();
+        queueSnapshot = data; markDashboardRead('queue');
         document.getElementById('queueBadge').textContent = (data.items ? data.items.length : 0) + ' video';
         document.getElementById('queueMessage').textContent = data.message || 'Thứ tự xử lý từ trên xuống • Dùng nút ⬆ để ưu tiên video lên trước.';
         renderQueueTable(data.items || []);
+        if (pendingQueueOperation) await reconcileQueueOperation();
       } catch (error) {
+        markDashboardRead('queue', error);
         document.getElementById('queueMessage').textContent = 'Chưa kết nối được hàng đợi; dữ liệu cũ (nếu có) chưa được cập nhật.';
       } finally { queuePending = false; }
     }
 
 
     async function processQueue() {
-      const btn = document.getElementById('btnProcessQueue');
-      const msg = document.getElementById('queueMessage');
-      if (btn) btn.disabled = true;
-      try {
-        if (msg) msg.textContent = 'Đang gửi lệnh kích hoạt hàng chờ...';
-        const res = await fetch('/api/queue/process', { method: 'POST' });
-        const data = await res.json();
-        if (res.ok && data.status !== 'empty') {
-          showToast(data.message || 'Đã kích hoạt xử lý hàng chờ thành công!', 'success');
-          if (msg) {
-            msg.textContent = data.message || 'Đã kích hoạt xử lý hàng chờ!';
-            msg.style.color = '#34d399';
-          }
-          await fetchQueue();
-        } else {
-          showToast(data.detail || data.message || 'Hàng chờ hiện đang trống', data.status === 'empty' ? 'info' : 'error');
-          if (msg) {
-            msg.textContent = (data.detail || data.message || 'Không thể kích hoạt hàng chờ');
-            msg.style.color = data.status === 'empty' ? 'var(--text-muted)' : '#f87171';
-          }
-        }
-      } catch (err) {
-        showToast('Lỗi kết nối: ' + err.message, 'error');
-        if (msg) {
-          msg.textContent = 'Lỗi kết nối: ' + err.message;
-          msg.style.color = '#f87171';
-        }
-      } finally {
-        setTimeout(() => {
-          if (btn) btn.disabled = false;
-          if (msg) msg.style.color = 'var(--text-muted)';
-        }, 3000);
+      const now = Date.now() / 1000;
+      const invalidSources = ['missing_local_source','conflicting_local_source','unverified_local_source','changed_local_source'];
+      const ids = (queueSnapshot?.items || []).filter(item => !invalidSources.includes(item.hold?.reason_code) &&
+        (item.hold?.kind !== 'scheduled' || (Number.isFinite(item.hold.expires_at) && now > item.hold.expires_at))).map(item => item.job_id);
+      if (!ids.length && queueSnapshot?.items?.length) {
+        showToast('Các video đang được giữ theo lịch hoặc chưa xác minh nguồn. Xem thông báo ở từng video trước khi chạy.', 'info');
+        return;
       }
+      return submitQueueOperation('process', ids);
     }
-
     async function clearQueue() {
-      if (!confirm('Bạn có chắc muốn xóa tất cả video đang chờ trong hàng đợi không?')) return;
-      const btn = document.getElementById('btnClearQueue');
-      const msg = document.getElementById('queueMessage');
-      if (btn) btn.disabled = true;
-      try {
-        const res = await fetch('/api/queue/clear', { method: 'POST' });
-        const data = await res.json();
-        if (res.ok) {
-          showToast(data.message || 'Đã xóa sạch hàng chờ.', 'success');
-          if (msg) {
-            msg.textContent = data.message || 'Đã xóa sạch hàng chờ.';
-            msg.style.color = 'var(--text-muted)';
-          }
-          await fetchQueue();
-        } else {
-          showToast('Lỗi: ' + (data.detail || data.message), 'error');
-          if (msg) {
-            msg.textContent = 'Lỗi: ' + (data.detail || data.message);
-            msg.style.color = '#f87171';
-          }
-        }
-      } catch (err) {
-        showToast('Lỗi kết nối: ' + err.message, 'error');
-        if (msg) {
-          msg.textContent = 'Lỗi kết nối: ' + err.message;
-          msg.style.color = '#f87171';
-        }
-      } finally {
-        setTimeout(() => {
-          if (btn) btn.disabled = false;
-          if (msg) msg.style.color = 'var(--text-muted)';
-        }, 2000);
-      }
+      const ids = (window.queueDeleteIds || []).slice();
+      if (!confirm('Xóa ' + ids.length + ' video đang chờ trong danh sách đã xem? Video đang xử lý được giữ lại.')) return;
+      return submitQueueOperation('clear', ids);
     }
     // ===== MIXER AUDIO CONTROLS =====
     async function loadMixerSettings() {
@@ -5542,7 +5599,55 @@ let inputUploading=false;
 
     // ===== V1 UPGRADE SML ROUTER & FEATURE FLAGS =====
     let currentV1Mode = 'AUTO';
-    let v1ModeSaving = false;
+    const v1SettingWrites = new Map();
+
+    function saveV1Setting(key, value, previous, apply, successMessage, silent = false) {
+      let state = v1SettingWrites.get(key);
+      if (!state) {
+        state = {confirmed: previous, revision: 0, tail: Promise.resolve()};
+        v1SettingWrites.set(key, state);
+      }
+      const revision = ++state.revision;
+      state.error = null;
+      apply(value);
+      // Serialize each setting's writes; skip intermediate clicks still in the queue.
+      state.tail = state.tail.then(async () => {
+        if (revision !== state.revision) return;
+        const res = await fetch('/api/v1/feature-flags', {method: 'POST',
+          headers: {'Content-Type': 'application/json'}, body: JSON.stringify({[key]: value})});
+        const data = await res.json();
+        if (!res.ok || data.status !== 'ok') throw new Error(data.message || data.detail || 'Không lưu được cấu hình');
+        state.confirmed = data.flags?.[key] ?? value;
+        if (revision === state.revision) {
+          apply(state.confirmed);
+          if (!silent) showToast(successMessage, 'success');
+        }
+      }).catch(error => {
+        if (revision === state.revision) {
+          state.error = error;
+          apply(state.confirmed);
+          if (!silent) showToast(error.message, 'error');
+        }
+      });
+      return state.tail;
+    }
+
+    async function waitForV1Settings() {
+      let timer;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Cấu hình model vẫn đang lưu. Hãy chờ xác nhận rồi bấm chạy lại.')), 10000);
+      });
+      try {
+        while (true) {
+          const writes = Array.from(v1SettingWrites.values(), state => state.tail);
+          await Promise.race([Promise.all(writes), timeout]);
+          if (Array.from(v1SettingWrites.values()).some((state, index) => state.tail !== writes[index])) continue;
+          const failed = Array.from(v1SettingWrites.values()).find(state => state.error);
+          if (failed) throw new Error('Chưa lưu được cấu hình model: ' + failed.error.message + '. Hãy chọn lại model trước khi chạy.');
+          return;
+        }
+      } finally { clearTimeout(timer); }
+    }
 
     async function selectV1Mode(mode, persist = true) {
       const descriptions = {
@@ -5554,32 +5659,19 @@ let inputUploading=false;
       if (!Object.prototype.hasOwnProperty.call(descriptions, mode)) return;
       const buttons = document.querySelectorAll('.v1-mode-btn');
       const group = document.querySelector('.v1-mode-grid');
-      if (persist) {
-        if (v1ModeSaving) return;
-        v1ModeSaving = true;
-        buttons.forEach(button => { button.disabled = true; });
-        group?.setAttribute('aria-busy', 'true');
-        try {
-          const res = await fetch('/api/v1/feature-flags', {method:'POST',
-            headers:{'Content-Type':'application/json'}, body:JSON.stringify({V1_VIDEO_MODE:mode})});
-          const data = await res.json();
-          if (!res.ok || data.status !== 'ok') throw new Error(data.detail || data.message || 'Không lưu được chế độ');
-        } catch (error) {
-          showToast(error.message, 'error');
-          return;
-        } finally {
-          v1ModeSaving = false;
-          buttons.forEach(button => { button.disabled = false; });
-          group?.removeAttribute('aria-busy');
-        }
-      }
-      currentV1Mode = mode;
-      const descEl = document.getElementById('v1ModeDesc');
-      if (descEl) descEl.innerHTML = descriptions[mode];
-      buttons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.mode === mode)));
-      const badge = document.getElementById('v1RouterModeBadge');
-      if (badge) badge.textContent = mode;
-      if (persist) showToast('Đã lưu chế độ ' + mode + ' cho tác vụ mới', 'success');
+      const apply = selected => {
+        currentV1Mode = selected;
+        const descEl = document.getElementById('v1ModeDesc');
+        if (descEl) descEl.innerHTML = descriptions[selected];
+        buttons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.mode === selected)));
+        const badge = document.getElementById('v1RouterModeBadge');
+        if (badge) badge.textContent = selected;
+      };
+      if (!persist) { apply(mode); return; }
+      group?.setAttribute('aria-busy', 'true');
+      await saveV1Setting('V1_VIDEO_MODE', mode, currentV1Mode, apply,
+        'Đã lưu chế độ ' + mode + ' cho tác vụ mới');
+      if (currentV1Mode === v1SettingWrites.get('V1_VIDEO_MODE').confirmed) group?.removeAttribute('aria-busy');
     }
 
     let currentAsrModel = 'whisper_sensevoice';
@@ -5662,51 +5754,25 @@ let inputUploading=false;
     let sensevoiceAsrReady = true;
 
     async function selectAsrModel(modelId, silent = false) {
-      const previousModel = currentAsrModel;
+      if (!['whisper_sensevoice', 'whisper_turbo', 'sensevoice_small'].includes(modelId)) return;
       if ((modelId === 'sensevoice_small' || modelId === 'whisper_sensevoice') && sensevoiceAsrReady === false) {
         showToast('SenseVoice chưa sẵn sàng trên máy này.', 'warning');
-        updateAsrModelUI(previousModel);
         return;
       }
-      updateAsrModelUI(modelId);
       const labelMap = {
         whisper_sensevoice: 'Hybrid: Faster-Whisper + SenseVoice-Small (CTC 60ms)',
         whisper_turbo: 'Faster-Whisper Large-v3 Turbo',
         sensevoice_small: 'SenseVoice-Small (ONNX INT8 Siêu Tốc)'
       };
-      try {
-        const res = await fetch('/api/v1/feature-flags', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            V1_ASR_MODEL: modelId
-          })
-        });
-        if (res.ok && !silent) {
-          showToast(`Đã chuyển mô hình ASR: ${labelMap[modelId] || modelId}`, 'success');
-        } else if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          updateAsrModelUI(previousModel);
-          if (!silent) showToast('Không thể chuyển mô hình ASR: ' + (err.message || err.detail || 'runtime chưa sẵn sàng'), 'warning');
-        }
-      } catch (e) {
-        updateAsrModelUI(previousModel);
-        if (!silent) showToast('Lỗi cập nhật mô hình ASR: ' + e.message, 'error');
-      }
+      await saveV1Setting('V1_ASR_MODEL', modelId, currentAsrModel, updateAsrModelUI,
+        `Đã lưu ASR cho tác vụ mới: ${labelMap[modelId]}`, silent);
     }
 
     async function saveLengthProfile(select) {
-      select.disabled = true;
-      try {
-        const res = await fetch('/api/v1/feature-flags', {method:'POST',
-          headers:{'Content-Type':'application/json'}, body:JSON.stringify({[select.id]:select.value})});
-        const data = await res.json();
-        if (!res.ok || data.status !== 'ok') throw new Error(data.detail || data.message || 'Không lưu được model');
-        showToast('Đã lưu model cho job mới; giọng đọc giữ nguyên', 'success');
-      } catch (error) {
-        showToast(error.message, 'error');
-        await loadV1UpgradeSettings();
-      } finally { select.disabled = false; }
+      const fallback = select.id.endsWith('ASR_MODEL') ? 'inherit' : select.id.includes('SHORT') ? 'roformer' : 'demucs';
+      await saveV1Setting(select.id, select.value, select.dataset.savedValue || fallback,
+        value => { select.value = value; }, 'Đã lưu model cho tác vụ mới');
+      select.dataset.savedValue = v1SettingWrites.get(select.id).confirmed;
     }
 
     async function loadV1UpgradeSettings() {
@@ -5714,10 +5780,13 @@ let inputUploading=false;
         const res = await fetch('/api/v1/feature-flags');
         if (res.ok) {
           const flags = await res.json();
-          await selectV1Mode(flags.V1_VIDEO_MODE || 'AUTO', false);
+          if (!v1SettingWrites.has('V1_VIDEO_MODE')) await selectV1Mode(flags.V1_VIDEO_MODE || 'AUTO', false);
           for (const id of ['V1_SHORT_SEPARATOR','V1_LONG_SEPARATOR','V1_SHORT_ASR_MODEL','V1_LONG_ASR_MODEL']) {
             const el = document.getElementById(id);
-            if (el) el.value = flags[id] || (id.endsWith('ASR_MODEL') ? 'inherit' : id.includes('SHORT') ? 'roformer' : 'demucs');
+            if (el && !v1SettingWrites.has(id)) {
+              el.value = flags[id] || (id.endsWith('ASR_MODEL') ? 'inherit' : id.includes('SHORT') ? 'roformer' : 'demucs');
+              el.dataset.savedValue = el.value;
+            }
           }
 
 
@@ -5752,10 +5821,9 @@ let inputUploading=false;
           const asrChunk = document.getElementById('flagAsrChunking');
           if (asrChunk) asrChunk.checked = flags.V1_ASR_CHUNKING !== false;
 
-          if (flags.V1_ASR_MODEL === 'whisper_turbo' || flags.V1_ASR_MODEL === 'sensevoice_small') {
-            updateAsrModelUI(flags.V1_ASR_MODEL);
-          } else {
-            updateAsrModelUI('whisper_sensevoice');
+          if (!v1SettingWrites.has('V1_ASR_MODEL')) {
+            updateAsrModelUI(['whisper_turbo', 'sensevoice_small'].includes(flags.V1_ASR_MODEL)
+              ? flags.V1_ASR_MODEL : 'whisper_sensevoice');
           }
 
           const qcSelect = document.getElementById('selectQcPolicy');
@@ -6193,8 +6261,8 @@ let inputUploading=false;
 
   async function openRecoveryModal(encodedName) {
     const filename = decodeURIComponent(encodedName);
-    const cleanName = filename.replace(/\.[^/.]+$/, "");
-    currentRecoveryJobId = cleanName;
+    currentRecoveryJobId = filename;
+    currentRecoveryPlan = null;
 
     const modal = document.getElementById('recoveryPlanModal');
     if (!modal) return;
@@ -6213,15 +6281,17 @@ let inputUploading=false;
     modal.style.display = 'flex';
 
     try {
-      const res = await fetch(`/api/jobs/${encodeURIComponent(cleanName)}/resume-plan`);
+      const res = await fetch(`/api/jobs/${encodeURIComponent(filename)}/resume-plan`);
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.detail || `Lỗi HTTP ${res.status}`);
       }
       const plan = await res.json();
+      if (currentRecoveryJobId !== filename) return;
       currentRecoveryPlan = plan;
       renderRecoveryPlanUI(plan);
     } catch (err) {
+      if (currentRecoveryJobId !== filename) return;
       document.getElementById('recoveryStatusTag').textContent = 'Lỗi phân tích';
       document.getElementById('recoverySummaryText').textContent = 'Không tải được kế hoạch: ' + err.message;
       document.getElementById('recoveryStagesBody').innerHTML = `<tr><td colspan="3" style="text-align:center; padding:16px; color:#f87171;">Lỗi: ${escapeHtml(err.message)}</td></tr>`;
@@ -6271,10 +6341,11 @@ let inputUploading=false;
     }
 
     const src = plan.source_file;
-    const srcText = src && src.size_mb > 0 
-      ? `${src.filename} (${src.size_mb} MB)` 
+    const srcText = src && src.fingerprint
+      ? `${src.path} (${src.size_mb} MB)`
       : (src ? src.path : 'Không tìm thấy');
     document.getElementById('recoverySourceInfo').textContent = srcText;
+    document.getElementById('recoveryOutputPath').textContent = plan.output_path || 'Chưa xác định';
 
     const sm = plan.summary || {};
     document.getElementById('recoverySummaryText').textContent = 
@@ -6331,7 +6402,7 @@ let inputUploading=false;
       btnUnpause.style.cursor = 'not-allowed';
     }
 
-    const canRecover = (sm.reusable_stages > 0) && (plan.retry_count < 3);
+    const canRecover = Boolean(plan.can_recover);
     btnRecover.disabled = !canRecover;
     if (canRecover) {
       btnRecover.style.opacity = '1';
@@ -6341,23 +6412,25 @@ let inputUploading=false;
       btnRecover.style.cursor = 'not-allowed';
     }
 
-    btnRestart.disabled = false;
+    btnRestart.disabled = !plan.can_restart;
 
     const statusAction = document.getElementById('recoveryActionStatus');
     if (plan.retry_count >= 3) {
-      statusAction.innerHTML = '<span style="color:#f87171;">⚠️ Đã đạt giới hạn 3 lần thử. Khuyến nghị "Chạy lại từ đầu" để làm sạch.</span>';
+      statusAction.innerHTML = '<span style="color:#f87171;">Đã đạt giới hạn 3 lần thử. Chạy lại sẽ dùng thư mục làm việc mới.</span>';
     } else if (plan.can_unpause) {
       statusAction.innerHTML = '<span style="color:#38bdf8;">Tác vụ đang có cờ tạm dừng. Bạn có thể nhấn "Tiếp tục" ngay.</span>';
     } else if (canRecover) {
       statusAction.innerHTML = `<span style="color:#34d399;">Sẵn sàng khôi phục từ bước "${sm.first_rerun_stage}" (tiết kiệm ${sm.reusable_stages} bước đã xử lý).</span>`;
     } else {
-      statusAction.innerHTML = '<span>Tác vụ chưa có checkpoint hợp lệ, nên chọn "Chạy lại từ đầu".</span>';
+      statusAction.textContent = plan.can_restart
+        ? 'Có thể chạy lại video trong thư mục làm việc mới.'
+        : 'Hãy kiểm tra thông tin nguồn và đích trước khi chạy.';
     }
   }
 
   async function executeRecoveryAction(mode) {
     if (!currentRecoveryJobId) return;
-    if (!currentRecoveryPlan && mode !== 'restart' && mode !== 'unpause') {
+    if (!currentRecoveryPlan && mode !== 'unpause') {
       alert('Kế hoạch khôi phục chưa sẵn sàng!');
       return;
     }
@@ -6373,6 +6446,8 @@ let inputUploading=false;
       const payload = {
         mode: mode,
         plan_token: currentRecoveryPlan ? currentRecoveryPlan.plan_token : null,
+        execution_id: currentRecoveryPlan?.paused_execution?.execution_id,
+        generation: currentRecoveryPlan?.paused_execution?.generation,
       };
 
       const res = await fetch(`/api/jobs/${encodeURIComponent(currentRecoveryJobId)}/resume`, {
@@ -6392,7 +6467,7 @@ let inputUploading=false;
     } catch (err) {
       statusAction.innerHTML = `<span style="color:#f87171;">Lỗi: ${escapeHtml(err.message)}</span>`;
       showToast(`Lỗi thực thi: ${err.message}`, 'error');
-      document.getElementById('btnActionRestart').disabled = false;
+      document.getElementById('btnActionRestart').disabled = !currentRecoveryPlan?.can_restart;
     }
   }
 
@@ -6532,13 +6607,10 @@ let inputUploading=false;
         speed = parseFloat(document.getElementById('presetFormSpeed')?.value || 1.0);
         text = document.getElementById('presetVoicePreviewText')?.value || '';
       } else {
-        voiceId = document.getElementById('videoConfigVoice')?.value || '';
-        if (!voiceId) {
-          const presetId = document.getElementById('videoConfigPresetSelect')?.value;
-          const p = cachedPresets.find(item => item.id === presetId);
-          voiceId = p?.config?.voice_id || 'microsoft-hoaimy';
-        }
-        speed = parseFloat(document.getElementById('videoConfigSpeed')?.value || 1.0);
+        const effective = await refreshVideoConfigResolved();
+        if (!effective) { showToast('Chưa xác minh được cấu hình nghe thử.', 'error'); return; }
+        voiceId = effective.voice_id || '';
+        speed = Number(effective.speed);
         text = document.getElementById('videoVoicePreviewText')?.value || '';
       }
 
@@ -6949,6 +7021,53 @@ let inputUploading=false;
     }
 
     let currentEditingVideoName = null;
+    let videoConfigResolveSeq = 0;
+    const videoConfigNumericFields = {speed:'Speed', bgm_volume_db:'Bgm', dubbing_volume_db:'Dub'};
+
+    function collectVideoOverrides() {
+      const values = {};
+      for (const [key, suffix] of Object.entries(videoConfigNumericFields)) {
+        if (!document.getElementById('override' + suffix).checked) continue;
+        const input = document.getElementById('videoConfig' + suffix);
+        const value = Number(input.value);
+        if (!Number.isFinite(value) || value < Number(input.min) || value > Number(input.max)) throw new Error('Thông số ' + key + ' ngoài phạm vi cho phép.');
+        values[key] = value;
+      }
+      const voice = document.getElementById('videoConfigVoice').value;
+      const script = document.getElementById('videoConfigScriptMode').value;
+      if (voice) values.voice_id = voice;
+      if (script) values.script_mode = script;
+      return values;
+    }
+
+    async function refreshVideoConfigResolved() {
+      const sequence = ++videoConfigResolveSeq;
+      const status = document.getElementById('videoConfigResolveStatus');
+      const save = document.getElementById('btnSaveVideoConfig');
+      save.disabled = true; status.textContent = 'Đang xác minh cấu hình…';
+      try {
+        const res = await fetch('/api/config/resolve', {method:'POST', headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({preset_id:document.getElementById('videoConfigPresetSelect').value || null, overrides:collectVideoOverrides()})});
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Không đọc được cấu hình hiệu lực');
+        if (sequence !== videoConfigResolveSeq) return null;
+        const effective = data.effective_config || {};
+        for (const [key, suffix] of Object.entries(videoConfigNumericFields)) {
+          const input = document.getElementById('videoConfig' + suffix);
+          const overridden = document.getElementById('override' + suffix).checked;
+          input.disabled = !overridden;
+          if (!overridden && effective[key] !== undefined) input.value = effective[key];
+          input.title = overridden ? 'Ghi đè riêng của video' : 'Theo ' + (data.preset_name || 'mặc định hệ thống');
+        }
+        updateVideoConfigLiveDisplay();
+        status.textContent = 'Giá trị hiệu lực theo ' + (data.preset_name || 'mặc định hệ thống') + ' và ghi đè đã chọn.';
+        save.disabled = false;
+        return effective;
+      } catch (error) {
+        if (sequence === videoConfigResolveSeq) status.textContent = error.message;
+        return null;
+      }
+    }
 
     async function openVideoConfigModal(encodedName) {
       const filename = decodeURIComponent(encodedName);
@@ -6985,43 +7104,34 @@ let inputUploading=false;
         vSpeed.value = ovr.speed !== undefined ? ovr.speed : 1.0;
         vBgm.value = ovr.bgm_volume_db !== undefined ? ovr.bgm_volume_db : -2;
         vDub.value = ovr.dubbing_volume_db !== undefined ? ovr.dubbing_volume_db : 1;
-        if (vScript) vScript.value = ovr.script_mode || 'default';
+        if (vScript) vScript.value = ovr.script_mode || '';
       } else {
         pSel.value = currentActivePresetId || '';
         vVoice.value = '';
         vSpeed.value = 1.0;
         vBgm.value = -2;
         vDub.value = 1;
-        if (vScript) vScript.value = 'default';
+        if (vScript) vScript.value = '';
       }
-
+      for (const [key,suffix] of Object.entries(videoConfigNumericFields)) {
+        document.getElementById('override' + suffix).checked = Object.prototype.hasOwnProperty.call(draft?.overrides || {}, key);
+      }
       updateVideoConfigLiveDisplay();
       const modal = document.getElementById('videoConfigModal');
       if (modal) modal.style.display = 'flex';
+      await refreshVideoConfigResolved();
     }
 
     function closeVideoConfigModal(e) {
       if (e && e.target && e.target !== document.getElementById('videoConfigModal')) return;
       stopVoicePreview();
+      videoConfigResolveSeq++;
       const modal = document.getElementById('videoConfigModal');
       if (modal) modal.style.display = 'none';
     }
 
     function onVideoConfigPresetChanged(presetId) {
-      if (!presetId) return;
-      const p = cachedPresets.find(item => item.id === presetId);
-      if (!p) return;
-      const vBgm = document.getElementById('videoConfigBgm');
-      const vDub = document.getElementById('videoConfigDub');
-      const vSpeed = document.getElementById('videoConfigSpeed');
-      const vVoice = document.getElementById('videoConfigVoice');
-      const vScript = document.getElementById('videoConfigScriptMode');
-      if (vBgm && p.config.bgm_volume_db !== undefined) vBgm.value = p.config.bgm_volume_db;
-      if (vDub && p.config.dubbing_volume_db !== undefined) vDub.value = p.config.dubbing_volume_db;
-      if (vSpeed && p.config.speed !== undefined) vSpeed.value = p.config.speed;
-      if (vVoice && p.config.voice_id) vVoice.value = p.config.voice_id;
-      if (vScript && p.config && p.config.script_mode) vScript.value = p.config.script_mode;
-      updateVideoConfigLiveDisplay();
+      refreshVideoConfigResolved();
     }
 
     function updateVideoConfigLiveDisplay() {
@@ -7039,7 +7149,8 @@ let inputUploading=false;
     async function resetVideoConfigToPreset() {
       if (!currentEditingVideoName) return;
       try {
-        await fetch(`/api/video-draft/${encodeURIComponent(currentEditingVideoName)}`, { method: 'DELETE' });
+        const res = await fetch(`/api/video-draft/${encodeURIComponent(currentEditingVideoName)}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error((await res.json()).detail || 'Máy chủ chưa xóa cấu hình riêng');
         delete videoDraftsCache[currentEditingVideoName];
         showToast('Đã xóa ghi đè riêng; video sẽ dùng Preset chung.', 'info');
         closeVideoConfigModal();
@@ -7052,18 +7163,9 @@ let inputUploading=false;
     async function saveVideoConfigDraft() {
       if (!currentEditingVideoName) return;
       const presetId = document.getElementById('videoConfigPresetSelect').value || null;
-      const voiceId = document.getElementById('videoConfigVoice').value || null;
-      const speed = parseFloat(document.getElementById('videoConfigSpeed').value);
-      const bgm = parseFloat(document.getElementById('videoConfigBgm').value);
-      const dub = parseFloat(document.getElementById('videoConfigDub').value);
-      const scriptMode = document.getElementById('videoConfigScriptMode')?.value || 'default';
-
-      const overrides = {};
-      if (voiceId) overrides.voice_id = voiceId;
-      if (speed !== 1.0) overrides.speed = speed;
-      if (bgm !== -2.0) overrides.bgm_volume_db = bgm;
-      if (dub !== 1.0) overrides.dubbing_volume_db = dub;
-      if (scriptMode) overrides.script_mode = scriptMode;
+      let overrides;
+      try { overrides = collectVideoOverrides(); }
+      catch (error) { showToast(error.message, 'error'); return; }
 
       const payload = {
         preset_id: presetId,
@@ -7174,6 +7276,13 @@ let inputUploading=false;
     }
 
     async function openPreRunSummaryModal() {
+      if (pendingBatchIntent) {
+        const modal = document.getElementById('preRunSummaryModal');
+        if (modal) modal.style.display = 'flex';
+        document.getElementById('summarySubmitStatus').textContent = 'Còn thao tác chưa xác nhận cho ' + pendingBatchIntent.payload.items.length + ' video đã lưu. Thử lại giữ nguyên lựa chọn và cấu hình.';
+        document.getElementById('btnConfirmBulkEnqueue').textContent = 'Xác minh / thử lại cùng thao tác';
+        return;
+      }
       if (selectedPhoiFiles.size === 0) {
         showToast('Vui lòng chọn ít nhất một video để tiếp tục.', 'info');
         return;
@@ -7278,56 +7387,118 @@ let inputUploading=false;
       if (modal) modal.style.display = 'none';
     }
 
-    async function confirmBulkEnqueue() {
+    let pendingBatchIntent = null;
+    function newOperationId(prefix) {
+      return prefix + '_' + (globalThis.crypto?.randomUUID ? crypto.randomUUID() : Date.now() + '_' + Math.random().toString(36).slice(2));
+    }
+    function apiErrorMessage(data, fallback) {
+      return typeof data?.detail === 'string' ? data.detail : data?.detail?.message || data?.message || fallback;
+    }
+    function rememberBatchIntent(intent) {
+      pendingBatchIntent = intent;
+      try { if (intent) sessionStorage.setItem('dashboardPendingBatch', JSON.stringify(intent)); else sessionStorage.removeItem('dashboardPendingBatch'); } catch (_) {}
+      if (typeof renderRecoverableBatches === 'function') renderRecoverableBatches();
+    }
+    try { pendingBatchIntent = JSON.parse(sessionStorage.getItem('dashboardPendingBatch') || 'null'); } catch (_) {}
+
+    async function reconcileBatchIntent(intent) {
+      const response = await fetch('/api/batch-operations/' + encodeURIComponent(intent.payload.idempotency_key), {cache:'no-store',signal:AbortSignal.timeout(8000)});
+      if (response.status === 404) return null;
+      const data = await response.json();
+      if (!response.ok) throw new Error(apiErrorMessage(data, 'Chưa đối soát được batch'));
+      intent.result = data; rememberBatchIntent(intent);
+      return data;
+    }
+
+    function batchAdmissionMessage(data) {
+      const messages = {pipeline_busy:'Tiến trình đang bận. Batch đã lưu; bấm thử lại khi có chỗ.',
+        service_disabled:'Dịch vụ đang tắt. Batch đã lưu; bật dịch vụ rồi thử lại.',
+        target_reserved:'Video đang được một batch khác giữ chỗ. Xem mục Batch đã lưu để xử lý.',
+        schedule_reconciliation_required:'Batch vẫn giữ lịch; chọn thao tác trong mục Batch đã lưu.'};
+      return messages[data?.code] || apiErrorMessage(data, 'Batch đã lưu nhưng chưa được nhận chạy.');
+    }
+
+    async function confirmBulkEnqueue(options = {}) {
       if (isSubmittingBatch) return;
       const btn = document.getElementById('btnConfirmBulkEnqueue');
       if (!btn) return;
-
+      const scheduling = options.schedule === true;
+      const statusEl = document.getElementById('summarySubmitStatus');
+      const nightBtn = document.getElementById('btnScheduleBulk');
       isSubmittingBatch = true;
       btn.disabled = true;
-      btn.innerHTML = '<span class="spinner" style="width:12px;height:12px;display:inline-block;border:2px solid #fff;border-top-color:transparent;border-radius:50%;animation:spin 0.6s linear infinite;margin-right:6px;"></span> Đang xếp hàng...';
-
-      // Idempotency key chống double click
-      const idempotencyKey = 'idem_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
-
-      const items = Array.from(selectedPhoiFiles).map(fn => {
-        const draft = videoDraftsCache[fn] || {};
-        return {
-          filename: fn,
-          preset_id: draft.preset_id || currentActivePresetId || null,
-          overrides: draft.overrides || null,
-        };
-      });
-
+      if (nightBtn) nightBtn.disabled = true;
+      if (statusEl) statusEl.textContent = pendingBatchIntent ? 'Đang xác minh lần gửi trước…' : 'Đang lưu đúng các video đã chọn…';
       try {
-        const res = await fetch('/api/jobs/batch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            idempotency_key: idempotencyKey,
-            items: items,
-            video_mode: (typeof currentV1Mode !== 'undefined' ? currentV1Mode : 'AUTO'),
-            trigger: true,
-          }),
-        });
-
-        if (res.ok) {
-          const data = await res.json();
-          showToast(`Đã đưa ${data.total_items || items.length} video vào hàng chờ thành công!`, 'success');
-          closePreRunSummaryModal();
-          clearPhoiSelection();
-          fetchPhoi();
-          fetchStatus();
-        } else {
-          const err = await res.json().catch(() => ({}));
-          showToast(err.detail || err.message || 'Lỗi khi đưa video vào hàng chờ', 'error');
+        let intent = pendingBatchIntent;
+        if (intent && intent.schedule !== scheduling) throw new Error('Cần xác minh thao tác trước trước khi đổi giữa chạy ngay và lên lịch.');
+        if (!intent) {
+          if (!selectedPhoiFiles.size) throw new Error('Chưa chọn video.');
+          if (statusEl) statusEl.textContent = 'Đang xác nhận cấu hình model đã chọn…';
+          await waitForV1Settings();
+          intent = {schedule:scheduling, payload:{idempotency_key:newOperationId('batch'),
+            items:Array.from(selectedPhoiFiles).map(filename => ({filename,preset_id:videoDraftsCache[filename]?.preset_id || currentActivePresetId || null,overrides:videoDraftsCache[filename]?.overrides || {}})),
+            input_dir:dashboardInputPath,output_dir:dashboardOutputPath,video_mode:currentV1Mode || 'AUTO',trigger:!scheduling}};
+          rememberBatchIntent(intent);
         }
+        let data = intent.sent ? await reconcileBatchIntent(intent) : null;
+        if (!data || (!scheduling && data.state === 'prepared')) {
+          // Explicit user retry retains the same server idempotency key/payload.
+          intent.sent = true; rememberBatchIntent(intent);
+          let res;
+          try { res = await fetch('/api/jobs/batch', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(intent.payload)}); }
+          catch (error) { data = await reconcileBatchIntent(intent); if (!data) throw new Error('Chưa xác nhận được kết quả. Thử lại để đối soát cùng mã thao tác.'); }
+          if (res) {
+            data = await res.json();
+            if (!res.ok) {
+              intent.lastError = data; rememberBatchIntent(intent);
+              if (data?.reserved_by) await showBatchRecovery(data.reserved_by);
+              const saved = await reconcileBatchIntent(intent);
+              if (saved) data = saved;
+              else { if (res.status < 500) rememberBatchIntent(null); throw new Error(apiErrorMessage(data, 'Batch chưa được tiếp nhận')); }
+            } else delete intent.lastError;
+          }
+          intent.result = data; rememberBatchIntent(intent);
+        }
+        if (!data?.batch_id) throw new Error('Máy chủ chưa trả mã batch; chưa thể xác nhận.');
+        const state = data.state || data.status;
+        if (['failed','stopped','recovery_required','abandoned'].includes(state)) {
+          rememberBatchIntent(null);
+          await showBatchRecovery(data.batch_id);
+          throw new Error('Batch đã được đối soát: ' + state + '. Xem kết quả trong mục Batch đã lưu; thao tác này không tự chạy lại.');
+        }
+        if (scheduling) {
+          if (!['prepared','scheduled'].includes(data.state || data.status)) {
+            rememberBatchIntent(null); await showBatchRecovery(data.batch_id);
+            throw new Error('Batch đã được chạy; không thể đặt lịch.');
+          }
+          if (statusEl) statusEl.textContent = 'Đã lưu ' + intent.payload.items.length + ' video. Đang đặt lịch…';
+          intent.scheduleOperation ||= newOperationId('schedule'); rememberBatchIntent(intent);
+          const scheduled = await scheduleNightBatch(options.time, {target_kind:'local',batch_id:data.batch_id,
+            ...(data.action_identity || {expected_revision:data.revision}),operation_id:intent.scheduleOperation});
+          rememberBatchIntent(intent);
+          if (!scheduled) {
+            if (!pendingScheduleIntent) { rememberBatchIntent(null); await showBatchRecovery(data.batch_id); }
+            return null;
+          }
+        } else if (!['accepted','running','completed'].includes(data.state || data.status)) {
+          if (state === 'scheduled') { rememberBatchIntent(null); await showBatchRecovery(data.batch_id); }
+          if (statusEl) statusEl.textContent = 'Batch đã lưu nhưng chưa được nhận chạy: ' + (data.state || data.status || 'chưa xác định');
+          throw new Error(batchAdmissionMessage(intent.lastError));
+        }
+        showToast(scheduling ? 'Đã xác nhận lịch cho đúng các video đã chọn.' : 'Batch đã được tiếp nhận.', 'success');
+        rememberBatchIntent(null); closePreRunSummaryModal(); clearPhoiSelection(); fetchPhoi(); fetchStatus();
+        if (typeof fetchRecoverableBatches === 'function') await fetchRecoverableBatches();
+        return data;
       } catch (err) {
-        showToast('Lỗi kết nối khi gửi batch: ' + err, 'error');
+        if (statusEl) statusEl.textContent = err.message;
+        showToast(err.message, 'error');
+        return null;
       } finally {
         isSubmittingBatch = false;
         btn.disabled = false;
-        btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg> Xác nhận Đưa vào Hàng Chờ';
+        if (nightBtn) nightBtn.disabled = false;
+        btn.textContent = pendingBatchIntent ? 'Xác minh / thử lại cùng thao tác' : 'Chạy các video đã chọn ngay';
       }
     }
 
@@ -8115,74 +8286,79 @@ let inputUploading=false;
     });
 
     // ===== F2: BATCH ETA TOÀN HÀNG CHỜ =====
-    function updateBatchEta() {
-      const chip = document.getElementById('queueEtaChip');
-      if (!chip) return;
-      try {
-        const st = lastStatusData || {};
-        const total = Number(st.queue_total || 0);
-        if (!total) { chip.style.display = 'none'; return; }
-        const avg = (statsSummaryCache && statsSummaryCache.avg_total_s > 0) ? statsSummaryCache.avg_total_s : 480;
-        let remainSec;
-        if (st.active) {
-          const w1 = (st.workers && st.workers['1']) || {};
-          const w2 = (st.workers && st.workers['2']) || {};
-          let cur = (w1.eta_seconds || st.eta_seconds || avg);
-          if (w2.active && w2.eta_seconds) cur = Math.max(cur, w2.eta_seconds);
-          remainSec = cur + Math.max(0, total - 1) * avg / ((st.worker_settings && st.worker_settings.effective_concurrency) || 1);
-        } else {
-          remainSec = total * avg;
-        }
-        const fin = new Date(Date.now() + remainSec * 1000);
-        const hh = Math.floor(remainSec / 3600), mm = Math.round((remainSec % 3600) / 60);
-        chip.style.display = 'inline-flex';
-        chip.textContent = `⏱ ${total} video · ~${hh > 0 ? hh + 'h' + String(mm).padStart(2, '0') : mm + ' phút'} → ≈ ${fin.toLocaleTimeString('vi-VN', {hour:'2-digit', minute:'2-digit'})}`;
-        chip.title = 'Ước tính theo thời gian xử lý trung bình từ Thống kê (F2)';
-      } catch (e) { /* ETA là bổ trợ */ }
+    function estimateRemainingSeconds(state, average) {
+      if (!state?.active || ['stopping','paused','pausing'].includes(state.status) || ['paused','pausing'].includes(state.pause_state)) return null;
+      const counters = state.counters || state.batch_counters;
+      if (!counters || !Number.isFinite(Number(counters.pending))) return null;
+      const pending = Math.max(0, Number(counters.pending));
+      const workers = Object.values(state.workers || {}).filter(w => w?.active);
+      const running = workers.length ? workers : (Number(counters.running) > 0 ? [state] : []);
+      if (!pending && !running.length) return null;
+      const times = running.map(w => w.eta_seconds == null ? NaN : Number(w.eta_seconds));
+      if (times.some(value => !Number.isFinite(value) || value < 0)) return null;
+      if (pending && !(Number.isFinite(average) && average > 0)) return null;
+      return (times.length ? Math.max(...times) : 0) + pending * (average || 0);
     }
+    function updateBatchEta() {
+      const queueChip = document.getElementById('queueEtaChip');
+      if (queueChip) queueChip.style.display = 'none';
+      let chip = document.getElementById('batchEtaChip');
+      if (!chip) {
+        const anchor = document.getElementById('valQueue'); if (!anchor) return;
+        chip = document.createElement('span'); chip.id = 'batchEtaChip'; chip.className = 'badge';
+        anchor.parentElement.insertAdjacentElement('afterend', chip);
+      }
+      const state = lastStatusData || {}, counters = state.counters || state.batch_counters || {};
+      if (!state.active && !Number(counters.pending)) { chip.style.display = 'none'; return; }
+      chip.style.display = 'inline-flex';
+      if (dashboardReadState.status?.error) { chip.textContent = 'Batch · dữ liệu cũ, chờ kết nối'; return; }
+      if (state.status === 'stopping') { chip.textContent = 'Batch · đang dừng'; return; }
+      if (['paused','pausing'].includes(state.pause_state)) { chip.textContent = 'Batch · đã/chờ tạm dừng'; return; }
+      const remaining = estimateRemainingSeconds(state, Number(statsSummaryCache?.avg_total_s));
+      if (remaining === null) { chip.textContent = 'Batch · chưa đủ dữ liệu ước tính'; return; }
+      const minutes = Math.max(1, Math.ceil(remaining / 60));
+      chip.textContent = 'Batch · còn khoảng ' + (minutes >= 60 ? Math.floor(minutes/60) + 'h ' + minutes%60 + ' phút' : minutes + ' phút');
+      chip.title = 'Ước tính từ video đang chạy và số video chưa bắt đầu; không gồm hàng đợi Telegram.';
+    }
+
 
     // ===== F5: SO SÁNH TRƯỚC / SAU =====
-    function openCompareModal(banveName) {
-      const modal = document.getElementById('compareModal');
-      const orig = document.getElementById('compareOriginal');
-      const dub = document.getElementById('compareDubbed');
-      const hint = document.getElementById('compareHint');
+    let compareRequestController = null;
+    let compareRequestSequence = 0;
+    async function openCompareModal(encodedName) {
+      const modal = document.getElementById('compareModal'), orig = document.getElementById('compareOriginal');
+      const dub = document.getElementById('compareDubbed'), hint = document.getElementById('compareHint');
       if (!modal || !orig || !dub) return;
-      dub.src = '/api/stream/banve/' + encodeURIComponent(banveName);
-      let originalName = String(banveName).startsWith('Dubbed_') ? String(banveName).slice(7) : '';
-      orig.removeAttribute('src'); orig.style.opacity = '0.25';
-      if (!originalName) {
-        hint.textContent = 'Không xác định được video gốc tương ứng (tên thành phẩm không có tiền tố Dubbed_).';
-      } else {
-        hint.textContent = 'Đang tìm video gốc "' + originalName + '" trong thư mục phôi...';
-        fetch('/api/phoi?page=1&page_size=200', {cache:'no-store', signal: AbortSignal.timeout(10000)})
-          .then(r => r.ok ? r.json() : {files: []})
-          .then(d => {
-            const files = d.files || d.items || [];
-            const norm = (s) => String(s).toLowerCase().replace(/\s+/g, '');
-            const hit = files.find(f => f && f.name === originalName) || files.find(f => f && norm(f.name) === norm(originalName));
-            if (hit) {
-              orig.src = '/api/stream/phoi/' + encodeURIComponent(hit.name);
-              orig.style.opacity = '1';
-              hint.textContent = 'Tua một bên — bên kia tự nhảy theo thời điểm gần đúng để đối chiếu khớp môi & sub.';
-            } else {
-              hint.textContent = 'Không tìm thấy video gốc "' + originalName + '" trong bảng Video Gốc (có thể đã xóa/đổi tên) — chỉ phát bản lồng tiếng.';
-            }
-          })
-          .catch(() => { hint.textContent = 'Không kiểm tra được thư mục video gốc — vẫn phát được bản lồng tiếng.'; });
-      }
-      [orig, dub].forEach(master => {
-        master.onseeked = () => {
-          const slave = master === orig ? dub : orig;
-          if (slave.src && Math.abs((slave.currentTime || 0) - master.currentTime) > 0.4) {
-            try { slave.currentTime = master.currentTime; } catch (e) {}
-          }
-        };
-      });
-      modal.style.display = 'flex';
+      let filename;
+      try { filename = decodeURIComponent(encodedName); } catch (_) { showToast('Tên video không hợp lệ.', 'error'); return; }
+      compareRequestController?.abort();
+      const controller = new AbortController(); compareRequestController = controller;
+      const sequence = ++compareRequestSequence;
+      const timer = setTimeout(() => controller.abort(), 10000);
+      [orig,dub].forEach(video => { video.pause(); video.removeAttribute('src'); video.load(); });
+      orig.style.opacity = '0.25'; hint.textContent = 'Đang xác định nguồn video từ lịch sử xử lý…'; modal.style.display = 'flex';
+      dub.src = '/api/stream/banve/' + encodeURIComponent(filename);
+      try {
+        const res = await fetch('/api/media/compare?filename=' + encodeURIComponent(filename), {signal:controller.signal,cache:'no-store'});
+        const data = await res.json(); if (!res.ok) throw new Error(data.detail || 'Không xác minh được nguồn video');
+        if (sequence !== compareRequestSequence) return;
+        const safeMediaUrl = url => typeof url === 'string' && url.startsWith('/api/') && !url.includes('\\');
+        if (safeMediaUrl(data.dubbed?.url)) dub.src = data.dubbed.url;
+        if (safeMediaUrl(data.original?.url)) {
+          orig.src = data.original.url; orig.style.opacity = '1';
+          hint.textContent = 'Nguồn: ' + (data.original.name || filename) + ' · Tua một bên để đối chiếu.';
+        } else hint.textContent = data.reason || 'Không còn nguồn đã xác minh; đang hiển thị bản thành phẩm.';
+      } catch (error) { if (sequence === compareRequestSequence) hint.textContent = 'Chưa đọc được nguồn: ' + error.message; }
+      finally { clearTimeout(timer); }
+      [orig,dub].forEach(master => { master.onseeked = () => {
+        const slave = master === orig ? dub : orig;
+        if (slave.getAttribute('src') && Math.abs(slave.currentTime - master.currentTime) > 0.4) slave.currentTime = master.currentTime;
+      }; });
     }
 
+
     function closeCompareModal(e) {
+      compareRequestSequence++; compareRequestController?.abort();
       if (e && e.target && e.target !== document.getElementById('compareModal')) return;
       const modal = document.getElementById('compareModal');
       if (!modal) return;
@@ -8194,68 +8370,214 @@ let inputUploading=false;
     }
 
     // ===== F9: LỊCH CHẠY ĐÊM =====
+    let pendingScheduleIntent = null, scheduleSubmitting = false;
+    let lastScheduleData = null, batchRecoverySubmitting = false;
+    const recoverableBatchData = new Map();
+    let pendingScheduleCancel = null;
+    try { pendingScheduleCancel = JSON.parse(sessionStorage.getItem('dashboardScheduleCancel') || 'null'); } catch (_) {}
+    try { pendingScheduleIntent = JSON.parse(sessionStorage.getItem('dashboardScheduleIntent') || 'null'); } catch (_) {}
+    function storeScheduleIntent(value) {
+      pendingScheduleIntent = value;
+      try { if (value) sessionStorage.setItem('dashboardScheduleIntent', JSON.stringify(value)); else sessionStorage.removeItem('dashboardScheduleIntent'); } catch (_) {}
+    }
+    function storeScheduleCancel(value) {
+      pendingScheduleCancel = value;
+      try { if (value) sessionStorage.setItem('dashboardScheduleCancel', JSON.stringify(value)); else sessionStorage.removeItem('dashboardScheduleCancel'); } catch (_) {}
+    }
+    async function fetchScheduleOperation(intent) {
+      const res = await fetch('/api/schedule-operations/' + encodeURIComponent(intent.operation_id), {cache:'no-store',signal:AbortSignal.timeout(6000)});
+      if (res.status === 404) return null;
+      const data = await res.json();
+      if (!res.ok) throw Error(apiErrorMessage(data, 'Chưa đối soát được thao tác lịch.'));
+      if (!matchingSchedule(data, intent)) throw Error('Bản ghi lịch không khớp thao tác đã gửi.');
+      return data;
+    }
+    function renderRecoverableBatches() {
+      const panel = document.getElementById('recoverableBatches'); if (!panel) return;
+      const rows = [...recoverableBatchData.values()];
+      panel.style.display = rows.length || pendingBatchIntent || pendingScheduleIntent || pendingScheduleCancel ? 'block' : 'none';
+      const labels = {prepared:'Đã lưu, chưa chạy', scheduled:'Đang giữ video', recovery_required:'Cần kiểm tra tiến trình', abandoned:'Đã bỏ batch', failed:'Batch thất bại', stopped:'Batch đã dừng'};
+      panel.innerHTML = '<strong>Batch đã lưu</strong>' +
+        (pendingBatchIntent ? '<div>Còn thao tác gửi chưa xác nhận. <button type="button" class="btn btn-outline" onclick="retryPendingBatch()">Xác minh / thử lại</button></div>' : '') +
+        (pendingScheduleIntent && !pendingBatchIntent ? '<div>Còn thao tác lịch chưa xác nhận. <button type="button" class="btn btn-outline" onclick="retryPendingSchedule()">Xác minh lịch</button></div>' : '') +
+        (pendingScheduleCancel ? '<div>Còn yêu cầu hủy chưa xác nhận. <button type="button" class="btn btn-outline" onclick="cancelNightBatch()">Xác minh hủy lịch</button></div>' : '') +
+        rows.filter(plan => /^[A-Za-z0-9_-]+$/.test(plan.batch_id)).map(plan => {
+          const names = plan.filenames || (plan.items || []).map(item => item.filename);
+          const actionLabels = {start:'Chạy batch đã lưu',reschedule:'Đặt lại lịch',abandon:'Bỏ batch đã lưu'};
+          const actions = (plan.actions || []).filter(action => actionLabels[action]).map(action =>
+            '<button type="button" class="btn btn-outline" style="margin:4px" onclick="recoverBatchAction(\'' + plan.batch_id + '\',\'' + action + '\')"' + (batchRecoverySubmitting?' disabled':'') + '>' + actionLabels[action] + '</button>').join('');
+          return '<div style="margin-top:8px;border-top:1px solid #3f3f46;padding-top:6px">' + escapeHtml(names.join(', ')) +
+            ' · ' + escapeHtml(labels[plan.state] || plan.state) + (plan.schedule ? ' · ' + escapeHtml(plan.schedule.state) : '') +
+            (plan.recovery_reason ? '<div>' + escapeHtml(plan.recovery_reason) + '</div>' : '') +
+            (plan.execution_id ? '<div>Tiến trình: ' + escapeHtml(plan.execution_id) + '</div>' : '') + '<div>' + actions + '</div></div>';
+        }).join('');
+    }
+    async function retryPendingBatch() {
+      if (!pendingBatchIntent) return;
+      return confirmBulkEnqueue({schedule:pendingBatchIntent.schedule,time:pendingScheduleIntent?.hhmm || '02:00'});
+    }
+    async function retryPendingSchedule() {
+      if (pendingScheduleIntent) return scheduleNightBatch(pendingScheduleIntent.hhmm, pendingScheduleIntent);
+    }
+    async function fetchRecoverableBatches() {
+      try {
+        const res = await fetch('/api/batches?recoverable=true', {cache:'no-store',signal:AbortSignal.timeout(6000)});
+        const data = await res.json(); if (!res.ok) throw Error(apiErrorMessage(data, 'Không đọc được batch đã lưu.'));
+        recoverableBatchData.clear();
+        (data.items || []).forEach(plan => recoverableBatchData.set(plan.batch_id, plan));
+        renderRecoverableBatches();
+      } catch (_) {
+        const panel = document.getElementById('recoverableBatches');
+        if (panel) { panel.style.display='block'; panel.textContent='Chưa đọc được batch đã lưu. Chờ kết nối để xác minh các thao tác.'; }
+      }
+    }
+    async function showBatchRecovery(batchId) {
+      try {
+        const res = await fetch('/api/batches/' + encodeURIComponent(batchId), {cache:'no-store',signal:AbortSignal.timeout(6000)});
+        const data = await res.json(); if (!res.ok) throw Error(apiErrorMessage(data, 'Không đọc được batch.'));
+        recoverableBatchData.set(batchId, data); renderRecoverableBatches();
+        return data;
+      } catch (error) { showToast(error.message, 'error'); return null; }
+    }
+    async function recoverBatchAction(batchId, action) {
+      if (batchRecoverySubmitting) return;
+      const plan = recoverableBatchData.get(batchId);
+      if (!plan || !plan.actions?.includes(action)) { await showBatchRecovery(batchId); return; }
+      batchRecoverySubmitting = true; renderRecoverableBatches();
+      try {
+        if (action === 'reschedule') {
+          await scheduleNightBatch(null, {target_kind:'local',batch_id:batchId,...plan.action_identity});
+          return;
+        }
+        if (action === 'abandon' && !window.confirm('Bỏ batch đã lưu và nhả chỗ cho các video này? File nguồn và lịch sử sẽ được giữ lại.')) return;
+        let res, data;
+        try {
+          res = await fetch('/api/batches/' + encodeURIComponent(batchId) + '/' + action,
+            {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(plan.action_identity)});
+          data = await res.json();
+        } catch (_) {
+          data = await showBatchRecovery(batchId);
+          if (!data || !(action === 'abandon' ? data.state === 'abandoned' : ['accepted','running','completed'].includes(data.state)))
+            throw Error('Chưa xác nhận được thao tác. Trạng thái đã được đối soát; hãy thử lại nếu vẫn cần.');
+        }
+        if (res && !res.ok) {
+          if (data?.reserved_by) await showBatchRecovery(data.reserved_by);
+          throw Error(batchAdmissionMessage(data));
+        }
+        const accepted = action === 'abandon' ? data.state === 'abandoned' : ['accepted','running','completed'].includes(data.state);
+        if (!accepted) throw Error('Batch đã đổi trạng thái: ' + data.state + '; chưa thực hiện thao tác mới.');
+        showToast(action === 'abandon' ? 'Đã bỏ batch và nhả chỗ. File nguồn được giữ lại.' : 'Batch đã được tiếp nhận.', 'success');
+        if (pendingBatchIntent?.result?.batch_id === batchId) rememberBatchIntent(null);
+      } catch (error) { showToast(error.message, 'error'); }
+      finally { batchRecoverySubmitting=false; await fetchScheduleUI(); fetchStatus(); }
+    }
     async function fetchScheduleUI() {
       try {
-        const res = await fetch('/api/schedule', {cache:'no-store', signal: AbortSignal.timeout(6000)});
-        if (!res.ok) return;
-        renderScheduleChip(await res.json());
-      } catch (e) { /* lịch là tùy chọn */ }
-    }
-
-    function renderScheduleChip(d) {
-      const chip = document.getElementById('scheduleChip');
-      if (!chip) return;
-      if (!d || !d.active) {
-        if (d && d.state && d.state !== 'fired') {
-          chip.style.display = 'flex';
-          chip.textContent = d.state === 'expired' ? 'Lịch đã quá hạn — hãy đặt lại.' : 'Lịch cần kiểm tra trước khi chạy.';
-        } else chip.style.display = 'none';
-        return;
+        const res = await fetch('/api/schedule', {cache:'no-store',signal:AbortSignal.timeout(6000)});
+        if (!res.ok) throw new Error('Không đọc được lịch: HTTP ' + res.status);
+        const data = await res.json(); renderScheduleChip(data); markDashboardRead('schedule');
+        await fetchRecoverableBatches();
+        return data;
+      } catch (error) {
+        markDashboardRead('schedule', error);
+        const chip=document.getElementById('scheduleChip');
+        if (chip) { chip.style.display='flex'; chip.textContent='Chưa cập nhật được lịch. Dữ liệu cũ cần được xác minh.'; }
+        return null;
       }
-      const hhmm = d.time || '02:00';
-      const parts = hhmm.split(':').map(Number);
-      const now = new Date();
-      const target = new Date(d.run_at * 1000);
-      const mins = Math.max(0, Math.round((target - now) / 60000));
-      const wait = mins >= 60 ? Math.floor(mins / 60) + 'h' + String(mins % 60).padStart(2, '0') : mins + ' phút';
-      chip.style.display = 'flex';
-      chip.innerHTML = `<span>🌙 Đã lên lịch xử lý hàng đợi lúc <strong>${escapeHtml(target.toLocaleString())}</strong> — một lần (còn ~${wait})</span>
-        <button type="button" class="btn btn-outline" style="font-size:10.5px; padding:2px 8px; color:#f87171; border-color:rgba(239,68,68,0.3);" onclick="cancelNightBatch()">Hủy</button>`;
     }
-
-    async function scheduleNightBatch(presetTime) {
-      let t = presetTime;
-      if (!t) {
-        t = window.prompt('Chạy tự động vào lúc mấy giờ? (HH:MM, ví dụ 02:00)', '02:00');
-        if (!t) return;
-      }
+    function renderScheduleChip(data) {
+      lastScheduleData = data;
+      const chip = document.getElementById('scheduleChip'); if (!chip) return;
+      if (!data?.state) { chip.style.display='none'; return; }
+      const labels={holding:'Đang giữ các video chờ lịch',pending:'Đã xác nhận lịch',dispatching:'Đang bàn giao xử lý',canceling:'Đang hủy lịch',fired:'Đã bàn giao; xem tiến trình để biết kết quả',canceled:'Đã hủy lịch',expired:'Lịch đã quá hạn — cần đặt lại',needs_review:'Lịch cần kiểm tra trước khi chạy'};
+      const displayState=data.target_kind==='local' && data.binding_confirmed!==true && ['pending','dispatching'].includes(data.state)?'needs_review':data.state;
+      chip.style.display='flex';
+      const source=data.target_kind==='local'?'Batch video đã chọn':'Hàng chờ Telegram';
+      const date=Number.isFinite(data.run_at)?new Date(data.run_at*1000).toLocaleString('vi-VN',{timeZone:data.timezone||'Asia/Bangkok'}):'';
+      chip.innerHTML='<span>'+escapeHtml(labels[displayState]||displayState)+' · '+escapeHtml(source)+(date?' · '+escapeHtml(date)+' ('+escapeHtml(data.timezone||'Asia/Bangkok')+')':'')+'</span>'+
+        (['pending','holding','needs_review','expired'].includes(data.state)?'<button type="button" class="btn btn-outline" style="font-size:10px;margin-left:8px" onclick="cancelNightBatch()">Hủy</button>':'');
+    }
+    function matchingSchedule(data, intent) {
+      return data && data.operation_id === intent.operation_id && (!intent.batch_id || data.batch_id === intent.batch_id) &&
+        (intent.generation === undefined || (data.schedule_id === intent.schedule_id && data.generation === intent.generation));
+    }
+    async function scheduleNightBatch(presetTime, target = {}) {
+      if (scheduleSubmitting) return null;
+      let time=presetTime;
+      if (!time) { time=window.prompt('Giờ chạy theo Asia/Bangkok (HH:MM; nếu giờ đã qua sẽ chạy ngày mai):','02:00'); if (!time) return null; }
+      scheduleSubmitting=true;
       try {
-        const res = await fetch('/api/schedule', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({time: t, video_mode: (typeof currentV1Mode !== 'undefined' ? currentV1Mode : 'AUTO')})
-        });
-        if (res.ok) {
-          const d = await res.json();
-          showToast(`🌙 Đã lên lịch chạy lúc ${d.time}. Hệ thống sẽ tự xử lý hàng đợi khi đến giờ.`, 'success');
-          fetchScheduleUI();
-        } else {
-          const e = await res.json().catch(() => ({}));
-          showToast(e.detail || 'Giờ lên lịch không hợp lệ (HH:MM).', 'error');
+        let intent=pendingScheduleIntent;
+        if (!intent) {
+          if (!target.target_kind) {
+            if (!queueSnapshot?.available || !Number.isInteger(queueSnapshot.revision) || !(window.queueDeleteIds||[]).length) throw new Error('Hãy tải hàng chờ Telegram đang hoạt động trước khi lên lịch.');
+            target={target_kind:'telegram',target_job_ids:window.queueDeleteIds.slice(),expected_revision:queueSnapshot.revision};
+          }
+          intent={hhmm:time,timezone:'Asia/Bangkok',video_mode:typeof currentV1Mode==='undefined'?'AUTO':currentV1Mode,...target};
+          intent.operation_id ||= newOperationId('schedule'); storeScheduleIntent(intent);
+        } else if (target.batch_id && intent.batch_id !== target.batch_id) throw new Error('Còn lịch chưa xác nhận cho một batch khác; hãy kiểm tra lịch hiện tại.');
+        let data=null;
+        if (intent.sent) {
+          data=await fetchScheduleOperation(intent);
+          // GET only observes a half-written binding. Explicit replay of the
+          // same POST is what repairs it; pending alone is not an acknowledgement.
+          if (data && intent.target_kind === 'local' && data.binding_confirmed !== true && ['pending','needs_review'].includes(data.state)) data=null;
         }
-      } catch (e) { showToast('Lỗi kết nối khi lên lịch: ' + e.message, 'error'); }
+        if (!data) {
+          intent.sent=true; storeScheduleIntent(intent);
+          let response;
+          try { response=await fetch('/api/schedule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(intent)}); }
+          catch (_) { data=await fetchScheduleOperation(intent); if (!data) throw new Error('Chưa xác nhận được lịch. Thử lại để đối soát cùng mã thao tác.'); }
+          if (response) {
+            data=await response.json();
+            if (!response.ok) {
+              const known=await fetchScheduleOperation(intent);
+              if (known) data=known;
+              else { if (response.status<500) storeScheduleIntent(null); throw new Error(apiErrorMessage(data,'Không đặt được lịch')); }
+            }
+          }
+        }
+        if (intent.target_kind === 'local' && data?.binding_confirmed !== true && ['pending','dispatching','fired','needs_review'].includes(data?.state)) {
+          renderScheduleChip({...data,state:'needs_review'});
+          showToast('Lịch chưa xác nhận liên kết với batch. Thử lại cùng thao tác để hoàn tất; chưa tự chạy.', 'info');
+          return null;
+        }
+        renderScheduleChip(data);
+        for(let attempt=0;data?.state==='holding' && attempt<8;attempt++) {
+          await new Promise(resolve=>setTimeout(resolve,500));
+          const current=await fetchScheduleOperation(intent); if(current) data=current; else break;
+        }
+        if (!['pending','dispatching','fired'].includes(data?.state)) {
+          showToast(data?.state==='holding'?'Đang chờ bot giữ video cho lịch; chưa xác nhận hoàn tất.':'Lịch chưa được xác nhận: '+(data?.state||'không rõ'),'info');
+          if (data?.active === false) storeScheduleIntent(null);
+          return null;
+        }
+        storeScheduleIntent(null); renderScheduleChip(data);
+        showToast('Đã xác nhận lịch '+new Date(data.run_at*1000).toLocaleString('vi-VN',{timeZone:data.timezone||'Asia/Bangkok'})+' · Asia/Bangkok','success');
+        return data;
+      } catch(error) { showToast(error.message,'error'); return null; }
+      finally { scheduleSubmitting=false; renderRecoverableBatches(); }
     }
-
     async function scheduleNightBatchFromSummary() {
-      await confirmBulkEnqueue();
-      scheduleNightBatch('02:00');
+      return confirmBulkEnqueue({schedule:true,time:'02:00'});
     }
-
     async function cancelNightBatch() {
       try {
-        const res = await fetch('/api/schedule', {method:'DELETE'});
-        if (res.ok) { showToast('Đã hủy lịch chạy đêm.', 'info'); fetchScheduleUI(); }
-      } catch (e) { showToast('Lỗi hủy lịch: ' + e.message, 'error'); }
+        const target=pendingScheduleCancel || lastScheduleData;
+        if (!target?.schedule_id || !target?.operation_id || !Number.isInteger(target.generation)) throw Error('Chưa xác minh được lịch cần hủy. Hãy tải lại trạng thái.');
+        const identity={schedule_id:target.schedule_id,generation:target.generation,operation_id:target.operation_id};
+        storeScheduleCancel(identity);
+        let res, data;
+        try {
+          res=await fetch('/api/schedule',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify(identity)});
+          data=await res.json();
+        } catch (_) { data=await fetchScheduleOperation(identity); if (data?.state !== 'canceled') throw Error('Chưa nhận được xác nhận hủy; thử lại cùng lịch.'); }
+        if(res && !res.ok) { if(res.status<500) storeScheduleCancel(null); throw new Error(apiErrorMessage(data,'Chưa hủy được lịch')); }
+        renderScheduleChip(data);
+        if(data.state==='canceled') { storeScheduleCancel(null); if(pendingScheduleIntent?.operation_id===data.operation_id) storeScheduleIntent(null); showToast('Đã hủy thời điểm chạy. Batch vẫn giữ video; chọn chạy, đặt lại lịch hoặc bỏ batch bên dưới.','success'); }
+        else showToast('Đang chờ xác nhận hủy lịch.','info');
+      } catch(error) { showToast('Chưa xác nhận được hủy lịch: '+error.message,'error'); }
+      await fetchScheduleUI();
     }
 
     /* ==========================================================================
@@ -8716,30 +9038,12 @@ let inputUploading=false;
     }
 
     async function onQueueDrop(ev, toIdx) {
-      ev.preventDefault();
-      onQueueDragEnd(ev);
-      const from = queueDragFrom;
-      queueDragFrom = null;
-      if (from === null || from === toIdx || queueMoving) return;
-      queueMoving = true;
-      try {
-        const res = await fetch('/api/queue/move', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({index: from, action: 'position', to: toIdx})
-        });
-        const data = await res.json();
-        if (res.ok && Array.isArray(data.items)) {
-          renderQueueTable(data.items);
-          document.getElementById('queueBadge').textContent = data.items.length + ' video';
-          showToast(data.message || 'Đã đổi thứ tự hàng chờ.', 'success');
-        } else if (data && data.message) {
-          showToast(data.message, 'info');
-        }
-      } catch (err) {
-        showToast('Lỗi kéo-thả: ' + err.message, 'error');
-      } finally {
-        queueMoving = false;
-      }
+      ev.preventDefault(); onQueueDragEnd(ev);
+      const from = queueDragFrom; queueDragFrom = null;
+      const ids = (window.queueDeleteIds || []).slice();
+      if (from === null || from === toIdx || from < 0 || from >= ids.length || toIdx < 0 || toIdx >= ids.length) return;
+      const [moved] = ids.splice(from,1); ids.splice(toIdx,0,moved);
+      return submitQueueOperation('move', ids, {ordered_job_ids:ids});
     }
 
     // ===== F18: xuất / nhập cấu hình =====

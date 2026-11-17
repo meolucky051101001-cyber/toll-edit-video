@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import copy
 import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -49,13 +50,16 @@ def build_expected_cover_timeline(
     frame_dur = 1.0 / max(1.0, float(fps))
     raw_events = []
 
-    for seg in (segments or []):
+    for seg in copy.deepcopy(segments or []):
         is_sub = _prop(seg, "is_subtitle", None)
         is_pack = _prop(seg, "is_packaging", False) or _prop(seg, "is_static", False)
         if is_sub is False or is_pack is True:
             continue
 
-        blocks = _prop(seg, "tracking_blocks") or ([_prop(seg, "best_block")] if _prop(seg, "best_block") else [])
+        tracks = _prop(seg, "tracking_blocks") or []
+        verified = bool(_prop(seg, "geometry_verified", False) or any(
+            _prop(b, "geometry_verified", False) for b in tracks))
+        blocks = tracks if verified else (tracks or ([_prop(seg, "best_block")] if _prop(seg, "best_block") else []))
         if not blocks:
             # Segment has no OCR geometry -> Do not fabricate a default cover!
             continue
@@ -99,7 +103,7 @@ def build_expected_cover_timeline(
             key=lambda x: (float(_prop(x, "start", 0.0)), float(_prop(x, "end", 0.0))),
         )
         seg_start_sec = _prop(seg, "start")
-        if seg_start_sec is not None and sorted_blocks:
+        if not verified and seg_start_sec is not None and sorted_blocks:
             try:
                 if hasattr(seg_start_sec, "total_seconds"):
                     s_start = float(seg_start_sec.total_seconds())
@@ -168,6 +172,11 @@ def build_expected_cover_timeline(
         if current_cluster:
             clusters.append(current_cluster)
 
+        # Verified observations carry their own lifetimes; neither ASR/TTS
+        # boundaries nor neighbouring samples may fill observed absence.
+        if verified:
+            clusters = [[b] for b in sorted_blocks]
+
         seg_id = _prop(seg, "id", _prop(seg, "index", 0))
         seg_text = str(_prop(seg, "text", "") or "")
 
@@ -193,6 +202,7 @@ def build_expected_cover_timeline(
                 "max_x_pct": max_x_pct,
                 "max_y_pct": max_y_pct,
                 "text": c_text,
+                "geometry_verified": verified,
             })
 
     raw_events.sort(key=lambda ev: (
@@ -222,7 +232,11 @@ def build_expected_cover_timeline(
             ]
             next_ev = min(earliest_candidates, key=lambda c: abs(c["y_pct"] - ev["y_pct"]))
 
-        if next_ev is not None and (next_ev["src_start"] - ev["src_end"]) <= 1.0:
+        if ev.get("geometry_verified"):
+            bridged = False
+            expected_end = ev["src_end"]
+            pos_changed = False
+        elif next_ev is not None and (next_ev["src_start"] - ev["src_end"]) <= 1.0:
             bridged = True
             expected_end = max(ev["src_end"], next_ev["src_start"])
             pos_changed = abs(ev["y_pct"] - next_ev["y_pct"]) > 0.04
@@ -278,18 +292,18 @@ def parse_ass_covers(ass):
     if not width or not height:
         raise ValueError('ASS canvas is missing')
     w, h = int(width[1]), int(height[1])
-    outline = 0.
+    outlines = {}
     for line in ass.splitlines():
-        if line.startswith('Style: BgStyle,'):
+        if line.startswith('Style:'):
             style = line.split(':', 1)[1].strip().split(',')
             if len(style) > 16:
-                outline = max(0., float(style[16]))
+                outlines[style[0]] = max(0., float(style[16]))
     covers = []
     for line in ass.splitlines():
         if not line.startswith('Dialogue:'):
             continue
         fields = line.split(',', 9)
-        if len(fields) != 10 or fields[3] not in ('BgStyle', 'CoverStyle'):
+        if len(fields) != 10 or fields[3] not in ('BgStyle', 'CoverStyle', 'SourceMaskStyle'):
             continue
         if r'\an7' not in fields[9]:
             continue
@@ -301,6 +315,7 @@ def parse_ass_covers(ass):
         if len(numbers) < 4:
             continue
         x, y = float(pos[1]), float(pos[2])
+        outline = outlines.get(fields[3], 0.)
         covers.append((seconds(fields[1]), seconds(fields[2]),
             x+min(numbers[::2])-outline, y+min(numbers[1::2])-outline,
             x+max(numbers[::2])+outline, y+max(numbers[1::2])+outline))
@@ -766,7 +781,7 @@ def check_subtitle_text_collision(ass_text: str) -> Dict[str, Any]:
         if len(fields) != 10:
             continue
         style = fields[3].strip()
-        if style in ('BgStyle', 'CoverStyle'):
+        if style in ('BgStyle', 'CoverStyle', 'SourceMaskStyle', 'TextBgStyle'):
             continue
         try:
             start, end = seconds(fields[1]), seconds(fields[2])

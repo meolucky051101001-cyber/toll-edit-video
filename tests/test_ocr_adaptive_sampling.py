@@ -75,6 +75,28 @@ def recognize(images):
 
 
 class AdaptiveSamplingTests(unittest.TestCase):
+    def test_close_ocr_correction_preserves_subtitle_tracking(self):
+        module = importlib.import_module("backend.ocr_utils")
+        cases = [
+            ("今天我们学习做反", TEXT, TEXT),
+        ]
+        for asr_text, visible_text, expected in cases:
+            with self.subTest(asr=asr_text, ocr=visible_text):
+                segments = [cue(1, 0, 3)]
+                segments[0].content = asr_text
+                cap = TimedCapture(3, lambda t: 480)
+
+                def recognize_caption(images):
+                    return [[(box, visible_text, prob) for box, _, prob in rows]
+                            for rows in recognize(images)]
+
+                with patch.object(module.cv2, "VideoCapture", return_value=cap), patch.object(
+                        module, "_readtext_batch", side_effect=recognize_caption):
+                    inspect.unwrap(module.perform_video_ocr)(
+                        "fixture.mp4", srt_segments=segments, adaptive=True)
+                self.assertEqual(segments[0].content, expected)
+                self.assertTrue(segments[0].tracking_blocks)
+
     def acquire(self, duration, state, segments=None, inference=recognize, stopped=lambda: False):
         cap = TimedCapture(duration, state)
         metrics = {}

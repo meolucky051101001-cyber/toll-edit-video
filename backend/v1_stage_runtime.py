@@ -67,7 +67,7 @@ def load_payload(path):
 
 
 async def await_stage(awaitable, timeout, check_stop=None):
-    from batch_control import stop_check
+    from batch_control import stop_check, drain_task
     stopped = threading.Event()
     inherited = stop_check.get()
     def should_stop():
@@ -85,14 +85,9 @@ async def await_stage(awaitable, timeout, check_stop=None):
         return task.result()
     except BaseException:
         stopped.set()
-        if not task.done():
-            task.cancel()
-        drain_deadline = asyncio.get_running_loop().time() + 2.0
-        while not task.done() and asyncio.get_running_loop().time() < drain_deadline:
-            try:
-                await asyncio.wait({task}, timeout=0.25)
-            except BaseException:
-                break
+        # Cancelling to_thread's asyncio task does not stop its native thread.
+        # Keep ownership until real work sees the predicate and exits.
+        await drain_task(task)
         raise
     finally:
         stop_check.reset(token)

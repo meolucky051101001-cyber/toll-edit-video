@@ -1,0 +1,122 @@
+[
+  {
+    "path": "backend/ai/v1_auto_voice.py",
+    "sha256": "6181F67AE8D25080ED4787FC3A22833F1556BC9680053A084BFEA94395A4DB2E"
+  },
+  {
+    "path": "backend/ass_utils.py",
+    "sha256": "34144B9E83E07B144EDD75A2320B14DA514712954B852E66CEA6C8409B650211"
+  },
+  {
+    "path": "backend/model_workers/v1_ocr_worker.py",
+    "sha256": "586AC695ACC3506E30D82AE8E3A75134B521C2AE902184E5317788C373D9E186"
+  },
+  {
+    "path": "backend/ocr_subtitle_locator.py",
+    "sha256": "E9A73DC1FCF2BDB38662AB78454A09A844D8C01D83187B9EF56CD0FDC2B02F43"
+  },
+  {
+    "path": "backend/ocr_utils.py",
+    "sha256": "E57309FEC73F9982429FD0FF7D5F39E7C6B714C260FBED7F7451A84EDB58554C"
+  },
+  {
+    "path": "backend/segment_editor_service.py",
+    "sha256": "33CF50E04EA30BE60E87AA85B77158A4749849A41A282EDB1F5988C6D013E747"
+  },
+  {
+    "path": "backend/telegram_bot.py",
+    "sha256": "C3BD0E39A3B99C1B0A37CD64806618519D0228FC8CEAA70C82BE42BCD15183C4"
+  },
+  {
+    "path": "backend/v1_feature_flags.py",
+    "sha256": "4FD01ED40E53D1128CBA901B055B4AAF0A90FD46DA270E971B65EB18DB8855ED"
+  },
+  {
+    "path": "backend/v1_ocr_geometry.py",
+    "sha256": "E674BBB4A1E4DCB414C2B073FAF4635FC80C401D9EFCEA58AE3F99E8DE28A7EB"
+  },
+  {
+    "path": "tests/test_dual_voice_turn_accuracy.py",
+    "sha256": "6A75D7C17C8C654CB5B2D61F34E6323A9AA6BEA8CC0F751B4AEA6828E7A04823"
+  },
+  {
+    "path": "tests/test_ocr_adaptive_sampling.py",
+    "sha256": "5C35EF70C4A41F4594B0F46FE116F843C60F03DF984A41E93E995DC21BF5FEE7"
+  },
+  {
+    "path": "tests/test_v1_qc_policy_source.py",
+    "sha256": "834A7B888ABD19997820AC26082E6A3E2887405B08EA3D54EBCC5C5EB62D47A9"
+  },
+  {
+    "path": "backend/cloud/__init__.py",
+    "sha256": "2492942C94978581EBD70E9227CA0EB7848ADE2831CCB8C76038E524F3B9A448"
+  },
+  {
+    "path": "backend/cloud/cloud_config.py",
+    "sha256": "8B49DE4136811ACB4DC6013E98E6E62D4D334DF3FE093CDD4849EB7B50A31899"
+  },
+  {
+    "path": "backend/cloud/cloud_job_store.py",
+    "sha256": "0815F5B9DA5753A6104999197DE39FDB3C44644B3F0EFEC352C74E8A8E88FC56"
+  },
+  {
+    "path": "backend/cloud/cloud_orchestrator.py",
+    "sha256": "9AA7BB3EBE024B82412300FB32E71408EC46668AC97B5759B99953FD45C42D06"
+  },
+  {
+    "path": "backend/cloud/cloud_routes.py",
+    "sha256": "24B7D9A685B68B95CE322A36C9F4F5D3524B36B38C6122754B9E73FE6EDBA538"
+  },
+  {
+    "path": "backend/cloud/cloud_worker.py",
+    "sha256": "9793F49F6AABF18B60CA3DB2B9D9041368088DE4925248B590517E50B2CC7727"
+  },
+  {
+    "path": "backend/cloud/colab_bridge.py",
+    "sha256": "1B718F6D3F25B6135F1A9DFF8160F8CED37E69B9F58CBBF24B7A73B94E4C6204"
+  },
+  {
+    "path": "backend/cloud/gpu_scripts/capcut_tts_api-1.0.0-py3-none-any.whl",
+    "sha256": "A7B42630773A6AA44A2A076283EF315F43BD25AC1BBB193618D949163E3E2024"
+  },
+  {
+    "path": "backend/cloud/gpu_scripts/full_pipeline.py",
+    "sha256": "A948C42E9307C5A301BD3F9399D10898D3677D26D1467AD095D5E4192DF25942"
+  },
+  {
+    "path": "backend/cloud/gpu_scripts/mixer.py",
+    "sha256": "B1DFB8A6DF4BBF2C9CC80AE9BDEB020C936EE4E5EF56F25BA2870424D0E15364"
+  },
+  {
+    "path": "backend/cloud/gpu_scripts/requirements_cloud.txt",
+    "sha256": "79A586DF7C6FEBFEC2B3248389931A8F09CAF62492E51E8EF2E2F22DD5C08B8E"
+  },
+  {
+    "path": "backend/cloud/gpu_scripts/setup_env.py",
+    "sha256": "1C1C4E76A021789BB0A356920F15FF25E6289CB43B45E09752367877E5557524"
+  },
+  {
+    "path": "backend/templates/cloud_dashboard.html",
+    "sha256": "0D68EA6C29AF38C64D8BE2341CEC045F3B0B49FE93F930771FE9D8410E8AFFE5"
+  },
+  {
+    "path": "docs/CLOUD_IMPLEMENTATION_PLAN_20261114.md",
+    "sha256": "4E4F36CE6EDCF09019EC63688615DC90EF1F13CD1ADFFACED21C0054F600E07C"
+  },
+  {
+    "path": "docs/HANDOFF_TOOLV1_TO_CLOUD_20261114.md",
+    "sha256": "DF25E63C8AE5793677FAC7DA8514B7F987A18BEB626E31A1799132C9961318AE"
+  },
+  {
+    "path": "docs/local_review_fixes_20261114.md",
+    "sha256": "473423A2A050622DA8F85B85CDBA2BE7B9F6BBFE525999A367A05919432BF432"
+  },
+  {
+    "path": "start_cloud_dashboard.bat",
+    "sha256": "3BB93BE1149E9AE3A38FDAC947D810A2BFEDF28E747FE33276B303D49FC05A7D"
+  },
+  {
+    "path": "tests/test_ocr_asr_correction.py",
+    "sha256": "5223C18FAB5B47D3E44F1E9985744AD212E1D5C8589A8098AFC7305783650D5B"
+  }
+]

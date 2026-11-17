@@ -5,6 +5,18 @@ class JobStateReadError(RuntimeError):
     """The active-job state cannot be verified safely."""
 
 
+class StaleExecutionError(ValueError):
+    """A callback no longer owns the execution it is trying to complete."""
+
+
+class OutputVerificationError(ValueError):
+    """An output failed verification; rerendering must remain explicit."""
+
+
+class CloudRecoveryRequired(ValueError):
+    """An existing cloud attempt must be reconciled before queue acknowledgement."""
+
+
 class PipelineStateError(RuntimeError):
     """A manual job could not establish that the pipeline is available."""
 

@@ -3,8 +3,50 @@ import contextvars
 import os
 import subprocess
 import time
+import asyncio
+import threading
 
 stop_check = contextvars.ContextVar("batch_stop_check", default=None)
+
+
+class BatchStopRequested(RuntimeError):
+    """The active execution received a cooperative stop request."""
+
+
+async def to_thread_drained(func, /, *args, **kwargs):
+    """Run blocking work while keeping its ownership after caller cancellation.
+
+    asyncio.to_thread cancellation only cancels the awaitable, leaving native
+    work alive. Shield the executor future and drain it before propagating the
+    cancellation so locks and output state are released by the owner.
+    """
+    loop = asyncio.get_running_loop()
+    cancelled = threading.Event()
+    inherited = stop_check.get()
+    token = stop_check.set(lambda: cancelled.is_set() or bool(inherited and inherited()))
+    context = contextvars.copy_context()
+    future = loop.run_in_executor(None, lambda: context.run(func, *args, **kwargs))
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        cancelled.set()
+        await drain_task(future)
+        raise
+    finally:
+        stop_check.reset(token)
+
+
+async def drain_task(task):
+    """Join actual owned work even if the owner is cancelled more than once."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except BaseException:
+            break
+    if task.done() and not task.cancelled():
+        task.exception()
 
 
 def run(args, *, timeout=None, check=False, **kwargs):

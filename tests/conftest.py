@@ -67,7 +67,6 @@ QUARANTINE_STALE = {
     "tests/test_multi_llm_translation.py::TestMultiLLMTranslation::test_prompt_builder_with_glossary_entity_speaker_and_cross_batch_context": "không hermetic: cache đĩa máy chính trả sẵn kết quả dịch",
     "tests/test_multi_llm_translation.py::TestMultiLLMTranslation::test_translate_subtitles_forwards_glossary_and_maps": "không hermetic: cache đĩa máy chính trả sẵn kết quả dịch",
     "tests/test_ocr_fail_closed.py::OCRFailureTests::test_both_telegram_ocr_handlers_raise": "kỳ vọng fail-closed cũ",
-    "tests/test_ocr_geometry_audit.py::SourceMaskAuditTests::test_source_lifetime_outside_speech_is_covered_without_extending_text": "hành vi audit geometry đã đổi",
     "tests/test_ocr_runtime_audit.py::OCRTimestampTests::test_truncated_tail_does_not_stretch_last_frame_across_gap": "hành vi audit timestamp đã đổi",
     "tests/test_pipeline_v2_preservation.py::LegacyPatchPreservationTests::test_local_renderer_uses_portable_environment_paths": "kỳ vọng preservation cũ",
     "tests/test_pipeline_v2_preservation.py::LegacyPatchPreservationTests::test_telegram_network_updates_use_safe_wrapper": "kỳ vọng preservation cũ",

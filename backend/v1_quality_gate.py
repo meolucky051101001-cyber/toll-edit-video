@@ -525,13 +525,18 @@ def run_quality_gate(
                 status="PASS" if valid_ass else "FAIL",
                 message="Kiểm tra cấu trúc và timeline ASS (chưa xác minh hình ảnh che chữ)",
             ))
-            has_ass_cover_boxes = valid_ass and all_ocr_located and ("BgStyle" in ass_text or "\\p1" in ass_text)
+            try:
+                from pipeline_v2.cover_qc import parse_ass_covers
+                source_covers, _, _ = parse_ass_covers(ass_text)
+            except (ValueError, TypeError):
+                source_covers = []
+            has_ass_cover_boxes = valid_ass and all_ocr_located and bool(source_covers)
             if has_ass_cover_boxes:
                 checks.append(QCCheckItem(
                     QCCategory.SUBTITLE_STYLING.value,
                     "visual_mask_coverage",
                     "PASS",
-                    "Đã xác minh tọa độ OCR và lớp hộp che nền (BgStyle) trong tệp ASS",
+                    "Đã xác minh tọa độ OCR và sự hiện diện của lớp che chữ nguồn trong ASS; chưa xác minh pixel",
                 ))
             else:
                 checks.append(QCCheckItem(

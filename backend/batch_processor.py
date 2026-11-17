@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import asyncio
+from batch_control import BatchStopRequested, to_thread_drained
 import logging
 from v1_integrity_errors import FrozenConfigError
 import gc
@@ -94,10 +95,6 @@ import json
 SUPPORTED_EXTENSIONS = ('.mp4', '.mkv', '.mov', '.avi', '.webm', '.flv', '.m4v')
 
 
-class BatchStopRequested(RuntimeError):
-    """Raised at safe checkpoints when the user asks the batch to stop."""
-
-
 def _stop_requested() -> bool:
     return bool(
         getattr(shared_state, "stop_requested", False)
@@ -111,10 +108,8 @@ def _raise_if_stopped() -> None:
 
 
 def _receipt_path(output):
-    import hashlib
-    key = os.path.normcase(os.path.abspath(str(output)))
-    name = hashlib.sha256(key.encode("utf-8")).hexdigest() + ".json"
-    return Path(WORKSPACE) / "output_receipts" / name
+    from batch_plan_service import output_receipt_path
+    return output_receipt_path(WORKSPACE, output)
 
 
 def _verified_output(source, output):
@@ -193,7 +188,8 @@ class _LegacyVoice:
 
 async def process_single_local_video(video_path: str, output_dir: str, progress_callback=None,
                                      queue_index=None, queue_total=None, video_mode: str = "auto", *,
-                                     job_id=None, overrides=None, resume_if_possible=True, work_dir=None) -> bool:
+                                     job_id=None, overrides=None, resume_if_possible=True, work_dir=None,
+                                     config_snapshot=None, verified_v1_recovery=False) -> bool:
     """
     Quy trình 6 bước AI Dubbing cho 1 file video cục bộ
     """
@@ -209,7 +205,7 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
     from pipeline_v2.atomic_io import atomic_write_text
     atomic_write_text(Path(out_dir) / ".autodub-owned", str(Path(out_dir).resolve()))
     from batch_checkpoint import Checkpoints
-    checkpoints = await asyncio.to_thread(Checkpoints, out_dir, video_path)
+    checkpoints = await to_thread_drained(Checkpoints, out_dir, video_path)
 
     original_audio = os.path.join(out_dir, "original.wav")
     srt_original = os.path.join(out_dir, "original.srt")
@@ -249,6 +245,9 @@ async def process_single_local_video(video_path: str, output_dir: str, progress_
         notify=notify,
         pipeline_settings=pipeline_settings,
     )
+    c.config_snapshot = config_snapshot
+    if verified_v1_recovery:
+        return await _run_orchestrated_local_video(c, require_existing_manifest=True)
     if pipeline_settings.mode is PipelineMode.V2:
         return await _run_v2_local_video(c, verify_delivered_product)
 
@@ -329,7 +328,7 @@ async def _run_v2_local_video(c, verify_delivered_product):
         return False
 
 
-async def _run_orchestrated_local_video(c):
+async def _run_orchestrated_local_video(c, *, require_existing_manifest=False):
     try:
         from job_config_service import get_frozen_config
         from v1_orchestrator import V1Orchestrator
@@ -337,7 +336,7 @@ async def _run_orchestrated_local_video(c):
         c.job_id = c.job_id or f"batch_{c.base_name}_{int(time.time())}"
         clean_base = c.base_name[7:] if str(c.base_name).startswith("Dubbed_") else c.base_name
         final_dest = os.path.join(c.output_dir, f"Dubbed_{clean_base}.mp4")
-        frozen_plan = get_frozen_config(c.file_name, workspace_path=WORKSPACE) or {}
+        frozen_plan = c.config_snapshot if c.config_snapshot is not None else (get_frozen_config(c.job_id or c.file_name, workspace_path=WORKSPACE) or {})
         frozen_effective = {**frozen_plan.get("effective_config", {}), **(c.overrides or {})}
         planned_mode = frozen_effective.get("video_mode") or c.video_mode or "auto"
 
@@ -356,6 +355,7 @@ async def _run_orchestrated_local_video(c):
             progress_callback=_batch_orch_progress,
             stop_checker=lambda: getattr(shared_state, 'stop_requested', False),
             resume_if_possible=c.resume_if_possible,
+            require_existing_manifest=require_existing_manifest,
         )
         if not res.get('tracker_finalized'):
             job_tracker.finish_video(c.file_name, res["final_video"], time.monotonic() - orch_started)
@@ -368,6 +368,8 @@ async def _run_orchestrated_local_video(c):
             "pipeline_version": "v1_orchestrator_complete",
             "qc_status": res.get("qc_status"),
             "input_sha256": fingerprint(c.video_path),
+            "source_path": str(Path(c.video_path).resolve()),
+            "source_name": c.file_name,
             "output_sha256": fingerprint(final_dest),
         })
         await c.notify(f"✅ Hoàn tất video ({res.get('video_mode')}, QC: {res.get('qc_status')}) -> {final_dest}")
@@ -375,7 +377,7 @@ async def _run_orchestrated_local_video(c):
     except asyncio.CancelledError:
         raise
     except BatchStopRequested as exc:
-        job_tracker.mark_stopped(str(exc))
+        job_tracker.request_stop()
         return False
     except Exception as orch_err:
         logger.exception("V1 job failed; checkpoint retained, no legacy restart")
@@ -389,7 +391,7 @@ async def _legacy_prepare_audio(c):
     from job_config_service import get_frozen_config, freeze_job_config
     from audio_settings import get_audio_settings
     cur_audio_settings = get_audio_settings()
-    frozen_job_entry = get_frozen_config(c.file_name, workspace_path=WORKSPACE) or freeze_job_config(
+    frozen_job_entry = c.config_snapshot if c.config_snapshot is not None else (get_frozen_config(c.job_id or c.file_name, workspace_path=WORKSPACE) or freeze_job_config(
         video_name=c.file_name,
         workspace_path=WORKSPACE,
         overrides={
@@ -399,8 +401,9 @@ async def _legacy_prepare_audio(c):
             "separation_mode": cur_audio_settings.get("separation_mode", "roformer"),
             "ducking_mode": cur_audio_settings.get("ducking_mode", "soft"),
         }
-    )
+    ))
     frozen_eff = frozen_job_entry.get("effective_config", {}) if frozen_job_entry else {}
+    frozen_eff = {**frozen_eff, **(c.overrides or {})}
     from v1_job_policy import (
         looks_like_bgm_hallucination,
         resolve_visual_sub_to_speech,
@@ -416,7 +419,7 @@ async def _legacy_prepare_audio(c):
     _raise_if_stopped()
     await c.notify("🎧 Bước 1/6: Đang trích xuất âm thanh gốc...")
     job_tracker.update_step(1, "Bước 1/6: Đang trích xuất âm thanh gốc...", percent=10)
-    if not await asyncio.to_thread(extract_audio_from_video, c.video_path, c.original_audio):
+    if not await to_thread_drained(extract_audio_from_video, c.video_path, c.original_audio):
         await c.notify("❌ Không thể trích xuất âm thanh!")
         job_tracker.set_error(
             c.file_name, "Không thể trích xuất âm thanh", fatal=False
@@ -432,7 +435,7 @@ async def _legacy_prepare_audio(c):
     await pause_checkpoint()
     _raise_if_stopped()
     await c.notify("🧠 Bước 2/6: Đang bóc tách giọng nói & giữ nhạc nền (BS-RoFormer GPU / Demucs)...")
-    vocals_audio, no_vocals_audio = await asyncio.to_thread(
+    vocals_audio, no_vocals_audio = await to_thread_drained(
         separate_vocals_demucs,
         c.original_audio,
         c.out_dir,
@@ -459,7 +462,7 @@ async def _legacy_recognize_and_locate(c, frozen_eff, visual_sub_to_speech, asr_
     async with async_gpu_gatekeeper("speech_asr", timeout_seconds=900.0):
         srt_segments = await c.checkpoints.subtitles(
             "transcribe", vocals_audio,
-            lambda: asyncio.to_thread(extract_subtitles_whisper, vocals_audio, c.srt_original, original_audio_path=c.original_audio, asr_model=batch_asr_model),
+            lambda: to_thread_drained(extract_subtitles_whisper, vocals_audio, c.srt_original, original_audio_path=c.original_audio, asr_model=batch_asr_model),
             c.srt_original)
     if not srt_segments:
         asr_was_empty = True
@@ -479,7 +482,7 @@ async def _legacy_recognize_and_locate(c, frozen_eff, visual_sub_to_speech, asr_
         job_tracker.update_step(3.5, "Bước 3.5/6: Quét phụ đề trên hình (Visual OCR-to-TTS)...", percent=55)
         try:
             async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=900.0):
-                visual_segments, vid_w, vid_h, main_y_pct = await asyncio.to_thread(
+                visual_segments, vid_w, vid_h, main_y_pct = await to_thread_drained(
                     perform_video_ocr, c.video_path, target_lang="vi", sample_rate=1.0,
                     api_key=GEMINI_API_KEY, srt_segments=[], visual_sub_to_speech=True,
                     _source_duration=source_duration,
@@ -490,7 +493,7 @@ async def _legacy_recognize_and_locate(c, frozen_eff, visual_sub_to_speech, asr_
             srt_segments = visual_segments
             for idx, seg in enumerate(srt_segments, start=1):
                 seg.index = idx
-            await asyncio.to_thread(save_srt, srt_segments, c.srt_original)
+            await to_thread_drained(save_srt, srt_segments, c.srt_original)
             visual_geometry = (vid_w, vid_h, main_y_pct)
         elif asr_was_empty:
             await c.notify("⚠️ Không tìm thấy phụ đề động trên hình để lồng tiếng!")
@@ -520,7 +523,7 @@ async def _legacy_recognize_and_locate(c, frozen_eff, visual_sub_to_speech, asr_
         job_tracker.update_step(3.5, "Bước 3.5/6: Quét vị trí phụ đề gốc (PP-OCRv6)...", percent=55)
         try:
             async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=900.0):
-                _, vid_w, vid_h, main_y_pct = await asyncio.to_thread(
+                _, vid_w, vid_h, main_y_pct = await to_thread_drained(
                     perform_video_ocr, c.video_path, target_lang="vi", sample_rate=1.0,
                     api_key=GEMINI_API_KEY, srt_segments=srt_segments,
                     visual_sub_to_speech=visual_sub_to_speech,
@@ -558,11 +561,11 @@ async def _legacy_translate(c, srt_segments, frozen_eff):
     job_tracker.update_step(5, f"Bước 5/8: {configured_m} đang dịch{script_badge} ({len(srt_segments)} câu)...", percent=65)
     translated_segments = await c.checkpoints.subtitles(
         "translate", c.srt_original,
-        lambda: asyncio.to_thread(translate_subtitles, srt_segments, "vi",
+        lambda: to_thread_drained(translate_subtitles, srt_segments, "vi",
                                   api_key=GEMINI_API_KEY, video_path=c.video_path,
                                   script_mode=v1_script_mode),
         c.srt_translated)
-    await asyncio.to_thread(save_srt, translated_segments, c.srt_translated)
+    await to_thread_drained(save_srt, translated_segments, c.srt_translated)
     try:
         t_models = job_tracker.get_status().get("translation_models", [])
         used_model = ", ".join(t_models) if t_models else configured_m
@@ -625,7 +628,7 @@ async def _legacy_choose_voice(c, frozen_job_entry, frozen_eff, srt_segments, vo
         # Quyết định giọng theo chế độ Auto/Manual (Codex Plan)
         from ai.v1_auto_voice import decide_video_voice, get_auto_voice_mode
         batch_voice_mode = get_auto_voice_mode(WORKSPACE)
-        voice_lock_info = await asyncio.to_thread(
+        voice_lock_info = await to_thread_drained(
             decide_video_voice,
             out_dir=c.out_dir,
             srt_segments=srt_segments,
@@ -666,7 +669,7 @@ async def _legacy_dub_and_mix(c, voice, frozen_eff, srt_segments, translated_seg
 
     # Căn chỉnh phụ đề ASS
     ass_path = os.path.join(c.out_dir, "final.ass")
-    await asyncio.to_thread(generate_ass_file, translated_segments, [], ass_path, play_res_x=vid_w, play_res_y=vid_h, main_y_pct=main_y_pct)
+    await to_thread_drained(generate_ass_file, translated_segments, [], ass_path, play_res_x=vid_w, play_res_y=vid_h, main_y_pct=main_y_pct)
 
     # Trộn nhạc nền sạch với giọng lồng tiếng (ưu tiên effective_config đóng băng)
     v1_bgm_vol = frozen_eff.get("bgm_volume_db", -2.0)
@@ -674,7 +677,7 @@ async def _legacy_dub_and_mix(c, voice, frozen_eff, srt_segments, translated_seg
     v1_duck_mode = frozen_eff.get("ducking_mode", "soft")
     # Music-only source: no_vocals would strip the only original audio.
     bgm_audio = c.original_audio if (visual_sub_to_speech and asr_was_empty) else no_vocals_audio
-    await asyncio.to_thread(
+    await to_thread_drained(
         mix_audio_pydub,
         bgm_audio,
         dubbing_audio_files,
@@ -694,7 +697,7 @@ async def _legacy_render_and_deliver(c, voice, PipelineMode, ass_path, main_y_pc
     job_tracker.update_step(6, "Bước 6/6: Render video thành phẩm bằng NVENC GPU...", percent=95)
     from v1_gpu_gatekeeper import async_gpu_gatekeeper
     async with async_gpu_gatekeeper("video_rendering", timeout_seconds=900.0):
-        res = await asyncio.to_thread(process_video, c.video_path, ass_path, c.mixed_audio, c.final_video, main_y_pct=main_y_pct, delogo=False)
+        res = await to_thread_drained(process_video, c.video_path, ass_path, c.mixed_audio, c.final_video, main_y_pct=main_y_pct, delogo=False)
     if not res or not os.path.exists(c.final_video):
         await c.notify("❌ Lỗi trong quá trình render video!")
         job_tracker.set_error(
@@ -705,7 +708,7 @@ async def _legacy_render_and_deliver(c, voice, PipelineMode, ass_path, main_y_pc
     await pause_checkpoint()
     _raise_if_stopped()
     # Lưu thành phẩm vào thư mục đầu ra
-    probe = await asyncio.to_thread(probe_downloaded_video, c.final_video)
+    probe = await to_thread_drained(probe_downloaded_video, c.final_video)
     if not probe.audio_stream_count:
         raise RuntimeError("Thành phẩm không có luồng âm thanh.")
     os.makedirs(c.output_dir, exist_ok=True)
@@ -714,6 +717,9 @@ async def _legacy_render_and_deliver(c, voice, PipelineMode, ass_path, main_y_pc
     receipt_path = _receipt_path(final_dest)
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_json(receipt_path, {
+        "job_id": c.job_id,
+        "source_path": str(Path(c.video_path).resolve()),
+        "source_name": c.file_name,
         "voice_id": voice.voice_id,
         "voice_source": voice.source,
         "voice_mode": voice.info.get("voice_mode", voice.mode),
@@ -783,7 +789,7 @@ async def _run_legacy_local_video(c, PipelineMode):
             vocals_audio, no_vocals_audio, t0)
     except (BatchStopRequested, asyncio.CancelledError) as stop_error:
         logger.info("[%s] %s", c.file_name, stop_error)
-        job_tracker.mark_stopped("Đã dừng batch theo yêu cầu!")
+        job_tracker.request_stop()
         await c.notify(f"⏹️ {stop_error}")
         return False
     except Exception as e:
@@ -809,10 +815,12 @@ async def process_batch_folder(
     progress_callback=None,
     job_id: str = None,
     video_mode: str = "auto",
+    batch_plan=None,
 ):
     """Own the complete lifecycle, including failures from callbacks and cancellation."""
     job_id = job_id or uuid.uuid4().hex
-    worker = asyncio.create_task(_process_batch_folder(
+    execution_token = job_tracker.current_execution.set(job_id)
+    worker = asyncio.create_task(_process_batch_plan(batch_plan, job_id, progress_callback) if batch_plan else _process_batch_folder(
         input_dir, output_dir, progress_callback, job_id, video_mode=video_mode))
     try:
         result = await asyncio.shield(worker)
@@ -824,12 +832,15 @@ async def process_batch_folder(
         shared_state.stop_requested = True
         if job_tracker.get_status().get("job_id") == job_id:
             job_tracker.request_stop()
-        if not worker.done():
-            worker.cancel()
-        try:
-            await asyncio.wait({worker}, timeout=2.0)
-        except Exception as _phase6_exc:
-            logger.warning('Suppressed error in batch_processor.process_batch_folder (asyncio.wait): %s', type(_phase6_exc).__name__, exc_info=False)
+        # A cancelled await cannot terminate a native thread. Keep ownership
+        # through cooperative cleanup, including repeated cancellation requests.
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+        if not worker.cancelled():
+            worker.result()
         raise
     except job_tracker.JobAlreadyRunningError:
         raise
@@ -837,7 +848,82 @@ async def process_batch_folder(
         job_tracker.fail_batch(str(exc), job_id=job_id)
         raise
     finally:
+        if _stop_requested() and job_tracker.get_status().get("job_id") == job_id:
+            job_tracker.mark_stopped()
         job_tracker.release_batch(job_id)
+        job_tracker.current_execution.reset(execution_token)
+
+
+async def _process_batch_plan(plan, execution_id, progress_callback=None):
+    """Only selected identities may render, deliver, or archive in this execution."""
+    from batch_plan_service import BatchPlanStore, validate_source, fingerprint as source_fingerprint
+    from batch_control import stop_check
+    stop_check.set(_stop_requested)
+    store = BatchPlanStore(WORKSPACE)
+    batch_id = plan["batch_id"]
+    store.update(batch_id, expected_state="accepted", state="running")
+    job_tracker.start_batch(len(plan["items"]), plan["input_root"], plan["output_root"], job_id=execution_id)
+    failures = 0
+    try:
+        for index, item in enumerate(plan["items"], 1):
+            if _stop_requested():
+                break
+            try:
+                source = await to_thread_drained(validate_source, item, plan["input_root"])
+                store.item_result(batch_id, item["job_id"], "running")
+                work_dir = str(Path(WORKSPACE) / ("batch_" + item["job_id"]))
+                ok = await process_single_local_video(str(source), plan["output_root"], progress_callback,
+                    queue_index=index, queue_total=len(plan["items"]), video_mode=plan["video_mode"],
+                    job_id=item["job_id"], overrides=item["effective_config"], work_dir=work_dir,
+                    config_snapshot=item["config_snapshot"])
+                if _stop_requested():
+                    store.item_result(batch_id, item["job_id"], "canceled")
+                    break
+                if not ok:
+                    failures += 1
+                    store.item_result(batch_id, item["job_id"], "failed", error="Processing failed; checkpoint retained")
+                    continue
+                # Never archive an input that changed while processing.
+                if await to_thread_drained(source_fingerprint, source) != item["source_fingerprint"]:
+                    raise RuntimeError("Nguồn đổi trong lúc chạy; giữ nguồn để kiểm tra.")
+                receipt_path = _receipt_path(item["output_ref"])
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                delivered = await to_thread_drained(source_fingerprint, item["output_ref"])
+                if (receipt.get("job_id") != item["job_id"]
+                        or receipt.get("input_sha256") != item["source_fingerprint"]["sha256"]
+                        or receipt.get("output_sha256") != delivered["sha256"] or delivered["size"] == 0):
+                    raise RuntimeError("Receipt/thành phẩm chưa xác minh đúng item; giữ nguồn để kiểm tra.")
+                archived = source
+                if plan.get("archive_source", True):
+                    archive_dir = Path(plan["input_root"]) / "processed"
+                    archive_dir.mkdir(parents=True, exist_ok=True)
+                    archived = archive_dir / source.name
+                    if archived.exists():
+                        archived = archive_dir / f"{source.stem}_{item['job_id']}{source.suffix}"
+                    await to_thread_drained(shutil.move, str(source), str(archived))
+                receipt.update(job_id=item["job_id"], batch_id=batch_id, source_path=str(archived), source_name=source.name,
+                               input_sha256=item["source_fingerprint"]["sha256"])
+                atomic_write_json(receipt_path, receipt)
+                store.item_result(batch_id, item["job_id"], "completed", archived_source=str(archived), output_ref=item["output_ref"])
+            except Exception as exc:
+                failures += 1
+                store.item_result(batch_id, item["job_id"], "failed", error=str(exc))
+                job_tracker.set_error(item["filename"], str(exc), fatal=False)
+        if _stop_requested():
+            current = store.get(batch_id)
+            for item in current["items"]:
+                if item["state"] in {"pending", "running"}:
+                    store.item_result(batch_id, item["job_id"], "canceled")
+            store.update(batch_id, state="stopped", finished_at=time.time())
+        elif failures:
+            store.update(batch_id, state="failed", finished_at=time.time())
+            job_tracker.fail_batch(f"{failures} video xử lý lỗi", job_id=execution_id)
+        else:
+            store.update(batch_id, state="completed", finished_at=time.time())
+            job_tracker.finish_batch()
+    except BaseException as exc:
+        store.update(batch_id, state="recovery_required", error=str(exc))
+        raise
 
 
 async def _process_batch_folder(
@@ -982,7 +1068,7 @@ async def _process_batch_folder(
         expected_render = os.path.join(output_dir, f"Dubbed_{clean_stem}.mp4")
         if not os.path.isfile(expected_render):
             expected_render = os.path.join(output_dir, f"Dubbed_{base_stem}.mp4")
-        verified = os.path.isfile(expected_render) and await asyncio.to_thread(_verified_output, vpath, expected_render)
+        verified = os.path.isfile(expected_render) and await to_thread_drained(_verified_output, vpath, expected_render)
         if verified:
             receipt_file = _receipt_path(expected_render)
             receipt = json.loads(receipt_file.read_text(encoding="utf-8")) if receipt_file.is_file() else {}

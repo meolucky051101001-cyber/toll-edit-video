@@ -1,11 +1,8 @@
 import json
-import os
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 from fastapi.testclient import TestClient
 
@@ -65,38 +62,23 @@ class TestQueueResilience(unittest.TestCase):
         self.assertEqual(res_empty.status_code, 200)
         self.assertEqual(res_empty.json()["status"], "empty")
 
-        # 2. Populate queue file
-        snap_file = self.workspace / "telegram_queue.json"
-        payload = {
-            "items": [
-                {"position": 1, "url": "https://example.com/v1", "chat_id": 999, "name": "Video 1"},
-                {"position": 2, "url": "https://example.com/v2", "chat_id": 999, "name": "Video 2"}
-            ],
-            "pid": os.getpid(),
-            "updated_at": time.time()
-        }
-        snap_file.write_text(json.dumps(payload), encoding="utf-8")
-
-        # 3. Process queue
-        with patch("job_tracker._pid_is_running", return_value=True):
-            res_proc = self.client.post("/api/queue/process")
-            self.assertEqual(res_proc.status_code, 200)
-            self.assertEqual(res_proc.json()["status"], "processing")
-            self.assertEqual(res_proc.json()["count"], 2)
-
-            trigger_flag = self.workspace / "telegram_queue_trigger.flag"
-            self.assertTrue(trigger_flag.exists())
-
-        # 4. Clear queue via API
-        res_clear = self.client.post("/api/queue/clear")
-        self.assertEqual(res_clear.status_code, 200)
-        self.assertEqual(res_clear.json()["status"], "cleared")
-
-        clear_flag = self.workspace / "telegram_queue_clear.flag"
-        self.assertTrue(clear_flag.exists())
-
-        data_cleared = json.loads(snap_file.read_text(encoding="utf-8"))
-        self.assertEqual(len(data_cleared.get("items", [])), 0)
+        owner = MonitoredQueue()
+        owner.put_nowait({"job_id": "one", "hold": {"kind": "manual"}})
+        owner.put_nowait({"job_id": "two"})
+        payload = {"target_job_ids": ["one"], "expected_revision": owner.revision}
+        process = self.client.post("/api/queue/process", json=payload)
+        self.assertEqual(process.status_code, 202, process.text)
+        active = owner.get_nowait()
+        self.assertEqual(active["job_id"], "one")
+        payload = {"target_job_ids": ["one", "two"], "expected_revision": owner.revision}
+        cleared = self.client.post("/api/queue/clear", json=payload)
+        self.assertEqual(cleared.status_code, 202, cleared.text)
+        self.assertEqual(owner.qsize(), 1)
+        owner.apply_commands()
+        operation = self.client.get("/api/queue/operations/" + cleared.json()["operation_id"]).json()
+        self.assertEqual(operation["result"], {"one": "too_late", "two": "removed"})
+        self.assertEqual(owner.qsize(), 0)
+        self.assertEqual(owner.active_job["job_id"], "one")
 
 
 if __name__ == "__main__":

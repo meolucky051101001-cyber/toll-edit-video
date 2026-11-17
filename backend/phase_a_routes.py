@@ -99,11 +99,14 @@ async def api_resolve_config(payload: Dict[str, Any] = Body(...)):
     video_overrides = payload.get("video_overrides") or payload.get("overrides")
     system_defaults = payload.get("system_defaults")
 
-    result = preset_service.resolve_effective_config(
-        preset_id=preset_id,
-        video_overrides=video_overrides,
-        system_defaults=system_defaults,
-    )
+    try:
+        result = preset_service.resolve_effective_config(
+            preset_id=preset_id,
+            video_overrides=video_overrides,
+            system_defaults=system_defaults,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, str(exc))
     return {"status": "ok", **result}
 
 
@@ -126,7 +129,11 @@ async def api_get_video_draft(video_name: str):
 @router.post("/api/video-draft/{video_name}")
 async def api_save_video_draft(video_name: str, payload: Dict[str, Any] = Body(...)):
     """Lưu hoặc cập nhật bản nháp cấu hình riêng cho video."""
-    saved = job_config_service.save_video_draft(video_name, payload)
+    try:
+        preset_service.resolve_effective_config(preset_id=payload.get("preset_id"), video_overrides=payload.get("overrides"))
+        saved = job_config_service.save_video_draft(video_name, payload)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, str(exc))
     return {"status": "saved", "draft": saved}
 
 
@@ -163,11 +170,21 @@ async def api_patch_queued_job_config(job_id: str, payload: Dict[str, Any] = Bod
 
 @router.post("/api/jobs/batch")
 async def api_jobs_batch(request: Request, payload: Dict[str, Any] = Body(...)):
-    key = payload.get("idempotency_key")
-    if key:
-        with job_config_service.idempotency_lock(key):
-            return _enqueue_jobs_batch(request, payload)
-    return _enqueue_jobs_batch(request, payload)
+    import asyncio
+    from batch_plan_service import BatchPlanStore, PlanConflict, public_plan
+    runtime = getattr(request.app.state, "pipeline_runtime", None)
+    if runtime is None:
+        raise HTTPException(503, "Pipeline runtime chưa sẵn sàng.")
+    store = BatchPlanStore(runtime.WORKSPACE)
+    try:
+        plan = await asyncio.to_thread(store.prepare, payload, runtime.get_input_dir(), runtime.get_output_dir(), job_config_service.freeze_job_config)
+        if payload.get("trigger", True):
+            return await runtime.admit_batch_plan(plan["batch_id"])
+        return JSONResponse(status_code=201, content={**public_plan(plan), "message": "Đã lưu tập video và cấu hình; chưa khởi chạy."})
+    except PlanConflict as exc:
+        raise HTTPException(409, {"code": "batch_conflict", "message": str(exc)})
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, {"code": "invalid_batch", "message": str(exc)})
 
 
 def _safe_bare_name(value, label: str = "Tên video") -> str:
@@ -178,82 +195,3 @@ def _safe_bare_name(value, label: str = "Tên video") -> str:
     if any(ch in '<>:"|?*' for ch in clean):
         raise HTTPException(400, f"{label} chứa ký tự không hợp lệ.")
     return clean
-
-
-def _enqueue_jobs_batch(request: Request, payload: Dict[str, Any]):
-    """
-    Xếp hàng hàng loạt video với cấu hình đóng băng riêng từng video.
-    Hỗ trợ Idempotency key ngăn chặn double-click / gửi trùng.
-    """
-    idempotency_key = payload.get("idempotency_key")
-    if idempotency_key:
-        cached = job_config_service.check_idempotency(idempotency_key)
-        if cached:
-            logger.info("Trả về kết quả idempotency đã cache cho key: %s", idempotency_key)
-            return JSONResponse(status_code=200, content=cached)
-
-    items = payload.get("items", [])
-    if not items:
-        raise HTTPException(400, "Danh sách video rỗng (items is required).")
-
-    batch_id = payload.get("batch_id") or f"batch_{uuid.uuid4().hex[:8]}"
-    trigger_now = bool(payload.get("trigger", True))
-    batch_video_mode = str(payload.get("video_mode") or "auto").strip() or "auto"
-    
-    frozen_items = []
-    for it in items:
-        filename = it.get("filename") or it.get("name")
-        if not filename:
-            continue
-        filename = _safe_bare_name(filename)
-        p_id = it.get("preset_id")
-        ovr = dict(it.get("overrides") or {})
-        # Freeze the dashboard's S/M/L choice with the item. A later global
-        # mode change must not alter a job that is already queued.
-        ovr.setdefault("video_mode", str(it.get("video_mode") or batch_video_mode))
-        raw_job_id = it.get("job_id")
-        job_id = _safe_bare_name(raw_job_id, label="Mã job") if raw_job_id else f"{batch_id}_{filename}"
-
-        # Đóng băng cấu hình cho video này
-        snapshot = job_config_service.freeze_job_config(
-            video_name=filename,
-            preset_id=p_id,
-            overrides=ovr,
-            job_id=job_id,
-            batch_id=batch_id,
-        )
-        frozen_items.append({
-            "filename": filename,
-            "job_id": job_id,
-            "preset_id": p_id,
-            "preset_name": snapshot.get("preset_name"),
-            "effective_config": snapshot.get("effective_config"),
-            "warnings": snapshot.get("warnings", []),
-        })
-
-    # Trigger batch execution nếu được yêu cầu
-    execution_triggered = False
-    message = f"Đã xếp hàng {len(frozen_items)} video với cấu hình đóng băng."
-    
-    if trigger_now:
-        try:
-            from main import api_run_batch
-            import asyncio
-            asyncio.create_task(api_run_batch(None, video_mode=batch_video_mode))
-            execution_triggered = True
-            message += " Đang khởi chạy tiến trình xử lý V1..."
-        except Exception as e:
-            logger.warning("Không thể tự kích hoạt batch V1: %s", e)
-
-    response_data = {
-        "status": "started" if execution_triggered else "enqueued",
-        "batch_id": batch_id,
-        "total_items": len(frozen_items),
-        "items": frozen_items,
-        "message": message,
-    }
-
-    if idempotency_key:
-        job_config_service.record_idempotency(idempotency_key, response_data)
-
-    return JSONResponse(status_code=200, content=response_data)
