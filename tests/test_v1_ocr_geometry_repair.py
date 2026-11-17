@@ -327,9 +327,10 @@ class PipelineTests(unittest.TestCase):
         calls=[]
         def recognize(frames):calls.append(len(frames));return self.rows(frames)
         self.run_ocr([segment()],recognize,capture_args={'duration':20.})
-        self.assertEqual(calls[0],2)
-        self.assertTrue(all(1 <= size <= 8 for size in calls[1:]))
-        self.assertTrue(any(size > 1 for size in calls[1:]))
+        # A fully matched short cue needs exactly the two initial observations;
+        # geometry rescue is intentionally skipped when those already locate it.
+        self.assertEqual(calls,[2])
+        self.assertTrue(all(1 <= size <= 8 for size in calls))
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

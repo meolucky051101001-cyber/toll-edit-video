@@ -39,7 +39,8 @@ def critical_failures(checks):
              "source_geometry_fps", "video_stream_integrity", "ass_subtitle_file",
              "final_stream_layout", "ocr_coordinate_coverage",
              "tts_audio_files", "tts_cue_coverage", "tts_no_collisions",
-             "tts_timeline_bounds", "no_cjk_residual", "no_empty_subtitles"}
+             "tts_timeline_bounds", "no_cjk_residual", "no_empty_subtitles",
+             "visual_pixel_coverage"}
     return [c for c in checks if c.status == "FAIL" and c.name in names]
 
 
@@ -111,6 +112,33 @@ def _qc_ts_seconds(value: Any) -> float:
         return 0.0
 
 
+def _normalized_box_pixel_bounds(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    out_w: int,
+    out_h: int,
+    source_size: Optional[tuple[int, int]] = None,
+) -> tuple[float, float, float, float]:
+    """Map normalized source-caption bounds onto the rendered frame."""
+    if source_size and source_size[0] > 0 and source_size[1] > 0:
+        src_w, src_h = source_size
+        src_ar = src_w / src_h
+        out_ar = out_w / max(1, out_h)
+        if abs(src_ar - out_ar) >= 0.03:
+            scale = min(out_w / src_w, out_h / src_h)
+            pad_x = (out_w - src_w * scale) * 0.5
+            pad_y = (out_h - src_h * scale) * 0.5
+            return (
+                pad_x + x0 * src_w * scale,
+                pad_y + y0 * src_h * scale,
+                pad_x + x1 * src_w * scale,
+                pad_y + y1 * src_h * scale,
+            )
+    return x0 * out_w, y0 * out_h, x1 * out_w, y1 * out_h
+
+
 def _map_normalized_box_to_frame(
     x0: float,
     y0: float,
@@ -120,24 +148,10 @@ def _map_normalized_box_to_frame(
     out_h: int,
     source_size: Optional[tuple[int, int]] = None,
 ) -> tuple[int, int, int, int]:
-    """Ánh xạ bbox chuẩn hóa (0..1) từ video gốc sang tọa độ pixel trên video thành phẩm."""
-    if source_size and source_size[0] > 0 and source_size[1] > 0:
-        src_w, src_h = source_size
-        src_ar = src_w / src_h
-        out_ar = out_w / max(1, out_h)
-        if abs(src_ar - out_ar) >= 0.03:
-            scale = min(out_w / src_w, out_h / src_h)
-            pad_x = (out_w - src_w * scale) * 0.5
-            pad_y = (out_h - src_h * scale) * 0.5
-            px0 = pad_x + x0 * src_w * scale
-            py0 = pad_y + y0 * src_h * scale
-            px1 = pad_x + x1 * src_w * scale
-            py1 = pad_y + y1 * src_h * scale
-        else:
-            px0, py0, px1, py1 = x0 * out_w, y0 * out_h, x1 * out_w, y1 * out_h
-    else:
-        px0, py0, px1, py1 = x0 * out_w, y0 * out_h, x1 * out_w, y1 * out_h
-
+    """Map a normalized caption box to a padded crop in the rendered frame."""
+    px0, py0, px1, py1 = _normalized_box_pixel_bounds(
+        x0, y0, x1, y1, out_w, out_h, source_size
+    )
     pad_px = max(24, int(round(out_w * 0.05)))
     pad_py = max(20, int(round(out_h * 0.04)))
     rx0 = max(0, min(out_w - 2, int(round(px0)) - pad_px))
@@ -206,7 +220,7 @@ def check_rendered_pixel_coverage(
     """
     Hậu kiểm giữa câu và các biên chuyển phụ đề nguồn (tối đa 192 mẫu biên):
     cắt vùng OCR phụ đề gốc từ video xuất xưởng và quét lại bằng PP-OCRv6.
-    Chỉ trả PASS / WARN / UNKNOWN (không bao giờ trả FAIL để tránh chặn nhầm job).
+    OCR chữ gốc có độ tin cậy cao trong vùng caption đã xác nhận trả FAIL; chữ ở ngoài vùng chỉ cảnh báo.
     """
     if not enabled:
         return QCCheckItem(
@@ -315,6 +329,9 @@ def check_rendered_pixel_coverage(
             if fw < 32 or fh < 32:
                 continue
             x0, y0, x1, y1 = item["box"]
+            px0, py0, px1, py1 = _normalized_box_pixel_bounds(
+                x0, y0, x1, y1, fw, fh, source_size
+            )
             rx0, ry0, rx1, ry1 = _map_normalized_box_to_frame(x0, y0, x1, y1, fw, fh, source_size)
             crop = frame[ry0:ry1, rx0:rx1]
             if crop is None or crop.size == 0 or crop.shape[0] < 16 or crop.shape[1] < 16:
@@ -324,6 +341,12 @@ def check_rendered_pixel_coverage(
                 "index": item["index"],
                 "time_s": item["mid_s"],
                 "roi": [rx0, ry0, rx1, ry1],
+                "expected_box": [
+                    int(round(px0)) - rx0,
+                    int(round(py0)) - ry0,
+                    int(round(px1)) - rx0,
+                    int(round(py1)) - ry0,
+                ],
                 "transition": item.get("transition", False),
             })
     finally:
@@ -370,29 +393,62 @@ def check_rendered_pixel_coverage(
             text = str(row[1] or "").strip()
             prob = float(row[2]) if len(row) >= 3 and row[2] is not None else 1.0
             cjk_cnt = _visual_chinese_count(text)
-            if cjk_cnt >= 2 and prob >= 0.60:
-                leaks.append({
-                    "index": meta["index"],
-                    "time_s": meta["time_s"],
-                    "roi": meta["roi"],
-                    "detected_text": text[:40],
-                    "cjk_chars": cjk_cnt,
-                    "confidence": round(prob, 3),
-                })
+            if cjk_cnt < 2 or prob < 0.60:
+                continue
+
+            confirmed = False
+            overlap_ratio = 0.0
+            detection_box = None
+            try:
+                points = row[0]
+                xs = [float(point[0]) for point in points]
+                ys = [float(point[1]) for point in points]
+                if xs and ys:
+                    dx0, dy0, dx1, dy1 = min(xs), min(ys), max(xs), max(ys)
+                    mx0, my0, mx1, my1 = meta["expected_box"]
+                    intersection = max(0.0, min(dx1, mx1) - max(dx0, mx0)) * max(
+                        0.0, min(dy1, my1) - max(dy0, my0)
+                    )
+                    detection_area = max(1.0, (dx1 - dx0) * (dy1 - dy0))
+                    overlap_ratio = intersection / detection_area
+                    detection_box = [round(dx0, 1), round(dy0, 1), round(dx1, 1), round(dy1, 1)]
+                    confirmed = prob >= 0.90 and overlap_ratio >= 0.50
+            except (TypeError, ValueError, IndexError):
+                pass
+
+            leaks.append({
+                "index": meta["index"],
+                "time_s": meta["time_s"],
+                "roi": meta["roi"],
+                "detected_text": text[:40],
+                "cjk_chars": cjk_cnt,
+                "confidence": round(prob, 3),
+                "detection_box": detection_box,
+                "caption_overlap_ratio": round(overlap_ratio, 3),
+                "confirmed": confirmed,
+            })
 
     if leaks:
+        confirmed_leaks = [leak for leak in leaks if leak["confirmed"]]
         times_str = ", ".join(f"{lk['time_s']:.1f}s" for lk in leaks[:3])
+        status = "FAIL" if confirmed_leaks else "WARN"
+        message = (
+            f"Xác nhận còn chữ gốc trong vùng phụ đề ở khung hình {times_str}"
+            if confirmed_leaks else
+            f"Phát hiện khả năng còn chữ Hán gần vùng phụ đề ở khung hình {times_str} — kiểm tra lại video"
+        )
         return QCCheckItem(
             QCCategory.SUBTITLE_STYLING.value,
             "visual_pixel_coverage",
-            "WARN",
-            f"Phát hiện khả năng còn chữ Hán chưa che hết ở khung hình {times_str} — kiểm tra lại video",
+            status,
+            message,
             details={
                 "sampled_frames": len(crops),
                 "leaks": leaks[:5],
                 "ass_subtitle_path": str(ass_subtitle_path) if ass_subtitle_path else None,
                 "transition_candidates": transition_total,
                 "leak_count": len(leaks),
+                "confirmed_leak_count": len(confirmed_leaks),
                 "leak_times_s": sorted({leak["time_s"] for leak in leaks}),
             },
         )
