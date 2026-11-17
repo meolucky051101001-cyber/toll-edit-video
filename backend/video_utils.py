@@ -725,16 +725,26 @@ def process_video(
                 return []
 
         tail_pad_filter = ""
+        tail_pad_seconds = 0.0
         try:
-            import soundfile as sf
             src_dur_v = float(getattr(source_video, "duration", 0.0) or 0.0)
             if mixed_audio_path and os.path.isfile(mixed_audio_path) and src_dur_v > 0.0:
-                mix_dur_v = float(sf.info(str(mixed_audio_path)).duration)
+                mix_dur_v = 0.0
+                if str(mixed_audio_path).lower().endswith(".wav"):
+                    import wave
+                    with wave.open(str(mixed_audio_path), "rb") as wf:
+                        fr = wf.getframerate()
+                        if fr > 0:
+                            mix_dur_v = float(wf.getnframes()) / float(fr)
+                else:
+                    import soundfile as sf
+                    mix_dur_v = float(sf.info(str(mixed_audio_path)).duration)
                 if 0.08 < (mix_dur_v - src_dur_v) <= 4.0:
-                    pad_s = round(mix_dur_v - src_dur_v + 0.04, 3)
-                    tail_pad_filter = f"tpad=stop_mode=clone:stop_duration={pad_s:.3f}"
+                    tail_pad_seconds = round(mix_dur_v - src_dur_v + 0.04, 3)
+                    tail_pad_filter = f"tpad=stop_mode=clone:stop_duration={tail_pad_seconds:.3f}"
         except Exception:
             tail_pad_filter = ""
+            tail_pad_seconds = 0.0
 
         if not is_already_9_16:
             delogo_filters = _build_delogo_filters(orig_w, orig_h)
@@ -891,7 +901,10 @@ def process_video(
                     timeout=command_timeout,
                 )
                 if proc.returncode == 0 and os.path.exists(output_video_path) and os.path.getsize(output_video_path) > 10000:
-                    validate_video_output(output_video_path, source_video, require_audio=True, expected_size=(w, h))
+                    validate_kwargs = {"require_audio": True, "expected_size": (w, h)}
+                    if tail_pad_seconds > 0.0:
+                        validate_kwargs["allowed_tail_pad"] = tail_pad_seconds
+                    validate_video_output(output_video_path, source_video, **validate_kwargs)
                     logger.info("V1 render complete encoder=%s seconds=%.2f bytes=%d",
                                 encoder_name, time.monotonic()-encoder_started,
                                 os.path.getsize(output_video_path))

@@ -121,6 +121,17 @@ class MediaTests(unittest.TestCase):
         with patch.object(media, "probe_main_video", return_value=output):
             self.assertIs(media.validate_video_output("unused", source, require_audio=True), output)
 
+    def test_accept_tail_padded_output_within_allowed_pad(self):
+        source = media.select_main_video(metadata(duration=30.7, cover=False))
+        output = media.select_main_video(metadata(duration=31.35, cover=False))
+        with patch.object(media, "probe_main_video", return_value=output):
+            with self.assertRaises(ValueError):
+                media.validate_video_output("unused", source, require_audio=True)
+            self.assertIs(
+                media.validate_video_output("unused", source, require_audio=True, allowed_tail_pad=0.69),
+                output,
+            )
+
 
 class PreparationTests(unittest.TestCase):
     def setUp(self):

@@ -373,3 +373,18 @@ def test_duration_alignment_accepts_tail_padded_audio_overhang(tmp_path):
         )
     dur_chk = next(c for c in rep.checks if c.name == "duration_alignment")
     assert dur_chk.status == "PASS"
+
+
+def test_validate_video_output_accepts_tail_padded_audio_overhang():
+    import pytest
+    from unittest.mock import patch
+    import v1_media_streams as ms
+
+    src = ms.MainVideo(0, 720, 1280, 29.381, 30.70, 1, 1, False)
+    out = ms.MainVideo(0, 720, 1280, 29.394, 31.333, 1, 1, False)
+
+    with patch.object(ms, "probe_main_video", return_value=out):
+        with pytest.raises(ValueError):
+            ms.validate_video_output("out.mp4", src, require_audio=True)
+        res = ms.validate_video_output("out.mp4", src, require_audio=True, allowed_tail_pad=0.687)
+        assert res == out
