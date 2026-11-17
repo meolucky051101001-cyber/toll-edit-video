@@ -724,9 +724,22 @@ def process_video(
                 logger.warning("Không thể cấu hình delogo (%s)", d_err)
                 return []
 
+        tail_pad_filter = ""
+        try:
+            import soundfile as sf
+            src_dur_v = float(getattr(source_video, "duration", 0.0) or 0.0)
+            if mixed_audio_path and os.path.isfile(mixed_audio_path) and src_dur_v > 0.0:
+                mix_dur_v = float(sf.info(str(mixed_audio_path)).duration)
+                if 0.08 < (mix_dur_v - src_dur_v) <= 4.0:
+                    pad_s = round(mix_dur_v - src_dur_v + 0.04, 3)
+                    tail_pad_filter = f"tpad=stop_mode=clone:stop_duration={pad_s:.3f}"
+        except Exception:
+            tail_pad_filter = ""
+
         if not is_already_9_16:
             delogo_filters = _build_delogo_filters(orig_w, orig_h)
-            pre_split = ",".join(["format=yuv420p"] + delogo_filters) + ","
+            pre_items = ["format=yuv420p"] + delogo_filters + ([tail_pad_filter] if tail_pad_filter else [])
+            pre_split = ",".join(pre_items) + ","
             sub_filter = _build_sub_filter(orig_w, orig_h)
             blur_bg_filter = (
                 f"{pre_split}split[v1][v2];"
@@ -767,6 +780,10 @@ def process_video(
             delogo_filters = _build_delogo_filters(w, h)
             if delogo_filters:
                 filter_parts.extend(delogo_filters)
+            if tail_pad_filter:
+                if "format=yuv420p" not in filter_parts:
+                    filter_parts.append("format=yuv420p")
+                filter_parts.append(tail_pad_filter)
 
             sub_filter = _build_sub_filter(w, h)
             if "split[" in sub_filter and "format=yuv420p" not in filter_parts:

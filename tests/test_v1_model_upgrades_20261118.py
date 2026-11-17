@@ -329,3 +329,47 @@ def test_speaker_formant_disambiguation_and_cosine_similarity(monkeypatch):
     v1 = np.array([1.0, 0.0, 0.0], dtype=np.float32)
     v2 = np.array([0.8, 0.6, 0.0], dtype=np.float32)
     assert abs(cosine_similarity(v1, v2) - 0.8) < 1e-5
+
+
+def test_duration_alignment_accepts_tail_padded_audio_overhang(tmp_path):
+    import cv2
+    import soundfile as sf
+    from unittest.mock import MagicMock, patch
+    from backend import v1_quality_gate as qg
+    from backend.v1_media_streams import MainVideo
+
+    src_vid = tmp_path / "src.mp4"
+    out_vid = tmp_path / "out.mp4"
+    mix_wav = tmp_path / "mixed.wav"
+    src_vid.write_bytes(b"v" * 20000)
+    out_vid.write_bytes(b"v" * 20000)
+    # Source video track is 30.70s while original/mixed audio is 31.35s (+0.65s tail overhang)
+    sf.write(str(mix_wav), np.zeros(int(16000 * 31.35), dtype=np.float32), 16000)
+
+    def _fake_probe(p):
+        dur = 30.70 if Path(p).name == "src.mp4" else 31.35
+        return MainVideo(0, 720, 1280, 30.0, dur, 1, 1, False)
+
+    fake_cap = MagicMock()
+    fake_cap.isOpened.return_value = True
+    fake_cap.read.return_value = (True, np.zeros((16, 16, 3), dtype=np.uint8))
+    fake_cap.get.side_effect = lambda prop: {
+        cv2.CAP_PROP_FRAME_COUNT: 940,
+        cv2.CAP_PROP_FPS: 30.0,
+        cv2.CAP_PROP_FRAME_WIDTH: 720,
+        cv2.CAP_PROP_FRAME_HEIGHT: 1280,
+    }.get(prop, 0)
+
+    with patch("v1_media_streams.probe_main_video", side_effect=_fake_probe), \
+         patch("cv2.VideoCapture", return_value=fake_cap):
+        rep = qg.run_quality_gate(
+            job_id="qc_tail_pad",
+            final_video_path=out_vid,
+            original_video_path=src_vid,
+            mixed_audio_path=mix_wav,
+            policy="BLOCK",
+            workspace_path=tmp_path,
+            enable_visual_pixel_qc=False,
+        )
+    dur_chk = next(c for c in rep.checks if c.name == "duration_alignment")
+    assert dur_chk.status == "PASS"

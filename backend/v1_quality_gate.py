@@ -649,7 +649,16 @@ def run_quality_gate(
         tolerance = max(0.40, 3.0 / max(1.0, output.fps))
         duration_ok = output.duration > 0 and audio_duration > 0 and abs(output.duration - audio_duration) <= tolerance
         if source:
-            duration_ok = duration_ok and source.duration > 0 and abs(output.duration - source.duration) <= tolerance
+            allowed_tail_pad = (
+                max(0.0, min(4.0, audio_duration - source.duration))
+                if audio_duration > source.duration
+                else 0.0
+            )
+            duration_ok = (
+                duration_ok
+                and source.duration > 0
+                and (source.duration - tolerance) <= output.duration <= (source.duration + allowed_tail_pad + tolerance)
+            )
 
             # Nới rộng hoàn toàn độ phân giải và FPS theo yêu cầu:
             # Cho phép mọi độ phân giải (2K, 4K, 1080p, 720p, 9:16 dọc, 16:9 ngang, 4:3, 1:1, v.v.)
