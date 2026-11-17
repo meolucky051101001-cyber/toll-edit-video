@@ -1139,7 +1139,7 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
     )
     median_seed_h = seed_heights[len(seed_heights) // 2] if seed_heights else 0.0
     max_seed_h = seed_heights[-1] if seed_heights else 0.0
-    max_allowed_block_h = max(median_seed_h * 1.58, max_seed_h * 1.35) if median_seed_h > 0.0 else 1.0
+    max_allowed_block_h = max(median_seed_h * 1.66, max_seed_h * 1.40) if median_seed_h > 0.0 else 1.0
     seeds_centered = bool(
         source_seeds
         and max(abs(((s.x_pct + s.max_x_pct) * 0.5) - 0.5) for s in source_seeds) <= 0.08
@@ -1155,7 +1155,7 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             if source_only and source_seeds:
                 center = (block.y_pct + block.max_y_pct) / 2
                 in_band = (
-                    (median_seed_h <= 0.0 or (median_seed_h * 0.74 <= block_h <= max_allowed_block_h))
+                    (median_seed_h <= 0.0 or (median_seed_h * 0.56 <= block_h <= max_allowed_block_h))
                     and any(
                         abs(center - (seed.y_pct + seed.max_y_pct) / 2)
                         <= min(block_h, (seed.max_y_pct - seed.y_pct) * 1.30) * .52 + .004
@@ -1723,8 +1723,16 @@ def _bridge_source_caption_gaps(tracks):
     bridges = []
 
     def nearby(first, second):
-        return max(abs(getattr(first, field) - getattr(second, field)) for field in
-                   ('x_pct', 'max_x_pct', 'y_pct', 'max_y_pct')) <= .025
+        if max(abs(getattr(first, field) - getattr(second, field)) for field in
+               ('x_pct', 'max_x_pct', 'y_pct', 'max_y_pct')) <= .025:
+            return True
+        if (abs(first.y_pct - second.y_pct) <= .025
+                and abs(first.max_y_pct - second.max_y_pct) <= .025):
+            w1 = max(0.001, first.max_x_pct - first.x_pct)
+            w2 = max(0.001, second.max_x_pct - second.x_pct)
+            ov_x = min(first.max_x_pct, second.max_x_pct) - max(first.x_pct, second.x_pct)
+            return ov_x >= 0.55 * min(w1, w2)
+        return False
 
     for block in ordered:
         text = _visual_caption_key(block.text)
