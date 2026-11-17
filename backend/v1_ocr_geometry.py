@@ -3,7 +3,7 @@ import math
 from collections import Counter
 from difflib import SequenceMatcher
 
-OCR_GEOMETRY_VERSION = 6
+OCR_GEOMETRY_VERSION = 8
 
 
 class OCRGeometryError(RuntimeError):
@@ -171,6 +171,8 @@ def validate_mask_geometry(segments, strict=None):
     if strict is None:
         import os
         strict = os.getenv("V1_STRICT_OCR_GEOMETRY", "1").lower() in ("1", "true")
+    # Validation must not manufacture observations from neighbouring cues.
+    # Retain unresolved geometry for correction, including in warning mode.
     invalid = [value(s, 'index') for s in segments
                if value(s, 'ocr_mask_status') == 'unresolved'
                or (value(s, 'ocr_mask_status') == 'located'

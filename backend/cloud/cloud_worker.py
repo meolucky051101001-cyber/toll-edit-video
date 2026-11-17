@@ -45,7 +45,9 @@ class CloudWorker:
             self.store.request_cancel(self._current_job.job_id)
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=timeout)
-        return not self.is_running()
+        stopped = not self.is_running()
+        logger.info("Cloud GPU Worker %s", "đã dừng" if stopped else "đang chờ bước hiện tại kết thúc")
+        return stopped
 
     def is_running(self) -> bool:
         return bool(self._thread and self._thread.is_alive())

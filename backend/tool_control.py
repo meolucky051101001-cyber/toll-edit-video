@@ -31,8 +31,12 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import psutil
+from environment import load_environment
+from service_control import control_directories, control_directory, resume_services, service_workspace, request_service_stop
+import v1_shutdown as shutdown
+
+load_environment(_backend_dir)
 import voice_selection
-from service_control import resume_services, control_directories, control_directory, service_workspace, request_service_stop
 
 ROOTS = {"v1": _backend_dir}
 PORTS = {"v1": 8088}
@@ -40,27 +44,44 @@ TOKEN = secrets.token_urlsafe(32)
 LOCK = threading.Lock()
 _STOP_OPERATIONS = {}
 _STOP_OPERATIONS_LOCK = threading.Lock()
+WORKSPACE = service_workspace(_backend_dir.parent)
 FLAGS = control_directory(_backend_dir.parent)
-CONTROL_DIRS = control_directories(_backend_dir.parent)
+CONTROL_DIRS = control_directories(_backend_dir.parent, WORKSPACE)
 
 
 def get_control_paths(key, filename):
-    return [directory / filename for directory in control_directories(ROOTS[key].parent)]
+    root = ROOTS[key].parent
+    return [directory / filename for directory in control_directories(root)]
+
 
 def processes(key):
-    from v1_shutdown import enumerate_live_processes, select_shutdown_targets
+    """List processes using the same project identity rules as scoped shutdown."""
     root = ROOTS[key].parent
-    targets, _ = select_shutdown_targets(enumerate_live_processes(), project_root=root,
-        workspace_roots=[service_workspace(root)], scope="all", caller_pid=os.getpid())
-    names = {"dashboard": "main.py", "telegram": "telegram_bot.py", "control": "tool_control.py"}
-    result = []
-    for target in targets:
-        try:
-            name = names.get(target.role, "background_service.py" if target.role.startswith("supervisor") else "worker")
-            result.append((psutil.Process(target.record.pid), name))
-        except psutil.NoSuchProcess:
+    records = shutdown.enumerate_live_processes()
+    selected, _ = shutdown.select_shutdown_targets(
+        records, project_root=root, workspace_roots=[service_workspace(root)],
+        scope="processing", include_downloader=False, caller_pid=os.getpid(),
+    )
+    # Include UI/monitor hosts for status, without treating a downloader's media
+    # child or another application's input path as a processing worker.
+    for record in records:
+        role, reason, supervisor = shutdown._classify_project_process(record, root)
+        if role in ("dashboard", "watchdog", "supervisor:dashboard"):
+            selected.append(shutdown.SelectedTarget(record, role, reason, supervisor))
+    names = {"telegram": "telegram_bot.py", "dashboard": "main.py",
+             "scriptbot": "telegram_script_bot.py", "watchdog": "ops_watchdog.py"}
+    found = []
+    for target in selected:
+        if target.role == "control":
             continue
-    return result
+        try:
+            process = psutil.Process(target.record.pid)
+            name = names.get(target.role, "background_service.py" if target.role.startswith("supervisor") else "worker")
+            found.append((process, name))
+        except psutil.Error:
+            continue
+    return found
+
 
 def read_telemetry(key):
     best = {}
@@ -97,7 +118,9 @@ def status(key):
         logger.debug('Suppressed error in tool_control.status (urllib.request.urlopen): %s', type(_phase6_exc).__name__, exc_info=False)
 
     if paused:
-        state = 'stopped'
+        still_processing = any(name in ('telegram_bot.py', 'telegram_script_bot.py', 'worker')
+                               for _, name in procs)
+        state = 'partial' if still_processing else 'stopped'
     elif fresh and data.get('polling') and dashboard:
         state = 'running'
     elif not bots and not dashboard:
@@ -119,8 +142,7 @@ def launch(key, service):
     if not pythonw.exists():
         pythonw = root / 'venv' / 'Scripts' / 'python.exe'
     env = os.environ.copy()
-    for k in ('BOT_TOKEN', 'BOT_EXPECTED_USERNAME', 'AUTODUB_WORKSPACE', 'AUTODUB_OUTPUT_DIR'):
-        env.pop(k, None)
+    env['AUTODUB_WORKSPACE'] = str(service_workspace(root.parent))
     subprocess.Popen([str(pythonw), str(root / 'background_service.py'), '--service', service],
                      cwd=str(root), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      creationflags=subprocess.CREATE_NO_WINDOW)
@@ -138,9 +160,20 @@ def _get_dashboard_token(key="v1"):
             return path.read_text(encoding="utf-8").strip()
     return ""
 
+class ControlShutdownError(ValueError):
+    def __init__(self, result):
+        self.result = result
+        messages = {
+            shutdown.EXIT_BUSY: "Tool đang xử lý video; hãy chờ job hoàn tất rồi tắt.",
+            shutdown.EXIT_ACCESS_DENIED: "Không đủ quyền để dừng các tiến trình đã xác minh.",
+            shutdown.EXIT_AMBIGUOUS: "Chưa xác minh được danh tính tiến trình hoặc tác vụ; chưa xác nhận đã dừng.",
+            shutdown.EXIT_SURVIVOR: "Một số tiến trình xử lý vẫn còn chạy; chưa xác nhận đã dừng hoàn toàn.",
+        }
+        super().__init__(messages.get(result.exit_code, "Không hoàn tất được yêu cầu dừng Tool V1."))
+
+
 def stop_and_release(key):
     """Disable admission, request drain, then stop verified processing services."""
-    from v1_shutdown import execute_shutdown, EXIT_OK
     root = ROOTS[key].parent
     request_service_stop(root, scope="processing")
     base = "http://127.0.0.1:%s" % PORTS[key]
@@ -163,10 +196,11 @@ def stop_and_release(key):
             time.sleep(.25)
         else:
             raise OSError("Đã yêu cầu dừng; công việc vẫn đang dọn dẹp. Chưa xác nhận dừng hoàn tất.")
-    result = execute_shutdown(project_root=root, workspace=service_workspace(root), scope="processing")
-    if result.exit_code != EXIT_OK:
-        raise OSError("Dừng chưa hoàn tất: " + result.message)
-    return result.to_dict()
+    result = shutdown.execute_shutdown(project_root=root, workspace=service_workspace(root),
+        scope="processing", mode="stop", force=False, include_downloader=False, caller_pid=os.getpid())
+    if result.exit_code != shutdown.EXIT_OK:
+        raise ControlShutdownError(result)
+    return result
 
 def stop_all_tools():
     stop_and_release("v1")
@@ -229,8 +263,9 @@ def change(key, action):
             except Exception as _phase6_exc:
                 logger.debug('Suppressed error in tool_control.change (p.unlink): %s', type(_phase6_exc).__name__, exc_info=False)
         try:
-            __import__("video_pause").resume()
-            pass
+            for filename in ("video.pause", "video.pause.ack"):
+                for path in get_control_paths(key, filename):
+                    path.unlink(missing_ok=True)
         except Exception as _phase6_exc:
             logger.debug('Suppressed error in tool_control.change (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
@@ -246,10 +281,8 @@ def change(key, action):
         bots = [p for p, name in procs_found if name == 'telegram_bot.py']
         fresh = any(data.get('pid') == p.pid for p in bots) and (time.time() - data.get('at', 0) < 8)
         if not fresh and bots:
-            for b in bots:
-                try: b.kill()
-                except psutil.NoSuchProcess as _phase6_exc: logger.debug('Suppressed error in tool_control.change (b.kill): %s', type(_phase6_exc).__name__, exc_info=False)
-        if 'telegram_bot.py' not in names or not fresh:
+            raise ValueError('Bot còn chạy nhưng heartbeat chưa sẵn sàng; chưa khởi động thêm tiến trình.')
+        if not bots:
             launch(key, 'telegram')
 
         # Chờ bot và dashboard sẵn sàng (tối đa 6 giây)
@@ -278,8 +311,9 @@ def apply_boot_defaults():
             try: p.unlink(missing_ok=True)
             except Exception as _phase6_exc: logger.debug('Suppressed error in tool_control.apply_boot_defaults (p.unlink): %s', type(_phase6_exc).__name__, exc_info=False)
         try:
-            __import__("video_pause").resume()
-            pass
+            for filename in ("video.pause", "video.pause.ack"):
+                for path in get_control_paths('v1', filename):
+                    path.unlink(missing_ok=True)
         except Exception as _phase6_exc: logger.debug('Suppressed error in tool_control.apply_boot_defaults (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
 
         # Khởi chạy dịch vụ Tool V1
@@ -287,10 +321,8 @@ def apply_boot_defaults():
         names = [name for _, name in procs]
         if 'main.py' not in names:
             launch('v1', 'dashboard')
-        data = read_telemetry('v1')
         bots = [p for p, name in procs if name == 'telegram_bot.py']
-        fresh = any(data.get('pid') == p.pid for p in bots) and (time.time() - data.get('at', 0) < 8)
-        if 'telegram_bot.py' not in names or not fresh:
+        if not bots:
             launch('v1', 'telegram')
     except Exception as _phase6_exc:
         logger.debug('Suppressed error in tool_control.apply_boot_defaults (get_control_paths): %s', type(_phase6_exc).__name__, exc_info=False)
@@ -833,8 +865,8 @@ HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name=
 <div class="tools" id="tools"></div>
 
 <div class="actions-bar">
-  <button id="btn-off-all" class="btn-stop-all" onclick="stopAll()" title="Dừng triệt để Tool V1 và giải phóng toàn bộ RAM & VRAM">
-    ⏹ Tắt Tool V1 (Giải phóng 100% RAM & VRAM)
+  <button id="btn-off-all" class="btn-stop-all" onclick="stopAll()" title="Dừng các tiến trình xử lý khi không có job đang chạy; giữ Dashboard và Control">
+    ⏹ Dừng xử lý Tool V1
   </button>
   <div id="message" role="status" style="margin-bottom:0; flex-grow:1;">Đang tải trạng thái hệ thống…</div>
 </div>
@@ -1078,7 +1110,7 @@ async function stopAll() {
       msgElem.textContent = d.message;
     } else if (r.ok) {
       msgElem.className = 'success';
-      msgElem.textContent = '✅ ' + (d.message || 'Đã tắt cả hai Tool.');
+      msgElem.textContent = '✅ ' + (d.message || 'Đã dừng xử lý Tool V1.');
     } else {
       msgElem.className = 'error';
       msgElem.textContent = '⚠️ ' + (d.message || 'Có lỗi xảy ra.');
@@ -1377,7 +1409,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed_path.startswith('/voice-preview-video/'):
             filename = Path(parsed_path).name
-            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")]:
+            for base in [voice_selection.BASE, *CONTROL_DIRS]:
                 target = base / 'voice_previews' / filename
                 if target.is_file():
                     return self.send_file(target, 'video/mp4')
@@ -1385,7 +1417,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed_path.startswith('/voice-preview-audio/'):
             filename = Path(parsed_path).name
-            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")]:
+            for base in [voice_selection.BASE, *CONTROL_DIRS]:
                 target = base / 'voice_checks' / filename
                 if target.is_file():
                     mime = 'audio/wav' if filename.endswith('.wav') else 'audio/mpeg'
@@ -1393,7 +1425,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(404, {'message': 'Audio preview not found'})
 
         if parsed_path == '/sample-video':
-            for base in [voice_selection.BASE, Path(r"C:\tool v1\workspace\bot_system\control"), Path(r"C:\tool v1\workspace\control")]:
+            for base in [voice_selection.BASE, *CONTROL_DIRS]:
                 target = base / 'sample_test_video.mp4'
                 if target.is_file():
                     return self.send_file(target, 'video/mp4')
@@ -1417,6 +1449,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(202, {'status': 'stopping', **result})
             message = change_voice(data.get('id')) if self.path == '/voices' else change(data.get('key'), data.get('action'))
             self.send(200, {'message': message})
+        except ControlShutdownError as e:
+            code = 403 if e.result.exit_code == shutdown.EXIT_ACCESS_DENIED else 409
+            self.send(code, {'message': str(e), 'shutdown': e.result.to_dict()})
         except (ValueError, OSError, psutil.Error) as e:
             self.send(409, {'message': str(e)})
         finally:
@@ -1424,46 +1459,23 @@ class Handler(BaseHTTPRequestHandler):
                 LOCK.release()
 
 def ensure_single_controller():
-    current_pid = os.getpid()
-    try: parent_pid = os.getppid()
-    except Exception: parent_pid = -1
-
+    """An occupied control port is never grounds to terminate another process."""
+    import socket
     try:
-        import socket
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _s:
-            _s.settimeout(0.5)
-            if _s.connect_ex(('127.0.0.1', 8090)) == 0:
-                try:
-                    with urllib.request.urlopen('http://127.0.0.1:8090/status', timeout=2) as resp:
-                        if resp.status == 200:
-                            return 'already_running'
-                except Exception:
-                    time.sleep(1)
-                    try:
-                        with urllib.request.urlopen('http://127.0.0.1:8090/status', timeout=2) as resp:
-                            if resp.status == 200:
-                                return 'already_running'
-                    except Exception as _phase6_exc:
-                        logger.debug('Suppressed error in tool_control.ensure_single_controller (urllib.request.urlopen): %s', type(_phase6_exc).__name__, exc_info=False)
-    except Exception as _phase6_exc:
-        logger.debug('Suppressed error in tool_control.ensure_single_controller (socket.socket): %s', type(_phase6_exc).__name__, exc_info=False)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            if sock.connect_ex(('127.0.0.1', 8090)) != 0:
+                return 'proceed'
+        try:
+            with urllib.request.urlopen('http://127.0.0.1:8090/status', timeout=2) as response:
+                if response.status == 200:
+                    return 'already_running'
+        except (OSError, ValueError):
+            pass
+        return 'occupied'
+    except OSError:
+        return 'occupied'
 
-    killed = False
-    try:
-        for conn in psutil.net_connections(kind='inet'):
-            if conn.laddr and conn.laddr.port == 8090 and conn.pid:
-                if conn.pid not in (current_pid, parent_pid):
-                    try:
-                        proc = psutil.Process(conn.pid)
-                        cmdline = " ".join(proc.cmdline() or []).lower()
-                        if "tool_control.py" in cmdline:
-                            proc.kill()
-                            killed = True
-                    except (psutil.Error, OSError) as _phase6_exc: logger.debug('Suppressed error in tool_control.ensure_single_controller (psutil.Process): %s', type(_phase6_exc).__name__, exc_info=False)
-    except (psutil.Error, OSError) as _phase6_exc: logger.debug('Suppressed error in tool_control.ensure_single_controller (psutil.net_connections): %s', type(_phase6_exc).__name__, exc_info=False)
-    if killed:
-        time.sleep(1)
-    return 'proceed'
 
 class SingleInstanceServer(ThreadingHTTPServer):
     allow_reuse_address = True
@@ -1494,17 +1506,17 @@ def acquire_controller_mutex() -> bool:
 
 
 if __name__ == '__main__':
-    bs_log = Path(r"C:\tool v1\workspace\bot_system\service_logs\tool_control.log")
-    log_path = bs_log if (bs_log.parent.is_dir() or Path(r"C:\tool v1\workspace\bot_system").is_dir()) else Path(r"C:\tool v1\workspace\service_logs\tool_control.log")
+    bs_log = WORKSPACE / "bot_system" / "service_logs" / "tool_control.log"
+    log_path = bs_log if (bs_log.parent.is_dir() or (WORKSPACE / "bot_system").is_dir()) else WORKSPACE / "service_logs" / "tool_control.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     if not acquire_controller_mutex():
         with open(log_path, "a", encoding="utf-8") as lf:
             lf.write(f"PID {os.getpid()}: Mutex Local\\AutoDubV1_tool_control already held by active instance. Exiting cleanly.\n")
         raise SystemExit(0)
     status_check = ensure_single_controller()
-    if status_check == 'already_running':
+    if status_check in ('already_running', 'occupied'):
         with open(log_path, "a", encoding="utf-8") as lf:
-            lf.write(f"PID {os.getpid()}: Controller already running and healthy on 8090. Exiting cleanly.\n")
+            lf.write(f"PID {os.getpid()}: Port 8090 is occupied ({status_check}); leaving the existing process unchanged.\n")
         raise SystemExit(0)
 
     server = None

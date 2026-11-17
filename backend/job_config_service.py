@@ -247,6 +247,12 @@ def freeze_job_config(
                 "asr_model", "separation_mode", "script_mode", "visual_sub_to_speech"):
         if key in overrides:
             effective[key] = overrides[key]
+    from subtitle_blur import freeze_subtitle_settings
+    import canvas_settings
+    visual_defaults = dict(canvas_settings.get_canvas_settings())
+    if os.getenv("V1_SUBTITLE_COVER_STYLE"):
+        visual_defaults["sub_cover_style"] = os.environ["V1_SUBTITLE_COVER_STYLE"]
+    effective.update(freeze_subtitle_settings(overrides, visual_defaults))
     # Keep job-scoped settings tied to the workspace that owns the job.
     config_workspace = Path(workspace_path) if workspace_path else WORKSPACE_DIR
     try:

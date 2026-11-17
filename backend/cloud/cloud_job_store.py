@@ -6,13 +6,15 @@ reconciled from its staging inode, hash and receipt, never by rerendering.
 from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass
 import json
+import math
+import datetime
 import os
 from pathlib import Path
 import sqlite3
 import time
 import uuid
 from .cloud_config import DEFAULT_CONFIG
-from .cloud_contracts import CloudOwnershipError, CloudVerificationError, validate_request
+from .cloud_contracts import CloudCapabilityError, CloudOwnershipError, CloudVerificationError, validate_request
 from .cloud_artifacts import sha256_file
 
 RUNNING = ("creating_session", "uploading", "processing", "downloading", "validating")
@@ -128,6 +130,23 @@ class CloudJobStore:
                        session_cleanup='unconfirmed'
                        WHERE attempt_id IS NULL AND state NOT IN ('queued','completed','error','stopped','recovery_required')""")
             db.execute("CREATE TABLE IF NOT EXISTS cloud_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at REAL NOT NULL)")
+            # Billing is independent of mutable job history and remains open
+            # until scoped session cleanup is confirmed, including failures.
+            db.execute("""CREATE TABLE IF NOT EXISTS cloud_cu_ledger (
+                job_id TEXT PRIMARY KEY, started_at REAL NOT NULL, ended_at REAL,
+                hourly_rate REAL NOT NULL DEFAULT 0, cu_actual REAL NOT NULL DEFAULT 0,
+                cleanup_pending INTEGER NOT NULL DEFAULT 0,
+                owner_pid INTEGER, owner_created_at REAL)""")
+            ledger_columns = {r[1] for r in db.execute("PRAGMA table_info(cloud_cu_ledger)")}
+            for name, kind in (("cleanup_pending", "INTEGER NOT NULL DEFAULT 0"),
+                               ("owner_pid", "INTEGER"), ("owner_created_at", "REAL")):
+                if name not in ledger_columns:
+                    db.execute(f"ALTER TABLE cloud_cu_ledger ADD COLUMN {name} {kind}")
+            db.execute("""INSERT OR IGNORE INTO cloud_cu_ledger
+                (job_id, started_at, ended_at, cu_actual)
+                SELECT job_id, COALESCE(completed_at, started_at, created_at),
+                       COALESCE(completed_at, started_at, created_at), cu_actual
+                FROM cloud_jobs WHERE cu_actual > 0""")
             db.execute("CREATE TABLE IF NOT EXISTS cloud_schema (version INTEGER NOT NULL)")
             version = db.execute("SELECT version FROM cloud_schema").fetchone()
             if not version:
@@ -183,6 +202,8 @@ class CloudJobStore:
     @staticmethod
     def _claim(db, job_id, owner_id):
         if db.execute("SELECT 1 FROM cloud_jobs WHERE state NOT IN ('queued','completed','error','stopped') OR session_cleanup='unconfirmed' LIMIT 1").fetchone():
+            return None
+        if db.execute("SELECT 1 FROM cloud_cu_ledger WHERE ended_at IS NULL LIMIT 1").fetchone():
             return None
         token = uuid.uuid4().hex
         cur = db.execute("""UPDATE cloud_jobs SET state='creating_session', attempt_id=?,owner_id=?,
@@ -403,10 +424,23 @@ class CloudJobStore:
             ids = [r[0] for r in db.execute("SELECT job_id FROM cloud_jobs WHERE publication_json IS NOT NULL AND state IN ('publishing','recovery_required')")]
         for job_id in ids:
             self.recover_publication(job_id)
+        with self._connect() as db:
+            pending = db.execute("SELECT * FROM cloud_cu_ledger WHERE ended_at IS NULL").fetchall()
+        for row in pending:
+            if self._billing_owner_alive(row):
+                continue
+            with self._connect() as db:
+                db.execute("UPDATE cloud_cu_ledger SET cleanup_pending=1 WHERE job_id=? AND ended_at IS NULL", (row['job_id'],))
+                db.execute("""UPDATE cloud_jobs SET state=CASE WHEN publication_json IS NOT NULL
+                    THEN 'recovery_required' ELSE 'stop_incomplete' END,
+                    session_cleanup='unconfirmed', error='cloud_billing_owner_gone_cleanup_unconfirmed', revision=revision+1
+                    WHERE job_id=? AND session_cleanup!='confirmed'""", (row['job_id'],))
 
     def delete_job(self, job_id):
         with self._connect() as db:
-            return bool(db.execute("DELETE FROM cloud_jobs WHERE job_id=? AND state IN ('completed','error','stopped') AND session_cleanup IN ('confirmed','not_created')", (job_id,)).rowcount)
+            return bool(db.execute("""DELETE FROM cloud_jobs WHERE job_id=?
+                AND state IN ('completed','error','stopped') AND session_cleanup IN ('confirmed','not_created')
+                AND NOT EXISTS (SELECT 1 FROM cloud_cu_ledger WHERE job_id=? AND ended_at IS NULL)""", (job_id, job_id)).rowcount)
 
     def get_setting(self, key, default=None):
         with self._connect() as db:
@@ -421,14 +455,88 @@ class CloudJobStore:
         return float(self.get_setting('cu_budget_daily', DEFAULT_CONFIG.get('cu_budget_daily', 10)))
 
     def set_cu_budget_daily(self, budget):
+        if not math.isfinite(float(budget)) or round(float(budget), 2) <= 0:
+            raise ValueError('Hạn mức CU phải là số hữu hạn lớn hơn 0.')
         self.set_setting('cu_budget_daily', round(float(budget), 2))
 
-    def get_cu_spent_today(self):
-        from datetime import datetime
-        midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    @staticmethod
+    def _spent_today(db, now):
+        midnight = datetime.datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        total = 0.0
+        for row in db.execute('SELECT * FROM cloud_cu_ledger'):
+            if row['hourly_rate'] > 0:
+                end = row['ended_at'] if row['ended_at'] is not None else now
+                total += max(0.0, min(end, now) - max(row['started_at'], midnight)) * row['hourly_rate'] / 3600
+            elif row['ended_at'] is not None and midnight <= row['ended_at'] <= now:
+                total += row['cu_actual']
+        return total
+
+    def start_billing(self, job_id, hourly_rate, *, attempt_id=None, owner_id=None):
+        """Reserve budget before provisioning; an unknown allocation keeps admission closed."""
+        if not math.isfinite(hourly_rate) or hourly_rate <= 0:
+            raise ValueError('Invalid GPU CU rate')
+        budget = self.get_cu_budget_daily()
+        import psutil
+        pid = os.getpid()
+        created = psutil.Process(pid).create_time()
         with self._connect() as db:
-            row = db.execute("SELECT SUM(cu_actual) FROM cloud_jobs WHERE created_at>=? AND state='completed'", (midnight,)).fetchone()
-            return round(row[0] or 0, 3)
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM cloud_jobs WHERE job_id=?', (job_id,)).fetchone()
+            if (not row or row['state'] in TERMINAL or row['cancel_requested_at'] is not None
+                    or not attempt_id or (row['attempt_id'], row['owner_id']) != (attempt_id, owner_id)):
+                raise CloudOwnershipError('cloud_billing_attempt_not_owned')
+            if db.execute('SELECT 1 FROM cloud_cu_ledger WHERE ended_at IS NULL LIMIT 1').fetchone():
+                raise CloudCapabilityError('Còn session Cloud chưa xác nhận dừng; chưa thể tạo máy mới.')
+            now = time.time()
+            if self._spent_today(db, now) >= budget:
+                raise CloudCapabilityError('cloud_daily_budget_exceeded')
+            db.execute('''INSERT INTO cloud_cu_ledger
+                (job_id, started_at, hourly_rate, owner_pid, owner_created_at) VALUES (?,?,?,?,?)''',
+                (job_id, now, hourly_rate, pid, created))
+
+    def finish_billing(self, job_id, *, attempt_id=None, owner_id=None):
+        self.assert_owned(job_id, attempt_id, owner_id)
+        with self._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            now = time.time()
+            db.execute('''UPDATE cloud_cu_ledger SET ended_at=?,cleanup_pending=0,
+                cu_actual=MAX(0,?-started_at)*hourly_rate/3600
+                WHERE job_id=? AND ended_at IS NULL''', (now, now, job_id))
+            row = db.execute('SELECT cu_actual FROM cloud_cu_ledger WHERE job_id=?', (job_id,)).fetchone()
+            amount = float(row['cu_actual']) if row else 0.0
+            db.execute('UPDATE cloud_jobs SET cu_actual=? WHERE job_id=?', (amount, job_id))
+            db.execute("""UPDATE cloud_cu_ledger SET cleanup_pending=0
+                WHERE job_id=? AND ended_at IS NOT NULL""", (job_id,))
+            return amount
+
+    def note_cleanup_failure(self, job_id, message, *, attempt_id=None, owner_id=None):
+        self.assert_owned(job_id, attempt_id, owner_id)
+        with self._connect() as db:
+            db.execute('UPDATE cloud_cu_ledger SET cleanup_pending=1 WHERE job_id=? AND ended_at IS NULL', (job_id,))
+            db.execute('UPDATE cloud_jobs SET error=? WHERE job_id=?', ('cloud_cleanup_unconfirmed: ' + str(message)[:500], job_id))
+
+    def acknowledge_all_sessions_stopped(self):
+        # Account-wide inventory cannot prove scoped attempt/secret cleanup.
+        raise CloudOwnershipError('cloud_global_cleanup_cannot_release_owned_attempts')
+
+    def cancel_all(self):
+        return [self.request_cancel(job.job_id) for job in self.list_jobs(10000) if job.state not in TERMINAL]
+
+    @staticmethod
+    def _billing_owner_alive(row):
+        if not row['owner_pid'] or row['owner_created_at'] is None:
+            return True
+        import psutil
+        try:
+            return abs(psutil.Process(row['owner_pid']).create_time() - row['owner_created_at']) < 0.001
+        except psutil.NoSuchProcess:
+            return False
+        except (psutil.AccessDenied, OSError):
+            return True
+
+    def get_cu_spent_today(self):
+        with self._connect() as db:
+            return round(self._spent_today(db, time.time()), 3)
 
     def get_cu_budget_info(self):
         budget, spent = self.get_cu_budget_daily(), self.get_cu_spent_today()

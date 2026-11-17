@@ -299,12 +299,12 @@ def _read_batch_lock_unlocked() -> Dict[str, Any]:
         return {}
 
 
-def _claim_batch_lock_unlocked(job_id: str) -> None:
+def _claim_batch_lock_unlocked(job_id: str, *, exclusive: bool = False) -> None:
     with _process_guard():
-        _claim_batch_lock_guarded(job_id)
+        _claim_batch_lock_guarded(job_id, exclusive=exclusive)
 
 
-def _claim_batch_lock_guarded(job_id: str) -> None:
+def _claim_batch_lock_guarded(job_id: str, *, exclusive: bool = False) -> None:
     _ensure_dir()
     # Registry experiments and the legacy dispatcher share this OS guard.
     # Neither admission path may overlap the other's live or unreadable lease.
@@ -334,7 +334,7 @@ def _claim_batch_lock_guarded(job_id: str) -> None:
     import psutil
     payload = json.dumps(
         {"job_id": job_id, "pid": os.getpid(), "created_at": time.time(),
-         "owner_create_time": psutil.Process().create_time()},
+         "owner_create_time": psutil.Process().create_time(), "exclusive": exclusive},
         ensure_ascii=False,
     ).encode("utf-8")
     for _attempt in range(2):
@@ -621,6 +621,8 @@ def start_batch(
     input_dir: str = "",
     output_dir: str = "",
     job_id: Optional[str] = None,
+    *,
+    exclusive: bool = False,
 ) -> str:
     """Đăng ký bắt đầu một hàng đợi batch."""
     with state_transaction():
@@ -628,7 +630,10 @@ def start_batch(
         owner = _read_batch_lock_unlocked()
         reserved = owner.get("job_id") == job_id and owner.get("pid") == os.getpid()
         if not reserved:
-            _claim_batch_lock_unlocked(job_id)
+            if exclusive:
+                _claim_batch_lock_unlocked(job_id, exclusive=True)
+            else:
+                _claim_batch_lock_unlocked(job_id)
             stop_service.clear_stop(
                 WORKSPACE, status_file=STATUS_FILE, source="job_tracker", reason="new batch starts"
             )
@@ -1126,7 +1131,7 @@ def set_error(video_name: str, error_msg: str, fatal: bool = True, worker_id: Op
             logger.warning('Suppressed error in job_tracker.set_error (push): %s', type(_phase6_exc).__name__, exc_info=False)
 
 
-def request_stop():
+def request_stop(*, wait_for_completion: bool = True):
     """Gửi yêu cầu dừng batch (hỗ trợ đa tiến trình: main.py, telegram_bot.py, v1/v2)."""
     with state_transaction():
         stop_service.request_stop(

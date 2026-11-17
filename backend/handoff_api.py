@@ -441,6 +441,9 @@ def _execute_render(job_id: str, stem: str, payload: Dict[str, Any]) -> Dict[str
     from pipeline_v2.atomic_io import atomic_copy_file, atomic_write_text
     from ai.voice_cloning import generate_dubbing_audio
 
+    from subtitle_blur import freeze_subtitle_settings
+    import canvas_settings
+    subtitle_settings = freeze_subtitle_settings(payload, canvas_settings.get_canvas_settings())
     wf = _wf()
     job_dir = wf.resolve_job_dir(stem)
     meta = json.loads((job_dir / "handoff.json").read_text(encoding="utf-8"))
@@ -478,10 +481,14 @@ def _execute_render(job_id: str, stem: str, payload: Dict[str, Any]) -> Dict[str
             continue
         seg = srt.Subtitle(index=int(cue["index"]), start=timedelta(seconds=float(cue["start"])),
                            end=timedelta(seconds=float(cue["end"])), content=display)
-        _attach_geometry(seg, cue.get("box"), main_y)
+        _attach_geometry(seg, cue.get("box"), main_y,
+                         require_source_geometry=subtitle_settings["sub_cover_style"] == "localized_blur")
         segments.append(seg)
         if str(cue.get("trans") or "").strip():
             voiced.append(seg)
+
+    import copy
+    source_segments = copy.deepcopy(segments)
 
     voice_source, voice_param, voice_label = _resolve_voice(payload)
     failed_indices: List[int] = []
@@ -507,7 +514,7 @@ def _execute_render(job_id: str, stem: str, payload: Dict[str, Any]) -> Dict[str
     if voiced:
         sync_and_clamp_subtitles(voiced, dubbing)
 
-    _stage(job_id, 76, "Dựng final.ass kèm hộp che phụ đề gốc...")
+    _stage(job_id, 76, "Dựng phụ đề Việt và vùng xử lý chữ gốc...")
     ass_path = job_dir / "final.ass"
     generate_ass_file(
         segments, [], str(ass_path),
@@ -515,6 +522,8 @@ def _execute_render(job_id: str, stem: str, payload: Dict[str, Any]) -> Dict[str
         font_name=str(payload.get("font_name") or "Arial"),
         font_color=str(payload.get("font_color") or "&H00000000"),
         font_weight=int(_num(payload.get("font_weight"), 2)),
+        cover_style=subtitle_settings["sub_cover_style"], blur_settings=subtitle_settings,
+        source_segments=source_segments,
     )
     if not ass_path.is_file() or ass_path.stat().st_size < 64:
         raise RuntimeError("Không tạo được final.ass.")
@@ -531,7 +540,9 @@ def _execute_render(job_id: str, stem: str, payload: Dict[str, Any]) -> Dict[str
     final_video = job_dir / f"final_{stem}.mp4"
     staged_render = job_dir / f"final_{stem}.handoff.mp4"
     rendered = process_video(str(video), str(ass_path), str(mixed), str(staged_render),
-                             main_y_pct=main_y, delogo=False)
+                             main_y_pct=main_y, delogo=False,
+                             subtitle_cover_style=subtitle_settings["sub_cover_style"],
+                             subtitle_blur_settings=subtitle_settings)
     if not rendered or not staged_render.is_file() or staged_render.stat().st_size < 10240:
         raise RuntimeError("Render NVENC thất bại hoặc file xuất bị lỗi.")
     atomic_copy_file(staged_render, final_video)
@@ -549,6 +560,7 @@ def _execute_render(job_id: str, stem: str, payload: Dict[str, Any]) -> Dict[str
         "finished_at": _now_iso(), "job_id": job_id, "delivered": str(delivered),
         "final_video": str(final_video), "voice": voice_label,
         "cues": len(segments), "voiced": len(voiced), "failed_cues": failed_indices,
+        "subtitle_settings": subtitle_settings,
         "seconds": round(time.time() - started, 1),
     }, ensure_ascii=False, indent=2))
 
@@ -568,9 +580,12 @@ def _execute_render(job_id: str, stem: str, payload: Dict[str, Any]) -> Dict[str
     }
 
 
-def _attach_geometry(seg, box: Any, main_y: float) -> None:
+def _attach_geometry(seg, box: Any, main_y: float, *, require_source_geometry=False) -> None:
     """Gắn toạ độ hộp che cho từng câu — pipeline sinh từ OCR, còn đây là OCR của SubExtract."""
-    resolved = _clamp_box(box) or _band_box(main_y)
+    resolved = _clamp_box(box)
+    if resolved is None and require_source_geometry:
+        raise ValueError("Thiếu tọa độ phụ đề nguồn trong handoff; hãy sửa vùng trước khi làm mờ")
+    resolved = resolved or _band_box(main_y)
     block = {
         "text": seg.content,
         "start": seg.start.total_seconds(),

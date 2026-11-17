@@ -98,7 +98,6 @@ QUARANTINE_STALE = {
     "tests/test_v1_ocr_proxy.py::ProxyTests::test_large_source_preserves_original_dimensions": "OCR proxy đã đổi",
     "tests/test_v1_resource_control.py::ResourceTests::test_stage_context_and_failure": "format log stage đã đổi",
     "tests/test_v1_resource_control.py::ResourceTests::test_worker_environment_correlation": "format log stage đã đổi",
-    "tests/test_v1_speech_translation_repair.py::BatchTests::test_invalid_condensation_never_cached": "dispatcher/speech repair đã đổi",
     "tests/test_v1_speech_translation_repair.py::BatchTests::test_unresolved_overflow_is_rejected_without_cache": "dispatcher/speech repair đã đổi",
     "tests/test_v1_speech_translation_repair.py::DispatcherTests::test_auth_stops_chain": "dispatcher/speech repair đã đổi",
     "tests/test_v1_speech_translation_repair.py::DispatcherTests::test_bad_payload_stops_chain": "dispatcher/speech repair đã đổi",

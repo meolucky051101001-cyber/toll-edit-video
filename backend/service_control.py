@@ -41,7 +41,7 @@ def intent_names(scope: str, include_downloader: bool = False) -> tuple[str, ...
         return ("downloader.disabled",)
     if scope in ("all", "cutover", "processing"):
         names = ("v1.pause", "ops.pause", "telegram.disabled", "scriptbot.disabled")
-        return names + (("downloader.disabled",) if include_downloader or scope == "cutover" else ())
+        return names + (("downloader.disabled",) if scope != "processing" and (include_downloader or scope == "cutover") else ())
     return ()
 
 

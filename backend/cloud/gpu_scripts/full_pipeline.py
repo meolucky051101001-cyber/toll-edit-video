@@ -576,7 +576,7 @@ def step4_translate_subtitles(segments: list[dict], gemini_key: str, vi_srt_path
                 raw_json = response.text or "[]"
                 translated_data = json.loads(raw_json)
                 trans_map = {item["id"]: item["text"] for item in translated_data if "id" in item and "text" in item}
-                
+
                 if len(trans_map) > 0:
                     for s in segments:
                         s["translated_text"] = trans_map.get(s["id"], s["text"])

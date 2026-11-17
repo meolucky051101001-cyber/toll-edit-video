@@ -445,6 +445,8 @@ def generate_ass_file(
     watermark_box=None,
     cover_style=None,
     strip_terminal_punctuation=False,
+    blur_settings=None,
+    source_segments=None,
 ):
     """Generate an ASS subtitle file.
     
@@ -528,11 +530,12 @@ def generate_ass_file(
     if active_cover_style not in ("solid_box", "frosted_blur", "adaptive_box", "localized_blur"):
         active_cover_style = "solid_box"
 
-    text_outline = 1 if active_cover_style == "localized_blur" else 0
+    text_outline = 2 if active_cover_style == "localized_blur" else 0
+    text_shadow = 1 if active_cover_style == "localized_blur" else 0
     if active_cover_style == "frosted_blur":
         bg_color_ass = "&H50FFFFFF"
     elif active_cover_style == "localized_blur":
-        bg_color_ass = "&H78141418"
+        bg_color_ass = "&HFF000000"
     else:
         bg_color_ass = "&H00FFFFFF"
     style_text_color = (
@@ -553,11 +556,16 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 Style: BgStyle,Arial,{font_size},{bg_color_ass},{bg_color_ass},{bg_color_ass},{bg_color_ass},0,0,0,0,100,100,0,0,1,{outline},0,5,0,0,0,1
 Style: SourceMaskStyle,Arial,{font_size},&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1
 Style: TextBgStyle,Arial,{font_size},{bg_color_ass},{bg_color_ass},{bg_color_ass},{bg_color_ass},0,0,0,0,100,100,0,0,1,{outline},0,5,0,0,0,1
-Style: TextStyle,{font_name},{font_size},{style_text_color},&H000000FF,&H00000000,&H00000000,{bold},0,0,0,100,100,0,0,1,{text_outline},0,5,10,10,10,1
+Style: TextStyle,{font_name},{font_size},{style_text_color},&H000000FF,&H00000000,&H00000000,{bold},0,0,0,100,100,0,0,1,{text_outline},{text_shadow},5,10,10,10,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+
+    if active_cover_style == "localized_blur":
+        from subtitle_blur import ass_blur_metadata
+        ass_content += ass_blur_metadata(
+            dialogue_segments if source_segments is None else source_segments, blur_settings)
 
     c = _AssLayout(
         canvas_x=canvas_x,
@@ -623,8 +631,8 @@ def _align_ass_source_pages(dialogue_segments, video_duration):
         groups[-1][1].append(seg)
     for _, pages in groups:
         if all(_verified_geometry(page) for page in pages):
-            # Source masks are rendered separately, so they do not extend the
-            # translated page or acquire its audio duration.
+            # Source masks have their own lifetime. Confirmed observations must
+            # not extend translated dialogue into a period without speech.
             continue
         tracks = [b for page in pages for b in
                   (getattr(page, "tracking_blocks", None) or [])]
@@ -662,11 +670,7 @@ def _align_ass_source_pages(dialogue_segments, video_duration):
             for page in groups[i][1]:
                 if _is_visual_segment(page):
                     continue
-                gap = (boundary - page.end).total_seconds()
-                if 0.0 < gap <= 0.5:
-                    page.end = boundary
-                else:
-                    page.end = min(page.end, boundary)
+                page.end = min(page.end, boundary)
             continue
         # Check if next group has valid tracking blocks
         next_tracks = [b for page in groups[i + 1][1] for b in (getattr(page, "tracking_blocks", None) or []) if not _excluded_source(b)]
@@ -838,10 +842,11 @@ def _lock_ass_band(processed_segments, dialogue_segments, c):
 
 
 def _relevant_ass_tracks(seg, held_tracks, seg_s, seg_e, c):
+    verified = _verified_geometry(seg)
     # Determine seg's own vertical anchor region so we never merge unrelated subtitles/titles
     # from completely different parts of the screen (e.g. top title at y~0.25 vs bottom speech at y~0.85).
     seg_blist = [b for b in (getattr(seg, "tracking_blocks", None) or []) if not _excluded_source(b)]
-    if not seg_blist and not _verified_geometry(seg) and getattr(seg, "best_block", None):
+    if not verified and not seg_blist and getattr(seg, "best_block", None):
         bb = getattr(seg, "best_block")
         if not _excluded_source(bb):
             seg_blist = [bb]
@@ -856,7 +861,7 @@ def _relevant_ass_tracks(seg, held_tracks, seg_s, seg_e, c):
         seg_bottom = seg_cy + 0.03
 
     blocks = getattr(seg, "tracking_blocks", None) or []
-    if not blocks and not _verified_geometry(seg) and getattr(seg, "best_block", None):
+    if not verified and not blocks and getattr(seg, "best_block", None):
         bb = getattr(seg, "best_block")
         if not _excluded_source(bb):
             blocks = [dict(
@@ -869,7 +874,6 @@ def _relevant_ass_tracks(seg, held_tracks, seg_s, seg_e, c):
             )]
     blocks = sorted(blocks, key=lambda b: _block_value(b, "start", 0.0))
     blocks = [b for b in blocks if not _excluded_source(b)]
-    verified = _verified_geometry(seg)
     raw_relevant = [b for b in held_tracks if b['end'] > seg_s and b['start'] < seg_e]
     relevant = []
     for b in raw_relevant:
@@ -1005,6 +1009,7 @@ def _source_ass_sticker(
     bg_override=None,
     fg_override=None,
     background_style="BgStyle",
+    render_text=True,
 ):
     ass_content = ""
     start_str, end_str = times
@@ -1089,13 +1094,15 @@ def _source_ass_sticker(
     box_radius = 0 if (edge_source or (draw_x == 0 and draw_w == c.canvas_x)) else 12
     draw_cmd = "{\\p1}" + _rounded_box(draw_w, draw_h, radius=box_radius) + "{\\p0}"
     bg_line = f"{{\\an7\\pos({draw_x:g},{draw_y}){bg_color_tag}}}{draw_cmd}"
-    ass_content += f"Dialogue: 0,{start_str},{end_str},{background_style},,0,0,0,,{bg_line}\n"
+    if c.cover_style != "localized_blur":
+        ass_content += f"Dialogue: 0,{start_str},{end_str},{background_style},,0,0,0,,{bg_line}\n"
 
     text_cx = max(min_margin + metrics.actual_text_w / 2.0, min(
         draw_x + (draw_w / 2.0), c.canvas_x - min_margin - metrics.actual_text_w / 2.0))
     text_cy = draw_y + max(0, (draw_h - metrics.required_text_h) // 2)
-    text_line = f"{{\\an8\\pos({text_cx:g},{text_cy}){fg_color_tag}}}{metrics.formatted_text}"
-    ass_content += f"Dialogue: 1,{start_str},{end_str},TextStyle,,0,0,0,,{text_line}\n"
+    if render_text:
+        text_line = f"{{\\an8\\pos({text_cx:g},{text_cy}){fg_color_tag}}}{metrics.formatted_text}"
+        ass_content += f"Dialogue: 1,{start_str},{end_str},TextStyle,,0,0,0,,{text_line}\n"
     return ass_content
 
 
@@ -1126,15 +1133,16 @@ def _fallback_ass_sticker(c, band_layout, times, metrics, verified, seg_is_visua
 
     draw_cmd = "{\\p1}" + _rounded_box(draw_w, draw_h, radius=12) + "{\\p0}"
     bg_line = f"{{\\an7\\pos({draw_x:g},{draw_y})}}{draw_cmd}"
-    background_style = "TextBgStyle" if verified else "BgStyle"
-    ass_content += f"Dialogue: 0,{start_str},{end_str},{background_style},,0,0,0,,{bg_line}\n"
+    if c.cover_style != "localized_blur":
+        background_style = "TextBgStyle" if verified else "BgStyle"
+        ass_content += f"Dialogue: 0,{start_str},{end_str},{background_style},,0,0,0,,{bg_line}\n"
 
     text_line = f"{{\\an8\\pos({text_cx:g},{text_cy})}}{metrics.formatted_text}"
     ass_content += f"Dialogue: 1,{start_str},{end_str},TextStyle,,0,0,0,,{text_line}\n"
     return ass_content
 
 
-def _render_ass_event(event, text, c, band_layout, verified, seg_is_visual):
+def _render_ass_event(event, text, c, band_layout, verified, seg_is_visual, render_text=True):
     ev_start = timedelta(seconds=event["start"])
     ev_end = timedelta(seconds=event["end"])
     start_str = _format_ass_time(ev_start)
@@ -1170,7 +1178,7 @@ def _render_ass_event(event, text, c, band_layout, verified, seg_is_visual):
         else:
             is_near_bottom = c.main_y_pct >= 0.80
 
-    metrics = _format_ass_event_text(text, is_near_bottom, c)
+    metrics = _format_ass_event_text(text, is_near_bottom, c) if render_text else _AssText(0, "", 0, 0)
     if has_source:
         bg_override = None
         fg_override = None
@@ -1191,6 +1199,7 @@ def _render_ass_event(event, text, c, band_layout, verified, seg_is_visual):
             bg_override=bg_override,
             fg_override=fg_override,
             background_style="TextBgStyle" if verified else "BgStyle",
+            render_text=render_text,
         )
     return _fallback_ass_sticker(c, band_layout, (start_str, end_str), metrics, verified, seg_is_visual)
 
@@ -1221,7 +1230,7 @@ def _render_verified_source_masks(held_tracks, c, text_boundaries=()):
 
 
 def _render_ass_dialogue(processed_segments, held_tracks, c, band_layout):
-    ass_content = _render_verified_source_masks(held_tracks, c, (
+    ass_content = "" if c.cover_style == "localized_blur" else _render_verified_source_masks(held_tracks, c, (
         getattr(seg, bound).total_seconds()
         for seg in processed_segments for bound in ("start", "end")))
     for seg in processed_segments:

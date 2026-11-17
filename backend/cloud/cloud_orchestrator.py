@@ -141,6 +141,8 @@ class CloudOrchestrator:
             if self.store.get_cu_budget_info()['is_exceeded']:
                 raise CloudCapabilityError('cloud_daily_budget_exceeded')
             update('creating_session', 10, 'Creating cloud session', session_name=session, source_sha256=source_sha)
+            self.store.start_billing(job.job_id, GPU_CU_RATES[job.gpu_type],
+                                     attempt_id=job.attempt_id, owner_id=job.owner_id)
             attempted_session = True  # A failed/timeout create may still allocate resources.
             checked(lambda: self.provider.create_session(session, gpu=job.gpu_type), provisioning=True)
             update('uploading', 20, 'Uploading isolated cloud attempt')
@@ -215,6 +217,11 @@ class CloudOrchestrator:
                     cleanup_ok = cleanup_ok and stop_confirmed
                 except Exception:
                     cleanup_ok = False
+                if stop_confirmed:
+                    self.store.finish_billing(job.job_id, attempt_id=job.attempt_id, owner_id=job.owner_id)
+                else:
+                    self.store.note_cleanup_failure(job.job_id, error or 'cloud_stop_unconfirmed',
+                                                    attempt_id=job.attempt_id, owner_id=job.owner_id)
             self.store.finish_attempt(job.job_id, job.attempt_id, job.owner_id, error=error, cleanup_ok=cleanup_ok)
             final_job = self.store.get_job(job.job_id)
             if staged is not None and final_job and not final_job.publication_json:

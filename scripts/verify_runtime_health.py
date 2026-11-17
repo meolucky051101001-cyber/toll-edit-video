@@ -85,9 +85,15 @@ def _metrics(value):
 def _dashboard(port, deadline):
     state = _get_json(f"http://127.0.0.1:{port}/api/status", deadline)
     valid = isinstance(state.get("status"), str) and bool(state["status"]) and type(state.get("active")) is bool
+    service_health = state.get("service_health")
+    if service_health is not None:
+        valid = valid and isinstance(service_health, dict) and service_health.get("ready") is True
     detail = "status={} active={} vram={} ram={}".format(
         json.dumps(state.get("status")), json.dumps(state.get("active")),
         _metrics(state.get("vram")), _metrics(state.get("ram")))
+    if service_health is not None:
+        detail += " components_ready={}".format(
+            json.dumps(service_health.get("ready") if isinstance(service_health, dict) else False))
     return valid, detail
 
 

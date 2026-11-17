@@ -4,6 +4,8 @@ Cung cấp Dashboard giao diện Web và các endpoint REST API.
 """
 
 import logging
+import asyncio
+import math
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -45,9 +47,8 @@ async def cloud_dashboard_page():
 async def api_cloud_status():
     """Tra cứu trạng thái usage, worker, active job và danh sách active session của Cloud GPU."""
     worker = get_cloud_worker()
-    usage = get_usage()
+    usage, sessions = await asyncio.gather(asyncio.to_thread(get_usage), asyncio.to_thread(get_sessions))
     current_job = worker.get_current_job() or store.get_active_job()
-    sessions = get_sessions()
     budget = store.get_cu_budget_info()
 
     return {
@@ -79,7 +80,7 @@ async def api_cloud_set_budget(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=400, detail="Thiếu giá trị budget_daily.")
     try:
         val = float(raw_budget)
-        if val <= 0:
+        if not math.isfinite(val) or val <= 0:
             raise ValueError()
     except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="Hạn mức budget_daily phải là số dương lớn hơn 0.")
@@ -186,6 +187,8 @@ async def api_cloud_job_delete(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=400, detail="Thiếu job_id.")
 
     deleted = store.delete_job(job_id)
+    if not deleted and store.get_job(job_id):
+        raise HTTPException(status_code=409, detail="Chỉ xóa lịch sử sau khi job và session đã dừng.")
     return {
         "status": "ok",
         "deleted": deleted,
@@ -224,5 +227,5 @@ async def api_cloud_worker_start():
 @router.post("/api/cloud/worker/stop")
 async def api_cloud_worker_stop():
     worker = get_cloud_worker()
-    drained = worker.stop()
+    drained = await asyncio.to_thread(worker.stop)
     return {"status": "ok" if drained else "stopping", "worker_running": worker.is_running()}

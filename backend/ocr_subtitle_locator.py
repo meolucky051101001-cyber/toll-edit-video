@@ -819,6 +819,8 @@ def select_chinese_subtitle_band(
                 if len(cjk) < min_len:
                     continue
                 if not reliable(item):
+                    # Neighbouring captions locate the band; they cannot redeem
+                    # a repeated label that failed the scene-text classifier.
                     continue
                 w = item.block["max_x_pct"] - item.block["x_pct"]
                 h = item.block["max_y_pct"] - item.block["y_pct"]
@@ -832,8 +834,12 @@ def select_chinese_subtitle_band(
                 ):
                     observed.append(item)
             combined = existing + observed
-            # Geometry restrictions above apply only to weak rescue candidates.
-            # A strongly matched caption may move horizontally between samples.
+            if any(abs((item.block["x_pct"] + item.block["max_x_pct"]) * 0.5 - 0.5) <= 0.18 for item in combined):
+                combined = [
+                    item for item in combined
+                    if item.strong_text_match
+                    or abs((item.block["x_pct"] + item.block["max_x_pct"]) * 0.5 - 0.5) <= 0.20
+                ]
             if any(item.block.get("sample_in_cue") is not False for item in combined):
                 combined = [
                     item for item in combined

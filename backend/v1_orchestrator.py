@@ -201,7 +201,24 @@ class V1Orchestrator:
         safe_overrides = {k: v for k, v in overrides.items()
                           if not any(s in k.lower() for s in ("key", "token", "secret", "password"))}
         voice_config = dict(overrides.get("voice_config") or get_auto_voice_config(str(self.workspace)))
-        if "manual_voice" not in voice_config:
+        explicit_source = str(overrides.get("voice_source") or "").strip()
+        explicit_param = str(overrides.get("voice_param") or "").strip()
+        if explicit_source or explicit_param:
+            if not explicit_source or not explicit_param:
+                raise ValueError("Chọn giọng riêng cần cả voice_source và voice_param.")
+            selected_voice = next((dict(voice) for voice in voice_selection.catalog()
+                                   if voice.get("source") == explicit_source
+                                   and str(voice.get("param")) == explicit_param), None)
+            voice_config["manual_voice"] = selected_voice or {
+                "id": f"api-{explicit_source}-{explicit_param}",
+                "source": explicit_source, "param": explicit_param,
+                "label": f"{explicit_source} · {explicit_param}",
+            }
+            # An explicit API voice is a per-job choice, including when global
+            # automatic/dual speaker selection is enabled.
+            overrides["voice_mode"] = "manual"
+            safe_overrides["voice_mode"] = "manual"
+        elif "manual_voice" not in voice_config:
             voice_config["manual_voice"] = dict(voice_selection.selected())
         # The global QC policy is read live at execution; only an explicit
         # per-job choice is frozen into the snapshot.
@@ -210,9 +227,15 @@ class V1Orchestrator:
             {"qc_policy": explicit_qc_policy, "qc_policy_source": "job"}
             if explicit_qc_policy else {}
         )
+        from subtitle_blur import freeze_subtitle_settings
+        import canvas_settings
+        visual_defaults = dict(canvas_settings.get_canvas_settings())
+        if os.getenv("V1_SUBTITLE_COVER_STYLE"):
+            visual_defaults["sub_cover_style"] = os.environ["V1_SUBTITLE_COVER_STYLE"]
+        subtitle_settings = freeze_subtitle_settings(overrides, visual_defaults)
         snapshot = freeze_job_config(
             video_name=path.name, job_id=job_id, routing_snapshot=routing, workspace_path=self.workspace,
-            overrides={**safe_overrides,
+            overrides={**safe_overrides, **subtitle_settings,
                 "video_mode": resolved_mode, "planned_pipeline": planned,
                 "planned_models": planned_models, "policy_version": 2,
                 "separation_mode": planned["separation_model"],
@@ -224,6 +247,7 @@ class V1Orchestrator:
         effective_cfg = snapshot["effective_config"]
         # Config services may filter unknown preset fields; retain job-owned policy.
         effective_cfg.update({
+            **subtitle_settings,
             "policy_version": 2, "planned_pipeline": planned, "planned_models": planned_models,
             "video_mode": resolved_mode, "separation_mode": planned["separation_model"],
             "voice_config": voice_config, "feature_flags": flags,
@@ -457,6 +481,11 @@ class V1Orchestrator:
                     effective_cfg[field] = overrides.get(field) or captured[field]
             effective_cfg["legacy_runtime_defaults_captured"] = True
             logger.warning("Legacy job %s lacked runtime snapshot; captured missing settings once", job_id)
+
+        # Legacy snapshots did not freeze cover style. Preserve the historical
+        # solid default rather than switching an in-flight job to live settings.
+        from subtitle_blur import freeze_subtitle_settings
+        effective_cfg.update(freeze_subtitle_settings(effective_cfg))
 
         # Thư mục làm việc cho job
         base_name = v_path.stem
@@ -722,7 +751,9 @@ class V1Orchestrator:
                 candidate_ocr = load_payload(c.out_dir / "ocr.json")
             except (OSError, ValueError, KeyError, TypeError):
                 candidate_ocr = None
-            if candidate_ocr and candidate_ocr.get("visual_asr_reuse"):
+            from v1_ocr_geometry import OCR_GEOMETRY_VERSION
+            if (candidate_ocr and candidate_ocr.get("visual_asr_reuse")
+                    and candidate_ocr.get("geometry_version") == OCR_GEOMETRY_VERSION):
                 cached_ocr_payload = candidate_ocr
         if cached_ocr_payload is not None:
             srt_segments = cached_ocr_payload.get("segments") or srt_segments
@@ -942,6 +973,12 @@ class V1Orchestrator:
         await c.pause_checkpoint()
 
         should_run = not (c.can_resume and stage_id in c.verified_stages)
+        from subtitle_blur import BLUR_RENDER_VERSION, freeze_subtitle_settings
+        ass_signature = {"version": BLUR_RENDER_VERSION,
+                         "settings": freeze_subtitle_settings(c.effective_cfg),
+                         "font": [c.effective_cfg.get("font_name", "Arial"),
+                                  c.effective_cfg.get("font_color", "&H00000000"),
+                                  c.effective_cfg.get("font_weight", 2)]}
         dubbing_audio_files = []
         if should_run:
             await c.notify(stage_id, 6, 75.0, "Dang long tieng (TTS)...")
@@ -1012,17 +1049,7 @@ class V1Orchestrator:
                 translated_segments = sync_and_clamp_subtitles(translated_segments, dubbing_audio_files)
 
                 # Tạo file phụ đề ASS chuẩn theo kích thước video nguồn để khớp 100% tọa độ OCR
-                sub_cover_style = (
-                    c.effective_cfg.get("sub_cover_style")
-                    or c.overrides.get("sub_cover_style")
-                    or os.getenv("V1_SUBTITLE_COVER_STYLE", "")
-                ).strip().lower()
-                if not sub_cover_style:
-                    try:
-                        import canvas_settings
-                        sub_cover_style = str(canvas_settings.get_canvas_settings().get("sub_cover_style", "solid_box")).strip().lower()
-                    except Exception:
-                        sub_cover_style = "solid_box"
+                sub_cover_style = c.effective_cfg.get("sub_cover_style", "solid_box")
                 await to_thread_drained(
                     generate_ass_file,
                     translated_segments,
@@ -1035,6 +1062,8 @@ class V1Orchestrator:
                     font_color=c.effective_cfg.get("font_color", "&H00000000"),
                     font_weight=c.effective_cfg.get("font_weight", 2),
                     cover_style=sub_cover_style,
+                    blur_settings=c.effective_cfg,
+                    source_segments=srt_segments,
                 )
 
                 save_payload(c.out_dir / "tts.json", segments=translated_segments, dubs=dubbing_audio_files)
@@ -1045,6 +1074,8 @@ class V1Orchestrator:
                 self.manifest_manager.record_stage_complete(c.job_id, stage_id, tts_artifacts)
                 current = self.manifest_manager.load_manifest(c.job_id)
                 current.effective_config["speech_timing_version"] = 3
+                current.effective_config["subtitle_ass_signature"] = ass_signature
+                c.effective_cfg["subtitle_ass_signature"] = ass_signature
                 self.manifest_manager.save_manifest(current)
             except Exception as exc:
                 self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))
@@ -1052,6 +1083,24 @@ class V1Orchestrator:
         else:
             saved = load_payload(c.out_dir / "tts.json")
             translated_segments, dubbing_audio_files = saved["segments"], saved["dubs"]
+            if c.effective_cfg.get("subtitle_ass_signature") != ass_signature:
+                from ass_utils import generate_ass_file
+                await asyncio.to_thread(
+                    generate_ass_file, translated_segments, floating_segments, str(ass_path),
+                    play_res_x=vid_w, play_res_y=vid_h, main_y_pct=main_y_pct,
+                    font_name=c.effective_cfg.get("font_name", "Arial"),
+                    font_color=c.effective_cfg.get("font_color", "&H00000000"),
+                    font_weight=c.effective_cfg.get("font_weight", 2),
+                    cover_style=c.effective_cfg.get("sub_cover_style", "solid_box"),
+                    blur_settings=c.effective_cfg, source_segments=srt_segments)
+                current = self.manifest_manager.load_manifest(c.job_id)
+                current.stages[stage_id]["artifacts"]["ass_path"] = {
+                    "path": str(ass_path.resolve()), "size_bytes": ass_path.stat().st_size,
+                    "sha256": fingerprint(ass_path)}
+                current.effective_config["subtitle_ass_signature"] = ass_signature
+                c.effective_cfg["subtitle_ass_signature"] = ass_signature
+                self.manifest_manager.save_manifest(current)
+
         c.artifacts_acc["dubbing_dir"] = str(dubbing_dir)
         c.artifacts_acc["ass_path"] = str(ass_path)
         return translated_segments, dubbing_audio_files, ass_path
@@ -1130,7 +1179,12 @@ class V1Orchestrator:
         c.check_stop()
         await c.pause_checkpoint()
 
-        should_run = not (c.can_resume and stage_id in c.verified_stages)
+        from subtitle_blur import BLUR_RENDER_VERSION, freeze_subtitle_settings
+        render_signature = {"version": BLUR_RENDER_VERSION, "ass_sha256": fingerprint(ass_path),
+                            "settings": freeze_subtitle_settings(c.effective_cfg)}
+        cached_signature = c.effective_cfg.get("subtitle_render_signature")
+        should_run = not (c.can_resume and stage_id in c.verified_stages
+                          and cached_signature == render_signature)
         if should_run:
             await c.notify(stage_id, 8, 92.0, "🎬 Bước 8/8: Render video thành phẩm bằng NVENC GPU...")
             self.manifest_manager.record_stage_start(c.job_id, stage_id)
@@ -1146,13 +1200,7 @@ class V1Orchestrator:
                     canvas_cfg = canvas_settings.get_canvas_settings() or {}
                 except Exception:
                     canvas_cfg = {}
-                sub_cover_style = str(
-                    c.effective_cfg.get("sub_cover_style")
-                    or c.overrides.get("sub_cover_style")
-                    or os.getenv("V1_SUBTITLE_COVER_STYLE")
-                    or canvas_cfg.get("sub_cover_style")
-                    or "solid_box"
-                ).strip().lower()
+                sub_cover_style = c.effective_cfg.get("sub_cover_style", "solid_box")
                 delogo_mode = str(
                     c.effective_cfg.get("delogo_mode")
                     or c.overrides.get("delogo_mode")
@@ -1176,29 +1224,6 @@ class V1Orchestrator:
                                     delogo_boxes = geo_saved.get("watermarks") or (geo_saved.get("sampling") or {}).get("detected_watermarks") or []
                     except Exception:
                         delogo_boxes = []
-                localized_blur_boxes = []
-                if sub_cover_style == "localized_blur":
-                    try:
-                        tts_sidecar = c.out_dir / "tts.json"
-                        if tts_sidecar.is_file():
-                            tts_saved = load_payload(tts_sidecar)
-                            for seg in (tts_saved.get("segments") if isinstance(tts_saved, dict) else []):
-                                s_t = seg.start.total_seconds() if hasattr(seg, "start") else float((seg or {}).get("start", 0.0) or 0.0)
-                                e_t = seg.end.total_seconds() if hasattr(seg, "end") else float((seg or {}).get("end", 0.0) or 0.0)
-                                blocks = list(getattr(seg, "tracking_blocks", None) or [])
-                                if not blocks and getattr(seg, "best_block", None) is not None:
-                                    blocks = [seg.best_block]
-                                for blk in blocks:
-                                    localized_blur_boxes.append({
-                                        "x_pct": getattr(blk, "x_pct", None) if not isinstance(blk, dict) else blk.get("x_pct"),
-                                        "max_x_pct": getattr(blk, "max_x_pct", None) if not isinstance(blk, dict) else blk.get("max_x_pct"),
-                                        "y_pct": getattr(blk, "y_pct", None) if not isinstance(blk, dict) else blk.get("y_pct"),
-                                        "max_y_pct": getattr(blk, "max_y_pct", None) if not isinstance(blk, dict) else blk.get("max_y_pct"),
-                                        "start": float(getattr(blk, "start", s_t) if not isinstance(blk, dict) else blk.get("start", s_t)),
-                                        "end": float(getattr(blk, "end", e_t) if not isinstance(blk, dict) else blk.get("end", e_t)),
-                                    })
-                    except Exception:
-                        localized_blur_boxes = []
                 async with async_gpu_gatekeeper("video_rendering", timeout_seconds=t_out):
                     rendered = await c.run_stage(
                         to_thread_drained(
@@ -1212,7 +1237,7 @@ class V1Orchestrator:
                             delogo_mode=delogo_mode,
                             delogo_boxes=delogo_boxes,
                             subtitle_cover_style=sub_cover_style,
-                            localized_blur_boxes=localized_blur_boxes,
+                            subtitle_blur_settings=c.effective_cfg,
                         ),
                         timeout=t_out
                     )
@@ -1223,6 +1248,10 @@ class V1Orchestrator:
             except Exception as exc:
                 self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))
                 raise
+            current = self.manifest_manager.load_manifest(c.job_id)
+            current.effective_config["subtitle_render_signature"] = render_signature
+            c.effective_cfg["subtitle_render_signature"] = render_signature
+            self.manifest_manager.save_manifest(current)
         else:
             logger.info("[RESUME] Bỏ qua stage 8 (video_rendering).")
             temp_render_video = Path(c.manifest.stages[stage_id]["artifacts"]["temp_render"]["path"])

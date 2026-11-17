@@ -83,6 +83,8 @@ PYTHON_EXECUTABLE_PREFIXES = ("python", "pythonw", "py")
 
 SCHEDULED_TASKS_BY_SCOPE: dict[str, tuple[str, ...]] = {
     "telegram": ("AutoDubV1-telegram",),
+    # UI stop keeps the dashboard/controller available to show the result.
+    "processing": ("AutoDubV1-telegram", "AutoDubV1-scriptbot"),
     "downloader": ("AutoDubV1-telebot-downloader",),
     "all": (
         "AutoDubV1-ops-watchdog",
@@ -402,7 +404,7 @@ def _media_worker_belongs_to_project(
 
 def _scope_matches_role(scope: str, role: str, include_downloader: bool = False) -> bool:
     if scope == "processing":
-        return role in {"telegram", "scriptbot", "worker", "supervisor:telegram", "supervisor:scriptbot"}
+        return role in ("telegram", "scriptbot", "worker", "supervisor:telegram", "supervisor:scriptbot")
     if scope == "telegram":
         return role in ("telegram", "supervisor:telegram")
     if scope == "downloader":
@@ -493,7 +495,7 @@ def select_shutdown_targets(
     selected_by_pid: dict[int, SelectedTarget] = {}
     telemetry_rejection = ""
 
-    if telemetry and scope in ("telegram", "all", "cutover"):
+    if telemetry and scope in ("telegram", "processing", "all", "cutover"):
         verified_pid, reason = verify_telemetry_pid(
             telemetry, records_by_pid, project_root, expected_role="telegram"
         )
@@ -605,6 +607,8 @@ def select_shutdown_targets(
             child_role, child_reason, child_sup = _classify_project_process(
                 child, project_root, ws_roots
             )
+            if scope == "processing" and child_role and not _scope_matches_role(scope, child_role):
+                continue
             if scope == "workers" and (
                 child_role in SERVICE_SCRIPTS
                 or (child_role and child_role.startswith("supervisor"))
@@ -702,7 +706,7 @@ def check_busy_state(
     if scope in ("downloader", "workers"):
         return reasons
 
-    if scope in ("all", "cutover"):
+    if scope in ("processing", "all", "cutover"):
         for status_path in (
             workspace / "bot_system" / "job_status.json",
             workspace / "job_status.json",
@@ -730,7 +734,7 @@ def check_busy_state(
                     except Exception:
                         pass
 
-    if scope in ("telegram", "all", "cutover"):
+    if scope in ("telegram", "processing", "all", "cutover"):
         telemetry = read_telegram_telemetry(workspace, project_root)
         try:
             at = float(telemetry.get("at") or 0.0)
@@ -947,7 +951,7 @@ def _write_stop_intent_flags(
 
 
 def _update_stopped_telemetry(workspace: Path, scope: str, project_root: Path) -> None:
-    if scope not in ("telegram", "all", "cutover"):
+    if scope not in ("telegram", "processing", "all", "cutover"):
         return
     for candidate in (directory / "v1.json" for directory in control_directories(project_root, workspace)):
         if candidate.is_file():
@@ -957,7 +961,7 @@ def _update_stopped_telemetry(workspace: Path, scope: str, project_root: Path) -
                     data["pid"] = None
                     data["polling"] = False
                     data["busy"] = False
-                    if scope in ("all", "cutover"):
+                    if scope in ("processing", "all", "cutover"):
                         data["paused"] = True
                     candidate.write_text(json.dumps(data), encoding="utf-8")
             except Exception:
@@ -991,7 +995,7 @@ def execute_shutdown(
         ws_roots.append(default_ws)
 
     records = list(process_enumerator())
-    telemetry = read_telegram_telemetry(ws, root) if scope in ("telegram", "all", "cutover") else None
+    telemetry = read_telegram_telemetry(ws, root) if scope in ("telegram", "processing", "all", "cutover") else None
 
     selected, telemetry_rejected = select_shutdown_targets(
         records,
@@ -1123,7 +1127,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--scope",
-        choices=("all", "telegram", "downloader", "workers", "cutover"),
+        choices=("all", "processing", "telegram", "downloader", "workers", "cutover"),
         default="all",
     )
     parser.add_argument(

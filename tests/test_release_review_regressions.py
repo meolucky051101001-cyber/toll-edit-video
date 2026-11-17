@@ -67,3 +67,19 @@ def test_empty_git_inventory_stays_empty(tmp_path):
 def test_source_export_without_git_remains_supported(tmp_path):
     files = source(tmp_path, "# exported source\n")
     assert pkg.iter_release_files(tmp_path) == files
+
+
+@pytest.mark.parametrize('missing', ['backend/ai/v1_caption_evidence.py', 'backend/visual_caption_timing.py'])
+def test_missing_required_caption_module_blocks_zip_and_manifest(tmp_path, missing):
+    for relative in pkg.REQUIRED_RELEASE_FILES:
+        if relative == missing:
+            continue
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# fixture\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match=Path(missing).stem):
+        pkg.create_release_zip(tmp_path, tmp_path / "release.zip", dry_run=True)
+    with pytest.raises(RuntimeError, match=Path(missing).stem):
+        manifest.generate_manifest(tmp_path, dry_run=True)
+    assert not (tmp_path / "release.zip").exists()
+    assert not (tmp_path / "RELEASE_MANIFEST.sha256").exists()

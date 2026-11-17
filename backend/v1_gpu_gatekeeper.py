@@ -275,7 +275,7 @@ async def async_gpu_gatekeeper(
     cancelled = threading.Event()
     inherited = stop_check.get()
     token = stop_check.set(lambda: cancelled.is_set() or bool(inherited and inherited()))
-    manager = gpu_gatekeeper(stage_name, timeout_seconds, min_free_mb=min_free_mb)
+    manager = gpu_gatekeeper(stage_name=stage_name, timeout_seconds=timeout_seconds, min_free_mb=min_free_mb)
     entered = False
     async def enter():
         nonlocal entered

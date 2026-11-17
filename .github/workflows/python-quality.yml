@@ -47,6 +47,21 @@ jobs:
         run: >-
           python -B -m pytest -q --tb=short -p no:cacheprovider
           tests/test_ocr_subtitle_locator.py
+          tests/test_ocr_geometry_audit.py
+          tests/test_ass_cover_dimensions.py
+          tests/test_subtitle_tracking_regression.py
+          tests/test_ocr_asr_correction.py
+          tests/test_translation_caption_evidence.py
+          tests/test_local_runtime_stability.py
+          tests/test_control_scoped_shutdown.py
+          tests/test_localized_subtitle_blur.py
+          tests/test_localized_blur_ffmpeg.py
+          tests/test_visual_caption_timing.py
+          tests/test_runtime_lock_regressions.py
+          tests/test_environment_isolation.py
+          tests/test_phase7_orchestrator_golden.py
+          tests/test_v1_speech_translation_repair.py::BatchTests::test_invalid_condensation_never_cached
+          tests/test_cloud_review_regressions.py
           tests/test_url_utils.py
           tests/test_v1_checkpoint_orchestrator.py
           tests/test_v1_ocr_geometry_repair.py

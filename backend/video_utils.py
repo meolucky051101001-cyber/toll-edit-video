@@ -578,6 +578,7 @@ def process_video(
     is_ass = srt_path.lower().endswith('.ass')
     unique_sub_name = f"temp_burn_{int(time.time())}_{uuid.uuid4().hex[:6]}" + (".ass" if is_ass else ".srt")
     safe_sub_path = os.path.join(temp_subs_dir, unique_sub_name)
+    filter_script_path = None
     try:
         shutil.copy2(srt_path, safe_sub_path)
         srt_to_use = safe_sub_path
@@ -624,117 +625,32 @@ def process_video(
 
         base_sub_filter = f"subtitles='{srt_escaped}'" if is_ass else f"subtitles='{srt_escaped}':force_style='{style_str}'"
 
-        def _merge_localized_blur_regions(fw: int, fh: int):
-            raw_boxes = kwargs.get("localized_blur_boxes") or []
-            regions = []
-            for box in raw_boxes:
-                if not isinstance(box, dict):
-                    continue
-                try:
-                    x1 = float(box.get("x_pct", 0.0))
-                    x2 = float(box.get("max_x_pct", 0.0))
-                    y1 = float(box.get("y_pct", 0.0))
-                    y2 = float(box.get("max_y_pct", 0.0))
-                    st = max(0.0, float(box.get("start", 0.0) or 0.0))
-                    et = max(st, float(box.get("end", 0.0) or 0.0))
-                except (TypeError, ValueError):
-                    continue
-                if not (0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0) or et <= st:
-                    continue
-                # Nới nhẹ quanh chữ gốc để boxblur phủ kín nét chữ & viền
-                px1 = max(0, int((x1 - 0.015) * fw) // 2 * 2)
-                px2 = min(fw, (int((x2 + 0.015) * fw) + 1) // 2 * 2)
-                py1 = max(0, int((y1 - 0.008) * fh) // 2 * 2)
-                py2 = min(fh, (int((y2 + 0.008) * fh) + 1) // 2 * 2)
-                bw = max(24, min(fw - px1, px2 - px1) // 2 * 2)
-                bh = max(20, min(fh - py1, py2 - py1) // 2 * 2)
-                if bw < 16 or bh < 16:
-                    continue
-                px2 = px1 + bw
-                py2 = py1 + bh
-
-                matched = None
-                for reg in regions:
-                    if (
-                        abs(((px1 + px2) * 0.5) - reg["cx"]) <= fw * 0.08
-                        and abs(((py1 + py2) * 0.5) - reg["cy"]) <= fh * 0.04
-                    ):
-                        matched = reg
-                        break
-                if matched is not None:
-                    matched["x1"] = min(matched["x1"], px1)
-                    matched["y1"] = min(matched["y1"], py1)
-                    matched["x2"] = max(matched["x2"], px2)
-                    matched["y2"] = max(matched["y2"], py2)
-                    matched["cx"] = (matched["x1"] + matched["x2"]) * 0.5
-                    matched["cy"] = (matched["y1"] + matched["y2"]) * 0.5
-                    matched["intervals"].append((st, et))
-                else:
-                    regions.append({
-                        "x1": px1, "y1": py1, "x2": px2, "y2": py2,
-                        "cx": (px1 + px2) * 0.5, "cy": (py1 + py2) * 0.5,
-                        "intervals": [(st, et)],
-                    })
-
-            # Giới hạn tối đa 4 cụm vùng làm mờ để filtergraph gọn và ổn định
-            while len(regions) > 4:
-                regions.sort(key=lambda r: (r["cy"], r["cx"]))
-                a, b = regions.pop(0), regions.pop(0)
-                regions.append({
-                    "x1": min(a["x1"], b["x1"]),
-                    "y1": min(a["y1"], b["y1"]),
-                    "x2": max(a["x2"], b["x2"]),
-                    "y2": max(a["y2"], b["y2"]),
-                    "cx": (min(a["x1"], b["x1"]) + max(a["x2"], b["x2"])) * 0.5,
-                    "cy": (min(a["y1"], b["y1"]) + max(a["y2"], b["y2"])) * 0.5,
-                    "intervals": a["intervals"] + b["intervals"],
-                })
-
-            built = []
-            for reg in regions:
-                bx = max(0, int(reg["x1"]) // 2 * 2)
-                by = max(0, int(reg["y1"]) // 2 * 2)
-                bw = max(16, min(fw - bx, (int(reg["x2"]) - bx + 1) // 2 * 2))
-                bh = max(16, min(fh - by, (int(reg["y2"]) - by + 1) // 2 * 2))
-                ivs = sorted(reg["intervals"])
-                merged_ivs = []
-                for st, et in ivs:
-                    if merged_ivs and st - merged_ivs[-1][1] <= 0.35:
-                        merged_ivs[-1] = (merged_ivs[-1][0], max(merged_ivs[-1][1], et))
-                    else:
-                        merged_ivs.append((st, et))
-                while len(merged_ivs) > 18:
-                    # Gộp 2 khoảng gần nhau nhất để biểu thức enable không quá dài
-                    best_i = min(range(len(merged_ivs) - 1), key=lambda idx: merged_ivs[idx + 1][0] - merged_ivs[idx][1])
-                    merged_ivs[best_i] = (merged_ivs[best_i][0], max(merged_ivs[best_i][1], merged_ivs[best_i + 1][1]))
-                    merged_ivs.pop(best_i + 1)
-                enable_expr = "+".join(f"between(t,{s:.2f},{e:.2f})" for s, e in merged_ivs)
-                built.append((bx, by, bw, bh, enable_expr))
-            return built
+        # ASS carries the same source geometry/style as the text it describes.
+        # This also protects legacy entrypoints that do not pass explicit boxes.
+        from subtitle_blur import (read_ass_blur_metadata, build_localized_blur_filter,
+                                   resolve_blur_settings)
+        blur_meta = None
+        if is_ass:
+            with open(srt_to_use, "r", encoding="utf-8-sig") as blur_ass:
+                blur_meta = read_ass_blur_metadata(blur_ass.read())
+        if blur_meta is not None:
+            cover_style = "localized_blur"
+        if cover_style == "localized_blur":
+            if "localized_blur_boxes" in kwargs:
+                source_blur_boxes = kwargs["localized_blur_boxes"]
+            elif blur_meta is not None:
+                source_blur_boxes = blur_meta["boxes"]
+            else:
+                raise ValueError("Thiếu vùng phụ đề nguồn; hãy tạo lại ASS trước khi làm mờ")
+            source_blur_settings = resolve_blur_settings(
+                kwargs.get("subtitle_blur_settings") or
+                (blur_meta["settings"] if blur_meta is not None else None))
 
         def _build_sub_filter(fw: int, fh: int) -> str:
             if cover_style == "localized_blur":
-                regions = _merge_localized_blur_regions(fw, fh)
-                if regions:
-                    parts = []
-                    for k, (bx, by, bw, bh, enable_expr) in enumerate(regions):
-                        prefix = "" if k == 0 else ","
-                        parts.append(
-                            f"{prefix}split[lm{k}][lc{k}];"
-                            f"[lc{k}]crop={bw}:{bh}:{bx}:{by},boxblur=16:3[lb{k}];"
-                            f"[lm{k}][lb{k}]overlay={bx}:{by}:enable='{enable_expr}'"
-                        )
-                    return "".join(parts) + f",{base_sub_filter}"
-                if 0.15 <= float(main_y_pct or 0.75) <= 0.96:
-                    band_y = max(0, int(fh * max(0.0, float(main_y_pct) - 0.04)) // 2 * 2)
-                    band_h = max(24, min(fh - band_y, int(fh * 0.14)) // 2 * 2)
-                    band_x = max(0, int(fw * 0.08) // 2 * 2)
-                    band_w = max(24, min(fw - band_x, int(fw * 0.84) // 2 * 2))
-                    return (
-                        f"split[sub_main][sub_band];"
-                        f"[sub_band]crop={band_w}:{band_h}:{band_x}:{band_y},boxblur=16:3[sub_blurred];"
-                        f"[sub_main][sub_blurred]overlay={band_x}:{band_y},{base_sub_filter}"
-                    )
+                blur_filter = build_localized_blur_filter(
+                    source_blur_boxes, fw, fh, source_blur_settings)
+                return (blur_filter + "," if blur_filter else "") + base_sub_filter
             elif cover_style == "frosted_blur" and 0.15 <= float(main_y_pct or 0.75) <= 0.96:
                 band_y = max(0, int(fh * max(0.0, float(main_y_pct) - 0.04)) // 2 * 2)
                 band_h = max(24, min(fh - band_y, int(fh * 0.14)) // 2 * 2)
@@ -876,6 +792,15 @@ def process_video(
             ['h264_nvenc', '-preset', 'fast', '-b:v', b_v],
         ]
         
+        # Preserve exact observations even on long videos. A filter script avoids
+        # Windows command-line limits without broadening regions or filling gaps.
+        filter_args = ["-vf", filter_complex]
+        if len(filter_complex) > 8000:
+            filter_script_path = safe_sub_path + ".filters.txt"
+            with open(filter_script_path, "w", encoding="utf-8") as stream:
+                stream.write(filter_complex)
+            filter_args = ["-filter_script:v", filter_script_path]
+
         for enc_idx, enc_args in enumerate(encoders_to_try):
             encoder_name = enc_args[0]
             encoder_started = time.monotonic()
@@ -894,7 +819,7 @@ def process_video(
                 '-filter_threads', '2',
                 '-i', video_path,
                 '-i', mixed_audio_path,
-                '-vf', filter_complex,
+            ] + filter_args + [
                 '-map', source_video.input_map,
                 '-map', '1:a:0',
                 '-sn', '-dn',
@@ -972,6 +897,11 @@ def process_video(
         print("FFmpeg process video error:", e)
         return False
     finally:
+        if filter_script_path and os.path.exists(filter_script_path):
+            try:
+                os.remove(filter_script_path)
+            except OSError:
+                logger.warning("Unable to remove render filter script")
         if os.path.exists(safe_sub_path):
             try: os.remove(safe_sub_path)
             except Exception as _phase6_exc: logger.warning('Suppressed error in video_utils.process_video (os.remove): %s', type(_phase6_exc).__name__, exc_info=False)

@@ -980,6 +980,7 @@ NETWORK_RETRY_FILE = "telegram_retry_state.json"
 _RETRY_JOB_FIELDS = (
     "type", "url", "file_id", "filename", "chat_id", "voice_mode", "video_mode",
     "job_id", "job_overrides", "resume_state", "retry_count", "network_retry_count",
+    "video_path", "force_cloud", "cloud_gpu", "voice",
 )
 _network_retry_jobs = {}
 _network_retry_task = None
