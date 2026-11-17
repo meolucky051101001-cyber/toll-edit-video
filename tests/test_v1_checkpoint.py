@@ -2,10 +2,30 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from backend.v1_checkpoint import Checkpoint
+from backend.v1_checkpoint import Checkpoint, ManifestManager
 from backend.ai.v1_asr_isolated import extract_subtitles_isolated
 
 class CheckpointTests(unittest.TestCase):
+    def test_publish_updates_artifact_without_counting_qc_as_render_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, rendered, final = (root / name for name in ('input', 'temp', 'final'))
+            source.write_bytes(b'input')
+            rendered.write_bytes(b'rendered')
+            manager = ManifestManager(root)
+            manager.get_or_create_manifest('job', source)
+            with patch('backend.v1_checkpoint.time.time', return_value=100):
+                manager.record_stage_start('job', 'video_rendering')
+            with patch('backend.v1_checkpoint.time.time', return_value=120):
+                manager.record_stage_complete('job', 'video_rendering', {'temp_render': rendered})
+            rendered.replace(final)
+            with patch('backend.v1_checkpoint.time.time', return_value=180):
+                manager.record_stage_complete('job', 'video_rendering', {'temp_render': final})
+            stage = manager.load_manifest('job').stages['video_rendering']
+            self.assertEqual(stage['duration_s'], 20)
+            self.assertEqual(stage['completed_at'], 120)
+            self.assertEqual(stage['artifacts']['temp_render']['path'], str(final))
+
     def test_invalidation(self):
         with tempfile.TemporaryDirectory() as d:
             source, output = Path(d)/'in', Path(d)/'out'

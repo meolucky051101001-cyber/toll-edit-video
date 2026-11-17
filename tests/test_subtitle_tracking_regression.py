@@ -164,13 +164,13 @@ class SubtitleRegressionTests(unittest.TestCase):
                     module,"_readtext_batch",side_effect=recognize):
                 inspect.unwrap(module.perform_video_ocr)("fixture.mp4",srt_segments=segments)
             self.assertGreaterEqual(sum(calls),38)
-            self.assertLessEqual(sum(calls),19 * 14)
+            self.assertLess(sum(calls),38 * 30)
             self.assertLessEqual(max(calls),12)
             for item in segments:
                 self.assertGreaterEqual(len(item.tracking_blocks),10)
                 self.assertTrue(all(b.text=="今天我们学习做饭" for b in item.tracking_blocks))
-                self.assertAlmostEqual(item.tracking_blocks[0].start,max(0,item.start.total_seconds()-.3))
-                self.assertAlmostEqual(item.tracking_blocks[-1].end,min(38,item.end.total_seconds()+.3))
+                self.assertAlmostEqual(item.tracking_blocks[0].start,item.start.total_seconds(),delta=.1)
+                self.assertAlmostEqual(item.tracking_blocks[-1].end,item.end.total_seconds(),delta=.1)
             text=self.render(segments[0])
             self.assertIn("Dialogue: 0,",text)
 

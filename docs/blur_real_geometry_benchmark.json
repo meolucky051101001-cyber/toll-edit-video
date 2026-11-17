@@ -1,0 +1,24 @@
+{
+  "width": 320,
+  "height": 568,
+  "duration_s": 10,
+  "fps": 30,
+  "frame_md5_equal": true,
+  "note": "CPU synthetic video downscaled from production with real baseline geometry; serial filters; no NVENC/GPU or live queue. Full1080p legacy attempt exceeded55s and was killed; no speed claim for real clip.",
+  "runs": [
+    {
+      "name": "static_v5",
+      "seconds": 2.547,
+      "returncode": 0,
+      "graph_bytes": 38203,
+      "overlays": 101
+    },
+    {
+      "name": "fixed_slots_v6",
+      "seconds": 2.765,
+      "returncode": 0,
+      "graph_bytes": 41948,
+      "overlays": 91
+    }
+  ]
+}

@@ -628,7 +628,7 @@ def process_video(
         # ASS carries the same source geometry/style as the text it describes.
         # This also protects legacy entrypoints that do not pass explicit boxes.
         from subtitle_blur import (read_ass_blur_metadata, build_localized_blur_filter,
-                                   resolve_blur_settings)
+                                   resolve_blur_settings, combine_blur_boxes)
         blur_meta = None
         if is_ass:
             with open(srt_to_use, "r", encoding="utf-8-sig") as blur_ass:
@@ -642,14 +642,18 @@ def process_video(
                 source_blur_boxes = blur_meta["boxes"]
             else:
                 raise ValueError("Thiếu vùng phụ đề nguồn; hãy tạo lại ASS trước khi làm mờ")
+            source_blur_boxes = combine_blur_boxes(
+                source_blur_boxes, blur_meta.get("text_boxes", []) if blur_meta else [])
             source_blur_settings = resolve_blur_settings(
                 kwargs.get("subtitle_blur_settings") or
                 (blur_meta["settings"] if blur_meta is not None else None))
 
         def _build_sub_filter(fw: int, fh: int) -> str:
             if cover_style == "localized_blur":
+                blur_metrics = {}
                 blur_filter = build_localized_blur_filter(
-                    source_blur_boxes, fw, fh, source_blur_settings)
+                    source_blur_boxes, fw, fh, source_blur_settings, metrics=blur_metrics)
+                logger.info("V1 localized blur plan size=%dx%d metrics=%s", fw, fh, blur_metrics)
                 return (blur_filter + "," if blur_filter else "") + base_sub_filter
             elif cover_style == "frosted_blur" and 0.15 <= float(main_y_pct or 0.75) <= 0.96:
                 band_y = max(0, int(fh * max(0.0, float(main_y_pct) - 0.04)) // 2 * 2)

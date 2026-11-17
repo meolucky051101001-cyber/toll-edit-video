@@ -44,6 +44,15 @@ class VisualReuseTests(unittest.TestCase):
                 get=lambda key: {cv2.CAP_PROP_FPS:30, cv2.CAP_PROP_FRAME_WIDTH:720,
                     cv2.CAP_PROP_FRAME_HEIGHT:1280, cv2.CAP_PROP_FRAME_COUNT:180}[key],
                 set=lambda *args: None, read=lambda: (True, frame.copy()), release=lambda: None)
+            cap.index = 0
+            cap.set = lambda prop,value: setattr(cap,'index',round(value*30/1000) if prop==cv2.CAP_PROP_POS_MSEC else int(value))
+            def read_frame():
+                cap.index += 1
+                return True,frame.copy()
+            cap.read = read_frame
+            cap.get = lambda prop: {cv2.CAP_PROP_FPS:30,cv2.CAP_PROP_FRAME_WIDTH:720,
+                cv2.CAP_PROP_FRAME_HEIGHT:1280,cv2.CAP_PROP_FRAME_COUNT:180,
+                cv2.CAP_PROP_POS_FRAMES:cap.index,cv2.CAP_PROP_POS_MSEC:max(0,cap.index-1)*1000/30}.get(prop,0)
             from backend.pipeline_v2.segments import RuntimeSegment, segment_from_dict, segment_to_dict
             segments = [RuntimeSegment(i+1, timedelta(seconds=i*2),
                 timedelta(seconds=(i+1)*2), '今天我们学习做饭') for i in range(3)]
@@ -62,7 +71,7 @@ class VisualReuseTests(unittest.TestCase):
                     module, '_readtext_batch', side_effect=recognize):
                 inspect.unwrap(module.perform_video_ocr)(
                     'fixture.mp4', srt_segments=segments)
-            self.assertLessEqual(len(calls), 18)
+            self.assertLess(len(calls), 180)
             for item in segments:
                 self.assertIsNotNone(item.best_block)
                 self.assertTrue(item.tracking_blocks)

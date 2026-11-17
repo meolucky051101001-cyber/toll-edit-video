@@ -39,8 +39,9 @@ class OptimizationTests(unittest.TestCase):
         a = np.zeros((4, 4, 3), dtype=np.uint8)
         b = a.copy()
         b[1, 1, 1] = 1
-        ocr._frame_cache.clear()
-        try:
+        from backend.ocr_observation_ledger import video_observations
+        @video_observations
+        def run_video(_path, **kwargs):
             with patch.object(ocr, '_recognize_batch', return_value=[['a'], ['b']]) as recognize:
                 result = ocr._readtext_batch([a, a.copy(), b])
                 self.assertEqual(result, [['a'], ['a'], ['b']])
@@ -48,8 +49,7 @@ class OptimizationTests(unittest.TestCase):
                 result[0].append('mutated')
                 self.assertEqual(ocr._readtext_batch([a]), [['a']])
                 self.assertEqual(recognize.call_count, 1)
-        finally:
-            ocr._frame_cache.clear()
+        run_video('fixture.mp4')
 
     def test_cache_duration_not_rounded(self):
         segment = SimpleNamespace(content='Xin chào', start=datetime.timedelta(0), end=datetime.timedelta(seconds=1.01))

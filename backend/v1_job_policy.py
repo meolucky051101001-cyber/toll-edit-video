@@ -1,5 +1,9 @@
 """Pure, per-job model selection. Auto voice and video mode are independent."""
 from copy import deepcopy
+import math
+import re
+
+TRANSCRIPT_SOURCE_POLICY_VERSION = 1
 
 try:
     from v1_feature_flags import migrate_legacy_asr_model
@@ -31,27 +35,51 @@ def merged_speech_coverage(segments, duration_s):
 
 
 def looks_like_bgm_hallucination(segments, duration_s):
-    """ASR output too sparse/short to be a real voice track (music-only clips)."""
-    if not segments:
-        return True
-    durations = []
-    for seg in segments:
-        try:
-            durations.append(max(0.0, seg.end.total_seconds() - seg.start.total_seconds()))
-        except Exception:
+    """Only absent, invalid or explicitly rejected ASR permits visual fallback.
+
+    Low coverage and short utterances do not prove silence. A spoken sentence
+    in a mostly musical clip must not become product-label narration.
+    """
+    for seg in segments or []:
+        if getattr(seg, "asr_hallucination", False):
             continue
-    if len(segments) <= 2 and max(durations, default=0.0) <= 1.5:
-        return True
-    # Matches perform_video_ocr's visual-mode gate so sparse ASR cannot be
-    # mixed with recovered on-screen cues (which would duplicate dialogue).
-    if duration_s > 0 and merged_speech_coverage(segments, duration_s) < 0.25 * duration_s:
-        return True
-    return False
+        try:
+            start, end = seg.start.total_seconds(), seg.end.total_seconds()
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            continue
+        if (str(getattr(seg, "content", "") or "").strip()
+                and math.isfinite(start) and math.isfinite(end)
+                and 0 <= start < end and (duration_s <= 0 or start < duration_s)):
+            return False
+    return True
+
+
+def visual_transcript_candidates(segments):
+    """Exclude scene/product labels before selecting a silent-video transcript."""
+    def value(obj, name, default=None):
+        return obj.get(name, default) if isinstance(obj, dict) else getattr(obj, name, default)
+
+    candidates = []
+    for segment in segments or []:
+        if not value(segment, "visual_sub_to_speech", False):
+            continue
+        block = value(segment, "best_block")
+        if any(value(item, "is_packaging", False) or value(item, "is_static", False)
+               or value(item, "is_subtitle") is False
+               or value(item, "in_subtitle_band") is False
+               for item in (segment, block) if item is not None):
+            continue
+        text = str(value(segment, "content", "") or "").strip()
+        # Moving product labels can be misclassified as a caption band.
+        if re.search(r"生产(?:商|厂家|地址)|执行标准|(?:材质|品名|货号|型号)\s*[|｜:：]", text):
+            continue
+        candidates.append(segment)
+    return candidates
 
 
 def visual_ocr_transcript_usable(segments, duration_s):
-    """A recovered on-screen caption timeline worth using instead of ASR."""
-    cues = [seg for seg in segments or [] if getattr(seg, "visual_sub_to_speech", False)]
+    """A non-product caption timeline usable after speech was rejected."""
+    cues = visual_transcript_candidates(segments)
     if not cues:
         return False
     coverage = merged_speech_coverage(cues, duration_s)
