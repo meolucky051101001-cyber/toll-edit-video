@@ -20,6 +20,8 @@ def cloud(tmp_path, monkeypatch):
     module.__path__ = [str(root)]
     monkeypatch.setitem(sys.modules, package, module)
     config = types.ModuleType(package + ".cloud_config")
+    config.BACKEND_DIR = tmp_path / "backend"
+    config.WORKSPACE_DIR = tmp_path / "workspace"
     config.DEFAULT_CONFIG = {
         "db_path": str(tmp_path / "jobs.db"), "results_dir": str(tmp_path / "results"),
         "output_prefix": "cloud_", "cu_budget_daily": 10.0,
