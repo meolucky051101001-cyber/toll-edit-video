@@ -203,6 +203,10 @@ def gpu_gatekeeper(
                             torch.cuda.empty_cache()
                     except Exception:
                         pass
+            elif handle is not None:
+                # Acquisition can time out before this context owns the gate.
+                # Close that attempt's file handle as well.
+                handle.close()
 
 
 @asynccontextmanager
@@ -213,26 +217,61 @@ async def async_gpu_gatekeeper(
 ):
     """Phiên bản Async của GPU Gatekeeper, không chặn event loop trong lúc xếp hàng chờ."""
     import asyncio
-    cid = get_gpu_context_id()
+    get_gpu_context_id()  # Establish the identity before copying context to a thread.
     deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        # Nếu chính context này đã đang giữ khóa (re-entrant), vào ngay không cần chờ
-        with _PROCESS_LOCK:
-            if _CURRENT_HOLDER == cid and _RECURSION_DEPTH > 0:
-                with gpu_gatekeeper(stage_name=stage_name, timeout_seconds=timeout_seconds, min_free_mb=min_free_mb):
-                    yield
-                    return
+
+    async def drain(task):
+        # Repeated cancellation must not cancel a to_thread wrapper whose worker
+        # can still acquire the file lock after the HTTP task has disappeared.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        return task.result()
+
+    async def release(manager, exc_type=None, exc=None, traceback=None):
+        task = asyncio.create_task(asyncio.to_thread(manager.__exit__, exc_type, exc, traceback))
         try:
-            with gpu_gatekeeper(
-                stage_name=stage_name,
-                timeout_seconds=1.5,  # Thử khóa trong 1.5 giây mỗi nhịp
-                min_free_mb=min_free_mb,
-            ):
-                yield
-                return
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # A cancelled caller must not leave the file lease held.
+            await drain(task)
+            raise
+
+    while time.monotonic() < deadline:
+        manager = gpu_gatekeeper(
+            stage_name=stage_name,
+            timeout_seconds=min(1.5, max(0.001, deadline - time.monotonic())),
+            min_free_mb=min_free_mb,
+        )
+        acquisition = asyncio.create_task(asyncio.to_thread(manager.__enter__))
+        try:
+            await asyncio.shield(acquisition)
+        except asyncio.CancelledError:
+            # The bounded acquisition thread cannot be cancelled. Wait until it
+            # either fails or acquires, then release before propagating cancel.
+            try:
+                await drain(acquisition)
+            except Exception:
+                pass
+            else:
+                await release(manager)
+            raise
         except TimeoutError:
-            # Chưa lấy được khóa, nhả quyền cho event loop chạy tác vụ khác
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+            continue
+
+        # Body exceptions are not acquisition failures: never retry the stage or
+        # yield a second time when inference raises TimeoutError.
+        try:
+            yield
+        except BaseException as error:
+            if not await release(manager, type(error), error, error.__traceback__):
+                raise
+        else:
+            await release(manager)
+        return
 
     raise TimeoutError(
         f"[GPU_GATEKEEPER] Hết thời gian chờ ({timeout_seconds}s) để lấy quyền GPU cho '{stage_name}'."

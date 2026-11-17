@@ -142,6 +142,54 @@ def _map_normalized_box_to_frame(
     return rx0, ry0, rx1, ry1
 
 
+def _transition_pixel_candidates(segments, fps=30.0, limit=192):
+    """Check source-caption boundaries independently of fitted TTS timing."""
+    tracks = []
+    for i, seg in enumerate(segments or []):
+        for block in _seg_val(seg, "tracking_blocks", []) or []:
+            try:
+                box = tuple(float(_seg_val(block, k)) for k in
+                            ("x_pct", "y_pct", "max_x_pct", "max_y_pct"))
+                start, end = (_qc_ts_seconds(_seg_val(block, k)) for k in ("start", "end"))
+                if not (0 <= box[0] < box[2] <= 1 and 0 <= box[1] < box[3] <= 1 and 0 <= start < end):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if _seg_val(block, "is_static") or _seg_val(block, "is_packaging"):
+                continue
+            tracks.append(dict(index=_seg_val(seg, "index", i + 1), start=start, end=end,
+                               text=str(_seg_val(block, "text", "")), box=box))
+    tracks.sort(key=lambda b: (b["start"], b["end"]))
+    events = []
+    for i, current in enumerate(tracks):
+        previous = tracks[i - 1] if i else None
+        if previous and (current["text"] == previous["text"]
+                         and current["start"] <= previous["end"] + .001
+                         and max(abs(a-b) for a, b in zip(current["box"], previous["box"])) < .05):
+            continue
+        box = current["box"]
+        if previous:
+            old = previous["box"]
+            box = min(box[0], old[0]), min(box[1], old[1]), max(box[2], old[2]), max(box[3], old[3])
+            events.append((previous["end"], previous["index"], box))
+        events.append((current["start"], current["index"], box))
+    if tracks:
+        events.append((tracks[-1]["end"], tracks[-1]["index"], tracks[-1]["box"]))
+    candidates = {}
+    for boundary, index, box in events:
+        # The wider offset also audits legacy sampling uncertainty, not only
+        # the timestamp a possibly stale mask claims is the transition.
+        for offset in (-.12, -1/fps, 0., 1/fps):
+            time_s = round(max(0., boundary + offset), 6)
+            candidates[(time_s, box)] = dict(index=index, mid_s=time_s, box=box, transition=True)
+    ordered = sorted(candidates.values(), key=lambda c: c["mid_s"])
+    total = len(ordered)
+    if total > limit:
+        selected = sorted({round(i * (total - 1) / (limit - 1)) for i in range(limit)})
+        ordered = [ordered[i] for i in selected]
+    return ordered, total
+
+
 def check_rendered_pixel_coverage(
     final_video_path: str | Path,
     translated_subtitles: Optional[Sequence[Any]] = None,
@@ -151,7 +199,7 @@ def check_rendered_pixel_coverage(
     enabled: bool = True,
 ) -> QCCheckItem:
     """
-    Hậu kiểm pixel thực tế sau render trên tối đa 4 khung hình mẫu:
+    Hậu kiểm giữa câu và các biên chuyển phụ đề nguồn (tối đa 192 mẫu biên):
     cắt vùng OCR phụ đề gốc từ video xuất xưởng và quét lại bằng PP-OCRv6.
     Chỉ trả PASS / WARN / UNKNOWN (không bao giờ trả FAIL để tránh chặn nhầm job).
     """
@@ -199,7 +247,7 @@ def check_rendered_pixel_coverage(
             "box": (x0, y0, x1, y1),
         })
 
-    if not candidates:
+    if not candidates and not any(_seg_val(seg, "tracking_blocks", []) for seg in translated_subtitles or []):
         return QCCheckItem(
             QCCategory.SUBTITLE_STYLING.value,
             "visual_pixel_coverage",
@@ -207,8 +255,11 @@ def check_rendered_pixel_coverage(
             "Chưa đủ mẫu câu có tọa độ OCR hợp lệ (>= 0.4s) để hậu kiểm pixel",
         )
 
+    max_samples = max(1, int(max_samples))
     if len(candidates) <= max_samples:
         sampled = candidates
+    elif max_samples == 1:
+        sampled = [candidates[len(candidates) // 2]]
     else:
         pick = sorted({round(i * (len(candidates) - 1) / (max_samples - 1)) for i in range(max_samples)})
         sampled = [candidates[idx] for idx in pick]
@@ -225,6 +276,7 @@ def check_rendered_pixel_coverage(
 
     crops = []
     crop_meta = []
+    requested_frames = 0
     cap = cv2.VideoCapture(str(v_path))
     try:
         if not cap.isOpened():
@@ -234,7 +286,16 @@ def check_rendered_pixel_coverage(
                 "UNKNOWN",
                 "Không mở được video xuất xưởng bằng OpenCV để hậu kiểm pixel",
             )
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.)
+        if not math.isfinite(fps) or fps <= 0:
+            fps = 30.
+        transitions, transition_total = _transition_pixel_candidates(translated_subtitles, fps)
+        sampled = transitions + sampled
+        duration = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / fps
         for item in sampled:
+            if duration > 0 and item["mid_s"] >= duration:
+                continue
+            requested_frames += 1
             cap.set(cv2.CAP_PROP_POS_MSEC, item["mid_s"] * 1000.0)
             ok, frame = cap.read()
             if not ok or frame is None or not hasattr(frame, "shape") or getattr(frame, "ndim", 0) < 2:
@@ -252,6 +313,7 @@ def check_rendered_pixel_coverage(
                 "index": item["index"],
                 "time_s": item["mid_s"],
                 "roi": [rx0, ry0, rx1, ry1],
+                "transition": item.get("transition", False),
             })
     finally:
         cap.release()
@@ -286,6 +348,9 @@ def check_rendered_pixel_coverage(
             f"Không thể chạy PP-OCRv6 hậu kiểm pixel ({exc})",
         )
 
+    if len(batch_rows or []) != len(crops):
+        return QCCheckItem(QCCategory.SUBTITLE_STYLING.value, "visual_pixel_coverage", "UNKNOWN",
+                           "OCR hậu kiểm trả thiếu kết quả; chưa xác minh đủ các khung hình")
     leaks = []
     for meta, rows in zip(crop_meta, batch_rows or []):
         for row in rows or []:
@@ -315,17 +380,26 @@ def check_rendered_pixel_coverage(
                 "sampled_frames": len(crops),
                 "leaks": leaks[:5],
                 "ass_subtitle_path": str(ass_subtitle_path) if ass_subtitle_path else None,
+                "transition_candidates": transition_total,
+                "leak_count": len(leaks),
+                "leak_times_s": sorted({leak["time_s"] for leak in leaks}),
             },
         )
 
     return QCCheckItem(
         QCCategory.SUBTITLE_STYLING.value,
         "visual_pixel_coverage",
-        "PASS",
-        f"Đã quét pixel thực tế {len(crops)} khung hình xuất xưởng: không phát hiện chữ gốc lòi ra",
+        "WARN" if transition_total > len(transitions) or len(crops) < requested_frames else "PASS",
+        (f"Đã quét {len(crops)} khung hình; hậu kiểm chưa đủ do giới hạn lấy mẫu hoặc lỗi giải mã"
+         if transition_total > len(transitions) or len(crops) < requested_frames else
+         f"Đã quét pixel thực tế {len(crops)} khung hình xuất xưởng: không phát hiện chữ gốc lòi ra"),
         details={
             "sampled_frames": len(crops),
             "sample_times_s": [m["time_s"] for m in crop_meta],
+            "transition_candidates": transition_total,
+            "transition_samples": sum(m["transition"] for m in crop_meta),
+            "transition_sampling_capped": transition_total > len(transitions),
+            "requested_frames": requested_frames,
         },
     )
 

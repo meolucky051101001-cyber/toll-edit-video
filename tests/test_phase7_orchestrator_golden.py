@@ -278,9 +278,54 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "success")
         ocr.assert_called_once()
         release.assert_called_once()
-        self.assertEqual(Path(mix.call_args.args[0]), self.output / "original.wav")
+        # Windows runners can spell TEMP with an 8.3 alias (RUNNER~1).
+        self.assertEqual(Path(mix.call_args.args[0]).resolve(), (self.output / "original.wav").resolve())
         self.assertEqual(self.events.count("ocr"), 1)
         self.assertIn("今天我们学习做饭", (self.output / "original.srt").read_text(encoding="utf-8"))
+
+    async def test_visual_resume_recomputes_old_geometry_instead_of_reusing_sidecar(self):
+        import srt
+        import ocr_utils
+        from backend.ai import v1_asr_isolated
+        from backend.v1_stage_runtime import load_payload, save_payload
+        from backend.v1_ocr_geometry import OCR_GEOMETRY_VERSION
+
+        self.visual_mode = True
+        self.harness()
+        self.fail_mix = True
+
+        def empty_asr(source, output, **kwargs):
+            self.events.append("asr")
+            Path(output).write_text("", encoding="utf-8")
+            return []
+
+        def visual_ocr(source, **kwargs):
+            self.events.append("ocr")
+            self.assertEqual(kwargs["srt_segments"], [])
+            seg = srt.Subtitle(1, timedelta(seconds=.2), timedelta(seconds=3.8), "今天我们学习做饭")
+            seg.visual_sub_to_speech = True
+            seg.ocr_mask_status = "no_caption_evidence"
+            seg.tracking_blocks, seg.best_block = [], None
+            return [seg], 1080, 1920, .88
+
+        with patch.object(v1_asr_isolated, "extract_subtitles_isolated", empty_asr), \
+             patch.object(ocr_utils, "perform_video_ocr", side_effect=visual_ocr):
+            with self.assertRaisesRegex(RuntimeError, "fixture mixer interruption"):
+                await self.execute()
+            sidecar = self.output / "ocr.json"
+            cached = load_payload(sidecar)
+            cached["geometry_version"] = OCR_GEOMETRY_VERSION - 1
+            save_payload(sidecar, **cached)
+            self.orchestrator.manifest_manager.record_stage_complete(
+                "golden_fixture", "visual_ocr", {"ocr_data": str(sidecar)})
+            self.fail_mix = False
+            self.events.clear()
+            result = await self.execute()
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(self.events.count("ocr"), 1)
+        self.assertNotIn("asr", self.events)
+        self.assertIn("translate", self.events)
+        self.assertEqual(load_payload(sidecar)["geometry_version"], OCR_GEOMETRY_VERSION)
 
     async def test_progress_cancellation_stops_before_first_heavy_stage(self):
         self.harness()

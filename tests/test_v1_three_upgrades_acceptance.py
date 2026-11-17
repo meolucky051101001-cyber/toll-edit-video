@@ -212,7 +212,8 @@ class TestDot2CoverBlurDelogoAndPixelQC(unittest.TestCase):
             ass_blur = Path(tmp_dir) / "blur.ass"
             ass_utils.generate_ass_file([seg], [], str(ass_blur), 720, 1280, cover_style="localized_blur")
             txt_blur = ass_blur.read_text(encoding="utf-8-sig")
-            self.assertIn("Style: BgStyle,Arial,38,&H78141418", txt_blur)
+            self.assertNotIn("Dialogue: 0,", txt_blur)
+            self.assertIn("ToolV1BlurData:", txt_blur)
             self.assertIn("Style: TextStyle,Arial,38,&H00FFFFFF", txt_blur)
             self.assertNotIn(f"\\1c{bg_dark}", txt_blur)
 
@@ -272,8 +273,8 @@ class TestDot2CoverBlurDelogoAndPixelQC(unittest.TestCase):
             vf = cmd0[cmd0.index(vf_flag) + 1]
             self.assertIn("delogo=x=", vf)
             self.assertIn("format=yuv420p", vf)
-            self.assertIn("split[", vf)
-            self.assertIn("enable='between(t,0.50,2.00)'", vf)
+            self.assertIn("split=2[", vf)
+            self.assertIn("enable='gte(t,0.500000)*lt(t,2.000000)'", vf)
 
             captured_cmds.clear()
             with patch.object(v1_media_streams, "probe_main_video", return_value=MainVideo(0, 720, 1280, 30.0, 4.0, 1, 1, False)), \
@@ -328,6 +329,10 @@ class TestDot2CoverBlurDelogoAndPixelQC(unittest.TestCase):
             cap = MagicMock()
             cap.isOpened.return_value = True
             cap.read.return_value = (True, fake_frame)
+            import cv2
+            cap.get.side_effect = lambda prop: {cv2.CAP_PROP_FPS: 30., cv2.CAP_PROP_FRAME_COUNT: 120,
+                                                cv2.CAP_PROP_FRAME_WIDTH: 720,
+                                                cv2.CAP_PROP_FRAME_HEIGHT: 1280}.get(prop, 0)
 
             with patch("cv2.VideoCapture", return_value=cap), \
                  patch.object(ocr_utils, "_readtext_batch", return_value=[[[[[0, 0], [10, 0], [10, 10], [0, 10]], "你好世界", 0.92]]]), \

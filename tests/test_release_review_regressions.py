@@ -77,3 +77,18 @@ def test_cloud_release_requires_the_pinned_wheel_and_standalone_runner():
     with pytest.raises(RuntimeError, match="capcut_tts_api"):
         pkg.verify_required_files([config], required_files=())
     pkg.verify_required_files([config, *pkg.CLOUD_RELEASE_FILES], required_files=())
+
+@pytest.mark.parametrize('missing', ['backend/ai/v1_caption_evidence.py', 'backend/visual_caption_timing.py'])
+def test_missing_required_caption_module_blocks_zip_and_manifest(tmp_path, missing):
+    for relative in pkg.REQUIRED_RELEASE_FILES:
+        if relative == missing:
+            continue
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# fixture\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match=Path(missing).stem):
+        pkg.create_release_zip(tmp_path, tmp_path / "release.zip", dry_run=True)
+    with pytest.raises(RuntimeError, match=Path(missing).stem):
+        manifest.generate_manifest(tmp_path, dry_run=True)
+    assert not (tmp_path / "release.zip").exists()
+    assert not (tmp_path / "RELEASE_MANIFEST.sha256").exists()

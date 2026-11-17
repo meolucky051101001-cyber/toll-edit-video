@@ -3,7 +3,7 @@ import math
 from collections import Counter
 from difflib import SequenceMatcher
 
-OCR_GEOMETRY_VERSION = 5
+OCR_GEOMETRY_VERSION = 8
 
 
 class OCRGeometryError(RuntimeError):
@@ -170,47 +170,8 @@ def validate_mask_geometry(segments, strict=None):
     if strict is None:
         import os
         strict = os.getenv("V1_STRICT_OCR_GEOMETRY", "1").lower() in ("1", "true")
-    located_segs = [s for s in segments if value(s, 'ocr_mask_status') == 'located' and valid_box(value(s, 'best_block'))]
-    if (len(located_segs) >= 2 and len(located_segs) >= len(segments) * 0.5) or (len(located_segs) >= 1 and len(segments) > 2):
-        from statistics import median
-        med_top = median([float(value(value(s, 'best_block'), 'y_pct')) for s in located_segs])
-        med_bottom = median([float(value(value(s, 'best_block'), 'max_y_pct')) for s in located_segs])
-        for s in segments:
-            if value(s, 'ocr_mask_status') == 'unresolved' or (
-                value(s, 'ocr_mask_status') == 'located' and not valid_box(value(s, 'best_block'))
-            ):
-                s_start = getattr(s, 'start', None)
-                s_end = getattr(s, 'end', None)
-                st = s_start.total_seconds() if hasattr(s_start, 'total_seconds') else float(s_start or 0.0)
-                et = s_end.total_seconds() if hasattr(s_end, 'total_seconds') else float(s_end or (st + 2.0))
-                fallback_block = {
-                    'text': str(value(s, 'content', '')),
-                    'start': st,
-                    'end': et,
-                    'x_pct': 0.25,
-                    'max_x_pct': 0.75,
-                    'y_pct': med_top,
-                    'max_y_pct': med_bottom,
-                    'prob': 0.85,
-                    'is_subtitle': True,
-                    'in_subtitle_band': True,
-                    'is_packaging': False,
-                    'type': 'subtitle',
-                }
-                if isinstance(s, dict):
-                    s['best_block'] = fallback_block
-                    s['y_pct'] = med_top
-                    s['max_y_pct'] = med_bottom
-                    s['ocr_mask_status'] = 'located'
-                else:
-                    try:
-                        from ocr_utils import OCRBlock
-                        s.best_block = OCRBlock(**fallback_block)
-                    except Exception:
-                        s.best_block = fallback_block
-                    s.y_pct = med_top
-                    s.max_y_pct = med_bottom
-                    s.ocr_mask_status = 'located'
+    # Validation must not manufacture observations from neighbouring cues.
+    # Retain unresolved geometry for correction, including in warning mode.
     invalid = [value(s, 'index') for s in segments
                if value(s, 'ocr_mask_status') == 'unresolved'
                or (value(s, 'ocr_mask_status') == 'located'
@@ -225,19 +186,4 @@ def validate_mask_geometry(segments, strict=None):
             raise OCRGeometryError(msg)
         import logging
         logging.getLogger(__name__).warning('[OCR_GEOMETRY] ⚠️ ' + msg)
-        for s in segments:
-            st = value(s, 'ocr_mask_status')
-            if st == 'unresolved' or (
-                st == 'located'
-                and (not valid_box(value(s, 'best_block'))
-                     or any(not valid_box(b) for b in (value(s, 'tracking_blocks', []) or [])))
-            ):
-                if isinstance(s, dict):
-                    s['best_block'] = None
-                    s['tracking_blocks'] = []
-                    s['ocr_mask_status'] = 'no_caption_evidence'
-                else:
-                    s.best_block = None
-                    s.tracking_blocks = []
-                    s.ocr_mask_status = 'no_caption_evidence'
 

@@ -2,6 +2,8 @@
 import asyncio
 import functools
 import logging
+import inspect
+from pathlib import Path
 import uuid
 import job_tracker
 from v1_resource_control import begin_video, end_video
@@ -9,25 +11,54 @@ from fastapi import HTTPException
 
 _tasks = set()
 
+
+def has_active_media_tasks():
+    return any(not task.done() for task in _tasks)
+
 def guarded_media_api(function):
+    signature = inspect.signature(function)
     @functools.wraps(function)
     async def wrapper(*args, **kwargs):
         async def run():
             lease = uuid.uuid4().hex
+            bound = signature.bind_partial(*args, **kwargs)
+            source = bound.arguments.get("video_path")
+            video_name = Path(source).name if isinstance(source, str) and source else "API media"
             try:
-                with job_tracker._LOCK:
-                    job_tracker._claim_batch_lock_unlocked(lease)
+                # Claim before any await or artifact write. The shared file lease
+                # arbitrates with Telegram and batch processes, not just HTTP tasks.
+                job_tracker.start_batch(1, job_id=lease, exclusive=True)
             except job_tracker.JobAlreadyRunningError:
                 raise HTTPException(409, "Pipeline đang được bot hoặc batch khác sử dụng.")
+            failure = None
             try:
+                import shared_state
+                # start_batch cleared only the previous job's persisted stop.
+                # Reset the local latch without removing a newly arriving stop file.
+                shared_state._local_stop = False
+                job_tracker.start_video(video_name)
                 begin_video(lease)
-                return await function(*args, **kwargs)
+                result = await function(*args, **kwargs)
+                if isinstance(result, dict) and result.get("status") == "error":
+                    failure = str(result.get("message") or "Media API failed")
+                return result
+            except BaseException as error:
+                failure = type(error).__name__
+                raise
             finally:
                 try:
                     summary = end_video()
                     logging.getLogger('v1.performance').info('API resource_summary=%s', summary)
                 finally:
-                    job_tracker.release_batch(lease)
+                    try:
+                        if job_tracker.is_stop_requested():
+                            job_tracker.mark_stopped("Tác vụ API đã dừng theo yêu cầu.")
+                        elif failure:
+                            job_tracker.fail_batch(failure, video_name=video_name, job_id=lease)
+                        elif job_tracker.get_status().get("job_id") == lease:
+                            job_tracker.finish_batch()
+                    finally:
+                        job_tracker.release_batch(lease)
         task = asyncio.create_task(run())
         _tasks.add(task)
         def done(completed):

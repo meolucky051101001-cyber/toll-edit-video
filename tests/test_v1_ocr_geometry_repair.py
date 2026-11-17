@@ -1,6 +1,6 @@
 """Offline geometry regressions; no providers, model loads or production jobs."""
 import ast
-import importlib.util
+import inspect
 import json
 import math
 import os
@@ -17,45 +17,13 @@ import numpy as np
 import cv2
 
 CODE = Path(os.environ.get('V1_OCR_GEOMETRY_TEST_CODE', Path(__file__).resolve().parents[1] / 'backend'))
-PROD = Path(r'C:\tool v1\backend')
-_MOCKED_NAMES = [
-    'v1_stage_metrics', 'v1_ocr_proxy', 'shared_state',
-    'ai.v1_model_policy', 'ai.v1_model_runtime',
-    'v1_ocr_geometry', 'ocr_subtitle_locator', 'ocr_utils',
-    'ass_utils', 'v1_stage_runtime'
-]
-_ORIGINAL_MODULES = {name: sys.modules.get(name) for name in _MOCKED_NAMES}
-sys.modules['v1_stage_metrics'] = types.SimpleNamespace(stage=lambda *a, **k:lambda f:f)
-sys.modules['v1_ocr_proxy'] = types.SimpleNamespace(ocr_proxy=lambda f:f)
-sys.modules['shared_state'] = types.SimpleNamespace(stop_requested=False)
-sys.modules['ai.v1_model_policy'] = types.SimpleNamespace(current_v1_model_policy=lambda:None)
-sys.modules['ai.v1_model_runtime'] = types.SimpleNamespace(V1ModelRuntimeError=RuntimeError,
-    run_v1_ocr=lambda *a, **k:None, runtime_module_available=lambda *a:False)
-
-
-def tearDownModule():
-    for name, orig in _ORIGINAL_MODULES.items():
-        if orig is None:
-            sys.modules.pop(name, None)
-        else:
-            sys.modules[name] = orig
-
-
-def load(name, path):
-    source = CODE / path if (CODE / path).is_file() else PROD / path
-    spec = importlib.util.spec_from_file_location(name, source)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    sys.modules[f"backend.{name}"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-geo = load('v1_ocr_geometry', 'v1_ocr_geometry.py')
-locator = load('ocr_subtitle_locator', 'ocr_subtitle_locator.py')
-ocr = load('ocr_utils', 'ocr_utils.py')
-ass = load('ass_utils', 'ass_utils.py')
-runtime = load('v1_stage_runtime', 'v1_stage_runtime.py')
+# Use the suite's canonical module aliases. Collection-time sys.modules stubs
+# leaked into other test files and left two independent shared stop states.
+from backend import v1_ocr_geometry as geo
+from backend import ocr_subtitle_locator as locator
+from backend import ocr_utils as ocr
+from backend import ass_utils as ass
+from backend import v1_stage_runtime as runtime
 
 
 def block(text='这是当时导致伤口感染', sid=1, t=1., x=.1, right=.8, y=.9, bottom=.99):
@@ -155,6 +123,45 @@ class GeometryTests(unittest.TestCase):
     def test_missing_box_not_reported_located(self):
         s=segment();s.ocr_mask_status='located';s.best_block=None
         with self.assertRaises(geo.OCRGeometryError):geo.validate_mask_geometry([s])
+    def test_neighbour_boxes_never_resolve_unobserved_cue(self):
+        for as_dict in (False, True):
+            with self.subTest(as_dict=as_dict):
+                located=segment();located.ocr_mask_status='located';located.best_block=block()
+                missing=segment(2);missing.ocr_mask_status='unresolved';missing.best_block=None
+                other=segment(3);other.ocr_mask_status='located';other.best_block=block(sid=3)
+                rows=[vars(s).copy() for s in (located,missing,other)] if as_dict else [located,missing,other]
+                with self.assertRaises(geo.OCRGeometryError):
+                    geo.validate_mask_geometry(rows,strict=True)
+                self.assertEqual(geo.value(rows[1],'ocr_mask_status'),'unresolved')
+                self.assertIsNone(geo.value(rows[1],'best_block'))
+    def test_neighbour_boxes_never_repair_invalid_located_cue(self):
+        first=segment();first.ocr_mask_status='located';first.best_block=block()
+        missing=segment(2);missing.ocr_mask_status='located';missing.best_block=None
+        last=segment(3);last.ocr_mask_status='located';last.best_block=block(sid=3)
+        with self.assertRaises(geo.OCRGeometryError):
+            geo.validate_mask_geometry([first,missing,last],strict=True)
+        self.assertIsNone(missing.best_block)
+    def test_strict_geometry_never_invents_boxes_from_neighbouring_cues(self):
+        for unresolved_status in ('unresolved', 'located'):
+            with self.subTest(status=unresolved_status):
+                known = segment();known.ocr_mask_status='located'
+                known.best_block=types.SimpleNamespace(**block())
+                missing = [segment(2), segment(3)]
+                for item in missing:
+                    item.ocr_mask_status=unresolved_status
+                    item.best_block=None
+                with self.assertRaises(geo.OCRGeometryError):
+                    geo.validate_mask_geometry([known, *missing], strict=True)
+                self.assertTrue(all(item.best_block is None for item in missing))
+                self.assertTrue(all(item.ocr_mask_status==unresolved_status for item in missing))
+    def test_warning_geometry_retains_unresolved_evidence(self):
+        segments = [dict(index=1, ocr_mask_status='located', best_block=block()),
+                    dict(index=2, ocr_mask_status='unresolved', best_block=None),
+                    dict(index=3, ocr_mask_status='unresolved', best_block=None)]
+        with self.assertLogs(geo.__name__, level='WARNING'):
+            geo.validate_mask_geometry(segments, strict=False)
+        self.assertEqual([s['ocr_mask_status'] for s in segments], ['located', 'unresolved', 'unresolved'])
+        self.assertTrue(all(s['best_block'] is None for s in segments[1:]))
     def test_no_caption_keeps_vietnamese_card(self):
         s=segment(content='Không có chữ gốc');s.ocr_mask_status='no_caption_evidence'
         with tempfile.TemporaryDirectory() as tmp:
@@ -227,7 +234,7 @@ class PipelineTests(unittest.TestCase):
         def capture(_):
             c=Capture(**capture_args);captures.append(c);return c
         with patch.object(ocr.cv2,'VideoCapture',side_effect=capture), patch.object(ocr,'_readtext_batch',side_effect=recognize):
-            result=ocr.perform_video_ocr('fixture.mp4',srt_segments=segments,ocr_strategy='smart_skip',adaptive=False,**kwargs)
+            result=inspect.unwrap(ocr.perform_video_ocr)('fixture.mp4',srt_segments=segments,ocr_strategy='smart_skip',adaptive=False,**kwargs)
         self.assertTrue(all(c.released for c in captures))
         return result,captures
     @staticmethod

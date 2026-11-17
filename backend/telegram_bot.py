@@ -761,8 +761,11 @@ async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif subcmd in ("stop", "kill", "cancel"):
         try:
             from cloud.cloud_contract import run_provider_action_nonblocking
+            from cloud.cloud_job_store import CloudJobStore
             from cloud.colab_bridge import stop_all_sessions
 
+            cloud_store = CloudJobStore()
+            cloud_store.cancel_all()
             action_res = await asyncio.to_thread(
                 run_provider_action_nonblocking,
                 stop_all_sessions,
@@ -776,7 +779,10 @@ async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif not action_res["completed"]:
                 raise RuntimeError(str(action_res.get("error") or "Unknown error"))
             else:
-                await update.message.reply_text("🛑 Đã thu hồi và dừng toàn bộ máy ảo Colab an toàn!")
+                ok, message = action_res["result"]
+                if ok:
+                    cloud_store.acknowledge_all_sessions_stopped()
+                await update.message.reply_text(("🛑 " if ok else "❌ ") + message)
         except Exception as exc:
             from cloud.cloud_security import redact_secrets
             await update.message.reply_text(f"❌ Lỗi khi dừng session: {redact_secrets(str(exc))}")
@@ -1332,6 +1338,8 @@ async def video_worker():
                             chat_id=job.get('chat_id'), voice_mode=job_voice_mode,
                             retry_count=job.get('retry_count', 0), queue_job=job
                         )
+                    elif job['type'] == 'local_file':
+                        result = await _process_telegram_job(job)
                     elif job['type'] == 'resume_v2':
                         from pipeline_v2.config import PipelineSettings
                         from pipeline_v2.resume import resume_video_job
@@ -1349,6 +1357,8 @@ async def video_worker():
                             api_key=GEMINI_API_KEY,
                             progress=resume_progress,
                         )
+                    else:
+                        raise ValueError(f"Loại công việc Telegram không được hỗ trợ: {job.get('type')}")
                 else:
                     pos, update, context, url = job
                     from ai.v1_auto_voice import get_auto_voice_mode
@@ -1485,6 +1495,8 @@ async def run_pipeline_cloud_for_telegram(video_path, job, status_msg):
                 raise RuntimeError("Job Cloud trùng idempotency_key đã hoàn tất trước đó nhưng thiếu file thành phẩm.")
             if manifest and manifest.get("qc_passed") is False:
                 raise RuntimeError("Video thành phẩm chưa đạt kiểm tra QC nên bị chặn gửi.")
+            if not already_sent:
+                await asyncio.to_thread(job_tracker.finish_video, Path(v_path_str).name, cloud_job.result_path, 0)
             resume_state["delivered_cloud_job_id"] = cloud_job.job_id
             return {
                 "status": "success",
@@ -1515,7 +1527,18 @@ async def run_pipeline_cloud_for_telegram(video_path, job, status_msg):
 
     orchestrator = CloudOrchestrator(store, allowed_roots=allowed_roots)
     worker = CloudWorker(worker_id=cloud_job.owner_id, store=store, orchestrator=orchestrator)
-    success = await asyncio.to_thread(worker.process_claimed_job, cloud_job, on_progress)
+    processing_task = asyncio.create_task(
+        asyncio.to_thread(worker.process_claimed_job, cloud_job, on_progress)
+    )
+    try:
+        success = await asyncio.shield(processing_task)
+    except asyncio.CancelledError:
+        await asyncio.to_thread(worker.cancel_current_job, "Telegram job bị hủy.")
+        try:
+            await asyncio.shield(processing_task)
+        except (Exception, asyncio.CancelledError):
+            pass
+        raise
 
     updated_job = store.get_job(cloud_job.job_id)
     if not success or not updated_job or updated_job.state != "completed":
@@ -1530,6 +1553,7 @@ async def run_pipeline_cloud_for_telegram(video_path, job, status_msg):
     if manifest and manifest.get("qc_passed") is False:
         raise RuntimeError("Video thành phẩm chưa đạt kiểm tra QC nên bị chặn gửi.")
 
+    await asyncio.to_thread(job_tracker.finish_video, Path(v_path_str).name, updated_job.result_path, 0)
     resume_state["delivered_cloud_job_id"] = updated_job.job_id
     return {
         "status": "success",
@@ -1608,7 +1632,17 @@ async def _process_telegram_job(job):
         if shared_state.stop_requested:
             raise BatchStopRequested("Đã dừng theo yêu cầu.")
         if job.get("type") == "local_file" and job.get("video_path"):
-            video_path = Path(job["video_path"])
+            video_path = Path(job["video_path"]).resolve()
+            if not video_path.is_file():
+                raise ValueError("Không tìm thấy file video local đã xếp hàng.")
+            await asyncio.to_thread(probe_downloaded_video, video_path)
+            state = job["resume_state"]
+            source_sha = await asyncio.to_thread(fingerprint, video_path)
+            if state.get("source_sha256") and state["source_sha256"] != source_sha:
+                raise ValueError("Nguồn local đã thay đổi; không thể resume job cũ.")
+            state["source_path"] = str(video_path)
+            state["source_sha256"] = source_sha
+            global_queue.publish()
         else:
             state = job["resume_state"]
             video_path = Path(state["source_path"]) if state.get("source_path") else None
@@ -1665,7 +1699,13 @@ async def _process_telegram_job(job):
             raise BatchStopRequested("Đã dừng theo yêu cầu.")
         job_tracker.start_video(video_path.name, pos, pos + global_queue.qsize())
 
-        if job["execution_mode"] == "cloud":
+        from v1_feature_flags import get_feature_flags
+        is_cloud = (
+            job.get("execution_mode") == "cloud"
+            or job.get("force_cloud")
+            or bool(get_feature_flags(WORKSPACE).get("V1_CLOUD_MODE", False))
+        )
+        if is_cloud:
             result = await run_pipeline_cloud_for_telegram(video_path, job, status_msg)
         else:
             result = await run_pipeline_v1_for_telegram(video_path, job, status_msg)
@@ -1935,7 +1975,10 @@ async def enqueue_pending_queue_jobs(application=None):
             if not target or identity(item) in existing:
                 continue
             kind = "url" if str(target).startswith("http") else item.get("type")
-            if kind not in ("url", "video") or (kind == "video" and not item.get("file_id")):
+            if kind not in ("url", "video", "local_file") or (kind == "video" and not item.get("file_id")):
+                continue
+            if kind == "local_file" and not item.get("video_path"):
+                logger.error("Không thể khôi phục job local thiếu video_path: %s", identity(item))
                 continue
             queue_counter += 1
             job = {
@@ -1946,6 +1989,8 @@ async def enqueue_pending_queue_jobs(application=None):
                 "job_overrides": item.get("job_overrides"), "resume_state": item.get("resume_state"),
                 "retry_count": item.get("retry_count", 0), "update": None, "context": None,
                 "network_retry_count": item.get("network_retry_count", 0),
+                "video_path": item.get("video_path"), "force_cloud": item.get("force_cloud", False),
+                "cloud_gpu": item.get("cloud_gpu"), "voice": item.get("voice"),
             }
             await global_queue.put(prepare_telegram_job(job))
             existing.add(identity(item))

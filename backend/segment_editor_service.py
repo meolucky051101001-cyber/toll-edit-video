@@ -1026,6 +1026,15 @@ async def publish_revised_video(
     if not source_video:
         raise RuntimeError(f"Không tìm thấy video gốc để xuất bản sửa cho {clean_id}")
 
+    # This path remuxes audio and keeps the existing video pixels. Do not
+    # represent a global cover-style change as a visual conversion of that file.
+    import canvas_settings
+    if canvas_settings.get_canvas_settings().get("sub_cover_style") == "localized_blur":
+        from subtitle_blur import read_ass_blur_metadata
+        ass_file = job_folder / "final.ass"
+        if not ass_file.is_file() or read_ass_blur_metadata(ass_file.read_text(encoding="utf-8-sig")) is None:
+            raise ValueError("Bản sửa âm thanh không đổi được hộp trắng đã nướng; hãy xuất lại từ video nguồn trong Studio để làm mờ")
+
     # Output file name: Dubbed_{clean_id}_rev{current_rev}.mp4
     rev_filename = f"Dubbed_{clean_id}_rev{current_rev}.mp4"
     rev_filepath = out_dir / rev_filename

@@ -62,6 +62,9 @@ DEFAULT_CANVAS_SETTINGS: Dict[str, Any] = {
     "sub_shadow": False,         # Đổ bóng chữ
     "sub_preset": "custom",      # Preset phong cách chữ nhanh
     "sub_cover_style": "solid_box", # "solid_box" (hộp nền trắng mặc định), "adaptive_box" (thích ứng màu nền), "localized_blur" (làm mờ cục bộ đúng hộp chữ), hoặc "frosted_blur" (kính mờ cả băng)
+    "sub_blur_radius": 16,
+    "sub_blur_padding_x": 0.015,
+    "sub_blur_padding_y": 0.008,
     "delogo_mode": "off",        # "off" (tắt mặc định), "smart" (delogo đúng vùng logo tĩnh PP-OCRv6 phát hiện), hoặc "corners" (4 góc cố định)
     "sub_bg_color": "#ffffff",   # Màu khung nền (Mặc định: Trắng #ffffff)
     "sub_bg_opacity": 1.0,       # Độ mờ đục khung nền (0.1 - 1.0)
@@ -343,6 +346,8 @@ def _normalize_cover_and_delogo(cfg: Dict[str, Any]) -> None:
     if cover not in ("solid_box", "frosted_blur", "adaptive_box", "localized_blur"):
         cover = "solid_box"
     cfg["sub_cover_style"] = cover
+    from subtitle_blur import resolve_blur_settings
+    cfg.update(resolve_blur_settings(cfg))
 
     delogo = str(cfg.get("delogo_mode", "off")).strip().lower()
     if delogo not in ("off", "smart", "corners"):

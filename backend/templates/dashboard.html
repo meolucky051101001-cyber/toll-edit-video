@@ -2261,7 +2261,7 @@ header {
                 <select id="selectSubCoverStyle" onchange="saveVisualCoverSettings()" style="background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; font-size: 11px;">
                   <option value="solid_box">Hộp đặc (Mặc định)</option>
                   <option value="adaptive_box">Hộp thích ứng màu nền</option>
-                  <option value="localized_blur">Làm mờ cục bộ hộp chữ</option>
+                  <option value="localized_blur">Làm mờ vùng phụ đề gốc</option>
                   <option value="frosted_blur">Băng mờ toàn ngang</option>
                 </select>
               </div>
@@ -2276,6 +2276,13 @@ header {
                   <option value="smart">Thông minh theo OCR tĩnh</option>
                   <option value="corners">4 góc cố định (Cũ)</option>
                 </select>
+              </div>
+
+              <div style="grid-column: 1 / -1; padding: 8px 12px; color: var(--text-main);">
+                <label>Mức làm mờ <input id="subBlurRadius" type="number" min="2" max="32" value="16" onchange="saveVisualCoverSettings()" style="width: 55px;"></label>
+                <label style="margin-left: 10px;">Nới ngang (%) <input id="subBlurPaddingX" type="number" min="0" max="5" step="0.1" value="1.5" onchange="saveVisualCoverSettings()" style="width: 55px;"></label>
+                <label style="margin-left: 10px;">Nới dọc (%) <input id="subBlurPaddingY" type="number" min="0" max="5" step="0.1" value="0.8" onchange="saveVisualCoverSettings()" style="width: 55px;"></label>
+                <div style="font-size: 10.5px; color: var(--text-muted); margin-top: 5px;">Áp dụng cho video mới. Video đã có hộp trắng cần xuất lại từ nguồn; đổi cài đặt không thay video cũ.</div>
               </div>
 
               <!-- TÙY CHỌN MÔ HÌNH ASR: Hybrid (Whisper + SenseVoice) vs Faster-Whisper vs SenseVoice-Small -->
@@ -5779,6 +5786,9 @@ let inputUploading=false;
         const delogoEl = document.getElementById('selectDelogoMode');
         if (coverEl && cfg.sub_cover_style) coverEl.value = cfg.sub_cover_style;
         if (delogoEl && cfg.delogo_mode) delogoEl.value = cfg.delogo_mode;
+        document.getElementById('subBlurRadius').value = cfg.sub_blur_radius ?? 16;
+        document.getElementById('subBlurPaddingX').value = (cfg.sub_blur_padding_x ?? 0.015) * 100;
+        document.getElementById('subBlurPaddingY').value = (cfg.sub_blur_padding_y ?? 0.008) * 100;
       } catch (e) {
         console.warn('Lỗi đọc cấu hình che chữ / delogo:', e);
       }
@@ -5790,6 +5800,9 @@ let inputUploading=false;
       const payload = {};
       if (coverEl) payload.sub_cover_style = coverEl.value;
       if (delogoEl) payload.delogo_mode = delogoEl.value;
+      payload.sub_blur_radius = Number(document.getElementById('subBlurRadius').value);
+      payload.sub_blur_padding_x = Number(document.getElementById('subBlurPaddingX').value) / 100;
+      payload.sub_blur_padding_y = Number(document.getElementById('subBlurPaddingY').value) / 100;
       try {
         const res = await fetch('/api/canvas-settings', {
           method: 'POST',

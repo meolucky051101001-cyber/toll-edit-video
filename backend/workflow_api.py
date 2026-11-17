@@ -23,6 +23,7 @@ import cv2
 import numpy as np
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from urllib.parse import quote, unquote, urlencode
 from fastapi import APIRouter, HTTPException, Query, Body, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
@@ -98,10 +99,49 @@ def artifact_stem(stem: str, max_len: Optional[int] = None) -> str:
 def resolve_job_dir(stem: str) -> Path:
     """Thư mục job chung của pipeline và Studio.
 
-    Pipeline ghi workspace/<stem thô> (giữ space/Unicode); bản Studio cũ ghi
-    workspace/<artifact_stem>. Ưu tiên thư mục pipeline, fallback thư mục cũ.
+    Ưu tiên thư mục trong manifest V1, rồi batch legacy có marker sở hữu,
+    cuối cùng thư mục stem cũ. Tên trùng nhiều nguồn phải được phân giải trước.
     """
     raw_stem = safe_stem(stem)
+    workspace = WORKSPACE.resolve()
+    # V1 batch/recovery jobs own a manifest-selected directory, which can differ
+    # from the display stem. Prefer that mapping over an obsolete Studio folder.
+    manifests = workspace / "bot_system" / "manifests"
+    by_source = {}
+    for manifest_path in manifests.glob("*.manifest.json"):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            source = Path(manifest["video_path"])
+            if source.stem != raw_stem:
+                continue
+            directory = Path(manifest["effective_config"]["output_dir"]).resolve()
+            if directory == workspace or not directory.is_relative_to(workspace) or not directory.is_dir():
+                continue
+            updated = float(manifest.get("updated_at", 0))
+            if not math.isfinite(updated):
+                continue
+            key = os.path.normcase(str(source.resolve()))
+            if key not in by_source or updated > by_source[key][0]:
+                by_source[key] = (updated, directory)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    candidates = {record[1] for record in by_source.values()}
+    if not candidates and workspace.is_dir():
+        # Legacy batch jobs have no V1 manifest, but do have an ownership marker.
+        pattern = re.compile(r"batch_[0-9a-f]{16}_" + re.escape(raw_stem) + r"\Z")
+        for directory in workspace.iterdir():
+            if not pattern.fullmatch(directory.name) or not directory.is_dir():
+                continue
+            try:
+                resolved = directory.resolve()
+                if resolved.parent == workspace and (directory / ".autodub-owned").read_text(encoding="utf-8") == str(resolved):
+                    candidates.add(resolved)
+            except (OSError, UnicodeError):
+                continue
+    if len(candidates) > 1:
+        raise HTTPException(409, "Có nhiều video cùng tên; cần chọn đúng job trước khi chỉnh sửa trong Studio.")
+    if candidates:
+        return next(iter(candidates))
     raw_dir = WORKSPACE / raw_stem
     clean_dir = WORKSPACE / artifact_stem(raw_stem)
     if raw_dir == clean_dir or raw_dir.is_dir() or not clean_dir.is_dir():
@@ -370,10 +410,31 @@ def generate_smart_thumb_mask(video_path: str, tw: int = 1080, th: int = 1920, p
 
 def build_custom_ass_file(job_dir: Path, cfg: Dict[str, Any], tw: int = 1080, th: int = 1920) -> Optional[Path]:
     """
-    Giữ nguyên 100% tọa độ AI OCR tracking che phụ đề tiếng Trung cho từng câu trong final.ass.
-    Chỉ cập nhật phông chữ, màu chữ, màu khung nền và độ mờ đục theo tùy chỉnh của người dùng.
+    Cập nhật kiểu chữ; chế độ làm mờ tạo lại metadata từ OCR nguồn.
     """
+    from subtitle_blur import freeze_subtitle_settings
+    subtitle_settings = freeze_subtitle_settings(cfg)
+    localized = subtitle_settings["sub_cover_style"] == "localized_blur"
     orig_ass = job_dir / "final.ass"
+    if localized:
+        from v1_stage_runtime import load_payload
+        from ass_utils import generate_ass_file
+        tts_path, ocr_path = job_dir / "tts.json", job_dir / "ocr.json"
+        if not tts_path.is_file() or not ocr_path.is_file():
+            raise ValueError("Cần artifact TTS/OCR và video nguồn để xuất lại kiểu làm mờ")
+        tts, ocr = load_payload(tts_path), load_payload(ocr_path)
+        if not isinstance(ocr.get("segments"), list):
+            raise ValueError("Artifact OCR thiếu danh sách observation nguồn; cần chạy lại OCR")
+        from v1_ocr_geometry import OCR_GEOMETRY_VERSION
+        if ocr.get("geometry_version") != OCR_GEOMETRY_VERSION:
+            raise ValueError("Geometry OCR cũ chưa đủ để làm mờ chính xác; cần chạy lại OCR")
+        orig_ass = job_dir / "blur_source.ass"
+        generate_ass_file(tts["segments"], [], orig_ass,
+                          play_res_x=int(ocr.get("width") or tw),
+                          play_res_y=int(ocr.get("height") or th),
+                          main_y_pct=float(ocr.get("main_y_pct", 0.85)),
+                          cover_style="localized_blur", blur_settings=subtitle_settings,
+                          source_segments=ocr["segments"])
     if not orig_ass.is_file():
         return None
 
@@ -406,6 +467,12 @@ def build_custom_ass_file(job_dir: Path, cfg: Dict[str, Any], tw: int = 1080, th
         shadow_enabled = bool(cfg.get("sub_shadow", False))
         stroke_color_ass = hex_to_ass_color(stroke_color_hex, default_hex="000000", alpha=1.0)
         shadow_val = 2 if shadow_enabled else 0
+        if localized:
+            stroke_width = max(2, stroke_width)
+            shadow_val = max(1, shadow_val)
+            if font_color_hex.lower() == "#000000":
+                font_color_ass = "&H00FFFFFF"
+
 
         new_bg_style = f"Style: BgStyle,Arial,{font_size},{bg_color_ass},{bg_color_ass},{bg_color_ass},{bg_color_ass},0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1"
         new_txt_style = f"Style: TextStyle,{font_name},{font_size},{font_color_ass},&H000000FF,{stroke_color_ass},&H00000000,{bold_val},0,0,0,100,100,0,0,1,{stroke_width},{shadow_val},5,10,10,10,1"
@@ -437,6 +504,8 @@ def build_custom_ass_file(job_dir: Path, cfg: Dict[str, Any], tw: int = 1080, th
         return custom_ass
     except Exception as e:
         logger.warning(f"Error customizing ASS file: {e}")
+        if localized:
+            raise
         return None
 
 
@@ -1345,6 +1414,9 @@ def build_watermark_filter(cfg: Dict[str, Any], tw: int, th: int) -> str:
 def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]):
     """Tiến trình ngầm lồng khung chống re-up hàng loạt cho cả thư mục."""
     global batch_framing_state
+    if str(cfg.get("sub_cover_style", "solid_box")).lower() == "localized_blur":
+        batch_framing_state.update(status="error", message="Đổi kiểu che sang làm mờ cần xuất từ video nguồn trong Studio; chèn khung hàng loạt chỉ xử lý thành phẩm.")
+        return
     batch_framing_stop_flag.clear()
     
     aspect = str(cfg.get("aspect_ratio", "9:16")).lower()
@@ -1645,6 +1717,8 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
 async def api_start_batch_framing(payload: Dict[str, Any] = Body(...)):
     """Khởi chạy tiến trình lồng khung chống re-up hàng loạt cho cả thư mục."""
     global batch_framing_thread, batch_framing_state
+    if str(payload.get("sub_cover_style", "solid_box")).lower() == "localized_blur":
+        raise HTTPException(status_code=409, detail="Đổi kiểu che sang làm mờ cần xuất từ video nguồn trong Studio; chèn khung hàng loạt chỉ xử lý thành phẩm.")
     if batch_framing_state.get("status") == "running":
         return {"status": "error", "message": "Đang có một tiến trình chèn khung hàng loạt đang chạy!"}
 
@@ -3942,20 +4016,28 @@ def glob_escape(s: str) -> str:
     return s.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
 
 
+def _pipeline_lock():
+    # `python backend/main.py` serves the application as __main__. Importing
+    # main again would create another FastAPI app and an unrelated lock.
+    import sys
+    entrypoint = sys.modules.get("__main__")
+    if (entrypoint is not None
+            and getattr(entrypoint, "UNIFIED_PIPELINE_LOCK", None) is not None
+            and Path(getattr(entrypoint, "__file__", "")).resolve() == _BACKEND_ROOT / "main.py"):
+        return entrypoint.UNIFIED_PIPELINE_LOCK
+    import main
+    return main.UNIFIED_PIPELINE_LOCK
+
+
 def _wait_pipeline_free(job_id: str, max_wait_s: int = 1800) -> bool:
     """
-    P9: asyncio.Lock của pipeline không dùng được `with` từ thread nền —
-    chờ bằng polling: pipeline lock + batch active + job_tracker state.
-    Trả False nếu hết thời gian chờ.
+    Chờ trạng thái rảnh để hiển thị tiến độ; hàm này không cấp quyền xử lý.
+    Worker phải vào _manual_pipeline_ownership trước mọi thao tác ghi/model.
     """
-    import main as main_module
-    import stop_service
-    import shared_state
-
     deadline = time.monotonic() + max_wait_s
     while time.monotonic() < deadline:
         try:
-            locked = main_module.UNIFIED_PIPELINE_LOCK.locked()
+            locked = _pipeline_lock().locked()
             state = job_tracker.get_status(strict=True)
             active = state["active"] or any(w["active"] for w in state.get("workers", {}).values())
         except Exception as exc:
@@ -3965,7 +4047,42 @@ def _wait_pipeline_free(job_id: str, max_wait_s: int = 1800) -> bool:
             _manual_job_set(job_id, stage="Pipeline đang chạy — chờ tài nguyên rảnh...")
             time.sleep(min(3, max(0, deadline - time.monotonic())))
             continue
-        # Only clear stale stop state after both sources prove that no job is active.
+        return True
+    return False
+
+
+@contextmanager
+def _manual_pipeline_ownership(job_id: str, event_loop):
+    """Hold API admission and the cross-process lease for the entire worker."""
+    import stop_service
+    import shared_state
+    from batch_control import stop_check
+
+    if not _wait_pipeline_free(job_id):
+        raise PipelineStateError("Hết thời gian chờ pipeline rảnh; chưa chạy tác vụ.")
+    lock = _pipeline_lock()
+
+    async def acquire():
+        await asyncio.wait_for(lock.acquire(), timeout=1800)
+
+    # The endpoint passes its running loop; no asyncio lock is operated directly
+    # from this native thread, and a client disconnect cannot release it early.
+    asyncio.run_coroutine_threadsafe(acquire(), event_loop).result()
+    claimed = False
+    token = None
+    try:
+        deadline = time.monotonic() + 1800
+        while not claimed:
+            try:
+                with job_tracker._LOCK:
+                    job_tracker._claim_batch_lock_unlocked(job_id)
+                claimed = True
+            except job_tracker.JobAlreadyRunningError:
+                if time.monotonic() >= deadline:
+                    raise PipelineStateError("Hết thời gian chờ quyền xử lý Studio.")
+                time.sleep(0.25)
+        # Clear stale stop state only after admission is reserved; a live batch
+        # cannot start between the idle check and this operation.
         try:
             if stop_service.is_stop_requested(WORKSPACE) or shared_state.stop_requested:
                 stop_service.clear_stop(WORKSPACE, source="workflow_api", reason="idle manual job starts")
@@ -3976,8 +4093,16 @@ def _wait_pipeline_free(job_id: str, max_wait_s: int = 1800) -> bool:
             raise PipelineStateError("Không xác minh được cờ dừng; chưa chạy tác vụ.") from exc
         from disk_guard import ensure_free_space
         ensure_free_space(WORKSPACE, purpose="tạo phụ đề trong Studio")
-        return True
-    return False
+        token = stop_check.set(lambda: bool(shared_state.stop_requested) or stop_service.is_stop_requested(WORKSPACE))
+        yield
+    finally:
+        if token is not None:
+            stop_check.reset(token)
+        try:
+            if claimed:
+                job_tracker.release_batch(job_id)
+        finally:
+            event_loop.call_soon_threadsafe(lock.release)
 
 
 def _manual_job_set(job_id: str, **kw) -> None:
@@ -4001,21 +4126,20 @@ async def api_manual_generate_cn(payload: Dict[str, Any] = Body(...)):
 
     job_id = _uuid.uuid4().hex[:12]
     _MANUAL_JOBS[job_id] = {"status": "queued", "progress": 0, "stage": "Trong hàng đợi...", "kind": "cn", "created_at": time.time()}
+    event_loop = asyncio.get_running_loop()
 
     def worker():
         job = _MANUAL_JOBS[job_id]
         try:
             # Dùng chung GPU Whisper với pipeline — chờ pipeline chính rảnh
             job.update({"status": "running", "stage": "Chờ pipeline rảnh..."})
-            # asyncio.Lock KHÔNG dùng được `with` đồng bộ từ thread — chờ bằng polling
-            if not _wait_pipeline_free(job_id):
-                raise PipelineStateError("Hết thời gian chờ pipeline rảnh; chưa chạy tác vụ.")
-            if True:
+            with _manual_pipeline_ownership(job_id, event_loop):
                 job_dir = resolve_job_dir(stem)
                 job_dir.mkdir(parents=True, exist_ok=True)
                 wav = job_dir / "original.wav"
                 job.update({"progress": 10, "stage": "Tách audio 16kHz..."})
-                subprocess.run(
+                from batch_control import run
+                run(
                     ["ffmpeg", "-y", "-v", "error", "-i", str(video_path),
                      "-vn", "-ac", "1", "-ar", "16000", str(wav)],
                     capture_output=True, timeout=600, check=True,
@@ -4024,7 +4148,9 @@ async def api_manual_generate_cn(payload: Dict[str, Any] = Body(...)):
                 from ai.v1_asr_isolated import extract_subtitles_isolated
 
                 srt_path = job_dir / "original.srt"
-                segments = extract_subtitles_isolated(wav, srt_path)
+                from v1_gpu_gatekeeper import gpu_gatekeeper
+                with gpu_gatekeeper("studio_speech_asr"):
+                    segments = extract_subtitles_isolated(wav, srt_path)
                 _snapshot_srt_source(srt_path)
                 job.update({
                     "status": "done", "progress": 100,
@@ -4057,6 +4183,7 @@ async def api_manual_translate(payload: Dict[str, Any] = Body(...)):
 
     job_id = _uuid.uuid4().hex[:12]
     _MANUAL_JOBS[job_id] = {"status": "queued", "progress": 0, "stage": "Trong hàng đợi...", "kind": "translate", "created_at": time.time()}
+    event_loop = asyncio.get_running_loop()
 
     def worker():
         job = _MANUAL_JOBS[job_id]
@@ -4064,10 +4191,7 @@ async def api_manual_translate(payload: Dict[str, Any] = Body(...)):
             from datetime import timedelta
 
             job.update({"status": "running", "stage": "Chờ pipeline rảnh..."})
-            # asyncio.Lock KHÔNG dùng được `with` đồng bộ từ thread — chờ bằng polling
-            if not _wait_pipeline_free(job_id):
-                raise PipelineStateError("Hết thời gian chờ pipeline rảnh; chưa chạy tác vụ.")
-            if True:
+            with _manual_pipeline_ownership(job_id, event_loop):
                 job.update({"progress": 15, "stage": "Đọc sub Trung đã sửa..."})
                 from ai.translation import translate_subtitles
 
@@ -4083,8 +4207,9 @@ async def api_manual_translate(payload: Dict[str, Any] = Body(...)):
                         content=(b.get("text") or "").strip(),
                     ))
                 job.update({"progress": 30, "stage": f"Đang dịch {len(segments)} câu bằng LLM..."})
+                from batch_control import stop_check
                 translate_subtitles(segments, target_lang, api_key=os.getenv("GEMINI_API_KEY", ""), video_path=None,
-                                    stop_checker=lambda: False)  # job thủ công không dính cờ stop của batch
+                                    stop_checker=stop_check.get())
                 job.update({"progress": 80, "stage": "Đang ghi translated.srt..."})
                 srt_translated = job_dir / "translated.srt"
                 atomic_write_text(srt_translated, "\n".join(seg.to_srt() for seg in segments))
@@ -4139,8 +4264,8 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
     """
     stem = safe_stem(payload.get("stem"))
     job_dir = resolve_job_dir(stem)
-    job_dir.mkdir(parents=True, exist_ok=True)
     srt_translated = job_dir / "translated.srt"
+    supplied_srt = None
 
     # P9: Nhận phụ đề trực tiếp từ payload nếu người dùng tự gõ/sửa trong Studio
     payload_subs = payload.get("subtitles") or []
@@ -4154,18 +4279,12 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
             end = float(s.get("end", start + 2.0))
             srt_blocks.append(f"{idx}\n{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}\n{text}\n")
         if srt_blocks:
-            atomic_write_text(srt_translated, "\n".join(srt_blocks))
-            if _payload_video_version(payload, job_dir, stem) == "raw":
-                _snapshot_srt_source(srt_translated)
-            else:
-                _sync_srt_source_text(srt_translated)
+            supplied_srt = "\n".join(srt_blocks)
 
-    if not srt_translated.is_file() or not srt_translated.read_text(encoding="utf-8", errors="replace").strip():
+    if supplied_srt is None and (not srt_translated.is_file() or not srt_translated.read_text(encoding="utf-8", errors="replace").strip()):
         single_text = (payload.get("text") or "").strip()
         if single_text:
-            atomic_write_text(srt_translated, f"1\n00:00:00,000 --> 00:00:10,000\n{single_text}\n")
-            if _payload_video_version(payload, job_dir, stem) == "raw":
-                _snapshot_srt_source(srt_translated)
+            supplied_srt = f"1\n00:00:00,000 --> 00:00:10,000\n{single_text}\n"
         elif (job_dir / "chinese.srt").is_file() or (job_dir / "raw.srt").is_file():
             raise HTTPException(status_code=400, detail="Đã có phụ đề gốc nhưng chưa dịch — bấm nút 'Dịch Ngay' trên timeline trước khi tạo giọng!")
         else:
@@ -4212,12 +4331,21 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
 
     job_id = _uuid.uuid4().hex[:12]
     _MANUAL_JOBS[job_id] = {"status": "queued", "progress": 0, "stage": "Trong hàng đợi...", "kind": "tts", "created_at": time.time()}
+    event_loop = asyncio.get_running_loop()
 
-    def worker():
+    def owned_worker():
         job = _MANUAL_JOBS[job_id]
         try:
             import asyncio
             from datetime import timedelta
+
+            job_dir.mkdir(parents=True, exist_ok=True)
+            if supplied_srt is not None:
+                atomic_write_text(srt_translated, supplied_srt)
+                if _payload_video_version(payload, job_dir, stem) == "raw":
+                    _snapshot_srt_source(srt_translated)
+                else:
+                    _sync_srt_source_text(srt_translated)
 
             voice_source = str(voice_entry.get("source") or "capcut")
             voice_param = str(voice_entry.get("param") or "")
@@ -4247,20 +4375,10 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
 
             from ai.voice_cloning import generate_single_tts
 
-            # P9: xóa stop flag stale (batch đã xong nhưng cờ stop chưa reset)
-            try:
-                import shared_state
-                if shared_state.stop_requested and not job_tracker.get_status().get("active"):
-                    shared_state.stop_requested = False
-            except Exception as _phase6_exc:
-                logger.debug('Suppressed error in workflow_api.worker (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
-
             def _stop_requested() -> bool:
-                try:
-                    import shared_state
-                    return bool(shared_state.stop_requested)
-                except Exception:
-                    return False
+                from batch_control import stop_check
+                predicate = stop_check.get()
+                return bool(predicate and predicate())
 
             async def run_all():
                 failed = []
@@ -4322,7 +4440,8 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
                 cmd.extend(["-i", str(tts_dir / f"{cue.index}.mp3")])
             cmd.extend(["-filter_complex", ";".join(fc_parts), "-map", "[outa]",
                         "-c:a", "pcm_s16le", str(job_dir / "manual_tts_track.wav")])
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            from batch_control import run
+            res = run(cmd, capture_output=True, text=True, timeout=300)
             if res.returncode != 0 or not (job_dir / "manual_tts_track.wav").is_file():
                 raise RuntimeError("FFmpeg lắp bản lồng thất bại: " + (res.stderr or "")[-200:])
 
@@ -4339,6 +4458,14 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
         except Exception as e:
             logger.exception("Manual generate-tts job lỗi")
             _manual_job_set(job_id, status="error", stage=str(e)[:220])
+
+    def worker():
+        try:
+            with _manual_pipeline_ownership(job_id, event_loop):
+                owned_worker()
+        except Exception as exc:
+            logger.exception("Manual generate-tts admission lỗi")
+            _manual_job_set(job_id, status="error", stage=str(exc)[:220])
 
     threading.Thread(target=worker, daemon=True).start()
     return {"status": "ok", "job_id": job_id}
@@ -4631,6 +4758,10 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
 
     if not source_video and not final_video:
         raise HTTPException(status_code=404, detail="Không tìm thấy tệp video nguồn")
+    localized_export = str(cfg.get("sub_cover_style", "solid_box")).lower() == "localized_blur"
+    if localized_export and not source_video:
+        raise HTTPException(status_code=409, detail="Đổi sang làm mờ cần video nguồn; không thể bỏ hộp trắng đã nướng trong thành phẩm")
+
 
     _check_export_cancelled(job_ctl)
     _export_stage(job_ctl, 7, "Đang phân tích khung hình và bộ lọc...")
@@ -4837,11 +4968,25 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
             if crop_box:
                 crop_prefix = f"crop={crop_box['w']}:{crop_box['h']}:{crop_box['x']}:{crop_box['y']},"
 
-        if final_video and not mirror:
+        if final_video and not mirror and not localized_export:
             fc = f"[0:v]{crop_prefix}scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1[outv]"
             v_input_path = final_video
         else:
             fc = f"[0:v]{crop_prefix}{flip_str}scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1{srt_filter}[outv]"
+
+    if localized_export:
+        from subtitle_blur import read_ass_blur_metadata, build_localized_blur_filter
+        from v1_media_streams import probe_main_video
+        if custom_ass is None:
+            raise HTTPException(status_code=409, detail="Thiếu ASS/geometry để làm mờ nguồn")
+        metadata = read_ass_blur_metadata(custom_ass.read_text(encoding="utf-8-sig"))
+        if metadata is None:
+            raise HTTPException(status_code=409, detail="ASS chưa chứa vùng phụ đề nguồn đã xác minh")
+        source_info = probe_main_video(str(source_video))
+        blur_chain = build_localized_blur_filter(metadata["boxes"], source_info.width,
+                                                 source_info.height, metadata["settings"], prefix="exportblur")
+        if blur_chain:
+            fc = "[0:v]" + blur_chain + "[export_source];" + fc.replace("[0:v]", "[export_source]")
 
     # Lồng Watermark mờ mờ cố định ở góc phải nếu được kích hoạt
     wm_filt = build_watermark_filter(cfg, tw, th)
@@ -4888,9 +5033,11 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
     _check_export_cancelled(job_ctl)
     _export_stage(job_ctl, 12, "Đang mã hóa video bằng GPU NVENC...")
 
+    # Dense OCR tracks can exceed the Windows command-line length limit.
+    filter_path = temp_out.with_suffix(".filters.txt") if len(fc) > 8000 else None
+    filter_args = ["-filter_complex_script", str(filter_path)] if filter_path else ["-filter_complex", fc]
     # NVENC command
-    cmd_nvenc = cmd_inputs + [
-        "-filter_complex", fc,
+    cmd_nvenc = cmd_inputs + filter_args + [
         "-map", "[outv]",
     ] + (["-map", map_audio] if map_audio else ["-an"]) + [
         "-c:v", "h264_nvenc",
@@ -4908,6 +5055,8 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
     ]
 
     try:
+        if filter_path:
+            filter_path.write_text(fc, encoding="utf-8")
         success = False
         try:
             res = _run_ffmpeg_ctl(cmd_nvenc, job_ctl, timeout=600)
@@ -4920,8 +5069,7 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
         if not success:
             # Fallback CPU x264
             _export_stage(job_ctl, 15, "GPU lỗi — chuyển mã hóa CPU (libx264)...")
-            cmd_cpu = cmd_inputs + [
-                "-filter_complex", fc,
+            cmd_cpu = cmd_inputs + filter_args + [
                 "-map", "[outv]",
             ] + (["-map", map_audio] if map_audio else ["-an"]) + [
                 "-c:v", "libx264",
@@ -4973,6 +5121,9 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
         except OSError as _phase6_exc:
             logger.debug('Suppressed error in workflow_api._execute_custom_export (temp_out.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
         raise
+    finally:
+        if filter_path:
+            filter_path.unlink(missing_ok=True)
 
     # Xuất kèm file SRT nếu người dùng yêu cầu
     exported_srt_path = ""
