@@ -1764,6 +1764,17 @@ def _bridge_source_caption_gaps(tracks):
         if len(key) < 4:
             continue
         previous = recent.get(key)
+        if previous is None or not 0 < block.start - previous.end <= .25 or not nearby(previous, block):
+            fuzzy_candidates = [
+                cand
+                for prev_k, cand in recent.items()
+                if prev_k != key
+                and 0 < block.start - cand.end <= .25
+                and nearby(cand, block)
+                and SequenceMatcher(None, prev_k, key, autojunk=False).ratio() >= 0.65
+            ]
+            if fuzzy_candidates:
+                previous = max(fuzzy_candidates, key=lambda b: b.end)
         recent[key] = block
         if previous is None or not 0 < block.start - previous.end <= .25 or not nearby(previous, block):
             continue

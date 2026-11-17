@@ -648,22 +648,23 @@ def process_video(
                 kwargs.get("subtitle_blur_settings") or
                 (blur_meta["settings"] if blur_meta is not None else None))
 
-        def _build_sub_filter(fw: int, fh: int) -> str:
+        def _build_sub_filter(fw: int, fh: int, extra_post_blur: str = "") -> str:
+            post_blur = (extra_post_blur + ",") if extra_post_blur else ""
             if cover_style == "localized_blur":
                 blur_metrics = {}
                 blur_filter = build_localized_blur_filter(
                     source_blur_boxes, fw, fh, source_blur_settings, metrics=blur_metrics)
                 logger.info("V1 localized blur plan size=%dx%d metrics=%s", fw, fh, blur_metrics)
-                return (blur_filter + "," if blur_filter else "") + base_sub_filter
+                return (blur_filter + "," if blur_filter else "") + post_blur + base_sub_filter
             elif cover_style == "frosted_blur" and 0.15 <= float(main_y_pct or 0.75) <= 0.96:
                 band_y = max(0, int(fh * max(0.0, float(main_y_pct) - 0.04)) // 2 * 2)
                 band_h = max(24, min(fh - band_y, int(fh * 0.14)) // 2 * 2)
                 return (
                     f"split[sub_main][sub_band];"
                     f"[sub_band]crop={fw}:{band_h}:0:{band_y},boxblur=16:3[sub_blurred];"
-                    f"[sub_main][sub_blurred]overlay=0:{band_y},{base_sub_filter}"
+                    f"[sub_main][sub_blurred]overlay=0:{band_y},{post_blur}{base_sub_filter}"
                 )
-            return base_sub_filter
+            return post_blur + base_sub_filter
 
         def _build_delogo_filters(dw: int, dh: int):
             raw_delogo = kwargs.get("delogo_mode", delogo)
@@ -748,15 +749,16 @@ def process_video(
 
         if not is_already_9_16:
             delogo_filters = _build_delogo_filters(orig_w, orig_h)
-            pre_items = ["format=yuv420p"] + delogo_filters + ([tail_pad_filter] if tail_pad_filter else [])
+            pre_items = ["format=yuv420p"] + delogo_filters
             pre_split = ",".join(pre_items) + ","
-            sub_filter = _build_sub_filter(orig_w, orig_h)
+            sub_filter = _build_sub_filter(orig_w, orig_h, extra_post_blur=tail_pad_filter)
+            bg_tpad = (tail_pad_filter + ",") if tail_pad_filter else ""
             blur_bg_filter = (
                 f"{pre_split}split[v1][v2];"
                 # Bắt buộc ép format=yuv420p trước khi split/crop/boxblur vì NVDEC (-hwaccel cuda)
                 # giải mã ra khung nv12 (interleaved UV); nếu crop+boxblur trực tiếp trên nv12 sẽ
                 # làm lệch stride kênh UV khiến nửa bên phải (x >= 540) bị lỗi màu xanh lá cây (U=0, V=0).
-                "[v1]scale=360:640:force_original_aspect_ratio=increase:flags=bilinear,crop=360:640,"
+                f"[v1]{bg_tpad}scale=360:640:force_original_aspect_ratio=increase:flags=bilinear,crop=360:640,"
                 "boxblur=8:3,scale=1080:1920:flags=bilinear[bg];"
                 f"[v2]{sub_filter},scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos[fg];"
                 "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p"
@@ -790,13 +792,9 @@ def process_video(
             delogo_filters = _build_delogo_filters(w, h)
             if delogo_filters:
                 filter_parts.extend(delogo_filters)
-            if tail_pad_filter:
-                if "format=yuv420p" not in filter_parts:
-                    filter_parts.append("format=yuv420p")
-                filter_parts.append(tail_pad_filter)
 
-            sub_filter = _build_sub_filter(w, h)
-            if "split[" in sub_filter and "format=yuv420p" not in filter_parts:
+            sub_filter = _build_sub_filter(w, h, extra_post_blur=tail_pad_filter)
+            if ("split[" in sub_filter or tail_pad_filter) and "format=yuv420p" not in filter_parts:
                 filter_parts.append("format=yuv420p")
             filter_parts.append(sub_filter)
             filter_parts.append("format=yuv420p")

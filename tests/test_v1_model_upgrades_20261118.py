@@ -419,3 +419,25 @@ def test_attach_source_caption_tracks_preserves_off_center_anchor_column():
     attached_texts = [b.text for s in (seg1, seg2) for b in s.tracking_blocks]
     assert "硬卡套" in attached_texts
     assert "包装说明" not in attached_texts
+
+
+def test_bridge_source_caption_gaps_handles_single_char_ocr_flicker():
+    from types import SimpleNamespace
+    import ocr_utils
+
+    b1 = SimpleNamespace(
+        text="这是叠家三层的一", start=22.167, end=22.200,
+        x_pct=0.128, max_x_pct=0.691, y_pct=0.837, max_y_pct=0.893, prob=0.92,
+    )
+    b2 = SimpleNamespace(
+        text="这是叠疗三层的", start=22.267, end=22.300,
+        x_pct=0.129, max_x_pct=0.670, y_pct=0.836, max_y_pct=0.893, prob=0.92,
+    )
+    b_diff = SimpleNamespace(
+        text="试着打包一下", start=22.350, end=22.900,
+        x_pct=0.278, max_x_pct=0.681, y_pct=0.846, max_y_pct=0.899, prob=0.98,
+    )
+    bridged = ocr_utils._bridge_source_caption_gaps([b1, b2, b_diff])
+    spans = sorted((round(b.start, 3), round(b.end, 3)) for b in bridged)
+    assert (22.2, 22.267) in spans
+    assert (22.3, 22.35) not in spans
