@@ -1687,8 +1687,15 @@ def _attach_source_caption_tracks(segments, tracks):
     first_seg_start = seg_bounds[0][1] if seg_bounds else 0.0
     has_nearby = any(ov > 0.0 or dist <= 2.2 for _, _, ov, dist in scored)
     for track, owner, ov, dist in scored:
+        t_dur = float(track.end) - float(track.start)
+        t_cx = (float(track.x_pct) + float(track.max_x_pct)) * 0.5
+        is_locked_centered_subtitle = (
+            t_dur >= 1.20
+            and abs(t_cx - 0.5) <= 0.04
+            and _visual_chinese_count(getattr(track, "text", "")) >= 3
+        )
         max_dist = 3.0 if (owner is first_seg_obj and float(track.end) <= first_seg_start + 0.05) else 2.2
-        if has_nearby and ov == 0.0 and dist > max_dist:
+        if has_nearby and ov == 0.0 and dist > max_dist and not is_locked_centered_subtitle:
             continue
         grouped[id(owner)].append(track)
     for seg in segments:
