@@ -346,6 +346,8 @@ def resolve_planned_pipeline(
                 asr_model = "sensevoice_small"
             elif cfg_model in ("whisper_turbo", "whisper"):
                 asr_model = "whisper_turbo"
+            elif cfg_model in ("paraformer_zh", "paraformer", "paraformer_large_zh"):
+                asr_model = "paraformer_zh"
             else:
                 asr_model = "whisper_sensevoice"
         except Exception:

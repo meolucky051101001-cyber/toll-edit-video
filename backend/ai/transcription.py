@@ -492,11 +492,14 @@ def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, origin
         "hybrid": "whisper_sensevoice",
         "sensevoice": "sensevoice_small",
         "sensevoice_small": "sensevoice_small",
+        "paraformer": "paraformer_zh",
+        "paraformer_zh": "paraformer_zh",
+        "paraformer_large_zh": "paraformer_zh",
     }
     selected = model_id if model_id is not None else asr_model
     model_id = aliases.get(str(selected).lower(), selected) if selected is not None else None
     model_id = migrate_legacy_asr_model(model_id, "transcription")
-    if model_id not in (None, "whisper_turbo", "whisper_sensevoice", "sensevoice_small"):
+    if model_id not in (None, "whisper_turbo", "whisper_sensevoice", "sensevoice_small", "paraformer_zh"):
         raise ValueError(f"Unsupported ASR model: {model_id}")
 
     if model_id is None:
@@ -508,6 +511,36 @@ def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, origin
             pass
         if model_id is None:
             model_id = "whisper_sensevoice"
+
+    if model_id == "paraformer_zh":
+        try:
+            from .v1_paraformer_adapter import (
+                NonChineseAudioError,
+                check_paraformer_readiness,
+                transcribe_audio_paraformer,
+            )
+        except ImportError:
+            from ai.v1_paraformer_adapter import (
+                NonChineseAudioError,
+                check_paraformer_readiness,
+                transcribe_audio_paraformer,
+            )
+        pf_ready, pf_reason = check_paraformer_readiness()
+        if pf_ready:
+            print("🚀 [ASR] Đang nhận dạng tiếng Trung siêu tốc bằng Paraformer-large-zh + CT-Punct + SenseVoice CTC...")
+            try:
+                pf_subs = transcribe_audio_paraformer(
+                    audio_path, output_srt_path, original_audio_path=original_audio_path
+                )
+                if pf_subs:
+                    print(f"✅ Paraformer-large-zh hoàn tất nhận dạng thành công ({len(pf_subs)} câu thoại).")
+                    return pf_subs
+            except NonChineseAudioError as lang_err:
+                print(f"🌐 Phát hiện ngôn ngữ không phải tiếng Trung ({lang_err}); tự động chuyển sang Faster-Whisper Large-v3 Turbo đa ngôn ngữ...")
+            except Exception as pf_err:
+                print(f"⚠️ Paraformer-large-zh gặp lỗi: {pf_err}. Tự động fallback sang Faster-Whisper Large-v3 Turbo...")
+        else:
+            print(f"⚠️ Paraformer-large-zh chưa sẵn sàng ({pf_reason}). Chuyển sang Faster-Whisper.")
 
     if model_id == "sensevoice_small":
         sv_ready, sv_reason = check_sensevoice_readiness(ignore_flag=True)
@@ -578,6 +611,17 @@ def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, origin
         else:
             logger.info("SenseVoice not ready for hybrid refinement: %s", sv_reason)
 
+        try:
+            try:
+                from .v1_paraformer_adapter import check_paraformer_readiness, enrich_segments_with_paraformer
+            except ImportError:
+                from ai.v1_paraformer_adapter import check_paraformer_readiness, enrich_segments_with_paraformer
+            pf_ready, _ = check_paraformer_readiness()
+            if pf_ready and merged_segments:
+                merged_segments = enrich_segments_with_paraformer(merged_segments, audio_path=audio_path)
+        except Exception as pf_enrich_err:
+            logger.debug("Paraformer co-recognition enrichment skipped: %s", pf_enrich_err)
+
     srt_segments = []
     for i, seg in enumerate(merged_segments, start=1):
         sub = srt.Subtitle(
@@ -586,6 +630,12 @@ def extract_subtitles_whisper(audio_path, output_srt_path, num_workers=2, origin
             end=timedelta(seconds=seg["end"]),
             content=seg["text"].strip(),
         )
+        if seg.get("paraformer_alt"):
+            sub.paraformer_alt = str(seg["paraformer_alt"])
+        if "confidence" in seg:
+            sub.confidence = float(seg["confidence"])
+        if "avg_logprob" in seg:
+            sub.avg_logprob = float(seg["avg_logprob"])
         srt_segments.append(sub)
 
     with open(output_srt_path, "w", encoding="utf-8") as output_file:

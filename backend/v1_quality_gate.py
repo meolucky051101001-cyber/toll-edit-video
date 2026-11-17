@@ -178,9 +178,16 @@ def _transition_pixel_candidates(segments, fps=30.0, limit=192):
         box = current["box"]
         if previous:
             old = previous["box"]
-            box = min(box[0], old[0]), min(box[1], old[1]), max(box[2], old[2]), max(box[3], old[3])
-            events.append((previous["end"], previous["index"], box))
-        events.append((current["start"], current["index"], box))
+            same_vertical_zone = max(old[1], box[1]) <= min(old[3], box[3]) + .06
+            if same_vertical_zone:
+                union_box = min(box[0], old[0]), min(box[1], old[1]), max(box[2], old[2]), max(box[3], old[3])
+                events.append((previous["end"], previous["index"], union_box))
+                events.append((current["start"], current["index"], union_box))
+            else:
+                events.append((previous["end"], previous["index"], old))
+                events.append((current["start"], current["index"], box))
+        else:
+            events.append((current["start"], current["index"], box))
     if tracks:
         events.append((tracks[-1]["end"], tracks[-1]["index"], tracks[-1]["box"]))
     candidates = {}

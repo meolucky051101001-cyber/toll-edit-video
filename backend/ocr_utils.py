@@ -757,6 +757,12 @@ def _coalesce_stationary_source_tracks(tracks, max_chunk_s=0.9):
             piece = copy.copy(blk)
             _set_ocr_field(piece, "start", cur)
             _set_ocr_field(piece, "end", nxt)
+            raw_st = _ocr_field(piece, "sample_time", None)
+            if raw_st is not None:
+                try:
+                    _set_ocr_field(piece, "sample_time", max(cur, min(nxt, float(raw_st))))
+                except (TypeError, ValueError):
+                    pass
             chunked.append(piece)
             cur = nxt
     return chunked
@@ -1126,21 +1132,30 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         t_right = frame_times.get(right_idx, float(duration or 0.0))
         return any(w0 <= t_right and w1 >= t_left for w0, w1 in active_windows)
 
+    seed_heights = sorted(
+        max(0.001, float(s.max_y_pct - s.y_pct))
+        for s in source_seeds
+        if float(s.max_y_pct - s.y_pct) > 0.005
+    )
+    median_seed_h = seed_heights[len(seed_heights) // 2] if seed_heights else 0.0
+
     def caption_blocks(blocks):
         selected = []
         for block in blocks:
-            if source_only and active_windows and not in_active_speech_window(
-                float(_ocr_field(block, "sample_time", 0.0) or 0.0)
-            ):
-                continue
             matches_speech = (source_only and _visual_chinese_count(block.text) >= 6
                               and speech_similarity(block.text) >= .8)
+            block_h = max(0.0, float(block.max_y_pct - block.y_pct))
             in_band = block.max_y_pct >= band.top - .035 and block.y_pct <= band.bottom + .035
             if source_only and source_seeds:
                 center = (block.y_pct + block.max_y_pct) / 2
-                in_band = any(abs(center - (seed.y_pct + seed.max_y_pct) / 2) <=
-                              max(block.max_y_pct-block.y_pct, seed.max_y_pct-seed.y_pct)*.55 + .004
-                              for seed in source_seeds)
+                in_band = (
+                    (median_seed_h <= 0.0 or block_h >= median_seed_h * 0.74)
+                    and any(
+                        abs(center - (seed.y_pct + seed.max_y_pct) / 2)
+                        <= max(block_h, seed.max_y_pct - seed.y_pct) * .52 + .004
+                        for seed in source_seeds
+                    )
+                )
             english = getattr(band, 'mode', '') == 'english_match'
             readable = (_visual_chinese_count(block.text) >= 2 or
                         (english and sum(c.isascii() and c.isalpha() for c in block.text) >= 4))
@@ -1639,6 +1654,12 @@ def _attach_source_caption_tracks(segments, tracks):
                     piece = copy.copy(track)
                     _set_ocr_field(piece, "start", cur)
                     _set_ocr_field(piece, "end", piece_end)
+                    raw_st = _ocr_field(piece, "sample_time", None)
+                    if raw_st is not None:
+                        try:
+                            _set_ocr_field(piece, "sample_time", max(cur, min(piece_end, float(raw_st))))
+                        except (TypeError, ValueError):
+                            pass
                     ov = max(0., min(s1, piece_end) - max(s0, cur))
                     scored.append((piece, s, ov, 0.0))
                     cur = piece_end
@@ -1652,9 +1673,12 @@ def _attach_source_caption_tracks(segments, tracks):
         best_item = max(seg_bounds, key=score)
         ov, neg_dist = score(best_item)
         scored.append((track, best_item[0], ov, -neg_dist))
-    has_nearby = any(ov > 0.0 or dist <= 1.2 for _, _, ov, dist in scored)
+    first_seg_obj = seg_bounds[0][0] if seg_bounds else None
+    first_seg_start = seg_bounds[0][1] if seg_bounds else 0.0
+    has_nearby = any(ov > 0.0 or dist <= 2.2 for _, _, ov, dist in scored)
     for track, owner, ov, dist in scored:
-        if has_nearby and ov == 0.0 and dist > 1.2:
+        max_dist = 3.0 if (owner is first_seg_obj and float(track.end) <= first_seg_start + 0.05) else 2.2
+        if has_nearby and ov == 0.0 and dist > max_dist:
             continue
         grouped[id(owner)].append(track)
     for seg in segments:
@@ -1664,7 +1688,20 @@ def _attach_source_caption_tracks(segments, tracks):
         seg.source_caption_timing_verified = True
         seg.geometry_verified = bool(observed)
         if observed:
-            seg.best_block = max(observed, key=lambda b: (b.end - b.start, b.prob))
+            seg_text = str(getattr(seg, "content", "") or "")
+            text_totals = {}
+            for b in observed:
+                k = _visual_caption_key(getattr(b, "text", ""))
+                text_totals[k] = text_totals.get(k, 0.0) + max(0.0, float(b.end - b.start))
+            seg.best_block = max(
+                observed,
+                key=lambda b: (
+                    1 if _has_chinese_overlap(getattr(b, "text", ""), seg_text) else 0,
+                    round(text_totals.get(_visual_caption_key(getattr(b, "text", "")), float(b.end - b.start)), 3),
+                    float(b.end - b.start),
+                    float(b.prob),
+                ),
+            )
             seg.ocr_mask_status = 'located'
             seg.y_pct, seg.max_y_pct = seg.best_block.y_pct, seg.best_block.max_y_pct
         else:

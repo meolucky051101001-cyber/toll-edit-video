@@ -255,6 +255,14 @@ def detect_first_speaker_gender(
         if slice_voc is not None:
             y_voc, sr_voc = slice_voc
             f0_voc, cnt_voc, conf_voc, gen_voc, hnr_voc = estimate_f0_pitch(y_voc, sr_voc)
+            if 158.0 <= f0_voc <= 208.0 and cnt_voc >= 10 and hnr_voc >= 3.0:
+                try:
+                    from .v1_speaker_embedding import refine_ambiguous_pitch_gender
+                    gen_voc, conf_voc = refine_ambiguous_pitch_gender(
+                        y_voc, sr_voc, f0_voc, gen_voc, conf_voc
+                    )
+                except Exception as emb_err:
+                    logger.debug("Formant/CAM++ disambiguation skipped on vocals: %s", emb_err)
             logger.debug(
                 "Cau #%d (vocals): F0=%.1f, count=%d, conf=%.2f, gender=%s, HNR=%.1f",
                 idx, f0_voc, cnt_voc, conf_voc, gen_voc, hnr_voc
@@ -269,6 +277,14 @@ def detect_first_speaker_gender(
         if slice_orig is not None:
             y_orig, sr_orig = slice_orig
             f0_orig, cnt_orig, conf_orig, gen_orig, hnr_orig = estimate_f0_pitch(y_orig, sr_orig)
+            if 158.0 <= f0_orig <= 208.0 and cnt_orig >= 10 and hnr_orig >= 3.0:
+                try:
+                    from .v1_speaker_embedding import refine_ambiguous_pitch_gender
+                    gen_orig, conf_orig = refine_ambiguous_pitch_gender(
+                        y_orig, sr_orig, f0_orig, gen_orig, conf_orig
+                    )
+                except Exception as emb_err:
+                    logger.debug("Formant/CAM++ disambiguation skipped on original: %s", emb_err)
             logger.debug(
                 "Cau #%d (original): F0=%.1f, count=%d, conf=%.2f, gender=%s, HNR=%.1f",
                 idx, f0_orig, cnt_orig, conf_orig, gen_orig, hnr_orig
@@ -334,6 +350,89 @@ def classify_all_segments_gender(
         get_start=_get_start_sec, get_end=_get_end_sec,
         get_index=_get_index, get_content=_get_content,
     )
+    # CAM++ 512-D speaker verification for borderline cues when both male & female anchors exist
+    probe_audio = vocals_path if (vocals_path and Path(vocals_path).is_file()) else (
+        original_audio_path if (original_audio_path and Path(original_audio_path).is_file()) else None
+    )
+    if probe_audio and details:
+        try:
+            from .v1_speaker_embedding import (
+                check_camplus_readiness,
+                cosine_similarity,
+                extract_speaker_embedding,
+            )
+            unknown_ids = [
+                cid for cid, ev in details.items()
+                if ev.get("gender") == "unknown"
+                and ev.get("reason") in ("insufficient_voiced_evidence", "too_few_reliable_windows", "no_reliable_source")
+            ]
+            male_anchors = [
+                cid for cid, ev in details.items()
+                if ev.get("gender") == "male" and float(ev.get("confidence", 0.0)) >= 0.82
+            ]
+            female_anchors = [
+                cid for cid, ev in details.items()
+                if ev.get("gender") == "female" and float(ev.get("confidence", 0.0)) >= 0.82
+            ]
+            if unknown_ids and male_anchors and female_anchors and check_camplus_readiness()[0]:
+                seg_by_id = {_get_index(s, pos + 1): s for pos, s in enumerate(srt_segments)}
+
+                def _anchor_centroid(anchor_ids):
+                    vecs = []
+                    ranked = sorted(
+                        anchor_ids,
+                        key=lambda i: max(0.0, _get_end_sec(seg_by_id[i]) - _get_start_sec(seg_by_id[i])) if i in seg_by_id else 0.0,
+                        reverse=True,
+                    )[:3]
+                    for aid in ranked:
+                        seg_obj = seg_by_id.get(aid)
+                        if seg_obj is None:
+                            continue
+                        sl = extract_segment_audio_slice(probe_audio, _get_start_sec(seg_obj), min(_get_end_sec(seg_obj), _get_start_sec(seg_obj) + 8.0))
+                        if sl is not None:
+                            emb = extract_speaker_embedding(sl[0], sl[1])
+                            if emb is not None:
+                                vecs.append(emb)
+                    if not vecs:
+                        return None
+                    mean_v = np.mean(np.stack(vecs, axis=0), axis=0)
+                    norm = float(np.linalg.norm(mean_v))
+                    return (mean_v / norm).astype(np.float32) if norm > 1e-8 else None
+
+                m_cent = _anchor_centroid(male_anchors)
+                f_cent = _anchor_centroid(female_anchors)
+                if m_cent is not None and f_cent is not None:
+                    for uid in unknown_ids:
+                        seg_obj = seg_by_id.get(uid)
+                        if seg_obj is None:
+                            continue
+                        st_s, en_s = _get_start_sec(seg_obj), _get_end_sec(seg_obj)
+                        if en_s - st_s < 0.45:
+                            continue
+                        sl = extract_segment_audio_slice(probe_audio, st_s, min(en_s, st_s + 8.0))
+                        if sl is None:
+                            continue
+                        emb = extract_speaker_embedding(sl[0], sl[1])
+                        if emb is None:
+                            continue
+                        sim_m = cosine_similarity(emb, m_cent)
+                        sim_f = cosine_similarity(emb, f_cent)
+                        if sim_m >= 0.72 and (sim_m - sim_f) >= 0.14:
+                            details[uid] = dict(
+                                details[uid],
+                                gender="male",
+                                confidence=round(min(0.92, sim_m), 3),
+                                reason="camplus_speaker_verified",
+                            )
+                        elif sim_f >= 0.72 and (sim_f - sim_m) >= 0.14:
+                            details[uid] = dict(
+                                details[uid],
+                                gender="female",
+                                confidence=round(min(0.92, sim_f), 3),
+                                reason="camplus_speaker_verified",
+                            )
+        except Exception as spk_err:
+            logger.debug("CAM++ dialogue speaker verification skipped: %s", spk_err)
     return details if return_details else {
         index: evidence["gender"] for index, evidence in details.items()
     }
