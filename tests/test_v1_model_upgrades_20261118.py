@@ -395,7 +395,7 @@ def test_attach_source_caption_tracks_preserves_off_center_anchor_column():
     import ocr_utils
 
     seg1 = SimpleNamespace(index=1, start=0.0, end=2.0, content="首先你需要一张卡膜", tracking_blocks=[])
-    seg2 = SimpleNamespace(index=2, start=8.0, end=10.0, content="最后贴个封贴就完成了", tracking_blocks=[])
+    seg2 = SimpleNamespace(index=2, start=9.0, end=11.0, content="最后贴个封贴就完成了", tracking_blocks=[])
 
     # Off-center top-right column at cx ~ 0.69 (x=0.46..0.92 and x=0.58..0.80)
     t1 = SimpleNamespace(
@@ -403,15 +403,15 @@ def test_attach_source_caption_tracks_preserves_off_center_anchor_column():
         x_pct=0.46, max_x_pct=0.92, y_pct=0.17, max_y_pct=0.21, prob=0.99,
     )
     t_silent = SimpleNamespace(
-        text="硬卡套", start=4.5, end=6.0, sample_time=5.0,
+        text="硬卡套", start=4.6, end=6.0, sample_time=5.0,
         x_pct=0.60, max_x_pct=0.78, y_pct=0.17, max_y_pct=0.21, prob=0.99,
     )
     t_unrelated = SimpleNamespace(
-        text="包装说明", start=4.5, end=6.0, sample_time=5.0,
+        text="包装说明", start=4.6, end=6.0, sample_time=5.0,
         x_pct=0.12, max_x_pct=0.28, y_pct=0.17, max_y_pct=0.21, prob=0.99,
     )
     t2 = SimpleNamespace(
-        text="最后贴个封贴就完成了", start=8.1, end=9.8, sample_time=8.5,
+        text="最后贴个封贴就完成了", start=9.1, end=10.8, sample_time=9.5,
         x_pct=0.46, max_x_pct=0.92, y_pct=0.17, max_y_pct=0.21, prob=0.99,
     )
 
