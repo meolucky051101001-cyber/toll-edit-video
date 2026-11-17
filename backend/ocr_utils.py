@@ -1140,9 +1140,14 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
     median_seed_h = seed_heights[len(seed_heights) // 2] if seed_heights else 0.0
     max_seed_h = seed_heights[-1] if seed_heights else 0.0
     max_allowed_block_h = max(median_seed_h * 1.66, max_seed_h * 1.40) if median_seed_h > 0.0 else 1.0
+    seed_cxs = sorted(
+        (float(s.x_pct) + float(s.max_x_pct)) * 0.5
+        for s in source_seeds
+    )
+    seed_anchor_cx = seed_cxs[len(seed_cxs) // 2] if seed_cxs else 0.5
     seeds_centered = bool(
         source_seeds
-        and max(abs(((s.x_pct + s.max_x_pct) * 0.5) - 0.5) for s in source_seeds) <= 0.08
+        and max(abs(((s.x_pct + s.max_x_pct) * 0.5) - seed_anchor_cx) for s in source_seeds) <= 0.08
     )
 
     def caption_blocks(blocks):
@@ -1169,9 +1174,10 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
                     or _visual_watermark_text(block.text)):
                 continue
             cx = (block.x_pct + block.max_x_pct) / 2
+            anchor_cx = seed_anchor_cx if (source_only and source_seeds) else .5
             if not matches_speech and (
-                abs(cx - .5) > (.145 if (source_only and seeds_centered) else .25)
-                or (block.max_x_pct - block.x_pct < .25 and abs(cx - .5) > .15)
+                abs(cx - anchor_cx) > (.145 if (source_only and seeds_centered) else .25)
+                or (block.max_x_pct - block.x_pct < .25 and abs(cx - anchor_cx) > .15)
             ):
                 continue
             selected.append(block)
@@ -1686,12 +1692,18 @@ def _attach_source_caption_tracks(segments, tracks):
     first_seg_obj = seg_bounds[0][0] if seg_bounds else None
     first_seg_start = seg_bounds[0][1] if seg_bounds else 0.0
     has_nearby = any(ov > 0.0 or dist <= 2.2 for _, _, ov, dist in scored)
+    ov_cxs = sorted(
+        (float(t.x_pct) + float(t.max_x_pct)) * 0.5
+        for t, _, ov, _ in scored
+        if ov > 0.0
+    )
+    track_anchor_cx = ov_cxs[len(ov_cxs) // 2] if ov_cxs else 0.5
     for track, owner, ov, dist in scored:
         t_dur = float(track.end) - float(track.start)
         t_cx = (float(track.x_pct) + float(track.max_x_pct)) * 0.5
         is_locked_centered_subtitle = (
             t_dur >= 1.20
-            and abs(t_cx - 0.5) <= 0.04
+            and abs(t_cx - track_anchor_cx) <= 0.04
             and _visual_chinese_count(getattr(track, "text", "")) >= 3
         )
         max_dist = 3.0 if (owner is first_seg_obj and float(track.end) <= first_seg_start + 0.05) else 2.2

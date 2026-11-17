@@ -388,3 +388,34 @@ def test_validate_video_output_accepts_tail_padded_audio_overhang():
             ms.validate_video_output("out.mp4", src, require_audio=True)
         res = ms.validate_video_output("out.mp4", src, require_audio=True, allowed_tail_pad=0.687)
         assert res == out
+
+
+def test_attach_source_caption_tracks_preserves_off_center_anchor_column():
+    from types import SimpleNamespace
+    import ocr_utils
+
+    seg1 = SimpleNamespace(index=1, start=0.0, end=2.0, content="首先你需要一张卡膜", tracking_blocks=[])
+    seg2 = SimpleNamespace(index=2, start=8.0, end=10.0, content="最后贴个封贴就完成了", tracking_blocks=[])
+
+    # Off-center top-right column at cx ~ 0.69 (x=0.46..0.92 and x=0.58..0.80)
+    t1 = SimpleNamespace(
+        text="首先你需要一张卡膜", start=0.2, end=1.8, sample_time=0.5,
+        x_pct=0.46, max_x_pct=0.92, y_pct=0.17, max_y_pct=0.21, prob=0.99,
+    )
+    t_silent = SimpleNamespace(
+        text="硬卡套", start=4.5, end=6.0, sample_time=5.0,
+        x_pct=0.60, max_x_pct=0.78, y_pct=0.17, max_y_pct=0.21, prob=0.99,
+    )
+    t_unrelated = SimpleNamespace(
+        text="包装说明", start=4.5, end=6.0, sample_time=5.0,
+        x_pct=0.12, max_x_pct=0.28, y_pct=0.17, max_y_pct=0.21, prob=0.99,
+    )
+    t2 = SimpleNamespace(
+        text="最后贴个封贴就完成了", start=8.1, end=9.8, sample_time=8.5,
+        x_pct=0.46, max_x_pct=0.92, y_pct=0.17, max_y_pct=0.21, prob=0.99,
+    )
+
+    ocr_utils._attach_source_caption_tracks([seg1, seg2], [t1, t_silent, t_unrelated, t2])
+    attached_texts = [b.text for s in (seg1, seg2) for b in s.tracking_blocks]
+    assert "硬卡套" in attached_texts
+    assert "包装说明" not in attached_texts
