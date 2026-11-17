@@ -82,13 +82,19 @@ class AdaptiveSamplingTests(unittest.TestCase):
         original = np.zeros((640, 360, 3), dtype=np.uint8)
         changed = original.copy()
         changed[530:532, 150:152] = 255
-        frames = iter([original, changed, changed.copy()])
         capture = SimpleNamespace(index=0)
-        capture.set = lambda prop, value: setattr(capture, 'index', round(value * 30 / 1000))
-        def read_frame():
+        capture.set = lambda prop, value: setattr(capture, 'index', int(value))
+        def grab_frame():
+            if capture.index >= 30:
+                return False
             capture.index += 1
-            return True, next(frames)
-        capture.read = read_frame
+            return True
+        def retrieve_frame():
+            image = original if capture.index == 1 else changed
+            return True, image.copy() if capture.index == 22 else image
+        capture.grab = grab_frame
+        capture.retrieve = retrieve_frame
+        capture.read = lambda: (True, retrieve_frame()[1])
         capture.get = lambda prop: {cv2.CAP_PROP_FRAME_COUNT: 30,
             cv2.CAP_PROP_POS_FRAMES: capture.index,
             cv2.CAP_PROP_POS_MSEC: max(0, capture.index - 1) * 1000 / 30}.get(prop, 0)

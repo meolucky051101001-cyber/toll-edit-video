@@ -210,7 +210,7 @@ def test_real_vfr_source_masks_caption_on_its_actual_first_frame(tmp_path, first
         assert (min(b['x_pct'] for b in active) < .2) == (index >= 15), (index, pts)
 
 
-def test_failed_vfr_time_seek_recovers_from_real_pts_without_dropping_tail():
+def test_vfr_coarse_sampling_avoids_failed_time_seeks_without_dropping_tail():
     from backend import ocr_utils as ocr
     pts = [0., .1, .8, .9]
 
@@ -249,8 +249,60 @@ def test_failed_vfr_time_seek_recovers_from_real_pts_without_dropping_tail():
          patch.object(ocr, '_readtext_batch', side_effect=recognize):
         result = ocr._perform_visual_subtitle_ocr(Capture(), 64, 64, 1., [], lambda: False, metrics)
     assert result == ([], .85)
-    assert seen == [1, 3]
-    assert metrics['visual_seek_fallbacks'] == 2
+    assert seen == [2, 3]
+    assert not metrics.get('visual_seek_fallbacks')
+
+
+def test_vfr_refinement_uses_sequential_frames_when_nonzero_seeks_lie():
+    """OpenCV can report the requested ordinal while decoding another frame."""
+    from backend import ocr_utils as ocr
+    from backend.subtitle_blur import collect_source_blur_boxes
+    pts = [0., .1, .2, .3, .4, .5, .6, .7, .8, .9]
+
+    class Capture:
+        def __init__(self):
+            self.index = 0
+            self.seeks = []
+
+        def set(self, prop, value):
+            self.seeks.append((prop, value))
+            assert prop == cv2.CAP_PROP_POS_FRAMES and value == 0
+            self.index = 0
+            return True
+
+        def grab(self):
+            if self.index >= len(pts):
+                return False
+            self.index += 1
+            return True
+
+        def retrieve(self):
+            return True, np.full((64, 64, 3), self.index - 1, dtype=np.uint8)
+
+        def get(self, prop):
+            return {cv2.CAP_PROP_FRAME_COUNT: len(pts),
+                    cv2.CAP_PROP_POS_FRAMES: self.index,
+                    cv2.CAP_PROP_POS_MSEC: pts[max(0, self.index - 1)] * 1000}.get(prop, 0)
+
+    def recognize(images):
+        return [[([[8, 50], [56, 50], [56, 58], [8, 58]],
+                  '前面的字幕' if int(image[0, 0, 0]) < 5 else '后面的字幕', .99)]
+                for image in images]
+
+    capture = Capture()
+    with patch.object(ocr, '_visual_grid_times', return_value=[0., .7]), \
+         patch.object(ocr, '_readtext_batch', side_effect=recognize), \
+         patch.object(ocr, 'select_chinese_subtitle_band', return_value=SimpleNamespace(
+             top=.75, bottom=.95, support=5, mode='data')), \
+         patch.object(ocr, 'detect_static_watermarks', return_value=[]):
+        segments, _ = ocr._perform_visual_subtitle_ocr(capture, 64, 64, 1., [], lambda: False)
+    boxes = collect_source_blur_boxes(segments)
+    assert capture.seeks and all(value == 0 for _, value in capture.seeks)
+    for index, timestamp in enumerate(pts):
+        active = [b for b in boxes if b['start'] <= timestamp < b['end']]
+        assert active, (index, timestamp)
+    assert min(b.start for seg in segments for b in seg.tracking_blocks
+               if b.text == '后面的字幕') == .5
 
 
 def test_qc_audits_old_caption_boundary_uncertainty_independent_of_speech():

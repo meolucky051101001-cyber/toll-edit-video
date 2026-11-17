@@ -553,7 +553,7 @@ class V1Orchestrator:
                     asr_pos = STAGES_ORDER.index("speech_asr")
                     c.verified_stages = [s for s in c.verified_stages if STAGES_ORDER.index(s) < asr_pos]
                     logger.info("[RESUME] Recompute old transcript selection; retain extracted/separated audio")
-            if c.effective_cfg.get("speech_timing_version") != 3:
+            if c.effective_cfg.get("speech_timing_version") != 4:
                 tts_pos = STAGES_ORDER.index("ai_tts")
                 c.verified_stages = [s for s in c.verified_stages if STAGES_ORDER.index(s) < tts_pos]
             from v1_ocr_geometry import OCR_GEOMETRY_VERSION
@@ -1081,7 +1081,7 @@ class V1Orchestrator:
                     tts_artifacts[f"audio_{i}"] = dub["path"]
                 self.manifest_manager.record_stage_complete(c.job_id, stage_id, tts_artifacts)
                 current = self.manifest_manager.load_manifest(c.job_id)
-                current.effective_config["speech_timing_version"] = 3
+                current.effective_config["speech_timing_version"] = 4
                 current.effective_config["subtitle_ass_signature"] = ass_signature
                 c.effective_cfg["subtitle_ass_signature"] = ass_signature
                 self.manifest_manager.save_manifest(current)

@@ -675,6 +675,48 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         last_decoded_index = frame_index
         return frame_index, sample_time
 
+    def reset_source_decoder():
+        nonlocal last_decoded_index
+        # OpenCV's VFR seeks can report a requested ordinal for a different
+        # decoded frame. Only a rewind followed by sequential decode preserves
+        # the correspondence between image, ordinal and presentation time.
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        last_decoded_index = None
+
+    def advance_source_frame():
+        expected = 0 if last_decoded_index is None else last_decoded_index + 1
+        if expected >= frame_count:
+            raise RuntimeError("Source caption request exceeds the decoded frame count")
+        if stopped():
+            raise RuntimeError("OCR stop requested")
+        grab = getattr(cap, "grab", None)
+        retrieve = getattr(cap, "retrieve", None)
+        if callable(grab) and callable(retrieve):
+            if not grab():
+                raise RuntimeError(f"Cannot decode caption transition frame {expected}")
+            index, pts = decoded_position(expected_index=expected)
+            return index, pts, None
+        ok, image = cap.read()
+        if not ok:
+            raise RuntimeError(f"Cannot decode caption transition frame {expected}")
+        index, pts = decoded_position(expected_index=expected)
+        return index, pts, image
+
+    def source_image(sample):
+        index, pts, image = sample
+        if image is None:
+            ok, image = cap.retrieve()
+            if not ok:
+                raise RuntimeError(f"Cannot retrieve caption transition frame {index}")
+        return index, pts, image
+
+    def source_frame_at(index):
+        if last_decoded_index is not None and index <= last_decoded_index:
+            reset_source_decoder()
+        while last_decoded_index is None or last_decoded_index < index:
+            sample = advance_source_frame()
+        return source_image(sample)
+
     def append_rows(rows, frame_index, sample_time, orig_frame):
         frame_blocks = []
         for mapped in normalized_rows(rows, scale, 0, width, height):
@@ -713,38 +755,16 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
 
     logger.info("Visual OCR-to-TTS: scanning %d dense timeline samples (step=0.35s)", len(times))
     samples = []
-    for position, current_time in enumerate(times):
-        if stopped():
-            raise RuntimeError("OCR stop requested")
-        cap.set(cv2.CAP_PROP_POS_MSEC, current_time * 1000)
-        ok, frame = cap.read()
-        if not ok:
-            cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, current_time - 0.2) * 1000)
-            ok, frame = cap.read()
-        if not ok:
-            # Older OpenCV/FFmpeg builds can fail a valid time seek near a
-            # VFR tail. Recover through the real decoded clock, never FPS.
-            target_time = current_time
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            chosen = None
-            for _ in range(frame_count):
-                if stopped():
-                    raise RuntimeError("OCR stop requested")
-                decoded, image = cap.read()
-                if not decoded:
-                    raise RuntimeError(f"Could not decode source caption frame at {target_time:.3f}s")
-                index, pts = decoded_position()
-                if pts > target_time:
-                    if chosen is None:
-                        chosen = (index, pts, image)
-                    break
-                chosen = (index, pts, image)
-            if chosen is None:
-                raise RuntimeError(f"Could not decode source caption frame at {target_time:.3f}s")
-            frame_index, current_time, frame = chosen
-            metrics["visual_seek_fallbacks"] = metrics.get("visual_seek_fallbacks", 0) + 1
-        else:
-            frame_index, current_time = decoded_position()
+    reset_source_decoder()
+    coarse_sample = None
+    for position, target_time in enumerate(times):
+        while (coarse_sample is None or (coarse_sample[1] < target_time
+                                        and last_decoded_index < frame_count - 1)):
+            coarse_sample = advance_source_frame()
+        # Retrieve before advancing again; grab() avoids converting skipped
+        # frames to full-resolution BGR images.
+        coarse_sample = source_image(coarse_sample)
+        frame_index, current_time, frame = coarse_sample
         samples.append((frame_index, current_time, frame))
         if len(samples) == batch_size or position + 1 == len(times):
             recognize_samples(samples)
@@ -850,17 +870,7 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             for index in indices[offset:offset + batch_size]:
                 if stopped():
                     raise RuntimeError("OCR stop requested")
-                # Nearby frames can use the open decoder and its actual PTS.
-                # Seek across larger gaps rather than decoding that whole span.
-                gap = index - last_decoded_index
-                grab = getattr(cap, "grab", None)
-                sequential = gap == 1 or (1 < gap <= 24 and grab and all(grab() for _ in range(gap - 1)))
-                if not sequential:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, index)
-                ok, frame = cap.read()
-                if not ok:
-                    raise RuntimeError(f"Cannot decode caption transition frame {index}")
-                frame_index, sample_time = decoded_position(expected_index=index)
+                frame_index, sample_time, frame = source_frame_at(index)
                 samples.append((frame_index, sample_time, frame))
             recognize_samples(samples)
         return [observations[index] for index in indices]
@@ -1202,13 +1212,19 @@ def perform_video_ocr(video_path, target_lang='vi', sample_rate=1.0, api_key=Non
     if (ocr_strategy != 'smart_skip' and srt_segments
             and getattr(band, 'support', 0) > 0 and getattr(band, 'mode', '') != 'default'):
         source_cap, _, _, _, _ = _open_ocr_video(video_path, kwargs)
+        source_started = time.monotonic()
         try:
             source_tracks, _ = _perform_visual_subtitle_ocr(
                 source_cap, width, height, duration, [], _ocr_stopped, metrics=metrics,
                 source_band=band, source_segments=srt_segments)
+            _attach_source_caption_tracks(srt_segments, source_tracks)
+        except Exception:
+            metrics['source_timeline_seconds'] = round(time.monotonic() - source_started, 3)
+            _save_failed_source_timeline_metrics(kwargs, metrics)
+            raise
         finally:
             source_cap.release()
-        _attach_source_caption_tracks(srt_segments, source_tracks)
+        metrics['source_timeline_seconds'] = round(time.monotonic() - source_started, 3)
         _report_ocr_geometry(srt_segments, all_blocks, band, kwargs, metrics)
     return [], width, height, main_y_pct
 
@@ -1871,6 +1887,25 @@ def _report_ocr_geometry(srt_segments, all_blocks, band, kwargs, metrics):
             **details,
         )
     validate_mask_geometry(srt_segments, strict=kwargs.get('strict_geometry'))
+
+
+def _save_failed_source_timeline_metrics(kwargs, metrics):
+    """Retain the final counters without presenting initial geometry as success."""
+    path = kwargs.get('geometry_report_path')
+    if not path:
+        return
+    try:
+        try:
+            from .v1_stage_runtime import load_payload, save_payload
+        except ImportError:
+            from v1_stage_runtime import load_payload, save_payload
+        report = load_payload(path)
+        report.update(sampling=metrics, status='failed', failed_phase='source_caption_timeline',
+                      geometry_is_initial_snapshot=True)
+        save_payload(path, **report)
+    except Exception:
+        # Diagnostics must not replace the source timing/decoder exception.
+        logger.exception('Unable to retain failed source-caption OCR metrics')
 
 
 def _recover_missing_subtitles_legacy(all_blocks, srt_segments, band, duration=None):
