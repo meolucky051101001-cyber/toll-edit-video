@@ -82,16 +82,42 @@ class AdaptiveSamplingTests(unittest.TestCase):
         changed = original.copy()
         changed[530:532, 150:152] = 255
         frames = iter([original, changed, changed.copy()])
-        capture = SimpleNamespace(set=lambda *a: None, read=lambda: (True, next(frames)))
+        position = {"frame": 0}
+
+        def set_position(prop, value):
+            if prop == cv2.CAP_PROP_POS_MSEC:
+                position["frame"] = round(value * 30 / 1000)
+            elif prop == cv2.CAP_PROP_POS_FRAMES:
+                position["frame"] = int(value)
+            return True
+
+        def get_position(prop):
+            return {
+                cv2.CAP_PROP_FRAME_COUNT: 30,
+                cv2.CAP_PROP_POS_FRAMES: position["frame"],
+                cv2.CAP_PROP_POS_MSEC: max(0, position["frame"] - 1) * 1000 / 30,
+            }.get(prop, 0)
+
+        def read_frame():
+            frame = next(frames)
+            position["frame"] += 1
+            return True, frame
+
+        capture = SimpleNamespace(set=set_position, get=get_position, read=read_frame)
         rows = [([[100, 530], [250, 530], [250, 550], [100, 550]], TEXT, .95)]
         metrics = {}
+        module._frame_cache.clear()
+        self.addCleanup(module._frame_cache.clear)
         with patch.object(module, "_visual_grid_times", return_value=[0, .35, .7]), \
-             patch.object(module, "_readtext_batch", return_value=[rows]) as inference, \
+             patch.object(module, "_recognize_batch", return_value=[rows, rows]) as inference, \
              patch.object(module, "select_chinese_subtitle_band", return_value=SimpleNamespace(support=0)), \
              patch.object(module, "detect_static_watermarks", return_value=[]):
             module._perform_visual_subtitle_ocr(capture, 360, 640, 1, [], lambda: False, metrics)
-        self.assertEqual(inference.call_count, 2)
-        self.assertEqual(metrics["visual_roi_reused"], 1)
+        inference.assert_called_once()
+        submitted, = inference.call_args.args
+        self.assertEqual(len(submitted), 2)
+        np.testing.assert_array_equal(submitted[0], original)
+        np.testing.assert_array_equal(submitted[1], changed)
 
     def test_close_ocr_correction_preserves_subtitle_tracking(self):
         module = importlib.import_module("backend.ocr_utils")

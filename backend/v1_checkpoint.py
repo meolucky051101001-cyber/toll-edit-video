@@ -220,11 +220,12 @@ class ManifestManager:
             return
         if stage_id in manifest.stages:
             st = manifest.stages[stage_id]
-            now = time.time()
+            if st.get("status") != "completed" or not st.get("completed_at"):
+                now = time.time()
+                st["completed_at"] = now
+                if st.get("started_at"):
+                    st["duration_s"] = round(now - st["started_at"], 2)
             st["status"] = "completed"
-            st["completed_at"] = now
-            if st.get("started_at"):
-                st["duration_s"] = round(now - st["started_at"], 2)
             if artifacts:
                 # Ghi nhận artifacts và hash xác thực
                 st_artifacts = {}

@@ -16,6 +16,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+try:
+    from .v1_stage_metrics import stage
+except ImportError:
+    from v1_stage_metrics import stage
+
 logger = logging.getLogger(__name__)
 
 
@@ -292,12 +297,18 @@ def check_rendered_pixel_coverage(
         transitions, transition_total = _transition_pixel_candidates(translated_subtitles, fps)
         sampled = transitions + sampled
         duration = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / fps
+        last_time = None
         for item in sampled:
-            if duration > 0 and item["mid_s"] >= duration:
+            time_s = item["mid_s"]
+            if duration > 0 and time_s >= duration:
                 continue
             requested_frames += 1
-            cap.set(cv2.CAP_PROP_POS_MSEC, item["mid_s"] * 1000.0)
-            ok, frame = cap.read()
+            # Overlapping source cues can request different crops at the same PTS.
+            if time_s != last_time:
+                cap.set(cv2.CAP_PROP_POS_MSEC, time_s * 1000.0)
+                ok, frame = cap.read()
+                if ok:
+                    last_time = time_s
             if not ok or frame is None or not hasattr(frame, "shape") or getattr(frame, "ndim", 0) < 2:
                 continue
             fh, fw = frame.shape[:2]
@@ -404,6 +415,7 @@ def check_rendered_pixel_coverage(
     )
 
 
+@stage("quality_gate")
 def run_quality_gate(
     job_id: str,
     final_video_path: str | Path,

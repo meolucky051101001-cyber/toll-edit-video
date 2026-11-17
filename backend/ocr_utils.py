@@ -628,21 +628,43 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
 
     all_blocks = []
     observations = {}
-    fps = float(getattr(cap, "get", lambda *_: 0)(cv2.CAP_PROP_FPS) or 30.0)
-    if not math.isfinite(fps) or fps <= 0:
-        raise RuntimeError("Cannot refine captions without valid source FPS")
-    frame_count = max(1, int(math.ceil(duration * fps - 1e-6)))
-    previous_frame = None
-    previous_rows = None
-    previous_time = None
-    previous_scale = 1.0
-    previous_offset = 0
+    frame_times = {}
+    raw_frame_count = float(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if not math.isfinite(raw_frame_count) or raw_frame_count < 1:
+        raise RuntimeError("Cannot refine captions without a decoded frame count")
+    frame_count = int(round(raw_frame_count))
+    batch_size = 8
+    scale = min(1.0, 960.0 / max(width, 1))
+    scaled_size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    last_decoded_index = None
 
-    def append_rows(rows, sample_time, scale_ratio, crop_offset, orig_frame=None):
-        frame_index = max(0, min(frame_count - 1, round(sample_time * fps)))
-        sample_time = frame_index / fps
+    def decoded_position(expected_index=None):
+        nonlocal last_decoded_index
+        # POS_FRAMES is the next frame after a successful read; POS_MSEC is
+        # the returned frame's PTS. Keep both rather than deriving either from
+        # average FPS, which is not an invertible clock for VFR sources.
+        next_index = float(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        sample_time = float(cap.get(cv2.CAP_PROP_POS_MSEC)) / 1000.0
+        if not math.isfinite(next_index) or abs(next_index - round(next_index)) > .001:
+            raise RuntimeError("Decoder did not report a valid caption frame index")
+        frame_index = int(round(next_index)) - 1
+        if not 0 <= frame_index < frame_count:
+            raise RuntimeError("Decoded caption frame lies outside the source frame count")
+        if expected_index is not None and frame_index != expected_index:
+            raise RuntimeError(f"Caption seek returned frame {frame_index}, expected {expected_index}")
+        if (not math.isfinite(sample_time) or not 0 <= sample_time < duration
+                or (frame_index > 0 and sample_time == 0)):
+            raise RuntimeError("Decoder did not report a valid caption frame timestamp")
+        previous_pts = frame_times.get(frame_index)
+        if previous_pts is not None and abs(previous_pts - sample_time) > .000001:
+            raise RuntimeError("Decoder returned inconsistent caption frame timestamps")
+        frame_times[frame_index] = sample_time
+        last_decoded_index = frame_index
+        return frame_index, sample_time
+
+    def append_rows(rows, frame_index, sample_time, orig_frame):
         frame_blocks = []
-        for mapped in normalized_rows(rows, scale_ratio, crop_offset, width, height):
+        for mapped in normalized_rows(rows, scale, 0, width, height):
             bg_ass, fg_ass = _sample_box_bg_colors(
                 orig_frame, 1.0, 0, width, height,
                 mapped["x_pct"], mapped["max_x_pct"], mapped["y_pct"], mapped["max_y_pct"],
@@ -661,7 +683,19 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             frame_blocks.append(block)
         observations[frame_index] = frame_blocks
 
+    def recognize_samples(samples):
+        if stopped():
+            raise RuntimeError("OCR stop requested")
+        images = [cv2.resize(frame, scaled_size, interpolation=cv2.INTER_AREA) if scale < 1 else frame
+                  for _, _, frame in samples]
+        recognized = _readtext_batch(images)
+        if len(recognized or []) != len(samples):
+            raise RuntimeError("OCR returned incomplete source caption observations")
+        for (index, pts, frame), rows in zip(samples, recognized):
+            append_rows(rows, index, pts, frame)
+
     logger.info("Visual OCR-to-TTS: scanning %d dense timeline samples (step=0.35s)", len(times))
+    samples = []
     for position, current_time in enumerate(times):
         if stopped():
             raise RuntimeError("OCR stop requested")
@@ -671,53 +705,17 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, current_time - 0.2) * 1000)
             ok, frame = cap.read()
         if not ok:
-            logger.warning("Could not decode visual OCR frame at %.2fs", current_time)
-            continue
-        # OpenCV reports the timestamp of the frame actually returned by seek.
-        actual_time = float(getattr(cap, "get", lambda *_: 0)(cv2.CAP_PROP_POS_MSEC) or 0) / 1000
-        if actual_time > 0 or current_time == 0:
-            current_time = actual_time
-
-        can_reuse = (
-            previous_rows is not None
-            and previous_frame is not None
-            and previous_time is not None
-            and 0.0 <= current_time - previous_time <= 1.0
-        )
-        if can_reuse:
-            # A small caption can change while the average scene difference
-            # stays near zero. Reuse OCR only for identical inference input.
-            if np.array_equal(frame, previous_frame):
-                append_rows(previous_rows, current_time, previous_scale, previous_offset, orig_frame=frame)
-                metrics["visual_roi_reused"] = metrics.get("visual_roi_reused", 0) + 1
-                previous_time = current_time
-                previous_frame = frame.copy()
-                continue
-
-        scale_ratio = min(1.0, 960.0 / max(width, 1))
-        if scale_ratio < 1.0:
-            proc_frame = cv2.resize(
-                frame,
-                (max(1, round(width * scale_ratio)), max(1, round(height * scale_ratio))),
-                interpolation=cv2.INTER_AREA,
-            )
-        else:
-            proc_frame = frame
-        results = _readtext_batch([proc_frame])
-        rows = results[0] if results else []
-        has_valid_rows = any(len(row) >= 2 and str(row[1] or "").strip() for row in rows)
-        previous_rows = rows if has_valid_rows else None
-        previous_time = current_time
-        previous_scale = scale_ratio
-        previous_offset = 0
-        previous_frame = frame.copy()
-        metrics["visual_ocr_calls"] = metrics.get("visual_ocr_calls", 0) + 1
-        append_rows(rows, current_time, scale_ratio, 0, orig_frame=frame)
+            raise RuntimeError(f"Could not decode source caption frame at {current_time:.3f}s")
+        frame_index, current_time = decoded_position()
+        samples.append((frame_index, current_time, frame))
+        if len(samples) == batch_size or position + 1 == len(times):
+            recognize_samples(samples)
+            samples.clear()
+            metrics["visual_ocr_calls"] = metrics.get("visual_ocr_calls", 0) + 1
         if (position + 1) % 100 == 0:
             logger.info(
-                "Visual OCR progress: %d/%d samples, GPU calls=%d, reused=%d",
-                position + 1, len(times),
-                metrics.get("visual_ocr_calls", 0), metrics.get("visual_roi_reused", 0),
+                "Visual OCR progress: %d/%d decoded samples, OCR batches=%d",
+                position + 1, len(times), metrics.get("visual_ocr_calls", 0),
             )
 
     if not all_blocks:
@@ -760,22 +758,34 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
                          round(block.y_pct * height / 8), round(block.max_y_pct * height / 8)))
         return tuple(sorted(rows))
 
-    def observe_frame(index):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, index)
-        ok, frame = cap.read()
-        if not ok:
-            raise RuntimeError(f"Cannot decode caption transition frame {index}")
-        scale = min(1., 960. / max(width, 1))
-        image = cv2.resize(frame, (round(width * scale), round(height * scale)),
-                           interpolation=cv2.INTER_AREA) if scale < 1 else frame
-        recognized = _readtext_batch([image])
-        append_rows(recognized[0] if recognized else [], index / fps, scale, 0, orig_frame=frame)
-        return observations[index]
+    def observe_frames(indices):
+        for offset in range(0, len(indices), batch_size):
+            samples = []
+            for index in indices[offset:offset + batch_size]:
+                if stopped():
+                    raise RuntimeError("OCR stop requested")
+                # Nearby frames can use the open decoder and its actual PTS.
+                # Seek across larger gaps rather than decoding that whole span.
+                gap = index - last_decoded_index
+                grab = getattr(cap, "grab", None)
+                sequential = gap == 1 or (1 < gap <= 24 and grab and all(grab() for _ in range(gap - 1)))
+                if not sequential:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, index)
+                ok, frame = cap.read()
+                if not ok:
+                    raise RuntimeError(f"Cannot decode caption transition frame {index}")
+                frame_index, sample_time = decoded_position(expected_index=index)
+                samples.append((frame_index, sample_time, frame))
+            recognize_samples(samples)
+        return [observations[index] for index in indices]
 
-    refined, extra = refine_observations(observations, frame_count, observe_frame,
-                                         caption_signature, stopped)
+    refined, extra = refine_observations(observations, frame_count, None,
+                                         caption_signature, stopped,
+                                         max_extra_frames=4000,
+                                         observe_batch=observe_frames)
     metrics["visual_boundary_frames"] = extra
-    for blocks, left, right in observation_intervals(refined, fps, duration):
+    for blocks, left, right in observation_intervals(
+            refined, None, duration, frame_times=frame_times):
         for block in blocks:
             block.visual_interval_start = left
             block.visual_interval_end = right
