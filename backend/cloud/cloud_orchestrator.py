@@ -683,6 +683,8 @@ class CloudOrchestrator:
 
         session_may_exist = False
         cleanup_done = False
+        cleanup_result: Optional[Dict[str, Any]] = None
+        final_video_path: Optional[Path] = None
 
         def _estimate_elapsed_cu() -> float:
             if not session_may_exist or runtime_start_time is None:
@@ -783,8 +785,17 @@ class CloudOrchestrator:
             return ok
 
         def _finalize_session_once() -> Dict[str, Any]:
-            nonlocal cleanup_done
-            if cleanup_done or not session_may_exist:
+            nonlocal cleanup_done, cleanup_result
+            if cleanup_done:
+                if cleanup_result is not None:
+                    return dict(cleanup_result)
+                return {
+                    "verified_stopped": True,
+                    "cleanup_status": "verified",
+                    "attempts": 0,
+                    "error": None,
+                }
+            if not session_may_exist:
                 return {
                     "verified_stopped": True,
                     "cleanup_status": "verified",
@@ -794,6 +805,7 @@ class CloudOrchestrator:
             cleanup_done = True
             logger.info("Dọn dẹp: Dừng và xác nhận session Colab %s...", session_name)
             res = self._verify_or_stop_session(session_name, extra_secrets=extra_secrets)
+            cleanup_result = dict(res)
             safe_cleanup_err = (
                 redact_secrets(str(res.get("error")), extra_secrets=extra_secrets)
                 if res.get("error")
@@ -1267,62 +1279,46 @@ class CloudOrchestrator:
 
             out_env_dir = os.getenv("AUTODUB_OUTPUT_DIR", r"D:\banve")
             final_out_dir = Path(out_env_dir) if Path(out_env_dir).exists() else attempt_res_dir
-            final_video_path = self.export_deliverable_atomic(
-                dl_file,
-                final_out_dir,
-                job_id=job_id,
-                attempt=session_attempt,
-                video_name=job.video_name or validated_input.display_name,
-                expected_sha256=qc_res["sha256"],
+            if not is_url and source_snapshot:
+                src_final = Path(validated_input.normalized_value)
+                if not src_final.is_file() or src_final.stat().st_size != source_snapshot["size_bytes"]:
+                    raise _OrchestratorStageError(
+                        CloudErrorCode.VALIDATION_FAILED.value,
+                        "File video nguồn không còn nguyên vẹn sau quá trình xử lý Cloud.",
+                    )
+
+            remote_meta = qc_res.get("remote_metadata") or {}
+            local_probe = qc_res.get("local_probe") or {}
+            output_manifest: Dict[str, Any] = {
+                "schema_version": 1,
+                "job_id": job_id,
+                "attempt": session_attempt,
+                "result_path": None,
+                "staging_result_path": str(dl_file),
+                "staging_dir": str(attempt_res_dir),
+                "sha256": qc_res["sha256"],
+                "size_bytes": qc_res["size_bytes"],
+                "duration_seconds": (
+                    local_probe.get("duration_seconds")
+                    or (remote_meta.get("output_video_probe") or {}).get("duration_seconds")
+                ),
+                "video_codec": (
+                    local_probe.get("video_codec")
+                    or (remote_meta.get("output_video_probe") or {}).get("video_codec")
+                ),
+                "audio_codec": (
+                    local_probe.get("audio_codec")
+                    or (remote_meta.get("output_video_probe") or {}).get("audio_codec")
+                ),
+                "qc_passed": True,
+                "qc_report": qc_res["qc_report"],
+                "remote_metadata": remote_meta,
+            }
+            (attempt_res_dir / "output_manifest.json").write_text(
+                redact_secrets(json.dumps(output_manifest, indent=2, ensure_ascii=False), extra_secrets=extra_secrets),
+                encoding="utf-8",
             )
-            try:
-                if not is_url and source_snapshot:
-                    src_final = Path(validated_input.normalized_value)
-                    if not src_final.is_file() or src_final.stat().st_size != source_snapshot["size_bytes"]:
-                        raise _OrchestratorStageError(
-                            CloudErrorCode.VALIDATION_FAILED.value,
-                            "File video nguồn cục bộ không còn nguyên vẹn sau quá trình xử lý Cloud.",
-                        )
-
-                remote_meta = qc_res.get("remote_metadata") or {}
-                local_probe = qc_res.get("local_probe") or {}
-                output_manifest: Dict[str, Any] = {
-                    "schema_version": 1,
-                    "job_id": job_id,
-                    "attempt": session_attempt,
-                    "result_path": str(final_video_path),
-                    "staging_dir": str(attempt_res_dir),
-                    "sha256": qc_res["sha256"],
-                    "size_bytes": qc_res["size_bytes"],
-                    "duration_seconds": (
-                        local_probe.get("duration_seconds")
-                        or (remote_meta.get("output_video_probe") or {}).get("duration_seconds")
-                    ),
-                    "video_codec": (
-                        local_probe.get("video_codec")
-                        or (remote_meta.get("output_video_probe") or {}).get("video_codec")
-                    ),
-                    "audio_codec": (
-                        local_probe.get("audio_codec")
-                        or (remote_meta.get("output_video_probe") or {}).get("audio_codec")
-                    ),
-                    "qc_passed": True,
-                    "qc_report": qc_res["qc_report"],
-                    "remote_metadata": remote_meta,
-                }
-                (attempt_res_dir / "output_manifest.json").write_text(
-                    redact_secrets(json.dumps(output_manifest, indent=2, ensure_ascii=False), extra_secrets=extra_secrets),
-                    encoding="utf-8",
-                )
-
-                _raise_if_aborted()
-            except _JobAborted:
-                if final_video_path != dl_file:
-                    try:
-                        Path(final_video_path).unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                raise
+            _raise_if_aborted()
 
             # 8. Thu hồi & xác nhận session trước bước hoàn tất; tính lượng CU ước tính theo thời gian chạy
             elapsed_sec = max(0.0, time.time() - (runtime_start_time or start_time))
@@ -1331,6 +1327,27 @@ class CloudOrchestrator:
             final_cleanup_status = str(
                 cleanup_res.get("cleanup_status")
                 or ("verified" if cleanup_res.get("verified_stopped") else "failed_retry_needed")
+            )
+            if not cleanup_res.get("verified_stopped"):
+                raise _OrchestratorStageError(
+                    CloudErrorCode.CLEANUP_FAILED.value,
+                    cleanup_res.get("error") or "Chưa xác nhận đã dừng session Colab; chưa xuất thành phẩm.",
+                )
+
+            _raise_if_aborted()
+            final_video_path = self.export_deliverable_atomic(
+                dl_file,
+                final_out_dir,
+                job_id=job_id,
+                attempt=session_attempt,
+                video_name=job.video_name or validated_input.display_name,
+                expected_sha256=qc_res["sha256"],
+            )
+            output_manifest["result_path"] = str(final_video_path)
+            output_manifest.pop("staging_result_path", None)
+            (attempt_res_dir / "output_manifest.json").write_text(
+                redact_secrets(json.dumps(output_manifest, indent=2, ensure_ascii=False), extra_secrets=extra_secrets),
+                encoding="utf-8",
             )
 
             if not _update(
@@ -1343,6 +1360,12 @@ class CloudOrchestrator:
                 measurement_source=CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value,
                 output_manifest=output_manifest,
             ):
+                if final_video_path != dl_file:
+                    try:
+                        final_video_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    final_video_path = None
                 _raise_if_aborted()
                 raise _JobAborted("lease_lost", is_lease_lost=True)
 

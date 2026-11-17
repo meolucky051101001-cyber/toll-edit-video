@@ -851,7 +851,8 @@ def stop_session(session_name: str) -> Tuple[bool, str]:
     logger.info("Đang dừng session Colab: %s...", safe_session)
     rc, stdout, stderr = _run_wsl_colab_argv(["stop", "-s", safe_session], timeout=timeout)
     combined = redact_secrets(f"{stdout}\n{stderr}".strip())
-    if rc == 0 or "not found" in combined.lower() or "terminated" in combined.lower():
+    lowered = combined.lower()
+    if rc == 0 or "not found" in lowered or ("terminated" in lowered and "not terminated" not in lowered):
         logger.info("Đã dừng session %s an toàn.", safe_session)
         return True, "Session đã dừng."
 
@@ -918,20 +919,41 @@ def _ensure_no_orphan_assignments() -> None:
 
 
 def stop_all_sessions() -> Tuple[bool, str]:
-    """Terminate all active Colab sessions and clear local Colab CLI state cache."""
+    """Only acknowledge shutdown after a successful remote empty-inventory check."""
     logger.info("Đang quét và thu hồi toàn bộ máy ảo Colab...")
-    _ensure_no_orphan_assignments()
+    marker = "AUTODUB_STOP_VERIFIED:"
+    py_cleanup = "\n".join([
+        "import json, sys",
+        "sys.path.insert(0, '/root/.local/share/uv/tools/google-colab-cli/lib/python3.14/site-packages')",
+        "from colab_cli.common import state",
+        "errors = []",
+        "for assignment in list(state.client.list_assignments()):",
+        "    try:",
+        "        state.client.unassign(assignment.endpoint)",
+        "    except Exception as exc:",
+        "        errors.append(str(exc))",
+        "remaining = list(state.client.list_assignments())",
+        "if remaining or errors:",
+        "    raise RuntimeError('Shutdown unverified: remaining=%d; errors=%s' % (len(remaining), errors))",
+        "for name in list(state.store.list().keys()):",
+        "    state.store.remove(name)",
+        f"print({marker!r} + json.dumps({{'remaining': 0}}))",
+    ])
     try:
-        py_clean_store = (
-            "import sys\n"
-            "sys.path.insert(0, '/root/.local/share/uv/tools/google-colab-cli/lib/python3.14/site-packages')\n"
-            "from colab_cli.common import state\n"
-            "for name in list(state.store.list().keys()):\n"
-            "    state.store.remove(name)\n"
+        rc, stdout, stderr = _run_wsl_argv(
+            "/usr/bin/python3",
+            ["-"],
+            stdin_text=py_cleanup,
+            timeout=int(DEFAULT_CONFIG["stop_timeout_seconds"]),
         )
-        _run_wsl_argv("/usr/bin/python3", ["-"], stdin_text=py_clean_store, timeout=20)
-    except Exception:
-        pass
+        verified = any(
+            line.startswith(marker) and json.loads(line[len(marker):]) == {"remaining": 0}
+            for line in stdout.splitlines()
+        )
+        if rc != 0 or not verified:
+            return False, "Chưa xác nhận thu hồi Cloud: " + (stderr or stdout or f"exit={rc}")[-500:]
+    except Exception as exc:
+        return False, f"Chưa xác nhận thu hồi Cloud: {exc}"
     return True, "Đã thu hồi và dừng toàn bộ máy ảo Colab an toàn."
 
 
