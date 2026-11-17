@@ -402,6 +402,7 @@ class _AssLayout:
     wrap_text: object
     cover_style: str = "solid_box"
     strip_terminal_punctuation: bool = False
+    blur_text_boxes: object = None
 
 
 @dataclass(frozen=True)
@@ -420,6 +421,7 @@ class _AssText:
     formatted_text: object
     actual_text_w: object
     required_text_h: object
+    glyph_bounds: object = None
 
 
 def _format_ass_time(td):
@@ -529,6 +531,10 @@ def generate_ass_file(
             active_cover_style = "solid_box"
     if active_cover_style not in ("solid_box", "frosted_blur", "adaptive_box", "localized_blur"):
         active_cover_style = "solid_box"
+    if active_cover_style == "localized_blur":
+        if not hasattr(measure, "glyph_bounds"):
+            raise ValueError("Không đo được font phụ đề để tạo vùng blur chính xác")
+        font_name = measure.font_family
 
     text_outline = 2 if active_cover_style == "localized_blur" else 0
     text_shadow = 1 if active_cover_style == "localized_blur" else 0
@@ -562,11 +568,8 @@ Style: TextStyle,{font_name},{font_size},{style_text_color},&H000000FF,&H0000000
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
-    if active_cover_style == "localized_blur":
-        from subtitle_blur import ass_blur_metadata
-        ass_content += ass_blur_metadata(
-            dialogue_segments if source_segments is None else source_segments, blur_settings)
-
+    blur_source_segments = dialogue_segments if source_segments is None else source_segments
+    blur_text_boxes = []
     c = _AssLayout(
         canvas_x=canvas_x,
         canvas_y=canvas_y,
@@ -587,6 +590,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         wrap_text=_wrap_text,
         cover_style=active_cover_style,
         strip_terminal_punctuation=bool(strip_terminal_punctuation),
+        blur_text_boxes=blur_text_boxes,
     )
     if dialogue_segments:
         dialogue_segments, held_tracks = _align_ass_source_pages(dialogue_segments, video_duration)
@@ -594,6 +598,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         band_layout = _lock_ass_band(processed_segments, dialogue_segments, c)
         ass_content += _render_ass_dialogue(processed_segments, held_tracks, c, band_layout)
 
+    if active_cover_style == "localized_blur":
+        from subtitle_blur import ass_blur_metadata
+        ass_content += ass_blur_metadata(blur_source_segments, blur_settings, blur_text_boxes)
 
     with codecs.open(output_path, "w", "utf-8-sig") as f:
         f.write(ass_content)
@@ -996,7 +1003,41 @@ def _format_ass_event_text(text, is_near_bottom, c):
             max((c.measure(line) for line in lines), default=0)
         )
     required_text_h = num_lines * c.line_h
-    return _AssText(num_lines, formatted_text, actual_text_w, required_text_h)
+    glyph_bounds = None
+    if c.cover_style == "localized_blur":
+        ink = []
+        for index, line in enumerate(lines):
+            line = line.replace("\\", "／").replace("{", "｛").replace("}", "｝")
+            left, top, right, bottom = c.measure.glyph_bounds(line)
+            sx = scale_x / 100.0 if index == 1 else 1.0
+            offset_y = index * c.measure.line_height
+            ink.append((left * sx, top + offset_y, right * sx, bottom + offset_y))
+        if ink:
+            glyph_bounds = (min(b[0] for b in ink), min(b[1] for b in ink),
+                            max(b[2] for b in ink), max(b[3] for b in ink))
+    return _AssText(num_lines, formatted_text, actual_text_w, required_text_h, glyph_bounds)
+
+
+def _record_text_blur(c, times, metrics, center_x, top_y):
+    if c.cover_style != "localized_blur" or metrics.glyph_bounds is None:
+        return
+    left, top, right, bottom = metrics.glyph_bounds
+    # Outline, shadow and antialiasing, before configured blur padding.
+    left = max(0., center_x + left - 3)
+    right = min(c.canvas_x, center_x + right + 4)
+    top = max(0., top_y + top - 3)
+    bottom = min(c.canvas_y, top_y + bottom + 4)
+    if right <= left or bottom <= top:
+        return
+
+    def seconds(raw):
+        hours, minutes, seconds = raw.split(":")
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+    c.blur_text_boxes.append(dict(
+        start=seconds(times[0]), end=seconds(times[1]),
+        x_pct=left / c.canvas_x, max_x_pct=right / c.canvas_x,
+        y_pct=top / c.canvas_y, max_y_pct=bottom / c.canvas_y))
 
 
 def _source_ass_sticker(
@@ -1101,6 +1142,7 @@ def _source_ass_sticker(
         draw_x + (draw_w / 2.0), c.canvas_x - min_margin - metrics.actual_text_w / 2.0))
     text_cy = draw_y + max(0, (draw_h - metrics.required_text_h) // 2)
     if render_text:
+        _record_text_blur(c, times, metrics, text_cx, text_cy)
         text_line = f"{{\\an8\\pos({text_cx:g},{text_cy}){fg_color_tag}}}{metrics.formatted_text}"
         ass_content += f"Dialogue: 1,{start_str},{end_str},TextStyle,,0,0,0,,{text_line}\n"
     return ass_content
@@ -1138,6 +1180,7 @@ def _fallback_ass_sticker(c, band_layout, times, metrics, verified, seg_is_visua
         ass_content += f"Dialogue: 0,{start_str},{end_str},{background_style},,0,0,0,,{bg_line}\n"
 
     text_line = f"{{\\an8\\pos({text_cx:g},{text_cy})}}{metrics.formatted_text}"
+    _record_text_blur(c, times, metrics, text_cx, text_cy)
     ass_content += f"Dialogue: 1,{start_str},{end_str},TextStyle,,0,0,0,,{text_line}\n"
     return ass_content
 

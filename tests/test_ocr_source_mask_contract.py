@@ -133,7 +133,8 @@ def test_resume_invalidates_only_ocr_and_downstream_stages(tmp_path, version):
     orchestrator.manifest_manager = NS(verify_manifest_resumability=lambda *a, **k:
                                       (True, 'completed', {'verified_stages': list(STAGES_ORDER)}))
     ctx = NS(manifest=NS(routing_snapshot={'metadata': {'duration_s': 3}}),
-             effective_cfg={'speech_timing_version': 3}, job_id='fixture',
+             effective_cfg={'speech_timing_version': 3}, visual_sub_to_speech=False,
+             job_id='fixture',
              v_path=tmp_path / 'source.mp4', out_dir=tmp_path)
     orchestrator._restore_execution_checkpoint(ctx, True)
     if version == geometry.OCR_GEOMETRY_VERSION:

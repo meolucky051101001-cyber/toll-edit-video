@@ -87,7 +87,13 @@ STAGES_ORDER = [
     "ai_tts",
     "audio_mixing",
     "video_rendering",
+    "quality_gate",
 ]
+
+
+def _pending_stage() -> Dict[str, Any]:
+    return {"status": "pending", "started_at": None, "completed_at": None,
+            "duration_s": 0.0, "artifacts": {}, "retry_count": 0, "error": None}
 
 
 @dataclass
@@ -146,7 +152,16 @@ class ManifestManager:
             return None
         try:
             data = json.loads(file_path.read_text(encoding="utf-8"))
-            return JobManifest(**data)
+            manifest = JobManifest(**data)
+            # Eight-stage manifests retain their verified render and published
+            # jobs stay completed; interrupted jobs must still pass QC.
+            if "quality_gate" not in manifest.stages:
+                manifest.stages["quality_gate"] = _pending_stage()
+                if manifest.status == "completed":
+                    manifest.stages["quality_gate"]["status"] = "completed"
+                elif manifest.status == "awaiting_qc":
+                    manifest.current_stage = "quality_gate"
+            return manifest
         except Exception as exc:
             logger.warning("Không thể đọc manifest %s: %s", file_path.name, exc)
             return None
@@ -167,18 +182,7 @@ class ManifestManager:
         if existing and existing.video_fingerprint == v_fingerprint:
             return existing
 
-        initial_stages = {
-            s: {
-                "status": "pending",
-                "started_at": None,
-                "completed_at": None,
-                "duration_s": 0.0,
-                "artifacts": {},
-                "retry_count": 0,
-                "error": None,
-            }
-            for s in STAGES_ORDER
-        }
+        initial_stages = {s: _pending_stage() for s in STAGES_ORDER}
 
         manifest = JobManifest(
             job_id=job_id,
@@ -202,11 +206,10 @@ class ManifestManager:
             return
         manifest.status = "in_progress"
         manifest.current_stage = stage_id
-        if stage_id in manifest.stages:
-            st = manifest.stages[stage_id]
-            st["status"] = "running"
-            st["started_at"] = time.time()
-            st["retry_count"] = st.get("retry_count", 0) + 1
+        st = manifest.stages.setdefault(stage_id, _pending_stage())
+        st.update(status="running", started_at=time.time(), completed_at=None,
+                  duration_s=0.0, error=None, retry_count=st.get("retry_count", 0) + 1)
+        manifest.error_message = None
         self.save_manifest(manifest)
 
     def record_stage_complete(
@@ -218,13 +221,15 @@ class ManifestManager:
         manifest = self.load_manifest(job_id)
         if not manifest:
             return
+        was_completed = manifest.stages.get(stage_id, {}).get("status") == "completed"
         if stage_id in manifest.stages:
             st = manifest.stages[stage_id]
-            now = time.time()
+            if st.get("status") != "completed" or not st.get("completed_at"):
+                now = time.time()
+                st["completed_at"] = now
+                if st.get("started_at"):
+                    st["duration_s"] = round(now - st["started_at"], 2)
             st["status"] = "completed"
-            st["completed_at"] = now
-            if st.get("started_at"):
-                st["duration_s"] = round(now - st["started_at"], 2)
             if artifacts:
                 # Ghi nhận artifacts và hash xác thực
                 st_artifacts = {}
@@ -241,10 +246,13 @@ class ManifestManager:
         # Cập nhật stage tiếp theo
         try:
             curr_idx = STAGES_ORDER.index(stage_id)
-            if curr_idx + 1 < len(STAGES_ORDER):
-                manifest.current_stage = STAGES_ORDER[curr_idx + 1]
-            else:
-                manifest.status = "awaiting_qc"
+            if not was_completed or manifest.current_stage == stage_id:
+                if curr_idx + 1 < len(STAGES_ORDER):
+                    manifest.current_stage = STAGES_ORDER[curr_idx + 1]
+                    if stage_id == "video_rendering":
+                        manifest.status = "awaiting_qc"
+                else:
+                    manifest.status = "awaiting_publish"
         except ValueError:
             pass
 
@@ -255,6 +263,7 @@ class ManifestManager:
         if not manifest:
             return
         manifest.status = "failed"
+        manifest.current_stage = stage_id
         manifest.error_message = error_msg
         if stage_id in manifest.stages:
             st = manifest.stages[stage_id]

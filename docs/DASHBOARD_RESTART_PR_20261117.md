@@ -53,3 +53,26 @@ Ignored restart evidence is in `scratch/service-restart-20261117.json` and `scra
 - Cloud live remains gated pending secret/log/artifact transport and scoped cancellation acceptance, content/QC checks, and a budgeted provider canary. No paid provider was called for this verification.
 - The 24-hour soak is not complete. The historical smoke failed with a 9.344-second poll gap; subsequent checkpoint/timing regressions do not prove a successful real-time smoke or stress run. No new 24-hour workload was started for this restart/PR request.
 - This verification does not certify native GPU/AI rendering end to end, translation/TTS quality, or a Telegram message canary. Bot/polling readiness is a service-health observation.
+
+## PR synchronization after main advanced
+
+PR #31 was created after main advanced to `57cf100` (OCR/QC performance and progress changes). The PR was synchronized in a separate managed checkout at `C:/Users/admin/.codex/worktrees/dashboard-pr-sync/tool v1`, because the restarted dashboard-stability checkout was already processing live work.
+
+Three conflicts were resolved by retaining both sides' required behavior: tracker ownership fencing plus the new QC progress arguments; durable controller stop helpers plus boot-pause intent names; and native thread draining plus QC cancellation propagation. Test fixtures now explicitly provide nonvisual resume mode, the controller operation lock/state, and an isolated Studio workspace. Production ownership, pause, stop, and publication guards remain intact.
+
+Final verification on this synchronized PR source:
+
+| Suite | Result |
+| --- | --- |
+| Union of dashboard acceptance, current Python CI selections, controls/Telegram dispatch and changed OCR regressions (75 selections) | **1,007 passed, 11 skipped, 0 failures/errors**, 222.18 seconds |
+| Focused fixture/ownership regressions | **58 passed** |
+| All JavaScript suites including new QC progress and dashboard progress | **49 passed**, 0 skipped/failures |
+| Python syntax inventory | **488 files parsed** |
+
+The suites overlap. The earlier 478/408/42 totals above remain evidence for the deployed `fcefc13` code; they are not added to these final PR totals. The first synchronized run and its five fixture failures are preserved separately.
+
+The 11 final skips are declared quarantines: tracker lifecycle/stop (3), ASR checkpoint (1), resource/stage logs (2), separator GPU locking (1), voice/OCR cache (3), and load-sensitive early subtitle-band frame count (1). No immediate-control or boot-pause regression is skipped. ASR reuse after changed audio and all persistent voice-cache corruption/write-failure/invalid-duration behavior are not fully certified by substitute coverage.
+
+Final ignored evidence: `test_evidence/dashboard/pr-sync-final-20261117/{results.xml,run.json,source-hashes.json,pytest.log}`, `scratch/pr-sync-acceptance-final.log`, and `scratch/pr-sync-javascript.log`. The final runner confirms source was unchanged during the run. The failed first run remains under `pr-sync-20261117`; the focused run is under `pr-sync-focused-20261117`.
+
+The running service remains at deployed runtime commit `fcefc13`; PR synchronization did not replace files or restart the busy service. A final read-only check still returned HTTP 200/readiness true, with dashboard, bot, heartbeat, and polling healthy, one active worker, and three queued items. The PR source includes newer main OCR/QC work that has not been redeployed into that active session. The open acceptance gates above remain unchanged.

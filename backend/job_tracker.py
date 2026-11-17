@@ -85,7 +85,7 @@ logger = logging.getLogger(__name__)
 class JobAlreadyRunningError(RuntimeError):
     pass
 
-# Bảng quy đổi bước xử lý sang % tiến độ mặc định (Chuẩn 8 bước V1 Orchestrator)
+# Bảng quy đổi bước xử lý sang % tiến độ mặc định (9 bước V1 Orchestrator)
 STEP_PERCENT_MAP = {
     1.0: 10,   # Trích xuất âm thanh gốc
     2.0: 25,   # Bóc tách giọng nói khỏi nhạc nền
@@ -96,7 +96,46 @@ STEP_PERCENT_MAP = {
     6.0: 75,   # Lồng tiếng AI (TTS)
     7.0: 85,   # Trộn nhạc nền & giọng đọc (Adaptive Mixer)
     8.0: 95,   # Render video thành phẩm bằng NVENC GPU
+    9.0: 96,   # Kiểm tra chất lượng sau render
 }
+
+STAGE_BY_STEP = {1: "extract_audio", 2: "separate_vocals", 3: "speech_asr",
+                 3.5: "visual_ocr", 4: "visual_ocr", 5: "ai_translation", 6: "ai_tts",
+                 7: "audio_mixing", 8: "video_rendering", 9: "quality_gate"}
+
+
+def _remaining_stage_seconds(state, elapsed):
+    """Use measured phase work for QC; a fixed milestone is not work progress."""
+    if state.get("stage") == "quality_gate" or state.get("step") == 9:
+        details = state.get("details") or {}
+        if not isinstance(details, dict):
+            return None
+        if "recognized" in details:
+            # Streaming QC alternates decode and OCR; estimate the whole stage
+            # only after at least one recognition batch has been measured.
+            try:
+                fraction = float(details.get("stage_fraction", 0))
+                recognized = float(details.get("recognized", 0))
+            except (ValueError, TypeError):
+                return None
+            started = state.get("current_step_start")
+            if started and recognized > 0 and math.isfinite(fraction) and 0 < fraction < 1:
+                return max(0, int((time.time() - started) * (1 - fraction) / fraction))
+            return None
+        if details.get("phase") != "ocr":
+            return None
+        try:
+            done, total = float(details.get("completed", 0)), float(details.get("total", 0))
+        except (ValueError, TypeError):
+            return None
+        phase_start = state.get("phase_started_at")
+        if phase_start and math.isfinite(done) and math.isfinite(total) and 0 < done < total:
+            return max(0, int((time.time() - phase_start) * (total - done) / done))
+        return None
+    if state.get("total_steps") == 9:
+        return None
+    percent = state.get("percent", 0)
+    return max(0, int(elapsed * (100 - percent) / percent)) if 10 < percent < 100 else None
  
 def _default_worker_state(worker_id: int) -> Dict[str, Any]:
     return {
@@ -106,7 +145,10 @@ def _default_worker_state(worker_id: int) -> Dict[str, Any]:
         "video_name": "",
         "video_status": "idle",
         "step": 0,
-        "total_steps": 8,
+        "total_steps": 9,
+        "stage": None,
+        "details": {},
+        "phase_started_at": None,
         "step_name": "Hệ thống sẵn sàng" if worker_id == 1 else "Đang chờ video từ hàng đợi...",
         "percent": 0,
         "start_time": None,
@@ -158,7 +200,10 @@ _DEFAULT_STATE: Dict[str, Any] = {
     "video_name": "",
     "video_status": "idle",
     "step": 0,
-    "total_steps": 8,
+    "total_steps": 9,
+    "stage": None,
+    "details": {},
+    "phase_started_at": None,
     "step_name": "Hệ thống sẵn sàng",
     "percent": 0,
     "start_time": None,
@@ -505,17 +550,11 @@ def get_status(strict: bool = False) -> Dict[str, Any]:
             # Tính thời gian thực tế của bước đang chạy
             cur_step = state.get("step")
             cur_step_start = state.get("current_step_start")
-            if cur_step and cur_step > 0 and cur_step_start:
+            if cur_step and cur_step > 0 and cur_step_start and state.get("video_status") != "completed":
                 durations = dict(state.get("step_durations") or {})
                 durations[str(cur_step)] = round(time.time() - cur_step_start, 1)
                 state["step_durations"] = durations
-            # Ước tính ETA đơn giản theo %
-            pct = state.get("percent", 0)
-            if pct > 10 and pct < 100:
-                total_est = (elapsed / pct) * 100
-                state["eta_seconds"] = max(0, int(total_est - elapsed))
-            else:
-                state["eta_seconds"] = None
+            state["eta_seconds"] = _remaining_stage_seconds(state, elapsed)
         # Normalize historical snapshots without changing a running worker's disk state.
         if state.get("status") in ("error", "stopped", "interrupted"):
             state["video_status"] = state["status"]
@@ -579,12 +618,7 @@ def get_status(strict: bool = False) -> Dict[str, Any]:
                         durs = dict(w_info.get("step_durations") or {})
                         durs[str(c_step)] = round(max(0, time.time() - c_start), 1)
                         w_info["step_durations"] = durs
-                    w_pct = w_info.get("percent", 0)
-                    if w_pct > 10 and w_pct < 100:
-                        total_est = (w_elapsed / w_pct) * 100
-                        w_info["eta_seconds"] = max(0, int(total_est - w_elapsed))
-                    else:
-                        w_info["eta_seconds"] = None
+                    w_info["eta_seconds"] = _remaining_stage_seconds(w_info, w_elapsed)
         else:
             w1_copy = copy.deepcopy(state)
             w1_copy["worker_id"] = 1
@@ -649,6 +683,10 @@ def start_batch(
             "video_name": "",
             "video_status": "idle",
             "step": 0,
+            "stage": None,
+            "total_steps": 9,
+            "details": {},
+            "phase_started_at": None,
             "step_name": "Đang chuẩn bị hàng đợi...",
             "percent": 0,
             "start_time": None,
@@ -690,6 +728,10 @@ def start_video(video_name: str, index: int = 1, total: int = 1, worker_id: Opti
             "video_name": video_name,
             "video_status": "running",
             "step": 0,
+            "stage": None,
+            "total_steps": 9,
+            "details": {},
+            "phase_started_at": None,
             "step_name": "Bắt đầu xử lý video...",
             "percent": 5,
             "start_time": now,
@@ -717,6 +759,10 @@ def start_video(video_name: str, index: int = 1, total: int = 1, worker_id: Opti
             "router_info": None,
             "video_mode": None,
             "step": 0,
+            "stage": None,
+            "total_steps": 9,
+            "details": {},
+            "phase_started_at": None,
             "step_name": "Bắt đầu xử lý video...",
             "percent": 5,
             "start_time": now,
@@ -824,7 +870,9 @@ def record_mixer_info(info: Dict[str, Any], identity: Optional[Any] = None):
 
 
 @_fenced
-def update_step(step: float, step_name: str, percent: Optional[int] = None, details: str = "", worker_id: Optional[int] = None):
+def update_step(step: float, step_name: str, percent: Optional[int] = None,
+                details: Any = "", worker_id: Optional[int] = None, *,
+                stage: Optional[str] = None, total_steps: Optional[int] = None):
     """Cập nhật bước xử lý và tiến độ % (hỗ trợ phân biệt worker_id)."""
     with _LOCK:
         _sync_from_disk_unlocked()
@@ -833,6 +881,9 @@ def update_step(step: float, step_name: str, percent: Optional[int] = None, deta
         percent = min(99, max(0, percent))
 
         now = time.time()
+        stage = stage or STAGE_BY_STEP.get(step)
+        incoming_phase = details.get("phase") if isinstance(details, dict) else None
+        step_count = max(1, int(total_steps)) if total_steps is not None else None
         wid = _get_worker_id(worker_id)
         wid_str = str(wid)
 
@@ -847,14 +898,24 @@ def update_step(step: float, step_name: str, percent: Optional[int] = None, deta
                 w_step_durations[str(w_prev_step)] = round(now - w_current_step_start, 1)
 
             w_status = "rendering" if step >= 8.0 else "running"
+            if stage == "quality_gate":
+                w_status = "running"
+            previous_details = w.get("details") or {}
+            previous_phase = previous_details.get("phase") if isinstance(previous_details, dict) else None
+            phase_started = w.get("phase_started_at")
+            if w_prev_step != step or previous_phase != incoming_phase:
+                phase_started = now
             w.update({
                 "active": True,
                 "status": w_status,
                 "video_status": w_status,
                 "step": step,
+                "stage": stage,
+                "total_steps": step_count or w.get("total_steps", 9),
                 "step_name": step_name,
                 "percent": percent,
-                "details": details,
+                "details": copy.deepcopy(details),
+                "phase_started_at": phase_started,
                 "step_durations": w_step_durations,
                 "current_step_start": w_current_step_start if w_prev_step == step else now,
                 "updated_at": now,
@@ -869,6 +930,13 @@ def update_step(step: float, step_name: str, percent: Optional[int] = None, deta
             step_durations[str(prev_step)] = round(now - current_step_start, 1)
 
         status = "rendering" if step >= 8.0 else "running"
+        if stage == "quality_gate":
+            status = "running"
+        previous_details = _CURRENT_STATE.get("details") or {}
+        previous_phase = previous_details.get("phase") if isinstance(previous_details, dict) else None
+        phase_started = _CURRENT_STATE.get("phase_started_at")
+        if prev_step != step or previous_phase != incoming_phase:
+            phase_started = now
         if (_CURRENT_STATE.get("step"), _CURRENT_STATE.get("step_name")) != (step, step_name):
             logging.getLogger("pipeline.progress").info(
                 "Worker %s | Video %s | Bước %s: %s",
@@ -878,9 +946,12 @@ def update_step(step: float, step_name: str, percent: Optional[int] = None, deta
             "active": True,
             "status": status,
             "step": step,
+            "stage": stage,
+            "total_steps": step_count or _CURRENT_STATE.get("total_steps", 9),
             "step_name": step_name,
             "percent": percent,
-            "details": details,
+            "details": copy.deepcopy(details),
+            "phase_started_at": phase_started,
             "step_durations": step_durations,
             "current_step_start": current_step_start if prev_step == step else now,
             "updated_at": now,
@@ -944,7 +1015,8 @@ def _finish_video_verified(video_name, output_path, duration_seconds, worker_id,
             w.update({
                 "active": False,
                 "percent": 100,
-                "step": 8,
+                "step": 9 if w_last_step == 9 or w.get("stage") == "quality_gate" else 8,
+                "stage": "publish",
                 "step_name": f"Hoàn thành: {video_name}",
                 "video_status": "completed",
                 "step_durations": w_step_durations,
@@ -978,7 +1050,8 @@ def _finish_video_verified(video_name, output_path, duration_seconds, worker_id,
 
         _CURRENT_STATE.update({
             "percent": 100,
-            "step": 8,
+            "step": 9 if last_step == 9 or _CURRENT_STATE.get("stage") == "quality_gate" else 8,
+            "stage": "publish",
             "step_name": f"Hoàn thành xuất sắc: {video_name}",
             "last_completed": record,
             "video_status": "completed",

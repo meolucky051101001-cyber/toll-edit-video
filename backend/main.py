@@ -475,14 +475,14 @@ async def _apply_visual_sub_to_speech(
     source_duration, target_lang="vi",
 ):
     """Recover burned-in captions when the opt-in visual mode is on."""
-    from v1_job_policy import looks_like_bgm_hallucination, visual_ocr_transcript_usable
+    from v1_job_policy import looks_like_bgm_hallucination, visual_ocr_transcript_usable, visual_transcript_candidates
     asr_was_empty = not srt_segments
     if (visual_sub_to_speech and not asr_was_empty and source_duration > 0
             and looks_like_bgm_hallucination(srt_segments, source_duration)):
         logger.info("Visual mode: bỏ %d câu ASR nghi ảo giác nhạc nền", len(srt_segments))
         srt_segments = []
         asr_was_empty = True
-    if not visual_sub_to_speech:
+    if not visual_sub_to_speech or not asr_was_empty:
         return srt_segments, None, asr_was_empty
 
     from ocr_utils import perform_video_ocr, release_ocr_reader
@@ -494,6 +494,7 @@ async def _apply_visual_sub_to_speech(
         )
     finally:
         release_ocr_reader()
+    segments = visual_transcript_candidates(segments)
     if not visual_ocr_transcript_usable(segments, source_duration):
         if asr_was_empty:
             raise RuntimeError("Không tìm thấy phụ đề động trên hình để lồng tiếng.")

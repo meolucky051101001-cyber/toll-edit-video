@@ -26,6 +26,10 @@ class TelegramProgressTests(unittest.TestCase):
                 ("Bước 6/8: Đang lồng tiếng AI", 6),
                 ("Bước 7/8: Trộn nhạc nền", 7),
                 ("Bước 8/8: Render video NVENC", 8),
+                ("Bước 4/9: OCR phụ đề", 4),
+                ("Bước 8/9: Render video NVENC", 8),
+                ("Bước 9/9: OCR hậu kiểm QC", 9),
+                ("OCR hậu kiểm QC video sau render", 9),
             ]
             for message, step in cases:
                 with self.subTest(step=step), patch.object(progress.job_tracker, "update_step") as update:
@@ -38,6 +42,23 @@ class TelegramProgressTests(unittest.TestCase):
         with patch.object(progress.job_tracker, "update_step") as update:
             progress.report("Đang render video")
             update.assert_not_called()
+
+    def test_structured_progress_wins_and_text_suppression_is_scoped(self):
+        token = progress.current_job.set("test-job")
+        try:
+            with patch.object(progress.job_tracker, "update_step") as update:
+                with progress.suspend_text_progress():
+                    progress.report("OCR render", stage="quality_gate", step=9,
+                                    total_steps=9, percent=98,
+                                    details={"phase": "ocr", "completed": 2, "total": 4})
+                    progress.report("Bước 9/9: OCR hậu kiểm QC")
+                self.assertEqual(update.call_count, 1)
+                self.assertEqual(update.call_args.kwargs["percent"], 98)
+                self.assertEqual(update.call_args.kwargs["details"]["completed"], 2)
+                progress.report("Bước 8/8: Render video")
+                self.assertEqual(update.call_count, 2)
+        finally:
+            progress.current_job.reset(token)
 
     def test_tracker_failure_does_not_break_processing(self):
         token = progress.current_job.set("test-job")

@@ -11,10 +11,16 @@ import os
 import json
 import math
 import logging
+import time
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
+
+try:
+    from .v1_stage_metrics import stage
+except ImportError:
+    from v1_stage_metrics import stage
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +40,8 @@ def critical_failures(checks):
              "source_geometry_fps", "video_stream_integrity", "ass_subtitle_file",
              "final_stream_layout", "ocr_coordinate_coverage",
              "tts_audio_files", "tts_cue_coverage", "tts_no_collisions",
-             "tts_timeline_bounds", "no_cjk_residual", "no_empty_subtitles"}
+             "tts_timeline_bounds", "no_cjk_residual", "no_empty_subtitles",
+             "visual_pixel_coverage"}
     return [c for c in checks if c.status == "FAIL" and c.name in names]
 
 
@@ -114,6 +121,7 @@ def _map_normalized_box_to_frame(
     out_w: int,
     out_h: int,
     source_size: Optional[tuple[int, int]] = None,
+    padding: bool = True,
 ) -> tuple[int, int, int, int]:
     """Ánh xạ bbox chuẩn hóa (0..1) từ video gốc sang tọa độ pixel trên video thành phẩm."""
     if source_size and source_size[0] > 0 and source_size[1] > 0:
@@ -133,8 +141,8 @@ def _map_normalized_box_to_frame(
     else:
         px0, py0, px1, py1 = x0 * out_w, y0 * out_h, x1 * out_w, y1 * out_h
 
-    pad_px = max(24, int(round(out_w * 0.05)))
-    pad_py = max(20, int(round(out_h * 0.04)))
+    pad_px = max(24, int(round(out_w * 0.05))) if padding else 0
+    pad_py = max(20, int(round(out_h * 0.04))) if padding else 0
     rx0 = max(0, min(out_w - 2, int(round(px0)) - pad_px))
     ry0 = max(0, min(out_h - 2, int(round(py0)) - pad_py))
     rx1 = max(rx0 + 2, min(out_w, int(round(px1)) + pad_px))
@@ -190,6 +198,77 @@ def _transition_pixel_candidates(segments, fps=30.0, limit=192):
     return ordered, total
 
 
+def _qc_stop(stop_check):
+    if stop_check is not None and stop_check():
+        raise RuntimeError("QC stop requested")
+
+
+def _qc_progress(callback, phase, completed, total):
+    if callback is not None:
+        callback({"phase": phase, "completed": completed, "total": total})
+
+
+def _sequential_qc_frames(cap, requests, cv2, metrics, duration=None, stop_check=None):
+    """Select displayed frames by real PTS, using at most two decoded images.
+
+    A frame remains displayed until the following frame's timestamp. One-frame
+    lookahead avoids rounding VFR timestamps to an average-FPS frame number.
+    Requests for different ROIs can share the same decoded frame.
+    """
+    previous_pts = None
+    raw_count = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    expected_count = int(round(raw_count)) if math.isfinite(raw_count) and raw_count > 0 else None
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.)
+    fps = fps if math.isfinite(fps) and fps > 0 else 30.
+
+    def read_frame():
+        nonlocal previous_pts
+        _qc_stop(stop_check)
+        started = time.monotonic()
+        try:
+            ok, image = cap.read()
+            if not ok:
+                if expected_count is not None and metrics["decoded_frames"] < expected_count:
+                    raise ValueError("QC decoder stopped before the expected end of video")
+                return None
+            pts = float(cap.get(cv2.CAP_PROP_POS_MSEC)) / 1000.0
+        finally:
+            metrics["decode_seconds"] += time.monotonic() - started
+        metrics["decoded_frames"] += 1
+        # FFmpeg/OpenCV can report a small negative preroll for the first
+        # reordered frame of an otherwise zero-origin NVENC stream. That frame
+        # is already displayed at time zero; only this first timestamp may be
+        # clamped. Later timestamps must still strictly increase.
+        if previous_pts is None and -max(.1, 1.5 / fps) <= pts < 0:
+            pts = 0.
+            metrics["initial_preroll_clamped"] = True
+        if (not math.isfinite(pts) or pts < 0
+                or (previous_pts is not None and pts <= previous_pts)):
+            raise ValueError("QC decoder timestamps must increase")
+        if image is None or not hasattr(image, "shape") or getattr(image, "ndim", 0) < 2:
+            raise ValueError("QC decoder returned an invalid frame")
+        previous_pts = pts
+        return pts, metrics["decoded_frames"] - 1, image
+
+    current = read_frame()
+    following = read_frame() if current is not None else None
+    for item in sorted(requests, key=lambda row: row["mid_s"]):
+        _qc_stop(stop_check)
+        target = float(item["mid_s"])
+        if not math.isfinite(target) or target < 0:
+            continue
+        while following is not None and following[0] <= target + 1e-7:
+            current, following = following, read_frame()
+        if current is None or target + 1e-7 < current[0]:
+            continue
+        if following is None and target > current[0] + 1e-7:
+            # The last frame's display interval needs independently probed
+            # duration; frame_count / average_fps is unsafe for VFR video.
+            if duration is None or expected_count is None or target >= duration:
+                continue
+        yield item, current[2], current[0], current[1]
+
+
 def check_rendered_pixel_coverage(
     final_video_path: str | Path,
     translated_subtitles: Optional[Sequence[Any]] = None,
@@ -197,11 +276,14 @@ def check_rendered_pixel_coverage(
     source_size: Optional[tuple[int, int]] = None,
     max_samples: int = 4,
     enabled: bool = True,
+    rendered_duration_s: Optional[float] = None,
+    progress_callback=None,
+    stop_check=None,
 ) -> QCCheckItem:
     """
     Hậu kiểm giữa câu và các biên chuyển phụ đề nguồn (tối đa 192 mẫu biên):
     cắt vùng OCR phụ đề gốc từ video xuất xưởng và quét lại bằng PP-OCRv6.
-    Chỉ trả PASS / WARN / UNKNOWN (không bao giờ trả FAIL để tránh chặn nhầm job).
+    Chữ Hán còn nằm trong vùng phụ đề nguồn là FAIL; chữ ngoài vùng chỉ WARN.
     """
     if not enabled:
         return QCCheckItem(
@@ -274,8 +356,67 @@ def check_rendered_pixel_coverage(
             f"Bỏ qua hậu kiểm pixel do thiếu OpenCV ({exc})",
         )
 
+    source_text = []
+    for seg in translated_subtitles or []:
+        for block in _seg_val(seg, "tracking_blocks", []) or []:
+            if _seg_val(block, "is_static") or _seg_val(block, "is_packaging"):
+                continue
+            text = "".join(c for c in (_seg_val(block, "text") or "") if "\u3400" <= c <= "\u9fff")
+            if len(text) >= 2:
+                source_text.append((_qc_ts_seconds(_seg_val(block, "start", 0)),
+                                    _qc_ts_seconds(_seg_val(block, "end", 0)), text))
+
+    stop_error = None
+    original_stop_check = stop_check
+
+    def checked_stop():
+        nonlocal stop_error
+        try:
+            _qc_stop(original_stop_check)
+        except Exception as exc:
+            stop_error = exc
+            raise
+
+    stop_check = checked_stop
+    _qc_stop(stop_check)
     crops = []
     crop_meta = []
+    batch_rows = []
+    metrics = {"decoded_frames": 0, "unique_decoded_frames": 0, "seek_count": 0,
+               "decode_seconds": 0.0, "ocr_seconds": 0.0}
+    used_frames = set()
+    ocr_started = False
+    duration = rendered_duration_s
+    if duration is None:
+        try:
+            from v1_media_streams import probe_main_video
+            duration = probe_main_video(v_path).duration
+        except Exception:
+            duration = None
+    if duration is not None and (not math.isfinite(float(duration)) or float(duration) <= 0):
+        duration = None
+
+    def flush_crops():
+        nonlocal ocr_started
+        if not crops:
+            return
+        _qc_stop(stop_check)
+        from ocr_utils import _readtext_batch
+        from v1_gpu_gatekeeper import gpu_gatekeeper
+        started = time.monotonic()
+        try:
+            with gpu_gatekeeper("visual_ocr", timeout_seconds=120.0, min_free_mb=1000.0):
+                ocr_started = True
+                rows = _readtext_batch(crops)
+            if len(rows or []) != len(crops):
+                raise ValueError("OCR hậu kiểm trả thiếu kết quả")
+            batch_rows.extend(rows)
+            crops.clear()
+        finally:
+            metrics["ocr_seconds"] += time.monotonic() - started
+        _qc_stop(stop_check)
+        _qc_progress(progress_callback, "ocr", len(batch_rows), requested_frames)
+
     requested_frames = 0
     cap = cv2.VideoCapture(str(v_path))
     try:
@@ -291,15 +432,11 @@ def check_rendered_pixel_coverage(
             fps = 30.
         transitions, transition_total = _transition_pixel_candidates(translated_subtitles, fps)
         sampled = transitions + sampled
-        duration = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / fps
-        for item in sampled:
-            if duration > 0 and item["mid_s"] >= duration:
-                continue
-            requested_frames += 1
-            cap.set(cv2.CAP_PROP_POS_MSEC, item["mid_s"] * 1000.0)
-            ok, frame = cap.read()
-            if not ok or frame is None or not hasattr(frame, "shape") or getattr(frame, "ndim", 0) < 2:
-                continue
+        sampled = [item for item in sampled if duration is None or item["mid_s"] < duration]
+        requested_frames = len(sampled)
+        _qc_progress(progress_callback, "decode", 0, requested_frames)
+        for item, frame, decoded_pts, ordinal in _sequential_qc_frames(
+                cap, sampled, cv2, metrics, duration=duration, stop_check=stop_check):
             fh, fw = frame.shape[:2]
             if fw < 32 or fh < 32:
                 continue
@@ -309,16 +446,40 @@ def check_rendered_pixel_coverage(
             if crop is None or crop.size == 0 or crop.shape[0] < 16 or crop.shape[1] < 16:
                 continue
             crops.append(crop.copy())
+            used_frames.add(ordinal)
             crop_meta.append({
                 "index": item["index"],
                 "time_s": item["mid_s"],
                 "roi": [rx0, ry0, rx1, ry1],
+                "target_roi": _map_normalized_box_to_frame(
+                    x0, y0, x1, y1, fw, fh, source_size, padding=False),
+                "source_text": {text for start, end, text in source_text
+                                if start - .12 <= item["mid_s"] <= end + .12},
                 "transition": item.get("transition", False),
+                "decoded_time_s": decoded_pts,
             })
+            _qc_progress(progress_callback, "decode", len(crop_meta), requested_frames)
+            if len(crops) >= 8:
+                flush_crops()
+        flush_crops()
+    except Exception as exc:
+        if stop_error is not None:
+            raise stop_error
+        return QCCheckItem(QCCategory.SUBTITLE_STYLING.value, "visual_pixel_coverage", "UNKNOWN",
+                           f"Chưa xác minh đủ khung hình QC ({exc})", details=metrics)
     finally:
         cap.release()
+        if ocr_started:
+            from ocr_utils import release_ocr_reader
+            release_ocr_reader()
+    metrics["unique_decoded_frames"] = len(used_frames)
+    metrics["decode_seconds"] = round(metrics["decode_seconds"], 4)
+    metrics["ocr_seconds"] = round(metrics["ocr_seconds"], 4)
+    logger.info("QC sequential frames=%d samples=%d unique_frames=%d seeks=0 decode_seconds=%.3f ocr_seconds=%.3f",
+                metrics["decoded_frames"], len(crop_meta), len(used_frames),
+                metrics["decode_seconds"], metrics["ocr_seconds"])
 
-    if not crops:
+    if not crop_meta:
         return QCCheckItem(
             QCCategory.SUBTITLE_STYLING.value,
             "visual_pixel_coverage",
@@ -326,29 +487,8 @@ def check_rendered_pixel_coverage(
             "Không trích được khung hình hợp lệ từ video xuất xưởng để hậu kiểm pixel",
         )
 
-    try:
-        from contextlib import nullcontext
-        from ocr_utils import _readtext_batch, release_ocr_reader, _visual_chinese_count
-        try:
-            from v1_gpu_gatekeeper import gpu_gatekeeper
-            gate_ctx = gpu_gatekeeper("visual_ocr", timeout_seconds=120.0, min_free_mb=1000.0)
-        except Exception:
-            gate_ctx = nullcontext()
-
-        with gate_ctx:
-            try:
-                batch_rows = _readtext_batch(crops)
-            finally:
-                release_ocr_reader()
-    except Exception as exc:
-        return QCCheckItem(
-            QCCategory.SUBTITLE_STYLING.value,
-            "visual_pixel_coverage",
-            "UNKNOWN",
-            f"Không thể chạy PP-OCRv6 hậu kiểm pixel ({exc})",
-        )
-
-    if len(batch_rows or []) != len(crops):
+    from ocr_utils import _visual_chinese_count
+    if len(batch_rows or []) != len(crop_meta):
         return QCCheckItem(QCCategory.SUBTITLE_STYLING.value, "visual_pixel_coverage", "UNKNOWN",
                            "OCR hậu kiểm trả thiếu kết quả; chưa xác minh đủ các khung hình")
     leaks = []
@@ -360,6 +500,29 @@ def check_rendered_pixel_coverage(
             prob = float(row[2]) if len(row) >= 3 and row[2] is not None else 1.0
             cjk_cnt = _visual_chinese_count(text)
             if cjk_cnt >= 2 and prob >= 0.60:
+                # Padded OCR context can contain valid packaging/scene text.
+                # Only block when the recognized glyphs overlap the source
+                # caption itself, rather than treating every nearby CJK as a leak.
+                in_caption = False
+                try:
+                    points = row[0]
+                    x_min = min(float(p[0]) for p in points) + meta["roi"][0]
+                    x_max = max(float(p[0]) for p in points) + meta["roi"][0]
+                    y_min = min(float(p[1]) for p in points) + meta["roi"][1]
+                    y_max = max(float(p[1]) for p in points) + meta["roi"][1]
+                    tx0, ty0, tx1, ty1 = meta["target_roi"]
+                    area = max(0., x_max - x_min) * max(0., y_max - y_min)
+                    overlap = max(0., min(x_max, tx1) - max(x_min, tx0)) * max(0., min(y_max, ty1) - max(y_min, ty0))
+                    han = "".join(c for c in text if "\u3400" <= c <= "\u9fff")
+                    matches_source = not source_text or any(
+                        han[i:i + 2] in expected for expected in meta["source_text"]
+                        for i in range(len(han) - 1))
+                    # High-confidence glyphs in the verified caption box remain
+                    # a leak even when OCR spelling differs from source text.
+                    in_caption = (area > 0 and overlap / area >= 0.5
+                                  and (prob >= 0.90 or matches_source))
+                except (TypeError, ValueError, IndexError):
+                    pass
                 leaks.append({
                     "index": meta["index"],
                     "time_s": meta["time_s"],
@@ -367,21 +530,27 @@ def check_rendered_pixel_coverage(
                     "detected_text": text[:40],
                     "cjk_chars": cjk_cnt,
                     "confidence": round(prob, 3),
+                    "inside_caption": in_caption,
                 })
 
     if leaks:
-        times_str = ", ".join(f"{lk['time_s']:.1f}s" for lk in leaks[:3])
+        confirmed = [leak for leak in leaks if leak["inside_caption"]]
+        visible_leaks = confirmed or leaks
+        times_str = ", ".join(f"{lk['time_s']:.1f}s" for lk in visible_leaks[:3])
         return QCCheckItem(
             QCCategory.SUBTITLE_STYLING.value,
             "visual_pixel_coverage",
-            "WARN",
-            f"Phát hiện khả năng còn chữ Hán chưa che hết ở khung hình {times_str} — kiểm tra lại video",
+            "FAIL" if confirmed else "WARN",
+            (f"Còn chữ Hán trong vùng phụ đề nguồn ở {times_str}; cần sửa trước khi xuất video"
+             if confirmed else f"Phát hiện chữ Hán gần vùng phụ đề ở {times_str}; cần kiểm tra ngữ cảnh"),
             details={
-                "sampled_frames": len(crops),
-                "leaks": leaks[:5],
+                "sampled_frames": len(crop_meta),
+                **metrics,
+                "leaks": visible_leaks[:5],
                 "ass_subtitle_path": str(ass_subtitle_path) if ass_subtitle_path else None,
                 "transition_candidates": transition_total,
                 "leak_count": len(leaks),
+                "confirmed_leak_count": len(confirmed),
                 "leak_times_s": sorted({leak["time_s"] for leak in leaks}),
             },
         )
@@ -389,13 +558,15 @@ def check_rendered_pixel_coverage(
     return QCCheckItem(
         QCCategory.SUBTITLE_STYLING.value,
         "visual_pixel_coverage",
-        "WARN" if transition_total > len(transitions) or len(crops) < requested_frames else "PASS",
-        (f"Đã quét {len(crops)} khung hình; hậu kiểm chưa đủ do giới hạn lấy mẫu hoặc lỗi giải mã"
-         if transition_total > len(transitions) or len(crops) < requested_frames else
-         f"Đã quét pixel thực tế {len(crops)} khung hình xuất xưởng: không phát hiện chữ gốc lòi ra"),
+        "WARN" if transition_total > len(transitions) or len(crop_meta) < requested_frames else "PASS",
+        (f"Đã quét {len(crop_meta)} khung hình; hậu kiểm chưa đủ do giới hạn lấy mẫu hoặc lỗi giải mã"
+         if transition_total > len(transitions) or len(crop_meta) < requested_frames else
+         f"Đã quét pixel thực tế {len(crop_meta)} khung hình xuất xưởng: không phát hiện chữ gốc lòi ra"),
         details={
-            "sampled_frames": len(crops),
+            "sampled_frames": len(crop_meta),
+            **metrics,
             "sample_times_s": [m["time_s"] for m in crop_meta],
+            "decoded_sample_times_s": [m["decoded_time_s"] for m in crop_meta],
             "transition_candidates": transition_total,
             "transition_samples": sum(m["transition"] for m in crop_meta),
             "transition_sampling_capped": transition_total > len(transitions),
@@ -404,6 +575,7 @@ def check_rendered_pixel_coverage(
     )
 
 
+@stage("quality_gate")
 def run_quality_gate(
     job_id: str,
     final_video_path: str | Path,
@@ -415,11 +587,14 @@ def run_quality_gate(
     policy: Optional[str] = None,
     workspace_path: Optional[str | Path] = None,
     enable_visual_pixel_qc: Optional[bool] = None,
+    progress_callback=None,
+    stop_check=None,
 ) -> QCReport:
     """
     Chạy 8 nhóm kiểm tra tự động cho video thành phẩm và xuất báo cáo JSON.
     """
     effective_policy = (policy or os.getenv("V1_QC_POLICY", QCPolicy.BLOCK.value)).upper()
+    _qc_stop(stop_check)
     if effective_policy not in (QCPolicy.REPORT_ONLY.value, QCPolicy.WARN.value, QCPolicy.BLOCK.value):
         effective_policy = QCPolicy.BLOCK.value
 
@@ -652,7 +827,7 @@ def run_quality_gate(
             'ocr_coordinate_coverage', geometry_status,
             'OCR coordinate audit (not a guarantee of pixel-level coverage)', geometry))
 
-    # 5b. POST-RENDER VISUAL PIXEL QC (cảnh báo WARN nếu sót chữ Hán gốc sau render, không chặn BLOCK)
+    # 5b. Confirmed caption leaks participate in the normal BLOCK policy.
     if enable_visual_pixel_qc is None:
         try:
             from v1_feature_flags import get_feature_flags
@@ -672,11 +847,11 @@ def run_quality_gate(
             ass_subtitle_path=ass_subtitle_path,
             source_size=src_geom_size,
             enabled=True,
+            rendered_duration_s=output.duration if "output" in locals() else None,
+            progress_callback=progress_callback,
+            stop_check=stop_check,
         )
-        if pixel_check.status in ("PASS", "WARN"):
-            checks.append(pixel_check)
-        else:
-            logger.info("[QUALITY_GATE] Bỏ qua visual_pixel_coverage (%s): %s", pixel_check.status, pixel_check.message)
+        checks.append(pixel_check)
 
     # 6. TTS TIMING FIT: compare the actual files, not cached duration labels.
     measured_dubs = []

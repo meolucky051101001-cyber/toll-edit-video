@@ -130,6 +130,7 @@ class StudioOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 release.wait(3)
 
         with patch.dict(sys.modules, {"main": SimpleNamespace(UNIFIED_PIPELINE_LOCK=lock)}), \
+             patch.object(workflow, "WORKSPACE", job_tracker.WORKSPACE), \
              patch.object(workflow, "_wait_pipeline_free", return_value=True), \
              patch.object(stop_service, "is_stop_requested", return_value=False), \
              patch.object(disk_guard, "ensure_free_space"):
@@ -166,6 +167,7 @@ class StudioOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 self.fail("Uncleared stop flag must prevent native work")
 
         with patch.dict(sys.modules, {"main": SimpleNamespace(UNIFIED_PIPELINE_LOCK=lock)}), \
+             patch.object(workflow, "WORKSPACE", job_tracker.WORKSPACE), \
              patch.object(workflow, "_wait_pipeline_free", return_value=True), \
              patch.object(stop_service, "is_stop_requested", return_value=True), \
              patch.object(stop_service, "clear_stop"):

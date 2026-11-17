@@ -576,6 +576,7 @@ Yêu cầu TỐI QUAN TRỌNG:
 7. LỌC HOẶC VIỆT HÓA CÂU KÊU GỌI (CTA): Các câu kêu gọi Douyin/TikTok như '回复888', '关注我', '点赞' dịch khéo thành lời kêu gọi tự nhiên ngắn gọn (ví dụ: 'để lại bình luận bên dưới nhé', 'nhớ bấm theo dõi nhé'), không dịch máy số hiệu thô thiển.
 8. NGỮ CẢNH NỐI TIẾP: Vì phụ đề thường bị ngắt giữa chừng, hãy đọc cả đoạn để dịch sao cho ý nối liền mạch trơn tru.
 Không vì rút gọn cho TTS mà bỏ hình dạng, kích thước, số lượng, phủ định, điều kiện hoặc thứ tự thao tác. Không thêm công dụng hay độ bền mà nguồn không nói. Phân biệt chính xác hình vuông/hình chữ nhật và một bên/hai bên; giữ điều kiện như 'nếu không đậy nắp'.
+Trong ngữ cảnh bao bì/đồ sưu tầm: 自封袋 là túi zip, 背卡 là bìa lót, 吧唧 là huy hiệu, 谷子 là đồ sưu tầm. Với độ dày túi/màng, 丝 là đơn vị độ dày (1丝 = 0,01 mm), không dịch thành lụa; không tự suy ra độ dày một mặt hay hai mặt. Các số cỡ 65/75 không phải giá tiền.
 """
     if with_vision:
         prompt += "9. TRỰC QUAN: Kết hợp các bức ảnh đính kèm từ video để chọn đại từ nhân xưng và danh từ chính xác với bối cảnh.\n"

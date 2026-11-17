@@ -18,6 +18,7 @@
     "mix",
     "start:video_rendering",
     "render",
+    "start:quality_gate",
     "qc",
     "deliver",
     "publish"

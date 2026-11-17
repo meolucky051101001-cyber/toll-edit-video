@@ -341,8 +341,12 @@ async def _run_orchestrated_local_video(c, *, require_existing_manifest=False):
         planned_mode = frozen_effective.get("video_mode") or c.video_mode or "auto"
 
         async def _batch_orch_progress(st, step, tot, pct, msg, d):
-            job_tracker.update_step(step, msg, percent=int(pct))
-            await c.notify(msg)
+            from telegram_progress import suspend_text_progress
+            if st != "publish":
+                job_tracker.update_step(step, msg, percent=int(pct), stage=st,
+                                        total_steps=tot, details=d)
+            with suspend_text_progress():
+                await c.notify(msg)
 
         orch_started = time.monotonic()
         res = await orch.execute_job(
@@ -475,7 +479,7 @@ async def _legacy_recognize_and_locate(c, frozen_eff, visual_sub_to_speech, asr_
         srt_segments = []
         asr_was_empty = True
 
-    if visual_sub_to_speech:
+    if visual_sub_to_speech and asr_was_empty:
         await pause_checkpoint()
         _raise_if_stopped()
         await c.notify("👀 Đang quét phụ đề tiếng Trung trên hình (Visual OCR-to-TTS)...")
@@ -489,6 +493,8 @@ async def _legacy_recognize_and_locate(c, frozen_eff, visual_sub_to_speech, asr_
                 )
         finally:
             release_ocr_reader()
+        from v1_job_policy import visual_transcript_candidates
+        visual_segments = visual_transcript_candidates(visual_segments)
         if c.visual_ocr_transcript_usable(visual_segments, source_duration):
             srt_segments = visual_segments
             for idx, seg in enumerate(srt_segments, start=1):
@@ -526,7 +532,7 @@ async def _legacy_recognize_and_locate(c, frozen_eff, visual_sub_to_speech, asr_
                 _, vid_w, vid_h, main_y_pct = await to_thread_drained(
                     perform_video_ocr, c.video_path, target_lang="vi", sample_rate=1.0,
                     api_key=GEMINI_API_KEY, srt_segments=srt_segments,
-                    visual_sub_to_speech=visual_sub_to_speech,
+                    visual_sub_to_speech=bool(visual_sub_to_speech and asr_was_empty),
                     _source_duration=source_duration,
                 )
         except Exception as e:

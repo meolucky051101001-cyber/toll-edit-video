@@ -8,6 +8,79 @@ import pytest
 from backend.subtitle_blur import blur_regions, build_localized_blur_filter
 
 
+def _legacy_graph(boxes, width, height, settings):
+    """Frozen v5 execution graph, an independent pixel oracle for v6 slots."""
+    import math
+    regions = blur_regions(boxes, width, height, settings)
+    radius = settings.get('sub_blur_radius', 16)
+    parts = [f"format=yuv420p,split={len(regions) + 1}[oldmain0]" +
+             ''.join(f'[old{i}crop]' for i in range(len(regions))) + ';']
+    for i, (x, y, w, h, intervals) in enumerate(regions):
+        luma = min(radius, (min(w, h) - 1) // 2)
+        chroma = min(luma, max(0, (min(w, h) // 2 - 1) // 2))
+        stamp = lambda t: f'{math.floor(t * 1_000_000) / 1_000_000:.6f}'
+        enable = '+'.join(f'gte(t,{stamp(a)})*lt(t,{stamp(b)})' for a, b in intervals)
+        output = f'[oldmain{i + 1}];' if i + 1 < len(regions) else ''
+        parts.append(f'[old{i}crop]crop={w}:{h}:{x}:{y},'
+                     f"boxblur=luma_radius={luma}:luma_power=3:chroma_radius={chroma}:chroma_power=3:enable='{enable}'[old{i}blur];"
+                     f"[oldmain{i}][old{i}blur]overlay={x}:{y}:enable='{enable}'{output}")
+    return ''.join(parts)
+
+
+def _render_lossless(tmp_path, graph, frames, width, height, fps, name, pts=None):
+    source = tmp_path / f'{name}.in.yuv'
+    source.write_bytes(frames)
+    script = tmp_path / f'{name}.filters.txt'
+    script.write_text((f'settb=1/1000,setpts={pts},' if pts else '') + graph, encoding='utf-8')
+    output = tmp_path / f'{name}.out.yuv'
+    result = subprocess.run([shutil.which('ffmpeg'), '-v', 'error', '-nostdin', '-y',
+        '-threads', '1', '-filter_threads', '1', '-f', 'rawvideo', '-pix_fmt', 'yuv420p',
+        '-s', f'{width}x{height}', '-r', str(fps), '-i', str(source),
+        '-filter_script:v', str(script), '-c:v', 'rawvideo', '-threads', '1',
+        '-fps_mode', 'passthrough', '-pix_fmt', 'yuv420p', '-f', 'rawvideo', str(output)],
+        capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr.decode(errors='replace')
+    return output.read_bytes()
+
+
+@pytest.mark.parametrize('fps', [30, 60])
+@pytest.mark.parametrize('case', ['move', 'resize', 'gap', 'tiny_edges', 'overlap', 'vfr'])
+def test_compact_slots_match_legacy_yuv_at_every_frame(tmp_path, fps, case):
+    if not shutil.which('ffmpeg'):
+        pytest.skip('FFmpeg required for pixel integration check')
+    width, height, count = 96, 64, 24
+    yy, xx = np.indices((height, width))
+    chunks = []
+    for frame in range(count):
+        y = ((xx * 23 + yy * 17 + frame * 11) % 220 + 16).astype(np.uint8)
+        u = ((np.arange(width * height // 4) * 11 + frame * 7) % 224 + 16).astype(np.uint8)
+        v = ((np.arange(width * height // 4) * 13 + frame * 3) % 224 + 16).astype(np.uint8)
+        chunks.append(y.tobytes() + u.tobytes() + v.tobytes())
+    def box(a, b, x, y, w=24, h=16):
+        return dict(start=a/fps, end=b/fps, x_pct=x/width, max_x_pct=(x+w)/width,
+                    y_pct=y/height, max_y_pct=(y+h)/height)
+    boxes = [box(2, 8, 8, 8), box(9, 15, 40, 32), box(16, 22, 64, 8)]
+    if case == 'resize':
+        boxes = [box(2, 8, 8, 8, 32, 24), box(9, 15, 40, 32, 16, 16), box(16, 22, 64, 8)]
+    elif case == 'gap':
+        boxes = [box(2, 8, 8, 8), box(9, 16, 40, 32), box(17, 22, 8, 8)]
+    elif case == 'tiny_edges':
+        boxes = [box(0, 8, 0, 0, 2, 2), box(9, 16, 94, 62, 2, 2), box(17, 24, 0, 62, 2, 2)]
+    elif case == 'overlap':
+        # Region 3 cannot move before region 2: their padded pixels overlap.
+        boxes = [box(0, 8, 8, 8), box(8, 24, 30, 24, 32, 24), box(10, 20, 40, 32)]
+    settings = dict(sub_blur_padding_x=0, sub_blur_padding_y=0, sub_blur_radius=3)
+    graph = build_localized_blur_filter(boxes, width, height, settings)
+    legacy = _legacy_graph(boxes, width, height, settings)
+    pts = r'if(lt(N\,12)\,N*17\,204+(N-12)*41)' if case == 'vfr' else None
+    original = _render_lossless(tmp_path, legacy, b''.join(chunks), width, height, fps, 'legacy', pts)
+    optimized = _render_lossless(tmp_path, graph, b''.join(chunks), width, height, fps, 'slots', pts)
+    assert len(optimized) == len(original) == width * height * 3 // 2 * count
+    assert optimized == original
+    if case in {'move', 'gap', 'tiny_edges', 'vfr'}:
+        assert 'split=2[' in graph
+
+
 @pytest.mark.parametrize('width,height,tiny', [(320, 180, False), (180, 320, False), (64, 64, True)])
 def test_real_filter_changes_only_active_source_rectangles(tmp_path, width, height, tiny):
     ffmpeg = shutil.which('ffmpeg')

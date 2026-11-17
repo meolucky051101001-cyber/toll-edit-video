@@ -27,6 +27,7 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
         self.output = self.root / "work"
         self.delivery = self.root / "delivery" / "Dubbed_fixture.mp4"
         self.events = []
+        self.progress = []
         self.fail_mix = False
         self.block_qc = False
 
@@ -154,6 +155,10 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(kwargs["policy"], "BLOCK")
             if self.block_qc:
                 raise RuntimeError("Quality Gate BLOCK: fixture")
+            kwargs["progress_callback"]({"phase": "decode", "completed": 1, "total": 2})
+            kwargs["progress_callback"]({"phase": "ocr", "completed": 1, "total": 2})
+            kwargs["progress_callback"]({"phase": "decode", "completed": 2, "total": 2})
+            kwargs["progress_callback"]({"phase": "ocr", "completed": 2, "total": 2})
             return SimpleNamespace(overall_status="PASSED", to_dict=lambda: {"overall_status": "PASSED"})
 
         def deliver(source, destination):
@@ -192,6 +197,7 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
 
     async def execute(self):
         async def progress(stage, *args):
+            self.progress.append((stage, *args))
             if stage == "publish":
                 self.events.append("publish")
         return await self.orchestrator.execute_job(
@@ -229,7 +235,7 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "success")
         for name, content in before.items():
             self.assertEqual((self.output / name).read_bytes(), content)
-        self.assertEqual(self.events, ["start:audio_mixing", "mix", "start:video_rendering", "render", "qc", "deliver", "publish"])
+        self.assertEqual(self.events, ["start:audio_mixing", "mix", "start:video_rendering", "render", "start:quality_gate", "qc", "deliver", "publish"])
 
     async def test_qc_block_keeps_existing_delivery_untouched_and_checkpoint_incomplete(self):
         self.harness()
@@ -242,6 +248,38 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("deliver", self.events)
         self.assertNotIn("publish", self.events)
         self.assertNotEqual(self.orchestrator.manifest_manager.load_manifest("golden_fixture").status, "completed")
+
+    async def test_qc_retry_reuses_render_and_reports_a_separate_ninth_stage(self):
+        self.harness()
+        self.block_qc = True
+        with self.assertRaisesRegex(RuntimeError, "Quality Gate BLOCK"):
+            await self.execute()
+        manager = self.orchestrator.manifest_manager
+        failed = manager.load_manifest("golden_fixture")
+        self.assertEqual(failed.current_stage, "quality_gate")
+        self.assertEqual(failed.stages["quality_gate"]["status"], "failed")
+        render_duration = failed.stages["video_rendering"]["duration_s"]
+        rendered = next(iter(failed.stages["video_rendering"]["artifacts"].values()))
+        render_bytes = Path(rendered["path"]).read_bytes()
+        self.events.clear()
+        self.progress.clear()
+        self.block_qc = False
+        result = await self.execute()
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(self.events, ["start:quality_gate", "qc", "deliver", "publish"])
+        self.assertEqual(self.delivery.read_bytes(), render_bytes)
+        completed = manager.load_manifest("golden_fixture")
+        self.assertEqual(completed.stages["video_rendering"]["duration_s"], render_duration)
+        self.assertEqual(completed.stages["quality_gate"]["retry_count"], 2)
+        qc_progress = [record for record in self.progress if record[0] == "quality_gate"]
+        self.assertTrue(qc_progress)
+        self.assertTrue(all(record[1:3] == (9, 9) and record[3] < 100 for record in qc_progress))
+        self.assertEqual(qc_progress[-1][5]["phase"], "ocr")
+        self.assertEqual(qc_progress[-1][5]["stage_fraction"], 1.0)
+        self.assertEqual(qc_progress[-1][5]["recognized"], 2)
+        percentages = [record[3] for record in qc_progress]
+        self.assertEqual(percentages, sorted(percentages))
+        self.assertEqual(self.progress[-1][:4], ("publish", 9, 9, 100.0))
 
     async def test_visual_transcript_reuses_ocr_from_asr_and_keeps_original_bgm(self):
         import srt
@@ -341,3 +379,23 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.events, [])
         self.assertFalse(self.delivery.exists())
         self.assertNotEqual(self.orchestrator.manifest_manager.load_manifest("golden_fixture").status, "completed")
+
+    async def test_qc_progress_cancellation_is_propagated_and_cannot_publish(self):
+        self.harness()
+
+        async def cancel_during_qc(stage, step, total, percent, message, details):
+            if stage == "quality_gate" and details.get("phase"):
+                raise asyncio.CancelledError()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await self.orchestrator.execute_job(
+                self.source, "golden_fixture", output_dir=self.output, delivery_path=self.delivery,
+                progress_callback=cancel_during_qc, stop_checker=lambda: False,
+            )
+        self.assertIn("qc", self.events)
+        self.assertNotIn("deliver", self.events)
+        self.assertFalse(self.delivery.exists())
+        manifest = self.orchestrator.manifest_manager.load_manifest("golden_fixture")
+        self.assertEqual(manifest.stages["video_rendering"]["status"], "completed")
+        self.assertEqual(manifest.stages["quality_gate"]["status"], "failed")
+        self.assertNotEqual(manifest.status, "completed")

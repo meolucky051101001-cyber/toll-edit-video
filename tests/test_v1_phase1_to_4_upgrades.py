@@ -182,8 +182,8 @@ class TestToolV1Upgrades(unittest.TestCase):
                     policy="REPORT_ONLY",
                     workspace_path=tmp,
                 )
-            self.assertEqual(rep.overall_status, "PASSED")
-            self.assertEqual(rep.warning_count, 0)
+            self.assertEqual(rep.overall_status, "PASSED_WITH_WARNINGS")
+            self.assertEqual(next(c.status for c in rep.checks if c.name == 'visual_pixel_coverage'), 'UNKNOWN')
             self.assertEqual(rep.failure_count, 0)
 
     def test_05_smart_dialogue_does_not_guess_short_reply(self):

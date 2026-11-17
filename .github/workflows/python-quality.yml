@@ -54,9 +54,16 @@ jobs:
           tests/test_translation_caption_evidence.py
           tests/test_local_runtime_stability.py
           tests/test_control_scoped_shutdown.py
+          tests/test_control_boot_pause.py
           tests/test_localized_subtitle_blur.py
           tests/test_localized_blur_ffmpeg.py
           tests/test_visual_caption_timing.py
+          tests/test_ocr_observation_ledger.py
+          tests/test_ocr_adaptive_sampling.py
+          tests/test_narration_source_policy.py
+          tests/test_v1_voice_ocr_optimization.py
+          tests/test_telegram_progress.py
+          tests/test_qc_stage_progress.py
           tests/test_runtime_lock_regressions.py
           tests/test_environment_isolation.py
           tests/test_phase7_orchestrator_golden.py
