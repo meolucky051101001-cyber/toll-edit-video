@@ -1644,7 +1644,10 @@ def _attach_source_caption_tracks(segments, tracks):
         for s in ordered_segs
     ]
     scored = []
-    for track in _bridge_source_caption_gaps(tracks):
+    coalesced_input = _coalesce_stationary_source_tracks(
+        _bridge_source_caption_gaps(tracks), max_chunk_s=None
+    )
+    for track in coalesced_input:
         t_start, t_end = float(track.start), float(track.end)
         overlapping = [
             (s, s0, s1)
@@ -1677,8 +1680,9 @@ def _attach_source_caption_tracks(segments, tracks):
             distance = max(start - middle, middle - end, 0.)
             return overlap, -distance
         best_item = max(seg_bounds, key=score)
-        ov, neg_dist = score(best_item)
-        scored.append((track, best_item[0], ov, -neg_dist))
+        ov, _ = score(best_item)
+        edge_dist = max(best_item[1] - t_end, t_start - best_item[2], 0.)
+        scored.append((track, best_item[0], ov, edge_dist))
     first_seg_obj = seg_bounds[0][0] if seg_bounds else None
     first_seg_start = seg_bounds[0][1] if seg_bounds else 0.0
     has_nearby = any(ov > 0.0 or dist <= 2.2 for _, _, ov, dist in scored)
