@@ -1138,6 +1138,12 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         if float(s.max_y_pct - s.y_pct) > 0.005
     )
     median_seed_h = seed_heights[len(seed_heights) // 2] if seed_heights else 0.0
+    max_seed_h = seed_heights[-1] if seed_heights else 0.0
+    max_allowed_block_h = max(median_seed_h * 1.58, max_seed_h * 1.35) if median_seed_h > 0.0 else 1.0
+    seeds_centered = bool(
+        source_seeds
+        and max(abs(((s.x_pct + s.max_x_pct) * 0.5) - 0.5) for s in source_seeds) <= 0.08
+    )
 
     def caption_blocks(blocks):
         selected = []
@@ -1149,10 +1155,10 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             if source_only and source_seeds:
                 center = (block.y_pct + block.max_y_pct) / 2
                 in_band = (
-                    (median_seed_h <= 0.0 or block_h >= median_seed_h * 0.74)
+                    (median_seed_h <= 0.0 or (median_seed_h * 0.74 <= block_h <= max_allowed_block_h))
                     and any(
                         abs(center - (seed.y_pct + seed.max_y_pct) / 2)
-                        <= max(block_h, seed.max_y_pct - seed.y_pct) * .52 + .004
+                        <= min(block_h, (seed.max_y_pct - seed.y_pct) * 1.30) * .52 + .004
                         for seed in source_seeds
                     )
                 )
@@ -1164,7 +1170,7 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
                 continue
             cx = (block.x_pct + block.max_x_pct) / 2
             if not matches_speech and (
-                abs(cx - .5) > .25
+                abs(cx - .5) > (.145 if (source_only and seeds_centered) else .25)
                 or (block.max_x_pct - block.x_pct < .25 and abs(cx - .5) > .15)
             ):
                 continue
