@@ -152,11 +152,16 @@ def _load_mono_16k(audio_path: str | Path) -> np.ndarray:
     return np.asarray(mono, dtype=np.float32)
 
 
-def _decode_spans_paraformer(mono_16k: np.ndarray, spans: Sequence[Tuple[float, float]]) -> List[str]:
+def _decode_spans_paraformer(
+    mono_16k: np.ndarray,
+    spans: Sequence[Tuple[float, float]],
+    *,
+    use_punct: bool = True,
+) -> List[str]:
     if not spans or mono_16k.size == 0:
         return ["" for _ in spans]
     rec = _get_recognizer()
-    punct = _get_punctuator()
+    punct = _get_punctuator() if use_punct else None
     streams = []
     n_total = len(mono_16k)
     for start_s, end_s in spans:
@@ -282,7 +287,7 @@ def enrich_segments_with_paraformer(
 
         out = [dict(s) for s in segments]
         spans = [(float(s["start"]), float(s["end"])) for s in out]
-        pf_texts = _decode_spans_paraformer(mono, spans)
+        pf_texts = _decode_spans_paraformer(mono, spans, use_punct=False)
         for item, pf_txt in zip(out, pf_texts):
             w_cjk = _cjk_chars(item.get("text", ""))
             p_cjk = _cjk_chars(pf_txt)

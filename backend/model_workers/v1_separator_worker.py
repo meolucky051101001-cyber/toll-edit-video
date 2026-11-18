@@ -303,7 +303,7 @@ def main():
                     "segment_size": 256,
                     "override_model_segment_size": False,
                     "batch_size": batch_sz,
-                    "overlap": None,
+                    "overlap": max(1, int(os.getenv("V1_ROFORMER_OVERLAP", "2"))),
                     "pitch_shift": 0,
                 },
             )

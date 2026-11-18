@@ -109,6 +109,16 @@ def normalize_text_for_tts(text: str) -> str:
     res = re.sub(r'\b4K\b', '4 ca', res, flags=re.I)
     res = re.sub(r'\b8K\b', '8 ca', res, flags=re.I)
 
+    # Sàn TMĐT 1688 & mã tìm kiếm/ID/mã đơn 5-12 chữ số đứng độc lập:
+    # Tránh để TTS đọc "1067778" thành "một triệu không trăm sáu mươi bảy nghìn..." (15 âm tiết gây tràn khung đọc)
+    res = re.sub(r'\b1688\b', '16 88', res)
+    res = re.sub(
+        r'(?<![.,\d])\b(\d{5,12})\b(?![.,\d]|\s*(?:đ|đồng|k|nghìn|ngàn|triệu|tỷ|vnd|usd|%|fps|hz|mah|w)\b)',
+        lambda m: ' '.join(m.group(1)),
+        res,
+        flags=re.I,
+    )
+
     # 6. Chuẩn hóa VRAM thành 'vram' và chữ vi thành 'vy' (tránh CapCut đọc nhầm thành số La Mã 5 hoặc 6)
     res = re.sub(r'\b(?:VRAM|vram|V-RAM|v-ram|V\s+ram|v\s+ram|vi\s+ram|VI\s+RAM)\b', 'vram', res, flags=re.I)
     res = re.sub(r'\bvi\b', 'vy', res)

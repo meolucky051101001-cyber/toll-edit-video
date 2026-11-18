@@ -509,10 +509,15 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
     # Dự đoán độ dài dựa trên số từ (trung bình 0.28s mỗi từ tiếng Việt).
     # Gom một lượt gọi Gemini duy nhất để rút gọn toàn bộ câu quá dài trước khi render.
     overly_long_items = []
+    try:
+        from ai.v1_tech_pronunciation import normalize_text_for_tts as _norm_est
+    except Exception:
+        _norm_est = lambda s: s
     for seg in translated_segments:
         text = seg.content.strip()
         hard_max = windows.get(seg.index, 3.0)
-        word_count = len(text.split())
+        spoken_text = _norm_est(text)
+        word_count = max(len(text.split()), len(spoken_text.split()))
         est_duration = max(1.0, word_count * 0.28)
         if hard_max > 0 and (est_duration / hard_max) > MAX_NATURAL_SPEED:
             target_words = max(2, int((hard_max - 0.05) / 0.28))
@@ -669,6 +674,10 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                 target_words = max(1, int(hard_max / 0.35))
             else:
                 target_words = max(2, int((hard_max - 0.05) / 0.28))
+            cur_words = len(seg.content.strip().split())
+            if dur > hard_max and cur_words > 2:
+                measured_tw = max(2, int(cur_words * (hard_max / max(0.1, dur)) * 0.88))
+                target_words = min(target_words, measured_tw)
             post_tts_overly_long.append({
                 "index": seg.index,
                 "text": seg.content.strip(),
