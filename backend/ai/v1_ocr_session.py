@@ -13,18 +13,34 @@ _key = None
 
 def close_session():
     global _process, _key
+    import os
     with _lock:
         process, _process, _key = _process, None, None
         if process is not None:
+            if process.stdin:
+                try:
+                    process.stdin.close()
+                except Exception:
+                    pass
+            pid = getattr(process, "pid", None)
             if process.poll() is None:
                 process.terminate()
+                if os.name == "nt" and isinstance(pid, int) and pid > 0:
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/PID", str(pid), "/T", "/F"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                            timeout=5,
+                        )
+                    except Exception:
+                        pass
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
-            if process.stdin:
-                process.stdin.close()
 
 def run_request(args, *, timeout, env, creationflags=0, **kwargs):
     global _process, _key
