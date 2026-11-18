@@ -141,7 +141,7 @@ EXCLUDE_FILES = {
     "backend/update_dashboards_phase1.py",
 }
 
-ALLOWED_TOP_DIRS = ["backend", "tests", "docs", "assets", "scripts", "tools", ".github"]
+ALLOWED_TOP_DIRS = ["backend", "tests", "docs", "assets", "scripts", "tools", ".github", "requirements"]
 ALLOWED_TOP_FILES = [
     ".env.cpu.example",
     ".env.gpu.example",
@@ -151,23 +151,17 @@ ALLOWED_TOP_FILES = [
     "DOCS_HE_THONG_GIAM_SAT_VA_A2UI.md",
     "download_audio.py",
     "extract_wav.py",
-    "GIAI_MA_SHEET.bat",
     "Giao_Dien_Quan_Sat_Tool.bat",
     "HUONG_DAN_BOT_TAI_VIDEO.md",
     "KhoiDongAn.vbs",
-    "MA_HOA_SHEET.bat",
     "MoDieuKhien.vbs",
     "package_v1_release.py",
     "pytest.ini",
     "README.md",
     "README_FIRST.md",
-    "requirements-dev.txt",
-    "requirements-models.txt",
     "requirements.lock",
     "requirements.lock.txt",
     "requirements.txt",
-    "rollback_to_safe_state.ps1",
-    "run_batch_edit.bat",
     "run_cloud_node.py",
     "setup_new_laptop.ps1",
     "setup_v1.ps1",

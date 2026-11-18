@@ -20,13 +20,13 @@ echo.
 echo Đang quét và bắt đầu xử lý tuần tự từng video...
 echo.
 
-cd /d "%~dp0backend"
+cd /d "%~dp0..\..\backend"
 if not exist ".\venv\Scripts\python.exe" (
   echo [ERROR] Chua co backend\venv. Hay cai dependencies truoc.
   pause
   exit /b 1
 )
-call ".\venv\Scripts\python.exe" "v1_preflight.py" --project-root "%~dp0" --interface batch
+call ".\venv\Scripts\python.exe" "v1_preflight.py" --project-root "%~dp0..\.." --interface batch
 if errorlevel 1 (
   echo [ERROR] Preflight that bai.
   pause

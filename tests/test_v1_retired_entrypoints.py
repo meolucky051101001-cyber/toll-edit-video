@@ -20,7 +20,7 @@ RETIRED_LAUNCHERS = (
     PROJECT_ROOT / "scripts" / "windows" / "RESTORE_SAFE_BASELINE.bat",
     PROJECT_ROOT / "scripts" / "windows" / "ROLLBACK_TRANSLATION_FIX.bat",
     PROJECT_ROOT / "scripts" / "windows" / "RESTORE_VOICE_LOCK_BACKUP.bat",
-    PROJECT_ROOT / "rollback_to_safe_state.ps1",
+    PROJECT_ROOT / "scripts" / "windows" / "rollback_to_safe_state.ps1",
     PROJECT_ROOT / "fixes_for_v1" / "apply_fix_to_v1.bat",
     PROJECT_ROOT / "fixes_for_v1" / "rollback_tool_v1.bat",
     PROJECT_ROOT / "scripts" / "setup_telegram_bot_v2.ps1",
