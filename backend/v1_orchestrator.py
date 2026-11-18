@@ -972,7 +972,10 @@ class V1Orchestrator:
                 raise
             finally:
                 if "release_ocr_reader" in locals():
-                    release_ocr_reader()
+                    try:
+                        release_ocr_reader(force_close_session=True)
+                    except TypeError:
+                        release_ocr_reader()
                 elif c.ocr_reader_releaser is not None:
                     c.ocr_reader_releaser()
         else:
