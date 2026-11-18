@@ -32,5 +32,6 @@ Tài liệu được phân loại theo mục đích tra cứu: hướng dẫn v�
 Các tài liệu dưới đây thuộc giai đoạn thử nghiệm trước đây, được lưu trữ phục vụ tham khảo lịch sử:
 - [Hướng dẫn Pipeline V2 (Deprecated)](archive/TOOL_V2_FULL_GUIDE.md)
 - [Code Handoff 2.12](archive/CODE_HANDOFF_2_12.md)
+- [Kế hoạch sửa lỗi Tool V1 (bàn giao DeepSeek)](archive/ke_hoach_sua_loi_tool_v1_cho_deepseek.md)
 - [Phase 4 Acceptance](archive/PHASE4_ACCEPTANCE.md)
 - [Phase 5 Acceptance](archive/PHASE5_ACCEPTANCE.md)
