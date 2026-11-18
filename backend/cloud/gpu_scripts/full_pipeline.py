@@ -2016,7 +2016,12 @@ def _trim_tts_silence_in_process(
         from pydub import AudioSegment
         from pydub.silence import detect_leading_silence
 
-        audio = AudioSegment.from_file(audio_path)
+        with open(audio_path, "rb") as _hdr_fh:
+            _hdr = _hdr_fh.read(12)
+        if len(_hdr) >= 12 and _hdr[:4] == b"RIFF" and _hdr[8:12] == b"WAVE":
+            audio = AudioSegment.from_wav(audio_path)
+        else:
+            audio = AudioSegment.from_file(audio_path)
         total_ms = len(audio)
         if total_ms < 160:
             return audio_path
