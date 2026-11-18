@@ -277,3 +277,8 @@ async def async_gpu_gatekeeper(
         f"[GPU_GATEKEEPER] Hết thời gian chờ ({timeout_seconds}s) để lấy quyền GPU cho '{stage_name}'."
     )
 
+
+import sys as _sys  # noqa: E402
+_sys.modules.setdefault("v1_gpu_gatekeeper", _sys.modules[__name__])
+_sys.modules.setdefault("backend.v1_gpu_gatekeeper", _sys.modules[__name__])
+

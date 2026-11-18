@@ -466,13 +466,14 @@ def main(argv=None) -> int:
     except Exception:
         logger.debug("Không nạp được backend/.env", exc_info=True)
 
+    active_ws = Path(os.getenv("AUTODUB_WORKSPACE", str(PROJECT_ROOT / "workspace")))
     heal = args.heal or os.getenv("AUTODUB_OPS_AUTOHEAL", "0").lower() in ("1", "true", "yes")
     try:
         from core.logging_setup import setup_logging
 
         setup_logging(
             "ops_watchdog",
-            [WORKSPACE / "bot_system" / "service_logs" / "ops_watchdog.log"],
+            [active_ws / "bot_system" / "service_logs" / "ops_watchdog.log"],
             force=True,
             fmt="%(asctime)s [%(levelname)s] %(message)s",
         )
@@ -480,7 +481,7 @@ def main(argv=None) -> int:
         logging.basicConfig(level=logging.INFO)
 
     if args.once:
-        state = run_check(heal=heal)
+        state = run_check(workspace=active_ws, heal=heal)
         if args.json:
             text = json.dumps(state, ensure_ascii=False, indent=2)
             try:
@@ -495,7 +496,7 @@ def main(argv=None) -> int:
     logger.info("Watchdog bắt đầu (heal=%s, interval=%ss)", heal, args.interval)
     while True:
         try:
-            run_check(heal=heal)
+            run_check(workspace=active_ws, heal=heal)
         except Exception:
             logger.exception("Chu kỳ kiểm tra thất bại")
         time.sleep(max(5.0, float(args.interval)))

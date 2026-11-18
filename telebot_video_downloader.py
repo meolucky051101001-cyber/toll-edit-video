@@ -46,6 +46,12 @@ TEMP_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+try:
+    from environment import load_environment
+    load_environment(BACKEND_DIR)
+except Exception:
+    pass
+
 # Cấu hình gửi video lên Telegram: Mặc định là FALSE (chỉ báo thành công theo yêu cầu của bạn)
 SEND_VIDEO_TO_TELEGRAM = os.getenv("DOWNLOADER_SEND_VIDEO_TO_CHAT", "false").lower() in ("true", "1", "yes")
 

@@ -39,4 +39,11 @@ class _SharedState(types.ModuleType):
         except Exception:
             pass
 
-sys.modules[__name__] = _SharedState(__name__)
+_existing_shared = sys.modules.get("shared_state") or sys.modules.get("backend.shared_state")
+if isinstance(_existing_shared, _SharedState):
+    _canonical_shared = _existing_shared
+else:
+    _canonical_shared = _SharedState(__name__)
+sys.modules["shared_state"] = _canonical_shared
+sys.modules["backend.shared_state"] = _canonical_shared
+sys.modules[__name__] = _canonical_shared

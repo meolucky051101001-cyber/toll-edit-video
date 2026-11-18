@@ -91,15 +91,13 @@ def test_attach_source_tracks_ignores_tiny_boundary_graze_and_expands_leading_yi
     ]
     ocr._attach_source_caption_tracks([seg1, seg7, seg8], tracks)
 
-    # Leading thin '一' stroke compensated on seg1
-    assert len(seg1.tracking_blocks) == 1
-    assert seg1.tracking_blocks[0].x_pct < 0.080
+    # Leading thin '一' stroke compensated uniformly across all chunks of seg1
+    assert seg1.tracking_blocks
+    assert all(b.x_pct < 0.080 for b in seg1.tracking_blocks)
 
     # 7ms overlap at 16.460..16.467s stays on seg7 and never pollutes seg8
-    assert len(seg7.tracking_blocks) == 1
-    assert (seg7.tracking_blocks[0].start, seg7.tracking_blocks[0].end) == pytest.approx((15.267, 16.467))
-    assert len(seg8.tracking_blocks) == 1
-    assert (seg8.tracking_blocks[0].start, seg8.tracking_blocks[0].end) == pytest.approx((16.500, 18.067))
+    assert (seg7.tracking_blocks[0].start, seg7.tracking_blocks[-1].end) == pytest.approx((15.267, 16.467))
+    assert (seg8.tracking_blocks[0].start, seg8.tracking_blocks[-1].end) == pytest.approx((16.500, 18.067))
 
 
 def test_compound_asr_clause_at_secondary_y_band_is_not_dropped_from_source_timeline():

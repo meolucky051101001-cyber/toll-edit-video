@@ -1393,3 +1393,8 @@ def fail_batch(
         _save_state_to_disk()
         _release_batch_lock_unlocked(job_id or current_job_id)
 
+
+import sys as _sys  # noqa: E402
+_sys.modules.setdefault("job_tracker", _sys.modules[__name__])
+_sys.modules.setdefault("backend.job_tracker", _sys.modules[__name__])
+

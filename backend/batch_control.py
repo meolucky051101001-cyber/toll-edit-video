@@ -48,3 +48,8 @@ def run(args, *, timeout=None, check=False, **kwargs):
         if check:
             result.check_returncode()
         return result
+
+
+import sys as _sys  # noqa: E402
+_sys.modules.setdefault("batch_control", _sys.modules[__name__])
+_sys.modules.setdefault("backend.batch_control", _sys.modules[__name__])

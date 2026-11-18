@@ -8,8 +8,15 @@ if str(_backend_dir) not in sys.path:
 
 def __getattr__(name: str):
     import importlib
+    existing = sys.modules.get(f"backend.{name}") or sys.modules.get(name)
+    if existing is not None:
+        sys.modules.setdefault(name, existing)
+        sys.modules.setdefault(f"backend.{name}", existing)
+        setattr(sys.modules[__name__], name, existing)
+        return existing
     try:
         mod = importlib.import_module(name)
+        sys.modules.setdefault(f"backend.{name}", mod)
         setattr(sys.modules[__name__], name, mod)
         return mod
     except ImportError:

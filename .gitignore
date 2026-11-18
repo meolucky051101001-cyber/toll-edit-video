@@ -84,3 +84,6 @@ temp_dir/
 # Log xoay vong (app.log.1, ...) - khong commit
 app.log.*
 backend/app.log.*
+.pipeline_progress.json
+fixes_for_v1/
+export_giam_sat_a2ui/

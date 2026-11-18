@@ -7,11 +7,9 @@ from pathlib import Path
 from typing import Mapping, Optional
 
 
-def read_environment(backend_directory: Path, environment: Optional[Mapping[str, str]] = None) -> dict:
-    values = dict(os.environ if environment is None else environment)
-    dotenv = Path(backend_directory) / ".env"
+def _parse_dotenv_into(dotenv: Path, values: dict) -> None:
     if not dotenv.is_file():
-        return values
+        return
     for raw_line in dotenv.read_text(encoding="utf-8-sig").splitlines():
         line = raw_line.strip()
         if line.startswith("export "):
@@ -27,6 +25,14 @@ def read_environment(backend_directory: Path, environment: Optional[Mapping[str,
         else:
             value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
         values.setdefault(key, value)
+
+
+def read_environment(backend_directory: Path, environment: Optional[Mapping[str, str]] = None) -> dict:
+    values = dict(os.environ if environment is None else environment)
+    base = Path(backend_directory)
+    _parse_dotenv_into(base / ".env", values)
+    if base.name.lower() == "backend":
+        _parse_dotenv_into(base.parent / ".env", values)
     return values
 
 

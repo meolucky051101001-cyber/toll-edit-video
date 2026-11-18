@@ -1142,9 +1142,6 @@ class V1Orchestrator:
             try:
                 from ai.v1_auto_voice import decide_video_voice
                 from ai.v1_voice_isolated import generate_dubbing_audio_isolated as generate_dubbing_audio
-                import importlib
-                import ass_utils
-                importlib.reload(ass_utils)
                 from ass_utils import sync_and_clamp_subtitles, generate_ass_file
 
                 # Khóa giọng đọc
@@ -1475,9 +1472,6 @@ class V1Orchestrator:
                     raise asyncio.CancelledError() from exc
 
             try:
-                import importlib
-                import v1_quality_gate
-                importlib.reload(v1_quality_gate)
                 from v1_quality_gate import run_quality_gate
 
                 flags_cfg = c.effective_cfg.get("feature_flags") or {}

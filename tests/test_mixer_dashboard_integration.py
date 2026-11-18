@@ -1,4 +1,4 @@
-﻿"""Unit tests verifying dashboard audio volume settings integration with FFmpeg mixer V2."""
+"""Unit tests verifying dashboard audio volume settings integration with FFmpeg mixer V2."""
 
 import asyncio
 import json

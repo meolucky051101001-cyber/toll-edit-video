@@ -55,8 +55,14 @@ def main():
         raise ctypes.WinError(ctypes.get_last_error())
     if ctypes.get_last_error() == 183:
         return
-    bs_logs = WORKSPACE / "bot_system" / "service_logs"
-    logs = bs_logs if (bs_logs.is_dir() or (WORKSPACE / "bot_system").is_dir()) else (WORKSPACE / "service_logs")
+    try:
+        from environment import load_environment
+        load_environment(ROOT)
+    except Exception:
+        pass
+    active_ws = Path(os.getenv("AUTODUB_WORKSPACE", str(ROOT.parent / "workspace")))
+    bs_logs = active_ws / "bot_system" / "service_logs"
+    logs = bs_logs if (bs_logs.is_dir() or (active_ws / "bot_system").is_dir()) else (active_ws / "service_logs")
     logs.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger(service)
     logger.setLevel(logging.INFO)
