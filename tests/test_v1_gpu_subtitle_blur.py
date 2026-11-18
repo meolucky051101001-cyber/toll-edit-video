@@ -131,10 +131,23 @@ def test_ocr_worker_cuda_session_injects_cudnn_heuristic():
     )
     with patch.dict("sys.modules", {"onnxruntime": fake_ort}):
         module._configure_cuda()
+        # Case 1: provider_options is None
         fake_ort.InferenceSession("model.onnx", providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+        assert ("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}) in captured["providers"]
+        assert captured["sess_options"].graph_optimization_level == 99
 
-    assert ("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}) in captured["providers"]
-    assert captured["sess_options"].graph_optimization_level == 99
+        # Case 2: PaddleX passes parallel provider_options=[{"device_id": 0}, {}]
+        captured.clear()
+        fake_ort.InferenceSession(
+            "model.onnx",
+            sess_options=FakeOpts(),
+            providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+            provider_options=[{"device_id": 0}, {}],
+        )
+        assert captured["providers"] == ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        assert captured["provider_options"][0] == {"device_id": 0, "cudnn_conv_algo_search": "HEURISTIC"}
+        assert captured["provider_options"][1] == {}
+        assert captured["sess_options"].graph_optimization_level == 99
 
 
 def test_conditional_asr_retranscribe_uses_in_memory_float32_slice(tmp_path: Path):

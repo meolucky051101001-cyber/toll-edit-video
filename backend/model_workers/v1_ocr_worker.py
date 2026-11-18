@@ -45,18 +45,28 @@ def _configure_cuda():
                 sess_opts = kwargs.get("sess_options")
                 if sess_opts is None and len(args) < 2:
                     sess_opts = ort.SessionOptions()
-                    sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
                     kwargs["sess_options"] = sess_opts
+                if sess_opts is not None and hasattr(sess_opts, "graph_optimization_level"):
+                    sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
                 provs = kwargs.get("providers")
+                prov_opts = kwargs.get("provider_options")
                 if isinstance(provs, (list, tuple)):
-                    tuned = []
-                    for item in provs:
-                        if item == "CUDAExecutionProvider":
-                            tuned.append(("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}))
-                        else:
-                            tuned.append(item)
-                    kwargs["providers"] = tuned
-                    if kwargs.get("provider_options") is None:
+                    if isinstance(prov_opts, (list, tuple)) and len(prov_opts) == len(provs):
+                        new_opts = []
+                        for p_item, o_item in zip(provs, prov_opts):
+                            d = dict(o_item) if isinstance(o_item, Mapping) else {}
+                            if p_item == "CUDAExecutionProvider":
+                                d.setdefault("cudnn_conv_algo_search", "HEURISTIC")
+                            new_opts.append(d)
+                        kwargs["provider_options"] = new_opts
+                    elif prov_opts is None:
+                        tuned = []
+                        for item in provs:
+                            if item == "CUDAExecutionProvider":
+                                tuned.append(("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}))
+                            else:
+                                tuned.append(item)
+                        kwargs["providers"] = tuned
                         kwargs.pop("provider_options", None)
             super().__init__(*args, **kwargs)
             self.disable_fallback()
