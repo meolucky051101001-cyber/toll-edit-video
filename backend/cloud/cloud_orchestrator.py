@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import uuid
+import weakref
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -297,6 +298,41 @@ _WARM_RESET_SCRIPT = (
     "for p in pathlib.Path('/content').iterdir() if p.name not in keep]"
 )
 
+_GLOBAL_WARM_LOCK = threading.Lock()
+_GLOBAL_WARM_TIMERS: Dict[Tuple[str, str], threading.Timer] = {}
+_GLOBAL_ORCHESTRATORS: Dict[str, "weakref.WeakSet[CloudOrchestrator]"] = {}
+
+
+def _store_scope_key(store: Any) -> str:
+    db_path = getattr(store, "db_path", None)
+    if db_path:
+        try:
+            return os.path.normcase(str(Path(db_path).resolve()))
+        except OSError:
+            return os.path.normcase(str(db_path))
+    return f"mem:{id(store)}"
+
+
+def clear_warm_registry_for_store(store: Any, gpu_type: Optional[str] = None) -> List[str]:
+    """Xoá sạch bản ghi warm session & huỷ bộ đếm hẹn giờ thuộc store (dùng sau stop_all_sessions)."""
+    scope = _store_scope_key(store)
+    pop_all_fn = getattr(store, "pop_all_warm_sessions", None)
+    rows = pop_all_fn(gpu_type=gpu_type) if callable(pop_all_fn) else []
+    snames = [str(r["session_name"]) for r in rows if r.get("session_name")]
+    with _GLOBAL_WARM_LOCK:
+        keys = [
+            k for k in list(_GLOBAL_WARM_TIMERS.keys())
+            if k[0] == scope and (not gpu_type or k[1] in snames)
+        ]
+        for k in keys:
+            tmr = _GLOBAL_WARM_TIMERS.pop(k, None)
+            if tmr is not None:
+                try:
+                    tmr.cancel()
+                except Exception:
+                    pass
+    return snames
+
 
 class CloudOrchestrator:
     def __init__(
@@ -323,6 +359,48 @@ class CloudOrchestrator:
         self.has_pending_work_callback = has_pending_work_callback
         self._warm_lock = threading.Lock()
         self._warm_sessions: Dict[str, Dict[str, Any]] = {}
+        self._scope_key = _store_scope_key(self.store)
+        with _GLOBAL_WARM_LOCK:
+            _GLOBAL_ORCHESTRATORS.setdefault(self._scope_key, weakref.WeakSet()).add(self)
+
+    def _cancel_warm_timer(self, session_name: str) -> None:
+        with _GLOBAL_WARM_LOCK:
+            tmr = _GLOBAL_WARM_TIMERS.pop((self._scope_key, session_name), None)
+        if tmr is not None:
+            try:
+                tmr.cancel()
+            except Exception:
+                pass
+
+    def _requeue_unstopped_warm_session(self, session_name: str, gpu_type: str, source_job_id: Optional[str] = None) -> None:
+        park_fn = getattr(self.store, "park_warm_session", None)
+        if callable(park_fn):
+            try:
+                park_fn(
+                    session_name,
+                    gpu_type,
+                    ttl_seconds=1.0,
+                    source_job_id=source_job_id,
+                    keepalive_mode=False,
+                    now=time.time() - 5.0,
+                )
+            except Exception:
+                pass
+
+    def _stop_warm_session_with_retry_guard(
+        self,
+        session_name: str,
+        gpu_type: str,
+        source_job_id: Optional[str] = None,
+    ) -> bool:
+        try:
+            res = self._verify_or_stop_session(session_name)
+            if res.get("verified_stopped"):
+                return True
+        except Exception as exc:
+            logger.warning("Cảnh báo khi dừng session giữ ấm %s: %s", session_name, redact_secrets(str(exc)))
+        self._requeue_unstopped_warm_session(session_name, gpu_type, source_job_id=source_job_id)
+        return False
 
     def has_waiting_work(self, gpu_type: str) -> bool:
         gpu_norm = str(gpu_type or "").strip().upper()
@@ -333,71 +411,90 @@ class CloudOrchestrator:
                     return True
             except Exception:
                 pass
-        if callable(self.has_pending_work_callback):
-            try:
-                if self.has_pending_work_callback(gpu_norm):
-                    return True
-            except Exception:
-                pass
+        with _GLOBAL_WARM_LOCK:
+            peers = list(_GLOBAL_ORCHESTRATORS.get(self._scope_key) or ())
+        if self not in peers:
+            peers.append(self)
+        for peer in peers:
+            cb = getattr(peer, "has_pending_work_callback", None)
+            if callable(cb):
+                try:
+                    if cb(gpu_norm):
+                        return True
+                except Exception:
+                    pass
         return False
 
     def get_warm_session_names(self) -> Tuple[str, ...]:
+        list_fn = getattr(self.store, "list_warm_sessions", None)
+        if callable(list_fn):
+            rows = list_fn(include_expired=False)
+            return tuple(str(r["session_name"]) for r in rows if r.get("session_name"))
         with self._warm_lock:
             return tuple(str(v["session_name"]) for v in self._warm_sessions.values() if v.get("session_name"))
 
     def release_warm_sessions(self, gpu_type: Optional[str] = None) -> int:
         target_gpu = str(gpu_type).strip().upper() if gpu_type else None
-        to_stop: List[str] = []
+        to_stop: List[Tuple[str, str, Optional[str]]] = []
+        pop_all_fn = getattr(self.store, "pop_all_warm_sessions", None)
+        if callable(pop_all_fn):
+            for row in pop_all_fn(gpu_type=target_gpu):
+                sname = str(row.get("session_name") or "")
+                if sname:
+                    self._cancel_warm_timer(sname)
+                    to_stop.append((sname, str(row.get("gpu_type") or target_gpu or "T4"), row.get("source_job_id")))
         with self._warm_lock:
             keys = [target_gpu] if target_gpu else list(self._warm_sessions.keys())
             for k in keys:
                 entry = self._warm_sessions.pop(k, None)
-                if entry:
-                    tmr = entry.get("timer")
-                    if tmr is not None:
-                        try:
-                            tmr.cancel()
-                        except Exception:
-                            pass
-                    if entry.get("session_name"):
-                        to_stop.append(str(entry["session_name"]))
-        for sname in to_stop:
-            try:
-                logger.info("Giải phóng máy ảo giữ ấm %s...", sname)
-                self._verify_or_stop_session(sname)
-            except Exception as exc:
-                logger.warning("Cảnh báo khi giải phóng session giữ ấm %s: %s", sname, redact_secrets(str(exc)))
+                if entry and entry.get("session_name"):
+                    sname = str(entry["session_name"])
+                    self._cancel_warm_timer(sname)
+                    if not any(x[0] == sname for x in to_stop):
+                        to_stop.append((sname, str(entry.get("gpu_type") or k or "T4"), entry.get("source_job_id")))
+        for sname, g_type, src_jid in to_stop:
+            logger.info("Giải phóng máy ảo giữ ấm %s...", sname)
+            self._stop_warm_session_with_retry_guard(sname, g_type, source_job_id=src_jid)
         return len(to_stop)
 
     def release_idle_warm_sessions_if_no_work(self) -> int:
-        to_stop: List[str] = []
+        to_stop: List[Tuple[str, str, Optional[str]]] = []
+        now_ts = time.time()
+        list_fn = getattr(self.store, "list_warm_sessions", None)
+        rem_fn = getattr(self.store, "remove_warm_session", None)
+        if callable(list_fn) and callable(rem_fn):
+            for row in list_fn(include_expired=True):
+                sname = str(row.get("session_name") or "")
+                g_type = str(row.get("gpu_type") or "T4").strip().upper()
+                exp_ts = float(row.get("expires_at") or 0.0)
+                if not sname:
+                    continue
+                if bool(row.get("keepalive_mode")) and now_ts < exp_ts:
+                    continue
+                if self.has_waiting_work(g_type) and now_ts < exp_ts:
+                    continue
+                if rem_fn(sname):
+                    self._cancel_warm_timer(sname)
+                    to_stop.append((sname, g_type, row.get("source_job_id")))
         now_mono = time.monotonic()
         with self._warm_lock:
             for k in list(self._warm_sessions.keys()):
                 entry = self._warm_sessions.get(k)
                 if not entry:
                     continue
-                if entry.get("keepalive_mode"):
-                    if now_mono < float(entry.get("expires_at", 0.0)):
-                        continue
-                elif self.has_waiting_work(k) and now_mono < float(entry.get("expires_at", 0.0)):
+                if entry.get("keepalive_mode") and now_mono < float(entry.get("expires_at", 0.0)):
+                    continue
+                if self.has_waiting_work(k) and now_mono < float(entry.get("expires_at", 0.0)):
                     continue
                 popped = self._warm_sessions.pop(k, None)
-                if popped:
-                    tmr = popped.get("timer")
-                    if tmr is not None:
-                        try:
-                            tmr.cancel()
-                        except Exception:
-                            pass
-                    if popped.get("session_name"):
-                        to_stop.append(str(popped["session_name"]))
-        for sname in to_stop:
-            try:
-                logger.info("Không còn video chờ — thu hồi máy ảo giữ ấm %s...", sname)
-                self._verify_or_stop_session(sname)
-            except Exception as exc:
-                logger.warning("Cảnh báo thu hồi session giữ ấm %s: %s", sname, redact_secrets(str(exc)))
+                if popped and popped.get("session_name"):
+                    sname = str(popped["session_name"])
+                    self._cancel_warm_timer(sname)
+                    if not any(x[0] == sname for x in to_stop):
+                        to_stop.append((sname, k, popped.get("source_job_id")))
+        for sname, g_type, src_jid in to_stop:
+            logger.info("Không còn video chờ — thu hồi máy ảo giữ ấm %s...", sname)
+            self._stop_warm_session_with_retry_guard(sname, g_type, source_job_id=src_jid)
         return len(to_stop)
 
     def _sanitize_warm_workdir(self, session_name: str) -> bool:
@@ -419,36 +516,42 @@ class CloudOrchestrator:
         if not self.enable_warm_session_reuse:
             return None
         gpu_norm = str(gpu_type or "").strip().upper()
+        entry: Optional[Dict[str, Any]] = None
+        expired = False
+        pop_fn = getattr(self.store, "pop_warm_session", None)
+        if callable(pop_fn):
+            entry = pop_fn(gpu_norm)
+            if entry is not None:
+                expired = bool(entry.get("expired"))
         with self._warm_lock:
-            entry = self._warm_sessions.pop(gpu_norm, None)
+            mem_entry = self._warm_sessions.pop(gpu_norm, None)
+        if entry is None and mem_entry is not None:
+            entry = mem_entry
+            expired = time.monotonic() > float(mem_entry.get("expires_at", 0.0))
         if not entry:
             return None
-        tmr = entry.get("timer")
-        if tmr is not None:
-            try:
-                tmr.cancel()
-            except Exception:
-                pass
         sname = str(entry.get("session_name") or "")
+        src_jid = entry.get("source_job_id")
         if not sname:
             return None
-        if time.monotonic() > float(entry.get("expires_at", 0.0)):
-            try:
-                self._verify_or_stop_session(sname)
-            except Exception:
-                pass
+        self._cancel_warm_timer(sname)
+        if expired:
+            self._stop_warm_session_with_retry_guard(sname, gpu_norm, source_job_id=src_jid)
             return None
         if self._sanitize_warm_workdir(sname):
             logger.info("Tái sử dụng máy ảo GPU %s đang giữ ấm: %s (bỏ qua cold-start setup).", gpu_norm, sname)
             return sname
         logger.warning("Máy ảo giữ ấm %s không phản hồi lệnh dọn workdir; thu hồi và tạo máy mới.", sname)
-        try:
-            self._verify_or_stop_session(sname)
-        except Exception:
-            pass
+        self._stop_warm_session_with_retry_guard(sname, gpu_norm, source_job_id=src_jid)
         return None
 
-    def _park_warm_session_on_success(self, session_name: str, gpu_type: str) -> bool:
+    def _park_warm_session_on_success(
+        self,
+        session_name: str,
+        gpu_type: str,
+        *,
+        source_job_id: Optional[str] = None,
+    ) -> bool:
         if not self.enable_warm_session_reuse:
             return False
         gpu_norm = str(gpu_type or "").strip().upper()
@@ -461,8 +564,24 @@ class CloudOrchestrator:
         if not self._sanitize_warm_workdir(session_name):
             return False
 
+        evicted_snames: List[str] = []
+        park_fn = getattr(self.store, "park_warm_session", None)
+        rem_fn = getattr(self.store, "remove_warm_session", None)
+        if callable(park_fn):
+            evicted_snames = park_fn(
+                session_name,
+                gpu_norm,
+                ttl_seconds=float(ttl_s),
+                source_job_id=source_job_id,
+                keepalive_mode=not waiting_next,
+            )
+
         def _expire_warm() -> None:
+            with _GLOBAL_WARM_LOCK:
+                _GLOBAL_WARM_TIMERS.pop((self._scope_key, session_name), None)
             should_stop = False
+            if callable(rem_fn):
+                should_stop = bool(rem_fn(session_name))
             with self._warm_lock:
                 cur = self._warm_sessions.get(gpu_norm)
                 if cur and cur.get("session_name") == session_name:
@@ -470,38 +589,37 @@ class CloudOrchestrator:
                     should_stop = True
             if should_stop:
                 logger.info("Hết thời gian giữ ấm (%ds) — tự động thu hồi session %s...", ttl_s, session_name)
-                try:
-                    self._verify_or_stop_session(session_name)
-                except Exception as exc:
-                    logger.warning("Lỗi tự thu hồi session giữ ấm %s: %s", session_name, redact_secrets(str(exc)))
+                self._stop_warm_session_with_retry_guard(session_name, gpu_norm, source_job_id=source_job_id)
 
         timer = threading.Timer(float(ttl_s), _expire_warm)
         timer.daemon = True
-        evicted_sname: Optional[str] = None
         with self._warm_lock:
             prev = self._warm_sessions.pop(gpu_norm, None)
-            if prev:
-                prev_tmr = prev.get("timer")
-                if prev_tmr is not None:
-                    try:
-                        prev_tmr.cancel()
-                    except Exception:
-                        pass
-                if prev.get("session_name") and prev.get("session_name") != session_name:
-                    evicted_sname = str(prev["session_name"])
-            self._warm_sessions[gpu_norm] = {
-                "session_name": session_name,
-                "gpu_type": gpu_norm,
-                "expires_at": time.monotonic() + float(ttl_s),
-                "keepalive_mode": not waiting_next,
-                "timer": timer,
-            }
+            if prev and prev.get("session_name") and prev.get("session_name") != session_name:
+                if str(prev["session_name"]) not in evicted_snames:
+                    evicted_snames.append(str(prev["session_name"]))
+            if not callable(park_fn):
+                self._warm_sessions[gpu_norm] = {
+                    "session_name": session_name,
+                    "gpu_type": gpu_norm,
+                    "source_job_id": source_job_id,
+                    "expires_at": time.monotonic() + float(ttl_s),
+                    "keepalive_mode": not waiting_next,
+                }
+        for ev_name in evicted_snames:
+            self._cancel_warm_timer(ev_name)
+        with _GLOBAL_WARM_LOCK:
+            prev_tmr = _GLOBAL_WARM_TIMERS.pop((self._scope_key, session_name), None)
+            if prev_tmr is not None:
+                try:
+                    prev_tmr.cancel()
+                except Exception:
+                    pass
+            _GLOBAL_WARM_TIMERS[(self._scope_key, session_name)] = timer
             timer.start()
-        if evicted_sname:
-            try:
-                self._verify_or_stop_session(evicted_sname)
-            except Exception:
-                pass
+
+        for ev_name in evicted_snames:
+            self._stop_warm_session_with_retry_guard(ev_name, gpu_norm)
         logger.info("Giữ ấm máy ảo %s (%s) tối đa %ds chờ video kế tiếp.", session_name, gpu_norm, ttl_s)
         return True
 
@@ -1805,7 +1923,11 @@ class CloudOrchestrator:
             _raise_if_aborted()
 
             parked_warm = False
-            if session_may_exist and not cleanup_done and self._park_warm_session_on_success(session_name, gpu_type):
+            if (
+                session_may_exist
+                and not cleanup_done
+                and self._park_warm_session_on_success(session_name, gpu_type, source_job_id=job_id)
+            ):
                 parked_warm = True
                 cleanup_done = True
                 runtime_end_time = time.time()

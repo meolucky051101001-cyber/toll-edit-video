@@ -1007,3 +1007,195 @@ def test_orchestrator_warm_session_handoff_across_batch_and_auto_release_on_fini
     assert orch.get_warm_session_names() == ()
     assert len(adapter.reset_calls) >= 2
     assert store.get_cu_budget_info()["unreconciled_count"] == 0
+
+
+def test_cross_orchestrator_warm_handoff_and_crash_orphan_recovery(tmp_path: Path, monkeypatch):
+    from backend.cloud.cloud_config import DEFAULT_CONFIG
+    from backend.cloud.cloud_contract import get_cloud_status_snapshot
+    from tests.test_cloud_phase5_quality_export import _Phase5Adapter, _make_sample_video
+
+    out_dir = tmp_path / "shared_out"
+    out_dir.mkdir(parents=True)
+    vid1 = _make_sample_video(tmp_path / "in", "cross_1.mp4")
+    vid2 = _make_sample_video(tmp_path / "in", "cross_2.mp4")
+
+    monkeypatch.setenv("AUTODUB_OUTPUT_DIR", str(out_dir))
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyTestSecretKey_1234567890")
+    monkeypatch.setitem(DEFAULT_CONFIG, "results_dir", str(tmp_path / "results"))
+    monkeypatch.setitem(DEFAULT_CONFIG, "warm_session_handoff_seconds", 90)
+    monkeypatch.setitem(DEFAULT_CONFIG, "warm_session_keepalive_seconds", 0)
+
+    class _SharedAdapter(_Phase5Adapter):
+        def exec_argv(self, session_name, argv, *, cwd="/content", env_vars=None, timeout=None):
+            if len(argv) >= 3 and argv[0] == "python3" and argv[1] == "-c" and "keep=" in argv[2]:
+                return True, "sanitized"
+            return super().exec_argv(session_name, argv, cwd=cwd, env_vars=env_vars, timeout=timeout)
+
+    db_file = tmp_path / "shared_cloud.db"
+    store_bot = CloudJobStore(db_path=str(db_file), rollout_controlled=False)
+    store_dash = CloudJobStore(db_path=str(db_file), rollout_controlled=False)
+    adapter = _SharedAdapter()
+
+    pending_bot = {"waiting": True}
+    orch_dash = CloudOrchestrator(
+        store=store_dash,
+        adapter=adapter,
+        allowed_roots=[tmp_path],
+        enable_warm_session_reuse=True,
+    )
+    orch_bot = CloudOrchestrator(
+        store=store_bot,
+        adapter=adapter,
+        allowed_roots=[tmp_path],
+        enable_warm_session_reuse=True,
+        has_pending_work_callback=lambda g: pending_bot["waiting"] and g == "T4",
+    )
+
+    # 1. Dashboard runs Job 1 while Telegram Bot has a pending pre-claim video -> parks warm VM in SQLite!
+    j1 = store_dash.enqueue(str(vid1), gpu_type="T4")
+    c1 = store_dash.claim_job(j1.job_id, owner_id="w_dash", lease_seconds=300)
+    assert c1 is not None
+    assert orch_dash.process_job(c1, owner_id="w_dash") is True
+    warm_names = orch_bot.get_warm_session_names()
+    assert len(warm_names) == 1
+    snap = get_cloud_status_snapshot(
+        store_dash,
+        usage_fn=adapter.get_usage,
+        sessions_fn=lambda: [{"name": s} for s in adapter.created_sessions if s not in adapter.sessions_stopped],
+    )
+    assert [w["session_name"] for w in snap["warm_sessions"]] == list(warm_names)
+
+    # 2. Telegram Bot's separate orchestrator pops and reuses Dashboard's warm VM!
+    pending_bot["waiting"] = False
+    j2 = store_bot.enqueue(str(vid2), gpu_type="T4")
+    c2 = store_bot.claim_job(j2.job_id, owner_id="w_bot", lease_seconds=300)
+    assert c2 is not None
+    assert orch_bot.process_job(c2, owner_id="w_bot") is True
+    assert len(adapter.created_sessions) == 1
+    assert orch_dash.get_warm_session_names() == ()
+
+    # 3. Simulate a crashed host PID leaving an orphaned warm session in SQLite -> reconcile_expired_leases reaps it!
+    adapter.created_sessions.append("cjobcrashwarm1")
+    with store_dash._connect() as db:
+        db.execute(
+            """
+            INSERT INTO cloud_warm_sessions (
+                session_name, gpu_type, source_job_id, parked_at, expires_at, keepalive_mode, owner_pid
+            ) VALUES ('cjobcrashwarm1', 'T4', 'job-crashed', ?, ?, 0, 99999999)
+            """,
+            (1000.0, 9999999999.0),
+        )
+    rec = store_dash.reconcile_expired_leases(adapter=adapter)
+    assert any(r.get("session_name") == "cjobcrashwarm1" and r.get("state") == "warm_reclaimed" for r in rec)
+    assert "cjobcrashwarm1" in adapter.sessions_stopped
+    assert store_dash.list_warm_sessions() == []
+
+
+def test_step0_download_fallback_rejects_html_and_invalid_headers(tmp_path: Path, monkeypatch):
+    import requests as real_requests
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(full_pipeline, "run_cmd", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("yt-dlp blocked")))
+
+    class _FakeResp:
+        def __init__(self, body: bytes, ctype: str = "video/mp4"):
+            self._body = body
+            self.headers = {"Content-Type": ctype}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size=65536):
+            yield self._body
+
+    # 1. HTML login page disguised under video URL -> DOWNLOAD_FAILED & partial file deleted
+    monkeypatch.setattr(real_requests, "get", lambda *a, **kw: _FakeResp(b"<html>login</html>" * 200, "text/html; charset=utf-8"))
+    with pytest.raises(full_pipeline.PipelineStageError) as exc1:
+        full_pipeline.step0_download_video_from_url("https://example.com/share/1", "dl_html.mp4")
+    assert exc1.value.error_code == "DOWNLOAD_FAILED"
+    assert not (tmp_path / "dl_html.mp4").exists()
+
+    # 2. Binary garbage without container magic -> DOWNLOAD_FAILED
+    monkeypatch.setattr(real_requests, "get", lambda *a, **kw: _FakeResp(b"NOT_A_VIDEO_HEADER" * 200, "application/octet-stream"))
+    with pytest.raises(full_pipeline.PipelineStageError) as exc2:
+        full_pipeline.step0_download_video_from_url("https://example.com/share/2", "dl_bad.mp4")
+    assert exc2.value.error_code == "DOWNLOAD_FAILED"
+    assert not (tmp_path / "dl_bad.mp4").exists()
+
+    # 3. Valid MP4 ftyp header > 1024 bytes -> succeeds
+    valid_mp4 = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom" + (b"\x00" * 2048)
+    monkeypatch.setattr(real_requests, "get", lambda *a, **kw: _FakeResp(valid_mp4, "video/mp4"))
+    out = full_pipeline.step0_download_video_from_url("https://example.com/share/3", "dl_ok.mp4")
+    assert out == "dl_ok.mp4" and (tmp_path / "dl_ok.mp4").is_file()
+
+
+def test_step5_retry_keeps_best_text_when_intermediate_retry_is_longer(tmp_path: Path, monkeypatch):
+    import struct
+    import wave
+
+    def write_wav_ms(path: str, dur_ms: int):
+        sr = 16000
+        n = int(sr * dur_ms / 1000.0)
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            wf.writeframes(struct.pack(f"<{n}h", *([4000] * n)))
+
+    seen_prev_texts: list[str] = []
+
+    def fake_shorten(seg, window_s, gemini_key, **kwargs):
+        seen_prev_texts.append(str(seg["translated_text"]))
+        if len(seen_prev_texts) == 1:
+            return "Bản rút gọn lần một bị dài hơn"
+        return "Siêu gọn"
+
+    def fake_capcut(text, voice, out_file, **kwargs):
+        if text == "Câu gốc hơi dài một chút":
+            write_wav_ms(out_file, 1300)
+        elif text == "Bản rút gọn lần một bị dài hơn":
+            write_wav_ms(out_file, 1500)  # Worse than 1300ms!
+        else:
+            write_wav_ms(out_file, 600)
+        return True
+
+    def measure_wav(path: str, **_kw):
+        with wave.open(path, "rb") as wf:
+            return wf.getnframes() / float(wf.getframerate())
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(full_pipeline, "_shorten_translation_for_timing", fake_shorten)
+    monkeypatch.setattr(full_pipeline, "generate_capcut_tts_single", fake_capcut)
+    monkeypatch.setattr(full_pipeline, "validate_tts_audio_file", measure_wav)
+
+    segs = [{"id": 1, "start": 0.0, "end": 0.70, "text": "长句子测试", "translated_text": "Câu gốc hơi dài một chút"}]
+    res = full_pipeline.step5_generate_tts(segs, "BV562_streaming", str(tmp_path / "tts"), video_duration=0.80, gemini_key="AIzaTest12345678901234567890")
+    assert res["verified_count"] == 1
+    # Retry 2 MUST receive original best_text, NOT Retry 1's worse 1.50s candidate!
+    assert seen_prev_texts == ["Câu gốc hơi dài một chút", "Câu gốc hơi dài một chút"]
+    assert segs[0]["translated_text"] == "Siêu gọn"
+
+
+def test_write_pipeline_progress_skips_git_repo_root_under_pytest_and_writes_in_tmp(tmp_path: Path, monkeypatch):
+    # 1. Inside normal workdir without .git -> writes .pipeline_progress.json atomically with zero leftover .tmp
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    full_pipeline._write_pipeline_progress(75, 5, 8, "Đang tổng hợp TTS")
+    assert (work / ".pipeline_progress.json").is_file()
+    assert not list(work.glob("*.tmp"))
+
+    # 2. Inside a directory containing .git while PYTEST_CURRENT_TEST is set -> skips polluting git root
+    fake_repo = tmp_path / "repo"
+    (fake_repo / ".git").mkdir(parents=True)
+    monkeypatch.chdir(fake_repo)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_case")
+    monkeypatch.delenv("AUTODUB_ALLOW_TEST_PROGRESS_FILE", raising=False)
+    full_pipeline._write_pipeline_progress(75, 5, 8, "Không ghi bẩn repo")
+    assert not (fake_repo / ".pipeline_progress.json").exists()

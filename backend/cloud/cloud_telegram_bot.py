@@ -404,10 +404,19 @@ class CloudTelegramBotService:
     def has_waiting_items_for_gpu(self, gpu_type: str) -> bool:
         gpu_norm = str(gpu_type or "").strip().upper()
         with self._items_lock:
-            return any(
+            if any(
                 not item.cancelled and str(item.gpu_type or "").strip().upper() == gpu_norm
                 for item in self._pending_items
+            ):
+                return True
+            active_pre_gpu = (
+                self._active_item is not None
+                and not self._active_item.cancelled
+                and str(self._active_item.gpu_type or "").strip().upper() == gpu_norm
             )
+        if active_pre_gpu and self._cloud_worker.get_current_job() is None:
+            return True
+        return False
 
     @property
     def worker(self) -> CloudWorker:
@@ -929,7 +938,13 @@ class CloudTelegramBotService:
             else:
                 has_orphan_cleanup = any(ev.get("job_id") != active.job_id for ev in pending_events)
 
-        if not has_expired_active and not has_orphan_cleanup:
+        reclaimable_warm = (
+            self.store.list_reclaimable_warm_sessions(only_expired=True, now=now)
+            if hasattr(self.store, "list_reclaimable_warm_sessions")
+            else []
+        )
+
+        if not has_expired_active and not has_orphan_cleanup and not reclaimable_warm:
             return []
 
         adapter = self._adapter_factory()
@@ -1019,6 +1034,27 @@ class CloudTelegramBotService:
                     f"📥 Đang tải file video `{item.file_name}` từ Telegram...",
                 )
                 local_source_path = await self._download_telegram_video(bot, item, downloads_dir)
+
+            if item.cancelled:
+                await _safe_edit_message(item.status_message, "🛑 Đã huỷ trước khi cấp phát GPU.")
+                return
+
+            # Chờ tuần tự nếu Dashboard đang chạy dở 1 job trên cùng kho SQLite để tái sử dụng warm VM (0 mở trùng 2 máy)
+            from .cloud_worker import peek_cloud_worker
+
+            waited_notice = False
+            while not item.cancelled:
+                dash_w = peek_cloud_worker()
+                dash_job = dash_w.get_current_job() if dash_w is not None else None
+                if dash_job is None:
+                    break
+                if not waited_notice:
+                    waited_notice = True
+                    await _safe_edit_message(
+                        item.status_message,
+                        f"⏳ Đang chờ job `{dash_job.video_name[:40]}` hoàn tất để nhận lại máy ảo GPU `{item.gpu_type}` giữ ấm...",
+                    )
+                await asyncio.sleep(1.0)
 
             if item.cancelled:
                 await _safe_edit_message(item.status_message, "🛑 Đã huỷ trước khi cấp phát GPU.")

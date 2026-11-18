@@ -808,23 +808,38 @@ window.fetch = async function() {
           toggleBtn.className = 'btn btn-accent';
         }
 
-        // Dangling Sessions Alert Check (chỉ cảnh báo khi có máy mở mà KHÔNG CÓ JOB NÀO đang chạy)
+        // Dangling vs Warm Sessions Check
         const sessions = data.sessions || [];
+        const warmList = data.warm_sessions || [];
+        const warmNames = new Set(warmList.map(w => w.session_name).filter(Boolean));
         const alertBox = document.getElementById('session-alert-container');
         const hasActiveJob = !!data.active_job;
 
         if (sessions.length > 0 && !hasActiveJob) {
+          const orphanSessions = sessions.filter(s => !warmNames.has(s.name || s.id));
           alertBox.style.display = 'block';
-          alertBox.innerHTML = `
-            <div class="session-alert-box">
-              <div style="display: flex; align-items: center; gap: 8px;">
-                <span class="dot dot-yellow"></span>
-                <span style="font-weight: 600; color: #f87171;">CẢNH BÁO: Có ${sessions.length} máy ảo Colab đang mở nhưng không có job nào chạy (${escapeHtml(sessions.map(s => s.name || s.id).join(', '))}).</span>
-                <span style="font-size: 11px; color: var(--text-muted);">(Hao phí ~${(sessions.length * 1.15).toFixed(2)} CU/h nếu để quên)</span>
+          if (orphanSessions.length > 0) {
+            alertBox.innerHTML = `
+              <div class="session-alert-box">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <span class="dot dot-yellow"></span>
+                  <span style="font-weight: 600; color: #f87171;">CẢNH BÁO: Có ${orphanSessions.length} máy ảo Colab đang mở nhưng không có job nào chạy (${escapeHtml(orphanSessions.map(s => s.name || s.id).join(', '))}).</span>
+                  <span style="font-size: 11px; color: var(--text-muted);">(Hao phí ~${(orphanSessions.length * 1.15).toFixed(2)} CU/h nếu để quên)</span>
+                </div>
+                <button class="btn btn-danger" onclick="emergencyStopAll()">🛑 Dừng Ngay Tất Cả</button>
               </div>
-              <button class="btn btn-danger" onclick="emergencyStopAll()">🛑 Dừng Ngay Tất Cả</button>
-            </div>
-          `;
+            `;
+          } else {
+            alertBox.innerHTML = `
+              <div class="session-alert-box" style="background: rgba(56, 189, 248, 0.09); border-color: rgba(56, 189, 248, 0.35);">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <span class="dot dot-green"></span>
+                  <span style="font-weight: 600; color: #38bdf8;">♻️ Đang giữ ấm ${sessions.length} máy ảo Colab (${escapeHtml(sessions.map(s => s.name || s.id).join(', '))}) chờ chuyển giao cho video kế tiếp.</span>
+                </div>
+                <button class="btn btn-outline" onclick="emergencyStopAll()">🧹 Thu hồi ngay</button>
+              </div>
+            `;
+          }
         } else {
           alertBox.style.display = 'none';
         }
