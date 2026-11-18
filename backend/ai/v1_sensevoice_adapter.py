@@ -210,16 +210,11 @@ class SenseVoiceEngine:
         tokens_file = self.model_dir / "tokens.txt"
 
         sess_opts = ort.SessionOptions()
-        sess_opts.intra_op_num_threads = max(2, min(4, (os.cpu_count() or 4) // 2))
+        sess_opts.intra_op_num_threads = max(4, min(8, os.cpu_count() or 6))
         sess_opts.inter_op_num_threads = 1
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        try:
-            sess_opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
-            sess_opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
-        except Exception:
-            pass
 
-        # SenseVoice INT8 ONNX chạy cực nhanh trên CPUExecutionProvider (~0.1s/clip)
+        # SenseVoice INT8 ONNX chạy cực nhanh trên CPUExecutionProvider
         # và hoàn toàn không chiếm VRAM của GPU RTX 4050!
         self.session = ort.InferenceSession(
             str(model_file),
@@ -289,12 +284,17 @@ class SenseVoiceEngine:
         decoded_tokens: List[Dict[str, Any]] = []
         inline_events: List[str] = []
 
-        def _frame_prob(f_idx: int, win_tid: int) -> float:
-            row = logits[f_idx]
-            max_val = float(row[win_tid])
-            return float(1.0 / max(float(np.sum(np.exp(row - max_val))), 1e-9))
-
         T_total = len(token_ids)
+        non_blank_mask = (np.arange(T_total) >= 4) & (token_ids != 0)
+        frame_probs = np.zeros(T_total, dtype=np.float32)
+        if np.any(non_blank_mask):
+            nb_indices = np.nonzero(non_blank_mask)[0]
+            nb_logits = logits[nb_indices]
+            nb_max = nb_logits[np.arange(len(nb_indices)), token_ids[nb_indices]][:, None]
+            frame_probs[nb_indices] = 1.0 / np.maximum(
+                np.sum(np.exp(nb_logits - nb_max), axis=1), 1e-9
+            )
+
         idx = 4
         while idx < T_total:
             tid = int(token_ids[idx])
@@ -302,10 +302,10 @@ class SenseVoiceEngine:
                 idx += 1
                 continue
             start_idx = idx
-            best_prob = _frame_prob(idx, tid)
+            best_prob = float(frame_probs[idx])
             while idx + 1 < T_total and int(token_ids[idx + 1]) == tid:
                 idx += 1
-                p_cur = _frame_prob(idx, tid)
+                p_cur = float(frame_probs[idx])
                 if p_cur > best_prob:
                     best_prob = p_cur
             end_idx = idx

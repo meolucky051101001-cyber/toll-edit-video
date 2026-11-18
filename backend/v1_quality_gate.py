@@ -178,9 +178,16 @@ def _transition_pixel_candidates(segments, fps=30.0, limit=192):
         box = current["box"]
         if previous:
             old = previous["box"]
-            box = min(box[0], old[0]), min(box[1], old[1]), max(box[2], old[2]), max(box[3], old[3])
-            events.append((previous["end"], previous["index"], box))
-        events.append((current["start"], current["index"], box))
+            same_vertical_zone = max(old[1], box[1]) <= min(old[3], box[3]) + .06
+            if same_vertical_zone:
+                union_box = min(box[0], old[0]), min(box[1], old[1]), max(box[2], old[2]), max(box[3], old[3])
+                events.append((previous["end"], previous["index"], union_box))
+                events.append((current["start"], current["index"], union_box))
+            else:
+                events.append((previous["end"], previous["index"], old))
+                events.append((current["start"], current["index"], box))
+        else:
+            events.append((current["start"], current["index"], box))
     if tracks:
         events.append((tracks[-1]["end"], tracks[-1]["index"], tracks[-1]["box"]))
     candidates = {}
@@ -642,7 +649,16 @@ def run_quality_gate(
         tolerance = max(0.40, 3.0 / max(1.0, output.fps))
         duration_ok = output.duration > 0 and audio_duration > 0 and abs(output.duration - audio_duration) <= tolerance
         if source:
-            duration_ok = duration_ok and source.duration > 0 and abs(output.duration - source.duration) <= tolerance
+            allowed_tail_pad = (
+                max(0.0, min(4.0, audio_duration - source.duration))
+                if audio_duration > source.duration
+                else 0.0
+            )
+            duration_ok = (
+                duration_ok
+                and source.duration > 0
+                and (source.duration - tolerance) <= output.duration <= (source.duration + allowed_tail_pad + tolerance)
+            )
 
             # Nới rộng hoàn toàn độ phân giải và FPS theo yêu cầu:
             # Cho phép mọi độ phân giải (2K, 4K, 1080p, 720p, 9:16 dọc, 16:9 ngang, 4:3, 1:1, v.v.)

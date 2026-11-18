@@ -18,12 +18,36 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
+
+_GEMINI_HTTP_SESSION = None
+_GEMINI_HTTP_LOCK = threading.Lock()
+
+
+def _gemini_http_post(requests_mod):
+    post_fn = getattr(requests_mod, "post", None)
+    if getattr(post_fn, "__module__", "") != "requests.api" or getattr(post_fn, "__name__", "") != "post":
+        return post_fn
+    global _GEMINI_HTTP_SESSION
+    if _GEMINI_HTTP_SESSION is None:
+        with _GEMINI_HTTP_LOCK:
+            if _GEMINI_HTTP_SESSION is None:
+                sess = requests_mod.Session()
+                try:
+                    from requests.adapters import HTTPAdapter
+                    adapter = HTTPAdapter(pool_connections=8, pool_maxsize=16)
+                    sess.mount("https://", adapter)
+                    sess.mount("http://", adapter)
+                except Exception:
+                    pass
+                _GEMINI_HTTP_SESSION = sess
+    return _GEMINI_HTTP_SESSION.post
 
 
 @contextmanager
@@ -697,7 +721,8 @@ def call_gemini_api(
             }
 
             try:
-                resp = requests.post(url, json=payload, headers=headers, timeout=(connect_timeout, read_timeout))
+                http_post = _gemini_http_post(requests)
+                resp = http_post(url, json=payload, headers=headers, timeout=(connect_timeout, read_timeout))
                 resp.encoding = "utf-8"
                 elapsed_ms = int((time.monotonic() - t_start) * 1000)
 

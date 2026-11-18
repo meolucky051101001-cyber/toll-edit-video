@@ -19,6 +19,27 @@ from backend.v1_orchestrator import V1Orchestrator, resolve_qc_policy
 
 class CheckpointOrchestratorTests(unittest.TestCase):
 
+    def test_old_speech_checkpoint_rebuilds_tts_and_downstream_only(self):
+        from types import SimpleNamespace
+        from backend.v1_ocr_geometry import OCR_GEOMETRY_VERSION
+        method = V1Orchestrator._restore_execution_checkpoint
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            orch = object.__new__(V1Orchestrator)
+            orch.manifest_manager = SimpleNamespace(verify_manifest_resumability=lambda _: (
+                True, "completed", {"verified_stages": list(STAGES_ORDER)}))
+            for version in (3, 4):
+                with self.subTest(version=version):
+                    context = SimpleNamespace(job_id="speech-cache", out_dir=Path(tmp_dir),
+                        manifest=SimpleNamespace(routing_snapshot={"metadata": {"duration_s": 10.}}),
+                        effective_cfg={"speech_timing_version": version}, visual_sub_to_speech=False)
+                    with mock.patch.dict(method.__globals__, {"load_payload": lambda _: {
+                            "geometry_version": OCR_GEOMETRY_VERSION}}):
+                        method(orch, context, True)
+                    expected = (STAGES_ORDER[:STAGES_ORDER.index("ai_tts")]
+                                if version == 3 else STAGES_ORDER)
+                    self.assertEqual(context.verified_stages, expected)
+                    self.assertIn("ai_translation", context.verified_stages)
+
     def test_legacy_checkpoint_compatibility(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)

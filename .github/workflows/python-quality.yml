@@ -58,6 +58,7 @@ jobs:
           tests/test_localized_subtitle_blur.py
           tests/test_localized_blur_ffmpeg.py
           tests/test_visual_caption_timing.py
+          tests/test_ocr_failed_metrics.py
           tests/test_ocr_observation_ledger.py
           tests/test_ocr_adaptive_sampling.py
           tests/test_narration_source_policy.py
@@ -71,6 +72,9 @@ jobs:
           tests/test_cloud_review_regressions.py
           tests/test_url_utils.py
           tests/test_v1_checkpoint_orchestrator.py
+          tests/test_speech_timeline_preservation.py
+          tests/test_tts_caption_geometry.py
+          tests/test_tts_final_fit.py
           tests/test_v1_ocr_geometry_repair.py
           tests/test_v1_quality_gate.py
           tests/test_pipeline_v2_failure_semantics.py
@@ -87,6 +91,7 @@ jobs:
           tests/test_gemini_model_order.py
           tests/test_v1_asr_pyav_compat.py
           tests/test_runtime_health.py
+          tests/test_v1_model_upgrades_20261118.py
 
   v1-node-checks:
     name: Node Frontend & Dashboard Wrapper Checks

@@ -5,7 +5,8 @@ import math
 
 
 def refine_observations(observations, frame_count, observe, signature, stopped=lambda: False,
-                        max_extra_frames=4000, max_stable_gap_frames=None, *, observe_batch=None):
+                        max_extra_frames=4000, max_stable_gap_frames=None, *,
+                        observe_batch=None, active_interval=None):
     """Bisect changed intervals; retain empty observations as real boundaries.
 
     Matching endpoints keep the coarse sampling contract unless a maximum gap
@@ -62,8 +63,11 @@ def refine_observations(observations, frame_count, observe, signature, stopped=l
             gap = right - left
             if gap <= 1:
                 continue
-            if (max_stable_gap_frames is None or gap <= max_stable_gap_frames) and at(left) == at(right):
-                continue
+            if at(left) == at(right):
+                if max_stable_gap_frames is None or gap <= max_stable_gap_frames:
+                    continue
+                if active_interval is not None and not active_interval(left, right):
+                    continue
             middle = (left + right) // 2
             middle_indices.append(middle)
             children.extend(((left, middle), (middle, right)))

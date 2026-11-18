@@ -32,14 +32,20 @@ def build_ocr_hint(segment, max_chars=320):
         try:
             confidence = float(_value(row, "prob", 0) or 0)
             sample = _value(row, "sample_time")
+            has_verified_interval = bool(
+                (_value(row, "visual_locked") or _value(segment, "source_caption_timing_verified"))
+                and _value(row, "start") is not None
+                and _value(row, "end") is not None
+            )
             # A synthesized best_block has sample_time=0; its interval is the evidence.
-            if tracking and sample is not None:
+            if tracking and sample is not None and not has_verified_interval:
                 time = _seconds(sample)
                 within = start <= time <= end
             else:
-                time = _seconds(_value(row, "start", start))
+                r_start = _seconds(_value(row, "start", start))
                 finish = _seconds(_value(row, "end", end))
-                within = math.isfinite(finish) and finish > time and time < end and finish > start
+                within = math.isfinite(r_start) and math.isfinite(finish) and finish > r_start and r_start < end and finish > start
+                time = max(start, r_start) if within else r_start
         except (TypeError, ValueError, OverflowError):
             continue
         if text and math.isfinite(confidence) and confidence >= 0.80 and math.isfinite(time) and within:
@@ -65,5 +71,9 @@ def translation_cue_meta(segments, existing=None):
         if _value(segment, "tracking_blocks") or _value(segment, "best_block"):
             # Replace the caller's best-frame-only hint, including when all rows are rejected.
             meta["ocr_hint"] = build_ocr_hint(segment)
+        pf_alt = str(_value(segment, "paraformer_alt", "") or "").strip()
+        src_txt = str(_value(segment, "content", "") or "").strip()
+        if pf_alt and pf_alt != src_txt:
+            meta["asr_alt"] = pf_alt[:200]
         result.append(meta)
     return result
