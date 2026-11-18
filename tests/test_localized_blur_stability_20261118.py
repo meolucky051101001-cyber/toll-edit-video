@@ -152,13 +152,15 @@ def test_compound_asr_clause_at_secondary_y_band_is_not_dropped_from_source_time
     assert all(not t.visual_locked for t in tracks)
 
 
-def test_localized_blur_spoken_cue_stays_continuous_and_absorbs_micro_shoulders(tmp_path):
+def test_localized_blur_disjoint_band_cue_bridges_gap_without_dual_blur_bars(tmp_path):
+    from backend.ass_utils import sync_and_clamp_subtitles
+
     t1 = _trk("主包日常上学感觉够用了", 8.933, 10.667, 0.168, 0.606, top=0.248, bottom=0.288)
     t2 = _trk("这个是眼镜盒但是当笔筒还挺好用的", 10.833, 11.640, 0.257, 0.889, top=0.190, bottom=0.228)
-    seg = NS(
+    seg5 = NS(
         index=5,
         start=timedelta(seconds=8.96),
-        end=timedelta(seconds=11.59),
+        end=timedelta(seconds=11.64),
         content="Dùng đi học hàng ngày thấy rất ổn, đây là hộp đựng kính",
         tracking_blocks=[t1, t2],
         best_block=t1,
@@ -166,19 +168,88 @@ def test_localized_blur_spoken_cue_stays_continuous_and_absorbs_micro_shoulders(
         geometry_verified=True,
         visual_sub_to_speech=False,
     )
-    ass_path = tmp_path / "stable.ass"
-    generate_ass_file([seg], [], ass_path, play_res_x=720, play_res_y=1280, cover_style="localized_blur")
+    seg6 = NS(
+        index=6,
+        start=timedelta(seconds=11.66),
+        end=timedelta(seconds=15.14),
+        content="Cắm bút rất tiện",
+        tracking_blocks=[],
+        best_block=None,
+        ocr_mask_status="no_caption_evidence",
+        geometry_verified=True,
+        visual_sub_to_speech=False,
+    )
+    # Even when condensed TTS finishes speaking early (1.73s -> 10.69s), seg5.end holds
+    # over its active source caption window up to 11.64s (<= seg6.start=11.66s).
+    sync_and_clamp_subtitles([seg5, seg6], [{"index": 5, "duration": 1.73}, {"index": 6, "duration": 2.5}])
+    assert seg5.end.total_seconds() == pytest.approx(11.64)
+
+    ass_path = tmp_path / "stable_disjoint.ass"
+    generate_ass_file([seg5], [], ass_path, play_res_x=720, play_res_y=1280, cover_style="localized_blur")
     ass_text = ass_path.read_text(encoding="utf-8-sig")
     dialogues = [ln for ln in ass_text.splitlines() if ln.startswith("Dialogue: 1,")]
-    assert len(dialogues) == 1
-    assert "0:00:08.96,0:00:11.59" in dialogues[0]
+    assert len(dialogues) == 2
+    assert "0:00:08.96,0:00:10.83" in dialogues[0]
+    assert "0:00:10.83,0:00:11.64" in dialogues[1]
 
     meta = blur.read_ass_blur_metadata(ass_text)
     combined = blur.combine_blur_boxes(meta["boxes"], meta["text_boxes"])
     regions = blur.blur_regions(combined, 720, 1280, meta["settings"])
-    # Pre-shoulder 8.933..8.960 (27ms) is absorbed into the main box so there is
-    # only 1 lower blur region [8.933 -> 11.590] plus 1 upper source region [10.833 -> 11.640].
+    # Exactly 1 lower region [8.933 -> 10.833] and 1 upper region [10.833 -> 11.640]:
+    # zero missing-sub gap and never 2 simultaneous blur bars at t=11.0s!
     assert len(regions) == 2
+    active_at_11 = [
+        (x, y, w, h)
+        for x, y, w, h, ivs in regions
+        for s, e in ivs
+        if s <= 11.0 < e
+    ]
+    assert len(active_at_11) == 1
+
+
+def test_same_band_multi_track_cue_stays_single_motionless_blur_region(tmp_path):
+    from backend.ass_utils import sync_and_clamp_subtitles
+
+    s1 = _trk("这个笔筒可以给到一个夯", 20.833, 22.233, 0.314, 0.759, top=0.324, bottom=0.364)
+    s2 = _trk("肥肠平价还可以放下主包所有的笔", 22.233, 24.200, 0.204, 0.799, top=0.311, bottom=0.349)
+    seg10 = NS(
+        index=10,
+        start=timedelta(seconds=20.78),
+        end=timedelta(seconds=24.12),
+        content="Ống bút này điểm mười, giá rẻ lại đựng vừa hết bút",
+        tracking_blocks=[s1, s2],
+        best_block=s2,
+        ocr_mask_status="located",
+        geometry_verified=True,
+        visual_sub_to_speech=False,
+    )
+    seg11 = NS(
+        index=11,
+        start=timedelta(seconds=24.20),
+        end=timedelta(seconds=25.32),
+        content="Hẹn gặp lại",
+        tracking_blocks=[],
+        best_block=None,
+        ocr_mask_status="no_caption_evidence",
+        geometry_verified=True,
+        visual_sub_to_speech=False,
+    )
+    sync_and_clamp_subtitles([seg10, seg11], [{"index": 10, "duration": 1.99}, {"index": 11, "duration": 0.94}])
+    assert seg10.end.total_seconds() == pytest.approx(24.20)
+
+    ass_path = tmp_path / "stable_same_band.ass"
+    generate_ass_file([seg10], [], ass_path, play_res_x=720, play_res_y=1280, cover_style="localized_blur")
+    ass_text = ass_path.read_text(encoding="utf-8-sig")
+    dialogues = [ln for ln in ass_text.splitlines() if ln.startswith("Dialogue: 1,")]
+    assert len(dialogues) == 1
+    assert "0:00:20.78,0:00:24.20" in dialogues[0]
+
+    meta = blur.read_ass_blur_metadata(ass_text)
+    combined = blur.combine_blur_boxes(meta["boxes"], meta["text_boxes"])
+    regions = blur.blur_regions(combined, 720, 1280, meta["settings"])
+    # Entire 20.780..24.200s window coalesces into ONE single motionless GPU blur rectangle!
+    assert len(regions) == 1
+    assert regions[0][4] == [(pytest.approx(20.78), pytest.approx(24.20))]
 
 
 def test_secondary_band_rejects_tilted_packaging_and_rescues_split_single_cjk():

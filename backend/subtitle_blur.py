@@ -145,11 +145,11 @@ def _rects_intersect(a, b):
     )
 
 
-def _stabilize_blur_shoulders(rows, max_shoulder_s=0.15, min_main_s=0.20):
-    """Absorb <=150ms pre/post offset shoulders into an immediately touching outer union box.
+def _stabilize_blur_shoulders(rows, max_shoulder_s=0.30, min_main_s=0.20):
+    """Absorb <=300ms pre/post offset shoulders and sandwiched dips into touching outer boxes.
 
-    Preserves exact [start, end) intervals while preventing 1-4 frame two-step box-size
-    snaps when source caption onset/offset and translated speech differ by tens of ms.
+    Preserves exact [start, end) intervals while preventing short two-step box-size
+    snaps when source caption onset/offset and translated speech differ slightly.
     """
     if len(rows) < 2:
         return rows
@@ -157,6 +157,43 @@ def _stabilize_blur_shoulders(rows, max_shoulder_s=0.15, min_main_s=0.20):
     for row in rows:
         by_interval[(row["start"], row["end"])].append(dict(row))
     slices = [(s, e, by_interval[(s, e)]) for s, e in sorted(by_interval)]
+
+    # Pass 0: Sandwiched micro-dips where both adjacent main slices contain r
+    for i in range(1, len(slices) - 1):
+        s0, e0, cur_rects = slices[i]
+        ps, pe, prv_rects = slices[i - 1]
+        ns, ne, nxt_rects = slices[i + 1]
+        if not (
+            0.0 < (e0 - s0) <= max_shoulder_s
+            and abs(s0 - pe) <= 1e-6
+            and abs(ns - e0) <= 1e-6
+            and (pe - ps) >= min_main_s
+            and (ne - ns) >= min_main_s
+        ):
+            continue
+        for r in cur_rects:
+            p_cont = [m for m in prv_rects if _rect_contains(m, r)]
+            n_cont = [m for m in nxt_rects if _rect_contains(m, r)]
+            if len(p_cont) == 1 and len(n_cont) == 1:
+                pm, nm = p_cont[0], n_cont[0]
+                env = dict(
+                    x_pct=min(pm["x_pct"], nm["x_pct"]),
+                    y_pct=min(pm["y_pct"], nm["y_pct"]),
+                    max_x_pct=max(pm["max_x_pct"], nm["max_x_pct"]),
+                    max_y_pct=max(pm["max_y_pct"], nm["max_y_pct"]),
+                )
+                edge_delta = max(
+                    abs(pm["x_pct"] - nm["x_pct"]),
+                    abs(pm["max_x_pct"] - nm["max_x_pct"]),
+                    abs(pm["y_pct"] - nm["y_pct"]),
+                    abs(pm["max_y_pct"] - nm["max_y_pct"]),
+                )
+                target = env if edge_delta <= 0.025 else pm
+                if not any(other is not r and _rects_intersect(target, other) for other in cur_rects):
+                    r.update(target)
+                    if edge_delta <= 0.025:
+                        pm.update(env)
+                        nm.update(env)
 
     # Forward pass: short pre-shoulder touching a longer containing main slice
     for i in range(len(slices) - 1):
@@ -207,12 +244,15 @@ def combine_blur_boxes(source_boxes, text_boxes):
     Inputs must already use the same coordinate space. Disjoint captions stay
     separate, and source-only time ranges never inherit translated cue timing.
     """
-    rows = validate_blur_boxes(source_boxes) + validate_blur_boxes(text_boxes)
+    src_validated = validate_blur_boxes(source_boxes)
+    txt_validated = validate_blur_boxes(text_boxes)
+    n_src = len(src_validated)
+    rows = src_validated + txt_validated
     changes = defaultdict(list)
     for index, row in enumerate(rows):
         changes[row["start"]].append((index, True))
         changes[row["end"]].append((index, False))
-    active, result = {}, []
+    active, tagged_result = {}, []
     times = sorted(changes)
     for start, end in zip(times, times[1:]):
         for index, adding in changes[start]:
@@ -221,22 +261,61 @@ def combine_blur_boxes(source_boxes, text_boxes):
             else:
                 active.pop(index, None)
         rectangles = []
-        for row in active.values():
-            rect = [row[k] for k in ("x_pct", "y_pct", "max_x_pct", "max_y_pct")]
+        for idx_key, row in active.items():
+            rect = [
+                row["x_pct"],
+                row["y_pct"],
+                row["max_x_pct"],
+                row["max_y_pct"],
+                idx_key < n_src,
+                {idx_key} if idx_key >= n_src else set(),
+            ]
             index = 0
             while index < len(rectangles):
                 other = rectangles[index]
                 if (rect[0] <= other[2] and other[0] <= rect[2]
                         and rect[1] <= other[3] and other[1] <= rect[3]):
-                    rect = [min(rect[0], other[0]), min(rect[1], other[1]),
-                            max(rect[2], other[2]), max(rect[3], other[3])]
+                    rect = [
+                        min(rect[0], other[0]),
+                        min(rect[1], other[1]),
+                        max(rect[2], other[2]),
+                        max(rect[3], other[3]),
+                        rect[4] or other[4],
+                        rect[5] | other[5],
+                    ]
                     rectangles.pop(index)
                     index = 0
                 else:
                     index += 1
             rectangles.append(rect)
-        result.extend(dict(start=start, end=end, x_pct=r[0], y_pct=r[1],
-                           max_x_pct=r[2], max_y_pct=r[3]) for r in rectangles)
+        for r in rectangles:
+            tagged_result.append((
+                dict(start=start, end=end, x_pct=r[0], y_pct=r[1], max_x_pct=r[2], max_y_pct=r[3]),
+                r[4],
+                frozenset(r[5]),
+            ))
+
+    # Unify concurrent (source + same text_box) slices in the same vertical band
+    # so consecutive same-band source captions under one continuous Vietnamese line
+    # never cause mid-sentence 2px-18px box jumps.
+    by_text_group = defaultdict(list)
+    for entry in tagged_result:
+        row_d, has_src, txt_ids = entry
+        if has_src and txt_ids:
+            by_text_group[txt_ids].append(row_d)
+    for grp_rows in by_text_group.values():
+        if len(grp_rows) < 2:
+            continue
+        cys = [(r["y_pct"] + r["max_y_pct"]) * 0.5 for r in grp_rows]
+        if max(cys) - min(cys) <= 0.030:
+            gx1 = min(r["x_pct"] for r in grp_rows)
+            gy1 = min(r["y_pct"] for r in grp_rows)
+            gx2 = max(r["max_x_pct"] for r in grp_rows)
+            gy2 = max(r["max_y_pct"] for r in grp_rows)
+            for r in grp_rows:
+                r.update(x_pct=gx1, y_pct=gy1, max_x_pct=gx2, max_y_pct=gy2)
+
+    result = [entry[0] for entry in tagged_result]
     return _stabilize_blur_shoulders(result)
 
 

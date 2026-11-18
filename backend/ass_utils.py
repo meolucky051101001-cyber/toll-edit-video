@@ -314,11 +314,34 @@ def sync_and_clamp_subtitles(translated_segments, dubbing_audio_files=None):
             seg_idx = getattr(seg, "index", None) if not isinstance(seg, dict) else seg.get("index")
             if seg_idx in audio_dur_map:
                 actual_dur = audio_dur_map[seg_idx]
+                is_vis = _is_visual_segment(seg)
                 if isinstance(seg, dict):
-                    start_s = float(seg.get("start", 0))
-                    seg["end"] = start_s + actual_dur
+                    start_s = float(seg.get("start", 0.0))
+                    orig_end_s = float(seg.get("end", start_s + actual_dur))
+                    raw_tracks = seg.get("tracking_blocks") or []
                 else:
-                    seg.end = seg.start + datetime.timedelta(seconds=actual_dur)
+                    start_s = seg.start.total_seconds()
+                    orig_end_s = seg.end.total_seconds()
+                    raw_tracks = getattr(seg, "tracking_blocks", None) or []
+                tts_end_s = start_s + actual_dur
+                target_end_s = tts_end_s
+                if not is_vis and raw_tracks:
+                    ov_track_ends = [
+                        float(_block_value(b, "end", 0.0))
+                        for b in raw_tracks
+                        if not _excluded_source(b)
+                        and float(_block_value(b, "end", 0.0)) > start_s + 1e-4
+                        and float(_block_value(b, "start", 0.0)) < orig_end_s + 0.15
+                    ]
+                    if ov_track_ends:
+                        # Keep translated subtitle visible over its own active source caption
+                        # window when condensed TTS finishes speaking early (prevents empty blur bars).
+                        hold_cap_s = min(max(ov_track_ends), orig_end_s + 0.35)
+                        target_end_s = max(tts_end_s, hold_cap_s)
+                if isinstance(seg, dict):
+                    seg["end"] = target_end_s
+                else:
+                    seg.end = datetime.timedelta(seconds=target_end_s)
 
     # 2. Chống đè sub (Anti-Overlap): Đảm bảo sub trước phải biến mất trước khi sub sau xuất hiện
     # TUYỆT ĐỐI KHÔNG dịch chuyển next_seg.start về sau (Codex Plan - Điểm 4)
@@ -906,20 +929,78 @@ def _ass_segment_events(seg, held_tracks, seg_s, seg_e, c):
     seg_is_visual = _is_visual_segment(seg)
     if c.cover_style == "localized_blur" and not seg_is_visual:
         # Source blur masks carry their own frame-accurate lifetimes in ToolV1BlurData.
-        # Keep each paginated spoken Vietnamese cue continuous at one stable anchor block
-        # so text and text_boxes never blink off in caption gaps or jump mid-sentence.
+        # Keep spoken Vietnamese cues 100% gap-free across inter-caption silences, locked
+        # to one anchor per vertical band, and transition cleanly without gap only when
+        # the underlying source caption genuinely jumps (>0.045 Y) to a disjoint band.
         candidates = list(seg_blist) if seg_blist else list(relevant)
-        anchor = None
-        if candidates:
-            def _anchor_score(b):
-                b_s = float(_block_value(b, "start", seg_s))
-                b_e = float(_block_value(b, "end", seg_e))
-                ov = max(0.0, min(seg_e, b_e) - max(seg_s, b_s))
-                dur = max(0.0, b_e - b_s)
-                dist = max(b_s - seg_e, seg_s - b_e, 0.0)
-                return (round(ov, 4), -round(dist, 4), round(dur, 4))
-            anchor = max(candidates, key=_anchor_score)
-        return [{"start": seg_s, "end": seg_e, "block": anchor}], verified, seg_is_visual
+        if not candidates:
+            return [{"start": seg_s, "end": seg_e, "block": None}], verified, seg_is_visual
+
+        def _anchor_score(b):
+            b_s = float(_block_value(b, "start", seg_s))
+            b_e = float(_block_value(b, "end", seg_e))
+            ov = max(0.0, min(seg_e, b_e) - max(seg_s, b_s))
+            dur = max(0.0, b_e - b_s)
+            dist = max(b_s - seg_e, seg_s - b_e, 0.0)
+            return (round(ov, 4), -round(dist, 4), round(dur, 4))
+
+        ov_cands = sorted(
+            [
+                b for b in candidates
+                if (min(seg_e, float(_block_value(b, "end", seg_e))) - max(seg_s, float(_block_value(b, "start", seg_s)))) >= 0.08
+            ],
+            key=lambda b: (float(_block_value(b, "start", seg_s)), float(_block_value(b, "end", seg_e))),
+        )
+        runs = []
+        for b in ov_cands:
+            b_y1 = float(_block_value(b, "y_pct", 0.0))
+            b_y2 = float(_block_value(b, "max_y_pct", 0.0))
+            b_cy = (b_y1 + b_y2) * 0.5
+            b_ov = min(seg_e, float(_block_value(b, "end", seg_e))) - max(seg_s, float(_block_value(b, "start", seg_s)))
+            if not runs:
+                runs.append([b])
+                continue
+            cur_run = runs[-1]
+            run_cy = sum((float(_block_value(x, "y_pct", 0.0)) + float(_block_value(x, "max_y_pct", 0.0))) * 0.5 for x in cur_run) / len(cur_run)
+            if abs(b_cy - run_cy) <= 0.045:
+                cur_run.append(b)
+            elif b_ov >= 0.25:
+                runs.append([b])
+
+        def _envelope_anchor(group):
+            base = max(group, key=_anchor_score)
+            return _copy_visual_colors(
+                dict(
+                    start=min(float(_block_value(x, "start", seg_s)) for x in group),
+                    end=max(float(_block_value(x, "end", seg_e)) for x in group),
+                    x_pct=min(float(_block_value(x, "x_pct", 0.0)) for x in group),
+                    max_x_pct=max(float(_block_value(x, "max_x_pct", 1.0)) for x in group),
+                    y_pct=min(float(_block_value(x, "y_pct", 0.0)) for x in group),
+                    max_y_pct=max(float(_block_value(x, "max_y_pct", 0.0)) for x in group),
+                    **({"geometry_verified": True} if verified or all(_block_value(x, "geometry_verified", False) for x in group) else {}),
+                ),
+                base,
+            )
+
+        if len(runs) <= 1:
+            chosen_group = runs[0] if runs else [max(candidates, key=_anchor_score)]
+            return [{"start": seg_s, "end": seg_e, "block": _envelope_anchor(chosen_group)}], verified, seg_is_visual
+
+        out_events = []
+        cur_left = seg_s
+        for idx_r, grp in enumerate(runs):
+            if idx_r + 1 < len(runs):
+                raw_cut = float(_block_value(runs[idx_r + 1][0], "start", seg_e))
+                cut = max(cur_left + 0.15, min(seg_e - 0.15, raw_cut))
+            else:
+                cut = seg_e
+            if cut > cur_left + 1e-6:
+                out_events.append({"start": cur_left, "end": cut, "block": _envelope_anchor(grp)})
+                cur_left = cut
+        if out_events:
+            out_events[-1]["end"] = seg_e
+            return out_events, verified, seg_is_visual
+        return [{"start": seg_s, "end": seg_e, "block": max(candidates, key=_anchor_score)}], verified, seg_is_visual
     if verified:
         blocks = []
     if relevant:

@@ -520,7 +520,8 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
         word_count = max(len(text.split()), len(spoken_text.split()))
         est_duration = max(1.0, word_count * 0.28)
         if hard_max > 0 and (est_duration / hard_max) > MAX_NATURAL_SPEED:
-            target_words = max(2, int((hard_max - 0.05) / 0.28))
+            comfortable_speed = min(1.25, max(1.0, float(MAX_NATURAL_SPEED) * 0.85))
+            target_words = max(2, int(round((hard_max - 0.05) * comfortable_speed / 0.28)))
             overly_long_items.append({
                 "index": seg.index,
                 "text": text,
