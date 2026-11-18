@@ -91,6 +91,16 @@ def _remaining_stage_seconds(state, elapsed):
     percent = state.get("percent", 0)
     return max(0, int(elapsed * (100 - percent) / percent)) if 10 < percent < 100 else None
  
+def _configured_total_steps() -> int:
+    try:
+        from v1_feature_flags import get_feature_flags
+        if str(get_feature_flags(WORKSPACE).get("V1_QC_POLICY", "OFF")).upper() == "OFF":
+            return 8
+    except Exception:
+        return 8
+    return 9
+
+
 def _default_worker_state(worker_id: int) -> Dict[str, Any]:
     return {
         "worker_id": int(worker_id),
@@ -99,7 +109,7 @@ def _default_worker_state(worker_id: int) -> Dict[str, Any]:
         "video_name": "",
         "video_status": "idle",
         "step": 0,
-        "total_steps": 9,
+        "total_steps": _configured_total_steps(),
         "stage": None,
         "details": {},
         "phase_started_at": None,
@@ -113,6 +123,12 @@ def _default_worker_state(worker_id: int) -> Dict[str, Any]:
         "step_durations": {},
         "current_step_start": None,
         "router_info": None,
+        "separator_info": None,
+        "asr_model": None,
+        "asr_source": None,
+        "ocr_model": None,
+        "voice_name": None,
+        "speaker_lock": None,
         "video_mode": None,
         "last_error": None,
         "updated_at": 0,
@@ -154,7 +170,7 @@ _DEFAULT_STATE: Dict[str, Any] = {
     "video_name": "",
     "video_status": "idle",
     "step": 0,
-    "total_steps": 9,
+    "total_steps": 8,
     "stage": None,
     "details": {},
     "phase_started_at": None,
@@ -176,9 +192,14 @@ _DEFAULT_STATE: Dict[str, Any] = {
     "current_step_start": None,
     "separator_info": None,
     "mixer_info": None,
+    "asr_model": None,
+    "asr_source": None,
+    "ocr_model": None,
+    "voice_name": None,
+    "speaker_lock": None,
     "active_translation_model": None,
     "translation_models": [],
-    "configured_gemini_model": os.getenv("GEMINI_MODEL", "gemini-3.7-flash").strip() or "gemini-3.7-flash",
+    "configured_gemini_model": os.getenv("GEMINI_MODEL", "gemini-3-flash-preview").strip() or "gemini-3-flash-preview",
     "router_info": None,
     "video_mode": None,
     "workers": {
@@ -479,9 +500,30 @@ def get_status(strict: bool = False) -> Dict[str, Any]:
             if last_mix:
                 state["mixer_info"] = copy.deepcopy(last_mix)
 
-        # Cập nhật thông tin model dịch thuật cấu hình và model thực tế đang chạy
-        configured_m = os.getenv("GEMINI_MODEL", "gemini-3.7-flash").strip() or "gemini-3.7-flash"
+        # Cập nhật thông tin model dịch thuật cấu hình và các model thế hệ mới đang kích hoạt
+        caps = _runtime_model_capabilities()
+        configured_m = caps["configured_gemini_model"]
         state["configured_gemini_model"] = configured_m
+        state["configured_asr_model"] = caps["configured_asr_model"]
+        state["paraformer_co_rec"] = caps["paraformer_co_rec"]
+        state["camplus_ready"] = caps["camplus_ready"]
+        state["vad_smart_bypass"] = caps["vad_smart_bypass"]
+        state["qc_pixel_check"] = caps["qc_pixel_check"]
+        state["ocr_model_detail"] = caps["ocr_model_detail"]
+        if not state.get("ocr_model"):
+            last_ocr = (state.get("last_completed") or {}).get("ocr_model") if not state.get("active") else None
+            state["ocr_model"] = last_ocr or caps["ocr_model"]
+        if not state.get("asr_model"):
+            router_asr = (state.get("router_info") or {}).get("asr_model")
+            last_asr = (state.get("last_completed") or {}).get("asr_model") if not state.get("active") else None
+            state["asr_model"] = router_asr or last_asr or caps["configured_asr_model"]
+        if not state.get("active"):
+            if not state.get("voice_name"):
+                state["voice_name"] = (state.get("last_completed") or {}).get("voice_name")
+            if not state.get("speaker_lock"):
+                state["speaker_lock"] = (state.get("last_completed") or {}).get("speaker_lock")
+        if not state.get("speaker_lock") and caps["camplus_ready"]:
+            state["speaker_lock"] = "CAM++ 512-D"
         if not state.get("active_translation_model"):
             if state.get("active") and (state.get("step") == 5 or state.get("step") == 5.0):
                 state["active_translation_model"] = configured_m
@@ -497,6 +539,18 @@ def get_status(strict: bool = False) -> Dict[str, Any]:
         # Cập nhật thông tin chi tiết từng luồng xử lý (Workers 1 & 2)
         if "workers" in state and isinstance(state["workers"], dict):
             for wid_k, w_info in state["workers"].items():
+                w_info.setdefault("configured_gemini_model", configured_m)
+                w_info.setdefault("paraformer_co_rec", caps["paraformer_co_rec"])
+                w_info.setdefault("camplus_ready", caps["camplus_ready"])
+                w_info.setdefault("vad_smart_bypass", caps["vad_smart_bypass"])
+                w_info.setdefault("qc_pixel_check", caps["qc_pixel_check"])
+                w_info.setdefault("ocr_model_detail", caps["ocr_model_detail"])
+                if not w_info.get("ocr_model"):
+                    w_info["ocr_model"] = caps["ocr_model"]
+                if not w_info.get("asr_model"):
+                    w_info["asr_model"] = (w_info.get("router_info") or {}).get("asr_model") or caps["configured_asr_model"]
+                if not w_info.get("speaker_lock") and caps["camplus_ready"]:
+                    w_info["speaker_lock"] = "CAM++ 512-D"
                 if w_info.get("active") and w_info.get("start_time"):
                     w_elapsed = max(0, int(time.time() - w_info["start_time"]))
                     w_info["elapsed_seconds"] = w_elapsed
@@ -515,6 +569,55 @@ def get_status(strict: bool = False) -> Dict[str, Any]:
                 "2": _default_worker_state(2),
             }
         return state
+
+
+_MODEL_CAPS_CACHE: Dict[str, Any] = {}
+
+
+def _runtime_model_capabilities() -> Dict[str, Any]:
+    """Đọc nhanh thông tin các model thế hệ mới và cấu hình bền vững (reactive theo mtime)."""
+    root = Path(__file__).resolve().parent.parent
+    flags_file = Path(WORKSPACE) / "bot_system" / "v1_feature_flags.json"
+    try:
+        flags_mtime = flags_file.stat().st_mtime_ns if flags_file.is_file() else 0
+    except OSError:
+        flags_mtime = 0
+    env_gemini = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview").strip() or "gemini-3-flash-preview"
+    env_rec = os.getenv("V1_PADDLE_RECOGNITION_MODEL", "").strip()
+    cache_key = (str(WORKSPACE), flags_mtime, env_gemini, env_rec)
+    cached = _MODEL_CAPS_CACHE.get("value")
+    if cached is not None and _MODEL_CAPS_CACHE.get("key") == cache_key:
+        return cached
+
+    flags: Dict[str, Any] = {}
+    if flags_file.is_file():
+        try:
+            loaded = json.loads(flags_file.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                flags = loaded
+        except Exception:
+            flags = {}
+    configured_asr = str(flags.get("V1_ASR_MODEL") or "whisper_sensevoice").strip().lower()
+    configured_gemini = str(flags.get("V1_GEMINI_MODEL") or env_gemini).strip() or env_gemini
+    paraformer_ok = (root / "models" / "v1" / "paraformer_zh" / "model.int8.onnx").is_file()
+    camplus_ok = (root / "models" / "v1" / "speaker_id" / "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx").is_file()
+    server_rec_dir = (root / "models" / "v1" / "paddlex" / "official_models" / "PP-OCRv5_server_rec_onnx").is_dir()
+    rec_model = env_rec or ("PP-OCRv5_server_rec" if server_rec_dir else "PP-OCRv6_tiny_rec")
+    det_model = os.getenv("V1_PADDLE_DETECTION_MODEL", "PP-OCRv6_tiny_det").strip() or "PP-OCRv6_tiny_det"
+    ocr_label = "PP-OCRv6 + v5 Server" if "v5_server" in rec_model.lower() else "PP-OCRv6 Tiny"
+    result = {
+        "configured_asr_model": configured_asr,
+        "configured_gemini_model": configured_gemini,
+        "paraformer_co_rec": paraformer_ok,
+        "camplus_ready": camplus_ok,
+        "vad_smart_bypass": bool(flags.get("V1_VAD_SMART_BYPASS", False)),
+        "qc_pixel_check": flags.get("V1_QC_VISUAL_PIXEL_CHECK", True) is not False,
+        "ocr_model": ocr_label,
+        "ocr_model_detail": f"{det_model} + {rec_model} (PaddleOCR ONNX CUDA)",
+    }
+    _MODEL_CAPS_CACHE["key"] = cache_key
+    _MODEL_CAPS_CACHE["value"] = result
+    return result
 
 
 def active_job_names(state: Dict[str, Any]) -> list[str]:
@@ -561,6 +664,7 @@ def start_batch(
                 WORKSPACE, status_file=STATUS_FILE, source="job_tracker", reason="new batch starts"
             )
         now = time.time()
+        total_steps = _configured_total_steps()
         _CURRENT_STATE.update({
             "schema_version": 2,
             "job_id": job_id,
@@ -570,7 +674,7 @@ def start_batch(
             "video_status": "idle",
             "step": 0,
             "stage": None,
-            "total_steps": 9,
+            "total_steps": total_steps,
             "details": {},
             "phase_started_at": None,
             "step_name": "Đang chuẩn bị hàng đợi...",
@@ -607,6 +711,7 @@ def start_video(video_name: str, index: int = 1, total: int = 1, worker_id: Opti
         if wid_str not in _CURRENT_STATE["workers"]:
             _CURRENT_STATE["workers"][wid_str] = _default_worker_state(wid)
 
+        total_steps = _configured_total_steps()
         _CURRENT_STATE["workers"][wid_str].update({
             "active": True,
             "status": "running",
@@ -614,7 +719,7 @@ def start_video(video_name: str, index: int = 1, total: int = 1, worker_id: Opti
             "video_status": "running",
             "step": 0,
             "stage": None,
-            "total_steps": 9,
+            "total_steps": total_steps,
             "details": {},
             "phase_started_at": None,
             "step_name": "Bắt đầu xử lý video...",
@@ -628,6 +733,12 @@ def start_video(video_name: str, index: int = 1, total: int = 1, worker_id: Opti
             "step_durations": {},
             "current_step_start": now,
             "router_info": None,
+            "separator_info": None,
+            "asr_model": None,
+            "asr_source": None,
+            "ocr_model": None,
+            "voice_name": None,
+            "speaker_lock": None,
             "video_mode": None,
             "updated_at": now,
         })
@@ -641,11 +752,16 @@ def start_video(video_name: str, index: int = 1, total: int = 1, worker_id: Opti
             "translation_models": [],
             "separator_info": None,
             "mixer_info": None,
+            "asr_model": None,
+            "asr_source": None,
+            "ocr_model": None,
+            "voice_name": None,
+            "speaker_lock": None,
             "router_info": None,
             "video_mode": None,
             "step": 0,
             "stage": None,
-            "total_steps": 9,
+            "total_steps": total_steps,
             "details": {},
             "phase_started_at": None,
             "step_name": "Bắt đầu xử lý video...",
@@ -719,12 +835,16 @@ def record_translation_model(model: str, identity: Optional[Any] = None):
         logger.info("Đã ghi nhận model dịch thuật: %s", model)
 
 
-def record_separator_info(info: Dict[str, Any], identity: Optional[Any] = None):
-    """Ghi nhận thông tin mô hình tách âm (BS-RoFormer / Demucs / Bypass)."""
+def record_separator_info(info: Dict[str, Any], identity: Optional[Any] = None, worker_id: Optional[int] = None):
+    """Ghi nhận thông tin mô hình tách âm (BS-RoFormer / Demucs / Silero VAD Bypass)."""
     if not info:
         return
     with _LOCK:
         _sync_from_disk_unlocked()
+        wid = _get_worker_id(worker_id)
+        wid_str = str(wid)
+        if "workers" in _CURRENT_STATE and wid_str in _CURRENT_STATE["workers"]:
+            _CURRENT_STATE["workers"][wid_str]["separator_info"] = copy.deepcopy(info)
         if identity is not None:
             current = (_CURRENT_STATE.get("job_id"), _CURRENT_STATE.get("video_name"), _CURRENT_STATE.get("start_time"))
             if identity != current:
@@ -732,6 +852,70 @@ def record_separator_info(info: Dict[str, Any], identity: Optional[Any] = None):
         _CURRENT_STATE["separator_info"] = copy.deepcopy(info)
         _save_state_to_disk()
         logger.info("Đã ghi nhận thông tin tách âm: %s", info.get("engine") or info.get("model"))
+
+
+def record_asr_info(asr_model: str, source: str = "speech_asr", identity: Optional[Any] = None, worker_id: Optional[int] = None):
+    """Ghi nhận mô hình nhận dạng giọng nói thực tế của video đang chạy."""
+    if not asr_model:
+        return
+    with _LOCK:
+        _sync_from_disk_unlocked()
+        wid = _get_worker_id(worker_id)
+        wid_str = str(wid)
+        if "workers" in _CURRENT_STATE and wid_str in _CURRENT_STATE["workers"]:
+            _CURRENT_STATE["workers"][wid_str]["asr_model"] = str(asr_model)
+            _CURRENT_STATE["workers"][wid_str]["asr_source"] = str(source or "speech_asr")
+        if identity is not None:
+            current = (_CURRENT_STATE.get("job_id"), _CURRENT_STATE.get("video_name"), _CURRENT_STATE.get("start_time"))
+            if identity != current:
+                return
+        _CURRENT_STATE["asr_model"] = str(asr_model)
+        _CURRENT_STATE["asr_source"] = str(source or "speech_asr")
+        _save_state_to_disk()
+
+
+def record_ocr_info(ocr_model: str, detail: str = "", identity: Optional[Any] = None, worker_id: Optional[int] = None):
+    """Ghi nhận mô hình OCR thực tế của video đang chạy."""
+    if not ocr_model:
+        return
+    with _LOCK:
+        _sync_from_disk_unlocked()
+        wid = _get_worker_id(worker_id)
+        wid_str = str(wid)
+        if "workers" in _CURRENT_STATE and wid_str in _CURRENT_STATE["workers"]:
+            _CURRENT_STATE["workers"][wid_str]["ocr_model"] = str(ocr_model)
+            if detail:
+                _CURRENT_STATE["workers"][wid_str]["ocr_model_detail"] = str(detail)
+        if identity is not None:
+            current = (_CURRENT_STATE.get("job_id"), _CURRENT_STATE.get("video_name"), _CURRENT_STATE.get("start_time"))
+            if identity != current:
+                return
+        _CURRENT_STATE["ocr_model"] = str(ocr_model)
+        if detail:
+            _CURRENT_STATE["ocr_model_detail"] = str(detail)
+        _save_state_to_disk()
+
+
+def record_voice_info(voice_name: str, speaker_lock: str = "", identity: Optional[Any] = None, worker_id: Optional[int] = None):
+    """Ghi nhận giọng đọc TTS và chế độ khóa giọng người nói (CAM++ 512-D)."""
+    if not voice_name:
+        return
+    with _LOCK:
+        _sync_from_disk_unlocked()
+        wid = _get_worker_id(worker_id)
+        wid_str = str(wid)
+        if "workers" in _CURRENT_STATE and wid_str in _CURRENT_STATE["workers"]:
+            _CURRENT_STATE["workers"][wid_str]["voice_name"] = str(voice_name)
+            if speaker_lock:
+                _CURRENT_STATE["workers"][wid_str]["speaker_lock"] = str(speaker_lock)
+        if identity is not None:
+            current = (_CURRENT_STATE.get("job_id"), _CURRENT_STATE.get("video_name"), _CURRENT_STATE.get("start_time"))
+            if identity != current:
+                return
+        _CURRENT_STATE["voice_name"] = str(voice_name)
+        if speaker_lock:
+            _CURRENT_STATE["speaker_lock"] = str(speaker_lock)
+        _save_state_to_disk()
 
 
 def record_mixer_info(info: Dict[str, Any], identity: Optional[Any] = None):
@@ -893,6 +1077,11 @@ def finish_video(video_name: str, output_path: str = "", duration_seconds: float
             "active_translation_model": models[-1] if models else _CURRENT_STATE.get("active_translation_model"),
             "separator_info": copy.deepcopy(_CURRENT_STATE.get("separator_info")),
             "mixer_info": copy.deepcopy(_CURRENT_STATE.get("mixer_info")),
+            "asr_model": _CURRENT_STATE.get("asr_model") or (_CURRENT_STATE.get("router_info") or {}).get("asr_model"),
+            "asr_source": _CURRENT_STATE.get("asr_source"),
+            "ocr_model": _CURRENT_STATE.get("ocr_model"),
+            "voice_name": _CURRENT_STATE.get("voice_name"),
+            "speaker_lock": _CURRENT_STATE.get("speaker_lock"),
         }
         history = _CURRENT_STATE.get("history", [])
         history.insert(0, record)

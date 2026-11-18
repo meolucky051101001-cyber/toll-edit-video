@@ -25,8 +25,8 @@ DEFAULT_FLAGS: Dict[str, Any] = {
     "V1_ASR_MODEL": "whisper_sensevoice",
     "V1_ASR_CHUNKING": True,
     "V1_SMART_SKIP_OCR": True,
-    "V1_QC_POLICY": "BLOCK",
-    "V1_QC_VISUAL_PIXEL_CHECK": True,
+    "V1_QC_POLICY": "OFF",
+    "V1_QC_VISUAL_PIXEL_CHECK": False,
     "V1_MAX_NATURAL_SPEED": 1.50,
     "V1_TTS_WORKERS": 6,
     "V1_USE_ORCHESTRATOR": True,
@@ -149,7 +149,7 @@ def set_feature_flags(new_flags: Dict[str, Any], workspace_path: Optional[str | 
         "V1_LONG_ASR_MODEL": {"inherit", "whisper_turbo", "whisper_sensevoice", "sensevoice_small", "paraformer_zh"},
         "V1_SHORT_SEPARATOR": {"roformer", "demucs"},
         "V1_LONG_SEPARATOR": {"roformer", "demucs"},
-        "V1_QC_POLICY": {"REPORT_ONLY", "WARN", "BLOCK"},
+        "V1_QC_POLICY": {"OFF", "REPORT_ONLY", "WARN", "BLOCK"},
     }
     for key, allowed in choices.items():
         if key in updates and updates[key] not in allowed:

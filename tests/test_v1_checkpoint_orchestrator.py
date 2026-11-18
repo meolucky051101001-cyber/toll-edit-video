@@ -206,7 +206,7 @@ class CheckpointOrchestratorTests(unittest.TestCase):
                 self.assertNotIn("qc_policy", plan["effective_config"])
                 self.assertEqual(
                     resolve_qc_policy(plan["effective_config"], workspace_path=tmp_dir),
-                    "BLOCK",
+                    "OFF",
                 )
                 self.assertIn("separation", plan["planned_models"])
                 self.assertIn("asr", plan["planned_models"])

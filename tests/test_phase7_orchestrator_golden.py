@@ -64,10 +64,12 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
         import v1_gpu_gatekeeper
         import v1_quality_gate
         from backend.v1_orchestrator import V1Orchestrator
-        from backend.v1_feature_flags import get_feature_flags
+        from backend.v1_feature_flags import get_feature_flags, set_feature_flags
         from backend.ai import v1_asr_isolated, v1_voice_isolated, v1_auto_voice, translation
 
         self.orchestrator = V1Orchestrator(self.root)
+        if not getattr(self, "use_default_qc_off", False):
+            set_feature_flags({"V1_QC_POLICY": "BLOCK", "V1_QC_VISUAL_PIXEL_CHECK": True}, self.root)
         flags = get_feature_flags(self.root)
         flags["V1_SMART_SKIP_OCR"] = False
         config = {
@@ -399,3 +401,20 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manifest.stages["video_rendering"]["status"], "completed")
         self.assertEqual(manifest.stages["quality_gate"]["status"], "failed")
         self.assertNotEqual(manifest.status, "completed")
+
+    async def test_qc_off_default_skips_stage9_and_publishes_directly_in_8_steps(self):
+        self.use_default_qc_off = True
+        self.harness()
+        result = await self.execute()
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["qc_status"], "SKIPPED")
+        self.assertNotIn("qc", self.events)
+        self.assertNotIn("start:quality_gate", self.events)
+        self.assertIn("deliver", self.events)
+        self.assertTrue(self.delivery.is_file())
+        totals = {item[2] for item in self.progress}
+        self.assertEqual(totals, {8})
+        stages_seen = [item[0] for item in self.progress]
+        self.assertNotIn("quality_gate", stages_seen)
+        self.assertEqual(self.progress[-1][0], "publish")
+        self.assertEqual(self.progress[-1][1], 8)

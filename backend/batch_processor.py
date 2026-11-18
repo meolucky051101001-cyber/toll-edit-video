@@ -374,7 +374,8 @@ async def _run_orchestrated_local_video(c):
             "input_sha256": fingerprint(c.video_path),
             "output_sha256": fingerprint(final_dest),
         })
-        await c.notify(f"✅ Hoàn tất video ({res.get('video_mode')}, QC: {res.get('qc_status')}) -> {final_dest}")
+        qc_label = f", QC: {res.get('qc_status')}" if res.get("qc_status") not in (None, "SKIPPED") else ""
+        await c.notify(f"✅ Hoàn tất video ({res.get('video_mode')}{qc_label}) -> {final_dest}")
         return True
     except asyncio.CancelledError:
         raise

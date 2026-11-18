@@ -2776,7 +2776,7 @@ async def api_get_feature_flags():
         return {
             "V1_ASR_CHUNKING": os.getenv("V1_ASR_CHUNKING", "true").lower() in ("true", "1", "yes"),
             "V1_SMART_SKIP_OCR": os.getenv("V1_SMART_SKIP_OCR", "true").lower() in ("true", "1", "yes"),
-            "V1_QC_POLICY": os.getenv("V1_QC_POLICY", "BLOCK"),
+            "V1_QC_POLICY": os.getenv("V1_QC_POLICY", "OFF"),
             "V1_MAX_NATURAL_SPEED": natural_speed_limit(),
             "V1_TTS_WORKERS": int(os.getenv("V1_TTS_WORKERS", "6")),
             "V1_USE_ORCHESTRATOR": True,
