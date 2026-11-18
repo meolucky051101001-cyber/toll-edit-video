@@ -12,7 +12,7 @@ from backend.v1_video_router import VideoMetadata
 class QCPolicySourceTests(unittest.TestCase):
     def test_pixel_check_toggle_persists_and_preserves_other_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertIs(get_feature_flags(tmp)["V1_QC_VISUAL_PIXEL_CHECK"], True)
+            self.assertIs(get_feature_flags(tmp)["V1_QC_VISUAL_PIXEL_CHECK"], False)
             set_feature_flags({"V1_QC_POLICY": "WARN"}, tmp)
             for enabled in (False, True):
                 set_feature_flags({"V1_QC_VISUAL_PIXEL_CHECK": enabled}, tmp)
@@ -25,8 +25,8 @@ class QCPolicySourceTests(unittest.TestCase):
 
     def test_default_is_block_and_persisted_setting_wins(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(get_feature_flags(tmp)["V1_QC_POLICY"], "BLOCK")
-            self.assertEqual(resolve_qc_policy(workspace_path=tmp), "BLOCK")
+            self.assertEqual(get_feature_flags(tmp)["V1_QC_POLICY"], "OFF")
+            self.assertEqual(resolve_qc_policy(workspace_path=tmp), "OFF")
 
             set_feature_flags({"V1_QC_POLICY": "WARN"}, tmp)
             self.assertEqual(resolve_qc_policy(workspace_path=tmp), "WARN")
@@ -52,7 +52,7 @@ class QCPolicySourceTests(unittest.TestCase):
             self.assertNotIn("qc_policy", default_plan["effective_config"])
             self.assertEqual(
                 resolve_qc_policy(default_plan["effective_config"], workspace_path=tmp_path),
-                "BLOCK",
+                "OFF",
             )
             self.assertEqual(explicit_plan["effective_config"]["qc_policy"], "REPORT_ONLY")
             self.assertEqual(explicit_plan["effective_config"]["qc_policy_source"], "job")
@@ -64,7 +64,7 @@ class QCPolicySourceTests(unittest.TestCase):
     def test_legacy_snapshot_pin_is_ignored_in_favor_of_live_setting(self):
         legacy_snapshot = {"qc_policy": "REPORT_ONLY"}
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(resolve_qc_policy(legacy_snapshot, workspace_path=tmp), "BLOCK")
+            self.assertEqual(resolve_qc_policy(legacy_snapshot, workspace_path=tmp), "OFF")
             set_feature_flags({"V1_QC_POLICY": "WARN"}, tmp)
             self.assertEqual(resolve_qc_policy(legacy_snapshot, workspace_path=tmp), "WARN")
 
@@ -81,7 +81,7 @@ class QCPolicySourceTests(unittest.TestCase):
             flags_file = Path(tmp) / "bot_system" / "v1_feature_flags.json"
             flags_file.parent.mkdir(parents=True)
             flags_file.write_text(json.dumps({"V1_QC_POLICY": "SOMETHING"}), encoding="utf-8")
-            self.assertEqual(resolve_qc_policy(workspace_path=tmp), "BLOCK")
+            self.assertEqual(resolve_qc_policy(workspace_path=tmp), "OFF")
 
 
 if __name__ == "__main__":

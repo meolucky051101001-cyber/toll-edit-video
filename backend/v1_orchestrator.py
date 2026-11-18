@@ -55,7 +55,7 @@ except ImportError:
     )
 
 
-QC_POLICIES = ("REPORT_ONLY", "WARN", "BLOCK")
+QC_POLICIES = ("OFF", "REPORT_ONLY", "WARN", "BLOCK")
 
 
 def resolve_qc_policy(config=None, overrides=None, workspace_path=None) -> str:
@@ -69,10 +69,10 @@ def resolve_qc_policy(config=None, overrides=None, workspace_path=None) -> str:
         if requested in QC_POLICIES:
             return requested
     try:
-        live = str(get_feature_flags(workspace_path).get("V1_QC_POLICY", "BLOCK")).upper()
+        live = str(get_feature_flags(workspace_path).get("V1_QC_POLICY", "OFF")).upper()
     except Exception:
-        return "BLOCK"
-    return live if live in QC_POLICIES else "BLOCK"
+        return "OFF"
+    return live if live in QC_POLICIES else "OFF"
 
 
 
@@ -348,10 +348,13 @@ class V1Orchestrator:
         if isinstance(c, dict):
             return c
         job_id, resolved_mode = c.job_id, c.resolved_mode
-        total_steps = len(STAGES_ORDER)
+        active_qc_policy = resolve_qc_policy(c.effective_cfg, c.overrides, self.workspace)
+        total_steps = 8 if active_qc_policy == "OFF" else len(STAGES_ORDER)
 
         async def notify(stage: str, step: int, pct: float, msg: str, details: Optional[Dict[str, Any]] = None):
             if progress_callback:
+                if total_steps == 8 and isinstance(msg, str):
+                    msg = msg.replace(f"Bước {step}/9:", f"Bước {step}/8:")
                 d = details or {}
                 d["video_mode"] = resolved_mode
                 d["job_id"] = job_id
@@ -643,6 +646,13 @@ class V1Orchestrator:
                         )
                         c._vad_bypassed_separation = True
                         c._vad_saved_sep_mode = sep_mode
+                        try:
+                            import job_tracker
+                            job_tracker.record_separator_info(
+                                {"engine": "silero_vad_bypass", "model": "Silero VAD + SenseVoice CTC"}
+                            )
+                        except Exception:
+                            pass
                         await c.notify(
                             stage_id, 2, 25.0,
                             "⚡ Bước 2/9: Silero VAD + SenseVoice xác nhận clip không lời thoại — bỏ qua tách âm GPU, giữ nguyên BGM gốc!",
@@ -661,6 +671,14 @@ class V1Orchestrator:
                 except Exception as vad_err:
                     logger.warning("[VAD_GATE] Bỏ qua kiểm tra nhanh VAD do lỗi (%s); chạy tách âm chuẩn.", vad_err)
 
+            try:
+                import job_tracker
+                job_tracker.record_separator_info({
+                    "engine": sep_mode,
+                    "model": "BS-RoFormer SDR 12.97dB" if sep_mode == "roformer" else sep_mode,
+                })
+            except Exception:
+                pass
             await c.notify(stage_id, 2, 25.0, f"🧠 Bước 2/9: Bóc tách giọng nói khỏi nhạc nền ({sep_mode.upper()})...", {"model": sep_mode})
             self.manifest_manager.record_stage_start(c.job_id, stage_id)
             t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
@@ -721,6 +739,11 @@ class V1Orchestrator:
                 model_display = "Paraformer-large-zh + CT-Punct + SenseVoice CTC (60ms)"
             else:
                 model_display = "Faster-Whisper Large-v3 Turbo"
+            try:
+                import job_tracker
+                job_tracker.record_asr_info(asr_m, source="speech_asr")
+            except Exception:
+                pass
             await c.notify(stage_id, 3, 40.0, f"🤖 Bước 3/9: {model_display} đang nhận dạng giọng nói...")
             self.manifest_manager.record_stage_start(c.job_id, stage_id)
             t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
@@ -808,6 +831,12 @@ class V1Orchestrator:
                             c, srt_segments, asr_was_empty, srt_original, async_gpu_gatekeeper)
                     elif asr_was_empty:
                         raise RuntimeError(f"ASR ({model_display}) không nhận dạng được câu thoại nào.")
+                if asr_was_empty:
+                    try:
+                        import job_tracker
+                        job_tracker.record_asr_info(asr_m, source="visual_caption")
+                    except Exception:
+                        pass
                 save_payload(c.out_dir / "asr.json", segments=srt_segments, asr_was_empty=asr_was_empty,
                              source_policy_version=TRANSCRIPT_SOURCE_POLICY_VERSION,
                              transcript_source="visual_caption" if asr_was_empty else "speech_asr")
@@ -878,6 +907,16 @@ class V1Orchestrator:
                     ocr_strat = "full"
                 else:
                     ocr_strat = "smart_skip"
+            try:
+                import job_tracker
+                from ai.v1_model_policy import current_v1_model_policy
+                _pol = current_v1_model_policy()
+                _rec = getattr(_pol, "paddle_recognition_model", "PP-OCRv5_server_rec")
+                _det = getattr(_pol, "paddle_detection_model", "PP-OCRv6_tiny_det")
+                _ocr_lbl = "PP-OCRv6 + v5 Server" if "v5_server" in _rec.lower() else "PP-OCRv6 Tiny"
+                job_tracker.record_ocr_info(_ocr_lbl, detail=f"{_det} + {_rec} (PaddleOCR ONNX CUDA)")
+            except Exception:
+                pass
             await c.notify(stage_id, 4, 55.0, f"👀 Bước 4/9: Quét vị trí phụ đề chữ cứng (OCR {ocr_strat})...", {"ocr_strategy": ocr_strat})
             self.manifest_manager.record_stage_start(c.job_id, stage_id)
             t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
@@ -955,7 +994,10 @@ class V1Orchestrator:
         translated_segments = []
         v1_script_mode = c.effective_cfg.get("script_mode") or c.overrides.get("script_mode") or os.getenv("SCRIPT_MODE", "default")
         if should_run:
-            configured_gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.7-flash").strip() or "gemini-3.7-flash"
+            flag_gemini = str((c.effective_cfg.get("feature_flags") or {}).get("V1_GEMINI_MODEL") or "").strip()
+            if flag_gemini:
+                os.environ["GEMINI_MODEL"] = flag_gemini
+            configured_gemini_model = (flag_gemini or os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")).strip() or "gemini-3-flash-preview"
             try:
                 import job_tracker
                 job_tracker.record_active_translation_model(configured_gemini_model)
@@ -1120,6 +1162,12 @@ class V1Orchestrator:
                 v_label = voice_lock_info["voice_label"]
                 seg_voices = voice_lock_info.get("segment_voices")
 
+                try:
+                    import job_tracker
+                    _has_spk_lock = str(voice_lock_info.get("detected_gender") or "").lower() in ("male", "female", "dual")
+                    job_tracker.record_voice_info(v_label, speaker_lock="CAM++ 512-D" if _has_spk_lock else "")
+                except Exception:
+                    pass
                 await c.notify(stage_id, 6, 75.0, f"🗣️ Bước 6/9: Lồng tiếng AI CapCut ({v_label}, 6 luồng)...", {"voice": v_label})
                 c.check_stop()
 
@@ -1368,86 +1416,100 @@ class V1Orchestrator:
         return final_video, temp_render_video
 
     async def _stage_qc_and_deliver(self, c, final_video, temp_render_video, translated_segments, dubbing_audio_files, mixed_audio, ass_path):
-        # ==================== STAGE 9: QUALITY GATE & PUBLISH ====================
+        # ==================== STAGE 9: QUALITY GATE (OPTIONAL) & PUBLISH ====================
         c.check_stop()
         await c.pause_checkpoint()
-        await c.notify("quality_gate", 9, 96.0, "🔎 Bước 9/9: Kiểm tra chất lượng video sau render...")
-        self.manifest_manager.record_stage_start(c.job_id, "quality_gate")
         qc_target = temp_render_video if temp_render_video.is_file() else final_video
         qc_policy = resolve_qc_policy(c.effective_cfg, c.overrides, self.workspace)
-        logger.info("[QUALITY_GATE] Đang thực hiện kiểm tra chất lượng tự động 8 nhóm (policy=%s)...", qc_policy)
-        loop = asyncio.get_running_loop()
-        phase_progress = {"decode": (0, 0), "ocr": (0, 0)}
-        last_progress_at = 0.0
+        qc_status_val = "SKIPPED"
+        qc_report_dict: Dict[str, Any] = {
+            "overall_status": "SKIPPED",
+            "policy": "OFF",
+            "checks": [],
+            "failure_count": 0,
+            "warning_count": 0,
+        }
+        if qc_policy == "OFF":
+            logger.info("[QUALITY_GATE] Đã bỏ qua bước 9 theo cấu hình (V1_QC_POLICY=OFF) — xuất thẳng video sau Stage 8.")
+            self.manifest_manager.record_stage_complete(c.job_id, "quality_gate")
+        else:
+            await c.notify("quality_gate", 9, 96.0, "🔎 Bước 9/9: Kiểm tra chất lượng video sau render...")
+            self.manifest_manager.record_stage_start(c.job_id, "quality_gate")
+            logger.info("[QUALITY_GATE] Đang thực hiện kiểm tra chất lượng tự động 8 nhóm (policy=%s)...", qc_policy)
+            loop = asyncio.get_running_loop()
+            phase_progress = {"decode": (0, 0), "ocr": (0, 0)}
+            last_progress_at = 0.0
 
-        def qc_progress(event):
-            nonlocal last_progress_at
-            c.check_stop()
-            phase = str(event.get("phase", ""))
-            completed = max(0, int(event.get("completed", 0)))
-            total = max(0, int(event.get("total", 0)))
-            if phase not in phase_progress:
-                return
-            phase_progress[phase] = (completed, total)
-            # Bounded OCR batches interleave with decoding. Track both work
-            # counters so a subsequent decode event cannot rewind progress.
-            fraction = sum(min(1.0, done / count) if count else 0.0
-                           for done, count in phase_progress.values()) / 2.0
-            now = time.monotonic()
-            if now - last_progress_at < 2.0 and not (total and completed >= total):
-                return
-            last_progress_at = now
-            label = "Trích khung hậu kiểm" if phase == "decode" else "OCR hậu kiểm"
-            pct = 96.0 + 3.0 * fraction
-            details = {"phase": phase, "completed": completed, "total": total,
-                       "stage_fraction": fraction, "recognized": phase_progress["ocr"][0]}
-            # QC runs in a worker thread. Deliver ordered progress back through
-            # the owning event loop rather than invoking async callbacks there.
-            future = asyncio.run_coroutine_threadsafe(c.notify(
-                "quality_gate", 9, pct,
-                f"🔎 Bước 9/9: {label} ({completed}/{total})...", details), loop)
+            def qc_progress(event):
+                nonlocal last_progress_at
+                c.check_stop()
+                phase = str(event.get("phase", ""))
+                completed = max(0, int(event.get("completed", 0)))
+                total = max(0, int(event.get("total", 0)))
+                if phase not in phase_progress:
+                    return
+                phase_progress[phase] = (completed, total)
+                # Bounded OCR batches interleave with decoding. Track both work
+                # counters so a subsequent decode event cannot rewind progress.
+                fraction = sum(min(1.0, done / count) if count else 0.0
+                               for done, count in phase_progress.values()) / 2.0
+                now = time.monotonic()
+                if now - last_progress_at < 2.0 and not (total and completed >= total):
+                    return
+                last_progress_at = now
+                label = "Trích khung hậu kiểm" if phase == "decode" else "OCR hậu kiểm"
+                pct = 96.0 + 3.0 * fraction
+                details = {"phase": phase, "completed": completed, "total": total,
+                           "stage_fraction": fraction, "recognized": phase_progress["ocr"][0]}
+                # QC runs in a worker thread. Deliver ordered progress back through
+                # the owning event loop rather than invoking async callbacks there.
+                future = asyncio.run_coroutine_threadsafe(c.notify(
+                    "quality_gate", 9, pct,
+                    f"🔎 Bước 9/9: {label} ({completed}/{total})...", details), loop)
+                try:
+                    future.result()
+                except FutureCancelledError as exc:
+                    raise asyncio.CancelledError() from exc
+
             try:
-                future.result()
-            except FutureCancelledError as exc:
-                raise asyncio.CancelledError() from exc
+                import importlib
+                import v1_quality_gate
+                importlib.reload(v1_quality_gate)
+                from v1_quality_gate import run_quality_gate
 
-        try:
-            import importlib
-            import v1_quality_gate
-            importlib.reload(v1_quality_gate)
-            from v1_quality_gate import run_quality_gate
+                flags_cfg = c.effective_cfg.get("feature_flags") or {}
+                if "V1_QC_VISUAL_PIXEL_CHECK" in flags_cfg:
+                    qc_pixel_enabled = bool(flags_cfg.get("V1_QC_VISUAL_PIXEL_CHECK"))
+                else:
+                    from v1_feature_flags import get_feature_flags
+                    qc_pixel_enabled = bool(get_feature_flags(self.workspace).get("V1_QC_VISUAL_PIXEL_CHECK", False))
 
-            flags_cfg = c.effective_cfg.get("feature_flags") or {}
-            if "V1_QC_VISUAL_PIXEL_CHECK" in flags_cfg:
-                qc_pixel_enabled = bool(flags_cfg.get("V1_QC_VISUAL_PIXEL_CHECK"))
-            else:
-                from v1_feature_flags import get_feature_flags
-                qc_pixel_enabled = bool(get_feature_flags(self.workspace).get("V1_QC_VISUAL_PIXEL_CHECK", True))
-
-            qc_report = await asyncio.to_thread(run_quality_gate,
-                job_id=c.job_id,
-                final_video_path=qc_target,
-                original_video_path=c.v_path,
-                translated_subtitles=translated_segments,
-                dubbing_audio_files=dubbing_audio_files,
-                mixed_audio_path=mixed_audio,
-                ass_subtitle_path=ass_path,
-                policy=qc_policy,
-                workspace_path=self.workspace,
-                enable_visual_pixel_qc=qc_pixel_enabled,
-                progress_callback=qc_progress,
-                stop_check=c.check_stop,
-            )
-            c.check_stop()
-            report_path = self.workspace / "bot_system" / "qc_reports" / f"{c.job_id}.qc.json"
-            artifacts = {"qc_report": str(report_path)} if report_path.is_file() else None
-            self.manifest_manager.record_stage_complete(c.job_id, "quality_gate", artifacts)
-        except asyncio.CancelledError:
-            self.manifest_manager.record_stage_failure(c.job_id, "quality_gate", "Quality Gate cancelled")
-            raise
-        except Exception as exc:
-            self.manifest_manager.record_stage_failure(c.job_id, "quality_gate", str(exc))
-            raise
+                qc_report = await asyncio.to_thread(run_quality_gate,
+                    job_id=c.job_id,
+                    final_video_path=qc_target,
+                    original_video_path=c.v_path,
+                    translated_subtitles=translated_segments,
+                    dubbing_audio_files=dubbing_audio_files,
+                    mixed_audio_path=mixed_audio,
+                    ass_subtitle_path=ass_path,
+                    policy=qc_policy,
+                    workspace_path=self.workspace,
+                    enable_visual_pixel_qc=qc_pixel_enabled,
+                    progress_callback=qc_progress,
+                    stop_check=c.check_stop,
+                )
+                c.check_stop()
+                qc_status_val = qc_report.overall_status
+                qc_report_dict = qc_report.to_dict()
+                report_path = self.workspace / "bot_system" / "qc_reports" / f"{c.job_id}.qc.json"
+                artifacts = {"qc_report": str(report_path)} if report_path.is_file() else None
+                self.manifest_manager.record_stage_complete(c.job_id, "quality_gate", artifacts)
+            except asyncio.CancelledError:
+                self.manifest_manager.record_stage_failure(c.job_id, "quality_gate", "Quality Gate cancelled")
+                raise
+            except Exception as exc:
+                self.manifest_manager.record_stage_failure(c.job_id, "quality_gate", str(exc))
+                raise
 
         c.check_stop()
         # Xuất bản nguyên tử (Atomic Replace)
@@ -1513,9 +1575,10 @@ class V1Orchestrator:
         except Exception as cl_err:
             logger.warning("[CLEANUP] Lỗi dọn tệp trung gian job %s: %s", c.job_id, cl_err)
 
-        await c.notify("publish", 9, 100.0, f"✅ Hoàn tất xuất xưởng video thành phẩm: {Path(published_path).name}", {
+        publish_step = 8 if qc_policy == "OFF" else 9
+        await c.notify("publish", publish_step, 100.0, f"✅ Hoàn tất xuất xưởng video thành phẩm: {Path(published_path).name}", {
             "published_path": published_path,
-            "qc_status": qc_report.overall_status,
+            "qc_status": qc_status_val,
         })
 
         return {
@@ -1524,8 +1587,8 @@ class V1Orchestrator:
             "video_mode": c.resolved_mode,
             "final_video": published_path,
             "manifest_file": str(self.manifest_manager._manifest_file(c.job_id)),
-            "qc_status": qc_report.overall_status,
-            "qc_report": qc_report.to_dict(),
+            "qc_status": qc_status_val,
+            "qc_report": qc_report_dict,
             "tracker_finalized": tracker_finalized,
         }
 

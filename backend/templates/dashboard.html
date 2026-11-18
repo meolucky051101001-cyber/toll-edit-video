@@ -135,7 +135,7 @@ window.fetch = async function() {
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
     
     /* Pipeline Steps - Segmented Stepper Flow */
-    .steps-grid { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+    .steps-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
     .step-item { background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border); border-radius: 8px; padding: 9px 10px; text-align: left; transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1); display: flex; flex-direction: column; justify-content: space-between; min-height: 72px; position: relative; }
     .step-item:hover { background: rgba(255, 255, 255, 0.04); border-color: rgba(255, 255, 255, 0.15); }
     .step-header-row { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
@@ -1467,7 +1467,7 @@ header {
             <div class="step-tag" id="step8ModelTag" title="Bộ mã hóa GPU NVIDIA NVENC (h264_nvenc)">NVIDIA NVENC</div>
             <div class="step-duration" id="timeStep8" title="Thời gian chạy thực tế Bước 8">--</div>
           </div>
-          <div class="step-item" id="step9">
+          <div class="step-item" id="step9" style="display: none;">
             <div class="step-header-row">
               <div class="step-icon">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11z"/><polyline points="8 12 11 15 16 9"/></svg>
@@ -1587,7 +1587,7 @@ header {
               <div class="step-tag" id="w1Step8ModelTag" title="Bộ mã hóa GPU NVIDIA NVENC (h264_nvenc)">NVIDIA NVENC</div>
               <div class="step-duration" id="w1TimeStep8" title="Thời gian chạy thực tế Bước 8">--</div>
             </div>
-            <div class="step-item" id="w1Step9">
+            <div class="step-item" id="w1Step9" style="display: none;">
               <div class="step-header-row">
                 <div class="step-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11z"/><polyline points="8 12 11 15 16 9"/></svg></div>
                 <div class="step-title">9. Kiểm tra chất lượng</div>
@@ -1695,7 +1695,7 @@ header {
               <div class="step-tag" id="w2Step8ModelTag" title="Bộ mã hóa GPU NVIDIA NVENC (h264_nvenc)">NVIDIA NVENC</div>
               <div class="step-duration" id="w2TimeStep8" title="Thời gian chạy thực tế Bước 8">--</div>
             </div>
-            <div class="step-item" id="w2Step9">
+            <div class="step-item" id="w2Step9" style="display: none;">
               <div class="step-header-row">
                 <div class="step-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11z"/><polyline points="8 12 11 15 16 9"/></svg></div>
                 <div class="step-title">9. Kiểm tra chất lượng</div>
@@ -2257,7 +2257,8 @@ header {
                   <div style="font-size: 10.5px; color: var(--text-muted);">8 nhóm kiểm tra tự động sau render</div>
                 </div>
                 <select id="selectQcPolicy" onchange="setQcPolicy(this.value)" style="background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; font-size: 11px;">
-                  <option value="BLOCK" selected>Chặn giao khi có lỗi</option>
+                  <option value="OFF" selected>Tắt (Bỏ qua Bước 9 — Xuất thẳng sau Render)</option>
+                  <option value="BLOCK">Chặn giao khi có lỗi</option>
                   <option value="WARN">Cảnh báo</option>
                   <option value="REPORT_ONLY">Chỉ báo cáo (lỗi nghiêm trọng vẫn chặn)</option>
                 </select>
@@ -2276,7 +2277,7 @@ header {
                   <div style="font-weight: 600; color: #34d399;">🔍 Hậu kiểm Pixel QC sau render</div>
                   <div style="font-size: 10.5px; color: var(--text-muted);">Quét lại mẫu video xuất xưởng bằng PP-OCRv6, cảnh báo WARN nếu sót chữ gốc</div>
                 </div>
-                <input type="checkbox" id="flagQcVisualPixelCheck" onchange="toggleFeatureFlag('V1_QC_VISUAL_PIXEL_CHECK', this.checked)" checked style="cursor: pointer; width: 16px; height: 16px; accent-color: #34d399;">
+                <input type="checkbox" id="flagQcVisualPixelCheck" onchange="toggleFeatureFlag('V1_QC_VISUAL_PIXEL_CHECK', this.checked)" style="cursor: pointer; width: 16px; height: 16px; accent-color: #34d399;">
               </div>
 
               <div style="padding: 8px 12px; background: rgba(255, 255, 255, 0.02); border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.06); display: flex; justify-content: space-between; align-items: center; gap: 8px;">
@@ -3726,7 +3727,12 @@ header {
       const stepKeys = [1, 2, 3, 4, 5, 6, 7, 8, 9];
       const hasSeparateQc = Number(data.total_steps) >= 9 || currentStep === 9;
       const qcCard = document.getElementById(prefix ? prefix + 'Step9' : 'step9');
-      if (qcCard) qcCard.style.display = hasSeparateQc ? '' : 'none';
+      if (qcCard) {
+        qcCard.style.display = hasSeparateQc ? '' : 'none';
+        if (qcCard.parentElement && qcCard.parentElement.style) {
+          qcCard.parentElement.style.gridTemplateColumns = hasSeparateQc ? 'repeat(9, minmax(0, 1fr))' : 'repeat(8, minmax(0, 1fr))';
+        }
+      }
       stepKeys.forEach(k => {
         const elId = prefix ? `${prefix}Step${k}` : `step${k}`;
         const timeElId = prefix ? `${prefix}TimeStep${k}` : `timeStep${k}`;
