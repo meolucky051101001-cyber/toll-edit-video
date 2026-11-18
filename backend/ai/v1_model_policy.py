@@ -136,7 +136,9 @@ class V1ModelPolicy:
             ),
             paddle_recognition_model=_clean(
                 env.get("V1_PADDLE_RECOGNITION_MODEL"),
-                "PP-OCRv6_tiny_rec",
+                "PP-OCRv5_server_rec"
+                if (root / "models" / "v1" / "paddlex" / "official_models" / "PP-OCRv5_server_rec_onnx").is_dir()
+                else "PP-OCRv6_tiny_rec",
             ),
             paddle_engine=_clean(
                 env.get("V1_PADDLE_ENGINE"), "onnxruntime"

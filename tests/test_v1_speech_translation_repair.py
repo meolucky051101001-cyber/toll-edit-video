@@ -402,7 +402,7 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(kw["api_key"], "synthetic-gemini-key")
             return {1: "câu ngắn"}
         fake_cache = types.SimpleNamespace(voice_cache_key=lambda *a, **k: "k", read_voice_cache=lambda *a, **k: None, write_voice_cache=lambda *a, **k: None)
-        with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_voice_cache": fake_cache}), patch.dict(os.environ, GEMINI_API_KEY="synthetic-gemini-key"), patch.object(time, "monotonic", side_effect=lambda: clock[0]), patch.object(voice, "generate_single_tts", side_effect=generate), patch.object(translation, "condense_vietnamese_subtitles_batch", side_effect=condense), patch.object(guard, "validate_speech_timeline"), patch.object(voice.os.path, "exists", return_value=True), patch.object(voice.os.path, "getsize", return_value=1000):
+        with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_voice_cache": fake_cache}), patch.dict(os.environ, GEMINI_API_KEY="synthetic-gemini-key"), patch.object(time, "monotonic", side_effect=lambda: clock[0]), patch.object(voice, "generate_single_tts", side_effect=generate), patch.object(translation, "condense_vietnamese_subtitles_batch", side_effect=condense), patch.object(guard, "validate_speech_timeline"), patch.object(voice.os.path, "exists", return_value=True), patch.object(voice.os.path, "getsize", return_value=1000), patch.object(sf, "info", return_value=types.SimpleNamespace(duration=1.0)):
             asyncio.run(voice.generate_dubbing_audio(cues, str(SCRATCH / "batch"), "capcut", "Mai", api_key="synthetic-voice-key", video_duration=2))
         self.assertTrue(calls)
         self.assertGreater(calls[-1], 0)

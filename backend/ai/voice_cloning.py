@@ -298,14 +298,24 @@ async def fit_audio_file(audio_input_path: str, target_max_duration: float, outp
     import shutil
     output_path = output_path or audio_input_path
     from v1_speech_guard import load_audio, SpeechTimingError, natural_speed_limit
-    audio = load_audio(audio_input_path)
-    orig_dur = len(audio) / 1000.0
-    original_duration = orig_dur
     if target_max_duration is not None:
         import math
         if not math.isfinite(float(target_max_duration)) or target_max_duration <= 0:
-            from v1_speech_guard import SpeechTimingError
             raise SpeechTimingError("Reading window must be positive and finite")
+
+    audio = None
+    orig_dur = None
+    try:
+        import soundfile as sf
+        probed_dur = float(sf.info(str(audio_input_path)).duration)
+        if probed_dur > 0:
+            orig_dur = probed_dur
+    except Exception:
+        orig_dur = None
+    if orig_dur is None:
+        audio = load_audio(audio_input_path)
+        orig_dur = len(audio) / 1000.0
+    original_duration = orig_dur
 
     # 1. Nếu audio đã vừa khung đọc -> Giữ nguyên vẹn 100% file gốc CapCut (160kbps), KHÔNG nén lại
     if target_max_duration is None or target_max_duration <= 0 or orig_dur <= target_max_duration:
@@ -314,6 +324,8 @@ async def fit_audio_file(audio_input_path: str, target_max_duration: float, outp
         return output_path, orig_dur, 1.0
 
     # Trim safe silence before computing speed; even small overflow must be fit.
+    if audio is None:
+        audio = load_audio(audio_input_path)
     audio = trim_audio_silence(audio)
     orig_dur = len(audio) / 1000.0
     ratio = orig_dur / max(0.001, target_max_duration - 0.015)
@@ -482,7 +494,7 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
 
     import time
     condense_remaining = 45.0
-    from v1_speech_guard import coalesce_tiny_same_voice_cues, validate_speech_timeline, SpeechTimingError, load_audio
+    from v1_speech_guard import coalesce_tiny_same_voice_cues, validate_speech_timeline, SpeechTimingError
     if segment_voices:
         for seg in translated_segments:
             info = segment_voices[str(seg.index)]
@@ -700,13 +712,17 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
 
     # Final Hard Guard: Ensure EVERY single audio cue strictly fits its reading window
     # to guarantee zero audio overlap in the mixer.
+    import soundfile as sf
     sorted_active_segs = sorted([s for s in translated_segments if s.index in res_by_idx], key=lambda s: s.start)
     for k, seg in enumerate(sorted_active_segs):
         r = res_by_idx.get(seg.index)
         if not r:
             continue
         cur_start = float(r.get("start", seg.start.total_seconds()))
-        dur = float(r.get("actual_audio_duration", 0.0))
+        # Measure the artifact itself; cached labels cannot authorize clipping.
+        dur = float(sf.info(r["path"]).duration)
+        r["actual_audio_duration"] = dur
+        r["end"] = cur_start + dur
         previous_speed = float(r.get("speed_ratio", 1.0))
 
         # Determine true boundaries on the timeline
@@ -742,6 +758,7 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                 _, fitted_dur, extra_spd = await fit_audio_file(
                     r["path"], hard_max, r["path"], max_speed=MAX_NATURAL_SPEED / previous_speed
                 )
+                fitted_dur = float(sf.info(r["path"]).duration)
                 r["actual_audio_duration"] = fitted_dur
                 r["end"] = cur_start + fitted_dur
                 r["speed_ratio"] = previous_speed * extra_spd
@@ -751,95 +768,21 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
             except Exception as exc:
                 logger.warning("[VOICE_GUARD] Final fit for cue %s warning: %s", seg.index, exc)
 
-        dur = float(r.get("actual_audio_duration", 0.0))
+        # Condensation and bounded tempo fitting have already had their chance.
+        # Retain every spoken sample when the remaining window cannot fit it.
+        dur = float(sf.info(r["path"]).duration)
+        r["actual_audio_duration"] = dur
+        r["end"] = cur_start + dur
         if dur > hard_max + 0.005:
-            # 3. Trích xuất và cắt bớt khoảng lặng thừa đầu/cuối của audio TTS
-            try:
-                raw_aud = load_audio(r["path"])
-                trimmed_aud = trim_audio_silence(raw_aud, silence_thresh_db=-32.0, pad_ms=10)
-                trimmed_dur = len(trimmed_aud) / 1000.0
-                if trimmed_dur < dur:
-                    with trimmed_aud.export(r["path"], format="mp3", bitrate="192k"):
-                        pass
-                    dur = trimmed_dur
-                    r["actual_audio_duration"] = dur
-                    r["end"] = cur_start + dur
-            except Exception as e_trim:
-                logger.warning("[VOICE_GUARD] Pre-trim silence cue %s warning: %s", seg.index, e_trim)
-
-        # 4. Cấp cứu khẩn cấp: tăng tempo linh hoạt lên tới 1.85x hoặc soft-slice để không bao giờ làm sập pipeline
-        if dur > hard_max + 0.005:
-            cur_spd = float(r.get("speed_ratio", 1.0))
-            needed_spd = dur / max(0.05, hard_max - 0.01)
-            spd_to_apply = min(2.0, max(1.02, needed_spd))
-            try:
-                audio = load_audio(r["path"])
-                audio = trim_audio_silence(audio, silence_thresh_db=-32.0, pad_ms=10)
-                base, _ = os.path.splitext(r["path"])
-                temp_w_in = f"{base}_emerg_in.wav"
-                temp_w_out = f"{base}_emerg_out.wav"
-                try:
-                    with audio.export(temp_w_in, format="wav"):
-                        pass
-                    tempo_filter = build_atempo_filter(spd_to_apply)
-                    import subprocess
-                    from batch_control import run
-                    await asyncio.to_thread(
-                        run,
-                        ["ffmpeg", "-y", "-i", temp_w_in, "-filter:a", tempo_filter, temp_w_out],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
-                        check=True, timeout=60
-                    )
-                    if os.path.exists(temp_w_out) and os.path.getsize(temp_w_out) > 128:
-                        audio = load_audio(temp_w_out)
-                        target_ms = max(50, int(hard_max * 1000))
-                        if len(audio) > target_ms:
-                            fade_len = min(20, max(5, target_ms // 4))
-                            audio = audio[:target_ms].fade_out(fade_len)
-                        with audio.export(r["path"], format="mp3", bitrate="192k"):
-                            pass
-                        import soundfile as sf
-                        final_dur = float(sf.info(r["path"]).duration)
-                        r["actual_audio_duration"] = final_dur
-                        r["end"] = cur_start + final_dur
-                        r["speed_ratio"] = min(MAX_NATURAL_SPEED, cur_spd * spd_to_apply)
-                        dur = final_dur
-                        logger.info("[VOICE_GUARD] Emergency fit succeeded for cue %s: dur=%.3fs <= %.3fs",
-                                    seg.index, final_dur, hard_max)
-                finally:
-                    for p in (temp_w_in, temp_w_out):
-                        if os.path.exists(p):
-                            try: os.remove(p)
-                            except OSError: pass
-            except Exception as e_fit:
-                logger.warning("[VOICE_GUARD] Emergency fit for cue %s warning: %s", seg.index, e_fit)
-
-        # 5. Khóa an toàn tuyệt đối: nếu sau tất cả vẫn nhỉnh hơn do rounding frame, clamp chính xác bằng pydub
-        if float(r.get("actual_audio_duration", 0.0)) > hard_max + 0.005:
-            try:
-                audio = load_audio(r["path"])
-                target_ms = max(50, int(hard_max * 1000))
-                if len(audio) > target_ms:
-                    fade_len = min(20, max(5, target_ms // 4))
-                    audio = audio[:target_ms].fade_out(fade_len)
-                    with audio.export(r["path"], format="mp3", bitrate="192k"):
-                        pass
-                import soundfile as sf
-                final_dur = float(sf.info(r["path"]).duration)
-                r["actual_audio_duration"] = final_dur
-                r["end"] = cur_start + final_dur
-                r["speed_ratio"] = min(MAX_NATURAL_SPEED, float(r.get("speed_ratio", 1.0)))
-                logger.warning("[VOICE_GUARD] Clamped audio cue %s to %.3fs <= hard_max %.3fs",
-                               seg.index, final_dur, hard_max)
-            except Exception as e_clamp:
-                logger.warning("[VOICE_GUARD] Final clamp for cue %s warning: %s", seg.index, e_clamp)
-                r["actual_audio_duration"] = hard_max
-                r["end"] = cur_start + hard_max
-
-        if r["actual_audio_duration"] > hard_max + 0.005:
-            r["actual_audio_duration"] = hard_max
-            r["end"] = cur_start + hard_max
+            raise SpeechTimingError(
+                f"Speech cue {seg.index} requires {dur:.3f}s but its reading window "
+                f"is {hard_max:.3f}s; shorten translation before retry; audio retained"
+            )
+        if float(r.get("speed_ratio", 1.0)) > MAX_NATURAL_SPEED + 1e-9:
+            raise SpeechTimingError(
+                f"Speech cue {seg.index} exceeds the natural speed limit; "
+                "shorten translation before retry; audio retained"
+            )
 
     final_results = [res_by_idx[seg.index] for seg in translated_segments if seg.index in res_by_idx]
     validate_speech_timeline(final_results, total_duration=video_duration, max_speed=MAX_NATURAL_SPEED)

@@ -34,6 +34,7 @@ def extract_subtitles_isolated(audio_path, output_srt_path, original_audio_path=
     settings = {'stage': 'asr-v1', 'job_options': job_options, 'worker': fingerprint(worker),
                 'recovery': fingerprint(Path(__file__).with_name('v1_conditional_asr.py')),
                 'sensevoice': fingerprint(Path(__file__).with_name('v1_sensevoice_adapter.py')),
+                'paraformer': fingerprint(Path(__file__).with_name('v1_paraformer_adapter.py')),
                 'original_audio': fingerprint(original_audio_path) if original_audio_path and os.path.isfile(original_audio_path) else None,
                 'implementation': fingerprint(Path(__file__).with_name('transcription.py')),
                 'policy': fingerprint(Path(__file__).with_name('v1_model_policy.py')),

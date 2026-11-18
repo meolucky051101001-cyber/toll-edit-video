@@ -1,0 +1,24 @@
+{
+  "width": 320,
+  "height": 180,
+  "duration_s": 10,
+  "fps": 30,
+  "lossless_equal": true,
+  "note": "CPU single-thread synthetic, not RTX4050 production baseline; serial execution, no GPU",
+  "runs": [
+    {
+      "name": "static_v5",
+      "seconds": 3.094,
+      "returncode": 0,
+      "graph_bytes": 70339,
+      "overlays": 283
+    },
+    {
+      "name": "fixed_slots_v6",
+      "seconds": 0.157,
+      "returncode": 0,
+      "graph_bytes": 42194,
+      "overlays": 17
+    }
+  ]
+}

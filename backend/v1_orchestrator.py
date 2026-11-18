@@ -17,6 +17,7 @@ import time
 import math
 import logging
 import asyncio
+from concurrent.futures import CancelledError as FutureCancelledError
 from v1_stage_runtime import save_payload, load_payload, await_stage
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +38,7 @@ try:
         looks_like_bgm_hallucination as _looks_like_bgm_hallucination,
         merged_speech_coverage as _merged_speech_coverage,
         visual_ocr_transcript_usable as _visual_ocr_transcript_usable,
+        visual_transcript_candidates, TRANSCRIPT_SOURCE_POLICY_VERSION,
     )
 except ImportError:
     from .v1_checkpoint import ManifestManager, JobManifest, STAGES_ORDER, fingerprint
@@ -49,6 +51,7 @@ except ImportError:
         looks_like_bgm_hallucination as _looks_like_bgm_hallucination,
         merged_speech_coverage as _merged_speech_coverage,
         visual_ocr_transcript_usable as _visual_ocr_transcript_usable,
+        visual_transcript_candidates, TRANSCRIPT_SOURCE_POLICY_VERSION,
     )
 
 
@@ -130,6 +133,8 @@ class V1Orchestrator:
                 asr_model = "whisper_sensevoice"
             elif model_id == "sensevoice_small":
                 asr_model = "sensevoice_small"
+            elif model_id in ("paraformer_large_zh", "paraformer_zh"):
+                asr_model = "paraformer_zh"
             else:
                 asr_model = migrate_legacy_asr_model(model_id, "job manifest")
         asr_model = migrate_legacy_asr_model(
@@ -383,6 +388,8 @@ class V1Orchestrator:
         original_audio = await self._stage_extract(c)
         vocals_audio, no_vocals_audio = await self._stage_separate(c, original_audio)
         srt_original, srt_segments, asr_was_empty = await self._stage_asr(c, vocals_audio, original_audio)
+        vocals_audio = getattr(c, "_recovered_vocals_audio", vocals_audio)
+        no_vocals_audio = getattr(c, "_recovered_no_vocals_audio", no_vocals_audio)
         srt_segments, floating_segments, vid_w, vid_h, main_y_pct = await self._stage_ocr(
             c, srt_original, srt_segments, asr_was_empty)
         translated_segments, v1_script_mode = await self._stage_translate(
@@ -541,7 +548,16 @@ class V1Orchestrator:
         if resume_if_possible:
             c.can_resume, resume_stage, resume_details = self.manifest_manager.verify_manifest_resumability(c.job_id)
             c.verified_stages = resume_details.get("verified_stages", [])
-            if c.effective_cfg.get("speech_timing_version") != 3:
+            if c.visual_sub_to_speech and "speech_asr" in c.verified_stages:
+                try:
+                    source_policy = load_payload(c.out_dir / "asr.json").get("source_policy_version")
+                except (OSError, ValueError, KeyError, TypeError):
+                    source_policy = None
+                if source_policy != TRANSCRIPT_SOURCE_POLICY_VERSION:
+                    asr_pos = STAGES_ORDER.index("speech_asr")
+                    c.verified_stages = [s for s in c.verified_stages if STAGES_ORDER.index(s) < asr_pos]
+                    logger.info("[RESUME] Recompute old transcript selection; retain extracted/separated audio")
+            if c.effective_cfg.get("speech_timing_version") != 4:
                 tts_pos = STAGES_ORDER.index("ai_tts")
                 c.verified_stages = [s for s in c.verified_stages if STAGES_ORDER.index(s) < tts_pos]
             from v1_ocr_geometry import OCR_GEOMETRY_VERSION
@@ -566,7 +582,7 @@ class V1Orchestrator:
 
         should_run = not (c.can_resume and stage_id in c.verified_stages)
         if should_run:
-            await c.notify(stage_id, 1, 10.0, "🎧 Bước 1/8: Đang trích xuất âm thanh gốc...")
+            await c.notify(stage_id, 1, 10.0, "🎧 Bước 1/9: Đang trích xuất âm thanh gốc...")
             self.manifest_manager.record_stage_start(c.job_id, stage_id)
             t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
@@ -611,7 +627,41 @@ class V1Orchestrator:
                 or c.planned.get("separator_engine")
                 or ("demucs" if c.resolved_mode in ("LONG", "MEDIUM") else "roformer")
             )
-            await c.notify(stage_id, 2, 25.0, f"🧠 Bước 2/8: Bóc tách giọng nói khỏi nhạc nền ({sep_mode.upper()})...", {"model": sep_mode})
+            vad_bypass_enabled = bool(
+                (c.effective_cfg.get("feature_flags") or {}).get("V1_VAD_SMART_BYPASS", False)
+                and c.visual_sub_to_speech
+                and sep_mode != "bypass"
+            )
+            if vad_bypass_enabled:
+                try:
+                    from ai.v1_vad_gate import analyze_speech_presence_vad
+                    vad_res = await asyncio.to_thread(analyze_speech_presence_vad, str(original_audio))
+                    if not vad_res.has_speech:
+                        logger.info(
+                            "[VAD_GATE] Clip không có lời thoại (%s, speech=%.2fs/%.1fs) -> tạm bỏ qua tách âm GPU (%s), giữ nguyên BGM gốc.",
+                            vad_res.reason, vad_res.speech_seconds, vad_res.total_seconds, sep_mode,
+                        )
+                        c._vad_bypassed_separation = True
+                        c._vad_saved_sep_mode = sep_mode
+                        await c.notify(
+                            stage_id, 2, 25.0,
+                            "⚡ Bước 2/9: Silero VAD + SenseVoice xác nhận clip không lời thoại — bỏ qua tách âm GPU, giữ nguyên BGM gốc!",
+                            {"model": "silero_vad_bypass"},
+                        )
+                        self.manifest_manager.record_stage_start(c.job_id, stage_id)
+                        vocals_audio = Path(original_audio)
+                        no_vocals_audio = Path(original_audio)
+                        self.manifest_manager.record_stage_complete(c.job_id, stage_id, {
+                            "vocals_audio": str(vocals_audio),
+                            "no_vocals_audio": str(no_vocals_audio),
+                        })
+                        c.artifacts_acc["vocals_audio"] = str(vocals_audio)
+                        c.artifacts_acc["no_vocals_audio"] = str(no_vocals_audio)
+                        return vocals_audio, no_vocals_audio
+                except Exception as vad_err:
+                    logger.warning("[VAD_GATE] Bỏ qua kiểm tra nhanh VAD do lỗi (%s); chạy tách âm chuẩn.", vad_err)
+
+            await c.notify(stage_id, 2, 25.0, f"🧠 Bước 2/9: Bóc tách giọng nói khỏi nhạc nền ({sep_mode.upper()})...", {"model": sep_mode})
             self.manifest_manager.record_stage_start(c.job_id, stage_id)
             t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
@@ -667,9 +717,11 @@ class V1Orchestrator:
                 model_display = "Hybrid: Faster-Whisper Turbo + SenseVoice-Small (CTC 60ms)"
             elif asr_m == "sensevoice_small":
                 model_display = "SenseVoice-Small (ONNX INT8 Siêu Tốc)"
+            elif asr_m == "paraformer_zh":
+                model_display = "Paraformer-large-zh + CT-Punct + SenseVoice CTC (60ms)"
             else:
                 model_display = "Faster-Whisper Large-v3 Turbo"
-            await c.notify(stage_id, 3, 40.0, f"🤖 Bước 3/8: {model_display} đang nhận dạng giọng nói...")
+            await c.notify(stage_id, 3, 40.0, f"🤖 Bước 3/9: {model_display} đang nhận dạng giọng nói...")
             self.manifest_manager.record_stage_start(c.job_id, stage_id)
             t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
@@ -677,34 +729,88 @@ class V1Orchestrator:
                 from ai.v1_asr_isolated import extract_subtitles_isolated as extract_subtitles_whisper
                 from v1_gpu_gatekeeper import async_gpu_gatekeeper
                 c.check_stop()
-                # extract_subtitles_whisper tự động điều phối Hybrid/SenseVoice hoặc Faster-Whisper + Chunking
-                async with async_gpu_gatekeeper("speech_asr", timeout_seconds=t_out):
-                    srt_segments = await c.run_stage(
-                        asyncio.to_thread(
-                            extract_subtitles_whisper,
-                            str(vocals_audio),
-                            str(srt_original),
-                            original_audio_path=str(original_audio),
-                            model_id=c.planned["asr_model"], chunking=c.planned["asr_chunking"],
-                            chunk_size_s=c.planned["asr_chunk_size_s"], overlap_s=c.planned["asr_overlap_s"], timeout_s=t_out,
-                        ),
-                        timeout=t_out
-                    )
-                asr_was_empty = not srt_segments or not srt_original.is_file()
-                if c.visual_sub_to_speech and not asr_was_empty and _looks_like_bgm_hallucination(srt_segments, c.video_dur_s):
-                    logger.info(
-                        "🎬 Visual mode: bỏ %d câu ASR nghi ảo giác nhạc nền (phủ thoại %.1f%%)",
-                        len(srt_segments),
-                        100.0 * _merged_speech_coverage(srt_segments, c.video_dur_s) / max(c.video_dur_s, 1.0),
-                    )
-                    srt_segments = []
+                if getattr(c, "_vad_bypassed_separation", False):
                     asr_was_empty = True
-                if c.visual_sub_to_speech:
-                    srt_segments, visual_ocr_cached = await self._stage_visual_transcript(
-                        c, srt_segments, asr_was_empty, srt_original, async_gpu_gatekeeper)
-                elif asr_was_empty:
-                    raise RuntimeError(f"ASR ({model_display}) không nhận dạng được câu thoại nào.")
-                save_payload(c.out_dir / "asr.json", segments=srt_segments, asr_was_empty=asr_was_empty)
+                    srt_segments = []
+                    try:
+                        srt_segments, visual_ocr_cached = await self._stage_visual_transcript(
+                            c, srt_segments, asr_was_empty, srt_original, async_gpu_gatekeeper
+                        )
+                    except Exception as vis_exc:
+                        logger.warning(
+                            "[VAD_GATE] Không tìm thấy phụ đề động trên hình (%s) -> Kích hoạt Fail-safe chạy lại BS-RoFormer + ASR đầy đủ!",
+                            vis_exc,
+                        )
+                        c._vad_bypassed_separation = False
+                        sep_mode_fb = getattr(c, "_vad_saved_sep_mode", "roformer")
+                        t_sep_fb = self._calculate_stage_timeout("separate_vocals", c.video_dur_s, c.resolved_mode)
+                        from video_utils import separate_vocals_demucs
+                        async with async_gpu_gatekeeper("vocal_separation", timeout_seconds=t_sep_fb):
+                            v_res, nv_res = await c.run_stage(
+                                asyncio.to_thread(
+                                    separate_vocals_demucs,
+                                    str(original_audio),
+                                    str(c.out_dir),
+                                    separation_mode=sep_mode_fb,
+                                ),
+                                timeout=t_sep_fb,
+                            )
+                        vocals_audio = Path(v_res)
+                        no_vocals_audio = Path(nv_res)
+                        c._recovered_vocals_audio = vocals_audio
+                        c._recovered_no_vocals_audio = no_vocals_audio
+                        c.artifacts_acc["vocals_audio"] = str(vocals_audio)
+                        c.artifacts_acc["no_vocals_audio"] = str(no_vocals_audio)
+                        self.manifest_manager.record_stage_complete(c.job_id, "separate_vocals", {
+                            "vocals_audio": str(vocals_audio),
+                            "no_vocals_audio": str(no_vocals_audio),
+                        })
+                        async with async_gpu_gatekeeper("speech_asr", timeout_seconds=t_out):
+                            srt_segments = await c.run_stage(
+                                asyncio.to_thread(
+                                    extract_subtitles_whisper,
+                                    str(vocals_audio),
+                                    str(srt_original),
+                                    original_audio_path=str(original_audio),
+                                    model_id=c.planned["asr_model"], chunking=c.planned["asr_chunking"],
+                                    chunk_size_s=c.planned["asr_chunk_size_s"], overlap_s=c.planned["asr_overlap_s"], timeout_s=t_out,
+                                ),
+                                timeout=t_out,
+                            )
+                        asr_was_empty = not srt_segments or not srt_original.is_file()
+                        if asr_was_empty:
+                            raise vis_exc
+                else:
+                    # extract_subtitles_whisper tự động điều phối Hybrid/SenseVoice/Paraformer hoặc Faster-Whisper + Chunking
+                    async with async_gpu_gatekeeper("speech_asr", timeout_seconds=t_out):
+                        srt_segments = await c.run_stage(
+                            asyncio.to_thread(
+                                extract_subtitles_whisper,
+                                str(vocals_audio),
+                                str(srt_original),
+                                original_audio_path=str(original_audio),
+                                model_id=c.planned["asr_model"], chunking=c.planned["asr_chunking"],
+                                chunk_size_s=c.planned["asr_chunk_size_s"], overlap_s=c.planned["asr_overlap_s"], timeout_s=t_out,
+                            ),
+                            timeout=t_out
+                        )
+                    asr_was_empty = not srt_segments or not srt_original.is_file()
+                    if c.visual_sub_to_speech and not asr_was_empty and _looks_like_bgm_hallucination(srt_segments, c.video_dur_s):
+                        logger.info(
+                            "🎬 Visual mode: bỏ %d câu ASR nghi ảo giác nhạc nền (phủ thoại %.1f%%)",
+                            len(srt_segments),
+                            100.0 * _merged_speech_coverage(srt_segments, c.video_dur_s) / max(c.video_dur_s, 1.0),
+                        )
+                        srt_segments = []
+                        asr_was_empty = True
+                    if c.visual_sub_to_speech and asr_was_empty:
+                        srt_segments, visual_ocr_cached = await self._stage_visual_transcript(
+                            c, srt_segments, asr_was_empty, srt_original, async_gpu_gatekeeper)
+                    elif asr_was_empty:
+                        raise RuntimeError(f"ASR ({model_display}) không nhận dạng được câu thoại nào.")
+                save_payload(c.out_dir / "asr.json", segments=srt_segments, asr_was_empty=asr_was_empty,
+                             source_policy_version=TRANSCRIPT_SOURCE_POLICY_VERSION,
+                             transcript_source="visual_caption" if asr_was_empty else "speech_asr")
                 self.manifest_manager.record_stage_complete(c.job_id, stage_id, {"srt_original": str(srt_original), "asr_data": str(c.out_dir / "asr.json")})
             except Exception as exc:
                 self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))
@@ -717,7 +823,7 @@ class V1Orchestrator:
             srt_segments = asr_payload.get("segments") or list(srt.parse(srt_original.read_text(encoding="utf-8")))
             asr_was_empty = bool(asr_payload.get("asr_was_empty", False))
             ocr_sidecar = c.out_dir / "ocr.json"
-            if c.visual_sub_to_speech and ocr_sidecar.is_file():
+            if c.visual_sub_to_speech and asr_was_empty and ocr_sidecar.is_file():
                 cached_ocr = load_payload(ocr_sidecar)
                 visual_ocr_cached = bool(cached_ocr.get("visual_asr_reuse"))
                 if visual_ocr_cached:
@@ -735,13 +841,14 @@ class V1Orchestrator:
         vid_w, vid_h, main_y_pct = 1080, 1920, 0.88
         floating_segments = []
         cached_ocr_payload = None
-        if c.visual_sub_to_speech:
+        if c.visual_sub_to_speech and asr_was_empty:
             try:
                 candidate_ocr = load_payload(c.out_dir / "ocr.json")
             except (OSError, ValueError, KeyError, TypeError):
                 candidate_ocr = None
             from v1_ocr_geometry import OCR_GEOMETRY_VERSION
             if (candidate_ocr and candidate_ocr.get("visual_asr_reuse")
+                    and candidate_ocr.get("source_policy_version") == TRANSCRIPT_SOURCE_POLICY_VERSION
                     and candidate_ocr.get("geometry_version") == OCR_GEOMETRY_VERSION):
                 cached_ocr_payload = candidate_ocr
         if cached_ocr_payload is not None:
@@ -753,7 +860,7 @@ class V1Orchestrator:
             if should_run:
                 await c.notify(
                     stage_id, 4, 55.0,
-                    "👀 Bước 4/8: Tái sử dụng kết quả quét phụ đề từ bước 3 (không quét lại)...",
+                    "👀 Bước 4/9: Tái sử dụng kết quả quét phụ đề từ bước 3 (không quét lại)...",
                 )
                 self.manifest_manager.record_stage_start(c.job_id, stage_id)
                 self.manifest_manager.record_stage_complete(c.job_id, stage_id, {"ocr_data": str(c.out_dir / "ocr.json")})
@@ -771,7 +878,7 @@ class V1Orchestrator:
                     ocr_strat = "full"
                 else:
                     ocr_strat = "smart_skip"
-            await c.notify(stage_id, 4, 55.0, f"👀 Bước 4/8: Quét vị trí phụ đề chữ cứng (OCR {ocr_strat})...", {"ocr_strategy": ocr_strat})
+            await c.notify(stage_id, 4, 55.0, f"👀 Bước 4/9: Quét vị trí phụ đề chữ cứng (OCR {ocr_strat})...", {"ocr_strategy": ocr_strat})
             self.manifest_manager.record_stage_start(c.job_id, stage_id)
             t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
@@ -796,7 +903,7 @@ class V1Orchestrator:
                             adaptive=False,
                             geometry_report_path=str(c.out_dir / 'ocr_geometry_report.json'),
                             strict_geometry=True,
-                            visual_sub_to_speech=c.visual_sub_to_speech,
+                            visual_sub_to_speech=bool(c.visual_sub_to_speech and asr_was_empty),
                             _source_duration=c.video_dur_s,
                             metrics=ocr_metrics,
                         ),
@@ -805,6 +912,9 @@ class V1Orchestrator:
                 from v1_ocr_geometry import OCR_GEOMETRY_VERSION
 
                 if c.visual_sub_to_speech and asr_was_empty and ocr_result:
+                    ocr_result = visual_transcript_candidates(ocr_result)
+                    if not _visual_ocr_transcript_usable(ocr_result, c.video_dur_s):
+                        raise RuntimeError("Không tìm thấy phụ đề động hợp lệ để lồng tiếng")
                     srt_segments = ocr_result
                     floating_segments = []
                     from ai.transcription import save_srt
@@ -812,6 +922,7 @@ class V1Orchestrator:
                 else:
                     floating_segments = ocr_result
                 save_payload(c.out_dir / "ocr.json", geometry_version=OCR_GEOMETRY_VERSION, segments=srt_segments,
+                             source_policy_version=TRANSCRIPT_SOURCE_POLICY_VERSION,
                              floating_segments=floating_segments, width=vid_w, height=vid_h, main_y_pct=main_y_pct,
                              visual_asr_reuse=bool(c.visual_sub_to_speech and asr_was_empty),
                              asr_was_empty=asr_was_empty,
@@ -851,7 +962,7 @@ class V1Orchestrator:
             except Exception:
                 pass
             script_badge = " (Kịch bản: Hài hước)" if str(v1_script_mode).lower() in ("humorous", "hai_huoc", "haihuoc", "comedy") else ""
-            await c.notify(stage_id, 5, 65.0, f"🌐 Bước 5/8: Dịch phụ đề chuẩn ngữ cảnh bằng {configured_gemini_model}{script_badge} ({len(srt_segments)} câu)...", {"gemini_model": configured_gemini_model, "script_mode": v1_script_mode})
+            await c.notify(stage_id, 5, 65.0, f"🌐 Bước 5/9: Dịch phụ đề chuẩn ngữ cảnh bằng {configured_gemini_model}{script_badge} ({len(srt_segments)} câu)...", {"gemini_model": configured_gemini_model, "script_mode": v1_script_mode})
             self.manifest_manager.record_stage_start(c.job_id, stage_id)
             t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
@@ -883,7 +994,7 @@ class V1Orchestrator:
                             workspace=str(self.workspace),
                             voice_config=c.effective_cfg["voice_config"],
                             job_id=c.job_id,
-                            visual_sub_to_speech=c.visual_sub_to_speech,
+                            visual_sub_to_speech=bool(c.visual_sub_to_speech and asr_was_empty),
                         )
                     except Exception as vl_exc:
                         logger.warning("[TRANSLATE] Early voice lock fallback sang speaker='unknown': %s", vl_exc)
@@ -908,14 +1019,24 @@ class V1Orchestrator:
                         max_words = max(3, int(round(max(0.6, win_s - 0.05) * 3.6 * 1.15)))
                         bb = getattr(seg, "best_block", None)
                         bb_text = (bb.get("text") if isinstance(bb, dict) else getattr(bb, "text", "")) if bb else ""
-                        cue_meta.append({
+                        try:
+                            from ai.v1_caption_evidence import build_ocr_hint
+                            multi_hint = build_ocr_hint(seg)
+                        except Exception:
+                            multi_hint = ""
+                        final_ocr_hint = multi_hint or str(bb_text or "").strip()[:80]
+                        meta_entry: Dict[str, Any] = {
                             "id": pos + 1,
                             "index": seg_idx,
                             "speaker": speaker,
                             "max_sec": round(win_s, 2),
                             "max_words": max_words,
-                            "ocr_hint": str(bb_text or "").strip()[:80],
-                        })
+                            "ocr_hint": final_ocr_hint[:320],
+                        }
+                        pf_alt = str(getattr(seg, "paraformer_alt", "") or "").strip()
+                        if pf_alt and pf_alt != str(getattr(seg, "content", "") or "").strip():
+                            meta_entry["asr_alt"] = pf_alt[:200]
+                        cue_meta.append(meta_entry)
 
                 gemini_key = c.overrides.get("api_key") or ""
                 c.check_stop()
@@ -999,7 +1120,7 @@ class V1Orchestrator:
                 v_label = voice_lock_info["voice_label"]
                 seg_voices = voice_lock_info.get("segment_voices")
 
-                await c.notify(stage_id, 6, 75.0, f"🗣️ Bước 6/8: Lồng tiếng AI CapCut ({v_label}, 6 luồng)...", {"voice": v_label})
+                await c.notify(stage_id, 6, 75.0, f"🗣️ Bước 6/9: Lồng tiếng AI CapCut ({v_label}, 6 luồng)...", {"voice": v_label})
                 c.check_stop()
 
                 gemini_key = c.overrides.get("api_key") or os.getenv("GEMINI_API_KEY", "")
@@ -1062,7 +1183,7 @@ class V1Orchestrator:
                     tts_artifacts[f"audio_{i}"] = dub["path"]
                 self.manifest_manager.record_stage_complete(c.job_id, stage_id, tts_artifacts)
                 current = self.manifest_manager.load_manifest(c.job_id)
-                current.effective_config["speech_timing_version"] = 3
+                current.effective_config["speech_timing_version"] = 4
                 current.effective_config["subtitle_ass_signature"] = ass_signature
                 c.effective_cfg["subtitle_ass_signature"] = ass_signature
                 self.manifest_manager.save_manifest(current)
@@ -1103,7 +1224,7 @@ class V1Orchestrator:
 
         should_run = not (c.can_resume and stage_id in c.verified_stages)
         if should_run:
-            await c.notify(stage_id, 7, 85.0, "🎛️ Bước 7/8: Trộn nhạc nền & giọng đọc (Hierarchical Adaptive Mixer)...")
+            await c.notify(stage_id, 7, 85.0, "🎛️ Bước 7/9: Trộn nhạc nền & giọng đọc (Hierarchical Adaptive Mixer)...")
             self.manifest_manager.record_stage_start(c.job_id, stage_id)
             t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
@@ -1175,7 +1296,7 @@ class V1Orchestrator:
         should_run = not (c.can_resume and stage_id in c.verified_stages
                           and cached_signature == render_signature)
         if should_run:
-            await c.notify(stage_id, 8, 92.0, "🎬 Bước 8/8: Render video thành phẩm bằng NVENC GPU...")
+            await c.notify(stage_id, 8, 92.0, "🎬 Bước 8/9: Render video thành phẩm bằng NVENC GPU...")
             self.manifest_manager.record_stage_start(c.job_id, stage_id)
             t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
@@ -1248,9 +1369,47 @@ class V1Orchestrator:
 
     async def _stage_qc_and_deliver(self, c, final_video, temp_render_video, translated_segments, dubbing_audio_files, mixed_audio, ass_path):
         # ==================== STAGE 9: QUALITY GATE & PUBLISH ====================
+        c.check_stop()
+        await c.pause_checkpoint()
+        await c.notify("quality_gate", 9, 96.0, "🔎 Bước 9/9: Kiểm tra chất lượng video sau render...")
+        self.manifest_manager.record_stage_start(c.job_id, "quality_gate")
         qc_target = temp_render_video if temp_render_video.is_file() else final_video
         qc_policy = resolve_qc_policy(c.effective_cfg, c.overrides, self.workspace)
         logger.info("[QUALITY_GATE] Đang thực hiện kiểm tra chất lượng tự động 8 nhóm (policy=%s)...", qc_policy)
+        loop = asyncio.get_running_loop()
+        phase_progress = {"decode": (0, 0), "ocr": (0, 0)}
+        last_progress_at = 0.0
+
+        def qc_progress(event):
+            nonlocal last_progress_at
+            c.check_stop()
+            phase = str(event.get("phase", ""))
+            completed = max(0, int(event.get("completed", 0)))
+            total = max(0, int(event.get("total", 0)))
+            if phase not in phase_progress:
+                return
+            phase_progress[phase] = (completed, total)
+            # Bounded OCR batches interleave with decoding. Track both work
+            # counters so a subsequent decode event cannot rewind progress.
+            fraction = sum(min(1.0, done / count) if count else 0.0
+                           for done, count in phase_progress.values()) / 2.0
+            now = time.monotonic()
+            if now - last_progress_at < 2.0 and not (total and completed >= total):
+                return
+            last_progress_at = now
+            label = "Trích khung hậu kiểm" if phase == "decode" else "OCR hậu kiểm"
+            pct = 96.0 + 3.0 * fraction
+            details = {"phase": phase, "completed": completed, "total": total,
+                       "stage_fraction": fraction, "recognized": phase_progress["ocr"][0]}
+            # QC runs in a worker thread. Deliver ordered progress back through
+            # the owning event loop rather than invoking async callbacks there.
+            future = asyncio.run_coroutine_threadsafe(c.notify(
+                "quality_gate", 9, pct,
+                f"🔎 Bước 9/9: {label} ({completed}/{total})...", details), loop)
+            try:
+                future.result()
+            except FutureCancelledError as exc:
+                raise asyncio.CancelledError() from exc
 
         try:
             import importlib
@@ -1276,7 +1435,16 @@ class V1Orchestrator:
                 policy=qc_policy,
                 workspace_path=self.workspace,
                 enable_visual_pixel_qc=qc_pixel_enabled,
+                progress_callback=qc_progress,
+                stop_check=c.check_stop,
             )
+            c.check_stop()
+            report_path = self.workspace / "bot_system" / "qc_reports" / f"{c.job_id}.qc.json"
+            artifacts = {"qc_report": str(report_path)} if report_path.is_file() else None
+            self.manifest_manager.record_stage_complete(c.job_id, "quality_gate", artifacts)
+        except asyncio.CancelledError:
+            self.manifest_manager.record_stage_failure(c.job_id, "quality_gate", "Quality Gate cancelled")
+            raise
         except Exception as exc:
             self.manifest_manager.record_stage_failure(c.job_id, "quality_gate", str(exc))
             raise
@@ -1345,7 +1513,7 @@ class V1Orchestrator:
         except Exception as cl_err:
             logger.warning("[CLEANUP] Lỗi dọn tệp trung gian job %s: %s", c.job_id, cl_err)
 
-        await c.notify("publish", 8, 100.0, f"✅ Hoàn tất xuất xưởng video thành phẩm: {Path(published_path).name}", {
+        await c.notify("publish", 9, 100.0, f"✅ Hoàn tất xuất xưởng video thành phẩm: {Path(published_path).name}", {
             "published_path": published_path,
             "qc_status": qc_report.overall_status,
         })
@@ -1362,6 +1530,8 @@ class V1Orchestrator:
         }
 
     async def _stage_visual_transcript(self, c, srt_segments, asr_was_empty, srt_original, async_gpu_gatekeeper):
+        if not asr_was_empty and not _looks_like_bgm_hallucination(srt_segments, c.video_dur_s):
+            return srt_segments, False
         stage_id = "speech_asr"
         visual_ocr_cached = False
         asr_cue_count = len(srt_segments)
@@ -1393,6 +1563,7 @@ class V1Orchestrator:
                 )
         finally:
             release_ocr_reader()
+        visual_segments = visual_transcript_candidates(visual_segments)
         if _visual_ocr_transcript_usable(visual_segments, c.video_dur_s):
             srt_segments = visual_segments
             for idx, seg in enumerate(srt_segments, start=1):
@@ -1401,6 +1572,7 @@ class V1Orchestrator:
             save_payload(
                 c.out_dir / "ocr.json",
                 geometry_version=OCR_GEOMETRY_VERSION,
+                source_policy_version=TRANSCRIPT_SOURCE_POLICY_VERSION,
                 segments=srt_segments,
                 floating_segments=[],
                 width=vid_w_src,

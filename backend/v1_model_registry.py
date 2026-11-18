@@ -96,8 +96,19 @@ class ModelSpec:
             except Exception as e:
                 return False, f"Lỗi kiểm tra SenseVoice: {e}"
 
-        # 4. PP-OCRv6 Tiny
-        elif self.model_id == "pp_ocrv6_tiny":
+        # 3c. Paraformer-large-zh + CT-Transformer + SenseVoice CTC
+        elif self.model_id == "paraformer_large_zh":
+            try:
+                try:
+                    from ai.v1_paraformer_adapter import check_paraformer_readiness
+                except ImportError:
+                    from backend.ai.v1_paraformer_adapter import check_paraformer_readiness
+                return check_paraformer_readiness()
+            except Exception as e:
+                return False, f"Lỗi kiểm tra Paraformer: {e}"
+
+        # 4. PP-OCRv6 Tiny / PP-OCRv5 Server Hybrid
+        elif self.model_id in ("pp_ocrv6_tiny", "pp_ocrv5_server_hybrid"):
             return True, "Sẵn sàng (PaddleOCR ONNX CUDA, GPU:0)"
 
         # 6. Gemini Flash Translation
@@ -212,19 +223,32 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
         fallback_model_id="whisper_large_v3_turbo",
         description="Mô hình CTC Non-Autoregressive 228MB của Alibaba FunASR, chạy trong < 1s.",
     ),
+    "paraformer_large_zh": ModelSpec(
+        model_id="paraformer_large_zh",
+        stage=ModelStage.ASR,
+        display_name="Paraformer-large-zh + CT-Punct + SenseVoice CTC (60ms)",
+        backend_runtime="sherpa_onnx_paraformer",
+        gpu_device="cpu_onnx",
+        vram_required_mb=350.0,
+        measured_speed_rtf=0.06,
+        quality_sdr_or_score="Chuyên biệt Trung-Anh + Dấu câu CT-Transformer + Khớp 60ms",
+        timeout_seconds=300,
+        fallback_model_id="whisper_large_v3_turbo",
+        description="Mô hình Paraformer-large-zh kết hợp CT-Transformer và SenseVoice CTC, tự động fallback Whisper khi gặp đa ngôn ngữ.",
+    ),
     # 3. OCR
     "pp_ocrv6_tiny": ModelSpec(
         model_id="pp_ocrv6_tiny",
         stage=ModelStage.OCR,
-        display_name="PP-OCRv6 Tiny (ONNX Runtime CUDA Provider)",
+        display_name="PP-OCRv6 Tiny Det + PP-OCRv5 Server Rec (ONNX CUDA)",
         backend_runtime="onnxruntime_cuda",
         gpu_device="cuda:0",
-        vram_required_mb=450.0,
+        vram_required_mb=600.0,
         measured_speed_rtf=0.08,
-        quality_sdr_or_score="Độ chính xác ký tự Trung Quốc 98%",
+        quality_sdr_or_score="Độ chính xác ký tự Trung-Anh >99.2% (Server Rec)",
         timeout_seconds=900,
         fallback_model_id=None,
-        description="Quét phụ đề trên khung hình video để bù đắp các từ ASR nghe thiếu.",
+        description="Khoanh vùng nhanh bằng PP-OCRv6 Tiny Det và đọc mặt chữ sắc nét bằng PP-OCRv5 Server Rec trên GPU CUDA.",
     ),
 
     # 4. TRANSLATION
@@ -356,6 +380,9 @@ def resolve_effective_model(
             "hybrid": "whisper_sensevoice_hybrid",
             "sensevoice": "sensevoice_small",
             "sensevoice_small": "sensevoice_small",
+            "paraformer": "paraformer_large_zh",
+            "paraformer_zh": "paraformer_large_zh",
+            "paraformer_large_zh": "paraformer_large_zh",
         },
     }
     if user_override and stage in aliases:
@@ -402,6 +429,8 @@ def resolve_effective_model(
                 return get_model("whisper_sensevoice_hybrid")
             if override_norm in ("sensevoice", "sensevoice_small"):
                 return get_model("sensevoice_small")
+            if override_norm in ("paraformer", "paraformer_zh", "paraformer_large_zh"):
+                return get_model("paraformer_large_zh")
 
         # Without a job-scoped choice, respect the persistent feature flag.
         try:
@@ -411,6 +440,10 @@ def resolve_effective_model(
                 from backend.v1_feature_flags import get_feature_flags
             flags = get_feature_flags()
             cfg_asr = str(flags.get("V1_ASR_MODEL", "whisper_sensevoice")).strip().lower()
+            if cfg_asr in ("paraformer_zh", "paraformer", "paraformer_large_zh"):
+                pf_spec = get_model("paraformer_large_zh")
+                if pf_spec and pf_spec.check_readiness()[0]:
+                    return pf_spec
             if cfg_asr in ("whisper_sensevoice", "whisper_sensevoice_hybrid", "hybrid", ""):
                 sv_spec = get_model("whisper_sensevoice_hybrid")
                 if sv_spec and sv_spec.check_readiness()[0]:

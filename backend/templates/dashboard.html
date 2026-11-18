@@ -135,7 +135,7 @@ window.fetch = async function() {
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
     
     /* Pipeline Steps - Segmented Stepper Flow */
-    .steps-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+    .steps-grid { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
     .step-item { background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border); border-radius: 8px; padding: 9px 10px; text-align: left; transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1); display: flex; flex-direction: column; justify-content: space-between; min-height: 72px; position: relative; }
     .step-item:hover { background: rgba(255, 255, 255, 0.04); border-color: rgba(255, 255, 255, 0.15); }
     .step-header-row { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
@@ -1462,10 +1462,20 @@ header {
               <div class="step-icon">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="15" x="2" y="5" rx="2"/><polyline points="10 9 14 12 10 15"/></svg>
               </div>
-              <div class="step-title">8. Xuất video</div>
+              <div class="step-title">8. Render video</div>
             </div>
             <div class="step-tag" id="step8ModelTag" title="Bộ mã hóa GPU NVIDIA NVENC (h264_nvenc)">NVIDIA NVENC</div>
             <div class="step-duration" id="timeStep8" title="Thời gian chạy thực tế Bước 8">--</div>
+          </div>
+          <div class="step-item" id="step9">
+            <div class="step-header-row">
+              <div class="step-icon">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11z"/><polyline points="8 12 11 15 16 9"/></svg>
+              </div>
+              <div class="step-title">9. Kiểm tra chất lượng</div>
+            </div>
+            <div class="step-tag" id="step9ModelTag" title="Kiểm tra pixel, phụ đề và âm thanh sau render">QC sau render</div>
+            <div class="step-duration" id="timeStep9" title="Thời gian chạy thực tế Bước 9">--</div>
           </div>
         </div>
 
@@ -1572,10 +1582,18 @@ header {
             <div class="step-item" id="w1Step8">
               <div class="step-header-row">
                 <div class="step-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="15" x="2" y="5" rx="2"/><polyline points="10 9 14 12 10 15"/></svg></div>
-                <div class="step-title">8. Xuất video</div>
+                <div class="step-title">8. Render video</div>
               </div>
               <div class="step-tag" id="w1Step8ModelTag" title="Bộ mã hóa GPU NVIDIA NVENC (h264_nvenc)">NVIDIA NVENC</div>
               <div class="step-duration" id="w1TimeStep8" title="Thời gian chạy thực tế Bước 8">--</div>
+            </div>
+            <div class="step-item" id="w1Step9">
+              <div class="step-header-row">
+                <div class="step-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11z"/><polyline points="8 12 11 15 16 9"/></svg></div>
+                <div class="step-title">9. Kiểm tra chất lượng</div>
+              </div>
+              <div class="step-tag" id="w1Step9ModelTag" title="Kiểm tra pixel, phụ đề và âm thanh sau render">QC sau render</div>
+              <div class="step-duration" id="w1TimeStep9" title="Thời gian chạy thực tế Bước 9">--</div>
             </div>
           </div>
         </div>
@@ -1672,10 +1690,18 @@ header {
             <div class="step-item" id="w2Step8">
               <div class="step-header-row">
                 <div class="step-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="15" x="2" y="5" rx="2"/><polyline points="10 9 14 12 10 15"/></svg></div>
-                <div class="step-title">8. Xuất video</div>
+                <div class="step-title">8. Render video</div>
               </div>
               <div class="step-tag" id="w2Step8ModelTag" title="Bộ mã hóa GPU NVIDIA NVENC (h264_nvenc)">NVIDIA NVENC</div>
               <div class="step-duration" id="w2TimeStep8" title="Thời gian chạy thực tế Bước 8">--</div>
+            </div>
+            <div class="step-item" id="w2Step9">
+              <div class="step-header-row">
+                <div class="step-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11z"/><polyline points="8 12 11 15 16 9"/></svg></div>
+                <div class="step-title">9. Kiểm tra chất lượng</div>
+              </div>
+              <div class="step-tag" id="w2Step9ModelTag" title="Kiểm tra pixel, phụ đề và âm thanh sau render">QC sau render</div>
+              <div class="step-duration" id="w2TimeStep9" title="Thời gian chạy thực tế Bước 9">--</div>
             </div>
           </div>
         </div>
@@ -3410,7 +3436,7 @@ header {
         step7Tag.title = 'Bộ hòa âm tự động Adaptive Audio Mixer (EBU R128 Loudness Normalization)';
       }
 
-      // 8. Xuất video
+      // 8. Render video
       const step8Tag = document.getElementById(prefix ? prefix + 'Step8ModelTag' : 'step8ModelTag');
       if (step8Tag) {
         step8Tag.textContent = 'NVIDIA NVENC';
@@ -3580,8 +3606,12 @@ header {
         else if (currentStep === 6) currentStep = 8;
       }
       const stepName = (data.step_name || '').toLowerCase();
+      if (data.stage === 'quality_gate') currentStep = 9;
       if (!currentStep) {
-        if (stepName.includes('bước 1/8') || stepName.includes('trích xuất âm thanh')) currentStep = 1;
+        const numberedStage = stepName.match(/bước\s+([1-9])\/(?:8|9)\b/);
+        if (stepName.includes('hậu kiểm') || stepName.includes('kiểm tra chất lượng') || stepName.includes('quality gate')) currentStep = 9;
+        else if (numberedStage) currentStep = Number(numberedStage[1]);
+        else if (stepName.includes('bước 1/8') || stepName.includes('trích xuất âm thanh')) currentStep = 1;
         else if (stepName.includes('bước 2/8') || stepName.includes('bóc tách') || stepName.includes('tách lời') || stepName.includes('demucs') || stepName.includes('roformer')) currentStep = 2;
         else if (stepName.includes('bước 3/8') || stepName.includes('nhận dạng') || stepName.includes('whisper')) currentStep = 3;
         else if (stepName.includes('bước 4/8') || stepName.includes('quét phụ đề') || stepName.includes('quét chữ') || stepName.includes('ocr')) currentStep = 4;
@@ -3591,10 +3621,11 @@ header {
         else if (stepName.includes('bước 8/8') || stepName.includes('render') || stepName.includes('xuất video') || stepName.includes('nvenc')) currentStep = 8;
       }
 
-      const stepPercent = {1:10, 2:25, 3:40, 4:55, 5:65, 6:75, 7:85, 8:95};
-      let percent = videoDone ? 100 : (isWorkerActive ? (stepPercent[currentStep] || Math.max(0, Math.min(100, Number(data.percent) || 0)) || 5) :
-        Math.max(0, Math.min(100, Number(data.percent) || 0)));
-      if (failed || interrupted || (stopped && !videoDone)) percent = Math.min(99, percent);
+      const stepPercent = {1:10, 2:25, 3:40, 4:55, 5:65, 6:75, 7:85, 8:95, 9:96};
+      const reportedPercent = Math.max(0, Math.min(99, Number(data.percent) || 0));
+      const measuredProgress = Number(data.total_steps) >= 9 || data.stage === 'quality_gate';
+      let percent = videoDone ? 100 : (isWorkerActive ?
+        ((measuredProgress ? reportedPercent : stepPercent[currentStep]) || reportedPercent || 5) : reportedPercent);
 
       const descEl = document.getElementById(prefix ? prefix + 'StepDescription' : 'stepDescription');
       const pctEl = document.getElementById(prefix ? prefix + 'PctText' : 'pctText');
@@ -3613,7 +3644,7 @@ header {
           void barEl.offsetWidth;
           barEl.style.transition = '';
         }
-        [1, 2, 3, 4, 5, 6, 7, 8].forEach(k => {
+        [1, 2, 3, 4, 5, 6, 7, 8, 9].forEach(k => {
           const t = document.getElementById(prefix ? prefix + 'TimeStep' + k : 'timeStep' + k);
           if (t) t.textContent = '--';
         });
@@ -3679,7 +3710,7 @@ header {
         if (etaEl) etaEl.textContent = data.eta_seconds ? `~${formatTime(data.eta_seconds)}` : '--';
       }
 
-      // Update 8 Pipeline steps
+      // Update 9 Pipeline steps
       const durationLookup = {
         1: ['1', 'extract_audio', 'audio'],
         2: ['2', 'separate_vocals', 'demucs', 'roformer'],
@@ -3688,10 +3719,14 @@ header {
         5: ['5', 'ai_translation', 'translate', 'translation'],
         6: ['6', 'ai_tts', 'tts', 'voice'],
         7: ['7', 'audio_mixing', 'mix', 'mixing', 'mix_v2', 'mix_legacy'],
-        8: ['8', 'video_rendering', 'render', 'qc', 'deliver']
+        8: ['8', '8.0', 'video_rendering', 'render'],
+        9: ['9', '9.0', 'quality_gate', 'qc']
       };
 
-      const stepKeys = [1, 2, 3, 4, 5, 6, 7, 8];
+      const stepKeys = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+      const hasSeparateQc = Number(data.total_steps) >= 9 || currentStep === 9;
+      const qcCard = document.getElementById(prefix ? prefix + 'Step9' : 'step9');
+      if (qcCard) qcCard.style.display = hasSeparateQc ? '' : 'none';
       stepKeys.forEach(k => {
         const elId = prefix ? `${prefix}Step${k}` : `step${k}`;
         const timeElId = prefix ? `${prefix}TimeStep${k}` : `timeStep${k}`;
@@ -3870,7 +3905,8 @@ header {
             else if (vMode === 'SHORT') { bg = 'rgba(56, 189, 248, 0.2)'; color = '#38bdf8'; border = 'rgba(56, 189, 248, 0.45)'; }
             routerBadge = ` <span class="badge" style="margin-left: 8px; font-size: 11px; padding: 2px 9px; border-radius: 4px; background: ${bg}; color: ${color}; border: 1px solid ${border}; font-weight: 600;">${escapeHtml(rText)}</span>`;
           }
-          statusTitle.innerHTML = '<span class="dot dot-yellow"></span> ĐANG XỬ LÝ & RENDER NGẦM' + routerBadge;
+          statusTitle.innerHTML = '<span class="dot dot-yellow"></span> ' +
+            (state.stage === 'quality_gate' || Number(state.step) === 9 ? 'ĐANG KIỂM TRA CHẤT LƯỢNG' : 'ĐANG XỬ LÝ & RENDER NGẦM') + routerBadge;
           currentVideoName.textContent = state.video_name ?
             'Video ' + state.queue_index + '/' + state.queue_total + ': ' + state.video_name : 'Đang chuẩn bị hàng đợi...';
         } else {
@@ -8083,7 +8119,7 @@ let inputUploading=false;
       const body = document.getElementById('statsPanelBody');
       const d = statsSummaryCache;
       if (!body || !d) return;
-      const stepNames = {1:'1 · Chuẩn bị', 2:'2 · Tách nhạc', 3:'3 · ASR', 4:'4 · OCR sub', 5:'5 · Dịch', 6:'6 · TTS', 7:'7 · Mix', 8:'8 · Render'};
+      const stepNames = {1:'1 · Chuẩn bị', 2:'2 · Tách nhạc', 3:'3 · ASR', 4:'4 · OCR sub', 5:'5 · Dịch', 6:'6 · TTS', 7:'7 · Mix', 8:'8 · Render', 9:'9 · QC'};
       const steps = d.per_step_median_s || {};
       const stepVals = Object.values(steps);
       const maxStep = Math.max(0.1, ...(stepVals.length ? stepVals : [0.1]));

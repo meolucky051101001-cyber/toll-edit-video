@@ -36,6 +36,7 @@ DEFAULT_FLAGS: Dict[str, Any] = {
     "V1_SHORT_ASR_MODEL": "inherit",
     "V1_LONG_ASR_MODEL": "inherit",
     "V1_VISUAL_SUB_TO_SPEECH": False,
+    "V1_VAD_SMART_BYPASS": False,
     "V1_CLOUD_MODE": False,
     "V1_CLOUD_GPU": "T4",
 }
@@ -134,6 +135,8 @@ def set_feature_flags(new_flags: Dict[str, Any], workspace_path: Optional[str | 
             updates["V1_ASR_MODEL"] = "sensevoice_small"
         elif m in ("whisper_turbo", "whisper"):
             updates["V1_ASR_MODEL"] = "whisper_turbo"
+        elif m in ("paraformer_zh", "paraformer", "paraformer_large_zh"):
+            updates["V1_ASR_MODEL"] = "paraformer_zh"
     for key, value in updates.items():
         if key not in DEFAULT_FLAGS:
             raise ValueError(f"Unknown V1 setting: {key}")
@@ -141,9 +144,9 @@ def set_feature_flags(new_flags: Dict[str, Any], workspace_path: Optional[str | 
             raise ValueError(f"{key} requires a boolean")
     choices = {
         "V1_VIDEO_MODE": {"AUTO", "SHORT", "MEDIUM", "LONG", "CUSTOM"},
-        "V1_ASR_MODEL": {"whisper_turbo", "whisper_sensevoice", "sensevoice_small"},
-        "V1_SHORT_ASR_MODEL": {"inherit", "whisper_turbo", "whisper_sensevoice", "sensevoice_small"},
-        "V1_LONG_ASR_MODEL": {"inherit", "whisper_turbo", "whisper_sensevoice", "sensevoice_small"},
+        "V1_ASR_MODEL": {"whisper_turbo", "whisper_sensevoice", "sensevoice_small", "paraformer_zh"},
+        "V1_SHORT_ASR_MODEL": {"inherit", "whisper_turbo", "whisper_sensevoice", "sensevoice_small", "paraformer_zh"},
+        "V1_LONG_ASR_MODEL": {"inherit", "whisper_turbo", "whisper_sensevoice", "sensevoice_small", "paraformer_zh"},
         "V1_SHORT_SEPARATOR": {"roformer", "demucs"},
         "V1_LONG_SEPARATOR": {"roformer", "demucs"},
         "V1_QC_POLICY": {"REPORT_ONLY", "WARN", "BLOCK"},

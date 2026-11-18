@@ -344,6 +344,24 @@ class ChineseSubtitleLocatorTests(unittest.TestCase):
         self.assertEqual(selected.support, 0)
         self.assertEqual(selected.selected_by_sample, {})
 
+    def test_homophone_cue_rescued_when_distant_following_cue_shifts_within_band(self):
+        speech = {
+            6: "把本子买回家啦",
+            7: "趁机是开箱",
+            8: "四个小袋子",
+        }
+        detections = [
+            block(6, "把本子买回家啦", 0.289, 0.738, 0.666, 0.721, 0.995),
+            block(7, "沉浸式开箱", 0.344, 0.671, 0.681, 0.735, 0.998),
+            block(8, "四个小袋子", 0.351, 0.681, 0.630, 0.688, 0.999),
+        ]
+
+        selected = select_chinese_subtitle_band(detections, speech, 720, 1280)
+
+        self.assertEqual(selected.mode, "asr_match")
+        self.assertIn(7, selected.selected_by_segment)
+        self.assertEqual(selected.selected_by_segment[7]["text"], "沉浸式开箱")
+
 
 class SubtitleCoverGeometryTests(unittest.TestCase):
     def test_edge_to_edge_source_gets_full_white_cover_at_source_y(self):

@@ -800,6 +800,11 @@ def select_chinese_subtitle_band(
             if not anchors:
                 return
             anchor_center = median(item.center_y for item in anchors)
+            anchor_centers = [anchor_center]
+            if previous:
+                anchor_centers.append(median(item.center_y for item in previous))
+            if following:
+                anchor_centers.append(median(item.center_y for item in following))
             anchor_height = median(item.block["max_y_pct"] - item.block["y_pct"] for item in anchors)
             existing_times = {round(float(item.block.get("sample_time", -1.0)), 3) for item in existing}
             observed = []
@@ -825,8 +830,8 @@ def select_chinese_subtitle_band(
                 if (
                     w >= 0.05
                     and abs(cx - 0.5) <= 0.15
-                    and abs(item.center_y - anchor_center) <= 0.028
-                    and abs(item.center_y - center) <= 0.032
+                    and min(abs(item.center_y - ac) for ac in anchor_centers) <= 0.030
+                    and (abs(item.center_y - center) <= 0.042 or (top - 0.010 <= item.center_y <= bottom + 0.010))
                     and 0.65 * anchor_height <= h <= 1.6 * anchor_height
                 ):
                     observed.append(item)

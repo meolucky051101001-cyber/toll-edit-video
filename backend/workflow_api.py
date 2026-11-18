@@ -4983,10 +4983,19 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
         if metadata is None:
             raise HTTPException(status_code=409, detail="ASS chưa chứa vùng phụ đề nguồn đã xác minh")
         source_info = probe_main_video(str(source_video))
+        source_blur_metrics = {}
         blur_chain = build_localized_blur_filter(metadata["boxes"], source_info.width,
-                                                 source_info.height, metadata["settings"], prefix="exportblur")
+                                                 source_info.height, metadata["settings"], prefix="exportblur",
+                                                 metrics=source_blur_metrics)
         if blur_chain:
             fc = "[0:v]" + blur_chain + "[export_source];" + fc.replace("[0:v]", "[export_source]")
+        # Translated glyphs use the final ASS canvas, after crop/mirror/scale.
+        text_blur_metrics = {}
+        text_blur = build_localized_blur_filter(metadata.get("text_boxes", []), tw, th,
+                                                metadata["settings"], prefix="exporttext", metrics=text_blur_metrics)
+        logger.info("Studio localized blur plans source=%s text=%s", source_blur_metrics, text_blur_metrics)
+        if text_blur and srt_filter:
+            fc = fc.replace(srt_filter, "," + text_blur + srt_filter, 1)
 
     # Lồng Watermark mờ mờ cố định ở góc phải nếu được kích hoạt
     wm_filt = build_watermark_filter(cfg, tw, th)

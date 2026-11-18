@@ -86,6 +86,22 @@ def subtitle_measure(font_name="Arial", font_size=38, bold=True):
         left, _, right, _ = face.getbbox(text)
         return max(face.getlength(text), right - min(left, 0)) * scale
 
+    @lru_cache(maxsize=4096)
+    def glyph_bounds(text):
+        """Ink bounds relative to an ASS top-centred line, before outline.
+
+        Use the same resolved font and REAL_DIM scale as width measurement.
+        Pillow's default vertical anchor is the ascender, as is libass an8;
+        horizontal centring uses advance, not the possibly overhanging ink.
+        """
+        left, top, right, bottom = face.getbbox(text)
+        advance = face.getlength(text)
+        return ((left - advance / 2) * scale, top * scale,
+                (right - advance / 2) * scale, bottom * scale)
+
+    measure.glyph_bounds = glyph_bounds
+    measure.line_height = float(font_size)
+    measure.font_family = face.getname()[0]
     return measure
 
 

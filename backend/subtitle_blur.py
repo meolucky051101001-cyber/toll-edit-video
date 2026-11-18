@@ -9,7 +9,7 @@ import json
 import math
 from collections import defaultdict
 
-BLUR_RENDER_VERSION = 4
+BLUR_RENDER_VERSION = 6
 ASS_BLUR_MARKER = "; ToolV1BlurData: "
 BLUR_DEFAULTS = {"sub_blur_radius": 16, "sub_blur_padding_x": 0.015,
                  "sub_blur_padding_y": 0.008}
@@ -106,21 +106,64 @@ def collect_source_blur_boxes(segments):
     return sorted(unique.values(), key=lambda row: (row["start"], row["end"], row["x_pct"]))
 
 
-def ass_blur_metadata(segments, settings=None):
+def ass_blur_metadata(segments, settings=None, text_boxes=None):
     return ASS_BLUR_MARKER + json.dumps({"version": BLUR_RENDER_VERSION,
         "settings": resolve_blur_settings(settings),
-        "boxes": collect_source_blur_boxes(segments)}, separators=(",", ":")) + "\n"
+        "boxes": collect_source_blur_boxes(segments),
+        "text_boxes": validate_blur_boxes(text_boxes or [])}, separators=(",", ":")) + "\n"
 
 
 def read_ass_blur_metadata(text):
     for line in text.splitlines():
         if line.startswith(ASS_BLUR_MARKER):
             data = json.loads(line[len(ASS_BLUR_MARKER):])
-            if data.get("version") != BLUR_RENDER_VERSION:
+            # Version 6 changes only the filter execution plan. Version 5 stores
+            # the same exact source geometry and remains safe to render.
+            if data.get("version") not in {5, BLUR_RENDER_VERSION}:
                 raise ValueError("ASS làm mờ cần được tạo lại từ geometry nguồn")
             return {"settings": resolve_blur_settings(data.get("settings")),
-                    "boxes": validate_blur_boxes(data.get("boxes"))}
+                    "boxes": validate_blur_boxes(data.get("boxes")),
+                    "text_boxes": validate_blur_boxes(data.get("text_boxes", []))}
     return None
+
+
+def combine_blur_boxes(source_boxes, text_boxes):
+    """Union intersecting source/translated rectangles only while both exist.
+
+    Inputs must already use the same coordinate space. Disjoint captions stay
+    separate, and source-only time ranges never inherit translated cue timing.
+    """
+    rows = validate_blur_boxes(source_boxes) + validate_blur_boxes(text_boxes)
+    changes = defaultdict(list)
+    for index, row in enumerate(rows):
+        changes[row["start"]].append((index, True))
+        changes[row["end"]].append((index, False))
+    active, result = {}, []
+    times = sorted(changes)
+    for start, end in zip(times, times[1:]):
+        for index, adding in changes[start]:
+            if adding:
+                active[index] = rows[index]
+            else:
+                active.pop(index, None)
+        rectangles = []
+        for row in active.values():
+            rect = [row[k] for k in ("x_pct", "y_pct", "max_x_pct", "max_y_pct")]
+            index = 0
+            while index < len(rectangles):
+                other = rectangles[index]
+                if (rect[0] <= other[2] and other[0] <= rect[2]
+                        and rect[1] <= other[3] and other[1] <= rect[3]):
+                    rect = [min(rect[0], other[0]), min(rect[1], other[1]),
+                            max(rect[2], other[2]), max(rect[3], other[3])]
+                    rectangles.pop(index)
+                    index = 0
+                else:
+                    index += 1
+            rectangles.append(rect)
+        result.extend(dict(start=start, end=end, x_pct=r[0], y_pct=r[1],
+                           max_x_pct=r[2], max_y_pct=r[3]) for r in rectangles)
+    return result
 
 
 def blur_regions(boxes, width, height, settings=None):
@@ -151,33 +194,109 @@ def blur_regions(boxes, width, height, settings=None):
     return result
 
 
-def build_localized_blur_filter(boxes, width, height, settings=None, prefix="caption"):
-    """Unlabelled one-input/output filter chain; caller appends crisp subtitles."""
+def _blur_timestamp(value):
+    # Never round a half-open boundary upward into the next source frame.
+    return f"{math.floor(value * 1_000_000) / 1_000_000:.6f}"
+
+
+def _blur_enable(intervals):
+    return "+".join(f"gte(t,{_blur_timestamp(start)})*lt(t,{_blur_timestamp(end)})"
+                    for start, end in intervals)
+
+
+def _regions_overlap_in_time(left, right):
+    return any(max(a, c) < min(b, d)
+               for a, b in left[4] for c, d in right[4])
+
+
+def _regions_overlap_in_pixels(left, right):
+    x, y, w, h = left[:4]
+    ox, oy, ow, oh = right[:4]
+    return max(x, ox) < min(x + w, ox + ow) and max(y, oy) < min(y + h, oy + oh)
+
+
+def _blur_slots(regions):
+    """Share only fixed-size crops whose lifetimes never overlap.
+
+    Moving a later region to an earlier overlay slot is safe only if it cannot
+    overlap any overlay it passes. Width/height stay fixed: dynamically changing
+    crop size does not reliably reconfigure downstream boxblur/framesync.
+    """
+    slots = []
+    for index, region in enumerate(regions):
+        for slot in slots:
+            if slot["regions"][0][2:4] != region[2:4]:
+                continue
+            if any(_regions_overlap_in_time(other, region) for other in slot["regions"]):
+                continue
+            if any(_regions_overlap_in_time(other, region)
+                   and _regions_overlap_in_pixels(other, region)
+                   for other in regions[slot["first"] + 1:index]):
+                continue
+            slot["regions"].append(region)
+            break
+        else:
+            slots.append({"first": index, "regions": [region]})
+    return slots
+
+
+def _slot_position(regions, axis):
+    initial = regions[0][axis]
+    terms = [str(initial)]
+    for region in regions[1:]:
+        delta = region[axis] - initial
+        if delta:
+            terms.append(f"({delta})*({_blur_enable(region[4])})")
+    return "+".join(terms)
+
+
+def build_localized_blur_filter(boxes, width, height, settings=None, prefix="caption", *, metrics=None):
+    """Unlabelled one-input/output filter chain; caller appends crisp subtitles.
+
+    Each fixed-size slot reads untouched source pixels. Reusing a slot changes
+    only its crop/overlay position; incompatible sizes or overlay order retain
+    separate branches. Geometry and half-open source lifetimes are unchanged.
+    """
     settings = resolve_blur_settings(settings)
     regions = blur_regions(boxes, width, height, settings)
     if not regions:
+        if metrics is not None:
+            metrics.update(rectangles=0, slots=0, split_branches=0, strategy="empty")
         return ""
+    slots = _blur_slots(regions)
+    # A moving-position expression has a cost too. On real geometry with mostly
+    # different crop sizes, sharing only a few regions regressed CPU benchmarks.
+    # Keep the original static graph unless at least a quarter of branches go.
+    if len(slots) * 4 > len(regions) * 3:
+        slots = [{"first": index, "regions": [region]} for index, region in enumerate(regions)]
+    if metrics is not None:
+        metrics.update(rectangles=len(regions), slots=len(slots), split_branches=len(slots) + 1,
+                       strategy="fixed_size_slots" if len(slots) < len(regions) else "static",
+                       active_pixel_seconds=sum(w * h * (end - start)
+                           for _, _, w, h, intervals in regions for start, end in intervals))
     # Split the untouched source once. Repeated split/overlay diamonds make
     # FFmpeg negotiate the same upstream graph exponentially as regions grow.
     # Each crop also needs original pixels, not a previous region's blurred output.
-    parts = [f"format=yuv420p,split={len(regions) + 1}[{prefix}main0]" +
-             "".join(f"[{prefix}{index}crop]" for index in range(len(regions))) + ";"]
-    for index, (x, y, w, h, intervals) in enumerate(regions):
+    parts = [f"format=yuv420p,split={len(slots) + 1}[{prefix}main0]" +
+             "".join(f"[{prefix}{index}crop]" for index in range(len(slots))) + ";"]
+    for index, slot in enumerate(slots):
+        members = slot["regions"]
+        x, y, w, h, _ = members[0]
+        intervals = sorted(interval for region in members for interval in region[4])
         # Chroma planes are half-size in yuv420p; clamp their radius separately.
         # FFmpeg requires 2*radius+1 to fit the plane, including even-sized
         # crops. Half the size itself is already one pixel too large.
         luma = min(settings["sub_blur_radius"], (min(w, h) - 1) // 2)
         chroma = min(luma, max(0, (min(w, h) // 2 - 1) // 2))
-        # Rounding a 30-fps boundary such as 5/30 upward to .166667 makes
-        # the first new frame keep the old mask. Quantize both half-open
-        # boundaries downward by <1 microsecond, never into the next frame.
-        def timestamp(seconds):
-            return f"{math.floor(seconds * 1_000_000) / 1_000_000:.6f}"
-        enable = "+".join(f"gte(t,{timestamp(start)})*lt(t,{timestamp(end)})" for start, end in intervals)
+        enable = _blur_enable(intervals)
+        crop_x, crop_y = _slot_position(members, 0), _slot_position(members, 1)
+        crop = (f"{w}:{h}:{x}:{y}" if len(members) == 1
+                else f"{w}:{h}:x='{crop_x}':y='{crop_y}'")
+        overlay = f"{x}:{y}" if len(members) == 1 else f"x='{crop_x}':y='{crop_y}'"
         label = f"{prefix}{index}"
-        output = f"[{prefix}main{index + 1}];" if index + 1 < len(regions) else ""
+        output = f"[{prefix}main{index + 1}];" if index + 1 < len(slots) else ""
         parts.append(
-            f"[{label}crop]crop={w}:{h}:{x}:{y},"
+            f"[{label}crop]crop={crop},"
             f"boxblur=luma_radius={luma}:luma_power=3:chroma_radius={chroma}:chroma_power=3:enable='{enable}'[{label}blur];"
-            f"[{prefix}main{index}][{label}blur]overlay={x}:{y}:enable='{enable}'{output}")
+            f"[{prefix}main{index}][{label}blur]overlay={overlay}:enable='{enable}'{output}")
     return "".join(parts)

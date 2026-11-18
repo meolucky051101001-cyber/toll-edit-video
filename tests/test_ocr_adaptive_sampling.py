@@ -36,10 +36,11 @@ class TimedCapture:
         return {cv2.CAP_PROP_FPS: 30, cv2.CAP_PROP_FRAME_WIDTH: 360,
                 cv2.CAP_PROP_FRAME_HEIGHT: 640,
                 cv2.CAP_PROP_FRAME_COUNT: int(self.duration * 30),
-                cv2.CAP_PROP_POS_MSEC: self.index * 1000 / 30}.get(prop, 0)
+                cv2.CAP_PROP_POS_FRAMES: self.index,
+                cv2.CAP_PROP_POS_MSEC: max(0,self.index-1) * 1000 / 30}.get(prop, 0)
 
     def set(self, prop, value):
-        self.index = round(value * 30 / 1000)
+        self.index = round(value * 30 / 1000) if prop == cv2.CAP_PROP_POS_MSEC else int(value)
         self.seeks.append(self.index)
         return True
 
@@ -81,17 +82,37 @@ class AdaptiveSamplingTests(unittest.TestCase):
         original = np.zeros((640, 360, 3), dtype=np.uint8)
         changed = original.copy()
         changed[530:532, 150:152] = 255
-        frames = iter([original, changed, changed.copy()])
-        capture = SimpleNamespace(set=lambda *a: None, read=lambda: (True, next(frames)))
+        capture = SimpleNamespace(index=0)
+        capture.set = lambda prop, value: setattr(capture, 'index', int(value))
+        def grab_frame():
+            if capture.index >= 30:
+                return False
+            capture.index += 1
+            return True
+        def retrieve_frame():
+            image = original if capture.index == 1 else changed
+            return True, image.copy() if capture.index == 22 else image
+        capture.grab = grab_frame
+        capture.retrieve = retrieve_frame
+        capture.read = lambda: (True, retrieve_frame()[1])
+        capture.get = lambda prop: {cv2.CAP_PROP_FRAME_COUNT: 30,
+            cv2.CAP_PROP_POS_FRAMES: capture.index,
+            cv2.CAP_PROP_POS_MSEC: max(0, capture.index - 1) * 1000 / 30}.get(prop, 0)
         rows = [([[100, 530], [250, 530], [250, 550], [100, 550]], TEXT, .95)]
         metrics = {}
+        from backend.ocr_observation_ledger import video_observations
+        @video_observations
+        def scan(_path, **kwargs):
+            return module._perform_visual_subtitle_ocr(capture, 360, 640, 1, [], lambda: False, metrics)
         with patch.object(module, "_visual_grid_times", return_value=[0, .35, .7]), \
-             patch.object(module, "_readtext_batch", return_value=[rows]) as inference, \
+             patch.object(module, "_recognize_batch", side_effect=lambda imgs: [rows for _ in imgs]) as inference, \
              patch.object(module, "select_chinese_subtitle_band", return_value=SimpleNamespace(support=0)), \
              patch.object(module, "detect_static_watermarks", return_value=[]):
-            module._perform_visual_subtitle_ocr(capture, 360, 640, 1, [], lambda: False, metrics)
-        self.assertEqual(inference.call_count, 2)
-        self.assertEqual(metrics["visual_roi_reused"], 1)
+            scan('fixture.mp4', metrics=metrics)
+        self.assertEqual(inference.call_count, 1)
+        self.assertEqual(len(inference.call_args.args[0]), 2)
+        self.assertEqual(metrics["ocr_unique_inputs"], 2)
+        self.assertEqual(metrics["ocr_reused_inputs"], 1)
 
     def test_close_ocr_correction_preserves_subtitle_tracking(self):
         module = importlib.import_module("backend.ocr_utils")

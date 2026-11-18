@@ -1,0 +1,14 @@
+{
+  "baseline_available": false,
+  "video_duration_seconds": 23.766667,
+  "qc_requested_samples": 195,
+  "qc_selected_samples": 195,
+  "qc_decoded_frames": 713,
+  "qc_seek_count": 0,
+  "qc_extraction_wall_seconds": 3.5663,
+  "qc_decode_seconds": 3.252,
+  "legacy_random_seek_reads": 195,
+  "legacy_random_seek_seconds": 53.0042,
+  "ocr_cache_four_unique_960x1706_median_seconds": 0.0228,
+  "ocr_cache_payload_bytes": 19653128
+}

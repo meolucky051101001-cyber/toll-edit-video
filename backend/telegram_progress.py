@@ -1,16 +1,37 @@
 """Mirror Telegram pipeline status to the shared dashboard."""
 import contextvars
 import logging
+import re
+from contextlib import contextmanager
 import job_tracker
 current_job = contextvars.ContextVar("telegram_dashboard_job", default=None)
 current_worker_id = contextvars.ContextVar("telegram_worker_id", default=1)
+_text_progress_suspended = contextvars.ContextVar("telegram_text_progress_suspended", default=False)
 
 
-def report(text, worker_id=None):
+@contextmanager
+def suspend_text_progress():
+    """Keep an informational message from overwriting structured progress."""
+    token = _text_progress_suspended.set(True)
+    try:
+        yield
+    finally:
+        _text_progress_suspended.reset(token)
+
+
+def report(text, worker_id=None, *, stage=None, step=None, total_steps=None, percent=None, details=None):
     if current_job.get() is None:
         return
+    if stage is None and _text_progress_suspended.get():
+        return
     try:
-        _report(text, worker_id=worker_id)
+        if stage is not None and step is not None:
+            job_tracker.update_step(step, str(text).replace("*", "").split("\n")[0],
+                                    worker_id=worker_id or current_worker_id.get() or 1,
+                                    stage=stage, total_steps=total_steps, percent=percent,
+                                    details=details or {})
+        else:
+            _report(text, worker_id=worker_id)
     except Exception:
         logging.getLogger(__name__).exception("Dashboard progress update failed")
 
@@ -22,7 +43,17 @@ def _report(text, worker_id=None):
     if clean.startswith("❌") or lower.startswith(("không hoàn tất video", "xử lý gặp lỗi")):
         job_tracker.set_error(job_tracker.get_status().get("video_name", ""), clean, worker_id=w_id)
         return
-    # Bảng phân nhóm 8 bước pipeline chuẩn V1 Orchestrator & Dashboard
+    # QC can include OCR/render words, so it must win before those stages.
+    if any(term in lower for term in ("bước 9/9", "hậu kiểm", "kiểm tra chất lượng", "kiểm định chất lượng", "quality gate")):
+        job_tracker.update_step(9, clean.split("\n")[0], worker_id=w_id,
+                                stage="quality_gate", total_steps=9)
+        return
+    numbered = re.search(r"bước\s+([1-9])/(8|9)\b", lower)
+    if numbered:
+        job_tracker.update_step(int(numbered.group(1)), clean.split("\n")[0],
+                                worker_id=w_id, total_steps=int(numbered.group(2)))
+        return
+    # Legacy six-stage pipeline messages remain supported.
     stages = [
         (2, ("bước 2/8", "demucs", "roformer", "bóc tách giọng nói", "tách giọng nhân vật", "bước 2.5/6")),
         (4, ("bước 4/8", "ocr", "quét vị trí phụ đề", "quét vùng phụ đề", "phụ đề chữ cứng", "bước 3.5/6")),

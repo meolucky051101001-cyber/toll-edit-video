@@ -43,6 +43,66 @@ def test_verified_empty_never_reuses_best_box():
     assert blur.collect_source_blur_boxes([seg]) == []
 
 
+def test_vietnamese_ink_expands_blur_without_extending_source_lifetime(tmp_path):
+    source = box(.4, 1., x=.46, right=.57, y=.8, bottom=.83)
+    seg = segment([source])
+    seg.content = 'Những món phụ kiện đóng gói xinh xắn dành cho mọi người'
+    output = tmp_path / 'measured.ass'
+    generate_ass_file([seg], [], output, play_res_x=720, play_res_y=1280,
+                      cover_style='localized_blur')
+    metadata = blur.read_ass_blur_metadata(output.read_text(encoding='utf-8-sig'))
+    assert metadata['boxes'] == blur.validate_blur_boxes([source])
+    text_boxes = metadata['text_boxes']
+    assert max(b['max_x_pct'] - b['x_pct'] for b in text_boxes) > .5
+    assert all(b['max_y_pct'] - b['y_pct'] < .15 for b in text_boxes)
+    assert any(b['end'] > 1 for b in text_boxes)
+    assert max(b['end'] for b in metadata['boxes']) == 1
+
+
+def test_combined_blur_unions_only_concurrent_intersecting_regions():
+    source = box(0, 1, x=.4, right=.6, y=.7, bottom=.75)
+    translated = box(.5, 2, x=.2, right=.8, y=.72, bottom=.8)
+    distant = box(.5, 2, x=.05, right=.15, y=.1, bottom=.15)
+    result = blur.combine_blur_boxes([source], [translated, distant])
+    initial = [b for b in result if b['start'] == 0]
+    assert len(initial) == 1 and initial[0]['x_pct'] == .4
+    concurrent = [b for b in result if b['start'] == .5]
+    assert len(concurrent) == 2
+    joined = next(b for b in concurrent if b['y_pct'] == .7)
+    assert (joined['x_pct'], joined['max_x_pct'], joined['max_y_pct']) == (.2,.8,.8)
+    after = [b for b in result if b['start'] == 1]
+    assert all(b['y_pct'] != .7 for b in after) and len(after) == 2
+
+
+@pytest.mark.parametrize('width,height', [(360,640),(640,360)])
+def test_measured_text_blur_contains_real_libass_glyph_pixels(tmp_path,width,height):
+    import math, shutil, subprocess
+    import numpy as np
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        pytest.skip('FFmpeg required')
+    seg = segment([box(0,2,x=.46,right=.57,y=.72,bottom=.76)])
+    seg.end = timedelta(seconds=2)
+    seg.content = 'Những phụ kiện xinh xắn của Nguyễn giúp đóng gói quà thật đẹp và tiện lợi'
+    output = tmp_path / 'glyphs.ass'
+    generate_ass_file([seg],[],output,play_res_x=width,play_res_y=height,cover_style='localized_blur')
+    metadata = blur.read_ass_blur_metadata(output.read_text(encoding='utf-8-sig'))
+    escaped = str(output).replace('\\','/').replace(':','\\:')
+    result = subprocess.run([ffmpeg,'-v','error','-nostdin','-threads','1','-filter_threads','1',
+        '-f','lavfi','-i',f'color=black:s={width}x{height}:r=1','-vf',f"ass='{escaped}'",
+        '-frames:v','1','-pix_fmt','gray','-threads','1','-f','rawvideo','-'],capture_output=True,timeout=20)
+    assert result.returncode == 0, result.stderr.decode(errors='replace')
+    pixels = np.frombuffer(result.stdout,dtype=np.uint8).reshape(height,width)
+    mask = np.zeros((height,width),dtype=bool)
+    for b in metadata['text_boxes']:
+        if b['start'] <= 0 < b['end']:
+            mask[math.floor(b['y_pct']*height):math.ceil(b['max_y_pct']*height),
+                 math.floor(b['x_pct']*width):math.ceil(b['max_x_pct']*width)] = True
+    assert np.any(pixels > 1)
+    assert not np.any((pixels > 1) & ~mask)
+    assert mask.sum() < width*height*.2
+
+
 def test_tts_fitting_keeps_verified_source_tracking_gaps():
     from backend.ass_utils import sync_and_clamp_subtitles
     seg = segment([box(.4, 1), box(1.8, 2.2)])
@@ -97,6 +157,29 @@ def test_half_open_intervals_and_safe_pixel_format_precede_subtitles():
     assert "gte(t,0.400000)*lt(t,1.000000)" in chain
     assert "boxblur=" in chain
     assert blur.build_localized_blur_filter([], 720, 1280) == ""
+
+
+def test_fixed_size_slots_share_positions_but_keep_overlapping_order():
+    settings = dict(sub_blur_padding_x=0, sub_blur_padding_y=0)
+    moving = [box(0, 1, x=.1, right=.3, y=.1, bottom=.3),
+              box(2, 3, x=.6, right=.8, y=.6, bottom=.8)]
+    graph = blur.build_localized_blur_filter(moving, 100, 100, settings)
+    assert 'split=2[' in graph
+    assert graph.count('boxblur=') == graph.count('overlay=') == 1
+    # Moving region 3 before middle region 2 would reverse their overlay order.
+    ordered = [moving[0], box(1, 4, x=.5, right=.9, y=.5, bottom=.9), moving[1]]
+    graph = blur.build_localized_blur_filter(ordered, 100, 100, settings)
+    assert 'split=4[' in graph
+    assert 'select=' not in graph  # avoid framesync buffering whole inactive gaps
+
+
+def test_renderer_v6_accepts_v5_geometry_without_reinterpreting_boxes():
+    metadata = blur.ass_blur_metadata([segment()])
+    current = blur.read_ass_blur_metadata(metadata)
+    previous = blur.read_ass_blur_metadata(metadata.replace('"version":6', '"version":5', 1))
+    assert previous == current
+    with pytest.raises(ValueError, match='tạo lại'):
+        blur.read_ass_blur_metadata(metadata.replace('"version":6', '"version":4', 1))
 
 
 @pytest.mark.parametrize("b", [box(x=0, right=.001, y=0, bottom=.001),
@@ -210,7 +293,9 @@ def test_custom_export_blurs_raw_source_before_crop_and_scale(tmp_path, many_reg
     assert all(not script.exists() for script in scripts)
     if not many_regions:
         assert "gte(t,0.400000)*lt(t,1.000000)" in graph
-        assert "gte(t,0.000000)*lt(t,4.000000)" not in graph
+        assert "gte(t,0.000000)*lt(t,4.000000)" not in graph.split('[export_source];')[0]
+        assert graph.index('exporttextmain0') > graph.index('hflip')
+        assert graph.index('exporttextmain0') < graph.index('ass=')
 
 
 def test_batch_framing_rejects_unimplemented_blur_conversion_before_launch(tmp_path):

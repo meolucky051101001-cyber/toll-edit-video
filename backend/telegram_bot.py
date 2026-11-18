@@ -1581,9 +1581,12 @@ async def run_pipeline_v1_for_telegram(video_path, job, status_msg):
     global_queue.publish()
 
     async def progress(stage, step, total, percent, message, details):
+        from telegram_progress import suspend_text_progress
         if stage != "publish":
-            job_tracker.update_step(step, message, percent=int(percent))
-        await safe_edit_status(status_msg, message)
+            job_tracker.update_step(step, message, percent=int(percent), stage=stage,
+                                    total_steps=total, details=details)
+        with suspend_text_progress():
+            await safe_edit_status(status_msg, message)
 
     result = await V1Orchestrator(WORKSPACE).execute_job(
         video_path=video_path,

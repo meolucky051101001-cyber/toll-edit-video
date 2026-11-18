@@ -72,7 +72,7 @@ def probe_main_video(path, timeout=10.0):
     return select_main_video(json.loads(proc.stdout))
 
 
-def validate_video_output(path, source, *, require_audio=False, expected_size=None):
+def validate_video_output(path, source, *, require_audio=False, expected_size=None, allowed_tail_pad=0.0):
     output = probe_main_video(path)
     expected_size = expected_size or (source.width, source.height)
     if output.video_stream_count != 1 or output.has_cover:
@@ -85,6 +85,9 @@ def validate_video_output(path, source, *, require_audio=False, expected_size=No
         raise ValueError(f"Sai nhịp hình video: {output.fps:.6f}fps != {source.fps:.6f}fps")
     if source.duration > 0:
         tolerance = max(0.25, 2.0 / source.fps if source.fps > 0 else 0.25)
-        if output.duration <= 0 or abs(output.duration - source.duration) > tolerance:
+        tail_pad = max(0.0, float(allowed_tail_pad or 0.0))
+        min_duration = source.duration - tolerance
+        max_duration = source.duration + tail_pad + tolerance
+        if output.duration <= 0 or output.duration < min_duration or output.duration > max_duration:
             raise ValueError(f"Sai thời lượng video: {output.duration:.3f}s != {source.duration:.3f}s")
     return output

@@ -158,14 +158,14 @@ def validate_separated_audio(
 
     with sf.SoundFile(str(file_path)) as sfile:
         while True:
-            block = sfile.read(frames=65536, dtype="float32")
+            block = sfile.read(frames=524288, dtype="float32")
             if len(block) == 0:
                 break
-            if np.isnan(block).any():
-                has_nan = True
-                break
-            if np.isinf(block).any():
-                has_inf = True
+            if not np.isfinite(block).all():
+                if np.isnan(block).any():
+                    has_nan = True
+                else:
+                    has_inf = True
                 break
             block_peak = float(np.max(np.abs(block)))
             if block_peak > max_peak:
@@ -278,21 +278,60 @@ def main():
 
     sep = None
     try:
-        sep = Separator(
-            log_level=logging.WARNING,
-            output_dir=output_dir,
-            model_file_dir=model_dir,
-            output_format="WAV",
-            use_soundfile=False,  # Use PyDub/FFmpeg writer to preserve PCM WAV without subtype mismatch
-            use_native_fp16=True,  # Native FP16 on RTX 4050 Tensor Cores
-        )
-        sep.load_model(model_filename=args.model_name)
-        load_time_s = time.monotonic() - t_load_start
-        logger.info(f"Đã nạp model {args.model_name} vào GPU ({load_time_s:.2f}s). Bắt đầu suy luận...")
+        try:
+            configured_bs = int(os.getenv("V1_ROFORMER_BATCH_SIZE", "0"))
+        except ValueError:
+            configured_bs = 0
+        if configured_bs > 0:
+            mdxc_batch_size = configured_bs
+        elif free_vram_mb >= 2200:
+            mdxc_batch_size = 4
+        elif free_vram_mb >= 1400:
+            mdxc_batch_size = 2
+        else:
+            mdxc_batch_size = 1
 
-        t_infer_start = time.monotonic()
-        raw_outputs = sep.separate(input_audio)
-        infer_time_s = time.monotonic() - t_infer_start
+        def _run_separation(batch_sz: int):
+            inst = Separator(
+                log_level=logging.WARNING,
+                output_dir=output_dir,
+                model_file_dir=model_dir,
+                output_format="WAV",
+                use_soundfile=False,  # Use PyDub/FFmpeg writer to preserve PCM WAV without subtype mismatch
+                use_native_fp16=True,  # Native FP16 on RTX 4050 Tensor Cores
+                mdxc_params={
+                    "segment_size": 256,
+                    "override_model_segment_size": False,
+                    "batch_size": batch_sz,
+                    "overlap": None,
+                    "pitch_shift": 0,
+                },
+            )
+            t_ld = time.monotonic()
+            inst.load_model(model_filename=args.model_name)
+            ld_s = time.monotonic() - t_ld
+            logger.info(
+                f"Đã nạp model {args.model_name} vào GPU ({ld_s:.2f}s, batch_size={batch_sz}). Bắt đầu suy luận..."
+            )
+            t_inf = time.monotonic()
+            outputs = inst.separate(input_audio)
+            return inst, outputs, ld_s, time.monotonic() - t_inf
+
+        try:
+            sep, raw_outputs, load_time_s, infer_time_s = _run_separation(mdxc_batch_size)
+        except torch.cuda.OutOfMemoryError:
+            if mdxc_batch_size <= 1:
+                raise
+            logger.warning(
+                f"VRAM không đủ cho batch_size={mdxc_batch_size}; giải phóng cache và tự động thử lại với batch_size=1..."
+            )
+            if sep is not None:
+                del sep
+                sep = None
+            gc.collect()
+            torch.cuda.empty_cache()
+            sep, raw_outputs, load_time_s, infer_time_s = _run_separation(1)
+
         total_time_s = time.monotonic() - t_start
 
         peak_vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)

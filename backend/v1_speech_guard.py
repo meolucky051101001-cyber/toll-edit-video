@@ -1,4 +1,5 @@
 """Speech preservation invariants shared by direct, clustered and resumed jobs."""
+import copy
 import logging
 import math
 import os
@@ -6,7 +7,7 @@ import os
 log = logging.getLogger(__name__)
 
 # Match the final QC measurement: a cue may not run into the next cue.
-# Five milliseconds covers decoder rounding, not audible speech overlap.
+# Allow 35 milliseconds for decoder rounding in the shared QC contract.
 BOUNDARY_TOLERANCE_S = 0.035
 MIN_NATURAL_SPEED = 1.00
 MAX_NATURAL_SPEED = 1.50
@@ -49,7 +50,7 @@ def validate_speech_timeline(dubs, total_duration=None, measure=None, max_speed=
 
     Reject audio whose measured duration crosses the next cue beyond the
     decoder-rounding allowance. The mixer and the final QC use this contract.
-    Auto-remedies minor overruns in-place to protect the render pipeline.
+    Keep audio artifacts intact so a failed fit can be regenerated for retry.
     """
     max_speed = natural_speed_limit(max_speed)
     if boundary_tolerance is None:
@@ -71,28 +72,10 @@ def validate_speech_timeline(dubs, total_duration=None, measure=None, max_speed=
         boundary = float(ordered[i + 1]["start"]) if i + 1 < len(ordered) else total_duration
         if boundary is not None and start + duration > float(boundary) + boundary_tolerance:
             overrun = start + duration - float(boundary)
-            allowed_max = max(0.05, float(boundary) - start - 0.005)
-            # Auto-remedy: trim or fade out audio to fit within boundary
-            try:
-                from pydub import AudioSegment
-                seg_aud = AudioSegment.from_file(dub["path"])
-                target_ms = max(50, int(allowed_max * 1000))
-                if len(seg_aud) > target_ms:
-                    fade_len = min(20, max(5, target_ms // 4))
-                    seg_aud = seg_aud[:target_ms].fade_out(fade_len)
-                    seg_aud.export(dub["path"], format="mp3", bitrate="192k")
-                    duration = float(measure(dub["path"]))
-                    dub["duration"] = duration
-                    log.warning("[SPEECH_GUARD] Auto-remedied overrun of %.3fs for cue %s (dur=%.3fs <= %.3fs)",
-                                overrun, dub.get("index"), duration, allowed_max)
-            except Exception as fix_err:
-                log.warning("[SPEECH_GUARD] Overrun auto-fix failed for cue %s: %s", dub.get("index"), fix_err)
-
-            if start + duration > float(boundary) + 0.050:
-                raise SpeechTimingError(
-                    f"Speech cue {dub.get('index')} exceeds its boundary by {overrun:.3f}s; "
-                    "shorten translation before mixing"
-                )
+            raise SpeechTimingError(
+                f"Speech cue {dub.get('index')} exceeds its boundary by {overrun:.3f}s; "
+                "shorten translation before mixing"
+            )
         speed = float(dub.get("speed_ratio", 1.0))
         if not math.isfinite(speed) or speed < MIN_NATURAL_SPEED - 1e-9 or speed > MAX_EMERGENCY_SPEED + 1e-9:
             raise SpeechTimingError(f"Invalid speech speed at cue {dub.get('index')}")
@@ -101,6 +84,50 @@ def validate_speech_timeline(dubs, total_duration=None, measure=None, max_speed=
                      dub.get("index"), speed, max_speed)
             dub["speed_ratio"] = max_speed
     return ordered
+
+
+def _retain_source_caption_geometry(previous, segment):
+    """Join source observations without fitting their bounds to the speech cue."""
+    sources = (previous, segment)
+    if not any(hasattr(source, field) for source in sources for field in
+               ("tracking_blocks", "best_block", "ocr_mask_status", "geometry_verified")):
+        return
+    tracks, best = [], None
+    statuses = [getattr(source, "ocr_mask_status", None) for source in sources]
+    verified = all(getattr(source, "geometry_verified", False) for source in sources)
+    explicitly_empty = []
+    for source, status in zip(sources, statuses):
+        blocks = getattr(source, "tracking_blocks", None) or []
+        # Match the source-cover contract: verified emptiness and a negative
+        # caption observation must never revive a stale best_block.
+        empty = status == "no_caption_evidence" or (
+            getattr(source, "geometry_verified", False) and not blocks)
+        explicitly_empty.append(empty)
+        if empty:
+            continue
+        source_best = getattr(source, "best_block", None)
+        if not blocks and source_best is not None:
+            blocks = [source_best]
+        if blocks:
+            tracks.extend(copy.deepcopy(blocks))
+            if best is None:
+                best = copy.deepcopy(source_best if source_best is not None else blocks[0])
+    previous.tracking_blocks = tracks
+    previous.best_block = best
+    previous.geometry_verified = verified
+    if "unresolved" in statuses:
+        previous.ocr_mask_status = "unresolved"
+    elif tracks:
+        previous.ocr_mask_status = "located"
+    elif all(explicitly_empty):
+        previous.ocr_mask_status = "no_caption_evidence"
+    for field, bound in (("visual_start_sec", min), ("visual_end_sec", max)):
+        if any(hasattr(source, field) for source in sources):
+            fallback = "start" if field == "visual_start_sec" else "end"
+            setattr(previous, field, bound(float(getattr(source, field,
+                getattr(source, fallback).total_seconds())) for source in sources))
+    if any(getattr(source, "visual_sub_to_speech", False) for source in sources):
+        previous.visual_sub_to_speech = True
 
 
 def coalesce_tiny_same_voice_cues(segments, minimum_window=0.15):
@@ -115,6 +142,7 @@ def coalesce_tiny_same_voice_cues(segments, minimum_window=0.15):
             same_voice = (getattr(previous, "voice_source", None), getattr(previous, "voice_param", None)) == (getattr(seg, "voice_source", None), getattr(seg, "voice_param", None))
             same_gender = getattr(previous, "gender", None) == getattr(seg, "gender", None)
             if (seg.start - previous.start).total_seconds() < minimum_window and same_voice and same_gender:
+                _retain_source_caption_geometry(previous, seg)
                 previous.content = previous.content.strip() + " " + seg.content.strip()
                 previous.end = max(previous.end, seg.end)
                 if hasattr(previous, "orig_content") or hasattr(seg, "orig_content"):

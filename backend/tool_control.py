@@ -32,7 +32,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import psutil
 from environment import load_environment
-from service_control import control_directories, resume_services, service_workspace
+from service_control import control_directories, intent_names, resume_services, service_workspace
 import v1_shutdown as shutdown
 
 load_environment(_backend_dir)
@@ -243,29 +243,25 @@ def change(key, action):
         return f'Đã bật Tool {key.upper()} thành công.'
 
 def apply_boot_defaults():
-    """
-    Thiết lập trạng thái mặc định khi mở máy tính:
-    - Tool V1: BẬT
-    """
+    """Start UI hosts automatically, preserving an operator's processing pause."""
     try:
-        # Mở khóa Tool V1
-        resume_services(ROOTS['v1'].parent, scope="all")
-        for p in get_control_paths('v1', 'v1.pause'):
-            try: p.unlink(missing_ok=True)
-            except Exception as _phase6_exc: logger.debug('Suppressed error in tool_control.apply_boot_defaults (p.unlink): %s', type(_phase6_exc).__name__, exc_info=False)
-        try:
-            for filename in ("video.pause", "video.pause.ack"):
-                for path in get_control_paths('v1', filename):
-                    path.unlink(missing_ok=True)
-        except Exception as _phase6_exc: logger.debug('Suppressed error in tool_control.apply_boot_defaults (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
-
+        # Boot is an automatic recovery path. Preserve an operator's explicit
+        # pause/disabled intent; only the explicit Tool Control "on" action
+        # may clear those flags. This keeps a dashboard/control restart from
+        # silently resuming a Telegram queue.
         # Khởi chạy dịch vụ Tool V1
         procs = processes('v1')
         names = [name for _, name in procs]
         if 'main.py' not in names:
             launch('v1', 'dashboard')
         bots = [p for p, name in procs if name == 'telegram_bot.py']
-        if not bots:
+        pause_names = intent_names("processing") + ("video.pause", "video.pause.ack")
+        paused = any(
+            (directory / name).exists()
+            for directory in control_directories(ROOTS['v1'].parent)
+            for name in pause_names
+        )
+        if not paused and not bots:
             launch('v1', 'telegram')
     except Exception as _phase6_exc:
         logger.debug('Suppressed error in tool_control.apply_boot_defaults (get_control_paths): %s', type(_phase6_exc).__name__, exc_info=False)
@@ -1454,7 +1450,7 @@ if __name__ == '__main__':
                     lf.write(f"Failed to bind 8090: {e}\n")
                 raise SystemExit(0)
 
-    # Áp dụng mặc định khi khởi động máy: Tool V1 BẬT, Tool V2 TẮT
+    # Start UI hosts and resume processing only when no operator pause exists.
     try:
         threading.Thread(target=apply_boot_defaults, daemon=True).start()
         server.serve_forever()
