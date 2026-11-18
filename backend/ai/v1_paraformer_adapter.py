@@ -61,10 +61,13 @@ def _clean_paraformer_cjk_spacing(text: str) -> str:
 
 
 def check_paraformer_readiness() -> Tuple[bool, str]:
-    try:
-        import sherpa_onnx  # noqa: F401
-    except ImportError as exc:
-        return False, f"Thiếu thư viện sherpa-onnx: {exc}"
+    import importlib.util
+    import sys
+
+    if ("sherpa_onnx" in sys.modules and sys.modules["sherpa_onnx"] is None) or (
+        "sherpa_onnx" not in sys.modules and importlib.util.find_spec("sherpa_onnx") is None
+    ):
+        return False, "Thiếu thư viện sherpa-onnx: No module named 'sherpa_onnx'"
 
     model_file = DEFAULT_PARAFORMER_DIR / "model.int8.onnx"
     if not model_file.is_file():

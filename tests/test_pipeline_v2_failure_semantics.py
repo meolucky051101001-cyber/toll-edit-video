@@ -41,9 +41,6 @@ class MediaStageValidationTests(unittest.TestCase):
 
 class TranslationFailureTests(unittest.TestCase):
     def _load_translation_with_failing_google(self):
-        requests_module = ModuleType("requests")
-        deep_module = ModuleType("deep_translator")
-
         class FailingGoogleTranslator:
             def __init__(self, *args, **kwargs):
                 pass
@@ -58,14 +55,31 @@ class TranslationFailureTests(unittest.TestCase):
             def translate(self, text):
                 raise RuntimeError("offline")
 
-        deep_module.GoogleTranslator = FailingGoogleTranslator
-        deep_module.MyMemoryTranslator = FailingMyMemoryTranslator
-        sys.modules.pop("backend.ai.translation", None)
-        with mock.patch.dict(
-            sys.modules,
-            {"requests": requests_module, "deep_translator": deep_module},
-        ):
-            return importlib.import_module("backend.ai.translation")
+        # Reimporting under sys.modules stubs leaves backend.ai.translation's
+        # package attribute pointing at a module bound to the fake requests,
+        # even after patch.dict restores sys.modules. Patch only the provider
+        # constructors and restore them at test cleanup instead.
+        translation = importlib.import_module("backend.ai.translation")
+        for name, provider in (("GoogleTranslator", FailingGoogleTranslator),
+                               ("MyMemoryTranslator", FailingMyMemoryTranslator)):
+            patcher = mock.patch.object(translation, name, provider)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return translation
+
+    def test_fallback_fixture_preserves_translation_module_and_http_dependency(self):
+        import requests
+        from backend.ai import translation as package_translation
+        before = importlib.import_module("backend.ai.translation")
+        google, memory = before.GoogleTranslator, before.MyMemoryTranslator
+        isolated = self._load_translation_with_failing_google()
+        self.assertIs(isolated, before)
+        self.assertIs(package_translation, before)
+        self.assertIs(isolated.requests, requests)
+        self.assertTrue(callable(isolated.requests.post))
+        self.doCleanups()
+        self.assertIs(before.GoogleTranslator, google)
+        self.assertIs(before.MyMemoryTranslator, memory)
 
     def test_v2_strict_translation_rejects_source_text_fallback(self):
         translation = self._load_translation_with_failing_google()

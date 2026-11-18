@@ -102,8 +102,16 @@ REQUIRED_ROUTER_PATHS = {
 
 
 def component_health():
-    paths = {getattr(route, "path", "") for route in app.routes}
-    components = {name: path in paths for name, path in REQUIRED_ROUTER_PATHS.items()}
+    from starlette.routing import Match
+
+    def registered(path):
+        # Match through Starlette's routing contract: recent FastAPI versions
+        # keep include_router() entries nested instead of flattening .path.
+        scope = {"type": "http", "method": "GET", "path": path,
+                 "root_path": "", "query_string": b"", "headers": [], "app": app}
+        return any(route.matches(scope)[0] == Match.FULL for route in app.routes)
+
+    components = {name: registered(path) for name, path in REQUIRED_ROUTER_PATHS.items()}
     return {"ready": all(components.values()), "components": components}
 
 
@@ -274,8 +282,20 @@ async def _startup_background_tasks():
     except Exception as e:
         logger.warning("Không thể khởi động bộ theo dõi lịch chạy đêm: %s", e)
     try:
+        async def _warm_render_history():
+            await asyncio.sleep(1.0)
+            from render_history import get_all_render_durations
+            await asyncio.to_thread(get_all_render_durations)
+        asyncio.create_task(_warm_render_history())
+    except Exception:
+        pass
+    try:
         from workspace_cleaner import run_full_retention_maintenance
-        asyncio.create_task(asyncio.to_thread(run_full_retention_maintenance))
+        async def _deferred_retention():
+            await asyncio.sleep(30)
+            if not job_tracker.get_status().get("active"):
+                await asyncio.to_thread(run_full_retention_maintenance)
+        asyncio.create_task(_deferred_retention())
     except Exception as e:
         logger.warning("Không thể chạy bảo trì dọn dẹp workspace: %s", e)
 
@@ -1380,17 +1400,13 @@ async def api_process_queue(request: Request):
 @app.post("/api/queue/clear")
 async def api_clear_queue(request: Request):
     """Xóa sạch các video đang đợi trong hàng chờ Telegram."""
-    queue_file = _get_system_path("telegram_queue.json")
     clear_flag = _get_system_path("telegram_queue_clear.flag")
     try:
-        import json, time
+        import time
         # Ghi cờ xóa cho bot đang chạy
         clear_flag.write_text(str(time.time()), encoding="utf-8")
-        # Đồng thời cập nhật file snapshot json ngay lập tức
-        if queue_file.is_file():
-            payload = {"items": [], "updated_at": time.time(), "pid": 0}
-            queue_file.write_text(json.dumps(payload), encoding="utf-8")
-        return {"status": "cleared", "message": "Đã xóa toàn bộ video trong hàng chờ."}
+        # The bot owns snapshot publication and preserves its active job.
+        return {"status": "pending", "message": "Đã nhận yêu cầu xóa hàng chờ; chờ bot xác nhận."}
     except Exception as e:
         logger.exception("Lỗi api_clear_queue")
         raise HTTPException(500, f"Lỗi xóa hàng chờ: {str(e)}")
@@ -1450,17 +1466,10 @@ async def api_move_queue_item(request: Request):
         for i, item in enumerate(items, 1):
             item["position"] = i
 
-        data["items"] = items
-        data["updated_at"] = time.time()
-
-        # Lưu lại file json snapshot
-        await asyncio.to_thread(queue_file.write_text, json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        # Ghi cờ tín hiệu để telegram_bot.py đang chạy đồng bộ lại bộ nhớ ngay lập tức
-        reorder_flag = _get_system_path("telegram_queue_reorder.flag")
-        reorder_flag.write_text(str(time.time()), encoding="utf-8")
-
-        return {"status": "success", "items": items, "message": msg}
+        from queue_control_service import submit_reorder
+        operation = await asyncio.to_thread(submit_reorder, queue_file, items)
+        return {"status": "success", "items": items, "operation_id": operation["operation_id"],
+                "message": "Đã nhận yêu cầu đổi thứ tự; chờ bot xác nhận."}
     except Exception as e:
         logger.exception("Lỗi api_move_queue_item")
         raise HTTPException(500, f"Lỗi di chuyển video: {str(e)}")
@@ -1777,14 +1786,17 @@ def _list_banve(limit=None, offset=0, search="", status="all"):
             except Exception as _phase6_exc:
                 logger.debug('Suppressed error in main._list_banve (set): %s', type(_phase6_exc).__name__, exc_info=False)
 
-        for f in sorted(os.listdir(output_dir), reverse=True):
-            if f.startswith("Dubbed_queue_") or f in v2_names:
-                continue
-            full_path = output_dir / f
-            if full_path.is_file() and f.lower().endswith(SUPPORTED_EXTENSIONS):
-                size_b = full_path.stat().st_size
+        with os.scandir(output_dir) as entries:
+            for entry in entries:
+                f = entry.name
+                if f.startswith("Dubbed_queue_") or f in v2_names or not f.lower().endswith(SUPPORTED_EXTENSIONS):
+                    continue
+                if not entry.is_file():
+                    continue
+                st = entry.stat()
+                size_b = st.st_size
                 total_size += size_b
-                mtime_str = datetime.datetime.fromtimestamp(full_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                mtime_str = datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
                 dur_sec = durations.get(f) or durations.get(f.replace("Dubbed_", "")) or 0
                 if dur_sec:
                     total_render_sec += dur_sec
@@ -2758,7 +2770,11 @@ async def api_get_router_modes():
 
 @app.get("/api/v1/feature-flags")
 async def api_get_feature_flags():
-    """Lấy trạng thái các cờ tính năng nâng cấp."""
+    """Lấy trạng thái các cờ tính năng nâng cấp (không chặn event loop)."""
+    return await asyncio.to_thread(_collect_feature_flags)
+
+
+def _collect_feature_flags():
     try:
         from v1_feature_flags import get_feature_flags
         flags = get_feature_flags(WORKSPACE)
@@ -2770,6 +2786,43 @@ async def api_get_feature_flags():
         except Exception as sv_err:
             flags["SENSEVOICE_ASR_READY"] = False
             flags["SENSEVOICE_ASR_READINESS_REASON"] = str(sv_err)
+        try:
+            from ai.v1_paraformer_adapter import check_paraformer_readiness
+            pf_ready, pf_reason = check_paraformer_readiness()
+            flags["PARAFORMER_ASR_READY"] = bool(pf_ready)
+            flags["PARAFORMER_ASR_READINESS_REASON"] = pf_reason
+        except Exception as pf_err:
+            flags["PARAFORMER_ASR_READY"] = False
+            flags["PARAFORMER_ASR_READINESS_REASON"] = str(pf_err)
+        try:
+            from ai.v1_speaker_embedding import check_camplus_readiness
+            cp_ready, cp_reason = check_camplus_readiness()
+            flags["CAMPLUS_SPEAKER_READY"] = bool(cp_ready)
+            flags["CAMPLUS_SPEAKER_READINESS_REASON"] = cp_reason
+        except Exception as cp_err:
+            flags["CAMPLUS_SPEAKER_READY"] = False
+            flags["CAMPLUS_SPEAKER_READINESS_REASON"] = str(cp_err)
+        flags["SILERO_VAD_READY"] = True
+        flags["SILERO_VAD_READINESS_REASON"] = "Sẵn sàng (Silero VAD + SenseVoice CTC <1s)"
+        try:
+            from ai.v1_model_policy import current_v1_model_policy
+            pol = current_v1_model_policy()
+            det = getattr(pol, "paddle_detection_model", "PP-OCRv6_tiny_det")
+            rec = getattr(pol, "paddle_recognition_model", "PP-OCRv5_server_rec")
+            flags["OCR_DETECTION_MODEL"] = det
+            flags["OCR_RECOGNITION_MODEL"] = rec
+            flags["OCR_SERVER_REC_ACTIVE"] = "v5_server" in rec.lower()
+            flags["OCR_DISPLAY_NAME"] = (
+                "PP-OCRv6 + v5 Server"
+                if "v5_server" in rec.lower()
+                else ("PP-OCRv6 Tiny" if "v6" in det.lower() else det)
+            )
+        except Exception:
+            flags["OCR_DISPLAY_NAME"] = "PP-OCRv6 + v5 Server"
+            flags["OCR_SERVER_REC_ACTIVE"] = True
+        env_gemini = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview").strip() or "gemini-3-flash-preview"
+        flags["ENV_GEMINI_MODEL"] = env_gemini
+        flags["CONFIGURED_GEMINI_MODEL"] = str(flags.get("V1_GEMINI_MODEL") or env_gemini).strip() or env_gemini
         return flags
     except Exception:
         from v1_speech_guard import natural_speed_limit
@@ -2814,7 +2867,35 @@ async def api_set_feature_flags(payload: dict = Body(...)):
                         "message": sv_reason,
                     },
                 )
+        wants_paraformer = (
+            requested_model in ("paraformer_zh", "paraformer", "paraformer_large_zh")
+            or payload.get("V1_SHORT_ASR_MODEL") in ("paraformer_zh", "paraformer", "paraformer_large_zh")
+            or payload.get("V1_LONG_ASR_MODEL") in ("paraformer_zh", "paraformer", "paraformer_large_zh")
+        )
+        if wants_paraformer:
+            from ai.v1_paraformer_adapter import check_paraformer_readiness
+            pf_ready, pf_reason = check_paraformer_readiness()
+            if not pf_ready:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "status": "error",
+                        "code": "PARAFORMER_NOT_READY",
+                        "message": pf_reason,
+                    },
+                )
         updated = set_feature_flags(payload, WORKSPACE)
+        if "V1_GEMINI_MODEL" in payload:
+            chosen_gm = str(updated.get("V1_GEMINI_MODEL") or "").strip()
+            if chosen_gm:
+                os.environ["GEMINI_MODEL"] = chosen_gm
+            else:
+                from dotenv import dotenv_values
+                env_vals = {
+                    **dotenv_values(BASE_DIR.parent / ".env"),
+                    **dotenv_values(BASE_DIR / ".env"),
+                }
+                os.environ["GEMINI_MODEL"] = str(env_vals.get("GEMINI_MODEL") or "gemini-3-flash-preview").strip()
         return {"status": "ok", "flags": updated}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

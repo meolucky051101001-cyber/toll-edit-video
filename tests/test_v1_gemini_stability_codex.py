@@ -170,7 +170,7 @@ class TestGeminiStabilityCodex(unittest.TestCase):
         mock_data = {
             "candidates": [{
                 "content": {
-                    "parts": [{"text": '{"1": "Hôm nay ta đi chơi công viên"}'}]
+                    "parts": [{"text": '{"1": "Nay đi chơi công viên"}'}]
                 }
             }]
         }
@@ -179,9 +179,23 @@ class TestGeminiStabilityCodex(unittest.TestCase):
                 "call_gemini_api": MagicMock(return_value=(mock_data, "gemini-3.5-flash-lite"))}):
             res = condense_vietnamese_subtitles_batch(items, api_key=self.fake_key)
             self.assertIn(1, res)
-            self.assertEqual(res[1], "Hôm nay ta đi chơi công viên")
+            self.assertEqual(res[1], "Nay đi chơi công viên")
             # Index 2 was missing, so not in result (original preserved)
             self.assertNotIn(2, res)
+
+    def test_partial_response_over_word_budget_is_not_cached(self):
+        items = [{"index": 1, "text": "Hôm nay chúng ta đi chơi ở công viên rất vui vẻ",
+                  "target_seconds": 2.0, "target_words": 5}]
+        data = {"candidates": [{"content": {"parts": [
+            {"text": '{"1": "Hôm nay ta đi chơi công viên"}'}]}}]}
+        cache_write = MagicMock()
+        with patch.dict(condense_vietnamese_subtitles_batch.__globals__, {
+            "call_gemini_api": MagicMock(return_value=(data, "fixture-model")),
+            "read_condense_cache": MagicMock(return_value=None),
+            "write_condense_cache": cache_write,
+        }):
+            self.assertEqual(condense_vietnamese_subtitles_batch(items, api_key=self.fake_key), {})
+        cache_write.assert_not_called()
 
     # 8. Nhiều câu quá dài -> Gom lô, đúng 1 request API
     def test_08_multiple_long_cues_grouped_into_single_api_call(self):

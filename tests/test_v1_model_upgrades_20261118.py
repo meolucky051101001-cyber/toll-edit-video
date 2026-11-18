@@ -441,3 +441,113 @@ def test_bridge_source_caption_gaps_handles_single_char_ocr_flicker():
     spans = sorted((round(b.start, 3), round(b.end, 3)) for b in bridged)
     assert (22.2, 22.267) in spans
     assert (22.3, 22.35) not in spans
+
+
+def test_tts_pronunciation_splits_long_search_codes_without_touching_prices():
+    from backend.ai.v1_tech_pronunciation import normalize_text_for_tts
+
+    s = normalize_text_for_tts("Mở 1688 tìm kiếm 1067778 chỉ 150000đ hoặc 1.200.000")
+    assert "16 88" in s
+    assert "1 0 6 7 7 7 8" in s
+    assert "150000đ" in s
+    assert "1.200.000" in s
+
+
+def test_dashboard_feature_flags_and_job_tracker_expose_upgraded_models(tmp_path, monkeypatch):
+    import os
+    from fastapi.testclient import TestClient
+    import v1_feature_flags as ff
+    import job_config_service as jcs
+    import job_tracker as jt
+    import main as main_mod
+
+    ws = tmp_path / "workspace"
+    (ws / "bot_system").mkdir(parents=True)
+
+    # 1. Feature flags + sync_env_from_flags support V1_ASR_MODEL=paraformer_zh & V1_GEMINI_MODEL
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3-flash-preview")
+    saved = ff.set_feature_flags(
+        {
+            "V1_ASR_MODEL": "paraformer_zh",
+            "V1_SHORT_ASR_MODEL": "paraformer_zh",
+            "V1_VAD_SMART_BYPASS": True,
+            "V1_GEMINI_MODEL": "gemini-3.1-flash-lite-preview",
+        },
+        workspace_path=ws,
+    )
+    assert saved["V1_ASR_MODEL"] == "paraformer_zh"
+    assert saved["V1_SHORT_ASR_MODEL"] == "paraformer_zh"
+    assert saved["V1_VAD_SMART_BYPASS"] is True
+    assert saved["V1_GEMINI_MODEL"] == "gemini-3.1-flash-lite-preview"
+
+    ff.sync_env_from_flags(ws)
+    assert os.environ.get("GEMINI_MODEL") == "gemini-3.1-flash-lite-preview"
+
+    # 2. Job config preserves paraformer_zh instead of silently falling back to whisper_sensevoice
+    snap_flag = jcs.freeze_job_config(
+        video_name="demo.mp4",
+        job_id="job_pf_flag",
+        workspace_path=ws,
+    )
+    assert snap_flag["effective_config"]["asr_model"] == "paraformer_zh"
+
+    snap_spec = jcs.freeze_job_config(
+        video_name="demo2.mp4",
+        job_id="job_pf_spec",
+        workspace_path=ws,
+        overrides={"planned_models": {"asr": {"model_id": "paraformer_large_zh"}}},
+    )
+    assert snap_spec["effective_config"]["asr_model"] == "paraformer_zh"
+
+    # 3. Job tracker hydrates upgraded ASR/OCR/VAD/CAM++/Gemini metadata onto state and workers
+    monkeypatch.setattr(jt, "WORKSPACE", ws)
+    monkeypatch.setattr(jt, "STATUS_FILE", ws / "bot_system" / "job_status.json")
+    monkeypatch.setattr(jt, "BATCH_LOCK_FILE", ws / "bot_system" / "batch.lock")
+    jt._MODEL_CAPS_CACHE.clear()
+    monkeypatch.setenv("V1_PADDLE_DETECTION_MODEL", "PP-OCRv6_tiny_det")
+    monkeypatch.setenv("V1_PADDLE_RECOGNITION_MODEL", "PP-OCRv5_server_rec")
+
+    jt.start_batch(1, input_dir=str(ws), output_dir=str(ws), job_id="job_ui_test")
+    jt.start_video("demo.mp4", index=1, total=1, worker_id=1)
+    jt.record_asr_info("paraformer_zh", source="audio_asr", worker_id=1)
+    jt.record_ocr_info("PP-OCRv6 + v5 Server", detail="PP-OCRv6_tiny_det + PP-OCRv5_server_rec", worker_id=1)
+    jt.record_voice_info("Á Mai · CapCut", speaker_lock="CAM++ 512-D", worker_id=1)
+
+    status = jt.get_status()
+    assert status["configured_asr_model"] == "paraformer_zh"
+    assert status["configured_gemini_model"] == "gemini-3.1-flash-lite-preview"
+    assert status["asr_model"] == "paraformer_zh"
+    assert status["ocr_model"] == "PP-OCRv6 + v5 Server"
+    assert status["vad_smart_bypass"] is True
+    assert status["workers"]["1"]["voice_name"] == "Á Mai · CapCut"
+    assert status["workers"]["1"]["speaker_lock"] == "CAM++ 512-D"
+    jt.finish_batch()
+
+    # 4. FastAPI /api/v1/feature-flags GET & POST contract
+    monkeypatch.setattr(main_mod, "WORKSPACE", ws)
+    monkeypatch.setattr("ai.v1_paraformer_adapter.check_paraformer_readiness", lambda: (True, "ready"))
+    monkeypatch.setattr("ai.v1_speaker_embedding.check_camplus_readiness", lambda: (True, "ready"))
+
+    client = TestClient(main_mod.app)
+    r_get = client.get("/api/v1/feature-flags")
+    assert r_get.status_code == 200
+    body = r_get.json()
+    assert body["PARAFORMER_ASR_READY"] is True
+    assert body["CAMPLUS_SPEAKER_READY"] is True
+    assert body["OCR_SERVER_REC_ACTIVE"] is True
+    assert body["OCR_DISPLAY_NAME"] == "PP-OCRv6 + v5 Server"
+    assert body["CONFIGURED_GEMINI_MODEL"] == "gemini-3.1-flash-lite-preview"
+
+    # Guardrail: paraformer_zh rejected with 409 if weights are missing
+    monkeypatch.setattr(
+        "ai.v1_paraformer_adapter.check_paraformer_readiness",
+        lambda: (False, "missing paraformer model"),
+    )
+    r_bad = client.post(
+        "/api/v1/feature-flags",
+        headers={"X-Local-Control-Token": main_mod.DASHBOARD_CONTROL_TOKEN},
+        json={"V1_ASR_MODEL": "paraformer_zh"},
+    )
+    assert r_bad.status_code == 409
+    assert r_bad.json()["code"] == "PARAFORMER_NOT_READY"
+

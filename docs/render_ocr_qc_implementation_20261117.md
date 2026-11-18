@@ -1,6 +1,6 @@
 # Kết quả sửa render, OCR và QC — 17/11/2026
 
-Hàng đợi đã được dừng theo yêu cầu: utility `backend.v1_shutdown` xác minh và dừng hai tiến trình Telegram V1 (PID 8732, 36664), trả `exit_code=0`, không còn survivor. Preview worker sau đó không chọn tiến trình nào. Cờ tạm ngưng xử lý/ngăn tự khởi động lại đã được đặt với xác nhận của người dùng. Chưa bật lại dịch vụ, chưa đưa hàng đợi chạy tiếp. Bản ghi này mô tả thời điểm triển khai và benchmark trước commit/PR; trạng thái phát hành mới nhất nằm trên PR. Không đọc `.env`, cookie hoặc token thật.
+Hàng đợi đã được dừng theo yêu cầu: utility `backend.v1_shutdown` xác minh và dừng hai tiến trình Telegram V1 (PID 8732, 36664), trả `exit_code=0`, không còn survivor. Preview worker sau đó không chọn tiến trình nào. Cờ tạm ngưng xử lý/ngăn tự khởi động lại đã được đặt với xác nhận của người dùng. Sau đó người dùng cho phép commit/PR, cập nhật runtime và khôi phục các video Telegram chưa xong trong 6 giờ gần nhất. Trạng thái triển khai và khôi phục được ghi riêng trong biên nhận runtime. Không đọc `.env`, cookie hoặc token thật.
 
 ## Thay đổi đã triển khai
 
@@ -34,11 +34,6 @@ Node: 20/20 test trong glob CI đã qua. Bộ Python 3.12 theo danh sách CPU CI
 
 Windows sandbox có thể chặn TCP socketpair lúc tạo asyncio trước cả `setUp`; lần kiểm tra rộng đầu tiên chạy ngoài sandbox thực tế có 522 test qua và một test kỳ vọng batch cũ lỗi, đã sửa và xác nhận riêng. Bộ kiểm tra cuối và golden chạy qua launcher polling riêng trong scratch; production và thư viện chuẩn không thay đổi. Launcher này chỉ hỗ trợ môi trường test bị hạn chế và không được coi là benchmark runtime. Các lần xét duyệt quyền tự động để chạy lại ngoài sandbox đã hết thời gian; không thao tác dịch vụ nào trong lượt test.
 
-## Phạm vi phát hành
+## Trạng thái bàn giao
 
-Thay đổi được đóng gói trong PR hiệu năng riêng, dựa trên main và bao gồm hai commit OCR batch/QC của PR #28 cùng các precursor narration/geometry cục bộ cần thiết; không bao gồm tích hợp Cloud từ runtime. Việc cập nhật runtime giữ các cờ tạm dừng và chỉ cho phép khởi động lại hàng đợi bằng lệnh Start rõ ràng. Cần acceptance GPU đầy đủ ở ranh giới job trước khi coi toàn bộ mục tiêu tối ưu render/OCR đã nghiệm thu. Phần QC tuần tự và hiển thị 9/9 đã có kiểm chứng cụ thể; giới hạn blur baseline được giữ rõ ở trên.
-
-
-## Kiểm tra trên nhánh PR tách riêng
-
-Nhánh PR dựa trên `main`, bao gồm hai commit OCR batch/QC của PR #28 cùng precursor narration/geometry cục bộ và các thay đổi hiệu năng ở trên; không kéo mã Cloud từ runtime. Workflow CPU bổ sung regression ledger, QC stage, progress và bootstrap pause. Bộ Python 3.12 trực tiếp chạy theo workflow mới trả exit 0: 552 passed, 3 skip quarantine có sẵn; Node 20/20. Python 3.10 local dùng OpenCV 4.8 (CI pin 4.10) phát hiện seek thời gian ở đuôi VFR có thể thất bại; đường phục hồi đọc tuần tự có giới hạn dựa trên PTS thật giữ đủ khung. QC vẫn chặn độc lập khi OCR confidence >=0,90 nằm trong >=50% vùng caption đã xác minh, kể cả khi spelling khác source; packaging ngoài bbox chỉ cảnh báo. Các chỉnh cuối: nhóm OCR/timing/QC có 108 test qua trên mỗi Python; Python 3.10 exit 0 (kèm 15 subtest), Python 3.12 wrapper trả exit 1 sau summary xanh như giới hạn môi trường đã ghi ở trên. Hai regression cuối riêng chạy Python 3.12 exit 0.
+Mã nguồn tích hợp cục bộ giữ các sửa từ trước. PR hiệu năng được đóng gói riêng để không kéo toàn bộ Cloud vào cùng một diff. Control tự khởi động giữ nguyên ý định pause; chỉ thao tác bật rõ ràng mới tiếp tục xử lý. Cần acceptance GPU đầy đủ ở ranh giới job trước khi coi toàn bộ mục tiêu tối ưu render/OCR đã nghiệm thu. Phần QC tuần tự và hiển thị 9/9 đã có kiểm chứng cụ thể; giới hạn blur baseline được giữ rõ ở trên.

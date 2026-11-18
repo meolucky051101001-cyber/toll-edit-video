@@ -37,6 +37,7 @@ DEFAULT_FLAGS: Dict[str, Any] = {
     "V1_LONG_ASR_MODEL": "inherit",
     "V1_VISUAL_SUB_TO_SPEECH": False,
     "V1_VAD_SMART_BYPASS": False,
+    "V1_GEMINI_MODEL": "",
     "V1_CLOUD_MODE": False,
     "V1_CLOUD_GPU": "T4",
 }
@@ -150,6 +151,20 @@ def set_feature_flags(new_flags: Dict[str, Any], workspace_path: Optional[str | 
         "V1_SHORT_SEPARATOR": {"roformer", "demucs"},
         "V1_LONG_SEPARATOR": {"roformer", "demucs"},
         "V1_QC_POLICY": {"OFF", "REPORT_ONLY", "WARN", "BLOCK"},
+        "V1_CLOUD_GPU": {"T4", "L4", "A100", "H100", "G4", "V5E1", "V6E1", "CPU"},
+        "V1_GEMINI_MODEL": {
+            "",
+            "gemini-3-flash-preview",
+            "gemini-3.1-flash-lite-preview",
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-3.6-flash",
+            "gemini-3.7-flash",
+            "gemini-3.8-flash",
+            "gemini-flash-lite-latest",
+            "gemini-flash-latest",
+        },
     }
     for key, allowed in choices.items():
         if key in updates and updates[key] not in allowed:
@@ -192,4 +207,7 @@ def sync_env_from_flags(workspace_path: Optional[str | Path] = None) -> Dict[str
             os.environ[k] = "true" if v else "false"
         else:
             os.environ[k] = str(v)
+    gm = str(flags.get("V1_GEMINI_MODEL") or "").strip()
+    if gm:
+        os.environ["GEMINI_MODEL"] = gm
     return flags

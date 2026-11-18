@@ -158,6 +158,9 @@ class TelegramNetworkRetryTests(unittest.IsolatedAsyncioTestCase):
         p = patch.object(bot, "_ensure_network_retry_scheduler", MagicMock())
         p.start()
         self.addCleanup(p.stop)
+        # Real intake freezes Phase 8 execution/idempotency settings before a
+        # network failure can persist or retry the job.
+        bot.prepare_telegram_job(self.job)
 
     def _retry_state(self):
         return json.loads(bot.network_retry_state_path().read_text(encoding="utf-8"))

@@ -83,3 +83,13 @@ def test_missing_required_caption_module_blocks_zip_and_manifest(tmp_path, missi
         manifest.generate_manifest(tmp_path, dry_run=True)
     assert not (tmp_path / "release.zip").exists()
     assert not (tmp_path / "RELEASE_MANIFEST.sha256").exists()
+
+
+def test_cloud_release_requires_the_pinned_wheel_and_standalone_runner():
+    config = "backend/cloud/cloud_config.py"
+    assert all(pkg.should_include(name) for name in pkg.CLOUD_RELEASE_FILES)
+    assert not pkg.should_include("backend/cloud/gpu_scripts/unpinned.whl")
+    assert not pkg.should_include("backend/cloud/results/job/output_manifest.json")
+    with pytest.raises(RuntimeError, match="capcut_tts_api"):
+        pkg.verify_required_files([config], required_files=())
+    pkg.verify_required_files([config, *pkg.CLOUD_RELEASE_FILES], required_files=())

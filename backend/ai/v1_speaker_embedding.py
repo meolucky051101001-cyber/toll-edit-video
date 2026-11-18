@@ -27,10 +27,13 @@ _EXTRACTOR_CACHE: Dict[str, Any] = {}
 
 
 def check_camplus_readiness(model_path: Path = DEFAULT_CAMPLUS_PATH) -> Tuple[bool, str]:
-    try:
-        import sherpa_onnx  # noqa: F401
-    except ImportError as exc:
-        return False, f"Thiếu sherpa-onnx: {exc}"
+    import importlib.util
+    import sys
+
+    if ("sherpa_onnx" in sys.modules and sys.modules["sherpa_onnx"] is None) or (
+        "sherpa_onnx" not in sys.modules and importlib.util.find_spec("sherpa_onnx") is None
+    ):
+        return False, "Thiếu sherpa-onnx: No module named 'sherpa_onnx'"
     if not Path(model_path).is_file():
         return False, f"Thiếu model CAM++ tại {model_path}"
     return True, "Sẵn sàng (CAM++ 3D-Speaker 27MB ONNX)"

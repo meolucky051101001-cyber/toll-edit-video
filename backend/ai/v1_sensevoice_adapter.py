@@ -66,12 +66,14 @@ def check_sensevoice_readiness(ignore_flag: bool = True) -> Tuple[bool, str]:
     if not ignore_flag and not is_sensevoice_enabled():
         return False, "SenseVoice chưa được chọn trong cấu hình V1_ASR_MODEL"
 
-    try:
-        import onnxruntime  # noqa: F401
-        import torch  # noqa: F401
-        import torchaudio  # noqa: F401
-    except ImportError as err:
-        return False, f"Thiếu thư viện runtime cho SenseVoice: {err}"
+    import importlib.util
+    import sys
+
+    for pkg in ("onnxruntime", "torch", "torchaudio"):
+        if (pkg in sys.modules and sys.modules[pkg] is None) or (
+            pkg not in sys.modules and importlib.util.find_spec(pkg) is None
+        ):
+            return False, f"Thiếu thư viện runtime cho SenseVoice: No module named '{pkg}'"
 
     model_file = DEFAULT_SENSEVOICE_DIR / "model.int8.onnx"
     if not model_file.is_file():

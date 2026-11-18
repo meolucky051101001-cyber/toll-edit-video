@@ -17,6 +17,15 @@ def _resolve_snapshot_path() -> Path:
 
 SNAPSHOT = _resolve_snapshot_path()
 
+# One allowlist for snapshots, recovery, and network retry persistence. SDK
+# objects stay in memory; execution choices and source identity survive restart.
+PERSISTED_JOB_FIELDS = (
+    "type", "url", "file_id", "filename", "chat_id", "voice_mode", "video_mode",
+    "job_id", "job_overrides", "resume_state", "retry_count", "network_retry_count",
+    "video_path", "voice", "execution_mode", "force_cloud", "cloud_gpu",
+    "cloud_rollout_permit", "idempotency_key", "allow_cloud_fallback", "allow_no_speech",
+)
+
 class MonitoredQueue(asyncio.Queue):
     def __init__(self):
         super().__init__()
@@ -25,9 +34,9 @@ class MonitoredQueue(asyncio.Queue):
 
     def publish(self):
         if getattr(self, 'recovery_pending', False):
-            return
+            return False
         if multiprocessing.current_process().name != "MainProcess":
-            return
+            return False
         try:
             items = []
             jobs = list(self._queue)
@@ -43,6 +52,7 @@ class MonitoredQueue(asyncio.Queue):
                     elif job.get("chat_id"):
                         chat_id = job.get("chat_id")
                     items.append({
+                        **{field: job[field] for field in PERSISTED_JOB_FIELDS if field in job},
                         "position": i,
                         "telegram_position": job.get("pos", i),
                         "name": name,
@@ -76,8 +86,10 @@ class MonitoredQueue(asyncio.Queue):
             active = items.pop(0) if self.active_job is not None else None
             atomic_write_json(SNAPSHOT, {"items": items, "active_job": active,
                                          "updated_at": time.time(), "pid": os.getpid()})
+            return True
         except Exception:
             logging.getLogger(__name__).exception("Cannot publish queue snapshot")
+            return False
 
     def put_nowait(self, item):
         super().put_nowait(item)
@@ -102,8 +114,9 @@ class MonitoredQueue(asyncio.Queue):
                 continue
 
     def get_nowait(self):
-        from queue_control_service import apply_deletions
+        from queue_control_service import apply_deletions, apply_reorders
         apply_deletions(self, SNAPSHOT)
+        apply_reorders(self, SNAPSHOT)
         item = super().get_nowait()
         self.active_job = item
         self.publish()

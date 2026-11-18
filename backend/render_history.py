@@ -84,6 +84,12 @@ def _workspace_roots():
     return list(roots.values())
 
 
+_DURATIONS_CACHE_LOCK = threading.Lock()
+_DURATIONS_CACHE: Dict[str, object] = {"key": None, "ts": 0.0, "data": None}
+_V1_MANIFEST_DUR_CACHE: Dict[str, tuple] = {}
+_V2_DIR_DUR_CACHE: Dict[str, tuple] = {}
+
+
 def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int]:
     """Đọc toàn bộ lịch sử thời gian render từ workspace, manifests và cache runtime."""
     workspaces = _workspace_roots()
@@ -100,6 +106,42 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
         Path(r"C:\tool v2\workspace\bot_system\.render_history.json"),
         Path(r"C:\tool v2\workspace\.render_history.json"),
     ]
+    workspace_candidates = [
+        Path(r"D:\workspace\bot_system\job_status.json"),
+        Path(r"D:\workspace\job_status.json"),
+        Path(r"D:\workspace_v2\bot_system\job_status.json"),
+        Path(r"D:\workspace_v2\job_status.json"),
+        Path(r"C:\tool v1\workspace\bot_system\job_status.json"),
+        Path(r"C:\tool v1\workspace\job_status.json"),
+        Path(r"C:\tool v2\workspace\bot_system\job_status.json"),
+        Path(r"C:\tool v2\workspace\job_status.json"),
+    ]
+    if PATHS.shared_workspace_dir:
+        shared_workspace = Path(PATHS.shared_workspace_dir)
+        workspace_candidates.extend(
+            [shared_workspace / "bot_system" / "job_status.json", shared_workspace / "job_status.json"]
+        )
+
+    def _safe_mtime(p: Path) -> int:
+        try:
+            return p.stat().st_mtime_ns
+        except OSError:
+            return 0
+
+    sig_files = [*history_files, *workspace_candidates]
+    cache_key = (
+        tuple(str(w) for w in workspaces),
+        tuple((str(p), _safe_mtime(p)) for p in sig_files),
+    )
+    now = time.monotonic()
+    with _DURATIONS_CACHE_LOCK:
+        if (
+            _DURATIONS_CACHE.get("data") is not None
+            and _DURATIONS_CACHE.get("key") == cache_key
+            and (now - float(_DURATIONS_CACHE.get("ts") or 0.0)) < 20.0
+        ):
+            return dict(_DURATIONS_CACHE["data"])  # type: ignore[arg-type]
+
     meta: Dict[str, int] = {}
 
     def _register(key: str, dur: int):
@@ -126,21 +168,6 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
                 pass
 
     # 2. Đọc bổ sung từ job_status.json
-    workspace_candidates = [
-        Path(r"D:\workspace\bot_system\job_status.json"),
-        Path(r"D:\workspace\job_status.json"),
-        Path(r"D:\workspace_v2\bot_system\job_status.json"),
-        Path(r"D:\workspace_v2\job_status.json"),
-        Path(r"C:\tool v1\workspace\bot_system\job_status.json"),
-        Path(r"C:\tool v1\workspace\job_status.json"),
-        Path(r"C:\tool v2\workspace\bot_system\job_status.json"),
-        Path(r"C:\tool v2\workspace\job_status.json"),
-    ]
-    if PATHS.shared_workspace_dir:
-        shared_workspace = Path(PATHS.shared_workspace_dir)
-        workspace_candidates.extend(
-            [shared_workspace / "bot_system" / "job_status.json", shared_workspace / "job_status.json"]
-        )
     for ws in workspace_candidates:
         if ws.is_file():
             try:
@@ -154,59 +181,6 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
                         vname = item.get("video_name", "")
                         if vname:
                             _register(vname, int(dur))
-            except Exception:
-                pass
-
-    # 3. Đọc từ toàn bộ V1 Manifests (*.manifest.json)
-    manifest_dirs = [workspace / "bot_system" / "manifests" for workspace in workspaces]
-    for md in manifest_dirs:
-        if md.is_dir():
-            try:
-                for mf in md.glob("*.manifest.json"):
-                    try:
-                        d = json.loads(mf.read_text(encoding="utf-8"))
-                        vname = d.get("video_name")
-                        out_p = d.get("output_video_path")
-                        c_at = d.get("created_at")
-                        u_at = d.get("updated_at")
-                        dur = 0
-                        if c_at and u_at:
-                            dur = int(round(u_at - c_at))
-                        if not dur:
-                            stages = d.get("stages", {})
-                            dur = int(round(sum(st.get("duration_s", 0) for st in stages.values())))
-                        if dur > 0:
-                            if vname:
-                                _register(vname, dur)
-                            if out_p:
-                                _register(os.path.basename(out_p), dur)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-    # 4. Đọc từ toàn bộ V2 Manifests (job_manifest.json)
-    v2_ws_dirs = workspaces
-    for v2_dir in v2_ws_dirs:
-        if v2_dir.is_dir():
-            try:
-                for mf in v2_dir.glob("*/pipeline_v2/job_manifest.json"):
-                    try:
-                        d = json.loads(mf.read_text(encoding="utf-8"))
-                        c_at = d.get("created_at")
-                        u_at = d.get("updated_at")
-                        if c_at and u_at:
-                            t0 = datetime.fromisoformat(c_at.replace("Z", "+00:00"))
-                            t1 = datetime.fromisoformat(u_at.replace("Z", "+00:00"))
-                            dur = int(round(max(0, (t1 - t0).total_seconds())))
-                            if dur > 0:
-                                jname = mf.parent.parent.name
-                                _register(jname, dur)
-                                sp = d.get("metadata", {}).get("source_path")
-                                if sp:
-                                    _register(Path(sp).name, dur)
-                    except Exception:
-                        pass
             except Exception:
                 pass
 
@@ -238,38 +212,106 @@ def get_all_render_durations(output_dir: Optional[Path] = None) -> Dict[str, int
             )
         return 0
 
-    # V1 manifests are distinct from the dashboard's summarized job history.
+    # 3. V1 manifests (*.manifest.json) — quét os.scandir + cache theo (mtime_ns, size) từng file
     for workspace in workspaces:
         md = workspace / "bot_system" / "manifests"
         if md.is_dir():
-            for mf in md.glob("*.manifest.json"):
-                try:
-                    data = json.loads(mf.read_text(encoding="utf-8"))
-                    duration = manifest_duration(data)
-                    if duration > 0:
-                        _register(data.get("video_name", ""), duration)
-                        output_path = data.get("output_video_path")
-                        if output_path:
-                            _register(Path(output_path).name, duration)
-                except Exception:
-                    continue
+            try:
+                with os.scandir(md) as it:
+                    for entry in it:
+                        if not entry.name.endswith(".manifest.json"):
+                            continue
+                        try:
+                            if not entry.is_file():
+                                continue
+                            st = entry.stat()
+                        except OSError:
+                            continue
+                        sig = (st.st_mtime_ns, st.st_size)
+                        norm_p = os.path.normcase(entry.path)
+                        with _DURATIONS_CACHE_LOCK:
+                            cached_v1 = _V1_MANIFEST_DUR_CACHE.get(norm_p)
+                        if cached_v1 is not None and cached_v1[0] == sig:
+                            vname, out_name, duration = cached_v1[1]
+                        else:
+                            vname, out_name, duration = "", "", 0
+                            try:
+                                data = json.loads(Path(entry.path).read_text(encoding="utf-8"))
+                                duration = manifest_duration(data)
+                                if duration > 0:
+                                    vname = str(data.get("video_name") or "")
+                                    output_path = data.get("output_video_path")
+                                    out_name = Path(output_path).name if output_path else ""
+                            except Exception:
+                                vname, out_name, duration = "", "", 0
+                            with _DURATIONS_CACHE_LOCK:
+                                _V1_MANIFEST_DUR_CACHE[norm_p] = (sig, (vname, out_name, duration))
+                                while len(_V1_MANIFEST_DUR_CACHE) > 8192:
+                                    _V1_MANIFEST_DUR_CACHE.pop(next(iter(_V1_MANIFEST_DUR_CACHE)))
+                        if duration > 0:
+                            if vname:
+                                _register(vname, duration)
+                            if out_name:
+                                _register(out_name, duration)
+            except OSError:
+                continue
 
-    # V2 manifests may live in either the local or shared workspace.
+    # 4. V2 manifests (*/pipeline_v2/job_manifest.json) — quét os.scandir + cache theo mtime thư mục/file
     for workspace in workspaces:
         if workspace.is_dir():
-            for mf in workspace.glob("*/pipeline_v2/job_manifest.json"):
-                try:
-                    d = json.loads(mf.read_text(encoding="utf-8"))
-                    duration = manifest_duration(d)
-                    if duration > 0:
-                        job_name = mf.parent.parent.name
-                        _register(job_name, duration)
-                        source_path = d.get("metadata", {}).get("source_path")
-                        if source_path:
-                            _register(Path(source_path).name, duration)
-                except Exception:
-                    continue
+            try:
+                with os.scandir(workspace) as it:
+                    for entry in it:
+                        if entry.name == "bot_system":
+                            continue
+                        try:
+                            if not entry.is_dir():
+                                continue
+                            dir_mtime = entry.stat().st_mtime_ns
+                        except OSError:
+                            continue
+                        norm_d = os.path.normcase(entry.path)
+                        with _DURATIONS_CACHE_LOCK:
+                            cached_v2 = _V2_DIR_DUR_CACHE.get(norm_d)
+                        if cached_v2 is not None and cached_v2[1] is None and cached_v2[0] == dir_mtime:
+                            continue
+                        mf = Path(entry.path) / "pipeline_v2" / "job_manifest.json"
+                        try:
+                            mst = mf.stat()
+                            mf_sig = (mst.st_mtime_ns, mst.st_size)
+                        except OSError:
+                            with _DURATIONS_CACHE_LOCK:
+                                _V2_DIR_DUR_CACHE[norm_d] = (dir_mtime, None, ("", "", 0))
+                                while len(_V2_DIR_DUR_CACHE) > 8192:
+                                    _V2_DIR_DUR_CACHE.pop(next(iter(_V2_DIR_DUR_CACHE)))
+                            continue
+                        if cached_v2 is not None and cached_v2[1] == mf_sig:
+                            ename, sname, duration = cached_v2[2]
+                        else:
+                            ename, sname, duration = entry.name, "", 0
+                            try:
+                                d = json.loads(mf.read_text(encoding="utf-8"))
+                                duration = manifest_duration(d)
+                                if duration > 0:
+                                    source_path = d.get("metadata", {}).get("source_path")
+                                    sname = Path(source_path).name if source_path else ""
+                            except Exception:
+                                duration = 0
+                            with _DURATIONS_CACHE_LOCK:
+                                _V2_DIR_DUR_CACHE[norm_d] = (dir_mtime, mf_sig, (ename, sname, duration))
+                                while len(_V2_DIR_DUR_CACHE) > 8192:
+                                    _V2_DIR_DUR_CACHE.pop(next(iter(_V2_DIR_DUR_CACHE)))
+                        if duration > 0:
+                            _register(ename, duration)
+                            if sname:
+                                _register(sname, duration)
+            except OSError:
+                continue
 
+    with _DURATIONS_CACHE_LOCK:
+        _DURATIONS_CACHE["key"] = cache_key
+        _DURATIONS_CACHE["ts"] = time.monotonic()
+        _DURATIONS_CACHE["data"] = dict(meta)
     return meta
 
 
@@ -350,3 +392,5 @@ def record_render_duration(video_name_or_path: str, duration_seconds: float) -> 
                         lock_fd.close()
                     except Exception:
                         pass
+        with _DURATIONS_CACHE_LOCK:
+            _DURATIONS_CACHE["data"] = None

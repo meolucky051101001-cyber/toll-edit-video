@@ -174,3 +174,4 @@ class QcTrackerTests(unittest.TestCase):
         self.assertEqual(state["step_durations"]["8"], 30)
         self.assertEqual(state["step_durations"]["9"], 20)
         self.assertEqual(state["workers"]["1"]["step_durations"]["9"], 20)
+

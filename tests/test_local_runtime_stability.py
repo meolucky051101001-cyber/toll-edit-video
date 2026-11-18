@@ -283,3 +283,38 @@ def test_health_reports_missing_router_without_starting_services():
             assert response.status_code == 503
             assert json.loads(response.body)["components"] == {"missing": False}
     asyncio.run(scenario())
+
+
+def test_health_recognizes_effective_nested_routes_even_when_hidden(monkeypatch):
+    from fastapi import APIRouter, FastAPI
+    from fastapi.testclient import TestClient
+    import main
+
+    test_app = FastAPI()
+    nested = APIRouter()
+
+    @nested.get("/ready/{job_id}", include_in_schema=False)
+    async def ready(job_id: str):
+        return {"job_id": job_id}
+
+    @nested.post("/write-only")
+    async def write_only():
+        raise AssertionError("Health must not execute endpoints")
+
+    parent = APIRouter(prefix="/feature")
+    parent.include_router(nested)
+    test_app.include_router(parent)
+    monkeypatch.setattr(main, "app", test_app)
+    monkeypatch.setattr(main, "REQUIRED_ROUTER_PATHS", {"nested": "/feature/ready/{job_id}"})
+    assert main.component_health() == {"ready": True, "components": {"nested": True}}
+    response = TestClient(test_app).get("/feature/ready/fixture")
+    assert response.status_code == 200 and response.json() == {"job_id": "fixture"}
+    monkeypatch.setattr(main, "REQUIRED_ROUTER_PATHS", {"missing_get": "/feature/write-only"})
+    assert main.component_health() == {"ready": False, "components": {"missing_get": False}}
+
+
+def test_required_application_routers_are_healthy_without_lifespan():
+    import main
+    assert main.component_health() == {
+        "ready": True, "components": dict.fromkeys(main.REQUIRED_ROUTER_PATHS, True)
+    }

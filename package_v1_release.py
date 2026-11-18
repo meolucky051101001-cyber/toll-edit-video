@@ -37,6 +37,7 @@ EXCLUDE_DIRS = {
     "backend/model_venv",
     "models",
     "backend/models",
+    "backend/cloud/results",
     "MyVoiceModel_v2",
     "__pycache__",
     "temp",
@@ -110,6 +111,13 @@ ALLOWED_EXTENSIONS = {
     ".sha256",
     ".example",
 }
+CLOUD_CAPCUT_WHEEL = "backend/cloud/gpu_scripts/capcut_tts_api-1.0.0-py3-none-any.whl"
+CLOUD_RELEASE_FILES = (
+    CLOUD_CAPCUT_WHEEL,
+    "backend/cloud/gpu_scripts/cloud_env_manifest.json",
+    "run_cloud_node.py",
+    "start_cloud_dashboard.bat",
+)
 
 EXCLUDE_FILES = {
     "Tool_V1.0_Final_RC2.zip",
@@ -160,9 +168,11 @@ ALLOWED_TOP_FILES = [
     "requirements.txt",
     "rollback_to_safe_state.ps1",
     "run_batch_edit.bat",
+    "run_cloud_node.py",
     "setup_new_laptop.ps1",
     "setup_v1.ps1",
     "start_bot.bat",
+    "start_cloud_dashboard.bat",
     "start_telebot_downloader.bat",
     "stop_bot.bat",
     "stop_telebot_downloader.bat",
@@ -253,7 +263,7 @@ def should_include(rel_path: str | Path) -> bool:
         return False
 
     ext = Path(normalized).suffix.lower()
-    if ext not in ALLOWED_EXTENSIONS or ext in EXCLUDE_EXTENSIONS:
+    if normalized != CLOUD_CAPCUT_WHEEL and (ext not in ALLOWED_EXTENSIONS or ext in EXCLUDE_EXTENSIONS):
         return False
 
     if normalized in EXCLUDE_FILES or parts[-1] in EXCLUDE_FILES:
@@ -357,7 +367,8 @@ def verify_required_files(
     required_files: Iterable[str] = REQUIRED_RELEASE_FILES,
 ) -> None:
     normalized_set = {str(p).replace("\\", "/") for p in rel_paths}
-    for req in required_files:
+    cloud_files = CLOUD_RELEASE_FILES if "backend/cloud/cloud_config.py" in normalized_set else ()
+    for req in (*required_files, *cloud_files):
         if req not in normalized_set:
             raise RuntimeError(f"Missing required file in release: {req}")
 

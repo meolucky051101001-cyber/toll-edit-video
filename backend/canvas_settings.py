@@ -89,6 +89,7 @@ DEFAULT_CANVAS_SETTINGS: Dict[str, Any] = {
     "watermark_bg_opacity": 0.40,        # Độ mờ khung nền huy hiệu
     "watermark_pos_x_pct": 0.85,         # Vị trí ngang tự do (0.02 - 0.98)
     "watermark_pos_y_pct": 0.05,         # Vị trí dọc tự do (0.02 - 0.98)
+    "channel_profiles": [],              # Hồ sơ kênh 1-Click (lưu nhận diện kênh trọn gói)
 }
 
 def get_available_motion_backgrounds() -> List[Dict[str, Any]]:
@@ -402,6 +403,8 @@ def get_canvas_settings() -> Dict[str, Any]:
             merged["watermark_bg_opacity"] = round(max(0.0, min(1.0, float(merged.get("watermark_bg_opacity", 0.40)))), 2)
             merged["watermark_pos_x_pct"] = round(max(0.02, min(0.98, float(merged.get("watermark_pos_x_pct", 0.85)))), 4)
             merged["watermark_pos_y_pct"] = round(max(0.02, min(0.98, float(merged.get("watermark_pos_y_pct", 0.05)))), 4)
+            raw_profiles = merged.get("channel_profiles")
+            merged["channel_profiles"] = [p for p in raw_profiles if isinstance(p, dict) and p.get("name")][:24] if isinstance(raw_profiles, list) else []
             _normalize_cover_and_delogo(merged)
             return merged
     except Exception as e:
@@ -480,6 +483,8 @@ def save_canvas_settings(new_settings: Dict[str, Any]) -> Dict[str, Any]:
         current["watermark_bg_opacity"] = round(max(0.0, min(1.0, float(current.get("watermark_bg_opacity", 0.40)))), 2)
         current["watermark_pos_x_pct"] = round(max(0.02, min(0.98, float(current.get("watermark_pos_x_pct", 0.85)))), 4)
         current["watermark_pos_y_pct"] = round(max(0.02, min(0.98, float(current.get("watermark_pos_y_pct", 0.05)))), 4)
+        raw_profiles = current.get("channel_profiles")
+        current["channel_profiles"] = [p for p in raw_profiles if isinstance(p, dict) and p.get("name")][:24] if isinstance(raw_profiles, list) else []
 
         SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         SETTINGS_FILE.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")

@@ -106,7 +106,9 @@ class TestQueuePositionMove(unittest.TestCase):
         qdir.mkdir(parents=True)
         (qdir / "telegram_queue.json").write_text(json.dumps({
             "pid": 123, "items": [
-                {"name": "a.mp4"}, {"name": "b.mp4"}, {"name": "c.mp4"},
+                {"job_id": "a", "name": "a.mp4", "filename": "a.mp4"},
+                {"job_id": "b", "name": "b.mp4", "filename": "b.mp4"},
+                {"job_id": "c", "name": "c.mp4", "filename": "c.mp4"},
             ]
         }), encoding="utf-8")
         self._patch = patch.object(main, "WORKSPACE", str(self.root))
@@ -118,11 +120,28 @@ class TestQueuePositionMove(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_move_to_position(self):
+        import telegram_queue_monitor as monitor
+        from queue_control_service import apply_reorders
+        snapshot = self.root / "bot_system" / "telegram_queue.json"
+        original = snapshot.read_bytes()
         res = self.client.post("/api/queue/move", json={"index": 0, "action": "position", "to": 2})
         self.assertEqual(res.status_code, 200)
         names = [i["name"] for i in res.json()["items"]]
         self.assertEqual(names, ["b.mp4", "c.mp4", "a.mp4"])
         self.assertEqual([i["position"] for i in res.json()["items"]], [1, 2, 3])
+        self.assertEqual(snapshot.read_bytes(), original)
+        operation_path = snapshot.parent / "queue_reorders" / (res.json()["operation_id"] + ".json")
+        self.assertEqual(json.loads(operation_path.read_text())["state"], "pending")
+        with patch.object(monitor, "SNAPSHOT", snapshot):
+            queue = monitor.MonitoredQueue()
+            for item in json.loads(original)["items"]:
+                queue.put_nowait(item)
+            apply_reorders(queue, snapshot)
+        acknowledged = json.loads(snapshot.read_text())["items"]
+        self.assertEqual([item["filename"] for item in acknowledged], names)
+        self.assertEqual([item["position"] for item in acknowledged], [1, 2, 3])
+        self.assertEqual(json.loads(operation_path.read_text())["state"], "applied")
+        self.assertEqual(queue._unfinished_tasks, 3)
 
     def test_move_to_same_position_unchanged(self):
         res = self.client.post("/api/queue/move", json={"index": 1, "action": "position", "to": 1})

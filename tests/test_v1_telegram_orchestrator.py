@@ -125,6 +125,7 @@ class TelegramV1Tests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bot.global_queue.empty())
 
     async def test_active_job_survives_restart_with_all_resume_fields(self):
+        bot.prepare_telegram_job(self.job)
         await bot.global_queue.put(self.job)
         await bot.global_queue.get()
         snapshot = json.loads(monitor.SNAPSHOT.read_text(encoding="utf-8"))

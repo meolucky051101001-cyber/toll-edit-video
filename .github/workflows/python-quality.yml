@@ -101,6 +101,9 @@ jobs:
           tests/test_v1_asr_pyav_compat.py
           tests/test_runtime_health.py
           tests/test_v1_model_upgrades_20261118.py
+          tests/test_studio_audio_sub_tts.py
+          tests/test_refactor_architecture_20261118.py
+          tests/test_localized_blur_stability_20261118.py
 
   v1-node-checks:
     name: Node Frontend & Dashboard Wrapper Checks

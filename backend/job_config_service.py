@@ -285,6 +285,8 @@ def freeze_job_config(
             planned_asr_model = "whisper_sensevoice"
         elif model_id == "sensevoice_small":
             planned_asr_model = "sensevoice_small"
+        elif model_id in ("paraformer_large_zh", "paraformer_zh"):
+            planned_asr_model = "paraformer_zh"
         elif model_id:
             planned_asr_model = migrate_legacy_asr_model(model_id, "frozen snapshot")
     try:
@@ -300,6 +302,8 @@ def freeze_job_config(
                 effective["asr_model"] = "whisper_turbo"
             elif flags.get("V1_ASR_MODEL") == "sensevoice_small":
                 effective["asr_model"] = "sensevoice_small"
+            elif flags.get("V1_ASR_MODEL") == "paraformer_zh":
+                effective["asr_model"] = "paraformer_zh"
             else:
                 effective["asr_model"] = "whisper_sensevoice"
     except Exception:

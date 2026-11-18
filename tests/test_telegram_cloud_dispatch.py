@@ -62,6 +62,7 @@ class TelegramCloudDispatchTests(unittest.IsolatedAsyncioTestCase):
         import sys
         from backend import telegram_bot as bot
         store = Mock()
+        store.list_jobs.return_value = [SimpleNamespace(job_id="owned-cloud-job")]
         bridge = SimpleNamespace(stop_all_sessions=Mock(return_value=(False, "GPU vẫn chạy")))
         update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
         with patch.dict(sys.modules, {
@@ -69,7 +70,27 @@ class TelegramCloudDispatchTests(unittest.IsolatedAsyncioTestCase):
             "cloud.cloud_job_store": SimpleNamespace(CloudJobStore=lambda: store),
         }):
             await bot.cmd_cloud(update, SimpleNamespace(args=["stop"]))
-        store.cancel_all.assert_called_once()
-        store.acknowledge_all_sessions_stopped.assert_not_called()
+        store.set_rollout.assert_called_once_with(arm=False)
+        store.request_cancel.assert_called_once_with("owned-cloud-job", reason="Telegram yêu cầu dừng Cloud")
+        store.record_cleanup_result.assert_not_called()
         assert "GPU vẫn chạy" in update.message.reply_text.call_args.args[0]
+        assert "an toàn" not in update.message.reply_text.call_args.args[0]
+
+    async def test_cloud_stop_timeout_reports_pending_without_claiming_cleanup(self):
+        import sys
+        from backend import telegram_bot as bot
+        store = Mock()
+        store.list_jobs.return_value = [SimpleNamespace(job_id="owned-cloud-job")]
+        update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+        action = Mock(return_value={"completed": False, "timed_out": True})
+        with patch.dict(sys.modules, {
+            "cloud.cloud_contract": SimpleNamespace(run_provider_action_nonblocking=action),
+            "cloud.colab_bridge": SimpleNamespace(stop_all_sessions=Mock()),
+            "cloud.cloud_job_store": SimpleNamespace(CloudJobStore=lambda: store),
+        }):
+            await bot.cmd_cloud(update, SimpleNamespace(args=["stop"]))
+        store.set_rollout.assert_called_once_with(arm=False)
+        store.request_cancel.assert_called_once_with("owned-cloud-job", reason="Telegram yêu cầu dừng Cloud")
+        store.record_cleanup_result.assert_not_called()
+        assert "phản hồi chậm" in update.message.reply_text.call_args.args[0]
         assert "an toàn" not in update.message.reply_text.call_args.args[0]

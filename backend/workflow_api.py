@@ -96,7 +96,119 @@ def artifact_stem(stem: str, max_len: Optional[int] = None) -> str:
     return cleaned or "video"
 
 
-def resolve_job_dir(stem: str) -> Path:
+_BATCH_DIR_RE = re.compile(r"\Abatch_[0-9a-f]{16}_(.+)\Z")
+_job_index_lock = threading.RLock()
+_manifest_entry_cache: Dict[str, Tuple[Tuple[int, int], Optional[Tuple[str, str, float, Path]]]] = {}
+_legacy_marker_cache: Dict[str, Tuple[Tuple[int, int], Optional[Path]]] = {}
+
+
+def _build_workspace_job_index(
+    workspace: Path,
+) -> Tuple[Dict[str, Dict[str, Tuple[float, Path]]], Dict[str, List[Path]]]:
+    """Xây chỉ mục O(N_manifests + N_dirs) có cache theo (mtime_ns, size) cho toàn bộ workspace."""
+    manifest_by_stem: Dict[str, Dict[str, Tuple[float, Path]]] = {}
+    legacy_by_stem: Dict[str, List[Path]] = {}
+
+    if not workspace.is_dir():
+        return manifest_by_stem, legacy_by_stem
+
+    ws_dirs_norm: set = set()
+    try:
+        with os.scandir(workspace) as ws_entries:
+            for entry in ws_entries:
+                try:
+                    if not entry.is_dir():
+                        continue
+                except OSError:
+                    continue
+                ws_dirs_norm.add(os.path.normcase(entry.path))
+                m = _BATCH_DIR_RE.match(entry.name)
+                if not m:
+                    continue
+                b_stem = m.group(1)
+                marker_path = Path(entry.path) / ".autodub-owned"
+                try:
+                    mst = marker_path.stat()
+                except OSError:
+                    continue
+                m_sig = (mst.st_mtime_ns, mst.st_size)
+                norm_dir = os.path.normcase(entry.path)
+                with _job_index_lock:
+                    cached_leg = _legacy_marker_cache.get(norm_dir)
+                if cached_leg is not None and cached_leg[0] == m_sig:
+                    resolved_leg = cached_leg[1]
+                else:
+                    resolved_leg = None
+                    try:
+                        resolved_cand = Path(entry.path).resolve()
+                        if resolved_cand.parent == workspace and marker_path.read_text(encoding="utf-8") == str(resolved_cand):
+                            resolved_leg = resolved_cand
+                    except (OSError, UnicodeError):
+                        resolved_leg = None
+                    with _job_index_lock:
+                        _legacy_marker_cache[norm_dir] = (m_sig, resolved_leg)
+                        while len(_legacy_marker_cache) > 8192:
+                            _legacy_marker_cache.pop(next(iter(_legacy_marker_cache)))
+                if resolved_leg is not None:
+                    legacy_by_stem.setdefault(b_stem, []).append(resolved_leg)
+    except OSError:
+        pass
+
+    manifests_dir = workspace / "bot_system" / "manifests"
+    if manifests_dir.is_dir():
+        try:
+            with os.scandir(manifests_dir) as mf_entries:
+                for entry in mf_entries:
+                    if not entry.name.endswith(".manifest.json"):
+                        continue
+                    try:
+                        if not entry.is_file():
+                            continue
+                        st = entry.stat()
+                    except OSError:
+                        continue
+                    sig = (st.st_mtime_ns, st.st_size)
+                    norm_mf = os.path.normcase(entry.path)
+                    with _job_index_lock:
+                        cached_mf = _manifest_entry_cache.get(norm_mf)
+                    if cached_mf is not None and cached_mf[0] == sig:
+                        parsed = cached_mf[1]
+                    else:
+                        parsed = None
+                        try:
+                            manifest = json.loads(Path(entry.path).read_text(encoding="utf-8"))
+                            source = Path(manifest["video_path"])
+                            directory = Path(manifest["effective_config"]["output_dir"]).resolve()
+                            updated = float(manifest.get("updated_at", 0))
+                            if math.isfinite(updated) and directory != workspace and directory.is_relative_to(workspace):
+                                key = os.path.normcase(str(source.resolve()))
+                                parsed = (source.stem, key, updated, directory)
+                        except (OSError, ValueError, KeyError, TypeError):
+                            parsed = None
+                        with _job_index_lock:
+                            _manifest_entry_cache[norm_mf] = (sig, parsed)
+                            while len(_manifest_entry_cache) > 8192:
+                                _manifest_entry_cache.pop(next(iter(_manifest_entry_cache)))
+                    if parsed is None:
+                        continue
+                    m_stem, src_key, updated, directory = parsed
+                    dir_exists = (
+                        os.path.normcase(str(directory)) in ws_dirs_norm
+                        if directory.parent == workspace
+                        else directory.is_dir()
+                    )
+                    if not dir_exists:
+                        continue
+                    by_source = manifest_by_stem.setdefault(m_stem, {})
+                    if src_key not in by_source or updated > by_source[src_key][0]:
+                        by_source[src_key] = (updated, directory)
+        except OSError:
+            pass
+
+    return manifest_by_stem, legacy_by_stem
+
+
+def resolve_job_dir(stem: str, _index: Optional[Any] = None) -> Path:
     """Thư mục job chung của pipeline và Studio.
 
     Ưu tiên thư mục trong manifest V1, rồi batch legacy có marker sở hữu,
@@ -104,40 +216,54 @@ def resolve_job_dir(stem: str) -> Path:
     """
     raw_stem = safe_stem(stem)
     workspace = WORKSPACE.resolve()
-    # V1 batch/recovery jobs own a manifest-selected directory, which can differ
-    # from the display stem. Prefer that mapping over an obsolete Studio folder.
-    manifests = workspace / "bot_system" / "manifests"
-    by_source = {}
-    for manifest_path in manifests.glob("*.manifest.json"):
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            source = Path(manifest["video_path"])
-            if source.stem != raw_stem:
-                continue
-            directory = Path(manifest["effective_config"]["output_dir"]).resolve()
-            if directory == workspace or not directory.is_relative_to(workspace) or not directory.is_dir():
-                continue
-            updated = float(manifest.get("updated_at", 0))
-            if not math.isfinite(updated):
-                continue
-            key = os.path.normcase(str(source.resolve()))
-            if key not in by_source or updated > by_source[key][0]:
-                by_source[key] = (updated, directory)
-        except (OSError, ValueError, KeyError, TypeError):
-            continue
-    candidates = {record[1] for record in by_source.values()}
-    if not candidates and workspace.is_dir():
-        # Legacy batch jobs have no V1 manifest, but do have an ownership marker.
-        pattern = re.compile(r"batch_[0-9a-f]{16}_" + re.escape(raw_stem) + r"\Z")
-        for directory in workspace.iterdir():
-            if not pattern.fullmatch(directory.name) or not directory.is_dir():
-                continue
+    _builder = globals().get("_build_workspace_job_index")
+    if _index is not None:
+        manifest_map, legacy_map = _index
+        by_source = manifest_map.get(raw_stem)
+        candidates = {record[1] for record in by_source.values()} if by_source else set()
+        if not candidates:
+            candidates = set(legacy_map.get(raw_stem, ()))
+    elif _builder is not None:
+        manifest_map, legacy_map = _builder(workspace)
+        by_source = manifest_map.get(raw_stem)
+        candidates = {record[1] for record in by_source.values()} if by_source else set()
+        if not candidates:
+            candidates = set(legacy_map.get(raw_stem, ()))
+    else:
+        import json as _json
+        import math as _math
+        import os as _os
+        manifests = workspace / "bot_system" / "manifests"
+        by_source = {}
+        for manifest_path in manifests.glob("*.manifest.json"):
             try:
-                resolved = directory.resolve()
-                if resolved.parent == workspace and (directory / ".autodub-owned").read_text(encoding="utf-8") == str(resolved):
-                    candidates.add(resolved)
-            except (OSError, UnicodeError):
+                manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+                source = Path(manifest["video_path"])
+                if source.stem != raw_stem:
+                    continue
+                directory = Path(manifest["effective_config"]["output_dir"]).resolve()
+                if directory == workspace or not directory.is_relative_to(workspace) or not directory.is_dir():
+                    continue
+                updated = float(manifest.get("updated_at", 0))
+                if not _math.isfinite(updated):
+                    continue
+                key = _os.path.normcase(str(source.resolve()))
+                if key not in by_source or updated > by_source[key][0]:
+                    by_source[key] = (updated, directory)
+            except (OSError, ValueError, KeyError, TypeError):
                 continue
+        candidates = {record[1] for record in by_source.values()}
+        if not candidates and workspace.is_dir():
+            pattern = re.compile(r"batch_[0-9a-f]{16}_" + re.escape(raw_stem) + r"\Z")
+            for directory in workspace.iterdir():
+                if not pattern.fullmatch(directory.name) or not directory.is_dir():
+                    continue
+                try:
+                    resolved = directory.resolve()
+                    if resolved.parent == workspace and (directory / ".autodub-owned").read_text(encoding="utf-8") == str(resolved):
+                        candidates.add(resolved)
+                except (OSError, UnicodeError):
+                    continue
     if len(candidates) > 1:
         raise HTTPException(409, "Có nhiều video cùng tên; cần chọn đúng job trước khi chỉnh sửa trong Studio.")
     if candidates:
@@ -408,6 +534,17 @@ def generate_smart_thumb_mask(video_path: str, tw: int = 1080, th: int = 1920, p
         logger.warning(f"Lỗi khi tạo smart thumb mask cho {video_path}: {e}")
         return None
 
+def _hex_to_ass_style_color(hex_str: str, default_hex: str = "000000", alpha: float = 1.0) -> str:
+    s = str(hex_str).strip().lstrip("#")
+    if len(s) == 3:
+        s = "".join(c * 2 for c in s)
+    if len(s) != 6:
+        s = default_hex
+    r, g, b = s[0:2], s[2:4], s[4:6]
+    a_int = max(0, min(255, int((1.0 - alpha) * 255)))
+    return f"&H{a_int:02X}{b}{g}{r}"
+
+
 def build_custom_ass_file(job_dir: Path, cfg: Dict[str, Any], tw: int = 1080, th: int = 1920) -> Optional[Path]:
     """
     Cập nhật kiểu chữ; chế độ làm mờ tạo lại metadata từ OCR nguồn.
@@ -449,23 +586,13 @@ def build_custom_ass_file(job_dir: Path, cfg: Dict[str, Any], tw: int = 1080, th
         bg_color_hex = safe_hex_color(cfg.get("sub_bg_color", "#ffffff"), "#ffffff")
         bg_opacity = float(cfg.get("sub_bg_opacity", 1.0))
 
-        def hex_to_ass_color(hex_str: str, default_hex: str = "000000", alpha: float = 1.0) -> str:
-            s = str(hex_str).strip().lstrip("#")
-            if len(s) == 3:
-                s = "".join(c * 2 for c in s)
-            if len(s) != 6:
-                s = default_hex
-            r, g, b = s[0:2], s[2:4], s[4:6]
-            a_int = max(0, min(255, int((1.0 - alpha) * 255)))
-            return f"&H{a_int:02X}{b}{g}{r}"
-
-        font_color_ass = hex_to_ass_color(font_color_hex, default_hex="000000", alpha=1.0)
-        bg_color_ass = hex_to_ass_color(bg_color_hex, default_hex="ffffff", alpha=bg_opacity)
+        font_color_ass = _hex_to_ass_style_color(font_color_hex, default_hex="000000", alpha=1.0)
+        bg_color_ass = _hex_to_ass_style_color(bg_color_hex, default_hex="ffffff", alpha=bg_opacity)
 
         stroke_width = int(cfg.get("sub_stroke_width", 0))
         stroke_color_hex = safe_hex_color(cfg.get("sub_stroke_color", "#000000"), "#000000")
         shadow_enabled = bool(cfg.get("sub_shadow", False))
-        stroke_color_ass = hex_to_ass_color(stroke_color_hex, default_hex="000000", alpha=1.0)
+        stroke_color_ass = _hex_to_ass_style_color(stroke_color_hex, default_hex="000000", alpha=1.0)
         shadow_val = 2 if shadow_enabled else 0
         if localized:
             stroke_width = max(2, stroke_width)
@@ -479,6 +606,51 @@ def build_custom_ass_file(job_dir: Path, cfg: Dict[str, Any], tw: int = 1080, th
 
         ass_text = re.sub(r"Style:\s*BgStyle,[^\r\n]+", new_bg_style, ass_text)
         ass_text = re.sub(r"Style:\s*TextStyle,[^\r\n]+", new_txt_style, ass_text)
+
+        # Đồng bộ nội dung phụ đề mới nhất từ translated.srt (khi người dùng sửa chữ / dịch lại / kéo vị trí trong Studio)
+        # nhưng vẫn giữ nguyên 100% các hộp che OCR (BgStyle) của bản gốc!
+        trans_srt = job_dir / "translated.srt"
+        if not localized and trans_srt.is_file():
+            try:
+                pos_x_cfg = float(cfg.get("sub_pos_x_pct", 0.50))
+                pos_y_cfg = float(cfg.get("sub_pos_y_pct", 0.80))
+                pos_changed = abs(pos_x_cfg - 0.50) > 0.015 or abs(pos_y_cfg - 0.80) > 0.015
+                srt_newer = trans_srt.stat().st_mtime > orig_ass.stat().st_mtime + 0.5
+                if srt_newer or pos_changed:
+                    srt_cues = parse_srt(trans_srt.read_text(encoding="utf-8", errors="replace"))
+                    if srt_cues:
+                        m_rx = re.search(r"PlayResX:\s*(\d+)", ass_text)
+                        m_ry = re.search(r"PlayResY:\s*(\d+)", ass_text)
+                        play_w = int(m_rx.group(1)) if m_rx else tw
+                        play_h = int(m_ry.group(1)) if m_ry else th
+
+                        default_pos_tag = f"{{\\an5\\pos({int(round(play_w * pos_x_cfg))},{int(round(play_h * pos_y_cfg))})}}"
+                        if not pos_changed:
+                            m_existing_pos = re.search(r"Dialogue:\s*\d+,[^,]+,[^,]+,TextStyle,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,(\{[^}]*\\pos\([^)]+\)[^}]*\})", ass_text)
+                            if m_existing_pos:
+                                default_pos_tag = m_existing_pos.group(1)
+
+                        import textwrap as _tw_mod
+                        kept_lines = [
+                            ln for ln in ass_text.splitlines()
+                            if not re.match(r"^Dialogue:\s*\d+,[^,]+,[^,]+,TextStyle,", ln)
+                        ]
+                        for cue in srt_cues:
+                            raw_t = (cue.get("text") or "").strip()
+                            if not raw_t:
+                                continue
+                            wrapped_lines = []
+                            for part in raw_t.splitlines():
+                                p_clean = part.strip()
+                                if p_clean:
+                                    wrapped_lines.extend(_tw_mod.wrap(p_clean, width=36) or [p_clean])
+                            ass_txt_body = "\\N".join(wrapped_lines).replace("{", "(").replace("}", ")")
+                            s_ts = _ass_time(float(cue.get("start", 0.0)))
+                            e_ts = _ass_time(max(float(cue.get("start", 0.0)) + 0.08, float(cue.get("end", 0.0))))
+                            kept_lines.append(f"Dialogue: 1,{s_ts},{e_ts},TextStyle,,0,0,0,,{default_pos_tag}{ass_txt_body}")
+                        ass_text = "\n".join(kept_lines)
+            except Exception as _sync_ass_exc:
+                logger.debug("Suppressed error syncing translated.srt into custom ASS: %s", _sync_ass_exc)
 
         # P8: hiệu ứng vào/ra cho từng câu phụ đề (không đụng \pos/\move sẵn có)
         anim_in = str(cfg.get("sub_anim_in", "none") or "none").strip().lower()
@@ -515,16 +687,6 @@ def build_ass_force_style(cfg: Dict[str, Any], default_font_size: int = 18) -> s
     font_size = int(cfg.get("sub_font_size", default_font_size))
     bold_val = -1 if cfg.get("sub_font_bold", True) else 0
 
-    def hex_to_ass(hex_str: str, default_hex: str = "000000", alpha: float = 1.0) -> str:
-        s = str(hex_str).strip().lstrip("#")
-        if len(s) == 3:
-            s = "".join(c * 2 for c in s)
-        if len(s) != 6:
-            s = default_hex
-        r, g, b = s[0:2], s[2:4], s[4:6]
-        a_int = max(0, min(255, int((1.0 - alpha) * 255)))
-        return f"&H{a_int:02X}{b}{g}{r}"
-
     font_color_hex = safe_hex_color(cfg.get("sub_font_color", "#000000"), "#000000")
     bg_color_hex = safe_hex_color(cfg.get("sub_bg_color", "#ffffff"), "#ffffff")
     bg_opacity = float(cfg.get("sub_bg_opacity", 1.0))
@@ -533,11 +695,11 @@ def build_ass_force_style(cfg: Dict[str, Any], default_font_size: int = 18) -> s
     stroke_width = int(cfg.get("sub_stroke_width", 0))
     stroke_color_hex = safe_hex_color(cfg.get("sub_stroke_color", "#000000"), "#000000")
     shadow_enabled = bool(cfg.get("sub_shadow", False))
-    outline_color_ass = hex_to_ass(stroke_color_hex, default_hex="000000", alpha=1.0)
+    outline_color_ass = _hex_to_ass_style_color(stroke_color_hex, default_hex="000000", alpha=1.0)
     shadow_val = 2 if shadow_enabled else 0
 
-    primary = hex_to_ass(font_color_hex, default_hex="000000", alpha=1.0)
-    back = hex_to_ass(bg_color_hex, default_hex="ffffff", alpha=bg_opacity)
+    primary = _hex_to_ass_style_color(font_color_hex, default_hex="000000", alpha=1.0)
+    back = _hex_to_ass_style_color(bg_color_hex, default_hex="ffffff", alpha=bg_opacity)
 
     pos_y_pct = float(cfg.get("sub_pos_y_pct", 0.82))
     margin_v = max(15, int(1920 * max(0.02, 1.0 - pos_y_pct))) if default_font_size >= 18 else max(10, int(1080 * max(0.02, 1.0 - pos_y_pct)))
@@ -591,8 +753,24 @@ batch_framing_stop_flag = threading.Event()
 batch_framing_thread: Optional[threading.Thread] = None
 
 
-def _valid_final_video(path: Path, defer=False) -> bool:
-    return media_status(path, defer=defer)["status"] == "valid"
+def _valid_final_video(path: Path, defer: bool = False) -> bool:
+    if defer:
+        try:
+            st = path.stat()
+            if st.st_size <= 512:
+                return False
+            key = ("mp4_fast", str(path), st.st_size, st.st_mtime_ns)
+            hit = _artifact_cache_get(_audio_valid_cache, key)
+            if hit is not None:
+                return hit
+            with open(path, "rb") as fh:
+                hdr = fh.read(32)
+            ok = b"ftyp" in hdr
+            _artifact_cache_put(_audio_valid_cache, key, ok)
+            return ok
+        except OSError:
+            return False
+    return media_status(path, defer=False)["status"] == "valid"
 
 
 _artifact_cache_lock = threading.Lock()
@@ -608,38 +786,57 @@ def _artifact_cache_get(cache: Dict[tuple, bool], key: tuple) -> Optional[bool]:
 def _artifact_cache_put(cache: Dict[tuple, bool], key: tuple, value: bool) -> None:
     with _artifact_cache_lock:
         cache[key] = value
-        while len(cache) > 4096:
+        while len(cache) > 16384:
             cache.pop(next(iter(cache)))
 
 
 def _valid_audio(path: Path) -> bool:
     try:
         stat = path.stat()
+        if stat.st_size <= 44:
+            return False
         key = (str(path), stat.st_size, stat.st_mtime_ns)
     except OSError:
         return False
     cached = _artifact_cache_get(_audio_valid_cache, key)
     if cached is not None:
         return cached
+    valid = False
     try:
-        import soundfile as sf
-        info = sf.info(str(path))
-        valid = info.frames > 0 and info.samplerate > 0 and info.channels > 0
-    except (OSError, RuntimeError, ValueError):
-        valid = False
+        import wave
+        with wave.open(str(path), "rb") as wf:
+            valid = wf.getnframes() > 0 and wf.getframerate() > 0 and wf.getnchannels() > 0
+    except Exception:
+        try:
+            import soundfile as sf
+            info = sf.info(str(path))
+            valid = info.frames > 0 and info.samplerate > 0 and info.channels > 0
+        except (OSError, RuntimeError, ValueError):
+            valid = False
     _artifact_cache_put(_audio_valid_cache, key, valid)
     return valid
 
 
-def _valid_srt(path: Path) -> bool:
+def _valid_srt(path: Path, fast: bool = False) -> bool:
     try:
         stat = path.stat()
-        key = (str(path), stat.st_size, stat.st_mtime_ns)
+        if stat.st_size <= 10:
+            return False
+        key = (str(path), stat.st_size, stat.st_mtime_ns, bool(fast))
     except OSError:
         return False
     cached = _artifact_cache_get(_srt_valid_cache, key)
     if cached is not None:
         return cached
+    if fast:
+        try:
+            with open(path, "rb") as fh:
+                head = fh.read(1536).decode("utf-8-sig", errors="replace")
+            valid = "-->" in head
+        except OSError:
+            valid = False
+        _artifact_cache_put(_srt_valid_cache, key, valid)
+        return valid
     try:
         segments = parse_srt(path.read_text(encoding="utf-8-sig"))
         valid = bool(segments) and all(s["end"] > s["start"] >= 0 and s["text"] for s in segments)
@@ -649,7 +846,11 @@ def _valid_srt(path: Path) -> bool:
     return valid
 
 
-def safe_check_job_artifacts(stem: str, defer_media=False) -> Dict[str, bool]:
+def safe_check_job_artifacts(
+    stem: str,
+    defer_media: bool = False,
+    _index: Optional[Tuple[Dict[str, Any], Dict[str, Any]]] = None,
+) -> Dict[str, bool]:
     """Kiểm tra sự tồn tại của các artifact một cách an toàn trên Windows filesystem."""
     res = {
         "step1": False,
@@ -661,22 +862,39 @@ def safe_check_job_artifacts(stem: str, defer_media=False) -> Dict[str, bool]:
         "step6": False,
     }
     try:
-        job_dir = resolve_job_dir(stem)
+        job_dir = resolve_job_dir(stem, _index=_index)
         if job_dir.is_dir():
             res["step1"] = _valid_audio(job_dir / "original.wav")
-            res["step2"] = any(_valid_audio(p) for pattern in ("no_vocals.wav", "*_(Instrumental)_*.wav")
-                               for p in job_dir.rglob(pattern))
-            res["step3"] = _valid_srt(job_dir / "original.srt")
+            no_voc = job_dir / "no_vocals.wav"
+            if _valid_audio(no_voc):
+                res["step2"] = True
+            else:
+                bs_dir = job_dir / "bs_roformer"
+                if bs_dir.is_dir() and any(
+                    _valid_audio(p)
+                    for p in bs_dir.iterdir()
+                    if p.name.lower().endswith(".wav")
+                    and ("instrumental" in p.name.lower() or p.name.lower() == "no_vocals.wav")
+                ):
+                    res["step2"] = True
+                else:
+                    res["step2"] = any(
+                        _valid_audio(p)
+                        for pattern in ("no_vocals.wav", "*_(Instrumental)_*.wav")
+                        for p in job_dir.rglob(pattern)
+                    )
+            res["step3"] = _valid_srt(job_dir / "original.srt", fast=defer_media)
             res["step3_5"] = res["step3"]
-            res["step4"] = _valid_srt(job_dir / "translated.srt")
+            res["step4"] = _valid_srt(job_dir / "translated.srt", fast=defer_media)
             res["step5"] = _valid_audio(job_dir / "mixed.wav")
             try:
-                for item in job_dir.iterdir():
-                    if item.name == f"final_{stem}.mp4" and _valid_final_video(item, defer=defer_media):
-                        res["step6"] = True
-                        break
+                final_cand = job_dir / f"final_{stem}.mp4"
+                if final_cand.is_file() and _valid_final_video(final_cand, defer=defer_media):
+                    res["step6"] = True
             except OSError as _phase6_exc:
-                logger.debug('Suppressed error in workflow_api.safe_check_job_artifacts (job_dir.iterdir): %s', type(_phase6_exc).__name__, exc_info=False)
+                logger.debug('Suppressed error in workflow_api.safe_check_job_artifacts (final_cand): %s', type(_phase6_exc).__name__, exc_info=False)
+    except HTTPException:
+        pass
     except OSError as _phase6_exc:
         logger.debug('Suppressed error in workflow_api.safe_check_job_artifacts (job_dir.is_dir): %s', type(_phase6_exc).__name__, exc_info=False)
 
@@ -999,19 +1217,85 @@ async def api_get_workflow_videos():
 
 
 _video_scan_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="workflow-videos")
+_srt_preview_cache: Dict[tuple, Tuple[str, str]] = {}
 
 
-def _workflow_video_entry(path: Path, source: str) -> Optional[Dict[str, Any]]:
+def _extract_first_srt_preview(
+    stem: str,
+    _index: Optional[Tuple[Dict[str, Any], Dict[str, Any]]] = None,
+) -> Tuple[str, str]:
+    """Đọc siêu nhẹ 1.5KB đầu tiên của translated.srt (ưu tiên) hoặc original.srt để lấy câu mở đầu."""
+    try:
+        job_dir = resolve_job_dir(stem, _index=_index)
+        if not job_dir.is_dir():
+            return "", ""
+    except Exception:
+        return "", ""
+
+    for fname, lang in (("translated.srt", "vi"), ("original.srt", "zh")):
+        srt_p = job_dir / fname
+        try:
+            st = srt_p.stat()
+            if st.st_size <= 0:
+                continue
+            cache_key = (os.path.normcase(str(srt_p)), st.st_size, st.st_mtime_ns)
+        except OSError:
+            continue
+        with _artifact_cache_lock:
+            hit = _srt_preview_cache.get(cache_key)
+        if hit is not None:
+            if hit[0]:
+                return hit
+            continue
+        preview = ""
+        try:
+            with open(srt_p, "rb") as fh:
+                head = fh.read(1536).decode("utf-8-sig", errors="replace")
+            lines = []
+            for raw_line in head.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+                s = raw_line.strip()
+                if not s:
+                    if lines:
+                        break
+                    continue
+                if s.isdigit() or "-->" in s:
+                    continue
+                lines.append(s)
+                if len(" ".join(lines)) >= 72:
+                    break
+            preview = " ".join(lines).strip()
+            if len(preview) > 84:
+                preview = preview[:82].rstrip() + "…"
+        except OSError:
+            preview = ""
+        val = (preview, lang if preview else "")
+        with _artifact_cache_lock:
+            _srt_preview_cache[cache_key] = val
+            while len(_srt_preview_cache) > 8192:
+                _srt_preview_cache.pop(next(iter(_srt_preview_cache)))
+        if preview:
+            return val
+    return "", ""
+
+
+def _workflow_video_entry(
+    path: Path,
+    source: str,
+    _index: Optional[Tuple[Dict[str, Any], Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
     try:
         stat = path.stat()
+        preview_text, preview_lang = _extract_first_srt_preview(path.stem, _index=_index)
         return {
             "stem": path.stem,
             "filename": path.name,
             "source": source,
             "size_mb": round(stat.st_size / (1024 * 1024), 2),
             "created_at": stat.st_mtime,
-            "steps": safe_check_job_artifacts(path.stem, defer_media=True),
+            "steps": safe_check_job_artifacts(path.stem, defer_media=True, _index=_index),
             "thumbnail_url": f"/api/workflow/thumbnail/{quote(path.stem, safe='')}",
+            "preview_text": preview_text,
+            "preview_lang": preview_lang,
         }
     except OSError:
         return None
@@ -1038,8 +1322,9 @@ def _collect_workflow_videos() -> List[Dict[str, Any]]:
 
     if not candidates:
         return []
+    shared_index = _build_workspace_job_index(WORKSPACE.resolve())
     items = [item for item in _video_scan_pool.map(
-        lambda candidate: _workflow_video_entry(*candidate), candidates
+        lambda candidate: _workflow_video_entry(*candidate, _index=shared_index), candidates
     ) if item]
     items.sort(key=lambda item: item.get("created_at", 0), reverse=True)
     return items
@@ -1049,18 +1334,20 @@ def _find_vocal_files(job_dir: Optional[Path]) -> Tuple[Optional[Path], Optional
     """
     Tìm file nhạc nền đã tách (instrumental / no_vocals) và file giọng nói đã tách (vocals).
     Ưu tiên thư mục bs_roformer (BS-RoFormer SDR 12.97dB), sau đó đến htdemucs và thư mục gốc.
+    Chỉ chấp nhận các tệp âm thanh hợp lệ (_valid_audio) để tránh nhận nhầm tệp rỗng/lỗi dở dang.
     """
     if not job_dir or not isinstance(job_dir, Path) or not job_dir.is_dir():
         return None, None
     inst_path = None
     voc_path = None
+    _skip_names = {"original.wav", "mixed.wav", "manual_tts_track.wav", "_studio_tts_bed.wav"}
 
     # 1. Kiểm tra thư mục bs_roformer
     bs_dir = job_dir / "bs_roformer"
     if bs_dir.is_dir():
         for f in bs_dir.iterdir():
             fn = f.name.lower()
-            if fn.endswith(".wav"):
+            if fn.endswith(".wav") and fn not in _skip_names and _valid_audio(f):
                 if "instrumental" in fn and not inst_path:
                     inst_path = f
                 elif "vocals" in fn and not voc_path:
@@ -1071,11 +1358,14 @@ def _find_vocal_files(job_dir: Optional[Path]) -> Tuple[Optional[Path], Optional
         for root, dirs, files in os.walk(job_dir):
             for fname in files:
                 fl = fname.lower()
-                if fl.endswith(".wav"):
+                if fl.endswith(".wav") and fl not in _skip_names:
+                    cand = Path(root) / fname
                     if (fl == "no_vocals.wav" or "instrumental" in fl or fl == "bgm.wav") and not inst_path:
-                        inst_path = Path(root) / fname
+                        if _valid_audio(cand):
+                            inst_path = cand
                     elif (fl == "vocals.wav" or ("vocals" in fl and "no_vocals" not in fl)) and not voc_path:
-                        voc_path = Path(root) / fname
+                        if _valid_audio(cand):
+                            voc_path = cand
             if inst_path and voc_path:
                 break
 
@@ -1107,15 +1397,18 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
 
     # 2. Tìm video thành phẩm hoàn tất (final_video - ĐÃ LỒNG TIẾNG & CHE SUB)
     final_video_url = ""
+    final_video_path: Optional[Path] = None
     try:
         if job_dir.is_dir():
             for item in job_dir.iterdir():
                 if item.name == f"final_{stem}.mp4" and _valid_final_video(item):
+                    final_video_path = item
                     final_video_url = stream_file_url(item)
                     break
         if not final_video_url and OUTPUT_DIR.exists():
             banve_cand = OUTPUT_DIR / f"Dubbed_{stem}.mp4"
             if banve_cand.is_file() and _valid_final_video(banve_cand):
+                final_video_path = banve_cand
                 final_video_url = stream_file_url(banve_cand)
     except OSError as _phase6_exc:
         logger.debug('Suppressed error in workflow_api.api_get_workflow_video_data (job_dir.is_dir): %s', type(_phase6_exc).__name__, exc_info=False)
@@ -1194,6 +1487,21 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
     inst_url = stream_file_url(inst_file) if (inst_file and inst_file.is_file()) else ""
     voc_url = stream_file_url(voc_file) if (voc_file and voc_file.is_file()) else ""
 
+    manual_tts_file = job_dir / "manual_tts_track.wav" if job_dir.is_dir() else None
+    has_manual_tts = bool(manual_tts_file and _valid_audio(manual_tts_file))
+    manual_tts_url = stream_file_url(manual_tts_file, cache_bust=True) if has_manual_tts else ""
+    manual_tts_newer = False
+    if has_manual_tts and manual_tts_file:
+        try:
+            if not final_video_path or not final_video_path.is_file():
+                manual_tts_newer = True
+            else:
+                manual_tts_newer = manual_tts_file.stat().st_mtime >= final_video_path.stat().st_mtime - 0.5
+        except OSError:
+            manual_tts_newer = False
+
+    eff_step5_audio = step5_audio or manual_tts_url
+
     return {
         "stem": stem,
         "thumbnail_url": f"/api/workflow/thumbnail/{quote(stem, safe='')}",
@@ -1203,11 +1511,16 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
         "has_final": bool(final_video_url),
         "has_ai_sub": bool(trans_subtitles),
         "has_chinese_sub": bool(orig_subtitles),
+        "has_manual_tts": has_manual_tts,
+        "manual_tts_newer": manual_tts_newer,
+        "manual_tts_url": manual_tts_url,
         "chinese_subtitles": orig_subtitles,
         "vietnamese_subtitles": trans_subtitles,
         "subtitles": combined_subs,
         "vocal_separation": {
             "has_separated": has_vocal_sep,
+            "has_instrumental": bool(inst_url),
+            "has_vocals": bool(voc_url),
             "instrumental_url": inst_url,
             "vocals_url": voc_url,
             "status": "completed" if has_vocal_sep else "none"
@@ -1215,7 +1528,7 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
         "steps": {
             "step1": {"ready": bool(step1_audio), "audio_url": step1_audio, "title": "Trích xuất âm thanh (original.wav)"},
             "step2": {
-                "ready": has_demucs or has_vocal_sep,
+                "ready": has_demucs or has_vocal_sep or bool(inst_url),
                 "title": "Tách âm nền BS-RoFormer / Demucs (bs_roformer)",
                 "instrumental_url": inst_url,
                 "vocals_url": voc_url,
@@ -1223,7 +1536,7 @@ async def api_get_workflow_video_data(stem: str = Query(...)):
             "step3": {"ready": bool(orig_subtitles), "count": len(orig_subtitles), "title": "Nhận diện giọng Faster-Whisper (original.srt)"},
             "step3_5": {"ready": bool(orig_subtitles), "title": "Quét chữ & che phụ đề cũ (OCR Subtitle Band)"},
             "step4": {"ready": bool(trans_subtitles), "count": len(trans_subtitles), "title": "Dịch phụ đề Gemini AI (translated.srt)"},
-            "step5": {"ready": bool(step5_audio), "audio_url": step5_audio, "title": "Lồng tiếng AI TTS (mixed.wav)"},
+            "step5": {"ready": bool(eff_step5_audio), "audio_url": eff_step5_audio, "title": "Lồng tiếng AI TTS (mixed.wav)"},
             "step6": {"ready": bool(final_video_url), "video_url": final_video_url, "title": "Xuất bản video NVENC GPU (final.mp4)"}
         }
     }
@@ -1411,6 +1724,113 @@ def build_watermark_filter(cfg: Dict[str, Any], tw: int, th: int) -> str:
     return filt
 
 
+def _build_anti_reup_video_filter(
+    v_input_path: Path,
+    cfg: Dict[str, Any],
+    tw: int,
+    th: int,
+    srt_filter: str = "",
+    real_motion_override: Optional[str] = None,
+) -> Tuple[List[str], str]:
+    """Xây dựng extra_inputs & filter_complex cho chế độ khung nền chống Re-up (dùng chung cho Xuất lẻ & Hàng loạt)."""
+    bg_type = str(cfg.get("bg_type", "image")).lower()
+    motion_bg_enabled = bool(cfg.get("motion_bg_enabled", False))
+    if motion_bg_enabled:
+        bg_type = "video_motion"
+    elif bg_type == "video_motion" and not motion_bg_enabled:
+        bg_type = "image"
+
+    bg_motion_file = str(cfg.get("bg_motion_file", "song_bien.mp4"))
+    bg_image_file = str(cfg.get("bg_image_file", "tia_sang_vang_ngoi_sao.jpg"))
+    auto_crop_black_bars = bool(cfg.get("auto_crop_black_bars", True))
+    video_scale = float(cfg.get("video_scale", 1.0))
+    mirror = bool(cfg.get("mirror", False))
+    protect_top_thumb = bool(cfg.get("protect_top_thumb", True))
+    crop_padding = int(cfg.get("crop_padding", 0))
+
+    flip_str = "hflip," if mirror else ""
+    fw = max(100, int(tw * video_scale)) & ~1
+    fh = max(100, int(th * video_scale)) & ~1
+    safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
+
+    real_motion_path = (
+        real_motion_override
+        if real_motion_override is not None
+        else (resolve_motion_bg_path(bg_motion_file) if bg_type == "video_motion" else "")
+    )
+    real_image_path = resolve_image_bg_path(bg_image_file) if bg_type == "image" else ""
+    smart_mask_info = (
+        generate_smart_thumb_mask(str(v_input_path), tw=tw, th=th, padding=crop_padding)
+        if protect_top_thumb
+        else None
+    )
+
+    if smart_mask_info and smart_mask_info.get("thumb_found"):
+        mask_file = smart_mask_info["mask_path"]
+        fg_chain = f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
+        tail_chain = f"[fg][msk]alphamerge[fg_alpha];[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
+        if bg_type == "video_motion" and real_motion_path and os.path.isfile(real_motion_path):
+            extra_inputs = ["-stream_loop", "-1", "-i", real_motion_path, "-loop", "1", "-i", mask_file]
+            fc = (
+                f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
+                f"{fg_chain}[2:v]scale={tw}:{th},setsar=1[msk];{tail_chain}"
+            )
+        elif bg_type == "image" and real_image_path and os.path.isfile(real_image_path):
+            extra_inputs = ["-loop", "1", "-i", real_image_path, "-loop", "1", "-i", mask_file]
+            fc = (
+                f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
+                f"{fg_chain}[2:v]scale={tw}:{th},setsar=1[msk];{tail_chain}"
+            )
+        elif bg_type == "blur":
+            extra_inputs = ["-loop", "1", "-i", mask_file]
+            fc = (
+                f"[0:v]split=2[v_orig][v_bg];"
+                f"[v_bg]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur=25:5,setsar=1,colorlevels=rimax=0.65:gimax=0.65:bimax=0.65[bg];"
+                f"[v_orig]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
+                f"[1:v]scale={tw}:{th},setsar=1[msk];{tail_chain}"
+            )
+        else:
+            extra_inputs = ["-loop", "1", "-i", mask_file]
+            fc = f"color=c={safe_color}:s={tw}x{th}:r=30[bg];{fg_chain}[1:v]scale={tw}:{th},setsar=1[msk];{tail_chain}"
+        return extra_inputs, fc
+
+    crop_prefix = ""
+    if auto_crop_black_bars:
+        crop_box = detect_letterbox_crop(str(v_input_path), padding=crop_padding)
+        if crop_box:
+            crop_prefix = f"crop={crop_box['w']}:{crop_box['h']}:{crop_box['x']}:{crop_box['y']},"
+
+    if video_scale >= 0.99:
+        scale_fg = f"{crop_prefix}{flip_str}scale={tw}:-2,setsar=1"
+        overlay_coord = "0:(H-h)/2"
+    else:
+        scale_fg = f"{crop_prefix}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1"
+        overlay_coord = "(W-w)/2:(H-h)/2"
+
+    extra_inputs: List[str] = []
+    if bg_type == "video_motion" and real_motion_path and os.path.isfile(real_motion_path):
+        extra_inputs = ["-stream_loop", "-1", "-i", real_motion_path]
+        fc = (
+            f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
+            f"[0:v]{scale_fg}[fg];[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
+        )
+    elif bg_type == "image" and real_image_path and os.path.isfile(real_image_path):
+        extra_inputs = ["-loop", "1", "-i", real_image_path]
+        fc = (
+            f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
+            f"[0:v]{scale_fg}[fg];[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
+        )
+    elif bg_type == "blur":
+        fc = (
+            f"[0:v]split=2[bg_in][fg_in];"
+            f"[bg_in]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur=25:5,setsar=1,colorlevels=rimax=0.65:gimax=0.65:bimax=0.65[bg];"
+            f"[fg_in]{scale_fg}[fg];[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
+        )
+    else:
+        fc = f"color=c={safe_color}:s={tw}x{th}:r=30[bg];[0:v]{scale_fg}[fg];[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
+    return extra_inputs, fc
+
+
 def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]):
     """Tiến trình ngầm lồng khung chống re-up hàng loạt cho cả thư mục."""
     global batch_framing_state
@@ -1428,11 +1848,7 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
         bg_type = "image"
         
     bg_motion_file = str(cfg.get("bg_motion_file", "song_bien.mp4"))
-    bg_image_file = str(cfg.get("bg_image_file", "tia_sang_vang_ngoi_sao.jpg"))
-    auto_crop_black_bars = bool(cfg.get("auto_crop_black_bars", True))
-    video_scale = float(cfg.get("video_scale", 1.0))
     mirror = bool(cfg.get("mirror", False))
-    delogo = bool(cfg.get("delogo", False))
 
     if aspect == "9:16":
         tw, th = 1080, 1920
@@ -1442,10 +1858,6 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
         tw, th = 1080, 1080
     else:
         tw, th = 1080, 1920
-
-    fw = max(100, int(tw * video_scale)) & ~1
-    fh = max(100, int(th * video_scale)) & ~1
-    flip_str = "hflip," if mirror else ""
 
     real_motion_path = resolve_motion_bg_path(bg_motion_file) if bg_type == "video_motion" else ""
 
@@ -1521,120 +1933,9 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
             logger.info(f"Video {v_file.name} có luồng video ({v_dur:.2f}s) ngắn hơn audio ({a_dur:.2f}s) -> Tự động cắt khớp {v_dur:.2f}s để tránh đơ màn hình")
             duration_args = ["-t", f"{v_dur:.3f}"]
 
-        protect_top_thumb = bool(cfg.get("protect_top_thumb", True))
-        crop_padding = int(cfg.get("crop_padding", 0))
-        smart_mask_info = None
-        if protect_top_thumb:
-            smart_mask_info = generate_smart_thumb_mask(str(input_v), tw=tw, th=th, padding=crop_padding)
-
-        if smart_mask_info and smart_mask_info.get("thumb_found"):
-            # PHƯƠNG ÁN 1: Tự động bảo vệ thẻ chữ Thumb trên, che toàn bộ viền đen trên & dưới bằng nền mới
-            mask_file = smart_mask_info["mask_path"]
-            if bg_type == "video_motion" and real_motion_path and os.path.isfile(real_motion_path):
-                extra_inputs = ["-stream_loop", "-1", "-i", real_motion_path, "-loop", "1", "-i", mask_file]
-                fc = (
-                    f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
-                    f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
-                    f"[2:v]scale={tw}:{th},setsar=1[msk];"
-                    f"[fg][msk]alphamerge[fg_alpha];"
-                    f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
-                )
-            elif bg_type == "image":
-                real_image_path = resolve_image_bg_path(bg_image_file)
-                if real_image_path and os.path.isfile(real_image_path):
-                    extra_inputs = ["-loop", "1", "-i", real_image_path, "-loop", "1", "-i", mask_file]
-                    fc = (
-                        f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
-                        f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
-                        f"[2:v]scale={tw}:{th},setsar=1[msk];"
-                        f"[fg][msk]alphamerge[fg_alpha];"
-                        f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
-                    )
-                else:
-                    safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
-                    extra_inputs = ["-loop", "1", "-i", mask_file]
-                    fc = (
-                        f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
-                        f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
-                        f"[1:v]scale={tw}:{th},setsar=1[msk];"
-                        f"[fg][msk]alphamerge[fg_alpha];"
-                        f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
-                    )
-            elif bg_type == "blur":
-                extra_inputs = ["-loop", "1", "-i", mask_file]
-                fc = (
-                    f"[0:v]split=2[v_orig][v_bg];"
-                    f"[v_bg]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur=25:5,setsar=1,colorlevels=rimax=0.65:gimax=0.65:bimax=0.65[bg];"
-                    f"[v_orig]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
-                    f"[1:v]scale={tw}:{th},setsar=1[msk];"
-                    f"[fg][msk]alphamerge[fg_alpha];"
-                    f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
-                )
-            else:
-                safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
-                extra_inputs = ["-loop", "1", "-i", mask_file]
-                fc = (
-                    f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
-                    f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
-                    f"[1:v]scale={tw}:{th},setsar=1[msk];"
-                    f"[fg][msk]alphamerge[fg_alpha];"
-                    f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
-                )
-        else:
-            # Tự động cắt bỏ 2 viền đen trên/dưới của video phôi nếu có
-            crop_prefix = ""
-            if auto_crop_black_bars:
-                crop_box = detect_letterbox_crop(str(input_v), padding=crop_padding)
-                if crop_box:
-                    crop_prefix = f"crop={crop_box['w']}:{crop_box['h']}:{crop_box['x']}:{crop_box['y']},"
-
-            # Chế độ co dãn: Khi video_scale >= 0.99 (mặc định), giữ nguyên 100% chiều ngang, 2 bên sát mép (x=0)
-            # Background chỉ che 2 phần đen trên và dưới
-            if video_scale >= 0.99:
-                scale_fg = f"{crop_prefix}{flip_str}scale={tw}:-2,setsar=1"
-                overlay_coord = "0:(H-h)/2"
-            else:
-                scale_fg = f"{crop_prefix}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1"
-                overlay_coord = "(W-w)/2:(H-h)/2"
-
-            extra_inputs = []
-            if bg_type == "video_motion" and real_motion_path and os.path.isfile(real_motion_path):
-                extra_inputs = ["-stream_loop", "-1", "-i", real_motion_path]
-                fc = (
-                    f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
-                    f"[0:v]{scale_fg}[fg];"
-                    f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
-                )
-            elif bg_type == "image":
-                real_image_path = resolve_image_bg_path(bg_image_file)
-                if real_image_path and os.path.isfile(real_image_path):
-                    extra_inputs = ["-loop", "1", "-i", real_image_path]
-                    fc = (
-                        f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
-                        f"[0:v]{scale_fg}[fg];"
-                        f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
-                    )
-                else:
-                    safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
-                    fc = (
-                        f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
-                        f"[0:v]{scale_fg}[fg];"
-                        f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
-                    )
-            elif bg_type == "blur":
-                fc = (
-                    f"[0:v]split=2[bg_in][fg_in];"
-                    f"[bg_in]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur=25:5,setsar=1,colorlevels=rimax=0.65:gimax=0.65:bimax=0.65[bg];"
-                    f"[fg_in]{scale_fg}[fg];"
-                    f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
-                )
-            else:
-                safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
-                fc = (
-                    f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
-                    f"[0:v]{scale_fg}[fg];"
-                    f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
-                )
+        extra_inputs, fc = _build_anti_reup_video_filter(
+            input_v, cfg, tw, th, srt_filter=srt_filter, real_motion_override=real_motion_path
+        )
 
         # Lồng Watermark mờ mờ cố định ở góc phải nếu được kích hoạt
         wm_filt = build_watermark_filter(cfg, tw, th)
@@ -2709,11 +3010,12 @@ def _build_music_filter_lines(
     return {"lines": lines, "used_split": used_split}
 
 
-def _build_tts_mix_filter_lines(audio_tag: str, tts_idx: int) -> str:
+def _build_tts_mix_filter_lines(audio_tag: str, tts_idx: int, base_volume: float = 1.0) -> str:
     """Trộn track lồng tiếng AI lên audio gốc; audio_tag là stream specifier như "0:a?"."""
     base_tag = audio_tag.replace("?", "")
+    vol_str = "1.0" if abs(float(base_volume) - 1.0) < 1e-6 else f"{max(0.0, float(base_volume)):.2f}"
     return (
-        f"[{base_tag}]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.0[expbase];"
+        f"[{base_tag}]aformat=sample_rates=44100:channel_layouts=stereo,volume={vol_str}[expbase];"
         f"[{tts_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[exptts];"
         f"[expbase][exptts]amix=inputs=2:normalize=0:duration=first[expaout]"
     )
@@ -2821,6 +3123,7 @@ def _apply_timeline_edits_file(
     job_ctl: Optional[Dict[str, Any]] = None,
     export_frame: Optional[Dict[str, int]] = None,
     vocal_mode: str = "full",
+    tts_mix: bool = False,
 ) -> bool:
     """
     Cắt, ghép nối và nhân bản các đoạn video theo danh sách clips:
@@ -2880,18 +3183,62 @@ def _apply_timeline_edits_file(
 
     vocal_mode_norm = str(vocal_mode or "full").strip().lower()
     alt_audio_path = None
-    if workspace_dir and vocal_mode_norm in ("no_vocals", "vocals"):
-        inst_f, voc_f = _find_vocal_files(Path(workspace_dir))
+    ws_path = Path(workspace_dir) if workspace_dir else None
+    inst_f, voc_f = _find_vocal_files(ws_path) if ws_path else (None, None)
+    if ws_path and vocal_mode_norm in ("no_vocals", "vocals"):
         if vocal_mode_norm == "no_vocals" and inst_f and inst_f.is_file():
             alt_audio_path = inst_f
         elif vocal_mode_norm == "vocals" and voc_f and voc_f.is_file():
             alt_audio_path = voc_f
 
+    manual_tts_wav = (ws_path / "manual_tts_track.wav") if ws_path else None
+    has_active_tts_mix = bool(tts_mix and manual_tts_wav and _valid_audio(manual_tts_wav))
+    if has_active_tts_mix and ws_path and manual_tts_wav:
+        if vocal_mode_norm == "mute":
+            # Tắt tiếng nền gốc, nhưng giữ nguyên 100% giọng lồng AI mới!
+            alt_audio_path = manual_tts_wav
+            a_stream = a_stream or {"codec_type": "audio"}
+        else:
+            bed_src = None
+            bed_vol = 1.0
+            if vocal_mode_norm in ("full", "no_vocals") and inst_f and inst_f.is_file():
+                bed_src = inst_f
+                bed_vol = 0.85
+            elif vocal_mode_norm == "vocals" and voc_f and voc_f.is_file():
+                bed_src = voc_f
+                bed_vol = 0.85
+            elif (ws_path / "original.wav").is_file():
+                bed_src = ws_path / "original.wav"
+                bed_vol = 0.20
+            elif a_stream:
+                bed_src = video_path
+                bed_vol = 0.20
+
+            if bed_src and bed_src.is_file():
+                bed_out = ws_path / "_studio_tts_bed.wav"
+                mix_fc = _build_tts_mix_filter_lines("0:a?", 1, base_volume=bed_vol)
+                cmd_bed = [
+                    "ffmpeg", "-y", "-v", "error",
+                    "-i", str(bed_src), "-i", str(manual_tts_wav),
+                    "-filter_complex", mix_fc,
+                    "-map", "[expaout]", "-c:a", "pcm_s16le", str(bed_out)
+                ]
+                res_bed = subprocess.run(cmd_bed, capture_output=True, text=True, timeout=120)
+                if res_bed.returncode == 0 and _valid_audio(bed_out):
+                    alt_audio_path = bed_out
+                    a_stream = a_stream or {"codec_type": "audio"}
+                else:
+                    alt_audio_path = manual_tts_wav
+                    a_stream = a_stream or {"codec_type": "audio"}
+            else:
+                alt_audio_path = manual_tts_wav
+                a_stream = a_stream or {"codec_type": "audio"}
+
     extra_audio_inputs: List[str] = [str(alt_audio_path)] if (alt_audio_path and alt_audio_path.is_file()) else []
     audio_src_idx = 1 if extra_audio_inputs else 0
     audio_offset = len(extra_audio_inputs)
 
-    if vocal_mode_norm == "mute":
+    if vocal_mode_norm == "mute" and not has_active_tts_mix:
         for c in valid_clips:
             c["muted"] = True
 
@@ -3129,6 +3476,7 @@ def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, An
                     logger.debug('Suppressed error in workflow_api._prog (cb): %s', type(_phase6_exc).__name__, exc_info=False)
 
     stem = safe_stem(payload.get("stem"))
+    _assert_stem_not_in_active_pipeline(stem)
     clean_stem = artifact_stem(stem)
 
     clips = payload.get("clips", [])
@@ -3166,9 +3514,9 @@ def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, An
     audio_clips_in = payload.get("audio_clips") if isinstance(payload.get("audio_clips"), list) else []
     export_frame_in = payload.get("export_frame") if isinstance(payload.get("export_frame"), dict) else None
     vocal_mode_in = str(payload.get("vocal_mode", "full")).strip().lower()
+    tts_mix_in = bool(payload.get("tts_mix", False))
     _prog(20, "Bắt đầu render FFmpeg (GPU)...")
-    ok = _apply_timeline_edits_file(
-        input_video, clips, dest_final,
+    edit_kwargs: Dict[str, Any] = dict(
         text_clips=text_clips_in,
         overlay_clips=overlay_clips_in,
         audio_clips=audio_clips_in,
@@ -3177,10 +3525,20 @@ def _execute_apply_edits(payload: Dict[str, Any], job_ctl: Optional[Dict[str, An
         export_frame=export_frame_in,
         vocal_mode=vocal_mode_in,
     )
+    if tts_mix_in:
+        edit_kwargs["tts_mix"] = True
+    ok = _apply_timeline_edits_file(
+        input_video, clips, dest_final,
+        **edit_kwargs,
+    )
     if not ok:
         raise HTTPException(status_code=500, detail="Lỗi khi cắt ghép video bằng FFmpeg")
     if job_ctl and job_ctl.get("cancelled"):
         raise HTTPException(status_code=499, detail="Đã huỷ render")
+    try:
+        (job_dir / "proxy_final.mp4").unlink(missing_ok=True)
+    except OSError:
+        pass
     _prog(85, "Đã render xong — căn lại phụ đề...")
 
     # Tự động đồng bộ và căn chỉnh lại tệp phụ đề translated.srt theo timeline clips mới
@@ -3423,22 +3781,35 @@ def _run_vocal_separation_worker(stem: str) -> None:
                 task["message"] = "Trích xuất âm thanh từ video thất bại"
                 return
 
-        task["progress"] = 35
-        task["message"] = "Đang lọc âm thanh bằng BS-RoFormer AI (SDR 12.97dB)..."
+        task["progress"] = 25
+        task["message"] = "Chờ hàng đợi GPU rảnh để tách âm BS-RoFormer..."
 
         from video_utils import separate_vocals_demucs
-        v_path, bg_path = separate_vocals_demucs(str(orig_wav), str(job_dir))
+        from contextlib import nullcontext
+        try:
+            from v1_gpu_gatekeeper import gpu_gatekeeper
+            gpu_ctx = gpu_gatekeeper("studio_vocal_sep")
+        except Exception:
+            gpu_ctx = nullcontext()
+
+        with gpu_ctx:
+            task["progress"] = 40
+            task["message"] = "Đang lọc âm thanh bằng BS-RoFormer AI (SDR 12.97dB)..."
+            v_path, bg_path = separate_vocals_demucs(str(orig_wav), str(job_dir))
 
         inst_f, voc_f = _find_vocal_files(job_dir)
-        if inst_f and voc_f and inst_f.is_file() and voc_f.is_file():
+        if inst_f and inst_f.is_file():
             task["status"] = "completed"
             task["progress"] = 100
+            task["has_separated"] = bool(inst_f and voc_f and voc_f.is_file())
+            task["has_instrumental"] = True
+            task["has_vocals"] = bool(voc_f and voc_f.is_file())
             task["message"] = "Tách âm thanh hoàn tất!"
             task["instrumental_url"] = stream_file_url(inst_f, cache_bust=True)
-            task["vocals_url"] = stream_file_url(voc_f, cache_bust=True)
+            task["vocals_url"] = stream_file_url(voc_f, cache_bust=True) if (voc_f and voc_f.is_file()) else ""
             task["instrumental_path"] = str(inst_f)
-            task["vocals_path"] = str(voc_f)
-            logger.info(f"Vocal separation completed for {stem}: inst={inst_f.name}, voc={voc_f.name}")
+            task["vocals_path"] = str(voc_f) if (voc_f and voc_f.is_file()) else ""
+            logger.info(f"Vocal separation completed for {stem}: inst={inst_f.name}, voc={voc_f.name if voc_f else 'None'}")
         else:
             task["status"] = "error"
             task["message"] = "Không tìm thấy file kết quả sau khi tách âm"
@@ -3458,15 +3829,41 @@ async def api_get_vocal_status(stem: str = Query(...)):
     if inst_f and voc_f and inst_f.is_file() and voc_f.is_file():
         return {
             "has_separated": True,
+            "has_instrumental": True,
+            "has_vocals": True,
             "instrumental_url": stream_file_url(inst_f, cache_bust=True),
             "vocals_url": stream_file_url(voc_f, cache_bust=True),
             "status": "completed",
             "progress": 100,
             "message": "Đã có sẵn file tách âm BS-RoFormer"
         }
+    if task and task.get("status") == "running":
+        return {
+            "has_separated": False,
+            "has_instrumental": bool(inst_f and inst_f.is_file()),
+            "has_vocals": bool(voc_f and voc_f.is_file()),
+            "status": task.get("status", "running"),
+            "progress": task.get("progress", 0),
+            "message": task.get("message", ""),
+            "instrumental_url": stream_file_url(inst_f, cache_bust=True) if (inst_f and inst_f.is_file()) else task.get("instrumental_url", ""),
+            "vocals_url": stream_file_url(voc_f, cache_bust=True) if (voc_f and voc_f.is_file()) else task.get("vocals_url", "")
+        }
+    if inst_f and inst_f.is_file():
+        return {
+            "has_separated": False,
+            "has_instrumental": True,
+            "has_vocals": False,
+            "instrumental_url": stream_file_url(inst_f, cache_bust=True),
+            "vocals_url": "",
+            "status": "partial",
+            "progress": 100,
+            "message": "Đã có sẵn nhạc nền tách lời (no_vocals)"
+        }
     if task:
         return {
             "has_separated": False,
+            "has_instrumental": False,
+            "has_vocals": False,
             "status": task.get("status", "running"),
             "progress": task.get("progress", 0),
             "message": task.get("message", ""),
@@ -3475,6 +3872,8 @@ async def api_get_vocal_status(stem: str = Query(...)):
         }
     return {
         "has_separated": False,
+        "has_instrumental": False,
+        "has_vocals": False,
         "status": "none",
         "progress": 0,
         "message": "Chưa tách âm thanh"
@@ -3484,6 +3883,7 @@ async def api_get_vocal_status(stem: str = Query(...)):
 @router.post("/api/workflow/audio/separate-vocals")
 async def api_trigger_separate_vocals(payload: Dict[str, Any] = Body(...)):
     stem = safe_stem(payload.get("stem"))
+    _assert_stem_not_in_active_pipeline(stem)
     job_dir = resolve_job_dir(stem)
 
     inst_f, voc_f = _find_vocal_files(job_dir) if job_dir.is_dir() else (None, None)
@@ -3729,20 +4129,81 @@ def _proxy_is_fresh(proxy_path: Path, src_path: Path) -> bool:
         proxy_path.stat().st_mtime >= src_path.stat().st_mtime - 1.0
 
 
+def _assert_stem_not_in_active_pipeline(stem: str) -> None:
+    """
+    Chặn ghi đè vào thư mục job_dir của đúng video đang được Tool V1 (telegram_bot / batch worker)
+    xử lý trực tiếp, đảm bảo Studio Quy Trình không bao giờ gây xung đột file với pipeline chính.
+    """
+    if not stem:
+        return
+    try:
+        st = job_tracker.get_status(strict=False)
+        if not isinstance(st, dict):
+            return
+        active_names = []
+        if st.get("active") and st.get("video_name"):
+            active_names.append(str(st["video_name"]))
+        workers = st.get("workers")
+        if isinstance(workers, dict):
+            for w in workers.values():
+                if isinstance(w, dict) and w.get("active") and w.get("video_name"):
+                    active_names.append(str(w["video_name"]))
+        if not active_names:
+            return
+        target_clean = artifact_stem(stem)
+        for vname in active_names:
+            v_stem = Path(vname).stem
+            if not v_stem:
+                continue
+            if v_stem == stem or (target_clean and artifact_stem(v_stem) == target_clean):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Video '{stem}' đang được Tool V1 xử lý trực tiếp — vui lòng chờ chạy xong rồi chỉnh sửa!",
+                )
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+
+def _is_gpu_busy_with_pipeline() -> bool:
+    """Kiểm tra nhanh xem pipeline chính đang chạy hoặc VRAM đang cao để proxy nhường GPU."""
+    try:
+        st = job_tracker.get_status(strict=False)
+        if isinstance(st, dict):
+            if st.get("active"):
+                return True
+            workers = st.get("workers")
+            if isinstance(workers, dict) and any(isinstance(w, dict) and w.get("active") for w in workers.values()):
+                return True
+    except Exception:
+        pass
+    try:
+        from v1_vram_monitor import is_vram_safe_for_gpu_step
+        if not is_vram_safe_for_gpu_step(min_free_mb=1400.0):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _proxy_generate_worker(src_path: Path, proxy_path: Path, key: str) -> None:
     try:
         # đuôi .mp4 để ffmpeg đo được muxer (file .mp4.tmp sẽ lỗi "Invalid argument")
         tmp = proxy_path.parent / ("tmp_" + proxy_path.name)
         tmp.unlink(missing_ok=True)
-        # Ưu tiên NVENC p1 siêu tốc trên GPU (1-2s), fallback về libx264 veryfast nếu bận
-        nvenc_cmd = [
-            "ffmpeg", "-y", "-v", "error", "-hwaccel", "cuda", "-i", str(src_path),
-            "-vf", "scale='min(540,iw)':-2,format=yuv420p",
-            "-c:v", "h264_nvenc", "-preset", "p1", "-rc", "vbr", "-cq", "28",
-            "-c:a", "copy", "-movflags", "+faststart", str(tmp),
-        ]
-        res = subprocess.run(nvenc_cmd, capture_output=True, timeout=300)
-        if res.returncode != 0 or not tmp.is_file() or tmp.stat().st_size <= 1_000:
+        # Khi Tool V1 đang xử lý video hoặc VRAM thấp, nhường 100% GPU cho pipeline chính và tạo proxy 540p bằng CPU
+        ran_nvenc_ok = False
+        if not _is_gpu_busy_with_pipeline():
+            nvenc_cmd = [
+                "ffmpeg", "-y", "-v", "error", "-hwaccel", "cuda", "-i", str(src_path),
+                "-vf", "scale='min(540,iw)':-2,format=yuv420p",
+                "-c:v", "h264_nvenc", "-preset", "p1", "-rc", "vbr", "-cq", "28",
+                "-c:a", "copy", "-movflags", "+faststart", str(tmp),
+            ]
+            res = subprocess.run(nvenc_cmd, capture_output=True, timeout=300)
+            ran_nvenc_ok = (res.returncode == 0 and tmp.is_file() and tmp.stat().st_size > 1_000)
+        if not ran_nvenc_ok:
             tmp.unlink(missing_ok=True)
             subprocess.run(
                 ["ffmpeg", "-y", "-v", "error", "-i", str(src_path),
@@ -4148,14 +4609,23 @@ async def api_manual_generate_cn(payload: Dict[str, Any] = Body(...)):
                 from ai.v1_asr_isolated import extract_subtitles_isolated
 
                 srt_path = job_dir / "original.srt"
+                _, voc_stem = _find_vocal_files(job_dir)
                 from v1_gpu_gatekeeper import gpu_gatekeeper
                 with gpu_gatekeeper("studio_speech_asr"):
-                    segments = extract_subtitles_isolated(wav, srt_path)
+                    if voc_stem and voc_stem.is_file():
+                        segments = extract_subtitles_isolated(voc_stem, srt_path, original_audio_path=wav)
+                    else:
+                        segments = extract_subtitles_isolated(wav, srt_path)
                 _snapshot_srt_source(srt_path)
+                cn_subtitles = parse_srt(srt_path.read_text(encoding="utf-8", errors="replace")) if srt_path.is_file() else []
                 job.update({
                     "status": "done", "progress": 100,
-                    "stage": f"Đã tạo {len(segments)} câu sub tiếng Trung — bấm câu trên timeline để xem/sửa",
-                    "result": {"count": len(segments), "srt": str(srt_path)},
+                    "stage": f"Đã tạo {len(cn_subtitles) or len(segments)} câu sub tiếng Trung — bấm 'Dịch' để dịch sang tiếng Việt",
+                    "result": {
+                        "count": len(cn_subtitles) or len(segments),
+                        "srt": str(srt_path),
+                        "subtitles": cn_subtitles,
+                    },
                 })
         except Exception as e:
             logger.exception("Manual generate-cn job lỗi")
@@ -4176,6 +4646,19 @@ async def api_manual_translate(payload: Dict[str, Any] = Body(...)):
     target_lang = (payload.get("target_lang") or "vi").strip()
     job_dir = resolve_job_dir(stem)
     srt_original = job_dir / "original.srt"
+    payload_cn = payload.get("chinese_subtitles")
+    if isinstance(payload_cn, list) and payload_cn:
+        job_dir.mkdir(parents=True, exist_ok=True)
+        cn_blocks = []
+        for idx, c_item in enumerate(payload_cn, 1):
+            c_txt = (c_item.get("text") or c_item.get("original_text") or "").strip()
+            if not c_txt:
+                continue
+            c_st = float(c_item.get("start", 0.0))
+            c_en = float(c_item.get("end", c_st + 2.0))
+            cn_blocks.append(f"{idx}\n{format_srt_timestamp(c_st)} --> {format_srt_timestamp(c_en)}\n{c_txt}\n")
+        if cn_blocks:
+            atomic_write_text(srt_original, "\n".join(cn_blocks))
     if not srt_original.is_file():
         raise HTTPException(status_code=400, detail="Chưa có sub Trung gốc — bấm 'Sub Trung' trước đã!")
 
@@ -4358,8 +4841,6 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
 
             tts_dir = job_dir / "manual_tts"
             tts_dir.mkdir(parents=True, exist_ok=True)
-            for old in tts_dir.glob("*.mp3"):
-                old.unlink(missing_ok=True)
 
             raw_blocks = parse_srt(srt_translated.read_text(encoding="utf-8", errors="replace"))
             if not raw_blocks:
@@ -4373,6 +4854,24 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
                     content=(b.get("text") or "").strip(),
                 ))
 
+            try:
+                only_cue_index = int(payload.get("only_cue_index") or 0)
+            except (TypeError, ValueError):
+                only_cue_index = 0
+
+            # Nếu yêu cầu đọc lại đúng 1 câu VÀ các câu còn lại đã có file mp3 cache -> chỉ tạo lại đúng 1 câu (~1.5s)!
+            can_partial = (
+                1 <= only_cue_index <= len(cues)
+                and all((tts_dir / f"{c.index}.mp3").is_file() for c in cues if c.index != only_cue_index)
+            )
+            if can_partial:
+                (tts_dir / f"{only_cue_index}.mp3").unlink(missing_ok=True)
+                cues_to_synth = [c for c in cues if c.index == only_cue_index]
+            else:
+                for old in tts_dir.glob("*.mp3"):
+                    old.unlink(missing_ok=True)
+                cues_to_synth = cues
+
             from ai.voice_cloning import generate_single_tts
 
             def _stop_requested() -> bool:
@@ -4382,13 +4881,13 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
 
             async def run_all():
                 failed = []
-                total = len(cues)
-                for cue in cues:
+                total = len(cues_to_synth)
+                for step_idx, cue in enumerate(cues_to_synth, 1):
                     if _stop_requested():
                         return failed, True
                     cue_dur = max(0.5, (cue.end - cue.start).total_seconds())
-                    _manual_job_set(job_id, progress=10 + int(80 * (cue.index - 1) / max(1, total)),
-                                    stage=f"Đang đọc câu {cue.index}/{total} ({provider_label})...")
+                    _manual_job_set(job_id, progress=10 + int(80 * (step_idx - 1) / max(1, total)),
+                                    stage=f"Đang đọc câu #{cue.index} ({step_idx}/{total} · {provider_label})...")
                     try:
                         await generate_single_tts(cue, str(tts_dir), voice_source, voice_param,
                                                   api_key=os.getenv("GEMINI_API_KEY", ""),
@@ -4413,7 +4912,7 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
             if not ok_cues:
                 raise RuntimeError(
                     f"Không tạo được file giọng nào — API TTS không trả về audio "
-                    f"({len(failed_idx)}/{len(cues)} câu lỗi, xem log 'Manual TTS câu ... lỗi')"
+                    f"({len(failed_idx)}/{len(cues_to_synth)} câu lỗi, xem log 'Manual TTS câu ... lỗi')"
                 )
 
             # Lắp bản lồng: bed im lặng full video + từng câu đặt đúng vị trí
@@ -4445,12 +4944,21 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
             if res.returncode != 0 or not (job_dir / "manual_tts_track.wav").is_file():
                 raise RuntimeError("FFmpeg lắp bản lồng thất bại: " + (res.stderr or "")[-200:])
 
+            cue_mp3 = tts_dir / f"{only_cue_index}.mp3" if 1 <= only_cue_index <= len(cues) else None
+            cue_audio_url = stream_file_url(cue_mp3, cache_bust=True) if (cue_mp3 and cue_mp3.is_file()) else ""
+            stage_msg = (
+                f"Đã cập nhật giọng câu #{only_cue_index} ({provider_label})"
+                if can_partial
+                else f"Đã tạo giọng đọc {len(ok_cues)}/{len(cues)} câu bằng {provider_label}"
+                     + (f" — {len(failed_idx)} câu lỗi" if failed_idx else "")
+            )
             job.update({
                 "status": "done", "progress": 100,
-                "stage": f"Đã tạo giọng đọc {len(ok_cues)}/{len(cues)} câu bằng {provider_label}"
-                         + (f" — {len(failed_idx)} câu lỗi" if failed_idx else ""),
+                "stage": stage_msg,
                 "result": {
                     "count": len(ok_cues), "failed": failed_idx,
+                    "partial_cue": only_cue_index if can_partial else 0,
+                    "cue_audio_url": cue_audio_url,
                     "track_url": stream_file_url(job_dir / "manual_tts_track.wav", cache_bust=True),
                     "voice": provider_label,
                 },
@@ -4469,6 +4977,25 @@ async def api_manual_generate_tts(payload: Dict[str, Any] = Body(...)):
 
     threading.Thread(target=worker, daemon=True).start()
     return {"status": "ok", "job_id": job_id}
+
+
+def _compose_bilingual_srt(orig_subs: List[Dict[str, Any]], trans_subs: List[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for idx in range(max(len(trans_subs), len(orig_subs))):
+        ts = trans_subs[idx] if idx < len(trans_subs) else None
+        os_sub = orig_subs[idx] if idx < len(orig_subs) else None
+        s_str = ts["start_str"] if ts else os_sub["start_str"]
+        e_str = ts["end_str"] if ts else os_sub["end_str"]
+        viet_txt = ts["text"] if ts else ""
+        orig_txt = os_sub["text"] if os_sub else ""
+        lines.append(str(idx + 1))
+        lines.append(f"{s_str} --> {e_str}")
+        if viet_txt:
+            lines.append(viet_txt)
+        if orig_txt:
+            lines.append(orig_txt)
+        lines.append("")
+    return "\n".join(lines)
 
 
 @router.get("/api/workflow/download-srt")
@@ -4497,25 +5024,7 @@ async def api_download_srt(stem: str = Query(...), type: str = Query("translated
         if not trans_subs and not orig_subs:
             raise HTTPException(status_code=404, detail="Chưa có phụ đề để tạo song ngữ")
         
-        # Ghép song ngữ
-        lines = []
-        count = max(len(trans_subs), len(orig_subs))
-        for idx in range(count):
-            ts = trans_subs[idx] if idx < len(trans_subs) else None
-            os_sub = orig_subs[idx] if idx < len(orig_subs) else None
-            s_str = ts["start_str"] if ts else os_sub["start_str"]
-            e_str = ts["end_str"] if ts else os_sub["end_str"]
-            viet_txt = ts["text"] if ts else ""
-            orig_txt = os_sub["text"] if os_sub else ""
-
-            lines.append(str(idx + 1))
-            lines.append(f"{s_str} --> {e_str}")
-            if viet_txt:
-                lines.append(viet_txt)
-            if orig_txt:
-                lines.append(orig_txt)
-            lines.append("")
-        content = "\n".join(lines)
+        content = _compose_bilingual_srt(orig_subs, trans_subs)
         filename = f"{stem}_SongNgu.srt"
     else: # "translated" or "vietnamese"
         if not trans_srt_file.is_file():
@@ -4553,6 +5062,7 @@ def format_srt_timestamp(seconds: float) -> str:
 async def api_save_workflow_subtitles(payload: Dict[str, Any] = Body(...)):
     """Lưu phụ đề đã chỉnh sửa từ giao diện trực tiếp vào tệp translated.srt."""
     stem = safe_stem(payload.get("stem"), field="stem video")
+    _assert_stem_not_in_active_pipeline(stem)
     subs = payload.get("subtitles", [])
     job_dir = resolve_job_dir(stem)
     if not job_dir.is_dir():
@@ -4704,6 +5214,7 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
     _check_export_cancelled(job_ctl)
     _export_stage(job_ctl, 4, "Đang kiểm tra nguồn video...")
     stem = safe_stem(payload.get("stem"))
+    _assert_stem_not_in_active_pipeline(stem)
 
     resolution = str(payload.get("resolution", "1080p")).lower()
     if resolution not in ("720p", "1080p", "2k", "1440p", "4k"):
@@ -4789,29 +5300,41 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
 
     # Thiết lập bộ lọc FFmpeg
     extra_inputs = []
-    video_scale = float(cfg.get("video_scale", 1.0))
     mirror = bool(cfg.get("mirror", False))
-    bg_type = str(cfg.get("bg_type", "image")).lower()
-    motion_bg_enabled = bool(cfg.get("motion_bg_enabled", False))
-    if motion_bg_enabled:
-        bg_type = "video_motion"
-    elif bg_type == "video_motion" and not motion_bg_enabled:
-        bg_type = "image"
-
-    bg_motion_file = str(cfg.get("bg_motion_file", "song_bien.mp4"))
-    bg_image_file = str(cfg.get("bg_image_file", "tia_sang_vang_ngoi_sao.jpg"))
     auto_crop_black_bars = bool(cfg.get("auto_crop_black_bars", True))
 
     # Audio input & vocal isolation mode
     vocal_mode = str(payload.get("vocal_mode", "full")).strip().lower()
     inst_path, voc_path = _find_vocal_files(job_dir) if job_dir.is_dir() else (None, None)
+    tts_wav_cand = (job_dir / "manual_tts_track.wav") if job_dir.is_dir() else None
+    tts_mix_active = bool(payload.get("tts_mix") and tts_wav_cand and tts_wav_cand.is_file())
+    tts_base_volume = 1.0
 
     if vocal_mode == "no_vocals" and inst_path and inst_path.is_file():
         audio_input_path = inst_path
+        if tts_mix_active:
+            tts_base_volume = 0.85
     elif vocal_mode == "vocals" and voc_path and voc_path.is_file():
         audio_input_path = voc_path
+        if tts_mix_active:
+            tts_base_volume = 0.85
     elif vocal_mode == "mute":
         audio_input_path = None
+    elif tts_mix_active:
+        # Khi trộn giọng lồng AI mới (tts_mix=True) và người dùng đang để "full":
+        # TUYỆT ĐỐI không lấy mixed.wav / final_video (đã có giọng cũ -> gây chồng 2 giọng đọc cùng lúc!).
+        # Ưu tiên nhạc nền BS-RoFormer (inst_path); nếu chưa tách nhạc thì hạ nhỏ âm thanh gốc (0.20).
+        if inst_path and inst_path.is_file():
+            audio_input_path = inst_path
+            tts_base_volume = 0.85
+        elif job_dir.is_dir() and (job_dir / "original.wav").is_file():
+            audio_input_path = job_dir / "original.wav"
+            tts_base_volume = 0.20
+        elif source_video and source_video.is_file():
+            audio_input_path = source_video
+            tts_base_volume = 0.20
+        else:
+            audio_input_path = None
     else:
         audio_source = final_video if final_video else source_video
         if job_dir.is_dir() and (job_dir / "mixed.wav").is_file():
@@ -4820,10 +5343,7 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
             audio_input_path = audio_source
 
     v_input_path = source_video if source_video else final_video
-
     flip_str = "hflip," if mirror else ""
-    fw = max(100, int(tw * video_scale)) & ~1
-    fh = max(100, int(th * video_scale)) & ~1
 
     srt_filter = ""
     custom_ass = build_custom_ass_file(job_dir, cfg, tw, th) if job_dir.is_dir() else None
@@ -4844,122 +5364,12 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
         logger.info(f"Video {v_input_path} có luồng video ({v_dur:.2f}s) ngắn hơn audio ({a_dur:.2f}s) -> Tự động cắt khớp {v_dur:.2f}s để tránh đơ màn hình")
         duration_args = ["-t", f"{v_dur:.3f}"]
 
-    protect_top_thumb = bool(cfg.get("protect_top_thumb", True))
     crop_padding = int(cfg.get("crop_padding", 0))
-    smart_mask_info = None
 
     if use_anti_reup:
-        real_motion_path = resolve_motion_bg_path(bg_motion_file) if bg_type == "video_motion" else ""
-        if protect_top_thumb:
-            smart_mask_info = generate_smart_thumb_mask(str(v_input_path), tw=tw, th=th, padding=crop_padding)
-
-        if smart_mask_info and smart_mask_info.get("thumb_found"):
-            # PHƯƠNG ÁN 1: Tự động bảo vệ thẻ chữ Thumb trên, che toàn bộ viền đen trên & dưới bằng nền mới
-            mask_file = smart_mask_info["mask_path"]
-            if bg_type == "video_motion" and real_motion_path and os.path.isfile(real_motion_path):
-                extra_inputs = ["-stream_loop", "-1", "-i", real_motion_path, "-loop", "1", "-i", mask_file]
-                fc = (
-                    f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
-                    f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
-                    f"[2:v]scale={tw}:{th},setsar=1[msk];"
-                    f"[fg][msk]alphamerge[fg_alpha];"
-                    f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
-                )
-            elif bg_type == "image":
-                real_image_path = resolve_image_bg_path(bg_image_file)
-                if real_image_path and os.path.isfile(real_image_path):
-                    extra_inputs = ["-loop", "1", "-i", real_image_path, "-loop", "1", "-i", mask_file]
-                    fc = (
-                        f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
-                        f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
-                        f"[2:v]scale={tw}:{th},setsar=1[msk];"
-                        f"[fg][msk]alphamerge[fg_alpha];"
-                        f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
-                    )
-                else:
-                    safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
-                    extra_inputs = ["-loop", "1", "-i", mask_file]
-                    fc = (
-                        f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
-                        f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
-                        f"[1:v]scale={tw}:{th},setsar=1[msk];"
-                        f"[fg][msk]alphamerge[fg_alpha];"
-                        f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
-                    )
-            elif bg_type == "blur":
-                extra_inputs = ["-loop", "1", "-i", mask_file]
-                fc = (
-                    f"[0:v]split=2[v_orig][v_bg];"
-                    f"[v_bg]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur=25:5,setsar=1,colorlevels=rimax=0.65:gimax=0.65:bimax=0.65[bg];"
-                    f"[v_orig]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
-                    f"[1:v]scale={tw}:{th},setsar=1[msk];"
-                    f"[fg][msk]alphamerge[fg_alpha];"
-                    f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
-                )
-            else:
-                safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
-                extra_inputs = ["-loop", "1", "-i", mask_file]
-                fc = (
-                    f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
-                    f"[0:v]{flip_str}scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[fg];"
-                    f"[1:v]scale={tw}:{th},setsar=1[msk];"
-                    f"[fg][msk]alphamerge[fg_alpha];"
-                    f"[bg][fg_alpha]overlay=0:0:shortest=1{srt_filter}[outv]"
-                )
-        else:
-            # Chế độ thông thường khi không có thumb card trên
-            crop_prefix = ""
-            if auto_crop_black_bars:
-                crop_box = detect_letterbox_crop(str(v_input_path), padding=crop_padding)
-                if crop_box:
-                    crop_prefix = f"crop={crop_box['w']}:{crop_box['h']}:{crop_box['x']}:{crop_box['y']},"
-
-            # Chế độ co dãn: Khi video_scale >= 0.99 (mặc định), giữ nguyên 100% chiều ngang, 2 bên sát mép (x=0)
-            # Background chỉ che 2 phần đen trên và dưới
-            if video_scale >= 0.99:
-                scale_fg = f"{crop_prefix}{flip_str}scale={tw}:-2,setsar=1"
-                overlay_coord = "0:(H-h)/2"
-            else:
-                scale_fg = f"{crop_prefix}{flip_str}scale={fw}:{fh}:force_original_aspect_ratio=decrease,setsar=1"
-                overlay_coord = "(W-w)/2:(H-h)/2"
-
-            if bg_type == "video_motion" and real_motion_path and os.path.isfile(real_motion_path):
-                extra_inputs = ["-stream_loop", "-1", "-i", real_motion_path]
-                fc = (
-                    f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
-                    f"[0:v]{scale_fg}[fg];"
-                    f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
-                )
-            elif bg_type == "image":
-                real_image_path = resolve_image_bg_path(bg_image_file)
-                if real_image_path and os.path.isfile(real_image_path):
-                    extra_inputs = ["-loop", "1", "-i", real_image_path]
-                    fc = (
-                        f"[1:v]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},setsar=1[bg];"
-                        f"[0:v]{scale_fg}[fg];"
-                        f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
-                    )
-                else:
-                    safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
-                    fc = (
-                        f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
-                        f"[0:v]{scale_fg}[fg];"
-                        f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
-                    )
-            elif bg_type == "blur":
-                fc = (
-                    f"[0:v]split=2[bg_in][fg_in];"
-                    f"[bg_in]scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th},boxblur=25:5,setsar=1,colorlevels=rimax=0.65:gimax=0.65:bimax=0.65[bg];"
-                    f"[fg_in]{scale_fg}[fg];"
-                    f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
-                )
-            else:
-                safe_color = safe_hex_color(cfg.get("bg_color", "#f59e0b"), "#f59e0b").replace("#", "0x")
-                fc = (
-                    f"color=c={safe_color}:s={tw}x{th}:r=30[bg];"
-                    f"[0:v]{scale_fg}[fg];"
-                    f"[bg][fg]overlay={overlay_coord}{srt_filter}[outv]"
-                )
+        extra_inputs, fc = _build_anti_reup_video_filter(
+            v_input_path, cfg, tw, th, srt_filter=srt_filter
+        )
     else:
         # Không chống re-up: Xuất kích thước chuẩn
         crop_prefix = ""
@@ -4968,7 +5378,14 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
             if crop_box:
                 crop_prefix = f"crop={crop_box['w']}:{crop_box['h']}:{crop_box['x']}:{crop_box['y']},"
 
-        if final_video and not mirror and not localized_export:
+        srt_edited_after_final = False
+        if srt_file and final_video and source_video:
+            try:
+                srt_edited_after_final = srt_file.stat().st_mtime > final_video.stat().st_mtime + 0.5
+            except OSError:
+                srt_edited_after_final = False
+
+        if final_video and not mirror and not localized_export and not ((tts_mix_active or srt_edited_after_final) and source_video):
             fc = f"[0:v]{crop_prefix}scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1[outv]"
             v_input_path = final_video
         else:
@@ -5023,7 +5440,7 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
             tts_idx = cmd_inputs.count("-i")
             cmd_inputs.extend(["-i", str(tts_wav)])
             if map_audio:
-                fc += ";" + _build_tts_mix_filter_lines(map_audio, tts_idx)
+                fc += ";" + _build_tts_mix_filter_lines(map_audio, tts_idx, base_volume=tts_base_volume)
                 map_audio = "[expaout]"
             else:
                 fc += f";[{tts_idx}:a]aformat=sample_rates=44100:channel_layouts=stereo[expaout]"
@@ -5147,18 +5564,7 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
         elif srt_type == "bilingual" and (trans_srt_f.is_file() or orig_srt_f.is_file()):
             orig_s = parse_srt(orig_srt_f.read_text(encoding="utf-8", errors="replace")) if orig_srt_f.is_file() else []
             trans_s = parse_srt(trans_srt_f.read_text(encoding="utf-8", errors="replace")) if trans_srt_f.is_file() else []
-            blines = []
-            for idx in range(max(len(trans_s), len(orig_s))):
-                ts = trans_s[idx] if idx < len(trans_s) else None
-                os_s = orig_s[idx] if idx < len(orig_s) else None
-                s_str = ts["start_str"] if ts else os_s["start_str"]
-                e_str = ts["end_str"] if ts else os_s["end_str"]
-                blines.append(str(idx + 1))
-                blines.append(f"{s_str} --> {e_str}")
-                if ts: blines.append(ts["text"])
-                if os_s: blines.append(os_s["text"])
-                blines.append("")
-            atomic_write_text(srt_target, "\n".join(blines), encoding="utf-8-sig")
+            atomic_write_text(srt_target, _compose_bilingual_srt(orig_s, trans_s), encoding="utf-8-sig")
             exported_srt_path = str(srt_target)
         elif trans_srt_f.is_file():
             atomic_write_text(srt_target, trans_srt_f.read_text(encoding="utf-8", errors="replace"), encoding="utf-8-sig")
