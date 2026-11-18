@@ -310,12 +310,13 @@ window.fetch = async function() {
     </div>
 
     <div class="hw-status">
-      <div class="badge badge-cu" title="Số dư Compute Units thực tế trên tài khoản Colab">
-        <span class="dot dot-green"></span>
-        Số dư: <b id="header-cu-balance">--</b>
+      <div class="badge badge-cu" id="header-cu-balance-badge" title="Số CU còn lại theo lần đọc số dư Colab gần nhất">
+        <span class="dot dot-green" id="header-cu-balance-dot"></span>
+        CU còn lại: <b id="header-cu-balance">--</b>
+        <span id="header-cu-balance-age" style="font-size: 10px; color: var(--text-sub);">Chưa có dữ liệu</span>
       </div>
       <div class="badge badge-online" id="header-budget-badge" title="Hạn mức tiêu thụ CU trong ngày">
-        🛡️ Hôm nay: <b id="header-cu-budget">0.00 / 10.0 CU</b>
+        🛡️ CU hôm nay: <b id="header-cu-budget">0.00 / 10.0 CU</b>
       </div>
       <div class="badge badge-gpu" title="Tốc độ tiêu thụ CU hiện thời">
         Tải: <b id="header-cu-rate">0.00 CU/h</b>
@@ -326,6 +327,13 @@ window.fetch = async function() {
       </div>
       <div class="badge badge-gpu" id="header-worker-badge" title="Background Worker tự động lấy job">
         Worker: <b id="header-worker-text">Đang chạy</b>
+      </div>
+      <div class="badge badge-online" id="header-provider-cache-badge" title="Độ tươi dữ liệu kết nối Colab">
+        Colab: <b id="header-provider-cache-text">--</b>
+      </div>
+      <div class="badge badge-gpu" id="header-telebot-badge" style="display: none;" title="Bot Telegram riêng của Cloud GPU">
+        <span class="dot dot-green" id="header-telebot-dot"></span>
+        Telebot: <b id="header-telebot-text">--</b>
       </div>
       <a href="http://127.0.0.1:8088/" class="btn btn-outline" style="margin-left: 6px;" title="Quay lại giao diện Tool V1 Local chính thức">💻 Về Local (8088)</a>
     </div>
@@ -368,10 +376,13 @@ window.fetch = async function() {
       <div class="progress-track">
         <div class="progress-fill" id="hero-progress-fill" style="width: 0%;"></div>
       </div>
+      <div id="hero-alert-banner" style="display: none; margin-top: 10px; font-size: 11px; padding: 8px 10px; border-radius: 6px; background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); color: #fcd34d;"></div>
     </div>
 
-    <!-- Active Sessions Safety Alert (If dangling sessions exist) -->
+    <!-- Active Sessions & Unrecovered Cleanup Alert -->
     <div id="session-alert-container" style="display: none;"></div>
+    <div id="cleanup-alert-container" style="display: none;"></div>
+    <div id="rollout-alerts" role="status" class="spec-box" hidden></div>
 
     <!-- Main Grid -->
     <div class="main-grid">
@@ -379,8 +390,17 @@ window.fetch = async function() {
       <!-- Left Panel: Enqueue & Controls -->
       <div class="card">
         <div class="card-header">
-          <div class="card-title">⚡ Khởi Tạo Job Cloud (Tạm Thời)</div>
-          <span class="badge badge-warn" style="font-size: 10px;">Colab T4/L4</span>
+          <div class="card-title">Phát hành Cloud</div>
+        </div>
+
+        <p id="rollout-status" role="status">Đang kiểm tra lượt Cloud…</p>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <button type="button" class="btn btn-outline" id="btn-arm-rollout" onclick="setRollout('arm')">
+            Mở một lượt Cloud
+          </button>
+          <button type="button" class="btn btn-outline" id="btn-pause-rollout" onclick="setRollout('pause')">
+            Khóa nhận job Cloud
+          </button>
         </div>
 
         <form id="form-enqueue" style="display: flex; flex-direction: column; gap: 12px;">
@@ -415,28 +435,34 @@ window.fetch = async function() {
             <div class="form-group">
               <label>Giọng Đọc AI (TTS):</label>
               <select id="select-voice">
-                <option value="BV562_streaming" selected>CapCut · Mai (Nữ Chuẩn V1)</option>
+                <option value="auto" selected>Tự động Nam/Nữ (Chuẩn Tool V1 · Mai / Thanh Niên)</option>
+                <option value="BV562_streaming">CapCut · Mai (Nữ Chuẩn V1)</option>
                 <option value="BV075_streaming">CapCut · Thanh Niên Tự Tin (Nam)</option>
                 <option value="BV421_vivn_streaming">CapCut · Cô Gái Tươi Vui</option>
                 <option value="vi-VN-HoaiMyNeural">Edge · Hoài My (Nữ)</option>
                 <option value="vi-VN-NamMinhNeural">Edge · Nam Minh (Nam)</option>
               </select>
             </div>
+
+            <label style="display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-sub); text-transform: none; cursor: pointer;">
+              <input type="checkbox" id="chk-allow-no-speech" style="width: auto;">
+              Cho phép xuất video không lời thoại (giữ nhạc nền nếu ASR rỗng)
+            </label>
           </div>
 
           <!-- Specs Info Box -->
           <div class="spec-box">
-            <div style="font-weight: 600; color: #fff; margin-bottom: 4px;">Quy trình 8 bước tự động:</div>
+            <div style="font-weight: 600; color: #fff; margin-bottom: 4px;">Quy trình chuẩn Tool V1 (100% đồng bộ):</div>
             <div>
-              <span class="spec-tag">Demucs v4</span> Tách sạch vocal gốc & BGM<br>
-              <span class="spec-tag">Whisper v3</span> ASR trên vocal track không tạp âm<br>
-              <span class="spec-tag">Gemini Flash</span> Dịch thuật tự nhiên<br>
-              <span class="spec-tag">EBU R128</span> Sidechain Ducking hạ nhạc khi có tiếng nói
+              <span class="spec-tag">Auto Voice</span> Tự khóa giọng Nam/Nữ theo người nói đầu<br>
+              <span class="spec-tag">Localized Blur</span> Xóa mờ cục bộ chữ Trung & viền chữ nét<br>
+              <span class="spec-tag">Canvas 9:16</span> Tự chuyển khung dọc 1080×1920 nền mờ<br>
+              <span class="spec-tag">EBU R128</span> Tách nhạc sạch & hòa âm Sidechain Ducking
             </div>
           </div>
 
-          <button type="submit" class="btn btn-primary" id="btn-submit-enqueue" style="padding: 10px; justify-content: center; font-size: 13px;">
-            🚀 ĐẨY LINK / VIDEO LÊN CLOUD GPU
+          <button type="submit" class="btn btn-primary" id="btn-submit-enqueue" disabled style="padding: 10px; justify-content: center; font-size: 13px;">
+            Chạy video này trên Cloud
           </button>
         </form>
 
@@ -521,16 +547,106 @@ window.fetch = async function() {
   <script>
     let workerActive = true;
     let currentActiveJobId = null;
+    let rolloutPermit = null;
+    let enqueuePending = false;
+    let rolloutPending = false;
+    let latestJobsById = {};
+
+    function isHealthyRunningJob(j) {
+      if (!j) return false;
+      const runningStates = [
+        'provisioning',
+        'creating_session',
+        'uploading',
+        'preparing',
+        'processing',
+        'downloading',
+        'validating',
+      ];
+      if (!runningStates.includes(j.state)) return false;
+      if (j.cancel_requested_at) return false;
+      if (j.lease_expires_at && (Number(j.lease_expires_at) * 1000) < (Date.now() - 15000)) {
+        return false;
+      }
+      return true;
+    }
+
+    function syncEnqueueButton() {
+      document.getElementById('btn-submit-enqueue').disabled =
+        enqueuePending || !(rolloutPermit || pendingEnqueueIdempotencyKey);
+    }
+
+    function renderRollout(data) {
+      const rollout = data.rollout || {};
+      rolloutPermit = rollout.phase === 'armed' ? rollout.permit_id : null;
+      document.getElementById('rollout-status').textContent = {
+        armed: 'Đã mở một lượt cho Dashboard hoặc lệnh /cloud trên Telegram.',
+        admitted: rollout.job_id ? `Đã dùng lượt cho ${rollout.job_id}.` : 'Đã dùng lượt Cloud.',
+        paused: 'Cloud đang khóa.',
+      }[rollout.phase] || 'Chưa đọc được trạng thái Cloud.';
+      document.getElementById('btn-arm-rollout').disabled = rolloutPending || rollout.phase === 'armed';
+      document.getElementById('btn-pause-rollout').disabled = rolloutPending || rollout.phase === 'paused';
+      syncEnqueueButton();
+
+      const alertBox = document.getElementById('rollout-alerts');
+      const alertLabels = {
+        CLEANUP_PENDING: 'Chờ thu hồi session',
+        LEDGER_UNRECONCILED: 'Chờ đối soát CU',
+        DEADLINE_EXCEEDED: 'Quá hạn',
+        QC_FAILED: 'QC thất bại',
+        DUPLICATE_SUBMISSION: 'Đã gộp yêu cầu gửi lặp',
+        STATUS_SLOW: 'Phản hồi trạng thái chậm',
+      };
+      const healthyJob = isHealthyRunningJob(data.active_job) ? data.active_job : null;
+      const alerts = (data.rollout_alerts || [])
+        .filter(({code, job_id}) => !(
+          code === 'CLEANUP_PENDING' &&
+          healthyJob &&
+          job_id === healthyJob.job_id &&
+          healthyJob.cleanup_status === 'pending'
+        ))
+        .map(({code, job_id}) => `${alertLabels[code] || code}${job_id ? ` · ${job_id}` : ''}`);
+      alertBox.textContent = alerts.join(' | ');
+      alertBox.hidden = !alerts.length;
+    }
+
+    async function setRollout(action) {
+      rolloutPending = true;
+      document.getElementById('btn-arm-rollout').disabled = true;
+      document.getElementById('btn-pause-rollout').disabled = true;
+      try {
+        const res = await fetch('/api/cloud/rollout', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({action}),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Không thể cập nhật lượt Cloud.');
+        renderRollout(data);
+      } catch (err) {
+        alert(err.message);
+      } finally {
+        rolloutPending = false;
+        await loadStatus();
+      }
+    }
 
     // Helper map state class
     function getStateBadge(state) {
       const map = {
         'queued': { label: 'Chờ chạy', cls: 'st-queued' },
+        'provisioning': { label: 'Tạo máy ảo', cls: 'st-creating' },
         'creating_session': { label: 'Tạo máy ảo', cls: 'st-creating' },
         'uploading': { label: 'Đang upload', cls: 'st-processing' },
+        'preparing': { label: 'Chuẩn bị AI', cls: 'st-processing' },
         'processing': { label: 'Đang xử lý', cls: 'st-processing' },
         'downloading': { label: 'Đang tải về', cls: 'st-downloading' },
+        'validating': { label: 'Kiểm tra file', cls: 'st-downloading' },
         'completed': { label: 'Hoàn tất', cls: 'st-completed' },
+        'cancel_requested': { label: 'Đang huỷ', cls: 'st-stopped' },
+        'cancelling': { label: 'Đang thu hồi GPU', cls: 'st-stopped' },
+        'cancelled': { label: 'Đã huỷ', cls: 'st-stopped' },
+        'failed': { label: 'Lỗi', cls: 'st-error' },
         'error': { label: 'Lỗi', cls: 'st-error' },
         'stopped': { label: 'Đã dừng', cls: 'st-stopped' }
       };
@@ -584,15 +700,78 @@ window.fetch = async function() {
         const res = await fetch('/api/cloud/status');
         const data = await res.json();
         if (data.status !== 'ok') return;
+        if (data.active_job && latestJobsById[data.active_job.job_id]) {
+          const fresher = latestJobsById[data.active_job.job_id];
+          if (
+            Number(fresher.version || 0) >= Number(data.active_job.version || 0) ||
+            Number(fresher.updated_at || 0) >= Number(data.active_job.updated_at || 0)
+          ) {
+            data.active_job = fresher;
+          }
+        }
+        renderRollout(data);
 
         // Balance & Quota
-        const balance = (data.usage?.balance ?? 0).toFixed(2);
         const rate = (data.usage?.usage_rate ?? 0).toFixed(2);
         const activeCount = data.usage?.active_assignments ?? 0;
 
-        document.getElementById('header-cu-balance').innerText = balance + ' CU';
+        const pCache = data.provider_cache || {};
+        const balanceEl = document.getElementById('header-cu-balance');
+        const balanceAgeEl = document.getElementById('header-cu-balance-age');
+        const balanceBadge = document.getElementById('header-cu-balance-badge');
+        const balanceDot = document.getElementById('header-cu-balance-dot');
+        if (pCache.balance_available && Number.isFinite(Number(data.usage?.balance))) {
+          const balanceAge = pCache.balance_age_seconds;
+          balanceEl.innerText = Number(data.usage.balance).toFixed(2) + ' CU';
+          balanceAgeEl.innerText = balanceAge == null
+            ? 'Đã nhận số liệu'
+            : `Cập nhật ${Math.round(balanceAge)}s trước${pCache.balance_stale ? ' · dữ liệu cũ' : ''}`;
+          balanceBadge.className = pCache.balance_stale ? 'badge badge-warn' : 'badge badge-cu';
+          balanceDot.className = pCache.balance_stale ? 'dot dot-yellow' : 'dot dot-green';
+        } else {
+          balanceEl.innerText = '--';
+          balanceAgeEl.innerText = pCache.in_flight ? 'Đang lấy số dư' : 'Chưa có dữ liệu';
+          balanceBadge.className = pCache.provider_unreachable ? 'badge badge-danger' : 'badge badge-warn';
+          balanceDot.className = 'dot dot-yellow';
+        }
         document.getElementById('header-cu-rate').innerText = rate + ' CU/h';
         document.getElementById('header-session-count').innerText = activeCount;
+
+        // Provider cache freshness indicator
+        const pBadge = document.getElementById('header-provider-cache-badge');
+        const pText = document.getElementById('header-provider-cache-text');
+        if (pBadge && pText) {
+          if (pCache.provider_unreachable || pCache.stale) {
+            const ageTxt = pCache.age_seconds != null ? `${Math.round(pCache.age_seconds)}s trước` : 'mất kết nối';
+            pBadge.className = pCache.provider_unreachable ? 'badge badge-danger' : 'badge badge-warn';
+            pText.innerText = pCache.in_flight ? `Đang đồng bộ (${ageTxt})` : `Cũ (${ageTxt})`;
+          } else {
+            pBadge.className = 'badge badge-cu';
+            pText.innerText = pCache.age_seconds != null ? `Trực tuyến (${Math.round(pCache.age_seconds)}s)` : 'Trực tuyến';
+          }
+        }
+
+        // Dedicated Cloud Telegram Bot indicator
+        const tbInfo = data.telegram_bot;
+        const tbBadge = document.getElementById('header-telebot-badge');
+        const tbText = document.getElementById('header-telebot-text');
+        const tbDot = document.getElementById('header-telebot-dot');
+        if (tbBadge && tbText && tbDot) {
+          if (tbInfo && tbInfo.configured) {
+            tbBadge.style.display = 'inline-flex';
+            if (tbInfo.running) {
+              tbBadge.className = 'badge badge-cu';
+              tbDot.className = 'dot dot-green';
+              tbText.innerText = tbInfo.bot_username ? `@${tbInfo.bot_username}` : 'Đang bật';
+            } else {
+              tbBadge.className = 'badge badge-warn';
+              tbDot.className = 'dot dot-yellow';
+              tbText.innerText = 'Đang kết nối…';
+            }
+          } else {
+            tbBadge.style.display = 'none';
+          }
+        }
 
         // Budget & Quota Limit
         if (data.budget) {
@@ -617,6 +796,11 @@ window.fetch = async function() {
           wBadge.className = 'badge badge-cu';
           toggleBtn.innerText = 'Tạm Dừng Worker';
           toggleBtn.className = 'btn btn-outline';
+        } else if (tbInfo && tbInfo.running) {
+          wText.innerText = 'Sẵn sàng (Bot)';
+          wBadge.className = 'badge badge-cu';
+          toggleBtn.innerText = 'Bật Worker Web';
+          toggleBtn.className = 'btn btn-outline';
         } else {
           wText.innerText = 'Đã dừng';
           wBadge.className = 'badge badge-danger';
@@ -635,7 +819,7 @@ window.fetch = async function() {
             <div class="session-alert-box">
               <div style="display: flex; align-items: center; gap: 8px;">
                 <span class="dot dot-yellow"></span>
-                <span style="font-weight: 600; color: #f87171;">CẢNH BÁO: Có ${sessions.length} máy ảo Colab đang mở nhưng không có job nào chạy (${sessions.map(s => s.name || s.id).join(', ')}).</span>
+                <span style="font-weight: 600; color: #f87171;">CẢNH BÁO: Có ${sessions.length} máy ảo Colab đang mở nhưng không có job nào chạy (${escapeHtml(sessions.map(s => s.name || s.id).join(', '))}).</span>
                 <span style="font-size: 11px; color: var(--text-muted);">(Hao phí ~${(sessions.length * 1.15).toFixed(2)} CU/h nếu để quên)</span>
               </div>
               <button class="btn btn-danger" onclick="emergencyStopAll()">🛑 Dừng Ngay Tất Cả</button>
@@ -645,22 +829,86 @@ window.fetch = async function() {
           alertBox.style.display = 'none';
         }
 
+        // Unrecovered Cloud Cleanup Resources Alert (bỏ qua VM đang chạy khoẻ mạnh của job hiện tại)
+        const healthyActive = isHealthyRunningJob(data.active_job) ? data.active_job : null;
+        const pendingCleanup = (data.pending_cleanup_events || []).filter(ev => !(
+          healthyActive &&
+          ev.job_id === healthyActive.job_id &&
+          ev.status === 'pending' &&
+          Number(ev.attempts || 0) === 0
+        ));
+        const cleanupBox = document.getElementById('cleanup-alert-container');
+        if (cleanupBox) {
+          if (pendingCleanup.length > 0) {
+            const itemsSummary = pendingCleanup.slice(0, 3).map(ev =>
+              `${ev.session_name} (job ${String(ev.job_id || '').slice(-8)}: ${ev.status}, lần thử ${ev.attempts || 0})`
+            ).join(' · ');
+            cleanupBox.style.display = 'block';
+            cleanupBox.innerHTML = `
+              <div class="session-alert-box" style="background: rgba(245, 158, 11, 0.09); border-color: rgba(245, 158, 11, 0.35);">
+                <div style="display: flex; flex-direction: column; gap: 2px;">
+                  <span style="font-weight: 600; color: #fbbf24;">⚠️ TÀI NGUYÊN CHƯA THU HỒI (${pendingCleanup.length} session):</span>
+                  <span style="font-size: 11px; color: var(--text-sub);">${escapeHtml(itemsSummary)}</span>
+                </div>
+                <button class="btn btn-danger" onclick="emergencyStopAll()">🧹 Thu Hồi Khẩn Cấp</button>
+              </div>
+            `;
+          } else {
+            cleanupBox.style.display = 'none';
+          }
+        }
+
         // Active Job Hero Card
         const job = data.active_job;
         const heroCard = document.getElementById('hero-card');
         const stopBtn = document.getElementById('hero-btn-stop');
+        const heroBanner = document.getElementById('hero-alert-banner');
 
         if (job) {
           currentActiveJobId = job.job_id;
           heroCard.className = 'hero-card active-running';
-          document.getElementById('hero-status-heading').innerText = `Đang Xử Lý: ${job.video_name}`;
+          const isPendingCancel = job.state === 'cancel_requested' || job.state === 'cancelling';
+          const isHealthy = isHealthyRunningJob(job);
+          document.getElementById('hero-status-heading').innerText = isPendingCancel
+            ? `Đang Huỷ / Thu Hồi GPU: ${job.video_name}`
+            : `Đang Xử Lý: ${job.video_name}`;
           document.getElementById('hero-job-id').innerText = `ID: ${job.job_id.slice(-8)}`;
           document.getElementById('hero-gpu-tag').innerText = `GPU: ${job.gpu_type}`;
           document.getElementById('hero-voice-tag').innerText = `Giọng: ${job.voice || 'Mai'}`;
-          document.getElementById('hero-step-desc').innerText = job.step_name || 'Đang thực thi...';
+          const baseStepDesc = job.step_name || 'Đang thực thi...';
+          document.getElementById('hero-step-desc').innerText = (
+            job.state === 'preparing' && isHealthy && !baseStepDesc.includes('2–4 phút')
+          )
+            ? `${baseStepDesc} (Máy ảo mới cài môi trường AI lần đầu thường mất ~2–4 phút)`
+            : baseStepDesc;
           document.getElementById('hero-percent-text').innerText = (job.percent || 0) + '%';
           document.getElementById('hero-progress-fill').style.width = (job.percent || 0) + '%';
           stopBtn.style.display = 'inline-flex';
+          if (isPendingCancel) {
+            stopBtn.disabled = true;
+            stopBtn.innerText = job.state === 'cancelling' ? '⏳ Đang thu hồi GPU...' : '⏳ Đang chờ huỷ...';
+          } else {
+            stopBtn.disabled = false;
+            stopBtn.innerText = '🛑 Huỷ Job';
+          }
+          if (heroBanner) {
+            const parts = [];
+            if (isPendingCancel) {
+              parts.push(`Trạng thái: ${job.state} (thu hồi VM: ${job.cleanup_status || 'pending'})`);
+            } else if (!isHealthy && !job.error) {
+              parts.push('⚠️ Tiến trình nền bị gián đoạn (quá hạn lease) — hệ thống đang tự thu hồi VM hoặc bấm Huỷ Job.');
+            } else if (job.cleanup_status && !['none', 'verified', 'pending'].includes(job.cleanup_status)) {
+              parts.push(`Thu hồi VM: ${job.cleanup_status}`);
+            }
+            if (job.error) parts.push(`Lỗi: ${job.error}`);
+            if (job.error_remediation) parts.push(`Gợi ý: ${job.error_remediation}`);
+            if (parts.length > 0) {
+              heroBanner.style.display = 'block';
+              heroBanner.innerText = parts.join(' | ');
+            } else {
+              heroBanner.style.display = 'none';
+            }
+          }
           updatePipelineTracker(job.percent || 0, job.step_name || '');
         } else {
           currentActiveJobId = null;
@@ -673,6 +921,9 @@ window.fetch = async function() {
           document.getElementById('hero-percent-text').innerText = '0%';
           document.getElementById('hero-progress-fill').style.width = '0%';
           stopBtn.style.display = 'none';
+          stopBtn.disabled = false;
+          stopBtn.innerText = '🛑 Huỷ Job';
+          if (heroBanner) heroBanner.style.display = 'none';
           updatePipelineTracker(0, '');
         }
 
@@ -689,6 +940,10 @@ window.fetch = async function() {
         if (data.status !== 'ok') return;
 
         const jobs = data.jobs || [];
+        latestJobsById = {};
+        jobs.forEach(item => {
+          if (item && item.job_id) latestJobsById[item.job_id] = item;
+        });
         document.getElementById('jobs-count-badge').innerText = `${jobs.length} jobs`;
 
         const tbody = document.getElementById('table-jobs-body');
@@ -705,12 +960,65 @@ window.fetch = async function() {
 
         tbody.innerHTML = jobs.map(j => {
           const timeStr = j.created_at ? new Date(j.created_at * 1000).toLocaleTimeString('vi-VN') : '--';
-          const cuStr = j.cu_actual ? `${j.cu_actual.toFixed(3)} CU` : (j.cu_estimated ? `~${j.cu_estimated.toFixed(2)} CU` : '--');
-          const isRunning = ['queued', 'creating_session', 'uploading', 'processing', 'downloading'].includes(j.state);
+          const estTxt = j.cu_estimated ? `${Number(j.cu_estimated).toFixed(2)} dự kiến` : '';
+          let cuMain = '--';
+          if (j.cu_actual && Number(j.cu_actual) > 0) {
+            cuMain = `~${Number(j.cu_actual).toFixed(3)} CU (ước tính/đối soát)`;
+          } else if (j.cu_reserved && Number(j.cu_reserved) > 0) {
+            cuMain = `${Number(j.cu_reserved).toFixed(2)} CU (giữ chỗ)`;
+          } else if (j.cu_estimated) {
+            cuMain = `~${Number(j.cu_estimated).toFixed(2)} CU (ước tính)`;
+          }
+          const cuStr = estTxt && (j.cu_actual || j.cu_reserved)
+            ? `<div>${cuMain}</div><div style="font-size:10px;color:var(--text-muted);">${estTxt}</div>`
+            : cuMain;
+
+          const isPendingCancel = ['cancel_requested', 'cancelling'].includes(j.state);
+          const isCancellable = [
+            'queued',
+            'provisioning',
+            'creating_session',
+            'uploading',
+            'preparing',
+            'processing',
+            'downloading',
+            'validating'
+          ].includes(j.state);
+          const isHealthyRow = isHealthyRunningJob(j);
+          const hasUnrecoveredCleanup = Boolean(
+            j.cleanup_status && !['none', 'verified'].includes(j.cleanup_status) && !(isHealthyRow && j.cleanup_status === 'pending')
+          );
+
+          let cleanupBadge = '';
+          if (isHealthyRow && j.cleanup_status === 'pending') {
+            cleanupBadge = `<div style="margin-top:4px;"><span class="badge badge-cu" style="font-size:10px;">🖥️ VM đang chạy${j.session_name ? ': ' + escapeHtml(j.session_name) : ''}</span></div>`;
+          } else if (hasUnrecoveredCleanup) {
+            cleanupBadge = `<div style="margin-top:4px;"><span class="badge badge-danger" style="font-size:10px;">⚠️ Thu hồi VM: ${escapeHtml(j.cleanup_status)}</span></div>`;
+          }
+
+          let detailHtml = '';
+          if (j.error || j.error_code) {
+            const codePrefix = j.error_code ? `[${escapeHtml(j.error_code)}] ` : '';
+            detailHtml += `<div style="font-size:10px;color:#fca5a5;margin-top:4px;">${codePrefix}${escapeHtml(j.error || '')}</div>`;
+            if (j.error_remediation) {
+              detailHtml += `<div style="font-size:10px;color:#fcd34d;margin-top:2px;">💡 ${escapeHtml(j.error_remediation)}</div>`;
+            }
+          } else if (j.state === 'completed' && (j.output_manifest || j.result_path)) {
+            const m = j.output_manifest || {};
+            const delivery = m.delivery_path || j.result_path || '';
+            const qcBadge = m.qc_passed === false
+              ? `<span class="badge badge-danger" style="font-size:10px;">QC Lỗi</span>`
+              : `<span class="badge badge-cu" style="font-size:10px;">QC Đạt</span>`;
+            detailHtml += `<div style="font-size:10px;color:var(--text-sub);margin-top:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${qcBadge}<span>${escapeHtml(delivery)}</span></div>`;
+          }
 
           let actionHtml = '';
-          if (isRunning) {
+          if (isPendingCancel) {
+            actionHtml = `<span class="badge st-stopped" style="font-size: 10px;">⏳ Chờ thu hồi</span>`;
+          } else if (isCancellable) {
             actionHtml = `<button class="btn btn-danger" style="padding: 3px 8px; font-size: 11px;" onclick="cancelJob('${j.job_id}')">Huỷ</button>`;
+          } else if (hasUnrecoveredCleanup) {
+            actionHtml = `<button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px;" disabled title="Chưa thu hồi xong VM Colab">Đợi thu hồi</button>`;
           } else {
             actionHtml = `<button class="btn btn-outline" style="padding: 3px 8px; font-size: 11px;" onclick="deleteJob('${j.job_id}')">Xoá</button>`;
           }
@@ -719,21 +1027,22 @@ window.fetch = async function() {
             <tr>
               <td>
                 <div style="font-weight: 600; color: #fff;">${escapeHtml(j.video_name)}</div>
-                <div style="font-size: 10px; color: var(--text-muted); font-family: ui-monospace, monospace;">${j.job_id}</div>
+                <div style="font-size: 10px; color: var(--text-muted); font-family: ui-monospace, monospace;">${escapeHtml(j.job_id)}</div>
               </td>
               <td>
-                <span class="badge badge-gpu" style="font-weight: 600;">${j.gpu_type}</span>
+                <span class="badge badge-gpu" style="font-weight: 600;">${escapeHtml(j.gpu_type)}</span>
                 <div style="font-size: 10px; color: var(--text-sub); margin-top: 2px;">${escapeHtml(j.voice || 'Mai')}</div>
               </td>
-              <td>${getStateBadge(j.state)}</td>
-              <td style="min-width: 150px;">
-                <div style="font-size: 11px; margin-bottom: 4px; display: flex; justify-content: space-between;">
+              <td>${getStateBadge(j.state)}${cleanupBadge}</td>
+              <td style="min-width: 170px;">
+                <div style="font-size: 11px; margin-bottom: 4px; display: flex; justify-content: space-between; gap: 6px;">
                   <span>${escapeHtml(j.step_name || '')}</span>
                   <b style="color: var(--accent); font-family: ui-monospace, monospace;">${j.percent || 0}%</b>
                 </div>
                 <div class="progress-track" style="height: 4px;">
                   <div class="progress-fill" style="width: ${j.percent || 0}%;"></div>
                 </div>
+                ${detailHtml}
               </td>
               <td style="font-family: ui-monospace, monospace; font-size: 11px;">${cuStr}</td>
               <td style="color: var(--text-sub); font-size: 11px;">${timeStr}</td>
@@ -752,6 +1061,25 @@ window.fetch = async function() {
       return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
+    let pendingEnqueueIdempotencyKey = null;
+    let pendingEnqueuePermit = null;
+    function _makeIdempotencyKey() {
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return 'dash-' + window.crypto.randomUUID();
+      }
+      return 'dash-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
+    }
+    function _resetIdempotencyKey() {
+      pendingEnqueueIdempotencyKey = null;
+      pendingEnqueuePermit = null;
+      syncEnqueueButton();
+    }
+    ['input-video-path', 'select-gpu', 'select-voice', 'chk-allow-no-speech'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('change', _resetIdempotencyKey);
+      if (el && el.tagName === 'INPUT') el.addEventListener('input', _resetIdempotencyKey);
+    });
+
     // Submit Enqueue
     document.getElementById('form-enqueue').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -759,37 +1087,55 @@ window.fetch = async function() {
       const videoPath = pathInput.value.trim();
       const gpuType = document.getElementById('select-gpu').value;
       const voice = document.getElementById('select-voice').value;
+      const allowNoSpeech = Boolean(document.getElementById('chk-allow-no-speech')?.checked);
 
-      if (!videoPath) return;
+      if (!videoPath || enqueuePending || !(rolloutPermit || pendingEnqueueIdempotencyKey)) return;
+      if (!pendingEnqueueIdempotencyKey) {
+        pendingEnqueueIdempotencyKey = _makeIdempotencyKey();
+        pendingEnqueuePermit = rolloutPermit;
+      }
 
       const btn = document.getElementById('btn-submit-enqueue');
-      btn.disabled = true;
+      enqueuePending = true;
+      syncEnqueueButton();
       btn.innerText = 'Đang gửi lên Cloud...';
 
       try {
         const res = await fetch('/api/cloud/enqueue', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Idempotency-Key': pendingEnqueueIdempotencyKey
+          },
           body: JSON.stringify({
             video_path: videoPath,
             gpu_type: gpuType,
             voice: voice,
-            task_type: 'full_pipeline'
+            task_type: 'full_pipeline',
+            idempotency_key: pendingEnqueueIdempotencyKey,
+            rollout_permit: pendingEnqueuePermit,
+            options: {
+              execution_mode: 'cloud',
+              allow_no_speech: allowNoSpeech
+            }
           })
         });
         const data = await res.json();
         if (data.status === 'ok') {
           pathInput.value = '';
+          _resetIdempotencyKey();
           await loadJobs();
           await loadStatus();
         } else {
+          if (res.status >= 400 && res.status < 500) _resetIdempotencyKey();
           alert('Không thể tạo job: ' + (data.detail || data.message || 'Lỗi không xác định'));
         }
       } catch (err) {
         alert('Lỗi kết nối: ' + err.message);
       } finally {
-        btn.disabled = false;
-        btn.innerText = '🚀 ĐẨY LINK / VIDEO LÊN CLOUD GPU';
+        enqueuePending = false;
+        syncEnqueueButton();
+        btn.innerText = 'Chạy video này trên Cloud';
       }
     });
 
@@ -847,16 +1193,27 @@ window.fetch = async function() {
     function updateBudgetUI(b) {
       if (!b) return;
       const spent = (b.spent_today || 0).toFixed(2);
+      const reserved = (b.reserved_today || 0).toFixed(2);
+      const committed = (b.committed_today !== undefined ? b.committed_today : (b.spent_today || 0)).toFixed(2);
       const budget = (b.budget_daily || 10).toFixed(1);
       const remaining = (b.remaining_today || 0).toFixed(2);
       const pct = b.percent_used || 0;
+      const estTag = b.cost_is_estimated !== false ? ' (ước tính)' : '';
 
       const headEl = document.getElementById('header-cu-budget');
-      if (headEl) headEl.innerText = `${spent} / ${budget} CU`;
+      if (headEl) headEl.innerText = `${committed} / ${budget} CU${estTag}`;
       const spentEl = document.getElementById('budget-spent-text');
-      if (spentEl) spentEl.innerText = `${spent} CU`;
+      if (spentEl) {
+        spentEl.innerText = Number(reserved) > 0
+          ? `${spent} CU${estTag} + ${reserved} giữ chỗ`
+          : `${spent} CU${estTag}`;
+      }
       const remEl = document.getElementById('budget-remaining-text');
-      if (remEl) remEl.innerText = `${remaining} CU`;
+      if (remEl) {
+        remEl.innerText = b.has_uncertain_budget
+          ? `${remaining} CU (chờ đối soát)`
+          : `${remaining} CU`;
+      }
       const pctEl = document.getElementById('budget-percent-tag');
       if (pctEl) pctEl.innerText = `${pct}%`;
 
@@ -926,17 +1283,15 @@ window.fetch = async function() {
       }
     }
 
-    function manualRefresh() {
-      loadStatus();
-      loadJobs();
+    async function manualRefresh() {
+      await loadJobs();
+      await loadStatus();
     }
 
     // Auto Refresh Loop (Every 3 seconds)
-    loadStatus();
-    loadJobs();
+    manualRefresh();
     setInterval(() => {
-      loadStatus();
-      loadJobs();
+      manualRefresh();
     }, 3000);
   </script>
 </body>

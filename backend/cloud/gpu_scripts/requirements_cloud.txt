@@ -1,14 +1,23 @@
-openai-whisper
-edge-tts
-google-genai
-pydub
-requests
-tqdm
-demucs
-soundfile
-scipy
-yt-dlp
-easyocr
-Pillow
-srt
-opencv-python-headless
+# Pinned runtime dependencies for Tool V1 Cloud GPU worker (Colab VM).
+# Keep aligned with requirements.lock.txt to guarantee reproducible builds.
+torch==2.5.1
+torchaudio==2.5.1
+torchvision==0.20.1
+numpy==1.26.4
+scipy==1.17.1
+soundfile==0.14.0
+pydub==0.25.1
+requests==2.34.2
+tqdm==4.70.1
+srt==3.5.3
+Pillow==12.3.0
+opencv-python-headless==4.10.0.84
+edge-tts==7.3.1
+google-genai==2.23.0
+yt-dlp==2026.10.26
+demucs==4.1.0
+easyocr==1.7.2
+openai-whisper==20240930
+faster-whisper==1.2.1
+ctranslate2==4.8.4
+onnxruntime==1.20.1

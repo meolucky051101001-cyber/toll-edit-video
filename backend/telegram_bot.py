@@ -1335,6 +1335,7 @@ def prepare_telegram_job(job):
     """Freeze queue identity and settings before the first attempt."""
     import uuid
     from copy import deepcopy
+    from v1_feature_flags import get_feature_flags
     from v1_job_policy import capture_job_settings
     from preset_service import resolve_effective_config
 
@@ -1342,13 +1343,31 @@ def prepare_telegram_job(job):
         job["job_id"] = f"telegram_{uuid.uuid4().hex}"
     if not re.fullmatch(r"[A-Za-z0-9_-]+", job["job_id"]):
         raise ValueError("Job ID Telegram khong hop le.")
+
+    flags_snapshot = get_feature_flags(WORKSPACE)
+    if "execution_mode" not in job or job.get("execution_mode") not in ("cloud", "local"):
+        is_cloud_snap = bool(job.get("force_cloud"))
+        job["execution_mode"] = "cloud" if is_cloud_snap else "local"
+    if not job.get("cloud_gpu"):
+        job["cloud_gpu"] = str(flags_snapshot.get("V1_CLOUD_GPU", "T4") or "T4")
+    if "allow_cloud_fallback" not in job:
+        job["allow_cloud_fallback"] = False
+    if not job.get("idempotency_key"):
+        job["idempotency_key"] = f"tg:{job['job_id']}"
+
     if not job.get("job_overrides"):
         captured = capture_job_settings(WORKSPACE)
         mode = job.get("voice_mode") or captured["voice_mode"]
         captured["voice_mode"] = mode
         captured["voice_config"]["enabled"] = mode == "auto"
         settings = resolve_effective_config()["effective_config"]
-        job["job_overrides"] = deepcopy({**settings, **captured})
+        merged = deepcopy({**settings, **captured})
+        merged["execution_mode"] = job["execution_mode"]
+        merged["cloud_gpu"] = job["cloud_gpu"]
+        merged["allow_cloud_fallback"] = bool(job["allow_cloud_fallback"])
+        merged["idempotency_key"] = job["idempotency_key"]
+        job["job_overrides"] = merged
+
     job["voice_mode"] = job["job_overrides"].get("voice_mode", "auto")
     job["resume_state"] = dict(job.get("resume_state") or {})
     if not job.get("chat_id"):
@@ -1359,60 +1378,109 @@ def prepare_telegram_job(job):
 
 
 async def run_pipeline_cloud_for_telegram(video_path, job, status_msg):
-    """Xử lý video hoàn toàn trên Google Colab GPU (Demucs, Whisper Large-v3, CapCut Mai TTS, EBU R128)."""
+    """Xử lý video hoàn toàn trên Google Colab GPU dùng chung hợp đồng Admission & Idempotency."""
+    from cloud.cloud_contract import admit_and_enqueue_job, get_error_remediation
     from cloud.cloud_job_store import CloudJobStore
     from cloud.cloud_orchestrator import CloudOrchestrator
+    from cloud.cloud_security import get_default_allowed_roots, redact_secrets
+    from cloud.cloud_worker import CloudWorker
     from v1_feature_flags import get_feature_flags
 
+    prepare_telegram_job(job)
     gpu_type = job.get("cloud_gpu") or get_feature_flags(WORKSPACE).get("V1_CLOUD_GPU", "T4")
     voice = job.get("voice") or "BV562_streaming"
+    idem_key = job.get("idempotency_key") or f"tg:{job.get('job_id')}"
 
     store = CloudJobStore()
     v_path_str = str(video_path) if video_path else job.get("url")
+    allowed_roots = [WORKSPACE, OUTPUT_DIR, *get_default_allowed_roots()]
 
-    cloud_job = store.enqueue(
+    cloud_job, contract = await asyncio.to_thread(
+        admit_and_enqueue_job, store,
         video_path=v_path_str,
-        video_name=Path(str(v_path_str)).name if not job.get("url") else None,
+        source_channel="telegram",
+        source_job_id=job.get("job_id"),
         gpu_type=gpu_type,
-        voice=voice,
         task_type="full_pipeline",
+        voice=voice,
+        allowed_roots=allowed_roots,
+        enforce_budget=True,
+        claim_immediately=True,
+        owner_id=f"telegram:{job.get('job_id') or 'direct'}",
+        idempotency_key=idem_key,
+        rollout_permit=job.get("cloud_rollout_permit"),
+        options={
+            "execution_mode": "cloud",
+            "allow_no_speech": bool(job.get("allow_no_speech", False)),
+            "source_telegram_job_id": job.get("job_id"),
+        },
     )
-    store.update_progress(cloud_job.job_id, state="processing", percent=5, step_name="Khởi động kết nối Cloud GPU...")
+
+    resume_state = job.setdefault("resume_state", {})
+    if getattr(contract, "deduplicated", False):
+        if cloud_job.state == "completed":
+            already_sent = resume_state.get("delivered_cloud_job_id") == cloud_job.job_id
+            result_file = Path(cloud_job.result_path) if cloud_job.result_path else None
+            manifest = getattr(cloud_job, "output_manifest", None) or {}
+            if not result_file or not result_file.is_file() or result_file.stat().st_size <= 0:
+                raise RuntimeError("Job Cloud trùng idempotency_key đã hoàn tất trước đó nhưng thiếu file thành phẩm.")
+            if manifest and manifest.get("qc_passed") is False:
+                raise RuntimeError("Video thành phẩm chưa đạt kiểm tra QC nên bị chặn gửi.")
+            resume_state["delivered_cloud_job_id"] = cloud_job.job_id
+            return {
+                "status": "success",
+                "final_video": cloud_job.result_path,
+                "cu_actual": cloud_job.cu_actual,
+                "gpu_type": cloud_job.gpu_type,
+                "output_manifest": manifest or None,
+                "mode": "cloud",
+                "deduplicated": True,
+                "already_delivered": already_sent,
+            }
+        if cloud_job.state in ("failed", "cancelled", "error", "stopped"):
+            remediation = get_error_remediation(cloud_job.error_code)
+            err_txt = redact_secrets(cloud_job.error or f"Job đã kết thúc với trạng thái {cloud_job.state}.")
+            raise RuntimeError(f"{err_txt}" + (f" ({remediation})" if remediation else ""))
+        if cloud_job.state != "queued":
+            raise RuntimeError(f"Job Cloud {cloud_job.job_id} đang được thực thi ở tiến trình khác ({cloud_job.state}).")
 
     loop = asyncio.get_running_loop()
 
     def on_progress(percent: int, step_name: str):
-        text = f"☁️ *[Cloud GPU {gpu_type}]* ({percent}%)\n\n👉 {step_name}"
+        safe_step = redact_secrets(step_name)
+        text = f"☁️ *[Cloud GPU {cloud_job.gpu_type}]* ({percent}%)\n\n👉 {safe_step}"
         asyncio.run_coroutine_threadsafe(
             safe_edit_status(status_msg, text, parse_mode="Markdown"),
             loop,
         )
 
-    orchestrator = CloudOrchestrator(store)
-    import threading
-    stop_event = threading.Event()
-    try:
-        success = await asyncio.to_thread(
-            orchestrator.process_job, cloud_job, on_progress, stop_event.is_set
-        )
-    except asyncio.CancelledError:
-        stop_event.set()
-        store.cancel_job(cloud_job.job_id)
-        raise
+    orchestrator = CloudOrchestrator(store, allowed_roots=allowed_roots)
+    worker = CloudWorker(worker_id=cloud_job.owner_id, store=store, orchestrator=orchestrator)
+    success = await asyncio.to_thread(worker.process_claimed_job, cloud_job, on_progress)
 
     updated_job = store.get_job(cloud_job.job_id)
     if not success or not updated_job or updated_job.state != "completed":
-        err_msg = updated_job.error if updated_job else "Pipeline Cloud GPU thất bại."
-        raise RuntimeError(err_msg)
+        err_msg = redact_secrets(updated_job.error if updated_job else "Pipeline Cloud GPU thất bại.")
+        remediation = get_error_remediation(updated_job.error_code if updated_job else None)
+        raise RuntimeError(f"{err_msg}" + (f"\n💡 {remediation}" if remediation else ""))
 
-    await asyncio.to_thread(job_tracker.finish_video, Path(v_path_str).name,
-                            updated_job.result_path, 0)
+    result_file = Path(updated_job.result_path) if updated_job.result_path else None
+    manifest = getattr(updated_job, "output_manifest", None) or {}
+    if not result_file or not result_file.is_file() or result_file.stat().st_size <= 0:
+        raise RuntimeError("Không tìm thấy file video thành phẩm sau khi Cloud hoàn tất.")
+    if manifest and manifest.get("qc_passed") is False:
+        raise RuntimeError("Video thành phẩm chưa đạt kiểm tra QC nên bị chặn gửi.")
+
+    resume_state["delivered_cloud_job_id"] = updated_job.job_id
     return {
         "status": "success",
         "final_video": updated_job.result_path,
         "cu_actual": updated_job.cu_actual,
-        "gpu_type": gpu_type,
+        "gpu_type": cloud_job.gpu_type,
+        "output_manifest": manifest or None,
         "mode": "cloud",
+        "deduplicated": False,
+        "already_delivered": False,
     }
 
 

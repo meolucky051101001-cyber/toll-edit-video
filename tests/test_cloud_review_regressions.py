@@ -1,253 +1,292 @@
-"""Cloud lifecycle tests: isolated SQLite/files and fake WSL/provider only."""
-import importlib.util
-import json
-import shlex
+"""Retain the local safety regressions against the phase-8 Cloud lifecycle."""
 import sys
+import sqlite3
 import time
-import types
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
+from backend.cloud import cloud_job_store, cloud_orchestrator, colab_bridge
+from backend.cloud.cloud_config import DEFAULT_CONFIG
+from tests.test_cloud_phase5_quality_export import _Phase5Adapter, _make_sample_video
+
 
 @pytest.fixture
 def cloud(tmp_path, monkeypatch):
-    root = Path(__file__).resolve().parents[1] / "backend" / "cloud"
-    package = "_isolated_cloud_review"
-    module = types.ModuleType(package)
-    module.__path__ = [str(root)]
-    monkeypatch.setitem(sys.modules, package, module)
-    config = types.ModuleType(package + ".cloud_config")
-    config.DEFAULT_CONFIG = {
-        "db_path": str(tmp_path / "jobs.db"), "results_dir": str(tmp_path / "results"),
-        "output_prefix": "cloud_", "cu_budget_daily": 10.0,
-        "exec_timeout_seconds": 60, "stop_timeout_seconds": 30,
-        "wsl_distro": "TEST", "wsl_user": "TEST",
-    }
-    config.get_wsl_env_prefix = lambda: ""
-    config.to_wsl_path = str
-    monkeypatch.setitem(sys.modules, config.__name__, config)
-    modules = {}
-    for name in ("colab_bridge", "cloud_job_store", "cloud_orchestrator"):
-        spec = importlib.util.spec_from_file_location(package + "." + name, root / (name + ".py"))
-        imported = importlib.util.module_from_spec(spec)
-        monkeypatch.setitem(sys.modules, spec.name, imported)
-        spec.loader.exec_module(imported)
-        modules[name] = imported
     now = [time.time()]
-    fake_time = types.SimpleNamespace(time=lambda: now[0], strftime=time.strftime)
-    monkeypatch.setattr(modules["cloud_job_store"], "time", fake_time)
-    monkeypatch.setattr(modules["cloud_orchestrator"], "time", fake_time)
-    monkeypatch.setenv("GEMINI_API_KEY", "")
-    output = tmp_path / "output"
+    clock = SimpleNamespace(time=lambda: now[0], monotonic=time.monotonic, strftime=time.strftime)
+    monkeypatch.setattr(cloud_job_store, 'time', clock)
+    monkeypatch.setattr(cloud_orchestrator, 'time', clock)
+    output = tmp_path / 'output'
     output.mkdir()
-    monkeypatch.setenv("AUTODUB_OUTPUT_DIR", str(output))
-    store = modules["cloud_job_store"].CloudJobStore()
-    return types.SimpleNamespace(**modules, store=store, now=now, output=output, config=config)
+    monkeypatch.setenv('AUTODUB_OUTPUT_DIR', str(output))
+    monkeypatch.setenv('GEMINI_API_KEY', 'offline-fixture')
+    monkeypatch.setitem(DEFAULT_CONFIG, 'results_dir', str(tmp_path / 'results'))
+    store = cloud_job_store.CloudJobStore(tmp_path / 'jobs.db', rollout_controlled=False)
+    source = _make_sample_video(tmp_path)
+    return SimpleNamespace(store=store, now=now, output=output, source=source, root=tmp_path)
 
 
-@pytest.mark.parametrize("response", [(1, "", "denied"), (-1, "", "timeout"),
-                                     (0, "not verified", ""), (0, "AUTODUB_STOP_VERIFIED:{bad}", "")])
-def test_stop_all_never_claims_success_without_verified_inventory(cloud, monkeypatch, response):
+def claim(cloud, **kwargs):
+    job = cloud.store.enqueue(str(cloud.source), **kwargs)
+    claimed = cloud.store.claim_job(job.job_id, owner_id='review', lease_seconds=7200)
+    assert claimed is not None
+    return claimed
+
+
+def terminal(cloud, job, state, amount=1.):
+    for current in ('uploading', 'preparing', 'processing', 'downloading', 'validating'):
+        assert cloud.store.update_progress(job.job_id, state=current, owner_id='review', attempt=job.attempt)
+    if state == 'cancelled':
+        assert cloud.store.request_cancel(job.job_id)['cancelled']
+    assert cloud.store.update_progress(job.job_id, state=state, cu_actual=amount,
+                                      owner_id='review', attempt=job.attempt, allow_from_cancel=state == 'cancelled')
+
+
+@pytest.mark.parametrize('response', [(1, '', 'denied'), (-1, '', 'timeout'),
+                                    (0, 'not verified', ''), (0, 'AUTODUB_STOP_VERIFIED:{bad}', '')])
+def test_stop_all_never_claims_success_without_verified_inventory(monkeypatch, response):
     calls = []
-    def fake(command, **kwargs):
-        compile(shlex.split(command)[-1], "cleanup", "exec")
+    def fake(command, argv, **kwargs):
+        compile(kwargs['stdin_text'], 'cleanup', 'exec')
         calls.append(command)
         return response
-    monkeypatch.setattr(cloud.colab_bridge, "_run_wsl_bash", fake)
-    assert cloud.colab_bridge.stop_all_sessions()[0] is False
+    monkeypatch.setattr(colab_bridge, '_run_wsl_argv', fake)
+    assert colab_bridge.stop_all_sessions()[0] is False
     assert len(calls) == 1
 
 
-def test_stop_all_checks_remaining_before_deleting_local_inventory(cloud, monkeypatch):
-    assignments = [types.SimpleNamespace(endpoint="vm")]
+def test_stop_all_checks_remaining_before_deleting_local_inventory(monkeypatch):
+    assignments = [SimpleNamespace(endpoint='vm')]
     removed = []
-    state = types.SimpleNamespace(
-        client=types.SimpleNamespace(list_assignments=lambda: assignments,
-                                     unassign=lambda endpoint: assignments.clear()),
-        store=types.SimpleNamespace(list=lambda: {"session": {}}, remove=removed.append),
-    )
-    common = types.ModuleType("colab_cli.common")
-    common.state = state
-    monkeypatch.setitem(sys.modules, "colab_cli.common", common)
-    def fake(command, **kwargs):
-        code = shlex.split(command)[-1]
-        original_path = list(sys.path)
-        lines = []
+    state = SimpleNamespace(client=SimpleNamespace(list_assignments=lambda: assignments,
+        unassign=lambda _: assignments.clear()), store=SimpleNamespace(list=lambda: {'session': {}}, remove=removed.append))
+    monkeypatch.setitem(sys.modules, 'colab_cli.common', SimpleNamespace(state=state))
+    def fake(command, argv, **kwargs):
+        original_path, lines = list(sys.path), []
         try:
-            exec(compile(code, "cleanup", "exec"), {"print": lines.append})
+            exec(compile(kwargs['stdin_text'], 'cleanup', 'exec'), {'print': lines.append})
         except Exception as exc:
-            return 1, "", str(exc)
+            return 1, '', str(exc)
         finally:
             sys.path[:] = original_path
-        return 0, "\n".join(lines), ""
-    monkeypatch.setattr(cloud.colab_bridge, "_run_wsl_bash", fake)
-    assert cloud.colab_bridge.stop_all_sessions()[0] is True
-    assert removed == ["session"]
-    assignments.append(types.SimpleNamespace(endpoint="still-running"))
-    state.client.unassign = lambda endpoint: None
+        return 0, '\n'.join(lines), ''
+    monkeypatch.setattr(colab_bridge, '_run_wsl_argv', fake)
+    assert colab_bridge.stop_all_sessions()[0] is True
+    assert removed == ['session']
+    assignments.append(SimpleNamespace(endpoint='still-running'))
+    state.client.unassign = lambda _: None
     removed.clear()
-    assert cloud.colab_bridge.stop_all_sessions()[0] is False
+    assert colab_bridge.stop_all_sessions()[0] is False
     assert removed == []
 
 
-def test_stopping_one_session_does_not_stop_other_assignments(cloud, monkeypatch):
-    monkeypatch.setattr(cloud.colab_bridge, "_run_wsl_colab", Mock(return_value=(1, "not terminated", "denied")))
-    unrelated = Mock(side_effect=AssertionError("global cleanup must not run"))
-    monkeypatch.setattr(cloud.colab_bridge, "_run_wsl_bash", unrelated)
-    assert cloud.colab_bridge.stop_session("one")[0] is False
+def test_stopping_one_session_does_not_stop_other_assignments(monkeypatch):
+    monkeypatch.setattr(colab_bridge, '_run_wsl_colab_argv', Mock(return_value=(1, 'not terminated', 'denied')))
+    unrelated = Mock(side_effect=AssertionError('global cleanup must not run'))
+    monkeypatch.setattr(colab_bridge, '_run_wsl_argv', unrelated)
+    assert colab_bridge.stop_session('one')[0] is False
     unrelated.assert_not_called()
 
 
-@pytest.mark.parametrize("terminal", ["stopped", "error", "completed"])
-def test_terminal_state_rejects_late_progress_and_publication(cloud, terminal):
-    job = cloud.store.enqueue("video.mp4")
-    assert cloud.store.update_progress(job.job_id, state=terminal)
-    assert not cloud.store.update_progress(job.job_id, state="downloading", percent=85)
-    publish = Mock()
-    assert not cloud.store.publish_if_active(job.job_id, "final.mp4", publish)
-    publish.assert_not_called()
-    assert cloud.store.get_job(job.job_id).state == terminal
+@pytest.mark.parametrize('state', ['cancelled', 'failed', 'completed'])
+def test_terminal_state_rejects_late_progress_and_publication(cloud, state):
+    job = claim(cloud)
+    terminal(cloud, job, state)
+    assert not cloud.store.update_progress(job.job_id, state='downloading', percent=85)
+    assert not cloud.store.update_progress(job.job_id, state='completed', result_path='late.mp4')
+    assert cloud.store.get_job(job.job_id).state == state
+    assert cloud.store.get_job(job.job_id).result_path is None
 
 
-@pytest.mark.parametrize("terminal", ["error", "stopped", "completed"])
-def test_billing_survives_failure_cancel_history_delete_and_restart(cloud, terminal):
-    job = cloud.store.enqueue("video.mp4")
-    cloud.store.start_billing(job.job_id, 2.0)
+@pytest.mark.parametrize('state', ['failed', 'cancelled', 'completed'])
+def test_billing_survives_failure_cancel_history_delete_and_restart(cloud, state):
+    job = claim(cloud)
     cloud.now[0] += 1800
-    cloud.store.update_progress(job.job_id, state=terminal)
-    assert cloud.store.finish_billing(job.job_id) == pytest.approx(1.0)
+    terminal(cloud, job, state)
     assert cloud.store.delete_job(job.job_id)
-    restarted = cloud.cloud_job_store.CloudJobStore(cloud.store.db_path)
-    assert restarted.get_cu_spent_today() == 1.0
+    restarted = cloud_job_store.CloudJobStore(cloud.store.db_path, rollout_controlled=False)
+    assert restarted.get_cu_spent_today() == pytest.approx(1.)
+    assert len(restarted.list_cost_ledger(job_id=job.job_id)) == 1
 
 
-def test_billing_splits_cross_midnight_and_blocks_unknown_cleanup(cloud):
-    cloud.now[0] = datetime(2026, 11, 15, 23, 30).timestamp()
-    job = cloud.store.enqueue("old.mp4")
-    cloud.store.start_billing(job.job_id, 2.0)
-    cloud.store.cancel_job(job.job_id)
-    cloud.now[0] += 3600
-    assert cloud.store.get_cu_spent_today() == 1.0
-    assert not cloud.store.delete_job(job.job_id)
-    next_job = cloud.store.enqueue("next.mp4")
-    with pytest.raises(RuntimeError, match="chưa xác nhận"):
-        cloud.store.start_billing(next_job.job_id, 2.0)
-    cloud.store.acknowledge_all_sessions_stopped()
-    # A concurrent allocation may not exist remotely yet: stop-all must not release it.
-    assert not cloud.store.delete_job(job.job_id)
-    cloud.store.note_cleanup_failure(job.job_id, "timeout")
-    cloud.store.acknowledge_all_sessions_stopped()
-    assert cloud.store.get_cu_spent_today() == 1.0
-    assert cloud.store.delete_job(job.job_id)
+def seed_legacy_ledger(store, entries):
+    with store._connect() as db:
+        db.execute('''CREATE TABLE cloud_cu_ledger (job_id TEXT PRIMARY KEY, started_at REAL NOT NULL,
+            ended_at REAL, hourly_rate REAL NOT NULL DEFAULT 0, cu_actual REAL NOT NULL DEFAULT 0,
+            cleanup_pending INTEGER NOT NULL DEFAULT 0, owner_pid INTEGER, owner_created_at REAL)''')
+        db.executemany('INSERT INTO cloud_cu_ledger(job_id,started_at,ended_at,hourly_rate,cu_actual) VALUES (?,?,?,?,?)', entries)
 
 
-def test_old_failed_costs_are_migrated_once(cloud):
-    job = cloud.store.enqueue("legacy.mp4")
+def test_deleted_legacy_billing_is_migrated_once_and_split_at_midnight(cloud):
+    start = datetime(2026, 11, 15, 23, 30, tzinfo=timezone(timedelta(hours=7))).timestamp()
+    cloud.now[0] = start + 3600
+    seed_legacy_ledger(cloud.store, [('deleted-history', start, start + 3600, 2., 2.)])
+    for _ in range(2):
+        migrated = cloud_job_store.CloudJobStore(cloud.store.db_path, rollout_controlled=False)
+        assert migrated.get_cu_spent_today(now=start + 1800) == pytest.approx(1.)
+        assert migrated.get_cu_spent_today(now=start + 3600) == pytest.approx(1.)
+        assert len(migrated.list_cost_ledger()) == 1
+
+
+def test_old_failed_costs_are_migrated_once_without_changing_job_state(cloud):
+    job = cloud.store.enqueue(str(cloud.source))
     with cloud.store._connect() as db:
-        db.execute("UPDATE cloud_jobs SET state='error', cu_actual=3, completed_at=? WHERE job_id=?",
-                   (cloud.now[0], job.job_id))
-    migrated = cloud.cloud_job_store.CloudJobStore(cloud.store.db_path)
-    assert migrated.get_cu_spent_today() == 3.0
+        db.execute("UPDATE cloud_jobs SET state='error', cu_actual=3, completed_at=? WHERE job_id=?", (cloud.now[0], job.job_id))
+    migrated = cloud_job_store.CloudJobStore(cloud.store.db_path, rollout_controlled=False)
+    assert migrated.get_cu_spent_today() == pytest.approx(3.)
+    assert migrated.get_job(job.job_id).state == 'error'
     assert migrated.delete_job(job.job_id)
-    assert cloud.cloud_job_store.CloudJobStore(cloud.store.db_path).get_cu_spent_today() == 3.0
+    restarted = cloud_job_store.CloudJobStore(cloud.store.db_path, rollout_controlled=False)
+    assert restarted.get_cu_spent_today() == pytest.approx(3.)
+    assert len(restarted.list_cost_ledger()) == 1
 
 
-@pytest.mark.parametrize("state", ["stopped", "error", "processing"])
-def test_recover_orphan_billing_requires_dead_owner_before_settlement(cloud, monkeypatch, state):
-    job = cloud.store.enqueue("video.mp4")
-    cloud.store.start_billing(job.job_id, 1.0)
-    cloud.store.update_progress(job.job_id, state=state)
-    cloud.now[0] += 3600
-    # Current process can still be returning from create_session after a cancel.
-    cloud.store.acknowledge_all_sessions_stopped()
+def test_original_legacy_schema_migrates_without_resetting_status(tmp_path):
+    path = tmp_path / 'old.db'
+    now = time.time()
+    with sqlite3.connect(path) as db:
+        db.execute('''CREATE TABLE cloud_jobs (
+            id INTEGER PRIMARY KEY, job_id TEXT UNIQUE, video_path TEXT, video_name TEXT,
+            gpu_type TEXT DEFAULT 'T4', task_type TEXT DEFAULT 'full_pipeline', state TEXT,
+            percent INTEGER DEFAULT 0, step_name TEXT, session_name TEXT,
+            cu_estimated REAL DEFAULT 0, cu_actual REAL DEFAULT 0, created_at REAL,
+            started_at REAL, completed_at REAL, result_path TEXT, error TEXT)''')
+        db.execute("INSERT INTO cloud_jobs(job_id,video_path,video_name,state,cu_actual,created_at,completed_at) VALUES ('legacy','input.mp4','input.mp4','stopped',2,?,?)", (now, now))
+    for _ in range(2):
+        migrated = cloud_job_store.CloudJobStore(path, rollout_controlled=False)
+        assert migrated.get_job('legacy').state == 'stopped'
+        assert migrated.get_job('legacy').attempt == 1
+        assert migrated.get_cu_spent_today() == pytest.approx(2.)
+        assert len(migrated.list_cost_ledger()) == 1
+
+
+@pytest.mark.parametrize('has_session', [True, False])
+def test_pending_legacy_billing_blocks_admission_and_never_claims_cleanup(cloud, has_session):
+    job = cloud.store.enqueue(str(cloud.source))
     with cloud.store._connect() as db:
-        assert db.execute("SELECT ended_at FROM cloud_cu_ledger WHERE job_id=?", (job.job_id,)).fetchone()[0] is None
-    monkeypatch.setattr(cloud.store, "_billing_owner_alive", lambda row: False)
-    cloud.store.recover()
-    assert cloud.store.get_job(job.job_id).state == ("stopped" if state == "stopped" else "error")
-    cloud.store.acknowledge_all_sessions_stopped()
-    assert cloud.store.get_cu_spent_today() == 1.0
-    assert cloud.store.delete_job(job.job_id)
+        db.execute("UPDATE cloud_jobs SET state='processing', session_name=? WHERE job_id=?", ('old-session' if has_session else None, job.job_id))
+    seed_legacy_ledger(cloud.store, [(job.job_id, cloud.now[0] - 1800, None, 2., 0.)])
+    migrated = cloud_job_store.CloudJobStore(cloud.store.db_path, rollout_controlled=False)
+    assert migrated.get_job(job.job_id).state == 'processing'
+    assert migrated.get_cu_spent_today() == pytest.approx(1.)
+    cloud.now[0] += 900
+    assert migrated.get_cu_spent_today() == pytest.approx(1.5)
+    assert migrated.get_cu_budget_info()['unreconciled_count'] == 1
+    assert migrated.claim_job(migrated.enqueue(str(cloud.source)).job_id, owner_id='new') is None
+    assert not migrated.delete_job(job.job_id)
+    unavailable = SimpleNamespace(get_sessions_status=lambda: {'ok': False, 'sessions': [], 'error': 'offline'})
+    migrated.recover(adapter=unavailable)
+    assert migrated.list_cost_ledger(job_id=job.job_id)[0]['cleanup_verified'] == 0
+    if not has_session:
+        # Legacy cancellation used a terminal state before provider cleanup.
+        with migrated._connect() as db:
+            db.execute("UPDATE cloud_jobs SET state='stopped' WHERE job_id=?", (job.job_id,))
+        assert not migrated.delete_job(job.job_id)
+    if has_session:
+        migrated.record_cleanup_result(job.job_id, 1, 'old-session', verified_stopped=True,
+                                       cleanup_status='verified', attempts=1)
+        migrated.update_progress(job.job_id, state='failed', cleanup_status='verified')
+        assert migrated.get_cu_spent_today() == pytest.approx(1.5)
+        cloud.now[0] += 900
+        assert migrated.get_cu_spent_today() == pytest.approx(1.5)
+        assert migrated.get_cu_budget_info()['unreconciled_count'] == 0
 
 
-def fake_provider(cloud, tmp_path, monkeypatch):
-    module = cloud.cloud_orchestrator
-    for name, result in (("get_usage", {"ok": True, "balance": 100}),
-                         ("create_session", (True, "created")), ("upload_file", (True, "ok")),
-                         ("exec_cmd", (True, "ok")), ("stop_session", (True, "stopped"))):
-        monkeypatch.setattr(module, name, Mock(return_value=result))
-    def download(session, name, directory):
-        path = Path(directory) / name
-        path.write_bytes(b"fake media" if name.endswith("mp4") else b"{}")
-        return True, str(path)
-    monkeypatch.setattr(module, "download_file", Mock(side_effect=download))
-    orchestrator = module.CloudOrchestrator(cloud.store)
-    orchestrator.gpu_scripts_dir = tmp_path / "scripts"
-    orchestrator.gpu_scripts_dir.mkdir()
-    return orchestrator
+def fake_provider(cloud):
+    adapter = _Phase5Adapter()
+    for name in ('create_session', 'upload_file', 'download_file', 'exec_argv', 'stop_session'):
+        def invoke(*args, _method=getattr(adapter, name), **kwargs):
+            kwargs.pop('cancel_check', None)
+            return _method(*args, **kwargs)
+        setattr(adapter, name, Mock(wraps=invoke))
+    runner = cloud_orchestrator.CloudOrchestrator(cloud.store, adapter=adapter, allowed_roots=[cloud.root])
+    return runner, adapter
 
 
-def test_cancel_during_allocation_stops_vm_and_never_uploads(cloud, tmp_path, monkeypatch):
-    runner = fake_provider(cloud, tmp_path, monkeypatch)
-    job = cloud.store.enqueue("https://example.invalid/video")
-    def allocate(*args, **kwargs):
-        cloud.store.cancel_job(job.job_id)
+def test_cancel_during_allocation_stops_vm_and_never_uploads(cloud):
+    runner, provider = fake_provider(cloud)
+    job = claim(cloud)
+    def allocate(session, **kwargs):
+        provider.created_sessions.append(session)
+        cloud.store.request_cancel(job.job_id)
         cloud.now[0] += 1800
-        return True, "created after cancel"
-    cloud.cloud_orchestrator.create_session.side_effect = allocate
-    assert runner.process_job(job) is False
-    cloud.cloud_orchestrator.upload_file.assert_not_called()
-    cloud.cloud_orchestrator.stop_session.assert_called_once()
-    assert cloud.store.get_job(job.job_id).state == "stopped"
-    assert cloud.store.get_cu_spent_today() == 0.575
+        return True, 'created after cancel'
+    provider.create_session.side_effect = allocate
+    assert runner.process_job(job, owner_id='review') is False
+    provider.upload_file.assert_not_called()
+    provider.stop_session.assert_called_once()
+    assert cloud.store.get_job(job.job_id).state == 'cancelled'
+    assert cloud.store.get_cu_spent_today() == pytest.approx(.575)
 
 
-def test_upload_failure_is_billed_and_cleanup_failure_blocks_admission(cloud, tmp_path, monkeypatch):
-    runner = fake_provider(cloud, tmp_path, monkeypatch)
-    job = cloud.store.enqueue("https://example.invalid/video")
+def test_upload_failure_is_billed_and_cleanup_failure_blocks_admission(cloud):
+    runner, provider = fake_provider(cloud)
+    job = claim(cloud)
     def upload(*args, **kwargs):
         cloud.now[0] += 1800
-        return False, "upload failure"
-    cloud.cloud_orchestrator.upload_file.side_effect = upload
-    cloud.cloud_orchestrator.stop_session.return_value = (False, "provider timeout")
-    assert runner.process_job(job) is False
-    assert cloud.store.get_job(job.job_id).state == "error"
-    assert "provider timeout" in cloud.store.get_job(job.job_id).error
-    assert cloud.store.get_cu_spent_today() == 0.575
-    with pytest.raises(RuntimeError, match="chưa xác nhận"):
-        cloud.store.start_billing(cloud.store.enqueue("next").job_id, 1.15)
+        return False, 'upload failure'
+    provider.upload_file.side_effect = upload
+    provider.stop_session.side_effect = lambda *_: (False, 'provider timeout')
+    assert runner.process_job(job, owner_id='review') is False
+    saved = cloud.store.get_job(job.job_id)
+    assert saved.state == 'failed'
+    assert saved.cleanup_status != 'verified'
+    assert cloud.store.get_cu_spent_today() == pytest.approx(.575)
+    assert cloud.store.get_cu_budget_info()['unreconciled_count'] == 1
+    assert cloud.store.claim_job(cloud.store.enqueue(str(cloud.source)).job_id, owner_id='new') is None
 
 
-def test_cancel_during_download_never_publishes(cloud, tmp_path, monkeypatch):
-    runner = fake_provider(cloud, tmp_path, monkeypatch)
-    job = cloud.store.enqueue("https://example.invalid/video", video_name="video.mp4")
-    original = cloud.cloud_orchestrator.download_file.side_effect
-    def cancel(*args):
-        result = original(*args)
-        cloud.store.cancel_job(job.job_id)
+def test_cancel_during_download_never_publishes(cloud):
+    runner, provider = fake_provider(cloud)
+    job = claim(cloud)
+    original = provider.download_file._mock_wraps
+    def cancel(*args, **kwargs):
+        result = original(*args, **kwargs)
+        cloud.store.request_cancel(job.job_id)
         return result
-    cloud.cloud_orchestrator.download_file.side_effect = cancel
-    assert runner.process_job(job) is False
+    provider.download_file.side_effect = cancel
+    assert runner.process_job(job, owner_id='review') is False
     assert list(cloud.output.iterdir()) == []
-    assert cloud.store.get_job(job.job_id).state == "stopped"
+    assert cloud.store.get_job(job.job_id).state == 'cancelled'
 
 
-def test_success_cleans_up_before_publish_and_quotes_apostrophes(cloud, tmp_path, monkeypatch):
-    runner = fake_provider(cloud, tmp_path, monkeypatch)
-    job = cloud.store.enqueue("https://example.invalid/a'b", video_name="video.mp4", voice="test'voice")
+def test_success_cleans_up_before_publish_and_preserves_filename_apostrophe(cloud):
+    source = cloud.source.with_name("it's a video.mp4")
+    cloud.source.rename(source)
+    cloud.source = source
+    runner, provider = fake_provider(cloud)
+    job = claim(cloud)
+    original = provider.stop_session._mock_wraps
     def stop(*args):
         assert list(cloud.output.iterdir()) == []
         cloud.now[0] += 60
-        return True, "stopped"
-    cloud.cloud_orchestrator.stop_session.side_effect = stop
-    assert runner.process_job(job) is True
-    assert cloud.store.get_job(job.job_id).state == "completed"
-    assert cloud.store.get_job(job.job_id).cu_actual > 0
-    command = cloud.cloud_orchestrator.exec_cmd.call_args.args[1]
-    tokens = shlex.split(command)
-    assert tokens[tokens.index("--input") + 1] == job.video_path
-    assert tokens[tokens.index("--voice") + 1] == job.voice
-    assert (cloud.output / "cloud_video.mp4").is_file()
+        return original(*args)
+    provider.stop_session.side_effect = stop
+    assert runner.process_job(job, owner_id='review') is True
+    saved = cloud.store.get_job(job.job_id)
+    assert saved.state == 'completed'
+    assert saved.cu_actual > 0
+    argv = next(call.args[1] for call in provider.exec_argv.call_args_list if call.args[1][1] == 'full_pipeline.py')
+    assert argv[argv.index('--input') + 1].startswith('/content/')
+    assert Path(saved.result_path).is_file()
+
+
+def test_successful_pipeline_with_failed_cleanup_never_publishes(cloud):
+    runner, provider = fake_provider(cloud)
+    job = claim(cloud)
+    def fail_stop(*args):
+        cloud.now[0] += 60
+        return False, 'provider timeout'
+    provider.stop_session.side_effect = fail_stop
+    assert runner.process_job(job, owner_id='review') is False
+    saved = cloud.store.get_job(job.job_id)
+    assert saved.state != 'completed'
+    assert saved.result_path is None
+    assert list(cloud.output.iterdir()) == []
+    assert saved.cu_actual > 0
+    assert saved.cleanup_status != 'verified'
+    assert cloud.store.get_cu_budget_info()['unreconciled_count'] == 1
