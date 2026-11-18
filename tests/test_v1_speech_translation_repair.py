@@ -327,6 +327,76 @@ class QCAndCacheTests(unittest.TestCase):
 
 
 class BatchTests(unittest.TestCase):
+    def test_capcut_worker_passes_gemini_key_without_mislabeling_it_as_voice_key(self):
+        explicit_key = "synthetic-gemini-key"
+        base_env = {
+            "GEMINI_API_KEY": "old-gemini-key",
+            "VOICE_API_KEY": "synthetic-voice-key",
+            "FPT_API_KEY": "synthetic-fpt-key",
+        }
+
+        worker_env = isolated._build_worker_env(
+            base_env, api_key=explicit_key, voice_source="capcut", tts_workers=3,
+            max_natural_speed=1.5, script_mode="default")
+
+        self.assertEqual(worker_env["GEMINI_API_KEY"], explicit_key)
+        self.assertEqual(worker_env["VOICE_API_KEY"], "synthetic-voice-key")
+        self.assertEqual(worker_env["FPT_API_KEY"], "synthetic-fpt-key")
+        self.assertEqual(base_env["GEMINI_API_KEY"], "old-gemini-key", "The parent process environment is untouched")
+        with patch.dict(os.environ, worker_env, clear=True), patch.object(dispatcher, "BACKEND_DIR", SCRATCH):
+            self.assertEqual(dispatcher.get_gemini_api_keys(), [explicit_key])
+
+        fpt_env = isolated._build_worker_env(
+            base_env, api_key="synthetic-fpt-override", gemini_api_key=explicit_key,
+            voice_source="fpt", tts_workers=3, max_natural_speed=1.5,
+            script_mode="default")
+        self.assertEqual(fpt_env["GEMINI_API_KEY"], explicit_key)
+        self.assertEqual(fpt_env["VOICE_API_KEY"], "synthetic-fpt-override")
+        self.assertEqual(fpt_env["FPT_API_KEY"], "synthetic-fpt-override")
+
+    def test_overlong_rewrite_gets_one_stricter_measured_retry(self):
+        cues = [cue(1, 0, 1, "Cảm giác loại này có vẻ dính móng tay")]
+        fake_cache = types.SimpleNamespace(voice_cache_key=lambda *a, **k: "k",
+            read_voice_cache=lambda *a, **k: None, write_voice_cache=Mock())
+        calls = []
+
+        async def generate(seg, folder, src, param, key, target_max_duration=None):
+            duration = {"Ít dính móng tay": 1.05,
+                        "Ít dính móng": 1.02,
+                        "Ít dính": .6}[seg.content]
+            path = Path(folder) / f"{seg.index}.mp3"
+            sf.write(path, np.full(round(duration * 16000), .1, dtype=np.float32), 16000, format="WAV")
+            return {"index": seg.index, "path": str(path), "start": 0.,
+                    "actual_audio_duration": duration, "speed_ratio": 1.,
+                    "content": seg.content}
+
+        async def no_op_fit(path, target, output=None, **kwargs):
+            return path, float(sf.info(path).duration), 1.
+
+        def condense(items, **kwargs):
+            calls.append((items, kwargs))
+            return {1: {"round1_pre_tts": "Ít dính móng tay",
+                        "round2_post_tts": "Ít dính móng",
+                        "round3_final_tts": "Ít dính"}[kwargs["job_id"]]}
+
+        with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_voice_cache": fake_cache}), \
+                patch.object(voice, "generate_single_tts", side_effect=generate), \
+                patch.object(voice, "fit_audio_file", side_effect=no_op_fit), \
+                patch.object(translation, "condense_vietnamese_subtitles_batch", side_effect=condense):
+            loop = asyncio.SelectorEventLoop()
+            try:
+                result = loop.run_until_complete(voice.generate_dubbing_audio(
+                    cues, str(SCRATCH / "measured-retry"), "capcut", "Mai", video_duration=1))
+            finally:
+                loop.close()
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([entry[1]["job_id"] for entry in calls],
+                         ["round1_pre_tts", "round2_post_tts", "round3_final_tts"])
+        self.assertLess(calls[2][0][0]["target_words"], len("Ít dính móng".split()))
+        self.assertEqual(cues[0].content, "Ít dính")
+        self.assertLessEqual(result[0]["actual_audio_duration"], .955)
+
     def test_measured_overflow_condenses_before_publish(self):
         cues = [cue(1, 0, 1, "xin chao")]
         fake_cache = types.SimpleNamespace(voice_cache_key=lambda *a, **k: "k",
@@ -399,11 +469,11 @@ class BatchTests(unittest.TestCase):
                     "speed_ratio": 1.0 if duration == 1.0 else 2.0, "content": seg.content}
         def condense(items, **kw):
             calls.append(kw["deadline"] - clock[0])
-            self.assertEqual(kw["api_key"], "synthetic-gemini-key")
+            self.assertEqual(kw["api_key"], "explicit-gemini-key")
             return {1: "câu ngắn"}
         fake_cache = types.SimpleNamespace(voice_cache_key=lambda *a, **k: "k", read_voice_cache=lambda *a, **k: None, write_voice_cache=lambda *a, **k: None)
-        with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_voice_cache": fake_cache}), patch.dict(os.environ, GEMINI_API_KEY="synthetic-gemini-key"), patch.object(time, "monotonic", side_effect=lambda: clock[0]), patch.object(voice, "generate_single_tts", side_effect=generate), patch.object(translation, "condense_vietnamese_subtitles_batch", side_effect=condense), patch.object(guard, "validate_speech_timeline"), patch.object(voice.os.path, "exists", return_value=True), patch.object(voice.os.path, "getsize", return_value=1000), patch.object(sf, "info", return_value=types.SimpleNamespace(duration=1.0)):
-            asyncio.run(voice.generate_dubbing_audio(cues, str(SCRATCH / "batch"), "capcut", "Mai", api_key="synthetic-voice-key", video_duration=2))
+        with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_voice_cache": fake_cache}), patch.dict(os.environ, GEMINI_API_KEY="environment-gemini-key"), patch.object(time, "monotonic", side_effect=lambda: clock[0]), patch.object(voice, "generate_single_tts", side_effect=generate), patch.object(translation, "condense_vietnamese_subtitles_batch", side_effect=condense), patch.object(guard, "validate_speech_timeline"), patch.object(voice.os.path, "exists", return_value=True), patch.object(voice.os.path, "getsize", return_value=1000), patch.object(sf, "info", return_value=types.SimpleNamespace(duration=1.0)):
+            asyncio.run(voice.generate_dubbing_audio(cues, str(SCRATCH / "batch"), "capcut", "Mai", api_key="explicit-gemini-key", video_duration=2))
         self.assertTrue(calls)
         self.assertGreater(calls[-1], 0)
 

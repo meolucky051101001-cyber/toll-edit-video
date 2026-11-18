@@ -11,7 +11,7 @@ from contextlib import ExitStack, asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, create_autospec, patch
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "phase7"
@@ -137,6 +137,8 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
             return [{"index": s.index, "path": str(self.wav(Path(directory) / f"{s.index}.wav", seconds=1)),
                      "duration": 1.0, "actual_audio_duration": 1.0} for s in segments]
 
+        isolated_tts = create_autospec(v1_voice_isolated.generate_dubbing_audio_isolated, side_effect=tts)
+
         def ass(*args, **kwargs):
             self.events.append("ass")
             return real_ass(*args, **kwargs)
@@ -180,7 +182,7 @@ class OrchestratorGoldenTests(unittest.IsolatedAsyncioTestCase):
             (video_utils, "extract_audio_from_video", extract), (video_utils, "separate_vocals_demucs", separate),
             (v1_asr_isolated, "extract_subtitles_isolated", asr), (ocr_utils, "perform_video_ocr", ocr),
             (ocr_utils, "release_ocr_reader", lambda: None), (translation, "translate_subtitles", translate),
-            (v1_auto_voice, "decide_video_voice", voice), (v1_voice_isolated, "generate_dubbing_audio_isolated", tts),
+            (v1_auto_voice, "decide_video_voice", voice), (v1_voice_isolated, "generate_dubbing_audio_isolated", isolated_tts),
             (ass_utils, "generate_ass_file", ass), (ass_utils, "subtitle_measure", lambda *a: lambda t: len(t)*20),
             (video_utils, "mix_audio_pydub", mix), (video_utils, "process_video", render),
             (v1_gpu_gatekeeper, "async_gpu_gatekeeper", gate), (v1_quality_gate, "run_quality_gate", qc),

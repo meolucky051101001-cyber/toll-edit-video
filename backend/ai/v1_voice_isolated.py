@@ -7,7 +7,30 @@ import tempfile
 from pathlib import Path
 import srt
 
-async def generate_dubbing_audio_isolated(segments, output_folder, voice_source='edge', voice_param='vi-VN-HoaiMyNeural', api_key='', video_duration=None, segment_voices=None, *, tts_workers=None, max_natural_speed=None, timeout_s=1800, script_mode="default"):
+
+def _build_worker_env(base_env, *, api_key, gemini_api_key=None, voice_source, tts_workers,
+                      max_natural_speed, script_mode):
+    """Pass Gemini and voice-provider credentials through separate variables."""
+    worker_env = dict(base_env, PYTHONIOENCODING='utf-8')
+    if tts_workers is not None:
+        worker_env['V1_TTS_WORKERS'] = str(tts_workers)
+    from v1_speech_guard import natural_speed_limit
+    worker_env['V1_MAX_NATURAL_SPEED'] = str(natural_speed_limit(max_natural_speed))
+
+    if api_key and voice_source == "fpt":
+        worker_env['VOICE_API_KEY'] = str(api_key)
+        worker_env['FPT_API_KEY'] = str(api_key)
+
+    resolved_gemini_key = gemini_api_key or (api_key if voice_source != "fpt" else "")
+    if resolved_gemini_key:
+        worker_env['GEMINI_API_KEY'] = str(resolved_gemini_key)
+
+    if script_mode:
+        worker_env['V1_SCRIPT_MODE'] = str(script_mode)
+    return worker_env
+
+
+async def generate_dubbing_audio_isolated(segments, output_folder, voice_source='edge', voice_param='vi-VN-HoaiMyNeural', api_key='', video_duration=None, segment_voices=None, *, gemini_api_key=None, tts_workers=None, max_natural_speed=None, timeout_s=1800, script_mode="default"):
     from .translation import _contains_cjk
     if any(_contains_cjk(s.content) for s in segments):
         raise RuntimeError("Phụ đề chứa ký tự CJK tiếng Trung chưa được dịch (Fail-Closed).")
@@ -50,15 +73,15 @@ async def generate_dubbing_audio_isolated(segments, output_folder, voice_source=
             if final_segment_voices:
                 seg_voices_file.write_text(json.dumps(final_segment_voices, ensure_ascii=False), encoding='utf-8')
 
-            worker_env = dict(os.environ, PYTHONIOENCODING='utf-8')
-            if tts_workers is not None:
-                worker_env['V1_TTS_WORKERS'] = str(tts_workers)
-            worker_env['V1_MAX_NATURAL_SPEED'] = str(natural_speed_limit(max_natural_speed))
-            if api_key:
-                worker_env['VOICE_API_KEY'] = str(api_key)
-                worker_env['FPT_API_KEY'] = str(api_key)
-            if script_mode:
-                worker_env['V1_SCRIPT_MODE'] = str(script_mode)
+            worker_env = _build_worker_env(
+                os.environ,
+                api_key=api_key,
+                gemini_api_key=gemini_api_key,
+                voice_source=voice_source,
+                tts_workers=tts_workers,
+                max_natural_speed=max_natural_speed,
+                script_mode=script_mode,
+            )
             cmd = [
                 str(backend/'venv/Scripts/python.exe'), str(backend/'model_workers/v1_voice_worker.py'),
                 str(request), str(result), str(Path(output_folder).resolve()), voice_source, voice_param

@@ -1141,7 +1141,7 @@ class V1Orchestrator:
             t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
                 from ai.v1_auto_voice import decide_video_voice
-                from ai.v1_voice_isolated import generate_dubbing_audio_isolated as generate_dubbing_audio
+                from ai.v1_voice_isolated import generate_dubbing_audio_isolated
                 from ass_utils import sync_and_clamp_subtitles, generate_ass_file
 
                 # Khóa giọng đọc
@@ -1173,12 +1173,14 @@ class V1Orchestrator:
 
                 gemini_key = c.overrides.get("api_key") or os.getenv("GEMINI_API_KEY", "")
                 dubbing_audio_files = await c.run_stage(
-                    generate_dubbing_audio(
+                    generate_dubbing_audio_isolated(
                         translated_segments,
                         str(dubbing_dir),
                         voice_source=v_source,
                         voice_param=v_param,
-                        api_key=gemini_key,
+                        api_key=((os.getenv("VOICE_API_KEY") or os.getenv("FPT_API_KEY", ""))
+                                 if v_source == "fpt" else gemini_key),
+                        gemini_api_key=gemini_key,
                         video_duration=c.video_dur_s,
                         segment_voices=seg_voices,
                         tts_workers=c.effective_cfg["feature_flags"]["V1_TTS_WORKERS"],

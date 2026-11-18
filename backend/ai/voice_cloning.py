@@ -469,7 +469,7 @@ from v1_speech_guard import natural_speed_limit
 MAX_NATURAL_SPEED = natural_speed_limit()
 
 @stage("voice")
-async def generate_dubbing_audio(translated_segments, output_folder, voice_source="edge", voice_param="vi-VN-HoaiMyNeural", api_key="", video_duration=None, segment_voices=None, script_mode="default"):
+async def generate_dubbing_audio(translated_segments, output_folder, voice_source="edge", voice_param="vi-VN-HoaiMyNeural", api_key="", video_duration=None, segment_voices=None, script_mode="default", condensation_api_key=None):
     validate_tts_source(voice_source)
     for seg in translated_segments:
         if segment_voices:
@@ -494,6 +494,8 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
 
     import time
     condense_remaining = 45.0
+    condensation_api_key = (condensation_api_key if condensation_api_key is not None else api_key)
+    condensation_api_key = condensation_api_key or os.getenv("GEMINI_API_KEY", "")
     from v1_speech_guard import coalesce_tiny_same_voice_cues, validate_speech_timeline, SpeechTimingError
     if segment_voices:
         for seg in translated_segments:
@@ -604,7 +606,7 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
         condensed_map = await asyncio.to_thread(
             condense_vietnamese_subtitles_batch,
             overly_long_items,
-            api_key=os.getenv("GEMINI_API_KEY", ""),
+            api_key=condensation_api_key or os.getenv("GEMINI_API_KEY", ""),
             deadline=condense_started + min(25.0, condense_remaining),
             stop_checker=lambda: bool(__import__('shared_state').stop_requested),
             job_id="round1_pre_tts",
@@ -694,12 +696,13 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
         condensed_map_round2 = await asyncio.to_thread(
             condense_vietnamese_subtitles_batch,
             post_tts_overly_long,
-            api_key=os.getenv("GEMINI_API_KEY", ""),
+            api_key=condensation_api_key or os.getenv("GEMINI_API_KEY", ""),
             deadline=condense_started + condense_remaining,
             stop_checker=lambda: bool(__import__('shared_state').stop_requested),
             job_id="round2_post_tts",
             script_mode=script_mode
         )
+        condense_remaining = max(0.0, condense_remaining - (time.monotonic() - condense_started))
         cues_to_re_render = []
         for seg in translated_segments:
             if seg.index in condensed_map_round2 and condensed_map_round2[seg.index] != seg.content:
@@ -720,9 +723,72 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                 if r and isinstance(r, dict):
                     res_by_idx[r["index"]] = r
 
+    import soundfile as sf
+
+    # A rewrite can meet the word-count target but still take too long when
+    # spoken by the selected voice. Measure the regenerated files and give only
+    # unresolved, genuinely long cues one stricter, bounded rewrite attempt.
+    # The final hard guard below remains authoritative and never clips speech.
+    final_condense_items = []
+    for seg in translated_segments:
+        r = res_by_idx.get(seg.index)
+        if not r or not r.get("path"):
+            continue
+        try:
+            measured_duration = float(sf.info(r["path"]).duration)
+        except Exception:
+            continue
+        hard_max = windows.get(seg.index, 3.0)
+        cur_words = len(seg.content.strip().split())
+        if measured_duration <= hard_max + 0.005 or cur_words <= 2:
+            continue
+        target_words = max(2, int(cur_words * (hard_max / max(0.1, measured_duration)) * 0.68))
+        target_words = min(cur_words - 1, target_words)
+        final_condense_items.append({
+            "index": seg.index,
+            "text": seg.content.strip(),
+            "target_seconds": hard_max,
+            "target_words": target_words,
+            "current_seconds": measured_duration,
+        })
+
+    if final_condense_items and condense_remaining > 2.0:
+        logger.info("[VOICE_GUARD] Final bounded rewrite for %s measured overlong cue(s)",
+                    len(final_condense_items))
+        from .translation import condense_vietnamese_subtitles_batch
+        condense_started = time.monotonic()
+        condensed_map_final = await asyncio.to_thread(
+            condense_vietnamese_subtitles_batch,
+            final_condense_items,
+            api_key=condensation_api_key or os.getenv("GEMINI_API_KEY", ""),
+            deadline=condense_started + min(15.0, condense_remaining),
+            stop_checker=lambda: bool(__import__('shared_state').stop_requested),
+            job_id="round3_final_tts",
+            script_mode=script_mode,
+        )
+        condense_remaining = max(0.0, condense_remaining - (time.monotonic() - condense_started))
+        cues_to_re_render = []
+        for seg in translated_segments:
+            condensed = condensed_map_final.get(seg.index)
+            if condensed and condensed != seg.content:
+                logger.info("[VOICE_GUARD] Final rewrite applied to cue %s (%s -> %s words)",
+                            seg.index, len(seg.content.split()), len(condensed.split()))
+                seg.content = condensed
+                cues_to_re_render.append(seg)
+
+        if cues_to_re_render:
+            re_results = await asyncio.gather(*(run_one(seg) for seg in cues_to_re_render), return_exceptions=True)
+            re_errors = [r for r in re_results if isinstance(r, BaseException)]
+            re_errors.extend(TTSIncompleteError(r["error"]) for r in re_results
+                             if isinstance(r, dict) and r.get("error"))
+            if re_errors:
+                raise TTSIncompleteError("Final condensed TTS regeneration failed; stale dialogue is not published") from re_errors[0]
+            for r in re_results:
+                if r and isinstance(r, dict):
+                    res_by_idx[r["index"]] = r
+
     # Final Hard Guard: Ensure EVERY single audio cue strictly fits its reading window
     # to guarantee zero audio overlap in the mixer.
-    import soundfile as sf
     sorted_active_segs = sorted([s for s in translated_segments if s.index in res_by_idx], key=lambda s: s.start)
     for k, seg in enumerate(sorted_active_segs):
         r = res_by_idx.get(seg.index)
