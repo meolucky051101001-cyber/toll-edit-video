@@ -70,6 +70,15 @@ jobs:
           tests/test_phase7_orchestrator_golden.py
           tests/test_v1_speech_translation_repair.py::BatchTests::test_invalid_condensation_never_cached
           tests/test_cloud_review_regressions.py
+          tests/test_cloud_caption_geometry.py
+          tests/test_cloud_caption_reviewer.py
+          tests/test_cloud_content_repair.py
+          tests/test_cloud_subtitle_timing.py
+          tests/test_cloud_hidden_startup.py
+          tests/test_cloud_hidden_launcher.py
+          tests/test_cloud_status_balance.py
+          tests/test_cloud_telegram_bot.py
+          tests/test_cloud_v1_parity.py
           tests/test_url_utils.py
           tests/test_v1_checkpoint_orchestrator.py
           tests/test_speech_timeline_preservation.py
