@@ -900,7 +900,7 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
     if not math.isfinite(raw_frame_count) or raw_frame_count < 1:
         raise RuntimeError("Cannot refine captions without a decoded frame count")
     frame_count = int(round(raw_frame_count))
-    batch_size = 16 if source_only else 8
+    batch_size = 8
     scale = min(1.0, 960.0 / max(width, 1))
     scaled_size = (max(1, round(width * scale)), max(1, round(height * scale)))
     last_decoded_index = None
