@@ -1,9 +1,8 @@
 # AutoDub Video Tools (Tool V1 Production)
 
 > [!IMPORTANT]
-> **THÔNG BÁO VỀ TRẠNG THÁI HỆ THỐNG (Cập nhật 02/11/2026):**
-> - **Tool V2 ĐÃ NGỪNG SỬ DỤNG (DEPRECATED & RETIRED):** Toàn bộ runtime, database, background service và thư mục của Tool V2 đã được dọn sạch khỏi môi trường sản xuất.
-> - **Tool V1 là hệ thống DUY NHẤT được duy trì chính thức (OFFICIAL PRODUCTION):** Chạy trên **Python 3.12.14** (`backend/venv`, dự phòng rollback Python 3.10.11 tại `backend/venv_py310`), tích hợp đầy đủ quy trình tự động 8 bước lồng tiếng/dịch thuật AI trên card NVIDIA GPU và đã hoàn tất đợt gia cố an toàn & dọn dẹp mã thừa C0–C9 (`1217 passed, 0 failed`).
+> **THÔNG BÁO VỀ TRẠNG THÁI HỆ THỐNG (Cập nhật 18/11/2026):**
+> - **Tool V1 là hệ thống được duy trì chính thức (OFFICIAL PRODUCTION):** Chạy trên **Python 3.12.14** (`backend/venv`, dự phòng rollback Python 3.10.11 tại `backend/venv_py310`), tích hợp đầy đủ quy trình tự động 8 bước lồng tiếng/dịch thuật AI trên card NVIDIA GPU và đã hoàn tất đợt gia cố an toàn & dọn dẹp mã thừa C0–C9 (`1217 passed, 0 failed`).
 
 ---
 
@@ -24,8 +23,6 @@
 | Tên công cụ / Nhánh | Trạng thái | Cổng truy cập | Vai trò chính |
 | --- | --- | --- | --- |
 | **Tool V1 (Production)**<br>[`tool-v1`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v1) / [`main`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/main) | **ĐANG SỬ DỤNG (Chính thức)** | Dashboard: `http://127.0.0.1:8088`<br>Tool Control: `http://127.0.0.1:8090` | Hệ thống lồng tiếng & dịch video tự động 8 bước trọn gói, tích hợp Telegram bot, Dashboard theo dõi real-time, GPU BS-RoFormer, Whisper Turbo & Gemini AI failover. |
-| **Tool V2**<br>[`tool-v2`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-v2) | **ĐÃ DỪNG / RETIRED** | *Đã tắt toàn bộ* | Phiên bản thử nghiệm pipeline theo stage; đã ngừng phát triển và loại bỏ khỏi môi trường hoạt động thực tế. |
-| **AI Video Research Tool**<br>[`tool-tim-kiem-video`](https://github.com/meolucky051101001-cyber/toll-edit-video/tree/tool-tim-kiem-video) | **Độc lập** | Web: `http://localhost:3000`<br>API: `http://localhost:8000` | Ứng dụng nghiên cứu và thu thập video độc lập (cào dữ liệu Douyin/Xiaohongshu); không dùng chung quy trình với Tool V1. |
 
 ---
 
@@ -35,8 +32,8 @@ Tool V1 vận hành một quy trình khép kín gồm 8 công đoạn liên hoà
 
 1. **Tiếp nhận & Chuẩn bị:** Tự động nhận link video (Douyin, TikTok, Xiaohongshu) qua Telegram Bot hoặc file video đưa vào hàng đợi; trích xuất audio stream chuẩn WAV 44.1kHz.
 2. **Tách nguồn âm thanh (Vocal Separation):** Sử dụng **BS-RoFormer (SDR 12.97 dB)** chạy trực tiếp trên GPU (CUDA 0) thông qua môi trường cách ly `backend/model_venv_separator` để tách sạch giọng gốc và nhạc nền (BGM).
-3. **Nhận dạng lời nói (ASR):** Sử dụng **Whisper Large-v3 Turbo** để bóc tách lời thoại và sinh timestamp chính xác từng mili-giây.
-4. **Nhận diện phụ đề gốc (OCR):** Quét khung hình bằng **PP-OCRv6** với thuật toán Smart Skip và cân bằng hình học phụ đề (OCR Geometry auto-heal) để xác định vị trí và thời gian phụ đề gốc cần che.
+3. **Nhận dạng lời nói (ASR):** Mặc định dùng **Hybrid Faster-Whisper Large-v3 Turbo + SenseVoice-Small (CTC 60ms)**: Whisper cho ngữ nghĩa, SenseVoice căn timestamp chính xác ~60ms và lọc tạp âm nhạc nền. Có thể chọn riêng từng job: Whisper Turbo, SenseVoice-Small hoặc Paraformer-large-zh (tự fallback về Whisper khi gặp đa ngôn ngữ).
+4. **Nhận diện phụ đề gốc (OCR):** Quét khung hình bằng **PP-OCRv6 Tiny (phát hiện) + PP-OCRv5 Server (nhận dạng)** chạy ONNX CUDA, kết hợp thuật toán Smart Skip và cân bằng hình học phụ đề (OCR Geometry auto-heal) để xác định vị trí và thời gian phụ đề gốc cần che.
 5. **Dịch thuật AI theo ngữ cảnh:** Động cơ dịch đa kênh với cơ chế **Gemini Multi-key Failover Pool** (tự động đảo key dự phòng khi chạm quota/rate-limit), kết hợp prompt dịch tự nhiên, chuẩn văn phong Việt Nam.
 6. **Lồng tiếng & Căn nhịp đọc (TTS & Timing):** Tổng hợp giọng đọc tự nhiên (CapCut TTS đa luồng 6 worker chất lượng cao, Vie-TTS / VieNeu 14 giọng Bắc/Trung/Nam, Edge TTS dự phòng; loại bỏ hoàn toàn phụ thuộc model RVC nặng nề), kết hợp bộ giải thuật **Timing Solver & Speed Limiter (tối đa 1.45x)** chống méo tiếng hoặc nuốt chữ.
 7. **Hòa âm thông minh (Audio Mixing):** Bộ trộn **Hierarchical Soft Ducking** tự động hạ nhạc nền khi có lời nói, nâng nhạc nền ở khoảng lặng và chuẩn hóa âm lượng theo chuẩn quốc tế **EBU R128 (-15 LUFS)**.
@@ -50,9 +47,9 @@ Tool V1 quản lý các model tập trung qua `backend/v1_model_registry.py` và
 
 | Công đoạn | Model mặc định | Cơ chế tăng tốc / Runtime | Fallback / Dự phòng |
 | --- | --- | --- | --- |
-| **Separation** | BS-RoFormer Ep317 (SDR 12.97dB) | CUDA:0 (`backend/model_venv_separator`) | Demucs v4 (htdemucs) |
-| **ASR** | Whisper Large-v3 Turbo | CUDA:0 (Faster-Whisper FP16) | Standard Whisper / Fallback Cache |
-| **OCR** | PP-OCRv6 (ONNX Runtime) | ONNX Runtime GPU/DirectML | Smart Skip / Reuse visual bbox |
+| **Separation** | BS-RoFormer Ep317 (SDR 12.97dB) cho video ngắn (≤ 7 phút); Demucs v4 cho video dài | CUDA:0 (`backend/model_venv_separator`) | Demucs v4 (htdemucs) ↔ BS-RoFormer |
+| **ASR** | Hybrid Faster-Whisper Large-v3 Turbo + SenseVoice-Small (CTC 60ms); tùy chọn: Whisper Turbo, SenseVoice-Small, Paraformer-large-zh | CUDA:0 (Faster-Whisper FP16 + SenseVoice ONNX INT8) | Whisper Large-v3 Turbo |
+| **OCR** | PP-OCRv6 Tiny Det + PP-OCRv5 Server Rec (ONNX) | ONNX Runtime CUDA (GPU:0) | Smart Skip / Reuse visual bbox |
 | **Dịch thuật** | Gemini Flash (Multi-key Pool) | HTTP REST đa key + cache phiên | Secondary API keys / Tiered fallback |
 | **TTS** | CapCut TTS (6-workers) & Vie-TTS (VieNeu 14 giọng) | Async streaming pooling & fallback tự động | Edge-TTS (4-workers) |
 | **Render** | FFmpeg NVENC H.264 | NVIDIA NVENC Hardware Video Encoder | libx264 CPU encode |
@@ -137,7 +134,7 @@ node --test $jsFiles
 ### 6.4. Các công cụ lịch sử đã vô hiệu hóa (Retired Entrypoints) & Module dùng chung
 - **Đã ngừng sử dụng (Retired, exit code `1`, không có side effect khi import):** `backend/enqueue_missing_batch.py`, `backend/sync_capcut_queue.py`, `RESTORE_SAFE_BASELINE.bat`, `ROLLBACK_TRANSLATION_FIX.bat`, `RESTORE_VOICE_LOCK_BACKUP.bat`, `rollback_to_safe_state.ps1`, `fixes_for_v1/apply_fix_to_v1.bat`, `fixes_for_v1/rollback_tool_v1.bat`, `scripts/setup_telegram_bot_v2.ps1`. Để khôi phục môi trường hoặc mã nguồn, chỉ sử dụng `git log` / `git revert` theo từng commit hoặc `scripts\rollback_py310.bat` khi cần đổi lại interpreter.
 - **Các tiện ích CLI vẫn được giữ hỗ trợ:** `scripts/verify_runtime_health.py`, `scripts/cutover_py312.bat`, `scripts/rollback_py310.bat`, `scripts/generate_release_manifest.py`, `package_v1_release.py`, `tools/sheet_crypto.py`, `telebot_video_downloader.py`.
-- **Phạm vi module `backend/pipeline_v2/`:** Dù dịch vụ độc lập Tool V2 đã retired, gói `backend/pipeline_v2/` vẫn đang được giữ lại vì cung cấp các tiện ích dùng chung cho Tool V1 (`atomic_io`, `interprocess_lock`, `stage_validation`, `qc`, `cover_qc`). Không tự ý xóa `backend/pipeline_v2/`.
+- **Phạm vi module `backend/pipeline_v2/`:** Gói `backend/pipeline_v2/` vẫn được giữ lại vì cung cấp các tiện ích dùng chung cho Tool V1 (`atomic_io`, `interprocess_lock`, `stage_validation`, `qc`, `cover_qc`). Không tự ý xóa `backend/pipeline_v2/`.
 
 ---
 
