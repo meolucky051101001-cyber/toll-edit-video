@@ -35,7 +35,7 @@ Tài liệu hướng dẫn nhanh cho người vận hành hệ thống lồng ti
 - Cấu hình đặt tại `backend/.env` (tuyệt đối không commit file `.env` lên Git).
 - Runtime Python chính: **Python 3.12.14** tại `backend/venv/Scripts/python.exe` (môi trường dự phòng rollback Python 3.10.11 đặt tại `backend/venv_py310/Scripts/python.exe`).
 - Runtime tách âm BS-RoFormer: `backend/model_venv_separator/Scripts/python.exe` (sử dụng GPU CUDA:0).
-- Các script lịch sử nguy hiểm (`RESTORE_SAFE_BASELINE.bat`, `rollback_to_safe_state.ps1`, `backend/enqueue_missing_batch.py`, `backend/sync_capcut_queue.py`, ...) đã được vô hiệu hóa an toàn (retired, trả mã lỗi `1`).
+- Các script lịch sử nguy hiểm (`RESTORE_SAFE_BASELINE.bat`, `scripts/windows/rollback_to_safe_state.ps1`, `backend/enqueue_missing_batch.py`, `backend/sync_capcut_queue.py`, ...) đã được vô hiệu hóa an toàn (retired, trả mã lỗi `1`).
 
 ---
 

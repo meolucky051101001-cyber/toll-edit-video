@@ -132,7 +132,7 @@ node --test $jsFiles
 ~~~
 
 ### 6.4. Các công cụ lịch sử đã vô hiệu hóa (Retired Entrypoints) & Module dùng chung
-- **Đã ngừng sử dụng (Retired, exit code `1`, không có side effect khi import):** `backend/enqueue_missing_batch.py`, `backend/sync_capcut_queue.py`, `RESTORE_SAFE_BASELINE.bat`, `ROLLBACK_TRANSLATION_FIX.bat`, `RESTORE_VOICE_LOCK_BACKUP.bat`, `rollback_to_safe_state.ps1`, `fixes_for_v1/apply_fix_to_v1.bat`, `fixes_for_v1/rollback_tool_v1.bat`, `scripts/setup_telegram_bot_v2.ps1`. Để khôi phục môi trường hoặc mã nguồn, chỉ sử dụng `git log` / `git revert` theo từng commit hoặc `scripts\rollback_py310.bat` khi cần đổi lại interpreter.
+- **Đã ngừng sử dụng (Retired, exit code `1`, không có side effect khi import):** `backend/enqueue_missing_batch.py`, `backend/sync_capcut_queue.py`, `RESTORE_SAFE_BASELINE.bat`, `ROLLBACK_TRANSLATION_FIX.bat`, `RESTORE_VOICE_LOCK_BACKUP.bat`, `scripts/windows/rollback_to_safe_state.ps1`, `fixes_for_v1/apply_fix_to_v1.bat`, `fixes_for_v1/rollback_tool_v1.bat`, `scripts/setup_telegram_bot_v2.ps1`. Để khôi phục môi trường hoặc mã nguồn, chỉ sử dụng `git log` / `git revert` theo từng commit hoặc `scripts\rollback_py310.bat` khi cần đổi lại interpreter.
 - **Các tiện ích CLI vẫn được giữ hỗ trợ:** `scripts/verify_runtime_health.py`, `scripts/cutover_py312.bat`, `scripts/rollback_py310.bat`, `scripts/generate_release_manifest.py`, `package_v1_release.py`, `tools/sheet_crypto.py`, `telebot_video_downloader.py`.
 - **Phạm vi module `backend/pipeline_v2/`:** Gói `backend/pipeline_v2/` vẫn được giữ lại vì cung cấp các tiện ích dùng chung cho Tool V1 (`atomic_io`, `interprocess_lock`, `stage_validation`, `qc`, `cover_qc`). Không tự ý xóa `backend/pipeline_v2/`.
 
