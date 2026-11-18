@@ -41,6 +41,23 @@ def _configure_cuda():
     original = ort.InferenceSession
     class CudaSession(original):
         def __init__(self, *args, **kwargs):
+            if hasattr(ort, "SessionOptions") and hasattr(ort, "GraphOptimizationLevel"):
+                sess_opts = kwargs.get("sess_options")
+                if sess_opts is None and len(args) < 2:
+                    sess_opts = ort.SessionOptions()
+                    sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                    kwargs["sess_options"] = sess_opts
+                provs = kwargs.get("providers")
+                if isinstance(provs, (list, tuple)):
+                    tuned = []
+                    for item in provs:
+                        if item == "CUDAExecutionProvider":
+                            tuned.append(("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}))
+                        else:
+                            tuned.append(item)
+                    kwargs["providers"] = tuned
+                    if kwargs.get("provider_options") is None:
+                        kwargs.pop("provider_options", None)
             super().__init__(*args, **kwargs)
             self.disable_fallback()
             if "CUDAExecutionProvider" not in self.get_providers():
