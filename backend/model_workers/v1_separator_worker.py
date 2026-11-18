@@ -284,6 +284,8 @@ def main():
             configured_bs = 0
         if configured_bs > 0:
             mdxc_batch_size = configured_bs
+        elif free_vram_mb >= 3600:
+            mdxc_batch_size = 8
         elif free_vram_mb >= 2200:
             mdxc_batch_size = 4
         elif free_vram_mb >= 1400:

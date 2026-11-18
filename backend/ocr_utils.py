@@ -1203,6 +1203,12 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
     transition_cache = {}
     unsettled_targets = None
     max_transition_cache = 384
+    try:
+        import psutil
+        if psutil.virtual_memory().available >= int(2.5 * 1024 * 1024 * 1024):
+            max_transition_cache = 768
+    except Exception:
+        pass
 
     def _ensure_unsettled_targets():
         nonlocal unsettled_targets

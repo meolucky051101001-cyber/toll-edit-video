@@ -143,24 +143,46 @@ def retranscribe_gap_snippet(
     end_ms = int(end_sec * 1000)
     snippet = original_audio[start_ms:end_ms]
 
-    temp_wav = os.path.join(temp_dir, f"gap_{int(gap_start*1000)}.wav")
-    snippet.export(temp_wav, format="wav")
-
     # Use sensitive parameters for short suspected segments
     vad_active = duration > 4.0
     vad_params = dict(threshold=0.20, min_silence_duration_ms=300) if vad_active else None
 
+    # Convert directly to 16kHz mono float32 ndarray in RAM for direct GPU Whisper inference
+    audio_input: Any = None
+    temp_wav = None
+    try:
+        import numpy as np
+        mono_16k = snippet.set_channels(1).set_frame_rate(16000).set_sample_width(2)
+        audio_input = np.frombuffer(mono_16k.raw_data, dtype=np.int16).astype(np.float32) / 32768.0
+    except Exception:
+        temp_wav = os.path.join(temp_dir, f"gap_{int(gap_start*1000)}.wav")
+        snippet.export(temp_wav, format="wav")
+        audio_input = temp_wav
+
     recovered: List[Dict[str, Any]] = []
     try:
-        segments, _ = model.transcribe(
-            temp_wav,
-            beam_size=3,
-            language="zh",
-            vad_filter=vad_active,
-            vad_parameters=vad_params,
-            condition_on_previous_text=False,
-            temperature=[0.0, 0.2],
-        )
+        try:
+            segments, _ = model.transcribe(
+                audio_input,
+                beam_size=2,
+                language="zh",
+                vad_filter=vad_active,
+                vad_parameters=vad_params,
+                condition_on_previous_text=False,
+                temperature=0.0,
+            )
+        except TypeError:
+            temp_wav = os.path.join(temp_dir, f"gap_{int(gap_start*1000)}.wav")
+            snippet.export(temp_wav, format="wav")
+            segments, _ = model.transcribe(
+                temp_wav,
+                beam_size=2,
+                language="zh",
+                vad_filter=vad_active,
+                vad_parameters=vad_params,
+                condition_on_previous_text=False,
+                temperature=[0.0, 0.2],
+            )
         for seg in segments:
             text = seg.text.strip()
             if not text or not is_chinese_text(text) or is_hallucination(text):
@@ -184,7 +206,7 @@ def retranscribe_gap_snippet(
     except Exception as e:
         logger.warning("Error retranscribing gap %.2f - %.2f: %s", gap_start, gap_end, e)
     finally:
-        if os.path.exists(temp_wav):
+        if temp_wav and os.path.exists(temp_wav):
             try:
                 os.remove(temp_wav)
             except OSError:

@@ -648,12 +648,19 @@ def process_video(
                 kwargs.get("subtitle_blur_settings") or
                 (blur_meta["settings"] if blur_meta is not None else None))
 
+        last_blur_metrics = {}
+        gpu_blur_w, gpu_blur_h = orig_w, orig_h
+        gpu_pre_vf = ""
+        gpu_post_vf = ""
+
         def _build_sub_filter(fw: int, fh: int, extra_post_blur: str = "") -> str:
             post_blur = (extra_post_blur + ",") if extra_post_blur else ""
             if cover_style == "localized_blur":
                 blur_metrics = {}
                 blur_filter = build_localized_blur_filter(
                     source_blur_boxes, fw, fh, source_blur_settings, metrics=blur_metrics)
+                last_blur_metrics.clear()
+                last_blur_metrics.update(blur_metrics)
                 logger.info("V1 localized blur plan size=%dx%d metrics=%s", fw, fh, blur_metrics)
                 return (blur_filter + "," if blur_filter else "") + post_blur + base_sub_filter
             elif cover_style == "frosted_blur" and 0.15 <= float(main_y_pct or 0.75) <= 0.96:
@@ -753,6 +760,15 @@ def process_video(
             pre_split = ",".join(pre_items) + ","
             sub_filter = _build_sub_filter(orig_w, orig_h, extra_post_blur=tail_pad_filter)
             bg_tpad = (tail_pad_filter + ",") if tail_pad_filter else ""
+            wm_part_landscape = ""
+            # Tích hợp Watermark bản quyền nếu bật trong cài đặt Canvas
+            try:
+                import canvas_settings, workflow_api
+                c_set = canvas_settings.get_canvas_settings()
+                if c_set.get("watermark_enabled") and c_set.get("watermark_text"):
+                    wm_part_landscape = workflow_api.build_watermark_filter(c_set, 1080, 1920) or ""
+            except Exception as _wme:
+                logger.warning("Không thể lồng watermark vào video chuyển 9:16: %s", _wme)
             blur_bg_filter = (
                 f"{pre_split}split[v1][v2];"
                 # Bắt buộc ép format=yuv420p trước khi split/crop/boxblur vì NVDEC (-hwaccel cuda)
@@ -761,18 +777,18 @@ def process_video(
                 f"[v1]{bg_tpad}scale=360:640:force_original_aspect_ratio=increase:flags=bilinear,crop=360:640,"
                 "boxblur=8:3,scale=1080:1920:flags=bilinear[bg];"
                 f"[v2]{sub_filter},scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos[fg];"
-                "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p{wm_part_landscape}"
             )
-            # Tích hợp Watermark bản quyền nếu bật trong cài đặt Canvas
-            try:
-                import canvas_settings, workflow_api
-                c_set = canvas_settings.get_canvas_settings()
-                if c_set.get("watermark_enabled") and c_set.get("watermark_text"):
-                    wm_part = workflow_api.build_watermark_filter(c_set, 1080, 1920)
-                    if wm_part:
-                        blur_bg_filter += wm_part
-            except Exception as _wme:
-                logger.warning("Không thể lồng watermark vào video chuyển 9:16: %s", _wme)
+            gpu_blur_w, gpu_blur_h = orig_w, orig_h
+            gpu_pre_vf = ",".join(pre_items)
+            fg_post_sub = ((tail_pad_filter + ",") if tail_pad_filter else "") + base_sub_filter
+            gpu_post_vf = (
+                f"split[v1][v2];"
+                f"[v1]{bg_tpad}scale=360:640:force_original_aspect_ratio=increase:flags=bilinear,crop=360:640,"
+                f"boxblur=8:3,scale=1080:1920:flags=bilinear[bg];"
+                f"[v2]{fg_post_sub},scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p{wm_part_landscape}"
+            )
             filter_complex = blur_bg_filter
             w, h = 1080, 1920
             logger.info("Chuyển đổi video không phải 9:16 sang khung dọc 9:16 với nền mờ: %dx%d -> 1080x1920", orig_w, orig_h)
@@ -793,12 +809,16 @@ def process_video(
             if delogo_filters:
                 filter_parts.extend(delogo_filters)
 
+            gpu_blur_w, gpu_blur_h = w, h
+            gpu_pre_vf = ",".join(filter_parts)
+
             sub_filter = _build_sub_filter(w, h, extra_post_blur=tail_pad_filter)
             if ("split[" in sub_filter or tail_pad_filter) and "format=yuv420p" not in filter_parts:
                 filter_parts.append("format=yuv420p")
             filter_parts.append(sub_filter)
             filter_parts.append("format=yuv420p")
 
+            wm_part_vertical = ""
             # Tích hợp Watermark bản quyền nếu bật trong cài đặt Canvas
             try:
                 import canvas_settings, workflow_api
@@ -806,9 +826,19 @@ def process_video(
                 if c_set.get("watermark_enabled") and c_set.get("watermark_text"):
                     wm_part = workflow_api.build_watermark_filter(c_set, w, h).lstrip(",")
                     if wm_part:
+                        wm_part_vertical = wm_part
                         filter_parts.append(wm_part)
             except Exception as _wme:
                 logger.warning("Không thể lồng watermark vào video dọc 9:16: %s", _wme)
+
+            gpu_post_parts = []
+            if tail_pad_filter:
+                gpu_post_parts.append(tail_pad_filter)
+            gpu_post_parts.append(base_sub_filter)
+            gpu_post_parts.append("format=yuv420p")
+            if wm_part_vertical:
+                gpu_post_parts.append(wm_part_vertical)
+            gpu_post_vf = ",".join(gpu_post_parts)
 
             filter_complex = ",".join(filter_parts)
         
@@ -835,6 +865,55 @@ def process_video(
             ['h264_nvenc', '-preset', 'fast', '-b:v', b_v],
         ]
         
+        # GPU CUDA Localized Blur Fast-Path: eliminates O(N_slots) CPU split=N bottlenecks
+        if (
+            cover_style == "localized_blur"
+            and int(last_blur_metrics.get("slots", 0) or 0) >= 2
+            and not hasattr(run_batch_subprocess, "_mock_name")
+            and os.path.isfile(video_path)
+            and os.path.getsize(video_path) > 20000
+        ):
+            try:
+                from v1_gpu_subtitle_blur import (
+                    gpu_localized_blur_available,
+                    render_video_with_gpu_localized_blur,
+                )
+                if gpu_localized_blur_available():
+                    for gpu_enc_args in encoders_to_try:
+                        gpu_ok, gpu_reason = render_video_with_gpu_localized_blur(
+                            video_path=video_path,
+                            mixed_audio_path=mixed_audio_path,
+                            output_video_path=output_video_path,
+                            source_video=source_video,
+                            blur_boxes=source_blur_boxes,
+                            blur_settings=source_blur_settings,
+                            blur_width=gpu_blur_w,
+                            blur_height=gpu_blur_h,
+                            output_width=w,
+                            output_height=h,
+                            pre_blur_vf=gpu_pre_vf,
+                            post_blur_vf=gpu_post_vf,
+                            enc_args=gpu_enc_args,
+                            filter_threads=filter_threads,
+                            tail_pad_seconds=tail_pad_seconds,
+                            deadline=render_deadline,
+                        )
+                        if gpu_ok:
+                            print(f"Render video thành công bằng GPU CUDA Blur + encoder: {gpu_enc_args[0]}")
+                            return True
+                        logger.warning("GPU CUDA localized blur attempt failed (%s)", gpu_reason)
+                        if not any(tok in gpu_reason.lower() for tok in ("spatial-aq", "unsupported", "invalid param")):
+                            break
+            except RuntimeError as _gpu_stop_exc:
+                if "stop requested" in str(_gpu_stop_exc).lower():
+                    raise
+                logger.warning("GPU CUDA localized blur fallback to FFmpeg CPU graph: %s", _gpu_stop_exc)
+            except subprocess.TimeoutExpired:
+                print("Đã hết thời gian render trong bước GPU CUDA localized blur.")
+                return False
+            except Exception as _gpu_blur_exc:
+                logger.warning("GPU CUDA localized blur fallback to FFmpeg CPU graph: %s", _gpu_blur_exc)
+
         # Preserve exact observations even on long videos. A filter script avoids
         # Windows command-line limits without broadening regions or filling gaps.
         filter_args = ["-vf", filter_complex]
