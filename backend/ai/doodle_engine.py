@@ -27,7 +27,11 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
-import resvg_py
+
+try:
+    import resvg_py
+except ImportError:
+    resvg_py = None
 
 from ai.script_tts_service import (
     generate_single_tts,
@@ -147,6 +151,9 @@ def fetch_vector_icon(query: str, size: int = 180, color: str = "#1e1e1e") -> Op
             return Image.open(cache_file).convert("RGBA")
         except Exception:
             pass
+
+    if resvg_py is None:
+        return None
 
     try:
         search_url = f"https://api.iconify.design/search?query={urllib.parse.quote(clean_q)}&limit=6"
