@@ -687,11 +687,12 @@ def _coalesce_stationary_source_tracks(tracks, max_chunk_s=0.9):
         cur_prob = float(_ocr_field(cur, "prob", 0.0) or 0.0)
         k2 = _visual_caption_key(cur_text)
         for prev in active:
+            prev_s = float(_ocr_field(prev, "start", 0.0) or 0.0)
             prev_e = float(_ocr_field(prev, "end", 0.0) or 0.0)
             if prev_e < cur_s - 1e-5:
                 finished.append(prev)
                 continue
-            if not matched and abs(cur_s - prev_e) <= 1e-5:
+            if not matched and cur_s <= prev_e + 1e-5:
                 prev_x1 = float(_ocr_field(prev, "x_pct", 0.0) or 0.0)
                 prev_x2 = float(_ocr_field(prev, "max_x_pct", 0.0) or 0.0)
                 prev_y1 = float(_ocr_field(prev, "y_pct", 0.0) or 0.0)
@@ -702,6 +703,7 @@ def _coalesce_stationary_source_tracks(tracks, max_chunk_s=0.9):
                     abs(prev_y1 - cur_y1),
                     abs(prev_y2 - cur_y2),
                 )
+                y_diff = max(abs(prev_y1 - cur_y1), abs(prev_y2 - cur_y2))
                 k1 = _visual_caption_key(_ocr_field(prev, "text", ""))
                 same_caption = bool(k1 and k2) and (
                     k1 == k2
@@ -717,14 +719,45 @@ def _coalesce_stationary_source_tracks(tracks, max_chunk_s=0.9):
                         and (k1[0] == k2[0] or k1[-1] == k2[-1])
                     )
                 )
-                if edge_diff <= 0.025 and same_caption:
+                partial_occlusion_same = False
+                if not (edge_diff <= 0.025 and same_caption) and y_diff <= 0.022 and k1 and k2:
+                    cjk1 = "".join(c for c in k1 if "\u3400" <= c <= "\u9fff")
+                    cjk2 = "".join(c for c in k2 if "\u3400" <= c <= "\u9fff")
+                    if len(k1) <= len(k2):
+                        sk, lk, scjk, lcjk = k1, k2, cjk1, cjk2
+                        sx1, sx2, lx1, lx2 = prev_x1, prev_x2, cur_x1, cur_x2
+                    else:
+                        sk, lk, scjk, lcjk = k2, k1, cjk2, cjk1
+                        sx1, sx2, lx1, lx2 = cur_x1, cur_x2, prev_x1, prev_x2
+                    if (
+                        len(sk) >= 4
+                        and len(lk) > len(sk)
+                        and sx1 >= lx1 - 0.025
+                        and sx2 <= lx2 + 0.025
+                        and (sk in lk or (len(scjk) >= 3 and scjk in lcjk))
+                    ):
+                        partial_occlusion_same = True
+                    elif (
+                        y_diff <= 0.020
+                        and len(scjk) >= 4
+                        and len(lcjk) > len(scjk)
+                    ):
+                        ov_w = min(prev_x2, cur_x2) - max(prev_x1, cur_x1)
+                        min_w = max(1e-4, min(prev_x2 - prev_x1, cur_x2 - cur_x1))
+                        if ov_w >= 0.75 * min_w:
+                            sm = SequenceMatcher(None, scjk, lcjk, autojunk=False)
+                            m = sm.find_longest_match(0, len(scjk), 0, len(lcjk))
+                            if m.size >= max(3, len(scjk) - 1) or (len(scjk) >= 6 and sm.ratio() >= 0.85):
+                                partial_occlusion_same = True
+                if (edge_diff <= 0.025 and same_caption) or partial_occlusion_same:
+                    _set_ocr_field(prev, "start", min(prev_s, cur_s))
                     _set_ocr_field(prev, "end", max(prev_e, cur_e))
                     _set_ocr_field(prev, "x_pct", min(prev_x1, cur_x1))
                     _set_ocr_field(prev, "max_x_pct", max(prev_x2, cur_x2))
                     _set_ocr_field(prev, "y_pct", min(prev_y1, cur_y1))
                     _set_ocr_field(prev, "max_y_pct", max(prev_y2, cur_y2))
                     prev_prob = float(_ocr_field(prev, "prob", 0.0) or 0.0)
-                    if cur_prob > prev_prob:
+                    if len(k2) > len(k1) or (len(k2) == len(k1) and cur_prob > prev_prob):
                         _set_ocr_field(prev, "text", cur_text)
                         _set_ocr_field(prev, "prob", cur_prob)
                     matched = True
@@ -1070,18 +1103,39 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
     except ImportError:
         from visual_caption_timing import refine_observations, observation_intervals
 
-    speech_keys = {_visual_caption_key(seg.content) for seg in source_segments or []}
+    speech_keys = set()
+    for seg in source_segments or []:
+        speech_keys.add(_visual_caption_key(getattr(seg, "content", "")))
+        alt_txt = getattr(seg, "paraformer_alt", "")
+        if alt_txt:
+            speech_keys.add(_visual_caption_key(alt_txt))
     speech_keys.discard('')
 
     @lru_cache(maxsize=4096)
     def speech_similarity(text):
         key = _visual_caption_key(text)
+        if not key:
+            return 0.0
         if key in speech_keys:
             return 1.0
-        return max((SequenceMatcher(None, key, speech, autojunk=False).ratio()
-                    for speech in speech_keys
-                    if 2 * min(len(key), len(speech)) >= .65 * (len(key) + len(speech))),
-                   default=0.0)
+        if len(key) >= 4 and any(key in sp for sp in speech_keys):
+            return 1.0
+        best = 0.0
+        klen = len(key)
+        for speech in speech_keys:
+            slen = len(speech)
+            if 2 * min(klen, slen) >= .65 * (klen + slen):
+                score = SequenceMatcher(None, key, speech, autojunk=False).ratio()
+                if score > best:
+                    best = score
+            if best < 0.90 and klen >= 4 and slen >= klen + 4:
+                for idx in range(0, slen - klen + 1):
+                    score = SequenceMatcher(None, key, speech[idx:idx + klen], autojunk=False).ratio()
+                    if score > best:
+                        best = score
+                        if best >= 0.95:
+                            return best
+        return best
 
     # Use individual speech-matching OCR rows, not an expanded/composite band
     # that may also enclose a creator watermark or nearby packaging labels.
@@ -1099,8 +1153,26 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
                 group = [center, []]
                 clusters.append(group)
             group[1].append(block)
-        support = max((len(g[1]) for g in clusters),default=0)
-        source_seeds = [b for _, group in clusters if len(group) >= max(1,support*.25) for b in group]
+        support = max((len(g[1]) for g in clusters), default=0)
+        band_sel_centers = []
+        for sel in (getattr(source_band, "selected_by_segment", None) or {}).values():
+            try:
+                sy0 = float(_ocr_field(sel, "y_pct", -1.0))
+                sy1 = float(_ocr_field(sel, "max_y_pct", -1.0))
+                if 0.0 <= sy0 < sy1 <= 1.0:
+                    band_sel_centers.append((sy0 + sy1) * 0.5)
+            except (TypeError, ValueError):
+                continue
+        source_seeds = [
+            b
+            for g_cy, group in clusters
+            if (
+                len(group) >= max(1, support * .25)
+                or (len(group) >= 2 and max(speech_similarity(x.text) for x in group) >= .82)
+                or any(abs(g_cy - sc) <= .025 for sc in band_sel_centers)
+            )
+            for b in group
+        ]
 
     active_windows = []
     if source_only and source_segments:
@@ -1149,16 +1221,67 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         source_seeds
         and max(abs(((s.x_pct + s.max_x_pct) * 0.5) - seed_anchor_cx) for s in source_seeds) <= 0.08
     )
+    seed_char_widths = sorted(
+        float(s.max_x_pct - s.x_pct) / max(len(_visual_caption_key(s.text)), _visual_chinese_count(s.text), 1)
+        for s in source_seeds
+        if _visual_chinese_count(s.text) >= 4 and float(s.max_x_pct - s.x_pct) > 0.02
+    )
+    median_seed_char_w = seed_char_widths[len(seed_char_widths) // 2] if seed_char_widths else 0.0
+
+    def _rescue_split_single_cjk_blocks(raw_blocks):
+        if len(raw_blocks) <= 1:
+            return raw_blocks
+        items = [copy.copy(b) for b in raw_blocks]
+        used_single = set()
+        for i, main_b in enumerate(items):
+            if _visual_chinese_count(main_b.text) < 2 or float(main_b.prob) < 0.60:
+                continue
+            if _visual_watermark_text(main_b.text):
+                continue
+            my1, my2 = float(main_b.y_pct), float(main_b.max_y_pct)
+            mh = my2 - my1
+            if mh <= 0.0:
+                continue
+            mcy = (my1 + my2) * 0.5
+            mx1, mx2 = float(main_b.x_pct), float(main_b.max_x_pct)
+            for j, sub_b in enumerate(items):
+                if i == j or j in used_single:
+                    continue
+                if _visual_chinese_count(sub_b.text) != 1 or float(sub_b.prob) < 0.50:
+                    continue
+                if _visual_watermark_text(sub_b.text):
+                    continue
+                sy1, sy2 = float(sub_b.y_pct), float(sub_b.max_y_pct)
+                sh = sy2 - sy1
+                if sh <= 0.0 or max(mh, sh) > min(mh, sh) * 1.65:
+                    continue
+                scy = (sy1 + sy2) * 0.5
+                sx1, sx2 = float(sub_b.x_pct), float(sub_b.max_x_pct)
+                gap_x = max(0.0, sx1 - mx2, mx1 - sx2)
+                if abs(mcy - scy) <= min(0.016, max(mh, sh) * 0.35) and gap_x <= 0.065:
+                    left_t, right_t = (sub_b.text, main_b.text) if sx1 <= mx1 else (main_b.text, sub_b.text)
+                    main_b.x_pct = min(mx1, sx1)
+                    main_b.max_x_pct = max(mx2, sx2)
+                    main_b.y_pct = min(my1, sy1)
+                    main_b.max_y_pct = max(my2, sy2)
+                    main_b.text = f"{left_t}{right_t}".strip()
+                    mx1, mx2 = main_b.x_pct, main_b.max_x_pct
+                    my1, my2 = main_b.y_pct, main_b.max_y_pct
+                    used_single.add(j)
+        return [b for idx, b in enumerate(items) if idx not in used_single]
 
     def caption_blocks(blocks):
         selected = []
-        for block in blocks:
-            matches_speech = (source_only and _visual_chinese_count(block.text) >= 6
-                              and speech_similarity(block.text) >= .8)
+        for block in _rescue_split_single_cjk_blocks(blocks):
+            cjk_n = _visual_chinese_count(block.text)
+            sim = speech_similarity(block.text) if (source_only and cjk_n >= 4) else 0.0
+            matches_speech = bool(
+                source_only and ((cjk_n >= 6 and sim >= .8) or (cjk_n >= 4 and sim >= .88))
+            )
             block_h = max(0.0, float(block.max_y_pct - block.y_pct))
             in_band = block.max_y_pct >= band.top - .035 and block.y_pct <= band.bottom + .035
+            center = (block.y_pct + block.max_y_pct) / 2
             if source_only and source_seeds:
-                center = (block.y_pct + block.max_y_pct) / 2
                 in_band = (
                     (median_seed_h <= 0.0 or (median_seed_h * 0.56 <= block_h <= max_allowed_block_h))
                     and any(
@@ -1168,16 +1291,38 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
                     )
                 )
             english = getattr(band, 'mode', '') == 'english_match'
-            readable = (_visual_chinese_count(block.text) >= 2 or
+            readable = (cjk_n >= 2 or
                         (english and sum(c.isascii() and c.isalpha() for c in block.text) >= 4))
             if (not (in_band or matches_speech) or block.prob < .60 or not readable
                     or _visual_watermark_text(block.text)):
                 continue
+            if source_only and not matches_speech and cjk_n >= 3 and sim < 0.55:
+                px_w = max(0.0, float(block.max_x_pct - block.x_pct)) * max(width, 1)
+                px_h = max(1.0, block_h * max(height, 1))
+                char_units = max(len(_visual_caption_key(block.text)), cjk_n, 1)
+                blk_char_w = max(0.0, float(block.max_x_pct - block.x_pct)) / char_units
+                if (
+                    px_w < px_h * cjk_n * 0.42
+                    or (median_seed_char_w > 0.0 and blk_char_w < median_seed_char_w * 0.52)
+                    or ("/" in str(block.text or "") and sim < 0.40)
+                ):
+                    continue
             cx = (block.x_pct + block.max_x_pct) / 2
             anchor_cx = seed_anchor_cx if (source_only and source_seeds) else .5
+            dx = abs(cx - anchor_cx)
+            if source_only and source_seeds:
+                row_dx = min(
+                    (
+                        abs(cx - (s.x_pct + s.max_x_pct) * 0.5)
+                        for s in source_seeds
+                        if abs(center - (s.y_pct + s.max_y_pct) * 0.5) <= 0.03
+                    ),
+                    default=dx,
+                )
+                dx = min(dx, row_dx)
             if not matches_speech and (
-                abs(cx - anchor_cx) > (.145 if (source_only and seeds_centered) else .25)
-                or (block.max_x_pct - block.x_pct < .25 and abs(cx - anchor_cx) > .15)
+                dx > (.145 if (source_only and seeds_centered) else .25)
+                or (block.max_x_pct - block.x_pct < .25 and dx > .15)
             ):
                 continue
             selected.append(block)
@@ -1292,7 +1437,9 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             for block in caption_blocks(blocks):
                 track = _tracking_ocr_block(block, left, right, block)
                 track.geometry_verified = True
-                track.visual_locked = True
+                # Spoken ASR cues keep their speech/TTS display lifetime; only
+                # mute visual_sub_to_speech cues lock dialogue timing to OCR.
+                track.visual_locked = False
                 tracks.append(track)
         metrics['source_timeline'] = dict(observed_frames=len(refined), track_count=len(tracks),
                                           duration=duration, max_stable_gap_frames=stable_gap)
@@ -1667,6 +1814,17 @@ def _attach_source_caption_tracks(segments, tracks):
             if min(s1, t_end) - max(s0, t_start) > 1e-6
         ]
         if len(overlapping) >= 2:
+            max_ov = max(min(s1, t_end) - max(s0, t_start) for _, s0, s1 in overlapping)
+            tcjk = "".join(c for c in str(getattr(track, "text", "") or "") if "\u3400" <= c <= "\u9fff")
+            substantial = []
+            for s, s0, s1 in overlapping:
+                ov_s = min(s1, t_end) - max(s0, t_start)
+                scjk = "".join(c for c in str(getattr(s, "content", "") or "") if "\u3400" <= c <= "\u9fff")
+                if ov_s >= 0.15 or max_ov < 0.25 or (len(scjk) >= 2 and scjk in tcjk):
+                    substantial.append((s, s0, s1))
+            if len(substantial) == 1:
+                overlapping = substantial
+        if len(overlapping) >= 2:
             cur = t_start
             for pos, (s, s0, s1) in enumerate(overlapping):
                 nxt_cut = overlapping[pos + 1][1] if pos + 1 < len(overlapping) else t_end
@@ -1718,7 +1876,43 @@ def _attach_source_caption_tracks(segments, tracks):
         grouped[id(owner)].append(track)
     for seg in segments:
         observed = sorted(grouped[id(seg)], key=lambda b: (b.start, b.y_pct, b.x_pct))
-        observed = _coalesce_stationary_source_tracks(_bridge_source_caption_gaps(observed))
+        observed = _coalesce_stationary_source_tracks(
+            _bridge_source_caption_gaps(observed), max_chunk_s=None
+        )
+        if observed:
+            seg_cjk_main = "".join(
+                c for c in str(getattr(seg, "content", "") or "") if "\u3400" <= c <= "\u9fff"
+            )
+            seg_cjk_alt = "".join(
+                c for c in str(getattr(seg, "paraformer_alt", "") or "") if "\u3400" <= c <= "\u9fff"
+            )
+            seg_cjk_pool = f"{seg_cjk_main} {seg_cjk_alt}".strip()
+            filler_chars = {"嗯", "啊", "哦", "呃", "噢", "诶"}
+            consumed_main = 0
+            for b in observed:
+                b_txt = str(_ocr_field(b, "text", "") or "").strip()
+                b_cjk = "".join(c for c in b_txt if "\u3400" <= c <= "\u9fff")
+                missing_left = 0
+                if len(b_cjk) >= 4 and not b_cjk.startswith("一") and ("一" + b_cjk[:3]) in seg_cjk_pool:
+                    missing_left = 1
+                rem_main = seg_cjk_main[consumed_main:]
+                if len(b_cjk) >= 4 and rem_main:
+                    pos = rem_main.find(b_cjk[:4])
+                    if 1 <= pos <= 2 and not (set(rem_main[:pos]) <= filler_chars):
+                        missing_left = max(missing_left, pos)
+                if missing_left > 0:
+                    bx1 = float(_ocr_field(b, "x_pct", 0.0) or 0.0)
+                    bx2 = float(_ocr_field(b, "max_x_pct", 0.0) or 0.0)
+                    if bx2 > bx1:
+                        char_w = (bx2 - bx1) / max(len(b_txt), 4)
+                        pad_left = min(0.058 * missing_left, char_w * (missing_left * 1.15))
+                        _set_ocr_field(b, "x_pct", max(0.0, bx1 - pad_left))
+                if b_cjk and rem_main:
+                    m = SequenceMatcher(None, rem_main, b_cjk, autojunk=False).find_longest_match(
+                        0, len(rem_main), 0, len(b_cjk)
+                    )
+                    if m.size >= 3 and m.a <= 4:
+                        consumed_main += m.a + m.size
         seg.tracking_blocks = observed
         seg.source_caption_timing_verified = True
         seg.geometry_verified = bool(observed)

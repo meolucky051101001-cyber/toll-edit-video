@@ -127,6 +127,80 @@ def read_ass_blur_metadata(text):
     return None
 
 
+def _rect_contains(outer, inner, tol=1e-6):
+    return (
+        outer["x_pct"] <= inner["x_pct"] + tol
+        and outer["y_pct"] <= inner["y_pct"] + tol
+        and outer["max_x_pct"] >= inner["max_x_pct"] - tol
+        and outer["max_y_pct"] >= inner["max_y_pct"] - tol
+    )
+
+
+def _rects_intersect(a, b):
+    return (
+        a["x_pct"] <= b["max_x_pct"]
+        and b["x_pct"] <= a["max_x_pct"]
+        and a["y_pct"] <= b["max_y_pct"]
+        and b["y_pct"] <= a["max_y_pct"]
+    )
+
+
+def _stabilize_blur_shoulders(rows, max_shoulder_s=0.15, min_main_s=0.20):
+    """Absorb <=150ms pre/post offset shoulders into an immediately touching outer union box.
+
+    Preserves exact [start, end) intervals while preventing 1-4 frame two-step box-size
+    snaps when source caption onset/offset and translated speech differ by tens of ms.
+    """
+    if len(rows) < 2:
+        return rows
+    by_interval = defaultdict(list)
+    for row in rows:
+        by_interval[(row["start"], row["end"])].append(dict(row))
+    slices = [(s, e, by_interval[(s, e)]) for s, e in sorted(by_interval)]
+
+    # Forward pass: short pre-shoulder touching a longer containing main slice
+    for i in range(len(slices) - 1):
+        s0, e0, cur_rects = slices[i]
+        s1, e1, nxt_rects = slices[i + 1]
+        if not (0.0 < (e0 - s0) <= max_shoulder_s and abs(s1 - e0) <= 1e-6 and (e1 - s1) >= min_main_s):
+            continue
+        prev_main_rects = (
+            slices[i - 1][2]
+            if i > 0 and abs(s0 - slices[i - 1][1]) <= 1e-6 and (slices[i - 1][1] - slices[i - 1][0]) >= min_main_s
+            else []
+        )
+        for r in cur_rects:
+            if any(_rect_contains(pm, r) for pm in prev_main_rects):
+                continue
+            containers = [m for m in nxt_rects if _rect_contains(m, r)]
+            if len(containers) == 1:
+                m = containers[0]
+                if not any(other is not r and _rects_intersect(m, other) for other in cur_rects):
+                    r.update(x_pct=m["x_pct"], y_pct=m["y_pct"], max_x_pct=m["max_x_pct"], max_y_pct=m["max_y_pct"])
+
+    # Backward pass: short post-shoulder touching a longer containing main slice
+    for i in range(len(slices) - 1, 0, -1):
+        s0, e0, cur_rects = slices[i]
+        ps, pe, prv_rects = slices[i - 1]
+        if not (0.0 < (e0 - s0) <= max_shoulder_s and abs(s0 - pe) <= 1e-6 and (pe - ps) >= min_main_s):
+            continue
+        next_main_rects = (
+            slices[i + 1][2]
+            if i + 1 < len(slices) and abs(slices[i + 1][0] - e0) <= 1e-6 and (slices[i + 1][1] - slices[i + 1][0]) >= min_main_s
+            else []
+        )
+        for r in cur_rects:
+            if any(_rect_contains(nm, r) for nm in next_main_rects):
+                continue
+            containers = [m for m in prv_rects if _rect_contains(m, r)]
+            if len(containers) == 1:
+                m = containers[0]
+                if not any(other is not r and _rects_intersect(m, other) for other in cur_rects):
+                    r.update(x_pct=m["x_pct"], y_pct=m["y_pct"], max_x_pct=m["max_x_pct"], max_y_pct=m["max_y_pct"])
+
+    return [r for _, _, rects in slices for r in rects]
+
+
 def combine_blur_boxes(source_boxes, text_boxes):
     """Union intersecting source/translated rectangles only while both exist.
 
@@ -163,7 +237,7 @@ def combine_blur_boxes(source_boxes, text_boxes):
             rectangles.append(rect)
         result.extend(dict(start=start, end=end, x_pct=r[0], y_pct=r[1],
                            max_x_pct=r[2], max_y_pct=r[3]) for r in rectangles)
-    return result
+    return _stabilize_blur_shoulders(result)
 
 
 def blur_regions(boxes, width, height, settings=None):

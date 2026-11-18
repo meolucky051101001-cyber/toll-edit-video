@@ -903,6 +903,23 @@ def _relevant_ass_tracks(seg, held_tracks, seg_s, seg_e, c):
 def _ass_segment_events(seg, held_tracks, seg_s, seg_e, c):
     sub_events = []
     seg_blist, seg_cy, blocks, relevant, verified = _relevant_ass_tracks(seg, held_tracks, seg_s, seg_e, c)
+    seg_is_visual = _is_visual_segment(seg)
+    if c.cover_style == "localized_blur" and not seg_is_visual:
+        # Source blur masks carry their own frame-accurate lifetimes in ToolV1BlurData.
+        # Keep each paginated spoken Vietnamese cue continuous at one stable anchor block
+        # so text and text_boxes never blink off in caption gaps or jump mid-sentence.
+        candidates = list(seg_blist) if seg_blist else list(relevant)
+        anchor = None
+        if candidates:
+            def _anchor_score(b):
+                b_s = float(_block_value(b, "start", seg_s))
+                b_e = float(_block_value(b, "end", seg_e))
+                ov = max(0.0, min(seg_e, b_e) - max(seg_s, b_s))
+                dur = max(0.0, b_e - b_s)
+                dist = max(b_s - seg_e, seg_s - b_e, 0.0)
+                return (round(ov, 4), -round(dist, 4), round(dur, 4))
+            anchor = max(candidates, key=_anchor_score)
+        return [{"start": seg_s, "end": seg_e, "block": anchor}], verified, seg_is_visual
     if verified:
         blocks = []
     if relevant:
