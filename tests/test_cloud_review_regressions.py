@@ -4,9 +4,9 @@ import json
 import sys
 import time
 import types
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfoNotFoundError
 from unittest.mock import Mock
 
 import pytest
@@ -178,8 +178,12 @@ def test_billing_survives_failure_cancel_history_delete_and_restart(cloud, termi
     assert restarted.get_cu_spent_today(now=cloud.now[0]) == pytest.approx(1.0)
 
 
-def test_billing_splits_cross_midnight_and_blocks_unknown_cleanup(cloud):
-    cloud.now[0] = datetime(2026, 11, 15, 23, 30, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh")).timestamp()
+@pytest.mark.parametrize("missing_tzdata", [False, True])
+def test_billing_splits_cross_midnight_and_blocks_unknown_cleanup(cloud, monkeypatch, missing_tzdata):
+    if missing_tzdata:
+        monkeypatch.setattr(cloud.cloud_job_store, "ZoneInfo", Mock(side_effect=ZoneInfoNotFoundError("no tzdata")))
+    # The reference instant must work even on Windows without an IANA database.
+    cloud.now[0] = datetime(2026, 11, 15, 23, 30, tzinfo=timezone(timedelta(hours=7))).timestamp()
     job = cloud.store.enqueue("old.mp4")
     claimed = cloud.store.claim_job(job.job_id, "billing-test", enforce_budget=False)
     assert claimed is not None
@@ -187,6 +191,7 @@ def test_billing_splits_cross_midnight_and_blocks_unknown_cleanup(cloud):
     cloud.now[0] += 3600
     _finish_claimed_job(cloud, job, "failed", cu_actual=2.0,
                         cleanup_status="failed_retry_needed", claimed=claimed)
+    assert cloud.store.get_cu_spent_today(now=cloud.now[0] - 3600) == pytest.approx(1.0)
     assert cloud.store.get_cu_spent_today(now=cloud.now[0]) == pytest.approx(1.0)
     # Soft hiding is allowed when no provider session is registered; the unresolved ledger
     # still blocks admission and remains durable.
