@@ -93,7 +93,7 @@ def _model(detection_model, recognition_model, engine):
         if "CUDAExecutionProvider" not in onnxruntime.get_available_providers():
             raise RuntimeError("V1 OCR requires ONNX CUDAExecutionProvider; CPU fallback disabled")
     from paddleocr import PaddleOCR
-    return PaddleOCR(
+    common_kwargs = dict(
         device="gpu:0",
         text_detection_model_name=detection_model,
         text_recognition_model_name=recognition_model,
@@ -106,6 +106,10 @@ def _model(detection_model, recognition_model, engine):
         text_det_limit_side_len=960,
         engine=engine,
     )
+    try:
+        return PaddleOCR(**common_kwargs, text_recognition_batch_size=32)
+    except TypeError:
+        return PaddleOCR(**common_kwargs)
 
 def _extract_rows_from_prediction(prediction: Any) -> list[dict[str, Any]]:
     rows = []

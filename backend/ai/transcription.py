@@ -299,11 +299,11 @@ def _merge_continuous_sentences(segments, max_gap=0.35, max_duration=4.8, max_cj
 def _transcribe_raw_segments(model, target_audio):
     segments, _info = model.transcribe(
         target_audio,
-        beam_size=5,
+        beam_size=int(os.getenv("V1_WHISPER_BEAM_SIZE", "2")),
         vad_filter=True,
         vad_parameters=dict(min_silence_duration_ms=600, threshold=0.4),
         condition_on_previous_text=False,
-        temperature=[0.0, 0.2, 0.4],
+        temperature=[0.0, 0.2],
         word_timestamps=True,
     )
     transcribed_segments = []
