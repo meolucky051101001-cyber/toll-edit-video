@@ -722,6 +722,11 @@ def get_cloud_status_snapshot(
         if hasattr(store, "list_pending_cleanup_events")
         else []
     )
+    warm_sessions = (
+        store.list_warm_sessions(include_expired=False)
+        if hasattr(store, "list_warm_sessions")
+        else []
+    )
     active_job_dict = current_job.to_dict() if current_job is not None else None
     if active_job_dict is not None and "error_remediation" not in active_job_dict:
         active_job_dict["error_remediation"] = get_error_remediation(active_job_dict.get("error_code"))
@@ -742,6 +747,7 @@ def get_cloud_status_snapshot(
         "active_job": active_job_dict,
         "budget": budget,
         "pending_cleanup_events": pending_cleanup,
+        "warm_sessions": warm_sessions,
         "unrecovered_resources_count": len(pending_cleanup),
         "rollout": rollout,
         "rollout_alerts": alerts,

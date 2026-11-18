@@ -354,6 +354,11 @@ async def api_cloud_session_stop(payload: Dict[str, Any] = Body(...)):
             "message": f"Lỗi dừng session: {redact_secrets(str(action_res.get('error') or ''))}",
         }
     ok, msg = action_res["result"]
+    if ok and hasattr(store, "remove_warm_session"):
+        try:
+            await asyncio.to_thread(store.remove_warm_session, session_name)
+        except Exception:
+            pass
     safe_msg = redact_secrets(msg)
     return {
         "status": "ok" if ok else "error",
@@ -381,6 +386,10 @@ async def api_cloud_stop():
         return {"status": "error", "timed_out": False,
                 "message": "Chưa xác nhận dừng Cloud: " + redact_secrets(str(action.get("error") or ""))}
     stopped, message = action["result"]
+    if stopped:
+        from .cloud_orchestrator import clear_warm_registry_for_store
+
+        await asyncio.to_thread(clear_warm_registry_for_store, store)
     # In-flight allocations still require each worker's session-specific cleanup
     # verification; a global stop must not prematurely settle their ledger.
     return {"status": "ok" if stopped else "error", "timed_out": False,

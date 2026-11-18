@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -188,6 +189,12 @@ _STEP_PERCENT_MAP = {
 
 
 def _write_pipeline_progress(percent: int, step_num: int, total: int, message: str) -> None:
+    if (
+        os.getenv("PYTEST_CURRENT_TEST")
+        and os.getenv("AUTODUB_ALLOW_TEST_PROGRESS_FILE") != "1"
+        and (Path.cwd() / ".git").exists()
+    ):
+        return
     safe_msg = _redact_secrets_local(message)
     payload = {
         "percent": max(55, min(84, int(percent))),
@@ -196,13 +203,17 @@ def _write_pipeline_progress(percent: int, step_num: int, total: int, message: s
         "message": f"[{step_num}/{total}] {safe_msg}" if step_num > 0 else safe_msg,
         "updated_at": round(time.time(), 3),
     }
-    tmp_prog = ".pipeline_progress.json.tmp"
+    tmp_prog = f".pipeline_progress.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
         with open(tmp_prog, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False)
         os.replace(tmp_prog, ".pipeline_progress.json")
     except OSError:
-        pass
+        try:
+            if os.path.exists(tmp_prog):
+                os.unlink(tmp_prog)
+        except OSError:
+            pass
 
 
 def log_step(step_num: int, total: int, message: str):
@@ -211,9 +222,12 @@ def log_step(step_num: int, total: int, message: str):
     _write_pipeline_progress(_STEP_PERCENT_MAP.get(int(step_num), 55), step_num, total, safe_msg)
 
 
-def run_cmd(cmd: list[str], desc: str):
+def run_cmd(cmd: list[str], desc: str, *, timeout: int = 900):
     print(f"  -> Chạy: {' '.join(cmd[:6])}...", flush=True)
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=max(5, int(timeout)))
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{desc} quá thời gian chờ ({timeout}s)") from exc
     if res.returncode != 0:
         safe_stderr = _redact_secrets_local(res.stderr[-600:])
         print(f"  [ERROR] {desc} thất bại:\n{safe_stderr}", file=sys.stderr, flush=True)
@@ -1684,6 +1698,7 @@ def _resolve_cloud_gemini_keys(explicit_key: str = "") -> list[str]:
 
 
 _SHORTEN_DEMOTED_MODELS: set[str] = set()
+_SHORTEN_DEMOTED_LOCK = threading.Lock()
 _TRANSIENT_GENAI_MARKERS = ("503", "429", "404", "timeout", "timed out", "deadline", "unavailable")
 
 
@@ -2084,8 +2099,10 @@ def _shorten_translation_for_timing(
     last_error = "No valid concise translation"
     call_idx = max(0, int(key_offset))
     base_models = ("gemini-3-flash-preview", "gemini-3.1-flash-lite-preview", "gemini-flash-lite-latest")
-    ordered_models = [m for m in base_models if m not in _SHORTEN_DEMOTED_MODELS] + [
-        m for m in base_models if m in _SHORTEN_DEMOTED_MODELS
+    with _SHORTEN_DEMOTED_LOCK:
+        demoted_snap = set(_SHORTEN_DEMOTED_MODELS)
+    ordered_models = [m for m in base_models if m not in demoted_snap] + [
+        m for m in base_models if m in demoted_snap
     ]
     for model in ordered_models:
         transient_failures = 0
@@ -2103,7 +2120,8 @@ def _shorten_translation_for_timing(
                 if any(marker in lowered_err for marker in _TRANSIENT_GENAI_MARKERS):
                     transient_failures += 1
                     if transient_failures >= 2:
-                        _SHORTEN_DEMOTED_MODELS.add(model)
+                        with _SHORTEN_DEMOTED_LOCK:
+                            _SHORTEN_DEMOTED_MODELS.add(model)
                 else:
                     transient_failures = 0
                 if attempt == 0:
@@ -2147,6 +2165,8 @@ def step5_generate_tts(
     engine_name = f"CapCut TTS ({capcut_voice})" if is_capcut else f"Edge TTS ({edge_voice_target})"
 
     log_step(5, 8, f"Tổng hợp giọng đọc lồng tiếng ({engine_name})...")
+    with _SHORTEN_DEMOTED_LOCK:
+        _SHORTEN_DEMOTED_MODELS.clear()
     os.makedirs(tts_dir, exist_ok=True)
     fallback_used = False
     total_segs = len(segments)
@@ -2253,9 +2273,10 @@ def step5_generate_tts(
                     break
                 effective_win = base_win_dur * (0.78 ** retry)
                 eff_key = gemini_key or os.getenv("GEMINI_API_KEY", "")
+                cand_seg = {**s, "translated_text": best_text}
                 try:
                     replacement = _shorten_translation_for_timing(
-                        s,
+                        cand_seg,
                         effective_win,
                         eff_key,
                         measured_duration_s=best_dur,
@@ -2263,13 +2284,12 @@ def step5_generate_tts(
                     )
                 except TypeError:
                     replacement = _shorten_translation_for_timing(
-                        s,
+                        cand_seg,
                         effective_win,
                         eff_key,
                     )
-                if not replacement or replacement == s["translated_text"]:
+                if not replacement or replacement == best_text or any(h["text"] == replacement for h in history):
                     break
-                s["translated_text"] = replacement
                 cand_mp3 = os.path.join(tts_dir, f"seg_{int(s['id']):04d}_r{retry + 1}.mp3")
                 if is_capcut:
                     if not generate_capcut_tts_single(replacement, capcut_voice, str(cand_mp3)):
@@ -2344,7 +2364,7 @@ def step5_generate_tts(
                 if af and af != "anull":
                     tmp_fit = f"{tts_p}.fit.wav"
                     fit_cmd = ["ffmpeg", "-y", "-i", tts_p, "-filter:a", af, "-c:a", "pcm_s16le", tmp_fit]
-                    fit_res = subprocess.run(fit_cmd, capture_output=True, text=True)
+                    fit_res = subprocess.run(fit_cmd, capture_output=True, text=True, timeout=60)
                     if fit_res.returncode != 0:
                         if os.path.exists(tmp_fit):
                             os.remove(tmp_fit)
@@ -3013,12 +3033,67 @@ def step0_download_video_from_url(url: str, output_path: str = "downloaded_video
         safe_exc = _redact_secrets_local(str(exc))
         print(f"  [WARN] yt-dlp gặp sự cố ({safe_exc}). Thử tải trực tiếp stream qua requests...", flush=True)
         import requests
-        r = requests.get(url, stream=True, timeout=90, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        with open(output_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=65536):
-                f.write(chunk)
-        print(f"  -> Tải trực tiếp stream thành công: {output_path}", flush=True)
+
+        max_stream_bytes = 1536 * 1024 * 1024  # 1.5 GB guard
+        try:
+            with requests.get(url, stream=True, timeout=(15, 90), headers={"User-Agent": "Mozilla/5.0"}) as r:
+                r.raise_for_status()
+                ctype = str(r.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                if ctype in ("text/html", "application/xhtml+xml", "application/json", "text/plain"):
+                    raise PipelineStageError(
+                        "DOWNLOAD_FAILED",
+                        f"Liên kết trả về '{ctype}' thay vì tệp video hợp lệ (yt-dlp: {safe_exc[:160]}).",
+                    )
+                written = 0
+                with open(output_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        if not chunk:
+                            continue
+                        written += len(chunk)
+                        if written > max_stream_bytes:
+                            raise PipelineStageError("DOWNLOAD_FAILED", "Luồng tải video vượt trần 1.5GB an toàn.")
+                        f.write(chunk)
+        except PipelineStageError:
+            if os.path.exists(output_path):
+                try:
+                    os.unlink(output_path)
+                except OSError:
+                    pass
+            raise
+        except Exception as req_exc:
+            if os.path.exists(output_path):
+                try:
+                    os.unlink(output_path)
+                except OSError:
+                    pass
+            raise PipelineStageError(
+                "DOWNLOAD_FAILED",
+                f"Không tải được video từ liên kết ({_redact_secrets_local(str(req_exc))[:200]}).",
+            ) from req_exc
+
+        if not os.path.isfile(output_path) or os.path.getsize(output_path) <= 1024:
+            if os.path.exists(output_path):
+                try:
+                    os.unlink(output_path)
+                except OSError:
+                    pass
+            raise PipelineStageError("DOWNLOAD_FAILED", "Tệp tải về quá nhỏ hoặc rỗng, không phải video hợp lệ.")
+        with open(output_path, "rb") as vf:
+            hdr = vf.read(32)
+        valid_magic = (
+            (len(hdr) >= 8 and hdr[4:8] in (b"ftyp", b"moov", b"mdat", b"wide", b"free"))
+            or hdr.startswith(b"\x1a\x45\xdf\xa3")  # Matroska / WebM
+            or (len(hdr) >= 12 and hdr[:4] == b"RIFF" and hdr[8:11] == b"AVI")
+            or hdr.startswith(b"FLV\x01")
+            or (len(hdr) >= 1 and hdr[0] == 0x47 and len(hdr) > 188 and hdr[188] == 0x47)
+        )
+        if not valid_magic:
+            try:
+                os.unlink(output_path)
+            except OSError:
+                pass
+            raise PipelineStageError("DOWNLOAD_FAILED", "Dữ liệu tải về không có header container video hợp lệ.")
+        print(f"  -> Tải trực tiếp stream thành công: {output_path} ({os.path.getsize(output_path):,} bytes)", flush=True)
         return output_path
 
 
@@ -3046,15 +3121,6 @@ def main():
         flush=True,
     )
 
-    # Tự động tải nếu đầu vào là link URL
-    if input_target.startswith("http://") or input_target.startswith("https://"):
-        input_video = step0_download_video_from_url(input_target, "downloaded_video.mp4")
-    else:
-        input_video = input_target
-        if not os.path.exists(input_video):
-            print(f"[ERROR] Không tìm thấy video: {input_video}", file=sys.stderr)
-            sys.exit(1)
-
     output_audio = "input_audio.wav"
     output_srt = "subtitles.srt"
     output_vi_srt = "subtitles_vi.srt"
@@ -3065,6 +3131,14 @@ def main():
     metadata_file = "result_metadata.json"
 
     try:
+        # Tự động tải nếu đầu vào là link URL
+        if input_target.startswith("http://") or input_target.startswith("https://"):
+            input_video = step0_download_video_from_url(input_target, "downloaded_video.mp4")
+        else:
+            input_video = input_target
+            if not os.path.exists(input_video):
+                raise PipelineStageError("INVALID_INPUT", f"Không tìm thấy video: {input_video}")
+
         # Bước 1: Trích âm thanh
         step1_extract_audio(input_video, output_audio)
 

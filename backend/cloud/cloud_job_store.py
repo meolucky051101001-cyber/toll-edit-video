@@ -12,6 +12,7 @@ import datetime as dt
 import json
 import logging
 import math
+import os
 import re
 import sqlite3
 import threading
@@ -404,6 +405,19 @@ class CloudJobStore:
                 ledger_columns = {r[1] for r in db.execute("PRAGMA table_info(cloud_cost_ledger)")}
                 if "legacy_hourly_rate" not in ledger_columns:
                     db.execute("ALTER TABLE cloud_cost_ledger ADD COLUMN legacy_hourly_rate REAL NOT NULL DEFAULT 0")
+                db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS cloud_warm_sessions (
+                        session_name TEXT PRIMARY KEY,
+                        gpu_type TEXT NOT NULL,
+                        source_job_id TEXT,
+                        parked_at REAL NOT NULL,
+                        expires_at REAL NOT NULL,
+                        keepalive_mode INTEGER NOT NULL DEFAULT 0,
+                        owner_pid INTEGER
+                    )
+                    """
+                )
                 self._migrate_legacy_costs(db)
                 db.execute("COMMIT")
             except Exception:
@@ -1264,6 +1278,181 @@ class CloudJobStore:
                 (gpu_norm, gpu_norm, rollout_job_id, rollout_job_id),
             ).fetchone()
             return row is not None
+
+    def park_warm_session(
+        self,
+        session_name: str,
+        gpu_type: str,
+        *,
+        ttl_seconds: float,
+        source_job_id: Optional[str] = None,
+        keepalive_mode: bool = False,
+        now: Optional[float] = None,
+    ) -> List[str]:
+        """Ghi nhận bền vững máy ảo giữ ấm vào SQLite (chia sẻ giữa Dashboard & Telegram Bot, chống mồ côi khi crash)."""
+        ts = time.time() if now is None else float(now)
+        gpu_norm = str(gpu_type or "T4").strip().upper()
+        expires_at = ts + max(1.0, float(ttl_seconds))
+        evicted: List[str] = []
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                old_rows = db.execute(
+                    "SELECT session_name FROM cloud_warm_sessions WHERE UPPER(gpu_type) = ? AND session_name != ?",
+                    (gpu_norm, session_name),
+                ).fetchall()
+                evicted = [str(r["session_name"]) for r in old_rows if r["session_name"]]
+                if evicted:
+                    db.execute(
+                        "DELETE FROM cloud_warm_sessions WHERE UPPER(gpu_type) = ? AND session_name != ?",
+                        (gpu_norm, session_name),
+                    )
+                db.execute(
+                    """
+                    INSERT INTO cloud_warm_sessions (
+                        session_name, gpu_type, source_job_id, parked_at, expires_at, keepalive_mode, owner_pid
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(session_name) DO UPDATE SET
+                        gpu_type = excluded.gpu_type,
+                        source_job_id = COALESCE(excluded.source_job_id, cloud_warm_sessions.source_job_id),
+                        parked_at = excluded.parked_at,
+                        expires_at = excluded.expires_at,
+                        keepalive_mode = excluded.keepalive_mode,
+                        owner_pid = excluded.owner_pid
+                    """,
+                    (
+                        session_name,
+                        gpu_norm,
+                        source_job_id,
+                        ts,
+                        expires_at,
+                        1 if keepalive_mode else 0,
+                        os.getpid(),
+                    ),
+                )
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+        return evicted
+
+    def pop_warm_session(
+        self,
+        gpu_type: str,
+        *,
+        now: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Lấy nguyên tử một máy ảo giữ ấm cùng loại GPU khỏi SQLite để chuyển giao cho job mới."""
+        check_now = time.time() if now is None else float(now)
+        gpu_norm = str(gpu_type or "T4").strip().upper()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    """
+                    SELECT * FROM cloud_warm_sessions
+                    WHERE UPPER(gpu_type) = ?
+                    ORDER BY parked_at DESC
+                    LIMIT 1
+                    """,
+                    (gpu_norm,),
+                ).fetchone()
+                if not row:
+                    db.execute("COMMIT")
+                    return None
+                db.execute(
+                    "DELETE FROM cloud_warm_sessions WHERE session_name = ?",
+                    (row["session_name"],),
+                )
+                db.execute("COMMIT")
+                info = dict(row)
+                info["expired"] = check_now > float(row["expires_at"] or 0.0)
+                return info
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
+    def remove_warm_session(self, session_name: str) -> bool:
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                cur = db.execute(
+                    "DELETE FROM cloud_warm_sessions WHERE session_name = ?",
+                    (session_name,),
+                )
+                db.execute("COMMIT")
+                return cur.rowcount > 0
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
+    def pop_all_warm_sessions(self, gpu_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        gpu_norm = str(gpu_type).strip().upper() if gpu_type else None
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if gpu_norm:
+                    rows = db.execute(
+                        "SELECT * FROM cloud_warm_sessions WHERE UPPER(gpu_type) = ?",
+                        (gpu_norm,),
+                    ).fetchall()
+                    db.execute(
+                        "DELETE FROM cloud_warm_sessions WHERE UPPER(gpu_type) = ?",
+                        (gpu_norm,),
+                    )
+                else:
+                    rows = db.execute("SELECT * FROM cloud_warm_sessions").fetchall()
+                    db.execute("DELETE FROM cloud_warm_sessions")
+                db.execute("COMMIT")
+                return [dict(r) for r in rows]
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
+    def list_warm_sessions(
+        self,
+        *,
+        include_expired: bool = True,
+        now: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        check_now = time.time() if now is None else float(now)
+        with self._connect() as db:
+            if include_expired:
+                rows = db.execute(
+                    "SELECT * FROM cloud_warm_sessions ORDER BY parked_at DESC"
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT * FROM cloud_warm_sessions WHERE expires_at >= ? ORDER BY parked_at DESC",
+                    (check_now,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def list_reclaimable_warm_sessions(
+        self,
+        *,
+        only_expired: bool = False,
+        now: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Trả về các warm session đã hết hạn hoặc thuộc tiến trình cũ đã tắt để thu hồi chống mồ côi."""
+        check_now = time.time() if now is None else float(now)
+        cur_pid = os.getpid()
+        with self._connect() as db:
+            if only_expired:
+                rows = db.execute(
+                    """
+                    SELECT * FROM cloud_warm_sessions
+                    WHERE expires_at < ?
+                       OR (owner_pid IS NOT NULL AND owner_pid != ?)
+                    ORDER BY parked_at ASC
+                    """,
+                    (check_now, cur_pid),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT * FROM cloud_warm_sessions ORDER BY parked_at ASC"
+                ).fetchall()
+            return [dict(r) for r in rows]
 
     def request_cancel(
         self,
@@ -2503,10 +2692,15 @@ class CloudJobStore:
             ]
 
         pending_events = self.list_pending_cleanup_events()
+        reclaimable_warm = self.list_reclaimable_warm_sessions(
+            only_expired=only_expired_leases,
+            now=current_time,
+        )
         need_provider = (
             (adapter is not None and bool(jobs_to_check))
             or any(bool(j.session_name) for j in jobs_to_check)
             or bool(pending_events)
+            or bool(reclaimable_warm)
         )
 
         resolved_adapter = adapter
@@ -2738,6 +2932,59 @@ class CloudJobStore:
                         attempts=int(cleanup_res.get("attempts", 1)),
                         error=cleanup_res.get("error"),
                     )
+
+        if reclaimable_warm and provider_status is not None:
+            if provider_status.get("ok"):
+                active_names_warm = {
+                    s.get("name")
+                    for s in (provider_status.get("sessions") or [])
+                    if s.get("name") and s.get("is_active", True)
+                }
+                for w_row in reclaimable_warm:
+                    s_name = str(w_row.get("session_name") or "")
+                    if not s_name:
+                        continue
+                    w_job_id = str(w_row.get("source_job_id") or f"warm:{s_name}")
+                    if s_name not in active_names_warm:
+                        self.remove_warm_session(s_name)
+                        results.append({
+                            "job_id": w_job_id,
+                            "session_name": s_name,
+                            "state": "warm_reclaimed",
+                            "cleanup_status": CloudCleanupStatus.VERIFIED.value,
+                        })
+                    else:
+                        cleanup_res = self._stop_and_verify_with_adapter(resolved_adapter, s_name)
+                        if cleanup_res.get("verified_stopped"):
+                            self.remove_warm_session(s_name)
+                            results.append({
+                                "job_id": w_job_id,
+                                "session_name": s_name,
+                                "state": "warm_reclaimed",
+                                "cleanup_status": CloudCleanupStatus.VERIFIED.value,
+                            })
+                        else:
+                            results.append({
+                                "job_id": w_job_id,
+                                "session_name": s_name,
+                                "state": "warm_reclaim_pending",
+                                "cleanup_status": str(
+                                    cleanup_res.get("cleanup_status", CloudCleanupStatus.FAILED_RETRY_NEEDED.value)
+                                ),
+                                "error": cleanup_res.get("error"),
+                            })
+            else:
+                err_msg = provider_status.get("error") or "Mất kết nối provider khi thu hồi warm session"
+                for w_row in reclaimable_warm:
+                    s_name = str(w_row.get("session_name") or "")
+                    if s_name:
+                        results.append({
+                            "job_id": str(w_row.get("source_job_id") or f"warm:{s_name}"),
+                            "session_name": s_name,
+                            "state": "warm_reclaim_pending",
+                            "cleanup_status": CloudCleanupStatus.PROVIDER_UNREACHABLE.value,
+                            "error": err_msg,
+                        })
 
         return results
 
