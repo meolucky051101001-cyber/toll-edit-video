@@ -6,6 +6,7 @@ from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 import urllib.request
 
@@ -43,33 +44,81 @@ def dashboard_smoke_test(python: Path) -> str:
     return ""
 
 
+def _startup_failure_message(service: str, operation: str, path: Path, exc: BaseException) -> str:
+    details = [
+        f"component={service}",
+        f"operation={operation}",
+        f"path={path}",
+        f"error_type={type(exc).__name__}",
+    ]
+    for attr in ("errno", "winerror"):
+        value = getattr(exc, attr, None)
+        if value is not None:
+            details.append(f"{attr}={value}")
+    return "Startup failed: " + " ".join(details)
+
+
+def _install_stderr_fallback(logger: logging.Logger, stream=None):
+    stream = stream if stream is not None else (sys.stderr or sys.__stderr__)
+    if stream is None:
+        return None
+    for handler in logger.handlers:
+        if getattr(handler, "_autodub_startup_stderr", False):
+            return handler
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(RedactingFormatter("%(asctime)s %(message)s"))
+    handler._autodub_startup_stderr = True
+    logger.addHandler(handler)
+    return handler
+
+
+def _configure_service_logging(service: str, logs: Path, *, file_handler_factory=None, stream=None):
+    logger = logging.getLogger(service)
+    logger.setLevel(logging.INFO)
+    fallback = _install_stderr_fallback(logger, stream=stream)
+    factory = file_handler_factory or RotatingFileHandler
+    log_path = logs / (service + "_supervisor.log")
+    try:
+        logs.mkdir(parents=True, exist_ok=True)
+        handler = factory(log_path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+        handler.setFormatter(RedactingFormatter("%(asctime)s %(message)s"))
+    except Exception as exc:
+        logger.error(_startup_failure_message(service, "configure supervisor log", log_path, exc))
+        raise SystemExit(2) from exc
+    logger.addHandler(handler)
+    if fallback is not None:
+        logger.removeHandler(fallback)
+        fallback.close()
+    return logger
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--service", choices=("dashboard", "telegram", "scriptbot"), required=True)
     service = parser.parse_args().service
+    logger = logging.getLogger(service)
+    logger.setLevel(logging.INFO)
+    _install_stderr_fallback(logger)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
     kernel.CreateMutexW.restype = ctypes.c_void_p
     mutex = kernel.CreateMutexW(None, False, "Local\\AutoDubV1_" + service)
     if not mutex:
-        raise ctypes.WinError(ctypes.get_last_error())
+        exc = ctypes.WinError(ctypes.get_last_error())
+        logger.error(_startup_failure_message(service, "create supervisor mutex", ROOT, exc))
+        raise SystemExit(2) from exc
     if ctypes.get_last_error() == 183:
         return
     try:
         from environment import load_environment
         load_environment(ROOT)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error(_startup_failure_message(service, "load environment", ROOT, exc))
+        raise SystemExit(2) from exc
     active_ws = Path(os.getenv("AUTODUB_WORKSPACE", str(ROOT.parent / "workspace")))
     bs_logs = active_ws / "bot_system" / "service_logs"
     logs = bs_logs if (bs_logs.is_dir() or (active_ws / "bot_system").is_dir()) else (active_ws / "service_logs")
-    logs.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger(service)
-    logger.setLevel(logging.INFO)
-    handler = RotatingFileHandler(logs / (service + "_supervisor.log"),
-                                 maxBytes=2_000_000, backupCount=3, encoding="utf-8")
-    handler.setFormatter(RedactingFormatter("%(asctime)s %(message)s"))
-    logger.addHandler(handler)
+    logger = _configure_service_logging(service, logs)
     python = ROOT / "venv" / "Scripts" / "python.exe"
     scripts = {
         "dashboard": "main.py",

@@ -110,17 +110,39 @@ class TelegramV1Tests(unittest.IsolatedAsyncioTestCase):
         execute.assert_not_awaited()
         self.assertTrue(bot.global_queue.empty())
 
-    async def test_deterministic_timing_failure_is_not_requeued(self):
+    async def test_timing_failure_requeues_at_tail_twice_with_same_checkpoint(self):
         from v1_speech_guard import SpeechTimingError
         error = RuntimeError("Voice worker failed")
         error.__cause__ = SpeechTimingError("Cue exceeds its reading window")
+        self.job["retry_count"] = 0
+        next_video = dict(self.job, job_id="telegram_next")
+        await bot.global_queue.put(self.job)
+        job = await bot.global_queue.get()
+        await bot.global_queue.put(next_video)
         with patch.object(self.media, "probe_downloaded_video"), \
              patch.object(self.checkpoint, "fingerprint", return_value="source-hash"), \
              patch.object(bot, "run_pipeline_v1_for_telegram", side_effect=error), \
              patch.object(bot.job_tracker, "start_video"), \
-             patch.object(bot.job_tracker, "set_error"), \
+             patch.object(bot.job_tracker, "set_error") as set_error, \
              patch.object(bot, "safe_edit_status", new_callable=AsyncMock):
-            result = await bot._process_telegram_job(self.job)
+            for attempt in (1, 2):
+                result = await bot._process_telegram_job(job)
+                self.assertEqual(result["status"], "retry_queued")
+                set_error.assert_not_called()
+                snapshot = json.loads(monitor.SNAPSHOT.read_text(encoding="utf-8"))
+                self.assertIsNone(snapshot["active_job"])
+                self.assertEqual(snapshot["items"][-1]["retry_count"], attempt)
+                bot.global_queue.task_done()
+                if attempt == 1:
+                    self.assertIs(await bot.global_queue.get(), next_video)
+                    bot.global_queue.task_done()
+                job = await bot.global_queue.get()
+                self.assertEqual(job["job_id"], self.job["job_id"])
+                self.assertEqual(job["resume_state"], self.job["resume_state"])
+            result = await bot._process_telegram_job(job)
+            set_error.assert_called_once()
+        bot.global_queue.task_done()
+        await bot.global_queue.join()
         self.assertEqual(result["status"], "failed")
         self.assertTrue(bot.global_queue.empty())
 

@@ -197,6 +197,34 @@ class TestGeminiStabilityCodex(unittest.TestCase):
             self.assertEqual(condense_vietnamese_subtitles_batch(items, api_key=self.fake_key), {})
         cache_write.assert_not_called()
 
+    def test_condensation_fallback_requests_only_missing_cues_in_same_budget(self):
+        items = [
+            {"index": 1, "text": "Nếu không đậy nắp thì hãy lấy hộp chữ nhật rộng 65 mm.", "target_words": 12},
+            {"index": 2, "text": "Đây là chiếc hộp chữ nhật rộng 65 mm có giá 29 tệ.", "target_words": 12},
+        ]
+        first_result = {"1": "Không đậy nắp, lấy hộp chữ nhật 65 mm.", "2": "Hộp chữ nhật 65 mm, giá 29 tệ."}
+        fallback_result = {"1": "Nếu không đậy nắp, lấy hộp chữ nhật 65 mm."}
+        replies = [({"candidates": [{"content": {"parts": [{"text": json.dumps(value)}]}}]}, model)
+                   for value, model in ((first_result, "one"), (fallback_result, "two"))]
+        deadline = time.monotonic() + 20
+        from backend.ai import v1_translation_cache
+        with patch.dict(os.environ, {"V1_GEMINI_CONDENSATION_MODELS": "one,two"}), \
+             patch.object(v1_translation_cache, "read_condense_cache", return_value=None), \
+             patch.object(v1_translation_cache, "write_condense_cache"), \
+             patch.dict(condense_vietnamese_subtitles_batch.__globals__, {
+                 "call_gemini_api": MagicMock(side_effect=replies),
+             }) as functions:
+            result = condense_vietnamese_subtitles_batch(items, api_key=self.fake_key, deadline=deadline)
+            attempts = functions["call_gemini_api"].call_args_list
+        self.assertEqual(result, {1: fallback_result["1"], 2: first_result["2"]})
+        self.assertEqual(len(attempts), 2)
+        retry = attempts[-1].kwargs
+        self.assertEqual(retry["models"], ["two"])
+        self.assertEqual(retry["overall_deadline"], deadline)
+        prompt = retry["payload"]["contents"][0]["parts"][0]["text"]
+        self.assertIn(items[0]["text"], prompt)
+        self.assertNotIn(items[1]["text"], prompt)
+
     # 8. Nhiều câu quá dài -> Gom lô, đúng 1 request API
     def test_08_multiple_long_cues_grouped_into_single_api_call(self):
         items = [
@@ -262,11 +290,11 @@ class TestGeminiStabilityCodex(unittest.TestCase):
 
     # 11. Đảm bảo khóa FPT không bao giờ bị nhận làm khóa Gemini
     def test_11_fpt_key_isolation(self):
-        with patch.dict(os.environ, {"FPT_API_KEY": "fpt_secret_token_123", "GEMINI_API_KEY": "DUMMY_GEMINI_KEY_NOT_REAL"}):
-            # Explicitly passing FPT key must be rejected, falling back to GEMINI_API_KEY
-            key = get_gemini_api_key(explicit_key="fpt_secret_token_123")
-            self.assertEqual(key, "DUMMY_GEMINI_KEY_NOT_REAL")
-            self.assertNotIn("fpt", key.lower())
+        fpt_key = "fpt_secret_token_123"
+        with patch.dict(os.environ, {"FPT_API_KEY": fpt_key, "GEMINI_API_KEY": self.fake_key, "GEMINI_API_KEYS": ""}), \
+                patch("ai.v1_gemini_dispatcher.BACKEND_DIR", Path(self.tmp_dir.name)):
+            key = get_gemini_api_key(explicit_key=fpt_key)
+            self.assertTrue(key == self.fake_key, "Expected the Gemini fixture key after rejecting the FPT key")
 
     # 12. Kiểm tra bảo toàn từ phủ định và số khi rút gọn
     def test_12_validation_protects_negation_and_numbers(self):
@@ -275,7 +303,8 @@ class TestGeminiStabilityCodex(unittest.TestCase):
         # Number missing -> must be rejected
         self.assertFalse(validate_condensed_text("Có 5 người trong phòng", "Nhiều người trong phòng", 4))
         # Valid condensation preserving negation and number -> accepted
-        self.assertTrue(validate_condensed_text("Hôm nay tôi không có 5 nghìn đồng", "Nay tôi không có 5 nghìn", 6))
+        self.assertFalse(validate_condensed_text("Hôm nay tôi không có 5 nghìn đồng", "Nay tôi không có 5 nghìn", 6))
+        self.assertTrue(validate_condensed_text("Hôm nay tôi không có 5 nghìn đồng", "Không có 5 nghìn đồng", 6))
 
     # 13. Gemini hoàn toàn mất kết nối -> Không crash, trả về rỗng để giữ nguyên câu gốc đầy đủ
     def test_13_gemini_unreachable_preserves_original_texts_without_crashing(self):

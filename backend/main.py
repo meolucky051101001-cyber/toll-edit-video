@@ -3198,6 +3198,8 @@ if __name__ == "__main__":
     if _dashboard_already_serving(port):
         logger.warning("Dashboard đã chạy sẵn trên cổng %s — thoát để tránh khởi động trùng.", port)
         sys.exit(0)
+    from ai.v1_gemini_dispatcher import start_gemini_model_catalog_refresh
+    start_gemini_model_catalog_refresh()
     for attempt in range(15):
         try:
             uvicorn.run(app, host="127.0.0.1", port=port)

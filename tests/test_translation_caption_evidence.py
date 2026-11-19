@@ -117,6 +117,7 @@ def test_translate_subtitles_forwards_caption_sequence_and_caller_budgets(monkey
         (meta["id"], meta["speaker"], meta["max_words"], meta["ocr_hint"])
         for meta in received["cue_meta"]
     ]
+    assert [cue["max_sec"] for cue in payload] == [4.3, 3.0]
     assert result[0].content == ""
     assert [cue.orig_content for cue in result[1:]] == source_texts
     assert "hình vuông" in result[1].content and "không đậy nắp" in result[2].content
@@ -124,6 +125,47 @@ def test_translate_subtitles_forwards_caption_sequence_and_caller_budgets(monkey
         (17, timedelta(seconds=4.76), timedelta(seconds=9.06)),
         (22, timedelta(seconds=10), timedelta(seconds=13)),
     ]
+
+
+def test_long_gemini_translation_uses_scene_frames_and_keeps_speakers_and_terms(monkeypatch):
+    import json
+
+    from backend.ai import translation as tr, v1_gemini_dispatcher as dispatcher, v1_translation_cache as cache
+
+    texts = ["小白在这儿。"] + ["现在开始。"] * 41
+    metadata = [{"id": i + 1, "speaker": "female" if i == 0 else "unknown"} for i in range(len(texts))]
+    times = [(float(i), i + .8) for i in range(len(texts))]
+    requests = []
+    frames = []
+
+    def get_frames(_path, start, end, num_frames=3):
+        frames.append((start, end, num_frames))
+        return [f"frame-{start}"]
+
+    def gemini(**kwargs):
+        parts = kwargs["payload"]["contents"][0]["parts"]
+        prompt = parts[0]["text"]
+        context_line, cues_line = prompt.split("Dữ liệu:\n")[1].splitlines()[-2:]
+        rows = json.loads(cues_line)
+        requests.append((json.loads(context_line), rows, parts[1]["inline_data"]["data"]))
+        translated = [{"id": row["id"], "text": "Tiểu Bạch ở đây." if row["id"] == 1 else "Bắt đầu thôi."} for row in rows]
+        return {"candidates": [{"content": {"parts": [{"text": json.dumps(translated, ensure_ascii=False)}]}}]}, "fixture-model"
+
+    monkeypatch.setattr(tr, "extract_video_frames_base64", get_frames)
+    monkeypatch.setattr(dispatcher, "call_gemini_api", gemini)
+    monkeypatch.setattr(cache, "read_cache", lambda *args: None)
+    monkeypatch.setattr(cache, "write_cache", lambda *args: None)
+    result = tr.translate_with_gemini(texts, api_key="fixture-key", video_path="fixture.mp4",
+                                      _vision_frames=["overview"], domain="general", cue_meta=metadata, cue_times=times,
+                                      _glossary_resolved=True, glossary={"小白": "Tiểu Bạch"})
+    assert len(result) == 42
+    assert frames == [(0.0, 39.8, 2), (40.0, 41.8, 2)]
+    first, second = requests
+    assert [first[2], second[2]] == ["frame-0.0", "frame-40.0"]
+    assert first[0]["after"] == texts[40:]
+    assert second[0]["terms"] == {"小白": "Tiểu Bạch"}
+    assert second[0]["speakers"]["female"]["translated"] == "Tiểu Bạch ở đây."
+    assert [row["id"] for row in second[1]] == [41, 42]
 
 
 @pytest.mark.parametrize("provider_name", ["openai", "deepseek"])
@@ -172,7 +214,7 @@ def test_fallback_provider_prompt_retains_evidence_and_string_array_contract(mon
     assert "pure JSON arrays of translated strings" in request["messages"][0]["content"]
     assert "CHỈ trả về mảng JSON chứa các chuỗi dịch" in prompt
     payload = json.loads(prompt.split("Dữ liệu:\n", 1)[1])
-    assert payload == [dict(id=17, speaker="female", max_words=18,
+    assert payload == [dict(id=17, speaker="female", max_words=18, max_sec=4.3,
                             ocr_hint="就是可以放正方形吧唧的亚克力砖 / 我buy的是2格的",
                             text="第一个就是可以放脂肪型帮吉利亚克里转我买的是二格的")]
     assert result[0].content == translation

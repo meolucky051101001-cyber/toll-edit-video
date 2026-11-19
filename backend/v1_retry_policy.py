@@ -3,6 +3,10 @@ import asyncio
 import re
 
 
+MAX_AUTOMATIC_RETRIES = 2
+GENERATED_OUTPUT_ERRORS = {"GeminiResponseError", "OCRGeometryError", "SpeechTimingError"}
+INCOMPLETE_TRANSLATION = "strict translation mode requires a complete llm translation conforming to quality rules"
+
 PERMANENT_ERROR_NAMES = {
     "SyntaxError",
     "ImportError",
@@ -17,6 +21,7 @@ PERMANENT_ERROR_NAMES = {
     "GeminiConfigError",
     "GeminiCancelledError",
     "BatchStopRequested",
+    "_SeparatorCleanupError",
     "UnsupportedResolutionError",
     "FrozenConfigError",
     "GlossaryConfigError",
@@ -81,7 +86,7 @@ NETWORK_ERROR_MARKERS = (
 )
 
 PERMANENT_ERROR_MARKERS = (
-    "strict translation mode requires a complete llm translation conforming to quality rules",
+    INCOMPLETE_TRANSLATION,
     "unsupported filter",
     "unsupported resolution",
     "không được hỗ trợ",
@@ -138,7 +143,7 @@ def _exception_chain(error):
     return chain
 
 
-def _is_permanent_exception(exc):
+def _is_permanent_exception(exc, *, retry_generated_output=False):
     if isinstance(exc, (asyncio.CancelledError, SyntaxError, ImportError, FileNotFoundError)):
         return True
     status = _http_status(exc)
@@ -147,17 +152,27 @@ def _is_permanent_exception(exc):
     if _gemini_permanent_reason(exc):
         return True
     message = str(exc).lower()
+    if isinstance(exc, TimeoutError) and any(marker in message for marker in (
+        "stage exceeded ", "tiến trình tách âm timeout sau ",
+    )):
+        return True  # Local compute deadlines must not be retried as network outages.
     if "stop requested" in message or "operation cancelled" in message or "bị hủy" in message or "batchstoprequested" in message:
         return True
-    if any(marker in message for marker in PERMANENT_ERROR_MARKERS):
+    if any(marker in message for marker in PERMANENT_ERROR_MARKERS
+           if not (retry_generated_output and marker == INCOMPLETE_TRANSLATION)):
         return True
-    return type(exc).__name__ in PERMANENT_ERROR_NAMES
+    name = type(exc).__name__
+    return name in PERMANENT_ERROR_NAMES and not (retry_generated_output and name in GENERATED_OUTPUT_ERRORS)
 
 
-def should_retry_job(error, attempt=0, stopped=False, max_retries=2):
+def should_retry_job(error, attempt=0, stopped=False, max_retries=MAX_AUTOMATIC_RETRIES,
+                     *, retry_generated_output=False):
     if stopped or attempt >= max_retries:
         return False
-    return not any(_is_permanent_exception(exc) for exc in _exception_chain(error))
+    return not any(
+        _is_permanent_exception(exc, retry_generated_output=retry_generated_output)
+        for exc in _exception_chain(error)
+    )
 
 
 def is_transient_network_error(error):
