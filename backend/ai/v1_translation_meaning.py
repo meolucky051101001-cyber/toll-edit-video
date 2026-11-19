@@ -185,6 +185,10 @@ _ZH_CONDITION = re.compile(
 )
 _ZH_IMPLICIT_CONDITION = re.compile(r"(?:^|[，,])([^，。；！？,;!?]+?)的[话話]")
 _ZH_CONDITIONAL_RESULT = re.compile(r"^[\s，,]*(?:就|则|則|才|请|請|务必|務必|切勿|不要|别|別)")
+_VI_EXPLICIT_CONDITION = re.compile(
+    r"\b(?:nếu|miễn là|chỉ cần|trường hợp)\s+([^,.;!?]+?)\s+thì\b|"
+    r"\b(?:nếu|miễn là|chỉ cần|trường hợp)\s+([^,.;!?]+)"
+)
 _VI_CONDITION = re.compile(r"\b(?:nếu|miễn là|chỉ cần|trường hợp)\s+([^,.;!?]+?)\s+thì\b|"
                            r"\b(?:nếu|miễn là|chỉ cần|trường hợp)\s+([^,.;!?]+)|(?:^|[,;])([^,.;!?]+?)\s+thì\b")
 
@@ -245,7 +249,7 @@ def translation_meaning_issues(source, target):
             break
 
     source_negation = _ZH_NEGATION if chinese else _VI_NEGATION
-    condition = _chinese_condition(source) if chinese else _clause(_VI_CONDITION, source)
+    condition = _chinese_condition(source) if chinese else _clause(_VI_EXPLICIT_CONDITION, source)
     if condition:
         translated_condition = _clause(_VI_CONDITION, target)
         changed_action = any(re.search(zh if chinese else vi, condition) and not re.search(vi, translated_condition)

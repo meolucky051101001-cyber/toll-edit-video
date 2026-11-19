@@ -52,6 +52,70 @@ def test_condensing_preserves_an_alternative_and_enforces_explicit_counts():
     assert not tr.validate_condensed_text("Năm nay chỉ thử một loại sổ khác", "Năm nay thử sổ khác", 5)
 
 
+def test_condensing_vietnamese_topic_thi_and_synonym_negation_for_real_xhs_cues():
+    cue1 = "Bạn nào mới chơi đồ sưu tầm mà chưa biết chọn kích thước màng bọc thẻ thì xem ngay nhé"
+    assert tr.validate_condensed_text(cue1, "Mới chơi chưa biết chọn cỡ bọc thẻ, xem ngay", 15)
+    assert tr.validate_condensed_text(cue1, "Mới chơi không biết chọn cỡ bọc thẻ, xem ngay", 15)
+    assert not tr.validate_condensed_text(cue1, "Mới chơi biết chọn cỡ bọc thẻ, xem ngay", 15)
+
+    cue3 = "Dù là đồ của công ty chúng mình hay của giới giải trí thì bưu thiếp cơ bản đều có kích thước này"
+    assert tr.validate_condensed_text(cue3, "Bưu thiếp hay ảnh thường đều dùng cỡ này", 15)
+
+    explicit = "Nếu chưa biết chọn cỡ màng bọc thì hãy xem ngay nhé"
+    assert tr.validate_condensed_text(explicit, "Nếu không biết chọn cỡ bọc, xem ngay", 12)
+    assert not tr.validate_condensed_text(explicit, "Chưa biết chọn cỡ bọc, xem ngay", 12)
+
+
+def test_condensing_preserves_dimensions_with_ascii_x_and_glued_units_and_decimal_comma():
+    assert tr.validate_condensed_text("Dùng loại kích thước 57×164 để đựng ảnh", "Dùng loại 57x164 đựng ảnh", 10)
+    assert tr.validate_condensed_text("Dùng loại 3.5 inch 65×91 cho thẻ bo góc", "Dùng loại 3,5 inch 65x91", 10)
+    assert tr.validate_condensed_text("Chọn hộp chữ nhật rộng 65 mm nhé", "Chọn hộp chữ nhật 65mm", 10)
+    assert not tr.validate_condensed_text("Dùng loại 57×164 để đựng ảnh", "Dùng loại 58x164 đựng ảnh", 10)
+    assert not tr.validate_condensed_text("Dùng loại 3.5 inch 65×91 cho thẻ", "Dùng loại 65x91 cho thẻ", 10)
+
+
+def test_condense_batch_honors_max_accept_words_without_loosening_strict_callers(monkeypatch):
+    import json
+    from unittest.mock import Mock
+    from backend.ai import v1_translation_cache as tc
+
+    orig = "Bạn nào mới chơi đồ sưu tầm mà chưa biết chọn kích thước màng bọc thẻ thì xem ngay nhé"
+    short_10 = "Mới chơi chưa biết chọn cỡ bọc thẻ xem ngay"
+    assert len(short_10.split()) == 10
+    seen_payloads = []
+    write_mock = Mock()
+    monkeypatch.setattr(tc, "read_condense_cache", lambda *a, **k: None)
+    monkeypatch.setattr(tc, "write_condense_cache", write_mock)
+
+    def fake_gemini(payload, **kwargs):
+        text_prompt = payload["contents"][0]["parts"][0]["text"]
+        seen_payloads.append(text_prompt)
+        data = {"candidates": [{"finishReason": "STOP", "content": {
+            "parts": [{"text": json.dumps({"1": short_10}, ensure_ascii=False)}]
+        }}]}
+        validator = kwargs.get("response_validator")
+        if validator:
+            validator(data)
+        return data, "high"
+
+    monkeypatch.setattr(tr, "call_gemini_api", fake_gemini)
+
+    relaxed = tr.condense_vietnamese_subtitles_batch(
+        [{"index": 1, "text": orig, "target_seconds": 2.31, "target_words": 8, "max_accept_words": 11}],
+        api_key="synthetic",
+    )
+    assert relaxed == {1: short_10}
+    assert len(seen_payloads) == 1
+    assert "max_accept_words" not in seen_payloads[0]
+    write_mock.assert_not_called()
+
+    strict = tr.condense_vietnamese_subtitles_batch(
+        [{"index": 1, "text": orig, "target_seconds": 2.31, "target_words": 8}],
+        api_key="synthetic",
+    )
+    assert strict == {}
+
+
 def test_chinese_indefinite_article_does_not_force_a_spoken_quantity():
     assert validate_translation_batch_quality(
         ["然后是一个果冻，一起品尝一下吧。"], ["Tiếp theo là thạch, cùng nếm nhé."],

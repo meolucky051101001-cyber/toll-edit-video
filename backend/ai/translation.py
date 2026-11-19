@@ -1463,8 +1463,15 @@ def _fit_translation_cues(source, translated, metadata, *, api_key, script_mode,
         if estimate > slot * speed:
             # Keep room for a faithful rewrite if the first-pass comfort target was too tight.
             words = max(words, int(slot * speed / VI_SECONDS_PER_WORD))
-            items.append({"index": index, "text": text, "source_text": source[index],
-                          "target_seconds": slot, "target_words": words, "current_seconds": estimate})
+            item_entry = {"index": index, "text": text, "source_text": source[index],
+                          "target_seconds": slot, "target_words": words, "current_seconds": estimate}
+            cur_words = len(text.split())
+            if cur_words > words:
+                item_entry["max_accept_words"] = min(
+                    cur_words - 1,
+                    max(words, int(slot * speed / VI_SECONDS_PER_WORD) + 2),
+                )
+            items.append(item_entry)
     until = min(time.monotonic() + 15, deadline) if deadline is not None else time.monotonic() + 15
     if not items or until - time.monotonic() <= 1:
         return translated
@@ -1477,8 +1484,12 @@ def _fit_translation_cues(source, translated, metadata, *, api_key, script_mode,
     for item in items:
         index = item["index"]
         candidate = candidates.get(index)
-        if (candidate and validate_condensed_text(item["text"], candidate, item["target_words"])
-                and vietnamese_spoken_seconds(candidate) <= item["target_seconds"] * speed
+        if (candidate
+                and validate_condensed_text(
+                    item["text"], candidate, item["target_words"],
+                    max_accept_words=item.get("max_accept_words"),
+                )
+                and vietnamese_spoken_seconds(candidate) < vietnamese_spoken_seconds(item["text"])
                 and not translation_meaning_issues(source[index], candidate)):
             result[index] = candidate
     logger.info("Translation timing review: %s likely overlong cues, %s shortened before TTS",
@@ -1873,9 +1884,25 @@ _INDEFINITE_ALTERNATIVE = re.compile(
 )
 _ALTERNATIVE_CHOICE = re.compile(r"\b(?:đổi|thử)\b[^,.;!?]{1,40}\bkhác\b", re.IGNORECASE)
 _EXACT_COUNT = re.compile(r"\b(?:chỉ|đúng|duy nhất|mỗi)\b", re.IGNORECASE)
+_CONDENSE_DECL_NEG = re.compile(r"\b(?:không(?!\s+phẩy\b)|chưa|chẳng)\b")
+_CONDENSE_PROHIB_NEG = re.compile(r"\b(?:đừng|cấm)\b")
+_CONDENSE_DIM_SEP = re.compile(r"(?<=\d)\s*[xX×]\s*(?=\d)")
+_CONDENSE_UNIT_GLUE = re.compile(r"(?<=\d)(?=(?:mm|cm|dm|km|ml|mg|kg|g|m|l)\b)", re.IGNORECASE)
 
 
-def validate_condensed_text(orig_text: str, shortened: str, target_words: int) -> bool:
+def _extract_condense_numbers(text: str) -> set:
+    normalized = _CONDENSE_DIM_SEP.sub(" × ", text)
+    normalized = _CONDENSE_UNIT_GLUE.sub(" ", normalized)
+    return {n.replace(",", ".") for n in re.findall(r'(?<!\w)\d+(?:[.,]\d+)*(?!\w)', normalized)}
+
+
+def validate_condensed_text(
+    orig_text: str,
+    shortened: str,
+    target_words: int,
+    *,
+    max_accept_words: Optional[int] = None,
+) -> bool:
     """
     Kiểm tra chặt chẽ câu đã rút gọn theo Codex Plan:
     1. Không rỗng, không chứa markdown, code fence, hoặc lời giải thích.
@@ -1893,13 +1920,17 @@ def validate_condensed_text(orig_text: str, shortened: str, target_words: int) -
 
     orig_words = orig_text.strip().split()
     short_words = shortened.split()
-    if len(short_words) > min(len(orig_words), max(1, target_words)):
+    if max_accept_words is None:
+        accept_cap = min(len(orig_words), max(1, target_words))
+    else:
+        word_limit = max(1, target_words, int(max_accept_words))
+        accept_cap = min(max(1, len(orig_words) - 1), word_limit) if len(orig_words) > 1 else min(len(orig_words), word_limit)
+    if len(short_words) > accept_cap:
         return False
 
-    number_pattern = r'(?<!\w)\d+(?:[.,]\d+)*(?!\w)'
-    orig_nums = set(re.findall(number_pattern, orig_text))
+    orig_nums = _extract_condense_numbers(orig_text)
     if orig_nums:
-        short_nums = set(re.findall(number_pattern, shortened))
+        short_nums = _extract_condense_numbers(shortened)
         if not orig_nums.issubset(short_nums):
             return False
 
@@ -1909,14 +1940,11 @@ def validate_condensed_text(orig_text: str, shortened: str, target_words: int) -
         source_meaning = _UNCERTAIN_CHOICE.sub("phân vân", orig_text)
         target_meaning = _UNCERTAIN_CHOICE.sub("phân vân", shortened)
 
-    negations = ["không", "chưa", "chẳng", "đừng"]
-    orig_tokens = re.findall(r'\w+', source_meaning.lower())
-    short_tokens = re.findall(r'\w+', target_meaning.lower())
-    for neg in negations:
-        # Multiple negations are not necessarily a double negative. Without
-        # semantic proof, keep each one instead of allowing a polarity change.
-        if orig_tokens.count(neg) != short_tokens.count(neg):
-            return False
+    orig_lower, short_lower = source_meaning.lower(), target_meaning.lower()
+    if len(_CONDENSE_DECL_NEG.findall(orig_lower)) != len(_CONDENSE_DECL_NEG.findall(short_lower)):
+        return False
+    if len(_CONDENSE_PROHIB_NEG.findall(orig_lower)) != len(_CONDENSE_PROHIB_NEG.findall(short_lower)):
+        return False
 
     # “Thử một loại … khác” can introduce an alternative without asserting a count.
     # Require the alternative to survive and reject any new or changed quantity.
@@ -1937,7 +1965,7 @@ def trim_to_target_words(text: str, target_words: int) -> str:
         return text
     # Danh sách từ đệm có thể lược bỏ an toàn trong khẩu ngữ tiếng Việt
     fillers = {"nhé", "nha", "ạ"}
-    filtered = [w for w in words if w.lower() not in fillers]
+    filtered = [w for w in words if w.rstrip(".,!?;:").lower() not in fillers]
     # A word budget cannot justify dropping the rest of a sentence.
     return " ".join(filtered) if 0 < len(filtered) <= target_words else text
 
@@ -1969,6 +1997,7 @@ def condense_vietnamese_subtitles_batch(
 
     result = {}
     uncached_items = []
+    accept_limits = {}
 
     for it in items:
         idx = it["index"]
@@ -1979,8 +2008,10 @@ def condense_vietnamese_subtitles_batch(
         else:
             default_tw = max(2, int((sec - 0.05) / 0.28))
         tw = int(it.get("target_words") or default_tw)
+        max_aw = int(it["max_accept_words"]) if it.get("max_accept_words") is not None else None
+        accept_limits[idx] = max_aw
         cached_val = read_condense_cache(text, sec, tw, script_mode=script_mode)
-        if cached_val and validate_condensed_text(text, cached_val, tw):
+        if cached_val and validate_condensed_text(text, cached_val, tw, max_accept_words=max_aw):
             result[idx] = cached_val
         else:
             uncached_items.append({
@@ -2032,13 +2063,15 @@ def condense_vietnamese_subtitles_batch(
             accepted = {}
             for item in batch:
                 index, original, words = item["index"], item["text"], item["target_words"]
+                max_aw = accept_limits.get(index)
+                trim_limit = max(words, max_aw) if max_aw is not None else words
                 shortened = parsed.get(str(index))
                 if not isinstance(shortened, str) or not shortened:
                     continue
                 cleaned = repair_vietnamese_mojibake(shortened.strip())
-                if not validate_condensed_text(original, cleaned, words):
-                    cleaned = trim_to_target_words(cleaned, words)
-                if validate_condensed_text(original, cleaned, words):
+                if not validate_condensed_text(original, cleaned, words, max_accept_words=max_aw):
+                    cleaned = trim_to_target_words(cleaned, trim_limit)
+                if validate_condensed_text(original, cleaned, words, max_accept_words=max_aw):
                     accepted[index] = cleaned
             if not accepted:
                 raise GeminiResponseError("No valid condensed dialogue in response")
@@ -2062,8 +2095,10 @@ def condense_vietnamese_subtitles_batch(
                 index = item["index"]
                 if index in accepted:
                     result[index] = accepted[index]
-                    write_condense_cache(item["text"], item["target_seconds"], item["target_words"],
-                                         accepted[index], used_model, script_mode=script_mode)
+                    max_aw = accept_limits.get(index)
+                    if max_aw is None or len(accepted[index].split()) <= item["target_words"]:
+                        write_condense_cache(item["text"], item["target_seconds"], item["target_words"],
+                                             accepted[index], used_model, script_mode=script_mode)
             pending = [item for item in batch if item["index"] not in accepted]
             models = [model for model in models if model != used_model]
             logger.info("[CONDENSE] Gemini %s rút gọn thành công %s/%s câu", used_model, len(accepted), len(batch))
