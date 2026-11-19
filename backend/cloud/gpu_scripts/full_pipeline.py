@@ -1938,12 +1938,13 @@ def generate_capcut_tts_single(
     out_file: str,
     *,
     max_retries: int = 3,
-    poll_timeout: float = 12.0,
+    poll_timeout: float = 30.0,
 ) -> bool:
     """Gọi CapCut TTS SDK với retry có giới hạn và kiểm tra decode file audio trước khi chấp nhận."""
     tmp_out = f"{out_file}.part"
     attempts = max(1, int(max_retries))
     for attempt in range(1, attempts + 1):
+        phase = "create"
         try:
             if os.path.exists(tmp_out):
                 os.remove(tmp_out)
@@ -1957,37 +1958,42 @@ def generate_capcut_tts_single(
             task_id = tasks[0]["id"]
             token = tasks[0]["token"]
 
+            phase = "poll"
             deadline = time.monotonic() + max(1.0, float(poll_timeout))
-            downloaded = False
-            poll_round = 0
+            poll_delay = 0.4
             while time.monotonic() < deadline:
-                time.sleep(0.20 if poll_round == 0 else 0.30)
-                poll_round += 1
+                time.sleep(min(poll_delay, max(0.0, deadline - time.monotonic())))
+                if time.monotonic() >= deadline:
+                    break
+                poll_delay = min(1.5, poll_delay * 1.5)
                 query_res = client.query_tts_task(task_id, token)
                 q_tasks = query_res.get("data", {}).get("tasks", [])
                 if not q_tasks:
-                    break
+                    continue
                 status = q_tasks[0].get("status")
                 if status in ("success", "succeed"):
                     payload = json.loads(q_tasks[0].get("payload", "{}"))
                     speech_url = payload.get("audio_subtitles", [{}])[0].get("speech_url")
                     if speech_url:
+                        phase = "download"
                         r = client.session.get(speech_url, timeout=15)
                         r.raise_for_status()
-                        if len(r.content) > 128:
-                            with open(tmp_out, "wb") as f:
-                                f.write(r.content)
-                            validate_tts_audio_file(tmp_out)
-                            os.replace(tmp_out, out_file)
-                            downloaded = True
-                            break
+                        with open(tmp_out, "wb") as f:
+                            f.write(r.content)
+                        phase = "validate"
+                        validate_tts_audio_file(tmp_out)
+                        os.replace(tmp_out, out_file)
+                        return True
                 elif status == "failed":
                     raise RuntimeError("CapCut TTS task trả về status=failed.")
-            if downloaded:
-                return True
-            raise RuntimeError("Hết thời gian chờ hoặc âm thanh CapCut TTS không hợp lệ.")
+            raise TimeoutError("Hết thời gian chờ CapCut TTS.")
         except Exception as exc:
-            print(f"    [CapCut TTS Warn attempt {attempt}/{attempts}] {exc}", flush=True)
+            http_status = getattr(getattr(exc, "response", None), "status_code", None)
+            http_detail = f", HTTP {http_status}" if isinstance(http_status, int) else ""
+            print(
+                f"    [CapCut TTS Warn attempt {attempt}/{attempts}] {phase}: {type(exc).__name__}{http_detail}",
+                flush=True,
+            )
             if os.path.exists(tmp_out):
                 try:
                     os.remove(tmp_out)
@@ -2189,8 +2195,15 @@ def step5_generate_tts(
         sem = asyncio.Semaphore(tts_concurrency)
         done_count = 0
 
-        async def _synth_one(s: dict) -> None:
-            nonlocal fallback_used, done_count
+        def _report_synthesized() -> None:
+            nonlocal done_count
+            done_count += 1
+            if done_count == total_segs or done_count % progress_stride == 0:
+                pct = min(80, 71 + int(9 * done_count / max(1, total_segs)))
+                _write_pipeline_progress(pct, 5, 8, f"Tổng hợp giọng đọc {engine_name} ({done_count}/{total_segs} câu)...")
+
+        async def _synth_one(s: dict) -> bool:
+            nonlocal fallback_used
             t_text = str(s.get("translated_text") or "").strip()
             out_path = os.path.join(tts_dir, f"seg_{int(s['id']):04d}.mp3")
             s["tts_path"] = out_path
@@ -2221,17 +2234,30 @@ def step5_generate_tts(
                         except Exception as e:
                             print(f"  [WARN] Edge TTS lần {edge_try} đoạn {s['id']}: {e}", flush=True)
 
-                if not success:
-                    raise PipelineStageError(
-                        "TTS_GENERATION_FAILED",
-                        f"Tổng hợp giọng đọc TTS thất bại cho câu #{s['id']} (engine={engine_name}).",
-                    )
-                done_count += 1
-                if done_count == total_segs or done_count % progress_stride == 0:
-                    pct = min(80, 71 + int(9 * done_count / max(1, total_segs)))
-                    _write_pipeline_progress(pct, 5, 8, f"Tổng hợp giọng đọc {engine_name} ({done_count}/{total_segs} câu)...")
+                if success:
+                    _report_synthesized()
+                return success
 
-        await asyncio.gather(*(_synth_one(seg_item) for seg_item in segments))
+        results = await asyncio.gather(*(_synth_one(seg_item) for seg_item in segments))
+        for segment, success in zip(segments, results):
+            if success:
+                continue
+            if is_capcut and done_count:
+                print(f"  [WARN] Thử lại CapCut riêng cho câu #{segment['id']}.", flush=True)
+                if await asyncio.to_thread(
+                    generate_capcut_tts_single,
+                    str(segment["translated_text"]).strip(),
+                    capcut_voice,
+                    segment["tts_path"],
+                    max_retries=1,
+                ):
+                    segment["tts_engine_used"] = "capcut_tts"
+                    _report_synthesized()
+                    continue
+            raise PipelineStageError(
+                "TTS_GENERATION_FAILED",
+                f"Tổng hợp giọng đọc TTS thất bại cho câu #{segment['id']} (engine={engine_name}).",
+            )
 
     asyncio.run(_run_all())
     _write_pipeline_progress(81, 5, 8, "Căn chỉnh thời lượng giọng đọc chống đè lời chuẩn Tool V1...")

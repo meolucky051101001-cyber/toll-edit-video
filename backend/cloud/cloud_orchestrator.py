@@ -341,7 +341,7 @@ class CloudOrchestrator:
         adapter: Optional[ColabProviderAdapter] = None,
         allowed_roots: Optional[Sequence[str | Path]] = None,
         *,
-        enable_warm_session_reuse: Optional[bool] = None,
+        enable_warm_session_reuse: bool = False,
         has_pending_work_callback: Optional[Callable[[str], bool]] = None,
     ):
         self.store = store or CloudJobStore()
@@ -349,13 +349,7 @@ class CloudOrchestrator:
         self.allowed_roots = allowed_roots
         self.backend_dir = Path(__file__).resolve().parent.parent
         self.gpu_scripts_dir = Path(__file__).resolve().parent / "gpu_scripts"
-        if enable_warm_session_reuse is None:
-            self.enable_warm_session_reuse = (
-                isinstance(self.adapter, ColabProviderAdapter)
-                and not bool(os.getenv("PYTEST_CURRENT_TEST"))
-            )
-        else:
-            self.enable_warm_session_reuse = bool(enable_warm_session_reuse)
+        self.enable_warm_session_reuse = bool(enable_warm_session_reuse)
         self.has_pending_work_callback = has_pending_work_callback
         self._warm_lock = threading.Lock()
         self._warm_sessions: Dict[str, Dict[str, Any]] = {}

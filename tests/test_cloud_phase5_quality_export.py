@@ -330,6 +330,7 @@ def test_capcut_tts_retries_transient_error_without_switching_to_edge(tmp_path: 
     class FakeCapCutClient:
         def __init__(self):
             self.session = FakeSession()
+            self.query_count = 0
 
         def create_tts_task(self, texts, voice):
             attempts["create"] += 1
@@ -338,6 +339,9 @@ def test_capcut_tts_retries_transient_error_without_switching_to_edge(tmp_path: 
             return {"data": {"tasks": [{"id": "t1", "token": "tok1"}]}}
 
         def query_tts_task(self, task_id, token):
+            self.query_count += 1
+            if self.query_count == 1:
+                return {"data": {"tasks": []}}
             return {
                 "data": {
                     "tasks": [
@@ -373,6 +377,33 @@ def test_capcut_tts_retries_transient_error_without_switching_to_edge(tmp_path: 
     assert edge_called["called"] is False
     assert attempts["create"] == 3  # 2 tries on seg 1 + 1 try on seg 2
     assert all(Path(s["tts_path"]).is_file() for s in segments)
+
+
+def test_capcut_tts_recovers_only_the_failed_cue_with_the_same_voice(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(full_pipeline, "validate_tts_audio_file", lambda _p, **kw: 0.8)
+    monkeypatch.setattr(full_pipeline, "_trim_tts_silence_in_process", lambda path: path)
+    monkeypatch.setenv("CLOUD_TTS_CONCURRENCY", "1")
+    attempts = []
+
+    def synthesize(text, voice, out_file, *, max_retries=3):
+        attempts.append((text, voice, max_retries))
+        if text == "Câu bị lỗi" and max_retries != 1:
+            return False
+        Path(out_file).write_bytes(b"ID3" + b"\x00" * 300)
+        return True
+
+    monkeypatch.setattr(full_pipeline, "generate_capcut_tts_single", synthesize)
+    segments = [
+        {"id": 36, "start": 0.0, "end": 1.5, "text": "第一句", "translated_text": "Câu bị lỗi"},
+        {"id": 37, "start": 1.7, "end": 3.2, "text": "下一句", "translated_text": "Câu sau"},
+    ]
+    voice = "BV562_streaming"
+    summary = full_pipeline.step5_generate_tts(segments, voice, str(tmp_path), video_duration=3.5)
+
+    assert attempts == [("Câu bị lỗi", voice, 3), ("Câu sau", voice, 3), ("Câu bị lỗi", voice, 1)]
+    assert summary["verified_count"] == 2
+    assert summary["fallback_used"] is False
+    assert all(segment["tts_engine_used"] == "capcut_tts" for segment in segments)
 
 
 def test_capcut_tts_blocks_last_cue_failure_and_blocks_bgm_only_export(tmp_path: Path, monkeypatch):
