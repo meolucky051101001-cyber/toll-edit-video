@@ -76,6 +76,26 @@ def test_colloquial_chinese_if_still_requires_a_condition():
     assert "Câu 1 đổi hoặc bỏ điều kiện" in reasons
 
 
+def test_zh_topic_after_unpunctuated_negative_clause_does_not_require_if():
+    source = "D版是白色的不会突兀小卡的话是能当四公格放"
+    faithful = "Nền trắng nên không lạc tông, thẻ nhỏ xếp được bốn ô"
+    assert validate_translation_batch_quality([source], [faithful]) == (True, [])
+    dropped_negation = "Nền trắng, thẻ nhỏ xếp được bốn ô"
+    assert validate_translation_batch_quality([source], [dropped_negation]) == (
+        False, ["Câu 1 bỏ phủ định hoặc lời cấm"],
+    )
+
+
+@pytest.mark.parametrize("source,faithful,wrong", [
+    ("不盖盖子的话，放在这里。", "Nếu không đậy nắp, đặt ở đây.", "Đặt ở đây, đừng đậy nắp."),
+    ("温度太高的话就等一等。", "Nếu nóng quá thì đợi một lát.", "Đợi một lát."),
+])
+def test_zh_implicit_conditions_still_require_faithful_translation(source, faithful, wrong):
+    assert validate_translation_batch_quality([source], [faithful]) == (True, [])
+    _, reasons = validate_translation_batch_quality([source], [wrong])
+    assert "Câu 1 đổi hoặc bỏ điều kiện" in reasons
+
+
 def test_quality_retry_only_retranslates_bad_cue_with_adjacent_context(monkeypatch):
     from unittest.mock import Mock
 

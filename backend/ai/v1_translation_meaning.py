@@ -151,8 +151,11 @@ _ZH_NEGATION = re.compile(r"不要|不得|不能|不可|无需|無需|无法|無
                           r"没(?:盖|装|放|用)|沒(?:蓋|裝|放|用)|别(?:盖|用|放|装|开|碰)|別(?:蓋|用|放|裝|開|碰)")
 _VI_NEGATION = re.compile(r"\b(?:không(?!\s+phẩy\b)|chưa|chẳng|đừng|khỏi|tránh|cấm)\b")
 # 要是 can mean “if”, but inside 主要是 it is part of “mainly”.
-_ZH_CONDITION = re.compile(r"(?:如果|假如|若是|(?<![主次重])要是|只要)([^，。；！？,;!?]+?)(?:[，。；！？,;!?]|就|$)|"
-                           r"(?:^|[，,])([^，。；！？,;!?]+)的[话話]")
+_ZH_CONDITION = re.compile(
+    r"(?:如果|假如|若是|(?<![主次重])要是|只要)([^，。；！？,;!?]+?)(?:的[话話]|[，。；！？,;!?]|就|$)"
+)
+_ZH_IMPLICIT_CONDITION = re.compile(r"(?:^|[，,])([^，。；！？,;!?]+?)的[话話]")
+_ZH_CONDITIONAL_RESULT = re.compile(r"^[\s，,]*(?:就|则|則|才|请|請|务必|務必|切勿|不要|别|別)")
 _VI_CONDITION = re.compile(r"\b(?:nếu|miễn là|chỉ cần|trường hợp)\s+([^,.;!?]+?)\s+thì\b|"
                            r"\b(?:nếu|miễn là|chỉ cần|trường hợp)\s+([^,.;!?]+)|(?:^|[,;])([^,.;!?]+?)\s+thì\b")
 
@@ -166,6 +169,21 @@ _CONDITION_ACTIONS = (
     (r"盖(?:上|好|住|盖子)|蓋(?:上|好|住|蓋子)", r"\b(?:đậy|đóng|che|phủ)\b"),
     (r"开盖|開蓋|打开盖|打開蓋", r"\bmở\b"),
 )
+
+def _chinese_condition(text):
+    explicit = _clause(_ZH_CONDITION, text)
+    if explicit:
+        return explicit
+    for match in _ZH_IMPLICIT_CONDITION.finditer(text):
+        clause = match[1].strip()
+        # 的话 also introduces a topic. An unpunctuated ASR cue can include an
+        # unrelated negative statement before that topic.
+        if _ZH_CONDITIONAL_RESULT.match(text[match.end():]) or any(
+            re.search(action, clause) for action, _ in _CONDITION_ACTIONS
+        ):
+            return clause
+    return ""
+
 
 _ZH_AFFIRMATIVE_ACTIONS = (
     (r"打开盖子?|打開蓋子?|开盖|開蓋", r"\b(?:không|chẳng|đừng)\s+mở\b"),
@@ -199,7 +217,7 @@ def translation_meaning_issues(source, target):
             break
 
     source_negation = _ZH_NEGATION if chinese else _VI_NEGATION
-    condition = _clause(_ZH_CONDITION if chinese else _VI_CONDITION, source)
+    condition = _chinese_condition(source) if chinese else _clause(_VI_CONDITION, source)
     if condition:
         translated_condition = _clause(_VI_CONDITION, target)
         changed_action = any(re.search(zh if chinese else vi, condition) and not re.search(vi, translated_condition)
