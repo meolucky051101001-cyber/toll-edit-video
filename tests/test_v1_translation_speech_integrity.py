@@ -53,7 +53,8 @@ def test_speech_integrity_only_checks_trusted_original_and_preserves_cue_ids():
     assert [bad.index, untrusted.index] == [9, 13]
 
 
-def test_voice_cloning_rejects_before_translation_provider_or_tts(tmp_path):
+def test_voice_cloning_rejects_before_translation_provider_or_tts(tmp_path, monkeypatch):
+    monkeypatch.setenv("V1_TRANSLATION_MEANING_POLICY", "strict")
     wrong_vietnamese = cue(4, "Mở nắp", original="未开盖")
     pending_chinese = cue(5, "无糖。", original="无糖。")
     with patch("backend.ai.translation.translate_subtitles") as provider, \
@@ -66,7 +67,8 @@ def test_voice_cloning_rejects_before_translation_provider_or_tts(tmp_path):
     tts.assert_not_called()
 
 
-def test_voice_cloning_rejects_bad_provider_result_before_tts(tmp_path):
+def test_voice_cloning_rejects_bad_provider_result_before_tts(tmp_path, monkeypatch):
+    monkeypatch.setenv("V1_TRANSLATION_MEANING_POLICY", "strict")
     pending_chinese = cue(5, "无糖。", original="无糖。")
 
     def bad_provider(items, *args, **kwargs):
@@ -81,11 +83,20 @@ def test_voice_cloning_rejects_bad_provider_result_before_tts(tmp_path):
     tts.assert_not_called()
 
 
-def test_isolated_tts_rejects_before_worker_start(tmp_path):
+def test_isolated_tts_rejects_before_worker_start(tmp_path, monkeypatch):
     from backend import batch_control
 
+    monkeypatch.setenv("V1_TRANSLATION_MEANING_POLICY", "strict")
     segment = cue(7, "Có đường", original="无糖")
     with patch.object(batch_control, "run") as worker:
         with pytest.raises(RuntimeError, match="Translation fact mismatch"):
             asyncio.run(v1_voice_isolated.generate_dubbing_audio_isolated([segment], str(tmp_path)))
     worker.assert_not_called()
+
+
+def test_default_warn_policy_logs_advisory_without_blocking_tts(monkeypatch, caplog):
+    monkeypatch.delenv("V1_TRANSLATION_MEANING_POLICY", raising=False)
+    segment = cue(7, "Có đường", original="无糖")
+    with caplog.at_level("WARNING"):
+        ensure_translation_speech_integrity([segment])
+    assert any("Translation meaning advisory" in rec.message for rec in caplog.records)

@@ -1002,12 +1002,16 @@ class V1Orchestrator:
         should_run = not (c.can_resume and stage_id in c.verified_stages)
         translated_segments = []
         if not should_run:
-            from ai.v1_translation_meaning import translation_meaning_issues
+            from ai.v1_translation_meaning import translation_meaning_issues, translation_meaning_policy
 
             translated_segments = load_payload(c.out_dir / "translation.json")["segments"]
-            if c.effective_cfg.get("target_lang", "vi").lower().startswith("vi") and any(
-                translation_meaning_issues(getattr(segment, "orig_content", "") or "", segment.content)
-                for segment in translated_segments
+            if (
+                translation_meaning_policy() == "strict"
+                and c.effective_cfg.get("target_lang", "vi").lower().startswith("vi")
+                and any(
+                    translation_meaning_issues(getattr(segment, "orig_content", "") or "", segment.content)
+                    for segment in translated_segments
+                )
             ):
                 should_run = True
                 allowed = STAGES_ORDER[:STAGES_ORDER.index(stage_id)]

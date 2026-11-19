@@ -1,8 +1,18 @@
 """Check explicit, comparable Chinese/Vietnamese subtitle facts before dubbing."""
 
+import logging
+import os
 import re
 import unicodedata
 from decimal import Decimal
+
+_logger = logging.getLogger(__name__)
+
+
+def translation_meaning_policy() -> str:
+    """Return 'strict' only when explicitly opted in; default 'warn' avoids failing jobs on heuristic regex false positives."""
+    raw = str(os.getenv("V1_TRANSLATION_MEANING_POLICY", "warn") or "warn").strip().lower()
+    return "strict" if raw in ("strict", "block", "error", "hard", "1", "true", "yes") else "warn"
 
 
 _ZH_DIGITS = dict(zip("零〇一二两兩三四五六七八九", (0, 0, 1, 2, 2, 2, 3, 4, 5, 6, 7, 8, 9)))
@@ -42,7 +52,7 @@ def _unit_pattern(language):
     alternatives = "|".join(map(re.escape, sorted(aliases, key=len, reverse=True)))
     number = _ZH_NUMBER if language == "zh" else _VI_NUMBER
     boundary = r"(?![a-z0-9])" if language == "zh" else r"(?!\w)"
-    start = r"(?<![a-z0-9.,])" if language == "zh" else r"(?<![\w.,])"
+    start = r"(?<![a-z0-9.,])" if language == "zh" else r"(?:(?<![\w.,])|(?<=\dx))(?<!\d[.,])"
     return re.compile(rf"{start}(?P<number>{number})\s*(?P<unit>{alternatives}){boundary}"), aliases
 
 
@@ -50,7 +60,9 @@ _ZH_MEASURE, _ZH_UNITS = _unit_pattern("zh")
 _VI_MEASURE, _VI_UNITS = _unit_pattern("vi")
 _ZH_PERCENT = re.compile(rf"百分之({_ZH_NUMBER})")
 _ZH_IS_TEXT = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
-_BARE_ARABIC = re.compile(rf"(?<![a-z0-9.,]){_ARABIC}(?![a-z0-9.,])")
+_BARE_ARABIC = re.compile(
+    rf"(?:(?<![a-z0-9])|(?<=\dx))(?<!\d[.,]){_ARABIC}(?![.,]\d)(?:(?![a-z0-9])|(?=x\d))"
+)
 _SOCIAL_REPLY = re.compile(r"(?:评论|評論|回复|回覆|留言|扣)\s*\d+")
 _MODEL_OR_SIZE = re.compile(r"尺寸|规格|規格|尺码|尺碼|型号|型號|大号|大號|小号|小號")
 
@@ -102,23 +114,39 @@ def _value(number, language):
     return Decimal(integer) if not fraction else None
 
 
-def _facts(text, language):
+def _facts(text, language, raw_text=None):
     pattern, aliases = (_ZH_MEASURE, _ZH_UNITS) if language == "zh" else (_VI_MEASURE, _VI_UNITS)
     found = set()
     for match in pattern.finditer(text):
         unit = match["unit"]
         if language == "zh" and match.start() and text[match.start() - 1] == "第":
             continue  # An ordinal such as 第一个 does not count a quantity.
+        if language == "zh" and unit == "g" and raw_text is not None:
+            if len(raw_text) == len(text):
+                if raw_text[match.start("unit"):match.end("unit")] == "G":
+                    continue
+            elif re.search(rf"{re.escape(match['number'])}\s*G(?![A-Za-z0-9])", raw_text):
+                continue
+        if language == "zh" and re.fullmatch(
+            r"(?:一[二两兩]|二三|[两兩]三|三四|四五|五六|六七|七八|八九)", match["number"]
+        ):
+            continue
         # Exclude nouns such as “đồng hồ” from the currency detector.
         if unit == "đồng" and re.match(r"\s+(?:hồ|nghiệp|đội|chí|bào)\b", text[match.end():]):
             continue
         kind, scale = aliases[unit]
         number = _value(match["number"], language)
-        if language == "zh" and kind == "count" and unit in ("个", "個") and number == 1:
+        if language == "zh" and kind == "count" and number == 1:
             before, after = text[:match.start()], text[match.end():]
-            quantified = re.search(r"(?:只|仅|僅|每|拿|放|用|买|買|选|選|需要|剩|加|装|裝)$", before)
-            if not quantified and not after.startswith(("半", "不", "都", "也")):
-                continue  # 一个 + noun often introduces an item without asserting an exact count.
+            if match["number"] == "一":
+                if re.search(r"(?:这|這|那|哪|另|同|某)$", before):
+                    continue  # Demonstrative such as 那一张 / 同一张 / 这一套.
+                if before.endswith("的") and not after.startswith(("半", "不", "都", "也")):
+                    continue  # Attributive article such as 这么可爱的一套.
+            if unit in ("个", "個"):
+                quantified = re.search(r"(?:只|仅|僅|每|拿|放|用|买|買|选|選|需要|剩|加|装|裝)$", before)
+                if not quantified and not after.startswith(("半", "不", "都", "也")):
+                    continue  # 一个 + noun often introduces an item without asserting an exact count.
         if number is not None:
             found.add((kind, number * scale))
     if language == "zh":
@@ -144,10 +172,11 @@ _SHAPES = (
     (r"单面|單面|单侧|單側", r"\b(?:một|1)\s+(?:mặt|bên|phía)\b"),
     (r"双面|雙面|两面|兩面|两侧|兩側", r"\b(?:cả\s+)?(?:hai|2)\s+(?:mặt|bên|phía)\b"),
 )
-_ZH_NEGATION = re.compile(r"不要|不得|不能|不可|无需|無需|无法|無法|沒有|没有|"
+_ZH_NEGATION = re.compile(r"(?<!要)不要|不得|(?<!能)不能|不可|无需|無需|无法|無法|(?<!有)沒有|(?<!有)没有|"
                           # Keep these additions scoped to demonstrated polarity-bearing phrases.
                           r"(?:尚未|未)(?:打开盖子?|打開蓋子?|开盖|開蓋)|无(?:糖|蔗糖|添加糖)|"
-                          r"不(?:打开盖子?|打開蓋子?|盖|蓋|用|需要|装|裝|放|开|開|沾|粘|建议|建議|含|会|會|加|必|接触|接觸|涂|留)|"
+                          r"(?<!会)(?<!會)不(?:会|會)|"
+                          r"不(?:打开盖子?|打開蓋子?|盖|蓋|用|需要|装|裝|放|开|開|沾|粘|建议|建議|含|加|必|接触|接觸|涂|留)|"
                           r"没(?:盖|装|放|用)|沒(?:蓋|裝|放|用)|别(?:盖|用|放|装|开|碰)|別(?:蓋|用|放|裝|開|碰)")
 _VI_NEGATION = re.compile(r"\b(?:không(?!\s+phẩy\b)|chưa|chẳng|đừng|khỏi|tránh|cấm)\b")
 # 要是 can mean “if”, but inside 主要是 it is part of “mainly”.
@@ -193,12 +222,11 @@ _ZH_AFFIRMATIVE_ACTIONS = (
 
 def translation_meaning_issues(source, target):
     """Report concrete mismatches; send uncertain language to contextual review."""
-    source = unicodedata.normalize("NFKC", source).casefold()
-    target = unicodedata.normalize("NFKC", target).casefold()
-    source = re.sub(r"[\u2010\u2011]", "-", source)
-    target = re.sub(r"[\u2010\u2011]", "-", target)
+    raw_source = re.sub(r"[\u2010\u2011]", "-", unicodedata.normalize("NFKC", source))
+    source = raw_source.casefold()
+    target = re.sub(r"[\u2010\u2011]", "-", unicodedata.normalize("NFKC", target)).casefold()
     chinese = bool(_ZH_IS_TEXT.search(source))
-    expected = _facts(source, "zh" if chinese else "vi")
+    expected = _facts(source, "zh" if chinese else "vi", raw_text=raw_source if chinese else None)
     actual = _facts(target, "vi")
     issues = []
     expected_kinds = {kind for kind, _ in expected}
@@ -261,7 +289,14 @@ def translation_speech_integrity_failures(segments):
     return failures
 
 
-def ensure_translation_speech_integrity(segments):
+def ensure_translation_speech_integrity(segments, *, strict=None):
     failures = translation_speech_integrity_failures(segments)
-    if failures:
+    if not failures:
+        return
+    enforce = (translation_meaning_policy() == "strict") if strict is None else bool(strict)
+    if enforce:
         raise RuntimeError("Translation fact mismatch; refusing TTS: " + "; ".join(failures))
+    _logger.warning(
+        "Translation meaning advisory flagged before TTS (continuing under non-strict policy): %s",
+        "; ".join(failures),
+    )

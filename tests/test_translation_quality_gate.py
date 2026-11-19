@@ -142,6 +142,78 @@ def test_translation_shrinks_only_measured_risk_before_handoff(monkeypatch):
     assert len(shorten.call_args.args[0]) == 1
 
 
+def test_size_dimensions_accept_punctuation_and_ascii_x():
+    source = "用到的是3寸58×88的接下来就是我们的大海豹尺寸"
+    for faithful in (
+        "Dùng cỡ 3 inch 58×88, tiếp theo là kích thước lớn",
+        "Dùng cỡ 3 inch 58x88, tiếp theo là kích thước lớn",
+        "Dùng cỡ 3 inch 58x88mm, tiếp theo là kích thước lớn",
+    ):
+        assert validate_translation_batch_quality([source], [faithful]) == (True, [])
+    assert validate_translation_batch_quality(["用到的是3寸58×88。"], ["Dùng cỡ 3 inch 58x88."]) == (True, [])
+    assert validate_translation_batch_quality(["用到的是3寸58×88。"], ["Dùng cỡ 3 inch 58x88mm."]) == (True, [])
+    _, reasons = validate_translation_batch_quality([source], ["Dùng cỡ 3 inch, tiếp theo là kích thước lớn"])
+    assert "Câu 1 đổi hoặc bỏ số hiệu/số cỡ" in reasons
+
+
+def test_uppercase_g_slang_or_tech_not_parsed_as_grams():
+    assert validate_translation_batch_quality(
+        ["我们平姐姐连迷你8G都要配平哦"],
+        ["Chị ấy đến cả huy hiệu mini cũng muốn ghép cặp"],
+    ) == (True, [])
+    for gram_source in ("重8g", "重8克"):
+        _, reasons = validate_translation_batch_quality([gram_source], ["Rất nhẹ"])
+        assert "Câu 1 sai số lượng, số đo hoặc đơn vị" in reasons
+
+
+@pytest.mark.parametrize("source,faithful", [
+    ("另外一个是我给纪念卡组里面大的那一张", "Cái còn lại là tấm lớn đó trong bộ thẻ kỷ niệm"),
+    ("同一张的大卡册的火焰也是这样做的", "Trang rời của cuốn sổ lớn cùng loại cũng làm như vậy"),
+    ("怎么会有这么可爱的一套八机啊", "Sao lại có bộ huy hiệu dễ thương thế này chứ"),
+    ("最可爱的一套丙图了吧", "Chắc là bộ tranh in dễ thương nhất rồi"),
+    ("买两三个盒子", "Mua hai ba cái hộp"),
+    ("大家有没有发现三专明信片比正常的要小一些", "Mọi người có để ý card album ba nhỏ hơn bình thường một chút"),
+])
+def test_zh_demonstrative_attributive_singular_and_ranges_and_a_not_a(source, faithful):
+    assert validate_translation_batch_quality([source], [faithful]) == (True, [])
+
+
+def test_non_strict_meaning_policy_retries_once_then_warns_instead_of_aborting(monkeypatch):
+    from unittest.mock import Mock
+
+    cues = [Subtitle(1, timedelta(seconds=1), timedelta(seconds=3), "盒子宽65毫米。")]
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("V1_TRANSLATION_MEANING_POLICY", raising=False)
+    monkeypatch.delenv("V1_ALLOW_TRANSLATION_FALLBACK", raising=False)
+    monkeypatch.setattr(tr, "condense_vietnamese_subtitles_batch", Mock(return_value={}))
+
+    soft_mismatch = Mock(side_effect=[["Hộp rộng 75 mm."], ["Hộp rộng 75 mm."]])
+    monkeypatch.setattr(tr, "translate_with_gemini", soft_mismatch)
+    result = tr.translate_subtitles(cues, api_key="fixture-key", domain="general", strict=True)
+    assert soft_mismatch.call_count == 2
+    assert [cue.content for cue in result] == ["Hộp rộng 75 mm."]
+
+    monkeypatch.setenv("V1_TRANSLATION_MEANING_POLICY", "strict")
+    strict_mismatch = Mock(side_effect=[["Hộp rộng 75 mm."], ["Hộp rộng 75 mm."]])
+    monkeypatch.setattr(tr, "translate_with_gemini", strict_mismatch)
+    with pytest.raises(RuntimeError, match="Strict translation mode"):
+        tr.translate_subtitles(
+            [Subtitle(1, timedelta(seconds=1), timedelta(seconds=3), "盒子宽65毫米。")],
+            api_key="fixture-key", domain="general", strict=True,
+        )
+
+    monkeypatch.delenv("V1_TRANSLATION_MEANING_POLICY", raising=False)
+    cjk_leak = Mock(side_effect=[["Hộp 盒子 rộng 65 mm."], ["Hộp 盒子 rộng 65 mm."]])
+    monkeypatch.setattr(tr, "translate_with_gemini", cjk_leak)
+    with pytest.raises(RuntimeError, match="Strict translation mode"):
+        tr.translate_subtitles(
+            [Subtitle(1, timedelta(seconds=1), timedelta(seconds=3), "盒子宽65毫米。")],
+            api_key="fixture-key", domain="general", strict=True,
+        )
+
+
 class TranslationQualityGateTests(unittest.TestCase):
     def test_cjk_leak_rejection(self):
         sources = ["你好世界"]

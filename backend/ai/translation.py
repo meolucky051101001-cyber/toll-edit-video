@@ -52,7 +52,7 @@ except ImportError:
 
 from .model_policy import current_model_policy, ordered_unique
 from .v1_caption_evidence import translation_cue_meta
-from .v1_translation_meaning import translation_meaning_issues
+from .v1_translation_meaning import translation_meaning_issues, translation_meaning_policy
 
 try:
     from ..subtitle_text import clean_incomplete_segment_stops, normalize_subtitle_text
@@ -580,7 +580,7 @@ Yêu cầu TỐI QUAN TRỌNG:
 Không vì rút gọn cho TTS mà bỏ hình dạng, kích thước, số lượng, phủ định, điều kiện hoặc thứ tự thao tác. Không thêm công dụng hay độ bền mà nguồn không nói. Phân biệt chính xác hình vuông/hình chữ nhật và một bên/hai bên; giữ điều kiện như 'nếu không đậy nắp'.
 Khi ASR thiếu dấu câu, đối chiếu các đoạn OCR để tách mệnh đề. Cụm danh từ + 的话 có thể chuyển chủ đề (小卡的话 → 'còn thẻ nhỏ thì'); không kéo phủ định của mệnh đề trước vào phần này.
 Giữ số đếm ngay cả khi người nói gọi trực tiếp đồ vật: 你们三个 là 'ba món này' trong ngữ cảnh mua sắm, không phải 'mấy món này'. Ưu tiên giữ số chính xác và rút bớt từ đệm để vừa thời lượng.
-Trong ngữ cảnh bao bì/đồ sưu tầm: 自封袋 là túi zip, 背卡 là bìa lót, 吧唧 là huy hiệu, 谷子 là đồ sưu tầm. Với độ dày túi/màng, 丝 là đơn vị độ dày (1丝 = 0,01 mm), không dịch thành lụa; không tự suy ra độ dày một mặt hay hai mặt. Các số cỡ 65/75 không phải giá tiền.
+Trong ngữ cảnh bao bì/đồ sưu tầm: 自封袋 là túi zip, 背卡 là bìa lót, 吧唧 là huy hiệu, 谷子 là đồ sưu tầm. Với độ dày túi/màng, 丝 là đơn vị độ dày (1丝 = 0,01 mm), không dịch thành lụa; không tự suy ra độ dày một mặt hay hai mặt. Các số cỡ 65/75 không phải giá tiền. ASR/phụ đề gốc có thể viết đồng âm 8G/八机 cho 吧唧 (huy hiệu), và 柄图/丙图 là tranh in/hình in.
 """
     if with_vision:
         prompt += "9. TRỰC QUAN: Kết hợp các bức ảnh đính kèm từ video để chọn đại từ nhân xưng và danh từ chính xác với bối cảnh.\n"
@@ -1346,6 +1346,20 @@ def ensure_speech_pauses_and_entity(
     return out
 
 
+def _is_hard_translation_quality_reason(reason: str) -> bool:
+    """Only structural/corrupt outputs should abort a job after targeted retry."""
+    text = str(reason or "")
+    return any(
+        marker in text
+        for marker in (
+            "không phải là danh sách hợp lệ",
+            "không khớp số câu gốc",
+            "rỗng nội dung",
+            "còn sót chữ Hán (CJK)",
+        )
+    )
+
+
 def validate_translation_batch_quality(
     source_texts,
     translated_texts,
@@ -1689,13 +1703,13 @@ def translate_subtitles(
 
             if not is_valid:
                 allow_fallback = os.getenv("V1_ALLOW_TRANSLATION_FALLBACK", "false").lower() in ("true", "1", "yes")
-                fact_error = target_lang.lower().startswith("vi") and any(
-                    translation_meaning_issues(source, target) for source, target in zip(texts, translated_texts)
-                )
-                if fact_error or not allow_fallback:
+                hard_reasons = [r for r in reasons if _is_hard_translation_quality_reason(r)]
+                strict_meaning = translation_meaning_policy() == "strict"
+                if (hard_reasons and not allow_fallback) or strict_meaning:
                     raise RuntimeError(f"Strict translation mode requires a complete LLM translation conforming to quality rules: {'; '.join(reasons)}")
                 logger.warning(
-                    f"Strict translation quality check flagged: {'; '.join(reasons)}. Proceeding with sanitized translation to avoid job failure."
+                    "Translation quality advisory (policy=warn): %s. Proceeding with LLM translation after targeted repair pass.",
+                    "; ".join(reasons),
                 )
 
     if translated_texts_valid and not strict:
@@ -1727,7 +1741,7 @@ def translate_subtitles(
             translated_texts_valid = False
 
     if translated_texts_valid:
-        if strict and target_lang.lower().startswith("vi") and is_valid:
+        if strict and target_lang.lower().startswith("vi") and not any(_contains_cjk(t) for t in translated_texts):
             translated_texts = _fit_translation_cues(
                 texts, translated_texts, kwargs["cue_meta"], api_key=g_key_for_domain,
                 script_mode=script_mode, max_speed=kwargs.get("max_speech_speed"),
