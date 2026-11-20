@@ -112,7 +112,7 @@ def _paddle_payload(result: Any) -> Mapping[str, Any]:
     return nested if isinstance(nested, Mapping) else value
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=2)
 def _model(detection_model, recognition_model, engine):
     if engine == "onnxruntime":
         import onnxruntime
