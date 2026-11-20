@@ -16,7 +16,8 @@ from tests.test_cloud_phase5_quality_export import _Phase5Adapter, _make_sample_
 
 @pytest.fixture
 def cloud(tmp_path, monkeypatch):
-    now = [time.time()]
+    # Fixed midday ICT so +/-1800s billing tests never straddle midnight.
+    now = [datetime(2026, 11, 15, 12, 0, tzinfo=timezone(timedelta(hours=7))).timestamp()]
     clock = SimpleNamespace(time=lambda: now[0], monotonic=time.monotonic, strftime=time.strftime)
     monkeypatch.setattr(cloud_job_store, 'time', clock)
     monkeypatch.setattr(cloud_orchestrator, 'time', clock)
@@ -147,7 +148,7 @@ def test_old_failed_costs_are_migrated_once_without_changing_job_state(cloud):
 
 def test_original_legacy_schema_migrates_without_resetting_status(tmp_path):
     path = tmp_path / 'old.db'
-    now = time.time()
+    now = datetime(2026, 11, 15, 12, 0, tzinfo=timezone(timedelta(hours=7))).timestamp()
     with sqlite3.connect(path) as db:
         db.execute('''CREATE TABLE cloud_jobs (
             id INTEGER PRIMARY KEY, job_id TEXT UNIQUE, video_path TEXT, video_name TEXT,
@@ -160,7 +161,7 @@ def test_original_legacy_schema_migrates_without_resetting_status(tmp_path):
         migrated = cloud_job_store.CloudJobStore(path, rollout_controlled=False)
         assert migrated.get_job('legacy').state == 'stopped'
         assert migrated.get_job('legacy').attempt == 1
-        assert migrated.get_cu_spent_today() == pytest.approx(2.)
+        assert migrated.get_cu_spent_today(now=now) == pytest.approx(2.)
         assert len(migrated.list_cost_ledger()) == 1
 
 
