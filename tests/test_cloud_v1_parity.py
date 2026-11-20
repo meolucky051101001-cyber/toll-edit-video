@@ -946,7 +946,9 @@ def test_setup_env_prefers_bootstrapped_uv_and_falls_back_to_pip(tmp_path: Path,
     assert len(calls) == 2 and calls[0][0] == str(uv_bin) and "-m" in calls[1]
 
 
-def test_orchestrator_warm_session_handoff_across_batch_and_auto_release_on_finish(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("reuse_session", [False, True])
+def test_orchestrator_releases_gpu_by_default_even_with_another_job_queued(tmp_path: Path, monkeypatch, reuse_session):
+    from backend.cloud import cloud_orchestrator
     from backend.cloud.cloud_config import DEFAULT_CONFIG
     from tests.test_cloud_phase5_quality_export import _Phase5Adapter, _make_sample_video
 
@@ -974,38 +976,40 @@ def test_orchestrator_warm_session_handoff_across_batch_and_auto_release_on_fini
 
     store = CloudJobStore(db_path=str(tmp_path / "batch.db"), rollout_controlled=False)
     adapter = _WarmTrackingAdapter()
-    orch = CloudOrchestrator(
-        store=store,
-        adapter=adapter,
-        allowed_roots=[tmp_path],
-        enable_warm_session_reuse=True,
-    )
+    options = {"enable_warm_session_reuse": True} if reuse_session else {}
+    with monkeypatch.context() as probe:
+        probe.setattr(cloud_orchestrator, "ColabProviderAdapter", _WarmTrackingAdapter)
+        probe.delenv("PYTEST_CURRENT_TEST", raising=False)
+        orch = CloudOrchestrator(store=store, adapter=adapter, allowed_roots=[tmp_path], **options)
 
     j1 = store.enqueue(str(vid1), gpu_type="T4")
     j2 = store.enqueue(str(vid2), gpu_type="T4")
 
     c1 = store.claim_job(j1.job_id, owner_id="w_batch", lease_seconds=300)
     assert c1 is not None
-    # While j1 runs, j2 is already queued -> j1 parks the warm T4 session instead of destroying it!
     assert orch.process_job(c1, owner_id="w_batch") is True
     s1 = store.get_job(j1.job_id)
     assert s1 is not None and s1.state == "completed" and s1.cleanup_status == "verified"
     assert store.get_cu_budget_info()["unreconciled_count"] == 0
-    assert len(adapter.created_sessions) == 1
-    assert adapter.sessions_stopped == []
-    assert len(orch.get_warm_session_names()) == 1
+    assert adapter.created_sessions == [s1.session_name]
+    assert adapter.sessions_stopped == ([] if reuse_session else [s1.session_name])
+    assert orch.get_warm_session_names() == ((s1.session_name,) if reuse_session else ())
 
     c2 = store.claim_job(j2.job_id, owner_id="w_batch", lease_seconds=300)
     assert c2 is not None
-    # j2 adopts the warm session (0 new create_session calls!) and stops it cleanly because queue is now empty!
     assert orch.process_job(c2, owner_id="w_batch") is True
     s2 = store.get_job(j2.job_id)
     assert s2 is not None and s2.state == "completed" and s2.cleanup_status == "verified"
-    assert s2.session_name == s1.session_name
-    assert len(adapter.created_sessions) == 1
-    assert adapter.sessions_stopped == [s1.session_name]
+    if reuse_session:
+        assert s2.session_name == s1.session_name
+        assert adapter.created_sessions == [s1.session_name]
+        assert len(adapter.reset_calls) >= 2
+    else:
+        assert s2.session_name != s1.session_name
+        assert adapter.created_sessions == [s1.session_name, s2.session_name]
+        assert adapter.reset_calls == []
+    assert adapter.sessions_stopped == adapter.created_sessions
     assert orch.get_warm_session_names() == ()
-    assert len(adapter.reset_calls) >= 2
     assert store.get_cu_budget_info()["unreconciled_count"] == 0
 
 
