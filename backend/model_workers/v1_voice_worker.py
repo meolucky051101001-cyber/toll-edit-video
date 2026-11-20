@@ -52,7 +52,13 @@ if __name__ == '__main__':
 
     script_mode = os.environ.get("V1_SCRIPT_MODE", "default")
     try:
-        result = asyncio.run(generate_dubbing_audio(segments, output_folder, voice_source, voice_param, api_key=api_key, video_duration=video_duration, script_mode=script_mode))
+        result = asyncio.run(generate_dubbing_audio(
+            segments, output_folder, voice_source, voice_param,
+            api_key=api_key,
+            condensation_api_key=os.environ.get("GEMINI_API_KEY", ""),
+            video_duration=video_duration,
+            script_mode=script_mode,
+        ))
     except Exception as exc:
         from v1_retry_policy import should_retry_job
         from ai.v1_gemini_dispatcher import mask_secret

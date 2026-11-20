@@ -849,17 +849,11 @@ async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Hãy mở một lượt Cloud trên Dashboard cục bộ trước khi gửi video.")
         return
 
-    global queue_counter, worker_task
     import shared_state
     shared_state.stop_requested = False
 
-    if global_queue.empty():
-        queue_counter = 0
-
-    if worker_task is None or worker_task.done():
-        worker_task = asyncio.create_task(video_worker())
-
-    queue_counter += 1
+    position = _reserve_queue_positions()
+    _ensure_video_worker()
     flags = get_feature_flags(WORKSPACE)
     gpu_type = flags.get("V1_CLOUD_GPU", "T4")
 
@@ -869,7 +863,7 @@ async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_url:
         job_data = {
             'type': 'url',
-            'pos': queue_counter,
+            'pos': position,
             'update': update,
             'context': context,
             'url': raw_input,
@@ -881,7 +875,7 @@ async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         job_data = {
             'type': 'local_file',
-            'pos': queue_counter,
+            'pos': position,
             'update': update,
             'context': context,
             'filename': Path(raw_input).name,
@@ -896,7 +890,7 @@ async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"🚀 *ĐÃ THÊM VÀO HÀNG ĐỢI CLOUD GPU ({gpu_type})!*\n\n"
         f"📁 *Nguồn:* `{Path(raw_input).name if not is_url else raw_input[:60]}`\n"
-        f"👉 *Vị trí hàng đợi:* #{queue_counter}\n"
+        f"👉 *Vị trí hàng đợi:* #{position}\n"
         "⚡ Hệ thống sẽ xử lý trên Google Colab GPU và tự động lưu video vào `D:\\banve`.",
         parse_mode="Markdown"
     )
@@ -1048,6 +1042,15 @@ import re
 from telegram_queue_monitor import MonitoredQueue, PERSISTED_JOB_FIELDS
 global_queue = MonitoredQueue()
 queue_counter = 0
+
+
+def _reserve_queue_positions(count=1):
+    global queue_counter
+    if global_queue.empty() and global_queue.active_job is None:
+        queue_counter = 0
+    first_position = queue_counter + 1
+    queue_counter += count
+    return first_position
 worker_task = None
 GLOBAL_BOT_APP = None
 
@@ -1174,7 +1177,7 @@ async def process_due_network_retries(now=None):
             records.pop(job_id, None)
             changed = True
             continue
-        job["pos"] = global_queue.qsize() + 1
+        job["pos"] = _reserve_queue_positions()
         await global_queue.put(job)
         records.pop(job_id, None)
         changed = True
@@ -1769,7 +1772,7 @@ async def _process_telegram_job(job):
             return {"status": "failed", "job_id": job["job_id"]}
         job_tracker.set_error(name, str(exc), fatal=True)
         if not blocked and should_retry_job(exc, attempt=job.get("retry_count", 0), stopped=stopped):
-            retry = dict(job, retry_count=job.get("retry_count", 0) + 1, pos=global_queue.qsize() + 1)
+            retry = dict(job, retry_count=job.get("retry_count", 0) + 1, pos=_reserve_queue_positions())
             await global_queue.put(retry)
             await safe_edit_status(
                 status_msg, f"Xử lý gặp lỗi: {str(exc)[:300]}\nĐã xếp hàng thử lại lần {retry['retry_count']}/2."
@@ -1816,34 +1819,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    global queue_counter, worker_task
     import shared_state
     shared_state.stop_requested = False
 
-    if global_queue.empty():
-        queue_counter = 0
-    
-    if worker_task is None or worker_task.done():
-        worker_task = asyncio.create_task(video_worker())
+    _ensure_video_worker()
 
     from ai.v1_auto_voice import get_auto_voice_mode
     captured_mode = get_auto_voice_mode(WORKSPACE)
 
-    # Đưa từng URL vào hàng đợi
-    for url in urls:
-        queue_counter += 1
-        await global_queue.put(prepare_telegram_job({
+    first_position = _reserve_queue_positions(len(urls))
+    jobs = [
+        prepare_telegram_job({
             'type': 'url',
-            'pos': queue_counter,
+            'pos': position,
             'update': update,
             'context': context,
             'url': url,
             'voice_mode': captured_mode,
-        }))
-        
+        })
+        for position, url in enumerate(urls, start=first_position)
+    ]
+    global_queue.put_many_nowait(jobs)
+
     await update.message.reply_text(
         f"✅ Đã thêm {len(urls)} link vào hàng đợi.\n"
-        f"👉 Hàng đợi của bạn chạy từ thứ tự {queue_counter - len(urls) + 1} đến {queue_counter}.\n"
+        f"👉 Hàng đợi của bạn chạy từ thứ tự {first_position} đến {first_position + len(jobs) - 1}.\n"
         f"⏳ Hiện tại có tổng cộng {global_queue.qsize()} video đang chờ Bot xử lý lần lượt 1-1.",
         parse_mode="Markdown"
     )
@@ -1852,18 +1852,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== XỬ LÝ VIDEO GỬI TRỰC TIẾP =====
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Người dùng gửi file video trực tiếp qua Telegram (Đẩy vào Queue)."""
-    global queue_counter, worker_task
     import shared_state
     shared_state.stop_requested = False
 
-    if global_queue.empty():
-        queue_counter = 0
-    
-    if worker_task is None or worker_task.done():
-        worker_task = asyncio.create_task(video_worker())
-        
-    queue_counter += 1
-    
     if update.message.video:
         file_obj = update.message.video
         filename = update.message.video.file_name or f"tg_video_{int(time.time())}.mp4"
@@ -1877,9 +1868,11 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from ai.v1_auto_voice import get_auto_voice_mode
     captured_mode = get_auto_voice_mode(WORKSPACE)
 
+    position = _reserve_queue_positions()
+    _ensure_video_worker()
     await global_queue.put(prepare_telegram_job({
         'type': 'video',
-        'pos': queue_counter,
+        'pos': position,
         'update': update,
         'context': context,
         'file_id': file_obj.file_id,
@@ -1890,7 +1883,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remaining = global_queue.qsize()
     await update.message.reply_text(
         f"✅ Đã thêm video tải lên vào hàng đợi.\n"
-        f"👉 Vị trí của bạn: #{queue_counter}.\n"
+        f"👉 Vị trí của bạn: #{position}.\n"
         f"⏳ Hiện tại có tổng cộng {remaining} video đang chờ Bot xử lý lần lượt 1-1.",
         parse_mode="Markdown"
     )

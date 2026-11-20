@@ -95,6 +95,12 @@ class MonitoredQueue(asyncio.Queue):
         super().put_nowait(item)
         self.publish()
 
+    def put_many_nowait(self, items):
+        """Publish one snapshot after enqueuing a complete submission."""
+        for item in items:
+            super().put_nowait(item)
+        self.publish()
+
     def remove_pending(self, target):
         from queue_control_service import identity
         retained = [j for j in self._queue if identity(j) != target]
