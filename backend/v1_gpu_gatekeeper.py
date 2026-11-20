@@ -58,12 +58,72 @@ def get_gpu_context_id() -> str:
     return cid
 
 
+def _check_gpu_stop(check_stop=None):
+    """Use the job callback before stage runtime exists, plus any inherited scope."""
+    from batch_control import stop_check
+    if check_stop is not None and check_stop():
+        raise RuntimeError("Batch stop requested while waiting for GPU")
+    predicate = stop_check.get()
+    if predicate is not None and predicate():
+        raise RuntimeError("Batch stop requested while waiting for GPU")
+
+
+def _release_gpu_context(cid, stage_name, handle=None):
+    """The last same-context lease releases the file, regardless of exit order."""
+    global _CURRENT_HOLDER, _RECURSION_DEPTH, _HELD_HANDLE
+    release_owner = False
+    with _PROCESS_LOCK:
+        if _CURRENT_HOLDER == cid and (handle is None or handle is _HELD_HANDLE):
+            _RECURSION_DEPTH -= 1
+            if _RECURSION_DEPTH > 0:
+                return
+            _RECURSION_DEPTH = 0
+            _CURRENT_HOLDER = None
+            cur_h = _HELD_HANDLE or handle
+            _HELD_HANDLE = None
+            release_owner = True
+    if not release_owner:
+        # An acquisition may stop or time out before registering its owner.
+        if handle is not None:
+            handle.close()
+        return
+
+    # Keep the OS lease through local cleanup, but leave admission's process
+    # mutex free so queued callers can observe stop and drain their attempts.
+    try:
+        gc.collect()
+        torch = _sys.modules.get("torch")
+        if torch is not None and torch.cuda.is_initialized():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+    finally:
+        if cur_h:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    cur_h.seek(0)
+                    msvcrt.locking(cur_h.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(cur_h, fcntl.LOCK_UN)
+            except Exception as error:
+                logger.debug("Lỗi khi nhả GPU lock: %s", error)
+            finally:
+                try:
+                    cur_h.close()
+                except Exception:
+                    pass
+        logger.info("[GPU_GATEKEEPER] <<< ĐÃ GIẢI PHÓNG QUYỀN GPU từ stage: '%s' (holder=%s)", stage_name, cid)
+
+
 @contextmanager
 def gpu_gatekeeper(
     stage_name: str = "gpu_task",
     timeout_seconds: float = 900.0,
     poll_interval: float = 0.5,
     min_free_mb: float = 1800.0,
+    check_stop=None,
 ):
     """
     Khóa độc quyền GPU đa tiến trình & hỗ trợ tái nhập (Re-entrant Mutex).
@@ -72,6 +132,7 @@ def gpu_gatekeeper(
     """
     global _CURRENT_HOLDER, _RECURSION_DEPTH, _HELD_HANDLE
 
+    _check_gpu_stop(check_stop)
     cid = get_gpu_context_id()
 
     # Kiểm tra xem chính context này đã đang giữ khóa chưa (Re-entrancy)
@@ -87,9 +148,7 @@ def gpu_gatekeeper(
         try:
             yield
         finally:
-            with _PROCESS_LOCK:
-                _RECURSION_DEPTH -= 1
-                logger.debug("[GPU_GATEKEEPER] Thoát tái nhập khóa GPU '%s' (depth=%d, cid=%s)", stage_name, _RECURSION_DEPTH, cid)
+            _release_gpu_context(cid, stage_name)
         return
 
     # Chưa giữ khóa: Phải chiếm khóa file OS
@@ -107,6 +166,7 @@ def gpu_gatekeeper(
     try:
         handle = open(GPU_LOCK_FILE, "a+b")
         while time.monotonic() < deadline:
+            _check_gpu_stop(check_stop)
             # 1. Thử chiếm khóa file OS
             try:
                 if os.name == "nt":
@@ -153,6 +213,7 @@ def gpu_gatekeeper(
                 # VRAM an toàn và đã giữ khóa độc quyền
                 break
 
+        _check_gpu_stop(check_stop)
         if not acquired:
             v_stats = get_vram_stats()
             raise TimeoutError(
@@ -170,43 +231,7 @@ def gpu_gatekeeper(
         yield
 
     finally:
-        with _PROCESS_LOCK:
-            if _CURRENT_HOLDER == cid:
-                _RECURSION_DEPTH -= 1
-                if _RECURSION_DEPTH <= 0:
-                    _RECURSION_DEPTH = 0
-                    _CURRENT_HOLDER = None
-                    cur_h = _HELD_HANDLE or handle
-                    _HELD_HANDLE = None
-                    if cur_h:
-                        try:
-                            if os.name == "nt":
-                                import msvcrt
-                                cur_h.seek(0)
-                                msvcrt.locking(cur_h.fileno(), msvcrt.LK_UNLCK, 1)
-                            else:
-                                import fcntl
-                                fcntl.flock(cur_h, fcntl.LOCK_UN)
-                        except Exception as e:
-                            logger.debug("Lỗi khi nhả GPU lock: %s", e)
-                        finally:
-                            try:
-                                cur_h.close()
-                            except Exception:
-                                pass
-                    logger.info("[GPU_GATEKEEPER] <<< ĐÃ GIẢI PHÓNG QUYỀN GPU từ stage: '%s' (holder=%s)", stage_name, cid)
-                    # Dọn dẹp rác bộ nhớ sau khi hoàn tất bước GPU
-                    try:
-                        gc.collect()
-                        import torch
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                    except Exception:
-                        pass
-            elif handle is not None:
-                # Acquisition can time out before this context owns the gate.
-                # Close that attempt's file handle as well.
-                handle.close()
+        _release_gpu_context(cid, stage_name, handle)
 
 
 @asynccontextmanager
@@ -214,11 +239,14 @@ async def async_gpu_gatekeeper(
     stage_name: str = "gpu_task",
     timeout_seconds: float = 900.0,
     min_free_mb: float = 1800.0,
+    check_stop=None,
 ):
     """Phiên bản Async của GPU Gatekeeper, không chặn event loop trong lúc xếp hàng chờ."""
     import asyncio
+    _check_gpu_stop(check_stop)
     get_gpu_context_id()  # Establish the identity before copying context to a thread.
     deadline = time.monotonic() + timeout_seconds
+    acquisition_stopped = threading.Event()
 
     async def drain(task):
         # Repeated cancellation must not cancel a to_thread wrapper whose worker
@@ -240,17 +268,22 @@ async def async_gpu_gatekeeper(
             raise
 
     while time.monotonic() < deadline:
+        _check_gpu_stop(check_stop)
         manager = gpu_gatekeeper(
             stage_name=stage_name,
             timeout_seconds=min(1.5, max(0.001, deadline - time.monotonic())),
             min_free_mb=min_free_mb,
+            check_stop=acquisition_stopped.is_set,
         )
         acquisition = asyncio.create_task(asyncio.to_thread(manager.__enter__))
         try:
-            await asyncio.shield(acquisition)
-        except asyncio.CancelledError:
-            # The bounded acquisition thread cannot be cancelled. Wait until it
-            # either fails or acquires, then release before propagating cancel.
+            while not acquisition.done():
+                _check_gpu_stop(check_stop)
+                await asyncio.wait({acquisition}, timeout=0.1)
+        except BaseException:
+            # Callback stops and repeated async cancellation must drain a late
+            # acquisition before returning, just like running native work.
+            acquisition_stopped.set()
             try:
                 await drain(acquisition)
             except Exception:
@@ -258,6 +291,8 @@ async def async_gpu_gatekeeper(
             else:
                 await release(manager)
             raise
+        try:
+            acquisition.result()
         except TimeoutError:
             await asyncio.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
             continue
@@ -265,6 +300,7 @@ async def async_gpu_gatekeeper(
         # Body exceptions are not acquisition failures: never retry the stage or
         # yield a second time when inference raises TimeoutError.
         try:
+            _check_gpu_stop(check_stop)
             yield
         except BaseException as error:
             if not await release(manager, type(error), error, error.__traceback__):
@@ -273,6 +309,7 @@ async def async_gpu_gatekeeper(
             await release(manager)
         return
 
+    _check_gpu_stop(check_stop)
     raise TimeoutError(
         f"[GPU_GATEKEEPER] Hết thời gian chờ ({timeout_seconds}s) để lấy quyền GPU cho '{stage_name}'."
     )

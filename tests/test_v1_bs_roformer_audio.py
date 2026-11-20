@@ -1,7 +1,11 @@
 import os
 import sys
+import tempfile
+import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 # Add backend to path
 BACKEND_DIR = Path(__file__).resolve().parent.parent / "backend"
@@ -82,11 +86,60 @@ class TestBSRoFormerAudio(unittest.TestCase):
         self.assertGreaterEqual(intervals[0][1], 5300)
 
     def test_separator_gpu_lock_concurrency(self):
-        """Đảm bảo khóa độc quyền GPU hoạt động và có thể giải phóng."""
-        with separator_gpu_lock(timeout_seconds=5.0):
-            # Trong lock, file separator.lock phải tồn tại
-            lock_path = BACKEND_DIR.parent / "workspace" / "bot_system" / "separator.lock"
-            self.assertTrue(lock_path.exists())
+        """The native current lock serializes competing contexts in a temp workspace."""
+        import v1_gpu_gatekeeper as gatekeeper
+        import worker_settings
+
+        fake_torch = SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: False, empty_cache=lambda: None)
+        )
+        with tempfile.TemporaryDirectory() as folder, patch.object(
+            gatekeeper, "GPU_LOCK_FILE", Path(folder) / "bot_system" / "v1_gpu_execution.lock"
+        ), patch.object(worker_settings, "get_worker_settings", return_value={"auto_vram_guard": False}), patch.dict(
+            "sys.modules", {"torch": fake_torch}
+        ):
+            lock_path = gatekeeper.GPU_LOCK_FILE
+            first_entered = threading.Event()
+            release_first = threading.Event()
+            second_entered = threading.Event()
+            errors = []
+
+            def holder():
+                gatekeeper.set_gpu_context_id("holder")
+                try:
+                    with separator_gpu_lock(timeout_seconds=2.0, poll_interval=0.01):
+                        self.assertTrue(lock_path.exists())
+                        first_entered.set()
+                        self.assertTrue(release_first.wait(2.0))
+                except BaseException as error:
+                    errors.append(error)
+
+            def contender():
+                self.assertTrue(first_entered.wait(2.0))
+                gatekeeper.set_gpu_context_id("contender")
+                try:
+                    with separator_gpu_lock(timeout_seconds=2.0, poll_interval=0.01):
+                        second_entered.set()
+                except BaseException as error:
+                    errors.append(error)
+
+            first = threading.Thread(target=holder)
+            second = threading.Thread(target=contender)
+            first.start()
+            try:
+                self.assertTrue(first_entered.wait(2.0))
+                second.start()
+                self.assertFalse(second_entered.wait(0.1))
+            finally:
+                release_first.set()
+                first.join(2.0)
+                if second.ident is not None:
+                    second.join(2.0)
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertTrue(second_entered.is_set())
+            self.assertTrue(lock_path.is_file())
+            self.assertEqual(errors, [])
 
     def test_audio_settings_persistence(self):
         """Kiểm tra lưu và đọc cấu hình âm lượng / separation_mode / ducking_mode."""

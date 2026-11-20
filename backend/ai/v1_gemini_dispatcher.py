@@ -14,6 +14,7 @@ Strictly implements the Codex Plan for Gemini Stability & Speed:
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -66,31 +67,20 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 WORKSPACE_DIR = Path(os.getenv("AUTODUB_WORKSPACE", str(BACKEND_DIR.parent / "workspace")))
 DB_DIR = WORKSPACE_DIR / "bot_system"
 DB_PATH = DB_DIR / "gemini_circuit_breaker.db"
+MODEL_CATALOG_MAX_AGE_S = 24 * 60 * 60
+RETIRED_MODELS = {"gemini-3.1-flash-lite-preview"}
 
 # Model presets prioritizing fastest, verified active models
 DEFAULT_TRANSLATION_MODELS = [
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
     "gemini-flash-lite-latest",
-    "gemini-3.5-flash",
-    "gemini-3-flash-preview",
-    "gemini-3.1-flash-lite-preview",
-    "gemini-3.6-flash",
-    "gemini-3.7-flash",
-    "gemini-3.8-flash",
-    "gemini-flash-latest",
 ]
 
 DEFAULT_CONDENSATION_MODELS = [
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
     "gemini-flash-lite-latest",
-    "gemini-3.5-flash",
-    "gemini-3-flash-preview",
-    "gemini-3.1-flash-lite-preview",
-    "gemini-3.6-flash",
-    "gemini-3.7-flash",
-    "gemini-flash-latest",
 ]
 
 # Exceptions
@@ -132,7 +122,8 @@ def resolve_gemini_models(purpose: str, defaults=None, preferred=None) -> List[s
         if preferred is None:
             preferred = os.getenv("GEMINI_CONDENSE_MODEL" if condensation else "GEMINI_MODEL", "")
         candidates = [preferred] + list(defaults)
-    ordered = list(dict.fromkeys(str(model).strip() for model in candidates if str(model).strip()))
+    names = (str(model).strip() for model in candidates if model)
+    ordered = list(dict.fromkeys(name for name in names if name and name not in RETIRED_MODELS))
     if not ordered:
         raise GeminiConfigError(f"{setting} contains no model names")
     return ordered
@@ -249,6 +240,72 @@ def get_gemini_api_key(explicit_key: Optional[str] = None) -> str:
 
 def _get_account_hash(api_key: str) -> str:
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
+
+
+def _catalog_path(key):
+    return DB_DIR / "gemini_model_catalog" / f"{_get_account_hash(key)}.json"
+
+
+def _read_model_catalog(key):
+    try:
+        data = json.loads(_catalog_path(key).read_text(encoding="utf-8"))
+        if time.time() - float(data["verified_at"]) < MODEL_CATALOG_MAX_AGE_S:
+            names = data["models"]
+            if isinstance(names, list) and all(isinstance(name, str) for name in names):
+                return frozenset(names)
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    return None
+
+
+def _list_generation_models(key):
+    import requests
+
+    names = set()
+    params = {"pageSize": 1000}
+    for _ in range(3):
+        response = requests.get("https://generativelanguage.googleapis.com/v1beta/models",
+                                params=params, headers={"x-goog-api-key": key}, timeout=(2, 3))
+        response.raise_for_status()
+        data = response.json()
+        for model in data["models"]:
+            if "generateContent" in model.get("supportedGenerationMethods", []):
+                names.add(model["name"].removeprefix("models/"))
+        if not data.get("nextPageToken"):
+            return names
+        params = {**params, "pageToken": data["nextPageToken"]}
+    raise GeminiConfigError("Gemini model listing did not finish within the page limit")
+
+
+def refresh_gemini_model_catalog():
+    """Warm shared per-key model lists outside the time budget of video jobs."""
+    from pipeline_v2.atomic_io import atomic_write_json
+
+    try:
+        keys = get_gemini_api_keys()
+    except GeminiConfigError:
+        return {}
+    catalogs = {}
+    for key in keys:
+        names = _read_model_catalog(key)
+        if names is None:
+            try:
+                names = _list_generation_models(key)
+                atomic_write_json(_catalog_path(key), {"verified_at": time.time(), "models": sorted(names)})
+            except Exception as error:
+                logger.info("Gemini model catalog unavailable (%s); using runtime circuit breaker", type(error).__name__)
+                continue
+        catalogs[_get_account_hash(key)] = names
+    return catalogs
+
+
+def start_gemini_model_catalog_refresh():
+    def run():
+        while True:
+            refresh_gemini_model_catalog()
+            time.sleep(MODEL_CATALOG_MAX_AGE_S / 4)
+
+    threading.Thread(target=run, daemon=True, name="gemini-model-catalog").start()
 
 
 class GeminiCircuitBreaker:
@@ -630,18 +687,20 @@ def call_gemini_api(
     import requests
 
     keys_pool = get_gemini_api_keys(api_key)
-    curr_key, account_hash, key_cooldown = circuit_breaker.select_active_key(keys_pool)
+    curr_key, _, _ = circuit_breaker.select_active_key(keys_pool)
 
     if models is None:
         models = resolve_gemini_models(purpose)
 
-    # Deduplicate while preserving order
-    ordered_models = []
-    for m in models:
-        if m and m not in ordered_models:
-            ordered_models.append(m)
+    catalogs = {key: _read_model_catalog(key) for key in keys_pool}
+
+    def supports(key, model):
+        return catalogs[key] is None or model in catalogs[key]
+
+    ordered_models = list(dict.fromkeys(model for model in models if model and model not in RETIRED_MODELS
+                                        and any(supports(key, model) for key in keys_pool)))
     if not ordered_models:
-        raise GeminiConfigError("Gemini model list is empty")
+        raise GeminiConfigError("No configured Gemini model supports generateContent for the available keys")
 
     # Monotonic deadline enforcement
     if overall_deadline is None:
@@ -652,17 +711,19 @@ def call_gemini_api(
         logger.info(f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose}: Hủy theo yêu cầu /stop.")
         raise GeminiCancelledError("Operation cancelled by user stop request.")
 
-    candidate_statuses = circuit_breaker.get_candidate_models(account_hash, purpose, ordered_models, reserve_probe=False)
-    if not candidate_statuses and len(keys_pool) > 1:
-        # Check if other keys in the pool have active models
-        for alt_k in keys_pool:
-            alt_h = _get_account_hash(alt_k)
-            alt_statuses = circuit_breaker.get_candidate_models(alt_h, purpose, ordered_models, reserve_probe=False)
-            if alt_statuses:
-                curr_key = alt_k
-                account_hash = alt_h
-                candidate_statuses = alt_statuses
-                break
+    key_order = [curr_key] + [key for key in keys_pool if key != curr_key]
+    model_states = {}
+    for key in key_order:
+        key_hash = _get_account_hash(key)
+        if key != curr_key and circuit_breaker.is_account_exhausted(key_hash)[0]:
+            continue
+        candidates = [model for model in ordered_models if supports(key, model)]
+        for model, state in circuit_breaker.get_candidate_models(key_hash, purpose, candidates, reserve_probe=False):
+            model_states.setdefault(model, {})[key] = state
+    candidate_statuses = sorted(
+        (model for model in ordered_models if model in model_states),
+        key=lambda model: "ACTIVE" not in model_states[model].values(),
+    )
 
     if not candidate_statuses:
         # Leave durable job backoff to the caller; never sleep or probe a model
@@ -672,8 +733,10 @@ def call_gemini_api(
         )
 
     last_exception = None
+    transient_exception = None
+    invalid_keys = set()
 
-    for attempt, (model, state) in enumerate(candidate_statuses):
+    for attempt, model in enumerate(candidate_statuses):
         # 1. Check cancellation token
         if stop_checker and stop_checker():
             logger.info(f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose}: Hủy theo yêu cầu /stop.")
@@ -687,33 +750,33 @@ def call_gemini_api(
             )
             raise GeminiDeadlineError("Gemini call exceeded overall deadline budget.")
 
-        connect_timeout = min(5.0, max(0.1, remaining / 2.0))
-        read_timeout = min(timeout_per_request, max(0.1, remaining - connect_timeout))
-        # Reserve only the model actually about to be tried. Other candidates
-        # remain available to subsequent jobs if this request succeeds early.
-        admitted = circuit_breaker.get_candidate_models(account_hash, purpose, [model])
-        if not admitted:
-            continue
-        state = admitted[0][1]
-
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         t_start = time.monotonic()
-
-        state_tag = f"[{state}]" if state != "ACTIVE" else ""
-        logger.info(
-            f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} attempt={attempt+1} {state_tag} "
-            f"key=[{account_hash}] timeout=({connect_timeout:.1f}s, {read_timeout:.1f}s) remaining={remaining:.1f}s"
-        )
-
-        _record_dispatcher_active_model(model, purpose)
-
-        keys_to_try = [curr_key] + [k for k in keys_pool if k != curr_key]
+        keys_to_try = sorted(model_states[model], key=lambda key: model_states[model][key] != "ACTIVE")
 
         for key_idx, active_key in enumerate(keys_to_try):
+            if active_key in invalid_keys:
+                continue
+            if stop_checker and stop_checker():
+                raise GeminiCancelledError("Operation cancelled by user stop request.")
+            remaining = overall_deadline - time.monotonic()
+            if remaining <= 1.0:
+                raise GeminiDeadlineError("Gemini call exceeded overall deadline budget.")
+            connect_timeout = min(5.0, max(0.1, remaining / 2.0))
+            read_timeout = min(timeout_per_request, max(0.1, remaining - connect_timeout))
             active_account_hash = _get_account_hash(active_key)
-            if len(keys_to_try) > 1 and key_idx > 0:
-                if circuit_breaker.is_account_exhausted(active_account_hash)[0]:
-                    continue
+            if active_key != curr_key and circuit_breaker.is_account_exhausted(active_account_hash)[0]:
+                continue
+            # Reserve the probe on the account that can actually call this model.
+            admitted = circuit_breaker.get_candidate_models(active_account_hash, purpose, [model])
+            if not admitted:
+                continue
+            state_tag = "[HALF_OPEN]" if admitted[0][1] == "HALF_OPEN" else ""
+            logger.info(
+                f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} attempt={attempt+1} {state_tag} "
+                f"key=[{active_account_hash}] timeout=({connect_timeout:.1f}s, {read_timeout:.1f}s) remaining={remaining:.1f}s"
+            )
+            _record_dispatcher_active_model(model, purpose)
 
             headers = {
                 "Content-Type": "application/json",
@@ -756,6 +819,7 @@ def call_gemini_api(
                 )
 
                 if status == 429:
+                    transient_exception = GeminiQuotaExhaustedError("Gemini API quota temporarily exhausted (HTTP 429)")
                     circuit_breaker.record_account_quota_exhausted(active_account_hash, retry_after)
                     # Check if another key is available in the pool
                     available_alts = [k for k in keys_to_try[key_idx + 1:] if not circuit_breaker.is_account_exhausted(_get_account_hash(k))[0]]
@@ -765,15 +829,20 @@ def call_gemini_api(
                             f"Lập tức chuyển sang Key [{_get_account_hash(available_alts[0])}] trong Multi-Key Pool ({len(available_alts)} keys khả dụng)..."
                         )
                         continue
+                    break
+
+                if status in (500, 502, 503, 504):
+                    # Upstream model errors do not consume more keys on the same model.
+                    # Move to another model while the request still has budget.
+                    transient_exception = GeminiError(f"HTTP {status} from {model}")
+                    break
 
                 if status in (401, 403):
-                    if len(keys_to_try) == 1:
+                    invalid_keys.add(active_key)
+                    last_exception = GeminiAuthError(f"Gemini API key is invalid or lacks permission (HTTP {status}).")
+                    if len(invalid_keys) == len(keys_pool) and transient_exception is None:
                         raise GeminiAuthError(f"Gemini API key is invalid or lacks permission (HTTP {status}).")
-                    else:
-                        logger.warning(
-                            f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model}: Key [{active_account_hash}] lỗi xác thực (HTTP {status}). Chuyển sang key khác..."
-                        )
-                        continue
+                    continue
 
                 if status == 400:
                     try:
@@ -796,7 +865,7 @@ def call_gemini_api(
                     f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} key=[{active_account_hash}] TIMEOUT after {elapsed_ms}ms"
                 )
                 circuit_breaker.record_failure(active_account_hash, model, purpose, None, "Timeout")
-                last_exception = TimeoutError(mask_secret(str(e)))
+                transient_exception = TimeoutError(mask_secret(str(e)))
                 break
 
             except requests.ConnectionError as e:
@@ -805,7 +874,7 @@ def call_gemini_api(
                     f"[GEMINI_DISPATCHER] job_id={job_id} purpose={purpose} model={model} key=[{active_account_hash}] CONNECTION_ERROR after {elapsed_ms}ms"
                 )
                 circuit_breaker.record_failure(active_account_hash, model, purpose, None, "ConnectionError")
-                last_exception = ConnectionError(mask_secret(str(e)))
+                transient_exception = ConnectionError(mask_secret(str(e)))
                 break
 
             except Exception as e:
@@ -819,7 +888,8 @@ def call_gemini_api(
                 last_exception = e
                 break
 
-    raise GeminiAllModelsFailedError(f"All candidate Gemini models failed for {purpose}: {mask_secret(str(last_exception))}") from last_exception
+    cause = transient_exception or last_exception
+    raise GeminiAllModelsFailedError(f"All candidate Gemini models failed for {purpose}: {mask_secret(str(cause))}") from cause
 
 
 def get_gemini_pool_health(explicit_key: Optional[str] = None) -> Dict[str, Any]:

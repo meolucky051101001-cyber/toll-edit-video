@@ -9,6 +9,65 @@ from backend.v1_retry_policy import is_transient_network_error
 
 
 class GeminiModelOrderTests(unittest.TestCase):
+    def test_503_moves_to_the_next_model_without_trying_every_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            breaker = dispatcher.GeminiCircuitBreaker(Path(directory) / "circuit.db")
+            success = MagicMock(status_code=200)
+            success.json.return_value = {"result": "fixture"}
+            with patch.object(dispatcher, "circuit_breaker", breaker), \
+                 patch.object(dispatcher, "get_gemini_api_keys", return_value=["first", "second"]), \
+                 patch.object(dispatcher, "_read_model_catalog", return_value=None), \
+                 patch("requests.post", side_effect=[MagicMock(status_code=503, headers={}), success]) as post:
+                _, model = dispatcher.call_gemini_api({}, models=["busy", "working"])
+            self.assertEqual(model, "working")
+            self.assertEqual(post.call_count, 2)
+            self.assertIn("/working:", post.call_args.args[0])
+
+    def test_timeout_followed_by_404_still_goes_to_job_backoff(self):
+        import requests
+
+        with tempfile.TemporaryDirectory() as directory:
+            breaker = dispatcher.GeminiCircuitBreaker(Path(directory) / "circuit.db")
+            with patch.object(dispatcher, "circuit_breaker", breaker), \
+                 patch.object(dispatcher, "get_gemini_api_keys", return_value=["first"]), \
+                 patch.object(dispatcher, "_read_model_catalog", return_value=None), \
+                 patch("requests.post", side_effect=[requests.ReadTimeout("timed out"), MagicMock(status_code=404, headers={})]):
+                with self.assertRaises(dispatcher.GeminiAllModelsFailedError) as caught:
+                    dispatcher.call_gemini_api({}, models=["slow", "absent"])
+            self.assertIsInstance(caught.exception.__cause__, TimeoutError)
+            self.assertTrue(is_transient_network_error(caught.exception))
+
+    def test_catalog_uses_only_keys_that_support_the_requested_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            breaker = dispatcher.GeminiCircuitBreaker(Path(directory) / "circuit.db")
+            response = MagicMock(status_code=200)
+            response.json.return_value = {"result": "fixture"}
+            catalogs = {"primary": {"fallback"}, "alternate": {"preferred"}}
+            with patch.object(dispatcher, "circuit_breaker", breaker), \
+                 patch.object(dispatcher, "get_gemini_api_keys", return_value=list(catalogs)), \
+                 patch.object(dispatcher, "_read_model_catalog", side_effect=catalogs.get), \
+                 patch("requests.post", return_value=response) as post:
+                _, model = dispatcher.call_gemini_api({}, models=["missing", "preferred", "fallback"])
+            self.assertEqual(model, "preferred")
+            self.assertEqual(post.call_count, 1)
+            self.assertEqual(post.call_args.kwargs["headers"]["x-goog-api-key"], "alternate")
+
+    def test_catalog_refresh_is_shared_and_skips_non_generation_models(self):
+        with tempfile.TemporaryDirectory() as directory:
+            response = MagicMock()
+            response.json.return_value = {"models": [
+                {"name": "models/flash", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/embed", "supportedGenerationMethods": ["embedContent"]},
+            ]}
+            with patch.object(dispatcher, "DB_DIR", Path(directory)), \
+                 patch.object(dispatcher, "get_gemini_api_keys", return_value=["test-key"]), \
+                 patch("requests.get", return_value=response) as fetch:
+                catalog = dispatcher.refresh_gemini_model_catalog()
+                self.assertEqual(dispatcher.refresh_gemini_model_catalog(), catalog)
+                self.assertEqual(dispatcher._read_model_catalog("test-key"), {"flash"})
+                self.assertEqual(fetch.call_count, 1)
+                self.assertTrue(all("test-key" not in file.read_text() for file in Path(directory).rglob("*.json")))
+
     def test_unset_override_preserves_defaults_and_legacy_preference(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(dispatcher.resolve_gemini_models("translation"), dispatcher.DEFAULT_TRANSLATION_MODELS)

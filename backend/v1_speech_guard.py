@@ -12,10 +12,38 @@ BOUNDARY_TOLERANCE_S = 0.035
 MIN_NATURAL_SPEED = 1.00
 MAX_NATURAL_SPEED = 1.50
 MAX_EMERGENCY_SPEED = 1.75
+SPEECH_GAP_S = 0.05
+VI_SECONDS_PER_WORD = 0.28
 
 
 class SpeechTimingError(RuntimeError):
     """Deterministic fit failure: retain checkpoints, never publish cut speech."""
+
+
+def calculate_reading_windows(segments, video_duration=None, gap_s=SPEECH_GAP_S):
+    """Return the hard speech slots for an ordered sequence of subtitle cues."""
+    windows = {}
+    for position, segment in enumerate(segments):
+        start = segment.start.total_seconds()
+        if position + 1 < len(segments):
+            boundary = segments[position + 1].start.total_seconds()
+            if boundary <= start:
+                raise SpeechTimingError(f"Duplicate/reversed speech start at cue {segment.index}")
+            available = boundary - start - gap_s
+        elif video_duration is not None and video_duration > start + gap_s:
+            available = video_duration - start - gap_s
+        else:
+            available = segment.end.total_seconds() - start + 1.0
+        windows[segment.index] = max(SPEECH_GAP_S, available)
+    return windows
+
+
+def vietnamese_spoken_seconds(text):
+    """Estimate spoken words after the same pronunciation expansion used by TTS."""
+    from ai.v1_tech_pronunciation import normalize_text_for_tts
+
+    spoken = normalize_text_for_tts(text)
+    return max(len(text.split()), len(spoken.split())) * VI_SECONDS_PER_WORD
 
 
 def natural_speed_limit(value=None):

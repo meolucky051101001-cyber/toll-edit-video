@@ -281,7 +281,8 @@ def test_vad_gate_digital_silence_and_orchestrator_failsafe(tmp_path):
     sf.write(str(recovered_voc), np.zeros(16000, dtype=np.float32), 16000)
     sf.write(str(recovered_novoc), np.zeros(16000, dtype=np.float32), 16000)
 
-    def _fake_sep(audio_in, out_d, separation_mode="roformer"):
+    def _fake_sep(audio_in, out_d, separation_mode="roformer", timeout_seconds=None):
+        assert timeout_seconds == 450
         return str(recovered_voc), str(recovered_novoc)
 
     def _fake_asr(audio_in, srt_out, **kwargs):

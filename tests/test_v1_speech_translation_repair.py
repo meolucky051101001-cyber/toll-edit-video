@@ -424,13 +424,39 @@ class BatchTests(unittest.TestCase):
             read_voice_cache=lambda *a, **k: None, write_voice_cache=Mock())
 
         def provider(text, path, param):
-            sf.write(path, np.full(25600, .1), 16000, format="WAV")
+            sf.write(path, np.full(32000, .1), 16000, format="WAV")
 
         with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_voice_cache": fake_cache}), patch.object(
                 voice, "_run_capcut_tts", side_effect=provider), patch.object(
                 translation, "condense_vietnamese_subtitles_batch", return_value={}), self.assertRaises(
                 guard.SpeechTimingError):
             asyncio.run(voice.generate_dubbing_audio(cues, str(SCRATCH / "unresolved-fit"),
+                "capcut", "Mai", video_duration=1))
+        fake_cache.write_voice_cache.assert_not_called()
+
+    def test_slight_unresolved_overflow_uses_emergency_speed_fallback_without_caching(self):
+        cues_on = [cue(1, 0, 1, "xin chao")]
+        fake_cache = types.SimpleNamespace(voice_cache_key=lambda *a, **k: "k",
+            read_voice_cache=lambda *a, **k: None, write_voice_cache=Mock())
+
+        def provider(text, path, param):
+            sf.write(path, np.full(25600, .1), 16000, format="WAV")
+
+        with patch.dict(sys.modules, {TEST_PACKAGE + ".ai.v1_voice_cache": fake_cache}), patch.object(
+                voice, "_run_capcut_tts", side_effect=provider), patch.object(
+                translation, "condense_vietnamese_subtitles_batch", return_value={}):
+            result = asyncio.run(voice.generate_dubbing_audio(cues_on, str(SCRATCH / "emergency-fit-on"),
+                "capcut", "Mai", video_duration=1))
+        self.assertLessEqual(sf.info(result[0]["path"]).duration, .955)
+        fake_cache.write_voice_cache.assert_not_called()
+
+        cues_off = [cue(1, 0, 1, "xin chao")]
+        with patch.dict(os.environ, {"V1_ALLOW_EMERGENCY_SPEED": "0"}), patch.dict(
+                sys.modules, {TEST_PACKAGE + ".ai.v1_voice_cache": fake_cache}), patch.object(
+                voice, "_run_capcut_tts", side_effect=provider), patch.object(
+                translation, "condense_vietnamese_subtitles_batch", return_value={}), self.assertRaises(
+                guard.SpeechTimingError):
+            asyncio.run(voice.generate_dubbing_audio(cues_off, str(SCRATCH / "emergency-fit-off"),
                 "capcut", "Mai", video_duration=1))
         fake_cache.write_voice_cache.assert_not_called()
 

@@ -31,6 +31,8 @@ def _build_worker_env(base_env, *, api_key, gemini_api_key=None, voice_source, t
 
 
 async def generate_dubbing_audio_isolated(segments, output_folder, voice_source='edge', voice_param='vi-VN-HoaiMyNeural', api_key='', video_duration=None, segment_voices=None, *, gemini_api_key=None, tts_workers=None, max_natural_speed=None, timeout_s=1800, script_mode="default"):
+    from .v1_translation_meaning import ensure_translation_speech_integrity
+    ensure_translation_speech_integrity(segments)
     from .translation import _contains_cjk
     if any(_contains_cjk(s.content) for s in segments):
         raise RuntimeError("Phụ đề chứa ký tự CJK tiếng Trung chưa được dịch (Fail-Closed).")

@@ -11,6 +11,16 @@ def _memory():
     except (ImportError, OSError):
         return None
 
+def _video_id():
+    try:
+        try:
+            from v1_resource_control import current_video_id
+        except ImportError:
+            from .v1_resource_control import current_video_id
+        return current_video_id()
+    except ImportError:
+        return "untracked"
+
 def stage(name, cleanup=None):
     def resources():
         try:
@@ -23,13 +33,14 @@ def stage(name, cleanup=None):
             return 'memory_unavailable'
     def decorate(fn):
         def finish(start, ok):
+            video_id = _video_id()
             try:
                 if cleanup:
                     cleanup()
             finally:
                 logging.getLogger("v1.performance").info(
-                    "stage=%s seconds=%.2f success=%s rss_mb=%s %s",
-                    name, time.monotonic()-start, ok, _memory(), resources())
+                    "stage=%s seconds=%.2f success=%s rss_mb=%s %s video_id=%s",
+                    name, time.monotonic()-start, ok, _memory(), resources(), video_id)
         _time = time
         import types
         if inspect.iscoroutinefunction(fn):

@@ -11,6 +11,7 @@ except ImportError:
     from v1_stage_metrics import stage
 from pydub import AudioSegment
 from voice_selection import validate_tts_source
+from v1_speech_guard import calculate_reading_windows
 
 logger = logging.getLogger(__name__)
 
@@ -257,35 +258,7 @@ def trim_audio_silence(audio: AudioSegment, silence_thresh_db: float = -45.0, pa
     return audio
 
 
-def calculate_reading_windows(segments, video_duration=None, gap_s=0.05) -> dict:
-    """
-    Tính khoảng đọc tối đa cho từng câu theo mốc kết thúc, câu kế và kết thúc video (Codex Plan - Điểm 1).
-    Chừa khoảng chuyển câu nhỏ gap_s (0.05s).
-    Tuyệt đối không ép sàn cứng max(0.3, ...) khi câu sau bắt đầu sát hơn, nhằm ngăn chặn hoàn toàn
-    nguy cơ đè giọng khi các câu ở cự ly hẹp.
-    """
-    windows = {}
-    n = len(segments)
-    for i, seg in enumerate(segments):
-        start_s = seg.start.total_seconds()
-        end_s = seg.end.total_seconds()
-        if i + 1 < n:
-            next_start_s = segments[i + 1].start.total_seconds()
-            if next_start_s > start_s:
-                hard_max_s = max(0.05, next_start_s - start_s - gap_s)
-            else:
-                from v1_speech_guard import SpeechTimingError
-                raise SpeechTimingError(f"Duplicate/reversed speech start at cue {seg.index}")
-        else:
-            if video_duration is not None and video_duration > start_s + gap_s:
-                hard_max_s = max(0.05, video_duration - start_s - gap_s)
-            else:
-                hard_max_s = max(0.05, end_s - start_s + 1.0)
-        windows[seg.index] = hard_max_s
-    return windows
-
-
-async def fit_audio_file(audio_input_path: str, target_max_duration: float, output_path: str = None, *, max_speed=None) -> tuple:
+async def fit_audio_file(audio_input_path: str, target_max_duration: float, output_path: str = None, *, max_speed=None, allow_emergency: bool = False) -> tuple:
     """
     Căn chỉnh thời lượng audio nếu bị tràn khung đọc, đảm bảo giữ 100% độ thanh thoát, trong trẻo nguyên bản của giọng đọc:
     1. Không nén lại nếu audio đã vừa khung đọc -> giữ nguyên bản file gốc 160kbps (bit-for-bit, 0 transcoding).
@@ -297,7 +270,7 @@ async def fit_audio_file(audio_input_path: str, target_max_duration: float, outp
     """
     import shutil
     output_path = output_path or audio_input_path
-    from v1_speech_guard import load_audio, SpeechTimingError, natural_speed_limit
+    from v1_speech_guard import MAX_EMERGENCY_SPEED as _FIT_EMERGENCY_SPEED, load_audio, SpeechTimingError, natural_speed_limit
     if target_max_duration is not None:
         import math
         if not math.isfinite(float(target_max_duration)) or target_max_duration <= 0:
@@ -330,7 +303,8 @@ async def fit_audio_file(audio_input_path: str, target_max_duration: float, outp
     orig_dur = len(audio) / 1000.0
     ratio = orig_dur / max(0.001, target_max_duration - 0.015)
     applied_ratio = max(1.0, ratio)
-    max_speed = min(MAX_NATURAL_SPEED, natural_speed_limit(max_speed))
+    ceiling = _FIT_EMERGENCY_SPEED if allow_emergency else MAX_NATURAL_SPEED
+    max_speed = min(ceiling, natural_speed_limit(max_speed))
     if applied_ratio > max_speed:
         if os.path.abspath(audio_input_path) != os.path.abspath(output_path):
             shutil.copy2(audio_input_path, output_path)
@@ -464,12 +438,14 @@ async def generate_single_tts(segment, output_folder, voice_source, voice_param,
     raise TTSIncompleteError(f"Locked-voice TTS failed for cue {segment.index}; successful audio retained") from last_error
 
 
-from v1_speech_guard import natural_speed_limit
+from v1_speech_guard import MAX_EMERGENCY_SPEED, natural_speed_limit
 
 MAX_NATURAL_SPEED = natural_speed_limit()
 
 @stage("voice")
 async def generate_dubbing_audio(translated_segments, output_folder, voice_source="edge", voice_param="vi-VN-HoaiMyNeural", api_key="", video_duration=None, segment_voices=None, script_mode="default", condensation_api_key=None):
+    from .v1_translation_meaning import ensure_translation_speech_integrity
+    ensure_translation_speech_integrity(translated_segments)
     validate_tts_source(voice_source)
     for seg in translated_segments:
         if segment_voices:
@@ -491,12 +467,17 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                                 target_lang="vi", strict=True, enable_g4f=False, script_mode=script_mode)
         if any(_contains_cjk(s.content) for s in pending_translation):
             raise RuntimeError("Translation incomplete; Vietnamese TTS was not started")
+        ensure_translation_speech_integrity(translated_segments)
 
     import time
     condense_remaining = 45.0
+    condensation_failures = {}
     condensation_api_key = (condensation_api_key if condensation_api_key is not None else api_key)
     condensation_api_key = condensation_api_key or os.getenv("GEMINI_API_KEY", "")
-    from v1_speech_guard import coalesce_tiny_same_voice_cues, validate_speech_timeline, SpeechTimingError
+    import v1_speech_guard as _speech_guard_mod
+    from v1_speech_guard import coalesce_tiny_same_voice_cues, validate_speech_timeline, SpeechTimingError, vietnamese_spoken_seconds
+    emergency_enabled = os.getenv("V1_ALLOW_EMERGENCY_SPEED", "1").strip().lower() not in ("0", "false", "no", "off")
+    emergency_speed_cap = float(globals().get("MAX_EMERGENCY_SPEED") or getattr(_speech_guard_mod, "MAX_EMERGENCY_SPEED", 1.75))
     if segment_voices:
         for seg in translated_segments:
             info = segment_voices[str(seg.index)]
@@ -511,24 +492,22 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
     # Dự đoán độ dài dựa trên số từ (trung bình 0.28s mỗi từ tiếng Việt).
     # Gom một lượt gọi Gemini duy nhất để rút gọn toàn bộ câu quá dài trước khi render.
     overly_long_items = []
-    try:
-        from ai.v1_tech_pronunciation import normalize_text_for_tts as _norm_est
-    except Exception:
-        _norm_est = lambda s: s
     for seg in translated_segments:
         text = seg.content.strip()
         hard_max = windows.get(seg.index, 3.0)
-        spoken_text = _norm_est(text)
-        word_count = max(len(text.split()), len(spoken_text.split()))
-        est_duration = max(1.0, word_count * 0.28)
+        est_duration = max(1.0, vietnamese_spoken_seconds(text))
         if hard_max > 0 and (est_duration / hard_max) > MAX_NATURAL_SPEED:
             comfortable_speed = min(1.25, max(1.0, float(MAX_NATURAL_SPEED) * 0.85))
             target_words = max(2, int(round((hard_max - 0.05) * comfortable_speed / 0.28)))
+            cur_words = len(text.split())
+            hard_fit_words = max(target_words, int(round((hard_max - 0.05) * float(MAX_NATURAL_SPEED) / 0.28)))
+            max_accept_words = max(target_words, min(cur_words - 1, hard_fit_words + 1)) if cur_words > 2 else target_words
             overly_long_items.append({
                 "index": seg.index,
                 "text": text,
                 "target_seconds": hard_max,
                 "target_words": target_words,
+                "max_accept_words": max_accept_words,
                 "current_seconds": est_duration
             })
 
@@ -610,6 +589,7 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
             deadline=condense_started + min(25.0, condense_remaining),
             stop_checker=lambda: bool(__import__('shared_state').stop_requested),
             job_id="round1_pre_tts",
+            failure_causes=condensation_failures,
             script_mode=script_mode
         )
         condense_remaining = max(0.0, condense_remaining - (time.monotonic() - condense_started))
@@ -678,14 +658,21 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
             else:
                 target_words = max(2, int((hard_max - 0.05) / 0.28))
             cur_words = len(seg.content.strip().split())
+            max_accept_words = target_words
             if dur > hard_max and cur_words > 2:
-                measured_tw = max(2, int(cur_words * (hard_max / max(0.1, dur)) * 0.88))
-                target_words = min(target_words, measured_tw)
+                # Use the selected voice's measured pace, including any tempo
+                # already applied to this file. Leave headroom below the cap.
+                preferred_speed = min(MAX_NATURAL_SPEED, 1.25)
+                measured_words = cur_words * (hard_max - 0.05) * preferred_speed / (dur * speed_ratio)
+                target_words = max(2, min(cur_words - 1, int(measured_words)))
+                hard_measured_words = cur_words * (hard_max - 0.05) * float(MAX_NATURAL_SPEED) / (dur * speed_ratio)
+                max_accept_words = max(target_words, min(cur_words - 1, int(hard_measured_words) + 1))
             post_tts_overly_long.append({
                 "index": seg.index,
                 "text": seg.content.strip(),
                 "target_seconds": hard_max,
                 "target_words": target_words,
+                "max_accept_words": max_accept_words,
                 "current_seconds": dur
             })
 
@@ -700,6 +687,7 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
             deadline=condense_started + condense_remaining,
             stop_checker=lambda: bool(__import__('shared_state').stop_requested),
             job_id="round2_post_tts",
+            failure_causes=condensation_failures,
             script_mode=script_mode
         )
         condense_remaining = max(0.0, condense_remaining - (time.monotonic() - condense_started))
@@ -742,13 +730,19 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
         cur_words = len(seg.content.strip().split())
         if measured_duration <= hard_max + 0.005 or cur_words <= 2:
             continue
-        target_words = max(2, int(cur_words * (hard_max / max(0.1, measured_duration)) * 0.68))
-        target_words = min(cur_words - 1, target_words)
+        previous_speed = float(r.get("speed_ratio", 1.0))
+        preferred_speed = min(MAX_NATURAL_SPEED, 1.10)
+        measured_words = cur_words * (hard_max - 0.05) * preferred_speed / (measured_duration * previous_speed)
+        target_words = max(2, min(cur_words - 1, int(measured_words)))
+        rescue_speed = emergency_speed_cap if emergency_enabled else float(MAX_NATURAL_SPEED)
+        hard_measured_words = cur_words * (hard_max - 0.05) * rescue_speed / (measured_duration * previous_speed)
+        max_accept_words = max(target_words, min(cur_words - 1, int(hard_measured_words)))
         final_condense_items.append({
             "index": seg.index,
             "text": seg.content.strip(),
             "target_seconds": hard_max,
             "target_words": target_words,
+            "max_accept_words": max_accept_words,
             "current_seconds": measured_duration,
         })
 
@@ -764,6 +758,7 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
             deadline=condense_started + min(15.0, condense_remaining),
             stop_checker=lambda: bool(__import__('shared_state').stop_requested),
             job_id="round3_final_tts",
+            failure_causes=condensation_failures,
             script_mode=script_mode,
         )
         condense_remaining = max(0.0, condense_remaining - (time.monotonic() - condense_started))
@@ -839,10 +834,33 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
                 r["end"] = cur_start + fitted_dur
                 r["speed_ratio"] = previous_speed * extra_spd
                 dur = fitted_dur
-                logger.info("[VOICE_GUARD] Final fit enforced for cue %s: dur=%.3fs <= %.3fs",
+                logger.info("[VOICE_GUARD] Cue %s after final fit: duration=%.3fs, window=%.3fs",
                             seg.index, fitted_dur, hard_max)
             except Exception as exc:
                 logger.warning("[VOICE_GUARD] Final fit for cue %s warning: %s", seg.index, exc)
+
+        # 2b. Bounded emergency tempo fit (never cached) when cue still overflows slightly
+        dur = float(sf.info(r["path"]).duration)
+        previous_speed = float(r.get("speed_ratio", 1.0))
+        if emergency_enabled and dur > hard_max + 0.005 and previous_speed < emergency_speed_cap:
+            try:
+                _, fitted_dur, extra_spd = await fit_audio_file(
+                    r["path"], hard_max, r["path"],
+                    max_speed=emergency_speed_cap / previous_speed,
+                    allow_emergency=True,
+                )
+                fitted_dur = float(sf.info(r["path"]).duration)
+                r["actual_audio_duration"] = fitted_dur
+                r["end"] = cur_start + fitted_dur
+                r["speed_ratio"] = previous_speed * extra_spd
+                dur = fitted_dur
+                if extra_spd > 1.0 + 1e-6:
+                    logger.warning(
+                        "[VOICE_GUARD] Emergency tempo fit applied to cue %s (speed=%.2fx, duration=%.3fs, window=%.3fs)",
+                        seg.index, r["speed_ratio"], fitted_dur, hard_max,
+                    )
+            except Exception as exc:
+                logger.warning("[VOICE_GUARD] Emergency fit for cue %s warning: %s", seg.index, exc)
 
         # Condensation and bounded tempo fitting have already had their chance.
         # Retain every spoken sample when the remaining window cannot fit it.
@@ -850,11 +868,19 @@ async def generate_dubbing_audio(translated_segments, output_folder, voice_sourc
         r["actual_audio_duration"] = dur
         r["end"] = cur_start + dur
         if dur > hard_max + 0.005:
+            from v1_retry_policy import is_transient_network_error
+
+            failure = condensation_failures.get(seg.index)
+            if failure is not None and is_transient_network_error(failure):
+                raise TTSIncompleteError(
+                    f"Speech cue {seg.index} still exceeds its reading window after a temporary condensation failure; audio retained"
+                ) from failure
             raise SpeechTimingError(
                 f"Speech cue {seg.index} requires {dur:.3f}s but its reading window "
                 f"is {hard_max:.3f}s; shorten translation before retry; audio retained"
             )
-        if float(r.get("speed_ratio", 1.0)) > MAX_NATURAL_SPEED + 1e-9:
+        speed_ceiling = emergency_speed_cap if emergency_enabled else MAX_NATURAL_SPEED
+        if float(r.get("speed_ratio", 1.0)) > speed_ceiling + 1e-9:
             raise SpeechTimingError(
                 f"Speech cue {seg.index} exceeds the natural speed limit; "
                 "shorten translation before retry; audio retained"

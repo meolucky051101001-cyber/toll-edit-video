@@ -50,7 +50,7 @@ class TelegramNetworkRetryTests(unittest.IsolatedAsyncioTestCase):
         error = self._strict_translation_error(cause)
         self.assertIs(error.__cause__, cause)
         self.assertTrue(is_transient_network_error(error))
-        for attempt, delay in enumerate((60, 300, 900), 1):
+        for attempt, delay in enumerate((60, 300), 1):
             result, set_error, _ = await self._run_failing_pipeline(error)
             self.assertEqual(result["status"], "retry_scheduled")
             set_error.assert_not_called()
@@ -73,7 +73,7 @@ class TelegramNetworkRetryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(error.__cause__, cause)
                 self.assertTrue(is_transient_network_error(error))
 
-    async def test_strict_quality_gate_fails_fast_even_after_503(self):
+    async def test_invalid_translation_requeues_without_network_backoff(self):
         from backend.ai.v1_gemini_dispatcher import GeminiAllModelsFailedError
 
         error = self._strict_translation_error(GeminiAllModelsFailedError("status=503"), bad_quality=True)
@@ -81,8 +81,9 @@ class TelegramNetworkRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(error.__cause__)
         self.assertFalse(is_transient_network_error(error))
         result, set_error, _ = await self._run_failing_pipeline(error)
-        self.assertEqual(result["status"], "failed")
-        set_error.assert_called_once()
+        self.assertEqual(result["status"], "retry_queued")
+        self.assertEqual(bot.global_queue.qsize(), 1)
+        set_error.assert_not_called()
         self.assertFalse(bot.network_retry_state_path().exists())
 
     def test_strict_gemini_auth_request_and_config_fail_fast(self):
@@ -125,7 +126,7 @@ class TelegramNetworkRetryTests(unittest.IsolatedAsyncioTestCase):
         self.source.write_bytes(b"source fixture")
         self.job = {
             "type": "url", "url": "https://example.com/video", "pos": 1,
-            "job_id": "telegram_network_retry", "voice_mode": "manual", "retry_count": 1,
+            "job_id": "telegram_network_retry", "voice_mode": "manual", "retry_count": 0,
             "job_overrides": {"voice_mode": "manual", "voice_config": {"manual_voice": {"id": "chosen"}},
                               "feature_flags": {"V1_VIDEO_MODE": "SHORT"}, "bgm_volume_db": -17},
             "resume_state": {"source_path": str(self.source), "source_sha256": "source-hash"},
@@ -201,8 +202,8 @@ class TelegramNetworkRetryTests(unittest.IsolatedAsyncioTestCase):
         messages = [call.args[1] for call in status.call_args_list if len(call.args) > 1]
         self.assertTrue(any("Đang chờ mạng" in message and "thử lại" in message for message in messages))
 
-    async def test_backoff_is_one_five_fifteen_minutes_and_stops_after_three(self):
-        expected = (60, 300, 900)
+    async def test_backoff_is_one_and_five_minutes_and_stops_after_two(self):
+        expected = (60, 300)
         for attempt, delay in enumerate(expected, 1):
             scheduled = bot.schedule_network_retry(
                 dict(copy.deepcopy(self.job), network_retry_count=attempt - 1)
@@ -214,9 +215,27 @@ class TelegramNetworkRetryTests(unittest.IsolatedAsyncioTestCase):
                 delay, delta=5,
             )
         self.assertIsNone(
-            bot.schedule_network_retry(dict(copy.deepcopy(self.job), network_retry_count=3))
+            bot.schedule_network_retry(dict(copy.deepcopy(self.job), network_retry_count=2))
         )
         self.assertEqual(len(self._retry_state()["jobs"]), 1)
+
+    async def test_network_and_processing_errors_share_the_two_retry_limit(self):
+        self.job["retry_count"] = 1
+        result, _, _ = await self._run_failing_pipeline(httpx.ConnectError("offline"))
+        self.assertEqual(result["status"], "retry_scheduled")
+        self.assertIn("2/2", result["message"])
+        self._make_due()
+        self.assertEqual(await bot.process_due_network_retries(), 1)
+        self.job = await bot.global_queue.get()
+        bot.global_queue.task_done()
+        self.assertEqual(self.job["network_retry_count"], 1)
+
+        for error in (RuntimeError("TTS synthesis failed"), httpx.ConnectError("offline")):
+            result, set_error, _ = await self._run_failing_pipeline(error)
+            self.assertEqual(result["status"], "failed")
+            set_error.assert_called_once()
+            self.assertTrue(bot.global_queue.empty())
+            self.assertEqual(self._retry_state()["jobs"], {})
 
     async def test_due_retry_is_enqueued_once_with_same_job_id(self):
         bot.schedule_network_retry(copy.deepcopy(self.job))

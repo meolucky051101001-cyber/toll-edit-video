@@ -6,6 +6,7 @@ import os
 import time
 from pathlib import Path
 from pipeline_v2.atomic_io import atomic_write_json
+from v1_retry_policy import MAX_AUTOMATIC_RETRIES
 
 def _resolve_snapshot_path() -> Path:
     ws = Path(os.getenv("AUTODUB_WORKSPACE", str(Path(__file__).resolve().parent.parent / "workspace")))
@@ -72,6 +73,7 @@ class MonitoredQueue(asyncio.Queue):
                         "resume_state": job.get("resume_state"),
                         "retry_count": job.get("retry_count", 0),
                         "network_retry_count": job.get("network_retry_count", 0),
+                        "max_retries": MAX_AUTOMATIC_RETRIES,
                         "job_id": job.get("job_id"),
                         "in_progress": job is self.active_job,
                     })
@@ -93,6 +95,13 @@ class MonitoredQueue(asyncio.Queue):
 
     def put_nowait(self, item):
         super().put_nowait(item)
+        self.publish()
+
+    def requeue_nowait(self, failed_job, retry):
+        """Publish the retry as pending without also publishing the failed attempt."""
+        super().put_nowait(retry)
+        if self.active_job is failed_job:
+            self.active_job = None
         self.publish()
 
     def put_many_nowait(self, items):

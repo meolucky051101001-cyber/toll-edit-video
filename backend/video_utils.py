@@ -1,7 +1,7 @@
 import os
 import sys
 import subprocess
-from batch_control import run as run_batch_subprocess
+from batch_control import run as run_batch_subprocess, stop_check as batch_stop_check
 import time
 import logging
 from v1_integrity_errors import FrozenConfigError
@@ -46,7 +46,7 @@ def separate_vocals_demucs(
     input_audio_path,
     output_dir,
     segment_seconds=None,
-    timeout_seconds=900,
+    timeout_seconds=None,
     separation_mode=None,
 ):
     """
@@ -110,11 +110,13 @@ def separate_vocals_demucs(
     if getattr(shared_state, "stop_requested", False):
         raise RuntimeError("Tác vụ tách âm bị hủy: Lệnh dừng được yêu cầu.")
 
-    total_timeout = float(timeout_seconds) if timeout_seconds else 900.0
+    scope_stop = batch_stop_check.get()
+    has_explicit_timeout = timeout_seconds is not None and float(timeout_seconds) > 0
+    total_timeout = float(timeout_seconds) if has_explicit_timeout else 900.0
     try:
         import soundfile as _sf
         _info = _sf.info(input_audio_path)
-        if _info.duration > 0:
+        if _info.duration > 0 and not has_explicit_timeout:
             total_timeout = max(total_timeout, float(_info.duration) * 2.5 + 120.0)
     except Exception as _phase6_exc:
         logger.warning('Suppressed error in video_utils.separate_vocals_demucs (_sf.info): %s', type(_phase6_exc).__name__, exc_info=False)
@@ -122,9 +124,30 @@ def separate_vocals_demucs(
     policy = current_v1_model_policy()
     from v1_separator_lock import separator_gpu_lock
 
+    class _SeparatorCancellation(RuntimeError):
+        """A scoped cancellation signal; do not start a second GPU fallback."""
+
+    class _SeparatorCleanupError(RuntimeError):
+        """Fail closed when worker teardown cannot be verified."""
+
+    def _check_separator_stop(*, before_launch=False):
+        try:
+            requested = (getattr(shared_state, "stop_requested", False)
+                         or (scope_stop is not None and scope_stop()))
+        except Exception as stop_exc:
+            raise _SeparatorCancellation(
+                "Tác vụ tách âm bị hủy: không xác minh được lệnh dừng."
+            ) from stop_exc
+        if requested:
+            message = ("Tác vụ tách âm bị hủy trước khi khởi chạy worker."
+                       if before_launch else "Tác vụ tách âm bị hủy theo yêu cầu dừng.")
+            raise _SeparatorCancellation(message)
+
     def _run_cancellable_proc(cmd, t_limit):
+        _check_separator_stop(before_launch=True)
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUNBUFFERED"] = "1"
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -139,10 +162,63 @@ def separate_vocals_demucs(
         stdout_chunks = []
         stderr_chunks = []
 
+        def _terminate_worker_tree_impl():
+            tree_error = None
+
+            def taskkill_tree():
+                command = ["taskkill", "/PID", str(proc.pid), "/T", "/F"]
+                result = subprocess.run(
+                    command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=CREATE_NO_WINDOW, timeout=10, check=False,
+                )
+                if result.returncode != 0:
+                    raise subprocess.CalledProcessError(result.returncode, command)
+
+            if os.name == "nt" and proc.poll() is None:
+                try:
+                    taskkill_tree()
+                except (OSError, subprocess.SubprocessError) as kill_exc:
+                    tree_error = kill_exc
+                    logger.warning("Could not taskkill separator process tree (%s)", type(kill_exc).__name__)
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                if os.name == "nt":
+                    try:
+                        taskkill_tree()
+                        tree_error = None
+                    except (OSError, subprocess.SubprocessError) as kill_exc:
+                        tree_error = kill_exc
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait(timeout=2.0)
+            if tree_error is not None:
+                # Reaping the launcher alone does not prove its descendants stopped.
+                raise RuntimeError("Không xác nhận được taskkill /T cho cây worker.") from tree_error
+
+        def _terminate_worker_tree():
+            try:
+                _terminate_worker_tree_impl()
+            except Exception as cleanup_exc:
+                raise _SeparatorCleanupError(
+                    "Không xác minh được cây worker tách âm đã dừng; không chạy GPU fallback."
+                ) from cleanup_exc
+
         def _drain(pipe, collector):
             try:
                 for line in iter(pipe.readline, ''):
                     collector.append(line)
+                    text = line.strip()
+                    if text and any(marker in text.lower() for marker in (
+                        "gpu:", "nguồn:", "đã nạp model", "bắt đầu suy luận",
+                        "tách âm hoàn tất", "error", "warning",
+                    )):
+                        logger.info("[SEPARATOR_WORKER] %s", text[-1000:])
                 pipe.close()
             except Exception as _phase6_exc:
                 logger.warning('Suppressed error in video_utils._drain (iter): %s', type(_phase6_exc).__name__, exc_info=False)
@@ -153,33 +229,31 @@ def separate_vocals_demucs(
         t_err.start()
 
         while True:
-            if getattr(shared_state, "stop_requested", False):
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=1.0)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception as _phase6_exc:
-                        logger.warning('Suppressed error in video_utils._run_cancellable_proc (proc.kill): %s', type(_phase6_exc).__name__, exc_info=False)
-                raise RuntimeError("Tiến trình tách âm đã bị dừng theo yêu cầu (/stop).")
-
             ret = proc.poll()
             if ret is not None:
                 t_out.join(timeout=2.0)
                 t_err.join(timeout=2.0)
                 return ret, "".join(stdout_chunks), "".join(stderr_chunks)
 
-            if time.monotonic() > proc_deadline:
+            try:
+                _check_separator_stop()
+            except BaseException:
                 try:
-                    proc.terminate()
-                    proc.wait(timeout=1.0)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception as _phase6_exc:
-                        logger.warning('Suppressed error in video_utils._run_cancellable_proc (proc.kill): %s', type(_phase6_exc).__name__, exc_info=False)
-                raise TimeoutError(f"Tiến trình tách âm timeout sau {t_limit:.1f}s.")
+                    _terminate_worker_tree()
+                finally:
+                    t_out.join(timeout=2.0)
+                    t_err.join(timeout=2.0)
+                raise
+
+            if time.monotonic() >= proc_deadline:
+                try:
+                    _terminate_worker_tree()
+                finally:
+                    t_out.join(timeout=2.0)
+                    t_err.join(timeout=2.0)
+                detail = "".join(stderr_chunks[-8:]).strip()[-1200:]
+                suffix = f" Chi tiết cuối: {detail}" if detail else ""
+                raise TimeoutError(f"Tiến trình tách âm timeout sau {t_limit:.1f}s.{suffix}")
 
             time.sleep(0.3)
 
@@ -222,9 +296,9 @@ def separate_vocals_demucs(
                     "--model-name", model_name,
                     "--use-fp16",
                 ]
+                _check_separator_stop(before_launch=True)
                 with separator_gpu_lock(timeout_seconds=total_timeout):
-                    if getattr(shared_state, "stop_requested", False):
-                        raise RuntimeError("Tác vụ tách âm bị hủy: Lệnh dừng được yêu cầu.")
+                    _check_separator_stop(before_launch=True)
                     ret_code, stdout_str, stderr_str = _run_cancellable_proc(cmd_roformer, total_timeout)
                 if ret_code == 0:
                     for line in reversed(stdout_str.strip().splitlines()):
@@ -262,6 +336,9 @@ def separate_vocals_demucs(
                 if sep_mode == "roformer":
                     raise RuntimeError(f"BS-RoFormer worker thất bại: {err_detail}")
                 print(f"BS-RoFormer gặp sự cố ({err_detail}), tự động fallback sang Demucs...")
+            except (_SeparatorCancellation, _SeparatorCleanupError, TimeoutError):
+                # An explicit local deadline/cancellation is not a recoverable model error.
+                raise
             except Exception as r_err:
                 if sep_mode == "roformer":
                     raise

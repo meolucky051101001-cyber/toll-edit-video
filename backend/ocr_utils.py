@@ -662,13 +662,20 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
     if not math.isfinite(raw_frame_count) or raw_frame_count < 1:
         raise RuntimeError("Cannot refine captions without a decoded frame count")
     frame_count = int(round(raw_frame_count))
+    header_duration = float(duration)
+    timeline_duration = header_duration
+    nominal_fps = frame_count / max(timeline_duration, 0.1)
+    nominal_step = max(1.0 / max(nominal_fps, 1.0), 0.001)
+    max_vfr_pts = header_duration + max(2.0, header_duration * 0.10)
+    clock_warnings = 0
+    duration_extended_logged = False
     batch_size = 8
     scale = min(1.0, 960.0 / max(width, 1))
     scaled_size = (max(1, round(width * scale)), max(1, round(height * scale)))
     last_decoded_index = None
 
     def decoded_position(expected_index=None):
-        nonlocal last_decoded_index
+        nonlocal last_decoded_index, frame_count, timeline_duration, clock_warnings, duration_extended_logged
         # POS_FRAMES is the next frame after a successful read; POS_MSEC is
         # the returned frame's PTS. Keep both rather than deriving either from
         # average FPS, which is not an invertible clock for VFR sources.
@@ -677,18 +684,77 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         if not math.isfinite(next_index) or abs(next_index - round(next_index)) > .001:
             raise RuntimeError("Decoder did not report a valid caption frame index")
         frame_index = int(round(next_index)) - 1
+        if frame_index >= frame_count and expected_index is not None and frame_index == expected_index and frame_index == frame_count:
+            frame_count = frame_index + 1
         if not 0 <= frame_index < frame_count:
             raise RuntimeError("Decoded caption frame lies outside the source frame count")
         if expected_index is not None and frame_index != expected_index:
             raise RuntimeError(f"Caption seek returned frame {frame_index}, expected {expected_index}")
-        if frame_index == 0 and -.1 <= sample_time < 0:
-            sample_time = 0.
-        if (not math.isfinite(sample_time) or not 0 <= sample_time < duration
-                or (frame_index > 0 and sample_time == 0)):
-            raise RuntimeError("Decoder did not report a valid caption frame timestamp")
-        previous_pts = frame_times.get(frame_index)
-        if previous_pts is not None and abs(previous_pts - sample_time) > .000001:
-            raise RuntimeError("Decoder returned inconsistent caption frame timestamps")
+
+        if frame_index == 0:
+            if -.1 <= sample_time < 0:
+                sample_time = 0.0
+            if not math.isfinite(sample_time) or not 0 <= sample_time < timeline_duration:
+                raise RuntimeError("Decoder did not report a valid caption frame timestamp")
+            if frame_index in frame_times:
+                previous_pts = frame_times[frame_index]
+                if abs(previous_pts - sample_time) <= 0.10:
+                    sample_time = previous_pts
+                else:
+                    raise RuntimeError("Decoder returned inconsistent caption frame timestamps")
+        else:
+            if frame_index in frame_times:
+                previous_pts = frame_times[frame_index]
+                if (not math.isfinite(sample_time) or abs(previous_pts - sample_time) > 0.05) and clock_warnings < 5:
+                    logger.warning(
+                        "[OCR_CLOCK] Reused cached PTS %.4fs on rewind for frame %d (raw=%.4fs)",
+                        previous_pts, frame_index, sample_time if math.isfinite(sample_time) else -1.0,
+                    )
+                    clock_warnings += 1
+                sample_time = previous_pts
+            else:
+                prev_idx = (
+                    frame_index - 1
+                    if (frame_index - 1) in frame_times
+                    else (
+                        last_decoded_index
+                        if last_decoded_index is not None and last_decoded_index < frame_index and last_decoded_index in frame_times
+                        else None
+                    )
+                )
+                prev_pts = frame_times[prev_idx] if prev_idx is not None else None
+                bad_pts = (
+                    not math.isfinite(sample_time)
+                    or sample_time <= 0
+                    or sample_time > max_vfr_pts
+                    or (prev_pts is not None and sample_time <= prev_pts)
+                )
+                if bad_pts:
+                    if prev_pts is not None:
+                        if math.isfinite(sample_time) and 0 < sample_time <= prev_pts:
+                            fixed_time = prev_pts + 0.001
+                        else:
+                            fixed_time = prev_pts + nominal_step * max(1, frame_index - prev_idx)
+                    else:
+                        fixed_time = frame_index * nominal_step
+                    if clock_warnings < 5:
+                        logger.warning(
+                            "[OCR_CLOCK] Normalized invalid caption PTS on frame %d (raw=%.4fs -> %.4fs, duration=%.3fs)",
+                            frame_index, sample_time if math.isfinite(sample_time) else -1.0, fixed_time, timeline_duration,
+                        )
+                        clock_warnings += 1
+                    sample_time = fixed_time
+                if sample_time >= timeline_duration:
+                    step = (sample_time - prev_pts) if (prev_pts is not None and 0.001 <= sample_time - prev_pts <= 0.5) else nominal_step
+                    new_timeline = sample_time + step
+                    if not duration_extended_logged:
+                        logger.info(
+                            "[OCR_CLOCK] Extending visual timeline duration %.3fs -> %.3fs for decoded frame %d (pts=%.3fs)",
+                            timeline_duration, new_timeline, frame_index, sample_time,
+                        )
+                        duration_extended_logged = True
+                    timeline_duration = new_timeline
+
         frame_times[frame_index] = sample_time
         last_decoded_index = frame_index
         return frame_index, sample_time
@@ -701,7 +767,7 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         last_decoded_index = None
 
-    def advance_source_frame():
+    def advance_source_frame(allow_tail_eof=False):
         expected = 0 if last_decoded_index is None else last_decoded_index + 1
         if expected >= frame_count:
             raise RuntimeError("Source caption request exceeds the decoded frame count")
@@ -711,11 +777,15 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         retrieve = getattr(cap, "retrieve", None)
         if callable(grab) and callable(retrieve):
             if not grab():
+                if allow_tail_eof and last_decoded_index is not None and expected >= max(1, int(frame_count * 0.90)):
+                    return None
                 raise RuntimeError(f"Cannot decode caption transition frame {expected}")
             index, pts = decoded_position(expected_index=expected)
             return index, pts, None
         ok, image = cap.read()
         if not ok:
+            if allow_tail_eof and last_decoded_index is not None and expected >= max(1, int(frame_count * 0.90)):
+                return None
             raise RuntimeError(f"Cannot decode caption transition frame {expected}")
         index, pts = decoded_position(expected_index=expected)
         return index, pts, image
@@ -782,12 +852,33 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
     samples = []
     reset_source_decoder()
     coarse_sample = None
+    eof_reached = False
     for position, target_time in enumerate(times):
         while (coarse_sample is None or (coarse_sample[1] < target_time
                                         and last_decoded_index < frame_count - 1)):
-            coarse_sample = advance_source_frame()
+            next_sample = advance_source_frame(allow_tail_eof=True)
+            if next_sample is None:
+                eof_reached = True
+                logger.warning(
+                    "[OCR_CLOCK] Source EOF at frame %d before header frame_count (%d); clamping coarse scan",
+                    last_decoded_index, frame_count,
+                )
+                frame_count = last_decoded_index + 1
+                break
+            coarse_sample = next_sample
         # Retrieve before advancing again; grab() avoids converting skipped
         # frames to full-resolution BGR images.
+        if eof_reached:
+            if coarse_sample is not None and coarse_sample[2] is None:
+                coarse_sample = source_frame_at(last_decoded_index)
+            if coarse_sample is not None:
+                frame_index, current_time, frame = coarse_sample
+                if frame_index not in observations and all(s[0] != frame_index for s in samples):
+                    samples.append((frame_index, current_time, frame))
+            if samples:
+                recognize_samples(samples, roi_bounds=source_roi)
+                samples.clear()
+            break
         coarse_sample = source_image(coarse_sample)
         frame_index, current_time, frame = coarse_sample
         samples.append((frame_index, current_time, frame))
@@ -930,7 +1021,7 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         if not active_windows:
             return True
         t_left = frame_times.get(left_idx, 0.0)
-        t_right = frame_times.get(right_idx, float(duration or 0.0))
+        t_right = frame_times.get(right_idx, float(timeline_duration or 0.0))
         return any(w0 <= t_right and w1 >= t_left for w0, w1 in active_windows)
 
     seed_heights = sorted(
@@ -1105,6 +1196,7 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
         unsettled_targets = set(cand[:max_transition_cache])
 
     def _fetch_transition_sample(target_index):
+        nonlocal timeline_duration, clock_warnings
         cached = transition_cache.pop(target_index, None)
         if cached is not None:
             return (target_index, cached[0], cached[1], True)
@@ -1113,7 +1205,23 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
             reset_source_decoder()
         sample = None
         while last_decoded_index is None or last_decoded_index < target_index:
-            sample = advance_source_frame()
+            next_sample = advance_source_frame(allow_tail_eof=True)
+            if next_sample is None:
+                eof_idx = last_decoded_index
+                eof_pts = frame_times[eof_idx]
+                _, _, eof_raw = source_frame_at(eof_idx)
+                synth_pts = eof_pts + 0.001 * max(1, target_index - eof_idx)
+                frame_times[target_index] = synth_pts
+                if synth_pts >= timeline_duration:
+                    timeline_duration = synth_pts + nominal_step
+                if clock_warnings < 5:
+                    logger.warning(
+                        "[OCR_CLOCK] Source EOF at frame %d before header frame_count (%d); synthesizing monotonic sample for %d (pts=%.3fs)",
+                        eof_idx, frame_count, target_index, synth_pts,
+                    )
+                    clock_warnings += 1
+                return (target_index, synth_pts, eof_raw)
+            sample = next_sample
             cur_idx = sample[0]
             if cur_idx == target_index:
                 break
@@ -1154,7 +1262,7 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
     finally:
         transition_cache.clear()
     metrics["visual_boundary_frames"] = extra
-    for blocks, left, right in observation_intervals(refined, None, duration, frame_times=frame_times):
+    for blocks, left, right in observation_intervals(refined, None, timeline_duration, frame_times=frame_times):
         for block in blocks:
             block.visual_interval_start = left
             block.visual_interval_end = right
@@ -1162,7 +1270,7 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
 
     if source_only:
         tracks = []
-        for blocks, left, right in observation_intervals(refined, None, duration, frame_times=frame_times):
+        for blocks, left, right in observation_intervals(refined, None, timeline_duration, frame_times=frame_times):
             for block in caption_blocks(blocks):
                 track = _tracking_ocr_block(block, left, right, block)
                 track.geometry_verified = True
@@ -1171,14 +1279,14 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
                 track.visual_locked = False
                 tracks.append(track)
         metrics['source_timeline'] = dict(observed_frames=len(refined), track_count=len(tracks),
-                                          duration=duration, max_stable_gap_frames=stable_gap)
+                                          duration=timeline_duration, max_stable_gap_frames=stable_gap)
         return tracks, float(band.top)
 
     recovered = recover_missing_subtitles_from_ocr(
         all_blocks=all_blocks,
         srt_segments=existing_segments or [],
         band=band,
-        duration=duration,
+        duration=timeline_duration,
         visual_sub_to_speech=True,
     )
     segments = [

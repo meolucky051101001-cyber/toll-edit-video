@@ -440,3 +440,171 @@ def test_silent_gap_packaging_motion_is_not_attached_to_distant_speech_cue():
     assert all(b.start >= 38.0 for b in cue8.tracking_blocks)
 
 
+@pytest.mark.parametrize('final_pts', [1.0, 1.033])
+def test_visual_ocr_accepts_vfr_final_frame_at_header_duration(final_pts):
+    from backend import ocr_utils as ocr
+    from backend.subtitle_blur import collect_source_blur_boxes
+
+    pts = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.85, final_pts]
+
+    class Capture:
+        def __init__(self):
+            self.index = 0
+
+        def set(self, prop, value):
+            assert prop == cv2.CAP_PROP_POS_FRAMES and int(value) == 0
+            self.index = 0
+            return True
+
+        def grab(self):
+            if self.index >= len(pts):
+                return False
+            self.index += 1
+            return True
+
+        def retrieve(self):
+            return True, np.full((64, 64, 3), self.index - 1, dtype=np.uint8)
+
+        def get(self, prop):
+            return {
+                cv2.CAP_PROP_FRAME_COUNT: len(pts),
+                cv2.CAP_PROP_POS_FRAMES: self.index,
+                cv2.CAP_PROP_POS_MSEC: pts[max(0, self.index - 1)] * 1000.0,
+            }.get(prop, 0)
+
+    def recognize(images):
+        return [
+            [([[8, 50], [56, 50], [56, 58], [8, 58]],
+              '前面的字幕' if int(image[0, 0, 0]) < 5 else '后面的字幕', .99)]
+            for image in images
+        ]
+
+    with patch.object(ocr, '_visual_grid_times', return_value=[0.0, 0.4, 0.85]), \
+         patch.object(ocr, '_readtext_batch', side_effect=recognize), \
+         patch.object(ocr, 'select_chinese_subtitle_band', return_value=SimpleNamespace(
+             top=.75, bottom=.95, support=5, mode='data')), \
+         patch.object(ocr, 'detect_static_watermarks', return_value=[]):
+        segments, _ = ocr._perform_visual_subtitle_ocr(Capture(), 64, 64, 1.0, [], lambda: False)
+
+    boxes = collect_source_blur_boxes(segments)
+    for timestamp in pts:
+        active = [b for b in boxes if b['start'] <= timestamp < b['end']]
+        assert active, timestamp
+
+
+def test_visual_ocr_recovers_from_duplicate_zero_and_jittered_midvideo_pts():
+    from backend import ocr_utils as ocr
+    from backend.subtitle_blur import collect_source_blur_boxes
+
+    first_pass_pts = [0.0, 0.1, 0.2, 0.3, 0.4, 0.4, 0.0, 0.7, 0.8, 0.9]
+    rewind_pts = [0.0, 0.1, 0.2, 0.315, 0.4, 0.4, 0.0, 0.7, 0.8, 0.9]
+
+    class Capture:
+        def __init__(self):
+            self.index = 0
+            self.pass_num = 0
+
+        def set(self, prop, value):
+            assert prop == cv2.CAP_PROP_POS_FRAMES and int(value) == 0
+            self.index = 0
+            self.pass_num += 1
+            return True
+
+        def grab(self):
+            if self.index >= len(first_pass_pts):
+                return False
+            self.index += 1
+            return True
+
+        def retrieve(self):
+            return True, np.full((64, 64, 3), self.index - 1, dtype=np.uint8)
+
+        def get(self, prop):
+            table = first_pass_pts if self.pass_num <= 1 else rewind_pts
+            return {
+                cv2.CAP_PROP_FRAME_COUNT: len(table),
+                cv2.CAP_PROP_POS_FRAMES: self.index,
+                cv2.CAP_PROP_POS_MSEC: table[max(0, self.index - 1)] * 1000.0,
+            }.get(prop, 0)
+
+    def recognize(images):
+        return [
+            [([[8, 50], [56, 50], [56, 58], [8, 58]],
+              '前半句字幕' if int(image[0, 0, 0]) < 6 else '后半句字幕', .99)]
+            for image in images
+        ]
+
+    band = SimpleNamespace(top=.75, bottom=.95, support=5, mode='data')
+    with patch.object(ocr, '_visual_grid_times', return_value=[0.0, 0.35, 0.7, 0.9]), \
+         patch.object(ocr, '_readtext_batch', side_effect=recognize):
+        tracks, _ = ocr._perform_visual_subtitle_ocr(
+            Capture(), 64, 64, 1.0, [], lambda: False, source_band=band
+        )
+
+    assert len(tracks) >= 2
+    assert {'前半句字幕', '后半句字幕'}.issubset({t.text for t in tracks})
+    assert all(t.end > t.start for t in tracks)
+    boxes = collect_source_blur_boxes([SimpleNamespace(index=1, start=0.0, end=1.0, tracking_blocks=tracks)])
+    assert all(b['end'] > b['start'] for b in boxes)
+
+
+def test_visual_ocr_handles_header_frame_count_overcount_at_tail_eof():
+    from backend import ocr_utils as ocr
+
+    actual_pts = [i * 0.05 for i in range(20)]  # 0.00 .. 0.95, header falsely reports 22
+
+    class Capture:
+        def __init__(self, actual_limit=20, header_count=22):
+            self.index = 0
+            self.actual_limit = actual_limit
+            self.header_count = header_count
+
+        def set(self, prop, value):
+            self.index = int(value)
+            return True
+
+        def grab(self):
+            if self.index >= self.actual_limit:
+                return False
+            self.index += 1
+            return True
+
+        def retrieve(self):
+            if self.index <= 0 or self.index > self.actual_limit:
+                return False, None
+            return True, np.full((64, 64, 3), self.index - 1, dtype=np.uint8)
+
+        def get(self, prop):
+            return {
+                cv2.CAP_PROP_FRAME_COUNT: self.header_count,
+                cv2.CAP_PROP_POS_FRAMES: self.index,
+                cv2.CAP_PROP_POS_MSEC: actual_pts[max(0, min(self.actual_limit - 1, self.index - 1))] * 1000.0,
+            }.get(prop, 0)
+
+    def recognize(images):
+        return [
+            [([[8, 50], [56, 50], [56, 58], [8, 58]],
+              '第一条字幕' if int(image[0, 0, 0]) < 10 else '第二条字幕', .99)]
+            for image in images
+        ]
+
+    band = SimpleNamespace(top=.75, bottom=.95, support=5, mode='data')
+    with patch.object(ocr, '_visual_grid_times', return_value=[0.0, 0.35, 0.70]), \
+         patch.object(ocr, '_readtext_batch', side_effect=recognize):
+        tracks, _ = ocr._perform_visual_subtitle_ocr(
+            Capture(), 64, 64, 1.0, [], lambda: False, source_band=band
+        )
+
+    assert len(tracks) >= 2
+    assert {'第一条字幕', '第二条字幕'}.issubset({t.text for t in tracks})
+
+    # Unreadable frame 0 (0 decodable frames) must still fail closed.
+    empty_cap = Capture(actual_limit=0, header_count=20)
+    with patch.object(ocr, '_visual_grid_times', return_value=[0.0]), \
+         patch.object(ocr, '_readtext_batch') as inference:
+        with pytest.raises(RuntimeError, match='Cannot decode caption transition frame 0'):
+            ocr._perform_visual_subtitle_ocr(empty_cap, 64, 64, 1.0, [], lambda: False)
+    inference.assert_not_called()
+
+
+

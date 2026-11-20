@@ -684,16 +684,19 @@ class V1Orchestrator:
             t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
                 if sep_mode != "bypass":
-                    self._check_gpu_guard(stage_id)
+                    c.check_stop()
+                    await asyncio.to_thread(self._check_gpu_guard, stage_id)
+                    c.check_stop()
                 from video_utils import separate_vocals_demucs
                 from v1_gpu_gatekeeper import async_gpu_gatekeeper
                 c.check_stop()
-                async with async_gpu_gatekeeper("vocal_separation", timeout_seconds=t_out):
+                async with async_gpu_gatekeeper("vocal_separation", timeout_seconds=t_out, check_stop=c.check_stop):
                     v_res, nv_res = await c.run_stage(
                         asyncio.to_thread(
                             separate_vocals_demucs,
                             str(original_audio),
                             str(c.out_dir),
+                            timeout_seconds=t_out,
                             separation_mode=sep_mode,
                         ),
                         timeout=t_out
@@ -748,7 +751,9 @@ class V1Orchestrator:
             self.manifest_manager.record_stage_start(c.job_id, stage_id)
             t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
-                self._check_gpu_guard(stage_id)
+                c.check_stop()
+                await asyncio.to_thread(self._check_gpu_guard, stage_id)
+                c.check_stop()
                 from ai.v1_asr_isolated import extract_subtitles_isolated as extract_subtitles_whisper
                 from v1_gpu_gatekeeper import async_gpu_gatekeeper
                 c.check_stop()
@@ -768,12 +773,13 @@ class V1Orchestrator:
                         sep_mode_fb = getattr(c, "_vad_saved_sep_mode", "roformer")
                         t_sep_fb = self._calculate_stage_timeout("separate_vocals", c.video_dur_s, c.resolved_mode)
                         from video_utils import separate_vocals_demucs
-                        async with async_gpu_gatekeeper("vocal_separation", timeout_seconds=t_sep_fb):
+                        async with async_gpu_gatekeeper("vocal_separation", timeout_seconds=t_sep_fb, check_stop=c.check_stop):
                             v_res, nv_res = await c.run_stage(
                                 asyncio.to_thread(
                                     separate_vocals_demucs,
                                     str(original_audio),
                                     str(c.out_dir),
+                                    timeout_seconds=t_sep_fb,
                                     separation_mode=sep_mode_fb,
                                 ),
                                 timeout=t_sep_fb,
@@ -788,7 +794,7 @@ class V1Orchestrator:
                             "vocals_audio": str(vocals_audio),
                             "no_vocals_audio": str(no_vocals_audio),
                         })
-                        async with async_gpu_gatekeeper("speech_asr", timeout_seconds=t_out):
+                        async with async_gpu_gatekeeper("speech_asr", timeout_seconds=t_out, check_stop=c.check_stop):
                             srt_segments = await c.run_stage(
                                 asyncio.to_thread(
                                     extract_subtitles_whisper,
@@ -805,7 +811,7 @@ class V1Orchestrator:
                             raise vis_exc
                 else:
                     # extract_subtitles_whisper tự động điều phối Hybrid/SenseVoice/Paraformer hoặc Faster-Whisper + Chunking
-                    async with async_gpu_gatekeeper("speech_asr", timeout_seconds=t_out):
+                    async with async_gpu_gatekeeper("speech_asr", timeout_seconds=t_out, check_stop=c.check_stop):
                         srt_segments = await c.run_stage(
                             asyncio.to_thread(
                                 extract_subtitles_whisper,
@@ -929,7 +935,7 @@ class V1Orchestrator:
                 # Crash between stages 3/4: re-scan from an empty timeline so the
                 # cached visual cues are not appended to themselves.
                 ocr_input = [] if (c.visual_sub_to_speech and asr_was_empty) else srt_segments
-                async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=t_out):
+                async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=t_out, check_stop=c.check_stop):
                     ocr_result, vid_w, vid_h, main_y_pct = await c.run_stage(
                         asyncio.to_thread(
                             perform_video_ocr,
@@ -942,7 +948,7 @@ class V1Orchestrator:
                             adaptive=False,
                             geometry_report_path=str(c.out_dir / 'ocr_geometry_report.json'),
                             strict_geometry=True,
-                            visual_sub_to_speech=bool(c.visual_sub_to_speech and asr_was_empty),
+                            visual_sub_to_speech=False,
                             _source_duration=c.video_dur_s,
                             metrics=ocr_metrics,
                         ),
@@ -995,12 +1001,27 @@ class V1Orchestrator:
 
         should_run = not (c.can_resume and stage_id in c.verified_stages)
         translated_segments = []
+        if not should_run:
+            from ai.v1_translation_meaning import translation_meaning_issues, translation_meaning_policy
+
+            translated_segments = load_payload(c.out_dir / "translation.json")["segments"]
+            if (
+                translation_meaning_policy() == "strict"
+                and c.effective_cfg.get("target_lang", "vi").lower().startswith("vi")
+                and any(
+                    translation_meaning_issues(getattr(segment, "orig_content", "") or "", segment.content)
+                    for segment in translated_segments
+                )
+            ):
+                should_run = True
+                allowed = STAGES_ORDER[:STAGES_ORDER.index(stage_id)]
+                c.verified_stages = [name for name in c.verified_stages if name in allowed]
+                logger.info("[RESUME] Re-translate checkpoint with changed source facts")
         v1_script_mode = c.effective_cfg.get("script_mode") or c.overrides.get("script_mode") or os.getenv("SCRIPT_MODE", "default")
         if should_run:
             flag_gemini = str((c.effective_cfg.get("feature_flags") or {}).get("V1_GEMINI_MODEL") or "").strip()
-            if flag_gemini:
-                os.environ["GEMINI_MODEL"] = flag_gemini
-            configured_gemini_model = (flag_gemini or os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")).strip() or "gemini-3-flash-preview"
+            from ai.v1_gemini_dispatcher import resolve_gemini_models
+            configured_gemini_model = resolve_gemini_models("translation", preferred=flag_gemini or None)[0]
             try:
                 import job_tracker
                 job_tracker.record_active_translation_model(configured_gemini_model)
@@ -1013,6 +1034,7 @@ class V1Orchestrator:
             try:
                 from ai.translation import translate_subtitles
                 from ai.transcription import save_srt
+                import shared_state
 
                 # Early Voice Lock trước bước dịch (chỉ chạy khi bật tự động nhận diện giọng)
                 voice_lock_info = None
@@ -1047,10 +1069,14 @@ class V1Orchestrator:
                 # Chuẩn bị siêu dữ liệu từng câu ({id, speaker, max_words, ocr_hint}) khớp 1-1 với texts
                 cue_meta = []
                 if srt_segments:
+                    from v1_speech_guard import (
+                        SPEECH_GAP_S, VI_SECONDS_PER_WORD, SpeechTimingError, calculate_reading_windows, natural_speed_limit,
+                    )
+                    max_speed = natural_speed_limit((c.effective_cfg.get("feature_flags") or {}).get("V1_MAX_NATURAL_SPEED"))
                     try:
-                        from v1_timing_solver import calculate_timing_windows
-                        windows = calculate_timing_windows(srt_segments, total_audio_duration=c.video_dur_s)
-                    except Exception:
+                        non_empty_segs = sorted((s for s in srt_segments if s.content), key=lambda s: s.start)
+                        windows = calculate_reading_windows(non_empty_segs, video_duration=c.video_dur_s)
+                    except SpeechTimingError:
                         windows = {}
                     seg_voices = (voice_lock_info or {}).get("segment_voices") or {}
                     top_gender = str((voice_lock_info or {}).get("detected_gender") or "unknown").lower()
@@ -1060,8 +1086,7 @@ class V1Orchestrator:
                         sv = seg_voices.get(str(seg_idx)) or seg_voices.get(seg_idx) or {}
                         g = str(sv.get("gender") or ("unknown" if top_gender in ("dual", "manual", "") else top_gender)).lower()
                         speaker = g if g in ("male", "female") else "unknown"
-                        win_s = float(windows.get(seg_idx, 2.0) or 2.0)
-                        max_words = max(3, int(round(max(0.6, win_s - 0.05) * 3.6 * 1.15)))
+                        win_s = windows.get(seg_idx)
                         bb = getattr(seg, "best_block", None)
                         bb_text = (bb.get("text") if isinstance(bb, dict) else getattr(bb, "text", "")) if bb else ""
                         try:
@@ -1074,10 +1099,12 @@ class V1Orchestrator:
                             "id": pos + 1,
                             "index": seg_idx,
                             "speaker": speaker,
-                            "max_sec": round(win_s, 2),
-                            "max_words": max_words,
                             "ocr_hint": final_ocr_hint[:320],
                         }
+                        if win_s is not None:
+                            meta_entry["max_sec"] = round(win_s, 3)
+                            meta_entry["max_words"] = max(1, int(max(0, win_s - SPEECH_GAP_S)
+                                                                * min(1.15, max_speed) / VI_SECONDS_PER_WORD))
                         pf_alt = str(getattr(seg, "paraformer_alt", "") or "").strip()
                         if pf_alt and pf_alt != str(getattr(seg, "content", "") or "").strip():
                             meta_entry["asr_alt"] = pf_alt[:200]
@@ -1095,6 +1122,9 @@ class V1Orchestrator:
                         strict=True,
                         script_mode=v1_script_mode,
                         cue_meta=cue_meta or None,
+                        gemini_model=flag_gemini or None,
+                        max_speech_speed=(c.effective_cfg.get("feature_flags") or {}).get("V1_MAX_NATURAL_SPEED"),
+                        stop_checker=lambda: shared_state.stop_requested,
                         folder_scope=str(c.v_path.parent),
                     ),
                     timeout=t_out
@@ -1113,9 +1143,7 @@ class V1Orchestrator:
                 self.manifest_manager.record_stage_failure(c.job_id, stage_id, str(exc))
                 raise
         else:
-            import srt
             logger.info("[RESUME] Tải lại srt_translated đã cache.")
-            translated_segments = load_payload(c.out_dir / "translation.json")["segments"]
         c.artifacts_acc["srt_translated"] = str(srt_translated)
         return translated_segments, v1_script_mode
 
@@ -1350,7 +1378,9 @@ class V1Orchestrator:
             self.manifest_manager.record_stage_start(c.job_id, stage_id)
             t_out = self._calculate_stage_timeout(stage_id, c.video_dur_s, c.resolved_mode)
             try:
-                self._check_gpu_guard(stage_id)
+                c.check_stop()
+                await asyncio.to_thread(self._check_gpu_guard, stage_id)
+                c.check_stop()
                 from video_utils import process_video
                 from v1_gpu_gatekeeper import async_gpu_gatekeeper
                 c.check_stop()
@@ -1384,7 +1414,7 @@ class V1Orchestrator:
                                     delogo_boxes = geo_saved.get("watermarks") or (geo_saved.get("sampling") or {}).get("detected_watermarks") or []
                     except Exception:
                         delogo_boxes = []
-                async with async_gpu_gatekeeper("video_rendering", timeout_seconds=t_out):
+                async with async_gpu_gatekeeper("video_rendering", timeout_seconds=t_out, check_stop=c.check_stop):
                     rendered = await c.run_stage(
                         asyncio.to_thread(
                             process_video,
@@ -1608,7 +1638,7 @@ class V1Orchestrator:
         t_ocr = self._calculate_stage_timeout("visual_ocr", c.video_dur_s, c.resolved_mode)
         c.check_stop()
         try:
-            async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=t_ocr):
+            async with async_gpu_gatekeeper("visual_ocr", timeout_seconds=t_ocr, check_stop=c.check_stop):
                 visual_segments, vid_w_src, vid_h_src, main_y_src = await c.run_stage(
                     asyncio.to_thread(
                         perform_video_ocr,

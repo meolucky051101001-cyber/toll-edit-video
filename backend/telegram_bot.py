@@ -2,6 +2,7 @@
 Telegram Bot - Auto Video Dubbing
 Gửi link video → Bot tự động tải, tạo phụ đề, lồng tiếng, gửi lại video.
 """
+import errno
 import os
 import sys
 import asyncio
@@ -22,10 +23,84 @@ if os.name == 'nt':
         original_init(self, *args, **kwargs)
     subprocess.Popen.__init__ = patched_init
 
+
+class BotInstanceAlreadyRunning(RuntimeError):
+    """Raised only when the existing instance lock is contended."""
+
+
+class BotStartupError(RuntimeError):
+    """Raised when startup cannot inspect or create its required lock."""
+
+
+def _startup_failure_message(component, operation, path, exc):
+    details = [
+        f"component={component}",
+        f"operation={operation}",
+        f"path={path}",
+        f"error_type={type(exc).__name__}",
+    ]
+    for attr in ("errno", "winerror"):
+        value = getattr(exc, attr, None)
+        if value is not None:
+            details.append(f"{attr}={value}")
+    return "Startup failed: " + " ".join(details)
+
+
+def _emit_startup_diagnostic(message):
+    print(message, file=sys.stderr, flush=True)
+
+
+def _install_bot_startup_fallback():
+    startup_logger = logging.getLogger()
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(RedactingFormatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    handler._autodub_startup_stderr = True
+    startup_logger.addHandler(handler)
+    startup_logger.setLevel(logging.INFO)
+    return handler
+
+
+def _acquire_bot_instance_lock(lock_file_path, *, opener=open, lock_acquirer=None):
+    try:
+        lock_file = opener(lock_file_path, "w")
+    except Exception as exc:
+        raise BotStartupError(
+            _startup_failure_message("telegram", "open instance lock", lock_file_path, exc)
+        ) from exc
+
+    try:
+        if lock_acquirer is None:
+            import msvcrt
+            lock_acquirer = lambda file_obj: msvcrt.locking(
+                file_obj.fileno(), msvcrt.LK_NBLCK, 1
+            )
+        lock_acquirer(lock_file)
+    except OSError as exc:
+        try:
+            lock_file.close()
+        except Exception:
+            pass
+        message = _startup_failure_message(
+            "telegram", "acquire instance lock", lock_file_path, exc
+        )
+        if getattr(exc, "errno", None) in (errno.EACCES, errno.EAGAIN, errno.EDEADLK) or getattr(exc, "winerror", None) in (32, 33):
+            raise BotInstanceAlreadyRunning(message) from exc
+        raise BotStartupError(message) from exc
+    except Exception as exc:
+        try:
+            lock_file.close()
+        except Exception:
+            pass
+        raise BotStartupError(
+            _startup_failure_message("telegram", "acquire instance lock", lock_file_path, exc)
+        ) from exc
+    return lock_file
+
+
 import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from core.logging_setup import setup_logging
+from core.logging_setup import RedactingFormatter, setup_logging
 
 # Load .env local file
 from environment import load_environment
@@ -975,10 +1050,16 @@ async def cmd_llm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     deepseek_status = "🟢 Đã nạp Key" if os.getenv("DEEPSEEK_API_KEY") else "⚪ Chưa cấu hình"
     
     if not args:
+        from ai.v1_gemini_dispatcher import resolve_gemini_models
+        from v1_feature_flags import get_feature_flags
+
+        preferred = get_feature_flags(WORKSPACE).get("V1_GEMINI_MODEL") or None
+        gemini_models = " → ".join(resolve_gemini_models("translation", preferred=preferred))
         await update.message.reply_text(
             f"🧠 *CẤU HÌNH NHÀ CUNG CẤP AI DỊCH THUẬT (LLM)*\n\n"
             f"📍 *Chế độ ưu tiên hiện tại:* `{current_provider.upper()}`\n\n"
-            f"🔹 **Google Gemini (3.8 Flash + fallback):** {gemini_status}\n"
+            f"🔹 **Google Gemini:** {gemini_status}\n"
+            f"   `{gemini_models}`\n"
             f"🔹 **OpenAI ChatGPT (GPT-4o Vision):** {openai_status}\n"
             f"🔹 **DeepSeek-V4 Series (Văn phong Douyin/TikTok):** {deepseek_status}\n\n"
             f"👉 *Cách đổi mô hình ưu tiên:*\n"
@@ -1040,6 +1121,7 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 import re
 
 from telegram_queue_monitor import MonitoredQueue, PERSISTED_JOB_FIELDS
+from v1_retry_policy import MAX_AUTOMATIC_RETRIES, is_transient_network_error, should_retry_job
 global_queue = MonitoredQueue()
 queue_counter = 0
 
@@ -1054,8 +1136,8 @@ def _reserve_queue_positions(count=1):
 worker_task = None
 GLOBAL_BOT_APP = None
 
-NETWORK_RETRY_DELAYS = (60, 300, 900)
-NETWORK_RETRY_LABELS = {60: "1 phút", 300: "5 phút", 900: "15 phút"}
+NETWORK_RETRY_DELAYS = (60, 300)
+NETWORK_RETRY_LABELS = {60: "1 phút", 300: "5 phút"}
 NETWORK_RETRY_FILE = "telegram_retry_state.json"
 _RETRY_JOB_FIELDS = PERSISTED_JOB_FIELDS
 _network_retry_jobs = {}
@@ -1089,14 +1171,16 @@ def _serialize_retry_job(job):
     return {field: deepcopy(job.get(field)) for field in _RETRY_JOB_FIELDS}
 
 
+def _automatic_retry_count(job):
+    return int(job.get("retry_count") or 0) + int(job.get("network_retry_count") or 0)
+
+
 def schedule_network_retry(job):
     """Persist one delayed retry per job_id; returns None when attempts are exhausted."""
     job_id = str(job.get("job_id") or "").strip()
-    if not job_id:
+    if not job_id or _automatic_retry_count(job) >= MAX_AUTOMATIC_RETRIES:
         return None
     attempt = int(job.get("network_retry_count") or 0) + 1
-    if attempt > len(NETWORK_RETRY_DELAYS):
-        return None
     delay = NETWORK_RETRY_DELAYS[attempt - 1]
     now = time.time()
     retry_job = dict(job, network_retry_count=attempt)
@@ -1115,7 +1199,8 @@ def schedule_network_retry(job):
         return None
     _network_retry_jobs[job_id] = retry_job
     _ensure_network_retry_scheduler()
-    return {"attempt": attempt, "delay_seconds": delay, "next_attempt_at": now + delay}
+    return {"attempt": attempt, "total_retries": _automatic_retry_count(retry_job),
+            "delay_seconds": delay, "next_attempt_at": now + delay}
 
 
 def clear_network_retries():
@@ -1165,8 +1250,9 @@ async def process_due_network_retries(now=None):
             stored = record.get("job") if isinstance(record.get("job"), dict) else {}
             job = {field: stored.get(field) for field in _RETRY_JOB_FIELDS}
         job["network_retry_count"] = int(record.get("attempt") or 0)
-        if not (job.get("url") or job.get("file_id") or
-                (job.get("type") == "local_file" and job.get("video_path"))):
+        if (_automatic_retry_count(job) > MAX_AUTOMATIC_RETRIES
+                or not (job.get("url") or job.get("file_id") or
+                        (job.get("type") == "local_file" and job.get("video_path")))):
             records.pop(job_id, None)
             changed = True
             continue
@@ -1389,8 +1475,8 @@ async def video_worker():
                 global_queue.task_done()
                 if tracker_job:
                     state = job_tracker.get_status()
-                    if isinstance(result, dict) and result.get("status") == "retry_scheduled":
-                        job_tracker.mark_retry_waiting(tracker_job)
+                    if isinstance(result, dict) and result.get("status") in ("retry_scheduled", "retry_queued"):
+                        job_tracker.mark_retry_waiting(tracker_job, result["message"])
                     elif state.get("video_status") == "completed":
                         job_tracker.finish_batch()
                     elif state.get("active"):
@@ -1745,40 +1831,38 @@ async def _process_telegram_job(job):
         logger.exception("Telegram V1 job %s failed", job["job_id"])
         stopped = isinstance(exc, BatchStopRequested) or shared_state.stop_requested
         blocked = isinstance(exc, (CriticalQualityError, ValueError)) or "Quality Gate BLOCK:" in str(exc)
-        from v1_retry_policy import is_transient_network_error, should_retry_job
-        if not stopped and not blocked and is_transient_network_error(exc):
+        network_failure = is_transient_network_error(exc)
+        attempts = _automatic_retry_count(job)
+        can_retry = not blocked and should_retry_job(
+            exc, attempt=attempts, stopped=stopped, retry_generated_output=True,
+        )
+        if can_retry and network_failure:
             scheduled = schedule_network_retry(job)
             if scheduled:
                 delay_label = NETWORK_RETRY_LABELS.get(
                     scheduled["delay_seconds"], f"{scheduled['delay_seconds']} giây"
                 )
-                await safe_edit_status(
-                    status_msg,
-                    "⚠️ Mất kết nối mạng khi xử lý video.\n"
-                    f"Đang chờ mạng và sẽ thử lại sau {delay_label} "
-                    f"(lần {scheduled['attempt']}/{len(NETWORK_RETRY_DELAYS)}).",
-                )
+                message = (f"Đang chờ mạng và sẽ thử lại sau {delay_label} "
+                           f"(lần {scheduled['total_retries']}/{MAX_AUTOMATIC_RETRIES}).")
+                await safe_edit_status(status_msg, f"⚠️ Mất kết nối mạng khi xử lý video.\n{message}")
                 logger.warning(
                     "Telegram V1 job %s waiting for network; retry %s/%s in %ss",
-                    job["job_id"], scheduled["attempt"], len(NETWORK_RETRY_DELAYS),
+                    job["job_id"], scheduled["total_retries"], MAX_AUTOMATIC_RETRIES,
                     scheduled["delay_seconds"],
                 )
-                return {"status": "retry_scheduled", "job_id": job["job_id"]}
-            job_tracker.set_error(name, str(exc), fatal=True)
+                return {"status": "retry_scheduled", "job_id": job["job_id"], "message": message}
+        elif can_retry:
+            retry = dict(job, retry_count=int(job.get("retry_count") or 0) + 1, pos=_reserve_queue_positions())
+            global_queue.requeue_nowait(job, retry)
+            message = f"Đã xếp cuối hàng chờ để thử lại lần {attempts + 1}/{MAX_AUTOMATIC_RETRIES}."
             await safe_edit_status(
-                status_msg,
-                f"Không hoàn tất video do lỗi mạng: {str(exc)[:300]}",
+                status_msg, f"Xử lý gặp lỗi: {str(exc)[:300]}\n{message}",
             )
-            return {"status": "failed", "job_id": job["job_id"]}
+            return {"status": "retry_queued", "job_id": job["job_id"], "message": message}
         job_tracker.set_error(name, str(exc), fatal=True)
-        if not blocked and should_retry_job(exc, attempt=job.get("retry_count", 0), stopped=stopped):
-            retry = dict(job, retry_count=job.get("retry_count", 0) + 1, pos=_reserve_queue_positions())
-            await global_queue.put(retry)
-            await safe_edit_status(
-                status_msg, f"Xử lý gặp lỗi: {str(exc)[:300]}\nĐã xếp hàng thử lại lần {retry['retry_count']}/2."
-            )
-        else:
-            await safe_edit_status(status_msg, f"Không hoàn tất video: {str(exc)[:500]}")
+        reason = " do lỗi mạng" if network_failure else ""
+        exhausted = f"\nĐã dùng hết {MAX_AUTOMATIC_RETRIES} lượt thử lại." if attempts >= MAX_AUTOMATIC_RETRIES and not stopped else ""
+        await safe_edit_status(status_msg, f"Không hoàn tất video{reason}: {str(exc)[:500]}{exhausted}")
         return {"status": "stopped" if stopped else "failed", "job_id": job["job_id"]}
 
 
@@ -2058,28 +2142,36 @@ async def queue_signal_watcher(application=None):
 def main():
     # Dam bao chi co duy nhat 1 tien trinh Telegram Bot chay tai 1 thoi diem
 
-    import msvcrt
     bot_system = Path(WORKSPACE) / "bot_system"
     lock_dir = bot_system if bot_system.is_dir() else Path(WORKSPACE)
     lock_file_path = os.path.join(str(lock_dir), "bot_instance.lock")
+    startup_fallback = _install_bot_startup_fallback()
     try:
         global _singleton_lock_file
-        _singleton_lock_file = open(lock_file_path, "w")
-        msvcrt.locking(_singleton_lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-    except (IOError, OSError):
-        print("⚠️ Một tiến trình Telegram Bot khác đang chạy! Đang tự động thoát tiến trình này để tránh render 2 lần...")
-        logger.warning("Bot instance already running. Exiting duplicate process.")
-        sys.exit(0)
+        _singleton_lock_file = _acquire_bot_instance_lock(lock_file_path)
+    except BotInstanceAlreadyRunning as exc:
+        logger.warning("Bot instance already running; duplicate launch ignored: %s", exc)
+        return
+    except BotStartupError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(2) from exc
 
-    _configure_bot_logging()
+    try:
+        _configure_bot_logging()
+    except Exception as exc:
+        _emit_startup_diagnostic(_startup_failure_message(
+            "telegram", "configure bot log", f"{backend_app_log};{root_app_log}", exc
+        ))
+        raise SystemExit(2) from exc
+    finally:
+        root_logger = logging.getLogger()
+        if startup_fallback in root_logger.handlers:
+            root_logger.removeHandler(startup_fallback)
+        startup_fallback.close()
 
     if not BOT_TOKEN:
-        print("=" * 60)
-        print("❌ LỖI: Chưa cấu hình Bot Token!")
-        print("Mở file telegram_bot.py và dán Token vào dòng BOT_TOKEN")
-        print("Lấy Token từ @BotFather trên Telegram")
-        print("=" * 60)
-        return
+        logger.error("Startup failed: component=telegram operation=validate bot token error_type=MissingBotToken")
+        raise SystemExit(2)
     import socket
 
     print("Dang khoi dong Telegram Bot...")
@@ -2094,6 +2186,11 @@ def main():
             time.sleep(2)
 
     from telegram.request import HTTPXRequest
+    from ai.v1_gemini_dispatcher import start_gemini_model_catalog_refresh
+
+    start_gemini_model_catalog_refresh()
+
+    from telegram.error import NetworkError, TimedOut
 
     reconnect_delay = 5
     while True:
@@ -2128,9 +2225,11 @@ def main():
                 if isinstance(err, RetryAfter):
                     logger.warning("Telegram Flood Control: tạm chờ %s giây.", getattr(err, "retry_after", 5))
                 elif isinstance(err, (TimedOut, NetworkError)):
-                    logger.warning("Telegram kết nối tạm gián đoạn (tự động khôi phục): %s", err)
+                    logger.warning(
+                        "Telegram temporary network error (error_type=%s)", type(err).__name__
+                    )
                 else:
-                    logger.error("Lỗi xử lý sự kiện Telegram: %s", err, exc_info=err)
+                    logger.error("Telegram event handler failed (error_type=%s)", type(err).__name__)
 
             # Đăng ký handlers
             app.add_error_handler(telegram_error_handler)
@@ -2157,11 +2256,20 @@ def main():
             install_tool_control(app, globals(), 'v1')
             app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
             reconnect_delay = 5
-        except Exception as e:
-            logger.error(f"Lỗi polling hoặc mạng gián đoạn: {e}. Đang tự động kết nối lại sau {reconnect_delay} giây...")
-            print(f"⚠️ Mang chập chờn hoặc loi: {e}. Dang tu dong ket noi lai sau {reconnect_delay} giay...")
+        except (NetworkError, TimedOut) as exc:
+            logger.warning(
+                "Telegram network failure; retrying in %s seconds (error_type=%s)",
+                reconnect_delay,
+                type(exc).__name__,
+            )
             time.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, 60)
+        except Exception as exc:
+            logger.error(
+                "Fatal Telegram startup or polling failure; retries stopped (error_type=%s)",
+                type(exc).__name__,
+            )
+            raise SystemExit(3) from exc
 
 
 if __name__ == "__main__":
