@@ -730,7 +730,7 @@ def _perform_visual_subtitle_ocr(cap, width, height, duration, existing_segments
     max_vfr_pts = header_duration + max(2.0, header_duration * 0.10)
     clock_warnings = 0
     duration_extended_logged = False
-    batch_size = max(8, int(os.getenv("V1_OCR_VISUAL_BATCH_SIZE", "24")))
+    batch_size = max(1, int(os.getenv("V1_OCR_VISUAL_BATCH_SIZE", "8")))
     timeline_rec_model = (
         _resolve_timeline_fast_rec_model(current_v1_model_policy())
         if source_only
