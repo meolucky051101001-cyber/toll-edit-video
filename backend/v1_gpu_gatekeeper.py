@@ -117,6 +117,37 @@ def _release_gpu_context(cid, stage_name, handle=None):
         logger.info("[GPU_GATEKEEPER] <<< ĐÃ GIẢI PHÓNG QUYỀN GPU từ stage: '%s' (holder=%s)", stage_name, cid)
 
 
+def _evict_warm_sessions(current_stage_name: str) -> bool:
+    """Release warm idle worker sessions if VRAM guard needs headroom.
+
+    Returns True only if at least one active warm subprocess was closed.
+    """
+    evicted = False
+    if current_stage_name != "visual_ocr":
+        try:
+            try:
+                from .ai import v1_ocr_session as _ocr_sess_mod
+            except ImportError:
+                from ai import v1_ocr_session as _ocr_sess_mod
+            if getattr(_ocr_sess_mod, "_process", None) is not None:
+                _ocr_sess_mod.close_session()
+                evicted = True
+        except Exception:
+            pass
+    if current_stage_name not in ("vocal_separation", "studio_vocal_sep"):
+        try:
+            try:
+                from .ai import v1_separator_session as _sep_sess_mod
+            except ImportError:
+                from ai import v1_separator_session as _sep_sess_mod
+            if getattr(_sep_sess_mod, "_process", None) is not None:
+                _sep_sess_mod.close_session()
+                evicted = True
+        except Exception:
+            pass
+    return evicted
+
+
 @contextmanager
 def gpu_gatekeeper(
     stage_name: str = "gpu_task",
@@ -186,6 +217,9 @@ def gpu_gatekeeper(
             if acquired:
                 if auto_guard:
                     safe, reason = is_vram_safe_for_gpu_step(min_free_mb=min_free_mb)
+                    if not safe and _evict_warm_sessions(stage_name):
+                        time.sleep(0.15)
+                        safe, reason = is_vram_safe_for_gpu_step(min_free_mb=min_free_mb)
                     if not safe:
                         logger.warning(
                             "[GPU_GATEKEEPER] Đang chờ VRAM hạ nhiệt cho stage '%s': %s",

@@ -400,6 +400,7 @@ def analyze_audio_sensevoice(
         "elapsed_s": round(elapsed, 3),
         "tokens": all_tokens,
         "windows": windows_info,
+        "mono_16k": (samples / 32768.0).astype(np.float32),
     }
 
 
@@ -510,6 +511,7 @@ def refine_whisper_with_sensevoice(
     whisper_segments: Sequence[Dict[str, Any]],
     audio_path: str | Path,
     original_audio_path: Optional[str | Path] = None,
+    precomputed_sv_data: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Bộ Hợp Nhất Thông Minh (Hybrid Refiner):
@@ -517,7 +519,7 @@ def refine_whisper_with_sensevoice(
     """
     if not whisper_segments:
         # Nếu Whisper không bắt được câu nào, thử dùng SenseVoice quét xem có câu thoại ngắn bị sót không
-        sv_data = analyze_audio_sensevoice(audio_path)
+        sv_data = precomputed_sv_data if precomputed_sv_data is not None else analyze_audio_sensevoice(audio_path)
         rescued = group_sensevoice_tokens_to_segments(sv_data.get("tokens", []))
         return rescued
 
@@ -526,7 +528,7 @@ def refine_whisper_with_sensevoice(
     except ImportError:
         from ai.v1_conditional_asr import is_hallucination
 
-    sv_data = analyze_audio_sensevoice(audio_path)
+    sv_data = precomputed_sv_data if precomputed_sv_data is not None else analyze_audio_sensevoice(audio_path)
     sv_tokens = sv_data.get("tokens", [])
     sv_windows = sv_data.get("windows", [])
 
@@ -652,18 +654,29 @@ def refine_whisper_with_sensevoice(
                 if len(_strip_punct(left_text)) >= 4 and len(_strip_punct(right_text)) >= 4:
                     split_t = round(best_pause_time, 3)
                     if split_t - new_start >= 1.0 and new_end - split_t >= 1.0:
-                        refined.append({"start": round(new_start, 3), "end": round(split_t - 0.02, 3), "text": left_text})
-                        refined.append({"start": round(split_t + 0.02, 3), "end": round(new_end, 3), "text": right_text})
+                        left_entry = {"start": round(new_start, 3), "end": round(split_t - 0.02, 3), "text": left_text}
+                        right_entry = {"start": round(split_t + 0.02, 3), "end": round(new_end, 3), "text": right_text}
+                        if "avg_logprob" in seg:
+                            left_entry["avg_logprob"] = seg["avg_logprob"]
+                            right_entry["avg_logprob"] = seg["avg_logprob"]
+                        if "confidence" in seg:
+                            left_entry["confidence"] = seg["confidence"]
+                            right_entry["confidence"] = seg["confidence"]
+                        refined.append(left_entry)
+                        refined.append(right_entry)
                         split_count += 1
                         continue
 
-        refined.append(
-            {
-                "start": round(new_start, 3),
-                "end": round(new_end, 3),
-                "text": w_text,
-            }
-        )
+        entry = {
+            "start": round(new_start, 3),
+            "end": round(new_end, 3),
+            "text": w_text,
+        }
+        if "avg_logprob" in seg:
+            entry["avg_logprob"] = seg["avg_logprob"]
+        if "confidence" in seg:
+            entry["confidence"] = seg["confidence"]
+        refined.append(entry)
 
     # --- LỚP 4: GAP RESCUE (KHÔI PHỤC CÂU THOẠI NGẮN BỊ WHISPER BỎ SÓT) ---
     rescued_segments: List[Dict[str, Any]] = []

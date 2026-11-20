@@ -11,12 +11,19 @@ import fractions
 import logging
 import math
 import os
+import queue
 import subprocess
 import threading
 import time
+from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+
+try:
+    import cv2  # type: ignore
+except Exception:
+    cv2 = None
 
 try:
     from . import batch_control
@@ -59,6 +66,27 @@ def gpu_boxblur_planes_batch(planes_3d: "Any", radius: int, power: int = 3) -> "
         xp = F.pad(x, (0, 0, radius, radius), mode=pad_mode)
         x = F.avg_pool2d(xp, kernel_size=(kernel, 1), stride=1)
     return torch.clamp(torch.round(x.squeeze(1)), 0, 255).to(torch.uint8)
+
+
+def _use_cpu_inplace_blur() -> bool:
+    """Return True when OpenCV in-place ROI boxblur is available and enabled."""
+    if cv2 is None:
+        return False
+    return os.getenv("V1_BLUR_CPU_INPLACE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _boxblur_plane_inplace_cv2(plane_2d: np.ndarray, radius: int, power: int = 3) -> None:
+    """Apply separable boxblur in-place on a 2D uint8 plane slice via OpenCV."""
+    if cv2 is None or radius <= 0 or power <= 0 or plane_2d.size == 0:
+        return
+    h, w = plane_2d.shape[:2]
+    if h <= 0 or w <= 0:
+        return
+    r = int(radius)
+    k = 2 * r + 1
+    border = cv2.BORDER_REFLECT_101 if (w > r and h > r) else cv2.BORDER_REPLICATE
+    for _ in range(int(power)):
+        cv2.blur(plane_2d, (k, k), dst=plane_2d, borderType=border)
 
 
 def _probe_sorted_packet_pts(video_path: str, stream_index: int) -> List[float]:
@@ -262,7 +290,9 @@ def render_video_with_gpu_localized_blur(
         y_size = blur_width * blur_height
         uv_size = (blur_width // 2) * (blur_height // 2)
         frame_bytes = y_size + 2 * uv_size
-        batch_n = 24 if (blur_width * blur_height <= 1080 * 1920) else 8
+        pixels = blur_width * blur_height
+        batch_n = 8 if pixels > 1080 * 1920 else (12 if pixels >= 1080 * 1920 else 24)
+        use_cpu_inplace = _use_cpu_inplace_blur()
         pipe_buf = max(frame_bytes * 4, 4 * 1024 * 1024)
 
         try:
@@ -307,97 +337,269 @@ def render_video_with_gpu_localized_blur(
                 nut_stream.pix_fmt = "yuv420p"
                 nut_stream.time_base = tb
 
-            chunk_buf = bytearray(frame_bytes * batch_n)
-            chunk_mv = memoryview(chunk_buf)
+            free_q: queue.Queue = queue.Queue(maxsize=3)
+            for _ in range(3):
+                free_q.put(bytearray(frame_bytes * batch_n))
+            decoded_q: queue.Queue = queue.Queue(maxsize=2)
+            blurred_q: queue.Queue = queue.Queue(maxsize=2)
+
+            stop_ev = threading.Event()
+            err_holder: List[BaseException] = []
+            err_lock = threading.Lock()
+
+            def _record_err(exc: BaseException) -> None:
+                with err_lock:
+                    if not err_holder:
+                        err_holder.append(exc)
+                stop_ev.set()
+
             frame_idx = 0
             blurred_count = 0
             predicate: Optional[Callable[[], bool]] = batch_control.stop_check.get()
 
-            with torch.no_grad():
+            def _check_abort() -> None:
+                if predicate is not None and predicate():
+                    stop_ev.set()
+                    raise RuntimeError("Batch stop requested")
+                if deadline is not None and time.monotonic() >= deadline:
+                    stop_ev.set()
+                    raise subprocess.TimeoutExpired(enc_cmd, 0.0)
+                if err_holder:
+                    stop_ev.set()
+                    raise err_holder[0]
+
+            def _reader_loop() -> None:
+                eof_sent = False
+                try:
+                    while not stop_ev.is_set():
+                        try:
+                            buf = free_q.get(timeout=0.05)
+                        except queue.Empty:
+                            continue
+                        hand_off = False
+                        try:
+                            mv = memoryview(buf)
+                            try:
+                                got_bytes = _read_exact(dec_proc.stdout, mv)
+                            finally:
+                                mv.release()
+                            n_frames = got_bytes // frame_bytes
+                            if n_frames == 0:
+                                while not stop_ev.is_set():
+                                    try:
+                                        decoded_q.put(None, timeout=0.05)
+                                        eof_sent = True
+                                        break
+                                    except queue.Full:
+                                        continue
+                                return
+                            while not stop_ev.is_set():
+                                try:
+                                    decoded_q.put((buf, n_frames), timeout=0.05)
+                                    hand_off = True
+                                    break
+                                except queue.Full:
+                                    continue
+                        finally:
+                            if not hand_off:
+                                try:
+                                    free_q.put_nowait(buf)
+                                except queue.Full:
+                                    pass
+                except BaseException as exc:
+                    if not stop_ev.is_set():
+                        _record_err(exc)
+                finally:
+                    if not eof_sent:
+                        try:
+                            decoded_q.put(None, timeout=0.2)
+                        except queue.Full:
+                            pass
+
+            def _writer_loop() -> None:
+                try:
+                    while not stop_ev.is_set():
+                        try:
+                            item = blurred_q.get(timeout=0.05)
+                        except queue.Empty:
+                            continue
+                        if item is None:
+                            return
+                        buf, n_frames, start_idx = item
+                        try:
+                            if use_nut and nut_container is not None and nut_stream is not None and av_mod is not None:
+                                frames_view = np.frombuffer(
+                                    buf, dtype=np.uint8, count=n_frames * frame_bytes
+                                ).reshape(n_frames, blur_height * 3 // 2, blur_width)
+                                try:
+                                    for b_i in range(n_frames):
+                                        if stop_ev.is_set():
+                                            break
+                                        f_i = start_idx + b_i
+                                        t_sec = pts_list[f_i] if f_i < len(pts_list) else (f_i / fps)
+                                        vf = av_mod.VideoFrame.from_ndarray(frames_view[b_i], format="yuv420p")
+                                        vf.pts = int(round(t_sec * 1_000_000))
+                                        vf.time_base = tb
+                                        for pkt in nut_stream.encode(vf):
+                                            nut_container.mux(pkt)
+                                finally:
+                                    del frames_view
+                            else:
+                                mv_root = memoryview(buf)
+                                mv_slice = mv_root[:n_frames * frame_bytes]
+                                try:
+                                    enc_proc.stdin.write(mv_slice)
+                                finally:
+                                    mv_slice.release()
+                                    mv_root.release()
+                        except BaseException as exc:
+                            if not stop_ev.is_set():
+                                _record_err(exc)
+                            return
+                        finally:
+                            try:
+                                free_q.put_nowait(buf)
+                            except queue.Full:
+                                pass
+                except BaseException as exc:
+                    if not stop_ev.is_set():
+                        _record_err(exc)
+
+            t_reader = threading.Thread(target=_reader_loop, daemon=True)
+            t_writer = threading.Thread(target=_writer_loop, daemon=True)
+            t_reader.start()
+            t_writer.start()
+
+            try:
+                with (nullcontext() if use_cpu_inplace else torch.no_grad()):
+                    while True:
+                        _check_abort()
+                        try:
+                            item = decoded_q.get(timeout=0.05)
+                        except queue.Empty:
+                            continue
+                        if item is None:
+                            break
+                        buf, n_frames = item
+                        hand_off = False
+                        try:
+                            by_reg: Dict[int, List[int]] = {}
+                            for b_i in range(n_frames):
+                                f_i = frame_idx + b_i
+                                t_sec = pts_list[f_i] if f_i < len(pts_list) else (f_i / fps)
+                                for reg_idx, reg in enumerate(compiled_regions):
+                                    if any(a <= t_sec < b for a, b in reg[6]):
+                                        by_reg.setdefault(reg_idx, []).append(b_i)
+
+                            if by_reg:
+                                frames_np = np.frombuffer(
+                                    buf, dtype=np.uint8, count=n_frames * frame_bytes
+                                ).reshape(n_frames, frame_bytes)
+                                try:
+                                    active_bis = {bi for bis in by_reg.values() for bi in bis}
+                                    blurred_count += len(active_bis)
+
+                                    # Preserve exact deterministic order of regions (0 .. R-1)
+                                    if use_cpu_inplace:
+                                        for reg_idx in sorted(by_reg.keys()):
+                                            b_indices = by_reg[reg_idx]
+                                            rx, ry, rw, rh, lr, cr, _ = compiled_regions[reg_idx]
+                                            if lr > 0:
+                                                for bi in b_indices:
+                                                    y_plane = frames_np[bi, :y_size].reshape(blur_height, blur_width)
+                                                    _boxblur_plane_inplace_cv2(y_plane[ry:ry + rh, rx:rx + rw], lr, 3)
+                                            if cr > 0:
+                                                cx, cy, cw, ch = rx // 2, ry // 2, rw // 2, rh // 2
+                                                for bi in b_indices:
+                                                    u_plane = frames_np[bi, y_size:y_size + uv_size].reshape(blur_height // 2, blur_width // 2)
+                                                    v_plane = frames_np[bi, y_size + uv_size:].reshape(blur_height // 2, blur_width // 2)
+                                                    _boxblur_plane_inplace_cv2(u_plane[cy:cy + ch, cx:cx + cw], cr, 3)
+                                                    _boxblur_plane_inplace_cv2(v_plane[cy:cy + ch, cx:cx + cw], cr, 3)
+                                    else:
+                                        for reg_idx in sorted(by_reg.keys()):
+                                            b_indices = by_reg[reg_idx]
+                                            rx, ry, rw, rh, lr, cr, _ = compiled_regions[reg_idx]
+                                            if lr > 0:
+                                                y_crops = np.stack(
+                                                    [
+                                                        frames_np[bi, :y_size].reshape(blur_height, blur_width)[ry:ry + rh, rx:rx + rw]
+                                                        for bi in b_indices
+                                                    ],
+                                                    axis=0,
+                                                )
+                                                y_blurred = gpu_boxblur_planes_batch(
+                                                    torch.from_numpy(y_crops).cuda(), lr, 3
+                                                ).cpu().numpy()
+                                                for k_i, bi in enumerate(b_indices):
+                                                    frames_np[bi, :y_size].reshape(blur_height, blur_width)[ry:ry + rh, rx:rx + rw] = y_blurred[k_i]
+                                            if cr > 0:
+                                                cx, cy, cw, ch = rx // 2, ry // 2, rw // 2, rh // 2
+                                                u_crops = np.stack(
+                                                    [
+                                                        frames_np[bi, y_size:y_size + uv_size].reshape(blur_height // 2, blur_width // 2)[cy:cy + ch, cx:cx + cw]
+                                                        for bi in b_indices
+                                                    ],
+                                                    axis=0,
+                                                )
+                                                v_crops = np.stack(
+                                                    [
+                                                        frames_np[bi, y_size + uv_size:].reshape(blur_height // 2, blur_width // 2)[cy:cy + ch, cx:cx + cw]
+                                                        for bi in b_indices
+                                                    ],
+                                                    axis=0,
+                                                )
+                                                uv_cat = np.concatenate([u_crops, v_crops], axis=0)
+                                                uv_blurred = gpu_boxblur_planes_batch(
+                                                    torch.from_numpy(uv_cat).cuda(), cr, 3
+                                                ).cpu().numpy()
+                                                m = len(b_indices)
+                                                for k_i, bi in enumerate(b_indices):
+                                                    frames_np[bi, y_size:y_size + uv_size].reshape(blur_height // 2, blur_width // 2)[cy:cy + ch, cx:cx + cw] = uv_blurred[k_i]
+                                                    frames_np[bi, y_size + uv_size:].reshape(blur_height // 2, blur_width // 2)[cy:cy + ch, cx:cx + cw] = uv_blurred[m + k_i]
+                                finally:
+                                    del frames_np
+
+                            while True:
+                                _check_abort()
+                                if stop_ev.is_set():
+                                    raise RuntimeError("Pipeline stopped")
+                                try:
+                                    blurred_q.put((buf, n_frames, frame_idx), timeout=0.05)
+                                    hand_off = True
+                                    break
+                                except queue.Full:
+                                    continue
+                            frame_idx += n_frames
+                        finally:
+                            if not hand_off:
+                                try:
+                                    free_q.put_nowait(buf)
+                                except queue.Full:
+                                    pass
+
                 while True:
-                    if predicate is not None and predicate():
-                        raise RuntimeError("Batch stop requested")
-                    if deadline is not None and time.monotonic() >= deadline:
-                        raise subprocess.TimeoutExpired(enc_cmd, 0.0)
-
-                    got_bytes = _read_exact(dec_proc.stdout, chunk_mv)
-                    n_frames = got_bytes // frame_bytes
-                    if n_frames == 0:
+                    _check_abort()
+                    if stop_ev.is_set():
+                        raise RuntimeError("Pipeline stopped")
+                    try:
+                        blurred_q.put(None, timeout=0.05)
                         break
+                    except queue.Full:
+                        continue
 
-                    by_reg: Dict[int, List[int]] = {}
-                    for b_i in range(n_frames):
-                        f_i = frame_idx + b_i
-                        t_sec = pts_list[f_i] if f_i < len(pts_list) else (f_i / fps)
-                        for reg_idx, reg in enumerate(compiled_regions):
-                            if any(a <= t_sec < b for a, b in reg[6]):
-                                by_reg.setdefault(reg_idx, []).append(b_i)
-
-                    if by_reg:
-                        frames_np = np.frombuffer(
-                            chunk_mv[:n_frames * frame_bytes], dtype=np.uint8
-                        ).reshape(n_frames, frame_bytes)
-                        active_bis = {bi for bis in by_reg.values() for bi in bis}
-                        blurred_count += len(active_bis)
-
-                        # Preserve exact deterministic order of regions (0 .. R-1)
-                        for reg_idx in sorted(by_reg.keys()):
-                            b_indices = by_reg[reg_idx]
-                            rx, ry, rw, rh, lr, cr, _ = compiled_regions[reg_idx]
-                            if lr > 0:
-                                y_crops = np.stack(
-                                    [
-                                        frames_np[bi, :y_size].reshape(blur_height, blur_width)[ry:ry + rh, rx:rx + rw]
-                                        for bi in b_indices
-                                    ],
-                                    axis=0,
-                                )
-                                y_blurred = gpu_boxblur_planes_batch(
-                                    torch.from_numpy(y_crops).cuda(), lr, 3
-                                ).cpu().numpy()
-                                for k_i, bi in enumerate(b_indices):
-                                    frames_np[bi, :y_size].reshape(blur_height, blur_width)[ry:ry + rh, rx:rx + rw] = y_blurred[k_i]
-                            if cr > 0:
-                                cx, cy, cw, ch = rx // 2, ry // 2, rw // 2, rh // 2
-                                u_crops = np.stack(
-                                    [
-                                        frames_np[bi, y_size:y_size + uv_size].reshape(blur_height // 2, blur_width // 2)[cy:cy + ch, cx:cx + cw]
-                                        for bi in b_indices
-                                    ],
-                                    axis=0,
-                                )
-                                v_crops = np.stack(
-                                    [
-                                        frames_np[bi, y_size + uv_size:].reshape(blur_height // 2, blur_width // 2)[cy:cy + ch, cx:cx + cw]
-                                        for bi in b_indices
-                                    ],
-                                    axis=0,
-                                )
-                                uv_cat = np.concatenate([u_crops, v_crops], axis=0)
-                                uv_blurred = gpu_boxblur_planes_batch(
-                                    torch.from_numpy(uv_cat).cuda(), cr, 3
-                                ).cpu().numpy()
-                                m = len(b_indices)
-                                for k_i, bi in enumerate(b_indices):
-                                    frames_np[bi, y_size:y_size + uv_size].reshape(blur_height // 2, blur_width // 2)[cy:cy + ch, cx:cx + cw] = uv_blurred[k_i]
-                                    frames_np[bi, y_size + uv_size:].reshape(blur_height // 2, blur_width // 2)[cy:cy + ch, cx:cx + cw] = uv_blurred[m + k_i]
-
-                    if use_nut and nut_container is not None and nut_stream is not None and av_mod is not None:
-                        frames_view = np.frombuffer(
-                            chunk_mv[:n_frames * frame_bytes], dtype=np.uint8
-                        ).reshape(n_frames, blur_height * 3 // 2, blur_width)
-                        for b_i in range(n_frames):
-                            f_i = frame_idx + b_i
-                            t_sec = pts_list[f_i] if f_i < len(pts_list) else (f_i / fps)
-                            vf = av_mod.VideoFrame.from_ndarray(frames_view[b_i], format="yuv420p")
-                            vf.pts = int(round(t_sec * 1_000_000))
-                            vf.time_base = tb
-                            for pkt in nut_stream.encode(vf):
-                                nut_container.mux(pkt)
-                    else:
-                        enc_proc.stdin.write(chunk_mv[:n_frames * frame_bytes])
-
-                    frame_idx += n_frames
+                while t_writer.is_alive():
+                    _check_abort()
+                    t_writer.join(timeout=0.05)
+                t_reader.join(timeout=2.0)
+                if err_holder:
+                    raise err_holder[0]
+            except BaseException:
+                stop_ev.set()
+                _kill_proc_tree(dec_proc)
+                _kill_proc_tree(enc_proc)
+                t_reader.join(timeout=2.0)
+                t_writer.join(timeout=2.0)
+                raise
 
             if frame_idx == 0:
                 dec_err_txt = b"".join(dec_stderr).decode("utf-8", errors="replace")
@@ -440,13 +642,14 @@ def render_video_with_gpu_localized_blur(
 
             elapsed = time.monotonic() - started
             logger.info(
-                "V1 GPU CUDA localized blur render complete encoder=%s seconds=%.2f regions=%d frames=%d blurred=%d mode=%s",
+                "V1 GPU CUDA localized blur render complete encoder=%s seconds=%.2f regions=%d frames=%d blurred=%d mode=%s blur=%s",
                 enc_args[0],
                 elapsed,
                 len(compiled_regions),
                 frame_idx,
                 blurred_count,
                 "vfr_nut" if use_nut else "cfr_raw",
+                "cv2_inplace" if use_cpu_inplace else "cuda_batch",
             )
             return True, ""
 
@@ -469,9 +672,10 @@ def render_video_with_gpu_localized_blur(
                     os.remove(filter_script_path)
                 except OSError:
                     pass
-            try:
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
+            if not use_cpu_inplace:
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
 
     return False, "GPU localized blur exhausted attempts"

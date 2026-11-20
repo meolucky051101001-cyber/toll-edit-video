@@ -351,7 +351,56 @@ class V1Orchestrator:
         active_qc_policy = resolve_qc_policy(c.effective_cfg, c.overrides, self.workspace)
         total_steps = 8 if active_qc_policy == "OFF" else len(STAGES_ORDER)
 
+        _notify_pending: Optional[Tuple[str, int, int, float, str, Dict[str, Any]]] = None
+        _notify_task: Optional[asyncio.Task] = None
+        _notify_cancelled_exc: Optional[BaseException] = None
+        _async_notify_enabled = (
+            os.getenv("V1_ASYNC_PROGRESS_NOTIFY", "1").strip().lower() not in ("0", "false", "no")
+        )
+
+        async def _flush_notify(timeout: Optional[float] = 3.0) -> None:
+            nonlocal _notify_task, _notify_cancelled_exc
+            if _notify_cancelled_exc is not None:
+                exc = _notify_cancelled_exc
+                _notify_cancelled_exc = None
+                raise exc
+            if _notify_task is not None:
+                try:
+                    if timeout is not None:
+                        await asyncio.wait_for(asyncio.shield(_notify_task), timeout=timeout)
+                    else:
+                        await asyncio.shield(_notify_task)
+                except asyncio.TimeoutError:
+                    pass
+                if _notify_cancelled_exc is not None:
+                    exc = _notify_cancelled_exc
+                    _notify_cancelled_exc = None
+                    raise exc
+
+        async def _drain_notify_loop() -> None:
+            nonlocal _notify_pending, _notify_task, _notify_cancelled_exc
+            try:
+                while _notify_pending is not None:
+                    item = _notify_pending
+                    _notify_pending = None
+                    s_name, st_num, tot_steps, p_val, msg_txt, det_map = item
+                    try:
+                        await progress_callback(s_name, st_num, tot_steps, p_val, msg_txt, det_map)
+                    except asyncio.CancelledError as c_exc:
+                        _notify_cancelled_exc = c_exc
+                        _notify_pending = None
+                        raise
+                    except Exception:
+                        logger.warning("Progress notification failed; keep processing job %s", job_id, exc_info=True)
+            finally:
+                _notify_task = None
+
         async def notify(stage: str, step: int, pct: float, msg: str, details: Optional[Dict[str, Any]] = None):
+            nonlocal _notify_pending, _notify_task, _notify_cancelled_exc
+            if _notify_cancelled_exc is not None:
+                exc = _notify_cancelled_exc
+                _notify_cancelled_exc = None
+                raise exc
             if progress_callback:
                 if total_steps == 8 and isinstance(msg, str):
                     msg = msg.replace(f"Bước {step}/9:", f"Bước {step}/8:")
@@ -360,7 +409,21 @@ class V1Orchestrator:
                 d["job_id"] = job_id
                 try:
                     if asyncio.iscoroutinefunction(progress_callback):
-                        await progress_callback(stage, step, total_steps, pct, msg, d)
+                        if not _async_notify_enabled or stage in ("quality_gate", "publish"):
+                            if _notify_task is not None:
+                                await _flush_notify(timeout=3.0)
+                            await progress_callback(stage, step, total_steps, pct, msg, d)
+                        else:
+                            _notify_pending = (stage, step, total_steps, pct, msg, d)
+                            if _notify_task is None or _notify_task.done():
+                                _notify_task = asyncio.create_task(_drain_notify_loop())
+                            # Yield once so fast callbacks or immediate cancellations run right away,
+                            # while slow HTTP/Telegram updates continue in background.
+                            await asyncio.sleep(0)
+                            if _notify_cancelled_exc is not None:
+                                exc = _notify_cancelled_exc
+                                _notify_cancelled_exc = None
+                                raise exc
                     else:
                         progress_callback(stage, step, total_steps, pct, msg, d)
                 except asyncio.CancelledError:
@@ -388,22 +451,37 @@ class V1Orchestrator:
         c.notify, c.check_stop = notify, check_stop
         c.pause_checkpoint, c.run_stage = pause_checkpoint, run_stage
         self._restore_execution_checkpoint(c, resume_if_possible)
-        original_audio = await self._stage_extract(c)
-        vocals_audio, no_vocals_audio = await self._stage_separate(c, original_audio)
-        srt_original, srt_segments, asr_was_empty = await self._stage_asr(c, vocals_audio, original_audio)
-        vocals_audio = getattr(c, "_recovered_vocals_audio", vocals_audio)
-        no_vocals_audio = getattr(c, "_recovered_no_vocals_audio", no_vocals_audio)
-        srt_segments, floating_segments, vid_w, vid_h, main_y_pct = await self._stage_ocr(
-            c, srt_original, srt_segments, asr_was_empty)
-        translated_segments, v1_script_mode = await self._stage_translate(
-            c, srt_segments, original_audio=original_audio, vocals_audio=vocals_audio)
-        translated_segments, dubbing_audio_files, ass_path = await self._stage_tts(
-            c, original_audio, vocals_audio, srt_segments, translated_segments,
-            floating_segments, vid_w, vid_h, main_y_pct, v1_script_mode)
-        mixed_audio = await self._stage_mix(c, original_audio, no_vocals_audio, asr_was_empty, dubbing_audio_files)
-        final_video, temp_render_video = await self._stage_render(c, ass_path, mixed_audio, main_y_pct)
-        return await self._stage_qc_and_deliver(
-            c, final_video, temp_render_video, translated_segments, dubbing_audio_files, mixed_audio, ass_path)
+        completed_ok = False
+        try:
+            original_audio = await self._stage_extract(c)
+            vocals_audio, no_vocals_audio = await self._stage_separate(c, original_audio)
+            srt_original, srt_segments, asr_was_empty = await self._stage_asr(c, vocals_audio, original_audio)
+            vocals_audio = getattr(c, "_recovered_vocals_audio", vocals_audio)
+            no_vocals_audio = getattr(c, "_recovered_no_vocals_audio", no_vocals_audio)
+            srt_segments, floating_segments, vid_w, vid_h, main_y_pct = await self._stage_ocr(
+                c, srt_original, srt_segments, asr_was_empty)
+            translated_segments, v1_script_mode = await self._stage_translate(
+                c, srt_segments, original_audio=original_audio, vocals_audio=vocals_audio)
+            translated_segments, dubbing_audio_files, ass_path = await self._stage_tts(
+                c, original_audio, vocals_audio, srt_segments, translated_segments,
+                floating_segments, vid_w, vid_h, main_y_pct, v1_script_mode)
+            mixed_audio = await self._stage_mix(c, original_audio, no_vocals_audio, asr_was_empty, dubbing_audio_files)
+            final_video, temp_render_video = await self._stage_render(c, ass_path, mixed_audio, main_y_pct)
+            out_result = await self._stage_qc_and_deliver(
+                c, final_video, temp_render_video, translated_segments, dubbing_audio_files, mixed_audio, ass_path)
+            completed_ok = True
+            return out_result
+        finally:
+            if completed_ok:
+                await _flush_notify(timeout=3.0)
+            else:
+                _notify_pending = None
+                if _notify_task is not None and not _notify_task.done():
+                    _notify_task.cancel()
+                    try:
+                        await asyncio.wait_for(asyncio.gather(_notify_task, return_exceptions=True), timeout=0.5)
+                    except Exception:
+                        pass
 
     def _prepare_execution(self, video_path, job_id, output_dir, delivery_path, user_mode, overrides, resume_if_possible):
         v_path = Path(video_path).resolve()
@@ -424,8 +502,9 @@ class V1Orchestrator:
         # The same input may be retried with a fresh queue ID. Reuse only a
         # non-completed manifest with verified source and the same working folder.
         if resume_if_possible and not self.manifest_manager.load_manifest(job_id):
+            scan_limit = max(10, int(os.getenv("V1_RESUME_MANIFEST_SCAN_LIMIT", "50")))
             candidates = sorted(self.manifest_manager.manifest_dir.glob("*.manifest.json"),
-                                key=lambda p: p.stat().st_mtime, reverse=True)
+                                key=lambda p: p.stat().st_mtime, reverse=True)[:scan_limit]
             for candidate in candidates:
                 old = self.manifest_manager.load_manifest(candidate.name.removesuffix(".manifest.json"))
                 if (old and old.status != "completed" and Path(old.video_path).resolve() == v_path
@@ -979,7 +1058,7 @@ class V1Orchestrator:
             finally:
                 if "release_ocr_reader" in locals():
                     try:
-                        release_ocr_reader(force_close_session=True)
+                        release_ocr_reader(force_close_session=False)
                     except TypeError:
                         release_ocr_reader()
                 elif c.ocr_reader_releaser is not None:

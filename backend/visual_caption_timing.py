@@ -6,15 +6,16 @@ import math
 
 def refine_observations(observations, frame_count, observe, signature, stopped=lambda: False,
                         max_extra_frames=4000, max_stable_gap_frames=None, *,
-                        observe_batch=None, active_interval=None):
+                        observe_batch=None, active_interval=None, min_gap_frames=1):
     """Bisect changed intervals; retain empty observations as real boundaries.
 
     Matching endpoints keep the coarse sampling contract unless a maximum gap
     is supplied (equal endpoints can hide a short caption or empty interval).
-    Different endpoints are refined until adjacent frames, including
-    intermediate third captions. A batch observer receives the unknown frame
-    indices for one subdivision round and returns observations in index order.
-    The budget fails closed rather than labelling an unresolved interval exact.
+    Different endpoints are refined until ``gap <= min_gap_frames`` (default 1,
+    i.e. adjacent frames), including intermediate third captions. A batch observer
+    receives the unknown frame indices for one subdivision round and returns
+    observations in index order. The budget fails closed rather than labelling an
+    unresolved interval exact.
     """
     samples = dict(observations)
     extra = 0
@@ -44,6 +45,8 @@ def refine_observations(observations, frame_count, observe, signature, stopped=l
         raise ValueError("Caption refinement requires a positive frame count")
     if max_stable_gap_frames is not None and max_stable_gap_frames < 1:
         raise ValueError("Caption sampling gap must be at least one frame")
+    if min_gap_frames < 1:
+        raise ValueError("Caption minimum refinement gap must be at least one frame")
     if any(not isinstance(index, int) or not 0 <= index < frame_count for index in samples):
         raise ValueError("Caption observations lie outside the decoded frame range")
     sample((0, frame_count - 1))
@@ -61,7 +64,7 @@ def refine_observations(observations, frame_count, observe, signature, stopped=l
         children = []
         for left, right in pending:
             gap = right - left
-            if gap <= 1:
+            if gap <= min_gap_frames:
                 continue
             if at(left) == at(right):
                 if max_stable_gap_frames is None or gap <= max_stable_gap_frames:
