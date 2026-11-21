@@ -30,6 +30,16 @@ def test_generator_finds_known_variables():
     assert "V1_GPU_LOCALIZED_BLUR" in found
     assert "AUTODUB_WORKSPACE" in found
     assert found["V1_GPU_LOCALIZED_BLUR"]["defaults"] == {"True"}
+    # Read through an injected mapping (env.get) and a mapping helper (_env_bool).
+    assert "DOUYIN_COOKIE_FILE" in found
+    assert found["ENABLE_STAGE_CACHE"]["defaults"] == {"False"}
+
+
+def test_generator_skips_virtualenvs():
+    generator = _generator()
+    assert generator._skipped(("backend", "venv_py310", "Lib", "x.py"))
+    assert generator._skipped(("backend", "model_venv_separator", "x.py"))
+    assert not generator._skipped(("backend", "v1_orchestrator.py"))
 
 
 @pytest.mark.parametrize(

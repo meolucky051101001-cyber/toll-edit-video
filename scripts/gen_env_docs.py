@@ -15,8 +15,12 @@ ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "docs" / "ENV_VARS.md"
 SOURCE_DIRS = ("backend",)
 SOURCE_FILES = ("run_cloud_node.py", "telebot_video_downloader.py")
-SKIP_PARTS = {"venv", "vendor_runtime", "__pycache__", "node_modules"}
+SKIP_PARTS = {"vendor_runtime", "__pycache__", "node_modules", "site-packages"}
+SKIP_PREFIXES = ("venv", "model_venv", ".venv")
 HELPERS = {"env_flag", "env_int", "env_float", "env_str"}
+MAPPING_HELPERS = {"_env_bool", "_env_int", "_env_float"}
+# Local names the code uses for "os.environ or an injected mapping".
+ENV_MAPPING_NAMES = {"env", "environ", "environment"}
 DYNAMIC = "(tính lúc chạy)"
 NEWLINE = chr(10)
 
@@ -27,7 +31,11 @@ def _is_environ(node: ast.AST) -> bool:
         and node.attr == "environ"
         and isinstance(node.value, ast.Name)
         and node.value.id == "os"
-    )
+    ) or (isinstance(node, ast.Name) and node.id in ENV_MAPPING_NAMES)
+
+
+def _skipped(parts) -> bool:
+    return any(part in SKIP_PARTS or part.startswith(SKIP_PREFIXES) for part in parts)
 
 
 def _literal(node: ast.AST | None) -> str:
@@ -42,6 +50,15 @@ def _reads(tree: ast.AST):
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and node.args:
             func = node.func
+            if (
+                isinstance(func, ast.Name)
+                and func.id in MAPPING_HELPERS
+                and len(node.args) > 1
+                and isinstance(node.args[1], ast.Constant)
+                and isinstance(node.args[1].value, str)
+            ):
+                yield node.args[1].value, _literal(node.args[2] if len(node.args) > 2 else None)
+                continue
             name = node.args[0]
             if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
                 continue
@@ -70,7 +87,7 @@ def _reads(tree: ast.AST):
 def _python_files():
     for directory in SOURCE_DIRS:
         for path in sorted((ROOT / directory).rglob("*.py")):
-            if not SKIP_PARTS.intersection(path.relative_to(ROOT).parts):
+            if not _skipped(path.relative_to(ROOT).parts):
                 yield path
     for name in SOURCE_FILES:
         path = ROOT / name
