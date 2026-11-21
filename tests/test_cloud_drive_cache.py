@@ -656,6 +656,36 @@ def test_setup_cache_save_only_writes_after_verification(
     assert (key_dir / "runtime.tar.sha256").is_file()
 
 
+def test_cache_save_symlink_failure_emits_result_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    _use_temp_model_homes(monkeypatch, tmp_path)
+    workdir, manifest_path = _prepare_setup_workdir(tmp_path)
+    cache_root = tmp_path / "drive"
+    key_dir = cache_root / _cache_key(workdir, manifest_path)
+    key_dir.mkdir(parents=True)
+    target = tmp_path / "outside-runtime.tar"
+    target.write_bytes(b"outside")
+    try:
+        (key_dir / "runtime.tar").symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+
+    rc, result = _run_cache_save_only(
+        workdir,
+        manifest_path,
+        cache_root,
+        capsys=capsys,
+    )
+
+    assert rc == setup_env.EXIT_ENV_SETUP_FAILED
+    assert result["cache_status"] == "save_failed"
+    assert result["cache_sha256"] is None
+    assert result["error_code"] == "ENV_CACHE_SAVE_FAILED"
+
+
 def test_cache_sha256_uses_local_archive_bytes_and_rejects_drive_tampering(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

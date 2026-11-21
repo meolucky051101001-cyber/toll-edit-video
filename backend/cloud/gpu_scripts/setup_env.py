@@ -362,7 +362,7 @@ def _save_cloud_cache(
             path.is_symlink()
             for path in (key_dir, archive_path, checksum_path, archive_partial, checksum_partial)
         ):
-            return "save_failed"
+            return "save_failed", None
         archive_existed_before = archive_path.exists()
         checksum_existed_before = checksum_path.exists()
         key_dir.mkdir(parents=True, exist_ok=True)
