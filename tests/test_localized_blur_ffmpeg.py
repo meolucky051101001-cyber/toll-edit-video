@@ -36,7 +36,7 @@ def _render_lossless(tmp_path, graph, frames, width, height, fps, name, pts=None
     result = subprocess.run([shutil.which('ffmpeg'), '-v', 'error', '-nostdin', '-y',
         '-threads', '1', '-filter_threads', '1', '-f', 'rawvideo', '-pix_fmt', 'yuv420p',
         '-s', f'{width}x{height}', '-r', str(fps), '-i', str(source),
-        '-filter_script:v', str(script), '-c:v', 'rawvideo', '-threads', '1',
+        '-/filter:v', str(script), '-c:v', 'rawvideo', '-threads', '1',
         '-fps_mode', 'passthrough', '-pix_fmt', 'yuv420p', '-f', 'rawvideo', str(output)],
         capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr.decode(errors='replace')
@@ -108,7 +108,7 @@ def test_real_filter_changes_only_active_source_rectangles(tmp_path, width, heig
     command = [ffmpeg, '-v', 'error', '-nostdin', '-y', '-threads', '1',
                '-filter_threads', '1', '-f', 'rawvideo', '-pix_fmt', 'yuv420p',
                '-s', f'{width}x{height}', '-r', '5', '-i', str(source),
-               '-filter_script:v', str(script), '-frames:v', '20',
+               '-/filter:v', str(script), '-frames:v', '20',
                '-c:v', 'rawvideo', '-threads', '1', '-pix_fmt', 'yuv420p',
                '-f', 'rawvideo', str(output)]
     result = subprocess.run(command, capture_output=True, timeout=20)
@@ -149,7 +149,7 @@ def test_many_moving_regions_render_with_bounded_filter_setup(tmp_path, fps):
     result = subprocess.run([ffmpeg, '-v', 'error', '-nostdin', '-y', '-threads', '1',
         '-filter_threads', '1', '-f', 'rawvideo', '-pix_fmt', 'yuv420p',
         '-s', f'{width}x{height}', '-r', str(fps), '-i', str(source),
-        '-filter_script:v', str(script), '-frames:v', '30', '-c:v', 'rawvideo',
+        '-/filter:v', str(script), '-frames:v', '30', '-c:v', 'rawvideo',
         '-threads', '1', '-pix_fmt', 'yuv420p', '-f', 'rawvideo', str(output)],
         capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr.decode(errors='replace')

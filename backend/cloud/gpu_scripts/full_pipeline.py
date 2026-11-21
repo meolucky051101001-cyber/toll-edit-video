@@ -2843,7 +2843,7 @@ def step7_render_video(
         if len(filter_graph) > 8000:
             filter_script_path = os.path.join(os.path.dirname(os.path.abspath(output_mp4)) or ".", "_v1_render_filters.txt")
             Path(filter_script_path).write_text(filter_graph, encoding="utf-8")
-            video_filter_args = ["-filter_script:v", filter_script_path]
+            video_filter_args = ["-/filter:v", filter_script_path]
         else:
             video_filter_args = ["-vf", filter_graph]
 

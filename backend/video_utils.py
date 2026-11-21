@@ -1059,7 +1059,7 @@ def process_video(
             filter_script_path = safe_sub_path + ".filters.txt"
             with open(filter_script_path, "w", encoding="utf-8") as stream:
                 stream.write(filter_complex)
-            filter_args = ["-filter_script:v", filter_script_path]
+            filter_args = ["-/filter:v", filter_script_path]
 
         for enc_idx, enc_args in enumerate(encoders_to_try):
             encoder_name = enc_args[0]

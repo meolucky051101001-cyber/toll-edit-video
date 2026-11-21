@@ -5461,7 +5461,7 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
 
     # Dense OCR tracks can exceed the Windows command-line length limit.
     filter_path = temp_out.with_suffix(".filters.txt") if len(fc) > 8000 else None
-    filter_args = ["-filter_complex_script", str(filter_path)] if filter_path else ["-filter_complex", fc]
+    filter_args = ["-/filter_complex", str(filter_path)] if filter_path else ["-filter_complex", fc]
     # NVENC command
     cmd_nvenc = cmd_inputs + filter_args + [
         "-map", "[outv]",

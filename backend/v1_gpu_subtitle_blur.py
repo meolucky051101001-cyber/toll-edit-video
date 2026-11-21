@@ -265,7 +265,7 @@ def render_video_with_gpu_localized_blur(
                 filter_script_path = output_video_path + ".gpu_post_filters.txt"
                 with open(filter_script_path, "w", encoding="utf-8") as f_scr:
                     f_scr.write(post_blur_vf)
-                enc_cmd += ["-filter_script:v", filter_script_path]
+                enc_cmd += ["-/filter:v", filter_script_path]
             else:
                 enc_cmd += ["-vf", post_blur_vf]
 

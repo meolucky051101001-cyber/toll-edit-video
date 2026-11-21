@@ -62,6 +62,7 @@ Tool V1 quản lý các model tập trung qua `backend/v1_model_registry.py` và
 - Hệ điều hành: Windows 10/11 64-bit.
 - GPU: NVIDIA GeForce (Khuyến nghị từ RTX 3050 trở lên, tối thiểu 4GB-6GB VRAM, đã cài CUDA Driver).
 - Phần mềm: **Python 3.12.14** là runtime chính tại `backend\venv` (bản dự phòng rollback Python 3.10.11 đặt tại `backend\venv_py310`; không còn dùng đường dẫn staging `venv_py312` sau khi đã cutover). FFmpeg và ffprobe đã có trong biến môi trường `PATH`.
+- FFmpeg ≥ 7 trong PATH (khuyến nghị 8.0.x; đã kiểm tra 8.0.1 và 9.x).
 
 ### 4.2. Khởi động & Dừng dịch vụ theo đúng phạm vi (Scoped Shutdown)
 Tại thư mục gốc của Tool V1:
