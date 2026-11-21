@@ -12,7 +12,11 @@ logger = logging.getLogger(__name__)
 
 
 def parse_chat_ids(raw: str) -> frozenset[int]:
-    return frozenset(int(token) for token in re.findall(r"-?\d+", raw or ""))
+    value = raw or ""
+    tokens = re.findall(r"-?\d+", value)
+    if value.strip() and not tokens:
+        raise ValueError("TELEGRAM_ALLOWED_CHAT_IDS is set but contains no numeric chat id")
+    return frozenset(int(token) for token in tokens)
 
 
 def load_allowed_chat_ids(

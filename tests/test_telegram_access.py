@@ -12,7 +12,16 @@ from backend import telegram_access, v1_preflight
 
 def test_parse_chat_ids_extracts_every_integer_token():
     assert telegram_access.parse_chat_ids("") == frozenset()
+    assert telegram_access.parse_chat_ids(" \t\n") == frozenset()
     assert telegram_access.parse_chat_ids("1, 2;3 x -4") == frozenset({1, 2, 3, -4})
+
+
+def test_parse_chat_ids_rejects_nonempty_values_without_numeric_ids():
+    with pytest.raises(
+        ValueError,
+        match="TELEGRAM_ALLOWED_CHAT_IDS is set but contains no numeric chat id",
+    ):
+        telegram_access.parse_chat_ids("abc")
 
 
 def test_load_allowed_chat_ids_prefers_environment_then_reads_env_file(monkeypatch, tmp_path):
@@ -27,6 +36,10 @@ def test_load_allowed_chat_ids_prefers_environment_then_reads_env_file(monkeypat
     assert telegram_access.load_allowed_chat_ids(env_file=tmp_path / "missing.env") == frozenset({31, 32})
     monkeypatch.delenv("TELEGRAM_ALLOWED_CHAT_IDS")
     assert telegram_access.load_allowed_chat_ids(env_file=tmp_path / "missing.env") == frozenset()
+
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_IDS", "abc")
+    with pytest.raises(ValueError, match="contains no numeric chat id"):
+        telegram_access.load_allowed_chat_ids()
 
 
 def test_is_update_allowed_accepts_chat_or_user_ids_and_open_empty_list():
@@ -140,3 +153,14 @@ def test_preflight_reports_telegram_allowlist_configuration(monkeypatch, tmp_pat
     )
     assert fallback_check["status"] == "pass"
     assert fallback_check["message"] == "configured (1 ids)"
+
+    invalid = configure_preflight({
+        "PIPELINE_MODE": "legacy",
+        "BOT_TOKEN": "fixture",
+        "TELEGRAM_ALLOWED_CHAT_IDS": "abc",
+    })
+    invalid_check = next(
+        item for item in invalid["checks"] if item["name"] == "secret:TELEGRAM_ALLOWED_CHAT_IDS"
+    )
+    assert invalid_check["status"] == "error"
+    assert invalid_check["message"] == "TELEGRAM_ALLOWED_CHAT_IDS is set but contains no numeric chat id"

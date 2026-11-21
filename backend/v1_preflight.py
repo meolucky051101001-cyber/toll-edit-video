@@ -16,6 +16,11 @@ import tempfile
 import time
 from pathlib import Path
 
+try:
+    from .telegram_access import parse_chat_ids
+except ImportError:
+    from telegram_access import parse_chat_ids
+
 
 if isinstance(sys.stdout, io.TextIOWrapper):
     try:
@@ -129,12 +134,16 @@ def run_preflight(project_root: Path, interface: str, read_only: bool = False, t
         token = env.get("BOT_TOKEN", "").strip()
         checks.append(_check("secret:BOT_TOKEN", "pass" if token else "error", "configured" if token else "missing"))
         allowlist = env.get("TELEGRAM_ALLOWED_CHAT_IDS", os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", ""))
-        allowed_ids = {int(token) for token in re.findall(r"-?\d+", allowlist)}
-        checks.append(_check(
-            "secret:TELEGRAM_ALLOWED_CHAT_IDS",
-            "pass" if allowed_ids else "warning",
-            "configured ({} ids)".format(len(allowed_ids)) if allowed_ids else "empty; bot is open to everyone",
-        ))
+        try:
+            allowed_ids = parse_chat_ids(allowlist)
+        except ValueError as exc:
+            checks.append(_check("secret:TELEGRAM_ALLOWED_CHAT_IDS", "error", str(exc)))
+        else:
+            checks.append(_check(
+                "secret:TELEGRAM_ALLOWED_CHAT_IDS",
+                "pass" if allowed_ids else "warning",
+                "configured ({} ids)".format(len(allowed_ids)) if allowed_ids else "empty; bot is open to everyone",
+            ))
     gemini = env.get("GEMINI_API_KEY", "").strip()
     checks.append(_check("secret:GEMINI_API_KEY", "pass" if gemini else "warning", "configured" if gemini else "missing; free translation fallback remains"))
     if read_only:
