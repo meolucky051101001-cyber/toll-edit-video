@@ -1188,6 +1188,19 @@ class _JobRun:
                 or "/content/drive/MyDrive/AutoDubCloudCache"
             )
             setup_argv.extend(["--cache-dir", cache_root])
+            get_setting = getattr(self.orchestrator.store, "get_setting", None)
+            if callable(get_setting):
+                trusted_cache_key = str(
+                    get_setting("drive_cache_latest_key", "") or ""
+                ).strip()
+                if re.fullmatch(r"[0-9a-f]{64}", trusted_cache_key):
+                    trusted_sha256 = str(
+                        get_setting(f"drive_cache_sha256:{trusted_cache_key}", "") or ""
+                    ).strip().lower()
+                    if re.fullmatch(r"[0-9a-f]{64}", trusted_sha256):
+                        setup_argv.extend(
+                            ["--cache-expected-sha256", trusted_sha256]
+                        )
             if not DEFAULT_CONFIG.get("cloud_cache_save_enabled", True):
                 setup_argv.append("--no-cache-save")
         self.use_monitored_exec = isinstance(self.orchestrator.adapter, ColabProviderAdapter)
@@ -1368,6 +1381,31 @@ class _JobRun:
             self.setup_phase_seconds = dict(self.setup_phase_seconds or {})
             self.setup_phase_seconds["cache_save"] = save_phases["cache_save"]
         if save_ok and save_result.get("cache_status") == "saved":
+            cache_key = str(save_result.get("cache_key") or "").strip()
+            cache_sha256 = str(save_result.get("cache_sha256") or "").strip().lower()
+            set_setting = getattr(self.orchestrator.store, "set_setting", None)
+            if (
+                re.fullmatch(r"[0-9a-f]{64}", cache_key)
+                and re.fullmatch(r"[0-9a-f]{64}", cache_sha256)
+                and callable(set_setting)
+            ):
+                try:
+                    set_setting(f"drive_cache_sha256:{cache_key}", cache_sha256)
+                    set_setting("drive_cache_latest_key", cache_key)
+                except Exception:
+                    self.cache_status = "save_failed"
+                    logger.warning(
+                        "Không thể ghi dấu tin cậy Google Drive cache cho session %s; tiếp tục công việc.",
+                        self.session_name,
+                    )
+                    return
+            else:
+                self.cache_status = "save_failed"
+                logger.warning(
+                    "Không nhận được SHA-256 cache hợp lệ cho session %s; tiếp tục công việc.",
+                    self.session_name,
+                )
+                return
             self.cache_status = "saved"
             return
 

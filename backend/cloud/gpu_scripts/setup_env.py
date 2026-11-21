@@ -251,10 +251,16 @@ def _restore_cloud_cache(
     cache_dir: Optional[Union[str, Path]],
     cache_key: str,
     workdir: Path,
+    expected_sha256: Optional[str] = None,
 ) -> str:
     if not cache_dir:
         return "disabled"
     if re.fullmatch(r"[0-9a-f]{64}", cache_key or "") is None:
+        return "invalid"
+    expected_sha256 = str(expected_sha256 or "").strip().lower()
+    if not expected_sha256:
+        return "miss"
+    if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
         return "invalid"
 
     cache_root = _validated_cloud_cache_root(cache_dir)
@@ -262,20 +268,15 @@ def _restore_cloud_cache(
         return "invalid"
     key_dir = cache_root / cache_key
     archive_path = key_dir / "runtime.tar"
-    checksum_path = key_dir / "runtime.tar.sha256"
-    if key_dir.is_symlink() or archive_path.is_symlink() or checksum_path.is_symlink():
+    if key_dir.is_symlink() or archive_path.is_symlink():
         return "invalid"
-    if not archive_path.exists() and not checksum_path.exists():
+    if not archive_path.exists():
         return "miss"
-    if not archive_path.is_file() or not checksum_path.is_file():
+    if not archive_path.is_file():
         return "invalid"
 
     try:
-        expected_sha = checksum_path.read_text(encoding="ascii").strip()
-        if (
-            re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None
-            or _sha256_file(archive_path) != expected_sha
-        ):
+        if _sha256_file(archive_path) != expected_sha256:
             return "invalid"
 
         expected_anchors = _cloud_cache_anchor_paths(workdir)
@@ -1071,6 +1072,7 @@ def _emit_and_exit(
     manifest_sha256: Optional[str] = None,
     state_file: Optional[Path] = None,
     setup_fingerprint: Optional[str] = None,
+    cache_sha256: Optional[str] = None,
 ) -> int:
     payload: Dict[str, Any] = {
         "ok": ok,
@@ -1088,6 +1090,7 @@ def _emit_and_exit(
         "phase_seconds": dict(_SETUP_PHASES),
         "cache_status": _CURRENT_CACHE_STATUS,
         "cache_key": _CURRENT_CACHE_KEY,
+        "cache_sha256": cache_sha256,
     }
     try:
         manifest_out.parent.mkdir(parents=True, exist_ok=True)
@@ -1134,6 +1137,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--state-file", default=".autodub_env_state.json", help="Idempotency state file path")
     parser.add_argument("--pip-timeout", type=int, default=120, help="Pip network timeout in seconds")
     parser.add_argument("--cache-dir", default="", help="Optional Drive-backed cache root")
+    parser.add_argument("--cache-expected-sha256", default="", help="Locally trusted cache archive SHA-256")
     parser.add_argument("--no-cache-save", action="store_true", help="Restore cache but do not save it")
     parser.add_argument("--cache-save-only", action="store_true", help="Save the current runtime/model cache and exit")
     parser.add_argument("--verify-installed", action="store_true", help="Verify in a fresh process after installation; never reinstall")
@@ -1197,6 +1201,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.cache_save_only:
         cache_save_t0 = time.monotonic()
+        cache_sha256 = None
         if not args.cache_dir or args.no_cache_save:
             _CURRENT_CACHE_STATUS = "disabled"
             cache_save_ok = True
@@ -1210,6 +1215,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             if _CURRENT_CACHE_STATUS != "saved":
                 _CURRENT_CACHE_STATUS = "save_failed"
             cache_save_ok = _CURRENT_CACHE_STATUS == "saved"
+            if cache_save_ok:
+                try:
+                    cache_root = _validated_cloud_cache_root(args.cache_dir)
+                    if cache_root is None:
+                        raise OSError("Invalid cloud cache root.")
+                    cache_sha256 = _sha256_file(
+                        cache_root / setup_fingerprint / "runtime.tar"
+                    )
+                except OSError:
+                    _CURRENT_CACHE_STATUS = "save_failed"
+                    cache_save_ok = False
             cache_save_message = (
                 "Cloud runtime and model cache saved."
                 if cache_save_ok
@@ -1225,6 +1241,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             error_code=None if cache_save_ok else "ENV_CACHE_SAVE_FAILED",
             message=cache_save_message,
             manifest_sha256=manifest_sha,
+            cache_sha256=cache_sha256,
         )
 
     # 1. Disk Space Preflight
@@ -1288,6 +1305,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.cache_dir or None,
             cache_key,
             workdir,
+            expected_sha256=args.cache_expected_sha256,
         )
         _record_phase("cache_restore", phase_t0)
 

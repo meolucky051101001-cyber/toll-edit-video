@@ -185,6 +185,7 @@ def _run_setup_with_cache(
     cache_root: Path,
     *,
     no_cache_save: bool,
+    expected_sha256: str | None = None,
     capsys: pytest.CaptureFixture[str],
 ) -> tuple[int, dict]:
     result_path = workdir / "env_result.json"
@@ -204,6 +205,8 @@ def _run_setup_with_cache(
         "--cache-dir",
         str(cache_root),
     ]
+    if expected_sha256 is not None:
+        args.extend(["--cache-expected-sha256", expected_sha256])
     if no_cache_save:
         args.append("--no-cache-save")
     rc = setup_env.main(args)
@@ -260,10 +263,17 @@ def test_setup_cache_restores_matching_sha256(tmp_path: Path, monkeypatch: pytes
     assert setup_env._sha256_file(archive_path) == (
         cache_root / cache_key / "runtime.tar.sha256"
     ).read_text(encoding="ascii").strip()
+    trusted_sha256 = setup_env._sha256_file(archive_path)
+    (cache_root / cache_key / "runtime.tar.sha256").write_text("0" * 64, encoding="ascii")
     shutil.rmtree(runtime)
     shutil.rmtree(roformer)
 
-    assert setup_env._restore_cloud_cache(cache_root, cache_key, workdir) == "restored"
+    assert setup_env._restore_cloud_cache(
+        cache_root,
+        cache_key,
+        workdir,
+        expected_sha256=trusted_sha256,
+    ) == "restored"
     assert (runtime / "bin" / "python").read_text(encoding="utf-8") == "runtime"
     assert (roformer / "roformer.ckpt").read_bytes() == b"model"
 
@@ -293,9 +303,15 @@ def test_cache_restore_keeps_real_symlink_venv_runnable(
     cache_key = "e" * 64
 
     assert setup_env._save_cloud_cache(cache_root, cache_key, workdir) == "saved"
+    archive_path = cache_root / cache_key / "runtime.tar"
     shutil.rmtree(runtime)
 
-    assert setup_env._restore_cloud_cache(cache_root, cache_key, workdir) == "restored"
+    assert setup_env._restore_cloud_cache(
+        cache_root,
+        cache_key,
+        workdir,
+        expected_sha256=setup_env._sha256_file(archive_path),
+    ) == "restored"
     assert runtime_python.is_symlink()
     assert runtime_python.resolve() == base_interpreter
     assert (python_install / "interpreter-marker").read_text(encoding="utf-8") == "python"
@@ -322,9 +338,46 @@ def test_cache_sha_mismatch_is_invalid_and_setup_continues(
     cache_root = tmp_path / "drive"
     cache_key = _cache_key(workdir, manifest_path)
     assert setup_env._save_cloud_cache(cache_root, cache_key, workdir) == "saved"
+    archive_path = cache_root / cache_key / "runtime.tar"
     shutil.rmtree(runtime)
     checksum_path = cache_root / cache_key / "runtime.tar.sha256"
     checksum_path.write_text("0" * 64, encoding="ascii")
+
+    calls: list[str] = []
+    _patch_successful_setup(monkeypatch, calls)
+    rc, result = _run_setup_with_cache(
+        workdir,
+        manifest_path,
+        cache_root,
+        no_cache_save=True,
+        expected_sha256="0" * 64,
+        capsys=capsys,
+    )
+
+    assert rc == setup_env.EXIT_OK
+    assert calls == ["packages", "models"]
+    assert result["cache_status"] == "invalid"
+    assert result["cache_key"] == cache_key
+    assert (cache_root / cache_key / "runtime.tar").is_file()
+    assert checksum_path.read_text(encoding="ascii") == "0" * 64
+    assert not runtime.exists()
+    assert archive_path.is_file()
+
+
+def test_cache_restore_without_local_hash_skips_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    _use_temp_model_homes(monkeypatch, tmp_path)
+    workdir, manifest_path = _prepare_setup_workdir(tmp_path)
+    runtime = workdir / ".autodub_venv"
+    runtime.mkdir()
+    (runtime / "local.txt").write_text("local", encoding="utf-8")
+    cache_root = tmp_path / "drive"
+    cache_key = _cache_key(workdir, manifest_path)
+    assert setup_env._save_cloud_cache(cache_root, cache_key, workdir) == "saved"
+    shutil.rmtree(runtime)
 
     calls: list[str] = []
     _patch_successful_setup(monkeypatch, calls)
@@ -338,10 +391,8 @@ def test_cache_sha_mismatch_is_invalid_and_setup_continues(
 
     assert rc == setup_env.EXIT_OK
     assert calls == ["packages", "models"]
-    assert result["cache_status"] == "invalid"
-    assert result["cache_key"] == cache_key
-    assert (cache_root / cache_key / "runtime.tar").is_file()
-    assert checksum_path.read_text(encoding="ascii") == "0" * 64
+    assert result["cache_status"] == "miss"
+    assert not runtime.exists()
 
 
 def test_cache_restore_rejects_traversal_member(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -352,9 +403,15 @@ def test_cache_restore_rejects_traversal_member(tmp_path: Path, monkeypatch: pyt
     cache_root = tmp_path / "drive"
     traversal = anchors["runtime"].as_posix().lstrip("/") + "/../escape.txt"
     _write_cache_archive(cache_root, cache_key, anchors, [(traversal, b"unsafe")])
+    archive_path = cache_root / cache_key / "runtime.tar"
 
-    assert setup_env._restore_cloud_cache(cache_root, cache_key, workdir) == "invalid"
-    assert (cache_root / cache_key / "runtime.tar").is_file()
+    assert setup_env._restore_cloud_cache(
+        cache_root,
+        cache_key,
+        workdir,
+        expected_sha256=setup_env._sha256_file(archive_path),
+    ) == "invalid"
+    assert archive_path.is_file()
     assert not (workdir / "escape.txt").exists()
 
 
@@ -518,6 +575,7 @@ def test_setup_cache_save_only_writes_after_verification(
     assert save_rc == setup_env.EXIT_OK
     assert save_result["cache_status"] == "saved"
     assert save_result["cache_key"] == result["cache_key"]
+    assert save_result["cache_sha256"] == setup_env._sha256_file(key_dir / "runtime.tar")
     assert "cache_save" in save_result["phase_seconds"]
     assert calls == ["packages", "models"]
     assert (key_dir / "runtime.tar").is_file()
@@ -544,6 +602,8 @@ class _CacheJobAdapter:
         self.setup_cache_status = setup_cache_status
         self.pipeline_result = pipeline_result
         self.cache_save_result = cache_save_result
+        self.cache_key = "f" * 64
+        self.cache_sha256 = "a" * 64
         self.unmount_result = unmount_result
         self.unmount_calls = []
         self.active_sessions = {warm_session} if warm_session else set()
@@ -624,6 +684,8 @@ class _CacheJobAdapter:
             result = {
                 "ok": True,
                 "cache_status": "saved",
+                "cache_key": self.cache_key,
+                "cache_sha256": self.cache_sha256,
                 "phase_seconds": {"cache_save": 0.2},
             }
             return True, f"{setup_env.RESULT_PREFIX}{json.dumps(result)}"
@@ -634,6 +696,7 @@ class _CacheJobAdapter:
             result = {
                 "ok": True,
                 "cache_status": cache_status,
+                "cache_key": self.cache_key,
                 "phase_seconds": {"cache_restore": 0.1, "cache_save": 0.0},
             }
             return True, f"{setup_env.RESULT_PREFIX}{json.dumps(result)}"
@@ -669,6 +732,7 @@ def _run_cache_job(
     warm_keepalive_seconds: int = 0,
     unmount_result: tuple[bool, str] = (True, "unmounted"),
     expected_job_success: bool = True,
+    trusted_cache_sha256: str | None = None,
 ):
     output_dir = tmp_path / "deliverables"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -690,6 +754,9 @@ def _run_cache_job(
     video = tmp_path / "input.mp4"
     video.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42source")
     store = CloudJobStore(db_path=tmp_path / "jobs.db", rollout_controlled=False)
+    if trusted_cache_sha256 is not None:
+        store.set_setting(f"drive_cache_sha256:{'f' * 64}", trusted_cache_sha256)
+        store.set_setting("drive_cache_latest_key", "f" * 64)
     adapter = _CacheJobAdapter(
         mount_result,
         warm_session=warm_session,
@@ -698,6 +765,7 @@ def _run_cache_job(
         cache_save_result=cache_save_result,
         unmount_result=unmount_result,
     )
+    adapter.store = store
     if warm_session:
         store.park_warm_session(
             warm_session,
@@ -762,9 +830,32 @@ def test_orchestrator_mounts_drive_and_passes_cache_arguments(
     assert job.output_manifest["cache_backend"] == "gdrive"
     assert job.output_manifest["cache_mounted"] is True
     assert job.output_manifest["cache_status"] == "saved"
+    assert adapter.store.get_setting("drive_cache_latest_key") == adapter.cache_key
+    assert adapter.store.get_setting(
+        f"drive_cache_sha256:{adapter.cache_key}"
+    ) == adapter.cache_sha256
     assert job.output_manifest["setup_phase_seconds"]["cache_restore"] == 0.1
     assert job.output_manifest["setup_phase_seconds"]["cache_save"] == 0.2
     assert "cache_save" in job.output_manifest["stage_timings_seconds"]
+
+
+def test_orchestrator_passes_locally_trusted_cache_sha256(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    trusted_sha256 = "b" * 64
+    adapter, job = _run_cache_job(
+        tmp_path,
+        monkeypatch,
+        (True, "mounted"),
+        setup_cache_status="restored",
+        trusted_cache_sha256=trusted_sha256,
+    )
+
+    assert adapter.setup_argv is not None
+    expected_index = adapter.setup_argv.index("--cache-expected-sha256") + 1
+    assert adapter.setup_argv[expected_index] == trusted_sha256
+    assert job.state == "completed"
 
 
 @pytest.mark.parametrize(
