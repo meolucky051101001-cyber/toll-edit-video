@@ -379,42 +379,13 @@ def redact_secrets(text: Optional[str], extra_secrets: Iterable[str] = ()) -> st
 
 def resolve_local_control_token() -> str:
     """
-    Resolve or initialize the shared local control token using the same search order as backend/main.py.
+    Resolve the shared local control token using the same search order as backend/main.py.
     """
-    env_token = os.getenv("AUTODUB_LOCAL_TOKEN", "").strip()
-    if env_token:
-        return env_token
-
-    workspace_root = Path(
-        os.getenv(
-            "AUTODUB_WORKSPACE",
-            str(BACKEND_DIR.parent / "workspace"),
-        )
-    )
-    candidate_paths = [
-        workspace_root / "bot_system" / ".dashboard_control_token",
-        workspace_root / ".dashboard_control_token",
-        BACKEND_DIR.parent / "workspace_backup_safety" / ".dashboard_control_token",
-        BACKEND_DIR / ".dashboard_control_token",
-    ]
-    for path_item in candidate_paths:
-        try:
-            if path_item.is_file():
-                tok = path_item.read_text(encoding="utf-8").strip()
-                if len(tok) >= 16:
-                    return tok
-        except Exception:
-            continue
-
-    new_token = secrets.token_urlsafe(32)
-    for path_item in candidate_paths[:2]:
-        try:
-            path_item.parent.mkdir(parents=True, exist_ok=True)
-            path_item.write_text(new_token, encoding="utf-8")
-            break
-        except Exception:
-            continue
-    return new_token
+    try:
+        from ..control_token import load_or_create_control_token
+    except ImportError:
+        from control_token import load_or_create_control_token
+    return load_or_create_control_token(WORKSPACE_DIR)
 
 
 def is_valid_loopback_host(host_header: str) -> bool:

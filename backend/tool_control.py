@@ -138,17 +138,15 @@ def launch(key, service):
                      creationflags=subprocess.CREATE_NO_WINDOW)
 
 def _get_dashboard_token(key='v1'):
-    ws = os.getenv("AUTODUB_WORKSPACE")
-    if ws and key == 'v1':
-        token_file = Path(ws) / ".dashboard_control_token"
-        try:
-            if token_file.is_file():
-                return token_file.read_text(encoding="utf-8").strip()
-        except Exception as _phase6_exc:
-            logger.debug('Suppressed error in tool_control._get_dashboard_token (token_file.is_file): %s', type(_phase6_exc).__name__, exc_info=False)
     root = ROOTS.get(key)
     if not root:
         return ""
+    if key == "v1":
+        from control_token import read_control_token
+        workspace_root = Path(
+            os.getenv("AUTODUB_WORKSPACE") or root.parent / "workspace"
+        )
+        return read_control_token(workspace_root)
     token_file = root.parent / "workspace" / ".dashboard_control_token"
     try:
         if token_file.is_file():
@@ -1461,5 +1459,4 @@ if __name__ == '__main__':
     finally:
         with open(log_path, "a", encoding="utf-8") as lf:
             lf.write(f"Server PID {os.getpid()} exiting.\n")
-
 

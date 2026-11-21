@@ -1032,13 +1032,11 @@ def _payload_video_version(payload: Dict[str, Any], job_dir: Path, stem: str) ->
 
 def get_current_control_token() -> str:
     """Lấy token xác thực từ file workspace để bypass xác thực cục bộ."""
-    token_path = WORKSPACE / ".dashboard_control_token"
-    if token_path.is_file():
-        try:
-            return token_path.read_text(encoding="utf-8").strip()
-        except Exception as _phase6_exc:
-            logger.debug('Suppressed error in workflow_api.get_current_control_token (optional operation): %s', type(_phase6_exc).__name__, exc_info=False)
-    return ""
+    try:
+        from .control_token import read_control_token
+    except ImportError:
+        from control_token import read_control_token
+    return read_control_token(WORKSPACE)
 
 
 # ===== ROUTES =====

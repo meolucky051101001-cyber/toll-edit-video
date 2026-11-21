@@ -144,22 +144,11 @@ def format_script_preview(script: Dict[str, Any], engine: str, voice_nm: str) ->
 
 # ===== HTTP (chạy trong thread, không chặn event loop) =====
 def _control_token() -> str:
-    token = os.getenv("AUTODUB_LOCAL_TOKEN", "").strip()
-    if token:
-        return token
-    root = Path(__file__).resolve().parent.parent
-    for token_path in (
-        root / "workspace" / "bot_system" / ".dashboard_control_token",
-        root / "workspace" / ".dashboard_control_token",
-        root / "workspace_backup_safety" / ".dashboard_control_token",
-        Path(__file__).resolve().parent / ".dashboard_control_token",
-    ):
-        if token_path.is_file():
-            try:
-                return token_path.read_text(encoding="utf-8").strip()
-            except OSError:
-                pass
-    return ""
+    try:
+        from .control_token import read_control_token
+    except ImportError:
+        from control_token import read_control_token
+    return read_control_token()
 
 
 def _api_headers() -> Dict[str, str]:
