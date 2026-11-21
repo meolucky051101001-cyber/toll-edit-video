@@ -168,6 +168,115 @@ def test_provider_rate_ignored_when_other_assignments_active(tmp_path: Path):
     assert ledger[0]["measurement_source"] == CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value
 
 
+def test_provider_rate_is_not_adopted_during_provisioning(tmp_path: Path):
+    store = CloudJobStore(db_path=tmp_path / "jobs.db", rollout_controlled=False)
+    store.set_cu_budget_daily(1.0)
+    video = _make_sample_video(tmp_path)
+    job = store.enqueue(str(video), video_name=video.name, gpu_type="T4", cu_estimated=0.4, cu_buffer=0.04)
+    claimed = store.claim_job(job.job_id, owner_id="w-provisioning-rate")
+    assert claimed is not None
+
+    class ProvisioningAdapter:
+        created = False
+
+        def get_usage(self):
+            return {
+                "ok": True,
+                "balance": 100.0,
+                "usage_rate": 360000.0,
+                "active_assignments": 1 if not self.created else 2,
+            }
+
+        def create_session(self, session_name, gpu="T4", cancel_check=None):
+            deadline = time.monotonic() + 0.08
+            while time.monotonic() < deadline:
+                if cancel_check and cancel_check():
+                    return False, "aborted"
+                time.sleep(0.005)
+            self.created = True
+            return True, "created"
+
+        def upload_file(self, session_name, local_path, remote_filename=None):
+            return True, "uploaded"
+
+        def exec_argv(self, session_name, argv, *, cwd="/content", env_vars=None, timeout=None):
+            return False, "remote failed"
+
+        def verify_session_stopped(self, session_name):
+            return {"verified_stopped": True, "cleanup_status": "verified", "attempts": 1, "error": None}
+
+    with patch.dict(DEFAULT_CONFIG, {"runtime_budget_check_interval_seconds": 0.01}), patch.dict(
+        GPU_CU_RATES, {"T4": 0.0001}
+    ):
+        orchestrator = CloudOrchestrator(
+            store=store,
+            adapter=ProvisioningAdapter(),
+            allowed_roots=[tmp_path],
+        )
+        assert orchestrator.process_job(claimed, owner_id="w-provisioning-rate") is False
+
+    finished = store.get_job(claimed.job_id)
+    assert finished.error_code != CloudErrorCode.BUDGET_EXCEEDED.value
+    ledger = store.list_cost_ledger(job_id=claimed.job_id)
+    assert ledger[0]["measurement_source"] == CloudCostMeasurementSource.RUNTIME_RATE_ESTIMATE.value
+
+
+def test_provider_rate_falls_back_to_gpu_rate_when_assignments_change(tmp_path: Path):
+    store = CloudJobStore(db_path=tmp_path / "jobs.db", rollout_controlled=False)
+    store.set_cu_budget_daily(10000.0)
+    video = _make_sample_video(tmp_path)
+    job = store.enqueue(str(video), video_name=video.name, gpu_type="T4", cu_estimated=0.4, cu_buffer=0.04)
+    claimed = store.claim_job(job.job_id, owner_id="w-rate-fallback")
+    assert claimed is not None
+
+    class ChangingAssignmentsAdapter:
+        created = False
+        post_create_usage_calls = 0
+
+        def get_usage(self):
+            if not self.created:
+                assignments = 2
+            else:
+                self.post_create_usage_calls += 1
+                assignments = 1 if self.post_create_usage_calls == 1 else 2
+            return {
+                "ok": True,
+                "balance": 100.0,
+                "usage_rate": 3600000.0,
+                "active_assignments": assignments,
+            }
+
+        def create_session(self, session_name, gpu="T4"):
+            time.sleep(0.15)
+            self.created = True
+            return True, "created"
+
+        def upload_file(self, session_name, local_path, remote_filename=None):
+            time.sleep(0.03)
+            return True, "uploaded"
+
+        def exec_argv(self, session_name, argv, *, cwd="/content", env_vars=None, timeout=None):
+            return False, "remote failed"
+
+        def verify_session_stopped(self, session_name):
+            return {"verified_stopped": True, "cleanup_status": "verified", "attempts": 1, "error": None}
+
+    adapter = ChangingAssignmentsAdapter()
+    with patch.dict(DEFAULT_CONFIG, {"runtime_budget_check_interval_seconds": 0.01}), patch.dict(
+        GPU_CU_RATES, {"T4": 0.0001}
+    ):
+        orchestrator = CloudOrchestrator(store=store, adapter=adapter, allowed_roots=[tmp_path])
+        assert orchestrator.process_job(claimed, owner_id="w-rate-fallback") is False
+
+    ledger = store.list_cost_ledger(job_id=claimed.job_id)
+    job_ledger = ledger[0]
+    elapsed = job_ledger["usage_ended_at"] - job_ledger["usage_started_at"]
+    provider_rate_estimate_for_full_run = elapsed / 3600.0 * 3600000.0
+    assert adapter.post_create_usage_calls >= 2
+    assert job_ledger["measurement_source"] == CloudCostMeasurementSource.PROVIDER_RATE_ESTIMATE.value
+    assert job_ledger["cu_observed"] < provider_rate_estimate_for_full_run * 0.5
+
+
 def test_full_pipeline_step_timings_accumulate():
     full_pipeline._STEP_TIMINGS.clear()
     full_pipeline._STEP_TIMING_STATE.update({"key": None, "started": None})

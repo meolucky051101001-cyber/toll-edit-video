@@ -1282,6 +1282,7 @@ class CloudOrchestrator:
         cu_accrued = 0.0
         cu_accrual_ts: Optional[float] = None
         provider_rate_used = False
+        provider_rate_eligible = False
         setup_phase_seconds: Dict[str, Any] = {}
         stage_timings: Dict[str, float] = {}
         stage_state: Dict[str, Any] = {"name": None, "started": None}
@@ -1305,16 +1306,29 @@ class CloudOrchestrator:
 
         def _adopt_provider_rate(snap: Dict[str, Any]) -> None:
             nonlocal cu_accrued, cu_accrual_ts, rate_per_hour, provider_rate_used
-            rate = snap.get("usage_rate")
-            if not session_may_exist or runtime_start_time is None or runtime_end_time is not None:
-                return
-            if rate is None or float(rate) <= 0.0 or snap.get("active_assignments") != 1:
+            if (
+                not provider_rate_eligible
+                or not session_may_exist
+                or runtime_start_time is None
+                or runtime_end_time is not None
+            ):
                 return
             now_ts = time.time()
-            cu_accrued = _raw_elapsed_cu(now_ts)
-            cu_accrual_ts = now_ts
-            rate_per_hour = float(rate)
-            provider_rate_used = True
+            try:
+                candidate_rate = float(snap.get("usage_rate"))
+            except (TypeError, ValueError):
+                candidate_rate = 0.0
+            rate_is_valid = math.isfinite(candidate_rate) and candidate_rate > 0.0
+            if snap.get("active_assignments") == 1 and rate_is_valid:
+                cu_accrued = _raw_elapsed_cu(now_ts)
+                cu_accrual_ts = now_ts
+                rate_per_hour = candidate_rate
+                provider_rate_used = True
+                return
+            if provider_rate_used:
+                cu_accrued = _raw_elapsed_cu(now_ts)
+                cu_accrual_ts = now_ts
+                rate_per_hour = GPU_CU_RATES.get(gpu_type, 1.15)
 
         def _cu_measurement_source() -> str:
             if provider_rate_used:
@@ -1630,8 +1644,6 @@ class CloudOrchestrator:
 
             session_may_exist = True
             runtime_start_time = time.time()
-            if reused_warm_session and warm_parked_at is not None and warm_parked_at <= runtime_start_time:
-                runtime_start_time = warm_parked_at
             if reused_warm_session:
                 created, msg = True, f"reused warm session {session_name}"
             else:
@@ -1677,6 +1689,7 @@ class CloudOrchestrator:
                 )
                 return False
 
+            provider_rate_eligible = True
             _mark_stage("upload")
             # 3. Upload mã nguồn và video lên VM (`uploading` đơn hướng, không lùi từ preparing)
             is_url = validated_input.kind == "url"
