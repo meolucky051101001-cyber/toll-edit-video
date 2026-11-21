@@ -745,6 +745,8 @@ def _run_cache_job(
     cache_backend: str = "gdrive",
     warm_reuse_enabled: bool = False,
     warm_keepalive_seconds: int = 0,
+    daily_budget: float | None = None,
+    seeded_spent_cu: float = 0.0,
     unmount_result: tuple[bool, str] = (True, "unmounted"),
     expected_job_success: bool = True,
     trusted_cache_sha256: str | None = None,
@@ -769,6 +771,17 @@ def _run_cache_job(
     video = tmp_path / "input.mp4"
     video.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42source")
     store = CloudJobStore(db_path=tmp_path / "jobs.db", rollout_controlled=False)
+    if daily_budget is not None:
+        store.set_cu_budget_daily(daily_budget)
+    if seeded_spent_cu > 0:
+        now = time.time()
+        store.record_warm_idle_usage(
+            "budget-seed",
+            "T4",
+            parked_at=now - 60,
+            ended_at=now,
+            hourly_rate=seeded_spent_cu * 60,
+        )
     if trusted_cache_sha256 is not None:
         store.set_setting(f"drive_cache_sha256:{'f' * 64}", trusted_cache_sha256)
         store.set_setting("drive_cache_latest_key", "f" * 64)
@@ -1094,6 +1107,37 @@ def test_orchestrator_skips_cache_save_when_runtime_budget_check_fails(
     assert job.state == "completed"
     assert job.output_manifest["cache_status"] == "save_skipped_budget"
     assert Path(job.output_manifest["result_path"]).is_file()
+
+
+@pytest.mark.parametrize(
+    ("daily_budget", "seeded_spent_cu", "expect_parked"),
+    [(0.6, 0.1, False), (10.0, 0.0, True)],
+)
+def test_orchestrator_warm_keepalive_respects_daily_cu_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    daily_budget: float,
+    seeded_spent_cu: float,
+    expect_parked: bool,
+):
+    adapter, job = _run_cache_job(
+        tmp_path,
+        monkeypatch,
+        (False, "not mounted"),
+        cache_backend="none",
+        warm_reuse_enabled=True,
+        warm_keepalive_seconds=300,
+        daily_budget=daily_budget,
+        seeded_spent_cu=seeded_spent_cu,
+    )
+
+    assert job.state == "completed"
+    assert bool(adapter.parked_warm_sessions) is expect_parked
+    if expect_parked:
+        assert adapter.active_sessions
+    else:
+        assert adapter.active_sessions == set()
+        assert adapter.store.list_warm_sessions() == []
 
 
 def test_mount_drive_hides_authorization_url_and_closes_stdin(monkeypatch: pytest.MonkeyPatch):

@@ -1666,6 +1666,7 @@ class _JobRun:
                 self.gpu_type,
                 source_job_id=self.job_id,
                 before_park=self._unmount_drive_before_warm_park if self.cache_mounted else None,
+                rate_per_hour=self.rate_per_hour,
             )
         ):
             self.parked_warm = True
@@ -2215,6 +2216,7 @@ class CloudOrchestrator:
         *,
         source_job_id: Optional[str] = None,
         before_park: Optional[Callable[[], bool]] = None,
+        rate_per_hour: Optional[float] = None,
     ) -> bool:
         if not self.enable_warm_session_reuse:
             return False
@@ -2232,6 +2234,33 @@ class CloudOrchestrator:
         ttl_s = handoff_s if waiting_next else keepalive_s
         if ttl_s <= 0:
             return False
+        get_budget_info = getattr(self.store, "get_cu_budget_info", None)
+        if callable(get_budget_info):
+            try:
+                budget_info = get_budget_info()
+                daily_limit = float(budget_info.get("budget_daily", 0.0) or 0.0)
+                used_today = float(budget_info.get("spent_today", 0.0) or 0.0)
+                reserved_today = float(budget_info.get("reserved_today", 0.0) or 0.0)
+                hourly_rate = (
+                    float(rate_per_hour)
+                    if rate_per_hour is not None
+                    else float(GPU_CU_RATES.get(gpu_norm, 1.15))
+                )
+                idle_cu = (ttl_s / 3600.0) * hourly_rate
+                if daily_limit <= 0.0 or used_today + reserved_today + idle_cu > daily_limit:
+                    logger.info(
+                        "Không giữ ấm session %s vì CU dự kiến %.4f vượt phần hạn mức ngày còn lại.",
+                        session_name,
+                        idle_cu,
+                    )
+                    return False
+            except Exception as exc:
+                logger.warning(
+                    "Không xác định được CU còn lại để giữ ấm session %s; session sẽ được thu hồi: %s",
+                    session_name,
+                    redact_secrets(str(exc)),
+                )
+                return False
         if before_park is not None and not before_park():
             return False
         if not self._sanitize_warm_workdir(session_name):

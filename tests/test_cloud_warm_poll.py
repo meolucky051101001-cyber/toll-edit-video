@@ -36,6 +36,7 @@ def test_warm_session_keepalive_is_parked_and_clamped(
     monkeypatch.setitem(DEFAULT_CONFIG, "warm_session_keepalive_seconds", keepalive_seconds)
     monkeypatch.setitem(DEFAULT_CONFIG, "warm_session_keepalive_max_seconds", maximum_seconds)
     store = CloudJobStore(db_path=tmp_path / "warm.db", rollout_controlled=False)
+    store.set_cu_budget_daily(10.0)
     orchestrator = CloudOrchestrator(
         store=store,
         adapter=_WarmAdapter(),
@@ -48,6 +49,27 @@ def test_warm_session_keepalive_is_parked_and_clamped(
 
     orchestrator._cancel_warm_timer("warm-session")
     store.remove_warm_session("warm-session")
+
+
+def test_warm_session_keepalive_is_skipped_when_daily_cu_is_near_limit(tmp_path: Path):
+    store = CloudJobStore(db_path=tmp_path / "warm-budget.db", rollout_controlled=False)
+    store.set_cu_budget_daily(1.05)
+    now = time.time()
+    store.record_warm_idle_usage(
+        "already-spent",
+        "T4",
+        parked_at=now - 60,
+        ended_at=now,
+        hourly_rate=60.0,
+    )
+    orchestrator = CloudOrchestrator(
+        store=store,
+        adapter=_WarmAdapter(),
+        enable_warm_session_reuse=True,
+    )
+
+    assert orchestrator._park_warm_session_on_success("warm-session", "T4") is False
+    assert store.list_warm_sessions() == []
 
 
 def test_list_warm_sessions_includes_idle_seconds_and_cu_estimate(tmp_path: Path):
