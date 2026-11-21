@@ -255,7 +255,8 @@ class TestDot2CoverBlurDelogoAndPixelQC(unittest.TestCase):
             with patch.object(v1_media_streams, "probe_main_video", return_value=MainVideo(0, 720, 1280, 30.0, 4.0, 1, 1, False)), \
                  patch.object(v1_media_streams, "validate_video_output"), \
                  patch.object(video_utils, "run_batch_subprocess", side_effect=fake_run), \
-                 patch.object(canvas_settings, "get_canvas_settings", return_value={"sub_cover_style": "localized_blur", "delogo_mode": "smart", "watermark_enabled": False}):
+                 patch.object(canvas_settings, "get_canvas_settings", return_value={"sub_cover_style": "localized_blur", "delogo_mode": "smart", "watermark_enabled": False}), \
+                 patch.dict("os.environ", {"V1_GPU_LOCALIZED_BLUR": "0"}):
                 ok = video_utils.process_video(
                     str(in_vid),
                     str(in_ass),

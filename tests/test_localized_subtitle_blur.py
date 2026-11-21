@@ -335,7 +335,8 @@ def test_renderer_never_guesses_wide_band_without_metadata(tmp_path):
     for file in (source, audio, ass):
         file.write_text("input", encoding="utf-8")
     with patch.object(v1_media_streams, "probe_main_video", return_value=MainVideo(0,720,1280,30,4,1,1,False)), \
-         patch.object(video_utils, "run_batch_subprocess") as run:
+         patch.object(video_utils, "run_batch_subprocess") as run, \
+         patch.dict("os.environ", {"V1_GPU_LOCALIZED_BLUR": "0"}):
         assert video_utils.process_video(str(source), str(ass), str(audio), str(output),
                                          subtitle_cover_style="localized_blur") is False
     run.assert_not_called()
