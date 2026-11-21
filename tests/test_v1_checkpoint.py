@@ -6,6 +6,9 @@ from unittest.mock import patch
 from backend.v1_checkpoint import Checkpoint, ManifestManager
 from backend.ai.v1_asr_isolated import extract_subtitles_isolated
 
+ASR_PYTHON = Path(__file__).resolve().parents[1] / 'backend' / 'venv' / 'Scripts' / 'python.exe'
+
+
 class CheckpointTests(unittest.TestCase):
     def test_stage_metrics_keep_json_scalars_and_scalar_dicts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -82,7 +85,7 @@ class CheckpointTests(unittest.TestCase):
             stage = manager.load_manifest('job').stages['video_rendering']
             self.assertEqual(stage['duration_s'], 20)
             self.assertEqual(stage['completed_at'], 120)
-            self.assertEqual(stage['artifacts']['temp_render']['path'], str(final))
+            self.assertEqual(Path(stage['artifacts']['temp_render']['path']).resolve(), final.resolve())
 
     def test_invalidation(self):
         with tempfile.TemporaryDirectory() as d:
@@ -104,6 +107,7 @@ class CheckpointTests(unittest.TestCase):
             cp.save(); self.assertFalse(cp.hit())
             output.write_bytes(b''); cp.save(); self.assertFalse(cp.hit())
 
+    @unittest.skipUnless(ASR_PYTHON.is_file(), 'V1 ASR virtual environment is not installed')
     def test_asr_reuse_and_audio_change(self):
         def fake_run(args, **kw):
             Path(args[-1]).write_text('1\n00:00:00,000 --> 00:00:01,000\nhello\n', encoding='utf-8')
