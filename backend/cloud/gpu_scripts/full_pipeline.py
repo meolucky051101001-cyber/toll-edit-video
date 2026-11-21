@@ -190,7 +190,7 @@ _STEP_PERCENT_MAP = {
 
 def _write_pipeline_progress(percent: int, step_num: int, total: int, message: str) -> None:
     if (
-        os.getenv("PYTEST_CURRENT_TEST")
+        os.getenv("AUTODUB_DISABLE_REPO_PROGRESS_FILE") == "1"
         and os.getenv("AUTODUB_ALLOW_TEST_PROGRESS_FILE") != "1"
         and (Path.cwd() / ".git").exists()
     ):

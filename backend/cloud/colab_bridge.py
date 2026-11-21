@@ -634,7 +634,7 @@ def exec_script(
     combined = redact_secrets(f"{stdout}\n{stderr}".strip())
     if rc == -3:
         return False, f"Tác vụ đã bị hủy bởi yêu cầu dừng. {combined}".strip() if combined else "Tác vụ đã bị hủy bởi yêu cầu dừng."
-    is_ok = (rc == 0) and ("EXEC_CMD_FAILED_WITH_CODE:" not in combined) and ("SyntaxError" not in combined)
+    is_ok = (rc == 0) and ("EXEC_CMD_FAILED_WITH_CODE:" not in combined)
     return is_ok, combined
 
 
@@ -791,7 +791,7 @@ def exec_argv(
         combined = redact_secrets(f"{stdout}\n{stderr}".strip(), extra_secrets=secret_values)
         if rc == -3:
             return False, f"Tác vụ đã bị hủy bởi yêu cầu dừng. {combined}".strip() if combined else "Tác vụ đã bị hủy bởi yêu cầu dừng."
-        is_ok = (rc == 0) and ("EXEC_CMD_FAILED_WITH_CODE:" not in combined) and ("SyntaxError" not in combined)
+        is_ok = (rc == 0) and ("EXEC_CMD_FAILED_WITH_CODE:" not in combined)
         return is_ok, combined
 
     finally:
@@ -1313,7 +1313,6 @@ def run_argv_monitored(
                 is_ok = (
                     (remote_rc == 0)
                     and ("EXEC_CMD_FAILED_WITH_CODE:" not in final_log)
-                    and ("SyntaxError" not in final_log)
                 )
                 return is_ok, final_log
 

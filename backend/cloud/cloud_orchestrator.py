@@ -171,6 +171,20 @@ def _resolve_gemini_key_and_secrets() -> Tuple[str, Tuple[str, ...]]:
     return chosen, tuple(all_keys)
 
 
+def _build_gemini_env_vars(gemini_key: str, extra_secrets: Sequence[str]) -> Optional[Dict[str, str]]:
+    if not gemini_key:
+        return None
+    env_vars = {"GEMINI_API_KEY": gemini_key}
+    max_keys = max(0, int(DEFAULT_CONFIG.get("cloud_gemini_keys_max", 2)))
+    if max_keys > 1:
+        remote_keys = [gemini_key]
+        remote_keys.extend(key for key in extra_secrets if key and key not in remote_keys)
+        remote_keys = remote_keys[:max_keys]
+        if len(remote_keys) > 1:
+            env_vars["GEMINI_API_KEYS"] = ",".join(remote_keys)
+    return env_vars
+
+
 def _file_sha256(path_obj: Path) -> str:
     h = hashlib.sha256()
     with open(path_obj, "rb") as f:
@@ -352,7 +366,7 @@ class CloudOrchestrator:
         if enable_warm_session_reuse is None:
             self.enable_warm_session_reuse = (
                 isinstance(self.adapter, ColabProviderAdapter)
-                and not bool(os.getenv("PYTEST_CURRENT_TEST"))
+                and bool(DEFAULT_CONFIG.get("warm_session_reuse_enabled", True))
             )
         else:
             self.enable_warm_session_reuse = bool(enable_warm_session_reuse)
@@ -2036,11 +2050,7 @@ class CloudOrchestrator:
             job_opts = getattr(job, "options", None) or {}
             if isinstance(job_opts, dict) and job_opts.get("allow_no_speech"):
                 pipeline_argv.append("--allow-no-speech")
-            env_vars: Optional[Dict[str, str]] = None
-            if gemini_key:
-                env_vars = {"GEMINI_API_KEY": gemini_key}
-                if len(extra_secrets) > 1:
-                    env_vars["GEMINI_API_KEYS"] = ",".join(extra_secrets)
+            env_vars = _build_gemini_env_vars(gemini_key, extra_secrets)
 
             highest_pipe_pct = [55]
 
@@ -2181,7 +2191,7 @@ class CloudOrchestrator:
 
             cloud_out_override = os.getenv("AUTODUB_CLOUD_OUTPUT_DIR", "").strip()
             out_env_raw = os.getenv("AUTODUB_OUTPUT_DIR", "").strip()
-            pytest_default_cloud_leak = bool(os.getenv("PYTEST_CURRENT_TEST")) and (
+            pytest_default_cloud_leak = os.getenv("AUTODUB_CLOUD_TEST_OUTPUT_GUARD") == "1" and (
                 not cloud_out_override
                 or os.path.normcase(cloud_out_override.rstrip("\\/")) == os.path.normcase(r"D:\ToolV1_Cloud")
             )
