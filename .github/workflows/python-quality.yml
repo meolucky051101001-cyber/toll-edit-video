@@ -104,6 +104,7 @@ jobs:
           tests/test_studio_audio_sub_tts.py
           tests/test_refactor_architecture_20261118.py
           tests/test_localized_blur_stability_20261118.py
+          tests/test_telegram_access.py
 
   v1-node-checks:
     name: Node Frontend & Dashboard Wrapper Checks

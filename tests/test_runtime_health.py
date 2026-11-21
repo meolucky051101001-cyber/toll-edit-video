@@ -14,7 +14,7 @@ from scripts import verify_runtime_health as health
 from backend import v1_preflight as preflight
 
 
-def report(count=25, ready=True):
+def report(count=26, ready=True):
     return {"ready": ready, "checks": [{"name": str(i), "status": "pass"} for i in range(count)]}
 
 
@@ -43,12 +43,14 @@ class RuntimeHealthTests(unittest.TestCase):
         self.assertIn("active=false", results[3]["detail"])
         self.assertIn('"used_gb": 2', results[3]["detail"])
 
-    def test_wrong_python_broken_pip_and_incomplete_preflight_fail(self):
+    def test_wrong_python_broken_pip_and_non_pass_preflight_fail(self):
         def process(command, root, deadline):
             if "pip" in command:
                 return 1, "SENSITIVE dependency output"
             if "--interface" in command:
-                return 0, json.dumps(report(24))
+                result = report()
+                result["checks"][0]["status"] = "warning"
+                return 0, json.dumps(result)
             return 0, "[3, 10, 11]"
 
         with patch.object(health, "_process", side_effect=process), \
@@ -56,6 +58,18 @@ class RuntimeHealthTests(unittest.TestCase):
             results = health.verify(Path("."), Path(sys.executable))
         self.assertFalse(any(item["ok"] for item in results[:3]))
         self.assertNotIn("SENSITIVE", str(results))
+
+    def test_preflight_requires_nonempty_all_pass_checks(self):
+        def is_ok(result):
+            with patch.object(health, "_process", return_value=(0, json.dumps(result))):
+                return health._preflight(Path("."), Path(sys.executable), time.monotonic() + 2)[0]
+
+        self.assertTrue(is_ok(report()))
+
+        non_pass = report(count=1)
+        non_pass["checks"][0]["status"] = "warning"
+        self.assertFalse(is_ok(non_pass))
+        self.assertFalse(is_ok(report(count=0)))
 
     def test_active_job_is_reported_as_healthy_and_metrics_are_filtered(self):
         with patch.object(health, "_get_json", return_value={
@@ -125,10 +139,11 @@ class ReadOnlyPreflightTests(unittest.TestCase):
                 self.assertEqual(preflight._directory_check("missing", root / "absent", read_only=True)["status"], "error")
             self.assertFalse((root / "absent").exists())
 
-    def test_read_only_preflight_still_requires_all_25_checks(self):
+    def test_read_only_preflight_still_requires_all_checks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            env = {"PIPELINE_MODE": "legacy", "BOT_TOKEN": "fixture", "GEMINI_API_KEY": "fixture",
+            env = {"PIPELINE_MODE": "legacy", "BOT_TOKEN": "fixture", "TELEGRAM_ALLOWED_CHAT_IDS": "1",
+                   "GEMINI_API_KEY": "fixture",
                    "AUTODUB_WORKSPACE": str(root), "AUTODUB_OUTPUT_DIR": str(root)}
             with patch.object(preflight, "_load_env", return_value=env), \
                  patch.object(preflight.importlib.util, "find_spec", return_value=object()), \
@@ -138,7 +153,7 @@ class ReadOnlyPreflightTests(unittest.TestCase):
                  patch.object(preflight.tempfile, "mkstemp", side_effect=AssertionError("write")):
                 result = preflight.run_preflight(root, "all", read_only=True)
             self.assertIs(result["ready"], True)
-            self.assertEqual(len(result["checks"]), 25)
+            self.assertEqual(len(result["checks"]), 26)
             self.assertTrue(all(check["status"] == "pass" for check in result["checks"]))
 
     def test_ocr_timeout_is_incomplete_in_bounded_mode_and_fallback_otherwise(self):
