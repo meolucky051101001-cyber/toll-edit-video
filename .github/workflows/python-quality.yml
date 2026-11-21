@@ -73,6 +73,7 @@ jobs:
           tests/test_phase7_orchestrator_golden.py
           tests/test_v1_speech_translation_repair.py::BatchTests::test_invalid_condensation_never_cached
           tests/test_cloud_review_regressions.py
+          tests/test_cloud_review_findings.py
           tests/test_cloud_caption_geometry.py
           tests/test_cloud_caption_reviewer.py
           tests/test_cloud_content_repair.py
