@@ -408,6 +408,9 @@ class _JobRun:
     output_manifest: Dict[str, Any] = field(default_factory=dict)
     cu_spent: float = 0.0
     elapsed_sec: float = 0.0
+    cache_backend: str = "none"
+    cache_mounted: bool = False
+    cache_status: str = "disabled"
 
     @classmethod
     def from_job(
@@ -1070,6 +1073,44 @@ class _JobRun:
                 f"Giải nén mã nguồn trên Colab thất bại: {tar_msg}",
             )
 
+        self.cache_backend = str(DEFAULT_CONFIG.get("cloud_cache_backend", "none")).strip().lower()
+        if self.cache_backend not in {"none", "gdrive"}:
+            self.cache_backend = "none"
+        self.cache_mounted = False
+        self.cache_status = "disabled"
+        if self.cache_backend == "gdrive" and not self.reused_warm_session:
+            mount_drive = getattr(self.orchestrator.adapter, "mount_drive", None)
+            if callable(mount_drive):
+                try:
+                    mount_ok, mount_msg = mount_drive(
+                        self.session_name,
+                        "/content/drive",
+                        timeout=int(DEFAULT_CONFIG.get("cloud_drive_mount_timeout_seconds", 180) or 180),
+                        cancel_check=self._cancel_probe,
+                    )
+                except Exception:
+                    mount_ok, mount_msg = False, ""
+                if mount_ok:
+                    self.cache_mounted = True
+                else:
+                    reason = (
+                        "cần cấp quyền Google Drive một lần trong WSL"
+                        if "authorization needed" in str(mount_msg).lower()
+                        or "ủy quyền" in str(mount_msg).lower()
+                        else "gắn Drive thất bại"
+                    )
+                    logger.warning(
+                        "Không gắn được Google Drive cho session %s (%s); tiếp tục setup không cache.",
+                        self.session_name,
+                        reason,
+                    )
+            else:
+                logger.warning(
+                    "Adapter không hỗ trợ gắn Google Drive cho session %s; tiếp tục setup không cache.",
+                    self.session_name,
+                )
+            self._raise_if_aborted()
+
         setup_timeout = int(DEFAULT_CONFIG.get("setup_timeout_seconds", 600) or 600)
         min_disk_mb = int(DEFAULT_CONFIG.get("min_remote_disk_mb", 4096) or 4096)
         setup_argv = [
@@ -1084,6 +1125,17 @@ class _JobRun:
             "--pip-timeout",
             str(min(300, setup_timeout)),
         ]
+        if self.cache_mounted:
+            cache_root = str(
+                DEFAULT_CONFIG.get(
+                    "cloud_cache_drive_root",
+                    "/content/drive/MyDrive/AutoDubCloudCache",
+                )
+                or "/content/drive/MyDrive/AutoDubCloudCache"
+            )
+            setup_argv.extend(["--cache-dir", cache_root])
+            if not DEFAULT_CONFIG.get("cloud_cache_save_enabled", True):
+                setup_argv.append("--no-cache-save")
         self.use_monitored_exec = isinstance(self.orchestrator.adapter, ColabProviderAdapter)
         if self.use_monitored_exec:
             env_ok, env_msg = self.orchestrator.adapter.run_argv_monitored(
@@ -1106,7 +1158,20 @@ class _JobRun:
         self._raise_if_aborted()
         safe_env_msg = redact_secrets(env_msg, extra_secrets=self.extra_secrets)
         logger.info("Env setup output:\n%s", safe_env_msg)
-        self.setup_phase_seconds = (_parse_setup_env_result(safe_env_msg) or {}).get("phase_seconds") or {}
+        setup_result = _parse_setup_env_result(safe_env_msg) or {}
+        self.setup_phase_seconds = setup_result.get("phase_seconds") or {}
+        reported_cache_status = setup_result.get("cache_status")
+        if reported_cache_status in {
+            "restored",
+            "saved",
+            "miss",
+            "invalid",
+            "disabled",
+            "save_failed",
+        }:
+            self.cache_status = reported_cache_status
+        else:
+            self.cache_status = "miss" if self.cache_mounted else "disabled"
         if not env_ok:
             setup_err_code = _extract_setup_error_code(safe_env_msg)
             setup_result = _parse_setup_env_result(safe_env_msg) or {}
@@ -1341,6 +1406,9 @@ class _JobRun:
                 "qc_report": self.qc_res["qc_report"],
                 "remote_metadata": remote_meta,
                 "setup_phase_seconds": self.setup_phase_seconds,
+                "cache_backend": self.cache_backend,
+                "cache_mounted": self.cache_mounted,
+                "cache_status": self.cache_status,
                 "pipeline_step_seconds": remote_meta.get("step_timings_seconds") or {},
             }
             (self.attempt_res_dir / "output_manifest.json").write_text(

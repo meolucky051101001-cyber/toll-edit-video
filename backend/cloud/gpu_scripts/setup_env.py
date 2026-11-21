@@ -9,17 +9,24 @@ Không bao giờ được tự chạy để sửa backend/venv cục bộ trên 
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import importlib
 import importlib.metadata
+import inspect
+import io
 import json
 import os
+import posixpath
+import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import PurePosixPath
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 
 EXIT_OK = 0
@@ -33,6 +40,10 @@ EXIT_UPLOAD_VERIFICATION_FAILED = 15
 
 RESULT_PREFIX = "SETUP_ENV_RESULT_JSON:"
 _ORIGINAL_SUBPROCESS_RUN = subprocess.run
+_CACHE_INDEX_MEMBER = "autodub_cache_index.json"
+_CACHE_RESTORE_DONE_ENV = "AUTODUB_INTERNAL_CACHE_RESTORE_DONE"
+_CACHE_STATUS_ENV = "AUTODUB_INTERNAL_CACHE_STATUS"
+_CACHE_KEY_ENV = "AUTODUB_INTERNAL_CACHE_KEY"
 
 _NETWORK_ERROR_MARKERS = (
     "newconnectionerror",
@@ -61,6 +72,309 @@ def _sha256_file(path_obj: Path) -> str:
                 break
             h.update(chunk)
     return h.hexdigest()
+
+
+def _cloud_cache_anchor_paths(workdir: Path) -> Dict[str, Path]:
+    home = Path.home()
+    cache_home = Path(os.getenv("XDG_CACHE_HOME") or (home / ".cache")).expanduser()
+    easyocr_home = Path(os.getenv("EASYOCR_MODULE_PATH") or (home / ".EasyOCR")).expanduser()
+    torch_home = Path(os.getenv("TORCH_HOME") or (cache_home / "torch")).expanduser()
+    huggingface_home_raw = (
+        os.getenv("HF_HUB_CACHE")
+        or os.getenv("HUGGINGFACE_HUB_CACHE")
+    )
+    if not huggingface_home_raw:
+        huggingface_home_raw = (
+            Path(os.getenv("HF_HOME")).expanduser() / "hub"
+            if os.getenv("HF_HOME")
+            else home / ".cache" / "huggingface" / "hub"
+        )
+    huggingface_home = Path(huggingface_home_raw).expanduser()
+    return {
+        "runtime": (workdir / ".autodub_venv").absolute(),
+        "roformer": (workdir / "model_cache").absolute(),
+        "whisper": (home / ".cache" / "whisper").absolute(),
+        "demucs": (torch_home / "hub" / "checkpoints").absolute(),
+        "easyocr": (easyocr_home / "model").absolute(),
+        "huggingface": huggingface_home.absolute(),
+    }
+
+
+def _cache_member_anchor(
+    member_name: str,
+    anchor_paths: Dict[str, Path],
+) -> Tuple[str, Path]:
+    normalized_name = member_name.rstrip("/")
+    matching = [
+        (name, path)
+        for name, path in anchor_paths.items()
+        if normalized_name == path.as_posix().lstrip("/")
+        or normalized_name.startswith(path.as_posix().lstrip("/") + "/")
+    ]
+    if not matching:
+        raise ValueError("Cache archive contains a path outside the configured cache anchors.")
+    return max(matching, key=lambda item: len(item[1].parts))
+
+
+def _cache_target_has_symlink_component(path: Path) -> bool:
+    current = Path(path.anchor)
+    for component in path.parts[1:]:
+        current = current / component
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _validate_cache_archive_members(
+    members: List[tarfile.TarInfo],
+    anchor_paths: Dict[str, Path],
+    *,
+    allow_external_runtime_python: bool,
+) -> List[tarfile.TarInfo]:
+    seen_names: Set[str] = set()
+    blocked_parent_names: Set[str] = {
+        member.name.rstrip("/")
+        for member in members
+        if not member.isdir()
+    }
+    extract_members: List[tarfile.TarInfo] = []
+    index_count = 0
+
+    for member in members:
+        if member.name == _CACHE_INDEX_MEMBER:
+            index_count += 1
+            if not member.isfile():
+                raise ValueError("Cache index is not a regular file.")
+            continue
+
+        name = member.name.rstrip("/")
+        pure_name = PurePosixPath(name)
+        if (
+            not name
+            or pure_name.is_absolute()
+            or "\\" in name
+            or any(part in ("", ".", "..") for part in pure_name.parts)
+            or any(ord(char) < 32 or ord(char) == 127 for char in name)
+            or posixpath.normpath(name) != name
+            or name in seen_names
+        ):
+            raise ValueError("Cache archive contains an unsafe or duplicate path.")
+        seen_names.add(name)
+        anchor_name, anchor_path = _cache_member_anchor(name, anchor_paths)
+
+        if member.islnk() or not (
+            member.isfile() or member.isdir() or member.issym()
+        ):
+            raise ValueError("Cache archive contains an unsupported link or special file.")
+        for parent in pure_name.parents:
+            if parent.as_posix() in blocked_parent_names:
+                raise ValueError("Cache archive path traverses a non-directory member.")
+
+        if member.issym():
+            linkname = member.linkname
+            if (
+                not linkname
+                or "\\" in linkname
+                or any(ord(char) < 32 or ord(char) == 127 for char in linkname)
+            ):
+                raise ValueError("Cache archive contains an unsafe symlink.")
+            member_path = "/" + name
+            resolved_link = (
+                posixpath.normpath(linkname)
+                if posixpath.isabs(linkname)
+                else posixpath.normpath(posixpath.join(posixpath.dirname(member_path), linkname))
+            )
+            anchor_root = anchor_path.as_posix()
+            in_anchor = (
+                resolved_link == anchor_root
+                or resolved_link.startswith(anchor_root.rstrip("/") + "/")
+            )
+            is_runtime_python_link = (
+                allow_external_runtime_python
+                and anchor_name == "runtime"
+                and Path(resolved_link).parent.as_posix()
+                in {"/usr/bin", "/usr/local/bin", "/opt/conda/bin"}
+                and re.fullmatch(r"python(?:3(?:\.\d+)?)?", Path(resolved_link).name) is not None
+            )
+            if not in_anchor and not is_runtime_python_link:
+                raise ValueError("Cache archive symlink points outside its configured anchor.")
+        safe_member = copy.copy(member)
+        if member.issym() and posixpath.isabs(member.linkname):
+            safe_member.linkname = posixpath.relpath(
+                resolved_link,
+                posixpath.dirname(member_path),
+            )
+        extract_members.append(safe_member)
+
+    if index_count != 1:
+        raise ValueError("Cache archive must contain exactly one index.")
+    return extract_members
+
+
+def _restore_cloud_cache(
+    cache_dir: Optional[Union[str, Path]],
+    cache_key: str,
+    workdir: Path,
+) -> str:
+    if not cache_dir:
+        return "disabled"
+    if re.fullmatch(r"[0-9a-f]{64}", cache_key or "") is None:
+        return "invalid"
+
+    key_dir = Path(cache_dir) / cache_key
+    archive_path = key_dir / "runtime.tar"
+    checksum_path = key_dir / "runtime.tar.sha256"
+    if key_dir.is_symlink() or archive_path.is_symlink() or checksum_path.is_symlink():
+        return "invalid"
+    if not archive_path.exists() and not checksum_path.exists():
+        return "miss"
+    if not archive_path.is_file() or not checksum_path.is_file():
+        return "invalid"
+
+    try:
+        expected_sha = checksum_path.read_text(encoding="ascii").strip()
+        if (
+            re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None
+            or _sha256_file(archive_path) != expected_sha
+        ):
+            return "invalid"
+
+        expected_anchors = _cloud_cache_anchor_paths(workdir)
+        with tarfile.open(archive_path, mode="r:") as tar:
+            members = tar.getmembers()
+            index_member = next(
+                (member for member in members if member.name == _CACHE_INDEX_MEMBER),
+                None,
+            )
+            if index_member is None or not index_member.isfile():
+                return "invalid"
+            index_file = tar.extractfile(index_member)
+            if index_file is None:
+                return "invalid"
+            index = json.loads(index_file.read().decode("utf-8"))
+            if (
+                not isinstance(index, dict)
+                or index.get("schema_version") != 1
+                or index.get("cache_key") != cache_key
+                or not isinstance(index.get("anchors"), dict)
+            ):
+                return "invalid"
+
+            stored_anchors = index["anchors"]
+            if not stored_anchors or any(
+                anchor not in expected_anchors
+                or Path(stored_path).absolute() != expected_anchors[anchor]
+                for anchor, stored_path in stored_anchors.items()
+            ):
+                return "invalid"
+
+            anchors = {name: expected_anchors[name] for name in stored_anchors}
+            if any(_cache_target_has_symlink_component(path) for path in anchors.values()):
+                return "invalid"
+            extract_members = _validate_cache_archive_members(
+                members,
+                anchors,
+                allow_external_runtime_python=True,
+            )
+            supports_filter = "filter" in inspect.signature(tar.extractall).parameters
+            if not supports_filter:
+                tar.extractall(path="/", members=extract_members)
+            else:
+                checked_members = []
+                for member in extract_members:
+                    checked_member = tarfile.data_filter(member, "/")
+                    if checked_member is None:
+                        return "invalid"
+                    checked_members.append(checked_member)
+                tar.extractall(path="/", members=checked_members, filter="data")
+        return "restored"
+    except Exception:
+        print("Cloud cache restore failed validation; continuing with normal setup.", flush=True)
+        return "invalid"
+
+
+def _save_cloud_cache(
+    cache_dir: Optional[Union[str, Path]],
+    cache_key: str,
+    workdir: Path,
+) -> str:
+    if not cache_dir:
+        return "disabled"
+    if re.fullmatch(r"[0-9a-f]{64}", cache_key or "") is None:
+        return "save_failed"
+
+    key_dir = Path(cache_dir) / cache_key
+    archive_path = key_dir / "runtime.tar"
+    checksum_path = key_dir / "runtime.tar.sha256"
+    archive_partial = key_dir / "runtime.tar.partial"
+    checksum_partial = key_dir / "runtime.tar.sha256.partial"
+    archive_existed_before = False
+    checksum_existed_before = False
+    archive_published = False
+    checksum_published = False
+    try:
+        if any(
+            path.is_symlink()
+            for path in (key_dir, archive_path, checksum_path, archive_partial, checksum_partial)
+        ):
+            return "save_failed"
+        archive_existed_before = archive_path.exists()
+        checksum_existed_before = checksum_path.exists()
+        key_dir.mkdir(parents=True, exist_ok=True)
+        anchor_paths = {
+            name: path
+            for name, path in _cloud_cache_anchor_paths(workdir).items()
+            if path.is_dir() and not path.is_symlink()
+        }
+        if not anchor_paths:
+            return "miss"
+
+        index = {
+            "schema_version": 1,
+            "cache_key": cache_key,
+            "anchors": {name: str(path.absolute()) for name, path in anchor_paths.items()},
+        }
+        index_bytes = json.dumps(index, sort_keys=True).encode("utf-8")
+        with tarfile.open(archive_partial, mode="w:") as tar:
+            index_info = tarfile.TarInfo(_CACHE_INDEX_MEMBER)
+            index_info.size = len(index_bytes)
+            tar.addfile(index_info, io.BytesIO(index_bytes))
+            for anchor_path in anchor_paths.values():
+                tar.add(anchor_path, arcname=anchor_path.as_posix().lstrip("/"), recursive=True)
+
+        checksum_partial.write_text(_sha256_file(archive_partial) + "\n", encoding="ascii")
+        os.replace(archive_partial, archive_path)
+        archive_published = True
+        os.replace(checksum_partial, checksum_path)
+        checksum_published = True
+
+        for sibling in key_dir.parent.iterdir():
+            if (
+                sibling.name != cache_key
+                and re.fullmatch(r"[0-9a-f]{64}", sibling.name)
+                and sibling.is_dir()
+                and not sibling.is_symlink()
+            ):
+                shutil.rmtree(sibling)
+        return "saved"
+    except Exception:
+        for partial_path in (archive_partial, checksum_partial):
+            try:
+                partial_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if archive_published and not archive_existed_before:
+            try:
+                archive_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if checksum_published and not checksum_existed_before:
+            try:
+                checksum_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        print("Cloud cache save failed; environment setup remains successful.", flush=True)
+        return "save_failed"
 
 
 def _is_production_local_env() -> Tuple[bool, str]:
@@ -671,15 +985,28 @@ def _inherited_setup_phases() -> Dict[str, float]:
 
 
 _SETUP_PHASES: Dict[str, float] = {}
+_CURRENT_CACHE_STATUS = "disabled"
+_CURRENT_CACHE_KEY: Optional[str] = None
 
 
 def _record_phase(name: str, started_at: float) -> None:
     _SETUP_PHASES[name] = round(_SETUP_PHASES.get(name, 0.0) + max(0.0, time.monotonic() - started_at), 3)
 
 
-def _child_env_with_phases() -> Dict[str, str]:
+def _child_env_with_phases(
+    *,
+    cache_status: Optional[str] = None,
+    cache_key: Optional[str] = None,
+    cache_restore_done: Optional[bool] = None,
+) -> Dict[str, str]:
     env = dict(os.environ)
     env[SETUP_PHASES_ENV] = json.dumps(_SETUP_PHASES)
+    if cache_status is not None:
+        env[_CACHE_STATUS_ENV] = cache_status
+    if cache_key is not None:
+        env[_CACHE_KEY_ENV] = cache_key
+    if cache_restore_done is not None:
+        env[_CACHE_RESTORE_DONE_ENV] = "1" if cache_restore_done else "0"
     return env
 
 
@@ -716,6 +1043,8 @@ def _emit_and_exit(
         "manifest_sha256": manifest_sha256,
         "duration_seconds": round(time.monotonic() - started_at, 3),
         "phase_seconds": dict(_SETUP_PHASES),
+        "cache_status": _CURRENT_CACHE_STATUS,
+        "cache_key": _CURRENT_CACHE_KEY,
     }
     try:
         manifest_out.parent.mkdir(parents=True, exist_ok=True)
@@ -742,9 +1071,15 @@ def _emit_and_exit(
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    global _CURRENT_CACHE_STATUS, _CURRENT_CACHE_KEY
+
     started = time.monotonic()
     _SETUP_PHASES.clear()
     _SETUP_PHASES.update(_inherited_setup_phases())
+    _SETUP_PHASES.setdefault("cache_restore", 0.0)
+    _SETUP_PHASES.setdefault("cache_save", 0.0)
+    _CURRENT_CACHE_STATUS = "disabled"
+    _CURRENT_CACHE_KEY = None
     parser = argparse.ArgumentParser(description="Cloud GPU Environment Setup & Preflight")
     parser.add_argument("--workdir", default=".", help="Working directory (default: current dir)")
     parser.add_argument("--manifest", default="cloud_env_manifest.json", help="Path to cloud_env_manifest.json")
@@ -755,6 +1090,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--manifest-out", default="env_manifest_result.json", help="Output result JSON path")
     parser.add_argument("--state-file", default=".autodub_env_state.json", help="Idempotency state file path")
     parser.add_argument("--pip-timeout", type=int, default=120, help="Pip network timeout in seconds")
+    parser.add_argument("--cache-dir", default="", help="Optional Drive-backed cache root")
+    parser.add_argument("--no-cache-save", action="store_true", help="Restore cache but do not save it")
     parser.add_argument("--verify-installed", action="store_true", help="Verify in a fresh process after installation; never reinstall")
     parser.add_argument(
         "--allow-local-test",
@@ -812,6 +1149,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     setup_fingerprint = hashlib.sha256(
         f"{manifest_sha}:{req_sha}:{sys.version.split()[0]}".encode("utf-8")
     ).hexdigest()
+    _CURRENT_CACHE_KEY = setup_fingerprint
 
     # 1. Disk Space Preflight
     min_disk_mb = int(args.min_disk_mb or manifest.get("min_free_disk_mb", 4096))
@@ -856,6 +1194,27 @@ def main(argv: Optional[List[str]] = None) -> int:
             manifest_sha256=manifest_sha,
         )
 
+    inherited_cache_key = os.environ.get(_CACHE_KEY_ENV, "")
+    cache_restore_done = (
+        args.cache_dir
+        and os.environ.get(_CACHE_RESTORE_DONE_ENV) == "1"
+        and re.fullmatch(r"[0-9a-f]{64}", inherited_cache_key) is not None
+        and os.environ.get(_CACHE_STATUS_ENV)
+        in {"miss", "invalid", "restored", "saved", "save_failed"}
+    )
+    cache_key = inherited_cache_key if cache_restore_done else setup_fingerprint
+    _CURRENT_CACHE_KEY = cache_key
+    if cache_restore_done:
+        _CURRENT_CACHE_STATUS = os.environ[_CACHE_STATUS_ENV]
+    else:
+        phase_t0 = time.monotonic()
+        _CURRENT_CACHE_STATUS = _restore_cloud_cache(
+            args.cache_dir or None,
+            cache_key,
+            workdir,
+        )
+        _record_phase("cache_restore", phase_t0)
+
     runtime_spec = manifest.get("isolated_runtime")
     runtime_dir = (workdir / ".autodub_venv").absolute()
     if runtime_spec and not args.allow_local_test and Path(sys.prefix).absolute() != runtime_dir:
@@ -864,9 +1223,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             phase_t0 = time.monotonic()
             runtime_python = ensure_runtime(workdir, runtime_spec)
             _record_phase("bootstrap_runtime", phase_t0)
+            child_env = _child_env_with_phases(
+                cache_status=_CURRENT_CACHE_STATUS,
+                cache_key=cache_key,
+                cache_restore_done=bool(args.cache_dir),
+            )
             child = subprocess.run([str(runtime_python), str(Path(__file__).absolute()),
                                     *(argv if argv is not None else sys.argv[1:])],
-                                   cwd=workdir, timeout=1200, shell=False, env=_child_env_with_phases())
+                                   cwd=workdir, timeout=1200, shell=False, env=child_env)
             return child.returncode
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
             return _emit_and_exit(workdir=workdir, manifest_out=manifest_out, started_at=started,
@@ -889,6 +1253,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     phase_t0 = time.monotonic()
     pkg_ok, pkg_rc, pkg_code, pkg_msg, versions_info = _verify_packages_and_binaries(manifest, workdir)
     _record_phase("verify_packages", phase_t0)
+    if not pkg_ok and _CURRENT_CACHE_STATUS == "restored":
+        _CURRENT_CACHE_STATUS = "invalid"
     if pkg_ok:
         cache_hit = not args.verify_installed
     else:
@@ -959,7 +1325,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             child_args = list(argv if argv is not None else sys.argv[1:])
             child = subprocess.run([sys.executable, str(Path(__file__).absolute()),
                                     *child_args, "--verify-installed"], cwd=workdir,
-                                   timeout=300, shell=False, env=_child_env_with_phases())
+                                   timeout=300, shell=False,
+                                   env=_child_env_with_phases(
+                                       cache_status=_CURRENT_CACHE_STATUS,
+                                       cache_key=cache_key,
+                                       cache_restore_done=bool(args.cache_dir),
+                                   ))
             return child.returncode
 
         pkg_ok, pkg_rc, pkg_code, pkg_msg, versions_info = _verify_packages_and_binaries(manifest, workdir)
@@ -1013,6 +1384,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     phase_t0 = time.monotonic()
     model_ok, model_msg = _verify_models_readiness(manifest, workdir)
     _record_phase("verify_models", phase_t0)
+    if not model_ok and _CURRENT_CACHE_STATUS == "restored":
+        _CURRENT_CACHE_STATUS = "invalid"
     if not model_ok:
         return _emit_and_exit(
             workdir=workdir,
@@ -1029,6 +1402,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             versions_info=versions_info,
             manifest_sha256=manifest_sha,
         )
+
+    cache_save_t0 = time.monotonic()
+    if (
+        args.cache_dir
+        and not args.no_cache_save
+        and _CURRENT_CACHE_STATUS in {"miss", "invalid"}
+    ):
+        _CURRENT_CACHE_STATUS = _save_cloud_cache(
+            args.cache_dir,
+            cache_key,
+            workdir,
+        )
+    _record_phase("cache_save", cache_save_t0)
 
     # 5. Bundle & Uploaded Video Verification
     bundle_verified = False
