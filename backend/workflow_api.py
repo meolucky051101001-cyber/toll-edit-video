@@ -29,6 +29,10 @@ from fastapi import APIRouter, HTTPException, Query, Body, Request, UploadFile, 
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from dashboard_media import media_status
 from pipeline_v2.atomic_io import atomic_copy_file, atomic_replace_file, atomic_write_text
+try:
+    from backend.ffmpeg_encode import run_with_encoder_fallback
+except ImportError:
+    from ffmpeg_encode import run_with_encoder_fallback
 
 from canvas_settings import (
     get_canvas_settings,
@@ -1940,45 +1944,16 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
         if wm_filt:
             fc = fc.replace("[outv]", f"{wm_filt}[outv]")
 
-        # Thử mã hóa bằng GPU NVENC trước, nếu lỗi thì fallback sang CPU x264
-        cmd_nvenc = [
-            "ffmpeg", "-y",
-            "-i", str(input_v)
-        ] + extra_inputs + [
-            "-filter_complex", fc,
-            "-map", "[outv]",
-            "-map", "0:a?",
-            "-c:v", "h264_nvenc",
-            "-preset", "p4",
-            "-b:v", "7500k",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-movflags", "+faststart",
-            "-shortest",
-        ] + duration_args + [
-            str(out_path)
-        ]
-
-        success = False
-        try:
-            res = subprocess.run(cmd_nvenc, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
-            if res.returncode == 0 and _valid_final_video(out_path):
-                success = True
-        except Exception as e:
-            logger.warning(f"NVENC failed for {v_file.name}: {e}")
-
-        if not success:
-            # Fallback x264
-            cmd_cpu = [
+        def build_framing_command(encoder_args):
+            return [
                 "ffmpeg", "-y",
                 "-i", str(input_v)
             ] + extra_inputs + [
                 "-filter_complex", fc,
                 "-map", "[outv]",
                 "-map", "0:a?",
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-crf", "22",
+                "-c:v",
+            ] + encoder_args + [
                 "-c:a", "aac",
                 "-b:a", "192k",
                 "-movflags", "+faststart",
@@ -1986,12 +1961,21 @@ def _batch_framing_worker(input_dir: Path, output_dir: Path, cfg: Dict[str, Any]
             ] + duration_args + [
                 str(out_path)
             ]
-            try:
-                res2 = subprocess.run(cmd_cpu, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
-                if res2.returncode == 0 and _valid_final_video(out_path):
-                    success = True
-            except Exception as e2:
-                logger.error(f"CPU render failed for {v_file.name}: {e2}")
+
+        try:
+            success, _ = run_with_encoder_fallback(
+                build_framing_command,
+                ["h264_nvenc", "-preset", "p4", "-b:v", "7500k"],
+                ["libx264", "-preset", "veryfast", "-crf", "22"],
+                run=lambda command: subprocess.run(
+                    command, capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=300,
+                ),
+                ok=lambda result: result.returncode == 0 and _valid_final_video(out_path),
+            )
+        except Exception as e:
+            logger.error(f"CPU render failed for {v_file.name}: {e}")
+            success = False
 
         if success:
             clean_out_str = str(out_path).replace("\\", "/")
@@ -2283,43 +2267,35 @@ def _prepend_thumbnail_file(video_path: Path, thumb_path: Path, duration_s: floa
         )
         audio_maps = ["-map", "[outa]", "-c:a", "aac", "-b:a", "192k"]
 
-    cmd_nvenc = [
-        "ffmpeg", "-y",
-        "-loop", "1", "-t", str(duration_s), "-i", str(thumb_path),
-        "-i", str(video_path),
-        "-filter_complex", filter_complex,
-        "-map", "[outv]",
-    ] + audio_maps + [
-        "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "4000k",
-        "-shortest", "-movflags", "+faststart",
-        str(temp_out)
-    ]
-
-    success = False
     if job_ctl and job_ctl.get("cancelled"):
         return False
-    try:
-        res = _run_ffmpeg_ctl(cmd_nvenc, job_ctl, timeout=300)
-        if res.returncode == 0 and temp_out.is_file() and temp_out.stat().st_size > 1000:
-            success = True
-    except Exception as e:
-        logger.warning(f"Prepend NVENC failed: {e}")
 
-    if not success and not (job_ctl and job_ctl.get("cancelled")):
-        cmd_cpu = [
+    def build_thumbnail_command(encoder_args):
+        return [
             "ffmpeg", "-y",
             "-loop", "1", "-t", str(duration_s), "-i", str(thumb_path),
             "-i", str(video_path),
             "-filter_complex", filter_complex,
             "-map", "[outv]",
         ] + audio_maps + [
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+            "-c:v",
+        ] + encoder_args + [
             "-shortest", "-movflags", "+faststart",
             str(temp_out)
         ]
-        res2 = _run_ffmpeg_ctl(cmd_cpu, job_ctl, timeout=300)
-        if res2.returncode == 0 and temp_out.is_file() and temp_out.stat().st_size > 1000:
-            success = True
+
+    success, _ = run_with_encoder_fallback(
+        build_thumbnail_command,
+        ["h264_nvenc", "-preset", "p4", "-b:v", "4000k"],
+        ["libx264", "-preset", "veryfast", "-crf", "22"],
+        run=lambda command: _run_ffmpeg_ctl(command, job_ctl, timeout=300),
+        ok=lambda result: (
+            result.returncode == 0
+            and temp_out.is_file()
+            and temp_out.stat().st_size > 1000
+        ),
+        should_stop=lambda: bool(job_ctl and job_ctl.get("cancelled")),
+    )
 
     if success:
         try:
@@ -3375,53 +3351,42 @@ def _apply_timeline_edits_file(
     temp_out = out_path.parent / f"_temp_edit_{out_path.name}"
     temp_out.unlink(missing_ok=True)
 
-    cmd_nvenc = [
-        "ffmpeg", "-y",
-        "-i", str(video_path),
-    ] + [x for p in (extra_audio_inputs + overlay_inputs + music_inputs) for x in ("-i", p)] + [
-        "-filter_complex", filter_complex,
-        "-map", "[outv]"
-    ] + audio_maps + [
-        "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "4500k",
-        "-shortest",
-        "-movflags", "+faststart",
-        str(temp_out)
-    ]
-
-    success = False
     if job_ctl is not None:
         job_ctl.setdefault("total_dur", graph.get("total_dur") or 0.0)
         if job_ctl.get("cancelled"):
             return False
-    try:
-        res = _run_ffmpeg_ctl(cmd_nvenc, job_ctl, timeout=600)
-        if res.returncode == 0 and temp_out.is_file() and temp_out.stat().st_size > 1000:
-            success = True
-    except Exception as e:
-        logger.warning(f"Timeline edit NVENC failed: {e}")
 
-    if not success:
-        if job_ctl is not None and job_ctl.get("cancelled"):
-            return False
-        cmd_cpu = [
+    def build_timeline_edit_command(encoder_args):
+        return [
             "ffmpeg", "-y",
             "-i", str(video_path),
         ] + [x for p in (extra_audio_inputs + overlay_inputs + music_inputs) for x in ("-i", p)] + [
             "-filter_complex", filter_complex,
             "-map", "[outv]"
         ] + audio_maps + [
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:v",
+        ] + encoder_args + [
             "-shortest",
             "-movflags", "+faststart",
             str(temp_out)
         ]
-        try:
-            res2 = _run_ffmpeg_ctl(cmd_cpu, job_ctl, timeout=600)
-        except Exception as e:
-            logger.warning(f"Timeline edit CPU failed: {e}")
-            res2 = subprocess.CompletedProcess(cmd_cpu, 1, "", "")
-        if res2.returncode == 0 and temp_out.is_file() and temp_out.stat().st_size > 1000:
-            success = True
+
+    try:
+        success, _ = run_with_encoder_fallback(
+            build_timeline_edit_command,
+            ["h264_nvenc", "-preset", "p4", "-b:v", "4500k"],
+            ["libx264", "-preset", "veryfast", "-crf", "20"],
+            run=lambda command: _run_ffmpeg_ctl(command, job_ctl, timeout=600),
+            ok=lambda result: (
+                result.returncode == 0
+                and temp_out.is_file()
+                and temp_out.stat().st_size > 1000
+            ),
+            should_stop=lambda: bool(job_ctl is not None and job_ctl.get("cancelled")),
+        )
+    except Exception as e:
+        logger.warning(f"Timeline edit CPU failed: {e}")
+        success = False
 
     if success:
         # Không unlink bản cũ trước khi rename: nếu rename lỗi (file đang bị player giữ),
@@ -4191,26 +4156,40 @@ def _proxy_generate_worker(src_path: Path, proxy_path: Path, key: str) -> None:
         tmp = proxy_path.parent / ("tmp_" + proxy_path.name)
         tmp.unlink(missing_ok=True)
         # Khi Tool V1 đang xử lý video hoặc VRAM thấp, nhường 100% GPU cho pipeline chính và tạo proxy 540p bằng CPU
-        ran_nvenc_ok = False
-        if not _is_gpu_busy_with_pipeline():
-            nvenc_cmd = [
-                "ffmpeg", "-y", "-v", "error", "-hwaccel", "cuda", "-i", str(src_path),
-                "-vf", "scale='min(540,iw)':-2,format=yuv420p",
-                "-c:v", "h264_nvenc", "-preset", "p1", "-rc", "vbr", "-cq", "28",
+        def build_proxy_command(encoder_args):
+            is_nvenc = encoder_args[0] == "h264_nvenc"
+            return [
+                "ffmpeg", "-y", "-v", "error",
+            ] + (["-hwaccel", "cuda"] if is_nvenc else []) + [
+                "-i", str(src_path),
+                "-vf",
+                "scale='min(540,iw)':-2,format=yuv420p" if is_nvenc else "scale='min(540,iw)':-2",
+                "-c:v",
+            ] + encoder_args + [
                 "-c:a", "copy", "-movflags", "+faststart", str(tmp),
             ]
-            res = subprocess.run(nvenc_cmd, capture_output=True, timeout=300)
-            ran_nvenc_ok = (res.returncode == 0 and tmp.is_file() and tmp.stat().st_size > 1_000)
-        if not ran_nvenc_ok:
-            tmp.unlink(missing_ok=True)
-            subprocess.run(
-                ["ffmpeg", "-y", "-v", "error", "-i", str(src_path),
-                 "-vf", "scale='min(540,iw)':-2",
-                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
-                 "-c:a", "copy", "-movflags", "+faststart", str(tmp)],
-                capture_output=True, timeout=600,
+
+        def proxy_encode_ok(result):
+            encoder = result.args[result.args.index("-c:v") + 1]
+            return (
+                (encoder != "h264_nvenc" or result.returncode == 0)
+                and tmp.is_file()
+                and tmp.stat().st_size > 1_000
             )
-        if tmp.is_file() and tmp.stat().st_size > 1_000:
+
+        success, _ = run_with_encoder_fallback(
+            build_proxy_command,
+            ["h264_nvenc", "-preset", "p1", "-rc", "vbr", "-cq", "28"],
+            ["libx264", "-preset", "veryfast", "-crf", "28"],
+            run=lambda command: subprocess.run(
+                command, capture_output=True,
+                timeout=300 if "h264_nvenc" in command else 600,
+            ),
+            ok=proxy_encode_ok,
+            before_fallback=lambda: tmp.unlink(missing_ok=True),
+            skip_nvenc=_is_gpu_busy_with_pipeline(),
+        )
+        if success and tmp.is_file() and tmp.stat().st_size > 1_000:
             proxy_path.unlink(missing_ok=True)
             tmp.rename(proxy_path)
         else:
@@ -5460,48 +5439,16 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
     # Dense OCR tracks can exceed the Windows command-line length limit.
     filter_path = temp_out.with_suffix(".filters.txt") if len(fc) > 8000 else None
     filter_args = ["-/filter_complex", str(filter_path)] if filter_path else ["-filter_complex", fc]
-    # NVENC command
-    cmd_nvenc = cmd_inputs + filter_args + [
-        "-map", "[outv]",
-    ] + (["-map", map_audio] if map_audio else ["-an"]) + [
-        "-c:v", "h264_nvenc",
-        "-preset", "p4",
-        "-b:v", f"{bitrate_kbps}k",
-        "-maxrate", f"{int(bitrate_kbps * 1.5)}k",
-        "-bufsize", f"{bitrate_kbps * 2}k"
-    ] + fps_args + [
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-movflags", "+faststart",
-        "-shortest",
-    ] + duration_args + [
-        str(temp_out)
-    ]
-
     try:
         if filter_path:
             filter_path.write_text(fc, encoding="utf-8")
-        success = False
-        try:
-            res = _run_ffmpeg_ctl(cmd_nvenc, job_ctl, timeout=600)
-            if res.returncode == 0 and _valid_final_video(temp_out):
-                success = True
-        except Exception as e:
-            logger.warning(f"NVENC custom export failed: {e}")
-        _check_export_cancelled(job_ctl)
 
-        if not success:
-            # Fallback CPU x264
-            _export_stage(job_ctl, 15, "GPU lỗi — chuyển mã hóa CPU (libx264)...")
-            cmd_cpu = cmd_inputs + filter_args + [
+        def build_custom_export_command(encoder_args):
+            return cmd_inputs + filter_args + [
                 "-map", "[outv]",
             ] + (["-map", map_audio] if map_audio else ["-an"]) + [
-                "-c:v", "libx264",
-                "-preset", "medium",
-                "-b:v", f"{bitrate_kbps}k",
-                "-maxrate", f"{int(bitrate_kbps * 1.5)}k",
-                "-bufsize", f"{bitrate_kbps * 2}k"
-            ] + fps_args + [
+                "-c:v",
+            ] + encoder_args + fps_args + [
                 "-c:a", "aac",
                 "-b:a", "192k",
                 "-movflags", "+faststart",
@@ -5509,10 +5456,32 @@ def _execute_custom_export(payload: Dict[str, Any], job_ctl: Optional[Dict[str, 
             ] + duration_args + [
                 str(temp_out)
             ]
-            res_cpu = _run_ffmpeg_ctl(cmd_cpu, job_ctl, timeout=900)
-            if res_cpu.returncode == 0 and _valid_final_video(temp_out):
-                success = True
+
+        def before_custom_export_fallback():
             _check_export_cancelled(job_ctl)
+            _export_stage(job_ctl, 15, "GPU lỗi — chuyển mã hóa CPU (libx264)...")
+
+        success, _ = run_with_encoder_fallback(
+            build_custom_export_command,
+            [
+                "h264_nvenc", "-preset", "p4", "-b:v", f"{bitrate_kbps}k",
+                "-maxrate", f"{int(bitrate_kbps * 1.5)}k",
+                "-bufsize", f"{bitrate_kbps * 2}k",
+            ],
+            [
+                "libx264", "-preset", "medium", "-b:v", f"{bitrate_kbps}k",
+                "-maxrate", f"{int(bitrate_kbps * 1.5)}k",
+                "-bufsize", f"{bitrate_kbps * 2}k",
+            ],
+            run=lambda command: _run_ffmpeg_ctl(
+                command, job_ctl,
+                timeout=600 if command[command.index("-c:v") + 1] == "h264_nvenc" else 900,
+            ),
+            ok=lambda result: result.returncode == 0 and _valid_final_video(temp_out),
+            before_fallback=before_custom_export_fallback,
+            should_stop=lambda: bool(job_ctl and job_ctl.get("cancelled")),
+        )
+        _check_export_cancelled(job_ctl)
 
         if not success:
             raise HTTPException(status_code=500, detail="Không thể xuất video bằng FFmpeg")
