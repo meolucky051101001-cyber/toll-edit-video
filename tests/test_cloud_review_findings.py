@@ -25,7 +25,7 @@ def test_parked_warm_gpu_counts_against_the_daily_budget(tmp_path):
     store.park_warm_session("warm-1", "T4", ttl_seconds=300, now=NOON)
     parked = store.get_cu_budget_info(now=NOON + 100)
     assert parked["spent_today"] == pytest.approx(_cu(100), abs=.002)
-    assert parked["reserved_today"] == 0
+    assert parked["reserved_today"] == pytest.approx(_cu(200), abs=.002)
 
     assert store.pop_warm_session("T4", now=NOON + 100)["session_name"] == "warm-1"
     reused = store.get_cu_budget_info(now=NOON + 5000)
@@ -33,15 +33,18 @@ def test_parked_warm_gpu_counts_against_the_daily_budget(tmp_path):
     assert reused["reserved_today"] == 0
 
 
-def test_only_elapsed_standby_is_held_against_a_new_job(tmp_path):
+def test_standby_is_held_until_the_parked_gpu_is_taken_over(tmp_path):
     store = CloudJobStore(db_path=tmp_path / "cloud_jobs.db", rollout_controlled=False)
-    store.set_cu_budget_daily(1.0)  # the job (0.54 CU) fits; the full 0.96 CU standby beside it would not
+    store.set_cu_budget_daily(1.0)  # the job (0.58 CU) fits alone, not beside the 0.96 CU standby
     store.park_warm_session("warm-1", "T4", ttl_seconds=3000, now=NOON)
 
-    early = store.check_admission_allowed(cu_estimated=.5, gpu_type="T4", now=NOON + 100)
-    late = store.check_admission_allowed(cu_estimated=.5, gpu_type="T4", now=NOON + 2900)
-    assert early["allowed"] is True
-    assert late["code"] == "BUDGET_EXCEEDED"
+    # A job on another GPU leaves the standby running, so it must fit beside it.
+    held = store.check_admission_allowed(cu_estimated=.5, gpu_type="L4", now=NOON + 100)
+    assert held["code"] == "BUDGET_EXCEEDED"
+
+    store.pop_warm_session("T4", now=NOON + 100)
+    released = store.check_admission_allowed(cu_estimated=.5, gpu_type="L4", now=NOON + 100)
+    assert released["allowed"] is True
 
 
 def test_warm_gpu_left_past_expiry_is_billed_only_until_its_stop_window(tmp_path):

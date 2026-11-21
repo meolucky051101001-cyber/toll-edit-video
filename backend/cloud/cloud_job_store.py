@@ -1490,15 +1490,17 @@ class CloudJobStore:
                      (end - start) * rate / 3600.0),
                 )
 
-    def _warm_idle_spent_in_db(
+    def _warm_idle_budget_in_db(
         self, db: sqlite3.Connection, now_ts: float, win_start: float, win_end: float
-    ) -> float:
-        """CU spent idling: recorded intervals plus the elapsed part of sessions still parked.
+    ) -> Tuple[float, float]:
+        """(spent, reserved) CU of warm sessions: recorded idle intervals plus sessions still parked.
 
-        The remaining standby is deliberately not reserved: a job that reuses
-        the session ends it, so a hold would reject the job that stops the cost.
+        The remaining standby is held against every job, even one that would
+        take the session over, so all budget gates agree and standby cost can
+        never abort a job that was admitted without it.
         """
         spent = 0.0
+        reserved = 0.0
         for r in db.execute(
             "SELECT started_at, ended_at, cu FROM cloud_warm_idle_usage WHERE ended_at >= ? AND started_at < ?",
             (win_start, win_end),
@@ -1507,7 +1509,8 @@ class CloudJobStore:
         for row in db.execute("SELECT * FROM cloud_warm_sessions").fetchall():
             start, end, rate = self._warm_idle_interval(row, now_ts)
             spent += _allocate_cu_to_window((end - start) * rate / 3600.0, start, end, win_start, win_end)
-        return spent
+            reserved += max(0.0, float(row["expires_at"] or 0.0) - max(float(now_ts), start)) * rate / 3600.0
+        return spent, reserved
 
     def park_warm_session(
         self,
@@ -2675,8 +2678,9 @@ class CloudJobStore:
                 spent_raw += allocated
                 sources_used.add(CloudCostMeasurementSource.UNVERIFIED_ESTIMATE.value)
 
-        warm_spent = self._warm_idle_spent_in_db(db, check_now, win_start, win_end)
+        warm_spent, warm_reserved = self._warm_idle_budget_in_db(db, check_now, win_start, win_end)
         spent_raw += warm_spent
+        reserved_raw += warm_reserved
         if warm_spent > 0.0:
             sources_used.add(CloudCostMeasurementSource.UNVERIFIED_ESTIMATE.value)
 
