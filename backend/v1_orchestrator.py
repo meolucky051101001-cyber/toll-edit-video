@@ -461,7 +461,8 @@ class V1Orchestrator:
             srt_segments, floating_segments, vid_w, vid_h, main_y_pct = await self._stage_ocr(
                 c, srt_original, srt_segments, asr_was_empty)
             translated_segments, v1_script_mode = await self._stage_translate(
-                c, srt_segments, original_audio=original_audio, vocals_audio=vocals_audio)
+                c, srt_segments, original_audio=original_audio, vocals_audio=vocals_audio,
+                asr_was_empty=asr_was_empty)
             translated_segments, dubbing_audio_files, ass_path = await self._stage_tts(
                 c, original_audio, vocals_audio, srt_segments, translated_segments,
                 floating_segments, vid_w, vid_h, main_y_pct, v1_script_mode)
@@ -1071,7 +1072,9 @@ class V1Orchestrator:
         self._align_source_subtitles(srt_segments)
         return srt_segments, floating_segments, vid_w, vid_h, main_y_pct
 
-    async def _stage_translate(self, c, srt_segments, original_audio=None, vocals_audio=None):
+    async def _stage_translate(
+        self, c, srt_segments, original_audio=None, vocals_audio=None, asr_was_empty=False
+    ):
         # ==================== STAGE 5: AI TRANSLATION ====================
         stage_id = "ai_translation"
         srt_translated = c.out_dir / "translated.srt"
@@ -1122,7 +1125,7 @@ class V1Orchestrator:
                 run_early_voice_lock = bool(
                     srt_segments
                     and (vocals_audio or original_audio)
-                    and not c.visual_sub_to_speech
+                    and (not c.visual_sub_to_speech or asr_was_empty)
                     and v_mode != "manual"
                     and (v_cfg.get("enabled") or v_mode in ("auto", "dialogue", "smart_dialogue", "dual"))
                 )
