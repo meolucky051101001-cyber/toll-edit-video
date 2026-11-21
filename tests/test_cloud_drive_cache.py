@@ -1170,6 +1170,73 @@ def test_orchestrator_cache_save_budget_abort_keeps_delivered_video(
     assert job.state == "completed"
     assert job.output_manifest["cache_status"] == "save_skipped_budget"
     assert Path(job.output_manifest["result_path"]).is_file()
+    assert job.output_manifest["budget_overrun_after_validate"] is True
+
+
+def test_cleanup_budget_overrun_after_validation_preserves_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    original_sync_usage = cloud_orchestrator._JobRun._sync_runtime_usage
+
+    def budget_overrun_at_cleanup(run, *, check_provider=False):
+        if run.validation_complete and not check_provider:
+            run.budget_abort_code = "budget_exceeded"
+            run.budget_abort_reason = "daily budget exhausted during cleanup"
+            return False, "budget_exceeded"
+        return original_sync_usage(run, check_provider=check_provider)
+
+    monkeypatch.setattr(
+        cloud_orchestrator._JobRun,
+        "_sync_runtime_usage",
+        budget_overrun_at_cleanup,
+    )
+    _adapter, job = _run_cache_job(
+        tmp_path,
+        monkeypatch,
+        (False, "not mounted"),
+        cache_backend="none",
+        cache_save_enabled=False,
+        daily_budget=10.0,
+    )
+
+    assert job.state == "completed"
+    assert Path(job.output_manifest["result_path"]).is_file()
+    assert job.output_manifest["budget_overrun_after_validate"] is True
+
+
+def test_cache_save_usage_overrun_after_validation_is_ledgered_and_delivered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    original_cancel_probe = cloud_orchestrator._JobRun._cancel_probe
+    original_sync_usage = cloud_orchestrator._JobRun._sync_runtime_usage
+
+    def exceed_budget_during_cache_save(run):
+        if getattr(run.orchestrator.adapter, "in_cache_save", False):
+            run.runtime_start_time = time.time() - (8 * 3600)
+            original_sync_usage(run, check_provider=False)
+            return True
+        return original_cancel_probe(run)
+
+    monkeypatch.setattr(
+        cloud_orchestrator._JobRun, "_cancel_probe",
+        exceed_budget_during_cache_save,
+    )
+    adapter, job = _run_cache_job(
+        tmp_path,
+        monkeypatch,
+        (True, "mounted"),
+        cache_save_budget_abort=True,
+        daily_budget=5.0,
+    )
+
+    assert adapter.save_only_argv is not None
+    assert job.state == "completed"
+    assert Path(job.output_manifest["result_path"]).is_file()
+    assert job.output_manifest["budget_overrun_after_validate"] is True
+    ledger = adapter.store.list_cost_ledger(job_id=job.job_id)
+    assert ledger and ledger[0]["cu_observed"] > 5.0
 
 
 def test_orchestrator_skips_cache_save_when_runtime_budget_check_fails(

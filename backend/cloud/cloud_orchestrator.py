@@ -482,6 +482,8 @@ class _JobRun:
     cache_status: str = "disabled"
     is_gpu_check: bool = False
     subtitle_failure_after_setup: bool = False
+    validation_complete: bool = False
+    budget_overrun_after_validate: bool = False
 
     @classmethod
     def from_job(
@@ -624,6 +626,9 @@ class _JobRun:
             provider_balance=prov_bal,
         )
         if not res.get("within_budget", True):
+            if self.validation_complete:
+                self._record_budget_overrun_after_validate()
+                return False, "budget_exceeded"
             self.budget_abort_reason = (
                 "Đã vượt hạn mức CU trong ngày hoặc hết số dư trong khi đang chạy."
             )
@@ -660,6 +665,9 @@ class _JobRun:
     def _raise_if_aborted(self) -> None:
         aborted, reason = self._check_abort()
         if aborted:
+            if self.validation_complete and reason == "budget_exceeded":
+                self._record_budget_overrun_after_validate()
+                return
             is_lost = reason in _LEASE_LOST_REASONS
             is_budget = reason in ("budget_exceeded", "budget_uncertain")
             raise _JobAborted(
@@ -667,6 +675,19 @@ class _JobRun:
                 is_lease_lost=is_lost,
                 is_budget_exceeded=is_budget,
             )
+
+    def _record_budget_overrun_after_validate(self) -> None:
+        if not self.budget_overrun_after_validate:
+            self.budget_overrun_after_validate = True
+            logger.warning(
+                "Cloud Job %s vượt hạn mức CU sau khi QC đã đạt; tiếp tục giao thành phẩm.",
+                self.job_id,
+            )
+        self.budget_abort_code = ""
+        self.budget_abort_reason = ""
+        self.last_budget_check_ts = time.time()
+        if self.output_manifest:
+            self.output_manifest["budget_overrun_after_validate"] = True
 
     def _upload_with_retry(self, local_path: str | Path, remote_filename: str) -> Tuple[bool, str]:
         retry_delays = DEFAULT_CONFIG.get("cloud_upload_retry_delays_seconds", [5, 15])
@@ -1469,6 +1490,11 @@ class _JobRun:
                 manifest["setup_phase_seconds"] = self.setup_phase_seconds
 
         def _clear_save_budget_abort() -> None:
+            if (
+                self.validation_complete
+                and self.budget_abort_code == "budget_exceeded"
+            ):
+                self._record_budget_overrun_after_validate()
             if self.budget_abort_code in {"budget_exceeded", "budget_uncertain"}:
                 self.budget_abort_code = ""
                 self.budget_abort_reason = ""
@@ -1534,7 +1560,14 @@ class _JobRun:
             self._raise_if_aborted()
         except _JobAborted as abort_exc:
             if not abort_exc.is_budget_exceeded:
-                raise
+                try:
+                    self._raise_if_aborted()
+                except _JobAborted as current_abort:
+                    if not current_abort.is_budget_exceeded:
+                        raise
+                else:
+                    if not self.budget_overrun_after_validate:
+                        raise abort_exc
             _clear_save_budget_abort()
             _set_cache_result("save_skipped_budget")
             logger.warning(
@@ -1543,7 +1576,10 @@ class _JobRun:
             )
             return
         except Exception:
-            if self.budget_abort_code in {"budget_exceeded", "budget_uncertain"}:
+            if (
+                self.budget_abort_code in {"budget_exceeded", "budget_uncertain"}
+                or self.budget_overrun_after_validate
+            ):
                 _clear_save_budget_abort()
                 _set_cache_result("save_skipped_budget")
             else:
@@ -1565,6 +1601,13 @@ class _JobRun:
             _set_cache_result("save_failed")
             logger.warning(
                 "Không xử lý được kết quả Google Drive cache cho session %s; tiếp tục công việc.",
+                self.session_name,
+            )
+            return
+        if not save_ok and self.budget_overrun_after_validate:
+            _set_cache_result("save_skipped_budget")
+            logger.warning(
+                "Bỏ qua kết quả lưu Google Drive cache cho session %s sau khi vượt hạn mức CU; tiếp tục công việc.",
                 self.session_name,
             )
             return
@@ -1726,6 +1769,7 @@ class _JobRun:
                     "File video nguồn cục bộ không còn nguyên vẹn sau quá trình xử lý Cloud.",
                 )
         self._raise_if_aborted()
+        self.validation_complete = True
 
     def _stage_cleanup(self):
         self._mark_stage("cleanup")
@@ -1743,12 +1787,7 @@ class _JobRun:
                 CloudErrorCode.CLEANUP_FAILED.value,
                 cleanup_res.get("error") or "Cloud session cleanup is unverified.",
             )
-        if self.cache_status == "save_skipped_budget":
-            aborted, abort_reason = self._check_abort()
-            if aborted and abort_reason not in {"budget_exceeded", "budget_uncertain"}:
-                self._raise_if_aborted()
-        else:
-            self._raise_if_aborted()
+        self._raise_if_aborted()
         dl_file = Path(self.dl_path)
         try:
             self.final_video_path = self.orchestrator.export_deliverable_atomic(
@@ -1788,6 +1827,7 @@ class _JobRun:
                 "cache_backend": self.cache_backend,
                 "cache_mounted": self.cache_mounted,
                 "cache_status": self.cache_status,
+                "budget_overrun_after_validate": self.budget_overrun_after_validate,
                 "pipeline_step_seconds": remote_meta.get("step_timings_seconds") or {},
             }
             (self.attempt_res_dir / "output_manifest.json").write_text(
