@@ -91,6 +91,31 @@ def test_orchestrator_stop_of_parked_session_ledgers_idle(tmp_path: Path):
     assert "warm-3" not in orch._warm_parked_at
 
 
+def test_second_orchestrator_release_ledgers_store_parked_timestamp(tmp_path: Path):
+    store = CloudJobStore(db_path=tmp_path / "jobs.db", rollout_controlled=False)
+    parked_at = time.time() - 600
+    store.park_warm_session(
+        "warm-shared",
+        "T4",
+        ttl_seconds=3600,
+        source_job_id="source-job",
+        now=parked_at,
+    )
+
+    class Adapter:
+        def verify_session_stopped(self, name):
+            return {"verified_stopped": True, "cleanup_status": "verified", "attempts": 1, "error": None}
+
+    releasing_orchestrator = CloudOrchestrator(store=store, adapter=Adapter(), allowed_roots=[tmp_path])
+    assert releasing_orchestrator._warm_parked_at == {}
+    assert releasing_orchestrator.release_warm_sessions() == 1
+
+    rows = store.list_cost_ledger(job_id="warm:warm-shared")
+    assert len(rows) == 1
+    assert rows[0]["cu_observed"] > 0.0
+    assert rows[0]["usage_started_at"] == parked_at
+
+
 def test_reusing_warm_session_ledgers_idle_before_job_runtime(tmp_path: Path, monkeypatch):
     from tests.test_cloud_phase5_quality_export import _Phase5Adapter
 

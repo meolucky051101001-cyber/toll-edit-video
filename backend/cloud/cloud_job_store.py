@@ -1402,6 +1402,14 @@ class CloudJobStore:
                 db.execute("ROLLBACK")
                 raise
 
+    def get_warm_session(self, session_name: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM cloud_warm_sessions WHERE session_name = ?",
+                (session_name,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def pop_all_warm_sessions(self, gpu_type: Optional[str] = None) -> List[Dict[str, Any]]:
         gpu_norm = str(gpu_type).strip().upper() if gpu_type else None
         with self._connect() as db:
